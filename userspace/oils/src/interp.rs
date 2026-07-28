@@ -7552,6 +7552,9 @@ impl Shell {
         match r.op {
             RedirectOp::Read => {
                 let path = self.expand_to_string(&r.target);
+                if let Some(n) = special_redirect_fd(&path) {
+                    return self.persistent_special_dup(fd, &path, n, true);
+                }
                 let bytes = std::fs::read(self.host_path(&path))
                     .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
                 if fd == 0 {
@@ -7567,6 +7570,9 @@ impl Shell {
                 // current bytes; the write side is a live handle. The two do not
                 // share an OS offset (a documented model limitation).
                 let path = self.expand_to_string(&r.target);
+                if let Some(n) = special_redirect_fd(&path) {
+                    return self.persistent_special_dup(fd, &path, n, fd == 0);
+                }
                 let f = open_rw(&self.cwd, &path).map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
                 match fd {
                     0 => {
@@ -7600,6 +7606,9 @@ impl Shell {
             RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
                 let target = self.expand_to_string(&r.target);
                 let append = matches!(r.op, RedirectOp::AppendBoth);
+                if let Some(n) = special_redirect_fd(&target) {
+                    return self.persistent_special_dup(fd, &target, n, false);
+                }
                 let f = open_out(&self.cwd, &target, append).map_err(|e| format!("{target}: {}", io_error_message(&e)))?;
                 // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one handle.
                 let a = std::sync::Arc::new(f);
@@ -7609,6 +7618,10 @@ impl Shell {
             RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
                 let target = self.expand_to_string(&r.target);
                 let append = matches!(r.op, RedirectOp::Append);
+                // A dup, not an open — so noclobber has no file to protect.
+                if let Some(n) = special_redirect_fd(&target) {
+                    return self.persistent_special_dup(fd, &target, n, false);
+                }
                 if self.noclobber
                     && matches!(r.op, RedirectOp::Write)
                     && std::path::Path::new(&self.host_path(&target))
@@ -7630,76 +7643,111 @@ impl Shell {
             }
             RedirectOp::DupOut => {
                 let target = self.expand_to_string(&r.target);
-                if target == "-" {
-                    // `N>&-` / `N<&-`: close the descriptor.
-                    match fd {
-                        1 => self.exec_stdout = None,
-                        2 => self.exec_stderr = None,
-                        _ => {
-                            self.open_write_fds.remove(&fd);
-                            self.open_fds.remove(&fd);
-                        }
-                    }
-                } else if let Ok(n) = target.parse::<i32>() {
-                    // `M>&N`: fd M becomes a dup of fd N's *current* sink.
-                    let src = self
-                        .exec_dup_source(n)
-                        .map_err(|bad| format!("{bad}: Bad file descriptor"))?;
-                    match fd {
-                        1 => self.exec_stdout = src,
-                        2 => self.exec_stderr = src,
-                        _ => {
-                            // A user-space write fd needs a concrete handle:
-                            // reuse the source handle, or (when the source is a
-                            // std fd still on the terminal) dup the terminal.
-                            let handle = match src {
-                                Some(h) => h,
-                                None => std::sync::Arc::new(
-                                    dup_std_handle(n == 1)
-                                        .map_err(|e| format!("{fd}: {}", io_error_message(&e)))?,
-                                ),
-                            };
-                            self.open_write_fds.insert(fd, handle);
-                            self.open_fds.remove(&fd);
-                        }
-                    }
-                } else if fd == 1 {
-                    // `1>&$f` (non-numeric expansion): both streams to the file.
-                    let f = open_out(&self.cwd, &target, false).map_err(|e| format!("{target}: {e}"))?;
-                    let a = std::sync::Arc::new(f);
-                    self.exec_stdout = Some(a.clone());
-                    self.exec_stderr = Some(a);
-                } else {
-                    return Err(format!("{target}: ambiguous redirect"));
-                }
+                self.apply_persistent_dup_out(fd, &target)?;
             }
             RedirectOp::DupIn => {
                 let target = self.expand_to_string(&r.target);
-                if target == "-" {
-                    // `N<&-`: close the input descriptor.
-                    if fd == 0 {
-                        self.exec_stdin = None;
-                    } else {
-                        self.open_fds.remove(&fd);
-                        self.open_write_fds.remove(&fd);
-                    }
-                } else if let Ok(n) = target.parse::<i32>() {
-                    // `M<&N`: fd M becomes a dup of input fd N's *current* source.
-                    // Our fd sources are byte cursors, so a dup is modelled by
-                    // cloning the source cursor (data + offset) — an independent
-                    // offset, the same approximation used when cloning
-                    // `exec_stdin` into subshells.
-                    let cloned = self.clone_input_fd(n)?;
-                    if fd == 0 {
-                        self.exec_stdin = Some(cloned);
-                    } else {
-                        self.open_fds.insert(fd, cloned);
-                        self.open_write_fds.remove(&fd);
-                    }
-                } else {
-                    return Err(format!("{target}: ambiguous redirect"));
+                self.apply_persistent_dup_in(fd, &target)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply a bash *special redirection filename* (`path`, naming descriptor
+    /// `n` — see [`special_redirect_fd`]) to the persistent fd table, as the dup
+    /// it stands for. `exec` walks the raw redirects rather than a [`RedirPlan`]
+    /// (order matters there), so it needs its own translation; the transient
+    /// path's is [`Shell::resolve_special_redirect`], which also explains why a
+    /// missing descriptor is reported against the path rather than the number.
+    fn persistent_special_dup(
+        &mut self,
+        fd: i32,
+        path: &str,
+        n: i32,
+        read: bool,
+    ) -> Result<(), String> {
+        let n = n.to_string();
+        let res = if read {
+            self.apply_persistent_dup_in(fd, &n)
+        } else {
+            self.apply_persistent_dup_out(fd, &n)
+        };
+        res.map_err(|_| format!("{path}: No such file or directory"))
+    }
+
+    /// Point persistent fd `fd` at output descriptor `target` (`exec M>&N`,
+    /// `exec M>&-`, and the special filenames that mean the same thing).
+    fn apply_persistent_dup_out(&mut self, fd: i32, target: &str) -> Result<(), String> {
+        if target == "-" {
+            // `N>&-` / `N<&-`: close the descriptor.
+            match fd {
+                1 => self.exec_stdout = None,
+                2 => self.exec_stderr = None,
+                _ => {
+                    self.open_write_fds.remove(&fd);
+                    self.open_fds.remove(&fd);
                 }
             }
+        } else if let Ok(n) = target.parse::<i32>() {
+            // `M>&N`: fd M becomes a dup of fd N's *current* sink.
+            let src = self
+                .exec_dup_source(n)
+                .map_err(|bad| format!("{bad}: Bad file descriptor"))?;
+            match fd {
+                1 => self.exec_stdout = src,
+                2 => self.exec_stderr = src,
+                _ => {
+                    // A user-space write fd needs a concrete handle: reuse the
+                    // source handle, or (when the source is a std fd still on
+                    // the terminal) dup the terminal.
+                    let handle = match src {
+                        Some(h) => h,
+                        None => std::sync::Arc::new(
+                            dup_std_handle(n == 1)
+                                .map_err(|e| format!("{fd}: {}", io_error_message(&e)))?,
+                        ),
+                    };
+                    self.open_write_fds.insert(fd, handle);
+                    self.open_fds.remove(&fd);
+                }
+            }
+        } else if fd == 1 {
+            // `1>&$f` (non-numeric expansion): both streams to the file.
+            let f = open_out(&self.cwd, target, false).map_err(|e| format!("{target}: {e}"))?;
+            let a = std::sync::Arc::new(f);
+            self.exec_stdout = Some(a.clone());
+            self.exec_stderr = Some(a);
+        } else {
+            return Err(format!("{target}: ambiguous redirect"));
+        }
+        Ok(())
+    }
+
+    /// Point persistent fd `fd` at input descriptor `target` (`exec M<&N`,
+    /// `exec M<&-`, and the special filenames that mean the same thing).
+    fn apply_persistent_dup_in(&mut self, fd: i32, target: &str) -> Result<(), String> {
+        if target == "-" {
+            // `N<&-`: close the input descriptor.
+            if fd == 0 {
+                self.exec_stdin = None;
+            } else {
+                self.open_fds.remove(&fd);
+                self.open_write_fds.remove(&fd);
+            }
+        } else if let Ok(n) = target.parse::<i32>() {
+            // `M<&N`: fd M becomes a dup of input fd N's *current* source. Our
+            // fd sources are byte cursors, so a dup is modelled by cloning the
+            // source cursor (data + offset) — an independent offset, the same
+            // approximation used when cloning `exec_stdin` into subshells.
+            let cloned = self.clone_input_fd(n)?;
+            if fd == 0 {
+                self.exec_stdin = Some(cloned);
+            } else {
+                self.open_fds.insert(fd, cloned);
+                self.open_write_fds.remove(&fd);
+            }
+        } else {
+            return Err(format!("{target}: ambiguous redirect"));
         }
         Ok(())
     }
@@ -7879,29 +7927,34 @@ impl Shell {
             }
             match r.op {
                 RedirectOp::Read => {
-                    if fd == 0 {
-                        // bash opens the redirect *before* the command runs and
-                        // reports a missing/unreadable file at redirection time —
-                        // even for a builtin that never reads stdin (`true < x`,
-                        // `: < x`, `echo hi < x`). Validate the open here so the
-                        // error surfaces uniformly for builtins and externals;
-                        // downstream code re-opens the path when it actually reads.
+                    if fd == 0 || fd >= 3 {
                         let path = self.expand_redirect_target(&r.target)?;
-                        if let Err(e) = std::fs::File::open(self.host_path(&path)) {
-                            return Err(format!("{path}: {}", io_error_message(&e)));
+                        // `< /dev/stdin`, `< /dev/fd/N`: a dup, not an open.
+                        if self.resolve_special_redirect(r, fd, &path, true, plan)? {
+                            return Ok(());
                         }
-                        plan.stdin = Some(path);
-                        plan.stdin_data = None;
-                    } else if fd >= 3 {
-                        // `exec 3< file`: slurp the file now so a missing/unreadable
-                        // path surfaces as an error at redirection time (bash also
-                        // reports it then), then hand the bytes to `exec`.
-                        let path = self.expand_redirect_target(&r.target)?;
-                        match std::fs::read(self.host_path(&path)) {
-                            Ok(bytes) => {
-                                plan.extra_fds.push((fd, ExtraFdOp::InputBytes(bytes)));
+                        if fd == 0 {
+                            // bash opens the redirect *before* the command runs and
+                            // reports a missing/unreadable file at redirection time —
+                            // even for a builtin that never reads stdin (`true < x`,
+                            // `: < x`, `echo hi < x`). Validate the open here so the
+                            // error surfaces uniformly for builtins and externals;
+                            // downstream code re-opens the path when it actually reads.
+                            if let Err(e) = std::fs::File::open(self.host_path(&path)) {
+                                return Err(format!("{path}: {}", io_error_message(&e)));
                             }
-                            Err(e) => return Err(format!("{path}: {}", io_error_message(&e))),
+                            plan.stdin = Some(path);
+                            plan.stdin_data = None;
+                        } else {
+                            // `exec 3< file`: slurp the file now so a missing/unreadable
+                            // path surfaces as an error at redirection time (bash also
+                            // reports it then), then hand the bytes to `exec`.
+                            match std::fs::read(self.host_path(&path)) {
+                                Ok(bytes) => {
+                                    plan.extra_fds.push((fd, ExtraFdOp::InputBytes(bytes)));
+                                }
+                                Err(e) => return Err(format!("{path}: {}", io_error_message(&e))),
+                            }
                         }
                     }
                 }
@@ -7912,6 +7965,11 @@ impl Shell {
                     // open now so a genuinely unopenable path (e.g. a directory,
                     // or a permission error) surfaces at redirection time.
                     let path = self.expand_redirect_target(&r.target)?;
+                    // `<> /dev/stdout` and friends dup the named descriptor; the
+                    // side that matters is the one the fd is read or written on.
+                    if self.resolve_special_redirect(r, fd, &path, fd == 0, plan)? {
+                        return Ok(());
+                    }
                     if let Err(e) = open_rw(&self.cwd, &path) {
                         return Err(format!("{path}: {}", io_error_message(&e)));
                     }
@@ -7973,6 +8031,12 @@ impl Shell {
                     // not apply to `&>` (bash treats it like `>|`).
                     let target = self.expand_redirect_target(&r.target)?;
                     let append = matches!(r.op, RedirectOp::AppendBoth);
+                    // `&> /dev/stderr` is `> /dev/stderr 2>&1`: fd 1 dups fd 2,
+                    // which the output-dup resolver already expresses (fd 2 is
+                    // where it was, so nothing further is needed for it).
+                    if self.resolve_special_redirect(r, fd, &target, false, plan)? {
+                        return Ok(());
+                    }
                     open_output_target(&self.cwd, &target, append)?;
                     plan.stdout = Some((target.clone(), append));
                     plan.stderr = Some((target, append));
@@ -7989,6 +8053,13 @@ impl Shell {
                 RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
                     let target = self.expand_redirect_target(&r.target)?;
                     let append = matches!(r.op, RedirectOp::Append);
+                    // `> /dev/stdout`, `> /dev/fd/N`: a dup, not an open — so it
+                    // is not a file for noclobber to protect either (`set -C;
+                    // echo hi > /dev/stdout` succeeds in bash). Checked first for
+                    // that reason.
+                    if self.resolve_special_redirect(r, fd, &target, false, plan)? {
+                        return Ok(());
+                    }
                     // With `set -C` (noclobber), a plain `>` refuses to truncate an
                     // existing regular file; `>|` (Clobber) and `>>` (Append)
                     // always proceed. Matches bash's noclobber semantics. Checked
@@ -8029,156 +8100,219 @@ impl Shell {
                     }
                 }
                 RedirectOp::DupOut => {
-                    // `2>&1` → stderr follows stdout; `1>&2` → the reverse.
-                    // When the followed fd already targets a file, copy that file
-                    // target directly; otherwise flag the dup so the executor
-                    // routes fd 2→fd 1 (or fd 1→fd 2) to the live sink (pipe,
-                    // terminal, or capture), not just to a file path.
                     let target = self.expand_redirect_target(&r.target)?;
-                    // `M>&word` / `M<&word`: after expansion, a dup target must
-                    // be a descriptor number or `-` (close). A non-numeric
-                    // expansion on fd 1 (`>&$f`, `1>&$f`, `1>&file`) means "both
-                    // stdout and stderr to that file", exactly like `>&file`
-                    // (which the parser already rewrote to `WriteBoth` for the
-                    // no-explicit-fd literal form). On any other fd a non-numeric
-                    // target is an ambiguous redirect, as bash reports.
-                    if target != "-" && target.parse::<i32>().is_err() {
-                        if fd == 1 {
-                            open_output_target(&self.cwd, &target, false)?;
-                            plan.stdout = Some((target.clone(), false));
-                            plan.stderr = Some((target, false));
-                            // `>&file` is `>file 2>&1` — fd 2 dup's fd 1 (shared
-                            // offset, interleaved writes).
-                            plan.stderr_shares_stdout = true;
-                            plan.stderr_to_stdout = false;
-                            plan.stdout_to_stderr = false;
-                            plan.stdout_to_fd = None;
-                            plan.stderr_to_fd = None;
-                        } else {
-                            return Err(format!(
-                                "{}: ambiguous redirect",
-                                crate::unparse::word_src(&r.target)
-                            ));
-                        }
-                    } else if fd == 2 && target == "1" {
-                        // fd 2's destination is being (re)set: drop any earlier
-                        // stderr file/fd target so this dup wins (last-writer).
-                        plan.stderr_to_fd = None;
-                        if plan.stdout.is_some() {
-                            // `>file 2>&1`: fd 2 dup's fd 1's file — shared offset.
-                            plan.stderr = plan.stdout.clone();
-                            plan.stderr_shares_stdout = true;
-                            plan.stderr_to_stdout = false;
-                        } else {
-                            plan.stderr = None;
-                            plan.stderr_to_stdout = true;
-                        }
-                    } else if fd == 1 && target == "2" {
-                        plan.stdout_to_fd = None;
-                        if plan.stderr.is_some() {
-                            // `2>file 1>&2`: fd 1 dup's fd 2's file — shared offset.
-                            plan.stdout = plan.stderr.clone();
-                            plan.stderr_shares_stdout = true;
-                            plan.stdout_to_stderr = false;
-                        } else {
-                            plan.stdout = None;
-                            plan.stdout_to_stderr = true;
-                        }
-                    } else if fd >= 3 && target == "-" {
-                        // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
-                        plan.extra_fds.push((fd, ExtraFdOp::Close));
-                    } else if fd >= 3 && (target == "1" || target == "2") {
-                        // `exec 3>&1` / `exec 3>&2`: alias a user-space write
-                        // descriptor to a standard fd. Consumed only by `exec`
-                        // (and the scoped compound-command path), which snapshots
-                        // fd 1 / fd 2's current sink into `open_write_fds[fd]`.
-                        let n = if target == "1" { 1 } else { 2 };
-                        plan.extra_fds.push((fd, ExtraFdOp::AliasStd(n)));
-                    } else if let Ok(n) = target.parse::<i32>()
-                        && n >= 3
-                    {
-                        // `M>&N` with N ≥ 3: duplicate fd M onto a user-space
-                        // write descriptor (`echo … >&3`, `cmd 2>&3`). Routed to
-                        // `Shell::open_write_fds[N]` by write_bytes / run_external.
-                        // bash validates the source fd when setting up the
-                        // redirect and, on failure, echoes the *word as written*
-                        // (`>&$n` → "$n: Bad file descriptor", not the expanded
-                        // "5"). Reconstruct the source with `word_src` so the
-                        // diagnostic matches. A scratch fd opened earlier in the
-                        // *same* command's redirect list is staged in
-                        // `plan.extra_fds` (not yet in `open_write_fds`), so an
-                        // in-command dup like `3>&1 2>&3` must still resolve.
-                        let staged_write = plan.extra_fds.iter().any(|(f, op)| {
-                            *f == n && matches!(op, ExtraFdOp::OutputFile(..) | ExtraFdOp::AliasStd(_))
-                        });
-                        if !self.open_write_fds.contains_key(&n) && !staged_write {
-                            return Err(format!(
-                                "{}: Bad file descriptor",
-                                crate::unparse::word_src(&r.target)
-                            ));
-                        }
-                        if fd == 2 {
-                            plan.stderr_to_fd = Some(n);
-                            plan.stderr = None;
-                            plan.stderr_to_stdout = false;
-                        } else {
-                            plan.stdout_to_fd = Some(n);
-                            plan.stdout = None;
-                            plan.stdout_to_stderr = false;
-                        }
-                    }
+                    self.resolve_dup_out(r, fd, &target, plan)?;
                 }
                 RedirectOp::DupIn => {
-                    // `M<&N` — duplicate an *input* descriptor. `read <&3`,
-                    // `cat <&$r`. The dup shares the source cursor's offset (see
-                    // `stdin_from_fd`), matching bash. A `<&-` closes; a
-                    // non-numeric expansion is an ambiguous redirect.
                     let target = self.expand_redirect_target(&r.target)?;
-                    if target == "-" {
-                        if fd >= 3 {
-                            // `exec 3<&-`: close descriptor 3 (consumed by `exec`).
-                            plan.extra_fds.push((fd, ExtraFdOp::Close));
-                        }
-                        // `0<&-` (close stdin) on a non-exec command is a rare
-                        // corner not modelled here (documented limitation).
-                    } else if let Ok(n) = target.parse::<i32>() {
-                        if fd == 0 && n >= 3 {
-                            // fd 0 reads from input descriptor N's shared cursor
-                            // (a `read -u`/`exec 3<` byte fd) or, for a `coproc`
-                            // read end, the live pipe. An unbound source fd fails
-                            // the whole redirect (bash: "N: Bad file descriptor"),
-                            // rather than silent EOF.
-                            if !self.open_fds.contains_key(&n)
-                                && !self.coproc_read_fds.contains_key(&n)
-                            {
-                                // Echo the word as written (`<&$r` → "$r"), as
-                                // bash does, not the expanded fd number.
-                                return Err(format!(
-                                    "{}: Bad file descriptor",
-                                    crate::unparse::word_src(&r.target)
-                                ));
-                            }
-                            plan.stdin_from_fd = Some(n);
-                            plan.stdin = None;
-                            plan.stdin_data = None;
-                        }
-                        // `<&0` (and the rare `<&1`/`<&2`) leave fd 0 as the
-                        // ambient stdin — a dup of fd 0 onto itself is a no-op, so
-                        // the command reads from the inherited pipe/terminal/cursor
-                        // unchanged. `exec 5<&3` (fd ≥ 3 input alias) is only
-                        // meaningful for `exec`, which walks the raw redirects.
-                    } else {
-                        // A non-numeric input-dup target (`<&file`) is ambiguous;
-                        // bash echoes the word as written, not the expansion.
-                        return Err(format!(
-                            "{}: ambiguous redirect",
-                            crate::unparse::word_src(&r.target)
-                        ));
-                    }
+                    self.resolve_dup_in(r, fd, &target, plan)?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Resolve an output dup (`M>&N`, `M>&-`, and the special filenames that
+    /// mean the same thing) into `plan`. `target` is the already-expanded dup
+    /// word; `r` is kept for diagnostics, which echo the word as written.
+    fn resolve_dup_out(
+        &mut self,
+        r: &Redirect,
+        fd: i32,
+        target: &str,
+        plan: &mut RedirPlan,
+    ) -> Result<(), String> {
+        // `2>&1` → stderr follows stdout; `1>&2` → the reverse. When the
+        // followed fd already targets a file, copy that file target directly;
+        // otherwise flag the dup so the executor routes fd 2→fd 1 (or fd 1→fd 2)
+        // to the live sink (pipe, terminal, or capture), not just to a file path.
+        //
+        // `M>&word`: after expansion, a dup target must be a descriptor number
+        // or `-` (close). A non-numeric expansion on fd 1 (`>&$f`, `1>&$f`,
+        // `1>&file`) means "both stdout and stderr to that file", exactly like
+        // `>&file` (which the parser already rewrote to `WriteBoth` for the
+        // no-explicit-fd literal form). On any other fd a non-numeric target is
+        // an ambiguous redirect, as bash reports.
+        if target != "-" && target.parse::<i32>().is_err() {
+            if fd == 1 {
+                let target = target.to_string();
+                open_output_target(&self.cwd, &target, false)?;
+                plan.stdout = Some((target.clone(), false));
+                plan.stderr = Some((target, false));
+                // `>&file` is `>file 2>&1` — fd 2 dup's fd 1 (shared offset,
+                // interleaved writes).
+                plan.stderr_shares_stdout = true;
+                plan.stderr_to_stdout = false;
+                plan.stdout_to_stderr = false;
+                plan.stdout_to_fd = None;
+                plan.stderr_to_fd = None;
+            } else {
+                return Err(format!(
+                    "{}: ambiguous redirect",
+                    crate::unparse::word_src(&r.target)
+                ));
+            }
+        } else if fd == 2 && target == "1" {
+            // fd 2's destination is being (re)set: drop any earlier stderr
+            // file/fd target so this dup wins (last-writer).
+            plan.stderr_to_fd = None;
+            if plan.stdout.is_some() {
+                // `>file 2>&1`: fd 2 dup's fd 1's file — shared offset.
+                plan.stderr = plan.stdout.clone();
+                plan.stderr_shares_stdout = true;
+                plan.stderr_to_stdout = false;
+            } else {
+                plan.stderr = None;
+                plan.stderr_to_stdout = true;
+            }
+        } else if fd == 1 && target == "2" {
+            plan.stdout_to_fd = None;
+            if plan.stderr.is_some() {
+                // `2>file 1>&2`: fd 1 dup's fd 2's file — shared offset.
+                plan.stdout = plan.stderr.clone();
+                plan.stderr_shares_stdout = true;
+                plan.stdout_to_stderr = false;
+            } else {
+                plan.stdout = None;
+                plan.stdout_to_stderr = true;
+            }
+        } else if fd >= 3 && target == "-" {
+            // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
+            plan.extra_fds.push((fd, ExtraFdOp::Close));
+        } else if fd >= 3 && (target == "1" || target == "2") {
+            // `exec 3>&1` / `exec 3>&2`: alias a user-space write descriptor to
+            // a standard fd. Consumed only by `exec` (and the scoped
+            // compound-command path), which snapshots fd 1 / fd 2's current sink
+            // into `open_write_fds[fd]`.
+            let n = if target == "1" { 1 } else { 2 };
+            plan.extra_fds.push((fd, ExtraFdOp::AliasStd(n)));
+        } else if let Ok(n) = target.parse::<i32>()
+            && n >= 3
+        {
+            // `M>&N` with N ≥ 3: duplicate fd M onto a user-space write
+            // descriptor (`echo … >&3`, `cmd 2>&3`). Routed to
+            // `Shell::open_write_fds[N]` by write_bytes / run_external. bash
+            // validates the source fd when setting up the redirect and, on
+            // failure, echoes the *word as written* (`>&$n` → "$n: Bad file
+            // descriptor", not the expanded "5"). Reconstruct the source with
+            // `word_src` so the diagnostic matches. A scratch fd opened earlier
+            // in the *same* command's redirect list is staged in
+            // `plan.extra_fds` (not yet in `open_write_fds`), so an in-command
+            // dup like `3>&1 2>&3` must still resolve.
+            let staged_write = plan.extra_fds.iter().any(|(f, op)| {
+                *f == n && matches!(op, ExtraFdOp::OutputFile(..) | ExtraFdOp::AliasStd(_))
+            });
+            if !self.open_write_fds.contains_key(&n) && !staged_write {
+                return Err(format!(
+                    "{}: Bad file descriptor",
+                    crate::unparse::word_src(&r.target)
+                ));
+            }
+            if fd == 2 {
+                plan.stderr_to_fd = Some(n);
+                plan.stderr = None;
+                plan.stderr_to_stdout = false;
+            } else {
+                plan.stdout_to_fd = Some(n);
+                plan.stdout = None;
+                plan.stdout_to_stderr = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve an input dup (`M<&N`, `M<&-`, and the special filenames that mean
+    /// the same thing) into `plan`. `target` is the already-expanded dup word;
+    /// `r` is kept for diagnostics, which echo the word as written.
+    fn resolve_dup_in(
+        &mut self,
+        r: &Redirect,
+        fd: i32,
+        target: &str,
+        plan: &mut RedirPlan,
+    ) -> Result<(), String> {
+        // `M<&N` — duplicate an *input* descriptor. `read <&3`, `cat <&$r`. The
+        // dup shares the source cursor's offset (see `stdin_from_fd`), matching
+        // bash. A `<&-` closes; a non-numeric expansion is an ambiguous
+        // redirect.
+        if target == "-" {
+            if fd >= 3 {
+                // `exec 3<&-`: close descriptor 3 (consumed by `exec`).
+                plan.extra_fds.push((fd, ExtraFdOp::Close));
+            }
+            // `0<&-` (close stdin) on a non-exec command is a rare corner not
+            // modelled here (documented limitation).
+        } else if let Ok(n) = target.parse::<i32>() {
+            if fd == 0 && n >= 3 {
+                // fd 0 reads from input descriptor N's shared cursor (a `read
+                // -u`/`exec 3<` byte fd) or, for a `coproc` read end, the live
+                // pipe. An unbound source fd fails the whole redirect (bash:
+                // "N: Bad file descriptor"), rather than silent EOF.
+                if !self.open_fds.contains_key(&n) && !self.coproc_read_fds.contains_key(&n) {
+                    // Echo the word as written (`<&$r` → "$r"), as bash does,
+                    // not the expanded fd number.
+                    return Err(format!(
+                        "{}: Bad file descriptor",
+                        crate::unparse::word_src(&r.target)
+                    ));
+                }
+                plan.stdin_from_fd = Some(n);
+                plan.stdin = None;
+                plan.stdin_data = None;
+            }
+            // `<&0` (and the rare `<&1`/`<&2`) leave fd 0 as the ambient stdin —
+            // a dup of fd 0 onto itself is a no-op, so the command reads from
+            // the inherited pipe/terminal/cursor unchanged. `exec 5<&3` (fd ≥ 3
+            // input alias) is only meaningful for `exec`, which walks the raw
+            // redirects.
+        } else {
+            // A non-numeric input-dup target (`<&file`) is ambiguous; bash
+            // echoes the word as written, not the expansion.
+            return Err(format!(
+                "{}: ambiguous redirect",
+                crate::unparse::word_src(&r.target)
+            ));
+        }
+        Ok(())
+    }
+
+    /// Intercept bash's *special redirection filenames*. Returns `true` when
+    /// `path` names a descriptor to duplicate rather than a file to open, having
+    /// resolved the redirect into `plan` as the equivalent dup; `false` for an
+    /// ordinary path, which the caller opens as usual.
+    ///
+    /// See [`special_redirect_fd`] for the names. `read` picks the input side:
+    /// `< /dev/fd/3` shares fd 3's cursor exactly like `<&3`, while
+    /// `> /dev/fd/3` writes to it like `>&3`.
+    ///
+    /// A missing descriptor is reported against the *path*, not the descriptor
+    /// number: `> /dev/fd/9` with fd 9 unbound is "/dev/fd/9: No such file or
+    /// directory" in bash, because on a host that provides `/dev/fd` bash really
+    /// does open the path and the kernel really does return ENOENT. The dup
+    /// resolvers below phrase the same failure as "Bad file descriptor" (right
+    /// for a `>&9`, wrong for a filename), so their error is replaced here — the
+    /// only failure they can produce for an all-digits target.
+    fn resolve_special_redirect(
+        &mut self,
+        r: &Redirect,
+        fd: i32,
+        path: &str,
+        read: bool,
+        plan: &mut RedirPlan,
+    ) -> Result<bool, String> {
+        let Some(n) = special_redirect_fd(path) else {
+            return Ok(false);
+        };
+        let n = n.to_string();
+        let res = if read {
+            self.resolve_dup_in(r, fd, &n, plan)
+        } else {
+            self.resolve_dup_out(r, fd, &n, plan)
+        };
+        match res {
+            Ok(()) => Ok(true),
+            Err(_) => Err(format!("{path}: No such file or directory")),
+        }
     }
 
     /// Post-pass over a fully-resolved plan, reconciling the order-free
@@ -19172,6 +19306,37 @@ fn map_device_path(path: &str) -> &str {
 #[cfg(not(windows))]
 fn map_device_path(path: &str) -> &str {
     path
+}
+
+/// The descriptor a bash *special redirection filename* duplicates, or `None`
+/// for an ordinary path.
+///
+/// bash interprets these four names itself when they appear as a redirection
+/// target — `/dev/fd/N` duplicates descriptor N, and `/dev/stdin`,
+/// `/dev/stdout`, `/dev/stderr` duplicate 0, 1 and 2 (bash manual, "Redirections").
+/// The manual specifies the behaviour whether or not the host provides the
+/// files, so recognising them here is not a Windows workaround: it is what makes
+/// `echo msg > /dev/stderr` reach fd 2 rather than create a file called
+/// `/dev/stderr`, on every target osh runs on. (The Windows dev host has no
+/// `/dev` at all, so before this the redirect silently created a stray
+/// `\dev\stderr` at the drive root and the output vanished.)
+///
+/// The fd part must be all digits, as in bash: `/dev/fd/-1` and `/dev/fd/x` are
+/// ordinary filenames. `/dev/null` is deliberately not here — it is a real
+/// device with no dup semantics (see [`map_device_path`]).
+fn special_redirect_fd(path: &str) -> Option<i32> {
+    match path {
+        "/dev/stdin" => Some(0),
+        "/dev/stdout" => Some(1),
+        "/dev/stderr" => Some(2),
+        _ => {
+            let n = path.strip_prefix("/dev/fd/")?;
+            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            n.parse::<i32>().ok()
+        }
+    }
 }
 
 /// Wrap a raw parser message with `prefix`, adding bash's `syntax error: ` tag
@@ -31862,6 +32027,101 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run_exec_redirect("exec 2> \"{FILE}\"\necho diag >&2"),
             "diag\n"
         );
+    }
+
+    /// bash's *special redirection filenames* name a descriptor to duplicate,
+    /// not a file to open: `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and
+    /// `/dev/fd/N` (bash manual, "Redirections").
+    ///
+    /// These are tested in-process rather than in the differential corpus
+    /// because the reference bash cannot answer for them reliably: it is an MSYS
+    /// build whose `/dev/stdout` is a real magic path, and opening it fails with
+    /// ENOENT whenever fd 1 is an inherited non-MSYS pipe — which is exactly how
+    /// the corpus harness runs a case. (`tests/corpus/redirect-dev-fd.sh` covers
+    /// what *can* be phrased so the reference answers.)
+    #[test]
+    fn dev_stdout_duplicates_fd1_rather_than_naming_a_file() {
+        // Into a capture, `> /dev/stdout` is a dup of fd 1 onto itself: a no-op,
+        // and the bytes stay in the capture instead of creating `/dev/stdout`.
+        assert_eq!(run("echo hi > /dev/stdout").0, "hi\n");
+        assert_eq!(run("echo hi >> /dev/stdout").0, "hi\n");
+        assert_eq!(run("echo one > /dev/stdout; echo two").0, "one\ntwo\n");
+        // It duplicates fd 1 wherever it currently points, so an `exec > file`
+        // that moved fd 1 first takes the write with it.
+        assert_eq!(
+            run_exec_redirect("exec > \"{FILE}\"\necho hi > /dev/stdout"),
+            "hi\n"
+        );
+        // A dup is not an open, so noclobber has no file to protect.
+        assert_eq!(run("set -C; echo hi > /dev/stdout; echo rc=$?").0, "hi\nrc=0\n");
+    }
+
+    #[test]
+    fn dev_stderr_and_dev_stdout_cross_the_two_streams() {
+        // `> /dev/stderr` is `>&2`, and `2> /dev/stdout` is `2>&1`.
+        assert_eq!(
+            run_exec_redirect("exec 2> \"{FILE}\"\necho hi > /dev/stderr"),
+            "hi\n"
+        );
+        assert_eq!(
+            run_exec_redirect("exec > \"{FILE}\"\nexec 2>/dev/stdout\necho E >&2"),
+            "E\n"
+        );
+        // `2>/dev/stdout >file` is left-to-right like `2>&1 >file`: fd 2 keeps
+        // the stdout of that moment and only fd 1 moves on to the file. (The
+        // enclosing `> /dev/null` is what fd 2 is left holding, and keeps `E`
+        // out of the test runner's own output.)
+        assert_eq!(
+            run_exec_redirect(
+                "{ { echo E >&2; echo O; } 2>/dev/stdout > \"{FILE}\"; } > /dev/null"
+            ),
+            "O\n"
+        );
+    }
+
+    #[test]
+    fn dev_fd_n_duplicates_that_descriptor() {
+        assert_eq!(
+            run_exec_redirect("exec 3> \"{FILE}\"\necho hi >/dev/fd/3\nexec 3>&-"),
+            "hi\n"
+        );
+        // The input side reads descriptor N, exactly like `<&3`.
+        assert_eq!(
+            run("{ read l </dev/fd/3; echo \"[$l]\"; } 3<<< 'from3'").0,
+            "[from3]\n"
+        );
+    }
+
+    #[test]
+    fn dev_stdin_duplicates_fd0() {
+        // `< /dev/stdin` is `<&0`: a no-op that leaves fd 0 where it was, so a
+        // here-string applied to the same command still wins (last one applied).
+        assert_eq!(run("read l < /dev/stdin <<< 'x'; echo \"[$l]\"").0, "[x]\n");
+        assert_eq!(run("cat < /dev/stdin <<< 'y'").0, "y\n");
+    }
+
+    #[test]
+    fn unbound_dev_fd_is_reported_against_the_path() {
+        // bash names the *path*, not the descriptor, and the redirect failure
+        // stops the command (status 1, nothing written).
+        let (o, st) = run("{ echo hi >/dev/fd/9; } 2>&1; echo \"rc=$?\"");
+        assert_eq!(st, 0);
+        assert!(
+            o.contains("/dev/fd/9: No such file or directory"),
+            "diagnostic should name the path: {o:?}"
+        );
+        assert!(o.ends_with("rc=1\n"), "redirect failure is status 1: {o:?}");
+    }
+
+    #[test]
+    fn dev_fd_with_a_non_numeric_part_is_an_ordinary_filename() {
+        // Only an all-digits fd part is special: `/dev/fd/x` and `/dev/fd/-1`
+        // are plain paths. Probed on the *read* side so a host that would
+        // happily create the file is not left holding one.
+        for path in ["/dev/fd/x", "/dev/fd/-1", "/dev/fd/"] {
+            let (o, st) = run(&format!("{{ read v < {path}; }} 2>&1"));
+            assert_eq!(st, 1, "{path} must be treated as a filename: {o:?}");
+        }
     }
 
     #[test]

@@ -1626,8 +1626,19 @@ impl Shell {
     /// Parse and execute `src` as *top-level* shell input (the `-c` string, a
     /// script file, or one logical REPL command), returning its exit status.
     pub fn run_source(&mut self, src: &str) -> i32 {
+        self.run_source_at(src, 0)
+    }
+
+    /// [`Shell::run_source`] for input that is a *fragment* of a longer stream:
+    /// `line_base` is the number of lines already consumed before `src`, and is
+    /// added to every line `src` reports (`$LINENO`, error prefixes).
+    ///
+    /// A REPL reads stdin one logical command at a time, so without this every
+    /// command would restart at line 1 — bash keeps counting across the whole
+    /// stream (`printf 'echo one\nnosuchcmd\n' | bash` says `line 2:`).
+    pub fn run_source_at(&mut self, src: &str, line_base: u32) -> i32 {
         let mut out = Out::Inherit;
-        self.run_source_out(src, &mut out)
+        self.run_source_out(src, &mut out, line_base)
     }
 
     /// Whether top-level input has asked the shell to terminate. The read-eval
@@ -1693,8 +1704,8 @@ impl Shell {
     /// unwound everything there is to unwind: it collapses to the returned
     /// status *and* latches [`Shell::exit_requested`] so the read-eval loop
     /// stops reading further input.
-    fn run_source_out(&mut self, src: &str, out: &mut Out) -> i32 {
-        match self.run_source_flow_out(src, out, &StdinSrc::Inherit) {
+    fn run_source_out(&mut self, src: &str, out: &mut Out, line_base: u32) -> i32 {
+        match self.run_source_flow_out(src, out, &StdinSrc::Inherit, line_base) {
             Flow::Exit(code) => {
                 self.exit_requested = true;
                 self.last_status = code;
@@ -1715,13 +1726,24 @@ impl Shell {
     /// fds. Both matter: `x=$(eval echo hi)` must capture the output, and
     /// `echo hi | { eval "read v"; }` must read from the pipe. Only the outermost
     /// entry point ([`Shell::run_source_out`]) passes `StdinSrc::Inherit`.
-    fn run_source_flow_out(&mut self, src: &str, out: &mut Out, stdin: &StdinSrc) -> Flow {
+    ///
+    /// `line_base` shifts every line `src` reports, for input that is a fragment
+    /// of a longer stream (see [`Shell::run_source_at`]); it is 0 for a source
+    /// that numbers its own lines from 1, which is every internally-generated
+    /// body here.
+    fn run_source_flow_out(
+        &mut self,
+        src: &str,
+        out: &mut Out,
+        stdin: &StdinSrc,
+        line_base: u32,
+    ) -> Flow {
         // Parse and execute one unit (one logical line) at a time rather than
         // parsing the whole input up front, because bash's read-parse-execute
         // order is observable: a `shopt -s expand_aliases` or `alias foo=…` run
         // by unit N must affect how unit N+1 parses, and commands before a
         // syntax error must still have run. See [`IncrementalParser`].
-        let mut ip = IncrementalParser::new(src);
+        let mut ip = IncrementalParser::new(src, line_base);
         loop {
             // Expand command-word aliases only when `expand_aliases` is in
             // effect; otherwise the raw tokens are parsed so a non-interactive
@@ -1734,7 +1756,7 @@ impl Shell {
             let prog = match unit {
                 Ok(p) => p,
                 Err(e) => {
-                    self.errln(&self.format_parse_error(&e, src));
+                    self.errln(&self.format_parse_error(&e, src, line_base));
                     self.last_status = 2;
                     return Flow::Next;
                 }
@@ -9640,7 +9662,7 @@ impl Shell {
                 // so `x=$(eval echo hi)` captures it, matching bash, and let an
                 // `exit` inside the string unwind the shell via the side channel
                 // (a builtin can only return an `i32`).
-                let eval_flow = self.run_source_flow_out(&joined, out, stdin);
+                let eval_flow = self.run_source_flow_out(&joined, out, stdin, 0);
                 self.eval_depth = self.eval_depth.saturating_sub(1);
                 match eval_flow {
                     Flow::Exit(code) => {
@@ -11975,7 +11997,7 @@ impl Shell {
         }
         self.in_trap = true;
         let saved = self.last_status;
-        let flow = self.run_source_flow_out(&action, out, stdin);
+        let flow = self.run_source_flow_out(&action, out, stdin, 0);
         // Preserve the pre-trap status unless the handler asked to exit, in
         // which case its code is the shell's exit status.
         if !matches!(flow, Flow::Exit(_)) {
@@ -12031,7 +12053,7 @@ impl Shell {
                     flow = self.exec_program(&prog, out, stdin);
                 }
                 Err(e) => {
-                    self.errln(&self.format_parse_error(&e, &action));
+                    self.errln(&self.format_parse_error(&e, &action, 0));
                 }
             }
             let exited = match flow {
@@ -15021,7 +15043,7 @@ impl Shell {
                 // The callback runs in the current shell, so it gets the shell's
                 // stdin — not the file/fd `mapfile` is itself consuming, whose
                 // remaining bytes belong to the read loop.
-                if let Flow::Exit(n) = self.run_source_flow_out(&cmd, out, stdin) {
+                if let Flow::Exit(n) = self.run_source_flow_out(&cmd, out, stdin, 0) {
                     self.pending_builtin_exit = Some(n);
                     return n;
                 }
@@ -15088,7 +15110,7 @@ impl Shell {
                 });
                 // The script's stdout belongs to *this* command's sink, so
                 // `x=$(. script)` captures it (bash).
-                let flow = self.run_source_flow_out(&src, out, stdin);
+                let flow = self.run_source_flow_out(&src, out, stdin, 0);
                 self.trap_suppress.pop();
                 self.source_depth = self.source_depth.saturating_sub(1);
                 if let Some(p) = saved {
@@ -16311,7 +16333,17 @@ impl Shell {
     /// number comes from the [`ParseError`] (the offending token's line, or one
     /// past EOF); lexer-originated errors carry no line, so we fall back to the
     /// current execution line.
-    fn format_parse_error(&self, e: &crate::parser::ParseError, src: &str) -> String {
+    ///
+    /// `line_base` is the shift already applied to `e.line` (see
+    /// [`Shell::run_source_at`]): the reported number is absolute, but the
+    /// source echo has to index back into the *fragment* `src`, so the base is
+    /// subtracted again there.
+    fn format_parse_error(
+        &self,
+        e: &crate::parser::ParseError,
+        src: &str,
+        line_base: u32,
+    ) -> String {
         let line = e.line.unwrap_or_else(|| self.current_line.max(1));
         let prefix = self.syntax_error_prefix(line);
         // A `ParseError` message may span several physical lines (bash emits
@@ -16330,7 +16362,7 @@ impl Shell {
         // token \`X'` or the conditional-expression `near \`X'` form) — but not
         // for `unexpected end of file` / `unexpected EOF while looking for …`.
         if e.msg.contains("syntax error near ")
-            && let Some(text) = nth_source_line(src, line)
+            && let Some(text) = nth_source_line(src, line.saturating_sub(line_base))
         {
             out.push_str(&format!("\n{prefix}`{text}'"));
         }
@@ -20550,7 +20582,7 @@ mod tests {
         let mut buf = Vec::new();
         let status = {
             let mut out = Out::Capture(&mut buf);
-            sh.run_source_out(src, &mut out)
+            sh.run_source_out(src, &mut out, 0)
         };
         (String::from_utf8_lossy(&buf).into_owned(), status)
     }
@@ -20568,7 +20600,7 @@ mod tests {
         let mut buf = Vec::new();
         let status = {
             let mut out = Out::Capture(&mut buf);
-            sh.run_source_out(src, &mut out)
+            sh.run_source_out(src, &mut out, 0)
         };
         (String::from_utf8_lossy(&buf).into_owned(), status)
     }
@@ -20660,7 +20692,7 @@ mod tests {
         {
             let mut out = Out::Capture(&mut buf);
             // No terminating `EOF` line: bash runs `cat` with the partial body.
-            let status = sh.run_source_out("cat <<EOF\npartial\n", &mut out);
+            let status = sh.run_source_out("cat <<EOF\npartial\n", &mut out, 0);
             assert_eq!(status, 0, "unterminated heredoc should still execute");
         }
         assert_eq!(String::from_utf8_lossy(&buf), "partial\n");
@@ -20769,7 +20801,7 @@ mod tests {
         let src = "echo hello world (";
         let e = parse(src).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src),
+            sh.format_parse_error(&e, src, 0),
             "osh: -c: line 1: syntax error near unexpected token `('\n\
              osh: -c: line 1: `echo hello world ('"
         );
@@ -20778,7 +20810,7 @@ mod tests {
         let src = ":\n:\necho a | | b";
         let e = parse(src).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src),
+            sh.format_parse_error(&e, src, 0),
             "osh: -c: line 3: syntax error near unexpected token `|'\n\
              osh: -c: line 3: `echo a | | b'"
         );
@@ -20787,7 +20819,7 @@ mod tests {
         let src = "if true";
         let e = parse(src).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src),
+            sh.format_parse_error(&e, src, 0),
             "osh: -c: line 2: syntax error: unexpected end of file"
         );
 
@@ -20795,7 +20827,7 @@ mod tests {
         let src = "if true\n\n\n";
         let e = parse(src).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src),
+            sh.format_parse_error(&e, src, 0),
             "osh: -c: line 4: syntax error: unexpected end of file"
         );
 
@@ -20804,7 +20836,7 @@ mod tests {
         let src = "echo (";
         let e = parse(src).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src),
+            sh.format_parse_error(&e, src, 0),
             "osh: eval: line 1: syntax error near unexpected token `('\n\
              osh: eval: line 1: `echo ('"
         );
@@ -20824,7 +20856,7 @@ mod tests {
         sh.set_command_mode();
         let check = |sh: &Shell, src: &str, want: &str| {
             let e = parse(src).unwrap_err();
-            assert_eq!(sh.format_parse_error(&e, src), want, "src: {src}");
+            assert_eq!(sh.format_parse_error(&e, src, 0), want, "src: {src}");
         };
         // A bare word primary followed by another word: bash wanted a binary
         // operator. Covers a plain operand, a non-`[[` operator, and a unary
@@ -20903,7 +20935,7 @@ mod tests {
         let e = parse(src).unwrap_err();
         assert_eq!(e.line, Some(1));
         assert_eq!(
-            sh.format_parse_error(&e, src),
+            sh.format_parse_error(&e, src, 0),
             "osh: -c: line 1: unexpected EOF while looking for matching `)'"
         );
 
@@ -20912,7 +20944,7 @@ mod tests {
         let e = parse(src).unwrap_err();
         assert_eq!(e.line, Some(3));
         assert_eq!(
-            sh.format_parse_error(&e, src),
+            sh.format_parse_error(&e, src, 0),
             "osh: -c: line 3: unexpected EOF while looking for matching `)'"
         );
 
@@ -20929,7 +20961,7 @@ mod tests {
         // quote on a later line does not suppress the lines before it. The
         // incremental parser must therefore hand back every complete unit first
         // and only then report the lexer error.
-        let mut ip = crate::parser::IncrementalParser::new("echo one\necho two\nv='abc\n");
+        let mut ip = crate::parser::IncrementalParser::new("echo one\necho two\nv='abc\n", 0);
         let mut units = 0;
         loop {
             match ip.next_unit(None) {

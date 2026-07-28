@@ -294,11 +294,17 @@ fn repl(sh: &mut Shell) -> i32 {
     let interactive = sh.is_interactive();
     let stdin = io::stdin();
     let mut lock = stdin.lock();
+    // Physical lines already consumed from the stream. bash numbers `$LINENO`
+    // and its diagnostics across the *whole* input, not per command, so each
+    // buffer is executed with this as its line base — otherwise every command
+    // read from a pipe would report line 1.
+    let mut consumed: u32 = 0;
     loop {
         if interactive {
             print_prompt(sh);
         }
         let mut buffer = String::new();
+        let mut read_lines: u32 = 0;
         let done = loop {
             let mut line = String::new();
             match lock.read_line(&mut line) {
@@ -309,6 +315,7 @@ fn repl(sh: &mut Shell) -> i32 {
                     return 1;
                 }
             }
+            read_lines = read_lines.saturating_add(1);
             let trimmed = line.trim_end_matches(['\n', '\r']);
             // A trailing backslash is an explicit line continuation: drop it and
             // join the next physical line (bash's lexer-level `\<newline>`).
@@ -339,7 +346,7 @@ fn repl(sh: &mut Shell) -> i32 {
         };
 
         if !buffer.trim().is_empty() {
-            sh.run_source(&buffer);
+            sh.run_source_at(&buffer, consumed);
             // `exit` (or any unwind reaching the top level) ends the shell: stop
             // reading, exactly as bash does. Without this the loop would treat
             // the exit as an ordinary status and prompt for the next command.
@@ -349,6 +356,9 @@ fn repl(sh: &mut Shell) -> i32 {
                 return sh.last_status();
             }
         }
+        // Count blank/comment-only buffers too — bash's line counter tracks
+        // physical lines read, not commands run.
+        consumed = consumed.saturating_add(read_lines);
         if done {
             if interactive {
                 println!();

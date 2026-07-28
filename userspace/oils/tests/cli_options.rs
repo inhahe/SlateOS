@@ -156,3 +156,52 @@ fn double_dash_makes_dash_c_a_script_path() {
     assert_ne!(code, 0, "opening a nonexistent script must fail");
     assert!(err.contains("-c"), "error should name the file: {err:?}");
 }
+
+/// A REPL reading stdin numbers its lines across the *whole* stream, not from 1
+/// per command: bash's `$LINENO` and its `line N:` diagnostics both keep
+/// counting. Blank and comment-only lines count too, and a function body is
+/// numbered where it was *defined*, not where it is called. Every expectation
+/// below is bash 5.2.37's actual output for the same input.
+#[test]
+fn stdin_repl_numbers_lines_across_the_whole_stream() {
+    let (out, _err, _code) = run_osh(&["-s"], "echo A$LINENO\necho B$LINENO\n");
+    assert_eq!(out, "A1\nB2\n");
+
+    // Blank lines and comments are physical lines and advance the counter.
+    let (out, _err, _code) = run_osh(&["-s"], "echo A$LINENO\n\n# c\necho B$LINENO\n");
+    assert_eq!(out, "A1\nB4\n");
+
+    // A compound command spans several physical lines; the next command
+    // resumes after all of them.
+    let (out, _err, _code) =
+        run_osh(&["-s"], "echo A$LINENO\nif true\nthen\necho B$LINENO\nfi\necho C$LINENO\n");
+    assert_eq!(out, "A1\nB4\nC6\n");
+
+    // A function body reports the line it was defined on, wherever it is run.
+    let (out, _err, _code) =
+        run_osh(&["-s"], "f() {\necho B$LINENO\n}\necho C$LINENO\nf\n");
+    assert_eq!(out, "C4\nB2\n");
+
+    // Runtime diagnostics carry the same number.
+    let (_out, err, _code) = run_osh(&["-s"], "echo one\nnosuchcmd_xyz_123\n");
+    assert!(
+        err.starts_with("osh: line 2: nosuchcmd_xyz_123:"),
+        "diagnostic should name line 2: {err:?}"
+    );
+
+    // …and so does a syntax error, along with its echoed source line.
+    let (_out, err, _code) = run_osh(&["-s"], "echo one\necho two )\n");
+    assert_eq!(
+        err,
+        "osh: line 2: syntax error near unexpected token `)'\nosh: line 2: `echo two )'\n"
+    );
+
+    // An unterminated quote is reported on the stream line it opened on, after
+    // the complete lines before it have run.
+    let (out, err, _code) = run_osh(&["-s"], "echo one\necho two\nv='abc\n");
+    assert_eq!(out, "one\ntwo\n");
+    assert_eq!(
+        err,
+        "osh: line 3: unexpected EOF while looking for matching `''\n"
+    );
+}

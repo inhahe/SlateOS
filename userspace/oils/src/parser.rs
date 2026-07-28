@@ -196,13 +196,19 @@ impl IncrementalParser {
     /// therefore hands back the tokens up to the last complete line *plus* the
     /// error; the error is parked in `pending_lex_err` and surfaced by
     /// [`Self::next_unit`] only after those lines have been handed out.
+    ///
+    /// `line_base` is added to every source line, so a fragment lexed on its own
+    /// still reports the line numbers of the input it came from. It is 0 for a
+    /// script file or a `-c` string, and the count of lines already consumed for
+    /// a REPL reading stdin one command at a time.
     #[must_use]
-    pub fn new(src: &str) -> Self {
+    pub fn new(src: &str, line_base: u32) -> Self {
         let Tokenized {
-            toks: orig,
-            lines: orig_lines,
+            toks: mut orig,
+            lines: mut orig_lines,
             err,
         } = tokenize_deferred(src);
+        shift_lines(&mut orig, &mut orig_lines, line_base);
         Self {
             orig,
             orig_lines,
@@ -212,7 +218,12 @@ impl IncrementalParser {
             wpos: 0,
             pos: 0,
             last_aliases: None,
-            pending_lex_err: err.map(|(e, line)| ParseError::from(e).or_line(line)),
+            pending_lex_err: err
+                .map(|(e, line)| ParseError::from(e).or_line(line))
+                .map(|e| ParseError {
+                    line: e.line.map(|l| l.saturating_add(line_base)),
+                    ..e
+                }),
         }
     }
 
@@ -475,6 +486,49 @@ impl CmdSubLineMap {
                 Seg::Dq(inner) => self.rebase_segs(inner),
                 _ => {}
             }
+        }
+    }
+}
+
+/// Shift every source line recorded in a token stream by `base`.
+///
+/// A source lexed on its own numbers its lines from 1, which is wrong whenever
+/// that source is a *fragment* of a larger input — a REPL command read from a
+/// stdin stream that has already delivered `base` lines. Shifting here, before
+/// the parse, means every AST node ends up carrying an absolute line, so
+/// `$LINENO` inside a function body is right no matter where the function is
+/// later called from (bash numbers a body relative to the source that *defined*
+/// it, verified against bash 5.2).
+///
+/// [`Seg::CmdSub`]'s recorded close line is shifted too: [`parse_cmdsub_body`]
+/// rebases a substitution body relative to it, so leaving it alone would reset
+/// the body's numbering back to the fragment's.
+fn shift_lines(toks: &mut [Tok], lines: &mut [u32], base: u32) {
+    if base == 0 {
+        return;
+    }
+    for l in lines.iter_mut() {
+        *l = l.saturating_add(base);
+    }
+    for t in toks {
+        match t {
+            Tok::Word(segs) | Tok::HereDoc(segs) => shift_segs(segs, base),
+            Tok::ArrayAssign { elems, .. } => {
+                for e in elems {
+                    shift_segs(e, base);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn shift_segs(segs: &mut [Seg], base: u32) {
+    for seg in segs {
+        match seg {
+            Seg::CmdSub(_, close) => *close = close.saturating_add(base),
+            Seg::Dq(inner) => shift_segs(inner, base),
+            _ => {}
         }
     }
 }

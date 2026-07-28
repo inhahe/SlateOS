@@ -333,8 +333,87 @@ fn shell_path(p: &std::path::Path) -> String {
 /// The current working directory as a shell-facing path (see [`shell_path`]),
 /// or an empty string if the host cannot report it (e.g. the directory was
 /// removed out from under us).
+///
+/// Only used to *seed* [`Shell::cwd`] at construction. Everything after that
+/// reads the shell's own directory, which is per-`Shell` (see the field docs).
 fn shell_cwd() -> String {
     std::env::current_dir().as_deref().map(shell_path).unwrap_or_default()
+}
+
+/// True when `p` names a location without needing a working directory: a
+/// rooted `/a/b`, a Windows drive-qualified `C:/a` or UNC `//host/share`.
+///
+/// The Windows forms matter only on the development host, but they have to be
+/// recognised or [`Shell::resolve`] would glue `C:/x` onto the end of the cwd.
+fn path_is_rooted(p: &str) -> bool {
+    let b = p.as_bytes();
+    match b {
+        [b'/' | b'\\', ..] => true,
+        // `C:` — drive-qualified, whether or not a separator follows. `C:x` is
+        // drive-relative on Windows; treating it as rooted is the closest we
+        // can get without tracking per-drive directories.
+        [c, b':', ..] if c.is_ascii_alphabetic() => true,
+        _ => false,
+    }
+}
+
+/// Resolve `path` against the working directory `cwd`, so that a relative path
+/// names a location without consulting the *process*-global working directory.
+///
+/// This is the core of the virtual-cwd model: every shell (including each
+/// in-process subshell) carries its own `cwd`, and every filesystem access is
+/// rebased through here. An empty `cwd` means "not tracking" (the process cwd
+/// is authoritative) and leaves the path untouched.
+fn resolve_against(cwd: &str, path: &str) -> String {
+    if path_is_rooted(path) || cwd.is_empty() {
+        return path.to_string();
+    }
+    // An empty path stays empty: the OS must be the one to reject it, so
+    // `cd -P ""` and `< ""` keep reporting ENOENT rather than opening the
+    // current directory.
+    if path.is_empty() {
+        return String::new();
+    }
+    format!("{}/{path}", cwd.trim_end_matches('/'))
+}
+
+/// Fold `.` and `x/..` out of a slash-separated path *textually*, the way
+/// bash's default (logical) `cd` does — without consulting the filesystem, so
+/// `cd sym/..` returns to the directory `sym` was named from rather than to the
+/// parent of the symlink's target.
+///
+/// A leading `..` that cannot be cancelled is kept (it can only appear when the
+/// path is relative, which callers avoid by resolving against an absolute cwd).
+fn normalize_logical(path: &str) -> String {
+    let rooted = path.starts_with('/');
+    // Keep any leading `C:` / `//host` prefix out of the component walk.
+    let (prefix, rest) = match path.as_bytes() {
+        [c, b':', ..] if c.is_ascii_alphabetic() => path.split_at(2),
+        _ => ("", path),
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for c in rest.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                // `..` above the root is the root itself (POSIX).
+                if matches!(parts.last(), Some(&last) if last != "..") {
+                    parts.pop();
+                } else if !rest.starts_with('/') {
+                    parts.push("..");
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    let joined = parts.join("/");
+    if rest.starts_with('/') || rooted {
+        format!("{prefix}/{joined}")
+    } else if joined.is_empty() {
+        format!("{prefix}.")
+    } else {
+        format!("{prefix}{joined}")
+    }
 }
 
 /// The full set of standard bash `set -o` option names, in bash's alphabetical
@@ -748,6 +827,18 @@ pub struct Shell {
     func_redirects: HashMap<String, Vec<Redirect>>,
     positional: Vec<String>,
     name: String,
+    /// The shell's working directory — absolute, `/`-separated, no trailing
+    /// slash (see [`shell_path`]).
+    ///
+    /// This is per-`Shell`, *not* the process working directory, because osh
+    /// emulates subshells by cloning `Shell` rather than forking: a `cd` inside
+    /// `( … )`, `$( … )`, a pipeline stage or a background job must not escape
+    /// into the parent. Pipeline stages and background jobs also run
+    /// concurrently on threads, so a process-global cwd would additionally be a
+    /// data race between them. Every filesystem path osh opens is resolved
+    /// against this field by [`Shell::resolve`]; the *process* directory is
+    /// only ever read once, to seed the top-level shell.
+    cwd: String,
     last_status: i32,
     /// Monotonic count of command substitutions performed. Used to detect
     /// whether a pure assignment's value contained a `$(...)`/backtick — bash
@@ -1289,6 +1380,7 @@ impl Shell {
             func_redirects: HashMap::new(),
             positional: Vec::new(),
             name: "osh".to_string(),
+            cwd: shell_cwd(),
             last_status: 0,
             comsub_count: 0,
             subshell_depth: 0,
@@ -2455,8 +2547,11 @@ impl Shell {
                 continue;
             };
 
-            let mut pc = PCommand::new(program);
+            let mut pc = PCommand::new(self.resolve_program(program));
             pc.args(&argv[1..]);
+            // The child inherits *this* shell's directory, which is not the
+            // process's once we are inside a subshell clone.
+            pc.current_dir(&self.cwd);
             // When the shell owns its environment (imported at startup), spawn
             // from a cleared base so an `unset`/non-exported variable does not
             // leak in via the parent process's inherited environment.
@@ -3123,7 +3218,7 @@ impl Shell {
         let input_bytes: Option<Vec<u8>> = if let Some(data) = plan.stdin_data.clone() {
             Some(data)
         } else if let Some(path) = &plan.stdin {
-            match std::fs::read(map_device_path(path)) {
+            match std::fs::read(self.host_path(path)) {
                 Ok(b) => Some(b),
                 Err(e) => {
                     self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
@@ -3146,7 +3241,7 @@ impl Shell {
         // is the faithful model of bash dup'ing fd 1 around the group's body.
         let mut stdout_file: Option<Arc<File>> = None;
         if let Some((path, append)) = &plan.stdout {
-            match open_out(path, *append) {
+            match open_out(&self.cwd, path, *append) {
                 Ok(f) => stdout_file = Some(Arc::new(f)),
                 Err(e) => {
                     self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
@@ -3179,7 +3274,7 @@ impl Shell {
                 && plan.stdout.as_ref().is_some_and(|(sp, _)| sp == path);
             let opened: io::Result<File> = match (share_stdout, &stdout_file) {
                 (true, Some(f)) => f.try_clone(),
-                _ => open_out(path, *append),
+                _ => open_out(&self.cwd, path, *append),
             };
             match opened {
                 Ok(f) => {
@@ -3421,7 +3516,7 @@ impl Shell {
                     self.open_fds
                         .insert(*fd, RefCell::new(io::Cursor::new(bytes.clone())));
                 }
-                ExtraFdOp::OutputFile(path, append) => match open_out(path, *append) {
+                ExtraFdOp::OutputFile(path, append) => match open_out(&self.cwd, path, *append) {
                     Ok(f) => {
                         self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
                     }
@@ -3456,9 +3551,9 @@ impl Shell {
                     // live write handle for the same descriptor. Create-if-absent,
                     // never truncate. The two handles are independent (no shared
                     // OS offset) — a documented model limitation.
-                    match open_rw(path) {
+                    match open_rw(&self.cwd, path) {
                         Ok(f) => {
-                            let bytes = std::fs::read(map_device_path(path)).unwrap_or_default();
+                            let bytes = std::fs::read(self.host_path(path)).unwrap_or_default();
                             self.open_fds
                                 .insert(*fd, RefCell::new(io::Cursor::new(bytes)));
                             self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
@@ -3647,7 +3742,8 @@ impl Shell {
             // `-L`/`-h` — the operand is a path; test whether it is a symlink
             // (without following the final component).
             UnaryOp::Symlink => {
-                let path = self.expand_to_string(w);
+                let word = self.expand_to_string(w);
+                let path = self.resolve(&word);
                 std::fs::symlink_metadata(&path)
                     .map(|m| m.file_type().is_symlink())
                     .unwrap_or(false)
@@ -3663,7 +3759,8 @@ impl Shell {
                 }
             }
             _ => {
-                let path = self.expand_to_string(w);
+                let word = self.expand_to_string(w);
+                let path = self.resolve(&word);
                 let meta = std::fs::metadata(&path);
                 match op {
                     UnaryOp::Exists => meta.is_ok(),
@@ -3753,13 +3850,16 @@ impl Shell {
                 }
             }
             CondBinOp::FileNewer => {
-                file_cmp("-nt", &self.expand_to_string(l), &self.expand_to_string(r))
+                let (a, b) = (self.expand_to_string(l), self.expand_to_string(r));
+                file_cmp(&self.cwd, "-nt", &a, &b)
             }
             CondBinOp::FileOlder => {
-                file_cmp("-ot", &self.expand_to_string(l), &self.expand_to_string(r))
+                let (a, b) = (self.expand_to_string(l), self.expand_to_string(r));
+                file_cmp(&self.cwd, "-ot", &a, &b)
             }
             CondBinOp::SameFile => {
-                file_cmp("-ef", &self.expand_to_string(l), &self.expand_to_string(r))
+                let (a, b) = (self.expand_to_string(l), self.expand_to_string(r));
+                file_cmp(&self.cwd, "-ef", &a, &b)
             }
         }
     }
@@ -3776,6 +3876,9 @@ impl Shell {
             func_redirects: self.func_redirects.clone(),
             positional: self.positional.clone(),
             name: self.name.clone(),
+            // A subshell starts in the parent's directory and may wander freely
+            // without the parent ever seeing it (bash: it is a separate process).
+            cwd: self.cwd.clone(),
             last_status: self.last_status,
             comsub_count: self.comsub_count,
             // Entering a subshell increments the nesting depth (`$BASH_SUBSHELL`).
@@ -5214,7 +5317,7 @@ impl Shell {
     /// The working directory for prompt `\w` (full, `$HOME`→`~`) or `\W`
     /// (basename only).
     fn prompt_cwd(&self, basename_only: bool) -> String {
-        let cwd = shell_cwd();
+        let cwd = self.cwd.clone();
         if basename_only {
             let base = cwd.rsplit(['/', '\\']).next().unwrap_or(&cwd);
             return if base.is_empty() { "/".to_string() } else { base.to_string() };
@@ -6564,10 +6667,9 @@ impl Shell {
     /// Search `$PATH` for an executable named `name`. A name containing a slash
     /// is checked directly. Returns the first matching regular file.
     fn find_in_path(&self, name: &str) -> Option<std::path::PathBuf> {
-        use std::path::Path;
         if name.contains('/') || name.contains('\\') {
-            let p = Path::new(name);
-            return p.is_file().then(|| p.to_path_buf());
+            let p = self.resolve(name);
+            return p.is_file().then_some(p);
         }
         let path = match self.param_value("PATH") {
             Some(p) => p,
@@ -6578,7 +6680,9 @@ impl Shell {
             None => return None,
         };
         for dir in std::env::split_paths(&path) {
-            let cand = dir.join(name);
+            // A relative `$PATH` entry (`.`, `bin`) is relative to *this*
+            // shell's directory, not the process's.
+            let cand = self.resolve(&dir.to_string_lossy()).join(name);
             // bash's PATH search skips files it cannot execute (it probes with
             // `access(X_OK)`), so a non-executable data file (e.g. a `*.json`
             // config) sharing a name with a real command in an earlier PATH dir
@@ -6628,12 +6732,11 @@ impl Shell {
     /// `$PATH` directories in order (used by `type -a`). Duplicate paths are
     /// suppressed while preserving first-seen order.
     fn find_all_in_path(&self, name: &str) -> Vec<std::path::PathBuf> {
-        use std::path::Path;
         let mut out: Vec<std::path::PathBuf> = Vec::new();
         if name.contains('/') || name.contains('\\') {
-            let p = Path::new(name);
+            let p = self.resolve(name);
             if p.is_file() {
-                out.push(p.to_path_buf());
+                out.push(p);
             }
             return out;
         }
@@ -6646,7 +6749,7 @@ impl Shell {
             None => return out,
         };
         for dir in std::env::split_paths(&path) {
-            let cand = dir.join(name);
+            let cand = self.resolve(&dir.to_string_lossy()).join(name);
             if cand.is_file() && !out.contains(&cand) {
                 out.push(cand.clone());
             }
@@ -6685,9 +6788,10 @@ impl Shell {
                 std::os::unix::process::CommandExt::arg0(&mut c, &argv[0]);
                 c
             }
-            None => PCommand::new(&argv[0]),
+            None => PCommand::new(self.resolve_program(&argv[0])),
         };
         cmd.args(&argv[1..]);
+        cmd.current_dir(&self.cwd);
 
         // Environment: exported shell vars + this command's temp assignments.
         // When the shell owns its environment, start from a cleared base so an
@@ -6738,7 +6842,7 @@ impl Shell {
             cmd.stdin(Stdio::piped());
         } else {
             match &redir.stdin {
-                Some(path) => match std::fs::File::open(map_device_path(path)) {
+                Some(path) => match std::fs::File::open(self.host_path(path)) {
                     Ok(f) => {
                         cmd.stdin(Stdio::from(f));
                     }
@@ -6802,7 +6906,7 @@ impl Shell {
         // to hand to stderr in that case.
         let mut stdout_file_for_stderr: Option<File> = None;
         match &redir.stdout {
-            Some((path, append)) => match open_out(path, *append) {
+            Some((path, append)) => match open_out(&self.cwd, path, *append) {
                 Ok(f) => {
                     if redir.stderr_shares_stdout
                         && redir.stderr.as_ref().is_some_and(|(sp, _)| sp == path)
@@ -6911,7 +7015,7 @@ impl Shell {
             // otherwise open the target independently (`2>file` clobbers on its own).
             let opened = match stdout_file_for_stderr.take() {
                 Some(f) => Ok(f),
-                None => open_out(path, *append),
+                None => open_out(&self.cwd, path, *append),
             };
             match opened {
                 Ok(f) => {
@@ -7085,8 +7189,9 @@ impl Shell {
                 argv.extend(self.expand_word(w, true));
             }
             if !argv.is_empty() && !self.funcs.contains_key(&argv[0]) && !self.builtin_enabled(&argv[0]) {
-                let mut cmd = PCommand::new(&argv[0]);
+                let mut cmd = PCommand::new(self.resolve_program(&argv[0]));
                 cmd.args(&argv[1..]);
+                cmd.current_dir(&self.cwd);
                 if self.env_imported {
                     cmd.env_clear();
                 }
@@ -7299,7 +7404,7 @@ impl Shell {
         match r.op {
             RedirectOp::Read => {
                 let path = self.expand_to_string(&r.target);
-                let bytes = std::fs::read(map_device_path(&path))
+                let bytes = std::fs::read(self.host_path(&path))
                     .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
                 if fd == 0 {
                     self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
@@ -7314,16 +7419,16 @@ impl Shell {
                 // current bytes; the write side is a live handle. The two do not
                 // share an OS offset (a documented model limitation).
                 let path = self.expand_to_string(&r.target);
-                let f = open_rw(&path).map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
+                let f = open_rw(&self.cwd, &path).map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
                 match fd {
                     0 => {
-                        let bytes = std::fs::read(map_device_path(&path)).unwrap_or_default();
+                        let bytes = std::fs::read(self.host_path(&path)).unwrap_or_default();
                         self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
                     }
                     1 => self.exec_stdout = Some(std::sync::Arc::new(f)),
                     2 => self.exec_stderr = Some(std::sync::Arc::new(f)),
                     _ => {
-                        let bytes = std::fs::read(map_device_path(&path)).unwrap_or_default();
+                        let bytes = std::fs::read(self.host_path(&path)).unwrap_or_default();
                         self.open_fds.insert(fd, RefCell::new(io::Cursor::new(bytes)));
                         self.open_write_fds.insert(fd, std::sync::Arc::new(f));
                     }
@@ -7347,7 +7452,7 @@ impl Shell {
             RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
                 let target = self.expand_to_string(&r.target);
                 let append = matches!(r.op, RedirectOp::AppendBoth);
-                let f = open_out(&target, append).map_err(|e| format!("{target}: {}", io_error_message(&e)))?;
+                let f = open_out(&self.cwd, &target, append).map_err(|e| format!("{target}: {}", io_error_message(&e)))?;
                 // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one handle.
                 let a = std::sync::Arc::new(f);
                 self.exec_stdout = Some(a.clone());
@@ -7358,13 +7463,13 @@ impl Shell {
                 let append = matches!(r.op, RedirectOp::Append);
                 if self.noclobber
                     && matches!(r.op, RedirectOp::Write)
-                    && std::path::Path::new(map_device_path(&target))
+                    && std::path::Path::new(&self.host_path(&target))
                         .metadata()
                         .is_ok_and(|m| m.is_file())
                 {
                     return Err(format!("{target}: cannot overwrite existing file"));
                 }
-                let f = open_out(&target, append).map_err(|e| format!("{target}: {}", io_error_message(&e)))?;
+                let f = open_out(&self.cwd, &target, append).map_err(|e| format!("{target}: {}", io_error_message(&e)))?;
                 let a = std::sync::Arc::new(f);
                 match fd {
                     0 | 1 => self.exec_stdout = Some(a),
@@ -7412,7 +7517,7 @@ impl Shell {
                     }
                 } else if fd == 1 {
                     // `1>&$f` (non-numeric expansion): both streams to the file.
-                    let f = open_out(&target, false).map_err(|e| format!("{target}: {e}"))?;
+                    let f = open_out(&self.cwd, &target, false).map_err(|e| format!("{target}: {e}"))?;
                     let a = std::sync::Arc::new(f);
                     self.exec_stdout = Some(a.clone());
                     self.exec_stderr = Some(a);
@@ -7556,7 +7661,7 @@ impl Shell {
             // Append even for a `2>file`: the file was already truncated when
             // that redirect was resolved, and re-truncating would drop anything
             // an earlier command in the same plan wrote.
-            if let Ok(f) = open_out(path, *append) {
+            if let Ok(f) = open_out(&self.cwd, path, *append) {
                 self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
                 return true;
             }
@@ -7572,7 +7677,7 @@ impl Shell {
             // fd 2 follows fd 1 as of that moment: an already-resolved `>file`
             // target if there is one, else the caller's live stdout sink.
             if let Some((path, append)) = &p.stdout {
-                if let Ok(f) = open_out(path, *append) {
+                if let Ok(f) = open_out(&self.cwd, path, *append) {
                     self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
                     return true;
                 }
@@ -7629,7 +7734,7 @@ impl Shell {
                         // error surfaces uniformly for builtins and externals;
                         // downstream code re-opens the path when it actually reads.
                         let path = self.expand_redirect_target(&r.target)?;
-                        if let Err(e) = std::fs::File::open(map_device_path(&path)) {
+                        if let Err(e) = std::fs::File::open(self.host_path(&path)) {
                             return Err(format!("{path}: {}", io_error_message(&e)));
                         }
                         plan.stdin = Some(path);
@@ -7639,7 +7744,7 @@ impl Shell {
                         // path surfaces as an error at redirection time (bash also
                         // reports it then), then hand the bytes to `exec`.
                         let path = self.expand_redirect_target(&r.target)?;
-                        match std::fs::read(map_device_path(&path)) {
+                        match std::fs::read(self.host_path(&path)) {
                             Ok(bytes) => {
                                 plan.extra_fds.push((fd, ExtraFdOp::InputBytes(bytes)));
                             }
@@ -7654,7 +7759,7 @@ impl Shell {
                     // open now so a genuinely unopenable path (e.g. a directory,
                     // or a permission error) surfaces at redirection time.
                     let path = self.expand_redirect_target(&r.target)?;
-                    if let Err(e) = open_rw(&path) {
+                    if let Err(e) = open_rw(&self.cwd, &path) {
                         return Err(format!("{path}: {}", io_error_message(&e)));
                     }
                     if fd == 0 {
@@ -7715,7 +7820,7 @@ impl Shell {
                     // not apply to `&>` (bash treats it like `>|`).
                     let target = self.expand_redirect_target(&r.target)?;
                     let append = matches!(r.op, RedirectOp::AppendBoth);
-                    open_output_target(&target, append)?;
+                    open_output_target(&self.cwd, &target, append)?;
                     plan.stdout = Some((target.clone(), append));
                     plan.stderr = Some((target, append));
                     // `&>` is `>file 2>&1`: fd 2 is a dup of fd 1, sharing one
@@ -7738,13 +7843,13 @@ impl Shell {
                     // very file noclobber exists to protect.
                     if self.noclobber
                         && matches!(r.op, RedirectOp::Write)
-                        && std::path::Path::new(map_device_path(&target))
+                        && std::path::Path::new(&self.host_path(&target))
                             .metadata()
                             .is_ok_and(|m| m.is_file())
                     {
                         return Err(format!("{target}: cannot overwrite existing file"));
                     }
-                    open_output_target(&target, append)?;
+                    open_output_target(&self.cwd, &target, append)?;
                     match fd {
                         2 => {
                             plan.stderr = Some((target, append));
@@ -7786,7 +7891,7 @@ impl Shell {
                     // target is an ambiguous redirect, as bash reports.
                     if target != "-" && target.parse::<i32>().is_err() {
                         if fd == 1 {
-                            open_output_target(&target, false)?;
+                            open_output_target(&self.cwd, &target, false)?;
                             plan.stdout = Some((target.clone(), false));
                             plan.stderr = Some((target, false));
                             // `>&file` is `>file 2>&1` — fd 2 dup's fd 1 (shared
@@ -8078,8 +8183,8 @@ impl Shell {
             let mut failed = None;
             for f in fields {
                 glob_or_literal(
-                    &f, &mut out, nullglob, failglob, dotglob, nocaseglob, extglob, globstar,
-                    globignore_active, &globignore, &mut failed,
+                    &self.cwd, &f, &mut out, nullglob, failglob, dotglob, nocaseglob, extglob,
+                    globstar, globignore_active, &globignore, &mut failed,
                 );
             }
             // `failglob`: a pattern that matched nothing is a fatal expansion
@@ -9199,11 +9304,14 @@ impl Shell {
             // bash opens a *directory* read-only successfully: `$(< dir)` yields
             // the empty string with $? = 0 (no bytes, no error). `std::fs::read`
             // instead fails on a directory, so detect it first and mirror bash.
-            if std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+            // The *opened* path is resolved against the shell's own working
+            // directory; the *reported* one stays as the user spelled it.
+            let host = self.host_path(&path);
+            if std::fs::metadata(&host).is_ok_and(|m| m.is_dir()) {
                 self.last_status = 0;
                 return String::new();
             }
-            match std::fs::read(&path) {
+            match std::fs::read(&host) {
                 Ok(mut bytes) => {
                     self.strip_capture_nuls(&mut bytes);
                     let mut s = String::from_utf8_lossy(&bytes).into_owned();
@@ -9727,7 +9835,7 @@ impl Shell {
         let mut stderr_merge_buf: Option<Arc<Mutex<Vec<u8>>>> = None;
         if name != "exec" {
             if let Some((path, append)) = &redir.stderr {
-                if let Ok(f) = open_out(path, *append) {
+                if let Ok(f) = open_out(&self.cwd, path, *append) {
                     self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
                     pushed_stderr = true;
                 }
@@ -9896,7 +10004,7 @@ impl Shell {
                     if let Some(data) = &redir.stdin_data {
                         self.exec_stdin = Some(RefCell::new(io::Cursor::new(data.clone())));
                     } else if let Some(path) = &redir.stdin {
-                        match std::fs::read(map_device_path(path)) {
+                        match std::fs::read(self.host_path(path)) {
                             Ok(bytes) => {
                                 self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
                             }
@@ -9910,7 +10018,7 @@ impl Shell {
                     // the shared handle, so later commands accumulate into it at
                     // one OS offset (bash dups the fd, it does not reopen).
                     if let Some((path, append)) = &redir.stdout {
-                        match open_out(path, *append) {
+                        match open_out(&self.cwd, path, *append) {
                             Ok(f) => {
                                 self.exec_stdout = Some(std::sync::Arc::new(f));
                             }
@@ -9922,7 +10030,7 @@ impl Shell {
                     }
                     // fd 2 (`2> file` / `2>> file`).
                     if rc == 0 && let Some((path, append)) = &redir.stderr {
-                        match open_out(path, *append) {
+                        match open_out(&self.cwd, path, *append) {
                             Ok(f) => {
                                 self.exec_stderr = Some(std::sync::Arc::new(f));
                             }
@@ -9979,7 +10087,7 @@ impl Shell {
                                     self.open_write_fds.remove(fd);
                                 }
                                 ExtraFdOp::OutputFile(path, append) => {
-                                    match open_out(path, *append) {
+                                    match open_out(&self.cwd, path, *append) {
                                         Ok(f) => {
                                             self.open_write_fds
                                                 .insert(*fd, std::sync::Arc::new(f));
@@ -10007,9 +10115,9 @@ impl Shell {
                                     // Create-if-absent, no truncation; the read
                                     // side snapshots current bytes, the write side
                                     // is a live handle (independent offsets).
-                                    match open_rw(path) {
+                                    match open_rw(&self.cwd, path) {
                                         Ok(f) => {
-                                            let bytes = std::fs::read(map_device_path(path))
+                                            let bytes = std::fs::read(self.host_path(path))
                                                 .unwrap_or_default();
                                             self.open_fds.insert(
                                                 *fd,
@@ -10186,23 +10294,73 @@ impl Shell {
         flow
     }
 
-    /// Change the process working directory to `path`, updating `$OLDPWD`
+    /// Resolve a shell-supplied path against this shell's own working
+    /// directory ([`Shell::cwd`]).
+    ///
+    /// Every filesystem access in the interpreter must go through this rather
+    /// than handing a relative path straight to the OS: osh's subshells are
+    /// `Shell` clones inside one process, so the *process* directory belongs to
+    /// no particular shell (and several may be running at once on different
+    /// threads). Absolute paths pass through untouched.
+    fn resolve(&self, path: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(self.resolve_str(path))
+    }
+
+    /// The program path to hand to `Command::new`.
+    ///
+    /// A name containing a separator is a path and resolves against this
+    /// shell's directory; a bare name is left alone so the OS runs its own
+    /// `$PATH` search. Resolving here rather than relying on `Command::current_dir`
+    /// is required on the Windows host, where `CreateProcess` looks a relative
+    /// application name up against the *calling* process's directory rather
+    /// than the one handed to the child.
+    fn resolve_program(&self, name: &str) -> String {
+        if name.contains('/') || name.contains('\\') {
+            self.resolve_str(name)
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// [`Shell::resolve`] plus the host device-name mapping
+    /// ([`map_device_path`]): the form to hand to `File::open` / `fs::read` /
+    /// `OpenOptions`. Device paths are rooted, so resolving first leaves them
+    /// alone and the mapping still fires.
+    fn host_path(&self, path: &str) -> String {
+        map_device_path(&self.resolve_str(path)).to_string()
+    }
+
+    /// [`Shell::resolve`] as a string, for the callers that need to keep
+    /// talking about the path in shell terms (`/`-separated).
+    fn resolve_str(&self, path: &str) -> String {
+        resolve_against(&self.cwd, path)
+    }
+
+    /// Change *this shell's* working directory to `path`, updating `$OLDPWD`
     /// (to the previous cwd) and `$PWD` (to the new cwd). Returns the new cwd
     /// as a display string on success, or an OS error string on failure.
+    ///
+    /// The directory is logical (bash's default `-L`): the target is appended
+    /// to the current one and `.`/`..` are folded out textually, so the path
+    /// the user typed to reach a symlink is the path they walk back out of.
+    /// `cd -P` re-canonicalises afterwards, in [`Shell::builtin_cd`].
     fn change_dir(&mut self, path: &str) -> Result<String, String> {
-        let old = std::env::current_dir().as_deref().map(shell_path).ok();
-        std::env::set_current_dir(path).map_err(|e| io_error_message(&e))?;
-        let cwd = std::env::current_dir()
-            .as_deref()
-            .map(shell_path)
-            .unwrap_or_else(|_| path.to_string());
-        if let Some(o) = old {
-            self.vars.insert("OLDPWD".to_string(), o);
+        let target = normalize_logical(&self.resolve_str(path));
+        // `set_current_dir` used to supply these diagnostics for free; now that
+        // the directory is ours, the checks are too. Both messages are bash's.
+        match std::fs::metadata(&target) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Err("Not a directory".to_string()),
+            Err(e) => return Err(io_error_message(&e)),
         }
-        self.vars.insert("PWD".to_string(), cwd.clone());
+        let old = std::mem::replace(&mut self.cwd, target.clone());
+        if !old.is_empty() {
+            self.vars.insert("OLDPWD".to_string(), old);
+        }
+        self.vars.insert("PWD".to_string(), target.clone());
         // Keep DIRSTACK[0] (the current dir) in sync on every cwd change.
         self.refresh_dirstack();
-        Ok(cwd)
+        Ok(target)
     }
 
     fn builtin_cd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -10294,7 +10452,7 @@ impl Shell {
             for entry in cdpath.split(':') {
                 let base = if entry.is_empty() { "." } else { entry };
                 let candidate = format!("{base}/{target}");
-                if std::path::Path::new(&candidate).is_dir() {
+                if std::path::Path::new(&self.host_path(&candidate)).is_dir() {
                     if base != "." {
                         echo = true;
                     }
@@ -10347,7 +10505,7 @@ impl Shell {
     /// The current directory stack as a list with the current directory first
     /// (the conceptual top), followed by the saved `dir_stack` entries.
     fn dir_stack_full(&self) -> Vec<String> {
-        let cur = shell_cwd();
+        let cur = self.cwd.clone();
         let mut full = Vec::with_capacity(self.dir_stack.len() + 1);
         full.push(cur);
         full.extend(self.dir_stack.iter().cloned());
@@ -10449,7 +10607,7 @@ impl Shell {
             end_opts = true;
         }
 
-        let cur = shell_cwd();
+        let cur = self.cwd.clone();
         match (spec, dir) {
             (Some(s), _) => {
                 let full = self.dir_stack_full();
@@ -12425,7 +12583,7 @@ impl Shell {
                 }
             }
         }
-        let cwd = shell_cwd();
+        let cwd = self.cwd.clone();
         // `-P` reports the canonical, symlink-resolved path.
         let cwd = if physical {
             std::fs::canonicalize(&cwd).map(|p| shell_path(&p)).unwrap_or(cwd)
@@ -15165,7 +15323,7 @@ impl Shell {
             return data.clone();
         }
         if let Some(path) = &redir.stdin {
-            return std::fs::read(map_device_path(path)).unwrap_or_default();
+            return std::fs::read(self.host_path(path)).unwrap_or_default();
         }
         let mut buf = Vec::new();
         match stdin {
@@ -15420,7 +15578,7 @@ impl Shell {
             self.emit_stderr(format!("{tag}: usage: {tag} filename [arguments]\n").as_bytes());
             return 2;
         };
-        match std::fs::read_to_string(path) {
+        match std::fs::read_to_string(self.host_path(path)) {
             Ok(src) => {
                 let saved = if args.len() > 1 {
                     Some(std::mem::replace(&mut self.positional, args[1..].to_vec()))
@@ -15694,7 +15852,7 @@ impl Shell {
             }
             None => (String::new(), ".".to_string(), word.to_string()),
         };
-        let Ok(rd) = std::fs::read_dir(&dir_path) else {
+        let Ok(rd) = std::fs::read_dir(self.resolve(&dir_path)) else {
             return Vec::new();
         };
         let mut out: Vec<String> = Vec::new();
@@ -15731,7 +15889,8 @@ impl Shell {
         };
         let mut out: Vec<String> = Vec::new();
         for dir in std::env::split_paths(&path) {
-            let Ok(rd) = std::fs::read_dir(&dir) else {
+            // A relative `$PATH` entry is relative to *this shell's* cwd.
+            let Ok(rd) = std::fs::read_dir(self.resolve(&dir.to_string_lossy())) else {
                 continue;
             };
             for ent in rd.flatten() {
@@ -16332,7 +16491,7 @@ impl Shell {
                 // the remaining operands (so `[ ! -L path ]` works); then
                 // `( expr )` grouping.
                 if is_test_binary_op(op) {
-                    return eval_binary(l, op, r);
+                    return eval_binary(&self.cwd, l, op, r);
                 }
                 if op == "-a" {
                     return Ok(!l.is_empty() && !r.is_empty());
@@ -16346,7 +16505,7 @@ impl Shell {
                 if l == "(" && r == ")" {
                     return Ok(!op.is_empty());
                 }
-                eval_binary(l, op, r)
+                eval_binary(&self.cwd, l, op, r)
             }
             4 if a[0] == "!" => {
                 // bash's `posixtest` special-cases a four-argument leading `!`:
@@ -16382,7 +16541,7 @@ impl Shell {
             "-v" => self.var_is_set(x),
             "-o" => self.shell_option_enabled(x),
             "-R" => self.nameref_attr.contains(x),
-            _ => eval_unary(op, x),
+            _ => eval_unary(&self.cwd, op, x),
         }
     }
 
@@ -16424,7 +16583,7 @@ impl Shell {
         }
         // A `>`/`>>` redirect on the builtin wins over the ambient sink.
         if let Some((path, append)) = &redir.stdout {
-            match open_out(path, *append) {
+            match open_out(&self.cwd, path, *append) {
                 Ok(mut f) => {
                     if f.write_all(bytes).is_err() {
                         return 1;
@@ -16755,7 +16914,7 @@ impl Shell {
         let mut bytes = msg.as_bytes().to_vec();
         bytes.push(b'\n');
         if let Some((path, append)) = &redir.stderr {
-            if let Ok(mut f) = open_out(path, *append) {
+            if let Ok(mut f) = open_out(&self.cwd, path, *append) {
                 let _ = f.write_all(&bytes);
                 return;
             }
@@ -16878,7 +17037,7 @@ impl Shell {
             return read_one_line(&mut r);
         }
         if let Some(path) = &redir.stdin {
-            let f = std::fs::File::open(map_device_path(path)).ok()?;
+            let f = std::fs::File::open(self.host_path(path)).ok()?;
             let mut r = io::BufReader::new(f);
             return read_one_line(&mut r);
         }
@@ -16933,7 +17092,7 @@ impl Shell {
             return read_record(&mut r, delim, nchars, exact);
         }
         if let Some(path) = &redir.stdin {
-            let f = std::fs::File::open(map_device_path(path)).ok()?;
+            let f = std::fs::File::open(self.host_path(path)).ok()?;
             let mut r = io::BufReader::new(f);
             return read_record(&mut r, delim, nchars, exact);
         }
@@ -17147,6 +17306,7 @@ fn field_has_glob_meta(field: &[EChar], extglob: bool) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn glob_or_literal(
+    cwd: &str,
     field: &[EChar],
     out: &mut Vec<String>,
     nullglob: bool,
@@ -17167,7 +17327,8 @@ fn glob_or_literal(
     }
     // A non-null GLOBIGNORE enables a dotglob-like effect for this expansion.
     let effective_dotglob = dotglob || globignore_active;
-    let mut matches = glob_expand_field(field, effective_dotglob, nocaseglob, extglob, globstar);
+    let mut matches =
+        glob_expand_field(cwd, field, effective_dotglob, nocaseglob, extglob, globstar);
     if globignore_active {
         // Drop names matching any GLOBIGNORE pattern, and always drop the `.`
         // and `..` entries (bash ignores them whenever GLOBIGNORE is non-null,
@@ -17520,7 +17681,13 @@ fn glob_starts_with_dot(toks: &[PatTok]) -> bool {
 
 /// Expand an annotated field containing at least one unquoted metacharacter
 /// against the filesystem, returning the matching paths (unsorted).
+///
+/// `cwd` is the *shell's* working directory: the returned paths stay relative
+/// (bash substitutes the pattern's own spelling), but every directory read is
+/// rebased onto it so a subshell that has `cd`-ed elsewhere globs its own
+/// directory rather than the process's.
 fn glob_expand_field(
+    cwd: &str,
     field: &[EChar],
     dotglob: bool,
     nocaseglob: bool,
@@ -17557,7 +17724,7 @@ fn glob_expand_field(
             let terminal = ci == last;
             let mut next: Vec<String> = Vec::new();
             for base in &cands {
-                globstar_walk(base, dotglob, terminal, &mut next);
+                globstar_walk(cwd, base, dotglob, terminal, &mut next);
             }
             next.sort();
             next.dedup();
@@ -17589,7 +17756,7 @@ fn glob_expand_field(
                 // itself begins with a literal dot, or when `dotglob` is set.
                 // Even with `dotglob`, `.` and `..` are never matched by a glob.
                 let allow_dot = dotglob || glob_starts_with_dot(&toks);
-                let Ok(rd) = std::fs::read_dir(dir) else {
+                let Ok(rd) = std::fs::read_dir(resolve_against(cwd, dir)) else {
                     continue;
                 };
                 let mut names: Vec<String> = Vec::new();
@@ -17620,7 +17787,7 @@ fn glob_expand_field(
                 }
             } else {
                 let joined = join_glob(base, &comp_literal);
-                if std::path::Path::new(&joined).exists() {
+                if std::path::Path::new(&resolve_against(cwd, &joined)).exists() {
                     next.push(joined);
                 }
             }
@@ -17642,19 +17809,21 @@ fn is_globstar_comp(comp: &[EChar]) -> bool {
 /// directory — the candidate directories for the following component. Dotfiles
 /// are skipped unless `dotglob`. Symlinked directories are not recursed into
 /// (matching bash ≥ 4.3), which also prevents symlink-loop infinite recursion.
-fn globstar_walk(base: &str, dotglob: bool, terminal: bool, out: &mut Vec<String>) {
-    if !terminal && (base.is_empty() || std::path::Path::new(base).is_dir()) {
+fn globstar_walk(cwd: &str, base: &str, dotglob: bool, terminal: bool, out: &mut Vec<String>) {
+    if !terminal
+        && (base.is_empty() || std::path::Path::new(&resolve_against(cwd, base)).is_dir())
+    {
         out.push(base.to_string());
     }
-    globstar_descend(base, dotglob, terminal, out);
+    globstar_descend(cwd, base, dotglob, terminal, out);
 }
 
 /// Recursive worker for [`globstar_walk`]: descends `base`, pushing matching
 /// descendants. In terminal mode every entry is pushed; otherwise only
 /// directories (which are also the ones recursed into).
-fn globstar_descend(base: &str, dotglob: bool, terminal: bool, out: &mut Vec<String>) {
+fn globstar_descend(cwd: &str, base: &str, dotglob: bool, terminal: bool, out: &mut Vec<String>) {
     let dir = if base.is_empty() { "." } else { base };
-    let Ok(rd) = std::fs::read_dir(dir) else {
+    let Ok(rd) = std::fs::read_dir(resolve_against(cwd, dir)) else {
         return;
     };
     let mut entries: Vec<(String, bool)> = Vec::new();
@@ -17672,7 +17841,7 @@ fn globstar_descend(base: &str, dotglob: bool, terminal: bool, out: &mut Vec<Str
             out.push(path.clone());
         }
         if is_dir {
-            globstar_descend(&path, dotglob, terminal, out);
+            globstar_descend(cwd, &path, dotglob, terminal, out);
         }
     }
 }
@@ -18706,14 +18875,16 @@ fn nth_source_line(src: &str, line: u32) -> Option<&str> {
 /// non-existent, while `2>err > nodir/f` reports *into* `err`. It also gives
 /// no-output commands (`: > f`, `true 2> e`, a bare `> f`) the create/truncate
 /// bash performs for them.
-fn open_output_target(path: &str, append: bool) -> Result<(), String> {
-    match open_out(path, append) {
+fn open_output_target(cwd: &str, path: &str, append: bool) -> Result<(), String> {
+    match open_out(cwd, path, append) {
         Ok(_) => Ok(()),
+        // The diagnostic names the path as the *user* wrote it, not the
+        // cwd-resolved form bash never shows.
         Err(e) => Err(format!("{path}: {}", io_error_message(&e))),
     }
 }
 
-fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
+fn open_out(cwd: &str, path: &str, append: bool) -> io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true);
     if append {
@@ -18721,7 +18892,7 @@ fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
     } else {
         opts.truncate(true);
     }
-    opts.open(map_device_path(path))
+    opts.open(map_device_path(&resolve_against(cwd, path)))
 }
 
 /// Open `path` for both reading and writing (`<>` redirect): create it if it is
@@ -18729,7 +18900,7 @@ fn open_out(path: &str, append: bool) -> io::Result<std::fs::File> {
 /// from [`open_out`] (which truncates or appends) and from a read-only open
 /// (which errors on a missing file): `<>` guarantees the file exists afterward
 /// while preserving any current contents.
-fn open_rw(path: &str) -> io::Result<std::fs::File> {
+fn open_rw(cwd: &str, path: &str) -> io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -18737,7 +18908,7 @@ fn open_rw(path: &str) -> io::Result<std::fs::File> {
         // `<>` never truncates: existing contents are preserved (writes land at
         // offset 0 and overwrite in place). Spelled out for clippy and clarity.
         .truncate(false)
-        .open(map_device_path(path))
+        .open(map_device_path(&resolve_against(cwd, path)))
 }
 
 /// Is this redirect a descriptor *close* (`N>&-` / `N<&-`)? For a varfd
@@ -20621,7 +20792,7 @@ impl<'a> TestExpr<'a> {
                 self.toks[self.pos + 2],
             );
             self.pos += 3;
-            return eval_binary(l, op, r);
+            return eval_binary(&sh.cwd, l, op, r);
         }
         // Monadic primary: a recognised unary op with an operand following.
         if rem >= 2 && is_test_unary_op(self.toks[self.pos]) {
@@ -20740,18 +20911,20 @@ fn cd_is_explicit(t: &str) -> bool {
         || std::path::Path::new(t).is_absolute()
 }
 
-fn eval_unary(op: &str, x: &str) -> bool {
+fn eval_unary(cwd: &str, op: &str, x: &str) -> bool {
+    // The filesystem primaries name a path relative to *this shell's* directory.
+    let p = || std::path::PathBuf::from(resolve_against(cwd, x));
     match op {
         "-z" => x.is_empty(),
         "-n" => !x.is_empty(),
-        "-e" => std::path::Path::new(x).exists(),
-        "-f" => std::path::Path::new(x).is_file(),
-        "-d" => std::path::Path::new(x).is_dir(),
-        "-s" => std::fs::metadata(x).map(|m| m.len() > 0).unwrap_or(false),
-        "-r" | "-w" | "-x" => std::path::Path::new(x).exists(),
+        "-e" => p().exists(),
+        "-f" => p().is_file(),
+        "-d" => p().is_dir(),
+        "-s" => std::fs::metadata(p()).map(|m| m.len() > 0).unwrap_or(false),
+        "-r" | "-w" | "-x" => p().exists(),
         // `-L`/`-h` — the path is a symbolic link. `symlink_metadata` does not
         // follow the final component, so a broken symlink still tests true.
-        "-L" | "-h" => std::fs::symlink_metadata(x)
+        "-L" | "-h" => std::fs::symlink_metadata(p())
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false),
         // `-t FD` — file descriptor `FD` is open and refers to a terminal.
@@ -20828,7 +21001,7 @@ fn is_test_unary_op(op: &str) -> bool {
 /// diagnostic body) when an arithmetic comparison is given a non-integer
 /// operand (bash prints `integer expression expected` and exits 2 in that
 /// case).
-fn eval_binary(l: &str, op: &str, r: &str) -> Result<bool, String> {
+fn eval_binary(cwd: &str, l: &str, op: &str, r: &str) -> Result<bool, String> {
     match op {
         "=" | "==" => Ok(l == r),
         "!=" => Ok(l != r),
@@ -20848,7 +21021,7 @@ fn eval_binary(l: &str, op: &str, r: &str) -> Result<bool, String> {
                 _ => false,
             })
         }
-        "-nt" | "-ot" | "-ef" => Ok(file_cmp(op, l, r)),
+        "-nt" | "-ot" | "-ef" => Ok(file_cmp(cwd, op, l, r)),
         // Reached only from the three-argument fallback `[ a b c ]` where the
         // middle token is not a binary operator; bash reports it as such rather
         // than silently succeeding. (The parser paths guard with
@@ -20866,9 +21039,10 @@ fn eval_binary(l: &str, op: &str, r: &str) -> Result<bool, String> {
 /// device+inode match, which the standard library does not expose across our
 /// host and target (true hard links to *different* names are not detected; see
 /// known-issues TD-OILS12).
-fn file_cmp(op: &str, l: &str, r: &str) -> bool {
-    let lmtime = std::fs::metadata(l).and_then(|m| m.modified()).ok();
-    let rmtime = std::fs::metadata(r).and_then(|m| m.modified()).ok();
+fn file_cmp(cwd: &str, op: &str, l: &str, r: &str) -> bool {
+    let (l, r) = (resolve_against(cwd, l), resolve_against(cwd, r));
+    let lmtime = std::fs::metadata(&l).and_then(|m| m.modified()).ok();
+    let rmtime = std::fs::metadata(&r).and_then(|m| m.modified()).ok();
     match op {
         "-nt" => match (lmtime, rmtime) {
             (Some(a), Some(b)) => a > b,
@@ -27119,7 +27293,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
 
         // `*.txt` matches the two text files (sorted), not the log or hidden.
-        let mut txt: Vec<String> = glob_expand_field(&field_lit(&format!("{uniq}/*.txt")), false, false, false, false)
+        let mut txt: Vec<String> = glob_expand_field("", &field_lit(&format!("{uniq}/*.txt")), false, false, false, false)
             .iter()
             .map(|p| basename(p))
             .collect();
@@ -27127,12 +27301,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(txt, vec!["a.txt".to_string(), "b.txt".to_string()]);
 
         // `*` honors the leading-dot rule (no `.hidden`).
-        let all = glob_expand_field(&field_lit(&format!("{uniq}/*")), false, false, false, false);
+        let all = glob_expand_field("", &field_lit(&format!("{uniq}/*")), false, false, false, false);
         assert!(all.iter().all(|p| !p.ends_with(".hidden")));
         assert_eq!(all.len(), 3);
 
         // An explicit leading `.` matches hidden files.
-        let dot = glob_expand_field(&field_lit(&format!("{uniq}/.*")), false, false, false, false);
+        let dot = glob_expand_field("", &field_lit(&format!("{uniq}/.*")), false, false, false, false);
         assert!(dot.iter().any(|p| p.ends_with(".hidden")));
 
         std::fs::remove_dir_all(dir).ok();
@@ -27247,6 +27421,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut out = Vec::new();
         let mut failed = None;
         glob_or_literal(
+            "",
             &field_lit(&format!("{uniq}/*")),
             &mut out,
             false,
@@ -27270,6 +27445,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut out = Vec::new();
         let mut failed = None;
         glob_or_literal(
+            "",
             &field_lit(&format!("{uniq}/.*")),
             &mut out,
             false,
@@ -27309,6 +27485,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // `root/**/*.rs` with globstar finds every .rs at any depth.
         let mut rs = glob_expand_field(
+            "",
             &field_lit(&format!("{uniq}/**/*.rs")),
             false,
             false,
@@ -27327,6 +27504,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // Without globstar, `**` behaves like `*` (single level only).
         let one = glob_expand_field(
+            "",
             &field_lit(&format!("{uniq}/**/*.rs")),
             false,
             false,
@@ -27337,6 +27515,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // Terminal `**` lists every descendant file and directory.
         let mut all = glob_expand_field(
+            "",
             &field_lit(&format!("{uniq}/**")),
             false,
             false,
@@ -27377,10 +27556,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // Case-sensitive: lowercase pattern misses the uppercase-extension file.
         let field = field_lit(&format!("{uniq}/*.txt"));
-        let cs = glob_expand_field(&field, false, false, false, false);
+        let cs = glob_expand_field("", &field, false, false, false, false);
         assert!(cs.is_empty());
         // With nocaseglob, `*.txt` matches `Notes.TXT`.
-        let ci = glob_expand_field(&field, false, true, false, false);
+        let ci = glob_expand_field("", &field, false, true, false, false);
         assert_eq!(ci.len(), 1);
         assert!(ci[0].ends_with("Notes.TXT"));
 
@@ -27499,9 +27678,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Without dotglob, `*` skips the dotfile; with it, the dotfile is
         // included (but never `.`/`..`).
         let field = field_lit(&format!("{uniq}/*"));
-        let plain = glob_expand_field(&field, false, false, false, false);
+        let plain = glob_expand_field("", &field, false, false, false, false);
         assert!(plain.iter().all(|p| !p.ends_with(".hidden")));
-        let with_dot = glob_expand_field(&field, true, false, false, false);
+        let with_dot = glob_expand_field("", &field, true, false, false, false);
         assert!(with_dot.iter().any(|p| p.ends_with(".hidden")));
         assert!(with_dot.iter().all(|p| {
             let b = p.rsplit('/').next().unwrap_or(p);

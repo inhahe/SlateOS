@@ -14,7 +14,7 @@ work that should be done now."
 
 ## Active Bugs
 
-### BUG-OILS-SUBSHELL-SHARES-PROCESS-CWD. `cd` inside a subshell escapes it, because osh emulates subshells in-process and the working directory is process-global — 2026-07-27 — OPEN
+### BUG-OILS-SUBSHELL-SHARES-PROCESS-CWD. `cd` inside a subshell escapes it, because osh emulates subshells in-process and the working directory is process-global — 2026-07-27 — ✅ RESOLVED 2026-07-27
 
 **Symptom.** bash runs every subshell in a forked process, so a directory
 change inside one is invisible to the parent. osh emulates subshells by
@@ -53,35 +53,40 @@ osh -c 'R=$PWD; mkdir -p a; pushd a >/dev/null; popd | cat; cd a | cat; echo "cw
 bash reports `cd: a: No such file or directory` from the last stage;
 osh does not, because its real cwd had already been moved.
 
-**Proper fix.** Make the working directory *per-`Shell`* rather than
-per-process — the same way `$PWD`, the fd table and the variable
-namespace are already per-`Shell`:
+**Fix (2026-07-27).** The working directory is now *per-`Shell`* rather
+than per-process — the same way `$PWD`, the fd table and the variable
+namespace already were. `std::env::set_current_dir` is gone from the
+interpreter entirely.
 
-1. Add `cwd: String` to `Shell` (absolute, forward-slash, produced by the
-   existing `shell_path`). Seed it from `std::env::current_dir()` at
-   construction; `clone_for_subshell` copies it like any other field.
-2. Add `fn resolve(&self, p: &str) -> PathBuf` — returns `p` unchanged
-   when absolute, else joins it onto `self.cwd` — and route *every*
-   filesystem access in `interp.rs` through it. Roughly 60 non-test call
-   sites (`File::open`, `fs::metadata`, `fs::read`, `fs::read_dir`,
-   `OpenOptions`, `Path::is_file`/`is_dir`/`exists`, `fs::canonicalize`).
-   Free functions that resolve paths (`test_unary` and the `-nt`/`-ot`/
-   `-ef` helpers ~20740–20883, the glob/completion walkers ~15697,
-   ~17592, ~17657, the redirect openers ~18717/18733, and the `$PATH`
-   search ~6569–6656) need the cwd passed in.
-3. `change_dir` stops calling `set_current_dir`: it resolves the target
-   against `self.cwd`, normalises `.`/`..` textually (bash's *logical*
-   `cd`), confirms the result is a directory with `fs::metadata`, and
-   assigns `self.cwd`. It must keep producing today's messages — "No such
-   file or directory" for a missing path and "Not a directory" for a
-   plain file — which currently come free from `set_current_dir`.
-4. Spawned externals get `.current_dir(&self.cwd)` (`PCommand::new` sites
-   at ~2458, ~6677, ~6688, ~7088).
+1. `Shell.cwd: String` (absolute, forward-slash, produced by the existing
+   `shell_path`), seeded once from `std::env::current_dir()` in
+   `Shell::new`; `clone_for_subshell` copies it like any other field.
+2. Free function `resolve_against(cwd, path)` plus the `Shell` wrappers
+   `resolve` (→ `PathBuf`), `resolve_str`, `host_path` (adds the
+   `map_device_path` device mapping) and `resolve_program` (for
+   `Command::new`). Every filesystem access in `interp.rs` routes through
+   one of them. The free functions that touch the filesystem —
+   `eval_unary`, `file_cmp`, `eval_binary`, `glob_or_literal`,
+   `glob_expand_field`, `globstar_walk`/`globstar_descend`, `open_out`,
+   `open_rw`, `open_output_target` — take the cwd as their first
+   parameter.
+3. `change_dir` resolves the target against `self.cwd`, folds `.`/`..`
+   out textually via the new `normalize_logical` (bash's *logical* `cd`,
+   so `cd sym/..` returns where the user came from), confirms the result
+   is a directory with `fs::metadata`, and assigns `self.cwd`. The two
+   diagnostics `set_current_dir` used to supply for free — "No such file
+   or directory" and "Not a directory" — are produced explicitly and were
+   re-verified against bash 5.2.
+4. Every `PCommand::new` site resolves the program with `resolve_program`
+   and sets `.current_dir(&self.cwd)`. (The program path must be resolved
+   *as well as* setting `current_dir`: on the Windows host `CreateProcess`
+   looks a relative application name up against the calling process's
+   directory, not the child's.)
 
-**Interim severity.** High for correctness, low for the scripts the
-corpus exercises today (no corpus case changes directory inside a
-pipeline stage). It blocks any script that uses `cd` inside `$( )`,
-`( )`, a pipeline stage or a background job — a common idiom.
+**Regression test.** `tests/corpus/subshell-cwd.sh` — covers `( )`,
+`$( )`, single- and multi-stage pipelines, relative redirects, globs,
+`test`, `$(< f)`, `source`, `cd -`/`$OLDPWD`, and two concurrent pipeline
+stages sitting in different directories at the same time.
 
 ### BUG-OILS-LEX-ERROR-LINE. An unterminated quote/substitution was always blamed on line 1, and suppressed every command before it — 2026-07-27 — ✅ RESOLVED 2026-07-27
 

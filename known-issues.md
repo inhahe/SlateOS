@@ -94,6 +94,20 @@ condition is already satisfied returns without ever calling
 Eliminating that class properly needs the token to be scoped to a specific
 wait rather than being a bare per-task bool.
 
+**Loop result 2026-07-27 — NOT REPRODUCED in 4 consecutive boots.** After
+(a), (b) and `BUG-SINGLE-SHOT-PARK-FABRICATES-EVENT` landed, the boot test
+was run four times back to back (one verification boot at 315 s, then a
+three-iteration loop: BOOT_OK at 299 s / 331 s / 339 s). Every run passed
+`self_test_linux_real_glibc_shell_cmdsub`; the liveness watchdog did not
+fire in any of them. That is **not** proof the hang is gone — the original
+observation was roughly one failure in two boots on 2026-07-23, so four
+clean boots only bounds the current rate below ~20 %, and both fixed bugs
+are plausible-but-unproven causes. Keep the entry **OPEN** and keep the
+"re-run once before calling it a regression" rule. The next escalation, if
+it ever recurs, is *not* another blind audit — instrument the park: record
+on each task the wait object it parked on and the wake that released it,
+and dump both when the liveness watchdog trips.
+
 ### BUG-NATIVE-EXEC-FD-TABLE-LOST. Native-ABI `execve` dropped the child's userspace fd→handle table, so any pre-exec `dup2` redirect (e.g. `dup2(pipe_w, 1)` for output capture) was lost across `exec` — 2026-07-23 — ✅ RESOLVED 2026-07-23
 
 **Symptom.** The fastpy `capture` primitive (fork + `os.pipe` + child `os.dup2(w, 1)` + `os.execv("cat")`, parent `os.read`-drains the pipe) captured **0 bytes** instead of the child's stdout, so the self-test's byte-count cross-check tripped and it exited **113**. This is the core `$(...)`/`cmd1 | cmd2` shell primitive, so command substitution and pipelines were broken for every native (fastpy/posix) process, not just the test.

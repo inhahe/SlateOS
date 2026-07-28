@@ -718,6 +718,18 @@ struct Job {
     /// would not receive SIGHUP when the shell exits. (We have no SIGHUP
     /// delivery yet, so this is advisory bookkeeping matching bash semantics.)
     no_hup: bool,
+    /// Whether the job's final status has already been reported — bash's
+    /// `J_NOTIFIED`. A finished job is not dropped the moment it is reported;
+    /// it survives until the next operation that sweeps the table, which is
+    /// why `wait %1` answers with the status twice before `%1` becomes unknown.
+    notified: bool,
+    /// Whether the shell has *learned* that the job ended, as opposed to merely
+    /// being able to find out. bash hears about an exit asynchronously, so a job
+    /// it has itself just signalled is one it does not yet know is over; osh
+    /// only ever finds out at a reaping point, and `kill` — which writes the
+    /// status down itself — is not one. The distinction decides whether an
+    /// operand-less `wait` counts the job as one it waited *for*.
+    exit_seen: bool,
 }
 
 /// What resolving a job spec came to. Ambiguity is its own outcome because bash
@@ -7568,12 +7580,7 @@ impl Shell {
                     cmd.env(k, v);
                 }
             }
-            // Bash assigns the lowest job number not currently in use, so
-            // numbering restarts at 1 once the table empties.
-            let mut id = 1;
-            while self.jobs.iter().any(|j| j.id == id) {
-                id += 1;
-            }
+            let id = self.next_job_id();
             let (pid, child, status) = match cmd.spawn() {
                 Ok(child) => (child.id(), Some(JobBody::Process(child)), None),
                 Err(e) => {
@@ -7592,9 +7599,13 @@ impl Shell {
                 pid,
                 child,
                 cmd: argv.join(" "),
+                // A job that never got off the ground is one the shell knows
+                // the fate of the moment it exists.
+                exit_seen: status.is_some(),
                 status,
                 signal: None,
                 no_hup: false,
+                notified: false,
             });
             self.note_new_job(id);
             self.last_bg_pid = Some(pid);
@@ -7637,10 +7648,7 @@ impl Shell {
             sub.last_status
         });
         let pid = SYNTH_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut id = 1;
-        while self.jobs.iter().any(|j| j.id == id) {
-            id += 1;
-        }
+        let id = self.next_job_id();
         self.jobs.push(Job {
             id,
             pid,
@@ -7649,6 +7657,8 @@ impl Shell {
             status: None,
             signal: None,
             no_hup: false,
+            notified: false,
+            exit_seen: false,
         });
         self.note_new_job(id);
         self.last_bg_pid = Some(pid);
@@ -11671,6 +11681,11 @@ impl Shell {
     /// Deliver `signum` to a single `kill` target (job spec `%n` or a pid).
     /// Returns `true` on success. Signal 0 is an existence check (no delivery).
     fn kill_one(&mut self, target: &str, signum: u8, out: &mut Out, stdin: &StdinSrc) -> bool {
+        // Reap first: a job that had already exited is not one this `kill`
+        // terminated, so it keeps the `Done` it earned rather than being
+        // rewritten as `Terminated`. bash, which reaps asynchronously, already
+        // knows such a job is dead and quietly succeeds without touching it.
+        self.poll_jobs();
         // Resolve to one of our tracked jobs, if possible. An ambiguous `%name`
         // stops here: bash names the ambiguity and does not go on to claim
         // there is no such job.
@@ -11689,6 +11704,13 @@ impl Shell {
                 format!("{}kill: {target}: no such job\n", self.err_prefix()).as_bytes(),
             );
             return false;
+        }
+        // Naming a job in `kill` puts it back on the list of jobs whose fate is
+        // still owed to the user, even when the job is already dead and even
+        // for the no-op signal 0. So `jobs; kill -0 %1; jobs` announces the
+        // same finished job twice, where `jobs; jobs` announces it once.
+        if let Some(idx) = job_idx {
+            self.jobs[idx].notified = false;
         }
         // Signal 0: just report whether the target exists (a live job or the
         // shell itself); never terminate.
@@ -11835,8 +11857,43 @@ impl Shell {
             {
                 // Finished: reap it (join the thread / collect the exit code).
                 job.status = Some(job.child.take().map_or(1, JobBody::wait_blocking));
+                job.exit_seen = true;
             }
         }
+    }
+
+    /// Forget every job that has both finished and had its status reported —
+    /// bash's `cleanup_dead_jobs`.
+    ///
+    /// Reporting a job does not by itself remove it: the row survives until the
+    /// *next* operation that sweeps the table. That delay is directly
+    /// observable, because a job that is dead-but-still-listed can still be
+    /// named. `sleep 0.1 & wait %1; wait %1; wait %1` answers with the status
+    /// twice — the second `wait` is the sweep that drops the row — and only the
+    /// third says "no such job".
+    fn cleanup_dead_jobs(&mut self) {
+        self.poll_jobs();
+        let before = self.jobs.len();
+        self.jobs.retain(|j| j.status.is_none() || !j.notified);
+        if self.jobs.len() != before {
+            self.reset_job_markers();
+        }
+    }
+
+    /// The job number a newly backgrounded job takes: the lowest one not in
+    /// use, once the finished-and-reported jobs have been swept away.
+    ///
+    /// Sweeping first is what makes numbering restart at 1 rather than climb
+    /// forever: `sleep 5 & wait %1; sleep 5 &` gives the second job number 1
+    /// again, while `sleep 5 & sleep 0.1; sleep 5 &` — where job 1 died but was
+    /// never reported — numbers the second job 2.
+    fn next_job_id(&mut self) -> usize {
+        self.cleanup_dead_jobs();
+        let mut id = 1;
+        while self.jobs.iter().any(|j| j.id == id) {
+            id += 1;
+        }
+        id
     }
 
     /// Make the just-created job `id` the current one (`%+`), the way bash's
@@ -11872,30 +11929,33 @@ impl Shell {
     }
 
     /// Repair the `+`/`-` markers after jobs have left the table, the way
-    /// bash's `reset_current`/`reset_previous` do.
+    /// bash's `reset_current` does.
     ///
-    /// A removed current job is replaced by the newest job still running; when
-    /// nothing is running at all bash gives up on both markers rather than
-    /// pointing them at a finished job, so a listing whose jobs have all been
-    /// reaped and re-listed shows no marker at all. A removed previous job is
-    /// replaced by the newest running job older than the current one, falling
-    /// back to the current job itself.
+    /// Only losing a *marked* job disturbs anything: dropping some other row
+    /// leaves both markers exactly where they were, even when the job they
+    /// point at has finished. When a marked job does go, both markers are
+    /// recomputed together — so losing the `-` job can cost the `+` as well.
+    /// The replacement has to be a job still *running*; with nothing running
+    /// bash gives up on both markers rather than pointing them at a finished
+    /// job, which is why a listing whose jobs have all been reaped and reported
+    /// shows no marker at all.
     fn reset_job_markers(&mut self) {
         // "Still running" has to mean what bash means by it: bash reaps
         // asynchronously, so a job that has exited is already known to be dead
         // when it picks a replacement marker.
         self.poll_jobs();
-        let present = |id: usize, jobs: &[Job]| jobs.iter().any(|j| j.id == id);
-        if self.current_job.is_some_and(|c| !present(c, &self.jobs)) {
-            self.current_job = self.newest_running_before(None);
+        let gone =
+            |id: Option<usize>, jobs: &[Job]| id.is_some_and(|id| !jobs.iter().any(|j| j.id == id));
+        if !gone(self.current_job, &self.jobs) && !gone(self.previous_job, &self.jobs) {
+            return;
         }
-        let Some(cur) = self.current_job else {
+        let Some(cur) = self.newest_running_before(None) else {
+            self.current_job = None;
             self.previous_job = None;
             return;
         };
-        if self.previous_job.is_none_or(|p| !present(p, &self.jobs)) {
-            self.previous_job = self.newest_running_before(Some(cur)).or(Some(cur));
-        }
+        self.current_job = Some(cur);
+        self.previous_job = self.newest_running_before(Some(cur)).or(Some(cur));
     }
 
     /// The `+` (current job), `-` (previous job) or ` ` marker `jobs` prints
@@ -11926,6 +11986,13 @@ impl Shell {
     /// matching bash's notify-and-forget behavior — but only the ones actually
     /// listed, so a `jobs -r` that filtered a finished job out leaves it to be
     /// reported by the next `jobs`.
+    ///
+    /// The two forms sweep the table at opposite ends, which is why a bare
+    /// `jobs` never shows the same finished job twice while `jobs %1` shows it
+    /// once and then loses it outright: the bare form sweeps *before* listing,
+    /// so a job it reported is still nameable until the next command, whereas
+    /// the jobspec form lists first and sweeps after — leaving nothing behind
+    /// for a following `kill %1` to find.
     fn builtin_jobs(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         self.poll_jobs();
         let mut long = false;
@@ -11970,6 +12037,9 @@ impl Shell {
         // a failing status rather than a silent omission.
         let mut status = 0;
         let ids: Vec<usize> = if specs.is_empty() {
+            // Sweep before listing, so a job already reported by an earlier
+            // `jobs` is gone rather than reported a second time.
+            self.cleanup_dead_jobs();
             self.jobs.iter().map(|j| j.id).collect()
         } else {
             let mut ids = Vec::new();
@@ -12033,9 +12103,19 @@ impl Shell {
             }
         }
         let wstatus = self.write_bytes(out, redir, buf.as_bytes());
-        // Drop the finished jobs this listing reported.
-        self.jobs.retain(|j| j.status.is_none() || !reported.contains(&j.id));
-        self.reset_job_markers();
+        // Listing a job counts as reporting it. Only the jobs actually printed
+        // are marked, so a `-r` that filtered a finished one out leaves it for
+        // the next `jobs` to report.
+        for job in &mut self.jobs {
+            if reported.contains(&job.id) {
+                job.notified = true;
+            }
+        }
+        // A jobspec listing sweeps afterwards, so the job it just named is gone
+        // by the time the next command runs. The bare form already swept above.
+        if !specs.is_empty() {
+            self.cleanup_dead_jobs();
+        }
         if status == 0 { wstatus } else { status }
     }
 
@@ -12122,23 +12202,38 @@ impl Shell {
         );
     }
 
-    /// Block on every outstanding job and empty the job table.
+    /// Block on every job that still has a live body, and count each one as
+    /// reported once it is reaped.
     ///
     /// This is what an operand-less `wait` does, and also what an enclosing sink
     /// has to do before it can call its output complete — bash's collecting pipe
     /// stays open as long as any child still holds a copy of its write end.
     ///
+    /// Only the jobs actually blocked on are marked: one that had already
+    /// finished before the `wait` was reached is not something the `wait`
+    /// reported, so it stays unreported and a later `jobs` still announces it.
+    ///
     /// No status comes back because neither caller reports one: an operand-less
     /// `wait` names no job and so returns 0, and a command substitution's result
     /// is its output, not its jobs' fates.
     fn drain_jobs(&mut self) {
+        // Reap first, so "still had a live body" means what it meant when the
+        // `wait` was reached. bash learns of an exit asynchronously, so a job
+        // that had already finished is not one this `wait` waited for.
+        self.poll_jobs();
         for job in &mut self.jobs {
             if let Some(body) = job.child.take() {
                 job.status = Some(body.wait_blocking());
+                job.exit_seen = true;
+                job.notified = true;
+            } else if !job.exit_seen {
+                // Dead, but not as far as the shell knew a moment ago — a job
+                // `kill` reaped for itself. bash, which would not have heard
+                // yet, blocks on it here, so it counts as waited for too.
+                job.exit_seen = true;
+                job.notified = true;
             }
         }
-        self.jobs.clear();
-        self.reset_job_markers();
     }
 
     fn builtin_wait(&mut self, args: &[String]) -> i32 {
@@ -12228,6 +12323,18 @@ impl Shell {
 
         if operands.is_empty() {
             self.drain_jobs();
+            // POSIX lets the shell discard the statuses of every completed job
+            // once an operand-less `wait` has run, and bash takes it — with one
+            // exception: the job holding `$!` is spared, so a job that had
+            // already finished before the `wait` and happens to be the last one
+            // backgrounded survives to be announced by a later `jobs`.
+            let spared = self.last_bg_pid;
+            for job in &mut self.jobs {
+                if job.status.is_some() && Some(job.pid) != spared {
+                    job.notified = true;
+                }
+            }
+            self.cleanup_dead_jobs();
             // bash's purge point: after an argument-less `wait`, re-waiting a
             // pid that a targeted `wait` had reaped earlier reports 127 again
             // rather than replaying its remembered status.
@@ -12268,11 +12375,18 @@ impl Shell {
             let job = &mut self.jobs[idx];
             if let Some(body) = job.child.take() {
                 last = body.wait_blocking();
+                job.status = Some(last);
             } else {
                 last = job.status.unwrap_or(0);
             }
-            self.jobs.remove(idx);
-            self.reset_job_markers();
+            // Sweep *before* marking this job reported, so its row outlives the
+            // `wait` that read it. That ordering is what lets a second
+            // `wait %1` answer with the status again — it is that second one
+            // whose sweep drops the row, leaving only the third to fail.
+            self.cleanup_dead_jobs();
+            if let Some(job) = self.jobs.iter_mut().find(|j| j.pid == pid) {
+                job.notified = true;
+            }
             self.reaped_status.insert(pid, last);
             if let Some(var) = &pid_var {
                 self.vars.insert(var.clone(), pid.to_string());
@@ -12451,6 +12565,14 @@ impl Shell {
         }
 
         let target_ids: Vec<usize> = if all || running_only {
+            // Forgetting jobs wholesale gives up on both markers outright,
+            // before any job is even selected — so a `disown -r` that finds
+            // nothing running still leaves an already-finished job unmarked,
+            // whereas `disown -h -r`, which forgets nothing, does not.
+            if !mark_hup {
+                self.current_job = None;
+                self.previous_job = None;
+            }
             // `-r` narrows to the jobs that have not finished; `-a` is every one.
             self.jobs
                 .iter()
@@ -31353,9 +31475,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(sh.last_bg_pid.is_some());
         assert_eq!(sh.jobs.len(), 1);
         assert_eq!(sh.run_source("wait $!"), 7);
-        assert!(sh.jobs.is_empty());
+        // The row outlives the `wait` that read it; the next sweep drops it.
+        assert_eq!(sh.jobs.len(), 1);
         // An operand-less `wait` also blocks until the job is done, but names no
-        // job and so reports 0 rather than its status (bash).
+        // job and so reports 0 rather than its status (bash). It discards the
+        // jobs it waited for outright.
         assert_eq!(sh.run_source("cmd /c exit 7 &"), 0);
         assert_eq!(sh.run_source("wait"), 0);
         assert!(sh.jobs.is_empty());
@@ -31378,9 +31502,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             assert_eq!(sh.run_source(src), 0, "backgrounding {src:?} succeeds");
             assert!(sh.last_bg_pid.is_some(), "$! set for {src:?}");
             assert_eq!(sh.jobs.len(), 1, "one job registered for {src:?}");
-            // `wait $!` returns the job's exit status and clears the table.
+            // `wait $!` returns the job's exit status. Its row survives that
+            // one `wait` and is dropped by the next sweep of the table.
             assert_eq!(sh.run_source("wait $!"), want, "wait status for {src:?}");
-            assert!(sh.jobs.is_empty(), "job reaped for {src:?}");
+            assert_eq!(sh.jobs.len(), 1, "job reported but not yet swept for {src:?}");
+            assert_eq!(sh.run_source("wait $!"), want, "status answered again for {src:?}");
+            assert!(sh.jobs.is_empty(), "job swept for {src:?}");
         }
 
         // `$!` survives after a fast job finishes (bash keeps the last bg pid).
@@ -31524,16 +31651,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[cfg(windows)]
     #[test]
     fn wait_by_pid_and_job_spec() {
-        // `wait PID` and `wait %n` both target a specific job.
+        // `wait PID` and `wait %n` both target a specific job. The row outlives
+        // the `wait` that read it (it is the *next* sweep that drops it), and
+        // creating the next job is one such sweep — so numbering restarts.
         let mut sh = Shell::new();
         sh.run_source("cmd /c exit 3 &");
         let pid = sh.last_bg_pid.expect("bg pid");
         assert_eq!(sh.run_source(&format!("wait {pid}")), 3);
-        assert!(sh.jobs.is_empty());
+        assert_eq!(sh.jobs.len(), 1);
 
         sh.run_source("cmd /c exit 4 &");
+        assert_eq!(sh.jobs.len(), 1, "the reported job was swept first");
         assert_eq!(sh.run_source("wait %1"), 4);
-        assert!(sh.jobs.is_empty());
+        assert_eq!(sh.jobs.len(), 1);
     }
 
     #[test]
@@ -31816,6 +31946,130 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let pid = sh.jobs[1].pid.to_string();
         assert!(matches!(sh.lookup_job(&pid), JobLookup::Found(1)));
         sh.run_source("kill %1; kill %2");
+    }
+
+    /// Block until job `id` has ended *and the shell has noticed*.
+    ///
+    /// Tests about what a finished job does need this. A real shell hears about
+    /// an exit asynchronously, so by the time a script reaches the next command
+    /// the job is long since known to be over; a test that backgrounds a job and
+    /// looks at it in the same breath would instead catch it still running.
+    fn settle_job(sh: &mut Shell, id: usize) {
+        loop {
+            sh.poll_jobs();
+            let Some(job) = sh.jobs.iter().find(|j| j.id == id) else {
+                return;
+            };
+            if job.status.is_some() {
+                return;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn a_reported_job_outlives_the_command_that_reported_it() {
+        // Reporting a job does not remove it; the *next* sweep of the table
+        // does. The two `jobs` forms sweep at opposite ends, so a bare listing
+        // leaves the job nameable for one more command while a jobspec listing
+        // does not.
+        let mut sh = Shell::new();
+        sh.run_source("true &");
+        settle_job(&mut sh, 1);
+        let (o, _) = run_in(&mut sh, "jobs");
+        assert!(o.starts_with("[1]+  Done"), "{o}");
+        assert_eq!(sh.jobs.len(), 1, "a bare listing sweeps before it prints");
+        let (o, _) = run_in(&mut sh, "jobs");
+        assert_eq!(o, "", "the second listing swept it away first");
+        assert!(sh.jobs.is_empty());
+
+        let mut sh = Shell::new();
+        sh.run_source("true &");
+        settle_job(&mut sh, 1);
+        let (o, s) = run_in(&mut sh, "jobs %1");
+        assert!(o.starts_with("[1]+  Done"), "{o}");
+        assert_eq!(s, 0);
+        assert!(sh.jobs.is_empty(), "a jobspec listing sweeps after it prints");
+
+        // Naming a job in `kill` puts its fate back on the books, so a listing
+        // that already announced it announces it again.
+        let mut sh = Shell::new();
+        sh.run_source("true &");
+        settle_job(&mut sh, 1);
+        run_in(&mut sh, "jobs");
+        assert_eq!(run_in(&mut sh, "kill -0 %1").1, 0);
+        assert!(run_in(&mut sh, "jobs").0.starts_with("[1]+  Done"));
+    }
+
+    #[test]
+    fn waiting_on_a_job_answers_twice_before_the_row_is_gone() {
+        // The sweep happens before the job is marked reported, so the row
+        // outlives the `wait` that read it: the second `wait` answers with the
+        // status again and is the one that drops the row.
+        let mut sh = Shell::new();
+        sh.run_source("( exit 7 ) &");
+        assert_eq!(run_in(&mut sh, "wait %1").1, 7);
+        assert_eq!(sh.jobs.len(), 1);
+        assert_eq!(run_in(&mut sh, "wait %1").1, 7);
+        assert!(sh.jobs.is_empty());
+        let (o, s) = run_in(&mut sh, "wait %1 2>&1");
+        assert_eq!(o, "osh: wait: %1: no such job\n");
+        assert_eq!(s, 127);
+
+        // Numbering restarts once the row is gone, and not before.
+        sh.run_source("sleep 5 &");
+        assert_eq!(sh.jobs[0].id, 1);
+        sh.run_source("kill %1");
+    }
+
+    #[test]
+    fn an_operand_less_wait_spares_the_job_that_holds_the_last_bg_pid() {
+        // A job that had already finished is not one the `wait` waited for, so
+        // it is discarded only if some later job took `$!` away from it.
+        let mut sh = Shell::new();
+        sh.run_source("true &");
+        settle_job(&mut sh, 1);
+        assert_eq!(run_in(&mut sh, "wait").1, 0);
+        assert_eq!(sh.jobs.len(), 1, "the last job backgrounded is spared");
+        assert!(run_in(&mut sh, "jobs %1").0.starts_with("[1]+  Done"));
+
+        // Job 2 is still running, so the `wait` really waits for it and it is
+        // discarded despite holding `$!`; job 1, no longer holding it, goes too.
+        let mut sh = Shell::new();
+        sh.run_source("true &");
+        settle_job(&mut sh, 1);
+        sh.run_source("sleep 0.3 &");
+        assert_eq!(run_in(&mut sh, "wait").1, 0);
+        assert!(sh.jobs.is_empty(), "job 1 lost `$!` to job 2, so both went");
+    }
+
+    #[test]
+    fn losing_a_marked_job_costs_both_markers() {
+        // Dropping the `-` job leaves the `+` job in the table, and still
+        // clears both markers: the replacement has to be a job still running,
+        // and with none there is nothing to re-mark. Dropping an unmarked job
+        // disturbs neither.
+        // Job 1 has to still be running when job 2 arrives, or it would never
+        // have been the `-` job in the first place: a new job takes both
+        // markers when there is nothing running to hand the `-` to.
+        let mut sh = Shell::new();
+        sh.run_source("sleep 0.2 &");
+        sh.run_source("true &");
+        assert_eq!((sh.current_job, sh.previous_job), (Some(2), Some(1)));
+        settle_job(&mut sh, 1);
+        settle_job(&mut sh, 2);
+        run_in(&mut sh, "jobs %1");
+        assert_eq!(sh.jobs.len(), 1, "only job 1 was swept");
+        assert_eq!((sh.current_job, sh.previous_job), (None, None));
+
+        // With something still running, that running job takes both markers.
+        let mut sh = Shell::new();
+        sh.run_source("sleep 5 &");
+        sh.run_source("true &");
+        settle_job(&mut sh, 2);
+        run_in(&mut sh, "jobs %2");
+        assert_eq!((sh.current_job, sh.previous_job), (Some(1), Some(1)));
+        sh.run_source("kill %1");
     }
 
     #[cfg(windows)]

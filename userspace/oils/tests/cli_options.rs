@@ -205,3 +205,33 @@ fn stdin_repl_numbers_lines_across_the_whole_stream() {
         "osh: line 3: unexpected EOF while looking for matching `''\n"
     );
 }
+
+/// A `\<newline>` typed at a REPL prompt must reach the *lexer* intact. The
+/// read loop only decides whether more input is coming (an odd number of
+/// trailing backslashes means the pair is live); it must not splice the pair
+/// out itself, because the pair is not always a continuation and because
+/// replacing it with a bare newline split one command into two. Expectations
+/// are bash 5.2.37's output for the same stdin.
+#[test]
+fn stdin_repl_leaves_line_continuations_to_the_lexer() {
+    // The joined line is ONE command, not `echo a` followed by `b`.
+    let (out, _err, _code) = run_osh(&["-s"], "echo a\\\nb\n");
+    assert_eq!(out, "ab\n");
+
+    // Inside single quotes the backslash and the newline are both literal.
+    let (out, _err, _code) = run_osh(&["-s"], "echo 'x\\\ny'\n");
+    assert_eq!(out, "x\\\ny\n");
+
+    // Inside double quotes the pair *is* a continuation and vanishes.
+    let (out, _err, _code) = run_osh(&["-s"], "echo \"x\\\ny\"\n");
+    assert_eq!(out, "xy\n");
+
+    // An even count is an escaped backslash, not a continuation: the command
+    // ends at the newline.
+    let (out, _err, _code) = run_osh(&["-s"], "echo a\\\\\necho done\n");
+    assert_eq!(out, "a\\\ndone\n");
+
+    // An unquoted here-doc body honours the continuation too.
+    let (out, _err, _code) = run_osh(&["-s"], "cat <<E\na\\\nb\nE\n");
+    assert_eq!(out, "ab\n");
+}

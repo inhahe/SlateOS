@@ -317,17 +317,18 @@ fn repl(sh: &mut Shell) -> i32 {
             }
             read_lines = read_lines.saturating_add(1);
             let trimmed = line.trim_end_matches(['\n', '\r']);
-            // A trailing backslash is an explicit line continuation: drop it and
-            // join the next physical line (bash's lexer-level `\<newline>`).
-            if let Some(cont) = trimmed.strip_suffix('\\') {
-                buffer.push_str(cont);
-                buffer.push('\n');
-                if interactive {
-                    print_continuation();
-                }
-                continue;
-            }
             buffer.push_str(trimmed);
+            // A line ending in an *odd* number of backslashes leaves a live
+            // `\<newline>` pair, so more input is coming. Both characters stay
+            // in the buffer: splicing them out here is wrong in every case
+            // except the plain one, because only the lexer knows whether the
+            // pair is a continuation at all (inside `'…'`, and inside an
+            // unquoted here-doc body, the rules differ) — and dropping the
+            // backslash also merged the two physical lines into two separate
+            // *commands*, since a bare newline was pushed in its place.
+            let trailing_backslashes = trimmed
+                .len()
+                .saturating_sub(trimmed.trim_end_matches('\\').len());
             // If the command so far is only *incomplete* — an unterminated quote
             // or substitution, an unfinished `if`/`while`/`for`/`case`/`{`/`(`
             // compound command, or a line ending on `&&`/`||`/`|` — keep reading
@@ -335,7 +336,9 @@ fn repl(sh: &mut Shell) -> i32 {
             // several prompts is joined into one logical command, as in bash. A
             // complete command, or a genuine (non-continuable) syntax error, both
             // fall through to execution below.
-            if !buffer.trim().is_empty() && sh.parse_incomplete(&buffer) {
+            if trailing_backslashes % 2 == 1
+                || (!buffer.trim().is_empty() && sh.parse_incomplete(&buffer))
+            {
                 buffer.push('\n');
                 if interactive {
                     print_continuation();

@@ -3447,28 +3447,36 @@ impl Shell {
                     }
                 },
                 Out::Inherit => {
-                    if stdout_file.is_some() {
-                        // `2>&1 >file`: the `2>&1` dup copies fd 1's sink *before*
-                        // the later `>file` rebinds it, so fd 2 must stay on the
-                        // pre-override fd 1 (terminal, or a persistent `exec>other`)
-                        // — not follow the file. `StderrTarget::Stdout` resolves
-                        // `exec_stdout` dynamically and would wrongly chase the
-                        // override installed below, so snapshot the current fd 1
-                        // sink into a concrete handle now.
-                        match self.snapshot_std_fd(1) {
-                            Ok(f) => {
-                                self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
-                                pushed_stderr = true;
-                            }
-                            Err(e) => {
-                                self.errln(&format!("{}stdout: {e}", self.err_prefix()));
-                                self.last_status = 1;
-                                return Flow::Next;
-                            }
+                    // fd 1 is the ambient descriptor, so `2>&1` is a *dup* of it
+                    // taken at this instant — not a standing instruction for fd 2
+                    // to track fd 1. Snapshot the sink into a concrete handle now
+                    // so nothing that rebinds fd 1 later inside the body's scope
+                    // drags fd 2 along with it: neither the `>file` override
+                    // installed below (`2>&1 >file` keeps fd 2 on the original
+                    // stdout — redirects apply left to right), nor a runtime
+                    // `exec > file` in the body (`( exec >f; echo X >&2 ) 2>&1`
+                    // writes `X` to the original stdout and leaves `f` empty).
+                    // `StderrTarget::Stdout` resolves `exec_stdout` dynamically
+                    // and would chase both.
+                    //
+                    // Feeding the handle through `stderr_file` also seeds the
+                    // scoped `exec_stderr` override below, which is what carries
+                    // the dup into subshell clones — a pipeline stage or command
+                    // substitution inherits `exec_stderr` but not `stderr_stack`,
+                    // so without it `{ echo X >&2 | cat; } 2>&1` would leak `X`
+                    // to the real stderr.
+                    match self.snapshot_std_fd(1) {
+                        Ok(f) => {
+                            let f = Arc::new(f);
+                            self.stderr_stack.push(StderrTarget::File(Arc::clone(&f)));
+                            stderr_file = Some(f);
+                            pushed_stderr = true;
                         }
-                    } else {
-                        self.stderr_stack.push(StderrTarget::Stdout);
-                        pushed_stderr = true;
+                        Err(e) => {
+                            self.errln(&format!("{}stdout: {e}", self.err_prefix()));
+                            self.last_status = 1;
+                            return Flow::Next;
+                        }
                     }
                 }
             }

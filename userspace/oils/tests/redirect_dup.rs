@@ -62,6 +62,44 @@ fn external_child_2to1_under_a_compound_command() {
 }
 
 #[test]
+fn compound_2to1_does_not_follow_a_later_exec_redirect() {
+    // `2>&1` dups fd 1 as it stands; a runtime `exec > file` inside the
+    // redirect's scope moves fd 1 alone, so fd 2 stays on the original stdout.
+    let dir = std::env::temp_dir().join(format!("osh_rdup_exec_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let path = dir.join("g.txt");
+    let p = path.to_string_lossy().replace('\\', "/");
+
+    let (out, err) = run_osh(&format!("( exec >'{p}'; echo X >&2 ) 2>&1"));
+    assert_eq!(out, "X\n");
+    assert_eq!(err, "");
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "");
+
+    // The same for an external child, whose fd 2 the shell hands over explicitly.
+    let (out, err) = run_osh(&format!("( exec >'{p}'; {CHILD} ) 2>&1"));
+    assert_eq!(out, "E\n");
+    assert_eq!(err, "");
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "O\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn compound_2to1_reaches_an_inner_fd_table() {
+    // A pipeline stage and a command substitution each get their own fd table,
+    // and both must still see the enclosing dup rather than the real stderr.
+    let (out, err) = run_osh("{ { echo X >&2; } | sed 's/^/piped: /'; } 2>&1");
+    assert_eq!(out, "X\n");
+    assert_eq!(err, "");
+    let (out, err) = run_osh(r#"{ echo "[$( { echo X >&2; } )]"; } 2>&1"#);
+    assert_eq!(out, "X\n[]\n");
+    assert_eq!(err, "");
+    let (out, err) = run_osh(&format!("{{ {CHILD} | sed 's/^/piped: /'; }} 2>&1"));
+    assert_eq!(out, "E\npiped: O\n");
+    assert_eq!(err, "");
+}
+
+#[test]
 fn external_child_2to1_before_a_stdout_redirect() {
     // Redirects apply left to right: `2>&1 >f` sends fd 2 to the *original*
     // stdout and only fd 1 onward to the file.

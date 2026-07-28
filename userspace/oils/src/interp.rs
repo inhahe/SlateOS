@@ -284,6 +284,20 @@ fn parse_exit_status(arg: &str) -> Result<i32, ()> {
     arg.trim().parse::<i64>().map(|n| (n & 0xFF) as i32).map_err(|_| ())
 }
 
+/// Drop a single leading `--`, bash's end-of-options marker.
+///
+/// Exactly one: a second `--` is an ordinary argument, so `exit -- -- 3` is a
+/// "numeric argument required" error rather than an exit with status 3, and
+/// `eval -- -- cmd` runs `-- cmd`. Builtins that take no options at all still
+/// honour the marker (`eval`, `let`), because bash's `builtin_usage` shim
+/// strips it before the builtin ever sees the words.
+fn strip_end_of_options(args: &[String]) -> &[String] {
+    match args.split_first() {
+        Some((first, rest)) if first == "--" => rest,
+        _ => args,
+    }
+}
+
 /// Render an `io::Error` the way bash renders `strerror(errno)` — e.g.
 /// "No such file or directory" rather than the host `std::io::Error` Display,
 /// which on Windows reads "The system cannot find the file specified. (os error
@@ -2849,10 +2863,7 @@ impl Shell {
     /// lone `break --` defaults to one). The number itself may carry a sign and
     /// surrounding whitespace, because bash's `legal_number` skips both.
     fn loop_count_arg(&mut self, name: &str, args: &[String]) -> Result<u32, (Flow, i32)> {
-        let rest = match args.split_first() {
-            Some((first, rest)) if first == "--" => rest,
-            _ => args,
-        };
+        let rest = strip_end_of_options(args);
         let Some(s) = rest.first() else {
             return Ok(1);
         };
@@ -3125,6 +3136,8 @@ impl Shell {
     /// zero; an arithmetic error or no arguments yields status 1 (bash: 2 for
     /// "expression expected", but 1 for a zero result — we report 1 for both).
     fn builtin_let(&mut self, args: &[String]) -> i32 {
+        // `let --` is `let` with no expression, not arithmetic on `--`.
+        let args = strip_end_of_options(args);
         if args.is_empty() {
             self.emit_stderr(format!("{}let: expression expected\n", self.err_prefix()).as_bytes());
             return 1;
@@ -10371,7 +10384,10 @@ impl Shell {
             "test" | "[" => self.builtin_test(name, args),
             "let" => self.builtin_let(args),
             "eval" => {
-                let joined = args.join(" ");
+                // `eval` takes no options, but still honours the end-of-options
+                // marker: `eval -- 'echo hi'` prints `hi` rather than looking
+                // for a command named `--`.
+                let joined = strip_end_of_options(args).join(" ");
                 // bash tags a syntax error inside `eval` with the `eval:`
                 // input-source token; `eval_depth` drives that in the parse-error
                 // prefix. Restore on every exit path (the borrow of `self` ends
@@ -10584,8 +10600,8 @@ impl Shell {
             "exit" => {
                 // A non-numeric argument is an error in bash: it prints
                 // "exit: ARG: numeric argument required" and still exits with
-                // status 2. A bare `exit` uses `$?`.
-                let code = match args.first() {
+                // status 2. A bare `exit` uses `$?`, and so does `exit --`.
+                let code = match strip_end_of_options(args).first() {
                     None => self.last_status,
                     Some(s) => match parse_exit_status(s) {
                         Ok(n) => n,
@@ -10610,7 +10626,7 @@ impl Shell {
                 // numeric argument required" and forces status 2. bash validates
                 // the argument *before* the context check, so `return -Z` outside
                 // a function emits BOTH this and the "can only return" line.
-                let code = match args.first() {
+                let code = match strip_end_of_options(args).first() {
                     None => self.last_status,
                     Some(s) => match parse_exit_status(s) {
                         Ok(n) => n,
@@ -15275,6 +15291,7 @@ impl Shell {
         // `shift [n]`: default 1. A non-numeric count is a hard error, as is a
         // negative count ("out of range"); a count larger than `$#` silently
         // returns 1 (bash). More than one operand is "too many arguments".
+        let args = strip_end_of_options(args);
         let n = match args.first() {
             None => 1i64,
             Some(s) => {

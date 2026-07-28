@@ -17609,92 +17609,116 @@ impl Shell {
     /// shortcuts: alias, builtin, command, directory, export, file, keyword,
     /// variable — and `-A function`), `-P prefix` / `-S suffix` (added to each
     /// match after filtering), and `-X filterpat` (glob-remove matches; a
-    /// leading `!` inverts to keep-only). Returns 0 if at least one candidate
-    /// was produced, else 1 (matching bash). The interactive/programmable
+    /// leading `!` inverts to keep-only). The interactive/programmable
     /// selectors that require a live completion context (`-F`/`-C`/`-o`/`-G`
     /// and the user/group/job/service actions) are parsed-and-ignored so
     /// scripts that pass them still run without error.
+    ///
+    /// Options are read the way bash reads them: clustered, with an
+    /// argument-taking letter swallowing the rest of its cluster (`-Wab`,
+    /// `-Afunction`), and the scan stopping at the first operand — so a word
+    /// placed before an option hides it. `-A` and `-o` names are checked against
+    /// the same tables `complete` uses; an unknown one is a usage error (2), as
+    /// is a missing option argument.
+    ///
+    /// Status: 2 for those usage errors; otherwise 1 when candidates were asked
+    /// for and none survived, and 0 when at least one did — or when *nothing*
+    /// was asked for, since bash builds no compspec at all in that case and so
+    /// has nothing to report as missing (`compgen` and `compgen zzz` both
+    /// succeed silently).
     fn builtin_compgen(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         const KEYWORDS: &[&str] = SHELL_KEYWORDS;
+        // Option letters that take an argument: the rest of the cluster if there
+        // is any (`-Wab`, `-Afunction`), else the next word.
+        const ARG_LETTERS: &str = "oAGWFCXPS";
+        const USAGE: &str = "compgen [-abcdefgjksuv] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [word]";
 
         let mut wordlists: Vec<String> = Vec::new();
         let mut actions: Vec<String> = Vec::new();
         let mut prefix = String::new();
         let mut suffix = String::new();
         let mut filter: Option<String> = None;
-        let mut word = String::new();
-        let mut word_seen = false;
+        // Whether any option that asks for candidates was given. bash builds a
+        // compspec only if there is something to put in it, and a `compgen` with
+        // nothing to build succeeds silently rather than reporting "no matches".
+        let mut has_spec = false;
 
         let mut i = 0;
-        let mut opts_done = false;
         while i < args.len() {
-            let a = args[i].as_str();
-            // After `--`, every remaining argument is a non-option; the first
-            // becomes the word to complete (even if it begins with `-`, e.g.
-            // `compgen -W '-a -b' -- -a`). bash consumes exactly one word.
-            if opts_done {
-                if !word_seen {
-                    word = args[i].clone();
-                    word_seen = true;
-                }
+            let a = &args[i];
+            if a == "--" {
                 i += 1;
-                continue;
+                break;
             }
-            match a {
-                "--" => opts_done = true,
-                // Options taking a following argument.
-                "-W" | "-A" | "-P" | "-S" | "-X" | "-F" | "-C" | "-o" | "-G" => {
-                    i += 1;
-                    let val = args.get(i).cloned();
-                    match a {
-                        "-W" => {
-                            if let Some(v) = val {
-                                wordlists.push(v);
+            // Option scanning stops at the first operand, so a word before an
+            // option hides it: `compgen zzz -W 'a b'` asks for nothing at all.
+            if !(a.len() > 1 && a.starts_with('-')) {
+                break;
+            }
+            let chars: Vec<char> = a[1..].chars().collect();
+            let mut ci = 0;
+            while ci < chars.len() {
+                let c = chars[ci];
+                if ARG_LETTERS.contains(c) {
+                    let val = if ci + 1 < chars.len() {
+                        chars[ci + 1..].iter().collect::<String>()
+                    } else {
+                        i += 1;
+                        match args.get(i) {
+                            Some(v) => v.clone(),
+                            None => {
+                                self.errln(&format!(
+                                    "{}compgen: -{c}: option requires an argument",
+                                    self.err_prefix()
+                                ));
+                                self.emit_stderr(format!("compgen: usage: {USAGE}\n").as_bytes());
+                                return 2;
                             }
                         }
-                        "-A" => {
-                            if let Some(v) = val {
-                                actions.push(v);
-                            }
+                    };
+                    has_spec = true;
+                    match c {
+                        // The two names checked against a table are rejected
+                        // here, as the option is read, so the complaint comes
+                        // before anything a valid option would have generated.
+                        'A' if !COMP_ACTIONS.iter().any(|(n, _)| *n == val) => {
+                            self.errln(&format!(
+                                "{}compgen: {val}: invalid action name",
+                                self.err_prefix()
+                            ));
+                            return 2;
                         }
-                        "-P" => prefix = val.unwrap_or_default(),
-                        "-S" => suffix = val.unwrap_or_default(),
-                        "-X" => filter = val,
-                        // Accepted but not implemented (need a live context).
+                        'o' if !COMP_O_ORDER.contains(&val.as_str()) => {
+                            self.errln(&format!(
+                                "{}compgen: {val}: invalid option name",
+                                self.err_prefix()
+                            ));
+                            return 2;
+                        }
+                        'W' => wordlists.push(val),
+                        'A' => actions.push(val),
+                        'P' => prefix = val,
+                        'S' => suffix = val,
+                        'X' => filter = Some(val),
+                        // A valid -o, and -G/-F/-C, need a live completion
+                        // context; kept only as "something was asked for".
                         _ => {}
                     }
-                }
-                "-a" => actions.push("alias".into()),
-                "-b" => actions.push("builtin".into()),
-                "-c" => actions.push("command".into()),
-                "-d" => actions.push("directory".into()),
-                "-e" => actions.push("export".into()),
-                "-f" => actions.push("file".into()),
-                "-g" => actions.push("group".into()),
-                "-j" => actions.push("job".into()),
-                "-k" => actions.push("keyword".into()),
-                "-s" => actions.push("service".into()),
-                "-u" => actions.push("user".into()),
-                "-v" => actions.push("variable".into()),
-                // An unrecognized `-X` (before `--`) is an invalid option,
-                // reported like bash. A bare word (no leading `-`) is the
-                // completion word.
-                _ if a.starts_with('-') && a.len() > 1 => {
-                    let c = a.chars().nth(1).unwrap_or('-');
-                    return self.builtin_invalid_option(
-                        "compgen",
-                        &format!("-{c}"),
-                        "compgen [-abcdefgjksuv] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [word]",
-                    );
-                }
-                _ => {
-                    if !word_seen {
-                        word = args[i].clone();
-                        word_seen = true;
-                    }
+                    ci = chars.len(); // the cluster's remainder was the value
+                } else if let Some(act) = comp_short_action(c) {
+                    has_spec = true;
+                    actions.push(act.to_string());
+                    ci += 1;
+                } else {
+                    return self.builtin_invalid_option("compgen", &format!("-{c}"), USAGE);
                 }
             }
             i += 1;
+        }
+        // The first operand is the word to complete; bash never looks past it.
+        let word = args.get(i).cloned().unwrap_or_default();
+        if !has_spec {
+            return 0;
         }
 
         // ---- gather raw candidates from every specified source ----
@@ -28729,6 +28753,38 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("compgen -W '-a -b -c' -- -a").0, "-a\n");
         // `--` with no following word offers every candidate.
         assert_eq!(run("compgen -W 'one two' --").0, "one\ntwo\n");
+    }
+
+    #[test]
+    fn compgen_reads_its_options_the_way_bash_does() {
+        // An argument-taking letter swallows the rest of its cluster, and a
+        // no-argument letter can share a cluster with it.
+        assert_eq!(run("compgen -Wab").0, "ab\n");
+        assert_eq!(run("compgen -W'a b'").0, "a\nb\n");
+        assert_eq!(run("compgen -aW 'x y'").0, "x\ny\n");
+        assert_eq!(run("f1(){ :; }; compgen -Afunction f").0, "f1\n");
+        // The scan stops at the first operand, so a word placed before an
+        // option hides it: nothing is asked for, and nothing is reported.
+        assert_eq!(run("compgen zzz -W 'a b' 2>&1"), (String::new(), 0));
+        // Asking for nothing at all succeeds; asking and getting nothing is 1.
+        assert_eq!(run("compgen"), (String::new(), 0));
+        assert_eq!(run("compgen --"), (String::new(), 0));
+        assert_eq!(run("compgen -W ''"), (String::new(), 1));
+        assert_eq!(run("compgen -P ''"), (String::new(), 1));
+        // `-A`/`-o` names are checked against the same tables `complete` uses.
+        let (o, s) = run("compgen -A nosuch x 2>&1");
+        assert_eq!((o.as_str(), s), ("osh: compgen: nosuch: invalid action name\n", 2));
+        let (o, s) = run("compgen -o nosuchopt 2>&1");
+        assert_eq!((o.as_str(), s), ("osh: compgen: nosuchopt: invalid option name\n", 2));
+        // The check happens as the option is read, so it beats a later error
+        // and beats the generation a valid option would have driven.
+        let (o, s) = run("compgen -W 'a b' -A nosuch 2>&1");
+        assert_eq!((o.as_str(), s), ("osh: compgen: nosuch: invalid action name\n", 2));
+        // A missing option argument is a usage error, with the synopsis.
+        let (o, s) = run("compgen -W 2>&1");
+        assert!(o.starts_with("osh: compgen: -W: option requires an argument\n"), "got {o:?}");
+        assert!(o.contains("compgen: usage: compgen [-abcdefgjksuv]"), "got {o:?}");
+        assert_eq!(s, 2);
     }
 
     #[test]

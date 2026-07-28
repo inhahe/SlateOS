@@ -556,6 +556,25 @@ enum Out {
     Pipe(io::PipeWriter),
 }
 
+impl Out {
+    /// A second handle on the same sink, for a writer that outlives this one.
+    ///
+    /// A background job writes to whatever fd 1 was where it was started, and
+    /// keeps writing after the command that started it has returned — inside
+    /// `$( … )` or a pipeline stage that means the job shares the enclosing
+    /// capture or pipe. A capture is already shared by design; a pipe needs a
+    /// duplicate of its write end, and duplicating it is also what makes the
+    /// reader's EOF wait for the job, exactly as a forked child's inherited fd
+    /// does in bash.
+    fn share(&self) -> io::Result<Out> {
+        Ok(match self {
+            Out::Inherit => Out::Inherit,
+            Out::Capture(buf) => Out::Capture(Arc::clone(buf)),
+            Out::Pipe(w) => Out::Pipe(w.try_clone()?),
+        })
+    }
+}
+
 /// A fresh, empty capture sink for [`Out::Capture`].
 fn capture_buf() -> Arc<Mutex<Vec<u8>>> {
     Arc::new(Mutex::new(Vec::new()))
@@ -2142,7 +2161,7 @@ impl Shell {
                 // other form (builtin, function, compound, pipeline, …) runs on a
                 // background thread. Both register a job and set `$!`. See
                 // `exec_background` and TD-OILS13.
-                self.exec_background(&item.list);
+                self.exec_background(&item.list, out);
                 continue;
             }
             let flow = self.exec_and_or(&item.list, out, stdin);
@@ -7427,7 +7446,24 @@ impl Shell {
         }
     }
 
-    fn exec_background(&mut self, ao: &AndOr) {
+    fn exec_background(&mut self, ao: &AndOr, out: &Out) {
+        // A job writes to whatever fd 1 was where it was started, so it needs a
+        // handle on the enclosing sink that outlives this call. Inside `$( … )`
+        // or a pipeline stage that is the capture or pipe the caller is
+        // collecting, which is why `x=$(echo hi &)` substitutes `hi` in bash
+        // rather than letting it escape to the terminal.
+        let job_out = match out.share() {
+            Ok(o) => o,
+            Err(e) => {
+                // Only a pipe can fail here, and only by running out of
+                // descriptors. Report it rather than silently detaching the job
+                // from the pipeline it belongs to.
+                self.errln(&format!("{}cannot duplicate output for `&': {e}", self.err_prefix()));
+                self.last_status = 1;
+                return;
+            }
+        };
+
         // Fast path: a lone external command, spawned as a real child process so
         // `$!`, `jobs` and `kill` see the OS pid bash would report.
         //
@@ -7444,6 +7480,18 @@ impl Shell {
         // twice. Under that restriction the speculative expansion is free, and
         // giving up costs only the work of expanding a literal.
         if ao.rest.is_empty()
+            // The shortcut hands the OS a bare `Command`, so the child's fd 1 and
+            // fd 2 are the real process's. That is the right thing to inherit only
+            // when the shell's own fd 1 and fd 2 are the real process's too. An
+            // enclosing capture or pipe, a runtime `exec >`/`exec 2>`, or a
+            // compound command's `2>` each need the child wired somewhere else,
+            // and working out where is `run_external`'s precedence ladder — so
+            // those all go down the general path rather than being reproduced
+            // here.
+            && matches!(job_out, Out::Inherit)
+            && self.exec_stdout.is_none()
+            && self.exec_stderr.is_none()
+            && self.stderr_stack.is_empty()
             && ao.first.commands.len() == 1
             && !ao.first.negated
             && let Command::Simple(sc) = &ao.first.commands[0]
@@ -7536,7 +7584,7 @@ impl Shell {
             ao_owned.first.negated = false;
         }
         let handle = std::thread::spawn(move || {
-            let mut out = Out::Inherit;
+            let mut out = job_out;
             // A backgrounded job's stdin is disconnected (bash redirects it from
             // /dev/null so it can't steal the terminal): feed an empty cursor so
             // any `read` sees immediate EOF rather than racing the parent shell
@@ -9865,6 +9913,13 @@ impl Shell {
             // the same capture so its output is included in the result (bash).
             sub.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
         }
+        // A job started inside the substitution holds a copy of the collecting
+        // pipe's write end, so bash's reader does not see EOF — and the
+        // substitution does not finish — until that job exits: `x=$(sleep 2 &)`
+        // measurably blocks for two seconds, and `x=$(echo hi &)` substitutes
+        // `hi`. Wait the same way before taking the capture. The job's status is
+        // discarded, not propagated: `x=$(false &); echo $?` is 0 in bash.
+        sub.drain_jobs();
         self.last_status = sub.last_status;
         let mut buf = take_capture(&cap);
         self.strip_capture_nuls(&mut buf);
@@ -11792,6 +11847,28 @@ impl Shell {
         }
     }
 
+    /// Block on every outstanding job and empty the job table, returning the
+    /// last job's exit status and pid (`(0, None)` when there were none).
+    ///
+    /// This is what an operand-less `wait` does, and also what an enclosing sink
+    /// has to do before it can call its output complete — bash's collecting pipe
+    /// stays open as long as any child still holds a copy of its write end.
+    fn drain_jobs(&mut self) -> (i32, Option<u32>) {
+        let mut last = 0;
+        let mut last_pid = None;
+        for job in &mut self.jobs {
+            if let Some(body) = job.child.take() {
+                last = body.wait_blocking();
+                job.status = Some(last);
+            } else if let Some(s) = job.status {
+                last = s;
+            }
+            last_pid = Some(job.pid);
+        }
+        self.jobs.clear();
+        (last, last_pid)
+    }
+
     fn builtin_wait(&mut self, args: &[String]) -> i32 {
         // Parse flags: `-n` (return as soon as the next job completes) and
         // `-p VAR` (store the pid of the job whose status is returned in VAR).
@@ -11855,19 +11932,7 @@ impl Shell {
         }
 
         if operands.is_empty() {
-            // Wait for all jobs, blocking on each.
-            let mut last = 0;
-            let mut last_pid = None;
-            for job in &mut self.jobs {
-                if let Some(body) = job.child.take() {
-                    last = body.wait_blocking();
-                    job.status = Some(last);
-                } else if let Some(s) = job.status {
-                    last = s;
-                }
-                last_pid = Some(job.pid);
-            }
-            self.jobs.clear();
+            let (last, last_pid) = self.drain_jobs();
             // bash's purge point: after an argument-less `wait`, re-waiting a
             // pid that a targeted `wait` had reaped earlier reports 127 again
             // rather than replaying its remembered status.
@@ -30988,6 +31053,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             assert_eq!(sh.run_source(src), 0, "backgrounding {src:?} succeeds");
             assert_eq!(sh.run_source("wait $!"), want, "job status for {src:?}");
         }
+    }
+
+    #[test]
+    fn background_job_writes_to_the_sink_it_was_started_under() {
+        // A job inherits fd 1 as it stood where it was started, so inside
+        // `$( … )` its output belongs to the substitution — and the substitution
+        // waits for it, because bash's collecting pipe has no EOF while the job
+        // still holds a copy of the write end.
+        assert_eq!(run("x=$(echo hi &); echo \"[$x]\"").0, "[hi]\n");
+        assert_eq!(run("x=$(echo hi & wait); echo \"[$x]\"").0, "[hi]\n");
+        // Its writes interleave with the substitution's own in write order…
+        assert_eq!(run("x=$(printf a; printf b & wait); echo \"[$x]\"").0, "[ab]\n");
+        // …and so do a compound job's.
+        assert_eq!(run("x=$( { echo g1; echo g2; } & wait ); echo \"[$x]\"").0, "[g1\ng2]\n");
+        assert_eq!(run("f() { echo fn; }; x=$(f &); echo \"[$x]\"").0, "[fn]\n");
+        // The job's status is not the substitution's: the substitution ends when
+        // the pipe closes, and never consults it.
+        assert_eq!(run("x=$(false &); echo \"rc=$?\"").0, "rc=0\n");
+        // A redirection in the job points its fd 1 somewhere else, so there is no
+        // copy of the sink left to collect from or wait on.
+        assert_eq!(run("x=$(echo s > /dev/null &); echo \"[$x]\"").0, "[]\n");
+        // A pipeline stage is the same sink.
+        assert_eq!(run("{ echo hi & wait; } | tr a-z A-Z").0, "HI\n");
+        assert_eq!(run("{ echo hi & } | tr a-z A-Z").0, "HI\n");
     }
 
     #[cfg(windows)]

@@ -4568,6 +4568,32 @@ incomplete:
    already-running case: `bg: job N already in background` on stderr, exit 0
    (previously osh printed a non-bash `[id] cmd &` line on stdout).
 
+3. **`%name` job specs match the job's whole command text, not each of its
+   processes.** `lookup_job` (2026-07-27) implements bash's spec grammar —
+   `%N` only when the remainder is all digits, `%`/`%%`/`%+`/`%-` reading just
+   the first character (so `%+x` is the current job), `%str` a prefix match,
+   `%?str` a substring match, and more than one match an `ambiguous job spec`
+   error rather than a pick. But bash matches a spec against *every process* of
+   a pipeline job, so `sleep 5 | cat &` answers to `%cat`; osh stores only the
+   job's source text (`Job::cmd`), so it answers only to `%sleep`. Proper fix:
+   record the per-process command words for a pipeline job and match each.
+4. **No asynchronous job-death notification.** bash announces a job killed by a
+   signal other than INT/TERM/PIPE (which its `DONT_REPORT_*` build options
+   suppress) on stderr as `bash: line N: PID Hangup   sleep 5`, before the next
+   prompt or command; osh reports such a death only when `jobs` next runs. Ties
+   into TD-OILS11 (async signal delivery).
+
+**Note — reference bash's `jobs` ambiguity answer is not stable, so it is not
+in the corpus.** For `sleep 0.7 & sleep 0.8 & jobs %sleep`, bash 5.2.37 prints
+either `ambiguous job spec` followed by `%sleep: no such job` with status 1, or
+the ambiguity alone with status 0 — decided by whether `PS1`/`PS2`/`LC_ALL` are
+present in the environment, which this path never consults (`LANG`, `PATH` and
+arbitrary new variables make no difference). It looks like an out-of-bounds read
+of bash's job array with its internal `DUP_JOB` sentinel (-2). `disown`, `kill`
+and `wait` are stable, and are what `tests/corpus/jobs-spec.sh` exercises; osh
+follows bash's plain-environment answer (both messages, status 1), which is also
+what bash's own `disown` does either way.
+
 **Proper fix (remaining):** once the kernel provides process groups +
 job-control signals (ties into TD-OILS11 async-signal delivery), extend `fg`/
 `bg` to genuine stop/continue + terminal-foreground transfer and add the

@@ -720,6 +720,21 @@ struct Job {
     no_hup: bool,
 }
 
+/// What resolving a job spec came to. Ambiguity is its own outcome because bash
+/// diagnoses it differently from "no such job" — and because the builtins do
+/// not agree on what to say afterwards: `kill` and `wait` stop at the ambiguity
+/// message, while `jobs` and `disown` follow it with their usual "no such job".
+enum JobLookup {
+    /// An index into [`Shell::jobs`].
+    Found(usize),
+    /// Nothing matched.
+    NotFound,
+    /// A `%name`/`%?string` spec matched more than one job. The payload is the
+    /// text that was matched against, which is what bash names — the spec with
+    /// its leading `%` (and `?`) stripped off.
+    Ambiguous(String),
+}
+
 /// One function frame's trap-inheritance mask (see [`Shell::trap_suppress`]).
 /// A `true` field means the correspondingly-named trap is currently inherited
 /// but suppressed: it exists in `self.traps` (so `trap -p` still shows it and it
@@ -11656,8 +11671,25 @@ impl Shell {
     /// Deliver `signum` to a single `kill` target (job spec `%n` or a pid).
     /// Returns `true` on success. Signal 0 is an existence check (no delivery).
     fn kill_one(&mut self, target: &str, signum: u8, out: &mut Out, stdin: &StdinSrc) -> bool {
-        // Resolve to one of our tracked jobs, if possible.
-        let job_idx = self.resolve_job_spec(target);
+        // Resolve to one of our tracked jobs, if possible. An ambiguous `%name`
+        // stops here: bash names the ambiguity and does not go on to claim
+        // there is no such job.
+        let job_idx = match self.lookup_job(target) {
+            JobLookup::Found(idx) => Some(idx),
+            JobLookup::NotFound => None,
+            JobLookup::Ambiguous(text) => {
+                self.ambiguous_job_spec("kill", &text);
+                return false;
+            }
+        };
+        // A `%…` operand is a job spec and nothing else, so failing to resolve it
+        // is "no such job" — never the "No such process" a stale *pid* gets.
+        if job_idx.is_none() && target.starts_with('%') {
+            self.emit_stderr(
+                format!("{}kill: {target}: no such job\n", self.err_prefix()).as_bytes(),
+            );
+            return false;
+        }
         // Signal 0: just report whether the target exists (a live job or the
         // shell itself); never terminate.
         if signum == 0 {
@@ -11878,6 +11910,16 @@ impl Shell {
         }
     }
 
+    /// Where the current job — the one `jobs` marks `+` — sits in `self.jobs`.
+    ///
+    /// This is what a jobspec-less `fg`, `bg` or `disown` operates on. It is not
+    /// simply the last row of the table: reaping a job hands the `+` to the
+    /// newest job still *running*, which may be an older one.
+    fn current_job_idx(&self) -> Option<usize> {
+        let id = self.current_job?;
+        self.jobs.iter().position(|j| j.id == id)
+    }
+
     /// `jobs [-lnprs] [jobspec ...]` — list background jobs. `-l` adds the pid
     /// column, `-p` prints pids only, `-r`/`-s` restrict the listing to running
     /// / stopped jobs. Finished jobs are forgotten once they have been reported,
@@ -11932,9 +11974,14 @@ impl Shell {
         } else {
             let mut ids = Vec::new();
             for spec in &specs {
-                match self.resolve_job_spec(spec) {
-                    Some(idx) => ids.push(self.jobs[idx].id),
-                    None => {
+                match self.lookup_job(spec) {
+                    JobLookup::Found(idx) => ids.push(self.jobs[idx].id),
+                    outcome => {
+                        // `jobs` reports an ambiguity *and* then falls through
+                        // to its usual "no such job".
+                        if let JobLookup::Ambiguous(text) = outcome {
+                            self.ambiguous_job_spec("jobs", &text);
+                        }
                         self.emit_stderr(
                             format!("{}jobs: {spec}: no such job\n", self.err_prefix()).as_bytes(),
                         );
@@ -11996,26 +12043,83 @@ impl Shell {
     /// operands, wait for all jobs. Returns the exit status of the last waited
     /// job (0 when there are no jobs to wait for). Each waited job is removed
     /// from the table.
-    /// Resolve a `wait`/`jobs` operand (`%n` job spec, bare job id, or pid) to
-    /// an index into `self.jobs`.
-    fn resolve_job_spec(&self, spec: &str) -> Option<usize> {
-        if let Some(rest) = spec.strip_prefix('%') {
-            // `%+` and `%%` name the current job, `%-` the previous one — the
-            // same two jobs `jobs` marks `+` and `-`.
-            let id = match rest {
-                "+" | "%" => self.current_job?,
-                "-" => self.previous_job?,
-                _ => rest.parse::<usize>().ok()?,
+    /// Resolve a `wait`/`jobs`/`kill`/`disown` operand — a `%…` job spec, a bare
+    /// job id, or a pid — to an index into `self.jobs`.
+    ///
+    /// Only the first character after the `%` decides what kind of spec it is,
+    /// which is why `%+x` still names the current job. Everything that is not a
+    /// job number or one of the `+`/`-`/`%` shorthands is matched against the
+    /// job's command text, and a spec that matches more than one job is an
+    /// error rather than a pick.
+    fn lookup_job(&self, spec: &str) -> JobLookup {
+        let Some(rest) = spec.strip_prefix('%') else {
+            // A bare number is a pid first and a job number second.
+            let Ok(n) = spec.parse::<u32>() else {
+                return JobLookup::NotFound;
             };
-            self.jobs.iter().position(|j| j.id == id)
-        } else if let Ok(n) = spec.parse::<u32>() {
-            self.jobs
+            return self
+                .jobs
                 .iter()
                 .position(|j| j.pid == n)
                 .or_else(|| self.jobs.iter().position(|j| j.id as u32 == n))
-        } else {
-            None
+                .map_or(JobLookup::NotFound, JobLookup::Found);
+        };
+        // `%N` is a job number, but only when the whole of it is digits: `%1x`
+        // falls through to a name match rather than being read as job 1.
+        if rest.starts_with(|c: char| c.is_ascii_digit()) && rest.bytes().all(|b| b.is_ascii_digit())
+        {
+            let Ok(id) = rest.parse::<usize>() else {
+                return JobLookup::NotFound;
+            };
+            return self
+                .jobs
+                .iter()
+                .position(|j| j.id == id)
+                .map_or(JobLookup::NotFound, JobLookup::Found);
         }
+        // `%`, `%%` and `%+` name the current job, `%-` the previous one — the
+        // same two jobs `jobs` marks `+` and `-`.
+        let (name, substring) = match rest.chars().next() {
+            None | Some('%' | '+') => {
+                return self
+                    .current_job
+                    .and_then(|id| self.jobs.iter().position(|j| j.id == id))
+                    .map_or(JobLookup::NotFound, JobLookup::Found);
+            }
+            Some('-') => {
+                return self
+                    .previous_job
+                    .and_then(|id| self.jobs.iter().position(|j| j.id == id))
+                    .map_or(JobLookup::NotFound, JobLookup::Found);
+            }
+            // `%?str` searches anywhere in the command, `%str` only its start.
+            Some('?') => (&rest[1..], true),
+            Some(_) => (rest, false),
+        };
+        // bash matches against each *process* of a pipeline job; osh tracks the
+        // job's source text as a whole, so `%cat` finds `sleep 5 | cat` only by
+        // its whole-command spelling. Logged as part of TD-OILS13.
+        let mut found = None;
+        for (idx, job) in self.jobs.iter().enumerate() {
+            let hit =
+                if substring { job.cmd.contains(name) } else { job.cmd.starts_with(name) };
+            if !hit {
+                continue;
+            }
+            if found.is_some() {
+                return JobLookup::Ambiguous(name.to_string());
+            }
+            found = Some(idx);
+        }
+        found.map_or(JobLookup::NotFound, JobLookup::Found)
+    }
+
+    /// `BUILTIN: TEXT: ambiguous job spec` — the diagnostic for a `%name` spec
+    /// that named more than one job.
+    fn ambiguous_job_spec(&mut self, builtin: &str, text: &str) {
+        self.emit_stderr(
+            format!("{}{builtin}: {text}: ambiguous job spec\n", self.err_prefix()).as_bytes(),
+        );
     }
 
     /// Block on every outstanding job and empty the job table.
@@ -12136,19 +12240,29 @@ impl Shell {
         }
         let mut last = 0;
         for spec in &operands {
-            let Some(idx) = self.resolve_job_spec(spec) else {
-                // Not a live job — but it may be one we already reaped, whose
-                // status bash keeps answering with (silently, no diagnostic).
-                match spec.parse::<u32>().ok().and_then(|p| self.reaped_status.get(&p)) {
-                    Some(&status) => {
-                        last = status;
-                        if let Some(var) = &pid_var {
-                            self.vars.insert(var.clone(), spec.clone());
-                        }
-                    }
-                    None => last = self.wait_bad_operand(spec),
+            let idx = match self.lookup_job(spec) {
+                JobLookup::Found(idx) => idx,
+                // An ambiguous `%name` stops at the ambiguity message, with the
+                // same 127 an unknown operand gets.
+                JobLookup::Ambiguous(text) => {
+                    self.ambiguous_job_spec("wait", &text);
+                    last = 127;
+                    continue;
                 }
-                continue;
+                JobLookup::NotFound => {
+                    // Not a live job — but it may be one we already reaped, whose
+                    // status bash keeps answering with (silently, no diagnostic).
+                    match spec.parse::<u32>().ok().and_then(|p| self.reaped_status.get(&p)) {
+                        Some(&status) => {
+                            last = status;
+                            if let Some(var) = &pid_var {
+                                self.vars.insert(var.clone(), spec.clone());
+                            }
+                        }
+                        None => last = self.wait_bad_operand(spec),
+                    }
+                    continue;
+                }
             };
             let pid = self.jobs[idx].pid;
             let job = &mut self.jobs[idx];
@@ -12211,9 +12325,10 @@ impl Shell {
         } else {
             let mut v = Vec::new();
             for spec in operands {
-                match self.resolve_job_spec(spec) {
-                    Some(idx) => v.push(idx),
-                    None => {
+                match self.lookup_job(spec) {
+                    JobLookup::Found(idx) => v.push(idx),
+                    JobLookup::Ambiguous(text) => self.ambiguous_job_spec("wait", &text),
+                    JobLookup::NotFound => {
                         self.emit_stderr(format!("{}wait: {spec}: no such job\n", self.err_prefix()).as_bytes());
                     }
                 }
@@ -12312,9 +12427,14 @@ impl Shell {
         let mut target_ids: Vec<usize> = Vec::new();
         if !specs.is_empty() {
             for spec in &specs {
-                match self.resolve_job_spec(spec) {
-                    Some(idx) => target_ids.push(self.jobs[idx].id),
-                    None => {
+                match self.lookup_job(spec) {
+                    JobLookup::Found(idx) => target_ids.push(self.jobs[idx].id),
+                    outcome => {
+                        // Like `jobs`, `disown` reports an ambiguity and then
+                        // its usual "no such job".
+                        if let JobLookup::Ambiguous(text) = outcome {
+                            self.ambiguous_job_spec("disown", &text);
+                        }
                         self.emit_stderr(format!("{}disown: {spec}: no such job\n", self.err_prefix()).as_bytes());
                         return 1;
                     }
@@ -12325,9 +12445,10 @@ impl Shell {
         } else if running_only {
             target_ids = self.jobs.iter().filter(|j| j.status.is_none()).map(|j| j.id).collect();
         } else {
-            // No spec: operate on the current (last) job.
-            match self.jobs.last() {
-                Some(j) => target_ids.push(j.id),
+            // No spec: operate on the current job — the one `jobs` marks `+`,
+            // which is not always the last row of the table.
+            match self.current_job_idx() {
+                Some(idx) => target_ids.push(self.jobs[idx].id),
                 None => {
                     self.emit_stderr(format!("{}disown: current: no such job\n", self.err_prefix()).as_bytes());
                     return 1;
@@ -12385,20 +12506,29 @@ impl Shell {
         // Skip a leading `--` separator; the first remaining operand is the spec.
         let spec = args.iter().find(|a| a.as_str() != "--");
         let idx = match spec {
-            Some(s) => match self.resolve_job_spec(s) {
-                Some(i) => i,
-                None => {
-                    self.emit_stderr(format!("{}fg: {s}: no such job\n", self.err_prefix()).as_bytes());
-                    return 1;
+            Some(s) => {
+                let s = s.clone();
+                match self.lookup_job(&s) {
+                    JobLookup::Found(i) => i,
+                    // An ambiguous `%name` stops here: bash names the ambiguity
+                    // and does not go on to claim there is no such job.
+                    JobLookup::Ambiguous(text) => {
+                        self.ambiguous_job_spec("fg", &text);
+                        return 1;
+                    }
+                    JobLookup::NotFound => {
+                        self.emit_stderr(format!("{}fg: {s}: no such job\n", self.err_prefix()).as_bytes());
+                        return 1;
+                    }
                 }
-            },
-            None => {
-                if self.jobs.is_empty() {
+            }
+            None => match self.current_job_idx() {
+                Some(idx) => idx,
+                None => {
                     self.emit_stderr(format!("{}fg: current: no such job\n", self.err_prefix()).as_bytes());
                     return 1;
                 }
-                self.jobs.len() - 1
-            }
+            },
         };
         // Echo the command line to stdout, matching bash's `fg` behavior.
         let cmd = self.jobs[idx].cmd.clone();
@@ -12429,19 +12559,26 @@ impl Shell {
             return 1;
         }
         self.poll_jobs();
-        let specs: Vec<&String> = args.iter().filter(|a| a.as_str() != "--").collect();
+        let specs: Vec<String> = args.iter().filter(|a| a.as_str() != "--").cloned().collect();
         let idxs: Vec<usize> = if specs.is_empty() {
-            if self.jobs.is_empty() {
-                self.emit_stderr(format!("{}bg: current: no such job\n", self.err_prefix()).as_bytes());
-                return 1;
+            match self.current_job_idx() {
+                Some(idx) => vec![idx],
+                None => {
+                    self.emit_stderr(format!("{}bg: current: no such job\n", self.err_prefix()).as_bytes());
+                    return 1;
+                }
             }
-            vec![self.jobs.len() - 1]
         } else {
             let mut v = Vec::new();
             for s in specs {
-                match self.resolve_job_spec(s) {
-                    Some(i) => v.push(i),
-                    None => {
+                match self.lookup_job(&s) {
+                    JobLookup::Found(i) => v.push(i),
+                    // As with `fg`, an ambiguity is the whole diagnostic.
+                    JobLookup::Ambiguous(text) => {
+                        self.ambiguous_job_spec("bg", &text);
+                        return 1;
+                    }
+                    JobLookup::NotFound => {
                         self.emit_stderr(format!("{}bg: {s}: no such job\n", self.err_prefix()).as_bytes());
                         return 1;
                     }
@@ -31592,6 +31729,45 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 "kill -{sig}"
             );
         }
+    }
+
+    #[test]
+    fn job_specs_name_by_number_prefix_and_substring() {
+        // Only the first character after the `%` decides what kind of spec it
+        // is, so a suffix on `%+`/`%-` is ignored while `%1x` is a *name*.
+        let mut sh = Shell::new();
+        sh.run_source("sleep 5 &");
+        sh.run_source("( sleep 6 ) &");
+        for (spec, want) in [
+            ("%1", 0),
+            ("%2", 1),
+            // `%`, `%%` and `%+` are the current job; `%-` the previous one.
+            ("%", 1),
+            ("%%", 1),
+            ("%+", 1),
+            ("%+x", 1),
+            ("%-", 0),
+            ("%-x", 0),
+            // A name matches the start of the command, `%?str` anywhere in it.
+            ("%sleep", 0),
+            ("%(", 1),
+            ("%?6", 1),
+        ] {
+            assert!(matches!(sh.lookup_job(spec), JobLookup::Found(i) if i == want), "{spec}");
+        }
+        for spec in ["%0", "%1x", "%nosuch", "%?nosuch"] {
+            assert!(matches!(sh.lookup_job(spec), JobLookup::NotFound), "{spec}");
+        }
+        // Matching two jobs is an error rather than a pick, and the error names
+        // the text that was matched against — the spec minus its `%` and `?`.
+        match sh.lookup_job("%?sleep") {
+            JobLookup::Ambiguous(text) => assert_eq!(text, "sleep"),
+            _ => panic!("%?sleep should have matched both jobs"),
+        }
+        // A bare operand is a pid before it is a job number.
+        let pid = sh.jobs[1].pid.to_string();
+        assert!(matches!(sh.lookup_job(&pid), JobLookup::Found(1)));
+        sh.run_source("kill %1; kill %2");
     }
 
     #[cfg(windows)]

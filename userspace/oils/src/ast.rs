@@ -368,6 +368,30 @@ impl Word {
             parts: vec![WordPart::Literal(s.into())],
         }
     }
+
+    /// Whether expanding this word can be observed — i.e. whether it may run a
+    /// command, assign a variable, or open a file.
+    ///
+    /// Only text and quoting qualify as free of that. Everything else is
+    /// conservatively assumed to be observable: a command substitution runs a
+    /// command outright, `$(( i++ ))` and `${x:=y}` assign, `<( … )` spawns a
+    /// process, and even a plain `$x` can be a nameref whose resolution is worth
+    /// not repeating.
+    ///
+    /// Callers use this to decide whether a word may be expanded *speculatively*
+    /// — expanded once to look at, then discarded and expanded again later by
+    /// whichever path really runs the command.
+    #[must_use]
+    pub fn expansion_is_unobservable(&self) -> bool {
+        fn parts_ok(parts: &[WordPart]) -> bool {
+            parts.iter().all(|p| match p {
+                WordPart::Literal(_) | WordPart::SingleQuoted { .. } => true,
+                WordPart::DoubleQuoted(inner) => parts_ok(inner),
+                _ => false,
+            })
+        }
+        parts_ok(&self.parts)
+    }
 }
 
 /// A fragment of a word. Quoting is captured per-part so field splitting and
@@ -741,4 +765,59 @@ pub enum RedirectOp {
     /// `<<< word` — here-string. The `target` word is expanded and fed to stdin
     /// with a trailing newline.
     HereStr,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The command word of the first simple command in `src`.
+    fn first_word(src: &str) -> Word {
+        let prog = crate::parser::parse(src).expect("parse");
+        let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+            panic!("not a simple command: {src}");
+        };
+        sc.words[0].clone()
+    }
+
+    #[test]
+    fn expansion_is_unobservable_only_for_plain_text() {
+        // Text and quoting expand to themselves, so expanding twice is the same
+        // as expanding once — including a double-quoted run of pure literals.
+        for src in [
+            "cat",
+            "'cat'",
+            r"c\at",
+            "\"cat\"",
+            "\"ca\"t'x'",
+            r"$'ca\tt'",
+            "/usr/bin/cat",
+        ] {
+            assert!(
+                first_word(src).expansion_is_unobservable(),
+                "expected unobservable: {src}"
+            );
+        }
+        // Anything that consults or changes shell state is not, whether it sits
+        // at the top of the word or nested inside double quotes.
+        for src in [
+            "$cmd",
+            "${cmd}",
+            "${cmd:-cat}",
+            "${cmd:=cat}",
+            "$(echo cat)",
+            "`echo cat`",
+            "$((1+1))",
+            "pre$cmd",
+            "\"$cmd\"",
+            "\"pre$(echo x)\"",
+            "${a[0]}",
+            "${#cmd}",
+        ] {
+            assert!(
+                !first_word(src).expansion_is_unobservable(),
+                "expected observable: {src}"
+            );
+        }
+    }
 }

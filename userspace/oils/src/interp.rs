@@ -7428,56 +7428,89 @@ impl Shell {
     }
 
     fn exec_background(&mut self, ao: &AndOr) {
-        // Only handle the common case: a single external simple command.
+        // Fast path: a lone external command, spawned as a real child process so
+        // `$!`, `jobs` and `kill` see the OS pid bash would report.
+        //
+        // Its precondition is deliberately narrow, because it is a *shortcut*
+        // around the executor rather than a second copy of it — it can pass the
+        // command's own words to the OS and nothing else. Assignments,
+        // redirections and a declaration command's array operands all need the
+        // executor proper, so their presence sends the whole command down the
+        // general path below instead of being silently dropped.
+        //
+        // The command word must also be plain text, since deciding whether the
+        // command is external at all means expanding it, and this path may still
+        // give up afterwards — a word whose expansion runs something would run it
+        // twice. Under that restriction the speculative expansion is free, and
+        // giving up costs only the work of expanding a literal.
         if ao.rest.is_empty()
             && ao.first.commands.len() == 1
             && !ao.first.negated
             && let Command::Simple(sc) = &ao.first.commands[0]
+            && sc.assignments.is_empty()
+            && sc.redirects.is_empty()
+            && sc.decl_arrays.is_empty()
+            && let Some(w0) = sc.words.first()
+            && w0.expansion_is_unobservable()
+            && let [name] = self.expand_word(w0, true).as_slice()
+            && !self.funcs.contains_key(name)
+            && !self.builtin_enabled(name)
+            // A name that resolves nowhere is *not* handled here: bash reports
+            // `command not found` from the forked child, so the status belongs to
+            // the job and `command_not_found_handle` may run instead. The general
+            // path runs the real executor and gets all of that right.
+            && let Some(path) = self.resolve_external(name)
         {
-            let mut argv = Vec::new();
-            for w in &sc.words {
+            let name = name.clone();
+            let mut argv = vec![name];
+            for w in &sc.words[1..] {
                 argv.extend(self.expand_word(w, true));
             }
-            if !argv.is_empty() && !self.funcs.contains_key(&argv[0]) && !self.builtin_enabled(&argv[0]) {
-                let mut cmd = PCommand::new(self.resolve_program(&argv[0]));
-                cmd.args(&argv[1..]);
-                cmd.current_dir(&self.cwd);
-                if self.env_imported {
-                    cmd.env_clear();
-                }
-                for (k, v) in &self.vars {
-                    if self.exported.contains(k) {
-                        cmd.env(k, v);
-                    }
-                }
-                match cmd.spawn() {
-                    Ok(child) => {
-                        let pid = child.id();
-                        // Bash assigns the lowest job number not currently in
-                        // use, so numbering restarts at 1 once the table empties.
-                        let mut id = 1;
-                        while self.jobs.iter().any(|j| j.id == id) {
-                            id += 1;
-                        }
-                        self.jobs.push(Job {
-                            id,
-                            pid,
-                            child: Some(JobBody::Process(child)),
-                            cmd: argv.join(" "),
-                            status: None,
-                            no_hup: false,
-                        });
-                        self.last_bg_pid = Some(pid);
-                        self.last_status = 0;
-                        return;
-                    }
-                    Err(e) => {
-                        self.errln(&format!("{}{}: {e}", self.err_prefix(), argv[0]));
-                        self.last_status = 1;
-                        return;
-                    }
+            let mut cmd = PCommand::new(path);
+            // bash execs the resolved binary but hands the child the command word
+            // as typed, exactly as the synchronous path does.
+            #[cfg(unix)]
+            std::os::unix::process::CommandExt::arg0(&mut cmd, &argv[0]);
+            cmd.args(&argv[1..]);
+            cmd.current_dir(&self.cwd);
+            if self.env_imported {
+                cmd.env_clear();
+            }
+            for (k, v) in &self.vars {
+                if self.exported.contains(k) {
+                    cmd.env(k, v);
                 }
             }
+            // Bash assigns the lowest job number not currently in use, so
+            // numbering restarts at 1 once the table empties.
+            let mut id = 1;
+            while self.jobs.iter().any(|j| j.id == id) {
+                id += 1;
+            }
+            let (pid, child, status) = match cmd.spawn() {
+                Ok(child) => (child.id(), Some(JobBody::Process(child)), None),
+                Err(e) => {
+                    // The name resolved but would not run — a directory, a file
+                    // without execute permission, a bad executable format. bash
+                    // reports this from the child it already forked, so the job
+                    // exists and has already exited with the failure status.
+                    let (msg, code) = spawn_error_message(&argv[0], &e);
+                    self.errln(&format!("{}{msg}", self.err_prefix()));
+                    let pid = SYNTH_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    (pid, None, Some(code))
+                }
+            };
+            self.jobs.push(Job {
+                id,
+                pid,
+                child,
+                cmd: argv.join(" "),
+                status,
+                no_hup: false,
+            });
+            self.last_bg_pid = Some(pid);
+            self.last_status = 0;
+            return;
         }
         // Every other backgrounded form — a builtin, function, compound command,
         // pipeline, negated command, or multi-command and-or list — runs
@@ -30869,6 +30902,52 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `$!` survives after a fast job finishes (bash keeps the last bg pid).
         let mut sh = Shell::new();
         assert_eq!(sh.run_source("true &\np=$!\nwait\n[ -n \"$p\" ] && echo saved"), 0);
+    }
+
+    #[test]
+    fn background_spawn_shortcut_declines_what_it_cannot_carry() {
+        // The direct-spawn shortcut in `exec_background` can only hand the OS a
+        // program and its arguments. Everything else about the command has to
+        // send it down the general path, or it would simply be dropped — bash
+        // forks, so a `&` job keeps its assignments, its redirections, and the
+        // expansions in its words exactly as a foreground command would.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let dir = std::env::temp_dir().join(format!("osh_bg_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let cd = dir.to_string_lossy().replace('\\', "/");
+
+        let mut sh = Shell::new();
+        assert_eq!(sh.run_source(&format!("cd '{cd}'")), 0);
+
+        // A redirection applies to the job, rather than being dropped.
+        assert_eq!(sh.run_source("printf 'redirected\\n' > bg.out & wait"), 0);
+        assert_eq!(std::fs::read_to_string(dir.join("bg.out")).expect("bg.out"), "redirected\n");
+
+        // An assignment prefix reaches the job's environment.
+        assert_eq!(sh.run_source("V=zz sh -c 'printf v=$V' > bg.env & wait"), 0);
+        assert_eq!(std::fs::read_to_string(dir.join("bg.env")).expect("bg.env"), "v=zz");
+
+        // The words are expanded once. `true` is a builtin, so a shortcut that
+        // expanded them to discover that and then let the general path expand
+        // them again would run the substitution twice.
+        assert_eq!(sh.run_source(": > bg.cnt\ntrue $(printf x >> bg.cnt; echo y) &\nwait"), 0);
+        assert_eq!(std::fs::read_to_string(dir.join("bg.cnt")).expect("bg.cnt"), "x");
+
+        // A name that resolves nowhere is reported by the job, not by the shell:
+        // the shell's own status is 0 and the 127 belongs to the job.
+        assert_eq!(sh.run_source("nosuch_cmd_bg_xyz &"), 0);
+        assert_eq!(sh.run_source("wait $!"), 127);
+        // …which is also why `command_not_found_handle` gets a chance to run and
+        // to supply the job's status.
+        assert_eq!(
+            sh.run_source("command_not_found_handle() { return 9; }\nnosuch_cmd_bg_xyz &"),
+            0
+        );
+        assert_eq!(sh.run_source("wait $!"), 9);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(windows)]

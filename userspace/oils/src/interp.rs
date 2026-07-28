@@ -575,6 +575,36 @@ struct TrapSuppress {
     err: bool,
 }
 
+/// A `+N` / `-N` directory-stack index as written to `dirs`/`pushd`/`popd`.
+///
+/// bash parses *any* signed argument these builtins do not recognise as a flag
+/// through the same numeric path, which is why `pushd -nz` and `dirs -cp` are
+/// reported as "invalid number" rather than as unknown options.
+struct DirStackSpec {
+    /// `true` for `+N` (count from the left, 0 = current dir), `false` for `-N`
+    /// (count from the right).
+    plus: bool,
+    n: usize,
+}
+
+impl DirStackSpec {
+    /// Parse `+N`/`-N`. Returns `None` when the sign is not followed by a plain
+    /// non-negative decimal number, which the caller turns into bash's
+    /// "invalid number" usage error.
+    fn parse(arg: &str) -> Option<Self> {
+        let plus = match arg.as_bytes().first()? {
+            b'+' => true,
+            b'-' => false,
+            _ => return None,
+        };
+        let digits = arg.get(1..)?;
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok().map(|n| Self { plus, n })
+    }
+}
+
 /// One `source`/`.` frame (see [`Shell::source_stack`]).
 ///
 /// bash keeps sourced scripts on the same frame stack as function calls, so the
@@ -9754,7 +9784,7 @@ impl Shell {
         let status = match name {
             ":" | "true" => 0,
             "false" => 1,
-            "cd" => self.builtin_cd(args),
+            "cd" => self.builtin_cd(args, out, redir),
             "pwd" => self.builtin_pwd(args, out, redir),
             "pushd" => self.builtin_pushd(args, out, redir),
             "popd" => self.builtin_popd(args, out, redir),
@@ -10175,7 +10205,7 @@ impl Shell {
         Ok(cwd)
     }
 
-    fn builtin_cd(&mut self, args: &[String]) -> i32 {
+    fn builtin_cd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Leading `-L`/`-P` select logical (default) vs physical (symlink-
         // resolved) handling. `-` is a target (`$OLDPWD`), not a flag.
         let mut physical = false;
@@ -10214,6 +10244,28 @@ impl Shell {
             }
         }
         let rest = &args[i..];
+
+        // bash rejects a second operand outright (before any chdir), with a
+        // bare message and no usage line: `cd a b` → "cd: too many arguments".
+        if rest.len() > 1 {
+            self.errln(&format!("{}cd: too many arguments", self.err_prefix()));
+            return 1;
+        }
+        // An empty operand is a *logical* no-op in bash: `cd ""` succeeds and
+        // leaves `$PWD`/`$OLDPWD` untouched, because bash short-circuits on an
+        // empty dirname before it ever calls chdir. Under `-P` it does call
+        // chdir(""), which fails — with ENOENT, not whatever the host says (the
+        // Windows CRT reports "invalid syntax" for an empty path).
+        if rest.first().is_some_and(|d| d.is_empty()) {
+            if physical {
+                self.errln(&format!(
+                    "{}cd: : No such file or directory",
+                    self.err_prefix()
+                ));
+                return 1;
+            }
+            return 0;
+        }
 
         // `cd -` returns to `$OLDPWD` and echoes the new directory (bash).
         let is_dash = rest.first().map(String::as_str) == Some("-");
@@ -10261,8 +10313,10 @@ impl Shell {
                     cwd = shell_path(&canon);
                     self.vars.insert("PWD".to_string(), cwd.clone());
                 }
+                // The echo is ordinary builtin stdout, so it must honour any
+                // redirection on the `cd` itself (`cd - >/dev/null`).
                 if echo {
-                    println!("{cwd}");
+                    return self.write_line(out, redir, &cwd);
                 }
                 0
             }
@@ -10322,58 +10376,133 @@ impl Shell {
         self.write_line(out, redir, &line)
     }
 
-    /// `pushd [dir | +N | -N]` — push onto the directory stack and change to the
-    /// new top. With no argument, swap the top two entries. `+N`/`-N` rotate the
-    /// stack so the N-th entry (from the left / right) becomes current.
+    /// Resolve a `+N`/`-N` directory-stack index to a position in
+    /// [`Shell::dir_stack_full`], reporting bash's error and returning `Err(rc)`
+    /// when it is out of range.
+    ///
+    /// bash distinguishes two failures, and the distinction is observable:
+    /// with **no saved entries** any out-of-range index is
+    /// "`NAME: directory stack empty`", otherwise it is
+    /// "`NAME: IDX: directory stack index out of range`" — where `IDX` keeps its
+    /// sign for `pushd`/`popd` but is printed bare for `dirs`.
+    fn dirstack_index(&mut self, tag: &str, spec: &DirStackSpec, keep_sign: bool) -> Result<usize, i32> {
+        let len = self.dir_stack.len().saturating_add(1);
+        if spec.n >= len {
+            let msg = if self.dir_stack.is_empty() {
+                format!("{tag}: directory stack empty")
+            } else if keep_sign {
+                let sign = if spec.plus { '+' } else { '-' };
+                format!("{tag}: {sign}{}: directory stack index out of range", spec.n)
+            } else {
+                format!("{tag}: {}: directory stack index out of range", spec.n)
+            };
+            self.errln(&format!("{}{msg}", self.err_prefix()));
+            return Err(1);
+        }
+        // `+N` counts from the left (0 = current dir), `-N` from the right.
+        Ok(if spec.plus { spec.n } else { len - 1 - spec.n })
+    }
+
+    /// `pushd [-n] [dir | +N | -N]` — push onto the directory stack and change to
+    /// the new top. With no argument, swap the top two entries. `+N`/`-N` rotate
+    /// the stack so the N-th entry (from the left / right) becomes current. `-n`
+    /// performs the stack manipulation *without* changing directory.
     fn builtin_pushd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
-        let is_rot = |s: &str| {
-            s.len() > 1
-                && (s.starts_with('+') || s.starts_with('-'))
-                && s[1..].chars().all(|c| c.is_ascii_digit())
-        };
-        let cur = shell_cwd();
-        match args.first().map(String::as_str) {
-            None => {
-                if self.dir_stack.is_empty() {
-                    self.emit_stderr(format!("{}pushd: no other directory\n", self.err_prefix()).as_bytes());
-                    return 1;
+        const USAGE: &str = "pushd [-n] [+N | -N | dir]";
+        let mut no_cd = false;
+        let mut spec: Option<DirStackSpec> = None;
+        let mut dir: Option<String> = None;
+        let mut end_opts = false;
+        for a in args {
+            if !end_opts {
+                if a == "--" {
+                    end_opts = true;
+                    continue;
                 }
-                let top = self.dir_stack[0].clone();
-                match self.change_dir(&top) {
-                    Ok(_) => self.dir_stack[0] = cur,
-                    Err(e) => {
-                        self.emit_stderr(format!("{}pushd: {top}: {e}\n", self.err_prefix()).as_bytes());
-                        return 1;
+                if a == "-n" {
+                    no_cd = true;
+                    continue;
+                }
+                // Anything else that leads with a sign must be an index: bash
+                // does not cluster `-n` with other letters, so `-nz` is an
+                // "invalid number", not an unknown option.
+                if a.starts_with('+') || a.starts_with('-') {
+                    match DirStackSpec::parse(a) {
+                        // A recognised index ends the scan outright — bash
+                        // silently ignores everything after it (`pushd +1 foo`
+                        // rotates and never looks at `foo`).
+                        Some(s) => {
+                            spec = Some(s);
+                            break;
+                        }
+                        None => return self.dirstack_invalid_number("pushd", a, USAGE),
                     }
                 }
             }
-            Some(spec) if is_rot(spec) => {
+            if dir.replace(a.clone()).is_some() {
+                self.errln(&format!("{}pushd: too many arguments", self.err_prefix()));
+                return 1;
+            }
+            // The directory operand ends option processing: bash reads a
+            // trailing `-n` or `--` as a *second* operand ("too many
+            // arguments"), not as another option.
+            end_opts = true;
+        }
+
+        let cur = shell_cwd();
+        match (spec, dir) {
+            (Some(s), _) => {
                 let full = self.dir_stack_full();
-                let len = full.len();
-                let n: usize = spec[1..].parse().unwrap_or(0);
-                if n >= len {
-                    self.emit_stderr(format!("{}pushd: directory stack index out of range\n", self.err_prefix()).as_bytes());
-                    return 1;
-                }
-                let idx = if spec.starts_with('+') { n } else { len - 1 - n };
+                let idx = match self.dirstack_index("pushd", &s, true) {
+                    Ok(i) => i,
+                    Err(rc) => return rc,
+                };
                 let mut rotated: Vec<String> = full[idx..].to_vec();
                 rotated.extend_from_slice(&full[..idx]);
-                let newtop = rotated[0].clone();
-                match self.change_dir(&newtop) {
-                    Ok(_) => self.dir_stack = rotated[1..].to_vec(),
-                    Err(e) => {
-                        self.emit_stderr(format!("{}pushd: {newtop}: {e}\n", self.err_prefix()).as_bytes());
-                        return 1;
-                    }
+                // Under `-n` the rotation is applied to the saved stack only;
+                // the cwd stays put and therefore remains entry 0. bash also
+                // suppresses the usual stack printout in that case (it prints
+                // for `pushd -n dir`, but not for `pushd -n +N`).
+                if no_cd {
+                    self.dir_stack = rotated[1..].to_vec();
+                    self.refresh_dirstack();
+                    return 0;
                 }
+                if let Err(e) = self.change_dir(&rotated[0]) {
+                    self.errln(&format!("{}pushd: {}: {e}", self.err_prefix(), rotated[0]));
+                    return 1;
+                }
+                self.dir_stack = rotated[1..].to_vec();
             }
-            Some(dir) => match self.change_dir(dir) {
+            // `pushd -n dir` records the directory below the current one without
+            // visiting it, so the entry is stored exactly as written.
+            (None, Some(d)) if no_cd => self.dir_stack.insert(0, d),
+            // An empty operand never chdirs (see `builtin_cd`), so it just
+            // duplicates the current directory onto the stack — as bash does.
+            (None, Some(d)) if d.is_empty() => self.dir_stack.insert(0, cur),
+            (None, Some(d)) => match self.change_dir(&d) {
                 Ok(_) => self.dir_stack.insert(0, cur),
                 Err(e) => {
-                    self.emit_stderr(format!("{}pushd: {dir}: {e}\n", self.err_prefix()).as_bytes());
+                    self.errln(&format!("{}pushd: {d}: {e}", self.err_prefix()));
                     return 1;
                 }
             },
+            // `pushd -n` with no operand is a complete no-op in bash: the swap it
+            // would perform is a cwd change, which `-n` forbids, so nothing is
+            // printed and the status is 0 even with an empty stack.
+            (None, None) if no_cd => return 0,
+            (None, None) => {
+                if self.dir_stack.is_empty() {
+                    self.errln(&format!("{}pushd: no other directory", self.err_prefix()));
+                    return 1;
+                }
+                let top = self.dir_stack[0].clone();
+                if let Err(e) = self.change_dir(&top) {
+                    self.errln(&format!("{}pushd: {top}: {e}", self.err_prefix()));
+                    return 1;
+                }
+                self.dir_stack[0] = cur;
+            }
         }
         // `change_dir` refreshed DIRSTACK from the pre-mutation stack; re-sync
         // now that the saved stack has been pushed.
@@ -10381,36 +10510,52 @@ impl Shell {
         self.print_dirs_line(out, redir)
     }
 
-    /// `popd [+N | -N]` — pop the top of the directory stack and change to it.
-    /// `+N`/`-N` remove the N-th entry (from the left / right) instead; removing
-    /// the current entry (index 0) behaves like a plain `popd`.
+    /// `popd [-n] [+N | -N]` — pop the top of the directory stack and change to
+    /// it. `+N`/`-N` remove the N-th entry (from the left / right) instead;
+    /// removing the current entry (index 0) behaves like a plain `popd`. `-n`
+    /// drops the saved top without changing directory.
     fn builtin_popd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
-        let is_rot = |s: &str| {
-            s.len() > 1
-                && (s.starts_with('+') || s.starts_with('-'))
-                && s[1..].chars().all(|c| c.is_ascii_digit())
-        };
-        match args.first().map(String::as_str) {
-            Some(spec) if is_rot(spec) => {
-                let len = self.dir_stack.len() + 1; // current + saved
-                let n: usize = spec[1..].parse().unwrap_or(0);
-                if n >= len {
-                    self.emit_stderr(format!("{}popd: directory stack index out of range\n", self.err_prefix()).as_bytes());
-                    return 1;
+        const USAGE: &str = "popd [-n] [+N | -N]";
+        let mut no_cd = false;
+        let mut spec: Option<DirStackSpec> = None;
+        for a in args {
+            // `popd` has no operands, so `--` simply ends the scan; bash
+            // discards whatever follows it rather than complaining.
+            if a == "--" {
+                break;
+            }
+            if a == "-n" {
+                no_cd = true;
+                continue;
+            }
+            if a.starts_with('+') || a.starts_with('-') {
+                match DirStackSpec::parse(a) {
+                    Some(s) => {
+                        spec = Some(s);
+                        continue;
+                    }
+                    None => return self.dirstack_invalid_number("popd", a, USAGE),
                 }
-                let idx = if spec.starts_with('+') { n } else { len - 1 - n };
+            }
+            // `popd` takes no directory operand at all.
+            self.errln(&format!("{}popd: {a}: invalid argument", self.err_prefix()));
+            self.errln(&format!("popd: usage: {USAGE}"));
+            return 2;
+        }
+        match spec {
+            Some(s) => {
+                let idx = match self.dirstack_index("popd", &s, true) {
+                    Ok(i) => i,
+                    Err(rc) => return rc,
+                };
                 if idx == 0 {
                     // Removing the current directory: fall back to a plain popd.
-                    return self.popd_top(out, redir);
+                    return self.popd_top(no_cd, out, redir);
                 }
                 // idx-1 indexes into the saved stack.
                 self.dir_stack.remove(idx - 1);
             }
-            None => return self.popd_top(out, redir),
-            Some(_) => {
-                self.emit_stderr(format!("{}popd: invalid argument\n", self.err_prefix()).as_bytes());
-                return 1;
-            }
+            None => return self.popd_top(no_cd, out, redir),
         }
         // A `+N`/`-N` removal edits the saved stack without a cwd change, so
         // resync DIRSTACK here (the plain-popd path goes through `change_dir`).
@@ -10418,16 +10563,27 @@ impl Shell {
         self.print_dirs_line(out, redir)
     }
 
+    /// Report bash's `NAME: ARG: invalid number` plus the builtin's usage line,
+    /// the shape every `pushd`/`popd`/`dirs` index-parse failure takes (status 2).
+    fn dirstack_invalid_number(&mut self, tag: &str, arg: &str, usage: &str) -> i32 {
+        self.errln(&format!("{}{tag}: {arg}: invalid number", self.err_prefix()));
+        self.errln(&format!("{tag}: usage: {usage}"));
+        2
+    }
+
     /// Pop the saved top of the directory stack and change to it (the common
-    /// `popd` with no rotation argument). Errors if the stack is empty.
-    fn popd_top(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
+    /// `popd` with no rotation argument). Errors if the stack is empty. With
+    /// `no_cd` (bash's `-n`) the entry is dropped but the cwd is left alone.
+    fn popd_top(&mut self, no_cd: bool, out: &mut Out, redir: &RedirPlan) -> i32 {
         if self.dir_stack.is_empty() {
-            self.emit_stderr(format!("{}popd: directory stack empty\n", self.err_prefix()).as_bytes());
+            self.errln(&format!("{}popd: directory stack empty", self.err_prefix()));
             return 1;
         }
         let top = self.dir_stack.remove(0);
-        if let Err(e) = self.change_dir(&top) {
-            self.emit_stderr(format!("{}popd: {top}: {e}\n", self.err_prefix()).as_bytes());
+        if no_cd {
+            self.refresh_dirstack();
+        } else if let Err(e) = self.change_dir(&top) {
+            self.errln(&format!("{}popd: {top}: {e}", self.err_prefix()));
             return 1;
         }
         self.print_dirs_line(out, redir)
@@ -10438,46 +10594,71 @@ impl Shell {
     /// line, `-v` prints one per line with an index; `+N`/`-N` print a single
     /// entry (from the left / right).
     fn builtin_dirs(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        const USAGE: &str = "dirs [-clpv] [+N] [-N]";
         let mut clear = false;
         let mut long = false;
         let mut per_line = false;
         let mut verbose = false;
-        let mut single: Option<String> = None;
+        let mut single: Option<DirStackSpec> = None;
         for a in args {
-            if a.len() > 1
-                && (a.starts_with('+') || a.starts_with('-'))
-                && a[1..].chars().all(|c| c.is_ascii_digit())
-            {
-                single = Some(a.clone());
-            } else if let Some(flags) = a.strip_prefix('-') {
-                for c in flags.chars() {
-                    match c {
-                        'c' => clear = true,
-                        'l' => long = true,
-                        'p' => per_line = true,
-                        'v' => verbose = true,
-                        _ => {}
+            // Like `popd`, `dirs` has no operands: `--` ends the scan and bash
+            // ignores every word after it (`dirs -- foo` prints the stack).
+            if a == "--" {
+                break;
+            }
+            // bash's `dirs` does *not* cluster its flags: each option word
+            // is a single letter, and `-cp` is read as an index (hence
+            // "invalid number", not "invalid option").
+            match a.as_str() {
+                "-c" => {
+                    clear = true;
+                    continue;
+                }
+                "-l" => {
+                    long = true;
+                    continue;
+                }
+                "-p" => {
+                    per_line = true;
+                    continue;
+                }
+                "-v" => {
+                    verbose = true;
+                    continue;
+                }
+                _ => {}
+            }
+            if a.starts_with('+') || a.starts_with('-') {
+                match DirStackSpec::parse(a) {
+                    Some(s) => {
+                        single = Some(s);
+                        continue;
                     }
+                    None => return self.dirstack_invalid_number("dirs", a, USAGE),
                 }
             }
+            // `dirs` accepts no operands; bash reports a bare word as an
+            // invalid *option* even though it does not start with a dash.
+            self.errln(&format!("{}dirs: {a}: invalid option", self.err_prefix()));
+            self.errln(&format!("dirs: usage: {USAGE}"));
+            return 2;
         }
         if clear {
             self.dir_stack.clear();
             self.refresh_dirstack();
             return 0;
         }
-        let full = self.dir_stack_full();
         if let Some(spec) = single {
-            let len = full.len();
-            let n: usize = spec[1..].parse().unwrap_or(0);
-            if n >= len {
-                self.emit_stderr(format!("{}dirs: directory stack index out of range\n", self.err_prefix()).as_bytes());
-                return 1;
-            }
-            let idx = if spec.starts_with('+') { n } else { len - 1 - n };
-            let rendered = self.dirs_render(&full[idx], long);
+            // Unlike `pushd`/`popd`, `dirs` prints the index without its sign.
+            let idx = match self.dirstack_index("dirs", &spec, false) {
+                Ok(i) => i,
+                Err(rc) => return rc,
+            };
+            let full = self.dir_stack_full();
+            let rendered = full.get(idx).map(|p| self.dirs_render(p, long)).unwrap_or_default();
             return self.write_line(out, redir, &rendered);
         }
+        let full = self.dir_stack_full();
         if per_line || verbose {
             let mut s = String::new();
             for (i, p) in full.iter().enumerate() {

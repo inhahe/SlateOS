@@ -1038,8 +1038,17 @@ pub struct Shell {
     ///     whose default disposition is to terminate (`128 + signum`), or whose
     ///     trap handler ran an `exit`;
     ///   * `source`/`.` — an `exit` in the sourced script, or in the `RETURN`
-    ///     trap that fires when the script finishes.
+    ///     trap that fires when the script finishes;
+    ///   * a `mapfile`/`readarray` `-C` callback that ran an `exit`.
     pending_builtin_exit: Option<i32>,
+    /// Set once top-level input asked the shell to terminate (an `exit`, or any
+    /// other unwind that reached [`Shell::run_source`]). The read-eval loop polls
+    /// it via [`Shell::exit_requested`] and stops reading, so `exit` in a REPL or
+    /// on piped stdin ends the shell instead of merely setting `$?` — bash's
+    /// behaviour. Only the outermost entry point sets it; nested shell code
+    /// (`eval`, `source`, trap handlers, subshells) unwinds through `Flow::Exit`
+    /// and reaches this flag only if it propagates all the way out.
+    exit_requested: bool,
     /// Background jobs started with `&`, tracked so `jobs`/`wait` can report and
     /// reap them. NOT inherited by subshell clones (a subshell has no jobs).
     /// Each new job takes the lowest unused job number (bash semantics), so the
@@ -1165,6 +1174,7 @@ impl Shell {
             exit_trap_done: false,
             in_trap: false,
             pending_builtin_exit: None,
+            exit_requested: false,
             jobs: Vec::new(),
             umask_val: 0o022,
             cmd_hash: std::collections::HashMap::new(),
@@ -1513,9 +1523,20 @@ impl Shell {
             .unwrap_or_else(|| self.shopt_default("expand_aliases"))
     }
 
+    /// Parse and execute `src` as *top-level* shell input (the `-c` string, a
+    /// script file, or one logical REPL command), returning its exit status.
     pub fn run_source(&mut self, src: &str) -> i32 {
         let mut out = Out::Inherit;
         self.run_source_out(src, &mut out)
+    }
+
+    /// Whether top-level input has asked the shell to terminate. The read-eval
+    /// loop checks this after every command so `exit` ends the loop; without it
+    /// an `exit` typed at a prompt (or piped in) would only set `$?` and the
+    /// shell would keep reading.
+    #[must_use]
+    pub fn exit_requested(&self) -> bool {
+        self.exit_requested
     }
 
     /// Returns `true` if `src` is an *incomplete* command — it fails to parse
@@ -1575,13 +1596,17 @@ impl Shell {
         self.run_source_flow_out(src, &mut out)
     }
 
-    /// Parse and execute `src`, sending its standard output to the caller's
-    /// `out` sink. This lets internally-generated commands (e.g. the `mapfile
-    /// -C` callback) participate in an active capture — a command substitution
-    /// or brace-group redirect — rather than escaping to the real fd 1.
+    /// [`Shell::run_source`] with an explicit stdout sink, so a caller that
+    /// captures the shell's output (the test harness) sees it.
+    ///
+    /// This is the outermost entry point, so a `Flow::Exit` reaching it has
+    /// unwound everything there is to unwind: it collapses to the returned
+    /// status *and* latches [`Shell::exit_requested`] so the read-eval loop
+    /// stops reading further input.
     fn run_source_out(&mut self, src: &str, out: &mut Out) -> i32 {
         match self.run_source_flow_out(src, out) {
             Flow::Exit(code) => {
+                self.exit_requested = true;
                 self.last_status = code;
                 code
             }
@@ -2239,19 +2264,21 @@ impl Shell {
                 // so `Send` is not a concern; `StderrTarget` is all `Arc`-based.
                 sub.stderr_stack.clone_from(&self.stderr_stack);
                 let flow = sub.exec_program(p, out, stdin);
+                // An explicit `exit` from the subshell body propagates outward as
+                // a status only — but it must land *before* the EXIT trap runs, so
+                // the handler sees it as `$?` and can override it.
+                if let Flow::Exit(c) = flow {
+                    sub.last_status = c;
+                }
                 // Fire the subshell's own EXIT trap (if it set one) before its
                 // state is discarded — matching bash, which runs an EXIT trap for
-                // every exiting shell environment, not only the top level.
+                // every exiting shell environment, not only the top level. An
+                // `exit N` inside the handler replaces the body's status
+                // (`( trap 'exit 9' EXIT; exit 2 )` yields 9), which
+                // `run_exit_trap_out` records in `last_status`.
                 sub.run_exit_trap_out(out, stdin);
                 self.last_status = sub.last_status;
-                // Propagate an explicit exit from the subshell as a status only.
-                match flow {
-                    Flow::Exit(c) => {
-                        self.last_status = c;
-                        Flow::Next
-                    }
-                    _ => Flow::Next,
-                }
+                Flow::Next
             }
         }
     }
@@ -3571,6 +3598,9 @@ impl Shell {
             exit_trap_done: false,
             in_trap: false,
             pending_builtin_exit: None,
+            // A subshell's own `exit` unwinds only the subshell; the flag is a
+            // top-level-input concern, so it never carries into a clone.
+            exit_requested: false,
             // A subshell does not inherit the parent's job table.
             jobs: Vec::new(),
             // The umask is a process attribute, inherited by subshells.
@@ -11299,9 +11329,15 @@ impl Shell {
 
     /// Run the `EXIT` trap, if set, exactly once when the top-level shell exits.
     /// Called by the binary driver at each true-exit point.
-    pub fn run_exit_trap(&mut self) {
+    ///
+    /// Returns `Some(code)` if the handler itself ran `exit N`, which replaces
+    /// the shell's exit status (bash: `trap 'exit 9' EXIT; exit 2` exits 9). The
+    /// driver cannot simply read `$?` instead, because a status it produced
+    /// without running any command (e.g. 127 for an unreadable script) never
+    /// reached `last_status`.
+    pub fn run_exit_trap(&mut self) -> Option<i32> {
         let mut out = Out::Inherit;
-        self.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
+        self.run_exit_trap_out(&mut out, &StdinSrc::Inherit)
     }
 
     /// Fire the EXIT trap (at most once), writing its output to `out`.
@@ -11314,9 +11350,12 @@ impl Shell {
     /// a trap installed inside the subshell fires on the subshell's exit. Routing
     /// through `out` is what lets `x=$( trap 'echo t' EXIT; … )` capture the
     /// trap's output into the substitution result, matching bash.
-    fn run_exit_trap_out(&mut self, out: &mut Out, stdin: &StdinSrc) {
+    ///
+    /// Returns `Some(code)` when the handler ran `exit N`; `self.last_status` is
+    /// updated either way, so callers that read it need not inspect the result.
+    fn run_exit_trap_out(&mut self, out: &mut Out, stdin: &StdinSrc) -> Option<i32> {
         if self.exit_trap_done {
-            return;
+            return None;
         }
         self.exit_trap_done = true;
         if let Some(action) = self.traps.get("EXIT").cloned()
@@ -11337,11 +11376,14 @@ impl Shell {
                     self.errln(&self.format_parse_error(&e, &action));
                 }
             }
-            self.last_status = match flow {
-                Flow::Exit(code) => code,
-                _ => saved,
+            let exited = match flow {
+                Flow::Exit(code) => Some(code),
+                _ => None,
             };
+            self.last_status = exited.unwrap_or(saved);
+            return exited;
         }
+        None
     }
 
     fn builtin_pwd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -14099,7 +14141,13 @@ impl Shell {
                 && let Some(cb) = &callback
             {
                 let cmd = format!("{cb} {idx} {}", single_quote(&s));
-                self.run_source_out(&cmd, out);
+                // An `exit N` in the callback terminates the *shell* (bash), so
+                // the read loop stops and the array is never assigned at all.
+                // A builtin can only hand back an `i32`, hence the side channel.
+                if let Flow::Exit(n) = self.run_source_flow_out(&cmd, out) {
+                    self.pending_builtin_exit = Some(n);
+                    return n;
+                }
             }
             elems.insert(idx, s);
             idx = idx.saturating_add(1);
@@ -26655,6 +26703,76 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.run_exit_trap();
         assert_eq!(sh.last_status, 3);
         assert_eq!(sh.vars.get("MARK").map(String::as_str), Some("1"));
+    }
+
+    /// The status the driver finally exits with: `run_exit_trap` must *report*
+    /// the handler's own `exit N` (not merely record it in `$?`), because the
+    /// driver's status can come from a path that never ran a command — e.g. 127
+    /// for an unreadable script file.
+    #[test]
+    fn exit_trap_reports_its_own_exit_to_the_driver() {
+        let mut sh = Shell::new();
+        sh.run_source("trap 'exit 9' EXIT");
+        sh.last_status = 2;
+        assert_eq!(sh.run_exit_trap(), Some(9));
+
+        let mut sh = Shell::new();
+        sh.run_source("trap 'echo bye > /dev/null' EXIT");
+        sh.last_status = 2;
+        assert_eq!(sh.run_exit_trap(), None, "a normal handler leaves the status alone");
+
+        // Fired at most once, and a shell with no EXIT trap reports nothing.
+        let mut sh = Shell::new();
+        assert_eq!(sh.run_exit_trap(), None);
+    }
+
+    /// A subshell's EXIT trap fires *after* the body's `exit N` has landed as
+    /// `$?`, so the handler both sees that status and can replace it. bash:
+    /// `( trap 'exit 9' EXIT; exit 2 ); echo $?` prints 9.
+    #[test]
+    fn subshell_exit_trap_exit_replaces_body_status() {
+        let (o, _) = run("( trap 'exit 9' EXIT; exit 2 ); echo \"sub=$?\"");
+        assert_eq!(o, "sub=9\n");
+        // …and the handler observes the body's status as `$?`.
+        let (o, _) = run("( trap 'echo saw=$?' EXIT; exit 2 ); echo \"sub=$?\"");
+        assert_eq!(o, "saw=2\nsub=2\n");
+    }
+
+    /// `exit` reaching the *top level* latches `exit_requested`, which is how the
+    /// read-eval loop knows to stop reading (bash: `printf 'echo a\nexit 3\necho
+    /// b\n' | bash` prints only `a` and exits 3). An exit confined to a subshell
+    /// must NOT latch it — the parent shell keeps running.
+    #[test]
+    fn top_level_exit_latches_exit_requested() {
+        let mut sh = Shell::new();
+        sh.run_source("echo hi > /dev/null");
+        assert!(!sh.exit_requested(), "an ordinary command does not request exit");
+
+        assert_eq!(sh.run_source("exit 3"), 3);
+        assert!(sh.exit_requested());
+
+        let mut sh = Shell::new();
+        sh.run_source("( exit 4 )");
+        assert!(!sh.exit_requested(), "a subshell exit stays inside the subshell");
+        assert_eq!(sh.last_status, 4);
+    }
+
+    /// bash runs a `mapfile -C` callback in the *current* shell, so an `exit` in
+    /// it terminates the whole shell: the read loop stops and the array is never
+    /// assigned. (Verified against bash 5.x.)
+    #[test]
+    fn mapfile_callback_exit_unwinds_shell() {
+        let path = scratch_script("mapfile_cb_exit", "a\nb\nc\n");
+        let mut sh = Shell::new();
+        let code = sh.run_source(&format!(
+            "cb() {{ CB=\"$CB $1\"; exit 5; }}\nmapfile -C cb -c 1 arr < {path}\nAFTER=1"
+        ));
+        assert_eq!(code, 5);
+        assert!(sh.exit_requested());
+        assert_eq!(sh.vars.get("CB").map(String::as_str), Some(" 0"), "one callback, then unwind");
+        assert!(sh.arrays.get("arr").is_none_or(BTreeMap::is_empty), "array not assigned");
+        assert!(!sh.vars.contains_key("AFTER"), "commands after the mapfile do not run");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

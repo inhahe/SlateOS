@@ -270,9 +270,10 @@ fn run(args: &[String]) -> i32 {
         },
     };
     // Fire the EXIT trap (if any) once, on true shell exit. It preserves the
-    // pending exit status, so `code` remains the shell's final status.
-    sh.run_exit_trap();
-    code
+    // pending exit status, so `code` remains the shell's final status — unless
+    // the handler itself ran `exit N`, which replaces it (bash: `trap 'exit 9'
+    // EXIT; exit 2` exits 9).
+    sh.run_exit_trap().unwrap_or(code)
 }
 
 /// Interactive read-eval-print loop.
@@ -339,6 +340,14 @@ fn repl(sh: &mut Shell) -> i32 {
 
         if !buffer.trim().is_empty() {
             sh.run_source(&buffer);
+            // `exit` (or any unwind reaching the top level) ends the shell: stop
+            // reading, exactly as bash does. Without this the loop would treat
+            // the exit as an ordinary status and prompt for the next command.
+            // No trailing newline here (unlike the EOF path below): the user's
+            // Enter already ended the line.
+            if sh.exit_requested() {
+                return sh.last_status();
+            }
         }
         if done {
             if interactive {

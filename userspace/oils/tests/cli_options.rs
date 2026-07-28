@@ -128,6 +128,27 @@ fn bare_dash_reads_commands_from_stdin() {
     assert_eq!(code, 0);
 }
 
+/// `exit` read from stdin must end the shell, not merely set `$?`: the loop
+/// stops reading and the status is the one `exit` named. bash prints only `one`
+/// and exits 3 for the same input.
+#[test]
+fn exit_from_stdin_ends_the_read_loop() {
+    let (out, _err, code) = run_osh(&["-s"], "echo one\nexit 3\necho two\n");
+    assert_eq!(out, "one\n", "commands after `exit` must not run");
+    assert_eq!(code, 3);
+}
+
+/// An `exit N` *inside* the EXIT trap replaces the shell's exit status, even
+/// when the shell was already exiting with a different one (bash).
+#[test]
+fn exit_trap_exit_replaces_the_shells_status() {
+    let (_out, _err, code) = run_osh(&["-c", "trap 'exit 9' EXIT; exit 2"], "");
+    assert_eq!(code, 9);
+    // Without an `exit` of its own the handler leaves the status untouched.
+    let (_out, _err, code) = run_osh(&["-c", "trap ':' EXIT; exit 2"], "");
+    assert_eq!(code, 2);
+}
+
 #[test]
 fn double_dash_makes_dash_c_a_script_path() {
     // After `--`, `-c` is a *file* name, not the command flag; opening it fails.

@@ -7162,23 +7162,24 @@ impl Shell {
             }
         } else if redir.stderr_to_stdout {
             // `2>&1` and fd 1 is not a file (else the file target was copied
-            // into `redir.stderr` already): mirror fd 1's live sink.
-            if capturing {
-                cmd.stderr(Stdio::piped());
-                stderr_to_stdout_capture = true;
-            } else if let Out::Pipe(w) = out {
-                match w.try_clone() {
-                    Ok(wp) => {
-                        cmd.stderr(Stdio::from(wp));
-                    }
-                    Err(e) => {
-                        self.errln(&format!("{}pipe: {e}", self.err_prefix()));
-                        self.last_status = 1;
-                        return;
-                    }
+            // into `redir.stderr` already): mirror fd 1's live sink. That sink
+            // is fd 1 as it stood *before* this command's own `>` redirect —
+            // reaching here with one means `2>&1` was written first, and bash
+            // applies redirects left to right, so `cmd 2>&1 >f` sends fd 2 to
+            // the original stdout and only fd 1 to the file.
+            match self.child_stdio_for_stdout(out) {
+                Ok(Some(s)) => {
+                    cmd.stderr(s);
                 }
-            } else {
-                cmd.stderr(Stdio::inherit());
+                Ok(None) => {
+                    cmd.stderr(Stdio::piped());
+                    stderr_to_stdout_capture = true;
+                }
+                Err(e) => {
+                    self.errln(&format!("{}{e}", self.err_prefix()));
+                    self.last_status = 1;
+                    return;
+                }
             }
         } else {
             match self.stderr_stack.last() {
@@ -7233,25 +7234,23 @@ impl Shell {
                         return;
                     }
                 },
-                // fd 2 follows fd 1: a persistent `exec > file` target if set,
-                // else inherit (fd 2 → terminal, same visual result at the
-                // shell's controlling terminal).
-                Some(StderrTarget::Stdout) => {
-                    if let Some(f) = &self.exec_stdout {
-                        match f.try_clone() {
-                            Ok(fc) => {
-                                cmd.stderr(Stdio::from(fc));
-                            }
-                            Err(e) => {
-                                self.errln(&format!("{}exec stdout: {e}", self.err_prefix()));
-                                self.last_status = 1;
-                                return;
-                            }
-                        }
-                    } else {
-                        cmd.stderr(Stdio::inherit());
+                // An enclosing compound command's `2>&1`: fd 2 follows fd 1,
+                // which for this child means the pipeline stage's pipe, the
+                // capture buffer, a persistent `exec > file`, or the real fd 1.
+                Some(StderrTarget::Stdout) => match self.child_stdio_for_stdout(out) {
+                    Ok(Some(s)) => {
+                        cmd.stderr(s);
                     }
-                }
+                    Ok(None) => {
+                        cmd.stderr(Stdio::piped());
+                        stderr_to_stdout_capture = true;
+                    }
+                    Err(e) => {
+                        self.errln(&format!("{}{e}", self.err_prefix()));
+                        self.last_status = 1;
+                        return;
+                    }
+                },
             }
         }
 
@@ -17091,6 +17090,41 @@ impl Shell {
     /// buffer-capture sink can't back a live child fd, so it (and the real-fd-1
     /// `Stdout` case) fall back to inheriting fd 2 — a rare edge documented in
     /// the module limitations.
+    /// Build a child-process [`Stdio`] that writes to fd 1's current sink, for
+    /// `2>&1` (`stderr_to_stdout`) on an external command.
+    ///
+    /// `Ok(None)` means fd 1 is a capture buffer, which cannot back a live child
+    /// descriptor: the caller must hand the child a pipe and append the drained
+    /// bytes to that same buffer.
+    ///
+    /// Inheriting fd 2 is *not* a substitute for the real-fd-1 case, even though
+    /// it looks like one whenever both standard descriptors happen to land on
+    /// the same terminal. As soon as the shell's own stdout and stderr differ —
+    /// `osh script >out 2>err`, or any harness that captures the two streams
+    /// separately — inheriting fd 2 sends the child's diagnostics to the wrong
+    /// destination and `2>&1` silently does nothing.
+    fn child_stdio_for_stdout(&self, out: &Out) -> Result<Option<Stdio>, String> {
+        match out {
+            Out::Capture(_) => Ok(None),
+            Out::Pipe(w) => w
+                .try_clone()
+                .map(|p| Some(Stdio::from(p)))
+                .map_err(|e| format!("pipe: {e}")),
+            // A persistent `exec > file` target if one is set (a dup of the
+            // shared handle, so the child writes at the live offset), otherwise
+            // a dup of the process's real fd 1.
+            Out::Inherit => match &self.exec_stdout {
+                Some(f) => f
+                    .try_clone()
+                    .map(|f| Some(Stdio::from(f)))
+                    .map_err(|e| format!("exec stdout: {e}")),
+                None => dup_std_handle(true)
+                    .map(|f| Some(Stdio::from(f)))
+                    .map_err(|e| format!("stdout: {e}")),
+            },
+        }
+    }
+
     fn child_stdio_for_stderr(&self) -> Result<Stdio, String> {
         match self.stderr_stack.last() {
             None | Some(StderrTarget::Stdout | StderrTarget::Buffer(_)) => Ok(Stdio::inherit()),

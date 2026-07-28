@@ -545,6 +545,25 @@ struct TrapSuppress {
     err: bool,
 }
 
+/// One `source`/`.` frame (see [`Shell::source_stack`]).
+///
+/// bash keeps sourced scripts on the same frame stack as function calls, so the
+/// two must be *interleaved* to reproduce `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO`
+/// and `caller`. `fn_depth` records how many function frames were active when
+/// this `source` began, which is enough to rebuild the merged order: the frames
+/// nest, so a source frame always sits directly above function frame
+/// `fn_depth - 1` and below function frame `fn_depth`.
+#[derive(Clone)]
+struct SourceFrame {
+    /// The file name as written on the `.`/`source` command line — what bash
+    /// puts in `BASH_SOURCE` and uses to label diagnostics from that file.
+    path: String,
+    /// The line of the `.`/`source` command itself, in *its* caller's source.
+    call_line: u32,
+    /// `fn_stack.len()` at the moment this frame was pushed.
+    fn_depth: usize,
+}
+
 /// Snapshot of the `set`-controlled shell options, captured by `local -` and
 /// restored on function return. Covers exactly the toggles osh models for
 /// `set`/`set -o` (see [`Shell::set_short_option`] / [`Shell::set_named_option`]);
@@ -657,6 +676,11 @@ pub struct Shell {
     /// child environment — staying deterministic and host-independent.
     env_imported: bool,
     funcs: HashMap<String, Program>,
+    /// The source label each function was *defined* in — bash's `BASH_SOURCE`
+    /// entry for that function's frames. Kept as a parallel map for the same
+    /// reason as `func_redirects`: the many `self.funcs.get()` sites stay
+    /// unchanged.
+    func_sources: HashMap<String, String>,
     /// Redirections attached to a function *definition* (`f() { …; } >log`).
     /// bash applies these on every invocation of the function, wrapping the
     /// body execution. Kept as a parallel map (rather than folding into
@@ -976,6 +1000,12 @@ pub struct Shell {
     /// `call_line_stack[k]` is the line where `fn_stack[k]` was invoked. Drives
     /// `BASH_LINENO` and the `caller` builtin. Kept in lockstep with `fn_stack`.
     call_line_stack: Vec<u32>,
+    /// Parallel to `fn_stack`: the source label each active function was
+    /// *defined* in (`func_sources` at the time it was called). bash's
+    /// `BASH_SOURCE[i]` names the file `FUNCNAME[i]` came from, not the file it
+    /// was called from, so a function defined in a sourced script keeps
+    /// reporting that script even once the `source` has returned.
+    fn_source_stack: Vec<String>,
     /// The `BASH_ARGC` stack (only populated under `shopt -s extdebug`).
     /// `bash_argc[0]` is the *innermost* frame's argument count, then outward.
     /// The base frame (index last) is the shell's own positional-parameter count,
@@ -994,12 +1024,16 @@ pub struct Shell {
     /// return pops its arg frame only when its recorded flag is true, so toggling
     /// extdebug mid-call cannot desynchronise the stacks.
     arg_frame_pushed: Vec<bool>,
-    /// Nesting depth of `source`/`.` invocations currently executing. `return`
-    /// is only valid inside a function *or* a sourced script; this lets the
-    /// `return` builtin distinguish a legal source-level return from an illegal
-    /// top-level one (which bash reports as an error, status 2, without
-    /// unwinding). Reset to 0 in subshell clones.
-    source_depth: u32,
+    /// The `source`/`.` invocations currently executing, innermost last.
+    ///
+    /// bash treats a sourced script as a *frame* on the same stack as function
+    /// calls: it contributes a `source` entry to `FUNCNAME`, its path to
+    /// `BASH_SOURCE`, and its call site to `BASH_LINENO`, and every diagnostic
+    /// raised while it is being read is labelled with that path rather than
+    /// with the outer script's name. It also makes `return` legal (a
+    /// source-level `return` unwinds just that file), which is why a plain
+    /// depth counter was enough before. Reset to empty in subshell clones.
+    source_stack: Vec<SourceFrame>,
     /// Nesting depth of enclosing loops (`for`/`while`/`until`/`select`) whose
     /// body is currently executing. `break`/`continue` are only meaningful
     /// inside a loop: bash reports "only meaningful in a …" to stderr, returns
@@ -1191,6 +1225,7 @@ impl Shell {
             exported: HashSet::new(),
             env_imported: false,
             funcs: HashMap::new(),
+            func_sources: HashMap::new(),
             func_redirects: HashMap::new(),
             positional: Vec::new(),
             name: "osh".to_string(),
@@ -1248,10 +1283,11 @@ impl Shell {
             local_opt_saves: Vec::new(),
             fn_stack: Vec::new(),
             call_line_stack: Vec::new(),
+            fn_source_stack: Vec::new(),
             bash_argc: Vec::new(),
             bash_argv: Vec::new(),
             arg_frame_pushed: Vec::new(),
-            source_depth: 0,
+            source_stack: Vec::new(),
             loop_depth: 0,
             readonly: HashSet::new(),
             readonly_funcs: HashSet::new(),
@@ -2458,6 +2494,12 @@ impl Shell {
                     self.last_status = 1;
                 } else {
                     self.funcs.insert(f.name.clone(), f.body.clone());
+                    // Remember which file the definition was read from: bash's
+                    // `BASH_SOURCE` for a call frame names where the function was
+                    // *defined*, so a function defined by a sourced script keeps
+                    // naming that script for the rest of the shell's life.
+                    let src = self.current_source();
+                    self.func_sources.insert(f.name.clone(), src);
                     // Redirections attached to the definition apply on every
                     // invocation (bash semantics). Store them, or clear a
                     // prior set when the function is redefined without any.
@@ -3670,6 +3712,7 @@ impl Shell {
             exported: self.exported.clone(),
             env_imported: self.env_imported,
             funcs: self.funcs.clone(),
+            func_sources: self.func_sources.clone(),
             func_redirects: self.func_redirects.clone(),
             positional: self.positional.clone(),
             name: self.name.clone(),
@@ -3784,15 +3827,20 @@ impl Shell {
             // (and further nested calls) stay consistent.
             fn_stack: self.fn_stack.clone(),
             call_line_stack: self.call_line_stack.clone(),
+            fn_source_stack: self.fn_source_stack.clone(),
             // A subshell does not push its own arg frame, but it inherits (clones)
             // the parent's BASH_ARGC/BASH_ARGV stack so `${BASH_ARGV[@]}` reads the
             // same inside `( … )` as outside, matching bash.
             bash_argc: self.bash_argc.clone(),
             bash_argv: self.bash_argv.clone(),
             arg_frame_pushed: self.arg_frame_pushed.clone(),
-            // A subshell starts a fresh `source` nesting (it is not itself a
-            // sourced script), though it inherits the function context above.
-            source_depth: 0,
+            // A subshell is still *inside* whatever file is being read, so it
+            // inherits the source frames: `${BASH_SOURCE[0]}` and diagnostics
+            // raised in `( … )` or `$( … )` name the sourced file, and a
+            // `return` there unwinds it (`( return 3 )` in a sourced script
+            // yields 3 in bash rather than the top-level "can only return"
+            // error).
+            source_stack: self.source_stack.clone(),
             // A subshell body is not itself inside the parent's loop for the
             // purpose of `break`/`continue`: bash resets loop_level in a
             // subshell, so `(break)` inside a loop is an error, not a break.
@@ -5772,6 +5820,15 @@ impl Shell {
         // line at the call site (the item currently executing) for `BASH_LINENO`.
         self.fn_stack.push(name.to_string());
         self.call_line_stack.push(self.current_line);
+        // `BASH_SOURCE` for this frame is where the function was *defined*, not
+        // where it is being called from; a function defined in a sourced script
+        // keeps naming that script for the rest of the shell's life.
+        self.fn_source_stack.push(
+            self.func_sources
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| self.frame_source()),
+        );
         self.refresh_funcname();
         // Under `extdebug`, each function call pushes its argument count/values
         // onto the BASH_ARGC/BASH_ARGV stack. Record whether we pushed (per
@@ -5887,6 +5944,7 @@ impl Shell {
         // Pop this call from the `FUNCNAME` stack.
         self.fn_stack.pop();
         self.call_line_stack.pop();
+        self.fn_source_stack.pop();
         self.refresh_funcname();
         // Pop this call's BASH_ARGC/BASH_ARGV frame iff we pushed one on entry.
         if self.arg_frame_pushed.pop() == Some(true) {
@@ -5915,16 +5973,15 @@ impl Shell {
         }
     }
 
-    /// The source-file label bash reports for a *function* call frame in
-    /// `BASH_SOURCE`. It depends on how the shell was started, because bash has
-    /// no real file for `-c`/interactive frames and substitutes a sentinel:
+    /// The *base* source label — what bash uses for a frame that has no real
+    /// file behind it, which depends on how the shell was started:
     ///   * script file (`osh SCRIPT`) → the script path (`$0`),
     ///   * `-c COMMAND`               → the literal string `environment`,
     ///   * stdin / interactive REPL   → the literal string `main`.
     ///
     /// (`caller` uses a *different* sentinel — `NULL` — for the non-file cases;
-    /// see `caller_source`.) Per-function definition source is not tracked, so
-    /// every frame reports the same label (see known-issues TD-OILS21).
+    /// see `caller_source`.) A function defined while a `source` was in
+    /// progress records that file instead; see `func_sources`.
     fn frame_source(&self) -> String {
         if self.script_mode {
             self.name.clone()
@@ -5935,13 +5992,75 @@ impl Shell {
         }
     }
 
-    /// `FUNCNAME[i]` for the current call stack, or `None` past the end.
-    /// Index 0 is the innermost function; in script-file mode a bottom `main`
-    /// pseudo-frame sits just past the real function frames.
+    /// The file currently being read: the innermost `source` frame's path, or
+    /// the base label when no `source` is active. This is bash's
+    /// `${BASH_SOURCE[0]}` at the point of a *definition*, and the label it
+    /// puts on diagnostics.
+    fn current_source(&self) -> String {
+        self.source_stack
+            .last()
+            .map_or_else(|| self.frame_source(), |f| f.path.clone())
+    }
+
+    /// The label bash puts on a diagnostic — its `get_name_for_error()`, which
+    /// is the source of the *innermost active frame*: a running function's
+    /// definition file, or the file a `source` is currently reading. With no
+    /// frames at all it degrades to `$0` (the script path, or `osh` for `-c` and
+    /// stdin), which is what bash prints for a top-level error.
+    ///
+    /// This is exactly `${BASH_SOURCE[0]}` except for the no-frame case, where
+    /// bash's array still carries the script's base frame.
+    fn error_source(&self) -> String {
+        self.merged_frames()
+            .last()
+            .map_or_else(|| self.name.clone(), |f| f.1.clone())
+    }
+
+    /// The merged call stack — function calls and `source` invocations
+    /// interleaved in the order they were entered, **outermost first**.
+    ///
+    /// bash keeps both on one stack, so `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO`
+    /// and `caller` see a sourced file as a frame named `source`. Frames nest,
+    /// so each source frame's recorded `fn_depth` is enough to place it: it
+    /// sits directly above function frame `fn_depth - 1`.
+    ///
+    /// Each entry is `(FUNCNAME, BASH_SOURCE, BASH_LINENO)`.
+    fn merged_frames(&self) -> Vec<(String, String, u32)> {
+        let mut out = Vec::with_capacity(self.fn_stack.len() + self.source_stack.len());
+        let mut si = 0usize;
+        for k in 0..=self.fn_stack.len() {
+            while let Some(f) = self.source_stack.get(si).filter(|f| f.fn_depth == k) {
+                out.push(("source".to_string(), f.path.clone(), f.call_line));
+                si = si.saturating_add(1);
+            }
+            if let Some(name) = self.fn_stack.get(k) {
+                out.push((
+                    name.clone(),
+                    self.fn_source_stack
+                        .get(k)
+                        .cloned()
+                        .unwrap_or_else(|| self.frame_source()),
+                    self.call_line_stack.get(k).copied().unwrap_or(0),
+                ));
+            }
+        }
+        out
+    }
+
+    /// `FUNCNAME[i]`, or `None` past the end. Index 0 is the innermost frame;
+    /// in script-file mode a bottom `main` pseudo-frame sits just past the real
+    /// ones — but only while at least one *function* frame is active, since
+    /// bash leaves `FUNCNAME` unset entirely otherwise (verified: at the top
+    /// level of a sourced script `${FUNCNAME+set}` is empty even though
+    /// `BASH_SOURCE` has two entries).
     fn funcname_at(&self, i: usize) -> Option<String> {
-        let depth = self.fn_stack.len();
+        if self.fn_stack.is_empty() {
+            return None;
+        }
+        let frames = self.merged_frames();
+        let depth = frames.len();
         if i < depth {
-            Some(self.fn_stack[depth - 1 - i].clone())
+            frames.get(depth.saturating_sub(1).saturating_sub(i)).map(|f| f.0.clone())
         } else if self.script_mode && i == depth {
             Some("main".to_string())
         } else {
@@ -5949,12 +6068,13 @@ impl Shell {
         }
     }
 
-    /// `BASH_LINENO[i]` — the line at which `FUNCNAME[i]` was invoked. In
+    /// `BASH_LINENO[i]` — the line at which frame `i` was entered. In
     /// script-file mode the bottom frame (the script itself) reports line 0.
     fn bash_lineno_at(&self, i: usize) -> Option<u32> {
-        let depth = self.fn_stack.len();
+        let frames = self.merged_frames();
+        let depth = frames.len();
         if i < depth {
-            Some(self.call_line_stack[depth - 1 - i])
+            frames.get(depth.saturating_sub(1).saturating_sub(i)).map(|f| f.2)
         } else if self.script_mode && i == depth {
             Some(0)
         } else {
@@ -5962,12 +6082,14 @@ impl Shell {
         }
     }
 
-    /// `BASH_SOURCE[i]` — the source label of frame `i`. Function frames share
-    /// `frame_source`; the script-mode base frame reports the script path.
+    /// `BASH_SOURCE[i]` — the source label of frame `i`: a function's
+    /// *definition* file, or a `source` frame's path. The script-mode base
+    /// frame reports the script path.
     fn bash_source_at(&self, i: usize) -> Option<String> {
-        let depth = self.fn_stack.len();
+        let frames = self.merged_frames();
+        let depth = frames.len();
         if i < depth {
-            Some(self.frame_source())
+            frames.get(depth.saturating_sub(1).saturating_sub(i)).map(|f| f.1.clone())
         } else if self.script_mode && i == depth {
             Some(self.name.clone())
         } else {
@@ -5976,41 +6098,39 @@ impl Shell {
     }
 
     /// Materialise the `FUNCNAME`, `BASH_LINENO`, and `BASH_SOURCE` arrays from
-    /// the current call stack. Bash makes `FUNCNAME[0]` the currently-executing
-    /// function, then each caller outward. `BASH_LINENO[i]` is the line where
-    /// `FUNCNAME[i]` was called, and `BASH_SOURCE[i]` is the source label of
-    /// that frame (see `frame_source`).
+    /// the current call stack (see `merged_frames`). Bash makes `FUNCNAME[0]`
+    /// the innermost frame, then each caller outward. `BASH_LINENO[i]` is the
+    /// line where frame `i` was entered, and `BASH_SOURCE[i]` its source label.
     ///
     /// Bash's boundary behaviour differs by frame array *and* invocation mode:
     ///   * `-c` / stdin: no bottom frame — all three arrays hold exactly the
-    ///     active function frames (empty at top level).
+    ///     active frames (empty at top level).
     ///   * script file: there is always a bottom frame for the script itself.
     ///     `BASH_SOURCE`/`BASH_LINENO` carry it even at top level (so
     ///     `${BASH_SOURCE[0]}` yields the script path outside any function),
     ///     but `FUNCNAME` gains its bottom `main` entry only once at least one
     ///     function frame sits above it. This makes the arrays legitimately
     ///     differ in length at a script's top level (FUNCNAME 0, the others 1).
+    ///   * `FUNCNAME` is left *unset* whenever no function frame is active,
+    ///     even inside a sourced file whose frame the other two arrays show.
     fn refresh_funcname(&mut self) {
         let mut names: BTreeMap<usize, String> = BTreeMap::new();
         let mut linenos: BTreeMap<usize, String> = BTreeMap::new();
         let mut sources: BTreeMap<usize, String> = BTreeMap::new();
-        let src = self.frame_source();
+        let in_function = !self.fn_stack.is_empty();
         let mut idx = 0usize;
-        // Walk both stacks from innermost (last) to outermost (first).
-        for (name, line) in self
-            .fn_stack
-            .iter()
-            .rev()
-            .zip(self.call_line_stack.iter().rev())
-        {
-            names.insert(idx, name.clone());
+        // Walk the merged stack from innermost (last) to outermost (first).
+        for (name, src, line) in self.merged_frames().into_iter().rev() {
+            if in_function {
+                names.insert(idx, name);
+            }
             linenos.insert(idx, line.to_string());
-            sources.insert(idx, src.clone());
-            idx += 1;
+            sources.insert(idx, src);
+            idx = idx.saturating_add(1);
         }
         if self.script_mode {
             // FUNCNAME gains `main` only when a function frame sits above it.
-            if !self.fn_stack.is_empty() {
+            if in_function {
                 names.insert(idx, "main".to_string());
             }
             // BASH_SOURCE/BASH_LINENO always carry the script's own base frame.
@@ -6023,7 +6143,11 @@ impl Shell {
             self.arrays.remove("BASH_SOURCE");
             return;
         }
-        self.arrays.insert("FUNCNAME".to_string(), names);
+        if names.is_empty() {
+            self.arrays.remove("FUNCNAME");
+        } else {
+            self.arrays.insert("FUNCNAME".to_string(), names);
+        }
         self.arrays.insert("BASH_LINENO".to_string(), linenos);
         self.arrays.insert("BASH_SOURCE".to_string(), sources);
     }
@@ -9904,7 +10028,7 @@ impl Shell {
                         }
                     },
                 };
-                if self.fn_stack.is_empty() && self.source_depth == 0 {
+                if self.fn_stack.is_empty() && self.source_stack.is_empty() {
                     self.errln(
                         &format!("{}return: can only `return' from a function or sourced script", self.err_prefix()),
                     );
@@ -13803,6 +13927,7 @@ impl Shell {
                     continue;
                 }
                 self.funcs.remove(a);
+                self.func_sources.remove(a);
                 self.fn_trace_attr.remove(a);
                 continue;
             }
@@ -13864,6 +13989,7 @@ impl Shell {
                     continue;
                 }
                 self.funcs.remove(a);
+                self.func_sources.remove(a);
                 self.fn_trace_attr.remove(a);
                 continue;
             }
@@ -15101,9 +15227,18 @@ impl Shell {
                 } else {
                     None
                 };
-                // Mark that we are inside a sourced script so a `return` in it is
-                // legal (and unwinds just this source, like bash).
-                self.source_depth = self.source_depth.saturating_add(1);
+                // Push a source frame: this makes a `return` in the script legal
+                // (unwinding just this source, like bash) *and* puts the file on
+                // the same frame stack as function calls, so `FUNCNAME`/
+                // `BASH_SOURCE`/`BASH_LINENO`, `caller` and diagnostics all see
+                // it. The path goes in as written on the command line, which is
+                // what bash reports.
+                self.source_stack.push(SourceFrame {
+                    path: path.clone(),
+                    call_line: self.current_line,
+                    fn_depth: self.fn_stack.len(),
+                });
+                self.refresh_funcname();
                 // bash treats a sourced script like a function frame for the
                 // DEBUG trap: commands *inside* it fire DEBUG only under
                 // functrace (`set -T`). RETURN is deliberately NOT masked — a
@@ -15120,7 +15255,8 @@ impl Shell {
                 // `x=$(. script)` captures it (bash).
                 let flow = self.run_source_flow_out(&src, out, stdin, 0);
                 self.trap_suppress.pop();
-                self.source_depth = self.source_depth.saturating_sub(1);
+                self.source_stack.pop();
+                self.refresh_funcname();
                 if let Some(p) = saved {
                     self.positional = p;
                 }
@@ -16278,13 +16414,11 @@ impl Shell {
         // definition source — the same value `${BASH_SOURCE[0]}` reports
         // (`environment` for a `-c`-defined function, the script path for a
         // script-defined one, `main` for an interactive one). Mirror that via
-        // `frame_source` so, e.g., `f(){ x=6; }; readonly x=5; f` reports
-        // `environment: line 1: x: readonly variable` under `-c`, as bash does.
-        let src = if self.fn_stack.is_empty() {
-            self.name.clone()
-        } else {
-            self.frame_source()
-        };
+        // `error_source` so, e.g., `f(){ x=6; }; readonly x=5; f` reports
+        // `environment: line 1: x: readonly variable` under `-c`, as bash does,
+        // and an error raised while a `source`d script is being read names that
+        // script rather than the top-level one.
+        let src = self.error_source();
         // bash shows the `line N:` token for every *non-interactive* input —
         // `-c`, a script file, *and* piped/redirected stdin — omitting it only
         // for a tty-attached interactive shell. `is_interactive()` folds all
@@ -16305,11 +16439,7 @@ impl Shell {
     /// `bash: -c: line 2: syntax error…` and `bash: eval: line 1: …`; osh
     /// mirrors the shape with its own `$0` name.
     fn syntax_error_prefix(&self, line: u32) -> String {
-        let name = if self.fn_stack.is_empty() {
-            self.name.clone()
-        } else {
-            self.frame_source()
-        };
+        let name = self.error_source();
         // `eval` wins over the outer `-c`/script token (bash reports `eval:`
         // even for an `eval` run from a script).
         let token = if self.eval_depth > 0 {
@@ -24810,6 +24940,79 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // additionally carries the builtin's name tag.
         let (bi, _) = run("readonly z=1; h(){ declare z=2 2>&1; }; h");
         assert_eq!(bi, "main: declare: z: readonly variable\n");
+    }
+
+    #[test]
+    fn source_frames_interleave_with_function_frames() {
+        // bash puts a `source`d script on the *same* frame stack as function
+        // calls: FUNCNAME shows it as the literal name `source`, BASH_SOURCE
+        // carries its path as written, BASH_LINENO the line the `.` sat on, and
+        // diagnostics raised while it is being read are labelled with it rather
+        // than with the top-level shell name. Verified against bash 5.2; the
+        // end-to-end shapes live in tests/corpus/source-frames.sh and
+        // tests/corpus/source-error-name.sh.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("osh_srcframe_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        // Absolute forward-slash paths, so the test needs no cwd mutation and
+        // the label the shell reports is exactly what we pass in.
+        let base = dir.to_string_lossy().replace('\\', "/");
+        let show = "echo \"F=[${FUNCNAME[@]}] set=${FUNCNAME+yes} \
+                    S=[${BASH_SOURCE[@]}] L=[${BASH_LINENO[@]}]\"";
+        let inner = format!("{base}/inner.sh");
+        let outer = format!("{base}/outer.sh");
+        std::fs::write(&inner, format!("{show}\nnosuchcmd_frame 2>&1\n")).expect("write inner");
+        // A function *defined* by a sourced file keeps naming that file.
+        std::fs::write(&outer, format!("d() {{\n{show}\ncaller 0\n}}\n")).expect("write outer");
+
+        // Top level of a sourced file: FUNCNAME is unset even though the other
+        // two arrays show the source frame, and its errors name the file.
+        let (o, _) = run(&format!(". {inner}"));
+        assert_eq!(
+            o,
+            format!("F=[] set= S=[{inner}] L=[1]\n{inner}: nosuchcmd_frame: command not found\n")
+        );
+
+        // Calling that function back at the top level: only its own frame is
+        // live, but BASH_SOURCE still names the file it was *defined* in. There
+        // is no bottom frame in stdin mode, so `caller 0` fails silently.
+        let (o, _) = run(&format!(". {outer}\nd"));
+        assert_eq!(o, format!("F=[d] set=yes S=[{outer}] L=[2]\n"));
+
+        // source -> function: called *from* a sourced file, the function frame
+        // sits above that source frame and `caller 0` names it.
+        let call = format!("{base}/call.sh");
+        std::fs::write(&call, "d\n").expect("write call");
+        let (o, _) = run(&format!(". {outer}\n. {call}"));
+        assert_eq!(
+            o,
+            format!("F=[d source] set=yes S=[{outer} {call}] L=[1 2]\n1 source {call}\n")
+        );
+
+        // source -> function -> source: three frames, outermost last.
+        let nested = format!("{base}/nested.sh");
+        std::fs::write(&nested, format!("e() {{\n. {inner}\n}}\ne\n")).expect("write nested");
+        let (o, _) = run(&format!(". {nested}"));
+        assert_eq!(
+            o,
+            format!(
+                "F=[source e source] set=yes S=[{inner} {nested} {nested}] L=[2 4 1]\n\
+                 {inner}: nosuchcmd_frame: command not found\n"
+            )
+        );
+
+        // The stack unwinds cleanly: after the source returns, the top-level
+        // label and the empty frame arrays are back.
+        let (o, _) = run(&format!(". {inner}\nnosuchcmd_after 2>&1\n{show}"));
+        assert!(
+            o.ends_with("osh: nosuchcmd_after: command not found\nF=[] set= S=[] L=[]\n"),
+            "frames should unwind after the source returns, got {o:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

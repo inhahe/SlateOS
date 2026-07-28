@@ -4589,7 +4589,10 @@ impl Shell {
     /// here: the callers disagree on how a refusal should be reported (a
     /// diagnostic, or an [`arith::ArithError`] that aborts an expression), so
     /// each checks [`ScalarDest::base`] itself first.
-    fn scalar_write_store(&mut self, dest: &ScalarDest, val: String) {
+    ///
+    /// Returns `false` when an element destination's subscript named nowhere and
+    /// the write was refused (the diagnostic has already been given).
+    fn scalar_write_store(&mut self, dest: &ScalarDest, val: String) -> bool {
         let base = dest.base().to_string();
         // `set -a` (allexport): any assigned variable is given the export
         // attribute automatically.
@@ -4598,10 +4601,13 @@ impl Shell {
         }
         let val = self.apply_value_attrs(&base, val);
         match dest {
-            ScalarDest::Var(n) => self.set_scalar_store(n, val),
+            ScalarDest::Var(n) => {
+                self.set_scalar_store(n, val);
+                true
+            }
             ScalarDest::Elem(n, sub) => {
                 let n = n.clone();
-                self.assign_elem(&n, &Some(Box::new(Word::literal(sub))), val);
+                self.assign_elem(&n, &Some(Box::new(Word::literal(sub))), val)
             }
         }
     }
@@ -4623,8 +4629,7 @@ impl Shell {
             self.emit_stderr(format!("{}{base}: readonly variable\n", self.err_prefix()).as_bytes());
             return false;
         }
-        self.scalar_write_store(&dest, val);
-        true
+        self.scalar_write_store(&dest, val)
     }
 
     /// Where an *arithmetic* scalar write to `name` lands, or the refusal that
@@ -5426,6 +5431,30 @@ impl Shell {
         usize::try_from(abs).ok()
     }
 
+    /// Whether a subscript names nowhere at all — bash's "bad array subscript".
+    ///
+    /// Only a negative subscript can: it counts back from one past the highest
+    /// index the name *holds*, so it underflows whenever the name has fewer
+    /// elements than it reaches back over. A scalar answers to `a[0]`, but it
+    /// has no highest index to count back from, so every negative subscript on
+    /// one is bad — as is every negative subscript on a name that is not set.
+    ///
+    /// Reporting is left to the caller: each site that resolves a subscript
+    /// phrases the complaint differently and disagrees about whether it is
+    /// fatal, so what they share is only the question, not the answer.
+    fn subscript_is_bad(&self, name: &str, idx: i64) -> bool {
+        idx < 0 && Self::resolve_index(idx, self.highest_index_bound(name)).is_none()
+    }
+
+    /// One past the highest index `name` holds — what a negative subscript
+    /// counts back from. Zero for anything that is not an indexed array.
+    fn highest_index_bound(&self, name: &str) -> usize {
+        self.arrays
+            .get(name)
+            .and_then(|a| a.keys().next_back().copied())
+            .map_or(0, |k| k.saturating_add(1))
+    }
+
     /// A single array element by index (scalar acts as a one-element array).
     /// Negative indices count from the end (`-1` = last). `None` if the index
     /// is out of range.
@@ -5467,10 +5496,26 @@ impl Shell {
             None => self.param_value(name),
             Some(w) => {
                 if self.assoc.contains_key(name) {
+                    // An empty key names nothing an associative array can hold,
+                    // and is reported exactly as an out-of-range index is.
                     let key = self.expand_to_string(w);
+                    if key.is_empty() {
+                        self.errln(&format!("{}{name}: bad array subscript", self.err_prefix()));
+                        return None;
+                    }
                     self.assoc_element(name, &key)
                 } else {
                     let idx = self.eval_arith_index(w);
+                    // Every operator reads its base value through here, and each
+                    // of them reports a subscript that names nowhere the same
+                    // non-fatal way the bare `${a[-9]}` does, then carries on
+                    // with the element treated as unset — so `${a[-9]-D}` gives
+                    // the default and `${a[-9]:?msg}` raises its own error after
+                    // this one.
+                    if self.subscript_is_bad(name, idx) {
+                        self.errln(&format!("{}{name}: bad array subscript", self.err_prefix()));
+                        return None;
+                    }
                     self.array_element(name, idx)
                 }
             }
@@ -5478,13 +5523,21 @@ impl Shell {
     }
 
     /// Write `value` back to a parameter or array element, honoring an optional
-    /// subscript. Used by `${name[i]:=default}` (assign-default). Out-of-range
-    /// negative indices are ignored (matching bash's "bad subscript" no-op here).
-    fn assign_elem(&mut self, name: &str, index: &Option<Box<Word>>, value: String) {
+    /// subscript. Used wherever a *name* rather than an assignment designates
+    /// the destination: `${name[i]:=default}`, `printf -v 'a[i]'`, `read 'a[i]'`,
+    /// and a nameref that resolves to an element.
+    ///
+    /// Returns `false` when nothing was written. A subscript that names nowhere
+    /// is refused here — with the complaint quoting the whole reference, which
+    /// is the one shape all the callers agree on — rather than silently dropping
+    /// the value, since a caller told the write succeeded would report a value
+    /// stored where it is not. The array is not brought into being either: a
+    /// write that never happened should leave no trace of having been tried.
+    fn assign_elem(&mut self, name: &str, index: &Option<Box<Word>>, value: String) -> bool {
         // A circular chain names nothing to write to; the read that led here
         // has already reported it.
         let Some(name) = &self.resolve_ref_name(name) else {
-            return;
+            return false;
         };
         match index {
             None => {
@@ -5492,18 +5545,39 @@ impl Shell {
             }
             Some(w) => {
                 if self.assoc.contains_key(name) {
+                    // An empty key has no representation in an associative
+                    // array. The complaint quotes the subscript's *source*, so
+                    // `m[$blank]` reports `$blank` rather than the nothing it
+                    // expanded to.
                     let key = self.expand_to_string(w);
+                    if key.is_empty() {
+                        self.errln(&format!(
+                            "{}{name}[{}]: bad array subscript",
+                            self.err_prefix(),
+                            crate::unparse::word_src(w)
+                        ));
+                        return false;
+                    }
                     self.assoc_set(name, key, value, false);
                 } else {
                     let idx = self.eval_arith_index(w);
-                    let arr = self.arrays.entry(name.to_string()).or_default();
-                    let bound = arr.keys().next_back().map_or(0, |k| k.saturating_add(1));
-                    if let Some(real) = Self::resolve_index(idx, bound) {
-                        arr.insert(real, value);
+                    if self.subscript_is_bad(name, idx) {
+                        let src = self.expand_to_string(w);
+                        self.errln(&format!(
+                            "{}{name}[{src}]: bad array subscript",
+                            self.err_prefix()
+                        ));
+                        return false;
                     }
+                    let bound = self.highest_index_bound(name);
+                    let Some(real) = Self::resolve_index(idx, bound) else {
+                        return false;
+                    };
+                    self.arrays.entry(name.to_string()).or_default().insert(real, value);
                 }
             }
         }
+        true
     }
 
     /// Expand `${name[index]}` / `${name[@]}` / `${#name[@]}` to a string
@@ -6071,37 +6145,31 @@ impl Shell {
                     }
                 } else {
                     let idx = self.eval_arith_index(w);
-                    // A negative subscript that underflows below index 0 is a
-                    // "bad array subscript" on read too (bash), but the two read
-                    // forms diverge:
+                    // A subscript that names nowhere is a "bad array subscript"
+                    // on read too (bash), but the two read forms diverge:
                     //   * value form `${a[-9]}`  — non-fatal, names the *base*
                     //     (`a: bad array subscript`), expands empty.
                     //   * length form `${#a[-9]}` — *fatal*, names the raw
                     //     subscript source followed by `]`
                     //     (`-9]: bad array subscript`), aborts the command.
-                    if idx < 0 && self.arrays.contains_key(name) {
-                        let bound = self
-                            .arrays
-                            .get(name)
-                            .and_then(|a| a.keys().next_back().copied())
-                            .map_or(0, |k| k.saturating_add(1));
-                        if Self::resolve_index(idx, bound).is_none() {
-                            if length {
-                                let src = self.expand_to_string(w);
-                                self.errln(&format!(
-                                    "{}{src}]: bad array subscript",
-                                    self.err_prefix()
-                                ));
-                                self.discard_error = Some(1);
-                                return "0".to_string();
-                            }
+                    if self.subscript_is_bad(name, idx) {
+                        if length {
+                            let src = self.expand_to_string(w);
                             self.errln(&format!(
-                                "{}{name}: bad array subscript",
+                                "{}{src}]: bad array subscript",
                                 self.err_prefix()
                             ));
+                            self.discard_error = Some(1);
+                            return "0".to_string();
                         }
+                        self.errln(&format!("{}{name}: bad array subscript", self.err_prefix()));
+                        // It named nothing, so there is nothing to expand to —
+                        // not even the scalar that `a[-1]` would otherwise have
+                        // been allowed to reach through index 0.
+                        None
+                    } else {
+                        self.array_element(name, idx)
                     }
-                    self.array_element(name, idx)
                 };
                 if length {
                     val.map_or(0, |v| v.chars().count()).to_string()
@@ -9729,7 +9797,14 @@ impl Shell {
                     cur.unwrap_or_default()
                 } else {
                     let v = self.expand_to_string(arg);
-                    self.assign_elem(name, index, v.clone());
+                    // The default has to go somewhere, so a subscript that names
+                    // nowhere makes the expansion itself impossible: the
+                    // complaint is already given, and the command is discarded
+                    // the way a division by zero is.
+                    if !self.assign_elem(name, index, v.clone()) {
+                        self.discard_error = Some(1);
+                        return String::new();
+                    }
                     v
                 }
             }
@@ -10000,8 +10075,11 @@ impl Shell {
     }
 
     /// If `name` is a nameref whose target is an array element (`arr[0]` /
-    /// `m[key]`), return the referenced element's value. `None` when `name` is
-    /// not such a nameref (the caller then falls through to normal resolution).
+    /// `m[key]`), return the referenced element's value. `None` when there is no
+    /// value to read — because `name` is not such a nameref, because the element
+    /// is unset, or because the subscript names nowhere (which is reported here,
+    /// as reading it directly would be). The caller falls through to normal
+    /// resolution in every case, and finds nothing for the latter two.
     fn nameref_elem_value(&self, name: &str) -> Option<String> {
         if !self.nameref_attr.contains(name) {
             return None;
@@ -10019,6 +10097,10 @@ impl Shell {
         // A literal integer subscript (the common `arr[0]` case). Non-numeric
         // subscripts on an indexed array fall back to index 0, as bash does.
         let idx = sub.parse::<i64>().unwrap_or(0);
+        if self.subscript_is_bad(base, idx) {
+            self.errln(&format!("{}{base}: bad array subscript", self.err_prefix()));
+            return None;
+        }
         self.array_element(base, idx)
     }
 
@@ -14390,7 +14472,11 @@ impl Shell {
                 self.emit_stderr(format!("{}{base}: readonly variable\n", self.err_prefix()).as_bytes());
                 return 1;
             }
-            self.assign_elem(&base, &index, text);
+            // A subscript that names nowhere fails the builtin (status 1) with
+            // its own complaint; the line carries on.
+            if !self.assign_elem(&base, &index, text) {
+                return 1;
+            }
             num_status
         } else {
             // Interleave stdout and stderr the way bash does (see
@@ -32467,8 +32553,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("a=(x y z); echo [${a[-4]}]").0, "[]\n");
         // Length of the last element via ${#a[-1]}.
         assert_eq!(run("a=(x yy zzz); echo ${#a[-1]}").0, "3\n");
-        // A scalar behaves as a one-element array: [-1] is the value.
-        assert_eq!(run("x=hello; echo ${x[-1]}").0, "hello\n");
+        // A scalar answers to `[0]`, but it has no highest index to count back
+        // from, so a negative subscript on one names nowhere at all.
+        assert_eq!(run("x=hello; echo [${x[0]}]").0, "[hello]\n");
+        assert_eq!(
+            run("x=hello; { echo [${x[-1]}]; } 2>&1").0,
+            "osh: x: bad array subscript\n[]\n"
+        );
         // Negative index in an assignment target overwrites from the end.
         assert_eq!(run("a=(x y z); a[-1]=Q; echo ${a[@]}").0, "x y Q\n");
         assert_eq!(run("a=(x y z); a[-2]=Q; echo ${a[@]}").0, "x Q z\n");
@@ -32477,6 +32568,60 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `bash -c 'a=(x y); { a[-9]=Q; } 2>&1; echo ${a[@]}'` → error, exit 1).
         let (o, s) = run("a=(x y); { a[-9]=Q; } 2>&1; echo ${a[@]}");
         assert_eq!(o, "osh: a[-9]: bad array subscript\n");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn a_subscript_naming_nowhere_is_reported_wherever_it_is_resolved() {
+        // Reading one is not fatal: the complaint names the *base*, and the
+        // reference stands for nothing, so every operator gets the answer it
+        // would give an unset element.
+        assert_eq!(
+            run("a=(x); { echo [${a[-5]}]; } 2>&1").0,
+            "osh: a: bad array subscript\n[]\n"
+        );
+        for op in ["-D", ":+A", "#p", "/x/y", "^^", ":0:2"] {
+            let want = if op == "-D" { "[D]" } else { "[]" };
+            assert_eq!(
+                run(&format!("a=(x); {{ echo [${{a[-5]{op}}}]; }} 2>&1")).0,
+                format!("osh: a: bad array subscript\n{want}\n"),
+                "${{a[-5]{op}}}"
+            );
+        }
+        // An empty associative key is the same fact about a different kind of
+        // array, and is reported the same way.
+        assert_eq!(
+            run("declare -A m=([k]=v); b=; { echo [${m[$b]}]; } 2>&1").0,
+            "osh: m: bad array subscript\n[]\n"
+        );
+        // A nameref that stands for such an element reports it on the nameref's
+        // behalf, naming the array it points into.
+        assert_eq!(
+            run("a=(x y); declare -n r='a[-5]'; { echo [$r]; } 2>&1; echo AFTER").0,
+            "osh: a: bad array subscript\n[]\nAFTER\n"
+        );
+        // The *length* form is the one read that is fatal, and it names the
+        // subscript rather than the base.
+        let (o, s) = run("a=(x); { echo [${#a[-5]}]; } 2>&1; echo AFTER");
+        assert_eq!(o, "osh: -5]: bad array subscript\n");
+        assert_eq!(s, 1);
+
+        // Writing through one is refused rather than silently dropped — the
+        // complaint quotes the whole reference — and the array is not brought
+        // into being by a write that never happened.
+        assert_eq!(
+            run("a=(x y); read 'a[-5]' <<< NEW 2>&1; echo rc=$?; declare -p a").0,
+            "osh: a[-5]: bad array subscript\nrc=1\ndeclare -a a=([0]=\"x\" [1]=\"y\")\n"
+        );
+        assert_eq!(
+            run("printf -v 'a[-1]' v 2>&1; echo rc=$?; declare -p a 2>&1").0,
+            "osh: a[-1]: bad array subscript\nrc=1\nosh: declare: a: not found\n"
+        );
+        // `${a[i]:=v}` has nowhere to put the default, so the expansion cannot
+        // be completed at all: the read reports it first, then the write, and
+        // the command is discarded.
+        let (o, s) = run("a=(x); { echo [${a[-5]:=v}]; } 2>&1; echo AFTER");
+        assert_eq!(o, "osh: a: bad array subscript\nosh: a[-5]: bad array subscript\n");
         assert_eq!(s, 1);
     }
 

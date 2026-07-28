@@ -17320,6 +17320,37 @@ impl Shell {
             ));
             return 1;
         }
+
+        // Everything the target name has to be is settled *before* a byte is
+        // read: a refused `mapfile` leaves the input where it was, so a `read`
+        // sharing the same redirection still sees the first line. bash asks the
+        // three questions in this order, and each is worded its own way — the
+        // readonly complaint names the variable alone (the attribute is the
+        // variable's, not the builtin's doing), while the other two are the
+        // builtin's own objections and carry its name.
+        let array = match self.resolve_ref_use(&array) {
+            Some(t) => t,
+            None => return 1,
+        };
+        if !crate::parser::is_valid_name(&array) {
+            self.errln(&format!(
+                "{}{tag}: `{array}': not a valid identifier",
+                self.err_prefix()
+            ));
+            return 1;
+        }
+        if self.readonly.contains(&array) {
+            self.errln(&format!("{}{array}: readonly variable", self.err_prefix()));
+            return 1;
+        }
+        if self.assoc.contains_key(&array) {
+            self.errln(&format!(
+                "{}{tag}: {array}: not an indexed array",
+                self.err_prefix()
+            ));
+            return 1;
+        }
+
         let mut ufd_plan = RedirPlan::default();
         let inherit_src = StdinSrc::Inherit;
         let ufd_active = ufd.is_some_and(|n| n >= 3);
@@ -17359,10 +17390,10 @@ impl Shell {
         // when `-O origin` was given, where the read overwrites in place and any
         // elements outside the written range survive: with `arr=(x y z w v)`,
         // reading the three lines `a b c` at `-O 1` leaves `x a b c v`. Either
-        // way the name becomes array-valued, so a scalar or associative binding
-        // of the same name is dropped.
+        // way the name becomes array-valued, so a scalar binding of the same
+        // name is dropped. (An *associative* one cannot be here — that is the
+        // "not an indexed array" refusal above.)
         self.vars.remove(&array);
-        self.assoc.remove(&array);
         self.array_valued.insert(array.clone());
         if origin_given {
             self.arrays.entry(array.clone()).or_default();
@@ -26162,6 +26193,36 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                    echo \"${#arr[@]}\"\n\
                    echo \"${arr[0]}-${arr[1]}-${arr[2]}\"";
         assert_eq!(run(src).0, "3\na-b-c\n");
+    }
+
+    #[test]
+    fn mapfile_refuses_a_name_it_cannot_fill() {
+        // The three ways a target can be unusable, each worded its own way: the
+        // readonly one names the variable alone, the other two are the
+        // builtin's own objections.
+        assert_eq!(
+            run("readonly x=1; mapfile x <<< hi 2>&1; echo \"rc=$? x=$x\"").0,
+            "osh: x: readonly variable\nrc=1 x=1\n"
+        );
+        assert_eq!(
+            run("mapfile 'a b' <<< hi 2>&1; echo rc=$?").0,
+            "osh: mapfile: `a b': not a valid identifier\nrc=1\n"
+        );
+        assert_eq!(
+            run("declare -A m; mapfile m <<< hi 2>&1; echo rc=$?; declare -p m").0,
+            "osh: mapfile: m: not an indexed array\nrc=1\ndeclare -A m\n"
+        );
+        // A refusal reads nothing, so input shared with the refused call is
+        // still there for the next reader.
+        assert_eq!(
+            run("readonly x=1; { mapfile x; read y; } <<< $'p\\nq' 2>/dev/null; echo \"y=$y\"").0,
+            "y=p\n"
+        );
+        // A nameref is followed first, so what is judged is the target.
+        assert_eq!(
+            run("declare -n r=zz; mapfile -t r <<< hi; declare -p zz").0,
+            "declare -a zz=([0]=\"hi\")\n"
+        );
     }
 
     #[test]

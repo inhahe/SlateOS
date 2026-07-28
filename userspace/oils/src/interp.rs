@@ -874,24 +874,39 @@ pub struct Shell {
     /// negated commands). While `> 0`, a failing command does not trigger
     /// errexit. Incremented around condition evaluation; reset in subshells.
     errexit_suppress: u32,
-    /// Set by expansion when a fatal word-expansion error occurs (a `nounset`
-    /// unset-variable reference, a `${var:?word}` on an unset/null parameter, or
-    /// a bad indirect/subscript expansion). Carries the **main-shell** exit
-    /// status the shell aborts with: bash uses **127** for nounset and
-    /// `${var:?}` errors, but **1** for bad indirect expansions and bad array
-    /// subscripts. That carried code is only honoured in the *main shell
-    /// environment* (`subshell_depth == 0`, which includes brace groups and
-    /// function bodies); inside any subshell / command substitution / pipeline
-    /// stage bash yields **1** for all of these — see [`Shell::fatal_abort_status`].
-    /// The simple-command driver checks the flag and aborts (`Flow::Exit`) after
-    /// expanding its words.
+    /// Set by expansion when a **fatal** word-expansion error occurs — one that
+    /// aborts the whole shell rather than just the command. bash has exactly
+    /// three: a `nounset` unset-variable reference, a `${var:?word}` on an
+    /// unset/null parameter, and a `${…}` "bad substitution". Carries the
+    /// **main-shell** exit status the shell aborts with (**127** for nounset and
+    /// `${var:?}`, **1** for a bad substitution). That carried code is only
+    /// honoured in the *main shell environment* (`subshell_depth == 0`, which
+    /// includes brace groups and function bodies); inside any subshell / command
+    /// substitution / pipeline stage bash yields **1** for all of them — see
+    /// [`Shell::fatal_abort_status`]. The simple-command driver checks the flag
+    /// and aborts (`Flow::Exit`) after expanding its words.
+    ///
+    /// Everything else that goes wrong during expansion is *non*-fatal and
+    /// belongs in [`Shell::discard_error`] instead. Getting this distinction
+    /// wrong is a script-truncation bug: osh used to route bad array subscripts
+    /// and bad indirect expansions through here, so a single mistyped subscript
+    /// ended the entire script with no further output.
     unbound_error: Option<i32>,
-    /// Set when an arithmetic evaluation error occurs while expanding a
-    /// `$(( … ))` substitution in a word or assignment value. The simple-command
-    /// driver checks and skips the command (status 1, `Flow::Next`) after
-    /// expansion, matching bash (which discards the command on an arithmetic
-    /// error rather than running it with a bogus value).
-    arith_error: bool,
+    /// The shared **non-fatal** word-expansion error signal, carrying the status
+    /// the discarded command reports. bash's rule: the erroring command never
+    /// runs, `$?` becomes the carried status, the rest of the current parse unit
+    /// is abandoned — and the *next* one still runs. Sources, with their bash
+    /// statuses:
+    ///
+    /// * an arithmetic error in `$(( … ))` / a subscript / a substring bound — 1
+    /// * `substring expression < 0` — 1
+    /// * a "bad array subscript" (`a[-9]=v`, `${#a[-9]}`, `m['']=v`) — 1
+    /// * `${a[@]=v}` / `${a[@]:=v}`, which would have to assign to `a[@]` — 2
+    /// * an invalid indirect expansion / invalid variable name — 1
+    ///
+    /// The simple-command driver, the bare-assignment path and the prefix-value
+    /// path each take the flag after expansion and return `Flow::Discard`.
+    discard_error: Option<i32>,
     /// Set when a `[[ … =~ RHS ]]` match fails because the RHS could not be
     /// compiled as a regex. bash reports such a `[[` command as status 2 (not 1
     /// "no match") and prints nothing to stderr. `exec_cond` checks this flag
@@ -904,14 +919,21 @@ pub struct Shell {
     /// assignments and word/`$(( … ))` expansion carry no builtin tag. Set for
     /// the duration of the relevant builtin, `None` otherwise.
     arith_cmd: Option<&'static str>,
-    /// True while an array literal is being applied on behalf of a
-    /// `declare`/`local`/`readonly`/`export` operand rather than a bare
-    /// `name=(…)` compound assignment. bash re-parses the builtin's operand and
-    /// consequently reports an offending associative element in *quoted* form
-    /// (`m: 'word': must use subscript …`), where the bare compound-assignment
-    /// path reports it unquoted (`m: word: must use subscript …`). Saved and
-    /// restored around the inner `apply_assignment` call.
-    decl_array_ctx: bool,
+    /// True while an assignment is being applied on behalf of a
+    /// `declare`/`local`/`readonly`/`export` *operand* rather than a bare
+    /// `name=…` / `name=(…)` assignment command. bash re-parses the builtin's
+    /// operand and diagnoses it from inside the builtin, which changes two
+    /// observable things:
+    ///
+    /// * an offending associative element is named in *quoted* form
+    ///   (`m: 'word': must use subscript …`); the bare compound-assignment path
+    ///   reports it unquoted (`m: word: must use subscript …`);
+    /// * a "bad array subscript" only makes the *builtin* fail (status 1) and
+    ///   the rest of the line still runs, where in command position it discards
+    ///   the whole parse unit.
+    ///
+    /// Saved and restored around the inner `apply_assignment` call.
+    decl_builtin_ctx: bool,
     /// Set (to the unmatched pattern) when `shopt -s failglob` is on and a glob
     /// in a command word matches nothing. The simple-command driver reports
     /// `no match: PATTERN` and aborts the command list (`Flow::Exit(1)`) after
@@ -1200,10 +1222,10 @@ impl Shell {
             eval_depth: 0,
             errexit_suppress: 0,
             unbound_error: None,
-            arith_error: false,
+            discard_error: None,
             cond_regex_error: false,
             arith_cmd: None,
-            decl_array_ctx: false,
+            decl_builtin_ctx: false,
             glob_error: None,
             local_frames: Vec::new(),
             local_opt_saves: Vec::new(),
@@ -2651,9 +2673,9 @@ impl Shell {
         // their own errors and set their own status — a nested `$(( … ))` here
         // must not additionally trip the simple-command abort flag, so save and
         // restore it around the sub-expansion.
-        let saved_arith_error = self.arith_error;
+        let saved_arith_error = self.discard_error;
         let expanded = self.expand_arith_params(raw);
-        self.arith_error = saved_arith_error;
+        self.discard_error = saved_arith_error;
         match arith::eval(&expanded, self) {
             Ok(v) => Some(v),
             Err(e) => {
@@ -2673,7 +2695,7 @@ impl Shell {
     /// `let` / `(( … ))` (which merely return a non-zero status on a bad
     /// expression), an arithmetic error in an integer *assignment* is **fatal**
     /// in bash: the diagnostic is printed and the shell aborts with status 1.
-    /// `eval_arith_raw` deliberately suppresses `arith_error` (so nested
+    /// `eval_arith_raw` deliberately suppresses `discard_error` (so nested
     /// `$(( … ))` in `let`/`((` don't trip the abort), so this wrapper re-sets
     /// it on failure. The command driver / `run_builtin` tail consumes the flag
     /// and turns it into a `Flow::Exit(1)`. Yields 0 as the placeholder value.
@@ -2681,7 +2703,7 @@ impl Shell {
         match self.eval_arith_raw(raw) {
             Some(n) => n,
             None => {
-                self.arith_error = true;
+                self.discard_error = Some(1);
                 0
             }
         }
@@ -3618,10 +3640,10 @@ impl Shell {
             // the subshell's own commands are still subject to `-e`.
             errexit_suppress: self.errexit_suppress,
             unbound_error: None,
-            arith_error: false,
+            discard_error: None,
             cond_regex_error: false,
             arith_cmd: None,
-            decl_array_ctx: false,
+            decl_builtin_ctx: false,
             glob_error: None,
             // A subshell body is not itself a function frame; a `local` there is
             // an error until it enters one of its own function calls.
@@ -3942,9 +3964,9 @@ impl Shell {
                         let saved_tag = self.arith_cmd.take();
                         let raw = self.eval_arith_index(idx_word);
                         self.arith_cmd = saved_tag;
-                        if self.arith_error {
+                        if self.discard_error.is_some() {
                             // Malformed subscript expression (`a[x y]=v`): the
-                            // untagged diagnostic is emitted and `arith_error`
+                            // untagged diagnostic is emitted and `discard_error`
                             // stays set so the command driver aborts; do not
                             // assign anything.
                             return false;
@@ -3956,17 +3978,22 @@ impl Shell {
                             .map_or(0, |k| k.saturating_add(1));
                         let Some(idx) = Self::resolve_index(raw, bound) else {
                             // A negative subscript that underflows below 0 is a
-                            // fatal "bad array subscript" in bash, naming the full
+                            // "bad array subscript" in bash, naming the full
                             // reference with the *raw subscript source* text
                             // (post word-expansion, pre-arithmetic: `a[1+2-20]`,
-                            // `a[i]`), and aborting the command (status 1).
+                            // `a[i]`). In command position it discards the command
+                            // (status 1) and the rest of the parse unit, but does
+                            // NOT end the shell; as a `declare`/`local` operand
+                            // it only fails the builtin and the line carries on.
                             let src = self.expand_to_string(idx_word);
                             self.errln(&format!(
                                 "{}{}[{src}]: bad array subscript",
                                 self.err_prefix(),
                                 a.name
                             ));
-                            self.unbound_error = Some(1);
+                            if !self.decl_builtin_ctx {
+                                self.discard_error = Some(1);
+                            }
                             return false;
                         };
                         let int_val = if is_int {
@@ -4107,7 +4134,7 @@ impl Shell {
                                 // literal came from a `declare`/`local` operand
                                 // (which the builtin re-parses); a bare `m=(…)`
                                 // compound assignment names it unquoted.
-                                let shown = if self.decl_array_ctx {
+                                let shown = if self.decl_builtin_ctx {
                                     format!("'{word}'")
                                 } else {
                                     word
@@ -4289,7 +4316,7 @@ impl Shell {
                 // main level and the subshell fails without aborting the parent.
                 if l < 0 {
                     self.errln(&format!("{}{l}: substring expression < 0", self.err_prefix()));
-                    self.arith_error = true;
+                    self.discard_error = Some(1);
                     return Vec::new();
                 }
                 (start + l).min(n)
@@ -4597,12 +4624,11 @@ impl Shell {
         }
         let Some(target) = self.param_value(refname) else {
             // The pointer variable itself is unset: bash reports
-            // "invalid indirect expansion" and aborts a non-interactive shell.
-            // Reuse the nounset fatal-expansion flag (checked by the simple-
-            // command driver) so the following command never runs.
+            // "invalid indirect expansion", discards the command with status 1
+            // and abandons the rest of the parse unit — but keeps the shell
+            // alive, so the *next* line still runs.
             self.emit_stderr(format!("{}{refname}: invalid indirect expansion\n", self.err_prefix()).as_bytes());
-            // bash aborts a bad indirect expansion with status 1 (not 127).
-            self.unbound_error = Some(1);
+            self.discard_error = Some(1);
             return String::new();
         };
         // The resolved name must be a valid parameter name. An empty or
@@ -4611,8 +4637,8 @@ impl Shell {
         // target such as `ptr=missing`, which quietly expands to empty).
         if !is_valid_indirect_target(&target) {
             self.emit_stderr(format!("{}{target}: invalid variable name\n", self.err_prefix()).as_bytes());
-            // bash aborts an invalid indirect target with status 1 (not 127).
-            self.unbound_error = Some(1);
+            // Non-fatal, like the unset-pointer case above.
+            self.discard_error = Some(1);
             return String::new();
         }
         // The referent may name an array element: `ref=a[0]`, `ref=m[key]`,
@@ -5110,7 +5136,7 @@ impl Shell {
                                 self.err_prefix(),
                                 crate::unparse::word_src(w)
                             ));
-                            self.unbound_error = Some(1);
+                            self.discard_error = Some(1);
                             return "0".to_string();
                         }
                         self.errln(&format!(
@@ -5144,7 +5170,7 @@ impl Shell {
                                     "{}{src}]: bad array subscript",
                                     self.err_prefix()
                                 ));
-                                self.unbound_error = Some(1);
+                                self.discard_error = Some(1);
                                 return "0".to_string();
                             }
                             self.errln(&format!(
@@ -5243,7 +5269,7 @@ impl Shell {
 
         // `set -u`: a reference to an unset variable during expansion aborts the
         // shell (matching a non-interactive bash under nounset). The abort status
-        // is carried by the flag (127 for nounset/`:?`, 1 for indirect/subscript)
+        // is carried by the flag (127 for nounset/`:?`, 1 for a bad substitution)
         // but only at the main shell; a subshell yields 1 (see fatal_abort_status).
         if let Some(code) = self.unbound_error.take() {
             let status = self.fatal_abort_status(code);
@@ -5251,17 +5277,17 @@ impl Shell {
             return Flow::Exit(status);
         }
 
-        // An arithmetic error while expanding a command word (`echo $((1/0))`,
-        // a bad `${a[i]}` subscript, a `${v:o:l}` substring-<0) discards the
-        // command without running it: bash reports it, sets $? to 1, and aborts
-        // the rest of the current top-level parse unit — but does NOT exit the
-        // shell (a following line still runs). Arithmetic *commands* (`(( ))`,
-        // `let`, `for ((`) are non-fatal and never set this flag — only the
-        // `$(( … ))`/`$[ … ]` expansion path (`arith_sub`) does. Prefix
-        // assignment-value arith errors are checked after their own expansion.
-        if self.arith_error {
-            self.arith_error = false;
-            self.last_status = 1;
+        // A non-fatal word-expansion error while expanding a command word
+        // (`echo $((1/0))`, a bad `${a[i]}` subscript, a `${v:o:l}` substring-<0,
+        // `${!unset_ptr}`) discards the command without running it: bash reports
+        // it, sets $? to the carried status, and abandons the rest of the current
+        // top-level parse unit — but does NOT exit the shell (a following line
+        // still runs). Arithmetic *commands* (`(( ))`, `let`, `for ((`) never set
+        // this flag — only the `$(( … ))`/`$[ … ]` expansion path (`arith_sub`)
+        // does. Prefix assignment-value errors are checked after their own
+        // expansion.
+        if let Some(code) = self.discard_error.take() {
+            self.last_status = code;
             return Flow::Discard;
         }
 
@@ -5295,34 +5321,33 @@ impl Shell {
             // case (non-fatal: the shell continues with the next parse unit).
             if let Some(pat) = self.glob_error.take() {
                 self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
-                self.arith_error = false;
+                self.discard_error = None;
                 self.last_status = 1;
                 return Flow::Discard;
             }
             // A fatal word-expansion error while expanding a *bare* assignment
             // value — a `nounset` reference (`set -u; x=$UNSET`), a `${var:?}`,
-            // or a bad indirect/subscript expansion — aborts the shell (the
-            // diagnostic was already printed). Without this check the flag would
-            // only fire on the *next* command's word expansion, so a bare
-            // assignment as the final statement would wrongly exit 0. bash's
-            // abort status is carried by the flag (127 for nounset/`:?`, 1 for
-            // indirect/subscript).
+            // or a bad substitution — aborts the shell (the diagnostic was
+            // already printed). Without this check the flag would only fire on
+            // the *next* command's word expansion, so a bare assignment as the
+            // final statement would wrongly exit 0. bash's abort status is
+            // carried by the flag (127 for nounset/`:?`, 1 for bad substitution).
             if let Some(code) = self.unbound_error.take() {
-                self.arith_error = false;
+                self.discard_error = None;
                 let status = self.fatal_abort_status(code);
                 self.last_status = status;
                 return Flow::Exit(status);
             }
-            if !ok || self.arith_error {
-                // A readonly rejection or an arithmetic error in the value of a
-                // *bare* assignment command discards the command (status 1) and
-                // aborts the rest of the current top-level parse unit, but does
-                // not exit the shell: `readonly c=1; c=2` on one line and
-                // `x=$((1/0))` both let a *following line* run (bash). A temporary
+            let discard = self.discard_error.take();
+            if !ok || discard.is_some() {
+                // A readonly rejection or a word-expansion error in the value of
+                // a *bare* assignment command discards the command and abandons
+                // the rest of the current top-level parse unit, but does not exit
+                // the shell: `readonly c=1; c=2` on one line, `x=$((1/0))` and
+                // `a[-9]=v` all let a *following line* run (bash). A temporary
                 // assignment *prefix* to a command is not fatal at all — that path
                 // is handled separately in the command-execution branch.
-                self.arith_error = false;
-                self.last_status = 1;
+                self.last_status = discard.unwrap_or(1);
                 return Flow::Discard;
             } else if self.comsub_count == comsub_before {
                 // No command substitution ran; a plain assignment resets $? to 0.
@@ -5357,23 +5382,23 @@ impl Shell {
             assigns.push(self.assignment_prefix_value(a));
         }
 
-        // An arithmetic error while expanding a prefix assignment value
-        // (`x=$((1/0)) cmd`) discards the command without running it: bash reports
-        // it, sets $? to 1, and aborts the rest of the current top-level parse
-        // unit but does not exit the shell (matching the bare-assignment and
-        // command-word cases above; a following line still runs).
-        if self.arith_error {
-            self.arith_error = false;
-            self.last_status = 1;
+        // A non-fatal word-expansion error while expanding a prefix assignment
+        // value (`x=$((1/0)) cmd`, `x=${!nonexist} cmd`) discards the command
+        // without running it: bash reports it, sets $? to the carried status, and
+        // abandons the rest of the current top-level parse unit but does not exit
+        // the shell (matching the bare-assignment and command-word cases above;
+        // a following line still runs).
+        if let Some(code) = self.discard_error.take() {
+            self.last_status = code;
             return Flow::Discard;
         }
 
         // A fatal word-expansion error while expanding a prefix value — a
-        // nounset reference under `set -u` or a bad indirect expansion
-        // (`x=${!nonexist} cmd`) — likewise aborts the shell before running the
-        // command (the diagnostic was already printed at expansion time). The
-        // carried status distinguishes nounset/`:?` (127) from indirect (1), and
-        // only applies at the main shell (a subshell yields 1).
+        // nounset reference under `set -u`, a `${var:?}` or a bad substitution —
+        // aborts the shell before running the command (the diagnostic was already
+        // printed at expansion time). The carried status distinguishes
+        // nounset/`:?` (127) from a bad substitution (1), and only applies at the
+        // main shell (a subshell yields 1).
         if let Some(code) = self.unbound_error.take() {
             let status = self.fatal_abort_status(code);
             self.last_status = status;
@@ -8214,7 +8239,7 @@ impl Shell {
                 // a negative length that puts the end before the start is a fatal
                 // "substring expression < 0" word-expansion error (discards the
                 // command, status 1) — the same class as an array-slice negative
-                // length. Route it through `arith_error` so the simple-command
+                // length. Route it through `discard_error` so the simple-command
                 // driver discards the command.
                 let off = self.eval_arith_index(offset);
                 let len = length.as_ref().map(|l| self.eval_arith_index(l));
@@ -8225,7 +8250,7 @@ impl Shell {
                             "{}{bad_len}: substring expression < 0",
                             self.err_prefix()
                         ));
-                        self.arith_error = true;
+                        self.discard_error = Some(1);
                         String::new()
                     }
                 }
@@ -8319,16 +8344,16 @@ impl Shell {
                             self.emit_stderr(
                                 format!("{}{refname}: invalid indirect expansion\n", self.err_prefix()).as_bytes(),
                             );
-                            // bash aborts a bad indirect expansion with status 1.
-                            self.unbound_error = Some(1);
+                            // Non-fatal: discards the command, status 1.
+                            self.discard_error = Some(1);
                             return String::new();
                         }
                     }
                 };
                 if !is_valid_indirect_target(&tname) {
                     self.emit_stderr(format!("{}{tname}: invalid variable name\n", self.err_prefix()).as_bytes());
-                    // bash aborts an invalid indirect target with status 1.
-                    self.unbound_error = Some(1);
+                    // Non-fatal: discards the command, status 1.
+                    self.discard_error = Some(1);
                     return String::new();
                 }
                 let renamed = rename_param_target(target, &tname);
@@ -8344,7 +8369,7 @@ impl Shell {
 
     /// Report a runtime "bad substitution" (bash: an unrecognised `${…}` form
     /// caught during word expansion). Emits `${raw}: bad substitution` and sets
-    /// the shared word-expansion discard signal (`arith_error`) so the
+    /// the shared word-expansion discard signal (`discard_error`) so the
     /// simple-command driver aborts the command without running it — a
     /// DISCARD-class error: `$?`=1, the rest of the current parse unit is
     /// dropped, but the shell keeps reading (a following line still runs).
@@ -8352,7 +8377,7 @@ impl Shell {
         self.emit_stderr(
             format!("{}${{{raw}}}: bad substitution\n", self.err_prefix()).as_bytes(),
         );
-        self.arith_error = true;
+        self.discard_error = Some(1);
         String::new()
     }
 
@@ -8482,15 +8507,26 @@ impl Shell {
                     // needed), exactly like `:-` on an active array.
                     elements
                 } else {
+                    let sub = if star { "*" } else { "@" };
+                    // In an *associative* array a subscript is a string key, and
+                    // that applies here too: `${m[@]:=v}` on an empty `declare -A m`
+                    // assigns the literal key `@` (bash: `declare -A m=(["@"]="v")`)
+                    // rather than erroring. Only an indexed (or undeclared) array
+                    // rejects `[@]`/`[*]` as a subscript to write through.
+                    if self.assoc.contains_key(&resolved) {
+                        let val = self.expand_to_string(arg);
+                        self.assoc_set(&resolved, sub.to_string(), val.clone(), false);
+                        return vec![val];
+                    }
                     // Assigning the default would require writing to `a[@]`/`a[*]`,
                     // which bash rejects as a "bad array subscript". Report the
                     // same and abort the expansion.
-                    let sub = if star { "*" } else { "@" };
                     self.emit_stderr(
                         format!("{}{name}[{sub}]: bad array subscript\n", self.err_prefix()).as_bytes(),
                     );
-                    // bash aborts a bad array subscript with status 1 (not 127).
-                    self.unbound_error = Some(1);
+                    // bash discards the command with status **2** here — not
+                    // the 1 every other bad-subscript site uses.
+                    self.discard_error = Some(2);
                     Vec::new()
                 }
             }
@@ -8915,7 +8951,7 @@ impl Shell {
     /// *malformed* literal (`10.0`, `2#9`) is an arithmetic error: bash prints
     /// the diagnostic tagged `[[` and treats the whole comparison as false
     /// (status 1). Unlike an integer *assignment*, this is non-fatal — it does
-    /// not set `arith_error`/abort — so it returns `None` after emitting the
+    /// not set `discard_error`/abort — so it returns `None` after emitting the
     /// message and the caller yields `false`.
     fn eval_arith_cond_operand(&mut self, w: &Word) -> Option<i64> {
         let s = self.expand_to_string(w);
@@ -8940,7 +8976,7 @@ impl Shell {
     /// error* is **fatal** — the bash behavior for an arithmetic subscript on an
     /// indexed array (`${a[3 x]}`, `a[1/0]=v`) and for substring offset/length
     /// arithmetic (`${x:1 z}`, `${x:2:1 z}`). The diagnostic is printed (honoring
-    /// an active stderr redirect) and `arith_error` is set, which the
+    /// an active stderr redirect) and `discard_error` is set, which the
     /// simple-command driver / bare-assignment path turns into a `Flow::Exit(1)`
     /// (status 1 at the main shell, or in a subshell without aborting the
     /// parent). A bare-identifier subscript (`${a[abc]}`) is a normal arithmetic
@@ -8958,7 +8994,7 @@ impl Shell {
             Ok(v) => v,
             Err(e) => {
                 self.emit_arith_error(s, &e);
-                self.arith_error = true;
+                self.discard_error = Some(1);
                 0
             }
         }
@@ -8977,7 +9013,7 @@ impl Shell {
                 // An arithmetic error in a `$(( … ))` word/value substitution
                 // makes the whole simple command abort (bash) rather than run
                 // with a fabricated value; the driver consumes this flag.
-                self.arith_error = true;
+                self.discard_error = Some(1);
                 "0".to_string()
             }
         }
@@ -9658,20 +9694,19 @@ impl Shell {
         // the scoped fds or the temporary assignments. It outranks both the
         // builtin's own `flow` and the arithmetic-error discard below.
         if let Some(code) = self.pending_builtin_exit.take() {
-            self.arith_error = false;
+            self.discard_error = None;
             return Flow::Exit(code);
         }
         // An arithmetic error while binding an integer-attribute value
         // (`declare -i k="3 apples"`, `local -i n=1/0`, `declare -ia a=(x)`)
         // discards the command with status 1 — unlike `let`/`(( ))`, which only
         // return non-zero — but does not exit the shell (a following line runs).
-        // The declare/local builtin sets `arith_error` via `eval_int_assign`;
+        // The declare/local builtin sets `discard_error` via `eval_int_assign`;
         // honour it here exactly as the simple-command driver does for a bare
         // `k=$((…))` assignment. In a subshell this discard is caught at the
         // subshell boundary (status 1, parent continues).
-        if self.arith_error {
-            self.arith_error = false;
-            self.last_status = 1;
+        if let Some(code) = self.discard_error.take() {
+            self.last_status = code;
             return Flow::Discard;
         }
         flow
@@ -12731,20 +12766,24 @@ impl Shell {
                         append,
                         value: AssignRhs::Scalar(Word::literal(v)),
                     };
-                    // A range-underflow "bad array subscript" is fatal in command
-                    // position but only sets status 1 inside `declare` (bash does
-                    // not abort the shell). Arithmetic *syntax* errors (bad `-i`
-                    // value / bad subscript expr) set `arith_error` instead and
-                    // stay fatal, so we only demote the `unbound_error` flag.
-                    let had_fatal = self.unbound_error.is_some();
-                    self.apply_assignment(&assignment, false);
-                    if self.arith_error {
-                        // Malformed subscript/value expression: fatal, the command
-                        // driver aborts; skip export/readonly for this argument.
+                    // A range-underflow "bad array subscript" discards the
+                    // command in command position, but as a `declare`/`local`
+                    // operand it only fails the builtin — the rest of the line
+                    // still runs. `decl_builtin_ctx` tells `apply_assignment`
+                    // to report without arming `discard_error`. Arithmetic
+                    // *syntax* errors (bad `-i` value / bad subscript
+                    // expression) still discard, in either context.
+                    let saved_decl_ctx = self.decl_builtin_ctx;
+                    self.decl_builtin_ctx = true;
+                    let ok = self.apply_assignment(&assignment, false);
+                    self.decl_builtin_ctx = saved_decl_ctx;
+                    if self.discard_error.is_some() {
+                        // Malformed subscript/value expression: the command
+                        // driver discards the command; skip export/readonly
+                        // for this argument.
                         continue;
                     }
-                    if !had_fatal && self.unbound_error.is_some() {
-                        self.unbound_error = None;
+                    if !ok {
                         status = 1;
                     }
                 }
@@ -13040,10 +13079,10 @@ impl Shell {
             // `apply_assignment` already does for a name absent from `assoc`.
             // `trace = false`: the `declare`/`local` command itself is traced via
             // the command path, so the inner assignment must not trace again.
-            let saved_decl_ctx = self.decl_array_ctx;
-            self.decl_array_ctx = true;
+            let saved_decl_ctx = self.decl_builtin_ctx;
+            self.decl_builtin_ctx = true;
             self.apply_assignment(a, false);
-            self.decl_array_ctx = saved_decl_ctx;
+            self.decl_builtin_ctx = saved_decl_ctx;
             // `readonly` is applied *after* the value is bound (a readonly guard
             // in `apply_assignment` would otherwise reject the initializer).
             if readonly {
@@ -18605,13 +18644,25 @@ fn quote_declare_key(k: &str) -> String {
         return ansi_c_quote(k);
     }
     // Metacharacters that would break re-parsing of a bare `[subscript]`, so
-    // bash double-quotes the key. Observed from real `declare -p` output (note
-    // `#`, `~`, `@`, `.`, `,`, `/`, `:`, `=`, `+`, `%`, `-` do *not* force it).
+    // bash double-quotes the key (mirrors `sh_contains_shell_metas`). Note that
+    // `.`, `,`, `/`, `:`, `=`, `+`, `%`, `-` do *not* force it, and `@` only
+    // does when it is the *whole* key (see below).
     const KEY_METAS: &[char] = &[
         ' ', '\t', '"', '\\', '$', '`', '\'', '*', '!', '?', ';', '|', '&', '(', ')', '<', '>',
         '{', '}', '^', '[', ']',
     ];
     if k.chars().any(|c| KEY_METAS.contains(&c)) {
+        return quote_declare_value(k);
+    }
+    // `#` starts a comment and `~` tilde-expands only in *leading* position, so
+    // bash quotes them there and leaves `a#b` / `a~b` bare.
+    if k.starts_with('#') || k.starts_with('~') {
+        return quote_declare_value(k);
+    }
+    // A lone `@` (like a lone `*`, already covered above) is bash's
+    // all-elements subscript, so re-inputting it bare would not name the key.
+    // `@@` and `a@b` are unambiguous and stay raw.
+    if k == "@" {
         return quote_declare_value(k);
     }
     k.to_string()
@@ -24366,8 +24417,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn bad_array_subscript_underflow() {
         // WRITE, command position: a negative subscript that underflows below 0
-        // is a FATAL "bad array subscript" naming the full computed reference
-        // (`a[-5]`), aborting the command (status 1, no `after`).
+        // is a "bad array subscript" naming the full computed reference
+        // (`a[-5]`). The command is *discarded* along with the rest of its parse
+        // unit (status 1, no `after`) — but the shell survives; see
+        // `bad_array_subscript_discards_only_the_parse_unit`.
         let (o, s) = run("a=(1 2); { a[-5]=z; } 2>&1; echo after");
         assert_eq!(o, "osh: a[-5]: bad array subscript\n");
         assert_eq!(s, 1);
@@ -24410,10 +24463,91 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A valid negative length read is fine (no error).
         assert_eq!(run("a=(x yy zzz); echo ${#a[-1]}").0, "3\n");
         // A bad *subscript expression* (`a[x y]=v`) is untagged even under
-        // `declare -i`, and fatal (aborts) — no `after`.
+        // `declare -i`, and discards the parse unit — no `after`.
         let (o, s) = run("{ declare -i \"a[x y]=v\"; } 2>&1; echo after");
         assert_eq!(o, "osh: x y: syntax error in expression (error token is \"y\")\n");
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn bad_array_subscript_discards_only_the_parse_unit() {
+        // Regression guard for a script-truncation class of bug: osh used to
+        // route these word-expansion errors through the *nounset* abort path,
+        // which terminates the whole shell. bash only discards the current
+        // command and the rest of its parse unit; the next line still runs.
+        // Every case below therefore ends with a line that MUST appear.
+        //
+        // Write with an underflowing subscript.
+        let (o, s) = run("a=(1 2 3)\n{ a[-9]=v; echo same-line; } 2>&1\necho \"next=$? n=${#a[@]}\"");
+        assert_eq!(o, "osh: a[-9]: bad array subscript\nnext=1 n=3\n");
+        assert_eq!(s, 0);
+        // Length form.
+        let (o, s) = run("a=(1 2 3)\n{ echo \"len=${#a[-9]}\"; } 2>&1\necho still-alive");
+        assert_eq!(o, "osh: -9]: bad array subscript\nstill-alive\n");
+        assert_eq!(s, 0);
+        // Invalid indirect expansion (`${!ptr}` where the target is not a name).
+        let (o, s) = run("ptr='not a name'\n{ echo \"v=${!ptr}\"; } 2>&1\necho \"st=$?\"\necho alive");
+        assert_eq!(o, "osh: not a name: invalid variable name\nst=1\nalive\n");
+        assert_eq!(s, 0);
+        // `${a[@]=v}` on an unset array: bash reports status **2**, not 1.
+        let (o, s) = run("unset arr\n{ echo \"x=${arr[@]=y}\"; } 2>&1\necho \"st=$?\"\necho alive");
+        assert_eq!(o, "osh: arr[@]: bad array subscript\nst=2\nalive\n");
+        assert_eq!(s, 0);
+        // As a `declare` operand the underflow does not even discard — it only
+        // fails the builtin, so the *same line* continues.
+        let (o, s) = run("a=(1 2 3)\n{ declare a[-9]=v; echo \"same-line=$?\"; } 2>&1\necho \"next=$? n=${#a[@]}\"");
+        // (The harness buffers stdout and the redirected stderr separately, so
+        // the merged order differs from a live terminal — bash prints the
+        // diagnostic first.)
+        assert_eq!(o, "same-line=1\nosh: a[-9]: bad array subscript\nnext=0 n=3\n");
+        assert_eq!(s, 0);
+        // …but a malformed arithmetic *value* under `-i` still discards.
+        let (o, s) = run("{ declare -i b=1+*2; echo \"same=$?\"; } 2>&1\necho \"next=$?\"");
+        assert_eq!(
+            o,
+            "osh: declare: 1+*2: syntax error: operand expected (error token is \"*2\")\nnext=1\n"
+        );
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn assoc_all_elements_subscript_is_a_literal_key_when_assigning() {
+        // In an associative array a subscript is a *string key*, and that holds
+        // for the assign-default forms too: `${m[@]:=v}` on an empty `declare -A`
+        // creates the literal key `@` rather than erroring. Only an indexed (or
+        // undeclared) array rejects `[@]`/`[*]` as a write target.
+        assert_eq!(
+            run("declare -A m; echo \"y=${m[@]:=z}\"; declare -p m").0,
+            "y=z\ndeclare -A m=([\"@\"]=\"z\" )\n"
+        );
+        assert_eq!(
+            run("declare -A m; echo \"y=${m[*]=s}\"; declare -p m").0,
+            "y=s\ndeclare -A m=([\"*\"]=\"s\" )\n"
+        );
+        // A non-empty associative array is "active", so nothing is assigned.
+        assert_eq!(
+            run("declare -A m=([k]=v); echo \"y=${m[@]:=z}\"; declare -p m").0,
+            "y=v\ndeclare -A m=([k]=\"v\" )\n"
+        );
+        // Indexed arrays keep the error (status 2, discards the parse unit).
+        let (o, _) = run("declare -a i\n{ echo \"y=${i[@]:=z}\"; } 2>&1\necho \"st=$?\"");
+        assert_eq!(o, "osh: i[@]: bad array subscript\nst=2\n");
+    }
+
+    #[test]
+    fn declare_p_quotes_associative_keys_like_bash() {
+        // bash's `sh_contains_shell_metas` plus its all-elements special case:
+        // a lone `@`/`*`, a *leading* `#` or `~`, and any glob/quoting/expansion
+        // metacharacter force double quotes; everything else is emitted raw.
+        let src = "declare -A k; k[@]=1; k['@@']=2; k['a@b']=3; k['#']=4; k['#x']=5; \
+                   k['a#b']=6; k['~']=7; k['a~b']=8; k['a,b']=9; k['a-b']=10; k[a.b]=11; \
+                   k['a b']=12; k[plain]=13; declare -p k";
+        assert_eq!(
+            run(src).0,
+            "declare -A k=([\"@\"]=\"1\" [@@]=\"2\" [a@b]=\"3\" [\"#\"]=\"4\" [\"#x\"]=\"5\" \
+             [a#b]=\"6\" [\"~\"]=\"7\" [a~b]=\"8\" [a,b]=\"9\" [a-b]=\"10\" [a.b]=\"11\" \
+             [\"a b\"]=\"12\" [plain]=\"13\" )\n"
+        );
     }
 
     #[test]

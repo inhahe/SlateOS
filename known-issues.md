@@ -6922,6 +6922,41 @@ exactly this for `readonly`/`export` operands and is the model.
 operator (`a[x=3]`), a comparison (`a[x==3]`) or a compound one (`a[x+=1]`).
 Kept out of `tests/corpus/arith-subscript-quoting.sh`.
 
+### TD-OILS-MISSING-INTERACTIVE-BUILTINS. osh has no `bind`, `fc`, `history`, `logout` or `suspend`, so every list of builtin names is five short — OPEN 2026-07-28
+
+**Where:** `userspace/oils/src/interp.rs` — `BUILTIN_NAMES`, `HELP_TABLE`, and
+the dispatch in `run_builtin`.
+
+**What.** The five builtins bash provides for an *interactive* session are
+absent. They are invisible until something enumerates the builtin set, at which
+point the whole list diverges:
+
+```
+$ bash -c 'compgen -b | wc -l'   # 61
+$ osh  -c 'compgen -b | wc -l'   # 56  (bind, fc, history, logout, suspend)
+$ bash -c 'compgen -A helptopic h'
+hash
+help
+history
+$ osh  -c 'compgen -A helptopic h'
+hash
+help
+```
+bash also carries a `%` help topic (the job-spec syntax) that osh does not.
+
+**Proper fix.** `fc` and `history` both need a command history, which osh does
+not keep at all — that is the real work, and it is one store serving both.
+`bind` needs a readline binding table; `suspend` needs job control to have a
+parent shell to stop; `logout` is a one-line refusal outside a login shell and
+could be written today. The order that unlocks the most first is history, then
+`logout`, then `bind`/`suspend` alongside the interactive line editor.
+
+**Impact.** Nothing a script does today is affected — these are all interactive
+tools. The cost is coverage rather than correctness: `compgen -b`, `compgen -c`
+and `compgen -A helptopic` can only appear in
+`tests/corpus/compgen-actions.sh` behind a prefix the two shells happen to
+agree on, so the corpus pins less of them than it otherwise would.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

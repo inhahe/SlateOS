@@ -98,8 +98,9 @@ echo -n "pb-n  "; hx "$(printf '%b' '\101')"
 echo -n "ee-0  "; hx "$(echo -e '\0101')"
 echo -n "ee-n  "; hx "$(echo -e '\101')"
 # `\0` with no digits after it is a NUL, in both echo-family decoders — and
-# unlike `$'…'`, it is emitted rather than truncating. A `$( )` capture drops
-# NUL bytes, so these go straight down a pipe.
+# unlike `$'…'`, it is emitted rather than truncating. These go straight down a
+# pipe rather than through `hx`, because a `$( )` capture drops NUL bytes (with
+# a warning) and would hide the very byte being checked — see cmdsub-nul.sh.
 echo -n "ee-09 "; echo -ne '\09' | od -An -tx1 | tr -d '\n '; echo
 echo -n "pb-0b "; printf '%b' 'a\0b' | od -An -tx1 | tr -d '\n '; echo
 echo -n "ee-0b "; echo -ne 'a\0b' | od -An -tx1 | tr -d '\n '; echo

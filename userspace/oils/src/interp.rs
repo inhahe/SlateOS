@@ -8968,6 +8968,27 @@ impl Shell {
         }
     }
 
+    /// Drop every NUL byte from a command substitution's captured output,
+    /// warning once if there were any.
+    ///
+    /// A shell word cannot hold a NUL, so bash discards them rather than
+    /// truncating at the first one, and reports it — once per *capture*, no
+    /// matter how many bytes were dropped. The strip happens **before** the
+    /// trailing-newline strip, which is observable: `$(printf 'a\n\0')` is `a`
+    /// in bash, not `a\n` (removing the NUL first re-exposes the newline as
+    /// trailing). Applies to `$( )`, backticks, and the `$(< file)` fast path
+    /// alike; process substitution is exempt because it writes a real file.
+    fn strip_capture_nuls(&mut self, buf: &mut Vec<u8>) {
+        if !buf.contains(&0) {
+            return;
+        }
+        buf.retain(|&b| b != 0);
+        self.errln(&format!(
+            "{}warning: command substitution: ignored null byte in input",
+            self.err_prefix()
+        ));
+    }
+
     fn command_sub(&mut self, prog: &Program) -> String {
         // Count every command substitution so callers (e.g. pure assignments)
         // can tell whether a `$(...)` ran while expanding a value.
@@ -8986,7 +9007,8 @@ impl Shell {
                 return String::new();
             }
             match std::fs::read(&path) {
-                Ok(bytes) => {
+                Ok(mut bytes) => {
+                    self.strip_capture_nuls(&mut bytes);
                     let mut s = String::from_utf8_lossy(&bytes).into_owned();
                     while s.ends_with('\n') {
                         s.pop();
@@ -9037,6 +9059,7 @@ impl Shell {
             sub.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
         }
         self.last_status = sub.last_status;
+        self.strip_capture_nuls(&mut buf);
         let mut s = String::from_utf8_lossy(&buf).into_owned();
         // Strip trailing newlines, as command substitution does.
         while s.ends_with('\n') {

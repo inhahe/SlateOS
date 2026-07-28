@@ -114,7 +114,7 @@ termination through a nesting boundary (`yes ab | t` with `t() { head -c 2 |
 cat; }` — that one hangs on regression, so run the suite under
 `scripts/run-timeout.py`), and `$?` propagation from the nested tail.
 
-### BUG-OILS-CMDSUB-NUL-BYTES. `$( )` keeps NUL bytes instead of dropping them with a warning — 2026-07-27 — OPEN
+### BUG-OILS-CMDSUB-NUL-BYTES. `$( )` kept NUL bytes instead of dropping them with a warning — 2026-07-27 — ✅ RESOLVED
 
 **Symptom.**
 ```sh
@@ -124,14 +124,22 @@ printf '%s' "$(printf '%b' 'a\0b')" | od -An -tx1
 ```
 
 **Root cause.** osh's command-substitution capture in
-`userspace/oils/src/interp.rs` returns the child's bytes unfiltered. bash strips
-every NUL from the captured output (a shell word cannot hold one) and warns once
-per capture that contained any.
+`userspace/oils/src/interp.rs` returned the child's bytes unfiltered. A shell
+word cannot hold a NUL, so bash discards every one of them — it does *not*
+truncate at the first — and warns once per **capture**, however many it dropped.
 
-**Proper fix.** In the capture path, scan for `\0`; if present, drop those bytes
-and emit `<prefix>warning: command substitution: ignored null byte in input` to
-stderr exactly once. Then the `escapes.sh` corpus case can drop its
-"straight down a pipe" workaround for the NUL probes.
+**Fix.** A new `Shell::strip_capture_nuls` runs on the captured bytes of both
+`command_sub` paths (the real subshell and the `$(< file)` fast path, which
+backticks share). It is called **before** the trailing-newline strip, which is
+observable: dropping the NUL in `$(printf 'a\n\0')` re-exposes the newline as
+trailing, so bash yields `a`, not `a\n`. Process substitution is exempt — it
+writes a real file, which can hold NULs.
+
+**Regression test.** `userspace/oils/tests/corpus/cmdsub-nul.sh` — leading /
+middle / trailing / repeated NULs, multi-command captures (still one warning),
+an all-NUL capture, the no-NUL no-warning case, backticks, both strip orderings,
+the `$(< file)` path, and the stripped result flowing into word splitting and
+arithmetic.
 
 ### BUG-OILS-ARITH-SUBSCRIPT-QUOTING. Quotes were removed from arithmetic subscripts — 2026-07-27 — ✅ RESOLVED 2026-07-27
 

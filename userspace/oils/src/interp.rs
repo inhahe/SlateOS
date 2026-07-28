@@ -732,6 +732,35 @@ struct Job {
     exit_seen: bool,
 }
 
+/// How `jobs` prints what it has selected.
+///
+/// bash keeps one *form*, not a set of flags, so the last of `-l`/`-p`/`-n`
+/// given decides: `jobs -lp` prints bare pids and `jobs -pl` the long listing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JobsForm {
+    /// No option: `[1]+  Done   cmd`.
+    Standard,
+    /// `-l`: the same, with the pid between the marker and the state.
+    Long,
+    /// `-p`: the pid alone. Saying only where a job is does not amount to
+    /// reporting it, so this form leaves the job's status still owed.
+    PidOnly,
+    /// `-n`: the standard listing, restricted to jobs whose status has not been
+    /// reported yet.
+    Changed,
+}
+
+/// Which jobs `jobs -r`/`-s` will consider. Independent of [`JobsForm`], and
+/// likewise one-of: the last of the two given wins.
+#[derive(Clone, Copy)]
+enum JobState {
+    /// `-r`: jobs that have not finished.
+    Running,
+    /// `-s`: stopped jobs. osh has none (no terminal job control — TD-OILS13),
+    /// so this selects nothing.
+    Stopped,
+}
+
 /// What resolving a job spec came to. Ambiguity is its own outcome because bash
 /// diagnoses it differently from "no such job" — and because the builtins do
 /// not agree on what to say afterwards: `kill` and `wait` stop at the ambiguity
@@ -12033,10 +12062,11 @@ impl Shell {
         redir: &RedirPlan,
     ) -> i32 {
         self.poll_jobs();
-        let mut long = false;
-        let mut pids_only = false;
-        let mut running_only = false;
-        let mut stopped_only = false;
+        // `-l`, `-p` and `-n` are not flags to combine but one setting to
+        // choose, so the last of them wins: `jobs -lp` prints bare pids and
+        // `jobs -pl` the long form. `-r`/`-s` are a separate one-of-two.
+        let mut form = JobsForm::Standard;
+        let mut state: Option<JobState> = None;
         // `-x` is not a listing option at all: it turns the operands into a
         // command to run. It refuses to share the line with an option that
         // would have shaped a listing — but only one seen *before* it, since
@@ -12056,8 +12086,7 @@ impl Shell {
                 break;
             };
             i += 1;
-            // Valid jobs options are -lnprsx; `-n` (changed-status-only) is
-            // accepted but not yet honored here.
+            // Valid jobs options are -lnprsx.
             if let Some(c) = flags.chars().find(|c| !matches!(c, 'l' | 'n' | 'p' | 'r' | 's' | 'x')) {
                 return self.builtin_invalid_option(
                     "jobs",
@@ -12067,10 +12096,11 @@ impl Shell {
             }
             for c in flags.chars() {
                 match c {
-                    'l' => long = true,
-                    'p' => pids_only = true,
-                    'r' => running_only = true,
-                    's' => stopped_only = true,
+                    'l' => form = JobsForm::Long,
+                    'p' => form = JobsForm::PidOnly,
+                    'n' => form = JobsForm::Changed,
+                    'r' => state = Some(JobState::Running),
+                    's' => state = Some(JobState::Stopped),
                     'x' => {
                         if listing_option {
                             self.emit_stderr(
@@ -12129,13 +12159,25 @@ impl Shell {
                 continue;
             }
             let running = job.status.is_none();
-            // osh has no stopped jobs (no terminal job control — TD-OILS13), so
-            // `-s` selects nothing.
-            if stopped_only || (running_only && !running) {
+            // `-r`/`-s` narrow a listing that had to choose for itself which
+            // jobs to show; an operand names its job outright, so they have no
+            // say over it. osh has no stopped jobs (no terminal job control —
+            // TD-OILS13), so `-s` selects nothing.
+            let excluded_by_state = match state {
+                None => false,
+                Some(JobState::Running) => !running,
+                Some(JobState::Stopped) => true,
+            };
+            if specs.is_empty() && excluded_by_state {
+                continue;
+            }
+            // `-n` shows only what has not been reported yet — in either form,
+            // since it is a way of printing rather than a way of selecting.
+            if form == JobsForm::Changed && job.notified {
                 continue;
             }
             reported.push(job.id);
-            if pids_only {
+            if form == JobsForm::PidOnly {
                 buf.push_str(&job.pid.to_string());
                 buf.push('\n');
                 continue;
@@ -12143,7 +12185,7 @@ impl Shell {
             // bash words the state three ways: `Running`, the description of
             // the signal that killed the job, or `Done` for a clean exit and
             // `Exit N` for a dirty one.
-            let state = match (running, job.signal, job.status) {
+            let state_text = match (running, job.signal, job.status) {
                 (true, _, _) => "Running".to_string(),
                 (_, Some(sig), _) => signal_description(sig).to_string(),
                 (_, None, Some(0) | None) => "Done".to_string(),
@@ -12154,22 +12196,28 @@ impl Shell {
             // `&` and all; a finished one loses the `&` because there is no
             // longer anything running in the background to denote.
             let amp = if running { " &" } else { "" };
-            if long {
+            if form == JobsForm::Long {
                 buf.push_str(&format!(
                     "[{}]{} {} {:<24}{}{}\n",
-                    job.id, marker, job.pid, state, job.cmd, amp
+                    job.id, marker, job.pid, state_text, job.cmd, amp
                 ));
             } else {
-                buf.push_str(&format!("[{}]{}  {:<24}{}{}\n", job.id, marker, state, job.cmd, amp));
+                buf.push_str(&format!(
+                    "[{}]{}  {:<24}{}{}\n",
+                    job.id, marker, state_text, job.cmd, amp
+                ));
             }
         }
         let wstatus = self.write_bytes(out, redir, buf.as_bytes());
         // Listing a job counts as reporting it. Only the jobs actually printed
         // are marked, so a `-r` that filtered a finished one out leaves it for
-        // the next `jobs` to report.
-        for job in &mut self.jobs {
-            if reported.contains(&job.id) {
-                job.notified = true;
+        // the next `jobs` to report — and `-p`, which says nothing about a job
+        // beyond where to find it, does not count as reporting one at all.
+        if form != JobsForm::PidOnly {
+            for job in &mut self.jobs {
+                if reported.contains(&job.id) {
+                    job.notified = true;
+                }
             }
         }
         // A jobspec listing sweeps afterwards, so the job it just named is gone

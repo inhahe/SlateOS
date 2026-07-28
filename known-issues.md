@@ -6616,6 +6616,104 @@ rebinding `out`.
 substitution **and** writing to the substitution's stdout. Output is lost, not
 corrupted.
 
+### TD-OILS-KILL-L-INTERLEAVE. `kill -l` batches all its stdout into one write, so its listing lands after every diagnostic instead of interleaving with them — OPEN 2026-07-27
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::kill_list` (the `buf`
+accumulator) and `Shell::write_bytes`.
+
+**What.** `kill -l 9 -x 15` prints in bash
+
+```
+KILL
+bash: line 1: kill: -x: invalid signal specification
+TERM
+```
+
+and in osh
+
+```
+osh: line 1: kill: -x: invalid signal specification
+KILL
+TERM
+```
+
+Both shells exit 1 and both print the same three lines; only the order differs.
+
+**Why.** `write_bytes` re-opens (and re-truncates) a `>` redirect on *every*
+call, so a builtin that wrote its stdout in pieces would keep the last piece
+only. Every builtin therefore accumulates its whole stdout and writes it once —
+which necessarily puts all of it after any stderr the builtin emitted along the
+way. This is the same root cause as TD-OILS-PRINTF-ERRORDER.
+
+**Proper fix.** Install a builtin's redirects *around* the builtin (open once on
+entry, restore on exit) rather than re-applying them per write, so a builtin can
+stream its stdout as it goes. That is a change to how `RedirPlan` is applied to
+builtins generally, not to `kill`; both this entry and TD-OILS-PRINTF-ERRORDER
+close with it.
+
+**Impact.** Cosmetic and invisible to the differential harness, which compares
+stdout and stderr separately. Only visible under `2>&1` to one sink.
+
+### TD-OILS-KILL-PSEUDO-SIGNAL. `kill -s DEBUG %1` errors in osh where bash silently succeeds — OPEN 2026-07-27
+
+**Where:** `userspace/oils/src/interp.rs` — the pseudo-signal rejection at the
+end of `builtin_kill`'s option run.
+
+**What.** `sleep 1 & kill -s DEBUG %1` gives rc 0 and no output in bash; osh
+prints `kill: DEBUG: invalid signal specification` per target and gives rc 1.
+
+**Why.** bash's `decode_signal` accepts `DEBUG` (it is a real entry in the shared
+`signal_names` table, numbered above `NSIG`), and bash only learns the number is
+unsendable when `kill(2)` refuses it — but for a *job spec* bash calls
+`killpg`/`kill` on the job's pgrp and, on this host, the call succeeds because
+the number is not validated against `NSIG` before the syscall. osh has no real
+signals, so it must decide for itself, and it decides the spec is invalid.
+
+**Proper fix.** Distinguish "spec named nothing" from "spec named something
+unsendable" and make the latter a silent no-op for a *live* target (matching what
+the host kernel does), keeping the error only where the target does not exist.
+Worth confirming against Linux bash first — this may be a Cygwin artifact rather
+than bash policy, in which case osh's behaviour is arguably the correct one and
+the entry closes as WONTFIX.
+
+**Impact.** Negligible: sending a pseudo signal is meaningless in either shell.
+Deliberately left out of the corpus.
+
+### TD-OILS-KILL-PGRP. osh has no notion of a process group, so `kill 0` and a negative pid do not reach one — OPEN 2026-07-27
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::kill_one`.
+
+**What.** `kill 0` signals every process in the shell's own process group in
+bash; `kill -TERM -123` signals process group 123. osh tracks individual child
+processes only, so both are treated as ordinary pids and report `No such
+process`.
+
+**Proper fix.** Needs process groups first — which SlateOS's process model does
+not yet have, and which Windows (where osh is developed) expresses differently
+(job objects). Once `setpgid`-equivalent grouping exists, `kill_one` should route
+a zero or negative pid to the group rather than to a process.
+
+**Impact.** Narrow: scripts that self-signal a whole pipeline. Untestable in the
+corpus anyway, since `kill 0` would kill the harness.
+
+### TD-OILS-NO-RTSIGNALS. osh's signal table stops at 31 — no realtime signals — OPEN 2026-07-27
+
+**Where:** `userspace/oils/src/interp.rs` — `SIGNALS` and `NSIG`.
+
+**What.** `kill -l` lists 31 signals; `kill -l 34` and `trap … RTMIN` are
+refused. Linux bash lists 64, with `SIGRTMIN`..`SIGRTMAX` (32–64) and the
+`RTMIN+n`/`RTMAX-n` spellings its `decode_signal` understands specially.
+
+**Proper fix.** Extend `SIGNALS` past 31 and raise `NSIG` to 65 (the
+`nsig_is_one_past_the_last_real_signal` test enforces they move together), then
+teach `decode_signal` the `RTMIN+n`/`RTMAX-n` arithmetic. Gate the numbering on
+the target: the realtime range is platform-defined, and SlateOS has not fixed one
+yet — which is the real blocker, not the parsing.
+
+**Impact.** None today: SlateOS has no realtime signals to deliver, so the table
+would be listing names that mean nothing. Deliberately kept out of the corpus,
+whose signal cases only use the numbers every Unix agrees on.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

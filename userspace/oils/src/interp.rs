@@ -705,6 +705,9 @@ struct VarSnapshot {
     capcase: bool,
     nameref: bool,
     readonly: bool,
+    /// Whether the name merely *existed* (declared without a value); see
+    /// [`Shell::declared`].
+    declared: bool,
     array_valued: bool,
 }
 
@@ -1387,6 +1390,18 @@ pub struct Shell {
     /// entry (a `break` inside a function must not escape to a caller's loop,
     /// matching bash) and in subshell clones.
     loop_depth: u32,
+    /// Names brought into being without a value — `declare n`, `declare -i n`,
+    /// `local n`, a bare `readonly n`/`export n`.
+    ///
+    /// A declaration is not an assignment, so such a name stays *unset*:
+    /// `${n-…}` takes the default and `[[ -v n ]]` is false. But it does exist,
+    /// which is what `declare -p n` reports (`declare -- n`, or with whatever
+    /// attributes it was given) where an undeclared name is "not found". It is
+    /// the attribute sets' anchor too: clearing the last attribute with
+    /// `declare +i n` leaves the variable behind, not nothing. `unset` removes
+    /// it; assigning a value moves the name into `vars`, which is looked at
+    /// first. Copied into subshell clones, like the attributes themselves.
+    declared: HashSet<String>,
     /// Names marked `readonly` (or `declare -r`). Assigning to or unsetting a
     /// readonly variable is an error; the shell reports it and leaves the value
     /// unchanged. Copied into subshell clones so the attribute is inherited.
@@ -1648,6 +1663,7 @@ impl Shell {
             arg_frame_pushed: Vec::new(),
             source_stack: Vec::new(),
             loop_depth: 0,
+            declared: HashSet::new(),
             readonly: HashSet::new(),
             readonly_funcs: HashSet::new(),
             shopt: HashMap::new(),
@@ -4388,6 +4404,7 @@ impl Shell {
             // purpose of `break`/`continue`: bash resets loop_level in a
             // subshell, so `(break)` inside a loop is an error, not a break.
             loop_depth: 0,
+            declared: self.declared.clone(),
             readonly: self.readonly.clone(),
             readonly_funcs: self.readonly_funcs.clone(),
             shopt: self.shopt.clone(),
@@ -6844,6 +6861,7 @@ impl Shell {
             upper: self.upper_attr.contains(name),
             capcase: self.capcase_attr.contains(name),
             nameref: self.nameref_attr.contains(name),
+            declared: self.declared.contains(name),
             readonly: self.readonly.contains(name),
             array_valued: self.array_valued.contains(name),
         }
@@ -6877,6 +6895,9 @@ impl Shell {
         Self::restore_flag(&mut self.nameref_attr, name, snap.nameref);
         Self::restore_flag(&mut self.readonly, name, snap.readonly);
         Self::restore_flag(&mut self.array_valued, name, snap.array_valued);
+        // A `local n` that was never assigned leaves the name existing-but-unset
+        // for the call only; on return it goes back to whatever it was before.
+        Self::restore_flag(&mut self.declared, name, snap.declared);
     }
 
     /// Set-or-clear `name`'s membership in an attribute set to match `present`.
@@ -6916,6 +6937,9 @@ impl Shell {
         self.capcase_attr.remove(name);
         self.nameref_attr.remove(name);
         self.array_valued.remove(name);
+        // The local starts out existing-but-unset, which is what a bare
+        // `local x; declare -p x` reports.
+        self.declared.insert(name.to_string());
         true
     }
 
@@ -14375,6 +14399,14 @@ impl Shell {
             } else if unexport {
                 self.exported.remove(&k);
             } else {
+                if !self.vars.contains_key(&k)
+                    && !self.arrays.contains_key(&k)
+                    && !self.assoc.contains_key(&k)
+                {
+                    // A bare `export n` declares the name without assigning it —
+                    // still unset, but reportable. See [`Shell::declared`].
+                    self.declared.insert(k.clone());
+                }
                 self.exported.insert(k);
             }
         }
@@ -14592,16 +14624,11 @@ impl Shell {
                 _ => false,
             })
         };
-        let mut all: Vec<&String> = self
-            .vars
-            .keys()
-            .chain(self.arrays.keys())
-            .chain(self.assoc.keys())
+        let names: Vec<String> = self
+            .declare_p_names()
+            .into_iter()
+            .filter(|n| has_attr(self, n))
             .collect();
-        all.sort();
-        all.dedup();
-        let names: Vec<String> =
-            all.into_iter().filter(|n| has_attr(self, n)).cloned().collect();
         let mut listing = String::new();
         for name in &names {
             if let Some(def) = self.format_declare_def(name) {
@@ -14612,22 +14639,32 @@ impl Shell {
         self.write_bytes(out, redir, listing.as_bytes())
     }
 
+    /// Every name `declare -p` has something to say about, sorted: the ones with
+    /// a value of some kind, plus the ones merely declared (see
+    /// [`Shell::declared`]) — bash reports those too, though a bare `set` and
+    /// `${!prefix@}`, which are about *values*, pass over them.
+    fn declare_p_names(&self) -> Vec<String> {
+        let mut all: Vec<String> = self
+            .vars
+            .keys()
+            .chain(self.arrays.keys())
+            .chain(self.assoc.keys())
+            .chain(self.declared.iter())
+            .cloned()
+            .collect();
+        all.sort();
+        all.dedup();
+        all
+    }
+
     fn declare_print(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Names are the non-flag operands after the leading dashed flags.
         let names: Vec<&String> = args.iter().skip_while(|a| a.starts_with('-')).collect();
         let mut listing = String::new();
         let mut status = 0;
         if names.is_empty() {
-            let mut all: Vec<&String> = self
-                .vars
-                .keys()
-                .chain(self.arrays.keys())
-                .chain(self.assoc.keys())
-                .collect();
-            all.sort();
-            all.dedup();
-            for name in all {
-                if let Some(def) = self.format_declare_def(name) {
+            for name in self.declare_p_names() {
+                if let Some(def) = self.format_declare_def(&name) {
                     listing.push_str(&def);
                     listing.push('\n');
                 }
@@ -14695,6 +14732,13 @@ impl Shell {
             return self
                 .format_var_assignment(name)
                 .map(|body| format!("declare {} {body}", self.declare_attr_flags(name, "")));
+        }
+        if self.declared.contains(name) {
+            // Declared without a value: the name exists, so it is reported —
+            // with its attributes, or `--` if it has none — even though it is
+            // unset and so has nothing to print on the right of an `=`. See
+            // [`Shell::declared`].
+            return Some(format!("declare {} {name}", self.declare_attr_flags(name, "")));
         }
         // Scalar dynamic special variables (`BASHPID`, `RANDOM`, …) have no
         // entry in `self.vars` but still respond to `declare -p NAME` in bash —
@@ -15266,6 +15310,16 @@ impl Shell {
                     };
                     self.vars.insert(name.to_string(), stored);
                 }
+            } else if !self.vars.contains_key(name)
+                && !self.arrays.contains_key(name)
+                && !self.assoc.contains_key(name)
+            {
+                // No value given, and nothing there already: the declaration
+                // still brings the name into being, unset, so `declare -p` can
+                // report it and its attributes have something to hang on. (An
+                // array declaration made its own — empty — entry above.) See
+                // [`Shell::declared`].
+                self.declared.insert(name.to_string());
             }
             if export {
                 self.exported.insert(name.to_string());
@@ -15598,6 +15652,13 @@ impl Shell {
                     v
                 };
                 self.vars.insert(name.clone(), stored);
+            } else if !self.vars.contains_key(&name)
+                && !self.arrays.contains_key(&name)
+                && !self.assoc.contains_key(&name)
+            {
+                // A bare `readonly n` declares the name without assigning it —
+                // still unset, but reportable. See [`Shell::declared`].
+                self.declared.insert(name.clone());
             }
             self.readonly.insert(name);
         }
@@ -15991,9 +16052,13 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // A name declared without a value is still a variable, and so still
+            // takes precedence over a function of the same name: `declare f;
+            // unset f` removes the (unset) variable and leaves `f()` callable.
             let is_var = self.vars.contains_key(a)
                 || self.arrays.contains_key(a)
-                || self.assoc.contains_key(a);
+                || self.assoc.contains_key(a)
+                || self.declared.contains(a);
             if !vars_only && !is_var {
                 // Not a set variable: fall back to unsetting a function.
                 if self.readonly_funcs.contains(a) {
@@ -16032,6 +16097,7 @@ impl Shell {
         self.capcase_attr.remove(name);
         self.nameref_attr.remove(name);
         self.array_valued.remove(name);
+        self.declared.remove(name);
     }
 
     /// `unset name[sub]` — remove one element (or, for `name[@]`/`name[*]` on an
@@ -16125,6 +16191,7 @@ impl Shell {
             self.capcase_attr.remove(name);
             self.nameref_attr.remove(name);
             self.array_valued.remove(name);
+            self.declared.remove(name);
             return true;
         }
         // A negative index counts back from `highest_index + 1`; underflowing
@@ -27703,6 +27770,32 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn declare_p_missing_is_error() {
         assert_eq!(run("declare -p nope").1, 1);
+    }
+
+    #[test]
+    fn a_declaration_without_a_value_still_brings_the_name_into_being() {
+        // Declaring is not assigning, so the name stays unset — but it now
+        // exists, which is the difference `declare -p` reports. See
+        // `Shell::declared`.
+        assert_eq!(run("declare n; declare -p n").0, "declare -- n\n");
+        assert_eq!(run("declare -i n; declare -p n").0, "declare -i n\n");
+        assert_eq!(run("readonly q; declare -p q").0, "declare -r q\n");
+        assert_eq!(run("export e; declare -p e").0, "declare -x e\n");
+        assert_eq!(run("declare n; [[ -v n ]]; echo $?; echo [${n-unset}]").0, "1\n[unset]\n");
+        // Clearing the last attribute leaves the variable behind, not nothing.
+        assert_eq!(run("declare -i n; declare +i n; declare -p n").0, "declare -- n\n");
+        // The attribute-filtered listing counts it; a bare `set` and
+        // `${!prefix@}`, which are about values, pass over it.
+        assert_eq!(run("declare -i zq; declare -i").0.lines().filter(|l| l.ends_with(" zq")).count(), 1);
+        assert_eq!(run("declare -i zq; set | grep -c '^zq'").0, "0\n");
+        assert_eq!(run("declare -i zq; echo [${!zq@}]").0, "[]\n");
+        // `unset` takes it away again — and because it *is* a variable, it is the
+        // variable that goes, leaving a function of the same name callable.
+        assert_eq!(run("declare n; unset n; declare -p n").1, 1);
+        assert_eq!(run("f() { echo fn; }; declare f; unset f; f").0, "fn\n");
+        // A `local` declaration exists for the call only.
+        assert_eq!(run("f() { local n; declare -p n; }; f; declare -p n").0, "declare -- n\n");
+        assert_eq!(run("f() { local n; }; f; declare -p n").1, 1);
     }
 
     #[test]

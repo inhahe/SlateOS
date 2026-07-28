@@ -17248,6 +17248,13 @@ impl Shell {
     /// `callback` every `quantum` lines, passing the target index and the raw
     /// line — including its delimiter — before the element is assigned; the
     /// default quantum is 5000).
+    ///
+    /// The options are a clustered getopt over `d:n:O:tu:s:C:c:`, so a letter
+    /// that takes an argument swallows the rest of its cluster (`-n2`, `-td,`)
+    /// and the scan stops at the first operand — `mapfile a -t` fills `a` and
+    /// leaves the `-t` as a word it never looks at. Each numeric argument is
+    /// checked as it is read, so the first bad one decides the answer and its
+    /// complaint arrives before a byte of input has been touched.
     fn builtin_mapfile(
         &mut self,
         args: &[String],
@@ -17268,65 +17275,105 @@ impl Shell {
         // any after it — it never looks past `list->word`, so `mapfile a b`
         // fills `a` and leaves `b` alone without a word of complaint.
         let mut array = String::from("MAPFILE");
-        let mut array_given = false;
         // `-u N`: read the array from user-space fd N (opened by `exec N< file`
         // or a coproc read end) instead of the ambient stdin. The raw spec is
         // kept so a non-numeric `-u abc` reproduces bash's exact diagnostic.
         let mut ufd_spec: Option<String> = None;
+
+        const ARG_LETTERS: &str = "dnOusCc";
+        let usage = format!(
+            "{tag} [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]"
+        );
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            match a.as_str() {
-                "-t" => strip = true,
-                "-u" => {
-                    i += 1;
-                    ufd_spec = args.get(i).cloned();
-                }
-                "-d" => {
-                    i += 1;
-                    delim = args.get(i).and_then(|s| s.bytes().next()).unwrap_or(0);
-                }
-                "-n" => {
-                    i += 1;
-                    count = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
-                }
-                "-c" => {
-                    i += 1;
-                    // A quantum of 0 disables the callback in bash; keep the
-                    // default otherwise.
-                    quantum = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(5000);
-                }
-                "-C" => {
-                    i += 1;
-                    callback = args.get(i).cloned();
-                }
-                "-s" => {
-                    i += 1;
-                    skip = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
-                }
-                "-O" => {
-                    i += 1;
-                    origin = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    // `-O` also suppresses the array-clearing below (bash): the
-                    // lines are written *over* whatever is already there.
-                    origin_given = true;
-                }
-                other if other.starts_with('-') && other.len() > 1 => {
-                    let opt: String = other.chars().take(2).collect();
-                    return self.builtin_invalid_option(
-                        tag,
-                        &opt,
-                        &format!("{tag} [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]"),
-                    );
-                }
-                _ => {
-                    if !array_given {
-                        array = a.clone();
-                        array_given = true;
+            if a == "--" {
+                i += 1;
+                break;
+            }
+            if !(a.len() > 1 && a.starts_with('-')) {
+                break;
+            }
+            let chars: Vec<char> = a[1..].chars().collect();
+            let mut ci = 0;
+            while ci < chars.len() {
+                let c = chars[ci];
+                if ARG_LETTERS.contains(c) {
+                    let val = if ci + 1 < chars.len() {
+                        chars[ci + 1..].iter().collect::<String>()
+                    } else {
+                        i += 1;
+                        match args.get(i) {
+                            Some(v) => v.clone(),
+                            None => {
+                                self.errln(&format!(
+                                    "{}{tag}: -{c}: option requires an argument",
+                                    self.err_prefix()
+                                ));
+                                self.emit_stderr(format!("{tag}: usage: {usage}\n").as_bytes());
+                                return 2;
+                            }
+                        }
+                    };
+                    // The three counts are read with bash's `legal_number`, so
+                    // ` 3 ` is three and `0x2` is not a number at all, and each
+                    // is rejected the moment it is read.
+                    let count_arg = |what: &str, least: i64| -> Result<usize, i32> {
+                        match legal_number(&val) {
+                            Some(n) if n >= least => {
+                                Ok(usize::try_from(n).unwrap_or(usize::MAX))
+                            }
+                            _ => {
+                                self.errln(&format!(
+                                    "{}{tag}: {val}: invalid {what}",
+                                    self.err_prefix()
+                                ));
+                                Err(1)
+                            }
+                        }
+                    };
+                    match c {
+                        'd' => delim = val.bytes().next().unwrap_or(0),
+                        'u' => ufd_spec = Some(val.clone()),
+                        'C' => callback = Some(val.clone()),
+                        'n' => match count_arg("line count", 0) {
+                            Ok(n) => count = n,
+                            Err(s) => return s,
+                        },
+                        's' => match count_arg("line count", 0) {
+                            Ok(n) => skip = n,
+                            Err(s) => return s,
+                        },
+                        'O' => match count_arg("array origin", 0) {
+                            Ok(n) => {
+                                origin = n;
+                                // `-O` also suppresses the array-clearing below
+                                // (bash): the lines are written *over* whatever
+                                // is already there.
+                                origin_given = true;
+                            }
+                            Err(s) => return s,
+                        },
+                        // A quantum of zero would call the callback endlessly
+                        // often, so bash refuses it rather than taking it as
+                        // "never".
+                        _ => match count_arg("callback quantum", 1) {
+                            Ok(n) => quantum = n,
+                            Err(s) => return s,
+                        },
                     }
+                    ci = chars.len(); // the cluster's remainder was the value
+                } else if c == 't' {
+                    strip = true;
+                    ci += 1;
+                } else {
+                    return self.builtin_invalid_option(tag, &format!("-{c}"), &usage);
                 }
             }
             i += 1;
+        }
+        if let Some(name) = args.get(i) {
+            array = name.clone();
         }
 
         // `-u N` (N ≥ 3): read from the user-space fd table instead of the
@@ -17335,8 +17382,9 @@ impl Shell {
         // bash's two distinct diagnostics (both status 1).
         let ufd: Option<i32> = match &ufd_spec {
             None => None,
-            Some(spec) => match spec.parse::<i32>() {
-                Ok(n) if n >= 0 => Some(n),
+            // Read with `legal_number` like the counts, so ` 0 ` names fd 0.
+            Some(spec) => match legal_number(spec).and_then(|n| i32::try_from(n).ok()) {
+                Some(n) if n >= 0 => Some(n),
                 _ => {
                     self.errln(&format!(
                         "{}{tag}: {spec}: invalid file descriptor specification",
@@ -26522,6 +26570,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let src = "mapfile -t -n 2 arr <<< $'a\\nb\\nc\\nd'\n\
                    echo \"${#arr[@]}\"; echo \"${arr[*]}\"";
         assert_eq!(run(src).0, "2\na b\n");
+    }
+
+    #[test]
+    fn mapfile_reads_its_options_the_way_bash_does() {
+        let feed = "<<< $'l1\\nl2\\nl3'";
+        // A letter that takes an argument swallows the rest of its cluster, and
+        // a letter that takes none can share the cluster with it.
+        assert_eq!(run(&format!("mapfile -n2 a {feed}; echo ${{#a[@]}}")).0, "2\n");
+        assert_eq!(run(&format!("mapfile -tn 2 a {feed}; echo [${{a[*]}}]")).0, "[l1 l2]\n");
+        assert_eq!(run(&format!("mapfile -td, a {feed}; echo ${{#a[@]}}")).0, "1\n");
+        // `--` ends the options, and what follows is the name — even one that
+        // looks like an option, which is then rejected as the name it is.
+        assert_eq!(run(&format!("mapfile -t -- a {feed}; echo [${{a[*]}}]")).0, "[l1 l2 l3]\n");
+        let (o, s) = run(&format!("mapfile -- -t {feed} 2>&1"));
+        assert_eq!((o.as_str(), s), ("osh: mapfile: `-t': not a valid identifier\n", 1));
+        // The scan stops at the first operand, so an option written after the
+        // name is just a word bash never looks at.
+        assert_eq!(run(&format!("mapfile a -t {feed}; echo \"[${{a[0]}}]\"")).0, "[l1\n]\n");
+        // An invalid letter is named on its own, not with the cluster it sat in.
+        let (o, s) = run(&format!("mapfile -ta {feed} 2>&1"));
+        assert!(o.starts_with("osh: mapfile: -a: invalid option\n"), "got {o:?}");
+        assert_eq!(s, 2);
+        // A missing option argument is a usage error, with the synopsis.
+        let (o, s) = run("mapfile -n 2>&1");
+        assert!(o.starts_with("osh: mapfile: -n: option requires an argument\n"), "got {o:?}");
+        assert!(o.contains("mapfile: usage: mapfile [-d delim]"), "got {o:?}");
+        assert_eq!(s, 2);
+    }
+
+    #[test]
+    fn mapfile_checks_each_count_as_it_reads_it() {
+        let feed = "<<< $'l1\\nl2\\nl3'";
+        // The three counts are read the way every other number bash reads is:
+        // surrounding blanks are skipped, a sign is allowed, and anything left
+        // over means it was not a number.
+        assert_eq!(run(&format!("mapfile -n ' 2 ' a {feed}; echo ${{#a[@]}}")).0, "2\n");
+        assert_eq!(run(&format!("mapfile -n +2 a {feed}; echo ${{#a[@]}}")).0, "2\n");
+        for (opt, val, what) in [
+            ("-n", "x", "line count"),
+            ("-n", "2x", "line count"),
+            ("-n", "0x2", "line count"),
+            ("-n", "-1", "line count"),
+            ("-s", "-1", "line count"),
+            ("-O", "y", "array origin"),
+            ("-O", "-1", "array origin"),
+            ("-c", "x", "callback quantum"),
+            // A quantum of zero would call the callback endlessly often, so it
+            // is refused rather than taken to mean "never".
+            ("-c", "0", "callback quantum"),
+        ] {
+            let (o, s) = run(&format!("mapfile {opt} {val} a {feed} 2>&1"));
+            assert_eq!((o.as_str(), s), (&*format!("osh: mapfile: {val}: invalid {what}\n"), 1));
+        }
+        // The check happens as the option is read, so the first bad one decides
+        // — and it beats the generation a good one would have driven.
+        let (o, _) =
+            run(&format!("mapfile -n 2 -O y a {feed} 2>&1; echo rc=$?; declare -p a 2>&1"));
+        assert!(o.starts_with("osh: mapfile: y: invalid array origin\nrc=1\n"), "got {o:?}");
+        assert!(o.contains("declare: a: not found"), "the array must be untouched: {o:?}");
     }
 
     #[test]

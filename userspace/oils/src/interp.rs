@@ -14791,28 +14791,36 @@ impl Shell {
     fn declare_print(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Names are the non-flag operands after the leading dashed flags.
         let names: Vec<&String> = args.iter().skip_while(|a| a.starts_with('-')).collect();
-        let mut listing = String::new();
         let mut status = 0;
+        let mut write_status = 0;
         if names.is_empty() {
+            // Nothing here can fail, so the whole table is one write.
+            let mut listing = String::new();
             for name in self.declare_p_names() {
                 if let Some(def) = self.format_declare_def(&name) {
                     listing.push_str(&def);
                     listing.push('\n');
                 }
             }
+            write_status = self.write_bytes(out, redir, listing.as_bytes());
         } else {
+            // Each name is answered where it is reached, rather than the
+            // answers being gathered up and written after every complaint: with
+            // the two streams merged, `declare -p a nope` reads `a`'s
+            // definition first and the complaint after it, as bash does.
             for name in names {
                 if let Some(def) = self.format_declare_def(name) {
-                    listing.push_str(&def);
-                    listing.push('\n');
+                    let w = self.write_bytes(out, redir, format!("{def}\n").as_bytes());
+                    if w != 0 {
+                        write_status = w;
+                    }
                 } else {
                     self.emit_stderr(format!("{}declare: {name}: not found\n", self.err_prefix()).as_bytes());
                     status = 1;
                 }
             }
         }
-        let w = self.write_bytes(out, redir, listing.as_bytes());
-        if w != 0 { w } else { status }
+        if write_status != 0 { write_status } else { status }
     }
 
     /// Format one variable's `declare` definition, or `None` if it is unset.
@@ -26741,8 +26749,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("echo end#").0, "end#\n");
         // A `#` at word start (preceded by blanks) is still a comment.
         assert_eq!(run("echo abc #def").0, "abc\n");
-        // The base-N arithmetic form survives as an assignment value.
-        assert_eq!(run("n=16#ff; echo [$n]").0, "[16#ff]\n");
+        // The base-N arithmetic form survives as an assignment value. (Quoted,
+        // because unbracketed `[16#ff]` is a glob that would match a one-letter
+        // file another test happened to leave in the shared working directory.)
+        assert_eq!(run("n=16#ff; echo \"[$n]\"").0, "[16#ff]\n");
         assert_eq!(run("declare -i n=16#ff; echo $n").0, "255\n");
         // A whole-line comment still works.
         assert_eq!(run("echo a; #comment\necho b").0, "a\nb\n");
@@ -28157,6 +28167,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn declare_p_missing_is_error() {
         assert_eq!(run("declare -p nope").1, 1);
+    }
+
+    #[test]
+    fn declare_p_writes_each_answer_where_it_is_reached() {
+        // Not all the definitions after all the complaints: with the two
+        // streams merged, each name's answer stands in its own place.
+        assert_eq!(
+            run("a=1; c=2; declare -p nope a nope2 c 2>&1; echo rc=$?").0,
+            "osh: declare: nope: not found\n\
+             declare -- a=\"1\"\n\
+             osh: declare: nope2: not found\n\
+             declare -- c=\"2\"\n\
+             rc=1\n"
+        );
+        // And with the listing going to a `>` file, where each definition is a
+        // separate write, the second must not start the file over. (The tests
+        // share one working directory, so the file is named distinctively and
+        // removed again — a stray short name is glob bait for another test.)
+        assert_eq!(
+            run("a=1; c=2; declare -p a nope c >declp.tmp 2>/dev/null; cat declp.tmp; rm -f declp.tmp").0,
+            "declare -- a=\"1\"\ndeclare -- c=\"2\"\n"
+        );
     }
 
     #[test]

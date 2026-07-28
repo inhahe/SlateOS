@@ -1395,6 +1395,16 @@ pub struct Shell {
     /// Each new job takes the lowest unused job number (bash semantics), so the
     /// numbering restarts at 1 once the table drains.
     jobs: Vec<Job>,
+    /// The job ids `jobs` marks `+` and `-` — bash's "current" and "previous"
+    /// job, also spelled `%+`/`%%` and `%-`.
+    ///
+    /// These are *history*, not a function of the table's present contents:
+    /// when a job is created the one before it becomes previous only if it was
+    /// still running at that moment, so `sleep 0.1 & sleep 5 & wait` leaves the
+    /// finished job marked `-` while `true & sleep 1; false &` does not. See
+    /// [`Shell::note_new_job`].
+    current_job: Option<usize>,
+    previous_job: Option<usize>,
     /// Exit statuses of background jobs already reaped by a *targeted* `wait`
     /// (`wait PID` or `wait -n`), keyed by pid.
     ///
@@ -1538,6 +1548,8 @@ impl Shell {
             pending_builtin_exit: None,
             exit_requested: false,
             jobs: Vec::new(),
+            current_job: None,
+            previous_job: None,
             reaped_status: HashMap::new(),
             umask_val: 0o022,
             cmd_hash: std::collections::HashMap::new(),
@@ -4304,6 +4316,8 @@ impl Shell {
             // same reason, its memory of already-reaped jobs: those were the
             // parent's children, not the subshell's.
             jobs: Vec::new(),
+            current_job: None,
+            previous_job: None,
             reaped_status: HashMap::new(),
             // The umask is a process attribute, inherited by subshells.
             umask_val: self.umask_val,
@@ -7562,6 +7576,7 @@ impl Shell {
                 status,
                 no_hup: false,
             });
+            self.note_new_job(id);
             self.last_bg_pid = Some(pid);
             self.last_status = 0;
             return;
@@ -7614,6 +7629,7 @@ impl Shell {
             status: None,
             no_hup: false,
         });
+        self.note_new_job(id);
         self.last_bg_pid = Some(pid);
         self.last_status = 0;
     }
@@ -11783,22 +11799,105 @@ impl Shell {
         }
     }
 
-    /// `jobs [-l] [-p]` — list background jobs. `-l` adds the pid column; `-p`
-    /// prints pids only. Finished jobs are reported once and then removed from
-    /// the table (matching bash's notify-and-forget behavior).
+    /// Make the just-created job `id` the current one (`%+`), the way bash's
+    /// `set_current_job` does.
+    ///
+    /// The job that *was* current becomes previous (`%-`) only if it is still
+    /// running; otherwise bash looks for the newest older job that is
+    /// (`job_last_running`), and failing that points previous at the new job
+    /// too — which is why only one marker shows. The distinction is observable
+    /// long after the fact: `sleep 0.1 & sleep 5 & wait` leaves the finished
+    /// first job marked `-`, because it was running when the second started,
+    /// whereas `true & sleep 1; false &` leaves it unmarked.
+    fn note_new_job(&mut self, id: usize) {
+        // bash learns of an exit asynchronously, so by the time it forks the
+        // next job an already-finished predecessor is known to be dead. Poll so
+        // the `still running?` test below sees the same thing.
+        self.poll_jobs();
+        if self.current_job != Some(id) {
+            self.previous_job = self.current_job;
+            self.current_job = Some(id);
+        }
+        self.previous_job = self.newest_running_before(Some(id)).or(Some(id));
+    }
+
+    /// The id of the newest job still running, optionally restricted to jobs
+    /// older than `before`. bash's `job_last_running`.
+    fn newest_running_before(&self, before: Option<usize>) -> Option<usize> {
+        self.jobs
+            .iter()
+            .filter(|j| j.status.is_none() && before.is_none_or(|b| j.id < b))
+            .map(|j| j.id)
+            .max()
+    }
+
+    /// Repair the `+`/`-` markers after jobs have left the table, the way
+    /// bash's `reset_current`/`reset_previous` do.
+    ///
+    /// A removed current job is replaced by the newest job still running; when
+    /// nothing is running at all bash gives up on both markers rather than
+    /// pointing them at a finished job, so a listing whose jobs have all been
+    /// reaped and re-listed shows no marker at all. A removed previous job is
+    /// replaced by the newest running job older than the current one, falling
+    /// back to the current job itself.
+    fn reset_job_markers(&mut self) {
+        // "Still running" has to mean what bash means by it: bash reaps
+        // asynchronously, so a job that has exited is already known to be dead
+        // when it picks a replacement marker.
+        self.poll_jobs();
+        let present = |id: usize, jobs: &[Job]| jobs.iter().any(|j| j.id == id);
+        if self.current_job.is_some_and(|c| !present(c, &self.jobs)) {
+            self.current_job = self.newest_running_before(None);
+        }
+        let Some(cur) = self.current_job else {
+            self.previous_job = None;
+            return;
+        };
+        if self.previous_job.is_none_or(|p| !present(p, &self.jobs)) {
+            self.previous_job = self.newest_running_before(Some(cur)).or(Some(cur));
+        }
+    }
+
+    /// The `+` (current job), `-` (previous job) or ` ` marker `jobs` prints
+    /// right after a job's `[N]`.
+    fn job_marker(&self, id: usize) -> char {
+        if self.current_job == Some(id) {
+            '+'
+        } else if self.previous_job == Some(id) {
+            '-'
+        } else {
+            ' '
+        }
+    }
+
+    /// `jobs [-lnprs] [jobspec ...]` — list background jobs. `-l` adds the pid
+    /// column, `-p` prints pids only, `-r`/`-s` restrict the listing to running
+    /// / stopped jobs. Finished jobs are forgotten once they have been reported,
+    /// matching bash's notify-and-forget behavior — but only the ones actually
+    /// listed, so a `jobs -r` that filtered a finished job out leaves it to be
+    /// reported by the next `jobs`.
     fn builtin_jobs(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         self.poll_jobs();
         let mut long = false;
         let mut pids_only = false;
-        for a in args {
+        let mut running_only = false;
+        let mut stopped_only = false;
+        let mut specs: Vec<String> = Vec::new();
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
             if a == "--" {
+                specs.extend_from_slice(&args[i + 1..]);
                 break;
             }
             let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) else {
-                continue; // jobspec operand (not yet filtered)
+                // First non-option word: the rest are jobspecs.
+                specs.extend_from_slice(&args[i..]);
+                break;
             };
-            // Valid jobs options are -lnprsx; -l/-p change output, the rest
-            // (filters / -x command) are accepted but not yet honored here.
+            i += 1;
+            // Valid jobs options are -lnprsx; `-n` (changed-status-only) and
+            // `-x` (command substitution of jobspecs) are accepted but not yet
+            // honored here.
             if let Some(c) = flags.chars().find(|c| !matches!(c, 'l' | 'n' | 'p' | 'r' | 's' | 'x')) {
                 return self.builtin_invalid_option(
                     "jobs",
@@ -11810,28 +11909,71 @@ impl Shell {
                 match c {
                     'l' => long = true,
                     'p' => pids_only = true,
+                    'r' => running_only = true,
+                    's' => stopped_only = true,
                     _ => {}
                 }
             }
         }
+        // With no jobspec every job is listed, in table order; with jobspecs
+        // only the named ones are, and an unresolvable one is a diagnostic plus
+        // a failing status rather than a silent omission.
+        let mut status = 0;
+        let ids: Vec<usize> = if specs.is_empty() {
+            self.jobs.iter().map(|j| j.id).collect()
+        } else {
+            let mut ids = Vec::new();
+            for spec in &specs {
+                match self.resolve_job_spec(spec) {
+                    Some(idx) => ids.push(self.jobs[idx].id),
+                    None => {
+                        self.emit_stderr(
+                            format!("{}jobs: {spec}: no such job\n", self.err_prefix()).as_bytes(),
+                        );
+                        status = 1;
+                    }
+                }
+            }
+            ids
+        };
         let mut buf = String::new();
+        let mut reported: Vec<usize> = Vec::new();
         for job in &self.jobs {
+            if !ids.contains(&job.id) {
+                continue;
+            }
+            let running = job.status.is_none();
+            // osh has no stopped jobs (no terminal job control — TD-OILS13), so
+            // `-s` selects nothing.
+            if stopped_only || (running_only && !running) {
+                continue;
+            }
+            reported.push(job.id);
             if pids_only {
                 buf.push_str(&job.pid.to_string());
                 buf.push('\n');
                 continue;
             }
-            let state = if job.status.is_some() { "Done" } else { "Running" };
+            let state = if running { "Running" } else { "Done" };
+            let marker = self.job_marker(job.id);
+            // bash prints a still-running job's command the way it was written,
+            // `&` and all; a finished one loses the `&` because there is no
+            // longer anything running in the background to denote.
+            let amp = if running { " &" } else { "" };
             if long {
-                buf.push_str(&format!("[{}]  {} {:<24}{}\n", job.id, job.pid, state, job.cmd));
+                buf.push_str(&format!(
+                    "[{}]{} {} {:<24}{}{}\n",
+                    job.id, marker, job.pid, state, job.cmd, amp
+                ));
             } else {
-                buf.push_str(&format!("[{}]  {:<24}{}\n", job.id, state, job.cmd));
+                buf.push_str(&format!("[{}]{}  {:<24}{}{}\n", job.id, marker, state, job.cmd, amp));
             }
         }
-        let status = self.write_bytes(out, redir, buf.as_bytes());
-        // Drop the jobs we just reported as Done.
-        self.jobs.retain(|j| j.status.is_none());
-        status
+        let wstatus = self.write_bytes(out, redir, buf.as_bytes());
+        // Drop the finished jobs this listing reported.
+        self.jobs.retain(|j| j.status.is_none() || !reported.contains(&j.id));
+        self.reset_job_markers();
+        if status == 0 { wstatus } else { status }
     }
 
     /// `wait [id|pid|%job ...]` — wait for background jobs to finish. With no
@@ -11842,7 +11984,14 @@ impl Shell {
     /// an index into `self.jobs`.
     fn resolve_job_spec(&self, spec: &str) -> Option<usize> {
         if let Some(rest) = spec.strip_prefix('%') {
-            rest.parse::<usize>().ok().and_then(|n| self.jobs.iter().position(|j| j.id == n))
+            // `%+` and `%%` name the current job, `%-` the previous one — the
+            // same two jobs `jobs` marks `+` and `-`.
+            let id = match rest {
+                "+" | "%" => self.current_job?,
+                "-" => self.previous_job?,
+                _ => rest.parse::<usize>().ok()?,
+            };
+            self.jobs.iter().position(|j| j.id == id)
         } else if let Ok(n) = spec.parse::<u32>() {
             self.jobs
                 .iter()
@@ -11869,6 +12018,7 @@ impl Shell {
             }
         }
         self.jobs.clear();
+        self.reset_job_markers();
     }
 
     fn builtin_wait(&mut self, args: &[String]) -> i32 {
@@ -11992,6 +12142,7 @@ impl Shell {
                 last = job.status.unwrap_or(0);
             }
             self.jobs.remove(idx);
+            self.reset_job_markers();
             self.reaped_status.insert(pid, last);
             if let Some(var) = &pid_var {
                 self.vars.insert(var.clone(), pid.to_string());
@@ -12080,6 +12231,7 @@ impl Shell {
                 if let Some(status) = done {
                     let pid = job.pid;
                     self.jobs.remove(idx);
+                    self.reset_job_markers();
                     // `wait -n` reaps just like a targeted `wait PID`, so the
                     // status stays answerable for a later `wait PID`.
                     self.reaped_status.insert(pid, status);
@@ -12181,6 +12333,7 @@ impl Shell {
             }
         } else {
             self.jobs.retain(|j| !target_ids.contains(&j.id));
+            self.reset_job_markers();
         }
         0
     }
@@ -12242,6 +12395,7 @@ impl Shell {
             job.status.unwrap_or(0)
         };
         self.jobs.remove(idx);
+        self.reset_job_markers();
         status
     }
 
@@ -31262,6 +31416,95 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.run_source("VAR=stale");
         assert_eq!(sh.run_source("wait -n -p VAR 2>/dev/null"), 127);
         assert!(!sh.vars.contains_key("VAR"), "`wait -n` with no jobs leaves -p VAR unset");
+    }
+
+    /// Run `src` and return what it wrote to stdout — for the `jobs` tests,
+    /// which need several listings from one shell whose job table persists.
+    #[cfg(test)]
+    fn listing(sh: &mut Shell, src: &str) -> String {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut out = Out::Capture(Arc::clone(&buf));
+        sh.run_source_out(src, &mut out, 0);
+        let b = buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        String::from_utf8_lossy(&b).into_owned()
+    }
+
+    #[test]
+    fn jobs_marks_the_current_and_previous_job() {
+        // The `+`/`-` markers are decided when a job is *created* and survive
+        // its death, so they are not a function of what is still running: the
+        // newest job is `+`, and the newest job that was still running when it
+        // started is `-`.
+        let mut sh = Shell::new();
+        let settle = || std::thread::sleep(std::time::Duration::from_millis(700));
+
+        // Two jobs alive at once: the newer is `+`, the older `-`.
+        sh.run_source("sleep 0.4 & sleep 1 &");
+        assert_eq!(
+            listing(&mut sh, "jobs"),
+            "[1]-  Running                 sleep 0.4 &\n\
+             [2]+  Running                 sleep 1 &\n"
+        );
+        sh.run_source("wait");
+
+        // The older one keeps its `-` after finishing — and loses its `&`,
+        // because there is no longer anything running in the background.
+        sh.run_source("sleep 0.2 & sleep 1 &");
+        settle();
+        assert_eq!(
+            listing(&mut sh, "jobs"),
+            "[1]-  Done                    sleep 0.2\n\
+             [2]+  Running                 sleep 1 &\n"
+        );
+        sh.run_source("wait");
+
+        // A job that had *already* finished when the next one started never
+        // gets the `-` at all: with no older job running, previous falls back
+        // to current, and only one marker shows.
+        sh.run_source("sleep 0.2 &");
+        settle();
+        sh.run_source("sleep 1 &");
+        assert_eq!(
+            listing(&mut sh, "jobs"),
+            "[1]   Done                    sleep 0.2\n\
+             [2]+  Running                 sleep 1 &\n"
+        );
+        sh.run_source("wait");
+
+        // Only ever two markers, however many jobs there are.
+        sh.run_source("sleep 0.4 & sleep 1 & sleep 1 &");
+        assert_eq!(
+            listing(&mut sh, "jobs"),
+            "[1]   Running                 sleep 0.4 &\n\
+             [2]-  Running                 sleep 1 &\n\
+             [3]+  Running                 sleep 1 &\n"
+        );
+        sh.run_source("wait");
+    }
+
+    #[test]
+    fn jobs_reports_a_finished_job_once() {
+        // bash forgets a finished job after listing it — but only the ones the
+        // listing actually reported, so a `-r` that filtered it out leaves it
+        // for the next `jobs`, as does a jobspec that named someone else.
+        let mut sh = Shell::new();
+        sh.run_source("sleep 0.2 &");
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        assert_eq!(listing(&mut sh, "jobs -r"), "", "-r filters the finished job out");
+        assert_eq!(listing(&mut sh, "jobs -s"), "", "no stopped jobs in a script shell");
+        assert_eq!(listing(&mut sh, "jobs"), "[1]+  Done                    sleep 0.2\n");
+        assert_eq!(listing(&mut sh, "jobs"), "", "reported once, then forgotten");
+        // Numbering restarts at 1 once the table has drained, and `-l` inserts
+        // the pid between the marker and the state column.
+        sh.run_source("sleep 0.2 &");
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        let l = listing(&mut sh, "jobs -l");
+        let pid = sh.last_bg_pid.expect("bg pid");
+        assert_eq!(l, format!("[1]+ {pid} Done                    sleep 0.2\n"));
+        // An unresolvable jobspec is a diagnostic and a failing status.
+        let (o, s) = run("jobs %9 2>&1");
+        assert_eq!(o, "osh: jobs: %9: no such job\n");
+        assert_eq!(s, 1);
     }
 
     #[cfg(windows)]

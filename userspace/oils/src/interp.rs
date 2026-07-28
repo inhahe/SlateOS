@@ -11661,74 +11661,107 @@ impl Shell {
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) -> i32 {
+        // bash reads `kill`'s options as a *run* rather than looking only at the
+        // first word, and three things follow from that. `-l` may appear
+        // anywhere in the run, so `kill -9 -l` lists. The signal is taken from
+        // the first spec the run offers and every later `-…` is an operand, so
+        // `kill -TERM -9 1` signals process group 9. And nothing is judged
+        // here: a spec's validity only matters once there is a signal to
+        // deliver, which is why `kill -l -x 15` still answers `TERM`.
+        let mut signum: Option<u16> = Some(15);
+        let mut sigspec: Option<&str> = None;
+        let mut list_names = false;
         let mut i = 0;
-        // `-l` / `-L`: list or translate signal specs, then done.
-        if let Some(a) = args.first()
-            && (a == "-l" || a == "-L")
-        {
-            return self.kill_list(&args[1..], out, redir);
+        while let Some(word) = args.get(i) {
+            // How many words this option occupies, and the spec it supplies.
+            let (spec, width) = match word.as_str() {
+                "-l" | "-L" => {
+                    list_names = true;
+                    i += 1;
+                    continue;
+                }
+                "--" => {
+                    i += 1;
+                    break;
+                }
+                "-?" => {
+                    self.emit_stderr(KILL_USAGE);
+                    return 2;
+                }
+                "-s" | "-n" => match args.get(i + 1) {
+                    Some(a) => (a.as_str(), 2),
+                    None => {
+                        self.emit_stderr(
+                            format!(
+                                "{}kill: {word}: option requires an argument\n",
+                                self.err_prefix()
+                            )
+                            .as_bytes(),
+                        );
+                        return 1;
+                    }
+                },
+                // `-sTERM` and `-n9`, whose argument is written against the
+                // letter. bash tells those from a plain `-SPEC` by what follows
+                // the letter — a name for `-s`, a number for `-n` — so `-sn9`
+                // is the spec `n9` while `-s9x` is the spec `s9x`.
+                w if w.len() > 2
+                    && w.starts_with("-s")
+                    && w.as_bytes().get(2).is_some_and(u8::is_ascii_alphabetic) =>
+                {
+                    (&w[2..], 1)
+                }
+                w if w.len() > 2
+                    && w.starts_with("-n")
+                    && w.as_bytes().get(2).is_some_and(u8::is_ascii_digit) =>
+                {
+                    (&w[2..], 1)
+                }
+                // A plain `-SPEC`, but only while no signal has been named yet.
+                w if w.starts_with('-') && sigspec.is_none() => (&w[1..], 1),
+                _ => break,
+            };
+            sigspec = Some(spec);
+            // bash reads a lone `0` as the existence check without consulting
+            // the table at all.
+            signum = if spec == "0" { Some(0) } else { decode_signal(spec) };
+            i += width;
         }
 
-        // Parse an optional signal specifier. Default is TERM (15).
-        let mut signum: u8 = 15;
-        if let Some(a) = args.get(i) {
-            if a == "--" {
-                i += 1;
-            } else if a == "-s" || a == "-n" {
-                let Some(spec) = args.get(i + 1) else {
-                    self.emit_stderr(
-                        format!("{}kill: {a}: option requires an argument\n", self.err_prefix())
-                            .as_bytes(),
-                    );
-                    return 2;
-                };
-                match kill_parse_sig(spec, a == "-n") {
-                    Some(n) => signum = n,
-                    None => {
-                        self.emit_stderr(
-                            format!(
-                                "{}kill: {spec}: invalid signal specification\n",
-                                self.err_prefix()
-                            )
-                            .as_bytes(),
-                        );
-                        return 1;
-                    }
-                }
-                i += 2;
-            } else if let Some(spec) = a.strip_prefix('-')
-                && !spec.is_empty()
-                && a != "-"
-            {
-                // `-SIGSPEC` where SIGSPEC is a name (`-KILL`, `-SIGKILL`) or a
-                // number (`-9`). A leading '-' followed by a non-spec is a bad
-                // signal spec, not an operand.
-                match kill_parse_sig(spec, false) {
-                    Some(n) => signum = n,
-                    None => {
-                        self.emit_stderr(
-                            format!(
-                                "{}kill: {spec}: invalid signal specification\n",
-                                self.err_prefix()
-                            )
-                            .as_bytes(),
-                        );
-                        return 1;
-                    }
-                }
-                i += 1;
-            }
+        if list_names {
+            return self.kill_list(&args[i..], out, redir);
         }
+        // Only now, with a signal actually to be delivered, does a spec that
+        // named nothing matter — and it is the spec that is at fault, so it is
+        // reported once rather than once per target.
+        let Some(signum) = signum else {
+            let spec = sigspec.unwrap_or_default();
+            self.emit_stderr(
+                format!("{}kill: {spec}: invalid signal specification\n", self.err_prefix())
+                    .as_bytes(),
+            );
+            return 1;
+        };
 
         let targets = &args[i..];
         if targets.is_empty() {
             // bash's builtin *usage* messages carry no `bash: line N:` location
             // prefix (unlike its other builtin errors), so neither does ours.
-            self.emit_stderr(
-                b"kill: usage: kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]\n",
-            );
+            self.emit_stderr(KILL_USAGE);
             return 2;
         }
+
+        // A pseudo signal is a spec that named something, but nothing that can
+        // be sent. bash learns that only from the kernel refusing each delivery,
+        // so it reports the same spec once per target.
+        let Some(signum) = u8::try_from(signum).ok().filter(|n| u16::from(*n) < NSIG) else {
+            let spec = sigspec.unwrap_or_default();
+            let msg = format!("{}kill: {spec}: invalid signal specification\n", self.err_prefix());
+            for _ in targets {
+                self.emit_stderr(msg.as_bytes());
+            }
+            return 1;
+        };
 
         let mut status = 0;
         for t in targets {
@@ -11869,7 +11902,14 @@ impl Shell {
     }
 
     /// `kill -l [sigspec…]` — with no specs, print the columnar signal table;
-    /// otherwise translate each spec (number→name, name→number).
+    /// otherwise answer each spec with its counterpart, a number for a name and
+    /// a name for a number.
+    ///
+    /// The translation is not [`decode_signal`] run backwards and forwards: a
+    /// number here may also be the *exit status* a signal produces, so
+    /// `kill -l $?` names what killed the last command. A name, on the other
+    /// hand, is looked up in the whole table, pseudo signals included — which
+    /// is the one place their numbers can be seen.
     fn kill_list(&mut self, specs: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         if specs.is_empty() {
             let buf = signal_list_columns();
@@ -11878,30 +11918,29 @@ impl Shell {
         let mut buf = String::new();
         let mut status = 0;
         for spec in specs {
-            if let Ok(n) = spec.parse::<u16>() {
-                // A number → its name. bash decodes exit-status form (128+sig).
-                let sig = if n > 128 { n - 128 } else { n };
-                match SIGNALS.iter().find(|(num, _)| u16::from(*num) == sig) {
-                    Some((_, name)) => buf.push_str(&format!("{name}\n")),
-                    None => {
-                        self.emit_stderr(
-                            format!(
-                                "{}kill: {spec}: invalid signal specification\n",
-                                self.err_prefix()
-                            )
-                            .as_bytes(),
-                        );
-                        status = 1;
-                    }
-                }
-            } else if let Some(num) = kill_parse_sig(spec, false) {
-                buf.push_str(&format!("{num}\n"));
+            let answer = if let Some(n) = legal_number(spec) {
+                let n = if n > 128 && n < 128 + i64::from(NSIG) { n - 128 } else { n };
+                u16::try_from(n).ok().filter(|n| *n < NSIG).and_then(signal_spec_name)
             } else {
-                self.emit_stderr(
-                    format!("{}kill: {spec}: invalid signal specification\n", self.err_prefix())
+                decode_signal(spec).map(|n| n.to_string())
+            };
+            match answer {
+                Some(text) => {
+                    buf.push_str(&text);
+                    buf.push('\n');
+                }
+                None => {
+                    // bash quotes the word it was given, not the number it read
+                    // out of it, so surrounding blanks survive into the message.
+                    self.emit_stderr(
+                        format!(
+                            "{}kill: {spec}: invalid signal specification\n",
+                            self.err_prefix()
+                        )
                         .as_bytes(),
-                );
-                status = 1;
+                    );
+                    status = 1;
+                }
             }
         }
         let w = self.write_bytes(out, redir, buf.as_bytes());
@@ -19690,64 +19729,83 @@ fn select_menu(items: &[String], cols_avail: usize) -> String {
     buf
 }
 
-/// Parse a `kill` signal spec to its number. Accepts a signal name with or
-/// without a `SIG` prefix (case-insensitive: `KILL`, `sigkill`) and, unless
-/// `numeric_only` restricts to `-n`, a decimal signal number. Signal `0` (the
-/// existence-check pseudo-signal) is valid. Returns `None` for anything else.
-fn kill_parse_sig(spec: &str, numeric_only: bool) -> Option<u8> {
-    if let Ok(n) = spec.parse::<u8>() {
-        if n == 0 || SIGNALS.iter().any(|(num, _)| *num == n) {
-            return Some(n);
-        }
-        return None;
-    }
-    if numeric_only {
-        return None;
-    }
-    let upper = spec.to_ascii_uppercase();
-    let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
-    SIGNALS.iter().find(|(_, name)| *name == bare).map(|(num, _)| *num)
+/// `kill`'s usage line. Like bash's other builtin *usage* messages — and unlike
+/// its builtin *errors* — it carries no `bash: line N:` location prefix.
+const KILL_USAGE: &[u8] =
+    b"kill: usage: kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l [sigspec]\n";
+
+/// bash's `NSIG`: one past the last real signal, which is where [`SIGNALS`]
+/// stops. A *numeric* signal spec is bounded by it, and the pseudo signals are
+/// filed in the slots immediately above it.
+const NSIG: u16 = 32;
+
+/// The pseudo signals that are not `EXIT`, in the slots bash gives them above
+/// [`NSIG`]. `EXIT` needs no entry: it is signal number zero.
+const PSEUDO_SIGNALS: &[(u16, &str)] =
+    &[(NSIG, "DEBUG"), (NSIG + 1, "ERR"), (NSIG + 2, "RETURN")];
+
+/// bash's `legal_number`: the integer a word denotes, or `None` when the word
+/// is not wholly a number.
+///
+/// `strtol` skips leading blanks and bash skips trailing ones before insisting
+/// the word is used up, so ` 15 ` is the number fifteen — which is why
+/// `kill -l " 15"` answers `TERM` where `kill -l " TERM"`, having no number to
+/// read, does not answer at all.
+fn legal_number(word: &str) -> Option<i64> {
+    word.trim_matches(|c: char| c.is_ascii_whitespace()).parse::<i64>().ok()
 }
 
-/// Normalize a `trap` signal spec to a canonical name (`EXIT`, `ERR`, `INT`, …).
-/// Accepts case-insensitive names with or without a `SIG` prefix, the pseudo
-/// signals `EXIT`/`ERR`/`DEBUG`/`RETURN`, and signal numbers (`0` = `EXIT`).
-/// Returns `None` for an unrecognized spec.
-fn normalize_sigspec(spec: &str) -> Option<String> {
-    if let Ok(n) = spec.parse::<u8>() {
-        if n == 0 {
-            return Some("EXIT".to_string());
-        }
-        return SIGNALS
-            .iter()
-            .find(|(num, _)| *num == n)
-            .map(|(_, name)| (*name).to_string());
+/// bash's `decode_signal`: the number a signal spec names, or `None`.
+///
+/// `trap` and `kill` share this, because bash keeps a single `signal_names`
+/// table covering the real signals *and* the pseudo ones. Two things follow
+/// from that table being flat rather than "the signals, with pseudo-signals
+/// bolted on". The pseudo names have numbers of their own above the last real
+/// signal, so `kill -l DEBUG` answers with one. And only a real signal's entry
+/// is spelled with the prefix, so `SIG` may be dropped from `SIGTERM` but never
+/// added to `EXIT`. Case is not significant either way.
+fn decode_signal(spec: &str) -> Option<u16> {
+    if let Some(n) = legal_number(spec) {
+        // A number names a slot in the table directly, and the table's real
+        // entries stop at NSIG — so no number reaches the pseudo signals.
+        return u16::try_from(n).ok().filter(|n| *n < NSIG);
     }
     let upper = spec.to_ascii_uppercase();
-    let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
-    if matches!(bare, "EXIT" | "ERR" | "DEBUG" | "RETURN") {
-        return Some(bare.to_string());
+    if upper == "EXIT" {
+        return Some(0);
     }
-    SIGNALS
-        .iter()
-        .find(|(_, name)| *name == bare)
-        .map(|(_, name)| (*name).to_string())
+    if let Some((num, _)) = PSEUDO_SIGNALS.iter().find(|(_, name)| *name == upper) {
+        return Some(*num);
+    }
+    let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
+    SIGNALS.iter().find(|(_, name)| *name == bare).map(|(num, _)| u16::from(*num))
+}
+
+/// The canonical spec name for a number [`decode_signal`] returned: `EXIT` for
+/// zero, the bare signal name for a real signal, and the pseudo signal's own
+/// name above [`NSIG`].
+fn signal_spec_name(num: u16) -> Option<String> {
+    if num == 0 {
+        return Some("EXIT".to_string());
+    }
+    if let Some((_, name)) = PSEUDO_SIGNALS.iter().find(|(n, _)| *n == num) {
+        return Some((*name).to_string());
+    }
+    u8::try_from(num).ok().and_then(signal_name).map(str::to_string)
+}
+
+/// Normalize a `trap` signal spec to a canonical name (`EXIT`, `ERR`, `INT`, …),
+/// or `None` for an unrecognized spec.
+fn normalize_sigspec(spec: &str) -> Option<String> {
+    signal_spec_name(decode_signal(spec)?)
 }
 
 /// Sort key placing `EXIT` first, then real signals by number, then the other
 /// pseudo signals in bash's order (`DEBUG`, `ERR`, `RETURN`) — used to order
-/// `trap -p` output deterministically.
+/// `trap -p` output deterministically. That is simply the order of bash's own
+/// table, so the spec's number is the key.
 fn sigspec_order(spec: &str) -> u16 {
-    match spec {
-        "EXIT" => 0,
-        "DEBUG" => 200,
-        "ERR" => 201,
-        "RETURN" => 202,
-        _ => SIGNALS
-            .iter()
-            .find(|(_, name)| *name == spec)
-            .map_or(255, |(num, _)| u16::from(*num)),
-    }
+    decode_signal(spec).unwrap_or(255)
 }
 
 /// Render a normalized trap spec as bash's `trap -p` display name: real signals
@@ -29777,6 +29835,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("kill -l 99 2>&1");
         assert!(o.contains("kill: 99: invalid signal specification"), "got {o:?}");
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn nsig_is_one_past_the_last_real_signal() {
+        // `NSIG` is what bounds a *numeric* signal spec and where the pseudo
+        // signals are filed, so it has to stay in step with the table it bounds:
+        // if a signal is ever appended to `SIGNALS`, `NSIG` must move with it or
+        // `kill -l` would refuse the new signal's number and `DEBUG` would
+        // collide with it.
+        let last = SIGNALS.last().expect("the signal table is not empty").0;
+        assert_eq!(u16::from(last) + 1, NSIG);
+        // …and the pseudo signals sit directly above, in bash's order.
+        assert_eq!(PSEUDO_SIGNALS.first().map(|(n, _)| *n), Some(NSIG));
+        for (i, (num, _)) in PSEUDO_SIGNALS.iter().enumerate() {
+            assert_eq!(*num, NSIG + u16::try_from(i).expect("three entries fit"));
+            // A number can never name one of them, however it is spelled.
+            assert_eq!(decode_signal(&num.to_string()), None);
+        }
     }
 
     #[test]

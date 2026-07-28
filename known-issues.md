@@ -14,6 +14,59 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-OILS-EVAL-DISCARD-SCOPE. A `Flow::Discard` raised inside `eval` aborts only the current *line* of the eval'd string, where bash unwinds the whole `eval` and the rest of the caller's list — 2026-07-27 — OPEN
+
+**Symptom.** Two of bash's `jump_to_top_level(DISCARD)` sites unwind to
+different depths, and osh models both with a single `Flow::Discard` that
+the top-level item loop (`exec_program_top`) catches one *line* at a
+time. Measured against bash 5.2:
+
+```sh
+# (a) word-expansion error — both shells agree
+$ bash -c 'eval "echo a; echo \$((1/0)); echo b
+echo c"; echo done=$?'
+a
+bash: line 2: 1/0: division by 0 (error token is "0")
+c
+done=0
+# osh: identical.
+
+# (b) special-builtin usage error — they diverge
+$ bash -c 'eval "for i in 1; do break 1 2; done
+echo next"; echo done=$?'
+bash: line 2: break: too many arguments        # eval AND `echo done` both discarded
+$ osh -c 'eval "for i in 1; do break 1 2; done
+echo next"; echo done=$?'
+osh: line 2: break: too many arguments
+next                                            # eval continued …
+done=0                                          # … and so did the caller
+```
+
+In bash the difference comes from `no_args()` calling
+`top_level_cleanup()` before `jump_to_top_level(DISCARD)`, which unwinds
+past `parse_and_execute`'s handler, whereas an expansion error is caught
+by it. osh has no equivalent distinction.
+
+**Where.** `userspace/oils/src/interp.rs` — the `Flow::Discard` variant
+(~line 509) and its only resumption point, `exec_program_top`. The
+too-many-arguments site is `loop_count_arg`.
+
+**Impact.** Very narrow: it needs a special-builtin *usage* error
+(`break`/`continue` with two operands is the only one osh currently
+raises this way) inside a multi-line `eval`/`source`. Nothing in the
+corpus depends on it; `tests/corpus/break-continue-args.sh` deliberately
+tests the discard scope at the script's own top level, where the shells
+agree, and says so in a comment.
+
+**Proper fix.** Split `Flow::Discard` into two variants — one caught by
+the nearest read-eval loop (`eval`, `.`/`source`, the top-level item
+loop) and one that unwinds past `eval`/`source` to the *outermost*
+read-eval loop — and audit every raise site against bash to decide which
+it is. Worth doing together with a survey of bash's other
+`top_level_cleanup()` callers (`no_args`, `sh_needarg` in special
+builtins, `assignment_error` under POSIX mode) so the classification is
+made once rather than one site at a time.
+
 ### BUG-OILS-SUBSHELL-SHARES-PROCESS-CWD. `cd` inside a subshell escapes it, because osh emulates subshells in-process and the working directory is process-global — 2026-07-27 — ✅ RESOLVED 2026-07-27
 
 **Symptom.** bash runs every subshell in a forked process, so a directory

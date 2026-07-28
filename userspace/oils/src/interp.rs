@@ -2803,6 +2803,57 @@ impl Shell {
         n.max(1).min(depth.max(1))
     }
 
+    /// Parse the loop-count operand shared by `break` and `continue`, which bash
+    /// reads with `get_numeric_arg`. All three failure modes differ, and all
+    /// three are observable:
+    ///
+    /// * **not a number** (`break abc`, `break 2abc`, `break ""`, `break 0x10`,
+    ///   an overflowing literal): the message, then the *shell exits*. bash
+    ///   reaches this through `throw_to_top_level`, which ORs 128 into the last
+    ///   status — so `(exit 3); … break abc` leaves 131, and a status that
+    ///   already has the 128 bit keeps its value. The EXIT trap still runs.
+    /// * **a second operand** (`break 1 2`): "too many arguments", status 1, and
+    ///   the current top-level parse unit is discarded (the *next* one still
+    ///   runs). bash checks this *before* the range check, so `break 0 2`
+    ///   reports too-many-arguments rather than the range error.
+    /// * **zero or negative** (`break 0`, `break -1`): "loop count out of
+    ///   range", status 1, and `breaking` is set to the full loop level — so
+    ///   every enclosing loop is left, for `continue` just as much as `break`.
+    ///
+    /// A leading `--` ends option parsing (`break -- 2` breaks two levels, and a
+    /// lone `break --` defaults to one). The number itself may carry a sign and
+    /// surrounding whitespace, because bash's `legal_number` skips both.
+    fn loop_count_arg(&mut self, name: &str, args: &[String]) -> Result<u32, (Flow, i32)> {
+        let rest = match args.split_first() {
+            Some((first, rest)) if first == "--" => rest,
+            _ => args,
+        };
+        let Some(s) = rest.first() else {
+            return Ok(1);
+        };
+        let Ok(n) = s.trim_matches(|c: char| c.is_ascii_whitespace()).parse::<i64>() else {
+            self.errln(&format!(
+                "{}{name}: {s}: numeric argument required",
+                self.err_prefix()
+            ));
+            let code = self.last_status | 128;
+            return Err((Flow::Exit(code), code));
+        };
+        if rest.len() > 1 {
+            self.errln(&format!("{}{name}: too many arguments", self.err_prefix()));
+            return Err((Flow::Discard, 1));
+        }
+        if n <= 0 {
+            self.errln(&format!(
+                "{}{name}: {s}: loop count out of range",
+                self.err_prefix()
+            ));
+            return Err((Flow::Break(self.loop_depth.max(1)), 1));
+        }
+        let n = u32::try_from(n).unwrap_or(u32::MAX);
+        Ok(Self::clamp_loop_level(n, self.loop_depth))
+    }
+
     /// Run `f` with the loop-nesting counter bumped, so `break`/`continue`
     /// executed anywhere inside `f` see a non-zero `loop_depth` and are treated
     /// as meaningful. The counter is always restored, including on early return.
@@ -2835,6 +2886,11 @@ impl Shell {
                     if n > 1 {
                         return Flow::Break(n - 1);
                     }
+                    // `break` is the last command executed in this iteration, so
+                    // *its* status is the loop's: bash does not let the previous
+                    // iteration's status leak out. `for i in 1 2; do (exit 5);
+                    // [ $i = 2 ] && break; done` is 0, not 5.
+                    body_status = self.last_status;
                     break;
                 }
                 Flow::Continue(n) => {
@@ -2897,6 +2953,8 @@ impl Shell {
                     if n > 1 {
                         return Flow::Break(n - 1);
                     }
+                    // `break`'s own status is the loop's — see `exec_loop`.
+                    body_status = self.last_status;
                     break;
                 }
                 Flow::Continue(n) => {
@@ -2948,7 +3006,6 @@ impl Shell {
         }
         let ps3 = self.vars.get("PS3").cloned().unwrap_or_else(|| "#? ".to_string());
         let redir = RedirPlan::default();
-        let mut body_status = 0;
         let mut show_menu = true;
         loop {
             if show_menu {
@@ -2996,6 +3053,10 @@ impl Shell {
                     if n > 1 {
                         return Flow::Break(n - 1);
                     }
+                    // `break` is the only way out of a `select` other than EOF
+                    // (which returns above with status 1), and it is the last
+                    // command executed — so the status it left standing is the
+                    // loop's, with no per-iteration bookkeeping needed.
                     break;
                 }
                 Flow::Continue(n) => {
@@ -3005,9 +3066,7 @@ impl Shell {
                 }
                 other => return other,
             }
-            body_status = self.last_status;
         }
-        self.last_status = body_status;
         Flow::Next
     }
 
@@ -10254,28 +10313,30 @@ impl Shell {
                     code
                 }
             }
-            "break" => {
-                // Outside any loop, `break` is a no-op: bash warns to stderr,
+            "break" | "continue" => {
+                // Outside any loop both are no-ops: bash warns to stderr,
                 // returns status 0, and continues executing the next command
-                // rather than unwinding.
+                // rather than unwinding. The operand is not even looked at —
+                // `break abc` outside a loop is only the warning.
                 if self.loop_depth == 0 {
-                    self.errln(&format!("{}break: only meaningful in a `for', `while', or `until' loop", self.err_prefix()));
+                    self.errln(&format!("{}{name}: only meaningful in a `for', `while', or `until' loop", self.err_prefix()));
+                    0
                 } else {
-                    let n = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-                    flow = Flow::Break(Self::clamp_loop_level(n, self.loop_depth));
+                    match self.loop_count_arg(name, args) {
+                        Ok(n) => {
+                            flow = if name == "break" {
+                                Flow::Break(n)
+                            } else {
+                                Flow::Continue(n)
+                            };
+                            0
+                        }
+                        Err((f, code)) => {
+                            flow = f;
+                            code
+                        }
+                    }
                 }
-                0
-            }
-            "continue" => {
-                if self.loop_depth == 0 {
-                    self.errln(
-                        &format!("{}continue: only meaningful in a `for', `while', or `until' loop", self.err_prefix()),
-                    );
-                } else {
-                    let n = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-                    flow = Flow::Continue(Self::clamp_loop_level(n, self.loop_depth));
-                }
-                0
             }
             _ => {
                 self.errln(&format!("{}{name}: not a builtin", self.err_prefix()));
@@ -28763,6 +28824,81 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "f() { break 9; echo in-fn; }; for a in 1 2; do echo \"iter$a\"; f; done 2>/dev/null",
         );
         assert_eq!(o3, "iter1\nin-fn\niter2\nin-fn\n");
+    }
+
+    #[test]
+    fn loop_status_is_breaks_own_not_the_previous_iterations() {
+        // `break` is the last command executed in its iteration, so its status
+        // (0) is the loop's. Before the fix the loop restored the status saved
+        // at the *end of the previous iteration*, so a failure two iterations
+        // back leaked out. (bash: all of these are 0.)
+        assert_eq!(run("for i in 1 2 3; do (exit 4); [ $i = 3 ] && break; done; echo $?").0, "0\n");
+        assert_eq!(run("for i in 1 2; do (exit 5); break; done; echo $?").0, "0\n");
+        assert_eq!(run("for i in 1 2; do break; (exit 5); done; echo $?").0, "0\n");
+        assert_eq!(
+            run("i=0; while [ $i -lt 3 ]; do i=$((i+1)); (exit 6); [ $i = 2 ] && break; done; echo $?").0,
+            "0\n"
+        );
+        // `continue` already fell through to the per-iteration bookkeeping, and
+        // an inner `break N` must not leak either.
+        assert_eq!(run("for i in 1 2; do (exit 7); continue; done; echo $?").0, "0\n");
+        assert_eq!(
+            run("for a in 1 2; do for b in x y; do (exit 8); break 2; done; done; echo $?").0,
+            "0\n"
+        );
+        // A loop that ends normally still reports its last body command.
+        assert_eq!(run("for i in 1 2; do (exit 5); done; echo $?").0, "5\n");
+    }
+
+    #[test]
+    fn break_continue_reject_a_bad_loop_count() {
+        // A count that is not a number is fatal: bash's `get_numeric_arg` calls
+        // `throw_to_top_level`, which ORs 128 into `$?` and exits the shell.
+        let (o, s) = run("{ for i in 1 2; do break abc; done; echo NOT-REACHED; } 2>&1");
+        assert_eq!(o, "osh: break: abc: numeric argument required\n");
+        assert_eq!(s, 128);
+        // The OR keeps a status that already carries the 128 bit …
+        assert_eq!(run("(exit 130); for i in 1; do break xyz; done 2>/dev/null").1, 130);
+        // … and adds to one that does not.
+        assert_eq!(run("(exit 3); for i in 1; do continue 2abc; done 2>/dev/null").1, 131);
+        // Hex and overflowing literals are not numbers to bash either.
+        assert_eq!(run("for i in 1; do break 0x10; done 2>/dev/null").1, 128);
+        assert_eq!(run("for i in 1; do break 99999999999999999999999; done 2>/dev/null").1, 128);
+        // A second operand is "too many arguments" — status 1, the rest of the
+        // current top-level unit discarded — and it is diagnosed *before* the
+        // range check, so `break 0 2` reports this rather than the range error.
+        let (o2, s2) = run("{ for i in 1 2; do break 0 2; done; echo NOT-REACHED; } 2>&1");
+        assert_eq!(o2, "osh: break: too many arguments\n");
+        assert_eq!(s2, 1);
+        // Only the *current* unit is discarded: the next line still runs.
+        let (o3, _) = run("for i in 1 2; do continue 1 2; done 2>/dev/null\necho next=$?");
+        assert_eq!(o3, "next=1\n");
+        // Zero or negative leaves *every* enclosing loop, `continue` included,
+        // with status 1 — bash sets `breaking` to the full loop level.
+        let (o4, _) = run(
+            "{ for a in 1 2; do for b in x y; do break 0; done; echo inner=$?; done; } 2>&1; echo outer=$?",
+        );
+        assert_eq!(o4, "osh: break: 0: loop count out of range\nouter=1\n");
+        let (o5, _) = run(
+            "{ for a in 1 2; do for b in x y; do continue -1; done; echo inner=$?; done; } 2>&1; echo outer=$?",
+        );
+        assert_eq!(o5, "osh: continue: -1: loop count out of range\nouter=1\n");
+        // `--` ends option processing; the count may carry a sign and padding.
+        assert_eq!(
+            run("for a in 1 2; do for b in x y; do break -- 2; done; echo inner=$?; done; echo $?").0,
+            "0\n"
+        );
+        assert_eq!(run("for i in 1 2; do break --; echo no; done; echo $?").0, "0\n");
+        assert_eq!(
+            run("for a in 1 2; do for b in x y; do break \" +2 \"; done; echo inner=$?; done; echo $?").0,
+            "0\n"
+        );
+        // Outside a loop the operand is not looked at at all.
+        let (o6, _) = run("{ break abc; } 2>&1; echo s=$?");
+        assert_eq!(
+            o6,
+            "osh: break: only meaningful in a `for', `while', or `until' loop\ns=0\n"
+        );
     }
 
     #[test]

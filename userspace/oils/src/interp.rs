@@ -16689,6 +16689,22 @@ impl Shell {
     /// (for bundled flags like `-abc`). Sets `name` to the option character,
     /// `OPTARG` to any option-argument. Returns 0 while options remain, 1 at
     /// the end of the option list.
+    /// Bind `getopts`' name operand to the value this call worked out.
+    ///
+    /// It is an ordinary scalar assignment, so it follows a nameref, obeys the
+    /// name's `-i`/`-u`/`-l`/`-c` attributes, lands on element 0 of an existing
+    /// array, and can be *refused* by the readonly attribute. Every exit from
+    /// `getopts` binds — including the ones that report "no more options", which
+    /// bind `?` — so a caller reading the variable never sees the previous
+    /// call's answer.
+    ///
+    /// Returns whether the write went through. A refusal costs the *option*
+    /// results their status (bash reports 2 rather than 0), but leaves the
+    /// out-of-options status at 1: there the 1 is the answer, not the write.
+    fn getopts_bind(&mut self, name: &str, value: &str) -> bool {
+        self.set_scalar_checked(name, value.to_string())
+    }
+
     fn builtin_getopts(&mut self, args: &[String]) -> i32 {
         // getopts has no options of its own, so bash's internal_getopt rejects
         // any leading `-X` (letter) as an invalid option; `--` ends option
@@ -16752,14 +16768,16 @@ impl Shell {
                 self.getopts_col = 0;
                 self.getopts_optind = optind;
                 self.vars.insert("OPTIND".to_string(), optind.to_string());
+                self.getopts_bind(&name, "?");
                 return 1;
             }
-            let arg = &pos[optind - 1];
+            let arg = &pos[optind - 1].clone();
             if self.getopts_col == 0 {
                 // Start of a fresh argument.
                 if !arg.starts_with('-') || arg == "-" {
                     self.getopts_optind = optind;
                     self.vars.insert("OPTIND".to_string(), optind.to_string());
+                    self.getopts_bind(&name, "?");
                     return 1;
                 }
                 if arg == "--" {
@@ -16767,6 +16785,7 @@ impl Shell {
                     self.getopts_col = 0;
                     self.getopts_optind = optind;
                     self.vars.insert("OPTIND".to_string(), optind.to_string());
+                    self.getopts_bind(&name, "?");
                     return 1;
                 }
                 self.getopts_col = 1;
@@ -16799,7 +16818,6 @@ impl Shell {
             let arg_exhausted = self.getopts_col >= chars.len();
 
             if !found {
-                self.vars.insert(name.clone(), "?".to_string());
                 if silent {
                     self.vars.insert("OPTARG".to_string(), opt.to_string());
                 } else {
@@ -16814,7 +16832,7 @@ impl Shell {
                 }
                 self.getopts_optind = optind;
                 self.vars.insert("OPTIND".to_string(), optind.to_string());
-                return 0;
+                return if self.getopts_bind(&name, "?") { 0 } else { 2 };
             }
 
             if takes_arg {
@@ -16834,28 +16852,26 @@ impl Shell {
                     // Missing required argument.
                     optind += 1;
                     self.getopts_col = 0;
-                    if silent {
-                        self.vars.insert(name.clone(), ":".to_string());
+                    let reported = if silent {
                         self.vars.insert("OPTARG".to_string(), opt.to_string());
+                        ":"
                     } else {
                         if report_errors {
                             self.errln(&format!("{}: option requires an argument -- {opt}", self.name));
                         }
-                        self.vars.insert(name.clone(), "?".to_string());
                         self.vars.remove("OPTARG");
-                    }
+                        "?"
+                    };
                     self.getopts_optind = optind;
                     self.vars.insert("OPTIND".to_string(), optind.to_string());
-                    return 0;
+                    return if self.getopts_bind(&name, reported) { 0 } else { 2 };
                 }
-                self.vars.insert(name.clone(), opt.to_string());
                 self.getopts_optind = optind;
                 self.vars.insert("OPTIND".to_string(), optind.to_string());
-                return 0;
+                return if self.getopts_bind(&name, &opt.to_string()) { 0 } else { 2 };
             }
 
             // Plain flag with no argument.
-            self.vars.insert(name.clone(), opt.to_string());
             self.vars.remove("OPTARG");
             if arg_exhausted {
                 optind += 1;
@@ -16863,7 +16879,7 @@ impl Shell {
             }
             self.getopts_optind = optind;
             self.vars.insert("OPTIND".to_string(), optind.to_string());
-            return 0;
+            return if self.getopts_bind(&name, &opt.to_string()) { 0 } else { 2 };
         }
     }
 
@@ -26192,6 +26208,42 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                    getopts \":ab\" opt\n\
                    echo \"$opt $OPTARG\"";
         assert_eq!(run(src).0, "? x\n");
+    }
+
+    #[test]
+    fn getopts_binds_its_name_like_an_assignment() {
+        // Running out of options is an answer too, and it is written into the
+        // name: the variable reads `?`, not the previous call's option.
+        assert_eq!(
+            run("q=zz; set -- -a; getopts ab q; getopts ab q; echo \"rc=$? q=$q\"").0,
+            "rc=1 q=?\n"
+        );
+        // …including when the scan stops at a non-option word or a `--`.
+        assert_eq!(
+            run("q=zz; set -- plain; getopts ab q; echo \"rc=$? q=$q\"").0,
+            "rc=1 q=?\n"
+        );
+        // The write is an ordinary assignment, so it follows a nameref and
+        // obeys the name's case-folding attribute.
+        assert_eq!(
+            run("t=orig; declare -n nr=t; set -- -a; getopts ab nr; echo \"t=$t\"").0,
+            "t=a\n"
+        );
+        assert_eq!(
+            run("declare -u U; set -- -a; getopts ab U; echo \"U=$U\"").0,
+            "U=A\n"
+        );
+        // And it can be refused. A refusal costs an option result its status —
+        // 2 rather than 0 — but leaves the out-of-options 1 alone, since there
+        // the 1 is the answer rather than the write.
+        assert_eq!(
+            run("readonly r=1; set -- -a; getopts ab r 2>&1; echo \"rc=$? r=$r\"").0,
+            "osh: r: readonly variable\nrc=2 r=1\n"
+        );
+        assert_eq!(
+            run("readonly r=1; set --; getopts ab r 2>&1; echo \"rc=$? r=$r\"").0,
+            "osh: r: readonly variable\nrc=1 r=1\n"
+        );
     }
 
     #[test]

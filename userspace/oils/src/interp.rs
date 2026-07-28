@@ -904,6 +904,14 @@ pub struct Shell {
     /// assignments and word/`$(( … ))` expansion carry no builtin tag. Set for
     /// the duration of the relevant builtin, `None` otherwise.
     arith_cmd: Option<&'static str>,
+    /// True while an array literal is being applied on behalf of a
+    /// `declare`/`local`/`readonly`/`export` operand rather than a bare
+    /// `name=(…)` compound assignment. bash re-parses the builtin's operand and
+    /// consequently reports an offending associative element in *quoted* form
+    /// (`m: 'word': must use subscript …`), where the bare compound-assignment
+    /// path reports it unquoted (`m: word: must use subscript …`). Saved and
+    /// restored around the inner `apply_assignment` call.
+    decl_array_ctx: bool,
     /// Set (to the unmatched pattern) when `shopt -s failglob` is on and a glob
     /// in a command word matches nothing. The simple-command driver reports
     /// `no match: PATTERN` and aborts the command list (`Flow::Exit(1)`) after
@@ -1195,6 +1203,7 @@ impl Shell {
             arith_error: false,
             cond_regex_error: false,
             arith_cmd: None,
+            decl_array_ctx: false,
             glob_error: None,
             local_frames: Vec::new(),
             local_opt_saves: Vec::new(),
@@ -3612,6 +3621,7 @@ impl Shell {
             arith_error: false,
             cond_regex_error: false,
             arith_cmd: None,
+            decl_array_ctx: false,
             glob_error: None,
             // A subshell body is not itself a function frame; a `local` there is
             // an error until it enters one of its own function calls.
@@ -3892,6 +3902,19 @@ impl Shell {
                     if is_assoc {
                         // `name[key]=val` — associative element (string key).
                         let key = self.expand_to_string(idx_word);
+                        // An empty key is rejected, not stored: bash has no
+                        // representation for it. The diagnostic quotes the
+                        // subscript's *source* (`m['']`, `m[""]`, `m[$blank]`),
+                        // so reconstruct it rather than printing the expansion.
+                        if key.is_empty() {
+                            self.errln(&format!(
+                                "{}{}[{}]: bad array subscript",
+                                self.err_prefix(),
+                                a.name,
+                                crate::unparse::word_src(idx_word)
+                            ));
+                            return false;
+                        }
                         let stored = if is_int {
                             let base = if a.append {
                                 self.assoc_element(&a.name, &key)
@@ -4023,18 +4046,78 @@ impl Shell {
                 if !a.append {
                     self.assoc.insert(a.name.clone(), Vec::new());
                 }
-                for e in items {
-                    match e {
-                        ArrayElem::Keyed { index, value } => {
-                            let key = self.expand_to_string(index);
-                            let val = self.expand_to_string(value);
-                            let val = self.apply_elem_attrs(&a.name, val);
-                            self.assoc_set(&a.name, key, val, false);
+                // bash picks one of two modes from the *first* element, and the
+                // choice governs the whole list:
+                //
+                //   `m=(k1 v1 k2 v2)` — first element unsubscripted, so every
+                //       word is taken literally and consumed in key/value
+                //       pairs; a trailing odd word gets an empty value. A later
+                //       `[k]=v` word is NOT special here, it becomes the
+                //       literal key `[k]=v` (bash: `m=(x y [a]=1)` yields the
+                //       two keys `x` and `[a]=1`).
+                //   `m=([k1]=v1 …)` — first element subscripted, so every
+                //       element must be; an unsubscripted one is an error
+                //       naming the offending word, and is skipped.
+                //
+                // osh previously rejected *every* unsubscripted element, which
+                // made the common `m=(k1 v1 k2 v2)` idiom fail outright.
+                if matches!(items.first(), Some(ArrayElem::Positional(_))) {
+                    // Pair mode. Flatten to words first: expansion here splits
+                    // like a command word, so `m=($pairs)` contributes one
+                    // element per field, and the pairing runs over the fields —
+                    // not over the pre-expansion elements.
+                    let mut words: Vec<String> = Vec::new();
+                    for e in items {
+                        match e {
+                            ArrayElem::Positional(w) => {
+                                for bw in self.expand_braces_opt(w) {
+                                    words.extend(self.expand_word(&bw, true));
+                                }
+                            }
+                            ArrayElem::Keyed { index, value } => {
+                                // Reassemble the `[idx]=val` source shape. The
+                                // brackets and `=` are literal separators, so
+                                // expanding the two halves and rejoining is
+                                // exactly what bash gets from expanding the
+                                // whole word.
+                                let idx = self.expand_to_string(index);
+                                let val = self.expand_to_string(value);
+                                words.push(format!("[{idx}]={val}"));
+                            }
                         }
-                        ArrayElem::Positional(_) => {
-                            self.errln(&format!("{}{}: must use subscript when assigning associative array", self.err_prefix(),
-                                a.name
-                            ));
+                    }
+                    let mut it = words.into_iter();
+                    while let Some(key) = it.next() {
+                        let val = it.next().unwrap_or_default();
+                        let val = self.apply_elem_attrs(&a.name, val);
+                        self.assoc_set(&a.name, key, val, false);
+                    }
+                } else {
+                    for e in items {
+                        match e {
+                            ArrayElem::Keyed { index, value } => {
+                                let key = self.expand_to_string(index);
+                                let val = self.expand_to_string(value);
+                                let val = self.apply_elem_attrs(&a.name, val);
+                                self.assoc_set(&a.name, key, val, false);
+                            }
+                            ArrayElem::Positional(w) => {
+                                let word = self.expand_to_string(w);
+                                // bash quotes the offending word only when the
+                                // literal came from a `declare`/`local` operand
+                                // (which the builtin re-parses); a bare `m=(…)`
+                                // compound assignment names it unquoted.
+                                let shown = if self.decl_array_ctx {
+                                    format!("'{word}'")
+                                } else {
+                                    word
+                                };
+                                self.errln(&format!(
+                                    "{}{}: {shown}: must use subscript when assigning associative array",
+                                    self.err_prefix(),
+                                    a.name
+                                ));
+                            }
                         }
                     }
                 }
@@ -5013,7 +5096,31 @@ impl Shell {
                 // Associative subscripts are string keys, not arithmetic.
                 let val = if self.assoc.contains_key(name) {
                     let key = self.expand_to_string(w);
-                    self.assoc_element(name, &key)
+                    // An empty key has no representation in an associative
+                    // array, so reading one is "bad array subscript" — with the
+                    // same two shapes as the negative-index case below: the
+                    // value form names the base and expands empty, the length
+                    // form names the subscript source and aborts the command.
+                    // The source, not the expansion, is what bash prints here
+                    // (`m['']` reports `''`, which expands to nothing).
+                    if key.is_empty() {
+                        if length {
+                            self.errln(&format!(
+                                "{}{}]: bad array subscript",
+                                self.err_prefix(),
+                                crate::unparse::word_src(w)
+                            ));
+                            self.unbound_error = Some(1);
+                            return "0".to_string();
+                        }
+                        self.errln(&format!(
+                            "{}{name}: bad array subscript",
+                            self.err_prefix()
+                        ));
+                        None
+                    } else {
+                        self.assoc_element(name, &key)
+                    }
                 } else {
                     let idx = self.eval_arith_index(w);
                     // A negative subscript that underflows below index 0 is a
@@ -12530,6 +12637,25 @@ impl Shell {
             if make_local {
                 self.declare_local(base_name);
             }
+            // An array's kind is fixed once set — see `array_kind_conflict`.
+            // Checked *after* the local-shadowing step above, which is what
+            // makes `local -A g` legal inside a function whose global `g` is an
+            // indexed array (bash allows that: the local is a fresh binding,
+            // not a conversion), while a same-scope `declare -A` on an existing
+            // indexed array is still rejected.
+            if let Some((from_kind, to_kind)) =
+                self.array_kind_conflict(base_name, assoc, indexed)
+            {
+                self.emit_stderr(
+                    format!(
+                        "{}{tag}: {base_name}: cannot convert {from_kind} to {to_kind} array\n",
+                        self.err_prefix()
+                    )
+                    .as_bytes(),
+                );
+                status = 1;
+                continue;
+            }
             if assoc {
                 self.assoc.entry(base_name.to_string()).or_default();
             } else if indexed || (subscript.is_some() && !self.assoc.contains_key(base_name)) {
@@ -12724,6 +12850,29 @@ impl Shell {
     /// any scalar/plain operands in `argv` go through [`Shell::builtin_declare`];
     /// each array literal is then marked with the declared kind (`-A` → assoc,
     /// `-a`/default → indexed) and applied via [`Shell::apply_assignment`].
+    /// Check whether `declare -A`/`declare -a` on `name` would reinterpret an
+    /// array that already exists under the *other* kind.
+    ///
+    /// Returns the `(from, to)` kind words for bash's
+    /// "cannot convert FROM to TO array" diagnostic, or `None` when the
+    /// declaration is compatible — including the common no-op cases of
+    /// re-declaring an array with the kind it already has, and of declaring a
+    /// kind for a name that is not an array yet.
+    fn array_kind_conflict(
+        &self,
+        name: &str,
+        want_assoc: bool,
+        want_indexed: bool,
+    ) -> Option<(&'static str, &'static str)> {
+        if want_assoc && self.arrays.contains_key(name) {
+            Some(("indexed", "associative"))
+        } else if want_indexed && self.assoc.contains_key(name) {
+            Some(("associative", "indexed"))
+        } else {
+            None
+        }
+    }
+
     fn exec_declare_with_arrays(
         &mut self,
         argv: &[String],
@@ -12818,6 +12967,31 @@ impl Shell {
             if make_local {
                 self.declare_local(&a.name);
             }
+            // An array's kind is fixed once set: bash refuses to reinterpret an
+            // existing array under the other kind, because the two index spaces
+            // have no meaningful mapping. Without this guard `declare -A` on an
+            // indexed array merely *shadowed* it — an empty associative entry
+            // took over every read while the original values sat unreachable in
+            // `self.arrays` — which looks exactly like silent data loss to a
+            // script. Reject with bash's message and status 1, leaving the
+            // variable untouched (`unset` first is the way to change kind).
+            if let Some(from) = self.array_kind_conflict(&a.name, assoc, indexed) {
+                let (from_kind, to_kind) = from;
+                // The *literal* form is diagnosed by bash's compound-assignment
+                // machinery, not by the builtin, so it carries no `declare:` tag
+                // (unlike the bare-name form in `builtin_declare`) and it
+                // discards the rest of the parse unit rather than merely failing.
+                self.emit_stderr(
+                    format!(
+                        "{}{}: cannot convert {from_kind} to {to_kind} array\n",
+                        self.err_prefix(),
+                        a.name
+                    )
+                    .as_bytes(),
+                );
+                self.last_status = 1;
+                return Flow::Discard;
+            }
             if assoc {
                 self.assoc.entry(a.name.clone()).or_default();
             } else if indexed {
@@ -12866,7 +13040,10 @@ impl Shell {
             // `apply_assignment` already does for a name absent from `assoc`.
             // `trace = false`: the `declare`/`local` command itself is traced via
             // the command path, so the inner assignment must not trace again.
+            let saved_decl_ctx = self.decl_array_ctx;
+            self.decl_array_ctx = true;
             self.apply_assignment(a, false);
+            self.decl_array_ctx = saved_decl_ctx;
             // `readonly` is applied *after* the value is bound (a readonly guard
             // in `apply_assignment` would otherwise reject the initializer).
             if readonly {
@@ -27425,6 +27602,97 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A pid that was never ours is still the 127 error case.
         let (o5, _) = run("wait 1 2>/dev/null; echo \"stranger=$?\"");
         assert_eq!(o5, "stranger=127\n");
+    }
+
+    #[test]
+    fn declare_cannot_convert_between_array_kinds() {
+        // `declare -A` on an existing *indexed* array is an error, not a silent
+        // shadow: bash refuses, reports on stderr, and leaves the array intact.
+        // Before the guard the empty associative map took over every read while
+        // the indexed values sat unreachable in the other table.
+        let (o, _) = run(
+            "declare -a a=(x y); declare -A a 2>&1; echo \"s=$? n=${#a[@]} first=${a[0]-unset}\"",
+        );
+        assert_eq!(
+            o,
+            "osh: declare: a: cannot convert indexed to associative array\ns=1 n=2 first=x\n"
+        );
+        // Symmetric in the other direction.
+        let (o2, _) = run(
+            "declare -A m=([k]=v); declare -a m 2>&1; echo \"s=$? n=${#m[@]} k=${m[k]-unset}\"",
+        );
+        assert_eq!(
+            o2,
+            "osh: declare: m: cannot convert associative to indexed array\ns=1 n=1 k=v\n"
+        );
+        // A compound assignment carrying the wrong kind is rejected too, but by
+        // bash's assignment machinery rather than the builtin: the message has
+        // no `declare:` tag and the rest of the parse unit is discarded, so the
+        // status has to be read on the following line.
+        let (o3, _) = run(
+            "declare -a b=(x)\n{ declare -A b=([k]=v); } 2>&1\necho \"s=$? b0=${b[0]} n=${#b[@]}\"",
+        );
+        assert_eq!(
+            o3,
+            "osh: b: cannot convert indexed to associative array\ns=1 b0=x n=1\n"
+        );
+        let (o6, _) = run(
+            "declare -a d=(x)\ndeclare -A d=([k]=v) 2>/dev/null; echo unreachable\necho \"s=$?\"",
+        );
+        assert_eq!(o6, "s=1\n");
+        // `local -A` shadowing a global of the *other* kind is legal — the local
+        // is a fresh variable, not a conversion of the global.
+        let (o4, _) = run(
+            "declare -a g=(x y); f() { local -A g=([k]=v); echo \"in=${g[k]} n=${#g[@]}\"; }; f; echo \"out=${g[0]} n=${#g[@]}\"",
+        );
+        assert_eq!(o4, "in=v n=1\nout=x n=2\n");
+    }
+
+    #[test]
+    fn assoc_compound_assignment_has_two_modes() {
+        // The *first* element chooses the mode. Unsubscripted first ⇒ the whole
+        // list is consumed as alternating key/value words (a bare list is not an
+        // error at all), and a trailing odd word gets the empty string.
+        let (o, _) = run(
+            "declare -A m=(a 1 b 2 c); echo \"n=${#m[@]} a=${m[a]} b=${m[b]} c=[${m[c]}]\"",
+        );
+        assert_eq!(o, "n=3 a=1 b=2 c=[]\n");
+        // In pair mode a later `[k]=v` is *not* interpreted — it is a literal key.
+        let (o2, _) = run("declare -A p=(x 1 [y]=2); echo \"n=${#p[@]} lit=${p['[y]=2']-missing}\"");
+        assert_eq!(o2, "n=2 lit=\n");
+        // Subscripted first ⇒ the other mode, where a bare word is rejected by
+        // name (status still 0) while the rest of the list still lands. bash
+        // quotes the word for a `declare` operand and not for a bare `m=(…)`.
+        let (o3, _) = run("{ declare -A k=([a]=1 loose [b]=2); } 2>&1\necho \"s=$? a=${k[a]} b=${k[b]}\"");
+        assert_eq!(
+            o3,
+            "osh: k: 'loose': must use subscript when assigning associative array\ns=0 a=1 b=2\n"
+        );
+        let (o5, _) = run("declare -A k2\n{ k2=([a]=1 loose [b]=2); } 2>&1\necho \"s=$? n=${#k2[@]}\"");
+        assert_eq!(
+            o5,
+            "osh: k2: loose: must use subscript when assigning associative array\ns=0 n=2\n"
+        );
+        // A plain `=` clears first; `+=` merges into what is already there.
+        let (o4, _) = run(
+            "declare -A c=([one]=1 [two]=2); c+=([three]=3 [one]=uno); echo \"n=${#c[@]} one=${c[one]}\"; c=([only]=x); echo \"n=${#c[@]}\"",
+        );
+        assert_eq!(o4, "n=3 one=uno\nn=1\n");
+    }
+
+    #[test]
+    fn assoc_empty_subscript_is_rejected() {
+        // An empty key has no representation in an associative array. Writing
+        // one reports the full reference in *source* form and creates nothing.
+        // The failed assignment discards the rest of its parse unit (bash), so
+        // the check has to live on a following line.
+        let (o, _) = run("declare -A m=([k]=v)\n{ m['']=x; } 2>&1\necho \"s=$? n=${#m[@]}\"");
+        assert_eq!(o, "osh: m['']: bad array subscript\ns=1 n=1\n");
+        // Reading the value form names the *base* and expands empty (status 0).
+        let (o2, _) = run("declare -A m=([k]=v)\n{ echo \"r=[${m['']}]\"; } 2>&1\necho \"s=$?\"");
+        // (The capture buffer sees the redirected stderr after the `echo`'s own
+        // write, so the diagnostic trails the line it belongs to here.)
+        assert_eq!(o2, "r=[]\nosh: m: bad array subscript\ns=0\n");
     }
 
     #[test]

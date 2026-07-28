@@ -956,12 +956,28 @@ impl Parser {
             let cmd = self.parse_cond()?;
             return self.with_redirects(cmd);
         }
-        // Function definition: `name ( )`.
-        if let Some(name) = self.bare_word_here()
-            && is_valid_name(&name)
+        // Function definition: `WORD ( )`.
+        //
+        // bash's production is `WORD '(' ')' …` — *any* word, not just an
+        // identifier. `my-func`, `a.b`, `1f`, `a[b]`, `[b]` and `f*` all define
+        // functions. The one shape excluded is an assignment, because the lexer
+        // hands that back as an ASSIGNMENT_WORD, which the production does not
+        // accept: `f=g() { :; }` is a syntax error. Escaping the `=` demotes the
+        // word back to a plain WORD, so `a\=b() { :; }` parses — and then fails
+        // at run time, being quoted (see below).
+        //
+        // A quoted or expanded name parses here too; bash rejects it only when
+        // the definition *executes*. See [`FunctionDef::definable`].
+        if matches!(self.peek(), Some(Tok::Word(segs)) if !word_is_assignment(segs))
             && matches!(self.toks.get(self.pos + 1), Some(Tok::Op(Op::LParen)))
             && matches!(self.toks.get(self.pos + 2), Some(Tok::Op(Op::RParen)))
         {
+            // A name written as a bare word is definable and *is* its literal;
+            // any other spelling is not, and is kept as written so the run-time
+            // error can quote it back exactly as typed.
+            let bare = self.bare_word_here();
+            let definable = bare.is_some();
+            let name = bare.unwrap_or_else(|| self.token_display());
             self.pos += 3;
             self.skip_newlines();
             let body = self.parse_compound_body()?;
@@ -971,7 +987,7 @@ impl Parser {
             while self.at_redirect_start() {
                 redirects.push(self.parse_redirect()?);
             }
-            return Ok(Command::Function(FunctionDef { name, body, redirects }));
+            return Ok(Command::Function(FunctionDef { name, definable, body, redirects }));
         }
         // `function NAME [()] body` — bash keyword form of a function
         // definition (recognised only at command start).
@@ -987,15 +1003,20 @@ impl Parser {
     }
 
     /// Parse the bash keyword form of a function definition:
-    /// `function NAME [( )] compound-body`. Unlike the POSIX `NAME ( )` form,
-    /// the parentheses are optional and bash permits function names that are
-    /// not valid identifiers (e.g. `function foo-bar { …; }`), so the name is
-    /// taken verbatim from the following word.
+    /// `function NAME [( )] compound-body`. Unlike the POSIX `NAME ( )` form the
+    /// parentheses are optional, and an assignment-shaped name is accepted
+    /// (`function f=g { …; }` defines `f=g`) because the lexer only forms an
+    /// assignment word at the start of a command. Otherwise the name rule is the
+    /// same: any word parses, and a quoted or expanded one is refused at run
+    /// time — see [`FunctionDef::definable`].
     fn parse_function_keyword(&mut self) -> Result<Command, ParseError> {
         self.pos += 1; // consume `function`
-        let Some(name) = self.bare_word_here() else {
+        if !matches!(self.peek(), Some(Tok::Word(_))) {
             return Err(self.unexpected_here());
-        };
+        }
+        let bare = self.bare_word_here();
+        let definable = bare.is_some();
+        let name = bare.unwrap_or_else(|| self.token_display());
         self.pos += 1; // consume the name word
         // Optional `()` after the name.
         if self.at_op(Op::LParen) {
@@ -1012,7 +1033,7 @@ impl Parser {
         while self.at_redirect_start() {
             redirects.push(self.parse_redirect()?);
         }
-        Ok(Command::Function(FunctionDef { name, body, redirects }))
+        Ok(Command::Function(FunctionDef { name, definable, body, redirects }))
     }
 
     /// Parse a `coproc [NAME] command`. Grammar (matches bash):
@@ -3144,6 +3165,40 @@ mod tests {
             panic!("expected function");
         };
         assert_eq!(f.name, "greet");
+    }
+
+    /// bash's `WORD ( )` production accepts any word, and defers the name check
+    /// to execution, so the parser's job is only to record what was written and
+    /// whether it was written bare. Every expectation is bash 5.2.37's own.
+    #[test]
+    fn function_name_is_any_word() {
+        let def = |src: &str| {
+            let prog = parse(src).unwrap();
+            let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
+                panic!("expected function: {src}");
+            };
+            (f.name.clone(), f.definable)
+        };
+        // Not an identifier, but a perfectly good function name.
+        for name in ["my-func", "a.b", "1f", "a/b", "a,b", ".f", "f%", "[b]", "a[b]"] {
+            assert_eq!(def(&format!("{name}() {{ :; }}")), (name.to_string(), true));
+        }
+        // Quoted or expanded: parses, keeps the spelling, and is not definable.
+        for name in ["\\f", "\"f\"", "'f'", "f\\g", "$x"] {
+            assert_eq!(def(&format!("{name}() {{ :; }}")), (name.to_string(), false));
+            assert_eq!(def(&format!("function {name} {{ :; }}")), (name.to_string(), false));
+        }
+        // An assignment word is not a WORD, so the POSIX form rejects it — but
+        // the lexer only forms one at the start of a command, so the keyword
+        // form takes the same spelling as an ordinary name.
+        assert!(parse("f=g() { :; }").is_err());
+        assert_eq!(def("function f=g { :; }"), ("f=g".to_string(), true));
+        // Escaping the `=` demotes the word, so it parses — and, being quoted,
+        // it is left for execution to refuse.
+        assert_eq!(def("a\\=b() { :; }"), ("a\\=b".to_string(), false));
+        // A reserved word is still the keyword, not a name.
+        assert!(parse("if() { :; }").is_err());
+        assert!(parse("time() { :; }").is_err());
     }
 
     #[test]

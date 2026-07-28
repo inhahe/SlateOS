@@ -3224,7 +3224,7 @@ accumulated as one contiguous literal — is unchanged. Covered by
 bash accepts the parse and rejects the name at runtime — see
 TD-OILS-FUNCNAME-RULE.
 
-### TD-OILS-FUNCNAME-RULE. A function name is held to a stricter rule than bash's, and a bad one is a syntax error — 2026-07-28 — OPEN
+### TD-OILS-FUNCNAME-RULE. A function name is held to a stricter rule than bash's, and a bad one is a syntax error — 2026-07-28 — RESOLVED 2026-07-28
 
 **Where:** `userspace/oils/src/parser.rs`, wherever a `WORD ( )` function
 definition is recognised.
@@ -3232,26 +3232,72 @@ definition is recognised.
 **What:** bash's grammar accepts *any* word before `()`, then rejects a name it
 does not like at run time — printing ``line N: `NAME': not a valid identifier``
 with the word spelled as written, leaving the function undefined, and carrying
-on with the rest of the script. osh instead refuses to parse, so the whole
-script dies with ``syntax error near unexpected token `('``.
+on with the rest of the script. osh instead refused to parse, so the whole
+script died with ``syntax error near unexpected token `('``.
 
 The rule bash applies is also looser than a shell identifier: the name must be
 a single *unquoted, unexpanded* literal, but its characters may be nearly
 anything. `a.b() { … }` and `1f() { … }` both define functions; `"f"()`,
-`'f'()`, `\f()`, `f\g()` and `$x()` are the ones rejected.
+`'f'()`, `\f()`, `f\g()` and `$x()` are the ones rejected. This mattered in
+practice: `my-func() { … }` is a common real-world spelling that osh could not
+parse at all.
 
-**Proper fix:** parse `WORD ( )` for any word, keep the word's source spelling
-on the `FunctionDef`, and move the name check to execution — emit bash's
-message, set status 1, and skip the definition. The spelling is what
-`token_display` already reconstructs for syntax errors, so the same renderer
-serves.
+**Fixed:** the POSIX-form gate is now "any `Tok::Word` that is not an
+assignment word", and `FunctionDef` carries a `definable: bool` recording
+whether the name was written as a bare word (`bare_word_here()` — a single
+unquoted `Seg::Lit` — is exactly bash's "no `W_QUOTED`, no `W_HASDOLLAR`"
+test). `name` holds the literal when definable and the source spelling from
+`token_display()` otherwise, so the error quotes the word back as typed. The
+check itself moved to `interp.rs`'s `Command::Function` arm, ahead of the
+`readonly -f` check. `parse_function_keyword` got the same treatment, minus the
+assignment exclusion — the lexer only forms an assignment word at the start of
+a command, so `function f=g { …; }` really does define `f=g`. Covered by
+`tests/corpus/function-name.sh` and `parser::tests::function_name_is_any_word`.
 
-**Reproduce:**
+**Reproduce (now matching):**
 
 ```sh
-a.b() { echo hi; }; a.b     # bash: hi        osh: syntax error near `('
-\f() { echo hi; }           # bash: `\f': not a valid identifier (rc 1, script continues)
+my-func() { echo hi; }; my-func   # bash: hi        osh (before): syntax error near `('
+a.b() { echo hi; }; a.b           # bash: hi        osh (before): syntax error near `('
+\f() { echo hi; }                 # bash: `\f': not a valid identifier (rc 1, script continues)
 ```
+
+**Left over:** a name beginning `?`, `*`, `+`, `@` or `!` immediately before the
+`(` — `f?() { …; }` — is still a syntax error in osh, because the lexer reads
+`?(` as an extglob group unconditionally. That is TD-OILS-EXTGLOB-UNGATED, not
+this issue.
+
+### TD-OILS-EXTGLOB-UNGATED. Extglob patterns are always recognised, where bash gates them on `shopt -s extglob` — 2026-07-28 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `read_word_inner`'s `ext_depth`
+tracking treats `?(`, `*(`, `+(`, `@(` and `!(` as an extglob group whenever it
+sees them; `userspace/oils/src/ere.rs` / the pattern matcher likewise. Nothing
+consults a shell option.
+
+**What:** bash recognises extglob only when the `extglob` shopt is on, and the
+decision is made by the *lexer*, at parse time — so `shopt -s extglob` on the
+same line as a use has no effect. With it off, `?(` is an ordinary `?` word
+followed by a `(` metacharacter, which is usually a syntax error:
+
+```sh
+echo ?(a)                      # bash: syntax error near unexpected token `('   osh: ?(a)
+f?() { echo hi; }; "f?"        # bash: hi (defines the function `f?')          osh: syntax error near `}'
+```
+
+The second line is the more damaging one: because osh swallows `?(` as an
+extglob group, a perfectly ordinary function definition whose name ends in a
+glob character cannot be parsed. The same applies to `*`, `+`, `@` and `!`.
+
+Note also that bash defaults `extglob` **on** for interactive shells and off
+for non-interactive ones, so a script's behaviour differs from what the same
+text does when pasted at a prompt.
+
+**Proper fix:** thread the `extglob` option into the lexer (it already receives
+shell state for alias expansion) and gate the `ext_depth` entry on it, and gate
+pattern *matching* on the same flag so that a literal `@(a|b)` string compares
+as itself. Then `shopt -s extglob` must take effect only for input lexed after
+it runs, matching bash. Add a corpus case covering both readings and the
+function-name spelling above.
 
 ### TD-OILS-CMDSUB-EOF-TERMINATOR. A command substitution body is parsed as if its `)` were a line end — 2026-07-28 — OPEN
 

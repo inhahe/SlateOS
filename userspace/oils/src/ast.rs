@@ -305,7 +305,18 @@ pub struct ForArithClause {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDef {
+    /// The name as *written*. bash's grammar accepts any word before `()`, so
+    /// this is not restricted to identifiers: `my-func`, `a.b`, `1f` and `f?`
+    /// are all real function names. When [`definable`](Self::definable) is
+    /// false this is instead the source spelling of a word bash refuses at run
+    /// time (`\f`, `"f"`, `$x`), kept verbatim so the error can quote it back
+    /// exactly as typed.
     pub name: String,
+    /// Whether the name may actually become a function. bash defers this check
+    /// to execution: a quoted or expanded name parses fine and then fails with
+    /// ``line N: `NAME': not a valid identifier`` — status 1, and the script
+    /// carries on. Always true for a name written as a bare word.
+    pub definable: bool,
     pub body: Program,
     /// Redirections attached to the function definition itself, e.g.
     /// `f() { …; } >log`. bash applies these every time the function is invoked,

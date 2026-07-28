@@ -2738,9 +2738,22 @@ impl Shell {
             Command::ForArith(c) => self.in_loop(|s| s.exec_for_arith(c, out, stdin)),
             Command::Select(c) => self.in_loop(|s| s.exec_select(c, out, stdin)),
             Command::Function(f) => {
+                // bash's parser takes any word as a function name and checks it
+                // here, where the definition *runs*: a quoted or expanded name is
+                // reported — quoted back as it was written, backslash and all —
+                // the definition is skipped, and the script carries on with
+                // status 1. The check is on the spelling, not the expansion, so
+                // `"f"()` fails even though `f` would be a fine name.
+                if !f.definable {
+                    self.emit_stderr(
+                        format!("{}`{}': not a valid identifier\n", self.err_prefix(), f.name)
+                            .as_bytes(),
+                    );
+                    self.last_status = 1;
+                }
                 // A `readonly -f` function cannot be redefined (bash reports the
                 // attempt and fails the command, leaving the definition intact).
-                if self.readonly_funcs.contains(&f.name) {
+                else if self.readonly_funcs.contains(&f.name) {
                     self.emit_stderr(
                         format!("{}{}: readonly function\n", self.err_prefix(), f.name).as_bytes(),
                     );

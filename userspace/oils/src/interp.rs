@@ -11852,6 +11852,13 @@ impl Shell {
             return exists;
         }
         if let Some(idx) = job_idx {
+            // What the signal *does* comes before who delivers it. A job that
+            // ignores the signal, or one whose default disposition is not to
+            // die, is left running — and the delivery still succeeds, because
+            // reaching the job is all `kill` promises.
+            if !signal_terminates_async_job(signum) {
+                return true;
+            }
             match self.jobs[idx].child.as_mut() {
                 // Terminate the spawned child (platform-native process kill).
                 Some(JobBody::Process(child)) => match child.kill() {
@@ -19631,6 +19638,25 @@ fn signal_default_terminates(signum: u8) -> bool {
         | 23 // URG (ignore)
         | 28 // WINCH (ignore)
     )
+}
+
+/// Whether a signal kills a job started with `&`.
+///
+/// A background job does not simply take each signal's default disposition.
+/// bash's `setup_async_signals` sets `SIGINT` *and* `SIGQUIT` to `SIG_IGN` in an
+/// asynchronous child whenever job control is off, so that an interrupt meant
+/// for the foreground cannot reach into the background; the ignore survives the
+/// child's `exec`, so it holds for every shape a job can take. Everything else
+/// keeps its default, and since osh cannot suspend a job, a signal whose default
+/// is to stop or to be ignored does nothing here rather than killing.
+///
+/// One consequence is worth stating, because it makes a `jobs` state
+/// unreachable: no background job can ever be listed as `Interrupt`. bash
+/// appears to allow it only under a race — `sleep 1 & kill -INT %1` does report
+/// `Interrupt` if the signal arrives before the forked child has established the
+/// ignore, and reports `Running` once the child has settled.
+fn signal_terminates_async_job(signum: u8) -> bool {
+    !matches!(signum, 2 /* INT */ | 3 /* QUIT */) && signal_default_terminates(signum)
 }
 
 /// Render the full signal table in bash's `trap -l` / `kill -l` layout: five
@@ -32179,7 +32205,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             std::thread::sleep(std::time::Duration::from_millis(100));
             assert_eq!(listing(&mut sh, "jobs"), format!("[1]+  {want}\n"), "{src}");
         }
-        for (sig, want) in [("TERM", "Terminated"), ("INT", "Interrupt"), ("PIPE", "Broken pipe")] {
+        for (sig, want) in [("TERM", "Terminated"), ("PIPE", "Broken pipe")] {
             sh.run_source("sleep 5 &");
             sh.run_source(&format!("kill -{sig} %1"));
             assert_eq!(
@@ -32187,6 +32213,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 format!("[1]+  {want:<24}sleep 5\n"),
                 "kill -{sig}"
             );
+        }
+        // `INT` and `QUIT` cannot produce such a row at all — no background job
+        // is ever listed as `Interrupt` or `Quit` — because an asynchronous job
+        // is handed both already ignored, so the delivery succeeds and the job
+        // keeps running. `CHLD` stands for the signals whose *default* is to be
+        // ignored, which the job is left to keep.
+        for sig in ["INT", "QUIT", "CHLD"] {
+            sh.run_source("sleep 5 &");
+            sh.run_source(&format!("kill -{sig} %1"));
+            assert_eq!(sh.last_status, 0, "kill -{sig}");
+            assert_eq!(
+                listing(&mut sh, "jobs"),
+                "[1]+  Running                 sleep 5 &\n",
+                "kill -{sig}"
+            );
+            sh.run_source("kill -TERM %1; disown -a");
         }
     }
 

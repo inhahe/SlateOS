@@ -33,12 +33,14 @@ echo "=== the state column words a clean exit, a dirty one and a signal apart"
 ( exit 0 ) & sleep 0.4; jobs
 ( exit 1 ) & sleep 0.4; jobs
 ( exit 255 ) & sleep 0.4; jobs
-# bash is built with DONT_REPORT_SIGTERM/SIGPIPE and skips SIGINT, so these
-# three deaths are not announced asynchronously and are still the listing's to
-# report.
-sleep 5 & kill -TERM %1; sleep 0.4; jobs
-sleep 5 & kill -INT %1; sleep 0.4; jobs
-sleep 5 & kill -PIPE %1; sleep 0.4; jobs
+# bash is built with DONT_REPORT_SIGTERM/SIGPIPE, so these two deaths are not
+# announced asynchronously and are still the listing's to report. `Interrupt`
+# cannot be shown alongside them: an asynchronous job is handed SIGINT already
+# ignored, so no background job ever reaches that state. (See
+# `kill-dispositions.sh`; the job is given a moment to settle first, because the
+# ignore is established after the fork.)
+sleep 5 & sleep 0.1; kill -TERM %1; sleep 0.4; jobs
+sleep 5 & sleep 0.1; kill -PIPE %1; sleep 0.4; jobs
 wait
 
 echo "=== the command is the source text, whatever shape it had"

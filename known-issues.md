@@ -6815,6 +6815,113 @@ is required for reference bash to be reproducible anyway — bash establishes an
 asynchronous child's dispositions after forking it — so the two shells agree
 throughout the suite.
 
+### TD-OILS-ARITH-SUBSCRIPT-LVALUE-ERR. An arithmetic error inside an array-assignment *subscript* is tagged and survivable in osh, bare and fatal in bash — OPEN 2026-07-28
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::emit_arith_error` (the `((`
+tag and the echoed expression) and the `(( … ))` command path that decides
+whether an arithmetic failure discards the rest of the list.
+
+**What.** bash evaluates the subscript of an array-assignment lvalue through a
+*separate* entry point from the expression around it, and a failure there is
+reported without the surrounding command's name and without the expression it
+came from — only the subscript's own text — and is fatal to the command list,
+the way a `$(( ))` expansion error is:
+
+```
+$ bash -c '((a[1/0]=9)); echo after'
+bash: line 1: 1/0: division by 0 (error token is "0")      # `after` never runs
+$ osh -c '((a[1/0]=9)); echo after'
+osh: line 1: ((: a[1/0]=9: division by 0 (error token is "0")
+after
+```
+
+**Proper fix.** Evaluate an lvalue's subscript through a path that carries its
+own error context — a subscript-scoped `ArithError` whose `expr_override` is the
+subscript text and whose `subject`-like flag suppresses the builtin tag — and
+have the `(( … ))` command treat a subscript failure as a discarding error
+rather than a status-1 one. The `subject` field added for the readonly refusal
+is the right shape to generalise.
+
+**Impact.** Narrow: only an lvalue whose *subscript* is itself malformed. Kept
+out of `tests/corpus/arith-subscript-quoting.sh`.
+
+### TD-OILS-NAMEREF-ELEM-ARITH-LVALUE. `((ref[i]=v))` through a nameref that names an element writes an element where bash refuses the name — OPEN 2026-07-28
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::arith_elem_base`, which
+strips a nameref target's subscript with `nameref_target_base` and then indexes
+the array it names.
+
+**What.** With `declare -n r=q[0]`, the reference already designates one element.
+bash therefore has no room for a *further* subscript and rejects the whole
+target as a name:
+
+```
+$ bash -c 'declare -n r=q[0]; ((r[1]=5))'
+bash: line 1: ((: `q[0]': not a valid identifier
+$ osh -c 'declare -n r=q[0]; ((r[1]=5)); declare -p q'
+declare -a q=([1]="5")
+```
+
+Scalar writes through such a nameref (`r=5`, `read r`) are correct — see
+`ScalarDest::Elem` — it is only the *subscripted* arithmetic form that diverges.
+
+**Proper fix.** `arith_elem_base` should distinguish "the nameref names a plain
+variable" from "the nameref names an element", and report
+``((: `TARGET': not a valid identifier`` for the latter instead of stripping the
+subscript.
+
+**Impact.** Very narrow. Kept out of `tests/corpus/nameref.sh`.
+
+### TD-OILS-READONLY-REFUSAL-NAMES-TARGET. A refused write through a nameref names the resolved target where bash sometimes names the reference — OPEN 2026-07-28
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::arith_write_dest` /
+`Shell::set_scalar_checked`, which both report `ScalarDest::base()`.
+
+**What.** bash is not consistent about which of the two names a readonly refusal
+puts to the reader. Where the nameref's target is a *scalar* it names the
+resolved target; where the target is an array or an associative array it names
+the *reference*:
+
+```
+$ bash -c 'readonly x=1; declare -n r=x; ((r=5))'          # x: readonly variable
+$ bash -c 'readonly -a q=(1); declare -n r=q; ((r=5))'     # r: readonly variable
+$ osh  -c 'readonly -a q=(1); declare -n r=q; ((r=5))'     # q: readonly variable
+```
+
+**Proper fix.** Arguably none: osh applies the scalar rule (name what was
+actually refused) uniformly, which is the principled reading, and bash's split
+looks like an artifact of which internal lookup happened to fail first. Logged
+so the divergence is not mistaken for an oversight. If it is ever matched, the
+condition is "the resolved target is array- or assoc-valued".
+
+**Impact.** Wording of one stderr line, in a shape combining `readonly`, a
+nameref and an array. Kept out of `tests/corpus/nameref.sh`.
+
+### TD-OILS-ASSIGN-WORD-SUBSCRIPT-EQ. `a[x=3]=1` is taken for a command name because assignment-word detection stops at the first `=` — OPEN 2026-07-28
+
+**Where:** `userspace/oils/src/parser.rs` — the assignment-word test applied to
+the first word of a simple command.
+
+**What.** A subscript is arithmetic, so it may contain an `=`. bash scans the
+`[ … ]` as a unit before looking for the assignment's `=`; osh does not, so the
+word is not recognised as an assignment at all:
+
+```
+$ bash -c 'a[x=3]=1; declare -p a x'
+declare -a a=([3]="1")
+declare -- x="3"
+$ osh -c 'a[x=3]=1'
+osh: line 1: a[x=3]=1: command not found
+```
+
+**Proper fix.** In the assignment-word scan, skip a balanced `[ … ]` immediately
+after the name before searching for the `=`. `attr_assignment_split` already does
+exactly this for `readonly`/`export` operands and is the model.
+
+**Impact.** Any assignment whose subscript contains an `=` — an assignment
+operator (`a[x=3]`), a comparison (`a[x==3]`) or a compound one (`a[x+=1]`).
+Kept out of `tests/corpus/arith-subscript-quoting.sh`.
+
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 
 **UPDATE 2026-07-16 (could not reproduce; downgraded WATCH; regression

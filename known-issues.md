@@ -14,7 +14,7 @@ work that should be done now."
 
 ## Active Bugs
 
-### BUG-OILS-NAMEREF-CIRCULAR-CHAIN. A nameref cycle expands to the last name in the chain instead of to nothing, with no warning — 2026-07-28 — OPEN
+### BUG-OILS-NAMEREF-CIRCULAR-CHAIN. A nameref cycle expands to the last name in the chain instead of to nothing, with no warning — 2026-07-28 — ✅ RESOLVED 2026-07-28
 
 **Symptom.** A nameref chain that closes on itself:
 
@@ -34,17 +34,52 @@ the chain with a 64-step bound and, on running out, returns whatever name it
 reached, so the cycle silently resolves to a real (usually unset) variable name
 rather than being reported.
 
-**Proper fix.** Track the names already visited and, on revisiting one, report
-the expansion as *unset* while emitting bash's `warning: NAME: circular name
-reference` line naming the **start** of the chain. The wrinkle is that
-`resolve_ref_name` is `&self` and is called from many read-only expansion paths,
-so emitting a diagnostic needs either `&mut self` throughout or a deferred
-warning slot on `Shell` that the expansion driver drains. Until then the
-declaration-time checks at least stop the *global* self-reference
-(`declare -n r=r`) from creating a cycle at all.
+**✅ RESOLVED 2026-07-28.** `resolve_ref_name` now carries a visited set and
+returns `Option<String>` — `None` meaning "this chain names nothing" — so every
+one of its ~20 call sites had to say what a cycle means for that operation.
+Reads treat it as unset, writes fail, and `${!ref}` (which has no final name to
+report) raises bash's `invalid indirect expansion` instead of a warning.
 
-**Coverage.** Deliberately left out of `tests/corpus/nameref.sh` so the case
-stays green; add the probes there as part of the fix.
+The diagnostic turned out **not** to need `&mut self`: `emit_stderr` is already
+`&self`, so the warning lives in a thin wrapper, `resolve_ref_use`, which every
+*use* of a name goes through while the handful of paths that must stay silent
+(`${!ref}`, the readonly pre-checks that would double-report, `nameref_elem_value`
+which resolves again immediately) call `resolve_ref_name` directly. The warning
+names the variable the walk *started* from, matching bash for `a→b→c→a` read
+from any link.
+
+Fixing this exposed a second, unrelated divergence in the same area: `var_is_set`
+(`-v`) never resolved namerefs at all, so `declare -n r=missing; [ -v r ]` said
+*set* — it was testing whether the reference existed rather than its target.
+It now resolves first; a target naming an array *element* (`declare -n e=arr[1]`)
+is looked up as a plain variable name and so is never `-v` set, which is bash's
+behaviour too.
+
+**Coverage.** `tests/corpus/nameref.sh` grew two sections (unset/element targets
+and the cycle), and `interp.rs` gained `nameref_cycle_reads_as_unset`,
+`nameref_cycle_write_fails_and_leaves_the_cycle_intact` and
+`nameref_to_unset_or_element_target_is_not_v_set`.
+
+**Remaining cosmetic gap — see TD-OILS-NAMEREF-WARNING-COUNT below.**
+
+### TD-OILS-NAMEREF-WARNING-COUNT. bash prints its circular-nameref warning twice for some expansions; osh prints it once — 2026-07-28 — OPEN
+
+**Symptom.** With `declare -n a=b; declare -n b=a`, bash 5.2 emits *two*
+`warning: a: circular name reference` lines for `${#a}`, `${a[1]}`, `${a[@]}`
+and `unset a`, but one for `$a`, `${a:-d}`, `[ -v a ]` and `a=5`. osh emits
+exactly one everywhere. Values, exit statuses and stdout all match; only the
+number of stderr lines differs.
+
+**Where.** `userspace\oils\src\interp.rs` — `Shell::resolve_ref_use`. The
+doubling is an artifact of bash resolving the variable twice internally (once to
+decide whether it exists, once to read it); osh's expansion paths resolve once.
+
+**Proper fix.** There isn't an obviously *principled* one: matching the count
+would mean adding a redundant second resolution at exactly the sites bash
+happens to have one, which is mimicking an implementation detail rather than a
+behaviour. Left as-is deliberately. The affected shapes are therefore kept out
+of `tests/corpus/nameref.sh` (which probes only the single-warning forms) — if
+they are ever added, this is why they would fail.
 
 ### BUG-OILS-DEVFD-IS-A-DUP-NOT-A-REOPEN. `> /dev/stdout` duplicates fd 1 where a host with a real `/dev/fd` re-opens it, so the two descriptors share an offset instead of getting independent ones — 2026-07-28 — APPROXIMATION
 

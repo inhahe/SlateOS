@@ -60,3 +60,27 @@ declare -n bad='a b' good=x; echo "  rc=$?"; declare -p good
 echo "=== unset -n removes the reference, unset removes the target"
 t=1; declare -n u=t; unset -n u; declare -p t; declare -p u 2>&1 >/dev/null
 t2=1; declare -n u2=t2; unset u2; declare -p t2 2>&1 >/dev/null; declare -p u2
+
+echo "=== a target that is not itself set makes the reference unset"
+declare -n zt=zmissing; echo "  -v rc=$([ -v zt ]; echo $?) val=[$zt]"
+zmissing=7; echo "  -v rc=$([ -v zt ]; echo $?) val=[$zt]"
+echo '--- while one naming an array *element* reads through but is never -v set'
+zarr=(p q); declare -n ze1=zarr[1]
+echo "  -v rc=$([ -v ze1 ]; echo $?) val=[$ze1]"
+
+echo "=== a cycle is a reference with nowhere to go, so it reads as unset"
+# osh used to stop at the last name walked, so `$za` expanded to the string `zb`.
+declare -n za=zb; declare -n zb=za
+echo "  plain=[$za]"
+echo "  default=[${za:-fallback}]"
+[ -v za ]; echo "  -v rc=$?"
+echo "--- writing through it fails, discarding the rest of that list"
+za=5; echo "  not reached"
+echo "  rc=$?"
+declare -p za zb
+echo "--- the warning names where the walk started, not a fixed member"
+declare -n zc=zd; declare -n zd=ze; declare -n ze=zc
+echo "  from-zc=[${zc:-DEF}]"
+echo '--- ${!ref} has no final name to report, so it errors instead of warning'
+echo "  ind=[${!za}]"
+echo "  the shell survives it"

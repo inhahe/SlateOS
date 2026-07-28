@@ -4291,7 +4291,11 @@ impl Shell {
     /// `read` builtin and temporary `NAME=val cmd` env prefixes — so a readonly
     /// variable cannot be overwritten there either (bash rejects both).
     fn set_scalar_checked(&mut self, name: &str, val: String) -> bool {
-        let target = self.resolve_ref_name(name);
+        // A circular nameref names nothing to write to: report it and fail,
+        // exactly as bash does for `a=5` through a cycle.
+        let Some(target) = self.resolve_ref_use(name) else {
+            return false;
+        };
         if self.readonly.contains(&target) {
             self.emit_stderr(format!("{}{target}: readonly variable\n", self.err_prefix()).as_bytes());
             return false;
@@ -4332,7 +4336,12 @@ impl Shell {
         // A nameref (`declare -n ref=target`) redirects the assignment to its
         // target: rewrite the name and re-run. `resolve_ref_name` follows the
         // whole chain, so the rewritten name is not itself a nameref (no loop).
-        let target = self.resolve_ref_name(&a.name);
+        // A *circular* chain has no target to redirect to — bash warns and the
+        // assignment fails (status 1), leaving every variable in the cycle
+        // untouched.
+        let Some(target) = self.resolve_ref_use(&a.name) else {
+            return false;
+        };
         if target != a.name {
             let mut a2 = a.clone();
             // A nameref may point at an array element (`declare -n ref=arr[0]`):
@@ -4773,7 +4782,9 @@ impl Shell {
 
     /// All values of `name`, treating a plain scalar as a one-element array.
     fn array_elements(&self, name: &str) -> Vec<String> {
-        let name = &self.resolve_ref_name(name);
+        let Some(name) = &self.resolve_ref_use(name) else {
+            return Vec::new();
+        };
         if let Some(m) = self.assoc.get(name) {
             m.iter().map(|(_, v)| v.clone()).collect()
         } else if let Some(a) = self.arrays.get(name) {
@@ -4910,7 +4921,9 @@ impl Shell {
     /// array's flag letters, e.g. `a`/`A`/`ar`); positional params have no
     /// attributes, so each field is empty.
     fn bulk_attr_transform(&mut self, name: &str, op: char) -> Vec<String> {
-        let name = &self.resolve_ref_name(name);
+        let Some(name) = &self.resolve_ref_use(name) else {
+            return Vec::new();
+        };
         let positional = name == "@" || name == "*";
         if op == 'A' {
             if positional {
@@ -4963,7 +4976,8 @@ impl Shell {
             // *associative* array (`[m "1" ]`) but not for an indexed array or
             // the positional params (`[0 "x" 1 "y"]`). Mirror that quirk so the
             // re-inputtable form round-trips byte-for-byte.
-            if !body.is_empty() && self.assoc.contains_key(&self.resolve_ref_name(name)) {
+            let target = self.resolve_ref_name(name);
+            if !body.is_empty() && target.is_some_and(|t| self.assoc.contains_key(&t)) {
                 body.push(' ');
             }
             vec![body]
@@ -5015,7 +5029,9 @@ impl Shell {
 
     /// The keys (associative) or indices (indexed) of `name`, in order.
     fn array_keys(&self, name: &str) -> Vec<String> {
-        let name = &self.resolve_ref_name(name);
+        let Some(name) = &self.resolve_ref_use(name) else {
+            return Vec::new();
+        };
         if let Some(m) = self.assoc.get(name) {
             m.iter().map(|(k, _)| k.clone()).collect()
         } else if let Some(a) = self.arrays.get(name) {
@@ -5078,7 +5094,7 @@ impl Shell {
     /// arrays, else an arithmetic index for indexed arrays. Returns `None` when
     /// the parameter/element is unset.
     fn param_elem_value(&mut self, name: &str, index: &Option<Box<Word>>) -> Option<String> {
-        let name = &self.resolve_ref_name(name);
+        let name = &self.resolve_ref_use(name)?;
         match index {
             None => self.param_value(name),
             Some(w) => {
@@ -5097,7 +5113,11 @@ impl Shell {
     /// subscript. Used by `${name[i]:=default}` (assign-default). Out-of-range
     /// negative indices are ignored (matching bash's "bad subscript" no-op here).
     fn assign_elem(&mut self, name: &str, index: &Option<Box<Word>>, value: String) {
-        let name = &self.resolve_ref_name(name);
+        // A circular chain names nothing to write to; the read that led here
+        // has already reported it.
+        let Some(name) = &self.resolve_ref_name(name) else {
+            return;
+        };
         match index {
             None => {
                 self.vars.insert(name.to_string(), value);
@@ -5128,7 +5148,24 @@ impl Shell {
         // expands to the *name* of the referenced variable, not a second level
         // of indirection (bash). Follow the chain to the final target name.
         if self.nameref_attr.contains(refname) {
-            return self.resolve_ref_name(refname);
+            match self.resolve_ref_name(refname) {
+                Some(target) => return target,
+                None => {
+                    // A circular chain has no final name to report. bash does
+                    // *not* warn here — it raises the same "invalid indirect
+                    // expansion" error as an unset pointer (status 1, the rest
+                    // of the parse unit discarded).
+                    self.emit_stderr(
+                        format!(
+                            "{}{refname}: invalid indirect expansion\n",
+                            self.err_prefix()
+                        )
+                        .as_bytes(),
+                    );
+                    self.discard_error = Some(1);
+                    return String::new();
+                }
+            }
         }
         // `${!@}` / `${!*}` indirect through the positional list: the value of
         // `$@`/`$*` becomes the target name. With **no** positionals there is
@@ -5616,7 +5653,10 @@ impl Shell {
     }
 
     fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> String {
-        let name = &self.resolve_ref_name(name);
+        let Some(name) = &self.resolve_ref_use(name) else {
+            // A circular chain is unset: `${a[@]}` is empty, `${#a[@]}` is 0.
+            return if length { "0".to_string() } else { String::new() };
+        };
         match index {
             ArrayIndex::All | ArrayIndex::Star => {
                 let elems = self.array_elements(name);
@@ -5935,8 +5975,13 @@ impl Shell {
         // succeeding command yields 0, not 1). Filter the offending assignments
         // out — no dispatch path can then mutate the readonly var — and emit one
         // diagnostic per hit before continuing.
-        let ro_targets: Vec<String> =
-            assigns.iter().map(|(k, _)| self.resolve_ref_name(k)).collect();
+        // A circular nameref is not readonly, and reporting it here would
+        // double up with the diagnostic the assignment itself emits, so it
+        // stands in for its own name in this check.
+        let ro_targets: Vec<String> = assigns
+            .iter()
+            .map(|(k, _)| self.resolve_ref_name(k).unwrap_or_else(|| k.clone()))
+            .collect();
         if ro_targets.iter().any(|t| self.readonly.contains(t)) {
             let mut i = 0;
             assigns.retain(|_| {
@@ -7533,8 +7578,10 @@ impl Shell {
                     };
                 }
                 // Pre-check readonly so `set_scalar_checked` (which reports its
-                // own error) can't double-print with the caller's report.
-                let target = self.resolve_ref_name(name);
+                // own error) can't double-print with the caller's report. A
+                // circular nameref is not readonly and is reported by the store
+                // itself, so it stands in for its own name here.
+                let target = self.resolve_ref_name(name).unwrap_or_else(|| name.clone());
                 if self.readonly.contains(&target) {
                     // bash emits *two* diagnostics for a readonly varfd target:
                     // the generic readonly-variable error, then a
@@ -7549,9 +7596,14 @@ impl Shell {
                 }
                 let n = self.alloc_varfd(reserved);
                 reserved.push(n);
-                let ok = self.set_scalar_checked(name, n.to_string());
-                debug_assert!(ok, "readonly pre-checked");
-                Ok(n)
+                if self.set_scalar_checked(name, n.to_string()) {
+                    Ok(n)
+                } else {
+                    // Readonly was pre-checked above, so the only remaining
+                    // failure is a circular nameref — already reported by the
+                    // store; report the redirect's own half of it too.
+                    Err(format!("{name}: cannot assign fd to variable"))
+                }
             }
             None => Ok(r.fd),
         }
@@ -9098,8 +9150,19 @@ impl Shell {
                 // `ref`, or the nameref chain's endpoint), then apply the modifier
                 // to that variable. Mirrors `expand_indirect`'s error handling for
                 // an unset pointer / invalid target name.
+                // A circular chain has no endpoint name, so it takes the same
+                // "invalid indirect expansion" path as an unset pointer.
                 let tname = if self.nameref_attr.contains(refname) {
-                    self.resolve_ref_name(refname)
+                    match self.resolve_ref_name(refname) {
+                        Some(t) => t,
+                        None => {
+                            self.emit_stderr(
+                                format!("{}{refname}: invalid indirect expansion\n", self.err_prefix()).as_bytes(),
+                            );
+                            self.discard_error = Some(1);
+                            return String::new();
+                        }
+                    }
                 } else {
                     match self.param_value(refname) {
                         Some(t) => t,
@@ -9266,11 +9329,13 @@ impl Shell {
         colon: bool,
         arg: &Word,
     ) -> Vec<String> {
+        // A circular nameref names nothing: `array_elements` below reports it,
+        // so resolve silently here and let `None` make the name non-existent.
         let resolved = self.resolve_ref_name(name);
         let elements = self.array_elements(name);
-        let exists = self.arrays.contains_key(&resolved)
-            || self.assoc.contains_key(&resolved)
-            || self.vars.contains_key(&resolved);
+        let exists = resolved.as_ref().is_some_and(|r| {
+            self.arrays.contains_key(r) || self.assoc.contains_key(r) || self.vars.contains_key(r)
+        });
         let is_active = if colon {
             // Colon forms test for "null": bash joins the elements with the first
             // `$IFS` char (as `${a[*]}` would) and treats an empty result as null.
@@ -9308,7 +9373,7 @@ impl Shell {
                     // assigns the literal key `@` (bash: `declare -A m=(["@"]="v")`)
                     // rather than erroring. Only an indexed (or undeclared) array
                     // rejects `[@]`/`[*]` as a subscript to write through.
-                    if self.assoc.contains_key(&resolved) {
+                    if let Some(resolved) = resolved.filter(|r| self.assoc.contains_key(r)) {
                         let val = self.expand_to_string(arg);
                         self.assoc_set(&resolved, sub.to_string(), val.clone(), false);
                         return vec![val];
@@ -9398,6 +9463,14 @@ impl Shell {
             }
             return false;
         }
+        // A nameref stands for its target, so `-v ref` asks whether the
+        // *target* is set — not whether the reference itself exists, which it
+        // always does. A target naming an array *element* (`declare -n
+        // e=arr[1]`) is looked up as an ordinary variable name and so is never
+        // set, and a circular chain names nothing at all (both bash).
+        let Some(name) = &self.resolve_ref_use(name) else {
+            return false;
+        };
         if self.vars.contains_key(name)
             || self.arrays.contains_key(name)
             || self.assoc.contains_key(name)
@@ -9408,26 +9481,63 @@ impl Shell {
         self.param_value(name).is_some()
     }
 
-    /// Resolve a parameter's value; `None` means unset.
     /// Resolve a variable name through any nameref chain (`declare -n`),
-    /// returning the final target name. A nameref's value is the name it points
-    /// to; following stops at the first non-nameref name (or an unset/empty
-    /// target), and a depth guard prevents an infinite loop on a cycle. Only the
-    /// bare-name portion is followed — a target that names an array element
-    /// (`ref=arr[0]`) is returned as-is for the caller's subscript logic.
-    fn resolve_ref_name(&self, name: &str) -> String {
+    /// returning the final target name — or `None` when the chain is *circular*
+    /// and therefore names nothing.
+    ///
+    /// A nameref's value is the name it points to; following stops at the first
+    /// non-nameref name (or an unset/empty target). Only the bare-name portion
+    /// is followed — a target that names an array element (`ref=arr[0]`) is
+    /// returned as-is for the caller's subscript logic.
+    ///
+    /// `declare -n a=b; declare -n b=a` is a reference with nowhere to go. bash
+    /// treats it as *unset* (`[$a]` is empty, `${a:-d}` takes the default,
+    /// `${#a}` is 0, `[ -v a ]` is false) rather than stopping at the last name
+    /// walked, which is what osh used to do — it returned `b`, so `$a` expanded
+    /// to the string `b`. This resolver stays silent about it; the warning bash
+    /// prints belongs to the *use* of the name, so it lives in
+    /// [`Self::resolve_ref_use`] and the few paths that must not warn (`${!a}`,
+    /// which reports `invalid indirect expansion` instead) call this directly.
+    fn resolve_ref_name(&self, name: &str) -> Option<String> {
         let mut cur = name.to_string();
-        // A short bound: real nameref chains are tiny; this only guards cycles.
-        for _ in 0..64 {
+        let mut seen: Vec<String> = Vec::new();
+        loop {
             if !self.nameref_attr.contains(&cur) {
-                return cur;
+                return Some(cur);
+            }
+            if seen.contains(&cur) {
+                return None;
             }
             match self.vars.get(&cur) {
-                Some(target) if !target.is_empty() && target != &cur => cur = target.clone(),
-                _ => return cur,
+                // A nameref naming *itself* is not a cycle: inside a function
+                // `local -n r=r` legitimately means the caller's `r`, and bash
+                // rejects the global form at declaration time instead.
+                Some(target) if !target.is_empty() && target != &cur => {
+                    seen.push(std::mem::replace(&mut cur, target.clone()));
+                }
+                _ => return Some(cur),
             }
         }
-        cur
+    }
+
+    /// Resolve a nameref chain for a *use* of the name, reporting a circular
+    /// chain the way bash does before yielding `None`.
+    ///
+    /// The warning names the variable the walk *started* from, not a fixed
+    /// member of the cycle: with `a→b→c→a`, reading `$c` reports `c`. Callers
+    /// then treat `None` as "no such variable".
+    fn resolve_ref_use(&self, name: &str) -> Option<String> {
+        let target = self.resolve_ref_name(name);
+        if target.is_none() {
+            self.emit_stderr(
+                format!(
+                    "{}warning: {name}: circular name reference\n",
+                    self.err_prefix()
+                )
+                .as_bytes(),
+            );
+        }
+        target
     }
 
     /// If `name` is a nameref whose target is an array element (`arr[0]` /
@@ -9437,7 +9547,9 @@ impl Shell {
         if !self.nameref_attr.contains(name) {
             return None;
         }
-        let target = self.resolve_ref_name(name);
+        // Silent: `param_value` resolves again right after and reports a
+        // circular chain there, so warning here would double it.
+        let target = self.resolve_ref_name(name)?;
         let open = target.find('[')?;
         let inner = target.strip_suffix(']')?;
         let base = &target[..open];
@@ -9503,7 +9615,7 @@ impl Shell {
         if let Some(v) = self.nameref_elem_value(name) {
             return Some(v);
         }
-        let name = &self.resolve_ref_name(name);
+        let name = &self.resolve_ref_use(name)?;
         match name.as_str() {
             "?" => Some(self.last_status.to_string()),
             "#" => Some(self.positional.len().to_string()),
@@ -13030,8 +13142,11 @@ impl Shell {
                 ),
                 _ => (name.clone(), None),
             };
-            // A readonly target is rejected (status 1), leaving it intact.
-            let resolved = self.resolve_ref_name(&base);
+            // A readonly target is rejected (status 1), leaving it intact; a
+            // circular nameref names nothing to write to and fails the same way.
+            let Some(resolved) = self.resolve_ref_use(&base) else {
+                return 1;
+            };
             if self.readonly.contains(&resolved) {
                 self.emit_stderr(format!("{}{base}: readonly variable\n", self.err_prefix()).as_bytes());
                 return 1;
@@ -14693,7 +14808,9 @@ impl Shell {
                     .map(|body| (&a[..open], &body[open + 1..]))
             });
             if let Some((base, sub_src)) = subscript {
-                let name = self.resolve_ref_name(base);
+                let name = self
+                    .resolve_ref_use(base)
+                    .unwrap_or_else(|| base.to_string());
                 if self.unset_element(&name, sub_src) {
                     continue;
                 }
@@ -14707,8 +14824,10 @@ impl Shell {
                 continue;
             }
             // Without `-n`, unsetting a nameref unsets the variable it points to
-            // (bash semantics); resolve the target name first.
-            let a = &self.resolve_ref_name(a);
+            // (bash semantics); resolve the target name first. A circular chain
+            // points nowhere, so bash reports it and unsets the *reference*,
+            // leaving the rest of the cycle in place.
+            let a = &self.resolve_ref_use(a).unwrap_or_else(|| a.clone());
             // A readonly variable cannot be unset.
             if self.readonly.contains(a) {
                 self.emit_stderr(
@@ -27415,6 +27534,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("t=v; declare -n r=t; declare -p r").0,
             "declare -n r=\"t\"\n"
+        );
+    }
+
+    #[test]
+    fn nameref_cycle_reads_as_unset() {
+        // A cycle is a reference with nowhere to go. osh used to stop at the
+        // last name walked, so `$a` expanded to the *string* `b`.
+        assert_eq!(run("declare -n a=b; declare -n b=a; echo \"[$a]\"").0, "[]\n");
+        assert_eq!(
+            run("declare -n a=b; declare -n b=a; echo \"[${a:-def}]\"").0,
+            "[def]\n"
+        );
+        assert_eq!(
+            run("declare -n a=b; declare -n b=a; echo \"[${#a}]\"").0,
+            "[0]\n"
+        );
+        assert_eq!(
+            run("declare -n a=b; declare -n b=a; echo \"[${a[@]}]\"").0,
+            "[]\n"
+        );
+        // Longer chains close the same way, from whichever link is read.
+        assert_eq!(
+            run("declare -n a=b; declare -n b=c; declare -n c=a; echo \"[$c]\"").0,
+            "[]\n"
+        );
+        // `-v` reports it unset, and the reference does not resolve to itself.
+        assert_eq!(
+            run("declare -n a=b; declare -n b=a; [ -v a ]; echo rc=$?").0,
+            "rc=1\n"
+        );
+    }
+
+    #[test]
+    fn nameref_cycle_write_fails_and_leaves_the_cycle_intact() {
+        // Writing through a cycle has no target: bash fails the assignment and
+        // discards the rest of that list, but the shell (and the cycle) survive.
+        assert_eq!(
+            run("declare -n a=b; declare -n b=a; a=5; echo nope\necho rc=$?\ndeclare -p a b").0,
+            "rc=1\ndeclare -n a=\"b\"\ndeclare -n b=\"a\"\n"
+        );
+    }
+
+    #[test]
+    fn nameref_to_unset_or_element_target_is_not_v_set() {
+        // `-v ref` asks whether the *target* is set, not whether the reference
+        // exists — which it always does.
+        assert_eq!(
+            run("declare -n r=missing; [ -v r ]; echo rc=$?").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("declare -n r=t; t=1; [ -v r ]; echo rc=$?").0,
+            "rc=0\n"
+        );
+        // A target naming an array *element* reads through, but `-v` looks the
+        // resolved text up as a plain variable name and so never finds it.
+        assert_eq!(
+            run("a=(p q); declare -n r=a[1]; [ -v r ]; echo \"rc=$? val=[$r]\"").0,
+            "rc=1 val=[q]\n"
         );
     }
 

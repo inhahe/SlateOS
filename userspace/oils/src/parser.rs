@@ -2074,49 +2074,55 @@ impl Parser {
         let Some(Seg::Lit(first)) = segs.first() else {
             return Ok(None);
         };
-        // A subscript containing expansions spans multiple segments, e.g.
-        // `m[$k]=v` → [Lit("m["), Param("k"), Lit("]=v")]. The first segment
-        // then has `[` but no closing `]`, so `=` isn't in it — handle here.
-        if let Some(open) = first.find('[')
-            && !first[open..].contains(']')
-        {
-            return self.spanning_subscript_assignment(segs, first, open);
-        }
-        let Some(eq) = first.find('=') else {
+        // Everything that decides the shape is anchored to the *name*: the word
+        // is an assignment only if a `[` or an `=` sits immediately after it.
+        // Scanning for the first `[` or `=` anywhere in the word instead gets
+        // two shapes wrong — `foo=a[b` (an unclosed bracket in the value is
+        // just text, not an unfinished subscript) and `a[x=3]=1` (a subscript
+        // is arithmetic, so the `=` inside it is not the operator).
+        let name_len = name_prefix_len(first);
+        if name_len == 0 {
             return Ok(None);
-        };
-        let mut lhs = &first[..eq];
-        // `+=` append.
-        let append = lhs.ends_with('+');
-        if append {
-            lhs = &lhs[..lhs.len() - 1];
         }
-        // Optional `[index]` subscript.
-        let (name, index) = if let Some(open) = lhs.find('[') {
-            if !lhs.ends_with(']') {
-                return Ok(None);
+        let name = &first[..name_len];
+        let (index, after_lhs) = if first[name_len..].starts_with('[') {
+            match balanced_subscript_end(&first[name_len..]) {
+                // A subscript containing expansions spans multiple segments,
+                // e.g. `m[$k]=v` → [Lit("m["), Param("k"), Lit("]=v")]; the
+                // first segment then has no closing `]` at all.
+                None => return self.spanning_subscript_assignment(segs, first, name_len),
+                Some(close) => {
+                    // An *empty* subscript still makes the word an assignment.
+                    // bash recognises `a[]=1` and then rejects it at run time
+                    // ("a[]: bad array subscript"); refusing it here instead
+                    // would demote the word to a command name and report
+                    // "command not found".
+                    let idx_src = &first[name_len + 1..name_len + close];
+                    // A subscript is parsed verbatim (no word-splitting or
+                    // trimming): for an associative array the expanded text —
+                    // leading/trailing whitespace included — is the literal key
+                    // (bash: `h[ x ]=v` keys on ` x `). For an indexed array the
+                    // arithmetic evaluator ignores the whitespace, so preserving
+                    // it is harmless.
+                    let idx = word_verbatim_from_source(idx_src, self.opts)?;
+                    (Some(idx), &first[name_len + close + 1..])
+                }
             }
-            let name = &lhs[..open];
-            let idx_src = &lhs[open + 1..lhs.len() - 1];
-            if name.is_empty() || !is_valid_name(name) || idx_src.is_empty() {
-                return Ok(None);
-            }
-            // A subscript is parsed verbatim (no word-splitting/trimming): for an
-            // associative array the expanded text — leading/trailing whitespace
-            // included — is the literal key (bash: `h[ x ]=v` keys on ` x `). For
-            // an indexed array the arithmetic evaluator ignores the whitespace, so
-            // preserving it is harmless.
-            (name, Some(word_verbatim_from_source(idx_src, self.opts)?))
         } else {
-            if lhs.is_empty() || !is_valid_name(lhs) {
-                return Ok(None);
-            }
-            (lhs, None)
+            (None, &first[name_len..])
+        };
+        // `+=` append. Only these two spellings follow the left-hand side; a
+        // word that runs on into anything else is not an assignment.
+        let (append, after) = if let Some(rest) = after_lhs.strip_prefix("+=") {
+            (true, rest)
+        } else if let Some(rest) = after_lhs.strip_prefix('=') {
+            (false, rest)
+        } else {
+            return Ok(None);
         };
         // Build the value word from the remainder of the first seg plus the
         // rest of the segments.
         let mut value_segs: Vec<Seg> = Vec::new();
-        let after = &first[eq + 1..];
         if !after.is_empty() {
             value_segs.push(Seg::Lit(after.to_string()));
         }
@@ -3045,6 +3051,51 @@ pub(crate) fn is_valid_name(s: &str) -> bool {
         _ => return false,
     }
     it.all(is_name_char)
+}
+
+/// Byte length of the identifier `s` begins with, or `0` if it does not begin
+/// with one. Used to anchor assignment-word recognition to the name, so that a
+/// `[` or `=` further right — in the *value* — cannot be mistaken for the start
+/// of a subscript or for the assignment operator.
+fn name_prefix_len(s: &str) -> usize {
+    let mut len = 0;
+    for (i, c) in s.char_indices() {
+        if i == 0 {
+            if !is_name_start(c) {
+                return 0;
+            }
+        } else if !is_name_char(c) {
+            break;
+        }
+        len = i + c.len_utf8();
+    }
+    len
+}
+
+/// Byte offset of the `]` closing the subscript `s` opens with, counting nested
+/// brackets (`a[b[0]]=v`). `None` when it never closes inside `s` — which for
+/// an assignment word means the subscript carries on into the next segment
+/// (`m[$k]=v`), not that the word is malformed.
+///
+/// The subscript body is *not* scanned for quoting: bash reads it as arithmetic
+/// (or, for an associative array, as a literal key) after the brackets have
+/// already been matched, so a `]` inside it is a `]` here too.
+fn balanced_subscript_end(s: &str) -> Option<usize> {
+    debug_assert!(s.starts_with('['));
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// A referent usable in a *bare* indirect expansion `${!name}`: a plain

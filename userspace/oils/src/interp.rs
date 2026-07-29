@@ -4873,6 +4873,24 @@ impl Shell {
                     self.fold_case_attr(&a.name, val)
                 };
                 if let Some(idx_word) = &a.index {
+                    // `a[]=v` — a subscript with no source text at all. bash
+                    // refuses it before it looks at the array's type, so this
+                    // check precedes the assoc/indexed split, and it is about
+                    // the *source* being empty, not the expansion: `a[""]=v`
+                    // and `a[$unset]=v` both expand to nothing and are indexed
+                    // by arithmetic as 0. An empty *key* on an associative
+                    // array is a separate rejection, below.
+                    if crate::unparse::word_src(idx_word).is_empty() {
+                        self.errln(&format!(
+                            "{}{}[]: bad array subscript",
+                            self.err_prefix(),
+                            a.name
+                        ));
+                        if !self.decl_builtin_ctx {
+                            self.discard_error = Some(1);
+                        }
+                        return false;
+                    }
                     if is_assoc {
                         // `name[key]=val` — associative element (string key).
                         let key = self.expand_to_string(idx_word);
@@ -9762,7 +9780,17 @@ impl Shell {
                 colon,
                 arg,
                 label,
-            } => self.expand_param_op(name, index, *op, *colon, arg, label.as_deref(), operand),
+            } => self.expand_param_op(
+                ParamOpNode {
+                    name,
+                    index,
+                    op: *op,
+                    colon: *colon,
+                    arg,
+                    label: label.as_deref(),
+                },
+                operand,
+            ),
             WordPart::ParamTrim {
                 name,
                 index,
@@ -9939,9 +9967,9 @@ impl Shell {
                 // t=(x y); ${!r^^}` is the first element upper-cased. The
                 // `${x:-…}` family never looks through: it works on whatever
                 // the reference itself expanded to.
-                let reads_name = nameref
-                    && !(self.indirect_target_reaches_array(&tname)
-                        && !matches!(**target, WordPart::ParamOp { .. }));
+                let looks_through = self.indirect_target_reaches_array(&tname)
+                    && !matches!(**target, WordPart::ParamOp { .. });
+                let reads_name = nameref && !looks_through;
                 let operand = if reads_name {
                     Some(tname.clone())
                 } else {
@@ -10003,16 +10031,15 @@ impl Shell {
         self.bad_substitution_with(raw, true)
     }
 
-    fn expand_param_op(
-        &mut self,
-        name: &str,
-        index: &Option<Box<Word>>,
-        op: ParamOp,
-        colon: bool,
-        arg: &Word,
-        label: Option<&str>,
-        operand: Operand,
-    ) -> String {
+    fn expand_param_op(&mut self, node: ParamOpNode<'_>, operand: Operand) -> String {
+        let ParamOpNode {
+            name,
+            index,
+            op,
+            colon,
+            arg,
+            label,
+        } = node;
         let cur = self.op_operand(operand, name, index);
         // Bash: the colon forms (`:-`, `:=`, `:+`, `:?`) treat an empty value the
         // same as unset ("active" only when set AND non-empty). The colon-less
@@ -19889,6 +19916,33 @@ enum Operand<'a> {
     /// still worth telling from the empty string, because `${!a[9]:-D}` yields
     /// the default while `${!a[9]:+S}` yields nothing.
     Value(Option<&'a str>),
+}
+
+/// The written form of a `${name[index]<op>arg}` modifier — everything the
+/// parser recorded about the node, borrowed from the AST.
+///
+/// It travels as one value because the *runtime* input is separate: an
+/// indirection rebuilds the node to name what the reference resolved to and
+/// then supplies the text to work on out of band (see [`Operand`]), so the
+/// expansion entry point takes a node and an operand rather than a handful of
+/// loose fields that must be kept in step.
+#[derive(Debug, Clone, Copy)]
+struct ParamOpNode<'a> {
+    /// The parameter named, after any indirection has been resolved.
+    name: &'a str,
+    /// Its subscript, unexpanded, if it was written with one.
+    index: &'a Option<Box<Word>>,
+    op: ParamOp,
+    /// The `:` of `:-`, `:=`, `:+`, `:?`, which makes an empty value count as
+    /// unset. Without it, only a genuinely unset parameter is.
+    colon: bool,
+    /// The word after the operator: the default, the replacement, or the `:?`
+    /// message.
+    arg: &'a Word,
+    /// How to *name* the parameter in a diagnostic, when that differs from
+    /// `name`: through an indirection bash blames the reference the writer
+    /// wrote (`ptr=b[1]; ${!ptr:?}` says `ptr`), not the name it resolved to.
+    label: Option<&'a str>,
 }
 
 /// The place a plain scalar assignment ends up, after namerefs are followed.

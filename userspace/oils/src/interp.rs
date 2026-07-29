@@ -1622,6 +1622,43 @@ impl DirStackSpec {
     }
 }
 
+/// What the read-eval loop ([`Shell::run_source_flow_out`]) does with the lines
+/// it consumes, as far as the command history is concerned.
+///
+/// bash draws the line at its *reader*: only input the reader consumed is
+/// recorded, and only that input is `!`-expanded. `fc` is the one caller that
+/// wants half of each — the file it edited is re-read with recording on (POSIX
+/// says the re-executed commands go into the history) but is not the reader's
+/// input, so no `!`-expansion happens in it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HistRead {
+    /// Neither record nor expand: a `source`d file, an `eval` string, a trap
+    /// action, a `$( … )` body. The *call* that reached them was recorded.
+    Off,
+    /// The shell's own top-level reader: record each unit and `!`-expand the
+    /// lines before parsing them.
+    Reader,
+    /// Record each unit but do not expand — `fc`'s re-read of the file its
+    /// editor left behind.
+    RecordOnly,
+}
+
+impl HistRead {
+    /// Whether a unit read in this mode goes into the history list.
+    ///
+    /// `Reader` obeys `set -o history`; `RecordOnly` does not, because bash's
+    /// `fc` forces `remember_on_history` on for the replay whatever the option
+    /// says — so a `fc` run under `set +o history` still leaves the commands it
+    /// re-ran in the list.
+    fn records(self, hist_on: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Reader => hist_on,
+            Self::RecordOnly => true,
+        }
+    }
+}
+
 /// One `source`/`.` frame (see [`Shell::source_stack`]).
 ///
 /// bash keeps sourced scripts on the same frame stack as function calls, so the
@@ -3082,7 +3119,7 @@ impl Shell {
             out,
             &StdinSrc::Inherit,
             &LineMap::Offset(line_base),
-            true,
+            HistRead::Reader,
         ) {
             Flow::Exit(code) => {
                 self.exit_requested = true;
@@ -3114,18 +3151,19 @@ impl Shell {
     /// built. It is `Offset(0)` for a source that numbers its own lines from 1,
     /// which is every other internally-generated body here.
     ///
-    /// `record` says whether the units read here go into the command history.
-    /// Only [`Shell::run_source_out`] passes `true`: bash records the lines its
+    /// `hist` says what the units read here do to the command history. Almost
+    /// every caller passes [`HistRead::Off`]: bash records the lines its
     /// *top-level* reader consumes and nothing else, so a `source`d file, an
     /// `eval` string, a trap action and a `$( … )` body are all silent — the
-    /// call that reached them is what was recorded.
+    /// call that reached them is what was recorded. See [`HistRead`] for the
+    /// two exceptions.
     fn run_source_flow_out(
         &mut self,
         src: &str,
         out: &mut Out,
         stdin: &StdinSrc,
         map: &LineMap,
-        record: bool,
+        hist: HistRead,
     ) -> Flow {
         // Parse and execute one unit (one logical line) at a time rather than
         // parsing the whole input up front, because bash's read-parse-execute
@@ -3145,7 +3183,7 @@ impl Shell {
             // read, before the lexer sees it — so it runs here, ahead of the
             // unit, and only for the top-level reader (`record`), which is the
             // only input bash expands. See [`Shell::expand_history_lines`].
-            if record && self.hist_on && self.histexpand {
+            if hist == HistRead::Reader && self.hist_on && self.histexpand {
                 self.expand_history_lines(&mut ip, opts);
             }
             let aliases = if self.aliases_enabled() { Some(&self.aliases) } else { None };
@@ -3171,7 +3209,7 @@ impl Shell {
             // bash records a line when it *reads* it, before it runs — which is
             // why `history` lists the `history` call that printed the list, and
             // why `$HISTCMD` already counts the line it appears on.
-            if record && self.hist_on {
+            if hist.records(self.hist_on) {
                 self.record_history(ip.last_unit_lines());
             }
             let prog = match unit {
@@ -12283,7 +12321,7 @@ impl Shell {
             // `exec > file`, so `exec >f; x=$(echo hi)` still captures `hi`.
             sub.exec_stdout = None;
             let mut out = Out::Capture(cap.clone());
-            if let Flow::Exit(code) = sub.run_source_flow_out(src, &mut out, &StdinSrc::Inherit, map, false)
+            if let Flow::Exit(code) = sub.run_source_flow_out(src, &mut out, &StdinSrc::Inherit, map, HistRead::Off)
             {
                 // Nothing above this is left to unwind — the substitution's
                 // subshell *is* the outermost frame here — so collapse the flow
@@ -13096,7 +13134,7 @@ impl Shell {
                 // reports 3; running a three-line string reports 3, 4, 5.)
                 // `current_line` is already absolute, so nested evals compose.
                 let eval_base = self.current_line.saturating_sub(1);
-                let eval_flow = self.run_source_flow_out(&joined, out, stdin, &LineMap::Offset(eval_base), false);
+                let eval_flow = self.run_source_flow_out(&joined, out, stdin, &LineMap::Offset(eval_base), HistRead::Off);
                 self.eval_depth = self.eval_depth.saturating_sub(1);
                 match eval_flow {
                     Flow::Exit(code) => {
@@ -13133,6 +13171,7 @@ impl Shell {
             "help" => self.builtin_help(args, out, redir),
             "hash" => self.builtin_hash(args, out, redir),
             "history" => self.builtin_history(args, out, redir),
+            "fc" => self.builtin_fc(args, out, stdin, redir),
             "umask" => self.builtin_umask(args, out, redir),
             "ulimit" => self.builtin_ulimit(args, out, redir),
             "exec" => {
@@ -16330,6 +16369,404 @@ impl Shell {
         0
     }
 
+    /// Resolve one of `fc`'s history specifications to an *index* into
+    /// [`Shell::history`] — bash's `fc_gethnum`.
+    ///
+    /// `fc` numbers the list from a different end than `history` does, and the
+    /// arithmetic is bash's, quirks included:
+    /// * The newest usable entry is `last_hist` — the one *before* `fc`'s own
+    ///   line, which the reader already recorded. `None` (no specification at
+    ///   all) is that entry.
+    /// * `-N` counts back from it: `-1` is `last_hist`, `-2` the one before,
+    ///   floored at the oldest entry.
+    /// * `-0` is the odd one out. It resolves to `real_last`, `fc`'s *own*
+    ///   line, which only makes sense while listing; when editing it is a hard
+    ///   error ("history specification out of range").
+    /// * A plain `0` is `last_hist`.
+    /// * A positive number is absolute, but **out of range includes the newest
+    ///   usable entry itself** (`n >= last_hist`, not `>`), so naming the
+    ///   previous command by its own number behaves as if it were far too
+    ///   large. Out of range resolves to the oldest entry when this is the
+    ///   *first* of a pair and to the newest when it is the last, which is how
+    ///   `fc -l 900 901` ends up listing the whole history.
+    /// * Anything else is a **prefix** of a command line, searched newest-first.
+    ///
+    /// The number is read like `atoi`, so trailing junk is ignored; only the
+    /// first character after an optional `-` has to be a digit for the word to
+    /// count as a number at all.
+    fn fc_gethnum(&self, spec: Option<&str>, listing: bool, first: bool) -> FcSpec {
+        let len = isize::try_from(self.history.len()).unwrap_or(isize::MAX);
+        // bash: `last_hist = i - rh - hist_last_line_added`. Both terms are 1
+        // exactly when the shell is recording, in which case `fc`'s own line is
+        // the newest entry and has to be skipped. With recording off nothing was
+        // added, and bash's "back up past the NULL terminator" loop lands on the
+        // true newest entry.
+        let last_hist = if self.hist_on { len - 2 } else { len - 1 };
+        if last_hist < 0 {
+            // bash returns -1 here: not one of the error sentinels, so a caller
+            // that is listing clamps it to the oldest entry, while `fc -s`
+            // treats it as "no command found".
+            return FcSpec::Idx(-1);
+        }
+        let real_last = len - 1;
+        let Some(s) = spec else { return FcSpec::Idx(last_hist) };
+        let (sign, digits) = match s.strip_prefix('-') {
+            Some(rest) => (-1_isize, rest),
+            None => (1, s),
+        };
+        if digits.starts_with(|c: char| c.is_ascii_digit()) {
+            let n = sign.saturating_mul(atoi(digits));
+            if n < 0 {
+                return FcSpec::Idx((n.saturating_add(last_hist).saturating_add(1)).max(0));
+            }
+            if n == 0 {
+                return if sign < 0 {
+                    if listing { FcSpec::Idx(real_last) } else { FcSpec::Invalid }
+                } else {
+                    FcSpec::Idx(last_hist)
+                };
+            }
+            let idx = n.saturating_sub(isize::try_from(self.hist_base).unwrap_or(1));
+            if idx < 0 || idx >= last_hist {
+                return FcSpec::Idx(if first { 0 } else { last_hist });
+            }
+            return FcSpec::Idx(idx);
+        }
+        let upto = usize::try_from(last_hist).unwrap_or(0);
+        for (j, entry) in self.history.iter().enumerate().take(upto.saturating_add(1)).rev() {
+            if entry.starts_with(s) {
+                return FcSpec::Idx(isize::try_from(j).unwrap_or(0));
+            }
+        }
+        FcSpec::NotFound
+    }
+
+    /// bash's `fc_replhist`: the `fc -s` line the reader just recorded is
+    /// replaced by the command it re-runs, so `fc` never appears in the history.
+    ///
+    /// The removal is unconditional in bash — it is a plain "drop the newest
+    /// entry", not "drop my own entry" — so with `set +o history` in force (and
+    /// therefore no entry of its own to drop) `fc -s` eats the last *real* entry
+    /// and puts the re-run command in its place. Reproduced deliberately.
+    fn fc_replhist(&mut self, command: &str) {
+        if command.is_empty() {
+            return;
+        }
+        if self.history.pop().is_some() {
+            self.hist_session = self.hist_session.saturating_sub(1);
+        }
+        self.hist_record(command.to_string());
+    }
+
+    /// `fc [-e ename] [-lnr] [first] [last]` / `fc -s [pat=rep …] [command]` —
+    /// list, or edit and re-run, entries from the command history.
+    ///
+    /// Two builtins in one, and they share almost nothing:
+    /// * **Listing** (`-l`) writes `N\t COMMAND` per entry to stdout — a tab and
+    ///   a *space*, not `history`'s `%5d  %s`. `-n` drops the number (the tab
+    ///   and space stay), `-r` reverses. The default window is the last 16
+    ///   entries. Listing leaves the history alone, including `fc`'s own line.
+    /// * **Editing** (the default) writes the same range *unnumbered* to a temp
+    ///   file, runs `${FCEDIT:-${EDITOR:-vi}} FILE` as a shell command line, and
+    ///   then reads the file back and runs it — with `set -v` raised, so each
+    ///   unit is echoed as it is read, and with history recording forced on, so
+    ///   the re-run commands are recorded (POSIX requires that). `fc`'s own line
+    ///   is removed first, so what is left behind is what was re-run. A failing
+    ///   editor is status 1 and nothing is executed.
+    /// * **`-s`** (or `-e -`) skips the editor: it applies any `pat=rep` global
+    ///   substitutions to the selected command, echoes the result to **stderr**,
+    ///   swaps it into the history in place of the `fc` line, and runs it.
+    ///
+    /// The whole builtin is a no-op returning success when the history list is
+    /// empty, which is what a non-interactive shell without `set -o history`
+    /// always sees.
+    #[allow(clippy::too_many_lines)]
+    fn builtin_fc(
+        &mut self,
+        args: &[String],
+        out: &mut Out,
+        stdin: &StdinSrc,
+        redir: &RedirPlan,
+    ) -> i32 {
+        const USAGE: &str =
+            "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]";
+        // A `HISTSIZE` assigned since the last line was recorded has already
+        // stifled the list by the time bash's builtin looks at it.
+        self.hist_sync();
+        let mut numbering = true;
+        let mut reverse = false;
+        let mut listing = false;
+        let mut execute = false;
+        let mut ename: Option<String> = None;
+        let mut i = 0;
+        'args: while let Some(a) = args.get(i) {
+            // bash stops option parsing at the first word that looks like a
+            // history number, so `fc -l -2` reads `-2` as a range endpoint
+            // rather than as a bundle of options.
+            if fc_is_number(a) {
+                break;
+            }
+            if a == "--" {
+                i = i.saturating_add(1);
+                break;
+            }
+            let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) else {
+                break;
+            };
+            i = i.saturating_add(1);
+            for (at, c) in flags.char_indices() {
+                match c {
+                    'n' => numbering = false,
+                    'l' => listing = true,
+                    'r' => reverse = true,
+                    's' => execute = true,
+                    'e' => {
+                        // getopt style: the name is the rest of this word, or
+                        // the next word when nothing follows the `e`.
+                        let tail = flags.get(at.saturating_add(1)..).unwrap_or("");
+                        if tail.is_empty() {
+                            let Some(name) = args.get(i) else {
+                                self.errln(&format!(
+                                    "{}fc: -e: option requires an argument",
+                                    self.err_prefix()
+                                ));
+                                self.errln(&format!("fc: usage: {USAGE}"));
+                                return 2;
+                            };
+                            i = i.saturating_add(1);
+                            ename = Some(name.clone());
+                        } else {
+                            ename = Some(tail.to_string());
+                        }
+                        continue 'args;
+                    }
+                    _ => {
+                        self.errln(&format!("{}fc: -{c}: invalid option", self.err_prefix()));
+                        self.errln(&format!("fc: usage: {USAGE}"));
+                        return 2;
+                    }
+                }
+            }
+        }
+        // `fc -e -` is the historical spelling of `fc -s`.
+        if ename.as_deref() == Some("-") {
+            execute = true;
+            ename = None;
+        }
+        let rest: Vec<String> = args.get(i..).unwrap_or(&[]).to_vec();
+
+        if execute {
+            return self.fc_execute(&rest, out, stdin);
+        }
+
+        if self.history.is_empty() {
+            return 0;
+        }
+        let len = isize::try_from(self.history.len()).unwrap_or(isize::MAX);
+        let real_last = len.saturating_sub(1);
+        // bash floors `last_hist` at 0 here (but not in `fc_gethnum`), which is
+        // why `fc -l` in a shell whose only entry is the `fc` line lists that
+        // line.
+        let last_hist = if self.hist_on { len - 2 } else { len - 1 }.max(0);
+
+        let (beg, end) = match rest.first() {
+            Some(s) => {
+                let beg = self.fc_gethnum(Some(s), listing, true);
+                let end = match rest.get(1) {
+                    Some(s2) => self.fc_gethnum(Some(s2), listing, false),
+                    // One endpoint only. Listing runs from it to the newest
+                    // entry; editing takes just that one command. `-0` is the
+                    // exception: it already named the newest line there is, so
+                    // the range cannot extend past it.
+                    None => match beg {
+                        FcSpec::Idx(n) if n == real_last => {
+                            FcSpec::Idx(if listing { real_last } else { n })
+                        }
+                        FcSpec::Idx(n) => FcSpec::Idx(if listing { last_hist } else { n }),
+                        other => other,
+                    },
+                };
+                (beg, end)
+            }
+            // No endpoints: the last 16 entries when listing, the previous
+            // command alone when editing.
+            None if listing => (
+                FcSpec::Idx((last_hist.saturating_sub(15)).max(0)),
+                FcSpec::Idx(last_hist),
+            ),
+            None => (FcSpec::Idx(last_hist), FcSpec::Idx(last_hist)),
+        };
+        let (mut beg, mut end) = match (beg, end) {
+            (FcSpec::Invalid, _) | (_, FcSpec::Invalid) => {
+                self.errln(&format!(
+                    "{}fc: history specification out of range",
+                    self.err_prefix()
+                ));
+                return 1;
+            }
+            (FcSpec::NotFound, _) | (_, FcSpec::NotFound) => {
+                self.errln(&format!("{}fc: no command found", self.err_prefix()));
+                return 1;
+            }
+            (FcSpec::Idx(b), FcSpec::Idx(e)) => (b.max(0), e.max(0)),
+        };
+
+        // "When not listing, the fc command that caused the editing shall not be
+        // entered into the history list." Dropping it can only shrink the range,
+        // never grow it, so the endpoints are pulled back to the new newest
+        // entry — which is index -1, i.e. nothing to run, when the `fc` line was
+        // all there was.
+        if !listing && self.hist_on {
+            self.hist_drop_own_entry();
+            let new_last = isize::try_from(self.history.len()).unwrap_or(isize::MAX) - 1;
+            if end >= new_last {
+                end = new_last;
+            } else if beg >= new_last {
+                beg = new_last;
+            }
+        }
+        if end < beg {
+            std::mem::swap(&mut beg, &mut end);
+            reverse = true;
+        }
+        // The temp file the editor sees carries no numbers and no separator —
+        // it has to be shell input again.
+        if !listing {
+            numbering = false;
+        }
+        let mut text = String::new();
+        let mut idx = if reverse { end } else { beg };
+        while if reverse { idx >= beg } else { idx <= end } {
+            if let Ok(u) = usize::try_from(idx)
+                && let Some(entry) = self.history.get(u)
+            {
+                if numbering {
+                    let n = self.hist_base.saturating_add(u);
+                    text.push_str(&format!("{n}"));
+                }
+                if listing {
+                    // bash writes a tab then a `*` for an entry carrying
+                    // timestamp data and a space otherwise; osh never attaches
+                    // data, so it is always the space.
+                    text.push_str("\t ");
+                }
+                text.push_str(entry);
+                text.push('\n');
+            }
+            if reverse {
+                idx = idx.saturating_sub(1);
+                if idx < beg {
+                    break;
+                }
+            } else {
+                idx = idx.saturating_add(1);
+            }
+        }
+        if listing {
+            return self.write_bytes(out, redir, text.as_bytes());
+        }
+        self.fc_edit_and_run(&text, ename.as_deref(), out, stdin)
+    }
+
+    /// `fc -s` / `fc -e -`: re-run a command with optional global substitutions,
+    /// without an editor.
+    fn fc_execute(&mut self, rest: &[String], out: &mut Out, stdin: &StdinSrc) -> i32 {
+        // Every leading operand containing `=` is a `pat=rep` pair, split at its
+        // *first* `=` so a replacement may itself contain one. They apply in the
+        // order written, and each replaces **every** occurrence.
+        let mut subs: Vec<(String, String)> = Vec::new();
+        let mut k = 0;
+        while let Some(w) = rest.get(k) {
+            let Some(eq) = w.find('=') else { break };
+            let (pat, rep) = (w.get(..eq).unwrap_or(""), w.get(eq.saturating_add(1)..).unwrap_or(""));
+            subs.push((pat.to_string(), rep.to_string()));
+            k = k.saturating_add(1);
+        }
+        let spec = rest.get(k).map(String::as_str);
+        let idx = match self.fc_gethnum(spec, false, false) {
+            FcSpec::Idx(n) if n >= 0 => usize::try_from(n).unwrap_or(0),
+            _ => {
+                self.errln(&format!("{}fc: no command found", self.err_prefix()));
+                return 1;
+            }
+        };
+        let Some(mut command) = self.history.get(idx).cloned() else {
+            self.errln(&format!("{}fc: no command found", self.err_prefix()));
+            return 1;
+        };
+        for (pat, rep) in &subs {
+            command = str_replace_all(&command, pat, rep);
+        }
+        // The command about to run is echoed on stderr — so `fc -s … 2>/dev/null`
+        // hides the echo while `> /dev/null` does not.
+        self.errln(&command);
+        self.fc_replhist(&command);
+        self.fc_run(&command, out, stdin, HistRead::Off)
+    }
+
+    /// The editing half of `fc`: hand `text` to the editor, then read back
+    /// whatever it left and run that.
+    fn fc_edit_and_run(
+        &mut self,
+        text: &str,
+        ename: Option<&str>,
+        out: &mut Out,
+        stdin: &StdinSrc,
+    ) -> i32 {
+        let path = unique_temp_path("osh_fc");
+        if std::fs::write(&path, text.as_bytes()).is_err() {
+            self.errln(&format!(
+                "{}fc: {path}: cannot open temp file",
+                self.err_prefix()
+            ));
+            return 1;
+        }
+        // bash builds the editor invocation as a *shell command line* and parses
+        // it, so `FCEDIT='sed -i s/a/b/'` works and `-e` may name an editor with
+        // options. The file name is quoted (bash concatenates it raw, which
+        // breaks on a path containing spaces — ours are generated, so quoting is
+        // free and strictly safer).
+        let quoted = format!("'{}'", path.replace('\'', r"'\''"));
+        let cmd = match ename {
+            Some(e) => format!("{e} {quoted}"),
+            None => format!("${{FCEDIT:-${{EDITOR:-vi}}}} {quoted}"),
+        };
+        let rc = self.fc_run(&cmd, out, stdin, HistRead::Off);
+        if rc != 0 || self.pending_builtin_exit.is_some() || self.pending_abort {
+            // A failing editor means the edits are not trustworthy: bash throws
+            // the file away, runs nothing, and reports 1 (not the editor's own
+            // status).
+            let _ = std::fs::remove_file(&path); // best effort; the file is ours
+            return if rc == 0 { rc } else { 1 };
+        }
+        let edited = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path); // best effort; the file is ours
+        // bash raises `echo_input_at_read` (i.e. `set -v`) for the replay, so
+        // each unit is echoed to stderr as it is read, and forces history
+        // recording on so the re-run commands are remembered.
+        let saved_verbose = self.verbose;
+        self.set_verbose(true);
+        let rc = self.fc_run(&edited, out, stdin, HistRead::RecordOnly);
+        self.set_verbose(saved_verbose);
+        rc
+    }
+
+    /// Run internally-generated shell source on `fc`'s behalf, routing an `exit`
+    /// or an abort out through the side channels a builtin has to use.
+    fn fc_run(&mut self, src: &str, out: &mut Out, stdin: &StdinSrc, hist: HistRead) -> i32 {
+        match self.run_source_flow_out(src, out, stdin, &LineMap::Offset(0), hist) {
+            Flow::Exit(code) => {
+                self.pending_builtin_exit = Some(code);
+                code
+            }
+            Flow::Abort => {
+                self.pending_abort = true;
+                self.last_status
+            }
+            _ => self.last_status,
+        }
+    }
+
     /// `umask [-S] [-p] [mode]` — get or set the file-creation mask. With no
     /// mode operand it prints the current mask (octal `0NNN`, or symbolic with
     /// `-S`); `-p` prefixes the output with a re-inputtable `umask ` command.
@@ -16586,7 +17023,7 @@ impl Shell {
         }
         self.in_trap = true;
         let saved = self.last_status;
-        let flow = self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), false);
+        let flow = self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), HistRead::Off);
         // Preserve the pre-trap status unless the handler asked to exit, in
         // which case its code is the shell's exit status.
         if !matches!(flow, Flow::Exit(_)) {
@@ -16640,7 +17077,7 @@ impl Shell {
             // `fire_trap_flow`), which is what bash's `parse_and_execute` does:
             // the commands before a syntax error in the action still run, and
             // `set -v` echoes each unit as it is read.
-            let flow = self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), false);
+            let flow = self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), HistRead::Off);
             let exited = match flow {
                 Flow::Exit(code) => Some(code),
                 _ => None,
@@ -20066,7 +20503,7 @@ impl Shell {
                 // The callback runs in the current shell, so it gets the shell's
                 // stdin — not the file/fd `mapfile` is itself consuming, whose
                 // remaining bytes belong to the read loop.
-                if let Flow::Exit(n) = self.run_source_flow_out(&cmd, out, stdin, &LineMap::Offset(0), false) {
+                if let Flow::Exit(n) = self.run_source_flow_out(&cmd, out, stdin, &LineMap::Offset(0), HistRead::Off) {
                     self.pending_builtin_exit = Some(n);
                     return n;
                 }
@@ -20142,7 +20579,7 @@ impl Shell {
                 });
                 // The script's stdout belongs to *this* command's sink, so
                 // `x=$(. script)` captures it (bash).
-                let flow = self.run_source_flow_out(&src, out, stdin, &LineMap::Offset(0), false);
+                let flow = self.run_source_flow_out(&src, out, stdin, &LineMap::Offset(0), HistRead::Off);
                 self.trap_suppress.pop();
                 self.source_stack.pop();
                 self.refresh_funcname();
@@ -22299,6 +22736,14 @@ impl RedirPlan {
 fn builtin_runs_commands(name: &str, args: &[String]) -> bool {
     match name {
         "eval" | "source" | "." => true,
+        // `fc` runs the editor and then the commands it left behind, so they
+        // inherit `fc`'s redirections — unless this is a bare listing, which
+        // only writes and so applies them at write time like any other builtin.
+        // `-s` re-runs a command whatever else was given, so it always counts.
+        "fc" => {
+            let (listing, execute, ename) = fc_scan_opts(args);
+            execute || ename.as_deref() == Some("-") || !listing
+        }
         // `jobs -x cmd …` runs `cmd`; every other spelling of `jobs` only
         // prints, and so applies its own redirections at write time.
         "jobs" => args
@@ -23903,6 +24348,7 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
     ("times", "times", "Display process times."),
     ("hash", "hash [-lr] [-p pathname] [-dt] [name ...]", "Remember or display program locations."),
     ("history", "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]", "Display or manipulate the history list."),
+    ("fc", "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]", "Display or execute commands from the history list."),
     ("umask", "umask [-p] [-S] [mode]", "Display or set the file mode creation mask."),
     ("ulimit", "ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]", "Modify shell resource limits."),
     ("exec", "exec [-cl] [-a name] [command [argument ...]] [redirection ...]", "Replace the shell with the given command."),
@@ -23938,7 +24384,7 @@ const BUILTIN_NAMES: &[&str] = &[
     "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
     "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
     ".", "type", "trap", "jobs", "kill", "wait", "disown", "fg", "bg", "caller", "times", "hash",
-    "history", "umask",
+    "history", "fc", "umask",
     "ulimit", "exec",
     "exit", "return", "break", "continue", "enable", "alias", "unalias", "help", "compgen",
     "complete", "compopt",
@@ -24198,6 +24644,91 @@ fn system_hostname() -> Option<String> {
 /// A unique temp-file path under the system temp dir, using the process id plus
 /// a monotonic counter so concurrent expansions never collide. Used for process
 /// substitution (`<(cmd)`/`>(cmd)`); the caller creates and later removes it.
+/// The outcome of resolving one of `fc`'s history specifications
+/// ([`Shell::fc_gethnum`]).
+///
+/// `Idx` may be negative: bash's `fc_gethnum` returns -1 when there is no usable
+/// entry at all, which is *not* an error sentinel — a listing clamps it to the
+/// oldest entry, while `fc -s` reports "no command found".
+#[derive(Clone, Copy)]
+enum FcSpec {
+    Idx(isize),
+    /// `-0` outside a listing: bash's `HIST_INVALID`.
+    Invalid,
+    /// A prefix that matches no entry: bash's `HIST_NOTFOUND`.
+    NotFound,
+}
+
+/// C's `atoi` on a leading run of ASCII digits: stops at the first non-digit and
+/// saturates instead of overflowing. `fc` reads its numeric endpoints this way,
+/// so `fc -l 2x` means `fc -l 2`.
+fn atoi(s: &str) -> isize {
+    let mut n: isize = 0;
+    for c in s.chars() {
+        let Some(d) = c.to_digit(10) else { break };
+        n = n
+            .saturating_mul(10)
+            .saturating_add(isize::try_from(d).unwrap_or(0));
+    }
+    n
+}
+
+/// Scan `fc`'s options far enough to tell a listing from a run — which decides
+/// whether `fc` inherits its redirections the way `eval` does (see
+/// [`builtin_runs_commands`]). Deliberately tolerant: a malformed option list is
+/// diagnosed by [`Shell::builtin_fc`], not here.
+///
+/// Returns `(listing, execute, ename)`.
+fn fc_scan_opts(args: &[String]) -> (bool, bool, Option<String>) {
+    let (mut listing, mut execute, mut ename) = (false, false, None);
+    let mut i = 0;
+    while let Some(a) = args.get(i) {
+        if a == "--" || fc_is_number(a) {
+            break;
+        }
+        let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            break;
+        };
+        i = i.saturating_add(1);
+        for (at, c) in flags.char_indices() {
+            match c {
+                'l' => listing = true,
+                's' => execute = true,
+                'e' => {
+                    let tail = flags.get(at.saturating_add(1)..).unwrap_or("");
+                    if tail.is_empty() {
+                        ename = args.get(i).cloned();
+                        i = i.saturating_add(1);
+                    } else {
+                        ename = Some(tail.to_string());
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    (listing, execute, ename)
+}
+
+/// bash's `fc_number`: whether a `fc` operand is a history number, which is what
+/// stops option parsing so `fc -l -2` reads `-2` as an endpoint. One leading `-`
+/// is allowed; the rest must be a valid number on its own.
+fn fc_is_number(s: &str) -> bool {
+    let body = s.strip_prefix('-').unwrap_or(s);
+    !body.is_empty() && body.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Replace **every** occurrence of `pat` in `s` with `rep` — bash's
+/// `strsub(…, global)`, which is what `fc -s pat=rep` performs. An empty pattern
+/// matches nothing (bash's loop cannot advance on one either).
+fn str_replace_all(s: &str, pat: &str, rep: &str) -> String {
+    if pat.is_empty() {
+        return s.to_string();
+    }
+    s.replace(pat, rep)
+}
+
 fn unique_temp_path(prefix: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);

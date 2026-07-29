@@ -8112,15 +8112,56 @@ at a time through `run_source_flow_out` like every other trap path (so the units
 before a syntax error in the action still run, as in bash), and `$-` had been
 missing `m` as well as `v`.
 
+**Done (2026-07-29) — Stage 2 (remainder): `fc`.** Three modes behind one name:
+`-l` lists a range, `-s` (spelled `-e -` as well) re-runs one command after a
+*global* `pat=rep` substitution, and bare `fc` dumps the range into a temporary
+file, runs `$FCEDIT` then `$EDITOR` then `vi` on it, and re-reads whatever comes
+back with `set -v` raised for that re-read only — which is why `set -v` was
+built first. Listings are `%d\t %s`, a tab and a space, not `history`'s
+`%5d  %s`. `tests/corpus/fc.sh` pins all of it against bash, stdout *and*
+stderr.
+
+The range arithmetic is the fiddly part, and deriving it from measurement alone
+kept producing rules that the next probe broke (`fc -l -0` printing only its own
+entry; `fc -l 900 901` printing the whole history *forward*). It was settled by
+reading bash's own `builtins/fc.def`, and the implementation now mirrors
+`fc_gethnum` structurally: `last_hist` is the newest entry *minus the `fc` line
+itself* while `real_last` is not, so `-0` yields `real_last` when listing but is
+"history specification out of range" when not; an out-of-range positive clamps
+to `0` for the first endpoint and `last_hist` for the second rather than
+failing; the out-of-range test is `n >= last_hist`, so the newest usable entry's
+own number is itself rejected; a non-numeric endpoint is a **prefix of the start
+of the line**, searched newest-first (so `fc -s pick` does not find
+`echo pick-this-one` — `fc -s 'echo pick'` does), and a miss is
+`fc: no command found`. A single endpoint lists just that entry, except that a
+`beg` landing on `real_last` gets its own branch; no endpoints at all means the
+last 16. `first > last` reverses without `-r`. The two editing modes un-record
+their own line before resolving any of this — bash's `fc_replhist` — which is
+why `fc -l` names itself and `fc -s` names the command before it.
+
+The read-eval loop grew a proper type for this rather than another boolean:
+`run_source_flow_out`'s `record: bool` is now `HistRead::{Off, Reader,
+RecordOnly}`, because `fc` needs "record, but do not `!`-expand, and record even
+with `set +o history`" — a combination no caller had needed. `fc_replhist`'s pop
+is unconditional, matching the measurement that with history off `fc -s` still
+eats the last real entry and puts the re-run command in its place.
+
+Two deliberate divergences, both unobservable in a script that does not go
+looking: the editor command line single-quotes the temporary path (bash
+concatenates it raw and so breaks on a path with spaces — ours cannot produce
+one, and quoting is strictly safer), and no `SourceFrame` is pushed for the
+replayed temporary file. bash names that file in diagnostics from the replayed
+code, but the name is randomly generated and therefore unpinnable, and a frame
+would perturb `BASH_SOURCE`/`FUNCNAME`/`caller` for no benefit.
+
 **Still to do.**
-* *Stage 2 (remainder):* `fc` (`-l`, `-n`, `-r`, `-e`, `-s`), which removes its
-  own entry and formats `%d\t %s` rather than `history`'s `%5d  %s`.
 * *Stage 4:* `logout` (a one-line refusal outside a login shell), then
   `bind` (needs a readline binding table) and `suspend` (needs job control to
   have a parent shell to stop) alongside the interactive line editor.
 
 **Impact.** Nothing a script does today is affected — these are all interactive
-tools. The cost is coverage rather than correctness: `compgen -b`, `compgen -c`
+tools. `compgen -b` is now 58 against bash's 61, the three being exactly the
+Stage 4 list. The cost is coverage rather than correctness: `compgen -b`, `compgen -c`
 and `compgen -A helptopic` can only appear in
 `tests/corpus/compgen-actions.sh` behind a prefix the two shells happen to
 agree on, so the corpus pins less of them than it otherwise would.

@@ -6,7 +6,7 @@
 
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseItem,
-    CaseTerm,
+    CaseTerm, CmdSubBody,
     Command,
     CondBinOp,
     CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, LoopClause,
@@ -403,6 +403,18 @@ impl IncrementalParser {
         self.last_aliases = Some(aliases.cloned());
     }
 
+    /// Whether every token has been handed out, so a further [`Self::next_unit`]
+    /// can only yield `None`. Meaningful once at least one unit has been
+    /// requested (that is what builds the working token stream).
+    ///
+    /// Lets a caller ask whether the unit it just took was the input's *only*
+    /// one — which bash's `$(< file)` fast path needs, since it applies solely
+    /// when the redirect is the whole substitution body.
+    #[must_use]
+    pub fn exhausted(&self) -> bool {
+        self.wpos >= self.work.len() && self.pending_lex_err.is_none()
+    }
+
     /// Parse the next unit under the given alias state, or `None` when the input
     /// is exhausted. A returned [`ParseError`] also ends the iteration: bash
     /// abandons the rest of a script (or `eval`/`source` string) after a syntax
@@ -523,8 +535,8 @@ impl IncrementalParser {
     }
 }
 
-/// Parse the body of a `$( … )` / `` ` … ` `` substitution, renumbering its
-/// lines the way bash does.
+/// Parse the body of a `$( … )` substitution, renumbering its lines the way
+/// bash does.
 ///
 /// bash scans the enclosing command first and only then re-parses the captured
 /// body, so `$LINENO` inside the body does not start at the body's own first
@@ -557,49 +569,38 @@ impl IncrementalParser {
 ///
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error in the body.
-pub fn parse_cmdsub_body(
-    src: &str,
-    close_line: u32,
-    backtick: bool,
-    opts: LexOpts,
-) -> Result<Program, ParseError> {
-    // The `$( )` body is lexed with the substitution's own `)` standing where
-    // the implicit trailing newline would otherwise go, because that is the
-    // token bash's parser sees after the body's last command; a backtick body
-    // really is lexed on its own. See [`tokenize_paren_body`].
-    let lexed = if backtick {
-        tokenize_spanned(src, opts)
-    } else {
-        tokenize_paren_body(src, opts)
-    };
-    let (mut toks, lines) = lexed
-        .map_err(|e| {
-            let e = ParseError::from(e);
-            if backtick { e } else { e.in_paren_body() }
-        })?;
+pub fn parse_cmdsub_body(src: &str, close_line: u32, opts: LexOpts) -> Result<Program, ParseError> {
+    // The body is lexed with the substitution's own `)` standing where the
+    // implicit trailing newline would otherwise go, because that is the token
+    // bash's parser sees after the body's last command. See
+    // [`tokenize_paren_body`].
+    let (mut toks, lines) = tokenize_paren_body(src, opts)
+        .map_err(|e| ParseError::from(e).in_paren_body())?;
     let map = CmdSubLineMap::build(&toks, &lines, close_line);
     let lines = lines.iter().map(|&l| map.map(l)).collect();
     for t in &mut toks {
         map.rebase_tok(t);
     }
-    parse_tokens_ending(toks, lines, opts, !backtick).map_err(|e| {
-        // A body that ends mid-construct is not an end of file in bash either:
-        // the next token is the `)`, and that is what bash names. Most such
-        // errors already say so, because the `)` really is in the stream — but
-        // a construct that swallows it (an unclosed quote's re-lex, say) can
-        // still bottom out at end of input, so the wording is normalised here.
-        //
-        // The distinction matters beyond wording: an error naming a token is not
-        // continuable, so the REPL must not offer a PS2 prompt for one. Neither
-        // form can be completed by more input anyway — the lexer already found
-        // the closing delimiter.
-        if !backtick && e.msg == "syntax error: unexpected end of file" {
-            ParseError::new("syntax error near unexpected token `)'".to_string())
-        } else {
-            e
-        }
-    })
-    .map_err(|e| if backtick { e } else { e.in_paren_body() })
+    parse_tokens_ending(toks, lines, opts, true)
+        .map_err(|e| {
+            // A body that ends mid-construct is not an end of file in bash
+            // either: the next token is the `)`, and that is what bash names.
+            // Most such errors already say so, because the `)` really is in the
+            // stream — but a construct that swallows it (an unclosed quote's
+            // re-lex, say) can still bottom out at end of input, so the wording
+            // is normalised here.
+            //
+            // The distinction matters beyond wording: an error naming a token
+            // is not continuable, so the REPL must not offer a PS2 prompt for
+            // one. Neither form can be completed by more input anyway — the
+            // lexer already found the closing delimiter.
+            if e.msg == "syntax error: unexpected end of file" {
+                ParseError::new("syntax error near unexpected token `)'".to_string())
+            } else {
+                e
+            }
+        })
+        .map_err(ParseError::in_paren_body)
 }
 
 /// The body-line → `$LINENO` translation described on [`parse_cmdsub_body`].
@@ -2447,9 +2448,17 @@ fn seg_to_part(seg: &Seg, opts: LexOpts) -> Result<WordPart, ParseError> {
         }
         Seg::Param(n) => WordPart::Param(n.clone()),
         Seg::ParamBraced(raw) => parse_braced_param(raw, opts)?,
+        // A backtick body is not parsed here at all: bash reads it only when the
+        // word is expanded, as an input of its own. See [`CmdSubBody`].
         Seg::CmdSub(raw, close_line, src) => WordPart::CommandSub {
-            body: parse_cmdsub_body(raw, *close_line, src.is_some(), opts)?,
-            backtick_src: src.clone(),
+            body: match src {
+                Some(verbatim) => CmdSubBody::Backtick {
+                    src: raw.clone(),
+                    verbatim: verbatim.clone(),
+                    close_line: *close_line,
+                },
+                None => CmdSubBody::Parsed(parse_cmdsub_body(raw, *close_line, opts)?),
+            },
         },
         Seg::Arith(raw, bracket) => WordPart::ArithSub {
             expr: raw.clone(),
@@ -3923,6 +3932,16 @@ mod tests {
     /// own, yet `!`/`time` standing alone — which do need one — are refused,
     /// and a body that stops mid-construct is blamed on the `)` rather than on
     /// the implicit newline every other input ends with.
+    /// Parse a backtick body the way `Shell::backtick_sub` does at expansion
+    /// time: as an input of its own, numbered from `close_line - 1`, one unit
+    /// at a time.
+    fn backtick_unit(src: &str, close_line: u32) -> Result<Program, ParseError> {
+        let opts = LexOpts::default();
+        IncrementalParser::new(src, close_line.saturating_sub(1), opts)
+            .next_unit(None, opts)
+            .unwrap_or_else(|| Ok(Program { items: Vec::new() }))
+    }
+
     #[test]
     fn cmdsub_body_is_terminated_by_its_closing_paren() {
         for src in [
@@ -3955,13 +3974,18 @@ mod tests {
             // Found inside the body, so it is fatal to whoever was reading it.
             assert!(e.fatal, "{src} should be a fatal substitution error");
         }
-        // A backtick body really is lexed on its own, so the implicit newline
-        // stands and `!` has its terminator.
-        assert!(parse("echo `!`").is_ok());
+        // A backtick body is not parsed here at all — bash reads it only when
+        // the word is expanded — so even a malformed one leaves the enclosing
+        // command parsing cleanly. Parsed on its own it really is lexed as its
+        // own input, so the implicit trailing newline stands.
+        for src in ["echo `!`", "echo `for`", "echo `$( ! )`"] {
+            assert!(parse(src).is_ok(), "{src} should parse (body deferred)");
+        }
         assert_eq!(
-            parse("echo `for`").unwrap_err().msg,
+            backtick_unit("for", 1).unwrap_err().msg,
             "syntax error near unexpected token `newline'"
         );
+        assert!(backtick_unit("!", 1).is_ok());
     }
 
     #[test]
@@ -3973,9 +3997,16 @@ mod tests {
         for src in ["echo $( ! )", "cat <( ! )", "cat >(for)", "echo $( echo $(if) )"] {
             assert!(parse(src).unwrap_err().fatal, "{src}");
         }
-        for src in ["for", "echo a | | b", "echo `for`", "echo )", "if true"] {
+        for src in ["for", "echo a | | b", "echo )", "if true"] {
             assert!(!parse(src).unwrap_err().fatal, "{src}");
         }
+        // A backtick body never reaches the reader — it is parsed at expansion
+        // time — so its errors cannot be fatal to *this* parse. Within that
+        // deferred parse the flag still marks a nested `$( … )` body's error,
+        // which is how `Shell::command_sub_body` picks the status bash gives:
+        // 1 for the nested-paren case, 2 for an ordinary one.
+        assert!(backtick_unit("echo $( ! )", 1).unwrap_err().fatal);
+        assert!(!backtick_unit("for", 1).unwrap_err().fatal);
     }
 
     #[test]

@@ -20,7 +20,8 @@
 //! `if` condition. See known-issues TD-OILS-DECLAREF-QUIRKS.
 
 use crate::ast::{
-    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseMode, Command,
+    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseMode, CmdSubBody,
+    Command,
     CondBinOp, CondExpr, Item, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor,
     SimpleCommand, UnaryOp, Word, WordPart,
 };
@@ -977,9 +978,13 @@ fn part_src(p: &WordPart) -> String {
         // A substitution is its own source context, so a here-document inside
         // one has to be flushed *within* the parentheses — carrying it out to
         // the enclosing line would leave the body outside the substitution.
-        WordPart::CommandSub { body, backtick_src } => match backtick_src {
-            Some(raw) => format!("`{raw}`"),
-            None => format!("$({})", flush_here_docs(&program_inline(body))),
+        WordPart::CommandSub { body } => match body {
+            // A backtick body was never parsed (bash reads it only at expansion
+            // time), and even if it had been, re-printing it would drop the
+            // backslash from a nested `` \` `` and stop it parsing. Echo it as
+            // written, which is what bash does.
+            CmdSubBody::Backtick { verbatim, .. } => format!("`{verbatim}`"),
+            CmdSubBody::Parsed(p) => format!("$({})", flush_here_docs(&program_inline(p))),
         },
         WordPart::ProcSub { input, body } => format!(
             "{}({})",

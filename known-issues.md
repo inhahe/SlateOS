@@ -3213,10 +3213,12 @@ lexer now keeps the verbatim span alongside the unescaped body
 unparser echoes it. Corpus `declare-f-backtick.sh`; test
 `interp::declare_f_prints_backticks_from_the_source`.
 
-### TD-OILS-CMDSUB-ERR-FATALITY. `osh` reports a command-substitution syntax error at parse time in both spellings; bash defers the backtick form and makes the `$( )` form fatal to the caller — 2026-07-28 — PARTIALLY RESOLVED (item 2 fixed same day; item 1 OPEN)
+### TD-OILS-CMDSUB-ERR-FATALITY. `osh` reported a command-substitution syntax error at parse time in both spellings; bash defers the backtick form and makes the `$( )` form fatal to the caller — 2026-07-28 — RESOLVED 2026-07-29
 
 **Where:** `userspace/oils/src/parser.rs` `parse_cmdsub_body` / `seg_to_part`;
-`userspace/oils/src/interp.rs` (`eval` builtin, `command_sub`).
+`userspace/oils/src/ast.rs` `CmdSubBody`; `userspace/oils/src/interp.rs`
+(`command_sub_body` / `backtick_sub`, `parse_error_flow`,
+`syntax_error_prefix`).
 
 **What:** The *message* now matches bash for both spellings — a `$( … )` body
 that runs out mid-construct is blamed on the substitution's closing `)`,
@@ -3225,26 +3227,23 @@ body is blamed on its own end of input. Two behavioural differences remained,
 both only observable when the substitution is inside `eval`; at script level
 the whole unit fails to parse in either shell, so they agree there.
 
-1. **bash parses a backtick body lazily.** — **STILL OPEN.** ``echo `if` `` in
-   bash prints
+1. **bash parses a backtick body lazily.** — **RESOLVED 2026-07-29.**
+   ``echo `if` `` in bash prints
    `<name>: command substitution: line 2: syntax error: unexpected end of file`
    at *expansion* time and then runs `echo` with an empty substitution, so the
-   command succeeds. osh parses the body up front, so the command never runs.
-   The proper fix is to store the backtick body unparsed — the verbatim source
-   is already kept, for printing — and parse it in `command_sub`. No cache:
-   bash re-parses on every expansion, which is also the *correct* thing to do,
-   because a `shopt -s extglob` between two expansions changes how the body
-   lexes.
+   command succeeds. osh parsed the body up front, so the command never ran.
 2. **A `$( )` body error is fatal to bash's caller.** — **RESOLVED
    2026-07-28.** `( eval 'echo $(if)' )` exits the subshell with status 1 in
    bash, whose comsub parser calls `jump_to_top_level` and unwinds past `eval`;
    osh returned 2 from `eval` and carried on.
 
-**Reproduce (item 1 only, now):**
+**Reproduce (both, before the fixes):**
 ```sh
 ( eval 'echo `if`'; echo "inner:$?" ); echo "sub:$?"
 # bash: `command substitution:` error, blank line, inner:0
-# osh:  `eval:` error, no blank line, inner:2
+# osh (old): `eval:` error, no blank line, inner:2
+( eval 'echo $(if)'; echo "NOT REACHED" ); echo "sub:$?"
+# bash: sub:1 (the subshell is unwound);  osh (old): "NOT REACHED", sub:0
 ```
 
 **Fix (item 2).** `ParseError` gained a `fatal` flag, set by
@@ -3284,14 +3283,110 @@ Two adjacent bugs fell out of the same measurement and are fixed with it:
   statuses deliberately unprinted because of this divergence; the header now
   points at the new corpus file instead.
 
+**Fix (item 1).** `WordPart::CommandSub` now carries a `CmdSubBody`
+(`ast.rs`): `Parsed(Program)` for `$( … )`, which the enclosing parse still
+recurses into, and `Backtick { src, verbatim, close_line }`, which it does not
+read at all. `Shell::backtick_sub` reads it at expansion time by handing `src`
+to `run_source_flow_out` — the ordinary read-eval loop — inside the
+substitution's subshell, with `line_base = close_line - 1`. Consequences, each
+measured against bash 5.2 and covered by the corpus file below:
+
+* **Lazy.** A body that is never expanded is never parsed, so
+  ``if false; then echo `for`; fi`` is silent.
+* **No cache.** The loop re-reads the body on every expansion, so an error in a
+  loop body is reported once per iteration. That is not merely bash fidelity:
+  a `shopt -s extglob` run between two expansions genuinely changes how the
+  body lexes, so a cached parse would be *wrong*.
+* **Incremental.** The body is read one logical line at a time, so commands
+  before a syntax error have already run and their output is kept
+  (``x=`echo ok<newline>for` `` substitutes `ok`, with side effects applied),
+  and an `alias`/`shopt` in the body changes how the rest of it parses.
+* **Not fatal to the reader.** The enclosing command still runs, with an empty
+  substitution. `Shell::parse_error_flow` gives the body's own read-eval loop
+  its own rule — status 2, or 1 when the body's error was itself a `$( … )`
+  body's — keyed on the new `Shell::backtick_body` flag, which is set only on
+  the substitution's subshell and cleared by `clone_for_subshell`.
+* **`command substitution` source token.** `syntax_error_prefix` emits it for
+  that same loop, in place of the enclosing `-c`. A nested `eval`/`.` inside
+  the body reports as itself, which falls out of gating on
+  `at_outermost_read_eval()`.
+* **Plain line offset.** A backtick body's `$LINENO` counts up from
+  `close_line - 1`, *not* by the rank-based renumbering `parse_cmdsub_body`
+  applies to a `$( … )` body — measured: a body of `echo $LINENO`, a blank
+  line, `echo $LINENO` closing on line 4 reports 3 and 5, where the `$( … )`
+  spelling of the same layout reports 3 and 4. `parse_backtick_body`, added
+  and then removed the same day, is unnecessary: `IncrementalParser` already
+  takes a `line_base`.
+
+Two further divergences fell out of the same measurement and are fixed with it:
+
+* `Shell::comsub_read_file` accepted the `$(< file)` fast path whenever *some*
+  fd-0 read redirect was present. bash's optimisation is all-or-nothing: with
+  a second input (`$(< a < b)`) or an unrelated `2>…` attached it runs the null
+  command instead, which writes nothing, so the substitution is empty. Now
+  requires exactly one redirect. The fast path applies to the backtick spelling
+  too, and only when the redirect is the body's whole content — hence
+  `IncrementalParser::exhausted()`, which lets `backtick_read_file` ask whether
+  the unit it just parsed was the only one.
+* Aliases/`shopt` set inside a substitution body did not affect the rest of it,
+  because `command_sub` executes a pre-parsed `Program`. Fixed for the backtick
+  spelling by the incremental loop above; still open for `$( … )` — see
+  `TD-OILS-CMDSUB-DOLLAR-NOT-INCREMENTAL`.
+
 **Coverage:** `tests/corpus/cmdsub-error-fatality.sh` (eval, nested eval,
 function, sourced file, command substitution, pipeline stage, and the
 non-fatal ordinary syntax error for contrast);
 `parser::only_a_paren_body_error_is_fatal_to_its_reader`; the `fatal`
 assertions in `parser::cmdsub_body_is_terminated_by_its_closing_paren`.
+Item 1: `tests/corpus/backtick-body-deferred.sh` (laziness, re-parse per
+expansion incl. the extglob case, incremental execution and side effects,
+`eval`/`.` reporting as themselves, the fast-path rules, and the line
+numbering); `interp::cmdsub_syntax_error_names_the_closing_paren`;
+`interp::lineno_inside_backticks_is_a_plain_offset_from_the_closing_tick`.
 
 **Not covered — see `TD-OILS-SYNTAX-ERR-ERREXIT-ECHO`:** under `set -e` bash
 reports 2 for every row of the table above, so the corpus file avoids errexit.
+
+### TD-OILS-CMDSUB-DOLLAR-NOT-INCREMENTAL. A `$( … )` body runs as one pre-parsed program, so an `alias`/`shopt` set inside it does not affect the rest of it — 2026-07-29 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` `Shell::command_sub` (the
+`exec_program(prog, …)` call); `userspace/oils/src/parser.rs`
+`parse_cmdsub_body`, which produces the `CmdSubBody::Parsed` program.
+
+**What:** bash parses a `$( … )` body *twice*: once with the enclosing token
+stream, purely to find the matching `)` (that scan is where the fatal syntax
+error of `TD-OILS-CMDSUB-ERR-FATALITY` item 2 comes from), and again at
+expansion time, when `command_substitute` hands the body *text* to
+`parse_and_execute`. The second pass is a read-eval loop, so the body is read
+one logical line at a time and a state change made by line N is visible to the
+parse of line N+1. osh only does the first pass and then executes the resulting
+`Program` wholesale, so it is not.
+
+**Reproduce:**
+```sh
+shopt -s expand_aliases; x=$(alias q="echo hi"
+q); echo "[$x]"
+# bash: [hi]
+# osh:  osh: line 2: q: command not found  /  []
+```
+The same probe with `shopt -s extglob` in place of the alias diverges the same
+way.
+
+**Note:** the backtick spelling was fixed on 2026-07-29 (see
+`TD-OILS-CMDSUB-ERR-FATALITY` item 1) because deferring its parse to expansion
+time *is* the fix; `Shell::backtick_sub` routes the body through
+`run_source_flow_out`. This entry is the residue: the `$( … )` spelling still
+needs its body re-read at expansion time.
+
+**Proper fix:** keep the body's source text on `CmdSubBody::Parsed` alongside
+the program — the eager parse must stay, since that is what finds the `)` and
+what raises the fatal error — and have `command_sub` run the *text* through
+`run_source_flow_out` rather than the program, with the rank-based `line_base`
+that `CmdSubLineMap` already computes. The line map is per-body-line rather
+than a single offset, so `run_source_flow_out`/`IncrementalParser` would need to
+take a line *mapping* instead of a scalar base; that is the bulk of the work.
+Until then the divergence is confined to bodies that change parse state
+mid-body, which is rare in practice.
 
 ### TD-OILS-SYNTAX-ERR-ERREXIT-ECHO. bash drops the echoed source line from *every* syntax error once `set -e` is on, and forces the status to 2 — 2026-07-28 — OPEN
 

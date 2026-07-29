@@ -94,7 +94,7 @@ use std::sync::{Arc, Mutex};
 use crate::arith::{self, VarLookup};
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseTerm,
-    Command,
+    CmdSubBody, Command,
     CondBinOp,
     CondExpr,
     ForArithClause, ForClause, IfClause, LoopClause, ParamOp, Pipeline, Program, Redirect,
@@ -113,6 +113,12 @@ use crate::parser::{IncrementalParser, parse_opts, parse_with_aliases};
 /// Oils sets these two variables under a `bash_compat` flag that defaults on
 /// for `osh`; see [`bash_compat_enabled`] for our equivalent per-session toggle.
 const BASH_VERSION: &str = "5.2.0(1)-release";
+
+/// The input-source token bash tags a syntax error in a backtick body with —
+/// `bash: command substitution: line 3: …`. It replaces the `-c`/`eval` token
+/// the enclosing input would otherwise contribute. See
+/// [`Shell::syntax_error_prefix`].
+const SRC_TOKEN_COMMAND_SUB: &str = "command substitution";
 
 /// Whether `osh` advertises a bash-compatible `$BASH_VERSION`/`$BASH_VERSINFO`
 /// (open-questions Q27). Defaults to **on** — option A — so scripts that
@@ -1066,6 +1072,16 @@ pub struct Shell {
     /// collected. The job stays in the substitution's table instead, still
     /// owed to whatever `jobs` runs there.
     in_comsub: bool,
+    /// Whether this shell's *top-level* read-eval loop is reading a `` `…` ``
+    /// body. bash parses a backtick body at expansion time, as its own input,
+    /// which shows in two places: a syntax error there is tagged
+    /// `command substitution` rather than the enclosing `-c`, and it yields
+    /// status 2 (or 1 for a nested `$( … )` body) rather than the status a
+    /// top-level syntax error would. Both only apply at
+    /// [`Shell::at_outermost_read_eval`] — a nested `eval`/`source` inside the
+    /// body reports and scores as its own input — and any nested subshell
+    /// clears the flag (see [`Shell::clone_for_subshell`]).
+    backtick_body: bool,
     /// The `>`/`>>` target of the builtin currently running, held open so it can
     /// write in pieces. Installed and restored around each builtin's dispatch by
     /// [`Shell::run_builtin_body`]; `None` whenever no builtin is running or the
@@ -1637,6 +1653,7 @@ impl Shell {
             last_status: 0,
             comsub_count: 0,
             in_comsub: false,
+            backtick_body: false,
             builtin_stdout: None,
             subshell_depth: 0,
             last_bg_pid: None,
@@ -2302,6 +2319,16 @@ impl Shell {
     /// *all* syntax errors under errexit — a separate divergence, tracked as
     /// `TD-OILS-SYNTAX-ERR-ERREXIT-ECHO`.
     fn parse_error_flow(&mut self, e: &crate::parser::ParseError) -> Flow {
+        // A backtick body's own read-eval loop scores differently, because there
+        // is no reader to unwind to and no invocation mode to key off: bash
+        // abandons the rest of the body, substitutes what it has captured so
+        // far, and leaves `$?` at 2 — or 1 when the body's error was itself a
+        // `$( … )` body's. The enclosing command carries on either way. See
+        // [`Shell::backtick_body`].
+        if self.backtick_body && self.at_outermost_read_eval() {
+            self.last_status = if e.fatal { 1 } else { 2 };
+            return Flow::Next;
+        }
         if !e.fatal {
             self.last_status = 2;
             return Flow::Next;
@@ -4414,6 +4441,9 @@ impl Shell {
             // — `x=$( ( sleep 5 & kill -HUP %1; … ) )` prints the message on the
             // parent's stderr, and the group's `jobs` then has nothing to say.
             in_comsub: false,
+            // Names *this* shell's top-level input, so a nested subshell — which
+            // gets a read-eval loop of its own, or none at all — starts clear.
+            backtick_body: false,
             // Belongs to a builtin that is running *now*, in this shell; a
             // subshell starts outside any builtin of its own.
             builtin_stdout: None,
@@ -9976,7 +10006,7 @@ impl Shell {
                     fields.join(" ")
                 }
             }
-            WordPart::CommandSub { body, .. } => self.command_sub(body),
+            WordPart::CommandSub { body } => self.command_sub_body(body),
             WordPart::ProcSub { input, body } => self.proc_sub(*input, body),
             WordPart::ArithSub { expr, .. } => self.arith_sub(expr),
             WordPart::ArrayRef {
@@ -10604,6 +10634,89 @@ impl Shell {
         ));
     }
 
+    /// Substitute a `` `…` ``/`$( … )` body, parsing the backtick spelling first.
+    ///
+    /// A `$( … )` body is parsed with the enclosing source, so a syntax error in
+    /// one is reported (fatally) at parse time and the enclosing command never
+    /// runs. A backtick body is not: bash reads it only when the word is
+    /// *expanded* — `if false; then echo \`for\`; fi` is silent — and re-reads it
+    /// on **every** expansion, so a loop body reports its error once per
+    /// iteration. Re-reading is not just bash-bug-compatibility: a
+    /// `shopt -s extglob` executed between two expansions changes how the body
+    /// lexes, so the parse genuinely cannot be cached.
+    ///
+    /// A parse failure here is *not* fatal to the caller (unlike a `$( … )`
+    /// body's): bash prints the diagnostic under a `command substitution` source
+    /// token, substitutes the empty string, sets `$?` — 2 for an ordinary syntax
+    /// error, 1 when the body's own error was itself fatal (a nested `$( … )`) —
+    /// and carries on with the enclosing command.
+    fn command_sub_body(&mut self, body: &CmdSubBody) -> String {
+        match body {
+            CmdSubBody::Parsed(prog) => self.command_sub(prog),
+            CmdSubBody::Backtick { src, close_line, .. } => {
+                self.backtick_sub(src, *close_line)
+            }
+        }
+    }
+
+    /// Read and run a `` `…` `` body, substituting what it wrote to stdout.
+    ///
+    /// The body is its own input, read one logical line at a time, so a `shopt`
+    /// or `alias` it runs changes how the *rest* of it parses, and the commands
+    /// before a syntax error have already run — a body of `echo ok` followed by
+    /// a bare `for` substitutes `ok`. That is [`Shell::run_source_flow_out`]'s
+    /// job, so this is `command_sub` with a read-eval loop in place of the
+    /// pre-parsed program — plus `backtick_body`, which tells that loop to
+    /// report a syntax error the way bash does here (see the field's docs).
+    fn backtick_sub(&mut self, src: &str, close_line: u32) -> String {
+        self.comsub_count = self.comsub_count.wrapping_add(1);
+        // The body's lines are numbered from `close_line - 1` — a plain offset,
+        // unlike the rank-based renumbering a `$( … )` body gets (see
+        // [`crate::parser::parse_cmdsub_body`]), because the body is read as an
+        // input of its own rather than folded back into the enclosing scan.
+        let base = close_line.saturating_sub(1);
+        if let Some(path) = self.backtick_read_file(src, base) {
+            return self.substitute_file(&path);
+        }
+        let cap = capture_buf();
+        let mut sub = self.new_comsub_shell();
+        sub.backtick_body = true;
+        {
+            sub.exec_stdout = None;
+            let mut out = Out::Capture(Arc::clone(&cap));
+            if let Flow::Exit(code) =
+                sub.run_source_flow_out(src, &mut out, &StdinSrc::Inherit, base)
+            {
+                // Nothing above this is left to unwind — the substitution's
+                // subshell *is* the outermost frame here — so collapse the flow
+                // to its status, exactly as `run_source_out` does at the top.
+                sub.exit_requested = true;
+                sub.last_status = code;
+            }
+            sub.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
+        }
+        self.finish_comsub(&mut sub, &cap)
+    }
+
+    /// The `$(< file)` fast path applied to a backtick body: `` `< file` `` gets
+    /// it too, but — as with `$( … )` — only when the redirect is the body's
+    /// *whole* content, since bash otherwise just runs the null command and
+    /// collects its (empty) stdout. Parsing one unit and checking the input is
+    /// then exhausted is exactly that test.
+    ///
+    /// Aliases are deliberately not expanded for the peek: the shape
+    /// [`Shell::comsub_read_file`] accepts has no command word for an alias to
+    /// replace, so expansion cannot change the answer.
+    fn backtick_read_file(&mut self, src: &str, base: u32) -> Option<String> {
+        let opts = self.lex_opts();
+        let mut ip = IncrementalParser::new(src, base, opts);
+        let prog = ip.next_unit(None, opts)?.ok()?;
+        if !ip.exhausted() {
+            return None;
+        }
+        self.comsub_read_file(&prog)
+    }
+
     fn command_sub(&mut self, prog: &Program) -> String {
         // Count every command substitution so callers (e.g. pure assignments)
         // can tell whether a `$(...)` ran while expanding a value.
@@ -10614,44 +10727,66 @@ impl Shell {
         // simple command with no assignments, no words, and a fd-0 read redirect,
         // then slurp the file directly.
         if let Some(path) = self.comsub_read_file(prog) {
-            // bash opens a *directory* read-only successfully: `$(< dir)` yields
-            // the empty string with $? = 0 (no bytes, no error). `std::fs::read`
-            // instead fails on a directory, so detect it first and mirror bash.
-            // The *opened* path is resolved against the shell's own working
-            // directory; the *reported* one stays as the user spelled it.
-            let host = self.host_path(&path);
-            if std::fs::metadata(&host).is_ok_and(|m| m.is_dir()) {
+            return self.substitute_file(&path);
+        }
+        let cap = capture_buf();
+        let mut sub = self.new_comsub_shell();
+        {
+            // The substitution's capture is its fd 1 — bash gives the subshell
+            // the write end of the collecting pipe, replacing any persistent
+            // `exec > file`, so `exec >f; x=$(echo hi)` still captures `hi`.
+            sub.exec_stdout = None;
+            let mut out = Out::Capture(Arc::clone(&cap));
+            let _ = sub.exec_program(prog, &mut out, &StdinSrc::Inherit);
+            // A command substitution is a subshell: fire its own EXIT trap into
+            // the same capture so its output is included in the result (bash).
+            sub.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
+        }
+        self.finish_comsub(&mut sub, &cap)
+    }
+
+    /// The value of the `$(< file)` fast path: the file's contents with trailing
+    /// newlines stripped, or the empty string after reporting a failed open.
+    fn substitute_file(&mut self, path: &str) -> String {
+        // bash opens a *directory* read-only successfully: `$(< dir)` yields
+        // the empty string with $? = 0 (no bytes, no error). `std::fs::read`
+        // instead fails on a directory, so detect it first and mirror bash.
+        // The *opened* path is resolved against the shell's own working
+        // directory; the *reported* one stays as the user spelled it.
+        let host = self.host_path(path);
+        if std::fs::metadata(&host).is_ok_and(|m| m.is_dir()) {
+            self.last_status = 0;
+            return String::new();
+        }
+        match std::fs::read(&host) {
+            Ok(mut bytes) => {
+                self.strip_capture_nuls(&mut bytes);
+                let mut s = String::from_utf8_lossy(&bytes).into_owned();
+                while s.ends_with('\n') {
+                    s.pop();
+                }
                 self.last_status = 0;
-                return String::new();
+                s
             }
-            match std::fs::read(&host) {
-                Ok(mut bytes) => {
-                    self.strip_capture_nuls(&mut bytes);
-                    let mut s = String::from_utf8_lossy(&bytes).into_owned();
-                    while s.ends_with('\n') {
-                        s.pop();
-                    }
-                    self.last_status = 0;
-                    return s;
-                }
-                Err(e) => {
-                    // bash reports the failed open ("bash: line N: FILE: <msg>")
-                    // to the shell's stderr and sets $? = 1, substituting the
-                    // empty string. The diagnostic escapes any `2>…` on the null
-                    // command because the input redirect is opened (and fails)
-                    // before the stderr redirect takes effect — matching the
-                    // plain `< file` redirect-error path.
-                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
-                    self.last_status = 1;
-                    return String::new();
-                }
+            Err(e) => {
+                // bash reports the failed open ("bash: line N: FILE: <msg>")
+                // to the shell's stderr and sets $? = 1, substituting the
+                // empty string. The diagnostic escapes any `2>…` on the null
+                // command because the input redirect is opened (and fails)
+                // before the stderr redirect takes effect — matching the
+                // plain `< file` redirect-error path.
+                self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                self.last_status = 1;
+                String::new()
             }
         }
-        // Command substitution runs in its own subshell (bash semantics): a
-        // clone of the shell state so variable/cwd/function mutations made
-        // inside `$(...)` do not leak into the parent. Only the captured stdout
-        // and the exit status ($?) propagate back.
-        let cap = capture_buf();
+    }
+
+    /// The subshell a command substitution's body runs in (bash semantics): a
+    /// clone of the shell state, so variable/cwd/function mutations made inside
+    /// it do not leak into the parent. Only the captured stdout and the exit
+    /// status (`$?`) propagate back — see [`Shell::finish_comsub`].
+    fn new_comsub_shell(&mut self) -> Shell {
         let mut sub = self.clone_for_subshell();
         // Inside `$( … )` a job's death is not announced (see `in_comsub`): the
         // message would land on the parent's stderr, unrelated to the value
@@ -10674,17 +10809,11 @@ impl Shell {
         if !self.shopt.get("inherit_errexit").copied().unwrap_or(false) {
             sub.errexit = false;
         }
-        {
-            // The substitution's capture is its fd 1 — bash gives the subshell
-            // the write end of the collecting pipe, replacing any persistent
-            // `exec > file`, so `exec >f; x=$(echo hi)` still captures `hi`.
-            sub.exec_stdout = None;
-            let mut out = Out::Capture(Arc::clone(&cap));
-            let _ = sub.exec_program(prog, &mut out, &StdinSrc::Inherit);
-            // A command substitution is a subshell: fire its own EXIT trap into
-            // the same capture so its output is included in the result (bash).
-            sub.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
-        }
+        sub
+    }
+
+    /// Take a finished substitution's status and captured output.
+    fn finish_comsub(&mut self, sub: &mut Shell, cap: &Arc<Mutex<Vec<u8>>>) -> String {
         // A job started inside the substitution holds a copy of the collecting
         // pipe's write end, so bash's reader does not see EOF — and the
         // substitution does not finish — until that job exits: `x=$(sleep 2 &)`
@@ -10693,7 +10822,7 @@ impl Shell {
         // discarded, not propagated: `x=$(false &); echo $?` is 0 in bash.
         sub.drain_jobs();
         self.last_status = sub.last_status;
-        let mut buf = take_capture(&cap);
+        let mut buf = take_capture(cap);
         self.strip_capture_nuls(&mut buf);
         let mut s = String::from_utf8_lossy(&buf).into_owned();
         // Strip trailing newlines, as command substitution does.
@@ -10723,12 +10852,17 @@ impl Shell {
         if !sc.assignments.is_empty() || !sc.words.is_empty() || !sc.decl_arrays.is_empty() {
             return None;
         }
-        // Use the last fd-0 read redirect (bash opens them in order; the last wins).
-        let target = sc
-            .redirects
-            .iter()
-            .rev()
-            .find(|r| r.op == RedirectOp::Read && r.fd == 0)?;
+        // Exactly one redirect, and it must be the fd-0 read. bash's optimisation
+        // is all-or-nothing: with anything else attached — a second input
+        // (`$(< a < b)`) or an unrelated `2>…` — it runs the null command
+        // instead, which writes nothing, so the substitution is *empty* rather
+        // than the file's contents. (Measured against bash 5.2.)
+        let [target] = &sc.redirects[..] else {
+            return None;
+        };
+        if target.op != RedirectOp::Read || target.fd != 0 {
+            return None;
+        }
         Some(self.expand_to_string(&target.target))
     }
 
@@ -19509,6 +19643,11 @@ impl Shell {
     /// for a script file or interactive input. bash prints, e.g.,
     /// `bash: -c: line 2: syntax error…` and `bash: eval: line 1: …`; osh
     /// mirrors the shape with its own `$0` name.
+    ///
+    /// A backtick body is a third input source, tagged `command substitution`
+    /// whatever the enclosing one was (`-c`, `eval`, or a script alike) — but
+    /// only for the body's *own* read-eval loop, since an `eval`/`.` run inside
+    /// it reports as itself. See [`Shell::backtick_body`].
     fn syntax_error_prefix(&self, line: u32) -> String {
         let name = self.error_source();
         // `eval` wins over the outer `-c`/script token (bash reports `eval:`
@@ -19518,17 +19657,21 @@ impl Shell {
         // reports `./bad.sh: line 2:`, not `./bad.sh: -c: line 2:`. (An `eval`
         // inside a sourced file still says `eval`, because that is then the
         // innermost source.)
+        let in_backtick = self.backtick_body && self.at_outermost_read_eval();
         let token = if self.eval_depth > 0 {
             Some("eval")
+        } else if in_backtick {
+            Some(SRC_TOKEN_COMMAND_SUB)
         } else if self.command_mode && self.source_stack.is_empty() {
             Some("-c")
         } else {
             None
         };
         // Any non-interactive input (`-c`, script file, or piped/redirected
-        // stdin) carries the `line N` token; an `eval` body always does too.
-        // Only a tty-attached interactive shell drops it.
-        if !self.is_interactive() || self.eval_depth > 0 {
+        // stdin) carries the `line N` token; an `eval` or backtick body always
+        // does too — bash clears `interactive` for the duration of a command
+        // substitution, so its errors always show a line.
+        if !self.is_interactive() || self.eval_depth > 0 || in_backtick {
             match token {
                 Some(t) => format!("{name}: {t}: line {line}: "),
                 None => format!("{name}: line {line}: "),
@@ -29573,14 +29716,39 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // The opening line's empty remainder is not a body line either.
         assert_eq!(run("z=$(\necho $LINENO)\necho \"$z\"").0, "2\n");
-        // Backticks follow the same rule, and a substitution nested inside one
-        // body is rebased through the outer body's numbering rather than its own.
-        assert_eq!(run("b=`echo $LINENO`; echo $b").0, "1\n");
+        // A substitution nested inside one body is rebased through the outer
+        // body's numbering rather than its own.
         assert_eq!(run("n=$(echo $(echo $LINENO)); echo $n").0, "1\n");
         // The enclosing script's own numbering is unaffected by the body.
         assert_eq!(
             run("echo $LINENO\nv=$(\necho $LINENO\n)\necho \"$v\"\necho $LINENO").0,
             "1\n4\n6\n"
+        );
+    }
+
+    /// A backtick body numbers its lines by a *plain offset* from `close_line -
+    /// 1` — unlike the rank-based renumbering above — because bash parses it as
+    /// its own input at expansion time rather than folding it back into the
+    /// enclosing scan. The two schemes agree only when the body is one line.
+    /// Measured against bash 5.2; see known-issues.md
+    /// TD-OILS-CMDSUB-ERR-FATALITY item 1.
+    #[test]
+    fn lineno_inside_backticks_is_a_plain_offset_from_the_closing_tick() {
+        // One line: close line 1 → 1, same answer either scheme would give.
+        assert_eq!(run("b=`echo $LINENO`; echo $b").0, "1\n");
+        // Two body lines, close on line 2 → 2 and 3.
+        assert_eq!(run("y=`echo $LINENO\necho $LINENO`\necho \"$y\"").0, "2\n3\n");
+        // A blank body line *does* advance here (rank-based would say 3 and 4).
+        assert_eq!(
+            run("q=`echo $LINENO\n\necho $LINENO`\necho \"$q\"").0,
+            "3\n5\n"
+        );
+        // So does the opening line's empty remainder (rank-based would say 2).
+        assert_eq!(run("z=`\necho $LINENO`\necho \"$z\"").0, "3\n");
+        // Two commands on one body line still share a line, of course.
+        assert_eq!(
+            run("r=`echo $LINENO; echo $LINENO\necho $LINENO`\necho \"$r\"").0,
+            "2\n2\n3\n"
         );
     }
 
@@ -35481,10 +35649,23 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("echo $(if)");
         assert_eq!((o.as_str(), s), ("", 2), "cmdsub parse error");
 
-        // A backtick body really is parsed on its own, so the end of the body is
-        // where it runs out.
+        // A backtick body is read only when the word is expanded, and its
+        // failure is not fatal to the reader: the enclosing `echo` still runs,
+        // with an empty substitution, and keeps its own status.
         let (o, s) = run("echo `if`");
-        assert_eq!((o.as_str(), s), ("", 2), "backtick parse error");
+        assert_eq!((o.as_str(), s), ("\n", 0), "backtick parse error");
+
+        // With nothing to overwrite it, the failure's own status shows: 2 for an
+        // ordinary syntax error in the body, 1 when that error came from a
+        // nested `$( … )` body (bash).
+        let (o, s) = run("x=`if`; echo \"st=$? x=[$x]\"");
+        assert_eq!((o.as_str(), s), ("st=2 x=[]\n", 0), "ordinary body error");
+        let (o, s) = run("x=`echo $( ! )`; echo \"st=$? x=[$x]\"");
+        assert_eq!((o.as_str(), s), ("st=1 x=[]\n", 0), "nested paren body error");
+
+        // Never expanded, never parsed: a body that could not parse is silent.
+        let (o, s) = run("if false; then echo `for`; fi; echo \"ok=$?\"");
+        assert_eq!((o.as_str(), s), ("ok=0\n", 0), "unexpanded body parsed anyway");
     }
 
     #[test]

@@ -515,18 +515,7 @@ pub enum WordPart {
         star: bool,
     },
     /// `$(command)` / `` `command` `` command substitution.
-    CommandSub {
-        body: Program,
-        /// The body's source text, kept for the `` ` … ` `` spelling only.
-        ///
-        /// bash prints the two forms back differently: a `$( … )` body is
-        /// re-printed from the parse (so `$(echo  a ;  echo b)` becomes
-        /// `$(echo a; echo b)`), while a backtick body is echoed verbatim,
-        /// newlines and all. Re-printing a backtick body is not merely untidy
-        /// either — a nested `` \` `` would lose its backslash and the result
-        /// would no longer parse. `None` is the `$( … )` spelling.
-        backtick_src: Option<String>,
-    },
+    CommandSub { body: CmdSubBody },
     /// `$(( expr ))` arithmetic substitution (raw expression text for now).
     /// `bracket` records the deprecated `$[ expr ]` spelling, which evaluates
     /// identically but is printed back as written (bash `declare -f`).
@@ -630,6 +619,56 @@ pub enum WordPart {
         input: bool,
         body: Program,
     },
+}
+
+/// The body of a [`WordPart::CommandSub`], in the form its spelling calls for.
+///
+/// bash reads the two spellings at different times, and that is observable:
+///
+/// ```sh
+/// if false; then echo $(for); fi   # syntax error — the whole unit fails to parse
+/// if false; then echo `for`;  fi   # silence — the body is never read
+/// ```
+///
+/// A `$( … )` body is parsed in the enclosing token stream, so its errors are
+/// the enclosing parse's errors. A backtick body is only a *string* until the
+/// word is expanded; bash parses it then, per expansion (a substitution in a
+/// loop is re-parsed every iteration), which is also what makes a `shopt -s
+/// extglob` between two expansions change how it reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CmdSubBody {
+    /// `$( … )` — parsed with the enclosing source.
+    Parsed(Program),
+    /// `` ` … ` `` — parsed at expansion time, by `Shell::command_sub`.
+    Backtick {
+        /// The body with `` \` ``/`\\`/`\$` unescaped: what actually gets parsed.
+        src: String,
+        /// The body exactly as written, for `declare -f`. bash echoes a backtick
+        /// body verbatim rather than re-printing it, and re-printing is not
+        /// merely untidy — a nested `` \` `` would lose its backslash and the
+        /// result would no longer parse.
+        verbatim: String,
+        /// The line the closing backtick sits on, in the enclosing source.
+        ///
+        /// The body's own lines are numbered from `close_line - 1` — a plain
+        /// offset, unlike the rank-based renumbering a `$( … )` body gets. Both
+        /// are bash's, measured: with the body spread over two lines,
+        /// `$LINENO` in `$( … )` reports the closing line and the one after,
+        /// while in `` ` … ` `` it reports one more than each.
+        close_line: u32,
+    },
+}
+
+impl CmdSubBody {
+    /// The parsed body, or `None` for a backtick body that has not been parsed
+    /// (which only happens at expansion time — see the type docs).
+    #[must_use]
+    pub fn parsed(&self) -> Option<&Program> {
+        match self {
+            Self::Parsed(p) => Some(p),
+            Self::Backtick { .. } => None,
+        }
+    }
 }
 
 /// The operator carried by [`WordPart::ArrayBulk`], applied element-wise.

@@ -80,6 +80,12 @@
 //!   `2>&1` into a *captured* stdout (command substitution `$( … 2>&1 )`)
 //!   likewise interleaves: fd 2 becomes a second writer on fd 1's own capture
 //!   buffer rather than a separate one folded in afterwards.
+//! - User scratch descriptors (`3>&1`, `exec 3>&1`) are modelled by [`WriteFd`],
+//!   which is either a real handle or a *capture sink*. A scratch fd dup'd from
+//!   fd 1 inside a `$( … )` therefore names the substitution's buffer, so the
+//!   `{ …; } 3>&1 2>&3` idiom collects stderr, and a `&` job that inherited
+//!   such a descriptor holds the substitution open the way a real pipe write
+//!   end would.
 //! - Background (`&`) runs a single external command asynchronously; compound
 //!   background jobs run synchronously.
 
@@ -1020,6 +1026,89 @@ enum StderrTarget {
     WriteFd(Arc<File>),
 }
 
+/// What a user-space write descriptor (fd ≥ 3, in [`Shell::open_write_fds`])
+/// actually points at.
+///
+/// Most such descriptors name a real OS file or pipe, but `N>&1` taken while
+/// fd 1 is a command substitution's capture must name the *capture* — a
+/// buffer with no OS descriptor at all. Modelling that as a variant rather
+/// than a second parallel table is what lets `{ … } 3>&1 2>&3` inside `$( … )`
+/// route stderr into the substitution, and what lets a `&` job that dup'd the
+/// capture through fd 3 hold it open the way bash's pipe write end does.
+#[derive(Clone)]
+enum WriteFd {
+    /// A real descriptor: an `exec 3> file` handle, a snapshot of fd 1 / fd 2's
+    /// live sink, a pipeline stage's write end, or a coproc's stdin.
+    File(Arc<File>),
+    /// A command substitution's capture buffer, dup'd here by `N>&1` while fd 1
+    /// was that capture. The handle may be *counted* (see
+    /// [`CaptureSink::share`]) — an entry installed for a scope that outlives
+    /// the command that made it keeps the substitution's reader waiting, which
+    /// is what an OS pipe's write end would do.
+    Capture(CaptureSink),
+}
+
+impl WriteFd {
+    /// This descriptor as an fd-2 sink, for `2>&N`.
+    fn as_stderr_target(&self) -> StderrTarget {
+        match self {
+            WriteFd::File(f) => StderrTarget::WriteFd(Arc::clone(f)),
+            WriteFd::Capture(sink) => StderrTarget::Buffer(sink.clone()),
+        }
+    }
+
+    /// A copy of this entry for a scope that *outlives* the one holding it (a
+    /// `&` job, a coproc body). A file handle is shared as-is — the OS keeps it
+    /// open — while a capture takes a counted write end so the collecting
+    /// `$( … )` waits for the new scope exactly as it would wait for EOF.
+    fn share(&self) -> WriteFd {
+        match self {
+            WriteFd::File(f) => WriteFd::File(Arc::clone(f)),
+            WriteFd::Capture(sink) => WriteFd::Capture(sink.share()),
+        }
+    }
+}
+
+/// How to wire one of an external child's output descriptors.
+///
+/// A child needs a real OS descriptor, so a destination that is a capture
+/// buffer cannot be handed over directly: the child gets a pipe and the parent
+/// drains it into the buffer once the child has run.
+enum ChildOut {
+    /// Give the child this descriptor.
+    Handle(Stdio),
+    /// Pipe the child and append the drained bytes to this sink.
+    Sink(CaptureSink),
+}
+
+/// Write bytes to whatever a [`WriteFd`] names, returning a builtin exit
+/// status (0 wrote, 1 failed). A file handle is `try_clone`d so the write lands
+/// at the descriptor's live OS offset; a capture is appended to.
+fn write_to_write_fd(w: &WriteFd, bytes: &[u8]) -> i32 {
+    match w {
+        WriteFd::Capture(sink) => {
+            lock_capture(sink).extend_from_slice(bytes);
+            0
+        }
+        WriteFd::File(f) => match f.try_clone() {
+            Ok(mut fc) => i32::from(fc.write_all(bytes).is_err()),
+            Err(_) => 1,
+        },
+    }
+}
+
+/// Resolve a [`WriteFd`] to a child descriptor. `what` names the binding for
+/// the error message (`exec stdout`, …).
+fn child_out_from_write_fd(w: &WriteFd, what: &str) -> Result<ChildOut, String> {
+    match w {
+        WriteFd::Capture(sink) => Ok(ChildOut::Sink(sink.clone())),
+        WriteFd::File(f) => f
+            .try_clone()
+            .map(|f| ChildOut::Handle(Stdio::from(f)))
+            .map_err(|e| format!("{what}: {e}")),
+    }
+}
+
 /// A saved snapshot of one variable's complete state (scalar, indexed array,
 /// associative array, export flag), captured when `local` shadows the name
 /// inside a function so it can be restored when the function returns.
@@ -1417,17 +1506,18 @@ pub struct Shell {
     /// subsequent writes share one OS offset — bash dups the fd, it does not
     /// reopen). `None` = the shell's real stdout. Inherited by subshell clones
     /// (a subshell shares the same `Arc<File>`, matching a real fd inheritance).
-    /// A restore `exec 1>&N` points this at fd N's `open_write_fds` handle.
-    /// Consulted by every ambient fd-1 write ([`Shell::write_bytes`]
-    /// `Out::Inherit`, external children).
-    exec_stdout: Option<std::sync::Arc<std::fs::File>>,
+    /// A restore `exec 1>&N` points this at fd N's `open_write_fds` handle, so
+    /// this is a [`WriteFd`] rather than a bare file: fd N may itself name a
+    /// command substitution's capture. Consulted by every ambient fd-1 write
+    /// ([`Shell::write_bytes`] `Out::Inherit`, external children).
+    exec_stdout: Option<WriteFd>,
     /// Persistent stderr target set by a redirection-only `exec 2> file` /
     /// `exec 2>> file` (or mirrored from `exec_stdout` by `exec … 2>&1`, which
     /// shares the same `Arc<File>`). `None` = the shell's real stderr. A restore
-    /// `exec 2>&N` points this at fd N's handle. Consulted by
-    /// [`Shell::emit_stderr`] and external children as the base fd-2 sink
-    /// beneath any `stderr_stack` entry.
-    exec_stderr: Option<std::sync::Arc<std::fs::File>>,
+    /// `exec 2>&N` points this at fd N's handle (a [`WriteFd`], which may be a
+    /// capture). Consulted by [`Shell::emit_stderr`] and external children as
+    /// the base fd-2 sink beneath any `stderr_stack` entry.
+    exec_stderr: Option<WriteFd>,
     /// Persistent stdin source set by a redirection-only `exec < file` (or an
     /// `exec << EOF` here-doc): the file's bytes are read once into a
     /// position-tracking cursor so successive ambient `read` calls (and an
@@ -1476,15 +1566,19 @@ pub struct Shell {
     /// approximation as [`Shell::exec_stdin`]).
     open_fds: std::collections::HashMap<i32, ByteCursor>,
     /// User-space table of non-standard *write* descriptors (fd ≥ 3) opened by a
-    /// redirection-only `exec 3> file` / `exec 3>> file`. Each entry is a shared
-    /// [`std::fs::File`] handle; `echo … >&3` (builtins) and `cmd >&3`
-    /// (externals) route their stdout to it via `RedirPlan::stdout_to_fd`, and
-    /// `exec 3>&-` removes it. Persistent across commands. A subshell clone
-    /// shares the same `Arc<File>` (bash: a subshell inherits the fd, so writes
-    /// share one OS offset). `exec 3>&1` / `exec 3>&2` snapshot fd 1 / fd 2's
-    /// current sink (an `exec`-redirected file, or a dup of the real terminal)
-    /// into an entry here, matching bash's dup-at-exec-time semantics.
-    open_write_fds: std::collections::HashMap<i32, std::sync::Arc<std::fs::File>>,
+    /// redirection-only `exec 3> file` / `exec 3>> file`. Each entry is a
+    /// [`WriteFd`] — usually a shared [`std::fs::File`] handle, but a capture
+    /// sink when the descriptor was dup'd from a command substitution's fd 1.
+    /// `echo … >&3` (builtins) and `cmd >&3` (externals) route their stdout to it
+    /// via `RedirPlan::stdout_to_fd`, and `exec 3>&-` removes it. Persistent
+    /// across commands. A subshell clone shares the same handle (bash: a
+    /// subshell inherits the fd, so writes share one OS offset); a scope that
+    /// outlives its creator takes [`WriteFd::share`] instead, so a capture stays
+    /// open for it. `exec 3>&1` / `exec 3>&2` snapshot fd 1 / fd 2's current sink
+    /// (an `exec`-redirected file, a dup of the real terminal, the enclosing
+    /// pipe, or the enclosing capture) into an entry here, matching bash's
+    /// dup-at-exec-time semantics.
+    open_write_fds: std::collections::HashMap<i32, WriteFd>,
     /// Live *read* endpoints of running `coproc`s (fd ≥ 10 → the coproc's
     /// stdout). Unlike [`Shell::open_fds`] (which replays a byte snapshot), these
     /// are genuine OS pipe streams behind a persistent [`io::BufReader`] so
@@ -4086,7 +4180,7 @@ impl Shell {
         let saved_stdin_redirected = self.stdin_redirected;
         self.stdin_redirected = redirects_rebind_stdin(redirects)
             || std::mem::take(&mut self.pipe_stage_redirect_root);
-        let plan = match self.resolve_redirects(redirects) {
+        let plan = match self.resolve_redirects(redirects, out) {
             Ok(p) => p,
             Err(fail) => {
                 self.last_status = self.report_redirect_failure(&fail, out);
@@ -4157,11 +4251,13 @@ impl Shell {
 
         // ---- stderr setup: push a target covering the whole body ----
         let mut pushed_stderr = false;
-        // fd-2 file sink for the group, kept so it can also seed a scoped
+        // fd-2 sink for the group, kept so it can also seed a scoped
         // `exec_stderr` override — a `( … ) 2> f` / `( … ) 2>&1` subshell body
         // clones `exec_stderr` (but *not* `stderr_stack`), so this is what lets
-        // a subshell's stderr reach the group's file at all.
-        let mut stderr_file: Option<Arc<File>> = None;
+        // a subshell's stderr reach the group's file at all. It is a [`WriteFd`]
+        // rather than a plain handle because `2>&1` can land on a capture (fd 1
+        // dup'd from a `3>&1` taken inside `$( … )`), which has no OS file.
+        let mut stderr_file: Option<WriteFd> = None;
         if let Some((path, append)) = &plan.stderr {
             // `> f 2>&1` / `&> f` / `2>f 1>&2`: fd 2 is a *dup* of fd 1's handle
             // (the resolver set `stderr_shares_stdout`). Share fd 1's already-open
@@ -4180,7 +4276,7 @@ impl Shell {
                 Ok(f) => {
                     let f = Arc::new(f);
                     self.stderr_stack.push(StderrTarget::File(Arc::clone(&f)));
-                    stderr_file = Some(f);
+                    stderr_file = Some(WriteFd::File(f));
                     pushed_stderr = true;
                 }
                 Err(e) => {
@@ -4229,10 +4325,9 @@ impl Shell {
                     // so without it `{ echo X >&2 | cat; } 2>&1` would leak `X`
                     // to the real stderr.
                     match self.snapshot_std_fd(1) {
-                        Ok(f) => {
-                            let f = Arc::new(f);
-                            self.stderr_stack.push(StderrTarget::File(Arc::clone(&f)));
-                            stderr_file = Some(f);
+                        Ok(w) => {
+                            self.stderr_stack.push(w.as_stderr_target());
+                            stderr_file = Some(w);
                             pushed_stderr = true;
                         }
                         Err(e) => {
@@ -4262,13 +4357,28 @@ impl Shell {
         // others), so it is safe to feed the fd-N handle through the existing
         // `stdout_file` / `stderr_file` machinery. An unbound N fails the whole
         // command (bash: "N: Bad file descriptor").
+        //
+        // A descriptor that names a *capture* (`3>&1` taken inside `$( … )`) has
+        // no OS handle to feed that machinery, so it takes the same route the
+        // plain `2>&1`-into-a-capture case above takes: fd 2 joins the sink as a
+        // second writer, and fd 1 runs the body with the sink as its ambient
+        // `Out` (`stdout_capture_fd`).
         let mut fd_alias_error = false;
+        let mut stdout_capture_fd: Option<CaptureSink> = None;
         if stdout_file.is_none()
             && let Some(n) = plan.stdout_to_fd
         {
-            match self.open_write_fds.get(&n).map(|f| f.try_clone()) {
-                Some(Ok(c)) => stdout_file = Some(Arc::new(c)),
-                _ => {
+            match self.open_write_fds.get(&n) {
+                Some(WriteFd::Capture(sink)) => stdout_capture_fd = Some(sink.clone()),
+                Some(WriteFd::File(f)) => match f.try_clone() {
+                    Ok(c) => stdout_file = Some(Arc::new(c)),
+                    Err(_) => {
+                        self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                        self.last_status = 1;
+                        fd_alias_error = true;
+                    }
+                },
+                None => {
                     self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                     self.last_status = 1;
                     fd_alias_error = true;
@@ -4279,14 +4389,16 @@ impl Shell {
             && stderr_file.is_none()
             && let Some(n) = plan.stderr_to_fd
         {
-            match self.open_write_fds.get(&n).map(|f| f.try_clone()) {
-                Some(Ok(c)) => {
-                    let f = Arc::new(c);
-                    self.stderr_stack.push(StderrTarget::WriteFd(Arc::clone(&f)));
+            match self.open_write_fds.get(&n).cloned() {
+                Some(w) => {
+                    self.stderr_stack.push(w.as_stderr_target());
                     pushed_stderr = true;
-                    stderr_file = Some(f);
+                    // Seeding `exec_stderr` too is what carries the alias into
+                    // subshell clones, which inherit `exec_stderr` but not
+                    // `stderr_stack` (`( echo x >&2 ) 2>&3`).
+                    stderr_file = Some(w);
                 }
-                _ => {
+                None => {
                     self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                     self.last_status = 1;
                     fd_alias_error = true;
@@ -4313,10 +4425,10 @@ impl Shell {
         // `( … ) > f 2>&1` body reaches the file — matching bash fd inheritance.
         let saved_exec_stdout = stdout_file
             .as_ref()
-            .map(|f| self.exec_stdout.replace(Arc::clone(f)));
+            .map(|f| self.exec_stdout.replace(WriteFd::File(Arc::clone(f))));
         let saved_exec_stderr = stderr_file
             .as_ref()
-            .map(|f| self.exec_stderr.replace(Arc::clone(f)));
+            .map(|w| self.exec_stderr.replace(w.clone()));
 
         let flow = if fd_alias_error {
             // A `1>&N` / `2>&N` alias named an unbound descriptor: the command
@@ -4338,6 +4450,15 @@ impl Shell {
                 // enclosing capture/pipe is bypassed for stdout).
                 let mut o = Out::Inherit;
                 run(self, &mut o, sin)
+            } else if let Some(sink) = &stdout_capture_fd {
+                // `1>&N` where fd N is a capture: the dup rebinds fd 1 outright,
+                // so a persistent `exec > file` is set aside for the body just as
+                // it is for the `1>&2` capture below.
+                let saved_exec_stdout = self.exec_stdout.take();
+                let mut o = Out::Capture(sink.clone());
+                let flow = run(self, &mut o, sin);
+                self.exec_stdout = saved_exec_stdout;
+                flow
             } else {
                 match &capture {
                     Some(buf) => {
@@ -4423,34 +4544,22 @@ impl Shell {
                 }
                 ExtraFdOp::OutputFile(path, append) => match open_out(&self.cwd, path, *append) {
                     Ok(f) => {
-                        self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
+                        self.open_write_fds.insert(*fd, WriteFd::File(std::sync::Arc::new(f)));
                     }
                     Err(e) => {
                         self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                         self.last_status = 1;
                     }
                 },
-                ExtraFdOp::AliasStd(n) => {
-                    // `N>&1` (N ≥ 3 dup'ing fd 1) on a *pipeline stage* must alias
-                    // fd N to the stage's output pipe, not the ambient terminal /
-                    // persistent `exec` stdout that `snapshot_std_fd(1)` returns.
-                    // Otherwise a `>&N` write inside the body (e.g.
-                    // `{ echo x >&3; } 3>&1 | cat`) leaks past the pipe and the
-                    // downstream stage sees nothing.
-                    let handle = match (*n, out) {
-                        (1, Out::Pipe(w)) => pipe_writer_to_file(w),
-                        _ => self.snapshot_std_fd(*n),
-                    };
-                    match handle {
-                        Ok(f) => {
-                            self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
-                        }
-                        Err(e) => {
-                            self.errln(&format!("{}{fd}: {e}", self.err_prefix()));
-                            self.last_status = 1;
-                        }
+                ExtraFdOp::AliasStd(n) => match self.alias_std_write_fd(*n, out) {
+                    Ok(w) => {
+                        self.open_write_fds.insert(*fd, w);
                     }
-                }
+                    Err(e) => {
+                        self.errln(&format!("{}{fd}: {e}", self.err_prefix()));
+                        self.last_status = 1;
+                    }
+                },
                 ExtraFdOp::ReadWriteFile(path) => {
                     // `exec {fd}<> file`: register both a read snapshot and a
                     // live write handle for the same descriptor. Create-if-absent,
@@ -4461,7 +4570,7 @@ impl Shell {
                             let bytes = std::fs::read(self.host_path(path)).unwrap_or_default();
                             self.open_fds
                                 .insert(*fd, byte_cursor(bytes));
-                            self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
+                            self.open_write_fds.insert(*fd, WriteFd::File(std::sync::Arc::new(f)));
                         }
                         Err(e) => {
                             self.errln(&format!(
@@ -4837,12 +4946,16 @@ impl Shell {
                 .iter()
                 .map(|(&fd, c)| (fd, snapshot_cursor(c)))
                 .collect(),
-            // Write descriptors share the same file handle (bash: a subshell
-            // inherits the fd, so writes go to one OS offset).
+            // Write descriptors share the same handle (bash: a subshell inherits
+            // the fd, so writes go to one OS offset). A capture entry is aliased
+            // *uncounted* here — a synchronous subshell finishes before the
+            // `$( … )` collecting it reads the buffer, so there is nothing to
+            // wait for. A clone that outlives its parent (a `&` job, a coproc)
+            // upgrades the table with [`Shell::share_write_fds`].
             open_write_fds: self
                 .open_write_fds
                 .iter()
-                .map(|(&fd, f)| (fd, std::sync::Arc::clone(f)))
+                .map(|(&fd, w)| (fd, w.clone()))
                 .collect(),
             // A subshell inherits each live coproc read fd as a *shared* OS pipe
             // (bash: the subshell dups the coproc fd, one open file description).
@@ -5003,6 +5116,30 @@ impl Shell {
             cmd_hash: self.cmd_hash.clone(),
             // Resource limits are a process attribute inherited by subshells.
             rlimits: self.rlimits.clone(),
+        }
+    }
+
+    /// Upgrade this shell's inherited write descriptors to *counted* handles,
+    /// for a clone that outlives the scope it was made in (a `&` job, a coproc
+    /// body).
+    ///
+    /// Only a capture entry is affected: an OS handle is already kept alive by
+    /// the `Arc`, but a capture's collecting `$( … )` has to be told to wait, and
+    /// [`WriteFd::share`] is what tells it. This is the fd-table analogue of the
+    /// `Out::share` an outliving scope takes for its fd 1 — bash's job holds a
+    /// dup of the substitution's pipe on *every* descriptor it inherited it on,
+    /// so `x=$( exec 3>&1; ( echo held >&3 & ) >/dev/null )` collects `held`.
+    fn share_write_fds(&mut self) {
+        for w in self.open_write_fds.values_mut() {
+            *w = w.share();
+        }
+        // The ambient fd 1 / fd 2 bindings can name a capture too, via a
+        // persistent `exec 1>&N` onto a descriptor that dup'd one.
+        for w in [&mut self.exec_stdout, &mut self.exec_stderr]
+            .into_iter()
+            .flatten()
+        {
+            *w = w.share();
         }
     }
 
@@ -7024,7 +7161,7 @@ impl Shell {
             // effects and error status match bash. A redirect failure overrides
             // the assignment's status but does not undo the assignment itself.
             if !sc.redirects.is_empty() {
-                match self.resolve_redirects(&sc.redirects) {
+                match self.resolve_redirects(&sc.redirects, out) {
                     // Resolution itself created/truncated every output target,
                     // so a null command needs nothing further here.
                     Ok(_) => {}
@@ -7129,13 +7266,13 @@ impl Shell {
         // (`exec cmd …`, and the rare `command exec`/`builtin exec` re-dispatch,
         // still go through the plan-based path below.)
         if argv.len() == 1 && argv[0] == "exec" && !sc.redirects.is_empty() {
-            let rc = self.apply_exec_redirects(&sc.redirects);
+            let rc = self.apply_exec_redirects(&sc.redirects, out);
             self.last_status = rc;
             return Flow::Next;
         }
 
         // Resolve redirections (targets are expanded now).
-        let redir = match self.resolve_redirects(&sc.redirects) {
+        let redir = match self.resolve_redirects(&sc.redirects, out) {
             Ok(r) => r,
             Err(fail) => {
                 self.last_status = self.report_redirect_failure(&fail, out);
@@ -7365,7 +7502,7 @@ impl Shell {
         let flow = if trap_exit.is_some() {
             Flow::Next
         } else if let Some(rs) = self.func_redirects.get(name).cloned() {
-            match self.resolve_redirects(&rs) {
+            match self.resolve_redirects(&rs, out) {
                 Ok(plan) => self.exec_with_redirects(plan, out, stdin, |sh, o, s| {
                     sh.exec_program(&body, o, s)
                 }),
@@ -8229,6 +8366,11 @@ impl Shell {
         // truncating opens (which would clobber). Keep a clone of the stdout file
         // to hand to stderr in that case.
         let mut stdout_file_for_stderr: Option<File> = None;
+        // `cmd >&N` where fd N names a capture: fd 1 is piped and drained into
+        // that sink after the spawn (the sink is not necessarily the one `out`
+        // holds — `r=$( exec 3>&1; cat f >&3 >/dev/null )` writes to the capture
+        // through fd 3 while fd 1 goes elsewhere).
+        let mut stdout_capture_fd: Option<CaptureSink> = None;
         match &redir.stdout {
             Some((path, append)) => match open_out(&self.cwd, path, *append) {
                 Ok(f) => {
@@ -8248,13 +8390,27 @@ impl Shell {
             },
             None if redir.stdout_to_fd.is_some() => {
                 // `cmd >&N` (N ≥ 3): the child's fd 1 is a user-space write
-                // descriptor opened by `exec N> file`.
+                // descriptor opened by `exec N> file` — or, when N was dup'd from
+                // a command substitution's fd 1, that substitution's capture,
+                // which has no OS handle to give the child and so is piped and
+                // drained after the spawn like any other captured stream.
                 let n = redir.stdout_to_fd.unwrap_or(0);
-                match self.open_write_fds.get(&n).map(|f| f.try_clone()) {
-                    Some(Ok(f)) => {
-                        cmd.stdout(Stdio::from(f));
+                match self.open_write_fds.get(&n) {
+                    Some(WriteFd::Capture(sink)) => {
+                        cmd.stdout(Stdio::piped());
+                        stdout_capture_fd = Some(sink.clone());
                     }
-                    _ => {
+                    Some(WriteFd::File(f)) => match f.try_clone() {
+                        Ok(f) => {
+                            cmd.stdout(Stdio::from(f));
+                        }
+                        Err(_) => {
+                            self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                            self.last_status = 1;
+                            return;
+                        }
+                    },
+                    None => {
                         self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                         self.last_status = 1;
                         return;
@@ -8276,18 +8432,27 @@ impl Shell {
                             return;
                         }
                     }
-                } else if let Some(f) = self.exec_stdout_shadowing(out) {
+                } else if let Some(w) = self.exec_stdout_shadowing(out) {
                     // A runtime `exec > file` inside a capture/pipe binding
                     // rebound fd 1 out from under it.
-                    match f.try_clone() {
-                        Ok(fc) => {
-                            cmd.stdout(Stdio::from(fc));
+                    match w {
+                        WriteFd::Capture(sink) => {
+                            // `exec 1>&N` where fd N was dup'd from an *outer*
+                            // capture: no OS handle, so pipe and drain.
+                            let sink = sink.clone();
+                            cmd.stdout(Stdio::piped());
+                            stdout_capture_fd = Some(sink);
                         }
-                        Err(e) => {
-                            self.errln(&format!("{}exec stdout: {e}", self.err_prefix()));
-                            self.last_status = 1;
-                            return;
-                        }
+                        WriteFd::File(f) => match f.try_clone() {
+                            Ok(fc) => {
+                                cmd.stdout(Stdio::from(fc));
+                            }
+                            Err(e) => {
+                                self.errln(&format!("{}exec stdout: {e}", self.err_prefix()));
+                                self.last_status = 1;
+                                return;
+                            }
+                        },
                     }
                 } else if capturing {
                     cmd.stdout(Stdio::piped());
@@ -8305,18 +8470,25 @@ impl Shell {
                             return;
                         }
                     }
-                } else if let Some(f) = &self.exec_stdout {
+                } else if let Some(w) = &self.exec_stdout {
                     // Persistent `exec > file`: the child's fd 1 is the file (a
                     // dup of the shared handle, so it writes at the live offset).
-                    match f.try_clone() {
-                        Ok(fc) => {
-                            cmd.stdout(Stdio::from(fc));
+                    match w {
+                        WriteFd::Capture(sink) => {
+                            let sink = sink.clone();
+                            cmd.stdout(Stdio::piped());
+                            stdout_capture_fd = Some(sink);
                         }
-                        Err(e) => {
-                            self.errln(&format!("{}exec stdout: {e}", self.err_prefix()));
-                            self.last_status = 1;
-                            return;
-                        }
+                        WriteFd::File(f) => match f.try_clone() {
+                            Ok(fc) => {
+                                cmd.stdout(Stdio::from(fc));
+                            }
+                            Err(e) => {
+                                self.errln(&format!("{}exec stdout: {e}", self.err_prefix()));
+                                self.last_status = 1;
+                                return;
+                            }
+                        },
                     }
                 } else {
                     cmd.stdout(Stdio::inherit());
@@ -8336,12 +8508,24 @@ impl Shell {
         // capture buffer as fd 1.
         let mut stderr_to_stdout_capture = false;
         if let Some(n) = redir.stderr_to_fd {
-            // `cmd 2>&N` (N ≥ 3): the child's fd 2 is a user-space write fd.
-            match self.open_write_fds.get(&n).map(|f| f.try_clone()) {
-                Some(Ok(f)) => {
-                    cmd.stderr(Stdio::from(f));
+            // `cmd 2>&N` (N ≥ 3): the child's fd 2 is a user-space write fd —
+            // piped and drained when that fd names a capture, as for fd 1 above.
+            match self.open_write_fds.get(&n) {
+                Some(WriteFd::Capture(sink)) => {
+                    cmd.stderr(Stdio::piped());
+                    stderr_capture = Some(sink.clone());
                 }
-                _ => {
+                Some(WriteFd::File(f)) => match f.try_clone() {
+                    Ok(f) => {
+                        cmd.stderr(Stdio::from(f));
+                    }
+                    Err(_) => {
+                        self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                        self.last_status = 1;
+                        return;
+                    }
+                },
+                None => {
                     self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                     self.last_status = 1;
                     return;
@@ -8372,12 +8556,20 @@ impl Shell {
             // applies redirects left to right, so `cmd 2>&1 >f` sends fd 2 to
             // the original stdout and only fd 1 to the file.
             match self.child_stdio_for_stdout(out) {
-                Ok(Some(s)) => {
+                Ok(ChildOut::Handle(s)) => {
                     cmd.stderr(s);
                 }
-                Ok(None) => {
+                Ok(ChildOut::Sink(sink)) => {
                     cmd.stderr(Stdio::piped());
-                    stderr_to_stdout_capture = true;
+                    // When that sink is the one `out` holds, fd 2's bytes are
+                    // folded in *after* fd 1's so the two interleave in write
+                    // order; a sink reached some other way (an `exec 1>&N` onto
+                    // an outer capture) is its own destination.
+                    if matches!(out, Out::Capture(b) if b.is(&sink)) {
+                        stderr_to_stdout_capture = true;
+                    } else {
+                        stderr_capture = Some(sink);
+                    }
                 }
                 Err(e) => {
                     self.errln(&format!("{}{e}", self.err_prefix()));
@@ -8389,8 +8581,13 @@ impl Shell {
             match self.stderr_stack.last() {
                 None => {
                     // Base fd 2: a persistent `exec 2> file` target, else inherit.
-                    if let Some(f) = &self.exec_stderr {
-                        match f.try_clone() {
+                    match &self.exec_stderr {
+                        Some(WriteFd::Capture(sink)) => {
+                            let sink = sink.clone();
+                            cmd.stderr(Stdio::piped());
+                            stderr_capture = Some(sink);
+                        }
+                        Some(WriteFd::File(f)) => match f.try_clone() {
                             Ok(fc) => {
                                 cmd.stderr(Stdio::from(fc));
                             }
@@ -8399,7 +8596,8 @@ impl Shell {
                                 self.last_status = 1;
                                 return;
                             }
-                        }
+                        },
+                        None => {}
                     }
                 }
                 Some(StderrTarget::File(f)) => match f.try_clone() {
@@ -8464,6 +8662,17 @@ impl Shell {
         {
             let mut captured = Vec::new();
             let _ = se.read_to_end(&mut captured);
+            lock_capture(buf).extend_from_slice(&captured);
+        }
+
+        // `cmd >&N` where fd N names a capture: fd 1 was piped, so drain it into
+        // that sink (the same treatment `capturing` gives an `out` capture, but
+        // the destination came from the fd table rather than from `out`).
+        if let Some(buf) = &stdout_capture_fd
+            && let Some(mut so) = child.stdout.take()
+        {
+            let mut captured = Vec::new();
+            let _ = so.read_to_end(&mut captured);
             lock_capture(buf).extend_from_slice(&captured);
         }
 
@@ -8661,6 +8870,9 @@ impl Shell {
         // subshell" behaviour; osh uses a thread rather than a fork. See
         // TD-OILS13.
         let mut sub = self.clone_for_subshell();
+        // The job outlives this call, so every descriptor it inherited that
+        // names a capture must hold it open for as long as the job runs.
+        sub.share_write_fds();
         let mut ao_owned = ao.clone();
         // A `!` written on the backgrounded pipeline itself is *not* applied to
         // the job's status. bash inverts a pipeline's result on the way out of
@@ -8734,6 +8946,8 @@ impl Shell {
         // parent-side endpoints, so the body does not inherit copies of its own
         // coproc fds (bash closes them in the child).
         let mut sub = self.clone_for_subshell();
+        // Like a `&` job, the coproc body outlives this call.
+        sub.share_write_fds();
         let body_owned = body.clone();
         let handle = std::thread::spawn(move || {
             // The coproc's pipe is its fd 1 (see the pipeline stage above).
@@ -8756,7 +8970,7 @@ impl Shell {
         let write_fd = self.alloc_varfd(&[]);
         let write_file = pipe_writer_into_file(parent_stdin_w);
         self.open_write_fds
-            .insert(write_fd, std::sync::Arc::new(write_file));
+            .insert(write_fd, WriteFd::File(std::sync::Arc::new(write_file)));
 
         // Publish `NAME=(read_fd write_fd)` and `NAME_PID`. The body runs as a
         // thread, not an OS process, so `NAME_PID` is a synthetic monotonic id
@@ -8848,12 +9062,12 @@ impl Shell {
     /// [`Self::apply_exec_redirects`] and the persistent varfd path in
     /// [`Self::resolve_redirects`]. `fd` is the already-resolved descriptor
     /// (varfd-allocated or literal).
-    fn apply_persistent_redirect(&mut self, r: &Redirect, fd: i32) -> Result<(), String> {
+    fn apply_persistent_redirect(&mut self, r: &Redirect, fd: i32, out: &Out) -> Result<(), String> {
         match r.op {
             RedirectOp::Read => {
                 let path = self.expand_to_string(&r.target);
                 if let Some(n) = special_redirect_fd(&path) {
-                    return self.persistent_special_dup(fd, &path, n, true);
+                    return self.persistent_special_dup(fd, &path, n, true, out);
                 }
                 let bytes = std::fs::read(self.host_path(&path))
                     .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
@@ -8871,7 +9085,7 @@ impl Shell {
                 // share an OS offset (a documented model limitation).
                 let path = self.expand_to_string(&r.target);
                 if let Some(n) = special_redirect_fd(&path) {
-                    return self.persistent_special_dup(fd, &path, n, fd == 0);
+                    return self.persistent_special_dup(fd, &path, n, fd == 0, out);
                 }
                 let f = open_rw(&self.cwd, &path).map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
                 match fd {
@@ -8879,12 +9093,12 @@ impl Shell {
                         let bytes = std::fs::read(self.host_path(&path)).unwrap_or_default();
                         self.exec_stdin = Some(byte_cursor(bytes));
                     }
-                    1 => self.exec_stdout = Some(std::sync::Arc::new(f)),
-                    2 => self.exec_stderr = Some(std::sync::Arc::new(f)),
+                    1 => self.exec_stdout = Some(WriteFd::File(std::sync::Arc::new(f))),
+                    2 => self.exec_stderr = Some(WriteFd::File(std::sync::Arc::new(f))),
                     _ => {
                         let bytes = std::fs::read(self.host_path(&path)).unwrap_or_default();
                         self.open_fds.insert(fd, byte_cursor(bytes));
-                        self.open_write_fds.insert(fd, std::sync::Arc::new(f));
+                        self.open_write_fds.insert(fd, WriteFd::File(std::sync::Arc::new(f)));
                     }
                 }
             }
@@ -8907,11 +9121,11 @@ impl Shell {
                 let target = self.expand_to_string(&r.target);
                 let append = matches!(r.op, RedirectOp::AppendBoth);
                 if let Some(n) = special_redirect_fd(&target) {
-                    return self.persistent_special_dup(fd, &target, n, false);
+                    return self.persistent_special_dup(fd, &target, n, false, out);
                 }
                 let f = open_out(&self.cwd, &target, append).map_err(|e| format!("{target}: {}", io_error_message(&e)))?;
                 // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one handle.
-                let a = std::sync::Arc::new(f);
+                let a = WriteFd::File(std::sync::Arc::new(f));
                 self.exec_stdout = Some(a.clone());
                 self.exec_stderr = Some(a);
             }
@@ -8920,7 +9134,7 @@ impl Shell {
                 let append = matches!(r.op, RedirectOp::Append);
                 // A dup, not an open — so noclobber has no file to protect.
                 if let Some(n) = special_redirect_fd(&target) {
-                    return self.persistent_special_dup(fd, &target, n, false);
+                    return self.persistent_special_dup(fd, &target, n, false, out);
                 }
                 if self.noclobber
                     && matches!(r.op, RedirectOp::Write)
@@ -8933,17 +9147,17 @@ impl Shell {
                 let f = open_out(&self.cwd, &target, append).map_err(|e| format!("{target}: {}", io_error_message(&e)))?;
                 let a = std::sync::Arc::new(f);
                 match fd {
-                    0 | 1 => self.exec_stdout = Some(a),
-                    2 => self.exec_stderr = Some(a),
+                    0 | 1 => self.exec_stdout = Some(WriteFd::File(a)),
+                    2 => self.exec_stderr = Some(WriteFd::File(a)),
                     _ => {
-                        self.open_write_fds.insert(fd, a);
+                        self.open_write_fds.insert(fd, WriteFd::File(a));
                         self.open_fds.remove(&fd);
                     }
                 }
             }
             RedirectOp::DupOut => {
                 let target = self.expand_to_string(&r.target);
-                self.apply_persistent_dup_out(fd, &target)?;
+                self.apply_persistent_dup_out(fd, &target, out)?;
             }
             RedirectOp::DupIn => {
                 let target = self.expand_to_string(&r.target);
@@ -8965,19 +9179,20 @@ impl Shell {
         path: &str,
         n: i32,
         read: bool,
+        out: &Out,
     ) -> Result<(), String> {
         let n = n.to_string();
         let res = if read {
             self.apply_persistent_dup_in(fd, &n)
         } else {
-            self.apply_persistent_dup_out(fd, &n)
+            self.apply_persistent_dup_out(fd, &n, out)
         };
         res.map_err(|_| format!("{path}: No such file or directory"))
     }
 
     /// Point persistent fd `fd` at output descriptor `target` (`exec M>&N`,
     /// `exec M>&-`, and the special filenames that mean the same thing).
-    fn apply_persistent_dup_out(&mut self, fd: i32, target: &str) -> Result<(), String> {
+    fn apply_persistent_dup_out(&mut self, fd: i32, target: &str, out: &Out) -> Result<(), String> {
         if target == "-" {
             // `N>&-` / `N<&-`: close the descriptor.
             match fd {
@@ -8991,7 +9206,7 @@ impl Shell {
         } else if let Ok(n) = target.parse::<i32>() {
             // `M>&N`: fd M becomes a dup of fd N's *current* sink.
             let src = self
-                .exec_dup_source(n)
+.exec_dup_source(n, out)
                 .map_err(|bad| format!("{bad}: Bad file descriptor"))?;
             match fd {
                 1 => self.exec_stdout = src,
@@ -9002,10 +9217,10 @@ impl Shell {
                     // the terminal) dup the terminal.
                     let handle = match src {
                         Some(h) => h,
-                        None => std::sync::Arc::new(
+                        None => WriteFd::File(std::sync::Arc::new(
                             dup_std_handle(n == 1)
                                 .map_err(|e| format!("{fd}: {}", io_error_message(&e)))?,
-                        ),
+                        )),
                     };
                     self.open_write_fds.insert(fd, handle);
                     self.open_fds.remove(&fd);
@@ -9014,7 +9229,7 @@ impl Shell {
         } else if fd == 1 {
             // `1>&$f` (non-numeric expansion): both streams to the file.
             let f = open_out(&self.cwd, target, false).map_err(|e| format!("{target}: {e}"))?;
-            let a = std::sync::Arc::new(f);
+            let a = WriteFd::File(std::sync::Arc::new(f));
             self.exec_stdout = Some(a.clone());
             self.exec_stderr = Some(a);
         } else {
@@ -9089,11 +9304,15 @@ impl Shell {
         }
     }
 
-    fn resolve_redirects(&mut self, redirs: &[Redirect]) -> Result<RedirPlan, Box<RedirFailure>> {
+    fn resolve_redirects(
+        &mut self,
+        redirs: &[Redirect],
+        out: &Out,
+    ) -> Result<RedirPlan, Box<RedirFailure>> {
         let mut plan = RedirPlan::default();
         let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
-            if let Err(msg) = self.resolve_one_redirect(r, &mut plan, &mut reserved) {
+            if let Err(msg) = self.resolve_one_redirect(r, &mut plan, &mut reserved, out) {
                 // Hand the caller the plan built from the redirects *before* this
                 // one: bash applies redirections left to right against the real fd
                 // table, so the diagnostic for a failure goes to fd 2 as it stood
@@ -9147,9 +9366,9 @@ impl Shell {
             return false;
         }
         if let Some(n) = p.stderr_to_fd
-            && let Some(f) = self.open_write_fds.get(&n)
+            && let Some(w) = self.open_write_fds.get(&n)
         {
-            self.stderr_stack.push(StderrTarget::WriteFd(Arc::clone(f)));
+            self.stderr_stack.push(w.as_stderr_target());
             return true;
         }
         if p.stderr_to_stdout {
@@ -9166,8 +9385,8 @@ impl Shell {
                 Out::Inherit => {
                     // fd 1 is the ambient descriptor: dup its current sink into a
                     // handle, as the redirect itself would have.
-                    if let Ok(f) = self.snapshot_std_fd(1) {
-                        self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
+                    if let Ok(w) = self.snapshot_std_fd(1) {
+                        self.stderr_stack.push(w.as_stderr_target());
                         return true;
                     }
                     return false;
@@ -9200,6 +9419,7 @@ impl Shell {
         r: &Redirect,
         plan: &mut RedirPlan,
         reserved: &mut Vec<i32>,
+        out: &Out,
     ) -> Result<(), String> {
         {
             let fd = self.redir_effective_fd(r, reserved)?;
@@ -9210,7 +9430,7 @@ impl Shell {
             // (`{name}>&-`) instead reuses `$name`'s current fd and is scoped
             // like a numeric `N>&-`, so it flows through the plan below.
             if r.varfd.is_some() && !redir_is_close(r) {
-                self.apply_persistent_redirect(r, fd)?;
+                self.apply_persistent_redirect(r, fd, out)?;
                 return Ok(());
             }
             match r.op {
@@ -9642,7 +9862,7 @@ impl Shell {
     /// the *current* sink of its source fd (as already mutated by earlier
     /// redirects in the same `exec`), matching bash's dup-at-that-moment
     /// semantics. Returns the resulting status (1 if any redirect failed).
-    fn apply_exec_redirects(&mut self, redirs: &[Redirect]) -> i32 {
+    fn apply_exec_redirects(&mut self, redirs: &[Redirect], out: &Out) -> i32 {
         let mut rc = 0;
         let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
@@ -9657,7 +9877,7 @@ impl Shell {
                     continue;
                 }
             };
-            if let Err(e) = self.apply_persistent_redirect(r, fd) {
+            if let Err(e) = self.apply_persistent_redirect(r, fd, out) {
                 self.errln(&format!("{}{e}", self.err_prefix()));
                 rc = 1;
             }
@@ -9677,21 +9897,16 @@ impl Shell {
     /// real fd 1). `Ok(None)` is only produced if duplicating the real std fd
     /// fails (pathological — a closed std fd), in which case callers fall back
     /// to the real std fd. This is the swap-idiom fix (`exec 3>&1 1>&2 2>&3`).
-    fn exec_dup_source(
-        &self,
-        n: i32,
-    ) -> Result<Option<std::sync::Arc<std::fs::File>>, i32> {
+    ///
+    /// fd 1 is resolved through [`Shell::alias_std_write_fd`], so `exec 3>&1`
+    /// run inside a `$( … )` or a pipeline stage aliases fd 3 to *that* sink
+    /// rather than to the terminal — the descriptor persists past the `exec`,
+    /// but not past the substitution whose fd 1 it copied.
+    fn exec_dup_source(&self, n: i32, out: &Out) -> Result<Option<WriteFd>, i32> {
         match n {
-            1 | 2 => {
-                let cur = if n == 1 { &self.exec_stdout } else { &self.exec_stderr };
-                match cur {
-                    Some(f) => Ok(Some(f.clone())),
-                    None => match dup_std_handle(n == 1) {
-                        Ok(f) => Ok(Some(std::sync::Arc::new(f))),
-                        Err(_) => Ok(None),
-                    },
-                }
-            }
+            // `Ok(None)` on failure: a pathological closed std fd, which callers
+            // resolve back to the real std fd.
+            1 | 2 => Ok(self.alias_std_write_fd(n, out).ok()),
             _ => match self.open_write_fds.get(&n) {
                 Some(f) => Ok(Some(f.clone())),
                 None => Err(n),
@@ -11723,8 +11938,8 @@ impl Shell {
                     pushed_stderr = true;
                 }
             } else if let Some(n) = redir.stderr_to_fd {
-                if let Some(f) = self.open_write_fds.get(&n) {
-                    self.stderr_stack.push(StderrTarget::WriteFd(Arc::clone(f)));
+                if let Some(w) = self.open_write_fds.get(&n) {
+                    self.stderr_stack.push(w.as_stderr_target());
                     pushed_stderr = true;
                 } else {
                     self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
@@ -11750,8 +11965,8 @@ impl Shell {
                         // block), but one it *runs* can: `eval 'exec >f; echo X
                         // >&2' 2>&1` must still send `X` to the original stdout.
                         match self.snapshot_std_fd(1) {
-                            Ok(f) => {
-                                self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
+                            Ok(w) => {
+                                self.stderr_stack.push(w.as_stderr_target());
                                 pushed_stderr = true;
                             }
                             Err(e) => {
@@ -11935,7 +12150,7 @@ impl Shell {
                     if let Some((path, append)) = &redir.stdout {
                         match open_out(&self.cwd, path, *append) {
                             Ok(f) => {
-                                self.exec_stdout = Some(std::sync::Arc::new(f));
+                                self.exec_stdout = Some(WriteFd::File(std::sync::Arc::new(f)));
                             }
                             Err(e) => {
                                 self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
@@ -11947,7 +12162,7 @@ impl Shell {
                     if rc == 0 && let Some((path, append)) = &redir.stderr {
                         match open_out(&self.cwd, path, *append) {
                             Ok(f) => {
-                                self.exec_stderr = Some(std::sync::Arc::new(f));
+                                self.exec_stderr = Some(WriteFd::File(std::sync::Arc::new(f)));
                             }
                             Err(e) => {
                                 self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
@@ -11956,7 +12171,7 @@ impl Shell {
                         }
                     }
                     // `2>&1` with fd 1 not a file: fd 2 mirrors the fd 1 target
-                    // (shares the same `Arc<File>` — a true dup, one offset).
+                    // (shares the same handle — a true dup, one offset).
                     if rc == 0 && redir.stderr_to_stdout {
                         self.exec_stderr = self.exec_stdout.clone();
                     }
@@ -11970,7 +12185,7 @@ impl Shell {
                     // fd is a status-1 `N: Bad file descriptor`, as in bash.
                     if rc == 0 && let Some(n) = redir.stdout_to_fd {
                         match self.open_write_fds.get(&n) {
-                            Some(f) => self.exec_stdout = Some(std::sync::Arc::clone(f)),
+                            Some(w) => self.exec_stdout = Some(w.clone()),
                             None => {
                                 self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                                 rc = 1;
@@ -11979,7 +12194,7 @@ impl Shell {
                     }
                     if rc == 0 && let Some(n) = redir.stderr_to_fd {
                         match self.open_write_fds.get(&n) {
-                            Some(f) => self.exec_stderr = Some(std::sync::Arc::clone(f)),
+                            Some(w) => self.exec_stderr = Some(w.clone()),
                             None => {
                                 self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                                 rc = 1;
@@ -12005,7 +12220,7 @@ impl Shell {
                                     match open_out(&self.cwd, path, *append) {
                                         Ok(f) => {
                                             self.open_write_fds
-                                                .insert(*fd, std::sync::Arc::new(f));
+                                                .insert(*fd, WriteFd::File(std::sync::Arc::new(f)));
                                             self.open_fds.remove(fd);
                                         }
                                         Err(e) => {
@@ -12014,10 +12229,14 @@ impl Shell {
                                         }
                                     }
                                 }
-                                ExtraFdOp::AliasStd(n) => match self.snapshot_std_fd(*n) {
-                                    Ok(f) => {
-                                        self.open_write_fds
-                                            .insert(*fd, std::sync::Arc::new(f));
+                                // `exec 3>&1` inside `$( … )` aliases fd 3 to the
+                                // capture, not to the terminal — the descriptor
+                                // outlives the `exec` but not the substitution,
+                                // so it is the same resolution a scoped `3>&1`
+                                // gets.
+                                ExtraFdOp::AliasStd(n) => match self.alias_std_write_fd(*n, out) {
+                                    Ok(w) => {
+                                        self.open_write_fds.insert(*fd, w);
                                         self.open_fds.remove(fd);
                                     }
                                     Err(e) => {
@@ -12039,7 +12258,7 @@ impl Shell {
                                                 byte_cursor(bytes),
                                             );
                                             self.open_write_fds
-                                                .insert(*fd, std::sync::Arc::new(f));
+                                                .insert(*fd, WriteFd::File(std::sync::Arc::new(f)));
                                         }
                                         Err(e) => {
                                             self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
@@ -19832,11 +20051,8 @@ impl Shell {
         } else {
             // A runtime `exec > file` inside a capture/pipe binding rebinds fd 1
             // out from under it, so it is checked before `out`.
-            if let Some(f) = self.exec_stdout_shadowing(out) {
-                return match f.try_clone() {
-                    Ok(mut fc) => i32::from(fc.write_all(bytes).is_err()),
-                    Err(_) => 1,
-                };
+            if let Some(w) = self.exec_stdout_shadowing(out) {
+                return write_to_write_fd(w, bytes);
             }
             match out {
                 Out::Capture(buf) => {
@@ -19846,16 +20062,8 @@ impl Shell {
                 Out::Inherit => {
                     // A persistent `exec > file` rebinds the shell's ambient
                     // fd 1 to a file; otherwise write to the real stdout.
-                    if let Some(f) = &self.exec_stdout {
-                        match f.try_clone() {
-                            Ok(mut fc) => {
-                                if fc.write_all(bytes).is_err() {
-                                    return 1;
-                                }
-                                0
-                            }
-                            Err(_) => 1,
-                        }
+                    if let Some(w) = &self.exec_stdout {
+                        write_to_write_fd(w, bytes)
                     } else {
                         let stdout = io::stdout();
                         let mut lock = stdout.lock();
@@ -19882,40 +20090,52 @@ impl Shell {
         }
     }
 
-    /// Write bytes to a user-space write descriptor (`>&N`, N ≥ 3) opened by
-    /// `exec N> file`. A `try_clone` of the shared handle is used so the write
-    /// goes to the descriptor's current OS offset. An unopened fd is a status-1
-    /// `N: bad file descriptor` (bash).
-    /// Snapshot standard fd `n` (1 or 2) into an owned [`File`] for an
-    /// `exec 3>&1` / `exec 3>&2` alias. If fd `n` is currently redirected to a
-    /// file (`exec > file` / `exec 2> file`), duplicate that live handle so the
-    /// alias writes to the same file at the shared offset; otherwise duplicate
-    /// the real terminal handle. This captures the *current* sink (bash's
+    /// Snapshot standard fd `n` (1 or 2) into an owned [`WriteFd`] for an
+    /// `exec 3>&1` / `exec 3>&2` alias. If fd `n` is currently redirected
+    /// (`exec > file` / `exec 2> file`, or a capture), take that live sink so
+    /// the alias writes where fd `n` writes; otherwise duplicate the real
+    /// terminal handle. This captures the *current* sink (bash's
     /// dup-at-exec-time semantics), so a later `exec > other` does not retarget
     /// the alias.
-    fn snapshot_std_fd(&self, n: i32) -> io::Result<std::fs::File> {
+    fn snapshot_std_fd(&self, n: i32) -> io::Result<WriteFd> {
         let redirected = if n == 1 {
             self.exec_stdout.as_ref()
         } else {
             self.exec_stderr.as_ref()
         };
         match redirected {
-            Some(f) => f.try_clone(),
-            None => dup_std_handle(n == 1),
+            Some(w) => Ok(w.clone()),
+            None => dup_std_handle(n == 1).map(|f| WriteFd::File(std::sync::Arc::new(f))),
         }
     }
 
+    /// Resolve `N>&n` (N ≥ 3 aliasing standard fd `n`) against the ambient
+    /// stdout `out` of the command carrying the redirect.
+    ///
+    /// `N>&1` must alias fd N to whatever fd 1 *is here*, not to the terminal /
+    /// persistent `exec` stdout that [`Shell::snapshot_std_fd`] reports. On a
+    /// pipeline stage fd 1 is the stage's output pipe, and inside a command
+    /// substitution it is the capture — otherwise a `>&N` write in the body
+    /// (`{ echo x >&3; } 3>&1 | cat`, `r=$({ echo x >&3; } 3>&1)`) leaks past
+    /// the sink the caller is collecting. Only fd 1 gets this treatment: `out`
+    /// describes fd 1 alone, and fd 2's live sink is already what
+    /// `snapshot_std_fd(2)` returns.
+    fn alias_std_write_fd(&self, n: i32, out: &Out) -> io::Result<WriteFd> {
+        match (n, out) {
+            (1, Out::Capture(sink)) => Ok(WriteFd::Capture(sink.clone())),
+            (1, Out::Pipe(w)) => {
+                pipe_writer_to_file(w).map(|f| WriteFd::File(std::sync::Arc::new(f)))
+            }
+            _ => self.snapshot_std_fd(n),
+        }
+    }
+
+    /// Write bytes to a user-space write descriptor (`>&N`, N ≥ 3) opened by
+    /// `exec N> file`. An unopened fd is a status-1 `N: bad file descriptor`
+    /// (bash).
     fn write_to_fd(&mut self, fd: i32, bytes: &[u8]) -> i32 {
         match self.open_write_fds.get(&fd) {
-            Some(f) => match f.try_clone() {
-                Ok(mut fc) => {
-                    if fc.write_all(bytes).is_err() {
-                        return 1;
-                    }
-                    0
-                }
-                Err(_) => 1,
-            },
+            Some(w) => write_to_write_fd(w, bytes),
             None => {
                 self.errln(&format!("{}{fd}: Bad file descriptor", self.err_prefix()));
                 1
@@ -19941,10 +20161,8 @@ impl Shell {
             None => {
                 // Base fd 2: a persistent `exec 2> file` target if set, else the
                 // shell's real stderr.
-                if let Some(f) = &self.exec_stderr {
-                    if let Ok(mut fc) = f.try_clone() {
-                        let _ = fc.write_all(bytes);
-                    }
+                if let Some(w) = &self.exec_stderr {
+                    write_to_write_fd(w, bytes);
                 } else {
                     let e = io::stderr();
                     let mut lock = e.lock();
@@ -20173,10 +20391,8 @@ impl Shell {
             return;
         } else if redir.stderr_to_stdout {
             // fd 2 follows fd 1: route to this command's stdout destination.
-            if let Some(f) = self.exec_stdout_shadowing(out)
-                && let Ok(mut fc) = f.try_clone()
-            {
-                let _ = fc.write_all(&bytes);
+            if let Some(w) = self.exec_stdout_shadowing(out) {
+                let _ = write_to_write_fd(w, &bytes);
                 return;
             }
             match out {
@@ -20189,10 +20405,8 @@ impl Shell {
                     return;
                 }
                 Out::Inherit => {
-                    if let Some(f) = &self.exec_stdout
-                        && let Ok(mut fc) = f.try_clone()
-                    {
-                        let _ = fc.write_all(&bytes);
+                    if let Some(w) = &self.exec_stdout {
+                        let _ = write_to_write_fd(w, &bytes);
                         return;
                     }
                     let o = io::stdout();
@@ -20227,7 +20441,7 @@ impl Shell {
     /// `Out::Inherit` is deliberately excluded — there the ambient fd 1 *is*
     /// `exec_stdout`, which every caller already resolves for itself (including
     /// the scoped override a compound `{ …; } > f` installs).
-    fn exec_stdout_shadowing(&self, out: &Out) -> Option<&std::sync::Arc<std::fs::File>> {
+    fn exec_stdout_shadowing(&self, out: &Out) -> Option<&WriteFd> {
         match out {
             Out::Inherit => None,
             Out::Capture(_) | Out::Pipe(_) => self.exec_stdout.as_ref(),
@@ -20245,12 +20459,12 @@ impl Shell {
         }
     }
 
-    /// Build a child-process [`Stdio`] that writes to fd 1's current sink, for
+    /// Build a child-process descriptor that writes to fd 1's current sink, for
     /// `2>&1` (`stderr_to_stdout`) on an external command.
     ///
-    /// `Ok(None)` means fd 1 is a capture buffer, which cannot back a live child
-    /// descriptor: the caller must hand the child a pipe and append the drained
-    /// bytes to that same buffer.
+    /// [`ChildOut::Sink`] means fd 1 is a capture buffer, which cannot back a
+    /// live child descriptor: the caller must hand the child a pipe and append
+    /// the drained bytes to that buffer.
     ///
     /// Inheriting fd 2 is *not* a substitute for the real-fd-1 case, even though
     /// it looks like one whenever both standard descriptors happen to land on
@@ -20258,29 +20472,23 @@ impl Shell {
     /// `osh script >out 2>err`, or any harness that captures the two streams
     /// separately — inheriting fd 2 sends the child's diagnostics to the wrong
     /// destination and `2>&1` silently does nothing.
-    fn child_stdio_for_stdout(&self, out: &Out) -> Result<Option<Stdio>, String> {
-        if let Some(f) = self.exec_stdout_shadowing(out) {
-            return f
-                .try_clone()
-                .map(|f| Some(Stdio::from(f)))
-                .map_err(|e| format!("exec stdout: {e}"));
+    fn child_stdio_for_stdout(&self, out: &Out) -> Result<ChildOut, String> {
+        if let Some(w) = self.exec_stdout_shadowing(out) {
+            return child_out_from_write_fd(w, "exec stdout");
         }
         match out {
-            Out::Capture(_) => Ok(None),
+            Out::Capture(sink) => Ok(ChildOut::Sink(sink.clone())),
             Out::Pipe(w) => w
                 .try_clone()
-                .map(|p| Some(Stdio::from(p)))
+                .map(|p| ChildOut::Handle(Stdio::from(p)))
                 .map_err(|e| format!("pipe: {e}")),
             // A persistent `exec > file` target if one is set (a dup of the
             // shared handle, so the child writes at the live offset), otherwise
             // a dup of the process's real fd 1.
             Out::Inherit => match &self.exec_stdout {
-                Some(f) => f
-                    .try_clone()
-                    .map(|f| Some(Stdio::from(f)))
-                    .map_err(|e| format!("exec stdout: {e}")),
+                Some(w) => child_out_from_write_fd(w, "exec stdout"),
                 None => dup_std_handle(true)
-                    .map(|f| Some(Stdio::from(f)))
+                    .map(|f| ChildOut::Handle(Stdio::from(f)))
                     .map_err(|e| format!("stdout: {e}")),
             },
         }
@@ -20749,7 +20957,7 @@ impl RedirPlan {
 /// scoped redirect (`{ …; } 3< file`) is in effect: `(fd, prior input cursor,
 /// prior write handle)`. Both prior slots are taken by ownership out of the
 /// shell's fd tables and reinstated when the body finishes.
-type SavedFd = (i32, Option<ByteCursor>, Option<std::sync::Arc<std::fs::File>>);
+type SavedFd = (i32, Option<ByteCursor>, Option<WriteFd>);
 
 /// An operation on a non-standard file descriptor (fd ≥ 3), captured by
 /// [`Shell::resolve_redirects`] and applied to the shell's fd tables by `exec`.
@@ -38083,6 +38291,45 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("{ echo x >&3; } 3>&1 | cat");
         assert_eq!(s, 0);
         assert_eq!(o, "x\n");
+    }
+
+    #[test]
+    fn scratch_fd_alias_inside_a_substitution_reaches_the_capture() {
+        // `3>&1` taken while fd 1 is a command substitution's capture must
+        // alias fd 3 to *that* capture — bash hands the body the collecting
+        // pipe's write end, so a `>&3` write is collected, not leaked to the
+        // terminal. Regression: `open_write_fds` could only hold an `Arc<File>`,
+        // so the alias fell back to the real fd 1 (TD-OILS-COMPOUND-SCRATCHFD-PIPE).
+        let (o, s) = run("r=$({ echo hi >&3; } 3>&1); echo \"[$r]\"");
+        assert_eq!(s, 0);
+        assert_eq!(o, "[hi]\n");
+        // The `2>&3` half of the idiom: stderr into the capture, stdout away.
+        let (o, s) = run("r=$({ echo o; echo e >&2; } 3>&1 2>&3); echo \"[$r]\"");
+        assert_eq!(s, 0);
+        assert_eq!(o, "[o\ne]\n");
+    }
+
+    #[test]
+    fn persistent_exec_alias_inside_a_substitution_reaches_the_capture() {
+        // The same resolution for `exec 3>&1`: the descriptor outlives the
+        // `exec`, but not the substitution whose fd 1 it copied.
+        let (o, s) = run("r=$(exec 3>&1; echo via3 >&3); echo \"[$r]\"");
+        assert_eq!(s, 0);
+        assert_eq!(o, "[via3]\n");
+        // …and a later `exec 2>&3` inherits the capture through fd 3.
+        let (o, s) = run("r=$(exec 3>&1; exec 2>&3; echo e >&2); echo \"[$r]\"");
+        assert_eq!(s, 0);
+        assert_eq!(o, "[e]\n");
+    }
+
+    #[test]
+    fn background_job_holds_a_capture_inherited_through_fd_three() {
+        // A `&` job that inherited the capture on fd 3 keeps it open exactly as
+        // it would keep a real pipe write end open, so the substitution waits
+        // for the job even though the job redirected its own fd 1 away.
+        let (o, s) = run("x=$( exec 3>&1; ( echo held >&3 & ) >/dev/null ); echo \"[$x]\"");
+        assert_eq!(s, 0);
+        assert_eq!(o, "[held]\n");
     }
 
     #[test]

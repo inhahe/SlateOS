@@ -6004,7 +6004,7 @@ MSYS build shows this; osh's output is the correct one.
 behavior to reproduce a host-libc bug on invalid-ish input. Documented as a
 reference-artifact divergence; osh keeps the correct inclusive char range.
 
-### TD-OILS-COMPOUND-SCRATCHFD-PIPE. A compound command's `2>&N` dup through a scratch fd aliased to a *pipe* (command substitution) leaks stderr to the real terminal — MINOR, obscure 2026-07-19
+### TD-OILS-COMPOUND-SCRATCHFD-PIPE. A compound command's `2>&N` dup through a scratch fd aliased to a *pipe* (command substitution) leaks stderr to the real terminal — 2026-07-19 — RESOLVED 2026-07-28
 
 **Where:** `userspace/oils/src/interp.rs` — the compound-command redirect path
 (the `saved_fds`/`SavedFd` + `stderr_stack` mechanism, redirect function ~line
@@ -6071,6 +6071,56 @@ and keep it open, with no band-aid merge step. That does not by itself fix the
 fd can't be stored there" impedance mismatch that made the narrow fix ugly. The
 same change would close the residual noted under
 TD-OILS-BG-SINK-OUTLIVES-SUBSHELL (`exec 3>&1; ( echo held >&3 & )`).
+
+**RESOLVED 2026-07-28.** Fixed as described in that update — the uniform
+version, not the band-aid. A new `WriteFd` enum
+
+```rust
+enum WriteFd { File(Arc<File>), Capture(CaptureSink) }
+```
+
+is what `open_write_fds`, `exec_stdout` and `exec_stderr` now hold, so a
+descriptor that names a capture is representable everywhere a descriptor is,
+and there is no second table and no post-hoc merge. The pieces:
+
+* **One resolver for `N>&1`/`N>&2`.** `Shell::alias_std_write_fd(n, out)`
+  resolves an alias against the *ambient* fd 1 (`Out::Capture` → the sink,
+  `Out::Pipe` → the pipe, otherwise `snapshot_std_fd`). Both the scoped path
+  (`install_extra_fds`) and the persistent one (`exec 3>&1`, via
+  `exec_dup_source`) go through it, so the two forms can no longer disagree.
+  Reaching the persistent path meant threading the ambient `Out` through
+  `resolve_redirects` → `resolve_one_redirect` → `apply_persistent_redirect` →
+  `apply_persistent_dup_out` → `exec_dup_source`; that plumbing is the reason
+  `exec 3>&1` inside `$( … )` used to alias the terminal.
+* **`snapshot_std_fd` returns a `WriteFd`**, so `exec 1>&N` onto a capture is
+  a representable state rather than a case with nowhere to go.
+* **Sinks per direction.** `WriteFd::as_stderr_target()` gives the fd-2 form
+  (`2>&N` on a capture becomes a second writer on the sink, interleaving in
+  write order); the compound path's fd-1 form runs the body with the sink as
+  its ambient `Out` (`stdout_capture_fd`), which is what a dup of fd 1 means.
+  `write_to_write_fd` / `child_out_from_write_fd` are the write and
+  spawn-a-child forms — a child gets a pipe the parent drains into the sink,
+  since a buffer cannot back a live OS descriptor.
+* **Counted vs. uncounted aliases.** `clone_for_subshell` aliases capture
+  entries *uncounted* (a synchronous subshell finishes before the `$( … )`
+  reads), while a clone that outlives its parent — a `&` job, a coproc — calls
+  `Shell::share_write_fds()` to upgrade every inherited entry (including
+  `exec_stdout`/`exec_stderr`) to a counted `CaptureSink::share()`. That is
+  what closes the TD-OILS-BG-SINK-OUTLIVES-SUBSHELL residual: bash's job holds
+  a dup of the substitution's pipe on *every* descriptor it inherited it on, so
+  `x=$( exec 3>&1; ( echo held >&3 & ) >/dev/null )` collects `held`.
+
+Note this did **not** require fixing the `RedirPlan` order-loss — the ordered
+fd-op executor is still the long-term want (see the "proper fix" above), but
+the leak was the impedance mismatch, not the ordering.
+
+**Coverage:** `tests/corpus/redirect-scratch-fd-capture.sh` (new, byte-identical
+to bash 5.2 — scoped and persistent aliases, `2>&3`, externals, pipeline
+stages, a fd-3 alias taken *outside* the substitution, `3>&1 >u.txt` ordering,
+two `&`-job hold shapes, and `3>&-`), plus unit tests
+`scratch_fd_alias_inside_a_substitution_reaches_the_capture`,
+`persistent_exec_alias_inside_a_substitution_reaches_the_capture` and
+`background_job_holds_a_capture_inherited_through_fd_three`.
 
 ### TD-OILS-ARRAY-EMPTY-ASSIGNED. `declare -p` / `@A` can't distinguish a never-assigned empty array from an assigned-empty one — RESOLVED 2026-07-19
 
@@ -7251,14 +7301,17 @@ complex than a single simple-or-redirected command conservatively holds.
 Covered by `tests/corpus/background-capture-sink.sh`, which records the waited/
 immediate outcome and the collected output for 19 shapes.
 
-**Residual.** A writer that reaches the sink through a descriptor ≥ 3 dup'd from
-fd 1 (`x=$( exec 3>&1; ( echo held >&3 & ) > /dev/null )` — bash `[held]`, osh
-`[]` with `held` on the terminal) is still missed, but not by anything this fix
-introduced: fd 3 never names the capture in the first place, because
-`open_write_fds` maps fd→`Arc<File>` and a capture has no OS fd. That is
-TD-OILS-COMPOUND-SCRATCHFD-PIPE, and it shows up identically without a `&`
-(`x=$( exec 3>&1; echo plain >&3 )`). `job_holds_sink` would answer correctly
-once such an fd resolves to the sink at all.
+**Residual — closed 2026-07-28.** A writer that reaches the sink through a
+descriptor ≥ 3 dup'd from fd 1 (`x=$( exec 3>&1; ( echo held >&3 & ) > /dev/null )`
+— bash `[held]`, osh `[]` with `held` on the terminal) was still missed, but not
+by anything this fix introduced: fd 3 never named the capture in the first place,
+because `open_write_fds` mapped fd→`Arc<File>` and a capture has no OS fd. That
+was TD-OILS-COMPOUND-SCRATCHFD-PIPE, and it showed up identically without a `&`
+(`x=$( exec 3>&1; echo plain >&3 )`). Resolving it — `open_write_fds` now holds a
+`WriteFd`, which can be a `CaptureSink` — made such an fd name the sink, and an
+outliving clone upgrades every inherited entry to a *counted* handle via
+`Shell::share_write_fds()`, so this shape now waits and collects like bash. See
+TD-OILS-COMPOUND-SCRATCHFD-PIPE.
 
 **Where:** `userspace/oils/src/interp.rs` — `Out::share()` / `drain_jobs()` /
 `command_sub`, and the `Command::Subshell` arm of `exec_command`.

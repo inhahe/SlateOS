@@ -4086,6 +4086,43 @@ mod tests {
         ));
     }
 
+    /// The `=~` RHS is one word, but an unquoted `( … )` group inside it holds
+    /// on to blanks and shell operators, so the regex can span them. Outside a
+    /// group the ordinary word boundaries are back.
+    #[test]
+    fn cond_regex_group_spans_blanks_and_operators() {
+        let regex_of = |src: &str| -> String {
+            let prog = parse(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+            let Command::Cond(CondExpr::Regex(_, rhs)) = &prog.items[0].list.first.commands[0]
+            else {
+                panic!("{src}: expected a regex conditional");
+            };
+            match rhs.parts.as_slice() {
+                [WordPart::Literal(s)] => s.clone(),
+                other => panic!("{src}: expected one literal part, got {other:?}"),
+            }
+        };
+        assert_eq!(regex_of("[[ $x =~ (a b) ]]"), "(a b)");
+        assert_eq!(regex_of("[[ $x =~ x(a b)y ]]"), "x(a b)y");
+        assert_eq!(regex_of("[[ $x =~ ((a b)) ]]"), "((a b))");
+        assert_eq!(regex_of("[[ $x =~ (a;b&c<d>e) ]]"), "(a;b&c<d>e)");
+        assert_eq!(regex_of("[[ $x =~ (a\nb) ]]"), "(a\nb)");
+        // `|`, `#` and `}` are regex characters, not shell syntax, at any depth.
+        assert_eq!(regex_of("[[ $x =~ a|b#c}d ]]"), "a|b#c}d");
+        // An escaped paren is a literal one: it neither opens nor closes.
+        assert_eq!(regex_of("[[ $x =~ (a\\)b) ]]"), "(a\\)b)");
+        // Once the group closes, an operator ends the word again.
+        assert!(parse("[[ $x =~ (a b) c ]]").is_err());
+        assert!(parse("[[ $x =~ a;b ]]").is_err());
+        assert!(parse("[[ $x =~ a) ]]").is_err());
+        // A group left open is the word reader's error, named as bash names it.
+        let e = parse("[[ $x =~ (a(b) ]]").unwrap_err().to_string();
+        assert!(
+            e.contains("unexpected EOF while looking for matching `)'"),
+            "got {e}"
+        );
+    }
+
     #[test]
     fn arith_command() {
         let prog = parse("(( x + 1 ))").unwrap();

@@ -742,9 +742,9 @@ impl Lexer {
             let start_line = self.line;
             let start_pos = self.pos;
             self.iter_start = start_pos;
-            // RHS of `=~`: read the whole regex as one word so that `(`, `)`,
-            // `|`, `<`, `>` are literal metacharacters rather than shell
-            // operators. Only unquoted whitespace terminates it (bash semantics).
+            // RHS of `=~`: read the regex as one word so that `|` and the rest
+            // of the regex alphabet are literal rather than shell operators,
+            // and so a `( … )` group holds on to the blanks inside it.
             if self.regex_next && !matches!(c, '\n' | '\r') {
                 self.regex_next = false;
                 let segs = self.read_word_regex()?;
@@ -1148,16 +1148,41 @@ impl Lexer {
         out.push(Tok::Word(segs));
     }
 
-    /// Read the RHS of `=~` as a single word. Regex metacharacters (`(`, `)`,
-    /// `|`, `<`, `>`, `#`, `;`, `&`) are literal; only unquoted whitespace or a
-    /// newline terminates the word. Quotes and `$…` expansions still apply
-    /// (the RHS undergoes parameter expansion in bash).
+    /// Read the RHS of `=~` as a single word. `|`, `#`, `{`, `*` and friends are
+    /// ordinary regex characters here, and an unquoted `(` opens a group whose
+    /// whole contents — whitespace, newlines and shell operators alike — belong
+    /// to the regex. Outside such a group the usual word boundaries still apply:
+    /// blanks, a newline, and the operators `;`, `&`, `<`, `>` and `)` end the
+    /// word and are handed back to the tokenizer, so bash rejects
+    /// `[[ a =~ a;b ]]` and `[[ a =~ a) ]]` as conditional-expression syntax
+    /// errors while accepting `[[ "a b" =~ (a b) ]]` and `[[ a =~ a|b ]]`.
+    /// Quotes and `$…` expansions still apply (the RHS undergoes parameter
+    /// expansion in bash), and a quoted or backslash-escaped paren is a literal
+    /// one — it does not open or close a group.
+    ///
+    /// An unclosed group is the lexer's error, not the conditional parser's:
+    /// bash's word reader scans to the matching `)` and reports
+    /// "unexpected EOF while looking for matching `)'" when the input runs out.
     fn read_word_regex(&mut self) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = String::new();
+        // Nesting depth of unquoted `(` … `)` groups. While it is non-zero the
+        // word swallows everything, which is the whole point of the construct.
+        let mut depth: u32 = 0;
         while let Some(c) = self.peek() {
             match c {
-                ' ' | '\t' | '\n' | '\r' => break,
+                ' ' | '\t' | '\n' | '\r' | ';' | '&' | '<' | '>' if depth == 0 => break,
+                ')' if depth == 0 => break,
+                '(' => {
+                    depth = depth.saturating_add(1);
+                    lit.push('(');
+                    self.pos += 1;
+                }
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    lit.push(')');
+                    self.pos += 1;
+                }
                 '\'' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
@@ -1207,6 +1232,9 @@ impl Lexer {
                     self.pos += 1;
                 }
             }
+        }
+        if depth > 0 {
+            return Err(eof_matching(')'));
         }
         flush_lit(&mut segs, &mut lit);
         Ok(segs)

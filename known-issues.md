@@ -3978,7 +3978,49 @@ populates BASH_ARGC/BASH_ARGV only under `extdebug`. Replicating the
 undocumented non-extdebug quirk was judged not worth the bug risk for a
 behaviour no real script relies on.
 
-### TD-OILS-COND-PAREN-REGEX. `[[ … =~ ( … ]]` — bash treats `(` as conditional grouping, osh treats it as regex — 2026-07-19
+### TD-OILS-COND-PAREN-REGEX. `[[ … =~ ( … ]]` — bash treats `(` as conditional grouping, osh treats it as regex — 2026-07-19 — RESOLVED 2026-07-28
+
+**Resolved 2026-07-28**, and the original report below turned out to have the
+rule backwards: bash does *not* treat `(` after `=~` as grouping. It reads the
+RHS as one word in which an unquoted `( … )` group swallows everything —
+blanks, newlines and shell operators alike — while *outside* a group the usual
+word boundaries still apply. So the interesting divergence was never the
+unbalanced paren; it was that osh rejected every regex with a space in it:
+
+```
+[[ "a b" =~ (a b) ]]        bash: 0     osh: 2 (syntax error near `b')
+[[ "xa by" =~ x(a b)y ]]    bash: 0     osh: 2
+[[ "a b" =~ ^(a b)$ ]]      bash: 0     osh: 2
+```
+
+which is a shape real scripts use. In the other direction osh was too
+permissive: it made `;`, `&`, `<`, `>` and `)` literal *everywhere* in the RHS,
+so `[[ "a;b" =~ a;b ]]` succeeded where bash reports
+``unexpected token `;'``.
+
+**Fix.** `Lexer::read_word_regex` now counts unquoted paren depth. At depth 0 the
+word ends at a blank, a newline, `;`, `&`, `<`, `>` or `)`, and those characters
+go back to the tokenizer — which is what produces bash's conditional-expression
+syntax errors. At depth > 0 nothing terminates the word. `|`, `#`, `{`, `}`, `*`,
+`^` and `$` stay ordinary regex characters at every depth, and a quoted or
+backslash-escaped paren neither opens nor closes a group (quotes and `$…` are
+still read by their own sub-readers, so their parens never reach the counter).
+A group left open at end of input is the lexer's error, reported with the
+existing `eof_matching(')')` — bash's
+``unexpected EOF while looking for matching `)'`` — rather than falling through
+to a regex-compile failure.
+
+Covered by `tests/corpus/cond-regex-word.sh` (38 shapes) and
+`parser::tests::cond_regex_group_spans_blanks_and_operators`.
+
+**Residual (not this entry's):** `[[ "a{b" =~ a{b ]]` is status 2 in bash and 0
+in osh — bash's ERE rejects the unmatched `{` as a bad interval, osh's regex
+engine takes it as a literal brace. That is a regex-dialect difference, not a
+word-boundary one. Diagnostic-echo differences on the rejected forms (bash's
+``syntax error near `a)'`` vs osh's ``near `)'``) belong to
+TD-OILS-COND-ERRTEXT's residual.
+
+**Original report (for reference):**
 
 **Where:** `userspace/oils/src/parser.rs` conditional-expression parsing
 and `userspace/oils/src/interp.rs` `cond_regex`.
@@ -5800,6 +5842,24 @@ original source quoting — so an empty/quoted operand (`[[ a "" ]]`) shows an
 empty near-token where bash shows `""`. This is the same source-token
 reconstruction limitation tracked elsewhere and affects all near-token
 diagnostics equally.
+
+*More of the same, measured 2026-07-28:* bash's near-text is a span of the raw
+input line rather than a token at all, so it routinely carries a character from
+whatever sits next to the offending token — and the neighbour it picks up is not
+even consistently the one before or the one after:
+
+```
+[[ ab =~ a) ]]              bash: near `a)'    osh: near `)'
+[[ ab =~ )a ]]              bash: near `)a'    osh: near `)'
+[[ ab =~ (a;b);echo hi ]]   bash: near `;e'    osh: near `;'
+[[ "a b" =~ (a) (b) ]]      bash: near `(b'    osh: near `('
+```
+
+Reproducing this needs the parser to keep a source span per token, which is the
+same prerequisite as the quoting residual above; `cond_error_near` currently
+approximates it for the trailing-operator cases only. First lines and exit
+statuses match throughout, so `tests/corpus/cond-regex-word.sh` drops stderr on
+the shapes it rejects.
 
 **Original report (for reference):**
 

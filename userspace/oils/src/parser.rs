@@ -284,6 +284,20 @@ pub struct UnitLine {
     pub open: bool,
 }
 
+/// One physical input line as it is about to be read, offered to a `!`-style
+/// history expander by [`IncrementalParser::peek_raw_line`].
+///
+/// Unlike [`UnitLine`] this has nothing to do with parse units: it is a raw
+/// slice of the source between newlines, handed out *before* the line is lexed,
+/// because that is when bash performs history expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawLine {
+    /// The line's source text, without its terminating newline.
+    pub text: String,
+    /// The line's number after the parser's line map, for a diagnostic.
+    pub line: u32,
+}
+
 pub struct IncrementalParser {
     /// The source, kept for re-lexing the tail when [`LexOpts`] change. Held as
     /// chars because the offsets recorded by the lexer are char indices.
@@ -311,6 +325,13 @@ pub struct IncrementalParser {
     /// text. Runs ahead of `pos` only in whole tokens, so it survives a
     /// [`Self::relex`] (which rebases offsets onto the same `src`).
     hist_cursor: usize,
+    /// Char offset into `src` of the first character not yet offered to the
+    /// caller's history expander by [`Self::peek_raw_line`]. Advances a physical
+    /// line at a time, so it runs *ahead* of `hist_cursor` while the lines of a
+    /// still-incomplete unit are being expanded; it falls behind again whenever
+    /// the parser swallows text no line-reader saw (a here-document body), which
+    /// is why the frontier is the greater of the two.
+    expand_cursor: usize,
     /// The top-level lines of the unit [`Self::next_unit`] last returned, for
     /// the caller's command history. Empty when the unit consumed no original
     /// token (an alias splice replaying tokens already recorded).
@@ -373,6 +394,7 @@ impl IncrementalParser {
             orig_ends,
             orig_conts,
             hist_cursor: 0,
+            expand_cursor: 0,
             unit_lines: Vec::new(),
             work: Vec::new(),
             work_lines: Vec::new(),
@@ -404,6 +426,18 @@ impl IncrementalParser {
             .orig_offsets
             .get(self.pos)
             .map_or(self.src.len(), |&o| (o as usize).min(self.src.len()));
+        self.relex_from(off, opts);
+    }
+
+    /// [`Self::relex`] from an explicit character offset.
+    ///
+    /// `off` must be at or before the next unconsumed token, so nothing already
+    /// handed out is re-lexed. History expansion re-lexes from
+    /// [`Self::hist_cursor`] rather than from that token, because the text it
+    /// rewrote can lie *before* the token (a `!`-reference on a line the lexer
+    /// produced no token for, such as one that is entirely a comment).
+    fn relex_from(&mut self, off: usize, opts: LexOpts) {
+        let off = off.min(self.src.len());
         let head = self.src.get(..off).unwrap_or(&[]);
         let newlines =
             u32::try_from(head.iter().filter(|&&c| c == '\n').count()).unwrap_or(u32::MAX);
@@ -497,6 +531,106 @@ impl IncrementalParser {
     #[must_use]
     pub fn exhausted(&self) -> bool {
         self.wpos >= self.work.len() && self.pending_lex_err.is_none()
+    }
+
+    /// Where the next physical line that has not yet been history-expanded
+    /// starts. See [`Self::expand_cursor`] for why it is the later of the two
+    /// cursors.
+    fn expand_frontier(&self) -> usize {
+        self.expand_cursor.max(self.hist_cursor).min(self.src.len())
+    }
+
+    /// The index just past the end of the line starting at `start`, not counting
+    /// its newline.
+    fn line_end(&self, start: usize) -> usize {
+        self.src
+            .get(start..)
+            .unwrap_or(&[])
+            .iter()
+            .position(|&c| c == '\n')
+            .map_or(self.src.len(), |i| start.saturating_add(i))
+    }
+
+    /// The next physical input line that has not yet been offered for `!`-style
+    /// history expansion, or `None` once the input is used up.
+    ///
+    /// bash expands history on a line as it *reads* it — before the lexer sees
+    /// it, and independently of where parse units begin and end — so a caller
+    /// doing history expansion drives this and [`Self::commit_raw_line`] in a
+    /// loop until the lines it has expanded form a complete command, then calls
+    /// [`Self::next_unit`] as usual.
+    #[must_use]
+    pub fn peek_raw_line(&self) -> Option<RawLine> {
+        let start = self.expand_frontier();
+        if start >= self.src.len() {
+            return None;
+        }
+        let end = self.line_end(start);
+        let newlines = self
+            .src
+            .get(..start)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|&&c| c == '\n')
+            .count();
+        let line = u32::try_from(newlines).unwrap_or(u32::MAX).saturating_add(1);
+        Some(RawLine {
+            text: self.src.get(start..end).unwrap_or(&[]).iter().collect(),
+            line: self.line_map.map(line),
+        })
+    }
+
+    /// Consume the line [`Self::peek_raw_line`] returned, optionally replacing
+    /// its text with its history-expanded form.
+    ///
+    /// `None` leaves the source untouched (the line held no history reference).
+    /// `Some(text)` splices `text` in and re-lexes the unparsed remainder, so the
+    /// parser goes on to see the expanded line and nothing else — which is also
+    /// what puts the *expanded* form into the command history, as bash does.
+    pub fn commit_raw_line(&mut self, expanded: Option<&str>, opts: LexOpts) {
+        let start = self.expand_frontier();
+        if start >= self.src.len() {
+            return;
+        }
+        let end = self.line_end(start);
+        let mut new_end = end;
+        if let Some(text) = expanded {
+            let repl: Vec<char> = text.chars().collect();
+            new_end = start.saturating_add(repl.len());
+            self.src.splice(start..end, repl);
+            // From `hist_cursor`, not from the next token: the rewritten text can
+            // precede that token (see [`Self::relex_from`]).
+            self.relex_from(self.hist_cursor, opts);
+        }
+        // Step past the newline ending the line, so the next peek starts on the
+        // following one. A replacement containing newlines counts as expanded in
+        // full — bash expands a line once, never its own output.
+        self.expand_cursor = if self.src.get(new_end) == Some(&'\n') {
+            new_end.saturating_add(1)
+        } else {
+            self.src.len()
+        };
+    }
+
+    /// Discard the line [`Self::peek_raw_line`] returned, newline included, as
+    /// bash does when a history expansion fails.
+    ///
+    /// Deleting the newline as well is not an implementation shortcut but the
+    /// observable behaviour: bash counts a source line only when its newline
+    /// reaches the lexer, so a discarded line never advances `line_number` and
+    /// every later diagnostic — and `$LINENO` — is one lower. Cutting the line
+    /// out of `src` reproduces that exactly, since line numbers here are likewise
+    /// counted from the newlines in `src`.
+    pub fn drop_raw_line(&mut self, opts: LexOpts) {
+        let start = self.expand_frontier();
+        if start >= self.src.len() {
+            return;
+        }
+        let end = self.line_end(start);
+        let cut = if self.src.get(end) == Some(&'\n') { end.saturating_add(1) } else { end };
+        self.src.drain(start..cut);
+        self.relex_from(self.hist_cursor, opts);
+        self.expand_cursor = start;
     }
 
     /// Parse the next unit under the given alias state, or `None` when the input

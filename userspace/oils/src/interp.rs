@@ -114,6 +114,7 @@ use crate::ast::{
     RedirectOp,
     ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
+use crate::histexpand::{Expansion, HistCtx};
 use crate::parser::{
     IncrementalParser, UnitLine, UnitLineKind, parse_opts, parse_with_aliases,
 };
@@ -2348,6 +2349,11 @@ pub struct Shell {
     /// because the two are independent switches: bash will happily have one on
     /// and the other off, and `set -o` lists them separately.
     histexpand: bool,
+    /// The last `s/old/new/` any history expansion performed, which a later
+    /// `:&` (or an empty `:s//new/`) repeats. bash keeps this for the life of
+    /// the shell rather than of one line, so it lives here rather than inside
+    /// [`crate::histexpand::expand`].
+    hist_last_subst: crate::histexpand::LastSubst,
     /// Builtins disabled via `enable -n NAME`. A name present here is treated as
     /// *not* a builtin during command resolution, so a same-named external is
     /// run instead. Cloned into subshells (bash inherits the enable state).
@@ -2568,6 +2574,7 @@ impl Shell {
             hist_saved: 0,
             hist_on: false,
             histexpand: false,
+            hist_last_subst: crate::histexpand::LastSubst::default(),
             disabled_builtins: HashSet::new(),
             aliases: BTreeMap::new(),
             traps: HashMap::new(),
@@ -3125,6 +3132,13 @@ impl Shell {
             // Same for the lexing options: `shopt -s extglob` run by one unit
             // changes how the *next* one is read, so re-sample it here.
             let opts = self.lex_opts();
+            // `!`-style history expansion happens as each *physical line* is
+            // read, before the lexer sees it — so it runs here, ahead of the
+            // unit, and only for the top-level reader (`record`), which is the
+            // only input bash expands. See [`Shell::expand_history_lines`].
+            if record && self.hist_on && self.histexpand {
+                self.expand_history_lines(&mut ip, opts);
+            }
             let aliases = if self.aliases_enabled() { Some(&self.aliases) } else { None };
             let Some(unit) = ip.next_unit(aliases, opts) else {
                 return Flow::Next;
@@ -3146,6 +3160,116 @@ impl Shell {
                 Flow::Next => {}
                 other => return other,
             }
+        }
+    }
+
+    /// Perform `!`-style history expansion on the input lines making up the unit
+    /// that is about to be parsed.
+    ///
+    /// bash expands history as its reader consumes each *physical line*, before
+    /// the lexer sees it, which differs observably from expanding a whole parse
+    /// unit at once. The history a line sees is the one current when the unit
+    /// started — entries are recorded per unit, so `if true; then` / `echo !!` /
+    /// `fi` recalls the command *before* the `if`, not the `if` line — but the
+    /// rewriting is per line, and a line whose event is missing is dropped on its
+    /// own rather than taking the rest of the command with it. So this loops a
+    /// line at a time, stopping as soon as the lines expanded so far form a
+    /// command the parser can run.
+    ///
+    /// Stopping only on a *complete* command is what reaches the later lines of a
+    /// compound command. Blank and comment lines do not end the loop either,
+    /// since the parser folds them into the unit that follows — without that,
+    /// the line after a comment would never be offered for expansion.
+    ///
+    /// A here-document body is deliberately *not* expanded (bash's reader does
+    /// not run one through history expansion). That falls out of stopping at the
+    /// line introducing it, which is already a complete command: the parser then
+    /// swallows the body whole and the frontier resumes past it.
+    fn expand_history_lines(&mut self, ip: &mut IncrementalParser, opts: crate::lexer::LexOpts) {
+        let mut accum = String::new();
+        loop {
+            let Some(raw) = ip.peek_raw_line() else { return };
+            // Lifted out and put back so the expander can hold `&mut` on the
+            // last-substitution state while `HistCtx` borrows the history list.
+            let mut last = std::mem::take(&mut self.hist_last_subst);
+            let expanded = {
+                let ctx = HistCtx { entries: &self.history, base: self.hist_base };
+                crate::histexpand::expand(&raw.text, &ctx, &mut last)
+            };
+            self.hist_last_subst = last;
+            match expanded {
+                Expansion::Unchanged => {
+                    ip.commit_raw_line(None, opts);
+                    accum.push_str(&raw.text);
+                    accum.push('\n');
+                }
+                Expansion::Changed(text) => {
+                    // bash echoes the rewritten line to stderr before running it,
+                    // so what `!!` turned into is visible.
+                    self.errln(&text);
+                    ip.commit_raw_line(Some(&text), opts);
+                    accum.push_str(&text);
+                    accum.push('\n');
+                }
+                Expansion::PrintOnly(text) => {
+                    // `:p` previews: the line is echoed and recorded just as a
+                    // rewritten line would be, but never handed to the parser.
+                    // Recording it here rather than through `record_history` is
+                    // what keeps it an entry of its own. Like a failed
+                    // expansion the line never reaches the parser, so it does
+                    // not count towards the source line numbering either.
+                    self.errln(&text);
+                    self.hist_record(text);
+                    ip.drop_raw_line(opts);
+                }
+                Expansion::NotFound(msg) => {
+                    let prefix = self.read_error_prefix(raw.line);
+                    self.errln(&format!("{prefix}{msg}"));
+                    // The line is dropped whole — not run, not recorded, `$?`
+                    // untouched — and never reaches the parser, so it does not
+                    // count towards the source line numbering either.
+                    ip.drop_raw_line(opts);
+                }
+            }
+            if !self.needs_more_lines(&accum) {
+                return;
+            }
+        }
+    }
+
+    /// The `<name>: line <N>: ` prefix for a diagnostic about a line being
+    /// *read*, which names that line rather than [`Shell::current_line`] (the
+    /// line being executed). Otherwise identical to [`Shell::err_prefix`],
+    /// including dropping the line number for an interactive shell.
+    fn read_error_prefix(&self, line: u32) -> String {
+        let src = self.error_source();
+        if self.is_interactive() {
+            format!("{src}: ")
+        } else {
+            format!("{src}: line {line}: ")
+        }
+    }
+
+    /// Whether `src` is not yet a runnable command, so a line-at-a-time reader
+    /// must take another line: either it ends mid-construct, or it holds no
+    /// command at all (it is entirely blank lines and comments).
+    ///
+    /// Judged on the same token stream that would actually run — alias expansion
+    /// applied only when `expand_aliases` is in effect — exactly as
+    /// [`Shell::parse_incomplete`] does. Unlike that one it uses *lenient*
+    /// here-document lexing, so `cat <<EOF` counts as complete and the body that
+    /// follows is left for the parser to swallow rather than being offered for
+    /// history expansion.
+    fn needs_more_lines(&self, src: &str) -> bool {
+        let opts = self.lex_opts();
+        let parsed = if self.aliases_enabled() {
+            parse_with_aliases(src, &self.aliases, opts)
+        } else {
+            parse_opts(src, opts)
+        };
+        match parsed {
+            Err(e) => e.is_incomplete(),
+            Ok(prog) => prog.items.is_empty(),
         }
     }
 
@@ -5823,6 +5947,7 @@ impl Shell {
             hist_saved: self.hist_saved,
             hist_on: self.hist_on,
             histexpand: self.histexpand,
+            hist_last_subst: self.hist_last_subst.clone(),
             disabled_builtins: self.disabled_builtins.clone(),
             aliases: self.aliases.clone(),
             // A subshell resets non-ignored traps to their default disposition

@@ -1,7 +1,6 @@
 # `set -H` / `set -o histexpand` is the switch for `!`-style history expansion.
-# This case covers the *switch* only — that it has real, observable state — not
-# the expansion itself, which is still unimplemented (known-issues.md
-# TD-OILS-NO-HISTEXPAND). When expansion lands, its own case joins this one.
+# This case covers the *switch* only — that it has real, observable state. The
+# expansion it enables has its own case, histexpand.sh.
 #
 # The switch is worth pinning separately because it shows up in four places that
 # are easy to get inconsistent: the `set -o` listing, `$-`, `SHELLOPTS`, and

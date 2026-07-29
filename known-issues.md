@@ -7858,8 +7858,11 @@ must still index. Full differential corpus: 108 matched, 0 failed.
 ### TD-OILS-MISSING-INTERACTIVE-BUILTINS. `history` now exists; `bind`, `fc`, `logout` and `suspend` still do not — PARTIAL 2026-07-29
 
 **Where:** `userspace/oils/src/interp.rs` — `BUILTIN_NAMES`, `HELP_TABLE`, the
-dispatch in `run_builtin`, `Shell::{history,hist_base,hist_max,hist_seen,hist_on}`
-and the `hist_*` methods around `record_history`; `src/parser.rs`
+dispatch in `run_builtin`,
+`Shell::{history,hist_base,hist_max,hist_seen,hist_file_seen,hist_session,hist_saved,hist_on}`
+and the `hist_*` methods around `record_history` (`hist_record`,
+`hist_drop_own_entry`, `hist_file`, `hist_file_op`, `hist_truncate_file`,
+`hist_sync`); `src/parser.rs`
 (`IncrementalParser::{unit_lines,split_unit_lines,classify_line,line_text}`);
 `src/lexer.rs` (`Tokenized::conts`).
 
@@ -7872,11 +7875,14 @@ $ osh  -c 'compgen -b | wc -l'   # 57 as of 2026-07-29 (was 56)
 ```
 bash also carries a `%` help topic (the job-spec syntax) that osh does not.
 
-**Done (2026-07-29) — the history store and the `history` builtin.** `set -o
-history`, `HISTCMD`, `HISTSIZE`/`HISTFILESIZE`, and `history [-c] [-d offset]
-[-s|-p arg…] [n]`, all pinned by `tests/corpus/history.sh` (matches bash
-exactly). The model below is *measured*, not read off the readline source —
-where the two disagree, the measurement won.
+**Done (2026-07-29) — the history store, the history *file*, and the `history`
+builtin.** `set -o history`, `HISTCMD`, `HISTSIZE`, `HISTFILE`, `HISTFILESIZE`
+(including the truncation it performs on assignment), and
+`history [-c] [-d offset] [-anrw [file]] [-s|-p arg…] [n]`, all pinned by
+`tests/corpus/history.sh` and `tests/corpus/history-file.sh` (both byte-identical
+to bash) plus eleven unit tests in `interp.rs`. The model below is *measured*,
+not read off the readline source — where the two disagree, the measurement won,
+repeatedly and decisively.
 
 *Enablement.* A non-interactive shell starts with `set -o history` **off** and
 `HISTFILE`/`HISTSIZE`/`HISTFILESIZE` unset. `HISTCMD` exists regardless and
@@ -7922,10 +7928,19 @@ why osh keeps `hist_max` and `hist_seen` rather than re-parsing the variable).
 `history -c` empties the list and resets the base to 1.
 
 *Builtin quirks that fall out of that.*
+* Exactly one branch runs, in the order **`-c` → `-s` → `-p` → `-d` → `-anrw` →
+  list**. `-c` is the odd one: it clears, resets the base to 1 and the session
+  count to 0, and then **returns immediately unless one of `-anrw` came with
+  it** — so `history -c -s x`, `-c -p x`, `-c -d 1` and `-c 5` all do nothing
+  further, while `history -c -w f` writes an empty file.
 * `history -s TEXT` **replaces** the entry its own line made: that line was
   recorded when it was read, so bash drops it and appends `TEXT` in its place.
   With the option **off** there is no such entry, so it just appends.
-* `history -p` prints its arguments and records nothing.
+* `history -p` prints its arguments and, like `-s`, **un-records its own line**.
+  Both only do so when they were actually given operands: a bare `history -p` or
+  `history -s` keeps its entry.
+* Options cluster getopt-style (`-cs`, `-aw`, `-cw f`) and `-d` takes its offset
+  attached (`-d1`) or following (`-d 1`).
 * `history -d` takes an offset, a negative offset (counting back from the
   newest), or a `START-END` range — the separator is the first `-` at index > 0,
   so `-2--1` is the range (−2, −1) while `-3` is a single offset. Every
@@ -7934,24 +7949,65 @@ why osh keeps `hist_max` and `hist_seen` rather than re-parsing the variable).
   oldest entry is clamped; a *reversed* range fails silently with rc 1.
 * `history N` rejects a non-number with `history: N: numeric argument required`,
   rc 1; `history 0` lists nothing.
+* Two **different** `-anrw` flags are `history: cannot use more than one of
+  -anrw`, rc 1 (no usage line, and the flag is not reported); the *same* flag
+  twice is fine.
+
+*The history file.* With no operand the file is `$HISTFILE`, and if that is unset
+or empty it is `$HOME/.history` — readline's fallback, **not** `~/.bash_history`
+(which is only bash's own default *value* for `HISTFILE`, set by an interactive
+startup). `-r` reads the whole file, `-n` only the part a previous read has not
+accounted for, `-w` writes the whole list, `-a` appends the entries added since
+the last save. A line of the file is an entry unless it is *wholly* empty — a
+whitespace-only line is an entry. Only `-a` reports a failure (`history: FILE:
+cannot create: <strerror>`, rc 1, after trying to create a missing file);
+`-r`/`-n`/`-w` fail **silently** with rc 1.
+
+*The two counters.* `-a` appends the last `hist_session` entries, where
+`hist_session` counts everything recorded since the last `-a`/`-w`/`-c`; the
+guard is `0 < session <= len`, and when it fails `-a` does nothing at all —
+*including* not resetting the counter. `hist_saved` (bash's
+`history_lines_in_file`) is where the next `-n` starts, and its update rule is
+the one thing here that no amount of reading the source predicts correctly:
+* `-r`/`-n` set it to **the file's line count** — not the list length, not the
+  number of lines actually consumed;
+* `-a` adds the session count to it;
+* `-w` and `history -c` leave it **alone**.
+Measured with a probe that infers the counter from how much of a known 9-line
+file a following `-n` reads, across 13 setups.
+
+*`HISTFILESIZE`.* Assigning it truncates the file `$HISTFILE` names to its last N
+lines **then and there** — the effect lands on the filesystem, which is why osh
+watches the value (`hist_file_seen`) instead of reading it on demand. Only a
+non-negative number does anything; `-1`, `abc`, empty and `unset` truncate
+nothing, and `0` empties the file. Assigning `HISTFILE` truncates nothing, and
+`history -w` ignores the limit entirely.
+
+*How the variables are watched.* bash applies `HISTSIZE`/`HISTFILESIZE` from a
+variable-assignment hook. osh re-derives both in `hist_sync`, called at the end
+of `exec_simple` — the one place every way of writing a variable (a plain
+assignment, `unset`, `declare`, `read`, `printf -v`, `let`) funnels through —
+rather than hooking all 60+ `vars.insert`/`vars.remove` sites. Per *simple
+command*, not per parse unit, so `HISTSIZE=2; HISTSIZE=1` stifles twice like
+bash does.
 
 **Residual divergences (accepted, low value).**
-1. Two `HISTSIZE` assignments in **one parse unit** (`HISTSIZE=2; HISTSIZE=1;
-   history`) — bash stifles twice (entry numbered 1), osh applies only the last
-   (numbered 4). This is the price of the lazy `HISTSIZE` sync, which re-derives
-   the cap when the history is next touched instead of hooking all 60+
-   `vars.insert`/`vars.remove` sites. Observationally exact otherwise, because
-   nothing but the history observes `HISTSIZE`.
-2. A `\<newline>` inside a `${x/y \<nl> z}` replacement: bash deletes it from the
+1. A `\<newline>` inside a `${x/y \<nl> z}` replacement: bash deletes it from the
    entry, osh keeps it. The main lexer captures `${…}` raw and the deletion
    happens in a throwaway sub-lexer whose `conts` are dropped.
-3. `echo a &` followed by a newline: bash records **two** entries, osh one. A
+2. `echo a &` followed by a newline: bash records **two** entries, osh one. A
    parse-unit-granularity divergence that shows up beyond history too.
+3. A `-n` whose starting point is already **at or past** the end of the file:
+   readline counts the lines it skipped by inspecting one byte *past* its own
+   buffer, so bash's resulting counter is `lines` or `lines − 1` depending on
+   unrelated heap state — renaming `$HISTFILE` flips the answer for the same
+   file. osh always uses the intended `lines`. Not reproducible and not worth
+   reproducing; `tests/corpus/history-file.sh` steers clear of the shape, with a
+   comment saying why.
 
 **Still to do.**
-* *Stage 2:* `history -a/-n/-r/-w` and `HISTFILE`; then `fc` (`-l`, `-n`, `-r`,
-  `-e`, `-s`), which removes its own entry and formats `%d\t %s` rather than
-  `history`'s `%5d  %s`.
+* *Stage 2 (remainder):* `fc` (`-l`, `-n`, `-r`, `-e`, `-s`), which removes its
+  own entry and formats `%d\t %s` rather than `history`'s `%5d  %s`.
 * *Stage 3:* history expansion (`!!`, `!n`, `!string`, `^a^b`) and a real
   `history -p`, gated on `set -H`.
 * *Stage 4:* `logout` (a one-line refusal outside a login shell), then

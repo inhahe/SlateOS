@@ -2315,10 +2315,28 @@ pub struct Shell {
     hist_max: Option<usize>,
     /// The `HISTSIZE` text the cap was last computed from, so a change can be
     /// spotted. `HISTSIZE` is an ordinary variable that any of a few dozen code
-    /// paths can write, so rather than hook every one of them the cap is
-    /// re-derived whenever the history is next touched — which is
-    /// indistinguishable from bash, since only the history itself observes it.
+    /// paths can write — an assignment, `unset`, `declare`, `read`, `printf -v`,
+    /// a `for` variable — so rather than hook every one of them,
+    /// [`Shell::hist_sync`] re-derives the cap once per simple command (and
+    /// whenever the history is touched in between).
     hist_seen: Option<String>,
+    /// The `HISTFILESIZE` text its truncation was last performed for. Assigning
+    /// `HISTFILESIZE` truncates the *file* `$HISTFILE` names to that many lines,
+    /// which is why the value has to be watched rather than read on demand: the
+    /// effect lands on the filesystem, where anything can see it.
+    hist_file_seen: Option<String>,
+    /// How many entries have been added since the last `history -a`/`-w`, which
+    /// is exactly what `history -a` appends. `history -c` resets it, so a
+    /// cleared list appends only what follows the clear.
+    hist_session: usize,
+    /// Where the next `history -n` starts reading the history file — bash's
+    /// `history_lines_in_file`. Measured, because the value is opaque from the
+    /// outside and the obvious guesses are all wrong: a `-r` or `-n` sets it to
+    /// the *file's* line count, whatever the list length is and however many
+    /// lines the read actually consumed; `-a` adds the session count to it; and
+    /// `-w` and `history -c` leave it alone entirely. So a `-n` on a shorter
+    /// file than the last one read starts past its end and sees nothing.
+    hist_saved: usize,
     /// `set -o history`: whether the *top-level* input stream's lines are
     /// recorded. Off by default, as in a non-interactive bash. A `source`d
     /// file, an `eval` string and a function body are never recorded whatever
@@ -2539,6 +2557,9 @@ impl Shell {
             hist_base: 1,
             hist_max: None,
             hist_seen: None,
+            hist_file_seen: None,
+            hist_session: 0,
+            hist_saved: 0,
             hist_on: false,
             disabled_builtins: HashSet::new(),
             aliases: BTreeMap::new(),
@@ -3144,7 +3165,7 @@ impl Shell {
                 UnitLineKind::Blank => continue,
                 UnitLineKind::Comment => {
                     if entry.is_empty() {
-                        self.hist_push(line.text.clone());
+                        self.hist_record(line.text.clone());
                     } else {
                         sep = "\n";
                     }
@@ -3171,7 +3192,7 @@ impl Shell {
             };
         }
         if !entry.is_empty() {
-            self.hist_push(entry);
+            self.hist_record(entry);
         }
     }
 
@@ -3233,6 +3254,7 @@ impl Shell {
             self.hist_max = max;
         }
         self.hist_seen = self.param_value("HISTSIZE");
+        self.hist_truncate_file();
     }
 
     /// Append one entry, honouring `HISTSIZE`.
@@ -3253,6 +3275,168 @@ impl Shell {
                 self.hist_base = self.hist_base.saturating_add(1);
             }
         }
+    }
+
+    /// Append an entry the *shell itself* read, which is what a later
+    /// `history -a` writes out. Entries pulled in from a history file by `-r` or
+    /// `-n` deliberately do not come through here: they are already in a file,
+    /// and appending them again would duplicate them.
+    fn hist_record(&mut self, entry: String) {
+        self.hist_session = self.hist_session.saturating_add(1);
+        self.hist_push(entry);
+    }
+
+    /// Un-record the line the running `history` builtin was itself read on.
+    ///
+    /// `-s` and `-p` both do it: the reader appended that line before the
+    /// builtin ran, so `-s`'s new entry takes its number and `-p` leaves nothing
+    /// behind. With the `history` option off the line was never recorded and
+    /// there is nothing to drop.
+    fn hist_drop_own_entry(&mut self) {
+        if !self.hist_on || self.history.pop().is_none() {
+            return;
+        }
+        self.hist_session = self.hist_session.saturating_sub(1);
+    }
+
+    /// The file `history -a/-n/-r/-w` acts on: the operand, else `$HISTFILE`,
+    /// else `$HOME/.history` — readline's fallback, and the one a
+    /// non-interactive shell always lands on, since it never sets `HISTFILE`.
+    fn hist_file(&self, arg: Option<&String>) -> Option<String> {
+        if let Some(a) = arg {
+            return Some(a.clone());
+        }
+        if let Some(f) = self.param_value("HISTFILE").filter(|f| !f.is_empty()) {
+            return Some(f);
+        }
+        let home = self.param_value("HOME").filter(|h| !h.is_empty())?;
+        Some(format!("{}/.history", home.trim_end_matches('/')))
+    }
+
+    /// `history -a|-n|-r|-w [FILE]` — move entries between the list and a file.
+    ///
+    /// Only `-a` reports why it failed (`cannot create`, when the file is not
+    /// there and cannot be made); `-n`, `-r` and `-w` fail silently with status
+    /// 1, which is bash's behaviour and not an oversight here.
+    fn hist_file_op(&mut self, op: char, arg: Option<&String>) -> i32 {
+        let Some(path) = self.hist_file(arg) else {
+            return 1;
+        };
+        let host = self.host_path(&path);
+        match op {
+            'r' | 'n' => {
+                let Ok(text) = std::fs::read_to_string(&host) else {
+                    return 1;
+                };
+                // `-r` takes the whole file; `-n` only what a previous read or
+                // write has not already accounted for.
+                let skip = if op == 'n' { self.hist_saved } else { 0 };
+                let mut lines = 0usize;
+                for line in text.lines() {
+                    lines = lines.saturating_add(1);
+                    if lines <= skip {
+                        continue;
+                    }
+                    // A wholly empty line is not an entry; a blank one is.
+                    if !line.is_empty() {
+                        self.hist_push(line.to_string());
+                    }
+                }
+                // The file's line count, not where the list now ends: a later
+                // `-n` on a *shorter* file therefore reads nothing at all.
+                self.hist_saved = lines;
+                0
+            }
+            'w' => {
+                let mut s = String::new();
+                for e in &self.history {
+                    s.push_str(e);
+                    s.push('\n');
+                }
+                if std::fs::write(&host, s.as_bytes()).is_err() {
+                    return 1;
+                }
+                // `-w` does not move the read cursor, however much it wrote.
+                self.hist_session = 0;
+                0
+            }
+            // `-a`. bash appends only when the session count is sane; when it is
+            // not (a `-r` grew the list past it) it silently does nothing at all,
+            // *including* not resetting the count.
+            _ => {
+                if self.hist_session == 0 || self.hist_session > self.history.len() {
+                    return 0;
+                }
+                if !std::path::Path::new(&host).exists()
+                    && let Err(e) = std::fs::File::create(&host)
+                {
+                    self.errln(&format!(
+                        "{}history: {path}: cannot create: {}",
+                        self.err_prefix(),
+                        io_error_message(&e)
+                    ));
+                    return 1;
+                }
+                let from = self.history.len().saturating_sub(self.hist_session);
+                let mut s = String::new();
+                for e in self.history.get(from..).unwrap_or(&[]) {
+                    s.push_str(e);
+                    s.push('\n');
+                }
+                let appended = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&host)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, s.as_bytes()));
+                if appended.is_err() {
+                    return 1;
+                }
+                self.hist_saved = self.hist_saved.saturating_add(self.hist_session);
+                self.hist_session = 0;
+                0
+            }
+        }
+    }
+
+    /// Apply a pending `HISTFILESIZE` change by truncating the history file to
+    /// its last N lines.
+    ///
+    /// Unlike `HISTSIZE`, this one's effect lands on the *filesystem*, where any
+    /// command can see it, so the value is watched rather than consulted on
+    /// demand — [`Shell::hist_sync`] runs once per simple command. bash does
+    /// nothing at all unless the value is a non-negative number and `$HISTFILE`
+    /// names a file that already exists; it never creates one.
+    fn hist_truncate_file(&mut self) {
+        let text = self.param_value("HISTFILESIZE");
+        if text.as_deref() == self.hist_file_seen.as_deref() {
+            return;
+        }
+        self.hist_file_seen = text.clone();
+        let Some(keep) = text
+            .as_deref()
+            .and_then(|t| t.trim().parse::<i64>().ok())
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return;
+        };
+        let Some(path) = self.param_value("HISTFILE").filter(|f| !f.is_empty()) else {
+            return;
+        };
+        let host = self.host_path(&path);
+        let Ok(text) = std::fs::read_to_string(&host) else {
+            return;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() <= keep {
+            return;
+        }
+        let mut s = String::new();
+        for line in lines.get(lines.len().saturating_sub(keep)..).unwrap_or(&[]) {
+            s.push_str(line);
+            s.push('\n');
+        }
+        // A write that fails leaves the file as it was, which is also what bash
+        // does — `history_truncate_file` reports nothing either way.
+        let _ = std::fs::write(&host, s.as_bytes());
     }
 
     /// The number `$HISTCMD` reports: the number the *newest* entry carries, or
@@ -5627,6 +5811,9 @@ impl Shell {
             hist_base: self.hist_base,
             hist_max: self.hist_max,
             hist_seen: self.hist_seen.clone(),
+            hist_file_seen: self.hist_file_seen.clone(),
+            hist_session: self.hist_session,
+            hist_saved: self.hist_saved,
             hist_on: self.hist_on,
             disabled_builtins: self.disabled_builtins.clone(),
             aliases: self.aliases.clone(),
@@ -7570,6 +7757,13 @@ impl Shell {
         let out_mark = self.procsub_out_jobs.len();
         let flow = self.exec_simple_inner(sc, out, stdin);
         self.finish_procsubs(in_mark, out_mark);
+        // bash applies `HISTSIZE`/`HISTFILESIZE` from a variable-assignment hook.
+        // osh instead re-derives them here, once per simple command, which is
+        // the one place every way of writing a variable — a plain assignment,
+        // `unset`, `declare`, `read`, `printf -v`, `let` — funnels through. The
+        // effects (stifling the list, truncating the history file) therefore
+        // land before the *next* command can observe either.
+        self.hist_sync();
         flow
     }
 
@@ -15719,11 +15913,14 @@ impl Shell {
     /// renumbers everything after the hole rather than leaving a gap.
     /// `-s` *replaces* the current entry instead of appending after it: the
     /// `history -s …` line was itself recorded when it was read, and bash drops
-    /// that entry before appending the new one. With the `history` option off
-    /// there is no such entry, so `-s` simply appends.
+    /// that entry before appending the new one. `-p` drops it too, without
+    /// putting anything back. With the `history` option off there is no such
+    /// entry, and neither is there one when the option was given no arguments at
+    /// all — bash reaches the removal only once it has a word to act on.
     ///
-    /// The file options (`-a`, `-n`, `-r`, `-w`) are not implemented; see
-    /// known-issues TD-OILS-MISSING-INTERACTIVE-BUILTINS.
+    /// The branches run in bash's order: `-c` (which returns immediately unless
+    /// one of `-anrw` also has work to do), then `-s`, `-p`, `-d`, the file
+    /// options, and finally the listing.
     fn builtin_history(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
         const USAGE: &str = "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]";
         // A `HISTSIZE` assigned since the last line was recorded has already
@@ -15733,71 +15930,111 @@ impl Shell {
         let mut delete: Option<String> = None;
         let mut store = false;
         let mut print = false;
+        // The one of `-anrw` in force, plus the distinct set seen: bash rejects
+        // two *different* file options but accepts the same one twice.
+        let mut file_op: Option<char> = None;
+        let mut file_ops: Vec<char> = Vec::new();
         let mut i = 0;
-        while let Some(a) = args.get(i) {
-            i = i.saturating_add(1);
+        'args: while let Some(a) = args.get(i) {
             if a == "--" {
+                i = i.saturating_add(1);
                 break;
             }
-            if !a.starts_with('-') || a == "-" {
-                i = i.saturating_sub(1);
+            let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) else {
                 break;
-            }
-            match a.as_str() {
-                "-c" => clear = true,
-                "-s" => store = true,
-                "-p" => print = true,
-                "-d" => {
-                    let Some(off) = args.get(i) else {
+            };
+            i = i.saturating_add(1);
+            for (at, c) in flags.char_indices() {
+                match c {
+                    'c' => clear = true,
+                    's' => store = true,
+                    'p' => print = true,
+                    'a' | 'n' | 'r' | 'w' => {
+                        file_op = Some(c);
+                        if !file_ops.contains(&c) {
+                            file_ops.push(c);
+                        }
+                    }
+                    'd' => {
+                        // getopt style: the offset is the rest of this word, or
+                        // the next word when nothing follows the `d`.
+                        let tail = flags.get(at.saturating_add(1)..).unwrap_or("");
+                        if tail.is_empty() {
+                            let Some(off) = args.get(i) else {
+                                self.errln(&format!(
+                                    "{}history: -d: option requires an argument",
+                                    self.err_prefix()
+                                ));
+                                self.errln(&format!("history: usage: {USAGE}"));
+                                return 2;
+                            };
+                            i = i.saturating_add(1);
+                            delete = Some(off.clone());
+                        } else {
+                            delete = Some(tail.to_string());
+                        }
+                        continue 'args;
+                    }
+                    _ => {
                         self.errln(&format!(
-                            "{}history: -d: option requires an argument",
+                            "{}history: -{c}: invalid option",
                             self.err_prefix()
                         ));
                         self.errln(&format!("history: usage: {USAGE}"));
                         return 2;
-                    };
-                    i = i.saturating_add(1);
-                    delete = Some(off.clone());
-                }
-                _ => {
-                    self.errln(&format!("{}history: {a}: invalid option", self.err_prefix()));
-                    self.errln(&format!("history: usage: {USAGE}"));
-                    return 2;
+                    }
                 }
             }
         }
+        if file_ops.len() > 1 {
+            self.errln(&format!(
+                "{}history: cannot use more than one of -anrw",
+                self.err_prefix()
+            ));
+            return 1;
+        }
         let rest = args.get(i..).unwrap_or(&[]);
-        // `-p` wins over `-s` in bash, and both consume every remaining word.
-        if print {
-            // History expansion is not implemented, so an argument with no
-            // `!`/`^` event in it — the only kind osh can answer — prints back
-            // unchanged, which is what bash does for it too.
+        if clear {
+            self.history.clear();
+            // readline's `clear_history` restarts the numbering, so the next
+            // entry is 1 again however far the numbers had climbed, and the
+            // count `-a` would append starts over with it.
+            self.hist_base = 1;
+            self.hist_session = 0;
+            // Everything else is skipped — except a file option, which still
+            // runs, so `history -c -w f` truncates the file to nothing.
+            if file_op.is_none() {
+                return 0;
+            }
+        }
+        if store && !rest.is_empty() {
+            // The `history -s …` line was recorded when it was read, so bash
+            // drops it again before appending — the replacement keeps the same
+            // number. With the option off there is no such entry to drop.
+            self.hist_drop_own_entry();
+            self.hist_record(rest.join(" "));
+            return 0;
+        }
+        if store || print {
+            // `-p` prints its arguments without recording them, which includes
+            // un-recording the line it was itself read on. History expansion is
+            // not implemented, so an argument with no `!`/`^` event in it — the
+            // only kind osh can answer — prints back unchanged, as in bash.
             let mut s = String::new();
             for a in rest {
                 s.push_str(a);
                 s.push('\n');
             }
-            return self.write_bytes(out, redir, s.as_bytes());
-        }
-        if store {
-            // The `history -s …` line was recorded when it was read, so bash
-            // drops it again before appending — the replacement keeps the same
-            // number. With the option off there is no such entry to drop.
-            if self.hist_on {
-                self.history.pop();
+            if !rest.is_empty() {
+                self.hist_drop_own_entry();
             }
-            self.hist_push(rest.join(" "));
-            return 0;
+            return self.write_bytes(out, redir, s.as_bytes());
         }
         if let Some(off) = delete {
             return self.history_delete(&off);
         }
-        if clear {
-            self.history.clear();
-            // readline's `clear_history` restarts the numbering, so the next
-            // entry is 1 again however far the numbers had climbed.
-            self.hist_base = 1;
-            return 0;
+        if let Some(op) = file_op {
+            return self.hist_file_op(op, rest.first());
         }
         // A count operand lists only the last N entries; bash rejects anything
         // that is not a number, and `history 0` lists nothing.
@@ -38058,6 +38295,149 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("HISTSIZE=2\nset -o history\n: a\n: b\nHISTSIZE=\n: c\nhistory").0.lines().count(),
             4
         );
+    }
+
+    /// A directory of this test module's own, plus its path in the forward-slash
+    /// form the shell needs. Removed by the caller when it is done with it.
+    fn history_file_dir(tag: &str) -> (std::path::PathBuf, String) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("osh_hist_{tag}_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let s = dir.to_string_lossy().replace('\\', "/");
+        (dir, s)
+    }
+
+    #[test]
+    fn history_writes_and_reads_a_file() {
+        let (dir, d) = history_file_dir("wr");
+        // `-w` writes the whole list, one entry per line, and `-r` appends every
+        // non-empty line of the file back onto it.
+        assert_eq!(
+            run(&format!(
+                "set -o history\n: one\n: two\nhistory -w {d}/f\nhistory -c\nhistory -r {d}/f\nhistory"
+            ))
+            .0,
+            "    1  history -r ".to_string()
+                + &format!("{d}/f\n    2  : one\n    3  : two\n    4  history -w {d}/f\n    5  history\n")
+        );
+        // A wholly empty line is not an entry; a blank one is.
+        std::fs::write(dir.join("b"), "x1\n\n  \nx2\n").expect("write");
+        assert_eq!(
+            run(&format!("set -o history\nhistory -c\nhistory -r {d}/b\nhistory")).0,
+            format!("    1  history -r {d}/b\n    2  x1\n    3    \n    4  x2\n    5  history\n")
+        );
+        // With no operand the file is `$HISTFILE`.
+        assert_eq!(
+            run(&format!(
+                "set -o history\nHISTFILE={d}/h\n: kept\nhistory -w\nhistory -c\nhistory -r\nhistory"
+            ))
+            .0,
+            format!("    1  history -r\n    2  HISTFILE={d}/h\n    3  : kept\n    4  history -w\n    5  history\n")
+        );
+        // A file that cannot be read or written fails quietly, status 1.
+        assert_eq!(run(&format!("history -r {d}/nope")), (String::new(), 1));
+        assert_eq!(run(&format!("history -w {d}/no/dir")), (String::new(), 1));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn history_appends_and_reads_new_lines() {
+        let (dir, d) = history_file_dir("an");
+        // `-a` appends only what this session added since the last save.
+        assert_eq!(
+            run(&format!(
+                "set -o history\nhistory -c\n: alpha\nhistory -a {d}/a\n: beta\nhistory -a {d}/a\ncat {d}/a"
+            ))
+            .0,
+            format!(": alpha\nhistory -a {d}/a\n: beta\nhistory -a {d}/a\n")
+        );
+        // `-n` reads only what was appended to the file since the last read.
+        std::fs::write(dir.join("g"), "n1\nn2\n").expect("write");
+        let (o, st) = run(&format!(
+            "set -o history\nhistory -c\nhistory -r {d}/g\nprintf 'n3\\n' >> {d}/g\nhistory -n {d}/g\nhistory"
+        ));
+        assert_eq!(st, 0, "out {o:?}");
+        assert_eq!(
+            o,
+            format!(
+                "    1  history -r {d}/g\n    2  n1\n    3  n2\n    4  printf 'n3\\n' >> {d}/g\n\
+                 \x20   5  history -n {d}/g\n    6  n3\n    7  history\n"
+            )
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn history_clear_runs_a_file_option_and_rejects_two() {
+        let (dir, d) = history_file_dir("cw");
+        // `-c` returns immediately unless one of `-anrw` came with it, so `-c -w`
+        // is how the file is emptied.
+        std::fs::write(dir.join("f"), "old\n").expect("write");
+        assert_eq!(run(&format!("set -o history\nhistory -c -w {d}/f")), (String::new(), 0));
+        assert_eq!(std::fs::read_to_string(dir.join("f")).expect("read"), "");
+        // Two *different* file options are an error (on stderr, which `run` does
+        // not capture); the same one twice is not.
+        assert_eq!(run(&format!("history -a -w {d}/f")), (String::new(), 1));
+        assert_eq!(run(&format!("history -aa {d}/f")).1, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn history_file_size_truncates_on_assignment() {
+        let (dir, d) = history_file_dir("fs");
+        let five = || std::fs::write(dir.join("h"), "l1\nl2\nl3\nl4\nl5\n").expect("write");
+        let body = format!("set -o history\nHISTFILE={d}/h\n");
+        // Assigning `HISTFILESIZE` truncates `$HISTFILE` to its last N lines then
+        // and there — the effect lands on the filesystem, not on the list.
+        five();
+        assert_eq!(run(&format!("{body}HISTFILESIZE=2")).1, 0);
+        assert_eq!(std::fs::read_to_string(dir.join("h")).expect("read"), "l4\nl5\n");
+        // 0 empties it.
+        five();
+        assert_eq!(run(&format!("{body}HISTFILESIZE=0")).1, 0);
+        assert_eq!(std::fs::read_to_string(dir.join("h")).expect("read"), "");
+        // Anything that is not a non-negative number truncates nothing.
+        for v in ["-1", "abc", ""] {
+            five();
+            assert_eq!(run(&format!("{body}HISTFILESIZE={v}")).1, 0);
+            assert_eq!(
+                std::fs::read_to_string(dir.join("h")).expect("read").lines().count(),
+                5,
+                "HISTFILESIZE={v} should not truncate"
+            );
+        }
+        // Assigning `HISTFILE` truncates nothing, and `-w` ignores the limit.
+        five();
+        assert_eq!(run(&format!("set -o history\nHISTFILESIZE=1\nHISTFILE={d}/h")).1, 0);
+        assert_eq!(std::fs::read_to_string(dir.join("h")).expect("read").lines().count(), 5);
+        assert_eq!(run(&format!("{body}HISTFILESIZE=1\nhistory -c\n: p\n: q\nhistory -w")).1, 0);
+        assert_eq!(std::fs::read_to_string(dir.join("h")).expect("read").lines().count(), 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn history_store_and_print_drop_their_own_line() {
+        // `-s` and `-p` each un-record the line they were written on, and `-s`
+        // wins over both `-p` and `-d`.
+        assert_eq!(run("set -o history\n: a\nhistory -p one\nhistory").0, "one\n    1  : a\n    2  history\n");
+        assert_eq!(
+            run("set -o history\n: a\nhistory -s -p one\nhistory").0,
+            "    1  : a\n    2  one\n    3  history\n"
+        );
+        assert_eq!(
+            run("set -o history\n: a\nhistory -d 1 -s foo\nhistory").0,
+            "    1  : a\n    2  foo\n    3  history\n"
+        );
+        // With no arguments at all they keep their own line.
+        assert_eq!(run("set -o history\nhistory -p\nhistory -s\nhistory").0.lines().count(), 3);
+        // Options cluster getopt-style, and `-d` takes an attached offset.
+        assert_eq!(run("set -o history\n: a\n: b\nhistory -d1\nhistory").0, "    1  : b\n    2  history -d1\n    3  history\n");
+        // `-c` returns before `-s` is looked at, so a clustered `-cs` clears and
+        // stores nothing — but the `-cs` line's own entry went with the clear.
+        assert_eq!(run("set -o history\n: a\nhistory -cs stored\nhistory").0, "    1  history\n");
     }
 
     #[test]

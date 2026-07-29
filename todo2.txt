@@ -1,3 +1,7 @@
+add to roadmap-detailed to port libreoffice
+
+when it's done fixing fastpy, do the speed benchmarks again
+
 tell opus in OS:
 I told Fable 5 to optimize fastpy, so you may want to re-port whatever's necessary to assimilate the optimizations. Here's what Fable 5 said:
 """

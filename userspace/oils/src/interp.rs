@@ -1381,19 +1381,19 @@ enum ChildOut {
     Sink(CaptureSink),
 }
 
-/// Write bytes to whatever a [`WriteFd`] names, returning a builtin exit
-/// status (0 wrote, 1 failed). A file handle is `try_clone`d so the write lands
-/// at the descriptor's live OS offset; a capture is appended to.
-fn write_to_write_fd(w: &WriteFd, bytes: &[u8]) -> i32 {
+/// Write bytes to whatever a [`WriteFd`] names. A file handle is `try_clone`d
+/// so the write lands at the descriptor's live OS offset; a capture is appended
+/// to and cannot fail.
+///
+/// The error is returned rather than swallowed so the caller can report it the
+/// way bash does — `NAME: write error: MESSAGE` — via [`Shell::finish_write`].
+fn write_to_write_fd(w: &WriteFd, bytes: &[u8]) -> io::Result<()> {
     match w {
         WriteFd::Capture(sink) => {
             lock_capture(sink).extend_from_slice(bytes);
-            0
+            Ok(())
         }
-        WriteFd::File(f) => match f.try_clone() {
-            Ok(mut fc) => i32::from(fc.write_all(bytes).is_err()),
-            Err(_) => 1,
-        },
+        WriteFd::File(f) => f.try_clone()?.write_all(bytes),
     }
 }
 
@@ -1785,6 +1785,12 @@ pub struct Shell {
     /// unwind the stage — the in-process analogue of a producer taking `SIGPIPE`.
     /// Only ever set on a per-stage subshell clone, never the top-level shell.
     pipe_broken: bool,
+    /// The builtins currently running, innermost last — the name a write-failure
+    /// diagnostic uses (`echo: write error: …`, see [`Shell::finish_write`]).
+    /// A stack because a builtin can run commands of its own (`eval`, `command`,
+    /// `source`), and bash names the innermost one, which is the builtin that
+    /// actually produced the bytes.
+    builtin_names: Vec<String>,
     pid: u32,
     /// Parent process id, backing `$PPID`. Determined once at shell startup (as
     /// bash does) and carried unchanged into subshell clones, so `$PPID` stays
@@ -2376,6 +2382,7 @@ impl Shell {
             last_bg_pid: None,
             pipefail: false,
             pipe_broken: false,
+            builtin_names: Vec::new(),
             pid: std::process::id(),
             ppid: parent_pid(),
             current_line: 1,
@@ -5204,6 +5211,9 @@ impl Shell {
             last_bg_pid: self.last_bg_pid,
             pipefail: self.pipefail,
             pipe_broken: false,
+            // A subshell is a fresh execution context: whatever builtin forked
+            // it is not the one whose writes the clone will report.
+            builtin_names: Vec::new(),
             pid: self.pid,
             ppid: self.ppid,
             current_line: self.current_line,
@@ -12174,16 +12184,25 @@ impl Shell {
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) -> Flow {
-        if builtin_runs_commands(name, argv.get(1..).unwrap_or(&[])) && !redir.is_empty() {
+        // A write failure inside the builtin is reported as `{name}: write
+        // error: …` (see [`Shell::finish_write`]), and the builtin that runs
+        // commands of its own must not lend its name to *their* failures — so
+        // this is a stack, popped on every exit path.
+        self.builtin_names.push(name.to_string());
+        let flow = if builtin_runs_commands(name, argv.get(1..).unwrap_or(&[])) && !redir.is_empty()
+        {
             let plan = redir.clone();
             // The body sees an empty plan: everything in it has just been
             // installed for real, and applying it a second time at write time
             // would reopen (and so re-truncate) the very files below.
-            return self.exec_with_redirects(plan, out, stdin, |sh, o, s| {
+            self.exec_with_redirects(plan, out, stdin, |sh, o, s| {
                 sh.run_builtin_body(name, argv, assigns, o, s, &RedirPlan::default())
-            });
-        }
-        self.run_builtin_body(name, argv, assigns, out, stdin, redir)
+            })
+        } else {
+            self.run_builtin_body(name, argv, assigns, out, stdin, redir)
+        };
+        self.builtin_names.pop();
+        flow
     }
 
     #[allow(clippy::too_many_lines)]
@@ -20258,18 +20277,21 @@ impl Shell {
                         }
                     }
                 }
-                let status = match h.file.as_mut() {
-                    Some(f) => i32::from(f.write_all(bytes).is_err()),
+                let res = h.file.as_mut().map(|f| f.write_all(bytes));
+                self.builtin_stdout = held;
+                return match res {
+                    Some(r) => self.finish_write(r),
                     None => 1,
                 };
-                self.builtin_stdout = held;
-                return status;
             }
             _ => open_out(&self.cwd, path, append),
         };
         self.builtin_stdout = held;
         match fresh {
-            Ok(mut f) => i32::from(f.write_all(bytes).is_err()),
+            Ok(mut f) => {
+                let r = f.write_all(bytes);
+                self.finish_write(r)
+            }
             Err(e) => {
                 self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
                 1
@@ -20318,8 +20340,11 @@ impl Shell {
         } else {
             // A runtime `exec > file` inside a capture/pipe binding rebinds fd 1
             // out from under it, so it is checked before `out`.
-            if let Some(w) = self.exec_stdout_shadowing(out) {
-                return write_to_write_fd(w, bytes);
+            // `WriteFd` is a pair of handles behind `Arc`s, so cloning one to
+            // release the borrow on `self` costs a refcount bump, not a `dup`.
+            if let Some(w) = self.exec_stdout_shadowing(out).cloned() {
+                let r = write_to_write_fd(&w, bytes);
+                return self.finish_write(r);
             }
             match out {
                 Out::Capture(buf) => {
@@ -20329,29 +20354,24 @@ impl Shell {
                 Out::Inherit => {
                     // A persistent `exec > file` rebinds the shell's ambient
                     // fd 1 to a file; otherwise write to the real stdout.
-                    if let Some(w) = &self.exec_stdout {
-                        write_to_write_fd(w, bytes)
+                    let r = if let Some(w) = self.exec_stdout.clone() {
+                        write_to_write_fd(&w, bytes)
                     } else {
                         let stdout = io::stdout();
                         let mut lock = stdout.lock();
-                        if lock.write_all(bytes).is_err() {
-                            return 1;
-                        }
-                        let _ = lock.flush();
-                        0
-                    }
+                        // The flush is part of the write: `io::stdout()` is line
+                        // buffered, so a full disk or a closed terminal surfaces
+                        // there rather than in `write_all`.
+                        lock.write_all(bytes).and_then(|()| lock.flush())
+                    };
+                    self.finish_write(r)
                 }
                 Out::Pipe(w) => {
                     // A downstream reader that closed early yields `BrokenPipe`;
-                    // flag it so the enclosing stage unwinds (SIGPIPE analogue).
-                    match w.write_all(bytes) {
-                        Ok(()) => 0,
-                        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
-                            self.pipe_broken = true;
-                            141 // 128 + SIGPIPE(13), as a shell would report
-                        }
-                        Err(_) => 1,
-                    }
+                    // `finish_write` flags it so the enclosing stage unwinds
+                    // (SIGPIPE analogue) instead of reporting a write error.
+                    let r = w.write_all(bytes);
+                    self.finish_write(r)
                 }
             }
         }
@@ -20402,9 +20422,47 @@ impl Shell {
     /// (bash).
     fn write_to_fd(&mut self, fd: i32, bytes: &[u8]) -> i32 {
         match self.open_write_fds.get(&fd) {
-            Some(w) => write_to_write_fd(w, bytes),
+            Some(w) => {
+                let r = write_to_write_fd(w, bytes);
+                self.finish_write(r)
+            }
             None => {
                 self.errln(&format!("{}{fd}: Bad file descriptor", self.err_prefix()));
+                1
+            }
+        }
+    }
+
+    /// Turn the result of writing a builtin's output into that builtin's exit
+    /// status, reporting a failure the way bash does.
+    ///
+    /// bash checks every write and, when one fails, names the builtin:
+    /// `bash: line 1: echo: write error: No space left on device`, status 1.
+    /// Discarding the error instead — which osh did — turns a full disk into
+    /// silently truncated output and a successful exit, so this is the funnel
+    /// every builtin write path goes through.
+    ///
+    /// A broken pipe is deliberately *not* an error: it is the ordinary end of
+    /// `cmd | head`, which bash reports as death by `SIGPIPE` rather than as a
+    /// write failure. It stays silent, flags the stage to unwind, and yields
+    /// `128 + SIGPIPE`.
+    fn finish_write(&mut self, res: io::Result<()>) -> i32 {
+        match res {
+            Ok(()) => 0,
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                self.pipe_broken = true;
+                141 // 128 + SIGPIPE(13), as a shell would report
+            }
+            Err(e) => {
+                let msg = io_error_message(&e);
+                let prefix = self.err_prefix();
+                // Outside a builtin there is no name to give — the shell itself
+                // is writing — so the diagnostic degrades to bash's bare form.
+                let what = match self.builtin_names.last() {
+                    Some(name) => format!("{name}: write error"),
+                    None => "write error".to_string(),
+                };
+                self.errln(&format!("{prefix}{what}: {msg}"));
                 1
             }
         }
@@ -20429,7 +20487,9 @@ impl Shell {
                 // Base fd 2: a persistent `exec 2> file` target if set, else the
                 // shell's real stderr.
                 if let Some(w) = &self.exec_stderr {
-                    write_to_write_fd(w, bytes);
+                    // Nowhere to report a failed *diagnostic* write to, so it is
+                    // dropped — as bash drops a failed write to fd 2.
+                    let _ = write_to_write_fd(w, bytes);
                 } else {
                     let e = io::stderr();
                     let mut lock = e.lock();

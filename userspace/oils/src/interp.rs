@@ -5703,6 +5703,17 @@ impl Shell {
             self.discard_error = Some(1);
             return String::new();
         }
+        self.indirect_target_value(&target).unwrap_or_default()
+    }
+
+    /// The value a resolved indirect *target* holds: a plain variable's, an
+    /// array element's, or the whole of a `name[@]`/`name[*]` reference joined
+    /// with a space.
+    ///
+    /// `None` means the target is unset, which is a real answer here rather
+    /// than an empty string: a modifier reached through the reference
+    /// (`${!ptr:-D}`) has to tell the two apart.
+    fn indirect_target_value(&mut self, target: &str) -> Option<String> {
         // The referent may name an array element: `ref=a[0]`, `ref=m[key]`,
         // or a whole-array reference `ref=a[@]` / `ref=a[*]`.
         if let Some(open) = target.find('[')
@@ -5714,17 +5725,39 @@ impl Shell {
             // `${name[@]}`/`${name[*]}` (bash). In this scalar (unjoined) path we
             // join with a space, matching `expand_array_ref`'s `[@]`/`[*]` join.
             if sub == "@" || sub == "*" {
-                return self.array_elements(name).join(" ");
+                return Some(self.array_elements(name).join(" "));
             }
+            // The base may itself be a nameref — `declare -n b=c; b=(p q)`
+            // stores the array on `c` — so a subscript reached through a
+            // reference has to follow it to the variable that actually holds
+            // the elements. The direct `${b[1]}` path and `array_elements`
+            // above both already resolve first; this was the one subscript
+            // lookup that did not, which made `ptr=b[1]; ${!ptr}` read nothing.
+            let name = &self.resolve_ref_use(name)?;
             if self.assoc.contains_key(name) {
-                return self.assoc_element(name, sub).unwrap_or_default();
+                return self.assoc_element(name, sub);
             }
             // A malformed arithmetic subscript in an indirect array reference is
             // fatal, like a direct `${a[3 x]}` (see `eval_int_assign`).
             let idx = self.eval_int_assign(sub);
-            return self.array_element(name, idx).unwrap_or_default();
+            return self.array_element(name, idx);
         }
-        self.param_value(&target).unwrap_or_default()
+        self.param_value(target)
+    }
+
+    /// Whether a resolved indirect target reaches an array: a subscripted
+    /// reference (`b[1]`, `h[k]`, `b[@]`), or a plain name holding an array or
+    /// an associative array.
+    ///
+    /// This is where a nameref's *name* stops being the answer a modifier
+    /// works on: the per-value modifiers look through it to the variable, so
+    /// `declare -n r="a[1]"; a=(x y)` makes `${!r^^}` the element's `Y` even
+    /// though `${!r}` is still `a[1]` (bash's `get_var_and_type`).
+    fn indirect_target_reaches_array(&self, target: &str) -> bool {
+        if target.contains('[') && target.ends_with(']') {
+            return true;
+        }
+        self.arrays.contains_key(target) || self.assoc.contains_key(target)
     }
 
     /// If `${!ref}` names a whole-array reference (`ref=a[@]` / `ref=a[*]`),
@@ -5803,8 +5836,30 @@ impl Shell {
     /// lower-all), `E` (expand ANSI-C backslash escapes), `a` (attribute
     /// flags — the kind plus `n`/`i`/`l`/`u`/`r`/`x`, else empty), and `A`
     /// (a re-inputtable assignment/`declare` statement recreating the variable).
-    fn param_transform(&mut self, name: &str, index: &Option<Box<Word>>, op: char) -> String {
+    /// The text a modifier works on: the parameter's own value, or the one the
+    /// caller already resolved through an indirection. See [`Operand`].
+    fn op_operand(
+        &mut self,
+        operand: Operand,
+        name: &str,
+        index: &Option<Box<Word>>,
+    ) -> Option<String> {
+        match operand {
+            Operand::Param => self.param_elem_value(name, index),
+            Operand::Value(v) => v.map(ToString::to_string),
+        }
+    }
+
+    fn param_transform(
+        &mut self,
+        name: &str,
+        index: &Option<Box<Word>>,
+        op: char,
+        operand: Operand,
+    ) -> String {
         // The `a` (attributes) transform reports type even for an unset scalar.
+        // It asks about the *variable*, so an indirection's resolved value is
+        // none of its business — `${!r@a}` reports what `r` points at.
         if op == 'a' {
             return self.attr_flag_letters(name);
         }
@@ -5817,7 +5872,7 @@ impl Shell {
         // An unset variable yields the empty string for every transform (bash):
         // `${x@Q}` on unset is empty, whereas a set-but-empty variable is still
         // quoted (`${x@Q}` → `''`). Distinguish the two by the Option itself.
-        let Some(value) = self.param_elem_value(name, index) else {
+        let Some(value) = self.op_operand(operand, name, index) else {
             return String::new();
         };
         if op == 'P' {
@@ -9610,6 +9665,13 @@ impl Shell {
 
     /// Expand a dynamic word part (parameter/command/arithmetic) to a string.
     fn expand_dynamic(&mut self, part: &WordPart) -> String {
+        self.expand_dynamic_with(part, Operand::Param)
+    }
+
+    /// [`Self::expand_dynamic`] with the text a modifier works on supplied by
+    /// the caller — see [`Operand`]. Only the parameter-modifier parts consult
+    /// it; every other part expands the same either way.
+    fn expand_dynamic_with(&mut self, part: &WordPart, operand: Operand) -> String {
         match part {
             WordPart::Param(name) => match self.param_value(name) {
                 Some(v) => v,
@@ -9637,7 +9699,7 @@ impl Shell {
                 colon,
                 arg,
                 label,
-            } => self.expand_param_op(name, index, *op, *colon, arg, label.as_deref()),
+            } => self.expand_param_op(name, index, *op, *colon, arg, label.as_deref(), operand),
             WordPart::ParamTrim {
                 name,
                 index,
@@ -9645,7 +9707,7 @@ impl Shell {
                 longest,
                 pattern,
             } => {
-                let value = self.param_elem_value(name, index).unwrap_or_default();
+                let value = self.op_operand(operand, name, index).unwrap_or_default();
                 let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_trim(&value, &pat, *suffix, *longest, extglob)
@@ -9656,7 +9718,7 @@ impl Shell {
                 offset,
                 length,
             } => {
-                let value = self.param_elem_value(name, index).unwrap_or_default();
+                let value = self.op_operand(operand, name, index).unwrap_or_default();
                 // `${x:off:len}` — a malformed offset/length is fatal (bash), and
                 // a negative length that puts the end before the start is a fatal
                 // "substring expression < 0" word-expansion error (discards the
@@ -9688,7 +9750,7 @@ impl Shell {
                 pattern,
                 replacement,
             } => {
-                let value = self.param_elem_value(name, index).unwrap_or_default();
+                let value = self.op_operand(operand, name, index).unwrap_or_default();
                 let pat = self.expand_word_pattern(pattern);
                 // bash's `patsub_replacement` (default on) makes an unquoted `&`
                 // in the replacement stand for the matched text. Expand the
@@ -9707,18 +9769,18 @@ impl Shell {
                 all,
                 pattern,
             } => {
-                let value = self.param_elem_value(name, index).unwrap_or_default();
+                let value = self.op_operand(operand, name, index).unwrap_or_default();
                 let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_case(&value, &pat, *mode, *all, extglob)
             }
             WordPart::ParamTransform { name, index, op } => {
-                self.param_transform(name, index, *op)
+                self.param_transform(name, index, *op, operand)
             }
             WordPart::BadTransform { name, index, raw } => {
                 // Empty/unknown/multi-char `@` operator: empty for an unset
                 // parameter (status 0), "bad substitution" for a set one.
-                if self.param_elem_value(name, index).is_some() {
+                if self.op_operand(operand, name, index).is_some() {
                     self.bad_transform_substitution(raw)
                 } else {
                     String::new()
@@ -9756,9 +9818,10 @@ impl Shell {
             WordPart::ArrayKeys { name, .. } => self.array_keys(name).join(" "),
             WordPart::Indirect { refname, index } => self.expand_indirect(refname, index),
             WordPart::IndirectOp { refname, index, target } => {
-                // `${!ref<op>}`: resolve the target variable *name* (the value
-                // read through the reference, or the nameref chain's endpoint),
-                // then apply the modifier to that variable.
+                // `${!ref<op>}`: resolve the reference to a target *name* (the
+                // value read through the reference, or the nameref chain's
+                // endpoint), and from there to the text the reference expands
+                // to — which is what the modifier works on.
                 // A circular chain has no endpoint name, so it takes the same
                 // "invalid indirect expansion" path as an unset pointer.
                 //
@@ -9766,7 +9829,8 @@ impl Shell {
                 // about the reference as written — the writer named `!ref`, and
                 // the variable it resolved to is not theirs to be told about.
                 let label = format!("!{}", Self::indirect_ref_src(refname, index));
-                let pointed_at = if index.is_none() && self.nameref_attr.contains(refname) {
+                let nameref = index.is_none() && self.nameref_attr.contains(refname);
+                let pointed_at = if nameref {
                     match self.resolve_ref_name(refname) {
                         Some(t) => Some(t),
                         None => {
@@ -9803,7 +9867,24 @@ impl Shell {
                     None => label.clone(),
                 };
                 let renamed = rename_param_target(target, &tname, &label);
-                self.expand_dynamic(&renamed)
+                // What the modifier reads. An ordinary pointer expands to the
+                // value at the name it read — element references (`ptr=b[1]`)
+                // included. A nameref answers with the *name* it holds, so
+                // `${!r}` is that name and `${!r%x}` trims it; but a name that
+                // reaches an array is one the per-value modifiers look
+                // *through*, back to the variable, so that `declare -n r=t;
+                // t=(x y); ${!r^^}` is the first element upper-cased. The
+                // `${x:-…}` family never looks through: it works on whatever
+                // the reference itself expanded to.
+                let reads_name = nameref
+                    && !(self.indirect_target_reaches_array(&tname)
+                        && !matches!(**target, WordPart::ParamOp { .. }));
+                let operand = if reads_name {
+                    Some(tname.clone())
+                } else {
+                    self.indirect_target_value(&tname)
+                };
+                self.expand_dynamic_with(&renamed, Operand::Value(operand.as_deref()))
             }
             WordPart::VarNames { prefix, .. } => self.var_names_with_prefix(prefix).join(" "),
             WordPart::BadSubst(raw) => self.bad_substitution(raw),
@@ -9867,8 +9948,9 @@ impl Shell {
         colon: bool,
         arg: &Word,
         label: Option<&str>,
+        operand: Operand,
     ) -> String {
-        let cur = self.param_elem_value(name, index);
+        let cur = self.op_operand(operand, name, index);
         // Bash: the colon forms (`:-`, `:=`, `:+`, `:?`) treat an empty value the
         // same as unset ("active" only when set AND non-empty). The colon-less
         // forms distinguish empty-but-set from genuinely unset ("active" whenever
@@ -9891,6 +9973,25 @@ impl Shell {
                     cur.unwrap_or_default()
                 } else {
                     let v = self.expand_to_string(arg);
+                    // Reached through a reference, the default is stored under
+                    // the name the reference *resolved to*, and bash insists
+                    // that be a plain identifier: `ptr=b[1]` can be read
+                    // through but not assigned through. A reference that
+                    // reached nothing stands in the `!ref` text for a name, and
+                    // no variable can be called that, so it is refused as the
+                    // indirection it is rather than as a bad name. Either way
+                    // the default word is expanded first — bash lets its side
+                    // effects happen before it complains.
+                    if matches!(operand, Operand::Value(_)) && !crate::parser::is_valid_name(name) {
+                        let complaint = if name.starts_with('!') {
+                            "invalid indirect expansion"
+                        } else {
+                            "invalid variable name"
+                        };
+                        self.errln(&format!("{}{name}: {complaint}", self.err_prefix()));
+                        self.discard_error = Some(1);
+                        return String::new();
+                    }
                     // The default has to go somewhere, so a subscript that names
                     // nowhere makes the expansion itself impossible: the
                     // complaint is already given, and the command is discarded
@@ -19687,6 +19788,24 @@ enum ElemValue {
     Absent,
     /// The subscript named nowhere; the string is the name to complain about.
     BadSubscript(String),
+}
+
+/// Where a `${…<op>}` modifier reads the text it works on.
+///
+/// Written directly, that is the parameter the modifier names, and there is
+/// nothing to say. Reached through an indirection it is not: bash resolves
+/// `${!ref<op>}` down to a value *first* and hands the modifier that, which for
+/// a nameref is the name the reference holds rather than anything stored under
+/// it — `declare -n r=t; t=hello` makes `${!r^^}` the upper-cased `T`, not
+/// `HELLO`. See the `IndirectOp` arm of [`Shell::expand_dynamic_with`].
+#[derive(Debug, Clone, Copy)]
+enum Operand<'a> {
+    /// Read the parameter the modifier names, as written.
+    Param,
+    /// Read this text instead. `None` is "the reference reached nothing" —
+    /// still worth telling from the empty string, because `${!a[9]:-D}` yields
+    /// the default while `${!a[9]:+S}` yields nothing.
+    Value(Option<&'a str>),
 }
 
 /// The place a plain scalar assignment ends up, after namerefs are followed.

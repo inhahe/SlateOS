@@ -2617,7 +2617,7 @@ extglob group (`@(a\*b)`, `ext_depth > 0`), where the group body is accumulated
 as one contiguous literal; only observable when `extglob` was enabled in a prior
 parse unit (otherwise the whole line is a parse error either way — see TD-OILS8).
 
-### TD-OILS-RW-OFFSET. `osh`'s `<>` read/write descriptor does not share one OS file offset — 2026-07-19 — OPEN (low priority)
+### TD-OILS-RW-OFFSET. `osh`'s `<>` read/write descriptor does not share one OS file offset — 2026-07-19 — ✅ RESOLVED 2026-07-28
 
 **What:** The `<>` (open-for-read-write) redirect is now implemented
 (`RedirectOp::ReadWrite`), covering `<> file` (fd 0 → stdin), `1<>`/`2<>`
@@ -2654,6 +2654,42 @@ is to let one entry appear in both `open_fds` and `open_write_fds` backed by
 the same handle, and to make the write path sync the read buffer first — a
 narrower change than it was, but still touching every builtin that reads or
 writes user-space fds. Deferred until there is a concrete need beyond `<>`.
+
+**Fix (2026-07-28) — ✅ the shared offset now works.** The proper fix, and it
+turned out to be small once the read side was a live `File`:
+
+1. **One open, two duplicates.** `open_rw_pair` opens the path `O_RDWR|O_CREAT`
+   *once* and `try_clone`s it; the clone is a duplicate of the descriptor (dup
+   on unix, `DuplicateHandle` on Windows), so the two halves name one open file
+   description and share one offset. `ExtraFdOp::ReadWriteFile(String)` becomes
+   `ExtraFdOp::ReadWrite(InputFd, Arc<File>)` — the pair is opened at
+   *resolution* time and carried, rather than the path being re-opened (twice!)
+   at install time, so the binding and every duplicate of it share a position.
+   All four `<>` sites go through it: both `install_extra_fds` loops, the
+   `RedirectOp::ReadWrite` arm of `resolve_one_redirect`, and
+   `apply_persistent_redirect`.
+2. **Read-ahead is squared up after every read.** A buffer over a descriptor
+   whose position the *write* half can observe is a hazard with no escape point
+   to unwind at — the write never passes through `FileInput`. So `FileInput`
+   gains an `observable` flag (set by `rw_input`), and `lock_input` now returns
+   an `InputGuard` that calls `sync()` on drop when it is set. This is bash's
+   rule (`zsyncfd` after the `read` builtin), and it is strictly necessary
+   rather than merely tidy: a record reader must peek one byte *past* its
+   delimiter, so `read -N 3` would otherwise leave the offset at 4 — an error
+   that not reading ahead at all would not have prevented.
+
+Verified byte-identical to bash 5.2 across writes-then-reads, reads-then-writes,
+alternation, `exec 4<&3` and `exec 4>&3` dups, an external child, a subshell, a
+partial `read -N`, `cat <&3`, fd 0, and create-without-truncate:
+`tests/corpus/redirect-rw-shared-offset.sh` (new) plus four `interp.rs` unit
+tests (`read_write_fd_*`, `read_write_redirect_creates_without_truncating`).
+
+**Residual — writing to fd 0 is still not modelled.** `>&0` resolves to stdout
+whatever fd 0 is, so `{ echo X >&0; } <> f` prints to the terminal instead of
+patching `f`, and `{ echo X >&0; } < f` succeeds instead of failing with
+bash's `echo: write error: Bad file descriptor` (status 1). That is a
+*write-side* gap — fd 0 has no `WriteFd` slot at all — and is tracked
+separately as TD-OILS-FD0-WRITE.
 
 ### TD-OILS-PRINTF-INTERLEAVE. `printf` error/warning ordering vs stdout — 2026-07-20 — ✅ RESOLVED 2026-07-20
 
@@ -7780,6 +7816,89 @@ tools. The cost is coverage rather than correctness: `compgen -b`, `compgen -c`
 and `compgen -A helptopic` can only appear in
 `tests/corpus/compgen-actions.sh` behind a prefix the two shells happen to
 agree on, so the corpus pins less of them than it otherwise would.
+
+### TD-OILS-FD0-WRITE. fd 0 has no write side, so `>&0` silently writes to stdout instead of the descriptor — OPEN 2026-07-28
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::exec_dup_source` and the
+transient `>&N` resolution both look fd N up in `open_write_fds`, which never
+has an entry for fd 0; the fallbacks resolve to the real stdout. The `<>` fd-0
+arm of `resolve_one_redirect` correspondingly drops the write half it now has
+(`drop(wr)`), and `apply_persistent_redirect`'s `exec 0<> file` keeps only the
+read half.
+
+**What.** osh models fd 0 as an input descriptor only, so a write *through* fd 0
+never reaches it. Two shapes diverge, in opposite directions:
+
+```sh
+{ echo X >&0; } <> f    # bash: patches f in place       osh: prints X to stdout
+{ echo X >&0; } < f     # bash: echo: write error: Bad file descriptor, st=1
+                        # osh:  prints X to stdout, st=0
+exec 0<> f; echo X >&0  # bash: patches f               osh: prints X to stdout
+```
+
+The second is the more troubling one: a write to a read-only descriptor is
+supposed to *fail*, and osh turns it into output on an unrelated stream.
+
+**Proper fix.** Give fd 0 a write side in the same places fd 1 and fd 2 have
+one. The machinery now exists: `open_rw_pair` already produces both halves of an
+`<>` open as duplicates of one descriptor with a shared offset (see
+TD-OILS-RW-OFFSET), so what is missing is only somewhere to *put* the write half
+and a resolution path that consults it. Concretely: a `Shell::exec_stdin_write`
+slot (symmetric with `exec_stdout`/`exec_stderr`) plus a `plan.stdin_write` for
+the scoped case, consulted by `exec_dup_source` and the transient `>&N` path
+before their std-fd fallbacks; and when fd 0 has no write side, `>&0` must
+resolve to an `EBADF` write error rather than to stdout — which is the half that
+matters even for scripts that never use `<>`.
+
+**Impact.** `>&0` is rare, and the read-only case fails *silently* rather than
+corrupting anything — but it fails by producing output where bash produces a
+diagnostic, so a script that redirects `>&0` deliberately (to write to the
+terminal, an old idiom when fd 0 is the tty) behaves differently under a
+redirect. Found while fixing TD-OILS-RW-OFFSET; the corresponding lines are
+excluded from `tests/corpus/redirect-rw-shared-offset.sh`.
+
+### TD-OILS-WRITE-ERROR-REPORTING. A builtin whose output write fails says nothing and returns success — OPEN 2026-07-28
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::write_bytes` and the builtin
+output helpers that call it; the `Out`/`WriteFd` write paths generally.
+
+**What.** bash checks the write and reports it, naming the builtin:
+
+```
+$ bash -c 'echo hi > /dev/full; echo "st=$?"'
+bash: line 1: echo: write error: No space left on device
+st=1
+$ bash -c 'printf abc > /dev/full; echo "st=$?"'
+bash: line 1: printf: write error: No space left on device
+st=1
+```
+
+osh has no such diagnostic anywhere — grep for `write error` finds nothing. A
+failed write is discarded, so a script that fills a disk (or writes to a
+descriptor that is not open for writing) sees success and carries on with
+truncated output. That is a silent-data-loss class of bug, not a cosmetic one.
+
+**Related.** TD-OILS-FD0-WRITE needs exactly this path: `{ echo X >&0; } < f`
+must produce `echo: write error: Bad file descriptor` and status 1.
+
+**Testing note.** The obvious test vehicle, `/dev/full`, is *not* usable in the
+differential harness: MSYS bash emulates it, osh's `map_device_path` does not
+map it, and Windows has no always-failing sink to map it to. (Mapping it to
+`NUL` would be wrong — `NUL` accepts writes.) So the corpus can only cover
+`EBADF` (via `>&0`, once TD-OILS-FD0-WRITE lands) and whatever a closed pipe
+gives; `ENOSPC` has to be a unit test against a stub sink. Deciding whether
+`map_device_path` should grow a synthetic always-failing `/dev/full` is part of
+the work.
+
+**Proper fix.** Thread the write `io::Result` back to the builtin that produced
+the output instead of discarding it, and have each builtin emit
+`{name}: write error: {io_error_message(e)}` and return 1. The awkward part is
+that osh's builtins mostly hand a `String`/`Vec<u8>` to a shared writer and
+never see the result, so this is a signature change across the builtin output
+helpers — do it once, uniformly, rather than per-builtin. `SIGPIPE`/broken-pipe
+must stay silent (bash suppresses `EPIPE` for the same reason: it is the normal
+end of `cmd | head`), which the existing broken-pipe handling in `run_external`
+already reasons about.
 
 ### B-TCC-LIBTCC1-MAIN. On-target tcc one-shot compile+link spuriously fails with `unresolved reference to 'main'` (exit 1) when the source emits one extra undefined symbol (e.g. the `memset` a struct/aggregate brace-initialiser synthesises) — ON-TARGET-ONLY, **COULD NOT REPRODUCE (22 on-target compiles) — DOWNGRADED TO WATCH**, REGRESSION-GUARDED 2026-07-16
 

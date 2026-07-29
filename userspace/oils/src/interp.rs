@@ -820,10 +820,31 @@ struct FileInput {
     pos: usize,
     /// How much of `buf` holds data read from the file.
     len: usize,
+    /// Whether this descriptor's OS position can be observed without going
+    /// through [`FileInput::share`] — see [`FileInput::observable`].
+    observable: bool,
 }
 
 impl FileInput {
     fn new(file: File) -> FileInput {
+        FileInput::build(file, false)
+    }
+
+    /// A reader whose OS position is *observable elsewhere*: the write half of
+    /// an `<>` open is a duplicate of this very descriptor, so a `>&3` write
+    /// lands wherever the shared offset happens to be.
+    ///
+    /// There is no escape point at which read-ahead could be unwound first —
+    /// the write does not pass through this type at all — so [`InputGuard`]
+    /// syncs at the end of *every* read instead. That is bash's rule too
+    /// (`zsyncfd` after the `read` builtin); it costs one seek per read and
+    /// keeps the buffering, which not reading ahead at all would not: a record
+    /// reader must peek one byte past its delimiter regardless.
+    fn observable(file: File) -> FileInput {
+        FileInput::build(file, true)
+    }
+
+    fn build(file: File, observable: bool) -> FileInput {
         // Seekability decides the read-ahead: without it `sync` cannot give the
         // unconsumed remainder back, so there must not be one.
         let seekable = {
@@ -836,6 +857,7 @@ impl FileInput {
             buf: vec![0u8; cap],
             pos: 0,
             len: 0,
+            observable,
         }
     }
 
@@ -986,14 +1008,57 @@ fn file_input(f: File) -> InputFd {
     Arc::new(Mutex::new(InputSrc::File(FileInput::new(f))))
 }
 
+/// The read half of an `<>` open: an [`InputFd`] that squares its OS position
+/// up after every read, because the write half names the same description (see
+/// [`FileInput::observable`] and [`open_rw_pair`]).
+fn rw_input(f: File) -> InputFd {
+    Arc::new(Mutex::new(InputSrc::File(FileInput::observable(f))))
+}
+
+/// A locked [`InputFd`], held for one read.
+///
+/// Dropping it re-syncs the descriptor's OS position when that position is
+/// *observable elsewhere* — see [`FileInput::observable`]. Read-ahead is
+/// otherwise invisible, because every other way of observing the position goes
+/// through [`FileInput::share`], which syncs; the `<>` write half does not, so
+/// it must be squared up at the end of each read instead. That includes the one
+/// byte a record reader has to peek at to find its delimiter, which is why
+/// simply not buffering would not be enough.
+struct InputGuard<'a>(std::sync::MutexGuard<'a, InputSrc>);
+
+impl std::ops::Deref for InputGuard<'_> {
+    type Target = InputSrc;
+    fn deref(&self) -> &InputSrc {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for InputGuard<'_> {
+    fn deref_mut(&mut self) -> &mut InputSrc {
+        &mut self.0
+    }
+}
+
+impl Drop for InputGuard<'_> {
+    fn drop(&mut self) {
+        if let InputSrc::File(f) = &mut *self.0
+            && f.observable
+        {
+            // Nothing useful to do on failure: the descriptor keeps whatever
+            // position it has, and the next read still reads real bytes.
+            let _ = f.sync();
+        }
+    }
+}
+
 /// Lock an [`InputFd`], recovering from poisoning.
 ///
 /// A panicking reader must not make the descriptor permanently unusable: the
 /// source is a byte buffer or a file with an offset, and there is no invariant
 /// a partial read could break — the position stays meaningful — so the lock is
 /// taken regardless (same reasoning as [`lock_capture`]).
-fn lock_input(c: &InputFd) -> std::sync::MutexGuard<'_, InputSrc> {
-    c.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+fn lock_input(c: &InputFd) -> InputGuard<'_> {
+    InputGuard(c.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
 }
 
 /// How a child process is given fd 0 over an input descriptor.
@@ -4799,25 +4864,13 @@ impl Shell {
                         self.last_status = 1;
                     }
                 },
-                ExtraFdOp::ReadWriteFile(path) => {
-                    // `exec {fd}<> file`: register both a read handle and a live
-                    // write handle for the same descriptor. Create-if-absent,
-                    // never truncate. The two handles are independent (no shared
-                    // OS offset) — a documented model limitation.
-                    match (open_rw(&self.cwd, path), open_rw(&self.cwd, path)) {
-                        (Ok(f), Ok(rd)) => {
-                            self.open_fds.insert(*fd, file_input(rd));
-                            self.open_write_fds.insert(*fd, WriteFd::File(std::sync::Arc::new(f)));
-                        }
-                        (Err(e), _) | (_, Err(e)) => {
-                            self.errln(&format!(
-                                "{}{path}: {}",
-                                self.err_prefix(),
-                                io_error_message(&e)
-                            ));
-                            self.last_status = 1;
-                        }
-                    }
+                ExtraFdOp::ReadWrite(rd, wr) => {
+                    // `{fd}<> file`: bind both halves of the one open. They are
+                    // duplicates of a single descriptor, so reads and writes
+                    // through fd N share an offset.
+                    self.open_fds.insert(*fd, Arc::clone(rd));
+                    self.open_write_fds
+                        .insert(*fd, WriteFd::File(Arc::clone(wr)));
                 }
                 ExtraFdOp::Close => {} // already removed above
             }
@@ -9323,27 +9376,25 @@ impl Shell {
             }
             RedirectOp::ReadWrite => {
                 // `exec {v}<> file` (persistent open-for-read-write). Create the
-                // file if absent, never truncate. The read side is the opened
-                // file itself; the write side is a second handle on it. The two
-                // do not share an OS offset (a documented model limitation).
+                // file if absent, never truncate. Both halves are duplicates of
+                // the one open, so they share an OS file offset.
                 let path = self.expand_to_string(&r.target);
                 if let Some(n) = special_redirect_fd(&path) {
                     return self.persistent_special_dup(fd, &path, n, fd == 0, out);
                 }
-                let f = open_rw(&self.cwd, &path).map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
+                let (rd, wr) = open_rw_pair(&self.cwd, &path)
+                    .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
+                // Only fd ≥ 3 has both a read and a write table, so a standard
+                // fd keeps the half its direction names: fd 0 the read half
+                // (`>&0` has nowhere to resolve — TD-OILS-FD0-WRITE), fds 1 and
+                // 2 the write half. The other half is dropped, closing it.
                 match fd {
-                    0 => {
-                        let rd = open_rw(&self.cwd, &path)
-                            .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
-                        self.exec_stdin = Some(file_input(rd));
-                    }
-                    1 => self.exec_stdout = Some(WriteFd::File(std::sync::Arc::new(f))),
-                    2 => self.exec_stderr = Some(WriteFd::File(std::sync::Arc::new(f))),
+                    0 => self.exec_stdin = Some(rd),
+                    1 => self.exec_stdout = Some(WriteFd::File(wr)),
+                    2 => self.exec_stderr = Some(WriteFd::File(wr)),
                     _ => {
-                        let rd = open_rw(&self.cwd, &path)
-                            .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
-                        self.open_fds.insert(fd, file_input(rd));
-                        self.open_write_fds.insert(fd, WriteFd::File(std::sync::Arc::new(f)));
+                        self.open_fds.insert(fd, rd);
+                        self.open_write_fds.insert(fd, WriteFd::File(wr));
                     }
                 }
             }
@@ -9718,18 +9769,21 @@ impl Shell {
                     if self.resolve_special_redirect(r, fd, &path, fd == 0, plan)? {
                         return Ok(());
                     }
-                    let rw = open_rw(&self.cwd, &path)
+                    let (rd, wr) = open_rw_pair(&self.cwd, &path)
                         .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
                     if fd == 0 {
                         // Connect the file to stdin, reading from offset 0 (a
                         // freshly created file is therefore at immediate EOF,
-                        // matching bash). Writing to fd 0 is not modelled
-                        // (documented limitation).
-                        plan.stdin = Some(file_input(rw));
+                        // matching bash). Writing to fd 0 is not modelled at all
+                        // — `>&0` has nowhere to resolve to (TD-OILS-FD0-WRITE)
+                        // — so the write half is dropped.
+                        drop(wr);
+                        plan.stdin = Some(rd);
                         plan.stdin_data = None;
                     } else if fd >= 3 {
-                        // `exec {fd}<> file`: a persistent read+write descriptor.
-                        plan.extra_fds.push((fd, ExtraFdOp::ReadWriteFile(path)));
+                        // `{fd}<> file`: a read+write descriptor, opened here so
+                        // the binding and any duplicate of it share one position.
+                        plan.extra_fds.push((fd, ExtraFdOp::ReadWrite(rd, wr)));
                     } else if fd == 2 {
                         // `2<> file`: fd 2 writes to the file without truncating
                         // it. osh models the write side as a no-truncate (append)
@@ -12473,22 +12527,13 @@ impl Shell {
                                         rc = 1;
                                     }
                                 },
-                                ExtraFdOp::ReadWriteFile(path) => {
+                                ExtraFdOp::ReadWrite(rd, wr) => {
                                     // `exec {fd}<> file`: persistent read+write.
-                                    // Create-if-absent, no truncation; the read
-                                    // and write sides are separate handles on
-                                    // the file (independent offsets).
-                                    match (open_rw(&self.cwd, path), open_rw(&self.cwd, path)) {
-                                        (Ok(f), Ok(rd)) => {
-                                            self.open_fds.insert(*fd, file_input(rd));
-                                            self.open_write_fds
-                                                .insert(*fd, WriteFd::File(std::sync::Arc::new(f)));
-                                        }
-                                        (Err(e), _) | (_, Err(e)) => {
-                                            self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
-                                            rc = 1;
-                                        }
-                                    }
+                                    // Both halves duplicate one descriptor, so
+                                    // they share an OS file offset.
+                                    self.open_fds.insert(*fd, Arc::clone(rd));
+                                    self.open_write_fds
+                                        .insert(*fd, WriteFd::File(Arc::clone(wr)));
                                 }
                                 ExtraFdOp::Close => {
                                     self.open_fds.remove(fd);
@@ -21200,13 +21245,12 @@ enum ExtraFdOp {
     /// *current* sink is duplicated into fd N (a snapshot, matching bash's dup
     /// semantics — a later `exec > file` does not retarget the alias).
     AliasStd(i32),
-    /// Open fd N for both reading and writing (`exec {fd}<> file`): the file is
-    /// created if absent and never truncated (`O_RDWR | O_CREAT`). In osh's
-    /// simulated fd model the read side is a byte snapshot of the file's current
-    /// contents (`open_fds`) and the write side is a live file handle
-    /// (`open_write_fds`); the two do NOT share an OS file offset the way a real
-    /// `O_RDWR` descriptor would — a documented limitation (see known-issues.md).
-    ReadWriteFile(String),
+    /// Bind fd N for both reading and writing (`exec {fd}<> file`): the two
+    /// halves of one `O_RDWR | O_CREAT` open (created if absent, never
+    /// truncated), made by [`open_rw_pair`] at resolution time. They are
+    /// duplicates of a single descriptor, so they share one OS file offset —
+    /// the read half goes in `open_fds`, the write half in `open_write_fds`.
+    ReadWrite(InputFd, Arc<File>),
     /// Close fd N (`N<&-` / `N>&-`).
     Close,
 }
@@ -23172,6 +23216,25 @@ fn open_rw(cwd: &str, path: &str) -> io::Result<std::fs::File> {
         // offset 0 and overwrite in place). Spelled out for clippy and clarity.
         .truncate(false)
         .open(map_device_path(&resolve_against(cwd, path)))
+}
+
+/// Open `path` for `<>` and split it into the read and write halves of the
+/// **one** open file description.
+///
+/// `try_clone` duplicates the descriptor rather than opening the path twice, so
+/// the two halves share a single OS file offset the way a real `O_RDWR` fd
+/// does: a `read -u 3` leaves the position just past the record it consumed, and
+/// the next `>&3` write overwrites from there. (Opening twice — what osh did
+/// before — gives two descriptions and two offsets, so every write went back to
+/// where the *writer* last was.)
+///
+/// The read half is [`rw_input`], which squares its position up after every
+/// read: with the position observable through the write half, read-ahead cannot
+/// be left outstanding.
+fn open_rw_pair(cwd: &str, path: &str) -> io::Result<(InputFd, Arc<File>)> {
+    let w = open_rw(cwd, path)?;
+    let r = w.try_clone()?;
+    Ok((rw_input(r), Arc::new(w)))
 }
 
 /// Is this redirect a descriptor *close* (`N>&-` / `N<&-`)? For a varfd
@@ -38638,6 +38701,97 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "read p < {FILE}; read q < {FILE}; echo \"p=[$p] q=[$q]\"",
         );
         assert_eq!(o, "p=[r1] q=[r1]\n");
+    }
+
+    /// Run `src_tmpl` with `{FILE}` replaced by the path of a fresh temp file
+    /// seeded with `seed`, and return `(the shell's stdout, the file's final
+    /// contents)`. The second half is the point: `<>` is used to patch a file
+    /// in place, so what ends up on disk *is* the behaviour under test.
+    fn run_over_seeded_file(seed: &str, src_tmpl: &str) -> (String, String) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "osh_rw_{}_{}.txt",
+            std::process::id(),
+            uniq
+        ));
+        std::fs::write(&path, seed.as_bytes()).expect("seed temp file");
+        let p = path.to_string_lossy().replace('\\', "/");
+        let (out, _) = run(&src_tmpl.replace("{FILE}", &p));
+        let disk = std::fs::read(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        (out, String::from_utf8_lossy(&disk).into_owned())
+    }
+
+    #[test]
+    fn read_write_fd_shares_one_offset_between_the_halves() {
+        // `<>` is ONE open, so a read and a write through it share a position:
+        // reading `l1` leaves the offset at `l2`, and the write overwrites
+        // there. Regression: osh used to open the path twice, giving two
+        // descriptions and two offsets, so the write went back to 0
+        // (TD-OILS-RW-OFFSET).
+        let (_, disk) = run_over_seeded_file(
+            "l1\nl2\nl3\n",
+            "exec 3<> {FILE}; read -u 3 a; echo XX >&3; exec 3<&-",
+        );
+        assert_eq!(disk, "l1\nXX\nl3\n");
+        // ... and the other way round: the read continues past the write.
+        let (out, disk) = run_over_seeded_file(
+            "abcdefghij\n",
+            "exec 3<> {FILE}; echo AB >&3; read -u 3 x; echo \"[$x]\"; exec 3<&-",
+        );
+        assert_eq!(out, "[defghij]\n");
+        assert_eq!(disk, "AB\ndefghij\n");
+    }
+
+    #[test]
+    fn read_write_fd_offset_is_exact_after_a_partial_read() {
+        // A record reader must peek one byte past its delimiter to know it is
+        // done; on a descriptor whose position the write half can observe,
+        // that byte must not be left consumed. `read -N 3` therefore leaves
+        // the offset at 3, not 4 — the case a smaller read-ahead would not
+        // have fixed (see `FileInput::observable`).
+        let (out, disk) = run_over_seeded_file(
+            "abcdefgh\n",
+            "exec 3<> {FILE}; read -N 3 -u 3 p; echo \"[$p]\"; printf XY >&3; exec 3<&-",
+        );
+        assert_eq!(out, "[abc]\n");
+        assert_eq!(disk, "abcXYfgh\n");
+    }
+
+    #[test]
+    fn read_write_fd_offset_is_shared_by_dups_and_subshells() {
+        // A dup names the same description, so reads through either advance
+        // both — and a *write* dup writes where the reads stopped.
+        let (out, disk) = run_over_seeded_file(
+            "l1\nl2\nl3\nl4\n",
+            "exec 3<> {FILE}; exec 4<&3; read -u 3 a; read -u 4 b; \
+             echo \"[$a][$b]\"; echo ZZ >&3; exec 3<&- 4<&-",
+        );
+        assert_eq!(out, "[l1][l2]\n");
+        assert_eq!(disk, "l1\nl2\nZZ\nl4\n");
+        // A subshell is a fork of the same description, so what it reads is
+        // consumed for the parent's next write too.
+        let (_, disk) = run_over_seeded_file(
+            "l1\nl2\nl3\n",
+            "exec 3<> {FILE}; ( read -u 3 v ); echo VV >&3; exec 3<&-",
+        );
+        assert_eq!(disk, "l1\nVV\nl3\n");
+    }
+
+    #[test]
+    fn read_write_redirect_creates_without_truncating() {
+        // `<>` never truncates — that is what distinguishes it from `>` — and
+        // an absent file is created, reading as immediate EOF.
+        let (_, disk) = run_over_seeded_file("keep me\n", "exec 3<> {FILE}; exec 3<&-");
+        assert_eq!(disk, "keep me\n");
+        let (out, disk) = run_over_seeded_file(
+            "",
+            "exec 3<> {FILE}; read -u 3 z; echo \"st=$? z=[$z]\"; echo new >&3; exec 3<&-",
+        );
+        assert_eq!(out, "st=1 z=[]\n");
+        assert_eq!(disk, "new\n");
     }
 
     #[test]

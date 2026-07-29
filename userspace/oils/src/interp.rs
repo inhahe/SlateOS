@@ -2342,6 +2342,12 @@ pub struct Shell {
     /// file, an `eval` string and a function body are never recorded whatever
     /// this says — only the call that reached them is.
     hist_on: bool,
+    /// `set -H` / `set -o histexpand`: whether `!`-style history expansion is
+    /// performed on a top-level line before it is parsed. Off by default, as in
+    /// a non-interactive bash. Tracked separately from [`Shell::hist_on`]
+    /// because the two are independent switches: bash will happily have one on
+    /// and the other off, and `set -o` lists them separately.
+    histexpand: bool,
     /// Builtins disabled via `enable -n NAME`. A name present here is treated as
     /// *not* a builtin during command resolution, so a same-named external is
     /// run instead. Cloned into subshells (bash inherits the enable state).
@@ -2561,6 +2567,7 @@ impl Shell {
             hist_session: 0,
             hist_saved: 0,
             hist_on: false,
+            histexpand: false,
             disabled_builtins: HashSet::new(),
             aliases: BTreeMap::new(),
             traps: HashMap::new(),
@@ -5815,6 +5822,7 @@ impl Shell {
             hist_session: self.hist_session,
             hist_saved: self.hist_saved,
             hist_on: self.hist_on,
+            histexpand: self.histexpand,
             disabled_builtins: self.disabled_builtins.clone(),
             aliases: self.aliases.clone(),
             // A subshell resets non-ignored traps to their default disposition
@@ -11918,7 +11926,7 @@ impl Shell {
     fn option_flags(&self) -> String {
         let mut s = String::new();
         // (letter, enabled) in bash's canonical relative order.
-        let flags: [(char, bool); 11] = [
+        let flags: [(char, bool); 12] = [
             ('a', self.allexport),
             ('e', self.errexit),
             ('f', self.noglob),
@@ -11929,9 +11937,11 @@ impl Shell {
             ('B', self.braceexpand),
             ('C', self.noclobber),
             // bash's `shell_flags[]` orders `E` (errtrace) and `T` (functrace)
-            // after `C`: the table is …,B,C,E,H,P,T, so `E` precedes `T` (with
-            // the unmodeled `H`/`P` between them).
+            // after `C`: the table is …,B,C,E,H,P,T, so `E` precedes `H`
+            // (histexpand) which precedes `T` (with the unmodeled `P` between
+            // `H` and `T`).
             ('E', self.errtrace),
+            ('H', self.histexpand),
             ('T', self.functrace),
         ];
         for (c, on) in flags {
@@ -18748,8 +18758,10 @@ impl Shell {
             'B' => self.braceexpand = enable,
             // `set -m`: job control (equivalent to `set -o monitor`).
             'm' => self.monitor = enable,
+            // `set -H`: history expansion (equivalent to `set -o histexpand`).
+            'H' => self.histexpand = enable,
             // Accepted by bash (`-abefhkmnptuvxBCEHPT`) but not modelled here.
-            'b' | 'h' | 'k' | 'p' | 't' | 'v' | 'H' | 'P' => {}
+            'b' | 'h' | 'k' | 'p' | 't' | 'v' | 'P' => {}
             _ => return false,
         }
         self.refresh_shellopts();
@@ -18793,8 +18805,12 @@ impl Shell {
                     }
                 }
             }
+            // `set -o histexpand` (`set -H`): enable `!`-style history
+            // expansion of top-level lines. Independent of `history` — bash
+            // tracks and lists the two separately.
+            "histexpand" => self.histexpand = enable,
             // Standard bash option names osh does not model (line-editing
-            // `emacs`/`vi`, `histexpand`, job-control `notify`,
+            // `emacs`/`vi`, job-control `notify`,
             // `posix`, `privileged`, `verbose`, …). bash accepts them
             // without error; accept them as no-ops so scripts that toggle them
             // don't spuriously fail. Only a name outside the standard set is a
@@ -18859,6 +18875,9 @@ impl Shell {
         if self.hist_on {
             opts.push("history");
         }
+        if self.histexpand {
+            opts.push("histexpand");
+        }
         opts.sort_unstable();
         self.vars.insert("SHELLOPTS".to_string(), opts.join(":"));
     }
@@ -18905,6 +18924,7 @@ impl Shell {
             "errtrace" => self.errtrace,
             "monitor" => self.monitor,
             "history" => self.hist_on,
+            "histexpand" => self.histexpand,
             // Always-on defaults for a non-interactive shell, mirroring bash's
             // `-c`/script `set -o` output (these have no osh-tunable state but
             // must report their true default so listings match bash).

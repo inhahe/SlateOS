@@ -144,10 +144,13 @@ echo one
 !!            # bash: re-runs `echo one`; osh: tries to run a command named `!!`
 ```
 
-`set -H` is accepted (it is swallowed by the `STANDARD_SET_O_OPTIONS` no-op arm
-in `set_named_option`, `userspace/oils/src/interp.rs:18796`), and
-`option_enabled` hard-codes `histexpand` to `false` (`interp.rs:18913`), so the
-option can be neither observed nor used.
+**Status 2026-07-29: half done.** The *switch* is now real — `histexpand` has
+its own field, is set by both `set -H` and `set -o histexpand`, and reports
+truthfully through `set -o`, `set +o`, `$-` (as `H`, ordered between `E` and
+`T`), `SHELLOPTS` and subshell inheritance. That surface is pinned by
+`tests/corpus/histexpand-option.sh` and matches bash exactly. What remains is
+the expansion itself — part (2) below. Until then the switch is observable but
+still has no effect on how a line is read.
 
 **Measured bash model (dev-host MSYS bash 5.2, 2026-07-29).** History expansion
 *is* reachable non-interactively, which is what makes it testable in the corpus
@@ -168,9 +171,10 @@ parsing:
 - When an expansion changes the line, bash echoes the resulting line before
   running it.
 
-**Proper fix.** Two parts. (1) Give `histexpand` real state — a `histexpand:
-bool` field beside `hist_on` (`interp.rs:2344`), wired through
-`set_named_option`, `option_enabled`, `$-` and `SHELLOPTS`. (2) Expand each
+**Proper fix.** Two parts. (1) **Done** — `histexpand` has real state, a
+`histexpand: bool` field beside `hist_on`, wired through `set_named_option`,
+the `-H` short flag, `option_enabled`, `option_flags` (`$-`) and
+`refresh_shellopts`. (2) Expand each
 top-level line *as it is read*, before it is lexed. This is the architecturally
 interesting half: expansion depends on the history built by the lines that
 already ran, so it cannot be done up front over the whole source, and

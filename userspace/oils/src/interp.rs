@@ -4723,15 +4723,44 @@ impl Shell {
         Ok(Some(dest))
     }
 
-    /// The array an arithmetic *element* reference (`a[i]`, `m[k]`) names, after
+    /// What an arithmetic *element* reference (`a[i]`, `m[k]`) designates, after
     /// following a nameref: `declare -n r=arr` makes `(( r[1] ))` element 1 of
-    /// `arr`. A nameref's own subscript is not consulted here — `ref[i]` is
-    /// element `i` of what `ref` refers to, not a second subscript on the
-    /// element `ref` designates. A circular chain names nothing, so the name as
-    /// written stands and the read or write falls where it may.
-    fn arith_elem_base(&self, name: &str) -> String {
-        self.resolve_ref_name(name)
-            .map_or_else(|| name.to_string(), |t| nameref_target_base(&t).to_string())
+    /// `arr`. A circular chain names nothing, so the name as written stands and
+    /// the read or write falls where it may.
+    ///
+    /// A nameref carrying its own subscript is the interesting case, and it is
+    /// [`ArithElem::Element`]: `declare -n r=q[0]` already designates one
+    /// element, so `r[1]` would be a subscript on a subscript, which bash has
+    /// no room for and refuses.
+    fn arith_elem(&self, name: &str) -> ArithElem {
+        match self.resolve_ref_name(name) {
+            None => ArithElem::Array(name.to_string()),
+            Some(t) => {
+                if nameref_target_base(&t).len() == t.len() {
+                    ArithElem::Array(t)
+                } else {
+                    ArithElem::Element(t)
+                }
+            }
+        }
+    }
+
+    /// bash's complaint when a *further* subscript is put on a nameref that
+    /// already designates one element (`declare -n r=q[0]; (( r[1]=5 ))`).
+    ///
+    /// It is a warning rather than an error: nothing is stored, but the
+    /// expression keeps its value and the command its status (`x=$((r[1]=5))`
+    /// still yields 5 and succeeds), so it does not travel as an
+    /// [`arith::ArithError`]. The name blamed is the target *as the nameref
+    /// holds it*, and it carries the same builtin tag (`((`, `let`) an
+    /// arithmetic error would — see [`Shell::arith_cmd`].
+    fn warn_elem_not_identifier(&mut self, target: &str) {
+        let prefix = self.err_prefix();
+        let line = match self.arith_cmd.clone() {
+            Some(tag) => format!("{prefix}{tag}: `{target}': not a valid identifier"),
+            None => format!("{prefix}`{target}': not a valid identifier"),
+        };
+        self.errln(&line);
     }
 
     /// Refuse an arithmetic write to an element of a readonly array — the array
@@ -19833,21 +19862,35 @@ impl VarLookup for Shell {
     }
 
     fn get_index_str(&self, name: &str, index: i64) -> Option<String> {
-        // `array_element` already applies bash negative-index semantics.
-        self.array_element(&self.arith_elem_base(name), index)
+        match self.arith_elem(name) {
+            // `array_element` already applies bash negative-index semantics.
+            ArithElem::Array(base) => self.array_element(&base, index),
+            // A subscript on a nameref that already designates an element names
+            // nothing. Reading it is silent (bash yields 0); only *writing*
+            // draws the complaint — see `set_index`.
+            ArithElem::Element(_) => None,
+        }
     }
 
     fn is_assoc(&self, name: &str) -> bool {
         // Which kind of subscript `name[sub]` has is decided by the array the
         // name ultimately reaches, so a nameref has to be followed before the
-        // question can be answered.
-        self.assoc.contains_key(&self.arith_elem_base(name))
+        // question can be answered. A reference that reaches an element reaches
+        // no array at all, so the subscript is read as an index and the refusal
+        // is raised on the indexed path.
+        match self.arith_elem(name) {
+            ArithElem::Array(base) => self.assoc.contains_key(&base),
+            ArithElem::Element(_) => false,
+        }
     }
 
     fn get_assoc_str(&self, name: &str, key: &str) -> Option<String> {
-        // An unset key (or empty value) evaluates to 0; a non-empty value is
-        // recursively arithmetic-evaluated by the caller.
-        self.assoc_element(&self.arith_elem_base(name), key)
+        match self.arith_elem(name) {
+            // An unset key (or empty value) evaluates to 0; a non-empty value is
+            // recursively arithmetic-evaluated by the caller.
+            ArithElem::Array(base) => self.assoc_element(&base, key),
+            ArithElem::Element(_) => None,
+        }
     }
 
     fn set(&mut self, name: &str, value: i64) -> Result<(), arith::ArithError> {
@@ -19861,7 +19904,16 @@ impl VarLookup for Shell {
     }
 
     fn set_index(&mut self, name: &str, index: i64, value: i64) -> Result<(), arith::ArithError> {
-        let base = self.arith_elem_base(name);
+        let base = match self.arith_elem(name) {
+            ArithElem::Array(base) => base,
+            // Nowhere to put it: the reference already names an element. bash
+            // complains and drops the store, but the expression is still worth
+            // its value, so this is `Ok`.
+            ArithElem::Element(target) => {
+                self.warn_elem_not_identifier(&target);
+                return Ok(());
+            }
+        };
         self.arith_elem_writable(&base)?;
         // Mirror the indexed branch of `assign_elem`: negative indices count
         // back from `highest_index + 1` (bash sparse semantics).
@@ -19874,7 +19926,15 @@ impl VarLookup for Shell {
     }
 
     fn set_assoc(&mut self, name: &str, key: &str, value: i64) -> Result<(), arith::ArithError> {
-        let base = self.arith_elem_base(name);
+        let base = match self.arith_elem(name) {
+            ArithElem::Array(base) => base,
+            // See `set_index`: the reference leaves the subscript nothing to
+            // apply to.
+            ArithElem::Element(target) => {
+                self.warn_elem_not_identifier(&target);
+                return Ok(());
+            }
+        };
         self.arith_elem_writable(&base)?;
         self.assoc_set(&base, key.to_string(), value.to_string(), false);
         Ok(())
@@ -19916,6 +19976,17 @@ enum Operand<'a> {
     /// still worth telling from the empty string, because `${!a[9]:-D}` yields
     /// the default while `${!a[9]:+S}` yields nothing.
     Value(Option<&'a str>),
+}
+
+/// What an arithmetic element reference `name[sub]` turns out to name, once any
+/// nameref on `name` has been followed. See [`Shell::arith_elem`].
+enum ArithElem {
+    /// An array (or associative array) to subscript, by name.
+    Array(String),
+    /// A single element, already designated by the nameref — leaving the `[sub]`
+    /// that was written with nothing to apply to. The string is the target text
+    /// the nameref holds (`q[0]`), which is what bash's refusal names.
+    Element(String),
 }
 
 /// The written form of a `${name[index]<op>arg}` modifier — everything the

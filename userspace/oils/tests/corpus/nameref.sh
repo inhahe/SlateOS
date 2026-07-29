@@ -84,3 +84,24 @@ echo "  from-zc=[${zc:-DEF}]"
 echo '--- ${!ref} has no final name to report, so it errors instead of warning'
 echo "  ind=[${!za}]"
 echo "  the shell survives it"
+
+echo "=== a reference that names an element has no room for a second subscript"
+# `declare -n r=q[0]` already designates one element, so the `[1]` in `r[1]` has
+# nothing left to apply to. bash *warns* rather than erroring: the store is
+# dropped, but the expression keeps its value and the command its status.
+zq=(7 8 9); declare -n zr=zq[0]
+(( zr[1]=5 )); echo "  after ((:  e=$?"
+declare -p zq
+let 'zr[1]=5'; echo "  after let: e=$?"
+zx=$(( zr[1]=5 )); echo "  after \$((:  e=$? value=$zx"
+echo "--- reading one is silent, and reads as 0"
+echo "  read=$(( zr[1] )) e=$?"
+echo "--- the same through an associative element"
+declare -A zm=([k]=3); declare -n zrm=zm[k]
+(( zrm[j]=5 )); echo "  e=$?"
+declare -p zm
+echo "--- while a reference to the array itself subscripts it as usual"
+declare -n zra=zq; (( zra[1]=5 )); echo "  e=$?"
+declare -p zq
+echo "--- and a scalar write through the element reference still lands"
+zr=42; declare -p zq

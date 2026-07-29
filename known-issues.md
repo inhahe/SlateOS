@@ -2689,7 +2689,10 @@ whatever fd 0 is, so `{ echo X >&0; } <> f` prints to the terminal instead of
 patching `f`, and `{ echo X >&0; } < f` succeeds instead of failing with
 bash's `echo: write error: Bad file descriptor` (status 1). That is a
 *write-side* gap — fd 0 has no `WriteFd` slot at all — and is tracked
-separately as TD-OILS-FD0-WRITE.
+separately as TD-OILS-FD0-WRITE. **(Closed 2026-07-28: fd 0 now carries its
+write half and its access mode; see TD-OILS-FD0-WRITE, resolved. The fd-0 lines
+excluded from `tests/corpus/redirect-rw-shared-offset.sh` for this reason are
+now covered by `tests/corpus/redirect-fd0-write.sh`.)**
 
 ### TD-OILS-PRINTF-INTERLEAVE. `printf` error/warning ordering vs stdout — 2026-07-20 — ✅ RESOLVED 2026-07-20
 
@@ -7817,7 +7820,62 @@ and `compgen -A helptopic` can only appear in
 `tests/corpus/compgen-actions.sh` behind a prefix the two shells happen to
 agree on, so the corpus pins less of them than it otherwise would.
 
-### TD-OILS-FD0-WRITE. fd 0 has no write side, so `>&0` silently writes to stdout instead of the descriptor — OPEN 2026-07-28
+### TD-OILS-FD0-WRITE. fd 0 has no write side, so `>&0` silently writes to stdout instead of the descriptor — ✅ RESOLVED 2026-07-28
+
+**Fix (2026-07-28).** fd 0 now carries its write half, and its *access mode* is
+modelled rather than probed. Two new variants say what a descriptor can do:
+`WriteFd::ReadOnly` (open, but its description is not open for writing — fd 0
+under `< file`, a here-document, or a pipe), whose write returns a synthetic
+`EBADF`; and `StderrTarget::Discard`, the `2>&0` case where a diagnostic has
+nowhere to go and bash drops it. The write half itself lives in
+`Shell::exec_stdin_write: Option<Arc<File>>` (for `exec 0<> f`) and
+`RedirPlan::stdin_write` (for the scoped `{ …; } <> f`), saved and restored
+alongside `exec_stdin` in `exec_with_redirects` so the two halves always travel
+together — re-binding fd 0 read-only drops the write half again. A new
+`Shell::write_fd_for(n, plan)` replaces all eight bare `open_write_fds.get(&n)`
+lookups, so every `>&N` path routes fd 0 through `stdin_write_fd`. `exec 3>&0`
+*succeeds* on a read-only fd 0 (bash's dup succeeds; the later write through
+fd 3 is what fails), which is why this is a descriptor variant and not a
+redirect-time error.
+
+Modelling the mode rather than attempting the write is what makes the answer
+portable: Windows reports `ERROR_ACCESS_DENIED` for a write to a read-only
+handle, which would have printed "Permission denied" where bash prints "Bad file
+descriptor".
+
+Depends on TD-OILS-WRITE-ERROR-REPORTING (resolved the same day) for the
+reporting half: the failure surfaces as `echo: write error: Bad file descriptor`
+with status 1, named against the builtin that produced the bytes.
+
+**Tests.** `tests/corpus/redirect-fd0-write.sh` (byte-identical to bash 5.2) plus
+six unit tests in `interp.rs`
+(`write_to_a_read_only_fd0_fails_and_names_the_builtin`,
+`write_to_a_read_only_fd0_fails_for_heredocs_and_pipes_too`,
+`read_write_fd0_is_writable_and_shares_the_read_position`,
+`a_dup_of_fd0_inherits_its_access_mode`,
+`a_diagnostic_sent_to_a_read_only_fd0_is_dropped`,
+`reopening_fd0_read_only_drops_the_write_half`). The lines excluded from
+`tests/corpus/redirect-rw-shared-offset.sh` for this issue are now covered.
+
+**Residual divergences (deliberately excluded from the corpus).** Three narrow
+shapes still differ from bash, all same-status/same-stream wording or
+unmodelled-syntax cases:
+
+1. An **external child**'s `>&0` on a read-only fd 0 gets `osh: 0: Bad file
+   descriptor` from the shell instead of the child's own `write error` message.
+   Same status 1, same stream, different wording — the shell refuses to hand the
+   child a descriptor it knows is unwritable rather than letting the child
+   discover it.
+2. `{ echo Q >&0; } <&-` gives a *write-time* error where bash gives a
+   *redirect-time* `0: Bad file descriptor`, because `0<&-` (closing fd 0) is not
+   modelled — fd 0 has no "closed" state distinct from "read-only".
+3. `exec 0<&N` where fd N was opened `<>` does not carry the write half across:
+   the input table (`open_input_fds`) and the write table (`open_write_fds`) are
+   separate, and the dup consults only the former. Fixing this properly means
+   pairing the two tables into one descriptor table keyed by fd — worth doing if
+   a third such divergence appears, not for this one alone.
+
+**Original report follows.**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::exec_dup_source` and the
 transient `>&N` resolution both look fd N up in `open_write_fds`, which never
@@ -7857,7 +7915,45 @@ terminal, an old idiom when fd 0 is the tty) behaves differently under a
 redirect. Found while fixing TD-OILS-RW-OFFSET; the corresponding lines are
 excluded from `tests/corpus/redirect-rw-shared-offset.sh`.
 
-### TD-OILS-WRITE-ERROR-REPORTING. A builtin whose output write fails says nothing and returns success — OPEN 2026-07-28
+### TD-OILS-WRITE-ERROR-REPORTING. A builtin whose output write fails says nothing and returns success — ✅ RESOLVED 2026-07-28
+
+**Fix (2026-07-28, commit `8af7af90e`).** The write `io::Result` is now threaded
+back rather than discarded. `write_to_write_fd` returns `io::Result<()>`, and
+every builtin output path (`write_bytes`, `write_redirected`) funnels its result
+through one new `Shell::finish_write`, which turns it into the status the builtin
+returns:
+
+- `Ok(())` → 0.
+- `ErrorKind::BrokenPipe` → sets `pipe_broken` and returns 141 (128 + SIGPIPE),
+  **silently** — `cmd | head` closing the pipe is the normal end of a pipeline,
+  not an error, and bash suppresses it for the same reason.
+- anything else → `{prefix}{builtin}: write error: {io_error_message(e)}` on
+  stderr and status 1.
+
+The builtin's *name* comes from a new `Shell::builtin_names: Vec<String>` stack,
+pushed/popped in `run_builtin`. A stack rather than a scalar because
+`eval`/`command`/`source` run commands of their own, so the name that should
+appear is the innermost builtin actually producing the bytes.
+
+Doing it in `finish_write` — one funnel — rather than per-builtin is what keeps
+the change from being a signature churn across every output helper, which is
+what the original report worried about.
+
+The `Out::Inherit` path additionally flushes: `io::stdout()` is line buffered, so
+a full disk or a closed terminal surfaces at the flush rather than in
+`write_all`, and a `write_all`-only check would have missed exactly the case the
+issue is about.
+
+**Testing note (resolved).** As predicted, `/dev/full` was not usable in the
+differential harness. Coverage instead comes from `EBADF` via `>&0` — see
+TD-OILS-FD0-WRITE and `tests/corpus/redirect-fd0-write.sh`, which pins
+`echo: write error: Bad file descriptor` / status 1 byte-for-byte against bash.
+`map_device_path` was **not** given a synthetic always-failing `/dev/full`: the
+error path is shared, so `EBADF` exercises it just as well as `ENOSPC` would,
+and a fake device node visible to scripts is a bigger commitment than the
+coverage justifies.
+
+**Original report follows.**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::write_bytes` and the builtin
 output helpers that call it; the `Out`/`WriteFd` write paths generally.

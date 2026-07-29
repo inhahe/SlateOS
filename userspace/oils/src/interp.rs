@@ -1324,6 +1324,11 @@ enum StderrTarget {
     /// `exec N> file`. The shared `Arc<File>` is append-positioned so writes
     /// land at the descriptor's current offset (matching a builtin `>&N`).
     WriteFd(Arc<File>),
+    /// `2>&0` where fd 0 is open for reading only — every write fails with
+    /// `EBADF` and there is nowhere to report *that* failure, so the bytes are
+    /// dropped. bash does the same: `ls /nosuch 2>&0 < f` prints nothing at all
+    /// and still exits 2.
+    Discard,
 }
 
 /// What a user-space write descriptor (fd ≥ 3, in [`Shell::open_write_fds`])
@@ -1346,6 +1351,16 @@ enum WriteFd {
     /// the command that made it keeps the substitution's reader waiting, which
     /// is what an OS pipe's write end would do.
     Capture(CaptureSink),
+    /// A descriptor that is open but whose file description is not open for
+    /// writing — fd 0 under a plain `< file`, a here-document, or a pipe.
+    ///
+    /// It exists (so `exec 3>&0` succeeds and `>&0` is a valid redirect), but
+    /// POSIX gives `EBADF` for a write to it, and bash duly reports
+    /// `echo: write error: Bad file descriptor` with status 1. Modelling the
+    /// *access mode* is what makes that the answer on every host: writing to a
+    /// read-only handle raises a platform-specific error (Windows says access
+    /// denied), whereas "this description has no write half" is portable.
+    ReadOnly,
 }
 
 impl WriteFd {
@@ -1354,6 +1369,7 @@ impl WriteFd {
         match self {
             WriteFd::File(f) => StderrTarget::WriteFd(Arc::clone(f)),
             WriteFd::Capture(sink) => StderrTarget::Buffer(sink.clone()),
+            WriteFd::ReadOnly => StderrTarget::Discard,
         }
     }
 
@@ -1365,8 +1381,18 @@ impl WriteFd {
         match self {
             WriteFd::File(f) => WriteFd::File(Arc::clone(f)),
             WriteFd::Capture(sink) => WriteFd::Capture(sink.share()),
+            WriteFd::ReadOnly => WriteFd::ReadOnly,
         }
     }
+}
+
+/// The error a write to a descriptor that is not open for writing produces.
+///
+/// `std::io::ErrorKind` has no portable `EBADF`, and the host's own message
+/// differs per platform, so the POSIX `strerror` text is carried directly —
+/// [`io_error_message`] passes it through unchanged.
+fn ebadf() -> io::Error {
+    io::Error::other("Bad file descriptor")
 }
 
 /// How to wire one of an external child's output descriptors.
@@ -1394,6 +1420,7 @@ fn write_to_write_fd(w: &WriteFd, bytes: &[u8]) -> io::Result<()> {
             Ok(())
         }
         WriteFd::File(f) => f.try_clone()?.write_all(bytes),
+        WriteFd::ReadOnly => Err(ebadf()),
     }
 }
 
@@ -1406,6 +1433,11 @@ fn child_out_from_write_fd(w: &WriteFd, what: &str) -> Result<ChildOut, String> 
             .try_clone()
             .map(|f| ChildOut::Handle(Stdio::from(f)))
             .map_err(|e| format!("{what}: {e}")),
+        // bash hands the child the read-only description and lets the child's
+        // own write fail; we cannot forge a descriptor that behaves that way on
+        // every host, so the shell refuses the redirect instead. Same status
+        // (1) and same stream, different wording — see TD-OILS-FD0-WRITE.
+        WriteFd::ReadOnly => Err(format!("{what}: Bad file descriptor")),
     }
 }
 
@@ -1836,6 +1868,17 @@ pub struct Shell {
     /// from bash's shared-fd semantics, acceptable because our subshells already
     /// copy their stdin).
     exec_stdin: Option<InputFd>,
+    /// The *write* half of the ambient fd 0, when it has one — i.e. after
+    /// `exec 0<> file`, whose single `O_RDWR` open gives fd 0 a writable
+    /// description with one shared offset.
+    ///
+    /// `None` means fd 0 is open for reading only, which is the usual case and
+    /// which [`Shell::stdin_write_fd`] renders as [`WriteFd::ReadOnly`] rather
+    /// than as "no such descriptor": `>&0` is a *valid* redirect onto an
+    /// unwritable descriptor, so it fails at write time (`EBADF`), not at
+    /// redirect time. Always assigned in lockstep with [`Shell::exec_stdin`] —
+    /// rebinding fd 0 replaces both halves.
+    exec_stdin_write: Option<Arc<File>>,
     /// bash's `stdin_redir`: whether the *currently active* redirect scope
     /// rebound fd 0. That flag — not "fd 0 is not a terminal" — is what decides
     /// whether a `&` job inherits fd 0 or reads `/dev/null`
@@ -2390,6 +2433,7 @@ impl Shell {
             exec_stdout: None,
             exec_stderr: None,
             exec_stdin: None,
+            exec_stdin_write: None,
             stdin_redirected: false,
             pipe_stage_redirect_root: false,
             open_fds: std::collections::HashMap::new(),
@@ -4669,8 +4713,16 @@ impl Shell {
         if stdout_file.is_none()
             && let Some(n) = plan.stdout_to_fd
         {
-            match self.open_write_fds.get(&n) {
+            match self.write_fd_for(n, &plan) {
                 Some(WriteFd::Capture(sink)) => stdout_capture_fd = Some(sink.clone()),
+                // `{ …; } 1>&0` onto a read-only fd 0: the group's fd 1 would
+                // have no writable descriptor behind it. Failing the redirect
+                // keeps the bytes from landing elsewhere — TD-OILS-FD0-WRITE.
+                Some(WriteFd::ReadOnly) => {
+                    self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                    self.last_status = 1;
+                    fd_alias_error = true;
+                }
                 Some(WriteFd::File(f)) => match f.try_clone() {
                     Ok(c) => stdout_file = Some(Arc::new(c)),
                     Err(_) => {
@@ -4690,7 +4742,7 @@ impl Shell {
             && stderr_file.is_none()
             && let Some(n) = plan.stderr_to_fd
         {
-            match self.open_write_fds.get(&n).cloned() {
+            match self.write_fd_for(n, &plan) {
                 Some(w) => {
                     self.stderr_stack.push(w.as_stderr_target());
                     pushed_stderr = true;
@@ -4735,9 +4787,12 @@ impl Shell {
         // it inherits the descriptor. That is what makes the `$( … )` in
         // `{ x=$(read a; echo "$a"); read b; } < f` read the first line and leave
         // the second for the enclosing `read`.
-        let saved_exec_stdin = input_fd
-            .as_ref()
-            .map(|c| self.exec_stdin.replace(Arc::clone(c)));
+        let saved_exec_stdin = input_fd.as_ref().map(|c| {
+            // fd 0's write half travels with its read half: `{ …; } <> f` makes
+            // the body's `>&0` writable, `{ …; } < f` makes it `EBADF`.
+            let prev_write = std::mem::replace(&mut self.exec_stdin_write, plan.stdin_write.clone());
+            (self.exec_stdin.replace(Arc::clone(c)), prev_write)
+        });
 
         let flow = if fd_alias_error {
             // A `1>&N` / `2>&N` alias named an unbound descriptor: the command
@@ -4793,8 +4848,9 @@ impl Shell {
         if let Some(prev) = saved_exec_stderr {
             self.exec_stderr = prev;
         }
-        if let Some(prev) = saved_exec_stdin {
+        if let Some((prev, prev_write)) = saved_exec_stdin {
             self.exec_stdin = prev;
+            self.exec_stdin_write = prev_write;
         }
 
         // Finalise the `1>&2` capture (fd 1 → fd 2, no file target): flush the
@@ -5235,6 +5291,7 @@ impl Shell {
             // parent no longer sees (`x=$(read a; echo "$a"); read b` reads two
             // successive lines).
             exec_stdin: self.exec_stdin.as_ref().map(Arc::clone),
+            exec_stdin_write: self.exec_stdin_write.clone(),
             // A subshell is forked inside whatever redirect scope reached it, so
             // it starts with the flag as it stands (bash: `stdin_redir` is a
             // plain global the fork copies). The one-shot is not inherited: it
@@ -8701,7 +8758,7 @@ impl Shell {
                 // which has no OS handle to give the child and so is piped and
                 // drained after the spawn like any other captured stream.
                 let n = redir.stdout_to_fd.unwrap_or(0);
-                match self.open_write_fds.get(&n) {
+                match self.write_fd_for(n, redir) {
                     Some(WriteFd::Capture(sink)) => {
                         cmd.stdout(Stdio::piped());
                         stdout_capture_fd = Some(sink.clone());
@@ -8716,7 +8773,12 @@ impl Shell {
                             return;
                         }
                     },
-                    None => {
+                    // fd 0 under a plain `< file` is open for reading only.
+                    // bash hands the child that description and lets the child's
+                    // own write fail; we cannot forge such a descriptor on every
+                    // host, so the shell refuses the redirect — same status and
+                    // stream, different wording (TD-OILS-FD0-WRITE).
+                    Some(WriteFd::ReadOnly) | None => {
                         self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                         self.last_status = 1;
                         return;
@@ -8742,6 +8804,13 @@ impl Shell {
                     // A runtime `exec > file` inside a capture/pipe binding
                     // rebound fd 1 out from under it.
                     match w {
+                        // `exec 1>&0` onto a read-only fd 0: see the `>&N` case
+                        // above — the child gets no descriptor it could write to.
+                        WriteFd::ReadOnly => {
+                            self.errln(&format!("{}0: Bad file descriptor", self.err_prefix()));
+                            self.last_status = 1;
+                            return;
+                        }
                         WriteFd::Capture(sink) => {
                             // `exec 1>&N` where fd N was dup'd from an *outer*
                             // capture: no OS handle, so pipe and drain.
@@ -8780,6 +8849,11 @@ impl Shell {
                     // Persistent `exec > file`: the child's fd 1 is the file (a
                     // dup of the shared handle, so it writes at the live offset).
                     match w {
+                        WriteFd::ReadOnly => {
+                            self.errln(&format!("{}0: Bad file descriptor", self.err_prefix()));
+                            self.last_status = 1;
+                            return;
+                        }
                         WriteFd::Capture(sink) => {
                             let sink = sink.clone();
                             cmd.stdout(Stdio::piped());
@@ -8816,7 +8890,7 @@ impl Shell {
         if let Some(n) = redir.stderr_to_fd {
             // `cmd 2>&N` (N ≥ 3): the child's fd 2 is a user-space write fd —
             // piped and drained when that fd names a capture, as for fd 1 above.
-            match self.open_write_fds.get(&n) {
+            match self.write_fd_for(n, redir) {
                 Some(WriteFd::Capture(sink)) => {
                     cmd.stderr(Stdio::piped());
                     stderr_capture = Some(sink.clone());
@@ -8831,6 +8905,13 @@ impl Shell {
                         return;
                     }
                 },
+                // `2>&0` onto a read-only fd 0: every write fails and there is
+                // nowhere to report it, so the child's diagnostics are lost.
+                // bash behaves identically — `ls /nosuch 2>&0 < f` prints
+                // nothing and still exits 2.
+                Some(WriteFd::ReadOnly) => {
+                    cmd.stderr(Stdio::null());
+                }
                 None => {
                     self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                     self.last_status = 1;
@@ -8903,8 +8984,14 @@ impl Shell {
                                 return;
                             }
                         },
+                        Some(WriteFd::ReadOnly) => {
+                            cmd.stderr(Stdio::null());
+                        }
                         None => {}
                     }
+                }
+                Some(StderrTarget::Discard) => {
+                    cmd.stderr(Stdio::null());
                 }
                 Some(StderrTarget::File(f)) => match f.try_clone() {
                     Ok(fc) => {
@@ -9379,6 +9466,9 @@ impl Shell {
                     .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
                 if fd == 0 {
                     self.exec_stdin = Some(file_input(f));
+                    // `exec 0< f` reopens fd 0 read-only, dropping any write
+                    // half an earlier `exec 0<> other` had installed.
+                    self.exec_stdin_write = None;
                 } else if fd >= 3 {
                     self.open_fds.insert(fd, file_input(f));
                     self.open_write_fds.remove(&fd);
@@ -9394,12 +9484,15 @@ impl Shell {
                 }
                 let (rd, wr) = open_rw_pair(&self.cwd, &path)
                     .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
-                // Only fd ≥ 3 has both a read and a write table, so a standard
-                // fd keeps the half its direction names: fd 0 the read half
-                // (`>&0` has nowhere to resolve — TD-OILS-FD0-WRITE), fds 1 and
-                // 2 the write half. The other half is dropped, closing it.
+                // fd 0 and fd ≥ 3 keep *both* halves — one open, two duplicates,
+                // one shared offset — so `exec 0<> f; read a; echo x >&0`
+                // overwrites from where the read stopped. fds 1 and 2 have only
+                // a write table, so their read half is dropped (closing it).
                 match fd {
-                    0 => self.exec_stdin = Some(rd),
+                    0 => {
+                        self.exec_stdin = Some(rd);
+                        self.exec_stdin_write = Some(wr);
+                    }
                     1 => self.exec_stdout = Some(WriteFd::File(wr)),
                     2 => self.exec_stderr = Some(WriteFd::File(wr)),
                     _ => {
@@ -9418,6 +9511,7 @@ impl Shell {
                 };
                 if fd == 0 {
                     self.exec_stdin = Some(bytes_input(bytes));
+                    self.exec_stdin_write = None;
                 } else if fd >= 3 {
                     self.open_fds.insert(fd, bytes_input(bytes));
                     self.open_write_fds.remove(&fd);
@@ -9551,6 +9645,7 @@ impl Shell {
             // `N<&-`: close the input descriptor.
             if fd == 0 {
                 self.exec_stdin = None;
+                self.exec_stdin_write = None;
             } else {
                 self.open_fds.remove(&fd);
                 self.open_write_fds.remove(&fd);
@@ -9563,6 +9658,11 @@ impl Shell {
             let cloned = self.clone_input_fd(n)?;
             if fd == 0 {
                 self.exec_stdin = Some(cloned);
+                // The dup copies the *input* table only, so fd 0 comes out
+                // read-only even when fd N was opened `<>`. Carrying the write
+                // half across would need the two tables joined; see
+                // known-issues TD-OILS-FD0-WRITE.
+                self.exec_stdin_write = None;
             } else {
                 self.open_fds.insert(fd, cloned);
                 self.open_write_fds.remove(&fd);
@@ -9675,7 +9775,7 @@ impl Shell {
             return false;
         }
         if let Some(n) = p.stderr_to_fd
-            && let Some(w) = self.open_write_fds.get(&n)
+            && let Some(w) = self.write_fd_for(n, p)
         {
             self.stderr_stack.push(w.as_stderr_target());
             return true;
@@ -9784,11 +9884,12 @@ impl Shell {
                     if fd == 0 {
                         // Connect the file to stdin, reading from offset 0 (a
                         // freshly created file is therefore at immediate EOF,
-                        // matching bash). Writing to fd 0 is not modelled at all
-                        // — `>&0` has nowhere to resolve to (TD-OILS-FD0-WRITE)
-                        // — so the write half is dropped.
-                        drop(wr);
+                        // matching bash). The write half is kept so `>&0` can
+                        // resolve to it — the two are duplicates of one
+                        // descriptor, so a `read` and a following `echo >&0`
+                        // continue from the same position.
                         plan.stdin = Some(rd);
+                        plan.stdin_write = Some(wr);
                         plan.stdin_data = None;
                     } else if fd >= 3 {
                         // `{fd}<> file`: a read+write descriptor, opened here so
@@ -9990,15 +10091,17 @@ impl Shell {
         } else if fd >= 3 && target == "-" {
             // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
             plan.extra_fds.push((fd, ExtraFdOp::Close));
-        } else if fd >= 3 && (target == "1" || target == "2") {
-            // `exec 3>&1` / `exec 3>&2`: alias a user-space write descriptor to
-            // a standard fd. Consumed only by `exec` (and the scoped
-            // compound-command path), which snapshots fd 1 / fd 2's current sink
-            // into `open_write_fds[fd]`.
-            let n = if target == "1" { 1 } else { 2 };
+        } else if fd >= 3 && matches!(target, "0" | "1" | "2") {
+            // `exec 3>&1` / `exec 3>&2` / `exec 3>&0`: alias a user-space write
+            // descriptor to a standard fd. Consumed only by `exec` (and the
+            // scoped compound-command path), which snapshots that fd's current
+            // sink into `open_write_fds[fd]`. Aliasing fd 0 is legal even when
+            // fd 0 is read-only: bash's dup succeeds, and it is the later
+            // *write* through fd 3 that reports `EBADF`.
+            let n = target.parse::<i32>().unwrap_or(1);
             plan.extra_fds.push((fd, ExtraFdOp::AliasStd(n)));
         } else if let Ok(n) = target.parse::<i32>()
-            && n >= 3
+            && (n >= 3 || n == 0)
         {
             // `M>&N` with N ≥ 3: duplicate fd M onto a user-space write
             // descriptor (`echo … >&3`, `cmd 2>&3`). Routed to
@@ -10013,7 +10116,10 @@ impl Shell {
             let staged_write = plan.extra_fds.iter().any(|(f, op)| {
                 *f == n && matches!(op, ExtraFdOp::OutputFile(..) | ExtraFdOp::AliasStd(_))
             });
-            if !self.open_write_fds.contains_key(&n) && !staged_write {
+            // fd 0 is always open, so `>&0` is always a valid redirect; whether
+            // it is *writable* is settled at write time (see
+            // [`Shell::stdin_write_fd`]).
+            if n != 0 && !self.open_write_fds.contains_key(&n) && !staged_write {
                 return Err(format!(
                     "{}: Bad file descriptor",
                     crate::unparse::word_src(&r.target)
@@ -10210,6 +10316,8 @@ impl Shell {
             // `Ok(None)` on failure: a pathological closed std fd, which callers
             // resolve back to the real std fd.
             1 | 2 => Ok(self.alias_std_write_fd(n, out).ok()),
+            // fd 0 is always open; only its access mode is in question.
+            0 => Ok(Some(self.ambient_stdin_write_fd())),
             _ => match self.open_write_fds.get(&n) {
                 Some(f) => Ok(Some(f.clone())),
                 None => Err(n),
@@ -12250,7 +12358,7 @@ impl Shell {
                     pushed_stderr = true;
                 }
             } else if let Some(n) = redir.stderr_to_fd {
-                if let Some(w) = self.open_write_fds.get(&n) {
+                if let Some(w) = self.write_fd_for(n, redir) {
                     self.stderr_stack.push(w.as_stderr_target());
                     pushed_stderr = true;
                 } else {
@@ -12446,8 +12554,12 @@ impl Shell {
                     // successive input from one shared position.
                     if let Some(data) = &redir.stdin_data {
                         self.exec_stdin = Some(bytes_input(data.clone()));
+                        self.exec_stdin_write = None;
                     } else if let Some(c) = &redir.stdin {
                         self.exec_stdin = Some(Arc::clone(c));
+                        // Present only for `exec 0<> file`; a plain `exec < file`
+                        // leaves fd 0 read-only.
+                        self.exec_stdin_write = redir.stdin_write.clone();
                     }
                     // fd 1 (`> file` / `>> file`): open the file once and keep
                     // the shared handle, so later commands accumulate into it at
@@ -12489,8 +12601,8 @@ impl Shell {
                     // (typically one saved earlier by `exec N>&1`). An unopened
                     // fd is a status-1 `N: Bad file descriptor`, as in bash.
                     if rc == 0 && let Some(n) = redir.stdout_to_fd {
-                        match self.open_write_fds.get(&n) {
-                            Some(w) => self.exec_stdout = Some(w.clone()),
+                        match self.write_fd_for(n, redir) {
+                            Some(w) => self.exec_stdout = Some(w),
                             None => {
                                 self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                                 rc = 1;
@@ -12498,8 +12610,8 @@ impl Shell {
                         }
                     }
                     if rc == 0 && let Some(n) = redir.stderr_to_fd {
-                        match self.open_write_fds.get(&n) {
-                            Some(w) => self.exec_stderr = Some(w.clone()),
+                        match self.write_fd_for(n, redir) {
+                            Some(w) => self.exec_stderr = Some(w),
                             None => {
                                 self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
                                 rc = 1;
@@ -20310,7 +20422,7 @@ impl Shell {
         if let Some(n) = redir.stdout_to_fd
             && redir.stdout.is_none()
         {
-            return self.write_to_fd(n, bytes);
+            return self.write_to_fd(n, redir, bytes);
         }
         // `1>&2` on the builtin (e.g. `echo msg >&2`): the builtin's stdout is
         // the current stderr sink, not the ambient stdout.
@@ -20385,6 +20497,11 @@ impl Shell {
     /// dup-at-exec-time semantics), so a later `exec > other` does not retarget
     /// the alias.
     fn snapshot_std_fd(&self, n: i32) -> io::Result<WriteFd> {
+        // fd 0 has no "real terminal handle" fallback: it is writable only when
+        // an `<>` open gave it a write half, and otherwise `EBADF` on write.
+        if n == 0 {
+            return Ok(self.ambient_stdin_write_fd());
+        }
         let redirected = if n == 1 {
             self.exec_stdout.as_ref()
         } else {
@@ -20417,13 +20534,53 @@ impl Shell {
         }
     }
 
+    /// fd 0 seen as a *write* descriptor, for `>&0` / `2>&0` / `exec 3>&0`.
+    ///
+    /// Only an `O_RDWR` open (`<> file`) gives fd 0 a write half; under a plain
+    /// `< file`, a here-document or a pipe the descriptor is open for reading
+    /// only, which POSIX answers with `EBADF` on write — hence
+    /// [`WriteFd::ReadOnly`] rather than "no such descriptor". `redir` decides
+    /// which fd 0 is meant: a command that rebinds fd 0 itself supplies its own
+    /// access mode, otherwise the ambient one applies.
+    fn stdin_write_fd(&self, redir: &RedirPlan) -> WriteFd {
+        if redir.rebinds_stdin() {
+            match redir.stdin_write.as_ref() {
+                Some(f) => WriteFd::File(Arc::clone(f)),
+                None => WriteFd::ReadOnly,
+            }
+        } else {
+            self.ambient_stdin_write_fd()
+        }
+    }
+
+    /// The *ambient* fd 0 as a write descriptor — what `exec 3>&0` snapshots,
+    /// and what a command that does not rebind fd 0 itself inherits.
+    fn ambient_stdin_write_fd(&self) -> WriteFd {
+        match self.exec_stdin_write.as_ref() {
+            Some(f) => WriteFd::File(Arc::clone(f)),
+            None => WriteFd::ReadOnly,
+        }
+    }
+
+    /// The descriptor `>&N` / `2>&N` names, for any N a redirect may mention:
+    /// fd 0 via [`Shell::stdin_write_fd`], fd ≥ 3 from the `exec`-installed
+    /// table. `None` is "no such descriptor" (bash's `N: Bad file descriptor`),
+    /// which fd 0 never is.
+    fn write_fd_for(&self, n: i32, redir: &RedirPlan) -> Option<WriteFd> {
+        if n == 0 {
+            Some(self.stdin_write_fd(redir))
+        } else {
+            self.open_write_fds.get(&n).cloned()
+        }
+    }
+
     /// Write bytes to a user-space write descriptor (`>&N`, N ≥ 3) opened by
-    /// `exec N> file`. An unopened fd is a status-1 `N: bad file descriptor`
-    /// (bash).
-    fn write_to_fd(&mut self, fd: i32, bytes: &[u8]) -> i32 {
-        match self.open_write_fds.get(&fd) {
+    /// `exec N> file`, or to fd 0's write half (`>&0`). An unopened fd is a
+    /// status-1 `N: bad file descriptor` (bash).
+    fn write_to_fd(&mut self, fd: i32, redir: &RedirPlan, bytes: &[u8]) -> i32 {
+        match self.write_fd_for(fd, redir) {
             Some(w) => {
-                let r = write_to_write_fd(w, bytes);
+                let r = write_to_write_fd(&w, bytes);
                 self.finish_write(r)
             }
             None => {
@@ -20509,6 +20666,9 @@ impl Shell {
             Some(StderrTarget::Buffer(b)) => {
                 lock_capture(b).extend_from_slice(bytes);
             }
+            // fd 2 names a descriptor that cannot be written to; the diagnostic
+            // is lost, exactly as it is under bash.
+            Some(StderrTarget::Discard) => {}
             Some(StderrTarget::WriteFd(f)) => {
                 let _ = (&**f).write_all(bytes);
             }
@@ -20714,7 +20874,7 @@ impl Shell {
             }
             // On open failure, fall through to the enclosing sink.
         } else if let Some(n) = redir.stderr_to_fd {
-            let _ = self.write_to_fd(n, &bytes);
+            let _ = self.write_to_fd(n, redir, &bytes);
             return;
         } else if redir.stderr_to_stdout {
             // fd 2 follows fd 1: route to this command's stdout destination.
@@ -20824,6 +20984,7 @@ impl Shell {
     fn child_stdio_for_stderr(&self) -> Result<Stdio, String> {
         match self.stderr_stack.last() {
             None | Some(StderrTarget::Buffer(_)) => Ok(Stdio::inherit()),
+            Some(StderrTarget::Discard) => Ok(Stdio::null()),
             Some(StderrTarget::File(f)) => f
                 .try_clone()
                 .map(Stdio::from)
@@ -21172,6 +21333,12 @@ struct RedirPlan {
     /// over and over, and re-opening for a child would give it an offset of
     /// its own.
     stdin: Option<InputFd>,
+    /// The *write* half of a `<> file` on fd 0 — a duplicate of the very
+    /// descriptor in `stdin`, so the two share one offset. Present only for
+    /// `<>`; a plain `< file`, a here-document and a pipe all leave fd 0 open
+    /// for reading only, which is what makes `>&0` fail with `EBADF` there.
+    /// See [`Shell::stdin_write_fd`].
+    stdin_write: Option<Arc<File>>,
     /// In-memory stdin bytes from a here-document / here-string (takes
     /// precedence over `stdin` and the inherited pipeline input).
     stdin_data: Option<Vec<u8>>,
@@ -21224,6 +21391,14 @@ impl RedirPlan {
             && self.stdout_to_fd.is_none()
             && self.stderr_to_fd.is_none()
             && self.extra_fds.is_empty()
+    }
+
+    /// Whether this command's own redirections rebind fd 0. Such a command
+    /// decides fd 0's *access mode* for itself (see [`Shell::stdin_write_fd`]):
+    /// `{ echo x >&0; } < f` writes to the `< f` descriptor, not to an ambient
+    /// `exec 0<> other`.
+    fn rebinds_stdin(&self) -> bool {
+        self.stdin.is_some() || self.stdin_data.is_some() || self.stdin_from_fd.is_some()
     }
 }
 
@@ -38852,6 +39027,115 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         assert_eq!(out, "st=1 z=[]\n");
         assert_eq!(disk, "new\n");
+    }
+
+    #[test]
+    fn write_to_a_read_only_fd0_fails_and_names_the_builtin() {
+        // `>&0` is a write to fd 0 like any other descriptor. Under a plain
+        // `< file` the description is open for reading only, so POSIX answers
+        // the write with `EBADF` — reported against the *builtin* that produced
+        // the bytes, with status 1 and the file left untouched.
+        let (out, disk) =
+            run_over_seeded_file("l1\nl2\n", "{ echo X >&0; } < {FILE} 2>&1; echo \"st=$?\"");
+        assert!(
+            out.contains("echo: write error: Bad file descriptor"),
+            "expected an EBADF write error naming `echo`, got {out:?}"
+        );
+        assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
+        assert_eq!(disk, "l1\nl2\n");
+        // The name comes from the builtin actually running, not from `echo`.
+        let (out, _) = run_over_seeded_file("l1\n", "{ printf 'P\\n' >&0; } < {FILE} 2>&1");
+        assert!(
+            out.contains("printf: write error: Bad file descriptor"),
+            "expected the error to name `printf`, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn write_to_a_read_only_fd0_fails_for_heredocs_and_pipes_too() {
+        // A here-document is spooled to a read-only descriptor and a pipe's
+        // read end is likewise write-less, so both behave as `< file` does.
+        // (The property is of the *description*, not of the path it came from.)
+        let (out, _) = run("{ echo X >&0; } <<'H' 2>&1\nh1\nH\necho \"st=$?\"");
+        assert!(
+            out.contains("echo: write error: Bad file descriptor"),
+            "here-doc stdin should be read-only, got {out:?}"
+        );
+        assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
+        let (out, _) = run("echo p1 | { echo X >&0; } 2>&1; echo \"st=$?\"");
+        assert!(
+            out.contains("echo: write error: Bad file descriptor"),
+            "pipe stdin should be read-only, got {out:?}"
+        );
+        assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
+    }
+
+    #[test]
+    fn read_write_fd0_is_writable_and_shares_the_read_position() {
+        // `<>` opens fd 0 for both directions, so `>&0` succeeds — and, being
+        // one description, it writes at exactly the position the last read
+        // left, which is what makes `<>` an in-place patch.
+        let (_, disk) = run_over_seeded_file("l1\nl2\nl3\n", "{ read a; echo XX >&0; } <> {FILE}");
+        assert_eq!(disk, "l1\nXX\nl3\n");
+        // Two writes in a row advance the shared offset between them.
+        let (_, disk) =
+            run_over_seeded_file("0123456789\n", "{ echo A >&0; echo B >&0; } <> {FILE}");
+        assert_eq!(disk, "A\nB\n456789\n");
+        // ... and the same holds for a persistent `exec 0<>`.
+        let (_, disk) =
+            run_over_seeded_file("abcdefghij\n", "exec 0<> {FILE}; echo YY >&0; exec 0<&-");
+        assert_eq!(disk, "YY\ndefghij\n");
+    }
+
+    #[test]
+    fn a_dup_of_fd0_inherits_its_access_mode() {
+        // The *dup* always succeeds — fd 0 is open — so the failure surfaces
+        // only on the later write through the new descriptor, exactly where
+        // bash puts it.
+        let (out, disk) = run_over_seeded_file(
+            "l1\nl2\n",
+            "{ exec 3>&0; echo Z >&3; } < {FILE} 2>&1; echo \"st=$?\"",
+        );
+        assert!(
+            out.contains("echo: write error: Bad file descriptor"),
+            "a dup of a read-only fd 0 must stay read-only, got {out:?}"
+        );
+        assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
+        assert_eq!(disk, "l1\nl2\n");
+        // Over `<>` the dup is writable, and shares the one offset.
+        let (out, disk) =
+            run_over_seeded_file("abcdefghij\n", "{ exec 3>&0; echo Q >&3; } <> {FILE} 2>&1");
+        assert_eq!(out, "");
+        assert_eq!(disk, "Q\ncdefghij\n");
+    }
+
+    #[test]
+    fn a_diagnostic_sent_to_a_read_only_fd0_is_dropped() {
+        // `2>&0` on a read-only fd 0 leaves a diagnostic with nowhere to go.
+        // There is no second stderr to report *that* failure on, so the bytes
+        // are simply lost and only the exit status survives.
+        let (out, _) = run_over_seeded_file(
+            "l1\n",
+            "{ { cd /nosuchdir 2>&0; } < {FILE}; echo \"st=$?\"; } 2>&1",
+        );
+        assert_eq!(out, "st=1\n");
+    }
+
+    #[test]
+    fn reopening_fd0_read_only_drops_the_write_half() {
+        // The write half travels with the open it came from: once fd 0 is
+        // re-bound by a read-only open, `>&0` is `EBADF` again and the file
+        // the `<>` had opened is left alone.
+        let (out, disk) = run_over_seeded_file(
+            "abcdefghij\n",
+            "exec 0<> {FILE}; exec 0< {FILE}; echo W >&0 2>&1; echo \"st=$?\"; exec 0<&-",
+        );
+        assert!(
+            out.contains("echo: write error: Bad file descriptor"),
+            "the re-opened fd 0 must be read-only, got {out:?}"
+        );
+        assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
+        assert_eq!(disk, "abcdefghij\n");
     }
 
     #[test]

@@ -165,6 +165,12 @@ impl EParser {
     }
 
     fn parse(&mut self) -> Result<Node, EreError> {
+        // bash rejects an empty `=~` right-hand side outright — `[[ x =~ "" ]]`
+        // is status 2, not a match on the empty string. An empty *sub*expression
+        // is still fine: `[[ x =~ () ]]` matches.
+        if self.chars.is_empty() {
+            return Err(EreError("empty regex".into()));
+        }
         let node = self.parse_alt()?;
         if self.pos != self.chars.len() {
             // A stray `)` (or other unconsumed input) is a syntax error.
@@ -185,85 +191,121 @@ impl EParser {
         if branches.len() == 1 {
             Ok(branches.pop().unwrap_or(Node::Empty))
         } else {
+            // `a|`, `|a`, `(a||b)`: glibc requires every branch of an
+            // alternation to be a real expression, even though a wholly empty
+            // pattern between parens (`()`) is fine.
+            if branches.iter().any(|b| matches!(b, Node::Empty)) {
+                return Err(EreError("empty alternation branch in regex".into()));
+            }
             Ok(Node::Alt(branches))
         }
     }
 
+    /// Parse a run of repeated atoms up to `|`, `)` or the end of the pattern.
+    ///
+    /// A `{0}` / `{0,0}` interval *deletes* the atom it follows rather than
+    /// repeating it zero times, and glibc then complains if that leaves the run
+    /// with nothing in it — which is why `a{0}` and `(a{0})` are errors while
+    /// `a{0}b`, `^a{0}` and the explicitly-empty `()` are not. The distinction
+    /// is how the run was written, not what it ends up matching, so it has to be
+    /// made here: a run that started with nothing is fine, a run that was
+    /// emptied is not.
     fn parse_concat(&mut self) -> Result<Node, EreError> {
         let mut parts = Vec::new();
+        let mut deleted = false;
         while let Some(c) = self.peek() {
             if c == '|' || c == ')' {
                 break;
             }
-            parts.push(self.parse_repeat()?);
+            match self.parse_repeat()? {
+                Some(n) => parts.push(n),
+                None => deleted = true,
+            }
         }
         match parts.len() {
+            0 if deleted => Err(EreError("nothing to repeat in regex".into())),
             0 => Ok(Node::Empty),
             1 => Ok(parts.pop().unwrap_or(Node::Empty)),
             _ => Ok(Node::Concat(parts)),
         }
     }
 
-    fn parse_repeat(&mut self) -> Result<Node, EreError> {
+    /// Parse one atom and its quantifier, if any. `Ok(None)` means the atom was
+    /// deleted by a zero-count interval — see [`Self::parse_concat`].
+    fn parse_repeat(&mut self) -> Result<Option<Node>, EreError> {
+        // A quantifier has to have something to quantify. glibc rejects `*a`,
+        // `?a`, `{2}a` and — because an alternation branch or a group starts a
+        // fresh expression — `a|*b` and `(*a)` too.
+        if is_quantifier_start(self.peek()) {
+            return Err(EreError("nothing to repeat in regex".into()));
+        }
         let atom = self.parse_atom()?;
-        let (min, max) = match self.peek() {
-            Some('*') => {
-                self.pos += 1;
-                (0, None)
-            }
-            Some('+') => {
-                self.pos += 1;
-                (1, None)
-            }
-            Some('?') => {
-                self.pos += 1;
-                (0, Some(1))
-            }
-            Some('{') => match self.try_parse_brace()? {
-                Some(mm) => mm,
-                // An invalid `{…}` is a literal `{` (POSIX/GNU behavior): leave
-                // it for the next atom and return the bare atom now.
-                None => return Ok(atom),
-            },
-            _ => return Ok(atom),
+        let Some((min, max)) = self.parse_quantifier()? else {
+            return Ok(Some(atom));
         };
-        Ok(Node::Repeat {
+        // `^` is an assertion, not an atom, so glibc reports `^*` and `a^*b`
+        // the same way it reports a leading `*`. `$` it does accept.
+        if matches!(atom, Node::Start) {
+            return Err(EreError("nothing to repeat in regex".into()));
+        }
+        // One quantifier per atom: `a**`, `a*?`, `a{1}*` and `a*{1}` are all
+        // errors, not a repeat of a repeat.
+        if is_quantifier_start(self.peek()) {
+            return Err(EreError("repeated quantifier in regex".into()));
+        }
+        if max == Some(0) {
+            return Ok(None);
+        }
+        Ok(Some(Node::Repeat {
             node: Box::new(atom),
             min,
             max,
-        })
+        }))
     }
 
-    /// Try to parse a `{m}` / `{m,}` / `{m,n}` interval at the cursor. Returns
-    /// `Ok(None)` (and does not consume) if the braces don't form a valid
-    /// interval, so the caller can treat `{` as a literal.
-    fn try_parse_brace(&mut self) -> Result<Option<(usize, Option<usize>)>, EreError> {
-        let start = self.pos;
+    /// Consume a `*` / `+` / `?` / `{m,n}` quantifier if one is at the cursor.
+    fn parse_quantifier(&mut self) -> Result<Option<(usize, Option<usize>)>, EreError> {
+        match self.peek() {
+            Some('*') => {
+                self.pos += 1;
+                Ok(Some((0, None)))
+            }
+            Some('+') => {
+                self.pos += 1;
+                Ok(Some((1, None)))
+            }
+            Some('?') => {
+                self.pos += 1;
+                Ok(Some((0, Some(1))))
+            }
+            Some('{') => self.parse_brace().map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// Parse a `{m}` / `{m,}` / `{m,n}` interval at the cursor.
+    ///
+    /// An unescaped `{` that does not open a well-formed interval is an error,
+    /// not a literal brace: glibc rejects `a{b`, `a{1`, `a{}`, `a{,3}` and
+    /// `a{1,2,3}` outright, and only `\{` or `[{]` gets you a literal one.
+    fn parse_brace(&mut self) -> Result<(usize, Option<usize>), EreError> {
+        let bad = || EreError("invalid interval in regex".into());
         self.pos += 1; // consume '{'
-        let min = self.parse_int();
-        let Some(min) = min else {
-            self.pos = start;
-            return Ok(None);
+        let Some(min) = self.parse_int() else {
+            return Err(bad());
         };
         let max = if self.peek() == Some(',') {
             self.pos += 1;
             if self.peek() == Some('}') {
                 None // `{m,}`
             } else {
-                match self.parse_int() {
-                    Some(n) => Some(n),
-                    None => {
-                        self.pos = start;
-                        return Ok(None);
-                    }
-                }
+                Some(self.parse_int().ok_or_else(bad)?)
             }
         } else {
             Some(min) // `{m}`
         };
         if self.peek() != Some('}') {
-            self.pos = start;
-            return Ok(None);
+            return Err(bad());
         }
         self.pos += 1; // consume '}'
         if min > MAX_REPEAT || max.is_some_and(|n| n > MAX_REPEAT) {
@@ -274,7 +316,7 @@ impl EParser {
         {
             return Err(EreError(format!("invalid interval {{{min},{n}}}")));
         }
-        Ok(Some((min, max)))
+        Ok((min, max))
     }
 
     fn parse_int(&mut self) -> Option<usize> {
@@ -323,6 +365,11 @@ impl EParser {
                 self.pos += 1;
                 Ok(Node::Lit(unescape(e)))
             }
+            // Only `parse_quantifier` may consume a `{`, and `parse_repeat`
+            // rejects one that reaches an atom slot, so this is unreachable —
+            // but a literal brace here would silently resurrect the lenient
+            // reading glibc does not have.
+            Some('{') => Err(EreError("invalid interval in regex".into())),
             Some(c) => {
                 self.pos += 1;
                 Ok(Node::Lit(c))
@@ -414,6 +461,12 @@ impl EParser {
         self.pos += 1;
         Ok(c)
     }
+}
+
+/// Whether a character begins a quantifier. `{` counts even when the braces
+/// turn out to be malformed — that is an error either way, never a literal.
+fn is_quantifier_start(c: Option<char>) -> bool {
+    matches!(c, Some('*' | '+' | '?' | '{'))
 }
 
 /// Map an escaped character to the literal it denotes (`\n` → newline, etc.).
@@ -838,8 +891,66 @@ mod tests {
         assert!(!m("^a{3}$", "aa"));
         assert!(m("^a{2,}$", "aaaaa"));
         assert!(!m("^a{2,}$", "a"));
-        // An invalid interval is a literal brace.
-        assert!(m("a{b", "a{b"));
+        // A zero-count interval deletes the atom rather than repeating it.
+        assert!(m("^a{0}b$", "b"));
+        assert!(m("^a{0,0}b$", "b"));
+    }
+
+    /// glibc — which is what bash's `=~` runs on — rejects a good deal that a
+    /// lenient engine would happily accept. Everything here is measured against
+    /// bash 5.2: each pattern makes `[[ x =~ … ]]` exit 2.
+    #[test]
+    fn rejects_what_glibc_rejects() {
+        let bad = |pat: &str| {
+            assert!(Regex::new(pat).is_err(), "expected {pat} to be rejected");
+        };
+        // A `{` that opens no well-formed interval is an error, not a literal.
+        bad("a{b");
+        bad("a{1");
+        bad("a{}");
+        bad("a{,3}");
+        bad("a{1,2,3}");
+        bad("{b");
+        // Only a backslash or a bracket expression gets a literal brace.
+        assert!(m("^a\\{b$", "a{b"));
+        assert!(m("^a[{]b$", "a{b"));
+        // A quantifier needs an atom before it — in every context.
+        bad("*a");
+        bad("+a");
+        bad("?a");
+        bad("{2}a");
+        bad("(*a)");
+        bad("a|*b");
+        // `^` is an assertion, not an atom; `$` glibc does let you quantify.
+        bad("^*a");
+        bad("a^*b");
+        assert!(Regex::new("a$*").is_ok());
+        // One quantifier per atom.
+        bad("a**");
+        bad("a*+");
+        bad("a*?");
+        bad("a?+");
+        bad("a{1}*");
+        bad("a*{1}");
+        bad("a{1}{2}");
+        bad("(a)*+");
+        // Every branch of an alternation has to be a real expression …
+        bad("|a");
+        bad("a|");
+        bad("(a|)");
+        bad("(|a)");
+        bad("(a||b)");
+        // … and a run emptied by a zero-count interval counts as no expression,
+        // even though an explicitly empty one is fine.
+        bad("a{0}");
+        bad("(a{0})");
+        bad("a{0}|b");
+        bad("a{0}b{0}");
+        assert!(Regex::new("()").is_ok());
+        assert!(Regex::new("^a{0}").is_ok());
+        assert!(Regex::new("a{0}$").is_ok());
+        // An empty pattern is not an empty match.
+        bad("");
     }
 
     #[test]

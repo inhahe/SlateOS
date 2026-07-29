@@ -2623,30 +2623,37 @@ parse unit (otherwise the whole line is a parse error either way — see TD-OILS
 (`RedirectOp::ReadWrite`), covering `<> file` (fd 0 → stdin), `1<>`/`2<>`
 (no-truncate write), and `exec {fd}<> file` (persistent rw descriptor).
 The *write* side is fully faithful — writes land at offset 0 and overwrite
-in place, matching bash (verified via `od`). The *read* side, however, is a
-**byte snapshot** taken at open time (osh's fd model stores read fds as
-`io::Cursor<Vec<u8>>` in `open_fds` and write fds as live `File`s in
-`open_write_fds` — two independent handles). A real `O_RDWR` descriptor
-shares ONE OS file offset between reads and writes, so in bash a `read`
-after a `>&N` write on the same `<>` fd continues from the post-write
-position; in osh the read cursor is independent of the write handle and does
-not see writes made through the same fd after open.
+in place, matching bash (verified via `od`). The read and write halves are,
+however, **two independent handles**: `open_fds` holds the read side and
+`open_write_fds` the write side, and since 2026-07-28 the read side is a real
+open `File` (`InputSrc::File`, see TD-OILS-PIPE-HEAD-CURSOR-DRAIN) rather than
+a byte snapshot — but it is a *separate* open of the path, with its own
+offset. A real `O_RDWR` descriptor shares ONE OS file offset between reads and
+writes, so in bash a `read` after a `>&N` write on the same `<>` fd continues
+from the post-write position; in osh the read handle's position is independent
+of the write handle's.
+
+(The 2026-07-28 shared-descriptor work fixed the *other* half of this — reads
+through a `<>` fd now share one offset with children, subshells and pipeline
+stages, exactly as `< file` does. What remains is only the read↔write split.)
 
 **Where:** `userspace/oils/src/interp.rs` — `ExtraFdOp::ReadWriteFile`
 (install in `install_extra_fds`, exec loop, and `apply_persistent_redirect`),
 `open_rw` helper, and the `RedirectOp::ReadWrite` arm of `resolve_redirects`.
 
 **Repro:** `exec 3<>f; echo AB >&3; read -u 3 x; echo "[$x]"` — bash reads
-from just past "AB\n" (EOF → empty); osh's read cursor still starts at the
-pre-write snapshot. This is unusual in real scripts (interleaved read+write
-on one `<>` fd), so it is low priority.
+from just past "AB\n" (EOF → empty); osh's read handle still starts at 0. This
+is unusual in real scripts (interleaved read+write on one `<>` fd), so it is
+low priority.
 
-**Proper fix:** unify osh's fd model so a single descriptor can be backed by
-one live `File` (or a shared seek position) usable for both reading and
-writing, rather than the split snapshot/live-handle representation. That is a
-broader fd-model refactor touching `open_fds`/`open_write_fds` and every
-builtin that reads/writes user-space fds — deferred until there is a concrete
-need beyond `<>`.
+**Proper fix:** unify osh's fd model so a single descriptor is backed by one
+`File` opened `O_RDWR` and usable for both directions, rather than the split
+two-handle representation. `InputSrc::File` already carries a live `File` with
+faithful seek/read-ahead accounting (`FileInput::sync`), so the remaining work
+is to let one entry appear in both `open_fds` and `open_write_fds` backed by
+the same handle, and to make the write path sync the read buffer first — a
+narrower change than it was, but still touching every builtin that reads or
+writes user-space fds. Deferred until there is a concrete need beyond `<>`.
 
 ### TD-OILS-PRINTF-INTERLEAVE. `printf` error/warning ordering vs stdout — 2026-07-20 — ✅ RESOLVED 2026-07-20
 
@@ -2941,28 +2948,29 @@ runtime would be a band-aid; better to land it whole. Findings below.)
     and `cmd >&N` work with **zero** changes to the write machinery, because
     `>&N` already resolves `open_write_fds` and the whole write path is
     `Arc<File>`-typed (`stdout_file`, `StderrTarget::WriteFd`, external stdio).
-  - *Read end* (`NAME[0]`): the read path is Cursor/byte-clone based
-    throughout (`StdinSrc::Cursor(&RefCell<Cursor>)`, `clone_input_fd` clones
-    bytes, subshell clones snapshot remaining bytes) — a live pipe cannot be
-    pre-buffered. Put live read ends in a **dedicated** table
-    `coproc_read_fds: HashMap<i32, Arc<File>>` (convert `PipeReader`→`File`),
-    consulted only at the canonical read-resolution points, and add a
-    `StdinSrc::Live(RefCell<BufReader<File>>)` variant (handled identically to
-    `StdinSrc::Pipe`, since `File: Read`). Read-resolution points to touch:
-    (a) `read -u N` (interp.rs ~10015-10029, currently reads `open_fds`);
-    (b) the `M<&N` input-dup in `apply_persistent_redirect` `RedirectOp::DupIn`
-    (~4905) and `clone_input_fd` (~4939); (c) the transient per-command
-    `<&N` input-dup path in the `RedirPlan` (`ExtraFdOp`, ~5100-5170 / 6759);
-    (d) external commands inheriting `fd 0 <&N` in `run_external` stdio wiring.
-    Extend `alloc_varfd`/fd allocation (~4749) to also skip `coproc_read_fds`
-    numbers so the three tables never collide, and have `clone_for_subshell`
-    `try_clone` the shared `Arc<File>` (bash: a subshell inherits the coproc
-    fd — a shared OS handle, so `try_clone` is the correct semantics, unlike
-    the byte-snapshot used for buffered fds).
-  - This keeps the 15 buffer-only `open_fds` sites untouched; only the ~4 live
-    read-resolution points + the executor + one `StdinSrc` variant + the write
-    conversion change. A separate live table is a legitimate model (live OS
-    streams are a genuinely different object than replay buffers), not scatter.
+  - *Read end* (`NAME[0]`): **this half is now largely done for free.** The
+    plan above was written when the read path was Cursor/byte-clone based
+    throughout; since 2026-07-28 (TD-OILS-PIPE-HEAD-CURSOR-DRAIN) `open_fds`
+    holds `InputFd = Arc<Mutex<InputSrc>>` where `InputSrc::File` is a **live
+    `File`** with faithful read-ahead accounting, shared — not snapshotted —
+    by `clone_input_fd` (`M<&N`), `clone_for_subshell`, and every child or
+    pipeline stage (via `child_input` → `try_clone`). So the dedicated
+    `coproc_read_fds` table and the extra `StdinSrc::Live` variant are **no
+    longer needed**: convert the parent-side `PipeReader` → `File` (via
+    `OwnedHandle`/`OwnedFd`, cfg-split, same as the write end) and install it
+    as `file_input(f)` in the existing `open_fds`. `read -u N`, `M<&N`, the
+    transient `<&N` `ExtraFdOp::Input` path and `run_external`'s fd-0
+    inheritance then all work unchanged, with the correct shared-handle
+    semantics a subshell inheriting a coproc fd requires.
+  - Two caveats for the live-pipe case specifically: `FileInput::new` probes
+    `stream_position()` and gives a non-seekable source a 1-byte buffer, so a
+    pipe is read unbuffered and never over-reads — correct, but check the
+    cost if a coproc is read in bulk (a `BufRead`-shaped consumer such as
+    `read` is fine; consider a larger buffer plus "never read past a newline"
+    only if profiling shows it matters). And `FileInput::sync`'s seek-back is
+    a no-op on a pipe precisely because nothing is ever buffered ahead.
+  - Remaining surface is therefore just the executor + the write-end
+    conversion; the 15 buffer-only `open_fds` sites stay untouched.
 - **`NAME_PID`:** the body runs as a *thread*, not an OS process, so there is
   no real child pid — assign a synthetic monotonic pid (same limitation osh
   already has for backgrounded shell bodies via `last_bg_pid`). `wait`/`kill`
@@ -7234,15 +7242,25 @@ there is no line boundary left to hang it on. Deliberate: the scoped rule is the
 defensible one, and the divergence needs a redirect scope that changes nothing
 (`0<&0`) followed by a job on the same line.
 
-**Residual 2 — an external command still drains the cursor.** `run_external`
-reads a `Cursor`-backed fd 0 to the end to feed the child, so
-`{ head -n 1 & wait; head -n 1; } < four.txt` prints `l1` where bash prints
-`l1 l2`: the job's `head` consumes the whole snapshot rather than one line. The
-builtin path (`read`) is exact. The proper fix is modelling `< file` as a real
-shared `File` handle rather than a byte snapshot, which is the same underlying
-approximation `Shell::exec_stdin`'s doc records.
+**Residual 2 — an external command still drains the cursor — ✅ CLOSED
+2026-07-28.** `run_external` read a `Cursor`-backed fd 0 to the end to feed the
+child, so `{ head -n 1 & wait; head -n 1; } < four.txt` printed `l1` where bash
+prints `l1 l2`: the job's `head` consumed the whole snapshot rather than one
+line. The builtin path (`read`) was already exact. Fixed by the named proper fix
+— modelling `< file` as a real shared `File` handle rather than a byte snapshot
+— under TD-OILS-PIPE-HEAD-CURSOR-DRAIN, which shares this root cause. The child
+now receives a `try_clone` of the descriptor itself, so it consumes exactly what
+it reads.
 
-### TD-OILS-PIPE-HEAD-CURSOR-DRAIN. A pipeline's head stage drains a `< file` cursor instead of sharing its offset — OPEN 2026-07-28
+**Note on the type names above.** `Fix (2026-07-28)` item 1 describes the shape
+as it was when this entry was written. That refactor was superseded the same day:
+`ByteCursor` is now `InputFd = Arc<Mutex<InputSrc>>` where `InputSrc` is either a
+byte snapshot or a real open `File`, `StdinSrc::Cursor` is `StdinSrc::Fd`,
+`byte_cursor`/`lock_cursor` are `bytes_input`/`lock_input`, and `snapshot_cursor`
+is gone — a subshell clone now *shares* rather than snapshotting, because a
+subshell is a `fork`. See TD-OILS-PIPE-HEAD-CURSOR-DRAIN for the current model.
+
+### TD-OILS-PIPE-HEAD-CURSOR-DRAIN. A pipeline's head stage drains a `< file` cursor instead of sharing its offset — ✅ RESOLVED 2026-07-28
 
 **Where:** `userspace/oils/src/interp.rs` — `pipeline_head_stdin`, the
 `StdinSrc::Cursor` arm (cited from its doc comment).
@@ -7271,6 +7289,45 @@ stage nor an external child has to choose between streaming and sharing.
 
 **Impact.** Narrow: a pipeline head that reads *part* of a redirected input and
 leaves the rest for a later command in the same scope.
+
+**Fix (2026-07-28).** The proper fix above, in full: **an input descriptor is now
+a real shared open file, not a byte snapshot.**
+
+1. **`InputSrc`** replaces the bare `io::Cursor<Vec<u8>>` behind fd 0 and
+   `open_fds`: `enum InputSrc { Bytes(io::Cursor<Vec<u8>>), File(FileInput) }`,
+   shared as `InputFd = Arc<Mutex<InputSrc>>` (the old `ByteCursor`). `< file`,
+   `<> file`, `exec < file` and `exec N< file` all build the `File` variant from
+   one real `File::open` performed when the redirect is applied; only sources
+   with no OS object behind them — a here-document, a here-string, a process
+   substitution's output — stay `Bytes`. `StdinSrc::Cursor` is accordingly
+   `StdinSrc::Fd`, and `snapshot_cursor` is **deleted**: every duplication of an
+   input descriptor now shares, because every one of them corresponds to a
+   `fork`/`dup2` in bash — `M<&N` (`clone_input_fd`), `clone_for_subshell`'s
+   `exec_stdin` and `open_fds`, and `plan.stdin` → `exec_with_redirects`.
+2. **`FileInput` mirrors bash's `sync_buffered_stream`.** Read-ahead is what
+   makes a shared offset hard: a buffered reader that has consumed 4 KiB to
+   return one line leaves the OS position 4 KiB too far for whoever reads next.
+   `FileInput::sync` seeks back over the unconsumed remainder, and is called
+   both by `share()` (before handing out a `try_clone`) and by `Drop` (so a
+   short-lived stage or subshell handle returns its read-ahead). A non-seekable
+   source gets a 1-byte buffer, so there is never a remainder to unwind.
+3. **Children and stages get the descriptor, not the bytes.** `child_input`
+   returns `ChildIn::Handle(File)` for a file-backed source — `run_external`
+   passes it straight to `Stdio::from`, and `pipeline_head_stdin` returns
+   `HeadIn::File` — falling back to `ChildIn::Bytes` (the old writer-thread
+   pipe) only for a snapshot source or a failed `try_clone`. So neither the head
+   stage nor an external child has to choose between streaming and sharing.
+4. **Command substitution shares too.** A `$( … )` never sees the `&StdinSrc`
+   parameter — only `Shell::exec_stdin` — so `exec_with_redirects` now
+   scope-overrides `exec_stdin` as well, symmetric with its existing
+   `exec_stdout`/`exec_stderr` overrides. That is what makes
+   `{ x=$(read a; echo "$a"); read b; } < f` leave `b=r2`.
+
+Covered by `tests/corpus/redirect-shared-input-offset.sh` (new; byte-identical
+to bash 5.2 across builtins, externals, subshells, command substitutions,
+pipeline stages, `exec <`, `exec 3<`, `exec 4<&3`, here-documents, `&` jobs and
+`while read` loops) and five `interp.rs` unit tests
+(`shared_input_offset_*`, `simple_command_input_redirects_are_separate_opens`).
 
 ### TD-OILS-BG-SINK-OUTLIVES-SUBSHELL. A job started inside a `( )` subshell stops holding the enclosing capture open when the subshell ends — RESOLVED 2026-07-28
 

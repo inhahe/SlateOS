@@ -16151,19 +16151,46 @@ impl Shell {
             return 0;
         }
         if store || print {
-            // `-p` prints its arguments without recording them, which includes
-            // un-recording the line it was itself read on. History expansion is
-            // not implemented, so an argument with no `!`/`^` event in it — the
-            // only kind osh can answer — prints back unchanged, as in bash.
-            let mut s = String::new();
-            for a in rest {
-                s.push_str(a);
-                s.push('\n');
-            }
+            // `-p` expands each argument and prints the result without
+            // recording it, which includes un-recording the line it was itself
+            // read on — done *before* expanding, so `history -p '!!'` names the
+            // command before it rather than itself. The expansion runs whatever
+            // `set -H` says: `-p` is the way to reach it with the option off.
             if !rest.is_empty() {
                 self.hist_drop_own_entry();
             }
-            return self.write_bytes(out, redir, s.as_bytes());
+            let mut status = 0;
+            for a in rest {
+                let mut last = std::mem::take(&mut self.hist_last_subst);
+                let expanded = {
+                    let ctx = HistCtx { entries: &self.history, base: self.hist_base };
+                    crate::histexpand::expand(a, &ctx, &mut last)
+                };
+                self.hist_last_subst = last;
+                let text = match expanded {
+                    Expansion::Unchanged => a.clone(),
+                    // A `:p` argument prints like any other here; the modifier
+                    // only means "do not run it", and `-p` never runs anything.
+                    Expansion::Changed(t) | Expansion::PrintOnly(t) => t,
+                    Expansion::NotFound(_) => {
+                        // The builtin reports the whole argument and its own
+                        // wording, not the event spec and the reader's message.
+                        self.errln(&format!(
+                            "{}history: {a}: history expansion failed",
+                            self.err_prefix()
+                        ));
+                        status = 1;
+                        continue;
+                    }
+                };
+                // Written per argument so a failure lands between the lines it
+                // actually falls between, as in bash.
+                let rc = self.write_bytes(out, redir, format!("{text}\n").as_bytes());
+                if rc != 0 {
+                    status = rc;
+                }
+            }
+            return status;
         }
         if let Some(off) = delete {
             return self.history_delete(&off);

@@ -8077,11 +8077,23 @@ bash does.
    reproducing; `tests/corpus/history-file.sh` steers clear of the shape, with a
    comment saying why.
 
+**Done (2026-07-29) — Stage 3: history expansion and a real `history -p`.**
+The `!`-style rewriting itself is written up under `TD-OILS-NO-HISTEXPAND`.
+`history -p` is the builtin door onto the same engine, and it differs from the
+reader in three ways bash makes observable, all pinned by
+`tests/corpus/history-p.sh`: it expands regardless of `set -H` (so it is the
+*only* way to reach the expansion with the switch off); it un-records its own
+line *before* expanding, so `!!` names the command before it; and a failure is
+`history: ARG: history expansion failed` naming the **whole argument** — not the
+reader's `EVENT: event not found` naming the event — after which the remaining
+arguments are still expanded and printed, with 1 returned at the end. Each
+argument is written as it is produced rather than buffered, so an error lands
+between the lines it falls between. A `:p` modifier prints like any other, since
+`-p` never runs anything. `history -s` does **not** expand; it stores literally.
+
 **Still to do.**
 * *Stage 2 (remainder):* `fc` (`-l`, `-n`, `-r`, `-e`, `-s`), which removes its
   own entry and formats `%d\t %s` rather than `history`'s `%5d  %s`.
-* *Stage 3:* history expansion (`!!`, `!n`, `!string`, `^a^b`) and a real
-  `history -p`, gated on `set -H`.
 * *Stage 4:* `logout` (a one-line refusal outside a login shell), then
   `bind` (needs a readline binding table) and `suspend` (needs job control to
   have a parent shell to stop) alongside the interactive line editor.

@@ -244,6 +244,15 @@ struct Lexer {
     /// rather than the implicit newline every other input ends with. See
     /// [`tokenize_paren_body`].
     paren_body: bool,
+    /// Character offsets of every `\` whose `\<newline>` this lexer *deleted* as
+    /// a line continuation. Only the reader — [`crate::parser::IncrementalParser`],
+    /// slicing a parse unit's source for the command history — has any use for
+    /// these: bash's history stores the joined line, without the backslash or
+    /// the newline, exactly where its own reader dropped them. A lexer run over
+    /// a sub-string (a `${…}` replacement, a here-doc body scan) fills this in
+    /// too, but its offsets are relative to that string and are simply dropped
+    /// with the lexer.
+    conts: Vec<u32>,
 }
 
 /// A here-document awaiting its body (collected when the introducing line ends).
@@ -273,6 +282,7 @@ impl Lexer {
             extpat_next: false,
             strict_heredoc_eof: false,
             paren_body: false,
+            conts: Vec::new(),
         }
     }
 
@@ -345,6 +355,22 @@ pub struct Tokenized {
     /// begins. [`crate::parser::IncrementalParser`] re-lexes the unconsumed
     /// remainder from here when a `shopt` changes how it must be read.
     pub offsets: Vec<u32>,
+    /// Parallel to `toks`: the character offset into `src` just past each
+    /// token's last character. For a `Newline` that swallowed a here-document
+    /// body this sits past the body, so the span `offsets[i]..ends[i]` always
+    /// covers every character the token consumed — which is what
+    /// [`crate::parser::IncrementalParser`] slices a parse unit's source out of
+    /// for the command history.
+    pub ends: Vec<u32>,
+    /// Character offsets into `src` of every `\` whose `\<newline>` the lexer
+    /// *deleted* as a line continuation, ascending. The command history stores
+    /// what bash stores — the joined line — so
+    /// [`crate::parser::IncrementalParser`] cuts each of these two-character
+    /// (three, for CRLF) spans back out of the text it slices. A continuation
+    /// inside `'…'`, `"…"`, `$( … )` or a quoted-delimiter here-document is
+    /// *not* deleted and so is not listed here, which is exactly the
+    /// distinction bash's own history draws.
+    pub conts: Vec<u32>,
     /// `Some((error, line))` when lexing stopped early. `toks` is then cut back
     /// to the last **complete** logical line, because that is the granularity
     /// at which bash stops executing: in `echo two; echo three 'unterm`
@@ -367,8 +393,16 @@ pub fn tokenize_deferred(src: &str, opts: LexOpts) -> Tokenized {
     let mut toks = Vec::new();
     let mut lines = Vec::new();
     let mut offsets = Vec::new();
-    let Err(e) = lx.run_into(&mut toks, &mut lines, &mut offsets) else {
-        return Tokenized { toks, lines, offsets, err: None };
+    let mut ends = Vec::new();
+    let res = lx.run_into(&mut toks, &mut lines, &mut offsets, &mut ends);
+    // A here-document body is scanned out of order with respect to the line that
+    // introduced it, so sort rather than assume the scan produced them in source
+    // order; callers binary-search this list.
+    let mut conts = std::mem::take(&mut lx.conts);
+    conts.sort_unstable();
+    conts.dedup();
+    let Err(e) = res else {
+        return Tokenized { toks, lines, offsets, ends, conts, err: None };
     };
     // The failing token's own line is the fallback when the raise site did not
     // name one. `Lexer::line` only advances at the end of each `run_into`
@@ -392,7 +426,11 @@ pub fn tokenize_deferred(src: &str, opts: LexOpts) -> Tokenized {
     toks.truncate(keep);
     lines.truncate(keep);
     offsets.truncate(keep);
-    Tokenized { toks, lines, offsets, err: Some((e, line)) }
+    ends.truncate(keep);
+    // The continuations are keyed by source offset rather than by token index, so
+    // the ones past the cut simply describe text no caller will slice; leaving
+    // them costs nothing and keeps the list a faithful record of the whole scan.
+    Tokenized { toks, lines, offsets, ends, conts, err: Some((e, line)) }
 }
 
 /// Like [`tokenize_spanned`] but reports an unterminated here-document (its
@@ -680,6 +718,20 @@ impl Lexer {
         c
     }
 
+    /// Record the `\<newline>` the caller just consumed and discarded.
+    ///
+    /// The cursor sits one past the newline, so the backslash is two back. A
+    /// backslash at end of input is not a continuation and is not recorded.
+    fn note_continuation(&mut self) {
+        if self.chars.get(self.pos.wrapping_sub(1)) != Some(&'\n') {
+            return;
+        }
+        let Some(at) = self.pos.checked_sub(2) else {
+            return;
+        };
+        self.conts.push(u32::try_from(at).unwrap_or(u32::MAX));
+    }
+
     /// If the cursor sits on a varfd redirect prefix `{name}` immediately
     /// followed by a redirection operator (`{fd}>`, `{fd}<`), return the name
     /// and the index just past the closing `}`. Returns `None` otherwise, so a
@@ -716,7 +768,7 @@ impl Lexer {
         // `stamp_lines` — that is what bash's `line_number` holds once the token
         // has been read).
         let mut lines: Vec<u32> = Vec::new();
-        self.run_into(&mut out, &mut lines, &mut Vec::new())?;
+        self.run_into(&mut out, &mut lines, &mut Vec::new(), &mut Vec::new())?;
         Ok((out, lines))
     }
 
@@ -729,6 +781,7 @@ impl Lexer {
         out: &mut Vec<Tok>,
         lines: &mut Vec<u32>,
         offsets: &mut Vec<u32>,
+        ends: &mut Vec<u32>,
     ) -> Result<(), LexError> {
         loop {
             // Skip inline blanks (but not newlines — those are tokens).
@@ -749,7 +802,7 @@ impl Lexer {
                 self.regex_next = false;
                 let segs = self.read_word_regex()?;
                 self.emit_word(out, segs);
-                self.stamp_lines(out, lines, offsets, start_line, start_pos);
+                self.stamp_lines(out, lines, offsets, ends, start_line, start_pos);
                 continue;
             }
             self.regex_next = false;
@@ -941,7 +994,7 @@ impl Lexer {
                     self.emit_word(out, segs);
                 }
             }
-            self.stamp_lines(out, lines, offsets, start_line, start_pos);
+            self.stamp_lines(out, lines, offsets, ends, start_line, start_pos);
         }
         // bash's reader hands the parser a newline when the input runs out, so a
         // script with no trailing newline — and every `-c` string, which never
@@ -966,14 +1019,14 @@ impl Lexer {
                 self.collect_heredocs(out)?;
             }
             out.push(Tok::Op(Op::RParen));
-            self.stamp_lines(out, lines, offsets, self.line, start_pos);
+            self.stamp_lines(out, lines, offsets, ends, self.line, start_pos);
         } else if !matches!(out.last(), None | Some(Tok::Newline)) {
             let start_pos = self.pos;
             out.push(Tok::Newline);
             if !self.pending_heredocs.is_empty() {
                 self.collect_heredocs(out)?;
             }
-            self.stamp_lines(out, lines, offsets, self.line, start_pos);
+            self.stamp_lines(out, lines, offsets, ends, self.line, start_pos);
         }
         Ok(())
     }
@@ -1039,6 +1092,7 @@ impl Lexer {
         out: &[Tok],
         lines: &mut Vec<u32>,
         offsets: &mut Vec<u32>,
+        ends: &mut Vec<u32>,
         start_line: u32,
         start_pos: usize,
     ) {
@@ -1056,6 +1110,14 @@ impl Lexer {
         }
         while offsets.len() < out.len() {
             offsets.push(start);
+        }
+        // Every token this iteration produced shares the iteration's span, so
+        // they all end where the cursor now stands. For the `Newline` that
+        // triggered here-document collection that is past the collected bodies,
+        // which is exactly the property the history slicer relies on.
+        let end = u32::try_from(self.pos).unwrap_or(u32::MAX);
+        while ends.len() < out.len() {
+            ends.push(end);
         }
         let consumed = self.chars[start_pos..self.pos]
             .iter()
@@ -1217,6 +1279,8 @@ impl Lexer {
                     {
                         lit.push('\\');
                         lit.push(next);
+                    } else {
+                        self.note_continuation();
                     }
                 }
                 '$' => {
@@ -1523,6 +1587,8 @@ impl Lexer {
                             flush_lit(&mut segs, &mut lit);
                             segs.push(Seg::Sq(next.to_string(), true));
                         }
+                    } else {
+                        self.note_continuation();
                     }
                 }
                 '$' => {
@@ -2059,6 +2125,7 @@ impl Lexer {
                 while !matches!(self.peek(), None | Some('\n')) {
                     self.pos += 1;
                 }
+                let eol = self.pos;
                 let mut line: String = self.chars[start..self.pos].iter().collect();
                 if self.peek() == Some('\n') {
                     self.pos += 1;
@@ -2073,6 +2140,18 @@ impl Lexer {
                 };
                 if content == ph.delim {
                     break;
+                }
+                // An expanding here-doc (unquoted delimiter) joins a line ending
+                // in an unescaped `\` to the next one, so the history has to
+                // drop that pair as well. A quoted delimiter makes the body
+                // literal, backslashes and all.
+                if ph.expand && ends_with_continuation(content) {
+                    // The backslash is the last character before the newline.
+                    let mut at = eol.saturating_sub(1);
+                    if self.chars.get(at) == Some(&'\r') {
+                        at = at.saturating_sub(1);
+                    }
+                    self.conts.push(u32::try_from(at).unwrap_or(u32::MAX));
                 }
                 body.push_str(content);
                 body.push('\n');
@@ -2117,6 +2196,12 @@ impl Lexer {
             }
         }
     }
+}
+
+/// Whether `line` ends in a `\` that is not itself escaped — a line
+/// continuation, which the reader joins to the following line.
+fn ends_with_continuation(line: &str) -> bool {
+    line.chars().rev().take_while(|&c| c == '\\').count() % 2 == 1
 }
 
 fn flush_lit(segs: &mut Vec<Seg>, lit: &mut String) {

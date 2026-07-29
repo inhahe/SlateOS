@@ -7855,80 +7855,108 @@ a second `=` in the value, every working subscript spelling as a control
 subscript as command and as a `declare` operand, and the empty *expansion* that
 must still index. Full differential corpus: 108 matched, 0 failed.
 
-### TD-OILS-MISSING-INTERACTIVE-BUILTINS. osh has no `bind`, `fc`, `history`, `logout` or `suspend`, so every list of builtin names is five short — OPEN 2026-07-28
+### TD-OILS-MISSING-INTERACTIVE-BUILTINS. `history` now exists; `bind`, `fc`, `logout` and `suspend` still do not — PARTIAL 2026-07-29
 
-**Where:** `userspace/oils/src/interp.rs` — `BUILTIN_NAMES`, `HELP_TABLE`, and
-the dispatch in `run_builtin`.
+**Where:** `userspace/oils/src/interp.rs` — `BUILTIN_NAMES`, `HELP_TABLE`, the
+dispatch in `run_builtin`, `Shell::{history,hist_base,hist_max,hist_seen,hist_on}`
+and the `hist_*` methods around `record_history`; `src/parser.rs`
+(`IncrementalParser::{unit_lines,split_unit_lines,classify_line,line_text}`);
+`src/lexer.rs` (`Tokenized::conts`).
 
-**What.** The five builtins bash provides for an *interactive* session are
-absent. They are invisible until something enumerates the builtin set, at which
-point the whole list diverges:
+**What.** The five builtins bash provides for an *interactive* session were all
+absent, which is invisible until something enumerates the builtin set:
 
 ```
 $ bash -c 'compgen -b | wc -l'   # 61
-$ osh  -c 'compgen -b | wc -l'   # 56  (bind, fc, history, logout, suspend)
-$ bash -c 'compgen -A helptopic h'
-hash
-help
-history
-$ osh  -c 'compgen -A helptopic h'
-hash
-help
+$ osh  -c 'compgen -b | wc -l'   # 57 as of 2026-07-29 (was 56)
 ```
 bash also carries a `%` help topic (the job-spec syntax) that osh does not.
 
-**Proper fix.** `fc` and `history` both need a command history, which osh does
-not keep at all — that is the real work, and it is one store serving both.
-`bind` needs a readline binding table; `suspend` needs job control to have a
-parent shell to stop; `logout` is a one-line refusal outside a login shell and
-could be written today. The order that unlocks the most first is history, then
-`logout`, then `bind`/`suspend` alongside the interactive line editor.
+**Done (2026-07-29) — the history store and the `history` builtin.** `set -o
+history`, `HISTCMD`, `HISTSIZE`/`HISTFILESIZE`, and `history [-c] [-d offset]
+[-s|-p arg…] [n]`, all pinned by `tests/corpus/history.sh` (matches bash
+exactly). The model below is *measured*, not read off the readline source —
+where the two disagree, the measurement won.
 
-**The history model, measured against bash 5.2 (2026-07-29).** All of it is
-reachable non-interactively, so all of it is corpus-testable — which is the
-reason this is worth building rather than stubbing.
+*Enablement.* A non-interactive shell starts with `set -o history` **off** and
+`HISTFILE`/`HISTSIZE`/`HISTFILESIZE` unset. `HISTCMD` exists regardless and
+reads `0`. `set -o history` materialises `HISTSIZE`/`HISTFILESIZE` at `500` (if
+unset) and starts recording from the *next* line; `set +o history` stops
+recording but keeps both the list and the variables.
 
-*Enablement.* A non-interactive shell starts with `set -o history` **off**, and
-`HISTFILE`/`HISTSIZE`/`HISTFILESIZE` unset (they are set only for interactive
-shells). `HISTCMD` exists regardless and reads `0` while the list is empty.
-Turning the option on with `set -o history` starts recording immediately — from
-the *next* line, not the `set` line itself.
-
-*What gets recorded.* Only lines read by the **top-level** input reader. A
-`source`d file's lines, an `eval` string's lines and a function body's lines are
-not recorded; the `.`/`eval`/function *call* is. One parse unit is one entry:
-
-```sh
-echo one; echo two          →  echo one; echo two
-for i in 1 2\ndo\n echo $i\ndone  →  for i in 1 2; do   echo $i; done
-```
+*What gets recorded.* Only lines read by the **top-level** input reader — a
+`source`d file's, an `eval` string's and a function body's lines are not; the
+`.`/`eval`/function *call* is. One parse unit is one entry. The list is cloned
+into subshells and command substitutions, since bash's `( history )` and
+`$(history)` both list the parent's entries.
 
 *The line-join rule (`cmdhist` on, `lithist` off — bash's defaults).* A unit
 spanning several physical lines is stored as one entry with its top-level
-newlines replaced. The replacement is `"; "`, except `" "` when the preceding
-line already ends in something a `;` cannot follow — `;`, `;;`, `&`, `&&`, `|`,
-`||`, `{`, `(`, or the reserved words `do`/`then`/`else`/`elif`/`in`. Newlines
-that are *not* top-level survive verbatim: inside a quoted string, inside a
-`$( … )`, and in a here-document body (whose entry also keeps its trailing
-newline). osh can implement this exactly rather than heuristically, because a
-top-level newline is precisely a `Tok::Newline` in the unit's token stream — so
-the entry is the unit's raw source sliced at those tokens' offsets and rejoined,
-and every other newline is inside a token and passes through untouched.
+newlines replaced by `"; "`, or by `" "` when the preceding line already ends in
+something a `;` cannot follow (`;`, `;;`, `;&`, `;;&`, `&`, `&&`, `|`, `|&`,
+`||`, `{`, `(`, or `do`/`then`/`else`/`elif`/`in`). Newlines that are *not*
+top-level survive verbatim: inside a quoted string, inside `$( … )`, and in a
+here-document body (whose entry keeps its trailing newline). osh implements this
+exactly rather than heuristically: a top-level newline is precisely a
+`Tok::Newline`, so the entry is the unit's raw source sliced at those tokens'
+offsets and rejoined. A `\<newline>` **the lexer joined away** is likewise gone
+from the entry — `Tokenized::conts` records the offset of every such backslash so
+`IncrementalParser::line_text` can cut it back out; one the lexer *kept* (inside
+`'…'`, `"…"`, `$( … )`, or a quoted-delimiter here-document) survives, which is
+the same split bash draws.
 
-*Numbering.* Entries are numbered from 1 and **renumbered** after any deletion,
-so the numbers are always contiguous. `HISTCMD` is the number of the entry just
-added — i.e. `len()` after the current line was recorded — which is why it
-advances by one per top-level command and jumps when entries are removed.
+*Numbering.* An entry's number is `hist_base + index`, so a deletion renumbers
+everything after it and the numbers are always contiguous. `HISTCMD` is the
+number of the entry just added. Two things move the base, and they are **not**
+the same operation:
+* **Append eviction** (list already at `HISTSIZE`): the front entry is dropped
+  and `hist_base += 1`, so survivors *keep* their numbers.
+* **Assigning `HISTSIZE`** runs readline's `stifle_history`, which
+  **renumbers**: survivors come out numbered from `len − cap` whatever they were
+  numbered before. Verified at base 1 (len 5, caps 5/4/3/2/1 → bases 1/1/2/3/4),
+  base 3 (len 4, cap 2 → base 2) and a large base (len 2, cap 1 → base 1).
+`HISTSIZE=0` stores nothing and does *not* move the base, so `HISTCMD` then sits
+one below the number of lines read. Unset/empty/negative unstifles; a
+**non-numeric** value is a no-op that leaves the previous cap in force (which is
+why osh keeps `hist_max` and `hist_seen` rather than re-parsing the variable).
+`history -c` empties the list and resets the base to 1.
 
 *Builtin quirks that fall out of that.*
-* `history -s TEXT` **replaces** the current entry rather than appending after
-  it: the `history -s …` line was already recorded when it was read, so bash
-  drops that entry and appends `TEXT` in its place.
-* `fc` removes its own entry too, which is why `fc -l` never lists the `fc`
-  that produced it. (`fc -l`'s format is `%d\t %s`, not `history`'s `%5d  %s`.)
-* `history -s` works with the `history` option **off** — it just appends, since
-  there is no current entry to replace.
-* `history -p` expands and prints without recording anything.
+* `history -s TEXT` **replaces** the entry its own line made: that line was
+  recorded when it was read, so bash drops it and appends `TEXT` in its place.
+  With the option **off** there is no such entry, so it just appends.
+* `history -p` prints its arguments and records nothing.
+* `history -d` takes an offset, a negative offset (counting back from the
+  newest), or a `START-END` range — the separator is the first `-` at index > 0,
+  so `-2--1` is the range (−2, −1) while `-3` is a single offset. Every
+  malformed or unreachable operand is `history: ARG: history position out of
+  range`, rc 1 — never "numeric argument required". A range *start* below the
+  oldest entry is clamped; a *reversed* range fails silently with rc 1.
+* `history N` rejects a non-number with `history: N: numeric argument required`,
+  rc 1; `history 0` lists nothing.
+
+**Residual divergences (accepted, low value).**
+1. Two `HISTSIZE` assignments in **one parse unit** (`HISTSIZE=2; HISTSIZE=1;
+   history`) — bash stifles twice (entry numbered 1), osh applies only the last
+   (numbered 4). This is the price of the lazy `HISTSIZE` sync, which re-derives
+   the cap when the history is next touched instead of hooking all 60+
+   `vars.insert`/`vars.remove` sites. Observationally exact otherwise, because
+   nothing but the history observes `HISTSIZE`.
+2. A `\<newline>` inside a `${x/y \<nl> z}` replacement: bash deletes it from the
+   entry, osh keeps it. The main lexer captures `${…}` raw and the deletion
+   happens in a throwaway sub-lexer whose `conts` are dropped.
+3. `echo a &` followed by a newline: bash records **two** entries, osh one. A
+   parse-unit-granularity divergence that shows up beyond history too.
+
+**Still to do.**
+* *Stage 2:* `history -a/-n/-r/-w` and `HISTFILE`; then `fc` (`-l`, `-n`, `-r`,
+  `-e`, `-s`), which removes its own entry and formats `%d\t %s` rather than
+  `history`'s `%5d  %s`.
+* *Stage 3:* history expansion (`!!`, `!n`, `!string`, `^a^b`) and a real
+  `history -p`, gated on `set -H`.
+* *Stage 4:* `logout` (a one-line refusal outside a login shell), then
+  `bind` (needs a readline binding table) and `suspend` (needs job control to
+  have a parent shell to stop) alongside the interactive line editor.
 
 **Impact.** Nothing a script does today is affected — these are all interactive
 tools. The cost is coverage rather than correctness: `compgen -b`, `compgen -c`

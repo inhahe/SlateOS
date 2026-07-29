@@ -114,7 +114,9 @@ use crate::ast::{
     RedirectOp,
     ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
-use crate::parser::{IncrementalParser, parse_opts, parse_with_aliases};
+use crate::parser::{
+    IncrementalParser, UnitLine, UnitLineKind, parse_opts, parse_with_aliases,
+};
 
 /// The bash release level this shell emulates, exposed via `$BASH_VERSION`
 /// (and parsed into `$BASH_VERSINFO`). Scripts branch on this to gate features;
@@ -2295,6 +2297,33 @@ pub struct Shell {
     /// the *current* directory (the process cwd) is conceptually the top of the
     /// stack and is not stored here. Cloned into subshells.
     dir_stack: Vec<String>,
+    /// The command history, oldest first, as recorded while `set -o history` is
+    /// in effect. An entry's *number* is [`Shell::hist_base`] plus its index, so
+    /// deleting one renumbers every entry after it — which is what bash does,
+    /// and why the numbers are never stored. Cloned into subshells, since
+    /// bash's `( history )` and `$(history)` both list the parent's entries.
+    history: Vec<String>,
+    /// The number readline would give [`Shell::history`]'s *first* entry. It is
+    /// 1 until `HISTSIZE` first forces an entry off the front, and rises by one
+    /// per evicted entry thereafter, so numbers keep climbing even though the
+    /// list stays capped. `history -c` resets it to 1. `$HISTCMD` is
+    /// `hist_base + history.len() - 1`, which is 0 for a pristine shell.
+    hist_base: usize,
+    /// The cap `HISTSIZE` currently imposes, or `None` while the list is
+    /// unstifled. Kept separately from the variable because a `HISTSIZE` that is
+    /// not a number leaves the previous cap in force.
+    hist_max: Option<usize>,
+    /// The `HISTSIZE` text the cap was last computed from, so a change can be
+    /// spotted. `HISTSIZE` is an ordinary variable that any of a few dozen code
+    /// paths can write, so rather than hook every one of them the cap is
+    /// re-derived whenever the history is next touched — which is
+    /// indistinguishable from bash, since only the history itself observes it.
+    hist_seen: Option<String>,
+    /// `set -o history`: whether the *top-level* input stream's lines are
+    /// recorded. Off by default, as in a non-interactive bash. A `source`d
+    /// file, an `eval` string and a function body are never recorded whatever
+    /// this says — only the call that reached them is.
+    hist_on: bool,
     /// Builtins disabled via `enable -n NAME`. A name present here is treated as
     /// *not* a builtin during command resolution, so a same-named external is
     /// run instead. Cloned into subshells (bash inherits the enable state).
@@ -2506,6 +2535,11 @@ impl Shell {
             fn_trace_attr: HashSet::new(),
             trap_suppress: Vec::new(),
             dir_stack: Vec::new(),
+            history: Vec::new(),
+            hist_base: 1,
+            hist_max: None,
+            hist_seen: None,
+            hist_on: false,
             disabled_builtins: HashSet::new(),
             aliases: BTreeMap::new(),
             traps: HashMap::new(),
@@ -2999,7 +3033,13 @@ impl Shell {
     /// status *and* latches [`Shell::exit_requested`] so the read-eval loop
     /// stops reading further input.
     fn run_source_out(&mut self, src: &str, out: &mut Out, line_base: u32) -> i32 {
-        match self.run_source_flow_out(src, out, &StdinSrc::Inherit, &LineMap::Offset(line_base)) {
+        match self.run_source_flow_out(
+            src,
+            out,
+            &StdinSrc::Inherit,
+            &LineMap::Offset(line_base),
+            true,
+        ) {
             Flow::Exit(code) => {
                 self.exit_requested = true;
                 self.last_status = code;
@@ -3029,12 +3069,19 @@ impl Shell {
     /// close-line numbering, so it passes the [`LineMap::CmdSub`] the parser
     /// built. It is `Offset(0)` for a source that numbers its own lines from 1,
     /// which is every other internally-generated body here.
+    ///
+    /// `record` says whether the units read here go into the command history.
+    /// Only [`Shell::run_source_out`] passes `true`: bash records the lines its
+    /// *top-level* reader consumes and nothing else, so a `source`d file, an
+    /// `eval` string, a trap action and a `$( … )` body are all silent — the
+    /// call that reached them is what was recorded.
     fn run_source_flow_out(
         &mut self,
         src: &str,
         out: &mut Out,
         stdin: &StdinSrc,
         map: &LineMap,
+        record: bool,
     ) -> Flow {
         // Parse and execute one unit (one logical line) at a time rather than
         // parsing the whole input up front, because bash's read-parse-execute
@@ -3054,6 +3101,12 @@ impl Shell {
             let Some(unit) = ip.next_unit(aliases, opts) else {
                 return Flow::Next;
             };
+            // bash records a line when it *reads* it, before it runs — which is
+            // why `history` lists the `history` call that printed the list, and
+            // why `$HISTCMD` already counts the line it appears on.
+            if record && self.hist_on {
+                self.record_history(ip.last_unit_lines());
+            }
             let prog = match unit {
                 Ok(p) => p,
                 Err(e) => {
@@ -3066,6 +3119,148 @@ impl Shell {
                 other => return other,
             }
         }
+    }
+
+    /// Fold the top-level lines of one parse unit into the command history.
+    ///
+    /// bash stores a multi-line command as a *single* entry whose lines are
+    /// rejoined. The separator is `"; "` normally; `" "` when a `;` cannot
+    /// follow what the previous line ended with (`|`, `&&`, `{`, `do`, `then`,
+    /// …), since the command is plainly unfinished; and a real newline when the
+    /// previous line ended in a comment or a here-document is about to start —
+    /// a `;` would be swallowed by the comment, and a here-document body has to
+    /// begin on a line of its own.
+    ///
+    /// Blank lines are dropped. A comment line *inside* a command is dropped
+    /// too, but still forces the next line onto a line of its own; a comment
+    /// line reached before any command becomes an entry of its own, because
+    /// bash's reader commits it as a (empty) command before the next line is
+    /// read.
+    fn record_history(&mut self, lines: &[UnitLine]) {
+        let mut entry = String::new();
+        let mut sep = "";
+        for (i, line) in lines.iter().enumerate() {
+            match line.kind {
+                UnitLineKind::Blank => continue,
+                UnitLineKind::Comment => {
+                    if entry.is_empty() {
+                        self.hist_push(line.text.clone());
+                    } else {
+                        sep = "\n";
+                    }
+                    continue;
+                }
+                UnitLineKind::Code | UnitLineKind::HereDocBody => {}
+            }
+            entry.push_str(sep);
+            entry.push_str(&line.text);
+            // A here-document body already ends in the newline that closed it,
+            // so what follows it just needs separating from the delimiter line.
+            let opens_next = lines
+                .get(i.saturating_add(1)..)
+                .unwrap_or(&[])
+                .iter()
+                .find(|l| !matches!(l.kind, UnitLineKind::Blank | UnitLineKind::Comment))
+                .is_some_and(|l| l.heredoc);
+            sep = if line.comment || line.heredoc || opens_next {
+                "\n"
+            } else if line.open || line.kind == UnitLineKind::HereDocBody {
+                " "
+            } else {
+                "; "
+            };
+        }
+        if !entry.is_empty() {
+            self.hist_push(entry);
+        }
+    }
+
+    /// What a not-yet-applied `HISTSIZE` change would do to the list, as
+    /// `(new base, entries dropped from the front, new cap)`; `None` when
+    /// `HISTSIZE` still reads the same as when the cap was last derived.
+    ///
+    /// Assigning `HISTSIZE` runs readline's `stifle_history`, which is *not* the
+    /// same as the eviction a single append does. An append that overflows the
+    /// cap drops one entry and bumps the base by one, so the survivors keep
+    /// their numbers. A stifle instead **renumbers**: whatever the entries were
+    /// called before, the survivors come out numbered from `len - cap`. That is
+    /// measured against bash 5.2 — `a b c d; HISTSIZE=2; history` renumbers the
+    /// last two entries 3 and 4, not 4 and 5 — and it is why `HISTSIZE=0` leaves
+    /// `$HISTCMD` one *below* the number of lines read.
+    ///
+    /// An unset, empty or negative `HISTSIZE` unstifles the list. One that is
+    /// not a number at all is ignored and leaves the previous cap in force.
+    fn hist_stifle_pending(&self) -> Option<(usize, usize, Option<usize>)> {
+        let text = self.param_value("HISTSIZE");
+        if text.as_deref() == self.hist_seen.as_deref() {
+            return None;
+        }
+        let max = match text.as_deref() {
+            None | Some("") => None,
+            Some(t) => match t.trim().parse::<i64>() {
+                Ok(n) if n < 0 => None,
+                Ok(n) => Some(usize::try_from(n).unwrap_or(usize::MAX)),
+                Err(_) => self.hist_max,
+            },
+        };
+        let Some(cap) = max else {
+            return Some((self.hist_base, 0, None));
+        };
+        if self.history.len() <= cap {
+            return Some((self.hist_base, 0, max));
+        }
+        let dropped = self.history.len().saturating_sub(cap);
+        Some((dropped, dropped, max))
+    }
+
+    /// The base and front-drop a read of the history should see, accounting for
+    /// a `HISTSIZE` change that has not been applied to the list yet.
+    fn hist_view(&self) -> (usize, usize) {
+        match self.hist_stifle_pending() {
+            Some((base, dropped, _)) => (base, dropped),
+            None => (self.hist_base, 0),
+        }
+    }
+
+    /// Apply a pending `HISTSIZE` change. Called before anything that reads or
+    /// writes the list for real, so the stifle lands in the same order bash's
+    /// would: after the assignment ran, before the next line is recorded.
+    fn hist_sync(&mut self) {
+        if let Some((base, dropped, max)) = self.hist_stifle_pending() {
+            let dropped = dropped.min(self.history.len());
+            self.history.drain(..dropped);
+            self.hist_base = base;
+            self.hist_max = max;
+        }
+        self.hist_seen = self.param_value("HISTSIZE");
+    }
+
+    /// Append one entry, honouring `HISTSIZE`.
+    ///
+    /// Once the list is full each new entry evicts the oldest and bumps
+    /// [`Shell::hist_base`], so the numbers keep climbing while the list stays
+    /// capped. `HISTSIZE=0` is the case readline spells out separately — the
+    /// entry is dropped outright and the base does *not* move.
+    fn hist_push(&mut self, entry: String) {
+        self.hist_sync();
+        if self.hist_max == Some(0) {
+            return;
+        }
+        self.history.push(entry);
+        if let Some(cap) = self.hist_max {
+            while self.history.len() > cap {
+                self.history.remove(0);
+                self.hist_base = self.hist_base.saturating_add(1);
+            }
+        }
+    }
+
+    /// The number `$HISTCMD` reports: the number the *newest* entry carries, or
+    /// 0 when the list is empty (as in a pristine shell, where `hist_base` is 1).
+    fn hist_number(&self) -> usize {
+        let (base, dropped) = self.hist_view();
+        base.saturating_add(self.history.len().saturating_sub(dropped))
+            .saturating_sub(1)
     }
 
     /// The control flow — and status — that follows a top-level parse error.
@@ -5428,6 +5623,11 @@ impl Shell {
             // inside the subshell correctly aligned.
             trap_suppress: self.trap_suppress.clone(),
             dir_stack: self.dir_stack.clone(),
+            history: self.history.clone(),
+            hist_base: self.hist_base,
+            hist_max: self.hist_max,
+            hist_seen: self.hist_seen.clone(),
+            hist_on: self.hist_on,
             disabled_builtins: self.disabled_builtins.clone(),
             aliases: self.aliases.clone(),
             // A subshell resets non-ignored traps to their default disposition
@@ -7245,6 +7445,7 @@ impl Shell {
         "BASH_LINENO",
         "BASH_SOURCE",
         "BASH_SUBSHELL",
+        "HISTCMD",
         "LINENO",
         "PPID",
         "RANDOM",
@@ -11591,6 +11792,9 @@ impl Shell {
                     .saturating_add(self.seconds_anchor.elapsed().as_secs())
                     .to_string(),
             ),
+            // `$HISTCMD` is the number carried by the entry just recorded, so
+            // it keeps climbing past `HISTSIZE` once eviction starts.
+            "HISTCMD" => Some(self.hist_number().to_string()),
             "EPOCHSECONDS" => Some(unix_time().0.to_string()),
             "EPOCHREALTIME" => {
                 let (secs, micros) = unix_time();
@@ -11722,7 +11926,7 @@ impl Shell {
             // `exec > file`, so `exec >f; x=$(echo hi)` still captures `hi`.
             sub.exec_stdout = None;
             let mut out = Out::Capture(cap.clone());
-            if let Flow::Exit(code) = sub.run_source_flow_out(src, &mut out, &StdinSrc::Inherit, map)
+            if let Flow::Exit(code) = sub.run_source_flow_out(src, &mut out, &StdinSrc::Inherit, map, false)
             {
                 // Nothing above this is left to unwind — the substitution's
                 // subshell *is* the outermost frame here — so collapse the flow
@@ -12521,7 +12725,7 @@ impl Shell {
                 // reports 3; running a three-line string reports 3, 4, 5.)
                 // `current_line` is already absolute, so nested evals compose.
                 let eval_base = self.current_line.saturating_sub(1);
-                let eval_flow = self.run_source_flow_out(&joined, out, stdin, &LineMap::Offset(eval_base));
+                let eval_flow = self.run_source_flow_out(&joined, out, stdin, &LineMap::Offset(eval_base), false);
                 self.eval_depth = self.eval_depth.saturating_sub(1);
                 match eval_flow {
                     Flow::Exit(code) => {
@@ -12557,6 +12761,7 @@ impl Shell {
             "unalias" => self.builtin_unalias(args),
             "help" => self.builtin_help(args, out, redir),
             "hash" => self.builtin_hash(args, out, redir),
+            "history" => self.builtin_history(args, out, redir),
             "umask" => self.builtin_umask(args, out, redir),
             "ulimit" => self.builtin_ulimit(args, out, redir),
             "exec" => {
@@ -15507,6 +15712,183 @@ impl Shell {
         status
     }
 
+    /// `history [-c] [-d offset] [n]` / `history -ps arg …` — display or
+    /// manipulate the command history.
+    ///
+    /// An entry's number is [`Shell::hist_base`] plus its index, so `-d`
+    /// renumbers everything after the hole rather than leaving a gap.
+    /// `-s` *replaces* the current entry instead of appending after it: the
+    /// `history -s …` line was itself recorded when it was read, and bash drops
+    /// that entry before appending the new one. With the `history` option off
+    /// there is no such entry, so `-s` simply appends.
+    ///
+    /// The file options (`-a`, `-n`, `-r`, `-w`) are not implemented; see
+    /// known-issues TD-OILS-MISSING-INTERACTIVE-BUILTINS.
+    fn builtin_history(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+        const USAGE: &str = "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]";
+        // A `HISTSIZE` assigned since the last line was recorded has already
+        // stifled the list by the time bash's builtin looks at it.
+        self.hist_sync();
+        let mut clear = false;
+        let mut delete: Option<String> = None;
+        let mut store = false;
+        let mut print = false;
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            i = i.saturating_add(1);
+            if a == "--" {
+                break;
+            }
+            if !a.starts_with('-') || a == "-" {
+                i = i.saturating_sub(1);
+                break;
+            }
+            match a.as_str() {
+                "-c" => clear = true,
+                "-s" => store = true,
+                "-p" => print = true,
+                "-d" => {
+                    let Some(off) = args.get(i) else {
+                        self.errln(&format!(
+                            "{}history: -d: option requires an argument",
+                            self.err_prefix()
+                        ));
+                        self.errln(&format!("history: usage: {USAGE}"));
+                        return 2;
+                    };
+                    i = i.saturating_add(1);
+                    delete = Some(off.clone());
+                }
+                _ => {
+                    self.errln(&format!("{}history: {a}: invalid option", self.err_prefix()));
+                    self.errln(&format!("history: usage: {USAGE}"));
+                    return 2;
+                }
+            }
+        }
+        let rest = args.get(i..).unwrap_or(&[]);
+        // `-p` wins over `-s` in bash, and both consume every remaining word.
+        if print {
+            // History expansion is not implemented, so an argument with no
+            // `!`/`^` event in it — the only kind osh can answer — prints back
+            // unchanged, which is what bash does for it too.
+            let mut s = String::new();
+            for a in rest {
+                s.push_str(a);
+                s.push('\n');
+            }
+            return self.write_bytes(out, redir, s.as_bytes());
+        }
+        if store {
+            // The `history -s …` line was recorded when it was read, so bash
+            // drops it again before appending — the replacement keeps the same
+            // number. With the option off there is no such entry to drop.
+            if self.hist_on {
+                self.history.pop();
+            }
+            self.hist_push(rest.join(" "));
+            return 0;
+        }
+        if let Some(off) = delete {
+            return self.history_delete(&off);
+        }
+        if clear {
+            self.history.clear();
+            // readline's `clear_history` restarts the numbering, so the next
+            // entry is 1 again however far the numbers had climbed.
+            self.hist_base = 1;
+            return 0;
+        }
+        // A count operand lists only the last N entries; bash rejects anything
+        // that is not a number, and `history 0` lists nothing.
+        let mut from = 0;
+        if let Some(a) = rest.first() {
+            let Ok(n) = a.parse::<usize>() else {
+                self.errln(&format!(
+                    "{}history: {a}: numeric argument required",
+                    self.err_prefix()
+                ));
+                return 1;
+            };
+            from = self.history.len().saturating_sub(n);
+        }
+        let mut s = String::new();
+        for (idx, entry) in self.history.iter().enumerate().skip(from) {
+            let n = self.hist_base.saturating_add(idx);
+            s.push_str(&format!("{n:>5}  {entry}\n"));
+        }
+        self.write_bytes(out, redir, s.as_bytes())
+    }
+
+    /// `history -d OFFSET` — delete one entry, or the `START-END` range.
+    ///
+    /// The separator of a range is the first `-` that is not `START`'s own sign,
+    /// so `-2--1` is the last two entries while `-3` is the single entry three
+    /// back. A negative endpoint counts back from the newest entry.
+    ///
+    /// bash reports every malformed or unreachable offset the same way — as a
+    /// position "out of range", naming the failing endpoint (or the whole
+    /// argument when it could not be split into numbers). The one silent
+    /// failure is a reversed range, which just returns 1. A range's *start* is
+    /// clamped to the oldest entry rather than rejected, which is why
+    /// `history -d 0-2` deletes the first two entries instead of failing.
+    fn history_delete(&mut self, arg: &str) -> i32 {
+        let len = i64::try_from(self.history.len()).unwrap_or(i64::MAX);
+        let base = i64::try_from(self.hist_base).unwrap_or(1);
+        let last = base.saturating_add(len).saturating_sub(1);
+        // A negative offset is relative to the newest entry's number.
+        let resolve = |s: &str| -> Option<i64> {
+            let n: i64 = s.parse().ok()?;
+            Some(if n < 0 {
+                base.saturating_add(len).saturating_add(n)
+            } else {
+                n
+            })
+        };
+        let fail = |shell: &mut Self, what: &str| -> i32 {
+            shell.errln(&format!(
+                "{}history: {what}: history position out of range",
+                shell.err_prefix()
+            ));
+            1
+        };
+        let sep = arg
+            .char_indices()
+            .find(|&(i, c)| c == '-' && i > 0)
+            .map(|(i, _)| i);
+        let (lo, hi) = match sep {
+            None => match resolve(arg) {
+                Some(pos) if pos >= base && pos <= last => (pos, pos),
+                _ => return fail(self, arg),
+            },
+            Some(k) => {
+                let (Some(lo_s), Some(hi_s)) =
+                    (arg.get(..k), arg.get(k.saturating_add(1)..))
+                else {
+                    return fail(self, arg);
+                };
+                let (Some(lo), Some(hi)) = (resolve(lo_s), resolve(hi_s)) else {
+                    return fail(self, arg);
+                };
+                if hi > last {
+                    return fail(self, hi_s);
+                }
+                (lo.max(base), hi)
+            }
+        };
+        if lo > hi {
+            // bash prints nothing for a reversed range; it just fails.
+            return 1;
+        }
+        let from = usize::try_from(lo.saturating_sub(base)).unwrap_or(0);
+        let to = usize::try_from(hi.saturating_sub(base)).unwrap_or(0);
+        let end = to.saturating_add(1).min(self.history.len());
+        if from < end {
+            self.history.drain(from..end);
+        }
+        0
+    }
+
     /// `umask [-S] [-p] [mode]` — get or set the file-creation mask. With no
     /// mode operand it prints the current mask (octal `0NNN`, or symbolic with
     /// `-S`); `-p` prefixes the output with a re-inputtable `umask ` command.
@@ -15763,7 +16145,7 @@ impl Shell {
         }
         self.in_trap = true;
         let saved = self.last_status;
-        let flow = self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0));
+        let flow = self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), false);
         // Preserve the pre-trap status unless the handler asked to exit, in
         // which case its code is the shell's exit status.
         if !matches!(flow, Flow::Exit(_)) {
@@ -16533,7 +16915,7 @@ impl Shell {
         let flags = match name {
             // `$PPID` is a readonly integer in bash (`declare -ir`).
             "PPID" => "-ir",
-            "BASHPID" | "RANDOM" | "SECONDS" => "-i",
+            "BASHPID" | "HISTCMD" | "RANDOM" | "SECONDS" => "-i",
             "BASH_ARGV0" | "BASH_SUBSHELL" | "LINENO" | "EPOCHSECONDS" | "EPOCHREALTIME" => "--",
             _ => return None,
         };
@@ -18157,8 +18539,25 @@ impl Shell {
             // control, but the flag still gates whether `fg`/`bg` operate (see
             // `job_control_enabled`), so it must track its real state.
             "monitor" => self.monitor = enable,
+            // `set -o history`: record the top-level input stream's lines.
+            // Recording begins with the *next* line, since this one was read
+            // before it ran.
+            "history" => {
+                self.hist_on = enable;
+                // Turning history on is where bash first materialises the two
+                // sizing variables, at readline's defaults, so `${!HIST*}`
+                // starts listing them. An existing value is left alone, and
+                // they survive `set +o history`.
+                if enable {
+                    for name in ["HISTSIZE", "HISTFILESIZE"] {
+                        if self.param_value(name).is_none() {
+                            self.set_var(name, "500");
+                        }
+                    }
+                }
+            }
             // Standard bash option names osh does not model (line-editing
-            // `emacs`/`vi`, `history`/`histexpand`, job-control `notify`,
+            // `emacs`/`vi`, `histexpand`, job-control `notify`,
             // `posix`, `privileged`, `verbose`, …). bash accepts them
             // without error; accept them as no-ops so scripts that toggle them
             // don't spuriously fail. Only a name outside the standard set is a
@@ -18220,6 +18619,9 @@ impl Shell {
         if self.monitor {
             opts.push("monitor");
         }
+        if self.hist_on {
+            opts.push("history");
+        }
         opts.sort_unstable();
         self.vars.insert("SHELLOPTS".to_string(), opts.join(":"));
     }
@@ -18265,12 +18667,13 @@ impl Shell {
             "functrace" => self.functrace,
             "errtrace" => self.errtrace,
             "monitor" => self.monitor,
+            "history" => self.hist_on,
             // Always-on defaults for a non-interactive shell, mirroring bash's
             // `-c`/script `set -o` output (these have no osh-tunable state but
             // must report their true default so listings match bash).
             "hashall" | "interactive-comments" => true,
             // Remaining standard options are modeled as off (their bash default
-            // in non-interactive mode): emacs/vi/history/histexpand line-editing,
+            // in non-interactive mode): emacs/vi/histexpand line-editing,
             // job-control (monitor/notify), posix, and the rare toggles. They are
             // listed by `set -o` for compatibility but are currently inert; see
             // the STANDARD_SET_O_OPTIONS note.
@@ -19199,7 +19602,7 @@ impl Shell {
                 // The callback runs in the current shell, so it gets the shell's
                 // stdin — not the file/fd `mapfile` is itself consuming, whose
                 // remaining bytes belong to the read loop.
-                if let Flow::Exit(n) = self.run_source_flow_out(&cmd, out, stdin, &LineMap::Offset(0)) {
+                if let Flow::Exit(n) = self.run_source_flow_out(&cmd, out, stdin, &LineMap::Offset(0), false) {
                     self.pending_builtin_exit = Some(n);
                     return n;
                 }
@@ -19275,7 +19678,7 @@ impl Shell {
                 });
                 // The script's stdout belongs to *this* command's sink, so
                 // `x=$(. script)` captures it (bash).
-                let flow = self.run_source_flow_out(&src, out, stdin, &LineMap::Offset(0));
+                let flow = self.run_source_flow_out(&src, out, stdin, &LineMap::Offset(0), false);
                 self.trap_suppress.pop();
                 self.source_stack.pop();
                 self.refresh_funcname();
@@ -23035,6 +23438,7 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
     ("caller", "caller [expr]", "Return the context of the current subroutine call."),
     ("times", "times", "Display process times."),
     ("hash", "hash [-lr] [-p pathname] [-dt] [name ...]", "Remember or display program locations."),
+    ("history", "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]", "Display or manipulate the history list."),
     ("umask", "umask [-p] [-S] [mode]", "Display or set the file mode creation mask."),
     ("ulimit", "ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]", "Modify shell resource limits."),
     ("exec", "exec [-cl] [-a name] [command [argument ...]] [redirection ...]", "Replace the shell with the given command."),
@@ -23069,7 +23473,8 @@ const BUILTIN_NAMES: &[&str] = &[
     ":", "true", "false", "cd", "pwd", "pushd", "popd", "dirs", "echo", "printf", "export",
     "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
     "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
-    ".", "type", "trap", "jobs", "kill", "wait", "disown", "fg", "bg", "caller", "times", "hash", "umask",
+    ".", "type", "trap", "jobs", "kill", "wait", "disown", "fg", "bg", "caller", "times", "hash",
+    "history", "umask",
     "ulimit", "exec",
     "exit", "return", "break", "continue", "enable", "alias", "unalias", "help", "compgen",
     "complete", "compopt",
@@ -37523,6 +37928,136 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("cmd /c exit 0\nhash -t cmd");
         assert_eq!(s, 0, "hash -t cmd should succeed; out {o:?}");
         assert!(o.to_lowercase().contains("cmd"), "got {o:?}");
+    }
+
+    #[test]
+    fn history_records_only_with_the_option_on() {
+        // Off by default, as in a non-interactive bash, and `HISTCMD` reads 0.
+        assert_eq!(run("echo a\nhistory").0, "a\n");
+        assert_eq!(run("echo $HISTCMD").0, "0\n");
+        // Recording starts with the line *after* `set -o history`, and a line is
+        // recorded when it is read, so `history` lists itself.
+        assert_eq!(
+            run("set -o history\necho a\nhistory").0,
+            "a\n    1  echo a\n    2  history\n"
+        );
+        assert_eq!(run("set -o history\necho $HISTCMD").0, "1\n");
+        // The option shows up in `SHELLOPTS` and in `set -o`.
+        assert!(run("set -o history\necho $SHELLOPTS").0.contains("history"));
+    }
+
+    #[test]
+    fn history_folds_a_multiline_command_into_one_entry() {
+        // `;` normally, a plain space after a line that cannot take one, and a
+        // real newline where a `;` would be swallowed or a body must start.
+        assert_eq!(
+            run("set -o history\nfor i in 1 2\ndo\n:\ndone\nhistory").0,
+            "    1  for i in 1 2; do :; done\n    2  history\n"
+        );
+        // A `\<newline>` is joined away before the line is stored, so the two
+        // physical lines become one entry with no backslash left in it.
+        assert_eq!(
+            run("set -o history\n: a && \\\n:\nhistory").0,
+            "    1  : a && :\n    2  history\n"
+        );
+        // A comment belongs to the line it trails; each line is its own entry.
+        assert_eq!(
+            run("set -o history\n: # note\n: b\nhistory").0,
+            "    1  : # note\n    2  : b\n    3  history\n"
+        );
+        // A here-document body travels with the line that introduced it.
+        assert_eq!(
+            run("set -o history\ncat <<E\nbody\nE\nhistory").0,
+            "body\n    1  cat <<E\nbody\nE\n\n    2  history\n"
+        );
+        // Blank lines are dropped entirely.
+        assert_eq!(run("set -o history\n\n\n: x\nhistory").0.lines().count(), 2);
+    }
+
+    #[test]
+    fn history_is_not_recorded_below_the_top_level() {
+        // Only the top-level reader records; the `eval` call is an entry, the
+        // string it ran is not.
+        assert_eq!(
+            run("set -o history\neval ': a\n: b'\nhistory").0,
+            "    1  eval ': a\n: b'\n    2  history\n"
+        );
+        // A function body is likewise invisible; only its definition and call.
+        assert_eq!(
+            run("set -o history\nf() { :; }\nf\nhistory").0,
+            "    1  f() { :; }\n    2  f\n    3  history\n"
+        );
+    }
+
+    #[test]
+    fn history_delete_takes_offsets_and_ranges() {
+        let list = "set -o history\n: a\n: b\n: c\n: d\n";
+        // A positive offset, a negative one counting back from the newest, and
+        // an inclusive range. Deleting renumbers what follows.
+        assert_eq!(
+            run(&format!("{list}history -d 2\nhistory 2")).0,
+            "    4  history -d 2\n    5  history 2\n"
+        );
+        assert_eq!(
+            run(&format!("{list}history -d -1\nhistory 1")).0,
+            "    5  history 1\n"
+        );
+        assert_eq!(
+            run(&format!("{list}history -d 1-3\nhistory 1")).0,
+            "    3  history 1\n"
+        );
+        // A start below the oldest entry is clamped rather than rejected.
+        assert_eq!(run(&format!("{list}history -d 0-2")).1, 0);
+        // Everything unreachable is a "position out of range", and a reversed
+        // range fails silently.
+        assert_eq!(run(&format!("{list}history -d 0")).1, 1);
+        assert_eq!(run(&format!("{list}history -d 99")).1, 1);
+        assert_eq!(run(&format!("{list}history -d foo")).1, 1);
+        assert_eq!(run(&format!("{list}history -d 3-")).1, 1);
+        assert_eq!(run(&format!("{list}history -d 9-8")), (String::new(), 1));
+    }
+
+    #[test]
+    fn history_clear_store_and_print() {
+        // `-c` empties the list and restarts the numbering.
+        assert_eq!(run("set -o history\n: a\nhistory -c\n: b\nhistory").0, "    1  : b\n    2  history\n");
+        // `-s` replaces the entry its own line made.
+        assert_eq!(
+            run("set -o history\n: a\nhistory -s new text\nhistory").0,
+            "    1  : a\n    2  new text\n    3  history\n"
+        );
+        // `-p` prints its arguments and records nothing.
+        assert_eq!(run("set -o history\nhistory -p one two").0, "one\ntwo\n");
+        // Bad usage is a usage error; a bad count operand is not.
+        assert_eq!(run("history -z").1, 2);
+        assert_eq!(run("history -d").1, 2);
+        assert_eq!(run("history bogus").1, 1);
+    }
+
+    #[test]
+    fn history_size_stifles_and_renumbers() {
+        // `HISTSIZE` caps the list; the numbers keep climbing past the cap.
+        assert_eq!(
+            run("HISTSIZE=2\nset -o history\n: a\n: b\n: c\nhistory").0,
+            "    3  : c\n    4  history\n"
+        );
+        // Assigning `HISTSIZE` renumbers the survivors from `len - cap` rather
+        // than preserving their numbers — readline's `stifle_history`.
+        assert_eq!(
+            run("set -o history\n: a\n: b\n: c\nHISTSIZE=2\nhistory").0,
+            "    3  HISTSIZE=2\n    4  history\n"
+        );
+        // `HISTSIZE=0` stores nothing and leaves `$HISTCMD` one below the count.
+        assert_eq!(run("set -o history\n: a\nHISTSIZE=0\n: b\necho $HISTCMD\nhistory").0, "1\n");
+        // Unset, empty and negative all unstifle; a non-number is ignored.
+        assert_eq!(
+            run("HISTSIZE=2\nset -o history\n: a\n: b\nHISTSIZE=abc\n: c\nhistory").0.lines().count(),
+            2
+        );
+        assert_eq!(
+            run("HISTSIZE=2\nset -o history\n: a\n: b\nHISTSIZE=\n: c\nhistory").0.lines().count(),
+            4
+        );
     }
 
     #[test]

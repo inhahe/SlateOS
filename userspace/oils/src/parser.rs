@@ -235,6 +235,55 @@ pub fn parse_with_aliases(
 /// when `expand_aliases` is off). The stream is re-expanded from the *original*
 /// tokens whenever the alias state changes, so already-expanded text is never
 /// expanded twice.
+/// What a top-level physical line of a parse unit is made of.
+///
+/// The command history keeps a unit's lines verbatim but joins them with a
+/// separator that depends on this — and drops two of the four kinds outright.
+/// See [`UnitLine`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitLineKind {
+    /// Whitespace only. Never recorded: bash's history skips a blank line
+    /// whether it stands between commands or inside one.
+    Blank,
+    /// A comment and nothing else. Dropped from a multi-line entry — though it
+    /// still forces the following line onto a line of its own — and recorded as
+    /// an entry in its own right when it precedes any command.
+    Comment,
+    /// The body of a here-document introduced by the previous line, delimiter
+    /// line and trailing newline included. The lexer swallows it whole, so it
+    /// carries no tokens of its own.
+    HereDocBody,
+    /// A line carrying at least one token.
+    Code,
+}
+
+/// One top-level physical line of a parse unit, as the command history needs
+/// it: bash records a multi-line command as a single entry whose lines are
+/// rejoined with `"; "`, `" "` or `"\n"` depending on what the previous line
+/// ended with.
+///
+/// "Top-level" means separated by a [`Tok::Newline`] — a newline the *parser*
+/// sees. A newline inside a quoted string, a `$( … )` body or a here-document
+/// body is part of a token and stays inside `text` untouched, which is exactly
+/// how bash stores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitLine {
+    /// The line's source text, without its terminating newline.
+    pub text: String,
+    pub kind: UnitLineKind,
+    /// The line ends in an unquoted `#` comment. bash cannot append `"; "` to
+    /// such a line — the next command would be swallowed by the comment — so it
+    /// breaks the entry onto a new line instead.
+    pub comment: bool,
+    /// The line introduces a here-document (`<<`/`<<-`), so the next line is
+    /// its body and must start on a line of its own.
+    pub heredoc: bool,
+    /// The line's last token is one a `;` cannot follow: `;`, `;;`, `;&`,
+    /// `;;&`, `&`, `&&`, `|`, `|&`, `||`, `(`, `{`, or a reserved word that
+    /// expects a command (`do`, `then`, `else`, `elif`, `in`).
+    pub open: bool,
+}
+
 pub struct IncrementalParser {
     /// The source, kept for re-lexing the tail when [`LexOpts`] change. Held as
     /// chars because the offsets recorded by the lexer are char indices.
@@ -250,6 +299,22 @@ pub struct IncrementalParser {
     orig_lines: Vec<u32>,
     /// Parallel to `orig`: the char offset into `src` each token starts at.
     orig_offsets: Vec<u32>,
+    /// Parallel to `orig`: the char offset into `src` just past each token. A
+    /// `Newline` that swallowed a here-document body ends past the body, so a
+    /// unit's source is always `src[hist_cursor .. orig_ends[last consumed]]`.
+    orig_ends: Vec<u32>,
+    /// Ascending char offsets into `src` of the `\` of every `\<newline>` the
+    /// lexer joined away. bash's history stores the *joined* line, so
+    /// [`Self::line_text`] cuts these spans back out — see [`Tokenized::conts`].
+    orig_conts: Vec<u32>,
+    /// Char offset into `src` of the first character not yet handed out as unit
+    /// text. Runs ahead of `pos` only in whole tokens, so it survives a
+    /// [`Self::relex`] (which rebases offsets onto the same `src`).
+    hist_cursor: usize,
+    /// The top-level lines of the unit [`Self::next_unit`] last returned, for
+    /// the caller's command history. Empty when the unit consumed no original
+    /// token (an alias splice replaying tokens already recorded).
+    unit_lines: Vec<UnitLine>,
     /// `orig[pos..]` alias-expanded under `last_aliases`, prefixed by any
     /// alias-spliced tokens carried across the last rebuild.
     work: Vec<Tok>,
@@ -294,6 +359,8 @@ impl IncrementalParser {
             toks: mut orig,
             lines: mut orig_lines,
             offsets: orig_offsets,
+            ends: orig_ends,
+            conts: orig_conts,
             err,
         } = tokenize_deferred(src, opts);
         map_lines(&mut orig, &mut orig_lines, &line_map);
@@ -303,6 +370,10 @@ impl IncrementalParser {
             orig,
             orig_lines,
             orig_offsets,
+            orig_ends,
+            orig_conts,
+            hist_cursor: 0,
+            unit_lines: Vec::new(),
             work: Vec::new(),
             work_lines: Vec::new(),
             work_origin: Vec::new(),
@@ -342,16 +413,25 @@ impl IncrementalParser {
             toks: mut orig,
             lines: mut orig_lines,
             mut offsets,
+            mut ends,
+            conts,
             err,
         } = tokenize_deferred(&tail, opts);
         map_lines(&mut orig, &mut orig_lines, &map);
         let delta = u32::try_from(off).unwrap_or(u32::MAX);
-        for o in &mut offsets {
+        for o in offsets.iter_mut().chain(ends.iter_mut()) {
             *o = o.saturating_add(delta);
         }
         self.orig = orig;
         self.orig_lines = orig_lines;
         self.orig_offsets = offsets;
+        self.orig_ends = ends;
+        // The head was not re-scanned, so its continuations are still the only
+        // record of what the first lex joined away there — text the history may
+        // yet slice, since `hist_cursor` can trail `off` by a comment or two.
+        self.orig_conts.retain(|&o| (o as usize) < off);
+        self.orig_conts
+            .extend(conts.iter().map(|&o| o.saturating_add(delta)));
         self.pos = 0;
         self.opts = opts;
         self.pending_lex_err = err
@@ -509,32 +589,192 @@ impl IncrementalParser {
             Err(e) if ran_out => Err(self.pending_lex_err.take().unwrap_or(e)),
             other => other,
         };
+        // Resume at the first not-yet-consumed token that came from the original
+        // stream; spliced tokens before it stay in `work`.
+        let next_orig = self
+            .work_origin
+            .get(self.wpos..)
+            .unwrap_or(&[])
+            .iter()
+            .flatten()
+            .next()
+            .copied()
+            .unwrap_or(self.orig.len());
+        self.unit_lines.clear();
         match outcome {
             // End of input. If the lexer stopped early on an unclosed
             // construct, this is the point where bash — having executed every
             // complete line before it — reports the error.
             Ok(()) if items.is_empty() => self.pending_lex_err.take().map(Err),
             Ok(()) => {
-                // Resume at the first not-yet-consumed token that came from the
-                // original stream; spliced tokens before it stay in `work`.
-                self.pos = self
-                    .work_origin
-                    .get(self.wpos..)
-                    .unwrap_or(&[])
-                    .iter()
-                    .flatten()
-                    .next()
-                    .copied()
-                    .unwrap_or(self.orig.len());
+                self.pos = next_orig;
+                self.split_unit_lines(next_orig);
                 Some(Ok(Program { items }))
             }
             Err(e) => {
+                // bash has already *read* the line it could not parse, so it is
+                // in the history before the diagnostic is printed.
+                self.split_unit_lines(next_orig);
                 // Abandon the rest of the input, discarding the units parsed so
                 // far in *this* unit — bash never runs a partially-parsed line.
                 self.wpos = self.work.len();
                 self.pos = self.orig.len();
                 Some(Err(e))
             }
+        }
+    }
+
+    /// The top-level lines of the unit [`Self::next_unit`] last returned, for a
+    /// caller keeping a command history. Empty when the unit consumed nothing
+    /// from the original stream (an alias splice replaying already-recorded
+    /// tokens), and reset by every call to `next_unit`.
+    #[must_use]
+    pub fn last_unit_lines(&self) -> &[UnitLine] {
+        &self.unit_lines
+    }
+
+    /// Cut the source the just-parsed unit occupies into its top-level lines.
+    ///
+    /// The span runs from wherever the previous unit's text ended to the end of
+    /// the last token this unit consumed — which for a `Newline` that swallowed
+    /// a here-document body is past the body, so the body travels with the line
+    /// that introduced it. Starting from the previous end rather than from this
+    /// unit's first token is what keeps the comment lines *before* a command:
+    /// the lexer emits no token for a comment, only for the newline ending it,
+    /// so the comment's own text lies before that token's offset.
+    fn split_unit_lines(&mut self, end_orig: usize) {
+        let Some(last) = end_orig.checked_sub(1) else { return };
+        let start = self.hist_cursor;
+        let end = self
+            .orig_ends
+            .get(last)
+            .map_or(self.src.len(), |&e| (e as usize).min(self.src.len()));
+        if end <= start {
+            return;
+        }
+        self.hist_cursor = end;
+        // Tokens are emitted in source order, so walking the span's tokens once
+        // groups them by the newlines between them.
+        let mut toks: Vec<usize> = Vec::new();
+        let mut line_start = start;
+        let mut prev_heredoc = false;
+        for i in 0..self.orig.len() {
+            let off = self.orig_offsets.get(i).map_or(usize::MAX, |&o| o as usize);
+            if off < start {
+                continue;
+            }
+            if off >= end {
+                break;
+            }
+            if !matches!(self.orig.get(i), Some(Tok::Newline)) {
+                toks.push(i);
+                continue;
+            }
+            let line = self.classify_line(line_start, off, &toks, prev_heredoc);
+            prev_heredoc = line.heredoc;
+            self.unit_lines.push(line);
+            toks.clear();
+            line_start = off.saturating_add(1);
+        }
+        // Whatever follows the last newline: a here-document body, a final line
+        // with no newline of its own, or nothing at all.
+        if line_start < end || !toks.is_empty() {
+            let line = self.classify_line(line_start, end, &toks, prev_heredoc);
+            self.unit_lines.push(line);
+        }
+    }
+
+    /// Build one [`UnitLine`] from the source range `[from, to)` and the tokens
+    /// standing on it.
+    fn classify_line(
+        &self,
+        from: usize,
+        to: usize,
+        toks: &[usize],
+        prev_heredoc: bool,
+    ) -> UnitLine {
+        let text = self.line_text(from, to);
+        let Some(&last) = toks.last() else {
+            // No token of its own: the body of the here-document the previous
+            // line opened, a comment, or a blank line.
+            let kind = if prev_heredoc {
+                UnitLineKind::HereDocBody
+            } else if text.trim().is_empty() {
+                UnitLineKind::Blank
+            } else {
+                UnitLineKind::Comment
+            };
+            return UnitLine {
+                text,
+                kind,
+                comment: kind == UnitLineKind::Comment,
+                heredoc: false,
+                open: false,
+            };
+        };
+        // Anything left on the line after its last token can only be a comment:
+        // every other run of source is a token.
+        let code_end = self.orig_ends.get(last).map_or(to, |&e| (e as usize).min(to));
+        // Joined-away continuations do not count as leftover text: `echo a \`
+        // followed by an empty line leaves a `\` after the last token that the
+        // history never sees.
+        let comment = self.line_text(code_end, to).contains(|c: char| !c.is_whitespace());
+        let heredoc = toks
+            .iter()
+            .any(|&i| matches!(self.orig.get(i), Some(Tok::Op(Op::DLess | Op::DLessDash))));
+        UnitLine { text, kind: UnitLineKind::Code, comment, heredoc, open: self.line_is_open(last) }
+    }
+
+    /// The source range `[from, to)` as the history should store it: with every
+    /// `\<newline>` the lexer joined away removed, exactly as bash records the
+    /// joined line rather than the two physical ones. A continuation the lexer
+    /// *kept* — inside `'…'`, `"…"`, `$( … )`, or a quoted-delimiter
+    /// here-document — was never recorded and so survives here too.
+    fn line_text(&self, from: usize, to: usize) -> String {
+        let mut text = String::new();
+        let mut i = from;
+        while i < to {
+            let at = u32::try_from(i).unwrap_or(u32::MAX);
+            if self.orig_conts.binary_search(&at).is_ok() {
+                // Skip the backslash and the newline it hid, CR included.
+                i = i.saturating_add(1);
+                if self.src.get(i) == Some(&'\r') {
+                    i = i.saturating_add(1);
+                }
+                if self.src.get(i) == Some(&'\n') {
+                    i = i.saturating_add(1);
+                }
+                continue;
+            }
+            if let Some(&c) = self.src.get(i) {
+                text.push(c);
+            }
+            i = i.saturating_add(1);
+        }
+        text
+    }
+
+    /// Whether a `;` may not follow the token at `i` — bash then joins the next
+    /// line on with a plain space instead.
+    fn line_is_open(&self, i: usize) -> bool {
+        match self.orig.get(i) {
+            Some(Tok::Op(
+                Op::Semi
+                | Op::DSemi
+                | Op::SemiAmp
+                | Op::DSemiAmp
+                | Op::Amp
+                | Op::AndIf
+                | Op::OrIf
+                | Op::Pipe
+                | Op::PipeAmp
+                | Op::LParen,
+            )) => true,
+            Some(Tok::Word(segs)) => matches!(
+                segs.as_slice(),
+                [Seg::Lit(s)] if matches!(s.as_str(), "{" | "do" | "then" | "else" | "elif" | "in")
+            ),
+            _ => false,
         }
     }
 }

@@ -110,7 +110,7 @@ use crate::ast::{
     CmdSubBody, Command,
     CondBinOp,
     CondExpr,
-    ForArithClause, ForClause, IfClause, LoopClause, ParamOp, Pipeline, Program, Redirect,
+    ForArithClause, ForClause, IfClause, LineMap, LoopClause, ParamOp, Pipeline, Program, Redirect,
     RedirectOp,
     ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
@@ -1790,16 +1790,24 @@ pub struct Shell {
     /// collected. The job stays in the substitution's table instead, still
     /// owed to whatever `jobs` runs there.
     in_comsub: bool,
-    /// Whether this shell's *top-level* read-eval loop is reading a `` `…` ``
-    /// body. bash parses a backtick body at expansion time, as its own input,
-    /// which shows in two places: a syntax error there is tagged
-    /// `command substitution` rather than the enclosing `-c`, and it yields
-    /// status 2 (or 1 for a nested `$( … )` body) rather than the status a
-    /// top-level syntax error would. Both only apply at
-    /// [`Shell::at_outermost_read_eval`] — a nested `eval`/`source` inside the
-    /// body reports and scores as its own input — and any nested subshell
-    /// clears the flag (see [`Shell::clone_for_subshell`]).
-    backtick_body: bool,
+    /// Whether this shell's *top-level* read-eval loop is a command
+    /// substitution's body, re-read at expansion time.
+    ///
+    /// Both spellings get there: bash hands `` `…` `` and `$( … )` alike to
+    /// `parse_and_execute` when the word is expanded, which shows in two places
+    /// — a syntax error is tagged `command substitution` rather than the
+    /// enclosing `-c`, and it yields status 2 (or 1 for a nested `$( … )` body)
+    /// rather than the status a top-level syntax error would. For `$( … )` that
+    /// is a rare path, because its *eager* parse (in the enclosing token stream)
+    /// has already rejected anything ill-formed and done so fatally; it is
+    /// reachable only when the body changes its own parse state mid-body, e.g.
+    /// `x=$(alias q=for` / `q)`.
+    ///
+    /// Both effects apply only at [`Shell::at_outermost_read_eval`] — a nested
+    /// `eval`/`source` inside the body reports and scores as its own input — and
+    /// any nested subshell clears the flag (see
+    /// [`Shell::clone_for_subshell`]).
+    comsub_read_eval: bool,
     /// The `>`/`>>` target of the builtin currently running, held open so it can
     /// write in pieces. Installed and restored around each builtin's dispatch by
     /// [`Shell::run_builtin_body`]; `None` whenever no builtin is running or the
@@ -2419,7 +2427,7 @@ impl Shell {
             last_status: 0,
             comsub_count: 0,
             in_comsub: false,
-            backtick_body: false,
+            comsub_read_eval: false,
             builtin_stdout: None,
             subshell_depth: 0,
             last_bg_pid: None,
@@ -2991,7 +2999,7 @@ impl Shell {
     /// status *and* latches [`Shell::exit_requested`] so the read-eval loop
     /// stops reading further input.
     fn run_source_out(&mut self, src: &str, out: &mut Out, line_base: u32) -> i32 {
-        match self.run_source_flow_out(src, out, &StdinSrc::Inherit, line_base) {
+        match self.run_source_flow_out(src, out, &StdinSrc::Inherit, &LineMap::Offset(line_base)) {
             Flow::Exit(code) => {
                 self.exit_requested = true;
                 self.last_status = code;
@@ -3015,23 +3023,25 @@ impl Shell {
     /// `echo hi | { eval "read v"; }` must read from the pipe. Only the outermost
     /// entry point ([`Shell::run_source_out`]) passes `StdinSrc::Inherit`.
     ///
-    /// `line_base` shifts every line `src` reports, for input that is a fragment
-    /// of a longer stream (see [`Shell::run_source_at`]); it is 0 for a source
-    /// that numbers its own lines from 1, which is every internally-generated
-    /// body here.
+    /// `map` renumbers every line `src` reports. For input that is a fragment of
+    /// a longer stream (see [`Shell::run_source_at`]) that is a plain
+    /// [`LineMap::Offset`]; a `$( … )` body instead reports bash's ranked
+    /// close-line numbering, so it passes the [`LineMap::CmdSub`] the parser
+    /// built. It is `Offset(0)` for a source that numbers its own lines from 1,
+    /// which is every other internally-generated body here.
     fn run_source_flow_out(
         &mut self,
         src: &str,
         out: &mut Out,
         stdin: &StdinSrc,
-        line_base: u32,
+        map: &LineMap,
     ) -> Flow {
         // Parse and execute one unit (one logical line) at a time rather than
         // parsing the whole input up front, because bash's read-parse-execute
         // order is observable: a `shopt -s expand_aliases` or `alias foo=…` run
         // by unit N must affect how unit N+1 parses, and commands before a
         // syntax error must still have run. See [`IncrementalParser`].
-        let mut ip = IncrementalParser::new(src, line_base, self.lex_opts());
+        let mut ip = IncrementalParser::new(src, map.clone(), self.lex_opts());
         loop {
             // Expand command-word aliases only when `expand_aliases` is in
             // effect; otherwise the raw tokens are parsed so a non-interactive
@@ -3047,7 +3057,7 @@ impl Shell {
             let prog = match unit {
                 Ok(p) => p,
                 Err(e) => {
-                    self.errln(&self.format_parse_error(&e, src, line_base));
+                    self.errln(&self.format_parse_error(&e, src, map));
                     return self.parse_error_flow(&e);
                 }
             };
@@ -3094,8 +3104,8 @@ impl Shell {
         // abandons the rest of the body, substitutes what it has captured so
         // far, and leaves `$?` at 2 — or 1 when the body's error was itself a
         // `$( … )` body's. The enclosing command carries on either way. See
-        // [`Shell::backtick_body`].
-        if self.backtick_body && self.at_outermost_read_eval() {
+        // [`Shell::comsub_read_eval`].
+        if self.comsub_read_eval && self.at_outermost_read_eval() {
             self.last_status = if e.fatal { 1 } else { 2 };
             return Flow::Next;
         }
@@ -5258,7 +5268,7 @@ impl Shell {
             in_comsub: false,
             // Names *this* shell's top-level input, so a nested subshell — which
             // gets a read-eval loop of its own, or none at all — starts clear.
-            backtick_body: false,
+            comsub_read_eval: false,
             // Belongs to a builtin that is running *now*, in this shell; a
             // subshell starts outside any builtin of its own.
             builtin_stdout: None,
@@ -11638,58 +11648,81 @@ impl Shell {
         ));
     }
 
-    /// Substitute a `` `…` ``/`$( … )` body, parsing the backtick spelling first.
+    /// Substitute a `` `…` ``/`$( … )` body, re-reading it at expansion time.
     ///
-    /// A `$( … )` body is parsed with the enclosing source, so a syntax error in
-    /// one is reported (fatally) at parse time and the enclosing command never
-    /// runs. A backtick body is not: bash reads it only when the word is
-    /// *expanded* — `if false; then echo \`for\`; fi` is silent — and re-reads it
-    /// on **every** expansion, so a loop body reports its error once per
-    /// iteration. Re-reading is not just bash-bug-compatibility: a
-    /// `shopt -s extglob` executed between two expansions changes how the body
-    /// lexes, so the parse genuinely cannot be cached.
+    /// Both spellings run through the same read-eval loop, because bash hands
+    /// both to `parse_and_execute` when the word is expanded. What differs is
+    /// what happened *before* that:
     ///
-    /// A parse failure here is *not* fatal to the caller (unlike a `$( … )`
-    /// body's): bash prints the diagnostic under a `command substitution` source
-    /// token, substitutes the empty string, sets `$?` — 2 for an ordinary syntax
-    /// error, 1 when the body's own error was itself fatal (a nested `$( … )`) —
-    /// and carries on with the enclosing command.
+    /// - A `$( … )` body was also parsed with the enclosing source, which is how
+    ///   the matching `)` was found and why a syntax error in one is reported
+    ///   (fatally) at parse time, before the enclosing command runs at all.
+    /// - A backtick body was not parsed at any earlier point — `if false; then
+    ///   echo \`for\`; fi` is silent — so its errors surface only here.
+    ///
+    /// Re-reading is observable either way, which is why the eager parse is not
+    /// simply executed: a `shopt`/`alias` the body runs changes how the *rest*
+    /// of the body parses, and a substitution inside a loop is re-read (and so
+    /// re-reports) once per iteration. See
+    /// `known-issues.md` TD-OILS-CMDSUB-DOLLAR-NOT-INCREMENTAL.
+    ///
+    /// A parse failure *here* is not fatal to the caller: bash prints the
+    /// diagnostic under a `command substitution` source token, substitutes the
+    /// empty string, sets `$?` — 2 for an ordinary syntax error, 1 when the
+    /// body's own error was itself fatal (a nested `$( … )`) — and carries on
+    /// with the enclosing command.
     fn command_sub_body(&mut self, body: &CmdSubBody) -> String {
+        // Count every command substitution so callers (e.g. pure assignments)
+        // can tell whether one ran while expanding a value.
+        self.comsub_count = self.comsub_count.wrapping_add(1);
         match body {
-            CmdSubBody::Parsed(prog) => self.command_sub(prog),
+            CmdSubBody::Parsed { prog, src, map } => {
+                // The `$(< file)` peek reuses the eager parse: for a body of
+                // that shape the re-read would produce the same program (a lone
+                // redirect has no command word for an alias to replace), and it
+                // is already to hand.
+                let path = self.comsub_read_file(prog);
+                self.command_sub(src, map, path)
+            }
             CmdSubBody::Backtick { src, close_line, .. } => {
-                self.backtick_sub(src, *close_line)
+                // A backtick body's lines are numbered from `close_line - 1` — a
+                // plain offset, unlike the rank-based renumbering a `$( … )`
+                // body gets (see [`crate::parser::parse_cmdsub_body`]). Both are
+                // bash's, measured.
+                let map = LineMap::Offset(close_line.saturating_sub(1));
+                let path = self.comsub_text_read_file(src, &map);
+                self.command_sub(src, &map, path)
             }
         }
     }
 
-    /// Read and run a `` `…` `` body, substituting what it wrote to stdout.
+    /// Run a command substitution's body text, substituting what it wrote to
+    /// stdout.
     ///
     /// The body is its own input, read one logical line at a time, so a `shopt`
     /// or `alias` it runs changes how the *rest* of it parses, and the commands
     /// before a syntax error have already run — a body of `echo ok` followed by
     /// a bare `for` substitutes `ok`. That is [`Shell::run_source_flow_out`]'s
-    /// job, so this is `command_sub` with a read-eval loop in place of the
-    /// pre-parsed program — plus `backtick_body`, which tells that loop to
-    /// report a syntax error the way bash does here (see the field's docs).
-    fn backtick_sub(&mut self, src: &str, close_line: u32) -> String {
-        self.comsub_count = self.comsub_count.wrapping_add(1);
-        // The body's lines are numbered from `close_line - 1` — a plain offset,
-        // unlike the rank-based renumbering a `$( … )` body gets (see
-        // [`crate::parser::parse_cmdsub_body`]), because the body is read as an
-        // input of its own rather than folded back into the enclosing scan.
-        let base = close_line.saturating_sub(1);
-        if let Some(path) = self.backtick_read_file(src, base) {
+    /// job; `comsub_read_eval` tells that loop to report a syntax error the way
+    /// bash does here (see the field's docs).
+    ///
+    /// `read_file` is the already-taken `$(< file)` fast path: a body that is
+    /// solely an input redirection reads and substitutes the file's contents
+    /// directly, which is what bash does instead of running the null command.
+    fn command_sub(&mut self, src: &str, map: &LineMap, read_file: Option<String>) -> String {
+        if let Some(path) = read_file {
             return self.substitute_file(&path);
         }
         let cap = capture_sink();
         let mut sub = self.new_comsub_shell();
-        sub.backtick_body = true;
+        sub.comsub_read_eval = true;
         {
+            // The substitution's capture is its fd 1 — bash gives the subshell
+            // the write end of the collecting pipe, replacing any persistent
+            // `exec > file`, so `exec >f; x=$(echo hi)` still captures `hi`.
             sub.exec_stdout = None;
             let mut out = Out::Capture(cap.clone());
-            if let Flow::Exit(code) =
-                sub.run_source_flow_out(src, &mut out, &StdinSrc::Inherit, base)
+            if let Flow::Exit(code) = sub.run_source_flow_out(src, &mut out, &StdinSrc::Inherit, map)
             {
                 // Nothing above this is left to unwind — the substitution's
                 // subshell *is* the outermost frame here — so collapse the flow
@@ -11697,56 +11730,31 @@ impl Shell {
                 sub.exit_requested = true;
                 sub.last_status = code;
             }
-            sub.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
-        }
-        self.finish_comsub(&mut sub, &cap)
-    }
-
-    /// The `$(< file)` fast path applied to a backtick body: `` `< file` `` gets
-    /// it too, but — as with `$( … )` — only when the redirect is the body's
-    /// *whole* content, since bash otherwise just runs the null command and
-    /// collects its (empty) stdout. Parsing one unit and checking the input is
-    /// then exhausted is exactly that test.
-    ///
-    /// Aliases are deliberately not expanded for the peek: the shape
-    /// [`Shell::comsub_read_file`] accepts has no command word for an alias to
-    /// replace, so expansion cannot change the answer.
-    fn backtick_read_file(&mut self, src: &str, base: u32) -> Option<String> {
-        let opts = self.lex_opts();
-        let mut ip = IncrementalParser::new(src, base, opts);
-        let prog = ip.next_unit(None, opts)?.ok()?;
-        if !ip.exhausted() {
-            return None;
-        }
-        self.comsub_read_file(&prog)
-    }
-
-    fn command_sub(&mut self, prog: &Program) -> String {
-        // Count every command substitution so callers (e.g. pure assignments)
-        // can tell whether a `$(...)` ran while expanding a value.
-        self.comsub_count = self.comsub_count.wrapping_add(1);
-        // bash fast path: a command substitution whose body is solely an input
-        // redirection — `$(< file)` — reads and substitutes the file's contents
-        // (equivalent to, but faster than, `$(cat file)`). Detect a single
-        // simple command with no assignments, no words, and a fd-0 read redirect,
-        // then slurp the file directly.
-        if let Some(path) = self.comsub_read_file(prog) {
-            return self.substitute_file(&path);
-        }
-        let cap = capture_sink();
-        let mut sub = self.new_comsub_shell();
-        {
-            // The substitution's capture is its fd 1 — bash gives the subshell
-            // the write end of the collecting pipe, replacing any persistent
-            // `exec > file`, so `exec >f; x=$(echo hi)` still captures `hi`.
-            sub.exec_stdout = None;
-            let mut out = Out::Capture(cap.clone());
-            let _ = sub.exec_program(prog, &mut out, &StdinSrc::Inherit);
             // A command substitution is a subshell: fire its own EXIT trap into
             // the same capture so its output is included in the result (bash).
             sub.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
         }
         self.finish_comsub(&mut sub, &cap)
+    }
+
+    /// The `$(< file)` fast path applied to a body held only as *text* (a
+    /// backtick body, or the body of a `$( … )` embedded in arithmetic):
+    /// `` `< file` `` gets it too, but — as with `$( … )` — only when the
+    /// redirect is the body's *whole* content, since bash otherwise just runs
+    /// the null command and collects its (empty) stdout. Parsing one unit and
+    /// checking the input is then exhausted is exactly that test.
+    ///
+    /// Aliases are deliberately not expanded for the peek: the shape
+    /// [`Shell::comsub_read_file`] accepts has no command word for an alias to
+    /// replace, so expansion cannot change the answer.
+    fn comsub_text_read_file(&mut self, src: &str, map: &LineMap) -> Option<String> {
+        let opts = self.lex_opts();
+        let mut ip = IncrementalParser::new(src, map.clone(), opts);
+        let prog = ip.next_unit(None, opts)?.ok()?;
+        if !ip.exhausted() {
+            return None;
+        }
+        self.comsub_read_file(&prog)
     }
 
     /// The value of the `$(< file)` fast path: the file's contents with trailing
@@ -12177,15 +12185,25 @@ impl Shell {
         out
     }
 
-    /// Parse `text` as a shell program and capture its stdout (a command
-    /// substitution body embedded in an arithmetic expression), reusing the
-    /// normal `command_sub` path (trailing-newline stripping, `$(<file)` fast
-    /// path). An unparseable body yields an empty string.
+    /// Run `text` as a command substitution body embedded in an arithmetic
+    /// expression, reusing the normal [`Shell::command_sub`] path (trailing-
+    /// newline stripping, `$(<file)` fast path, read-eval body semantics).
+    ///
+    /// The body reaches us as raw text — the arithmetic scanner carved it out of
+    /// the expression string — so it numbers its own lines from 1 and takes the
+    /// identity map. An unparseable body yields the empty string *silently*:
+    /// unlike a normal `$( … )` this text was never seen by the enclosing parse,
+    /// so a diagnostic here would be attributed to the wrong place. The eager
+    /// parse is only that validity check; the run is incremental, so a `shopt`
+    /// or `alias` in the body still affects the rest of it.
     fn run_command_sub_text(&mut self, text: &str) -> String {
-        match crate::parser::parse(text) {
-            Ok(prog) => self.command_sub(&prog),
-            Err(_) => String::new(),
+        if crate::parser::parse(text).is_err() {
+            return String::new();
         }
+        self.comsub_count = self.comsub_count.wrapping_add(1);
+        let map = LineMap::Offset(0);
+        let path = self.comsub_text_read_file(text, &map);
+        self.command_sub(text, &map, path)
     }
 
     /// From `chars[start..]` (just past an opening `(`), return the balanced
@@ -12503,7 +12521,7 @@ impl Shell {
                 // reports 3; running a three-line string reports 3, 4, 5.)
                 // `current_line` is already absolute, so nested evals compose.
                 let eval_base = self.current_line.saturating_sub(1);
-                let eval_flow = self.run_source_flow_out(&joined, out, stdin, eval_base);
+                let eval_flow = self.run_source_flow_out(&joined, out, stdin, &LineMap::Offset(eval_base));
                 self.eval_depth = self.eval_depth.saturating_sub(1);
                 match eval_flow {
                     Flow::Exit(code) => {
@@ -15745,7 +15763,7 @@ impl Shell {
         }
         self.in_trap = true;
         let saved = self.last_status;
-        let flow = self.run_source_flow_out(&action, out, stdin, 0);
+        let flow = self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0));
         // Preserve the pre-trap status unless the handler asked to exit, in
         // which case its code is the shell's exit status.
         if !matches!(flow, Flow::Exit(_)) {
@@ -15801,7 +15819,7 @@ impl Shell {
                     flow = self.exec_program(&prog, out, stdin);
                 }
                 Err(e) => {
-                    self.errln(&self.format_parse_error(&e, &action, 0));
+                    self.errln(&self.format_parse_error(&e, &action, &LineMap::Offset(0)));
                 }
             }
             let exited = match flow {
@@ -19181,7 +19199,7 @@ impl Shell {
                 // The callback runs in the current shell, so it gets the shell's
                 // stdin — not the file/fd `mapfile` is itself consuming, whose
                 // remaining bytes belong to the read loop.
-                if let Flow::Exit(n) = self.run_source_flow_out(&cmd, out, stdin, 0) {
+                if let Flow::Exit(n) = self.run_source_flow_out(&cmd, out, stdin, &LineMap::Offset(0)) {
                     self.pending_builtin_exit = Some(n);
                     return n;
                 }
@@ -19257,7 +19275,7 @@ impl Shell {
                 });
                 // The script's stdout belongs to *this* command's sink, so
                 // `x=$(. script)` captures it (bash).
-                let flow = self.run_source_flow_out(&src, out, stdin, 0);
+                let flow = self.run_source_flow_out(&src, out, stdin, &LineMap::Offset(0));
                 self.trap_suppress.pop();
                 self.source_stack.pop();
                 self.refresh_funcname();
@@ -20732,7 +20750,7 @@ impl Shell {
     /// A backtick body is a third input source, tagged `command substitution`
     /// whatever the enclosing one was (`-c`, `eval`, or a script alike) — but
     /// only for the body's *own* read-eval loop, since an `eval`/`.` run inside
-    /// it reports as itself. See [`Shell::backtick_body`].
+    /// it reports as itself. See [`Shell::comsub_read_eval`].
     fn syntax_error_prefix(&self, line: u32) -> String {
         let name = self.error_source();
         // `eval` wins over the outer `-c`/script token (bash reports `eval:`
@@ -20742,7 +20760,7 @@ impl Shell {
         // reports `./bad.sh: line 2:`, not `./bad.sh: -c: line 2:`. (An `eval`
         // inside a sourced file still says `eval`, because that is then the
         // innermost source.)
-        let in_backtick = self.backtick_body && self.at_outermost_read_eval();
+        let in_backtick = self.comsub_read_eval && self.at_outermost_read_eval();
         let token = if self.eval_depth > 0 {
             Some("eval")
         } else if in_backtick {
@@ -20776,15 +20794,18 @@ impl Shell {
     /// past EOF); lexer-originated errors carry no line, so we fall back to the
     /// current execution line.
     ///
-    /// `line_base` is the shift already applied to `e.line` (see
+    /// `map` is the renumbering already applied to `e.line` (see
     /// [`Shell::run_source_at`]): the reported number is absolute, but the
-    /// source echo has to index back into the *fragment* `src`, so the base is
-    /// subtracted again there.
+    /// source echo has to index back into the *fragment* `src`, so it is run
+    /// back through [`LineMap::unmap`] there. A `$( … )` body's mapping is
+    /// many-to-one (every body line before the last reports the close line's
+    /// number), so `unmap` can fail; then no source line is echoed rather than
+    /// a wrong one.
     fn format_parse_error(
         &self,
         e: &crate::parser::ParseError,
         src: &str,
-        line_base: u32,
+        map: &LineMap,
     ) -> String {
         let line = e.line.unwrap_or_else(|| self.current_line.max(1));
         let prefix = self.syntax_error_prefix(line);
@@ -20804,7 +20825,7 @@ impl Shell {
         // token \`X'` or the conditional-expression `near \`X'` form) — but not
         // for `unexpected end of file` / `unexpected EOF while looking for …`.
         if e.msg.contains("syntax error near ")
-            && let Some(text) = nth_source_line(src, line.saturating_sub(line_base))
+            && let Some(text) = map.unmap(line).and_then(|n| nth_source_line(src, n))
         {
             out.push_str(&format!("\n{prefix}`{text}'"));
         }
@@ -25884,7 +25905,7 @@ mod tests {
         let src = "echo hello world (";
         let e = parse(src).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src, 0),
+            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
             "osh: -c: line 1: syntax error near unexpected token `('\n\
              osh: -c: line 1: `echo hello world ('"
         );
@@ -25893,7 +25914,7 @@ mod tests {
         let src = ":\n:\necho a | | b";
         let e = parse(src).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src, 0),
+            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
             "osh: -c: line 3: syntax error near unexpected token `|'\n\
              osh: -c: line 3: `echo a | | b'"
         );
@@ -25902,7 +25923,7 @@ mod tests {
         let src = "if true";
         let e = parse(src).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src, 0),
+            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
             "osh: -c: line 2: syntax error: unexpected end of file"
         );
 
@@ -25910,7 +25931,7 @@ mod tests {
         let src = "if true\n\n\n";
         let e = parse(src).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src, 0),
+            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
             "osh: -c: line 4: syntax error: unexpected end of file"
         );
 
@@ -25919,7 +25940,7 @@ mod tests {
         let src = "echo (";
         let e = parse(src).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src, 0),
+            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
             "osh: eval: line 1: syntax error near unexpected token `('\n\
              osh: eval: line 1: `echo ('"
         );
@@ -25939,7 +25960,7 @@ mod tests {
         sh.set_command_mode();
         let check = |sh: &Shell, src: &str, want: &str| {
             let e = parse(src).unwrap_err();
-            assert_eq!(sh.format_parse_error(&e, src, 0), want, "src: {src}");
+            assert_eq!(sh.format_parse_error(&e, src, &LineMap::Offset(0)), want, "src: {src}");
         };
         // A bare word primary followed by another word: bash wanted a binary
         // operator. Covers a plain operand, a non-`[[` operator, and a unary
@@ -26018,7 +26039,7 @@ mod tests {
         let e = parse(src).unwrap_err();
         assert_eq!(e.line, Some(1));
         assert_eq!(
-            sh.format_parse_error(&e, src, 0),
+            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
             "osh: -c: line 1: unexpected EOF while looking for matching `)'"
         );
 
@@ -26027,7 +26048,7 @@ mod tests {
         let e = parse(src).unwrap_err();
         assert_eq!(e.line, Some(3));
         assert_eq!(
-            sh.format_parse_error(&e, src, 0),
+            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
             "osh: -c: line 3: unexpected EOF while looking for matching `)'"
         );
 

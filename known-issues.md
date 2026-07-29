@@ -3373,11 +3373,11 @@ Two further divergences fell out of the same measurement and are fixed with it:
   command instead, which writes nothing, so the substitution is empty. Now
   requires exactly one redirect. The fast path applies to the backtick spelling
   too, and only when the redirect is the body's whole content — hence
-  `IncrementalParser::exhausted()`, which lets `backtick_read_file` ask whether
-  the unit it just parsed was the only one.
+  `IncrementalParser::exhausted()`, which lets `comsub_text_read_file` ask
+  whether the unit it just parsed was the only one.
 * Aliases/`shopt` set inside a substitution body did not affect the rest of it,
   because `command_sub` executes a pre-parsed `Program`. Fixed for the backtick
-  spelling by the incremental loop above; still open for `$( … )` — see
+  spelling by the incremental loop above, and for `$( … )` on 2026-07-29 — see
   `TD-OILS-CMDSUB-DOLLAR-NOT-INCREMENTAL`.
 
 **Coverage:** `tests/corpus/cmdsub-error-fatality.sh` (eval, nested eval,
@@ -3394,7 +3394,7 @@ numbering); `interp::cmdsub_syntax_error_names_the_closing_paren`;
 **Not covered — see `TD-OILS-SYNTAX-ERR-ERREXIT-ECHO`:** under `set -e` bash
 reports 2 for every row of the table above, so the corpus file avoids errexit.
 
-### TD-OILS-CMDSUB-DOLLAR-NOT-INCREMENTAL. A `$( … )` body runs as one pre-parsed program, so an `alias`/`shopt` set inside it does not affect the rest of it — 2026-07-29 — OPEN
+### TD-OILS-CMDSUB-DOLLAR-NOT-INCREMENTAL. A `$( … )` body runs as one pre-parsed program, so an `alias`/`shopt` set inside it does not affect the rest of it — 2026-07-29 — ✅ RESOLVED 2026-07-29
 
 **Where:** `userspace/oils/src/interp.rs` `Shell::command_sub` (the
 `exec_program(prog, …)` call); `userspace/oils/src/parser.rs`
@@ -3425,15 +3425,44 @@ time *is* the fix; `Shell::backtick_sub` routes the body through
 `run_source_flow_out`. This entry is the residue: the `$( … )` spelling still
 needs its body re-read at expansion time.
 
-**Proper fix:** keep the body's source text on `CmdSubBody::Parsed` alongside
-the program — the eager parse must stay, since that is what finds the `)` and
-what raises the fatal error — and have `command_sub` run the *text* through
-`run_source_flow_out` rather than the program, with the rank-based `line_base`
-that `CmdSubLineMap` already computes. The line map is per-body-line rather
-than a single offset, so `run_source_flow_out`/`IncrementalParser` would need to
-take a line *mapping* instead of a scalar base; that is the bulk of the work.
-Until then the divergence is confined to bodies that change parse state
-mid-body, which is rare in practice.
+**Fix (2026-07-29):** done as described. `CmdSubLineMap` — which was private to
+`parser.rs` and knew only the `$( … )` rank rule — was generalised into a public
+`ast::LineMap` enum covering *both* renumbering rules the shell uses:
+`Offset(n)` (a REPL fragment, an `eval` string, a backtick body) and
+`CmdSub { pre, close_line, ranked }` (the rank rule). It also subsumes the
+old free functions `shift_lines`/`shift_segs`, which were the same traversal
+with the other mapping function; both are now `map_lines`/`map_segs` taking a
+`&LineMap`. `LineMap` additionally provides `shifted(n)` (compose with a
+re-lexed tail's restart, for `IncrementalParser::relex`) and `unmap(reported)`
+(the partial inverse, for echoing the offending source line back in a
+diagnostic).
+
+`IncrementalParser::new` and `Shell::{run_source_flow_out, format_parse_error}`
+now take a `LineMap` instead of a `u32` base. `parse_cmdsub_body` returns the
+map alongside the program, `CmdSubBody::Parsed` became a struct variant holding
+`{ prog, src, map }`, and `Shell::command_sub` takes `(src, map, read_file)` and
+runs the *text* through `run_source_flow_out` — so the one function now serves
+both spellings, and `backtick_sub` is gone (the backtick body just passes
+`LineMap::Offset(close_line - 1)`). `Shell::backtick_body` was renamed
+`comsub_read_eval`, since the flag now means "this read-eval loop is a command
+substitution's, of either spelling" rather than "backtick".
+
+`run_command_sub_text` (a `$( … )` embedded in an arithmetic expression, which
+reaches the interpreter as raw text) was routed through the same path, deleting
+the second, program-based `command_sub` that had been duplicating the capture /
+exit-trap / `$(<file)` logic.
+
+**Coverage:** `tests/corpus/cmdsub-incremental.sh` — an alias defined by the
+body applying to the rest of it (and not leaking out), a `shopt` doing the same,
+an expansion-time syntax error that is not fatal to the caller, the commands
+before it having already run, the error repeating once per expansion in a loop,
+the `$LINENO` rank rule still holding, and the `$(< file)` fast path unaffected.
+Byte-identical to bash 5.2.
+
+**Note:** `shopt -s extglob` inside the body deliberately does *not* appear in
+that corpus case: `@(` is rejected by the *first* read, which is fatal to the
+whole script, so it never reaches the re-read. `expand_aliases` is the only
+shopt whose effect is purely on the read-eval loop.
 
 ### TD-OILS-SYNTAX-ERR-ERREXIT-ECHO. bash drops the echoed source line from *every* syntax error once `set -e` is on, and forces the status to 2 — 2026-07-28 — OPEN
 

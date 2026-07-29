@@ -984,7 +984,9 @@ fn part_src(p: &WordPart) -> String {
             // backslash from a nested `` \` `` and stop it parsing. Echo it as
             // written, which is what bash does.
             CmdSubBody::Backtick { verbatim, .. } => format!("`{verbatim}`"),
-            CmdSubBody::Parsed(p) => format!("$({})", flush_here_docs(&program_inline(p))),
+            CmdSubBody::Parsed { prog, .. } => {
+                format!("$({})", flush_here_docs(&program_inline(prog)))
+            }
         },
         WordPart::ProcSub { input, body } => format!(
             "{}({})",

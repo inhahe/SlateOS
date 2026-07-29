@@ -9,7 +9,8 @@ use crate::ast::{
     CaseTerm, CmdSubBody,
     Command,
     CondBinOp,
-    CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, LoopClause,
+    CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, LineMap,
+    LoopClause,
     ParamOp,
     Pipeline, Program,
     Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
@@ -165,7 +166,7 @@ pub fn parse_opts(src: &str, opts: LexOpts) -> Result<Program, ParseError> {
 pub fn parse_procsub_body(src: &str, open_line: u32, opts: LexOpts) -> Result<Program, ParseError> {
     let (mut toks, mut lines) = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
-    shift_lines(&mut toks, &mut lines, open_line.saturating_sub(1));
+    map_lines(&mut toks, &mut lines, &LineMap::Offset(open_line.saturating_sub(1)));
     parse_tokens_ending(toks, lines, opts, true).map_err(ParseError::in_paren_body)
 }
 
@@ -238,9 +239,9 @@ pub struct IncrementalParser {
     /// The source, kept for re-lexing the tail when [`LexOpts`] change. Held as
     /// chars because the offsets recorded by the lexer are char indices.
     src: Vec<char>,
-    /// Added to every line the lexer reports, so a fragment lexed on its own
+    /// Applied to every line the lexer reports, so a fragment lexed on its own
     /// still names the lines of the input it came from.
-    line_base: u32,
+    line_map: LineMap,
     /// The options `orig` was lexed under.
     opts: LexOpts,
     /// The tokenized source exactly as lexed — never alias-expanded, so it can
@@ -281,22 +282,23 @@ impl IncrementalParser {
     /// error; the error is parked in `pending_lex_err` and surfaced by
     /// [`Self::next_unit`] only after those lines have been handed out.
     ///
-    /// `line_base` is added to every source line, so a fragment lexed on its own
-    /// still reports the line numbers of the input it came from. It is 0 for a
-    /// script file or a `-c` string, and the count of lines already consumed for
-    /// a REPL reading stdin one command at a time.
+    /// `line_map` renumbers every source line, so a fragment lexed on its own
+    /// still reports the line numbers of the input it came from. It is
+    /// `LineMap::Offset(0)` for a script file or a `-c` string, the count of
+    /// lines already consumed for a REPL reading stdin one command at a time,
+    /// and [`LineMap::CmdSub`] for a `$( … )` body re-read at expansion time.
     #[must_use]
-    pub fn new(src: &str, line_base: u32, opts: LexOpts) -> Self {
+    pub fn new(src: &str, line_map: impl Into<LineMap>, opts: LexOpts) -> Self {
+        let line_map = line_map.into();
         let Tokenized {
             toks: mut orig,
             lines: mut orig_lines,
             offsets: orig_offsets,
             err,
         } = tokenize_deferred(src, opts);
-        shift_lines(&mut orig, &mut orig_lines, line_base);
+        map_lines(&mut orig, &mut orig_lines, &line_map);
         Self {
             src: src.chars().collect(),
-            line_base,
             opts,
             orig,
             orig_lines,
@@ -310,9 +312,10 @@ impl IncrementalParser {
             pending_lex_err: err
                 .map(|(e, line)| ParseError::from(e).or_line(line))
                 .map(|e| ParseError {
-                    line: e.line.map(|l| l.saturating_add(line_base)),
+                    line: e.line.map(|l| line_map.map(l)),
                     ..e
                 }),
+            line_map,
         }
     }
 
@@ -320,8 +323,9 @@ impl IncrementalParser {
     ///
     /// Everything already handed out stays as it was — bash cannot un-read a
     /// line — so only the tail starting at the next unconsumed token's character
-    /// offset is tokenized again. Its line numbers restart at 1, so they are
-    /// shifted by the newlines that precede that offset. Alias-spliced tokens
+    /// offset is tokenized again. Its line numbers restart at 1, so the mapping
+    /// is composed with the newlines that precede that offset — see
+    /// [`LineMap::shifted`]. Alias-spliced tokens
     /// sitting in `work` are untouched and are carried over by the following
     /// [`Self::rebuild`], which is why `last_aliases` is cleared to force one.
     fn relex(&mut self, opts: LexOpts) {
@@ -332,7 +336,7 @@ impl IncrementalParser {
         let head = self.src.get(..off).unwrap_or(&[]);
         let newlines =
             u32::try_from(head.iter().filter(|&&c| c == '\n').count()).unwrap_or(u32::MAX);
-        let base = self.line_base.saturating_add(newlines);
+        let map = self.line_map.shifted(newlines);
         let tail: String = self.src.get(off..).unwrap_or(&[]).iter().collect();
         let Tokenized {
             toks: mut orig,
@@ -340,7 +344,7 @@ impl IncrementalParser {
             mut offsets,
             err,
         } = tokenize_deferred(&tail, opts);
-        shift_lines(&mut orig, &mut orig_lines, base);
+        map_lines(&mut orig, &mut orig_lines, &map);
         let delta = u32::try_from(off).unwrap_or(u32::MAX);
         for o in &mut offsets {
             *o = o.saturating_add(delta);
@@ -353,7 +357,7 @@ impl IncrementalParser {
         self.pending_lex_err = err
             .map(|(e, line)| ParseError::from(e).or_line(line))
             .map(|e| ParseError {
-                line: e.line.map(|l| l.saturating_add(base)),
+                line: e.line.map(|l| map.map(l)),
                 ..e
             });
         // `work` was expanded from the tokens just discarded, so it must be
@@ -569,19 +573,20 @@ impl IncrementalParser {
 ///
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error in the body.
-pub fn parse_cmdsub_body(src: &str, close_line: u32, opts: LexOpts) -> Result<Program, ParseError> {
+pub fn parse_cmdsub_body(
+    src: &str,
+    close_line: u32,
+    opts: LexOpts,
+) -> Result<(Program, LineMap), ParseError> {
     // The body is lexed with the substitution's own `)` standing where the
     // implicit trailing newline would otherwise go, because that is the token
     // bash's parser sees after the body's last command. See
     // [`tokenize_paren_body`].
-    let (mut toks, lines) = tokenize_paren_body(src, opts)
+    let (mut toks, mut lines) = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
-    let map = CmdSubLineMap::build(&toks, &lines, close_line);
-    let lines = lines.iter().map(|&l| map.map(l)).collect();
-    for t in &mut toks {
-        map.rebase_tok(t);
-    }
-    parse_tokens_ending(toks, lines, opts, true)
+    let map = build_cmdsub_line_map(&toks, &lines, close_line);
+    map_lines(&mut toks, &mut lines, &map);
+    let prog = parse_tokens_ending(toks, lines, opts, true)
         .map_err(|e| {
             // A body that ends mid-construct is not an end of file in bash
             // either: the next token is the `)`, and that is what bash names.
@@ -600,104 +605,53 @@ pub fn parse_cmdsub_body(src: &str, close_line: u32, opts: LexOpts) -> Result<Pr
                 e
             }
         })
-        .map_err(ParseError::in_paren_body)
+        .map_err(ParseError::in_paren_body)?;
+    Ok((prog, map))
 }
 
-/// The body-line → `$LINENO` translation described on [`parse_cmdsub_body`].
-struct CmdSubLineMap {
-    /// `(body line, rebased line)` for each distinct command-bearing body line,
-    /// ascending. Small (one entry per body line), so a linear scan beats a map.
-    ranked: Vec<(u32, u32)>,
-    close_line: u32,
+/// Build the rank-based [`LineMap::CmdSub`] for one `$( … )` body.
+fn build_cmdsub_line_map(toks: &[Tok], lines: &[u32], close_line: u32) -> LineMap {
+    let mut ranked: Vec<(u32, u32)> = Vec::new();
+    for (tok, &line) in toks.iter().zip(lines) {
+        // Only lines that actually carry a command count towards the rank;
+        // a `Newline` token is the *end* of a line, not content on one, so a
+        // blank body line contributes nothing.
+        if matches!(tok, Tok::Newline) {
+            continue;
+        }
+        if ranked.last().is_none_or(|&(l, _)| l != line) {
+            let rank = u32::try_from(ranked.len()).unwrap_or(u32::MAX);
+            ranked.push((line, close_line.saturating_add(rank)));
+        }
+    }
+    LineMap::CmdSub { pre: 0, close_line, ranked }
 }
 
-impl CmdSubLineMap {
-    fn build(toks: &[Tok], lines: &[u32], close_line: u32) -> Self {
-        let mut ranked: Vec<(u32, u32)> = Vec::new();
-        for (tok, &line) in toks.iter().zip(lines) {
-            // Only lines that actually carry a command count towards the rank;
-            // a `Newline` token is the *end* of a line, not content on one, so a
-            // blank body line contributes nothing.
-            if matches!(tok, Tok::Newline) {
-                continue;
-            }
-            if ranked.last().is_none_or(|&(l, _)| l != line) {
-                let rank = u32::try_from(ranked.len()).unwrap_or(u32::MAX);
-                ranked.push((line, close_line.saturating_add(rank)));
-            }
-        }
-        Self { ranked, close_line }
-    }
-
-    /// Translate one body line. Lines between two command-bearing lines (blank
-    /// lines, and the continuation lines of a multi-line token) take the number
-    /// of the nearest preceding command-bearing line, which is what makes a
-    /// `Newline` token report the line its command was on.
-    fn map(&self, line: u32) -> u32 {
-        let mut out = self.close_line;
-        for &(body_line, rebased) in &self.ranked {
-            if body_line > line {
-                break;
-            }
-            out = rebased;
-        }
-        out
-    }
-
-    /// Rewrite the close lines recorded for any substitutions nested inside this
-    /// token, so a `$( $( … ) )` body is rebased relative to the *outer* body's
-    /// already-rebased numbering rather than to its own first line.
-    fn rebase_tok(&self, tok: &mut Tok) {
-        match tok {
-            Tok::Word(segs) | Tok::HereDoc(segs, ..) => self.rebase_segs(segs),
-            Tok::ArrayAssign { elems, .. } => {
-                for e in elems {
-                    self.rebase_segs(e);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn rebase_segs(&self, segs: &mut [Seg]) {
-        for seg in segs {
-            match seg {
-                Seg::CmdSub(_, close, _) => *close = self.map(*close),
-                Seg::ProcSub(_, _, open) => *open = self.map(*open),
-                Seg::Dq(inner) => self.rebase_segs(inner),
-                _ => {}
-            }
-        }
-    }
-}
-
-/// Shift every source line recorded in a token stream by `base`.
+/// Renumber every source line recorded in a token stream through `map`.
 ///
-/// A source lexed on its own numbers its lines from 1, which is wrong whenever
-/// that source is a *fragment* of a larger input — a REPL command read from a
-/// stdin stream that has already delivered `base` lines. Shifting here, before
-/// the parse, means every AST node ends up carrying an absolute line, so
-/// `$LINENO` inside a function body is right no matter where the function is
-/// later called from (bash numbers a body relative to the source that *defined*
-/// it, verified against bash 5.2).
+/// Applying the mapping here, before the parse, is what makes every AST node
+/// carry an absolute line — see [`LineMap`] for why a fragment's own numbering
+/// is not the one to report.
 ///
 /// The lines recorded on [`Seg::CmdSub`] (its closing delimiter) and
-/// [`Seg::ProcSub`] (its opening one) are shifted too: [`parse_cmdsub_body`] and
-/// [`parse_procsub_body`] renumber a body relative to them, so leaving them
-/// alone would reset the body's numbering back to the fragment's.
-fn shift_lines(toks: &mut [Tok], lines: &mut [u32], base: u32) {
-    if base == 0 {
+/// [`Seg::ProcSub`] (its opening one) are renumbered too: [`parse_cmdsub_body`]
+/// and [`parse_procsub_body`] number a body relative to them, so leaving them
+/// alone would reset the body's numbering back to the fragment's. For a nested
+/// `$( $( … ) )` that means the inner body is numbered against the outer body's
+/// *already-rebased* lines rather than against its own first line.
+fn map_lines(toks: &mut [Tok], lines: &mut [u32], map: &LineMap) {
+    if map.is_identity() {
         return;
     }
     for l in lines.iter_mut() {
-        *l = l.saturating_add(base);
+        *l = map.map(*l);
     }
     for t in toks {
         match t {
-            Tok::Word(segs) | Tok::HereDoc(segs, ..) => shift_segs(segs, base),
+            Tok::Word(segs) | Tok::HereDoc(segs, ..) => map_segs(segs, map),
             Tok::ArrayAssign { elems, .. } => {
                 for e in elems {
-                    shift_segs(e, base);
+                    map_segs(e, map);
                 }
             }
             _ => {}
@@ -705,12 +659,12 @@ fn shift_lines(toks: &mut [Tok], lines: &mut [u32], base: u32) {
     }
 }
 
-fn shift_segs(segs: &mut [Seg], base: u32) {
+fn map_segs(segs: &mut [Seg], map: &LineMap) {
     for seg in segs {
         match seg {
-            Seg::CmdSub(_, close, _) => *close = close.saturating_add(base),
-            Seg::ProcSub(_, _, open) => *open = open.saturating_add(base),
-            Seg::Dq(inner) => shift_segs(inner, base),
+            Seg::CmdSub(_, close, _) => *close = map.map(*close),
+            Seg::ProcSub(_, _, open) => *open = map.map(*open),
+            Seg::Dq(inner) => map_segs(inner, map),
             _ => {}
         }
     }
@@ -2457,7 +2411,13 @@ fn seg_to_part(seg: &Seg, opts: LexOpts) -> Result<WordPart, ParseError> {
                     verbatim: verbatim.clone(),
                     close_line: *close_line,
                 },
-                None => CmdSubBody::Parsed(parse_cmdsub_body(raw, *close_line, opts)?),
+                None => {
+                    // The eager parse is kept — it is what found the `)` and
+                    // what raises the fatal syntax error — but so is the body
+                    // text, because bash re-reads it at expansion time.
+                    let (prog, map) = parse_cmdsub_body(raw, *close_line, opts)?;
+                    CmdSubBody::Parsed { prog, src: raw.clone(), map }
+                }
             },
         },
         Seg::Arith(raw, bracket) => WordPart::ArithSub {
@@ -3927,21 +3887,21 @@ mod tests {
         assert!(matches!(sc.words[1].parts[0], WordPart::CommandSub { .. }));
     }
 
+    /// Parse a backtick body the way `Shell::command_sub_body` does at expansion
+    /// time: as an input of its own, numbered from `close_line - 1`, one unit
+    /// at a time.
+    fn backtick_unit(src: &str, close_line: u32) -> Result<Program, ParseError> {
+        let opts = LexOpts::default();
+        IncrementalParser::new(src, LineMap::Offset(close_line.saturating_sub(1)), opts)
+            .next_unit(None, opts)
+            .unwrap_or_else(|| Ok(Program { items: Vec::new() }))
+    }
+
     /// A `$( … )` body is closed by the substitution's `)`, which ends its list
     /// but is not a `list_terminator`. So the body needs no terminator of its
     /// own, yet `!`/`time` standing alone — which do need one — are refused,
     /// and a body that stops mid-construct is blamed on the `)` rather than on
     /// the implicit newline every other input ends with.
-    /// Parse a backtick body the way `Shell::backtick_sub` does at expansion
-    /// time: as an input of its own, numbered from `close_line - 1`, one unit
-    /// at a time.
-    fn backtick_unit(src: &str, close_line: u32) -> Result<Program, ParseError> {
-        let opts = LexOpts::default();
-        IncrementalParser::new(src, close_line.saturating_sub(1), opts)
-            .next_unit(None, opts)
-            .unwrap_or_else(|| Ok(Program { items: Vec::new() }))
-    }
-
     #[test]
     fn cmdsub_body_is_terminated_by_its_closing_paren() {
         for src in [

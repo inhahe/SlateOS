@@ -621,6 +621,127 @@ pub enum WordPart {
     },
 }
 
+/// How a fragment's own line numbers become the numbers the shell reports.
+///
+/// A source lexed on its own numbers its lines from 1, which is wrong whenever
+/// that source is a *fragment* of a larger input — a REPL command read from a
+/// stdin stream that has already delivered N lines, an `eval` string, a
+/// `$( … )` body. Applying the mapping before the parse means every AST node
+/// ends up carrying an absolute line, so `$LINENO` inside a function body is
+/// right no matter where the function is later called from (bash numbers a body
+/// relative to the source that *defined* it, verified against bash 5.2).
+///
+/// Two rules are needed because bash uses two. Everything but a `$( … )` body
+/// is a plain offset; a `$( … )` body is renumbered by *rank* — see
+/// [`LineMap::CmdSub`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LineMap {
+    /// Reported line = raw line + this offset. `Offset(0)` is the identity, for
+    /// a source that numbers its own lines from 1.
+    Offset(u32),
+    /// The `$( … )` rule: reported line = `close_line` + the 0-based **rank** of
+    /// the raw line among the body's command-bearing lines.
+    ///
+    /// bash scans the enclosing command first and only then re-reads the body,
+    /// so the body's lines count up from the line the outer scan had already
+    /// reached — the substitution's *closing* delimiter. A rank, not an offset:
+    /// a blank body line does not advance it, and two commands on one body line
+    /// share a number. Measured against bash 5.x over 11 probes; see
+    /// `crate::parser::parse_cmdsub_body` for the worked example.
+    CmdSub {
+        /// Added to a raw line before the lookup. Non-zero only for a *tail* of
+        /// the body that has been re-lexed on its own (see
+        /// [`LineMap::shifted`]), whose lines restart at 1.
+        pre: u32,
+        /// The line the body's closing `)` sits on, already absolute.
+        close_line: u32,
+        /// `(body line, reported line)` for each distinct command-bearing body
+        /// line, ascending. Small — one entry per body line — so a linear scan
+        /// beats a map.
+        ranked: Vec<(u32, u32)>,
+    },
+}
+
+impl Default for LineMap {
+    fn default() -> Self {
+        Self::Offset(0)
+    }
+}
+
+impl From<u32> for LineMap {
+    fn from(base: u32) -> Self {
+        Self::Offset(base)
+    }
+}
+
+impl LineMap {
+    /// The line `raw` is reported as.
+    ///
+    /// Under [`LineMap::CmdSub`], a line between two command-bearing lines (a
+    /// blank line, or the continuation lines of a multi-line token) takes the
+    /// number of the nearest preceding command-bearing line, which is what
+    /// makes a newline token report the line its command was on.
+    #[must_use]
+    pub fn map(&self, raw: u32) -> u32 {
+        match self {
+            Self::Offset(base) => raw.saturating_add(*base),
+            Self::CmdSub { pre, close_line, ranked } => {
+                let raw = raw.saturating_add(*pre);
+                let mut out = *close_line;
+                for &(body_line, reported) in ranked {
+                    if body_line > raw {
+                        break;
+                    }
+                    out = reported;
+                }
+                out
+            }
+        }
+    }
+
+    /// The map for a *tail* of the same source, whose own lines restart at 1
+    /// after `n` lines have already been consumed.
+    ///
+    /// Re-lexing the unconsumed remainder under new options is how a mid-input
+    /// `shopt -s extglob` takes effect (see `IncrementalParser::relex`); the
+    /// tail's line 1 is the whole source's line `n + 1`, so the mapping has to
+    /// compose with that shift rather than be replaced by it.
+    #[must_use]
+    pub fn shifted(&self, n: u32) -> Self {
+        match self {
+            Self::Offset(base) => Self::Offset(base.saturating_add(n)),
+            Self::CmdSub { pre, close_line, ranked } => Self::CmdSub {
+                pre: pre.saturating_add(n),
+                close_line: *close_line,
+                ranked: ranked.clone(),
+            },
+        }
+    }
+
+    /// The raw line a reported one came from, for echoing the offending source
+    /// line back in a diagnostic. `None` when no raw line maps to it.
+    ///
+    /// The inverse is not total: under [`LineMap::CmdSub`] several raw lines can
+    /// share a reported number, and the one wanted is the command-bearing line —
+    /// which is exactly the one `ranked` records.
+    #[must_use]
+    pub fn unmap(&self, reported: u32) -> Option<u32> {
+        match self {
+            Self::Offset(base) => reported.checked_sub(*base),
+            Self::CmdSub { pre, ranked, .. } => ranked
+                .iter()
+                .find(|&&(_, r)| r == reported)
+                .and_then(|&(body_line, _)| body_line.checked_sub(*pre)),
+        }
+    }
+
+    /// Whether this map leaves every line alone, so applying it can be skipped.
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        matches!(self, Self::Offset(0))
+    }
+}
+
 /// The body of a [`WordPart::CommandSub`], in the form its spelling calls for.
 ///
 /// bash reads the two spellings at different times, and that is observable:
@@ -635,10 +756,28 @@ pub enum WordPart {
 /// word is expanded; bash parses it then, per expansion (a substitution in a
 /// loop is re-parsed every iteration), which is also what makes a `shopt -s
 /// extglob` between two expansions change how it reads.
+///
+/// bash reads a `$( … )` body *twice*, though: once with the enclosing scan, to
+/// find the matching `)` and to raise a syntax error there, and again at
+/// expansion time as an input of its own. Only the second pass runs, so both
+/// halves are kept here — [`CmdSubBody::Parsed::prog`] is the first pass (whose
+/// errors are the enclosing parse's, and which `declare -f` re-prints), and
+/// `src`/`map` are what the second pass re-reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CmdSubBody {
-    /// `$( … )` — parsed with the enclosing source.
-    Parsed(Program),
+    /// `$( … )` — parsed with the enclosing source, then re-read at expansion
+    /// time so a `shopt`/`alias` the body runs affects the rest of the body.
+    Parsed {
+        /// The eager parse: what the enclosing scan produced, and what
+        /// `declare -f` re-prints.
+        prog: Program,
+        /// The body text, re-read one logical line at a time when the
+        /// substitution is expanded.
+        src: String,
+        /// How that re-read's own line numbers become the numbers the shell
+        /// reports — the rank-based `$( … )` rule, already applied to `prog`.
+        map: LineMap,
+    },
     /// `` ` … ` `` — parsed at expansion time, by `Shell::command_sub`.
     Backtick {
         /// The body with `` \` ``/`\\`/`\$` unescaped: what actually gets parsed.
@@ -665,7 +804,7 @@ impl CmdSubBody {
     #[must_use]
     pub fn parsed(&self) -> Option<&Program> {
         match self {
-            Self::Parsed(p) => Some(p),
+            Self::Parsed { prog, .. } => Some(prog),
             Self::Backtick { .. } => None,
         }
     }

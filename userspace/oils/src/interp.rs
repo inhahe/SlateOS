@@ -605,7 +605,7 @@ enum Out {
     /// [`StderrTarget::Buffer`] holding the same `Arc` — collecting fd 2 into a
     /// second buffer and appending it afterwards, as osh used to, loses the
     /// ordering (bash prints `E` then `O`; that gave `O` then `E`).
-    Capture(Arc<Mutex<Vec<u8>>>),
+    Capture(CaptureSink),
     /// Stream to the write end of an OS pipe. Used by a *concurrent* pipeline
     /// stage that runs an in-process builtin/compound command: bytes flow to the
     /// next stage as they are produced (not buffered), and a write that fails
@@ -642,22 +642,126 @@ impl Out {
     /// A background job writes to whatever fd 1 was where it was started, and
     /// keeps writing after the command that started it has returned — inside
     /// `$( … )` or a pipeline stage that means the job shares the enclosing
-    /// capture or pipe. A capture is already shared by design; a pipe needs a
-    /// duplicate of its write end, and duplicating it is also what makes the
+    /// capture or pipe. Duplicating the write end is also what makes the
     /// reader's EOF wait for the job, exactly as a forked child's inherited fd
-    /// does in bash.
+    /// does in bash: an OS refcount for a pipe, [`CaptureSink`]'s explicit
+    /// writer count for a capture.
     fn share(&self) -> io::Result<Out> {
         Ok(match self {
             Out::Inherit => Out::Inherit,
-            Out::Capture(buf) => Out::Capture(Arc::clone(buf)),
+            Out::Capture(sink) => Out::Capture(sink.share()),
             Out::Pipe(w) => Out::Pipe(w.try_clone()?),
         })
     }
 }
 
+/// The shared state behind a [`CaptureSink`]: the collected bytes, plus a count
+/// of the write ends outstanding on them.
+struct CaptureState {
+    buf: Mutex<Vec<u8>>,
+    /// Write ends held by someone *other* than the sink's owner — claimed by
+    /// [`CaptureSink::share`] and released when that handle drops.
+    writers: Mutex<usize>,
+    /// Signalled when `writers` reaches zero.
+    idle: std::sync::Condvar,
+}
+
+/// A handle on a capture buffer, with the write end refcounting an fd has.
+///
+/// bash collects a command substitution through a *pipe*, and its reader stops
+/// at EOF — which arrives only when the last copy of the write end is closed. A
+/// `&` job started anywhere inside the substitution inherits such a copy, so
+/// `x=$(echo hi &)` substitutes `hi` and `x=$(sleep 2 &)` blocks for two
+/// seconds *however deeply nested* the job's starting point was — while
+/// `x=$(sleep 2 >/dev/null &)` returns at once, because that job's own redirect
+/// overwrote the descriptor holding the pipe.
+///
+/// A bare `Arc<Mutex<Vec<u8>>>` cannot express any of that: `Arc`'s refcount is
+/// not observable, and the case that most needs to keep the reader waiting is a
+/// job whose subshell's job table has already been dropped — a thread nobody is
+/// left holding. So the write ends are counted explicitly.
+///
+/// [`Clone`] yields another *alias* on the same sink for a writer of the same
+/// lifetime (fd 2 folded into fd 1 by `2>&1`, a nested `Out` for the same
+/// command); [`CaptureSink::share`] yields a *counted* one, for a writer that
+/// outlives the command that made it.
+struct CaptureSink {
+    state: Arc<CaptureState>,
+    /// Whether this handle is one of the write ends counted in
+    /// `state.writers` — true exactly for handles made by `share`.
+    claimed: bool,
+}
+
+impl Clone for CaptureSink {
+    fn clone(&self) -> Self {
+        CaptureSink {
+            state: Arc::clone(&self.state),
+            claimed: false,
+        }
+    }
+}
+
+impl Drop for CaptureSink {
+    fn drop(&mut self) {
+        if !self.claimed {
+            return;
+        }
+        let mut n = lock_writers(&self.state);
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            self.state.idle.notify_all();
+        }
+    }
+}
+
+impl CaptureSink {
+    /// A counted write end, for a writer that outlives the command that made it.
+    fn share(&self) -> CaptureSink {
+        *lock_writers(&self.state) += 1;
+        CaptureSink {
+            state: Arc::clone(&self.state),
+            claimed: true,
+        }
+    }
+
+    /// Block until every write end claimed by [`CaptureSink::share`] is gone —
+    /// the analogue of a `$( … )` reader waiting for EOF on its pipe.
+    fn wait_for_writers(&self) {
+        let mut n = lock_writers(&self.state);
+        while *n > 0 {
+            n = self
+                .state
+                .idle
+                .wait(n)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    /// Whether two handles name the same sink (`2>&1`'s buffer is fd 1's own).
+    fn is(&self, other: &CaptureSink) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+}
+
 /// A fresh, empty capture sink for [`Out::Capture`].
-fn capture_buf() -> Arc<Mutex<Vec<u8>>> {
-    Arc::new(Mutex::new(Vec::new()))
+fn capture_sink() -> CaptureSink {
+    CaptureSink {
+        state: Arc::new(CaptureState {
+            buf: Mutex::new(Vec::new()),
+            writers: Mutex::new(0),
+            idle: std::sync::Condvar::new(),
+        }),
+        claimed: false,
+    }
+}
+
+/// Lock a capture sink's writer count, recovering from poisoning (a panicking
+/// writer still releases its claim through `Drop`, so the count stays exact).
+fn lock_writers(state: &CaptureState) -> std::sync::MutexGuard<'_, usize> {
+    state
+        .writers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Lock a capture sink, recovering from poisoning.
@@ -665,13 +769,16 @@ fn capture_buf() -> Arc<Mutex<Vec<u8>>> {
 /// A panic in one writer must not silently discard what another wrote: the
 /// buffer is plain collected output with no invariant a partial write could
 /// break, so the bytes stay usable and the lock is taken regardless.
-fn lock_capture(buf: &Arc<Mutex<Vec<u8>>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
-    buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+fn lock_capture(sink: &CaptureSink) -> std::sync::MutexGuard<'_, Vec<u8>> {
+    sink.state
+        .buf
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Take everything a capture sink has collected, leaving it empty.
-fn take_capture(buf: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
-    std::mem::take(&mut *lock_capture(buf))
+fn take_capture(sink: &CaptureSink) -> Vec<u8> {
+    std::mem::take(&mut *lock_capture(sink))
 }
 
 /// An open input descriptor's in-process stand-in: the bytes it will yield,
@@ -743,6 +850,75 @@ fn command_redirects_stdin(cmd: &Command) -> bool {
         Command::Simple(sc) => redirects_rebind_stdin(&sc.redirects),
         Command::Redirected { redirects, .. } => redirects_rebind_stdin(redirects),
         _ => false,
+    }
+}
+
+/// Whether a `&` job still holds the fd-1 sink it was started with, once its
+/// own redirect list has been applied.
+///
+/// This is fd accounting, and bash gets the answer from the OS for free: the
+/// forked child starts with the sink on fd 1 (and, when a `2>&1` into that same
+/// sink is in force, on fd 2 as well), and a `> file` on the job's own list
+/// *overwrites* that descriptor. Once the last copy is gone a `$( … )`
+/// collecting the sink sees EOF at once — `x=$(sleep 2 >/dev/null &)` returns
+/// immediately where `x=$(sleep 2 &)` blocks for two seconds. A dup made
+/// *before* the overwrite keeps a copy alive, though, so this tracks the
+/// descriptors rather than just fd 1: `sleep 2 2>&1 >/dev/null &` still holds
+/// the sink through fd 2, while `sleep 2 >&2 &` — a dup *into* fd 1 — lets it
+/// go.
+///
+/// As with [`job_inherits_stdin`] the list consulted is the outermost async
+/// node's own. Anything more complex than a single command holds the sink: the
+/// async child keeps its own fd 1 for its whole life whatever its members
+/// redirect for themselves.
+fn job_holds_sink(ao: &AndOr, stderr_is_sink: bool) -> bool {
+    let redirects = match (ao.rest.is_empty(), ao.first.commands.as_slice()) {
+        (true, [Command::Simple(sc)]) => sc.redirects.as_slice(),
+        (true, [Command::Redirected { redirects, .. }]) => redirects.as_slice(),
+        _ => return true,
+    };
+    // The descriptors that currently refer to the sink.
+    let mut fds: Vec<i32> = if stderr_is_sink { vec![1, 2] } else { vec![1] };
+    for r in redirects {
+        // `{v}> f` binds a freshly allocated descriptor, never one of these.
+        if r.varfd.is_some() {
+            continue;
+        }
+        match r.op {
+            RedirectOp::Write
+            | RedirectOp::Clobber
+            | RedirectOp::Append
+            | RedirectOp::ReadWrite
+            | RedirectOp::Read
+            | RedirectOp::HereDoc
+            | RedirectOp::HereStr => fds.retain(|&f| f != r.fd),
+            RedirectOp::WriteBoth | RedirectOp::AppendBoth => fds.retain(|&f| f != 1 && f != 2),
+            // `n>&m` / `n<&m`: fd n becomes whatever fd m is — the sink if m is
+            // one of its descriptors, something else otherwise (`n>&-` closes).
+            RedirectOp::DupOut | RedirectOp::DupIn => {
+                let Some(src) = literal_word(&r.target).and_then(|t| t.parse::<i32>().ok()) else {
+                    // An expanded or non-numeric target: assume it leaves the
+                    // sink held, which is the answer for an unredirected job.
+                    continue;
+                };
+                if fds.contains(&src) {
+                    if !fds.contains(&r.fd) {
+                        fds.push(r.fd);
+                    }
+                } else {
+                    fds.retain(|&f| f != r.fd);
+                }
+            }
+        }
+    }
+    !fds.is_empty()
+}
+
+/// The text of a word that is a single unexpanded literal, if it is one.
+fn literal_word(w: &Word) -> Option<&str> {
+    match w.parts.as_slice() {
+        [WordPart::Literal(s)] => Some(s),
+        _ => None,
     }
 }
 
@@ -837,7 +1013,7 @@ enum StderrTarget {
     /// `$( … 2>&1 )`) — this is fd 1's *own* [`Out::Capture`] buffer, so the two
     /// streams interleave in write order exactly as they would on a shared file
     /// or pipe.
-    Buffer(Arc<Mutex<Vec<u8>>>),
+    Buffer(CaptureSink),
     /// `2>&N` (N ≥ 3) — write to a user-space write descriptor opened by
     /// `exec N> file`. The shared `Arc<File>` is append-positioned so writes
     /// land at the descriptor's current offset (matching a builtin `>&N`).
@@ -4019,7 +4195,7 @@ impl Shell {
                 // fd 1 is a capture: fd 2 joins it as a second writer on the
                 // *same* buffer, so the two interleave in write order.
                 Out::Capture(buf) => {
-                    self.stderr_stack.push(StderrTarget::Buffer(Arc::clone(buf)));
+                    self.stderr_stack.push(StderrTarget::Buffer(buf.clone()));
                     pushed_stderr = true;
                 }
                 Out::Pipe(w) => match w.try_clone() {
@@ -4124,8 +4300,8 @@ impl Shell {
         // it no longer needs a buffer. Otherwise the body writes straight to
         // `out`.
         let stdout_to_err = plan.stdout_to_stderr && plan.stdout.is_none();
-        let capture: Option<Arc<Mutex<Vec<u8>>>> = if stdout_to_err {
-            Some(capture_buf())
+        let capture: Option<CaptureSink> = if stdout_to_err {
+            Some(capture_sink())
         } else {
             None
         };
@@ -4170,7 +4346,7 @@ impl Shell {
                         // `exec > file` for the body — `exec >f; { echo hi; } >&2`
                         // writes to stderr, not to `f`.
                         let saved_exec_stdout = self.exec_stdout.take();
-                        let mut o = Out::Capture(Arc::clone(buf));
+                        let mut o = Out::Capture(buf.clone());
                         let flow = run(self, &mut o, sin);
                         self.exec_stdout = saved_exec_stdout;
                         flow
@@ -8155,7 +8331,7 @@ impl Shell {
         //   4. otherwise inherit the shell's real stderr
         // When fd 2 must be captured into a buffer we pipe it and drain the
         // child's stderr after spawn (`stderr_capture`).
-        let mut stderr_capture: Option<Arc<Mutex<Vec<u8>>>> = None;
+        let mut stderr_capture: Option<CaptureSink> = None;
         // For `2>&1` with a captured stdout, fd 2 is appended to the same
         // capture buffer as fd 1.
         let mut stderr_to_stdout_capture = false;
@@ -8248,7 +8424,7 @@ impl Shell {
                 },
                 Some(StderrTarget::Buffer(b)) => {
                     cmd.stderr(Stdio::piped());
-                    stderr_capture = Some(Arc::clone(b));
+                    stderr_capture = Some(b.clone());
                 }
                 // An enclosing `2>&N` (N ≥ 3) scoped stderr: hand the child a
                 // clone of the user-space write descriptor.
@@ -8288,9 +8464,7 @@ impl Shell {
         {
             let mut captured = Vec::new();
             let _ = se.read_to_end(&mut captured);
-            if let Ok(mut g) = buf.lock() {
-                g.extend_from_slice(&captured);
-            }
+            lock_capture(buf).extend_from_slice(&captured);
         }
 
         if capturing {
@@ -8326,16 +8500,34 @@ impl Shell {
         // or a pipeline stage that is the capture or pipe the caller is
         // collecting, which is why `x=$(echo hi &)` substitutes `hi` in bash
         // rather than letting it escape to the terminal.
-        let job_out = match out.share() {
-            Ok(o) => o,
-            Err(e) => {
-                // Only a pipe can fail here, and only by running out of
-                // descriptors. Report it rather than silently detaching the job
-                // from the pipeline it belongs to.
-                self.errln(&format!("{}cannot duplicate output for `&': {e}", self.err_prefix()));
-                self.last_status = 1;
-                return;
-            }
+        //
+        // A *capture* sink is also refcounted, so that a `$( … )` collecting it
+        // waits for the job exactly as bash's reader waits for EOF on its pipe.
+        // The job takes a counted write end only when fd 1 really is that sink:
+        // not when an `exec >`/scoped `> f` already shadows it
+        // (`x=$( { sleep 2 & } >/dev/null )` returns at once), and not when the
+        // job's own redirect list overwrites the descriptor
+        // (`x=$( sleep 2 >/dev/null & )` likewise). In those cases it still gets
+        // a handle on the sink — writes through it are simply not what fd 1
+        // resolves to — but an uncounted one.
+        let holds_sink = self.exec_stdout_shadowing(out).is_none()
+            && job_holds_sink(ao, self.stderr_aliases_capture(out));
+        let job_out = match out {
+            Out::Capture(sink) if !holds_sink => Out::Capture(sink.clone()),
+            _ => match out.share() {
+                Ok(o) => o,
+                Err(e) => {
+                    // Only a pipe can fail here, and only by running out of
+                    // descriptors. Report it rather than silently detaching the
+                    // job from the pipeline it belongs to.
+                    self.errln(&format!(
+                        "{}cannot duplicate output for `&': {e}",
+                        self.err_prefix()
+                    ));
+                    self.last_status = 1;
+                    return;
+                }
+            },
         };
 
         // fd 0 goes the other way: a job gets /dev/null *unless* something
@@ -8990,7 +9182,7 @@ impl Shell {
                     // fd 1 is a capture: fd 2 joins it as a second writer on the
                     // same buffer, so the diagnostic lands in write order among
                     // whatever the command already emitted on fd 1.
-                    self.stderr_stack.push(StderrTarget::Buffer(Arc::clone(buf)));
+                    self.stderr_stack.push(StderrTarget::Buffer(buf.clone()));
                     return true;
                 }
             }
@@ -10864,12 +11056,12 @@ impl Shell {
         if let Some(path) = self.backtick_read_file(src, base) {
             return self.substitute_file(&path);
         }
-        let cap = capture_buf();
+        let cap = capture_sink();
         let mut sub = self.new_comsub_shell();
         sub.backtick_body = true;
         {
             sub.exec_stdout = None;
-            let mut out = Out::Capture(Arc::clone(&cap));
+            let mut out = Out::Capture(cap.clone());
             if let Flow::Exit(code) =
                 sub.run_source_flow_out(src, &mut out, &StdinSrc::Inherit, base)
             {
@@ -10915,14 +11107,14 @@ impl Shell {
         if let Some(path) = self.comsub_read_file(prog) {
             return self.substitute_file(&path);
         }
-        let cap = capture_buf();
+        let cap = capture_sink();
         let mut sub = self.new_comsub_shell();
         {
             // The substitution's capture is its fd 1 — bash gives the subshell
             // the write end of the collecting pipe, replacing any persistent
             // `exec > file`, so `exec >f; x=$(echo hi)` still captures `hi`.
             sub.exec_stdout = None;
-            let mut out = Out::Capture(Arc::clone(&cap));
+            let mut out = Out::Capture(cap.clone());
             let _ = sub.exec_program(prog, &mut out, &StdinSrc::Inherit);
             // A command substitution is a subshell: fire its own EXIT trap into
             // the same capture so its output is included in the result (bash).
@@ -10999,14 +11191,18 @@ impl Shell {
     }
 
     /// Take a finished substitution's status and captured output.
-    fn finish_comsub(&mut self, sub: &mut Shell, cap: &Arc<Mutex<Vec<u8>>>) -> String {
+    fn finish_comsub(&mut self, sub: &mut Shell, cap: &CaptureSink) -> String {
         // A job started inside the substitution holds a copy of the collecting
         // pipe's write end, so bash's reader does not see EOF — and the
         // substitution does not finish — until that job exits: `x=$(sleep 2 &)`
         // measurably blocks for two seconds, and `x=$(echo hi &)` substitutes
-        // `hi`. Wait the same way before taking the capture. The job's status is
-        // discarded, not propagated: `x=$(false &); echo $?` is 0 in bash.
-        sub.drain_jobs();
+        // `hi`. Waiting on the sink's write ends rather than on the subshell's
+        // job table reproduces that for a job however deeply nested (a `( … )`
+        // inside the substitution drops its own job table, but not its claim),
+        // and equally declines to wait for a job whose fd 1 is not the sink
+        // (`x=$(sleep 2 >/dev/null &)` returns at once, as in bash). The job's
+        // status is discarded, not propagated: `x=$(false &); echo $?` is 0.
+        cap.wait_for_writers();
         self.last_status = sub.last_status;
         let mut buf = take_capture(cap);
         self.strip_capture_nuls(&mut buf);
@@ -11071,13 +11267,13 @@ impl Shell {
         // e.g. `false > >(true)` keeping status 1).
         let saved_status = self.last_status;
         if input {
-            let cap = capture_buf();
+            let cap = capture_sink();
             {
                 // Like a command substitution, the body's fd 1 is the collecting
                 // buffer, not any persistent `exec > file` (restored below —
                 // unlike a substitution this runs in the current shell).
                 let saved_exec_stdout = self.exec_stdout.take();
-                let mut out = Out::Capture(Arc::clone(&cap));
+                let mut out = Out::Capture(cap.clone());
                 let _ = self.exec_program(body, &mut out, &StdinSrc::Inherit);
                 self.exec_stdout = saved_exec_stdout;
             }
@@ -11539,7 +11735,7 @@ impl Shell {
                     // fd 1 is a capture: fd 2 joins it as a second writer on the
                     // *same* buffer, so the two interleave in write order.
                     Out::Capture(buf) => {
-                        self.stderr_stack.push(StderrTarget::Buffer(Arc::clone(buf)));
+                        self.stderr_stack.push(StderrTarget::Buffer(buf.clone()));
                         pushed_stderr = true;
                     }
                     Out::Pipe(w) => {
@@ -19766,9 +19962,7 @@ impl Shell {
                 let _ = (&**p).write_all(bytes);
             }
             Some(StderrTarget::Buffer(b)) => {
-                if let Ok(mut g) = b.lock() {
-                    g.extend_from_slice(bytes);
-                }
+                lock_capture(b).extend_from_slice(bytes);
             }
             Some(StderrTarget::WriteFd(f)) => {
                 let _ = (&**f).write_all(bytes);
@@ -20037,6 +20231,17 @@ impl Shell {
         match out {
             Out::Inherit => None,
             Out::Capture(_) | Out::Pipe(_) => self.exec_stdout.as_ref(),
+        }
+    }
+
+    /// Whether fd 2 currently points at fd 1's *own* capture sink — a `2>&1`
+    /// in force inside a `$( … )`. A `&` job then holds that sink through fd 2
+    /// as well as fd 1, which is what keeps `x=$( { sleep 2 >/dev/null & } 2>&1 )`
+    /// waiting even though the job redirected fd 1 away. See [`job_holds_sink`].
+    fn stderr_aliases_capture(&self, out: &Out) -> bool {
+        match (self.stderr_stack.last(), out) {
+            (Some(StderrTarget::Buffer(b)), Out::Capture(sink)) => b.is(sink),
+            _ => false,
         }
     }
 
@@ -24721,9 +24926,9 @@ mod tests {
     /// not a panic.
     fn run(src: &str) -> (String, i32) {
         let mut sh = Shell::new();
-        let buf = capture_buf();
+        let buf = capture_sink();
         let status = {
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             sh.run_source_out(src, &mut out, 0)
         };
         let buf = take_capture(&buf);
@@ -24740,9 +24945,9 @@ mod tests {
     fn run_script(src: &str) -> (String, i32) {
         let mut sh = Shell::new();
         sh.set_repl_interactive(false);
-        let buf = capture_buf();
+        let buf = capture_sink();
         let status = {
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             sh.run_source_out(src, &mut out, 0)
         };
         let buf = take_capture(&buf);
@@ -24832,9 +25037,9 @@ mod tests {
     #[test]
     fn unterminated_heredoc_lenient_in_run_source() {
         let mut sh = Shell::new();
-        let buf = capture_buf();
+        let buf = capture_sink();
         {
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             // No terminating `EOF` line: bash runs `cat` with the partial body.
             let status = sh.run_source_out("cat <<EOF\npartial\n", &mut out, 0);
             assert_eq!(status, 0, "unterminated heredoc should still execute");
@@ -24905,10 +25110,10 @@ mod tests {
     fn run_cmd_mode(src: &str) -> (String, i32) {
         let mut sh = Shell::new();
         sh.set_command_mode();
-        let buf = capture_buf();
+        let buf = capture_sink();
         let prog = parse(src).expect("parse");
         {
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit);
         }
         let buf = take_capture(&buf);
@@ -25187,10 +25392,10 @@ mod tests {
         fn run_cmd(src: &str) -> String {
             let mut sh = Shell::new();
             sh.set_command_mode();
-            let buf = capture_buf();
+            let buf = capture_sink();
             let prog = parse(src).expect("parse");
             {
-                let mut out = Out::Capture(Arc::clone(&buf));
+                let mut out = Out::Capture(buf.clone());
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             }
             let buf = take_capture(&buf);
@@ -25239,10 +25444,10 @@ mod tests {
         fn run_cmd(src: &str) -> String {
             let mut sh = Shell::new();
             sh.set_command_mode();
-            let buf = capture_buf();
+            let buf = capture_sink();
             let prog = parse(src).expect("parse");
             {
-                let mut out = Out::Capture(Arc::clone(&buf));
+                let mut out = Out::Capture(buf.clone());
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             }
             let buf = take_capture(&buf);
@@ -25282,10 +25487,10 @@ mod tests {
         fn run_cmd(src: &str) -> String {
             let mut sh = Shell::new();
             sh.set_command_mode();
-            let buf = capture_buf();
+            let buf = capture_sink();
             let prog = parse(src).expect("parse");
             {
-                let mut out = Out::Capture(Arc::clone(&buf));
+                let mut out = Out::Capture(buf.clone());
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             }
             let buf = take_capture(&buf);
@@ -25465,10 +25670,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn run_with_aliases(setup: &str, src: &str) -> (String, i32) {
         let mut sh = Shell::new();
         sh.run_source(setup);
-        let buf = capture_buf();
+        let buf = capture_sink();
         let prog = parse_with_aliases(src, &sh.aliases, sh.lex_opts()).expect("parse");
         {
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         let buf = take_capture(&buf);
@@ -25517,9 +25722,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         sh.set_command_mode();
         sh.run_source("alias g='echo hi'");
-        let buf = capture_buf();
+        let buf = capture_sink();
         {
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             sh.exec_program(&parse_with_aliases("g", &sh.aliases, sh.lex_opts()).expect("parse"), &mut out, &StdinSrc::Inherit);
         }
         // `parse_with_aliases` applies the table unconditionally — it is the
@@ -25578,10 +25783,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         fn run_repl(interactive: bool, src: &str) -> String {
             let mut sh = Shell::new();
             sh.set_repl_interactive(interactive);
-            let buf = capture_buf();
+            let buf = capture_sink();
             let prog = parse(src).expect("parse");
             {
-                let mut out = Out::Capture(Arc::clone(&buf));
+                let mut out = Out::Capture(buf.clone());
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             }
             let buf = take_capture(&buf);
@@ -28268,10 +28473,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn run_with(setup: impl FnOnce(&mut Shell), src: &str) -> (String, i32) {
         let mut sh = Shell::new();
         setup(&mut sh);
-        let buf = capture_buf();
+        let buf = capture_sink();
         let prog = parse(src).expect("parse");
         {
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             if let Flow::Exit(code) = sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit) {
                 sh.last_status = code;
             }
@@ -28798,8 +29003,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let mut sh = Shell::new();
             sh.set_name("scr.sh");
             sh.set_script_mode();
-            let buf = capture_buf();
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let buf = capture_sink();
+            let mut out = Out::Capture(buf.clone());
             let prog = parse(src).expect("parse");
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             String::from_utf8(take_capture(&buf)).unwrap()
@@ -28936,10 +29141,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         sh.set_command_mode();
         sh.set_execution_string("echo hi");
-        let buf = capture_buf();
+        let buf = capture_sink();
         let prog = parse("echo \"[$BASH_EXECUTION_STRING]\"; echo ${!BASH*}").expect("parse");
         {
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         let buf = take_capture(&buf);
@@ -29976,8 +30181,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let cmd_dash = |src: &str| {
             let mut sh = Shell::new();
             sh.set_command_mode();
-            let buf = capture_buf();
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let buf = capture_sink();
+            let mut out = Out::Capture(buf.clone());
             let prog = parse(src).expect("parse");
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             String::from_utf8(take_capture(&buf)).unwrap()
@@ -31537,10 +31742,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn run_imported(src: &str) -> (String, i32) {
         let mut sh = Shell::new();
         sh.import_environment();
-        let buf = capture_buf();
+        let buf = capture_sink();
         let prog = parse(src).expect("parse");
         {
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         let buf = take_capture(&buf);
@@ -32719,18 +32924,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The parent EXIT trap is reset (not fired) inside a subshell that does
         // not set its own — only the parent's fires, once, at real exit.
         let mut sh = Shell::new();
-        let buf = capture_buf();
+        let buf = capture_sink();
         {
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             let prog = parse("trap 'echo P' EXIT; ( echo in ); echo out").expect("parse");
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         let buf = take_capture(&buf);
         assert_eq!(String::from_utf8_lossy(&buf), "in\nout\n");
         // The parent's EXIT trap only fires now, at the real shell exit.
-        let buf2 = capture_buf();
+        let buf2 = capture_sink();
         {
-            let mut out = Out::Capture(Arc::clone(&buf2));
+            let mut out = Out::Capture(buf2.clone());
             sh.run_exit_trap_out(&mut out, &StdinSrc::Inherit);
         }
         let buf2 = take_capture(&buf2);
@@ -34904,9 +35109,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         std::fs::create_dir_all(&dir).expect("scratch dir");
         std::fs::write(dir.join("two.txt"), "l1\nl2\n").expect("write two.txt");
         let mut sh = Shell::new();
-        let cap = capture_buf();
+        let cap = capture_sink();
         {
-            let mut out = Out::Capture(Arc::clone(&cap));
+            let mut out = Out::Capture(cap.clone());
             let src = format!(
                 "cd '{}'\n\
                  exec < two.txt\n\
@@ -35037,11 +35242,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// which need several listings from one shell whose job table persists.
     #[cfg(test)]
     fn listing(sh: &mut Shell, src: &str) -> String {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let mut out = Out::Capture(Arc::clone(&buf));
+        let buf = capture_sink();
+        let mut out = Out::Capture(buf.clone());
         sh.run_source_out(src, &mut out, 0);
-        let b = buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        String::from_utf8_lossy(&b).into_owned()
+        String::from_utf8_lossy(&take_capture(&buf)).into_owned()
     }
 
     #[test]
@@ -35242,11 +35446,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// a shell whose job table survives from one command to the next.
     #[cfg(test)]
     fn run_in(sh: &mut Shell, src: &str) -> (String, i32) {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let mut out = Out::Capture(Arc::clone(&buf));
+        let buf = capture_sink();
+        let mut out = Out::Capture(buf.clone());
         let status = sh.run_source_out(src, &mut out, 0);
-        let b = buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        (String::from_utf8_lossy(&b).into_owned(), status)
+        (String::from_utf8_lossy(&take_capture(&buf)).into_owned(), status)
     }
 
     #[test]
@@ -35465,10 +35668,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `jobs` reports the tracked job with its job number and command line.
         let mut sh = Shell::new();
         sh.run_source("cmd /c exit 0 &");
-        let buf = capture_buf();
+        let buf = capture_sink();
         {
             let prog = parse("jobs").expect("parse");
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         let buf = take_capture(&buf);
@@ -35487,10 +35690,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         sh.run_source("cmd /c exit 7 &");
         assert_eq!(sh.jobs.len(), 1);
-        let buf = capture_buf();
+        let buf = capture_sink();
         let status = {
             let prog = parse("fg").expect("parse");
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             sh.last_status
         };
@@ -35529,10 +35732,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // (The stdout capture stays empty; the message goes to real stderr.)
         let mut sh = Shell::new();
         sh.run_source("cmd /c exit 0 &");
-        let buf = capture_buf();
+        let buf = capture_sink();
         {
             let prog = parse("bg").expect("parse");
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         let buf = take_capture(&buf);
@@ -37240,10 +37443,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let p = path.to_string_lossy().replace('\\', "/");
         let src = src_tmpl.replace("{FILE}", &p);
         let mut sh = Shell::new();
-        let buf = capture_buf();
+        let buf = capture_sink();
         let prog = parse(&src).expect("parse");
         {
-            let mut out = Out::Capture(Arc::clone(&buf));
+            let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         let buf = take_capture(&buf);

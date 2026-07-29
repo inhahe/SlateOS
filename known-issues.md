@@ -5958,6 +5958,18 @@ stderr. Ultimately this is another symptom of the collapsed-`RedirPlan`
 order-loss; the long-term proper fix is an ordered fd-op executor shared by
 all command kinds.
 
+**Update 2026-07-28.** The "parallel buffer table" half of this is now much
+cheaper than it was when it was rejected above. TD-OILS-BG-SINK-OUTLIVES-SUBSHELL
+replaced the bare `Arc<Mutex<Vec<u8>>>` with a `CaptureSink` handle that already
+carries a writer count and a `share()`/drop protocol, so an `open_write_fds`
+entry could hold a *sink* alongside a `File` (one enum, not a second map merged
+after the body) and a scratch fd aliased to the capture would both write to it
+and keep it open, with no band-aid merge step. That does not by itself fix the
+`RedirPlan` order-loss, but it removes the "a capture is a buffer, so a scratch
+fd can't be stored there" impedance mismatch that made the narrow fix ugly. The
+same change would close the residual noted under
+TD-OILS-BG-SINK-OUTLIVES-SUBSHELL (`exec 3>&1; ( echo held >&3 & )`).
+
 ### TD-OILS-ARRAY-EMPTY-ASSIGNED. `declare -p` / `@A` can't distinguish a never-assigned empty array from an assigned-empty one — RESOLVED 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` — `format_var_assignment` (~8792) and
@@ -7108,7 +7120,43 @@ stage nor an external child has to choose between streaming and sharing.
 **Impact.** Narrow: a pipeline head that reads *part* of a redirected input and
 leaves the rest for a later command in the same scope.
 
-### TD-OILS-BG-SINK-OUTLIVES-SUBSHELL. A job started inside a `( )` subshell stops holding the enclosing capture open when the subshell ends — OPEN 2026-07-28
+### TD-OILS-BG-SINK-OUTLIVES-SUBSHELL. A job started inside a `( )` subshell stops holding the enclosing capture open when the subshell ends — RESOLVED 2026-07-28
+
+**Resolved 2026-07-28** by the proper fix named below: the capture sink is now
+refcounted like an fd, so *who still holds a write end* is a fact the sink can
+answer rather than something the caller has to infer from a job table.
+
+`Out::Capture` and `StderrTarget::Buffer` now carry a `CaptureSink` — an `Arc<{
+buf, writers: Mutex<usize>, idle: Condvar }>` plus a `claimed` flag. `share()`
+(what a `&` job and a pipeline stage get) increments `writers` and returns a
+claimed handle whose `Drop` decrements it and notifies `idle` at zero; `clone()`
+returns an *unclaimed* alias, for the shapes that write to the sink without
+holding it open. `finish_comsub` waits with `cap.wait_for_writers()` instead of
+`sub.drain_jobs()`, which is what makes the nesting depth irrelevant: the count
+does not care which `Shell`'s job table the writer was forked from, and it drops
+to zero when the last writer's handle does.
+
+Whether a job gets a claimed handle is decided by `job_holds_sink`, which walks
+the async node's *own* redirect list over a small fd set (seeded `{1}`, or
+`{1,2}` when `stderr_aliases_capture` reports fd 2 is bound to the same sink) and
+answers "is any of them still the sink?". That is the same accounting bash gets
+from fd inheritance: `sleep 2 > /dev/null &` drops fd 1 and holds nothing;
+`sleep 2 2>&1 > /dev/null &` made its dup *before* the overwrite and still holds
+one; a job under a scope that already rebound fd 1 (`{ sleep 2 & } > /dev/null`,
+`exec > f`) never held it, which `exec_stdout_shadowing` detects. Anything more
+complex than a single simple-or-redirected command conservatively holds.
+
+Covered by `tests/corpus/background-capture-sink.sh`, which records the waited/
+immediate outcome and the collected output for 19 shapes.
+
+**Residual.** A writer that reaches the sink through a descriptor ≥ 3 dup'd from
+fd 1 (`x=$( exec 3>&1; ( echo held >&3 & ) > /dev/null )` — bash `[held]`, osh
+`[]` with `held` on the terminal) is still missed, but not by anything this fix
+introduced: fd 3 never names the capture in the first place, because
+`open_write_fds` maps fd→`Arc<File>` and a capture has no OS fd. That is
+TD-OILS-COMPOUND-SCRATCHFD-PIPE, and it shows up identically without a `&`
+(`x=$( exec 3>&1; echo plain >&3 )`). `job_holds_sink` would answer correctly
+once such an fd resolves to the sink at all.
 
 **Where:** `userspace/oils/src/interp.rs` — `Out::share()` / `drain_jobs()` /
 `command_sub`, and the `Command::Subshell` arm of `exec_command`.

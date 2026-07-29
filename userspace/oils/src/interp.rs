@@ -2354,6 +2354,14 @@ pub struct Shell {
     /// the shell rather than of one line, so it lives here rather than inside
     /// [`crate::histexpand::expand`].
     hist_last_subst: crate::histexpand::LastSubst,
+    /// `set -v` / `set -o verbose`: echo each unit of input to stderr as the
+    /// reader consumes it, before it runs. Unlike `set -x` this is a property of
+    /// *reading*, so it echoes the raw source — comments, blank lines,
+    /// here-document bodies and `\<newline>` joins included — and applies to
+    /// every source the shell parses, an `eval` string and a `source`d file as
+    /// much as the script itself. `fc`'s editing mode turns it on for the
+    /// commands it re-runs, which is bash's `echo_input_at_read`.
+    verbose: bool,
     /// Builtins disabled via `enable -n NAME`. A name present here is treated as
     /// *not* a builtin during command resolution, so a same-named external is
     /// run instead. Cloned into subshells (bash inherits the enable state).
@@ -2575,6 +2583,7 @@ impl Shell {
             hist_on: false,
             histexpand: false,
             hist_last_subst: crate::histexpand::LastSubst::default(),
+            verbose: false,
             disabled_builtins: HashSet::new(),
             aliases: BTreeMap::new(),
             traps: HashMap::new(),
@@ -3143,6 +3152,22 @@ impl Shell {
             let Some(unit) = ip.next_unit(aliases, opts) else {
                 return Flow::Next;
             };
+            // `set -v` echoes input as the *reader* consumes it, so it goes out
+            // here — before the unit runs, and whether or not the unit parses.
+            // The text is the raw span, unlike the history's cooked one:
+            // comments, blank lines, a here-document body and `\<newline>` joins
+            // are all echoed as typed. Input that ended without a newline still
+            // gets one.
+            if self.verbose {
+                let raw = ip.last_unit_raw();
+                if !raw.is_empty() {
+                    let mut bytes = raw.as_bytes().to_vec();
+                    if !raw.ends_with('\n') {
+                        bytes.push(b'\n');
+                    }
+                    self.emit_stderr(&bytes);
+                }
+            }
             // bash records a line when it *reads* it, before it runs — which is
             // why `history` lists the `history` call that printed the list, and
             // why `$HISTCMD` already counts the line it appears on.
@@ -5948,6 +5973,7 @@ impl Shell {
             hist_on: self.hist_on,
             histexpand: self.histexpand,
             hist_last_subst: self.hist_last_subst.clone(),
+            verbose: self.verbose,
             disabled_builtins: self.disabled_builtins.clone(),
             aliases: self.aliases.clone(),
             // A subshell resets non-ignored traps to their default disposition
@@ -12051,13 +12077,15 @@ impl Shell {
     fn option_flags(&self) -> String {
         let mut s = String::new();
         // (letter, enabled) in bash's canonical relative order.
-        let flags: [(char, bool); 12] = [
+        let flags: [(char, bool); 14] = [
             ('a', self.allexport),
             ('e', self.errexit),
             ('f', self.noglob),
             ('h', true),
+            ('m', self.monitor),
             ('n', self.noexec),
             ('u', self.nounset),
+            ('v', self.verbose),
             ('x', self.xtrace),
             ('B', self.braceexpand),
             ('C', self.noclobber),
@@ -12354,6 +12382,10 @@ impl Shell {
         if !self.shopt.get("inherit_errexit").copied().unwrap_or(false) {
             sub.errexit = false;
         }
+        // bash clears `-v` inside a substitution: the body is not input the
+        // *reader* consumed, so it is never echoed, and `$-`/`set -o` inside the
+        // substitution report the option off however the caller had it set.
+        sub.set_verbose(false);
         sub
     }
 
@@ -12440,8 +12472,14 @@ impl Shell {
                 // buffer, not any persistent `exec > file` (restored below —
                 // unlike a substitution this runs in the current shell).
                 let saved_exec_stdout = self.exec_stdout.take();
+                // As in a command substitution, bash's subshell here runs with
+                // `-v` cleared; osh runs the body in the current shell, so the
+                // flag is lowered and restored around it.
+                let saved_verbose = self.verbose;
+                self.set_verbose(false);
                 let mut out = Out::Capture(cap.clone());
                 let _ = self.exec_program(body, &mut out, &StdinSrc::Inherit);
+                self.set_verbose(saved_verbose);
                 self.exec_stdout = saved_exec_stdout;
             }
             let buf = take_capture(&cap);
@@ -12471,6 +12509,9 @@ impl Shell {
             // give each body the `$?` it would have inherited when bash forked it
             // — the status from *before* the enclosing command.
             let enclosing_status = self.last_status;
+            // Same as an input substitution: bash's subshell runs with `-v` off.
+            let saved_verbose = self.verbose;
+            self.set_verbose(false);
             for (path, body, forked_status) in jobs {
                 if let Ok(bytes) = std::fs::read(&path) {
                     let cursor = bytes_input(bytes);
@@ -12482,6 +12523,7 @@ impl Shell {
                 let _ = std::fs::remove_file(&path);
             }
             self.last_status = enclosing_status;
+            self.set_verbose(saved_verbose);
         }
         if self.procsub_in_temps.len() > in_mark {
             for path in self.procsub_in_temps.split_off(in_mark) {
@@ -16594,15 +16636,11 @@ impl Shell {
             // with N (the trap is already running, so there is nothing left to
             // unwind; only the status changes).
             let saved = self.last_status;
-            let mut flow = Flow::Next;
-            match parse_with_aliases(&action, &self.aliases, self.lex_opts()) {
-                Ok(prog) => {
-                    flow = self.exec_program(&prog, out, stdin);
-                }
-                Err(e) => {
-                    self.errln(&self.format_parse_error(&e, &action, &LineMap::Offset(0)));
-                }
-            }
+            // Read-parse-execute a unit at a time like every other handler (see
+            // `fire_trap_flow`), which is what bash's `parse_and_execute` does:
+            // the commands before a syntax error in the action still run, and
+            // `set -v` echoes each unit as it is read.
+            let flow = self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), false);
             let exited = match flow {
                 Flow::Exit(code) => Some(code),
                 _ => None,
@@ -18912,8 +18950,10 @@ impl Shell {
             'm' => self.monitor = enable,
             // `set -H`: history expansion (equivalent to `set -o histexpand`).
             'H' => self.histexpand = enable,
+            // `set -v`: echo input as it is read (`set -o verbose`).
+            'v' => self.verbose = enable,
             // Accepted by bash (`-abefhkmnptuvxBCEHPT`) but not modelled here.
-            'b' | 'h' | 'k' | 'p' | 't' | 'v' | 'P' => {}
+            'b' | 'h' | 'k' | 'p' | 't' | 'P' => {}
             _ => return false,
         }
         self.refresh_shellopts();
@@ -18961,9 +19001,11 @@ impl Shell {
             // expansion of top-level lines. Independent of `history` — bash
             // tracks and lists the two separately.
             "histexpand" => self.histexpand = enable,
+            // `set -o verbose` (`set -v`): echo input as the reader consumes it.
+            "verbose" => self.verbose = enable,
             // Standard bash option names osh does not model (line-editing
             // `emacs`/`vi`, job-control `notify`,
-            // `posix`, `privileged`, `verbose`, …). bash accepts them
+            // `posix`, `privileged`, …). bash accepts them
             // without error; accept them as no-ops so scripts that toggle them
             // don't spuriously fail. Only a name outside the standard set is a
             // "invalid option name".
@@ -18972,6 +19014,15 @@ impl Shell {
         }
         self.refresh_shellopts();
         true
+    }
+
+    /// Set `-v` (verbose) and keep `$SHELLOPTS` in step, for the paths that
+    /// change it outside the `set` builtin — a substitution body, which bash
+    /// runs with the flag cleared, and `fc`'s editing mode, which runs the
+    /// commands it re-reads with it raised.
+    fn set_verbose(&mut self, on: bool) {
+        self.verbose = on;
+        self.refresh_shellopts();
     }
 
     /// Recompute `$SHELLOPTS` from the current option state and store it as a
@@ -19030,6 +19081,9 @@ impl Shell {
         if self.histexpand {
             opts.push("histexpand");
         }
+        if self.verbose {
+            opts.push("verbose");
+        }
         opts.sort_unstable();
         self.vars.insert("SHELLOPTS".to_string(), opts.join(":"));
     }
@@ -19077,6 +19131,7 @@ impl Shell {
             "monitor" => self.monitor,
             "history" => self.hist_on,
             "histexpand" => self.histexpand,
+            "verbose" => self.verbose,
             // Always-on defaults for a non-interactive shell, mirroring bash's
             // `-c`/script `set -o` output (these have no osh-tunable state but
             // must report their true default so listings match bash).

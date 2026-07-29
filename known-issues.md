@@ -8091,6 +8091,27 @@ argument is written as it is produced rather than buffered, so an error lands
 between the lines it falls between. A `:p` modifier prints like any other, since
 `-p` never runs anything. `history -s` does **not** expand; it stores literally.
 
+**Done (2026-07-29) — `set -v` / `set -o verbose`, which `fc`'s editing mode
+needs.** bash's `echo_input_at_read` is what `fc` raises while it re-runs the
+commands it edited, so it is implemented first, on its own terms. Unlike `set -x`
+— which reports commands as they are *executed*, after expansion — this is a
+property of **reading**: the text goes out to stderr raw, before the unit runs
+and whatever the unit turns out to be. That distinction is observable, and
+`tests/corpus/verbose-option.sh` pins it. The echo carries the comment and blank
+lines before a command, a here-document's body *and* its delimiter, a
+`\<newline>` still spelled with its backslash, and the newlines inside a quoted
+string — none of which survive into the *history's* version of the same lines.
+So the parser now keeps a second span:
+`IncrementalParser::unit_raw`/`last_unit_raw()` is the unit's uncooked source,
+beside the `unit_lines` the history cooks. The echo reaches every source the
+shell parses (an `eval` string, a `source`d file, a trap action) but not a body
+the parser already swallowed: a function's, and — because bash *clears* the flag
+in the subshell, so `$-` inside reads `hB` — a command or process substitution's.
+Two things fell out of the work: `run_exit_trap_out` now reads its action a unit
+at a time through `run_source_flow_out` like every other trap path (so the units
+before a syntax error in the action still run, as in bash), and `$-` had been
+missing `m` as well as `v`.
+
 **Still to do.**
 * *Stage 2 (remainder):* `fc` (`-l`, `-n`, `-r`, `-e`, `-s`), which removes its
   own entry and formats `%d\t %s` rather than `history`'s `%5d  %s`.

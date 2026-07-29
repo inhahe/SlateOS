@@ -336,6 +336,11 @@ pub struct IncrementalParser {
     /// the caller's command history. Empty when the unit consumed no original
     /// token (an alias splice replaying tokens already recorded).
     unit_lines: Vec<UnitLine>,
+    /// The *raw* source span the unit [`Self::next_unit`] last returned occupies
+    /// — every physical line of it, including the comment and blank lines before
+    /// it, any here-document body it swallowed, and the `\<newline>` joins
+    /// [`Self::unit_lines`] cuts out. `set -v` echoes exactly this.
+    unit_raw: String,
     /// `orig[pos..]` alias-expanded under `last_aliases`, prefixed by any
     /// alias-spliced tokens carried across the last rebuild.
     work: Vec<Tok>,
@@ -396,6 +401,7 @@ impl IncrementalParser {
             hist_cursor: 0,
             expand_cursor: 0,
             unit_lines: Vec::new(),
+            unit_raw: String::new(),
             work: Vec::new(),
             work_lines: Vec::new(),
             work_origin: Vec::new(),
@@ -735,6 +741,7 @@ impl IncrementalParser {
             .copied()
             .unwrap_or(self.orig.len());
         self.unit_lines.clear();
+        self.unit_raw.clear();
         match outcome {
             // End of input. If the lexer stopped early on an unclosed
             // construct, this is the point where bash — having executed every
@@ -767,6 +774,17 @@ impl IncrementalParser {
         &self.unit_lines
     }
 
+    /// The raw source the unit [`Self::next_unit`] last returned occupies,
+    /// newline-terminated unless the input itself ended without one. This is
+    /// what `set -v` echoes: bash echoes input as its *reader* consumed it, so
+    /// the text is uncooked — leading blanks and comments, here-document bodies
+    /// and `\<newline>` joins are all still in it, unlike
+    /// [`Self::last_unit_lines`], which cooks them for the history.
+    #[must_use]
+    pub fn last_unit_raw(&self) -> &str {
+        &self.unit_raw
+    }
+
     /// Cut the source the just-parsed unit occupies into its top-level lines.
     ///
     /// The span runs from wherever the previous unit's text ended to the end of
@@ -787,6 +805,7 @@ impl IncrementalParser {
             return;
         }
         self.hist_cursor = end;
+        self.unit_raw = self.src.get(start..end).unwrap_or(&[]).iter().collect();
         // Tokens are emitted in source order, so walking the span's tokens once
         // groups them by the newlines between them.
         let mut toks: Vec<usize> = Vec::new();

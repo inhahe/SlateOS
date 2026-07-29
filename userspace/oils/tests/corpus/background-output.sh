@@ -49,20 +49,6 @@ echo "=== and so is a file fd 1 was bound to"
 # group leaves running behind it.
 { echo q & } > qo.txt; wait; cat qo.txt
 
-echo "=== fd 0 goes the other way: an unredirected job reads /dev/null"
-# A job that carries no redirection of its own must not read the shell's stdin,
-# or it would race the shell for the script it is being read from. That holds
-# even when fd 0 has been rebound with `exec`, which is not a redirection *of
-# the job*.
-printf 'l1\nl2\n' > two.txt
-exec < two.txt
-cat & wait; echo "unredirected=[]"
-{ cat; } & wait; echo "group=[]"
-read a & wait; echo "read=[${a-unset}]"
-# …and the shell's own fd 0 is untouched by any of that: it is still at the
-# first line.
-read b; echo "parent=[$b]"
-
-echo "=== a redirection of the job's own is honoured, as always"
-cat < two.txt & wait
-( cat ) < two.txt & wait
+# fd 0 goes the other way — a job that carries no redirection of its own reads
+# /dev/null rather than the shell's stdin — which has a case of its own; see
+# background-stdin.sh.

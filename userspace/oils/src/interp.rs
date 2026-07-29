@@ -674,20 +674,141 @@ fn take_capture(buf: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
     std::mem::take(&mut *lock_capture(buf))
 }
 
+/// An open input descriptor's in-process stand-in: the bytes it will yield,
+/// plus the offset reached so far.
+///
+/// `Arc<Mutex<…>>` rather than a plain `RefCell` because these handles cross
+/// threads. A `&` job runs a subshell clone on a thread of its own and, when it
+/// inherits fd 0, must read *this very cursor* — so that a line consumed by the
+/// job is a line the shell no longer sees. That is bash's shared file offset
+/// between a shell and the child it forked, and holding the same `Arc` is what
+/// reproduces it. Reads never block (the bytes are already in memory), so the
+/// lock is only ever held for the length of one record.
+type ByteCursor = Arc<Mutex<io::Cursor<Vec<u8>>>>;
+
+/// Wrap a byte snapshot as a fresh [`ByteCursor`] positioned at its start.
+fn byte_cursor(bytes: Vec<u8>) -> ByteCursor {
+    Arc::new(Mutex::new(io::Cursor::new(bytes)))
+}
+
+/// Lock a [`ByteCursor`], recovering from poisoning.
+///
+/// A panicking reader must not make the descriptor permanently unusable: the
+/// cursor is a byte buffer with an offset and no invariant a partial read could
+/// break, so the position stays meaningful and the lock is taken regardless
+/// (same reasoning as [`lock_capture`]).
+fn lock_cursor(c: &ByteCursor) -> std::sync::MutexGuard<'_, io::Cursor<Vec<u8>>> {
+    c.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Copy a [`ByteCursor`]'s remaining bytes into an independent cursor, so reads
+/// through one do not advance the other. Used where a subshell gets a *snapshot*
+/// of a descriptor rather than a share of it.
+fn snapshot_cursor(c: &ByteCursor) -> ByteCursor {
+    let cur = lock_cursor(c);
+    let mut copy = io::Cursor::new(cur.get_ref().clone());
+    copy.set_position(cur.position());
+    Arc::new(Mutex::new(copy))
+}
+
+/// Whether a `&` job inherits fd 0 rather than reading `/dev/null`.
+///
+/// bash disconnects an asynchronous command's input **only in the absence of a
+/// redirection**, which it tracks with the `stdin_redir` flag modelled by
+/// [`Shell::stdin_redirected`]: `do_piping` sets it for a pipeline stage, and a
+/// compound command's redirect list assigns it. So `echo A | { cat & wait; }`
+/// and `{ cat & wait; } < f` both read real input, while `exec < f; cat & wait`
+/// does not — `exec`'s redirection belongs to no command's list.
+///
+/// On top of the ambient flag, the async node's *own* redirect list counts. That
+/// matters for a redirect that resolves back to fd 0 — `cat 0<&0 &` — which is a
+/// dup onto itself and so changes nothing about the source, only the flag. The
+/// list consulted is the outermost async node's, matching bash: a redirect
+/// buried inside a group (`{ cat 0<&0; } &`) or attached to only one member of
+/// an and-or list (`cat 0<&0 && echo ok &`) does *not* count, while one on the
+/// group itself (`{ cat; } 0<&0 &`) or on a pipeline's first stage does.
+fn job_inherits_stdin(ao: &AndOr, stdin_redirected: bool) -> bool {
+    stdin_redirected
+        || (ao.rest.is_empty()
+            && ao
+                .first
+                .commands
+                .first()
+                .is_some_and(command_redirects_stdin))
+}
+
+/// Whether a command node's own redirection list rebinds fd 0.
+fn command_redirects_stdin(cmd: &Command) -> bool {
+    match cmd {
+        Command::Simple(sc) => redirects_rebind_stdin(&sc.redirects),
+        Command::Redirected { redirects, .. } => redirects_rebind_stdin(redirects),
+        _ => false,
+    }
+}
+
+/// Whether a redirection list rebinds fd 0 (`< f`, `<> f`, `<&N`, a here-doc or
+/// a here-string). A `{var}< f` form binds a fresh descriptor, not fd 0.
+fn redirects_rebind_stdin(redirects: &[Redirect]) -> bool {
+    redirects.iter().any(|r| {
+        r.varfd.is_none()
+            && r.fd == 0
+            && matches!(
+                r.op,
+                RedirectOp::Read
+                    | RedirectOp::ReadWrite
+                    | RedirectOp::DupIn
+                    | RedirectOp::HereDoc
+                    | RedirectOp::HereStr
+            )
+    })
+}
+
 /// A command's standard input source.
-enum StdinSrc<'a> {
+///
+/// Owned rather than borrowed — no lifetime parameter — because a background
+/// job's is moved onto the job's own thread. See [`StdinSrc::share`].
+enum StdinSrc {
     /// Inherit the shell's real stdin.
     Inherit,
     /// Read from a shared, position-tracking byte cursor. Used for pipeline
     /// stage input and compound-command `< file` / here-doc redirects so that
     /// repeated `read` calls (e.g. `while read …; done < file`) consume
     /// successive lines rather than restarting from the beginning.
-    Cursor(&'a RefCell<io::Cursor<Vec<u8>>>),
+    Cursor(ByteCursor),
     /// Read from the read end of an OS pipe fed by a concurrent upstream stage.
     /// Wrapped in a `BufReader`/`RefCell` so line-oriented `read` builtins can
     /// consume successive lines from the stream (interior mutability behind the
     /// `&StdinSrc` shared borrow, matching [`StdinSrc::Cursor`]).
     Pipe(RefCell<io::BufReader<io::PipeReader>>),
+}
+
+impl StdinSrc {
+    /// Build a source over a byte snapshot (a `< file` read into memory, a
+    /// here-doc, a here-string).
+    fn cursor(bytes: Vec<u8>) -> StdinSrc {
+        StdinSrc::Cursor(byte_cursor(bytes))
+    }
+
+    /// Build a source over the read end of an OS pipe.
+    fn pipe(r: io::PipeReader) -> StdinSrc {
+        StdinSrc::Pipe(RefCell::new(io::BufReader::new(r)))
+    }
+
+    /// A second handle on the same input, for a reader that outlives this one —
+    /// the counterpart of [`Out::share`].
+    ///
+    /// A background job that inherits fd 0 keeps reading after the command that
+    /// started it has returned, so it needs a handle it can own. A cursor is
+    /// shared outright (both parties advance one offset, as two processes
+    /// sharing an fd do); a pipe's read end is duplicated, which is literally
+    /// what `fork` does to it.
+    fn share(&self) -> io::Result<StdinSrc> {
+        Ok(match self {
+            StdinSrc::Inherit => StdinSrc::Inherit,
+            StdinSrc::Cursor(c) => StdinSrc::Cursor(Arc::clone(c)),
+            StdinSrc::Pipe(r) => StdinSrc::pipe(r.borrow().get_ref().try_clone()?),
+        })
+    }
 }
 
 /// Where a command's *stderr* (fd 2) is currently directed. Pushed onto
@@ -1142,7 +1263,33 @@ pub struct Shell {
     /// in the subshell do not advance the parent's cursor; a minor deviation
     /// from bash's shared-fd semantics, acceptable because our subshells already
     /// copy their stdin).
-    exec_stdin: Option<RefCell<io::Cursor<Vec<u8>>>>,
+    exec_stdin: Option<ByteCursor>,
+    /// bash's `stdin_redir`: whether the *currently active* redirect scope
+    /// rebound fd 0. That flag — not "fd 0 is not a terminal" — is what decides
+    /// whether a `&` job inherits fd 0 or reads `/dev/null`
+    /// ([`job_inherits_stdin`]).
+    ///
+    /// A **compound command's** redirect list assigns it for the duration of the
+    /// body: `{ …; } < f` sets it, `{ …; } > f` *clears* it (so an inner scope
+    /// can undo an outer one). A **simple command's** list does not, which is
+    /// why `f < file` (a function call), `eval … < file` and `. script < file`
+    /// leave it alone even though fd 0 really does change. A pipeline stage with
+    /// an upstream pipe gets it as well, and gets it *after* its own list is
+    /// applied — hence [`Shell::pipe_stage_redirect_root`].
+    ///
+    /// bash holds one global that a redirect scope never restores, so its flag
+    /// leaks to a later job in the same top-level command (`{ true; } < f
+    /// ; cat &` inherits, but the same two on separate lines do not). Here it is
+    /// saved and restored with the scope, which costs only that leak — see
+    /// known-issues TD-OILS-BG-STDIN-REDIR.
+    stdin_redirected: bool,
+    /// One-shot companion to [`Shell::stdin_redirected`], set when the command
+    /// about to run is a pipeline stage whose own node carries a redirect list.
+    /// The first [`Shell::exec_redirected`] to see it — the stage's own node —
+    /// consumes it and ORs it into its assignment, so the pipe survives a list
+    /// that does not mention fd 0 (`echo A | { cat & wait; } 2>/dev/null` reads
+    /// the pipe) while a list on a *nested* node still clears it.
+    pipe_stage_redirect_root: bool,
     /// User-space table of non-standard input descriptors (fd ≥ 3) opened by a
     /// redirection-only `exec 3< file` / `exec 3<&-`. Each entry is the file's
     /// bytes in a position-tracking cursor, so `read -u 3` consumes successive
@@ -1151,7 +1298,7 @@ pub struct Shell {
     /// and *write* descriptors are not yet modelled. A subshell clone inherits a
     /// snapshot of each fd's *remaining* bytes with an independent offset (same
     /// approximation as [`Shell::exec_stdin`]).
-    open_fds: std::collections::HashMap<i32, RefCell<io::Cursor<Vec<u8>>>>,
+    open_fds: std::collections::HashMap<i32, ByteCursor>,
     /// User-space table of non-standard *write* descriptors (fd ≥ 3) opened by a
     /// redirection-only `exec 3> file` / `exec 3>> file`. Each entry is a shared
     /// [`std::fs::File`] handle; `echo … >&3` (builtins) and `cmd >&3`
@@ -1666,6 +1813,8 @@ impl Shell {
             exec_stdout: None,
             exec_stderr: None,
             exec_stdin: None,
+            stdin_redirected: false,
+            pipe_stage_redirect_root: false,
             open_fds: std::collections::HashMap::new(),
             open_write_fds: std::collections::HashMap::new(),
             coproc_read_fds: std::collections::HashMap::new(),
@@ -2436,7 +2585,7 @@ impl Shell {
                 // other form (builtin, function, compound, pipeline, …) runs on a
                 // background thread. Both register a job and set `$!`. See
                 // `exec_background` and TD-OILS13.
-                self.exec_background(&item.list, out);
+                self.exec_background(&item.list, out, stdin);
                 continue;
             }
             let flow = self.exec_and_or(&item.list, out, stdin);
@@ -2711,15 +2860,16 @@ impl Shell {
     /// the inner `a` read the *script's* stdin instead — silently empty when
     /// that was at EOF, and a permanent hang when it was a terminal.
     ///
-    /// The result is an owned [`io::PipeReader`] (`None` meaning "inherit"),
-    /// because the head stage runs on a spawned thread — only the *last* stage
-    /// runs on the caller's — and no borrowing form of [`StdinSrc`] is `Send`:
-    /// [`StdinSrc::Cursor`] holds a shared `&RefCell`, which is not `Sync` at
-    /// any lifetime, `'static` included. A `Cursor`'s remaining bytes are
-    /// therefore pushed down a fresh OS pipe by a short-lived writer thread — a
-    /// thread rather than an inline `write_all` because the bytes can exceed
-    /// the pipe buffer, which would deadlock against a reader that has not
-    /// started yet.
+    /// The result is an owned [`io::PipeReader`] (`None` meaning "inherit").
+    /// A `Cursor`'s remaining bytes are pushed down a fresh OS pipe by a
+    /// short-lived writer thread — a thread rather than an inline `write_all`
+    /// because the bytes can exceed the pipe buffer, which would deadlock
+    /// against a reader that has not started yet.
+    ///
+    /// Handing the stage the cursor itself (which [`StdinSrc::share`] would now
+    /// allow) would be closer to bash, whose stage shares the shell's file
+    /// offset — but it would also turn a streaming stage into a buffered one,
+    /// so that stays a separate change. See TD-OILS-PIPE-HEAD-CURSOR-DRAIN.
     ///
     /// `Inherit` stays `None`: a persistent `exec < file` is consulted
     /// per-command further down, so resolving it here would consume it twice.
@@ -2739,7 +2889,7 @@ impl Shell {
                 let mut rest = Vec::new();
                 // Reading to the end advances the cursor, so a later `read` in
                 // the enclosing command does not replay these bytes.
-                let _ = c.borrow_mut().read_to_end(&mut rest);
+                let _ = lock_cursor(c).read_to_end(&mut rest);
                 match io::pipe() {
                     Ok((r, mut w)) => {
                         std::thread::spawn(move || {
@@ -2816,6 +2966,14 @@ impl Shell {
             for i in 0..n - 1 {
                 let mut sub = self.clone_for_subshell();
                 let cmd = &cmds[i];
+                // bash's `do_piping` sets `stdin_redir` for a stage that reads
+                // an upstream pipe, so a `&` job inside it inherits that pipe
+                // instead of `/dev/null`. It runs *after* the stage node's own
+                // redirect list, hence the one-shot when that node has one.
+                if i > 0 {
+                    sub.stdin_redirected = true;
+                    sub.pipe_stage_redirect_root = matches!(cmd, Command::Redirected { .. });
+                }
                 let reader = readers[i].take();
                 let Some(writer) = writers[i].take() else {
                     continue; // unreachable for non-last stages
@@ -2825,7 +2983,7 @@ impl Shell {
                 let head = if i == 0 { head_stdin.take() } else { None };
                 let handle = scope.spawn(move || {
                     let stdin = match reader.or(head) {
-                        Some(r) => StdinSrc::Pipe(RefCell::new(io::BufReader::new(r))),
+                        Some(r) => StdinSrc::pipe(r),
                         None => StdinSrc::Inherit,
                     };
                     // The stage's pipe *is* its fd 1, replacing any persistent
@@ -2850,17 +3008,27 @@ impl Shell {
             // caller ever routes a one-stage pipeline through here.
             let reader = readers[last].take().or_else(|| head_stdin.take());
             let stdin = match reader {
-                Some(r) => StdinSrc::Pipe(RefCell::new(io::BufReader::new(r))),
+                Some(r) => StdinSrc::pipe(r),
                 None => StdinSrc::Inherit,
             };
+            // `do_piping` again: the last stage always has an upstream pipe.
+            let stage_root_redirected = matches!(&cmds[last], Command::Redirected { .. });
             if lastpipe {
                 // Run in the current shell (not a subshell): mutations persist
                 // and control flow propagates. No EXIT trap firing here — this
                 // is the running shell, whose EXIT trap fires only on true exit.
+                // The pipe's `stdin_redir` is scoped to the stage, since the
+                // shell itself carries on afterwards.
+                let saved = std::mem::replace(&mut self.stdin_redirected, true);
+                self.pipe_stage_redirect_root = stage_root_redirected;
                 last_flow = self.exec_command(&cmds[last], out, &stdin);
+                self.stdin_redirected = saved;
+                self.pipe_stage_redirect_root = false;
                 statuses[last] = self.last_status;
             } else {
                 let mut sub = self.clone_for_subshell();
+                sub.stdin_redirected = true;
+                sub.pipe_stage_redirect_root = stage_root_redirected;
                 sub.exec_command(&cmds[last], out, &stdin);
                 // The last stage is a subshell too: fire its own EXIT trap.
                 sub.run_exit_trap_out(out, &stdin);
@@ -3733,16 +3901,27 @@ impl Shell {
         // its stdout file handle has been dropped, so the temp file is readable).
         let in_mark = self.procsub_in_temps.len();
         let out_mark = self.procsub_out_jobs.len();
+        // This is the one site that *assigns* bash's `stdin_redir`: a compound
+        // command's redirect list both sets it (`{ …; } < f`) and clears it
+        // (`{ …; } > f`), the latter being how a nested scope undoes an outer
+        // one. A pipeline stage's own list is ORed with the pipe instead, so the
+        // pipe is not what the list clears. Restored after the body, unlike
+        // bash's never-restored global — see the field doc.
+        let saved_stdin_redirected = self.stdin_redirected;
+        self.stdin_redirected = redirects_rebind_stdin(redirects)
+            || std::mem::take(&mut self.pipe_stage_redirect_root);
         let plan = match self.resolve_redirects(redirects) {
             Ok(p) => p,
             Err(fail) => {
                 self.last_status = self.report_redirect_failure(&fail, out);
                 self.finish_procsubs(in_mark, out_mark);
+                self.stdin_redirected = saved_stdin_redirected;
                 return Flow::Next;
             }
         };
         let flow =
             self.exec_with_redirects(plan, out, stdin, |sh, o, s| sh.exec_command(inner, o, s));
+        self.stdin_redirected = saved_stdin_redirected;
         self.finish_procsubs(in_mark, out_mark);
         flow
     }
@@ -3969,12 +4148,10 @@ impl Shell {
             // scope is still torn down below.
             Flow::Next
         } else {
-            let input_cursor;
             let owned_stdin;
             let sin: &StdinSrc = match input_bytes {
                 Some(bytes) => {
-                    input_cursor = RefCell::new(io::Cursor::new(bytes));
-                    owned_stdin = StdinSrc::Cursor(&input_cursor);
+                    owned_stdin = StdinSrc::cursor(bytes);
                     &owned_stdin
                 }
                 None => stdin,
@@ -4066,7 +4243,7 @@ impl Shell {
             match op {
                 ExtraFdOp::InputBytes(bytes) => {
                     self.open_fds
-                        .insert(*fd, RefCell::new(io::Cursor::new(bytes.clone())));
+                        .insert(*fd, byte_cursor(bytes.clone()));
                 }
                 ExtraFdOp::OutputFile(path, append) => match open_out(&self.cwd, path, *append) {
                     Ok(f) => {
@@ -4107,7 +4284,7 @@ impl Shell {
                         Ok(f) => {
                             let bytes = std::fs::read(self.host_path(path)).unwrap_or_default();
                             self.open_fds
-                                .insert(*fd, RefCell::new(io::Cursor::new(bytes)));
+                                .insert(*fd, byte_cursor(bytes));
                             self.open_write_fds.insert(*fd, std::sync::Arc::new(f));
                         }
                         Err(e) => {
@@ -4470,25 +4647,19 @@ impl Shell {
             exec_stderr: self.exec_stderr.clone(),
             // The subshell inherits a snapshot of the remaining stdin bytes with
             // an independent cursor (see the field doc).
-            exec_stdin: self.exec_stdin.as_ref().map(|c| {
-                let cur = c.borrow();
-                let pos = cur.position();
-                let mut copy = io::Cursor::new(cur.get_ref().clone());
-                copy.set_position(pos);
-                RefCell::new(copy)
-            }),
+            exec_stdin: self.exec_stdin.as_ref().map(snapshot_cursor),
+            // A subshell is forked inside whatever redirect scope reached it, so
+            // it starts with the flag as it stands (bash: `stdin_redir` is a
+            // plain global the fork copies). The one-shot is not inherited: it
+            // belongs to the stage node the parent is about to run.
+            stdin_redirected: self.stdin_redirected,
+            pipe_stage_redirect_root: false,
             // Snapshot each open input fd with its remaining bytes and an
             // independent offset (same approximation as exec_stdin above).
             open_fds: self
                 .open_fds
                 .iter()
-                .map(|(&fd, c)| {
-                    let cur = c.borrow();
-                    let pos = cur.position();
-                    let mut copy = io::Cursor::new(cur.get_ref().clone());
-                    copy.set_position(pos);
-                    (fd, RefCell::new(copy))
-                })
+                .map(|(&fd, c)| (fd, snapshot_cursor(c)))
                 .collect(),
             // Write descriptors share the same file handle (bash: a subshell
             // inherits the fd, so writes go to one OS offset).
@@ -7809,7 +7980,7 @@ impl Shell {
                 // advancing it (a close approximation of a shared-offset dup).
                 let mut rest = Vec::new();
                 if let Some(cur) = self.input_fd_cursor(n) {
-                    let _ = cur.borrow_mut().read_to_end(&mut rest);
+                    let _ = lock_cursor(&cur).read_to_end(&mut rest);
                 }
                 input_bytes = Some(rest);
                 cmd.stdin(Stdio::piped());
@@ -7837,7 +8008,7 @@ impl Shell {
                         // pipe buffer — a close approximation of a shared fd).
                         if let Some(cur) = &self.exec_stdin {
                             let mut rest = Vec::new();
-                            let _ = cur.borrow_mut().read_to_end(&mut rest);
+                            let _ = lock_cursor(cur).read_to_end(&mut rest);
                             input_bytes = Some(rest);
                             cmd.stdin(Stdio::piped());
                         } else {
@@ -7848,7 +8019,7 @@ impl Shell {
                         // Feed the external the cursor's remaining bytes (from the
                         // current position to the end), advancing the cursor.
                         let mut rest = Vec::new();
-                        let _ = c.borrow_mut().read_to_end(&mut rest);
+                        let _ = lock_cursor(c).read_to_end(&mut rest);
                         input_bytes = Some(rest);
                         cmd.stdin(Stdio::piped());
                     }
@@ -8149,7 +8320,7 @@ impl Shell {
         }
     }
 
-    fn exec_background(&mut self, ao: &AndOr, out: &Out) {
+    fn exec_background(&mut self, ao: &AndOr, out: &Out, stdin: &StdinSrc) {
         // A job writes to whatever fd 1 was where it was started, so it needs a
         // handle on the enclosing sink that outlives this call. Inside `$( … )`
         // or a pipeline stage that is the capture or pipe the caller is
@@ -8165,6 +8336,22 @@ impl Shell {
                 self.last_status = 1;
                 return;
             }
+        };
+
+        // fd 0 goes the other way: a job gets /dev/null *unless* something
+        // redirected its input, in which case it inherits fd 0 as it stands
+        // (bash's `stdin_redir`). `None` here means /dev/null.
+        let job_stdin = if job_inherits_stdin(ao, self.stdin_redirected) {
+            match stdin.share() {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    self.errln(&format!("{}cannot duplicate input for `&': {e}", self.err_prefix()));
+                    self.last_status = 1;
+                    return;
+                }
+            }
+        } else {
+            None
         };
 
         // Fast path: a lone external command, spawned as a real child process so
@@ -8192,6 +8379,10 @@ impl Shell {
             // those all go down the general path rather than being reproduced
             // here.
             && matches!(job_out, Out::Inherit)
+            // Likewise for fd 0: the shortcut can only give the child
+            // `Stdio::null()`, so a job that inherits its input goes down the
+            // general path, where `run_external` wires the real source up.
+            && job_stdin.is_none()
             && self.exec_stdout.is_none()
             && self.exec_stderr.is_none()
             && self.stderr_stack.is_empty()
@@ -8295,14 +8486,14 @@ impl Shell {
         }
         let handle = std::thread::spawn(move || {
             let mut out = job_out;
-            // A backgrounded job's stdin is disconnected (bash redirects it from
-            // /dev/null so it can't steal the terminal): feed an empty cursor so
-            // any `read` sees immediate EOF rather than racing the parent shell
-            // for real stdin.
-            let empty = RefCell::new(io::Cursor::new(Vec::new()));
-            let _ = sub.exec_and_or(&ao_owned, &mut out, &StdinSrc::Cursor(&empty));
+            // Nothing redirected fd 0 ⇒ /dev/null (bash disconnects an async
+            // command's input so it cannot steal the terminal): an empty cursor
+            // gives any `read` immediate EOF rather than racing the parent
+            // shell for real stdin.
+            let sin = job_stdin.unwrap_or_else(|| StdinSrc::cursor(Vec::new()));
+            let _ = sub.exec_and_or(&ao_owned, &mut out, &sin);
             // Fire the subshell's EXIT trap, then report its final status.
-            sub.run_exit_trap_out(&mut out, &StdinSrc::Cursor(&empty));
+            sub.run_exit_trap_out(&mut out, &sin);
             sub.last_status
         });
         let pid = SYNTH_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -8356,7 +8547,7 @@ impl Shell {
             // The coproc's pipe is its fd 1 (see the pipeline stage above).
             sub.exec_stdout = None;
             let mut out = Out::Pipe(child_stdout_w);
-            let sin = StdinSrc::Pipe(RefCell::new(io::BufReader::new(child_stdin_r)));
+            let sin = StdinSrc::pipe(child_stdin_r);
             let _ = sub.exec_command(&body_owned, &mut out, &sin);
             // Dropping `out` (its `PipeWriter`) at scope end closes the coproc's
             // stdout, delivering EOF to the parent's `NAME[0]` reader.
@@ -8475,9 +8666,9 @@ impl Shell {
                 let bytes = std::fs::read(self.host_path(&path))
                     .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
                 if fd == 0 {
-                    self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
+                    self.exec_stdin = Some(byte_cursor(bytes));
                 } else if fd >= 3 {
-                    self.open_fds.insert(fd, RefCell::new(io::Cursor::new(bytes)));
+                    self.open_fds.insert(fd, byte_cursor(bytes));
                     self.open_write_fds.remove(&fd);
                 }
             }
@@ -8494,13 +8685,13 @@ impl Shell {
                 match fd {
                     0 => {
                         let bytes = std::fs::read(self.host_path(&path)).unwrap_or_default();
-                        self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
+                        self.exec_stdin = Some(byte_cursor(bytes));
                     }
                     1 => self.exec_stdout = Some(std::sync::Arc::new(f)),
                     2 => self.exec_stderr = Some(std::sync::Arc::new(f)),
                     _ => {
                         let bytes = std::fs::read(self.host_path(&path)).unwrap_or_default();
-                        self.open_fds.insert(fd, RefCell::new(io::Cursor::new(bytes)));
+                        self.open_fds.insert(fd, byte_cursor(bytes));
                         self.open_write_fds.insert(fd, std::sync::Arc::new(f));
                     }
                 }
@@ -8514,9 +8705,9 @@ impl Shell {
                     s.into_bytes()
                 };
                 if fd == 0 {
-                    self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
+                    self.exec_stdin = Some(byte_cursor(bytes));
                 } else if fd >= 3 {
-                    self.open_fds.insert(fd, RefCell::new(io::Cursor::new(bytes)));
+                    self.open_fds.insert(fd, byte_cursor(bytes));
                     self.open_write_fds.remove(&fd);
                 }
             }
@@ -8672,22 +8863,17 @@ impl Shell {
     /// Clone input fd `n`'s current byte cursor for an input dup (`M<&N`). fd 0
     /// resolves to `exec_stdin` (falling back to an empty stream), fds ≥ 3 to
     /// the `open_fds` table. An unbound descriptor is a "Bad file descriptor".
-    fn clone_input_fd(&self, n: i32) -> Result<RefCell<io::Cursor<Vec<u8>>>, String> {
+    fn clone_input_fd(&self, n: i32) -> Result<ByteCursor, String> {
         let cur = if n == 0 {
             self.exec_stdin.as_ref()
         } else {
             self.open_fds.get(&n)
         };
         match cur {
-            Some(c) => {
-                let borrowed = c.borrow();
-                let mut clone = io::Cursor::new(borrowed.get_ref().clone());
-                clone.set_position(borrowed.position());
-                Ok(RefCell::new(clone))
-            }
+            Some(c) => Ok(snapshot_cursor(c)),
             // fd 0 with no bound stdin: treat as an empty input stream so a dup
             // of it does not error (bash's stdin would be the terminal).
-            None if n == 0 => Ok(RefCell::new(io::Cursor::new(Vec::new()))),
+            None if n == 0 => Ok(byte_cursor(Vec::new())),
             None => Err(format!("{n}: Bad file descriptor")),
         }
     }
@@ -10924,8 +11110,8 @@ impl Shell {
             let enclosing_status = self.last_status;
             for (path, body, forked_status) in jobs {
                 if let Ok(bytes) = std::fs::read(&path) {
-                    let cursor = RefCell::new(io::Cursor::new(bytes));
-                    let sin = StdinSrc::Cursor(&cursor);
+                    let cursor = byte_cursor(bytes);
+                    let sin = StdinSrc::Cursor(cursor);
                     let mut out = Out::Inherit;
                     self.last_status = forked_status;
                     let _ = self.exec_program(&body, &mut out, &sin);
@@ -11535,11 +11721,11 @@ impl Shell {
                     // position-tracking cursor so subsequent `read`s / externals
                     // consume successive input.
                     if let Some(data) = &redir.stdin_data {
-                        self.exec_stdin = Some(RefCell::new(io::Cursor::new(data.clone())));
+                        self.exec_stdin = Some(byte_cursor(data.clone()));
                     } else if let Some(path) = &redir.stdin {
                         match std::fs::read(self.host_path(path)) {
                             Ok(bytes) => {
-                                self.exec_stdin = Some(RefCell::new(io::Cursor::new(bytes)));
+                                self.exec_stdin = Some(byte_cursor(bytes));
                             }
                             Err(e) => {
                                 self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
@@ -11613,7 +11799,7 @@ impl Shell {
                                 ExtraFdOp::InputBytes(bytes) => {
                                     self.open_fds.insert(
                                         *fd,
-                                        RefCell::new(io::Cursor::new(bytes.clone())),
+                                        byte_cursor(bytes.clone()),
                                     );
                                     // A descriptor is input xor output; drop any
                                     // prior write binding for the same number.
@@ -11654,7 +11840,7 @@ impl Shell {
                                                 .unwrap_or_default();
                                             self.open_fds.insert(
                                                 *fd,
-                                                RefCell::new(io::Cursor::new(bytes)),
+                                                byte_cursor(bytes),
                                             );
                                             self.open_write_fds
                                                 .insert(*fd, std::sync::Arc::new(f));
@@ -17689,7 +17875,7 @@ impl Shell {
                 ufd_plan.stdin_from_fd = Some(n);
                 None
             } else {
-                self.open_fds.get(&n).map(StdinSrc::Cursor)
+                self.open_fds.get(&n).map(|c| StdinSrc::Cursor(Arc::clone(c)))
             }
         });
         let (rd_stdin, rd_redir): (&StdinSrc, &RedirPlan) = if ufd_active {
@@ -17884,7 +18070,7 @@ impl Shell {
                 return take(&mut *rd.borrow_mut(), delim, max);
             }
             return match self.input_fd_cursor(n) {
-                Some(c) => take(&mut *c.borrow_mut(), delim, max),
+                Some(c) => take(&mut *lock_cursor(&c), delim, max),
                 None => Vec::new(),
             };
         }
@@ -17898,11 +18084,11 @@ impl Shell {
             };
         }
         match stdin {
-            StdinSrc::Cursor(c) => take(&mut *c.borrow_mut(), delim, max),
+            StdinSrc::Cursor(c) => take(&mut *lock_cursor(c), delim, max),
             StdinSrc::Pipe(r) => take(&mut *r.borrow_mut(), delim, max),
             StdinSrc::Inherit => {
                 if let Some(cur) = &self.exec_stdin {
-                    return take(&mut *cur.borrow_mut(), delim, max);
+                    return take(&mut *lock_cursor(cur), delim, max);
                 }
                 let stdin = io::stdin();
                 let mut lock = stdin.lock();
@@ -18116,7 +18302,7 @@ impl Shell {
                 ufd_plan.stdin_from_fd = Some(n);
                 None
             } else {
-                self.open_fds.get(&n).map(StdinSrc::Cursor)
+                self.open_fds.get(&n).map(|c| StdinSrc::Cursor(Arc::clone(c)))
             }
         });
         let (mf_stdin, mf_redir): (&StdinSrc, &RedirPlan) = if ufd_active {
@@ -19917,12 +20103,13 @@ impl Shell {
     /// `exec_stdin` for fd 0, the `open_fds` table for fd ≥ 3. `None` when the
     /// descriptor is not bound (read yields immediate EOF, as bash does for a
     /// closed source).
-    fn input_fd_cursor(&self, n: i32) -> Option<&RefCell<io::Cursor<Vec<u8>>>> {
+    fn input_fd_cursor(&self, n: i32) -> Option<ByteCursor> {
         if n == 0 {
             self.exec_stdin.as_ref()
         } else {
             self.open_fds.get(&n)
         }
+        .map(Arc::clone)
     }
 
     /// Non-consuming availability check for `read -t 0`: does a read from this
@@ -19966,7 +20153,7 @@ impl Shell {
                 return read_one_line(&mut *rd.borrow_mut());
             }
             let c = self.input_fd_cursor(n)?;
-            return read_one_line(&mut *c.borrow_mut());
+            return read_one_line(&mut *lock_cursor(&c));
         }
         if let Some(data) = &redir.stdin_data {
             // Here-doc/here-string: read the first line. (Multi-line `read`
@@ -19985,7 +20172,7 @@ impl Shell {
                 // `io::Cursor` implements `BufRead`; `read_line` advances its
                 // position exactly past the consumed newline, so successive
                 // reads yield successive lines.
-                read_one_line(&mut *c.borrow_mut())
+                read_one_line(&mut *lock_cursor(c))
             }
             StdinSrc::Pipe(r) => {
                 // Streaming upstream stage: the `BufReader` yields successive
@@ -19995,7 +20182,7 @@ impl Shell {
             StdinSrc::Inherit => {
                 // A persistent `exec < file` rebinds the shell's ambient fd 0.
                 if let Some(cur) = &self.exec_stdin {
-                    return read_one_line(&mut *cur.borrow_mut());
+                    return read_one_line(&mut *lock_cursor(cur));
                 }
                 let stdin = io::stdin();
                 let mut lock = stdin.lock();
@@ -20024,7 +20211,7 @@ impl Shell {
                 return read_record(&mut *rd.borrow_mut(), delim, nchars, exact);
             }
             let c = self.input_fd_cursor(n)?;
-            return read_record(&mut *c.borrow_mut(), delim, nchars, exact);
+            return read_record(&mut *lock_cursor(&c), delim, nchars, exact);
         }
         if let Some(data) = &redir.stdin_data {
             let mut r = io::BufReader::new(&data[..]);
@@ -20036,11 +20223,11 @@ impl Shell {
             return read_record(&mut r, delim, nchars, exact);
         }
         match stdin {
-            StdinSrc::Cursor(c) => read_record(&mut *c.borrow_mut(), delim, nchars, exact),
+            StdinSrc::Cursor(c) => read_record(&mut *lock_cursor(c), delim, nchars, exact),
             StdinSrc::Pipe(r) => read_record(&mut *r.borrow_mut(), delim, nchars, exact),
             StdinSrc::Inherit => {
                 if let Some(cur) = &self.exec_stdin {
-                    return read_record(&mut *cur.borrow_mut(), delim, nchars, exact);
+                    return read_record(&mut *lock_cursor(cur), delim, nchars, exact);
                 }
                 let stdin = io::stdin();
                 let mut lock = stdin.lock();
@@ -20357,11 +20544,7 @@ impl RedirPlan {
 /// scoped redirect (`{ …; } 3< file`) is in effect: `(fd, prior input cursor,
 /// prior write handle)`. Both prior slots are taken by ownership out of the
 /// shell's fd tables and reinstated when the body finishes.
-type SavedFd = (
-    i32,
-    Option<RefCell<io::Cursor<Vec<u8>>>>,
-    Option<std::sync::Arc<std::fs::File>>,
-);
+type SavedFd = (i32, Option<ByteCursor>, Option<std::sync::Arc<std::fs::File>>);
 
 /// An operation on a non-standard file descriptor (fd ≥ 3), captured by
 /// [`Shell::resolve_redirects`] and applied to the shell's fd tables by `exec`.

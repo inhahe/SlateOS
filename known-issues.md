@@ -6988,7 +6988,7 @@ previously errored. Regression coverage: `tests/cli_options.rs`
 path) and shorter than bash's full GNU-long-option dump — exact byte-parity of
 the usage block is neither possible (different program name) nor desirable.
 
-### TD-OILS-BG-STDIN-REDIR. A `&` job does not inherit an *explicitly redirected* fd 0 — it always reads /dev/null — OPEN 2026-07-28
+### TD-OILS-BG-STDIN-REDIR. A `&` job does not inherit an *explicitly redirected* fd 0 — it always reads /dev/null — RESOLVED 2026-07-28
 
 **Where:** `userspace/oils/src/interp.rs` — `exec_background`'s thread path
 (`StdinSrc::Cursor(&empty)`) and its direct-spawn shortcut
@@ -7029,6 +7029,84 @@ shared-file-offset semantics between shell and job for free.
 **Impact.** Narrow: a `&` job that reads its enclosing pipeline's or group's
 input. Nothing in the corpus depends on it, and the failure mode is empty input
 rather than corruption.
+
+**Fix (2026-07-28).** Both halves, as described above.
+
+1. **`StdinSrc` now owns `Arc` handles and is `Send`.** Its lifetime parameter is
+   gone; `Cursor` holds a `ByteCursor` = `Arc<Mutex<io::Cursor<Vec<u8>>>>` (with
+   `byte_cursor`/`lock_cursor`/`snapshot_cursor` helpers) and `share()` sits
+   alongside `Out::share()` — `Arc::clone` for a cursor, `try_clone` for a pipe.
+   `Shell::exec_stdin` and `Shell::open_fds` hold `ByteCursor`s too, so a
+   subshell clone still takes a *snapshot* (`snapshot_cursor`) while a job takes
+   a *share*. Sharing the cursor is what gives bash's shared file offset between
+   shell and job: `{ read v & wait; read w; } < four.txt` leaves `w=r2`.
+2. **`Shell::stdin_redirected` models bash's `stdin_redir`.** `exec_redirected`
+   — the compound-command redirect site, and the only one — *assigns* it from
+   `redirects_rebind_stdin(list)`, so `{ …; } < f` sets it and a nested
+   `{ …; } > f` clears it again. The function-invocation / `eval` / `.` sites do
+   not assign it, matching bash: `f < file` leaves the flag alone even though fd
+   0 really does change. `exec_threaded_pipeline` sets it for every stage with an
+   upstream pipe, *after* the stage node's own list is applied — that ordering is
+   what `Shell::pipe_stage_redirect_root` (a one-shot ORed in by the stage's own
+   `exec_redirected`) exists for, so `echo A | { cat & wait; } 2>/dev/null` still
+   reads the pipe while `echo A | { { cat & wait; } > f; }` does not.
+   `clone_for_subshell` copies the flag. `exec_background` then decides with
+   `job_inherits_stdin(ao, self.stdin_redirected)`, which also consults the async
+   node's *own* redirect list (for `cat 0<&0 &`, a dup that changes only the
+   flag), and passes `stdin.share()` when it inherits.
+
+Covered by `tests/corpus/background-stdin.sh` (new; the superseded "fd 0 goes
+the other way" section of `background-output.sh` was removed in favour of it).
+
+**Residual 1 — the flag does not leak past its scope.** bash keeps one global
+that a redirect scope never restores, so its flag survives into a *later command
+of the same top-level command*: with fd 0 bound by `exec < two.txt`,
+`{ true; } 0<&0; cat & wait` prints `l1 l2` in bash and nothing in osh (the same
+two on separate lines print nothing in both). osh saves and restores the flag
+with the scope instead. Reproducing the leak faithfully would need the reset to
+be per *parsed top-level unit* — which for bash is per input **line**, since its
+reader parses a line at a time — and osh parses the whole script up front, so
+there is no line boundary left to hang it on. Deliberate: the scoped rule is the
+defensible one, and the divergence needs a redirect scope that changes nothing
+(`0<&0`) followed by a job on the same line.
+
+**Residual 2 — an external command still drains the cursor.** `run_external`
+reads a `Cursor`-backed fd 0 to the end to feed the child, so
+`{ head -n 1 & wait; head -n 1; } < four.txt` prints `l1` where bash prints
+`l1 l2`: the job's `head` consumes the whole snapshot rather than one line. The
+builtin path (`read`) is exact. The proper fix is modelling `< file` as a real
+shared `File` handle rather than a byte snapshot, which is the same underlying
+approximation `Shell::exec_stdin`'s doc records.
+
+### TD-OILS-PIPE-HEAD-CURSOR-DRAIN. A pipeline's head stage drains a `< file` cursor instead of sharing its offset — OPEN 2026-07-28
+
+**Where:** `userspace/oils/src/interp.rs` — `pipeline_head_stdin`, the
+`StdinSrc::Cursor` arm (cited from its doc comment).
+
+**What.** When a pipeline's head stage inherits a `Cursor`-backed fd 0 (a
+compound `< file`, a here-doc), osh reads the cursor **to the end** and pushes
+those bytes down a fresh OS pipe. bash's stage shares the shell's file offset
+instead, so it consumes only what it reads:
+
+```sh
+{ head -n 1 | cat; head -n 1; } < four.txt   # bash: r1 r2   osh: r1
+{ read a | cat; read b; echo "[$b]"; } < four.txt  # bash: [r2]  osh: []
+```
+
+**Why it is this way.** The drain predates `StdinSrc` being shareable. Now that
+`share()` exists the stage *could* be handed the cursor itself — but a stage
+holding the cursor is a stage that no longer streams: the bytes would be read
+inline instead of by the short-lived writer thread, and an unbounded upstream
+would have to be buffered. That is why the change was not folded into
+TD-OILS-BG-STDIN-REDIR.
+
+**Proper fix.** Same root cause as that entry's Residual 2: model `< file` as a
+real shared `File` handle (one OS description, one offset) rather than a byte
+snapshot, and hand stages and jobs a `try_clone` of it. Then neither the head
+stage nor an external child has to choose between streaming and sharing.
+
+**Impact.** Narrow: a pipeline head that reads *part* of a redirected input and
+leaves the rest for a later command in the same scope.
 
 ### TD-OILS-BG-SINK-OUTLIVES-SUBSHELL. A job started inside a `( )` subshell stops holding the enclosing capture open when the subshell ends — OPEN 2026-07-28
 

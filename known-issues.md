@@ -7884,6 +7884,52 @@ parent shell to stop; `logout` is a one-line refusal outside a login shell and
 could be written today. The order that unlocks the most first is history, then
 `logout`, then `bind`/`suspend` alongside the interactive line editor.
 
+**The history model, measured against bash 5.2 (2026-07-29).** All of it is
+reachable non-interactively, so all of it is corpus-testable — which is the
+reason this is worth building rather than stubbing.
+
+*Enablement.* A non-interactive shell starts with `set -o history` **off**, and
+`HISTFILE`/`HISTSIZE`/`HISTFILESIZE` unset (they are set only for interactive
+shells). `HISTCMD` exists regardless and reads `0` while the list is empty.
+Turning the option on with `set -o history` starts recording immediately — from
+the *next* line, not the `set` line itself.
+
+*What gets recorded.* Only lines read by the **top-level** input reader. A
+`source`d file's lines, an `eval` string's lines and a function body's lines are
+not recorded; the `.`/`eval`/function *call* is. One parse unit is one entry:
+
+```sh
+echo one; echo two          →  echo one; echo two
+for i in 1 2\ndo\n echo $i\ndone  →  for i in 1 2; do   echo $i; done
+```
+
+*The line-join rule (`cmdhist` on, `lithist` off — bash's defaults).* A unit
+spanning several physical lines is stored as one entry with its top-level
+newlines replaced. The replacement is `"; "`, except `" "` when the preceding
+line already ends in something a `;` cannot follow — `;`, `;;`, `&`, `&&`, `|`,
+`||`, `{`, `(`, or the reserved words `do`/`then`/`else`/`elif`/`in`. Newlines
+that are *not* top-level survive verbatim: inside a quoted string, inside a
+`$( … )`, and in a here-document body (whose entry also keeps its trailing
+newline). osh can implement this exactly rather than heuristically, because a
+top-level newline is precisely a `Tok::Newline` in the unit's token stream — so
+the entry is the unit's raw source sliced at those tokens' offsets and rejoined,
+and every other newline is inside a token and passes through untouched.
+
+*Numbering.* Entries are numbered from 1 and **renumbered** after any deletion,
+so the numbers are always contiguous. `HISTCMD` is the number of the entry just
+added — i.e. `len()` after the current line was recorded — which is why it
+advances by one per top-level command and jumps when entries are removed.
+
+*Builtin quirks that fall out of that.*
+* `history -s TEXT` **replaces** the current entry rather than appending after
+  it: the `history -s …` line was already recorded when it was read, so bash
+  drops that entry and appends `TEXT` in its place.
+* `fc` removes its own entry too, which is why `fc -l` never lists the `fc`
+  that produced it. (`fc -l`'s format is `%d\t %s`, not `history`'s `%5d  %s`.)
+* `history -s` works with the `history` option **off** — it just appends, since
+  there is no current entry to replace.
+* `history -p` expands and prints without recording anything.
+
 **Impact.** Nothing a script does today is affected — these are all interactive
 tools. The cost is coverage rather than correctness: `compgen -b`, `compgen -c`
 and `compgen -A helptopic` can only appear in

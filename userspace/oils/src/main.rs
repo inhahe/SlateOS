@@ -9,9 +9,9 @@
 //!   osh SCRIPT [ARG…]        Run SCRIPT, with ARG… as positional parameters.
 //!   osh --version | --help
 //!
-//! Leading `set` options (`-e`, `-x`, …) and `-i`/`+i` may be bundled with the
-//! `-c`/`-s` mode letter into a single cluster, getopt-style (`-ec`, `-ic`,
-//! `-cx`), matching bash.
+//! Leading `set` options (`-e`, `-x`, …), `-i`/`+i` and `-l` may be bundled
+//! with the `-c`/`-s` mode letter into a single cluster, getopt-style (`-ec`,
+//! `-ic`, `-lc`, `-cx`), matching bash.
 //!
 //! See `design-decisions.md §72` for why this is a Rust reimplementation of the
 //! OSH language rather than a cross-compile of upstream Oils.
@@ -82,6 +82,14 @@ fn run(args: &[String]) -> i32 {
     // prefix matching (`${!P*}`), and `set` listings behave like bash.
     sh.import_environment();
 
+    // `login(1)` marks the shell it starts by prefixing `argv[0]` with a `-`
+    // (`-bash`, `-osh`) rather than passing a flag, so bash checks the raw
+    // `argv[0]` — not its basename — before it looks at any option. `-l` and
+    // `--login` say the same thing explicitly.
+    if args.first().is_some_and(|a| a.starts_with('-')) {
+        sh.set_login_shell();
+    }
+
     // Consume leading `set`/`shopt`-style option flags (`bash -e`, `-x`, `-eu`,
     // `-o pipefail`, `-O extglob`, `+O nocasematch`, `-n`, …), applying each to
     // the shell before the mode token (`-c`, a script path, …) is dispatched.
@@ -145,6 +153,12 @@ fn run(args: &[String]) -> i32 {
             // osh's `-V` version shorthand is not a `set` letter; keep it out of
             // the option-cluster parser so it reaches the version dispatch below.
             "-V" => break,
+            // The long spelling of `-l`. Like the letter it is invocation-only
+            // and does not end option processing, so a script/`-c` may follow.
+            "--login" => {
+                sh.set_login_shell();
+                base += 1;
+            }
             // A `-`/`+` cluster of single-letter invocation options: `set`
             // letters (`-e`, `-x`, `-eux`, `+x`), `-i`/`+i` (force
             // interactivity), and — for `-` — the mode letters `-c`/`-s`, which
@@ -160,6 +174,16 @@ fn run(args: &[String]) -> i32 {
                 for c in s[1..].chars() {
                     match c {
                         'i' => force_interactive = Some(enable),
+                        // `-l`: start as a login shell. Invocation-only, like
+                        // `-i`, so it does not end option processing. bash
+                        // accepts `+l` and does nothing with it — a login shell
+                        // is how the shell was *started*, so it cannot be
+                        // switched off any more than `shopt -u login_shell` can.
+                        'l' => {
+                            if enable {
+                                sh.set_login_shell();
+                            }
+                        }
                         // Mode letters only select a mode with the `-` sign.
                         'c' if enable => {
                             mode = InvokeMode::Command;
@@ -396,7 +420,7 @@ fn eprint_option_usage() {
     eprintln!("\tosh [option] ... -s [arg ...]");
     eprintln!("Shell options:");
     eprintln!("\t-abefhkmnptuvxBCEHPT or -o option");
-    eprintln!("\t-ics or -c command\t(invocation only)");
+    eprintln!("\t-ils or -c command\t(invocation only)");
     eprintln!("Run 'osh --help' for the full option list.");
 }
 
@@ -415,6 +439,7 @@ fn print_help() {
     println!("Leading options (applied before the command/script, as in bash):");
     println!("  -e -x -u -f -C …             Single-letter `set` options (clusters OK).");
     println!("  -i / +i                      Force interactive / non-interactive REPL.");
+    println!("  -l / --login                 Start as a login shell (enables `logout`).");
     println!("  -o NAME / +o NAME            Enable/disable a `set -o` option (e.g. pipefail).");
     println!("  -O NAME / +O NAME            Enable/disable a shopt option (e.g. extglob).");
     println!("  --                           End option processing.");

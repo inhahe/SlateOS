@@ -330,6 +330,21 @@ fn parse_exit_status(arg: &str) -> Result<i32, ()> {
     arg.trim().parse::<i64>().map(|n| (n & 0xFF) as i32).map_err(|_| ())
 }
 
+/// The outcome of reading the status operand `exit`, `logout` and `return`
+/// share — see [`Shell::exit_status_arg`], which explains why the two failures
+/// have to stay distinguishable.
+enum ExitArg {
+    /// A usable status (`$?` when there was no operand at all).
+    Status(i32),
+    /// The operand was not a number. Already reported; the status is 2 and the
+    /// caller proceeds as it otherwise would.
+    BadNumber,
+    /// There was a second operand. Already reported by bash's `no_args`, which
+    /// then unwinds — so the caller must raise [`Flow::Abort`] with status 1
+    /// rather than act on any status of its own.
+    TooMany,
+}
+
 /// Drop a single leading `--`, bash's end-of-options marker.
 ///
 /// Exactly one: a second `--` is an ordinary argument, so `exit -- -- 3` is a
@@ -2399,6 +2414,13 @@ pub struct Shell {
     /// much as the script itself. `fc`'s editing mode turns it on for the
     /// commands it re-runs, which is bash's `echo_input_at_read`.
     verbose: bool,
+    /// Whether this shell was started as a **login** shell — `-l`/`--login`, or
+    /// an `argv[0]` beginning with `-`, which is how `login(1)` marks it. It
+    /// says how the shell was *started*, so nothing can change it afterwards:
+    /// `shopt -s login_shell` is one of the two options bash gives a setter that
+    /// silently does nothing (see [`shopt_is_read_only`]). The only behaviour
+    /// hanging off it today is `logout`, which refuses to work anywhere else.
+    login_shell: bool,
     /// Builtins disabled via `enable -n NAME`. A name present here is treated as
     /// *not* a builtin during command resolution, so a same-named external is
     /// run instead. Cloned into subshells (bash inherits the enable state).
@@ -2621,6 +2643,7 @@ impl Shell {
             histexpand: false,
             hist_last_subst: crate::histexpand::LastSubst::default(),
             verbose: false,
+            login_shell: false,
             disabled_builtins: HashSet::new(),
             aliases: BTreeMap::new(),
             traps: HashMap::new(),
@@ -2895,6 +2918,17 @@ impl Shell {
         self.refresh_bashopts();
     }
 
+    /// Mark this shell as a **login** shell — `-l`/`--login`, or an `argv[0]`
+    /// beginning with `-`, which is how `login(1)` marks the shell it starts.
+    /// Called once by the binary, before anything runs; there is no way back,
+    /// because the flag describes how the shell was started rather than
+    /// anything a script may decide. Recomputes `$BASHOPTS`, which lists
+    /// `login_shell` when it is on.
+    pub fn set_login_shell(&mut self) {
+        self.login_shell = true;
+        self.refresh_bashopts();
+    }
+
     /// Whether this shell is *interactive* in bash's sense: not a `-c` command
     /// and not a script file, and its REPL stdin/stderr is a terminal (or `-i`
     /// forced it). Governs alias-expansion default, prompt printing, job
@@ -3016,6 +3050,9 @@ impl Shell {
     fn shopt_default(&self, name: &str) -> bool {
         match name {
             "expand_aliases" => self.is_interactive(),
+            // Read-only (see `shopt_is_read_only`), so nothing can ever shadow
+            // it in `self.shopt` and this "default" is always the answer.
+            "login_shell" => self.login_shell,
             _ => SHOPT_TABLE.iter().find(|(n, _)| *n == name).map(|(_, d)| *d).unwrap_or(false),
         }
     }
@@ -4612,6 +4649,44 @@ impl Shell {
         Ok(Self::clamp_loop_level(n, self.loop_depth))
     }
 
+    /// Read the status operand `exit`, `logout` and `return` share, the way
+    /// bash's `get_exitstat` reads it: a leading `--` is dropped, no operand at
+    /// all means `$?`, and the number is taken modulo 256.
+    ///
+    /// The two failures are *not* interchangeable, which is why this returns a
+    /// three-way answer rather than a `Result<i32, ()>`:
+    ///
+    /// * A **non-numeric** first operand is reported and `get_exitstat` returns
+    ///   `EX_BADUSAGE` **immediately**, so the too-many check below it never
+    ///   runs — `exit abc def` is only the numeric complaint. The caller still
+    ///   acts on it (`exit` leaves with 2; `return` goes on to its
+    ///   in-a-function check, so `return -Z` at top level prints both lines).
+    /// * A **second operand** goes through bash's `no_args`, which reports
+    ///   "too many arguments" and then `top_level_cleanup()` +
+    ///   `jump_to_top_level(DISCARD)`. Nothing is exited: the rest of the
+    ///   current top-level parse unit is discarded and the next one runs, and
+    ///   because of the cleanup the unwind escapes an enclosing `eval`/`source`
+    ///   — exactly [`Flow::Abort`]. So `exit 3 4; echo x` on one line prints
+    ///   neither, and a following line still runs, with status 1.
+    fn exit_status_arg(&mut self, name: &str, args: &[String]) -> ExitArg {
+        let rest = strip_end_of_options(args);
+        let Some(s) = rest.first() else {
+            return ExitArg::Status(self.last_status);
+        };
+        let Ok(n) = parse_exit_status(s) else {
+            self.errln(&format!(
+                "{}{name}: {s}: numeric argument required",
+                self.err_prefix()
+            ));
+            return ExitArg::BadNumber;
+        };
+        if rest.len() > 1 {
+            self.errln(&format!("{}{name}: too many arguments", self.err_prefix()));
+            return ExitArg::TooMany;
+        }
+        ExitArg::Status(n)
+    }
+
     /// Run `f` with the loop-nesting counter bumped, so `break`/`continue`
     /// executed anywhere inside `f` see a non-zero `loop_depth` and are treated
     /// as meaningful. The counter is always restored, including on early return.
@@ -6012,6 +6087,7 @@ impl Shell {
             histexpand: self.histexpand,
             hist_last_subst: self.hist_last_subst.clone(),
             verbose: self.verbose,
+            login_shell: self.login_shell,
             disabled_builtins: self.disabled_builtins.clone(),
             aliases: self.aliases.clone(),
             // A subshell resets non-ignored traps to their default disposition
@@ -13319,25 +13395,40 @@ impl Shell {
                     code
                 }
             }
-            "exit" => {
-                // A non-numeric argument is an error in bash: it prints
-                // "exit: ARG: numeric argument required" and still exits with
-                // status 2. A bare `exit` uses `$?`, and so does `exit --`.
-                let code = match strip_end_of_options(args).first() {
-                    None => self.last_status,
-                    Some(s) => match parse_exit_status(s) {
-                        Ok(n) => n,
-                        Err(()) => {
-                            self.errln(&format!(
-                                "{}exit: {s}: numeric argument required",
-                                self.err_prefix()
-                            ));
+            "exit" | "logout" => {
+                // `logout` is `exit` with a gate in front of it: outside a login
+                // shell bash's `logout_builtin` refuses, naming the builtin that
+                // *would* work, and never looks at the operand — so
+                // `logout abc` in an ordinary shell is only the refusal. The
+                // interactivity test that gate once had is commented out in
+                // bash's own source, so a non-interactive login shell logs out
+                // just as well.
+                if name == "logout" && !self.login_shell {
+                    self.errln(&format!(
+                        "{}logout: not login shell: use `exit'",
+                        self.err_prefix()
+                    ));
+                    1
+                } else {
+                    // A non-numeric argument still exits, with status 2; a
+                    // second operand does not exit at all (see
+                    // `exit_status_arg`). A bare `exit` uses `$?`, and so does
+                    // `exit --`.
+                    match self.exit_status_arg(name, args) {
+                        ExitArg::Status(code) => {
+                            flow = Flow::Exit(code);
+                            code
+                        }
+                        ExitArg::BadNumber => {
+                            flow = Flow::Exit(2);
                             2
                         }
-                    },
-                };
-                flow = Flow::Exit(code);
-                code
+                        ExitArg::TooMany => {
+                            flow = Flow::Abort;
+                            1
+                        }
+                    }
+                }
             }
             "return" => {
                 // `return` is only valid inside a function (`fn_stack` is
@@ -13347,28 +13438,29 @@ impl Shell {
                 // Like `exit`, a non-numeric argument prints "return: ARG:
                 // numeric argument required" and forces status 2. bash validates
                 // the argument *before* the context check, so `return -Z` outside
-                // a function emits BOTH this and the "can only return" line.
-                let code = match strip_end_of_options(args).first() {
-                    None => self.last_status,
-                    Some(s) => match parse_exit_status(s) {
-                        Ok(n) => n,
-                        Err(()) => {
-                            self.errln(&format!(
-                                "{}return: {s}: numeric argument required",
-                                self.err_prefix()
-                            ));
-                            2
-                        }
-                    },
+                // a function emits BOTH this and the "can only return" line —
+                // and a *second* operand unwinds before the check is reached, so
+                // `return 3 4` at top level is only "too many arguments".
+                let code = match self.exit_status_arg("return", args) {
+                    ExitArg::Status(n) => Some(n),
+                    ExitArg::BadNumber => Some(2),
+                    ExitArg::TooMany => None,
                 };
-                if self.fn_stack.is_empty() && self.source_stack.is_empty() {
-                    self.errln(
-                        &format!("{}return: can only `return' from a function or sourced script", self.err_prefix()),
-                    );
-                    2
-                } else {
-                    flow = Flow::Return;
-                    code
+                match code {
+                    None => {
+                        flow = Flow::Abort;
+                        1
+                    }
+                    Some(_) if self.fn_stack.is_empty() && self.source_stack.is_empty() => {
+                        self.errln(
+                            &format!("{}return: can only `return' from a function or sourced script", self.err_prefix()),
+                        );
+                        2
+                    }
+                    Some(code) => {
+                        flow = Flow::Return;
+                        code
+                    }
                 }
             }
             "break" | "continue" => {
@@ -24353,6 +24445,7 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
     ("ulimit", "ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]", "Modify shell resource limits."),
     ("exec", "exec [-cl] [-a name] [command [argument ...]] [redirection ...]", "Replace the shell with the given command."),
     ("exit", "exit [n]", "Exit the shell."),
+    ("logout", "logout [n]", "Exit a login shell."),
     ("return", "return [n]", "Return from a shell function."),
     ("break", "break [n]", "Exit for, while, until, or select loops."),
     ("continue", "continue [n]", "Resume for, while, until, or select loops."),
@@ -24386,7 +24479,8 @@ const BUILTIN_NAMES: &[&str] = &[
     ".", "type", "trap", "jobs", "kill", "wait", "disown", "fg", "bg", "caller", "times", "hash",
     "history", "fc", "umask",
     "ulimit", "exec",
-    "exit", "return", "break", "continue", "enable", "alias", "unalias", "help", "compgen",
+    "exit", "logout", "return", "break", "continue", "enable", "alias", "unalias", "help",
+    "compgen",
     "complete", "compopt",
 ];
 
@@ -32875,6 +32969,81 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("shopt -s restricted_shell; shopt restricted_shell").0, "restricted_shell\toff\n");
         // …and nothing reaches $BASHOPTS either.
         assert!(!run("shopt -s login_shell; echo $BASHOPTS").0.contains("login_shell"));
+    }
+
+    /// The `-l`/`--login` side of `login_shell`, which only the binary can set —
+    /// so this drives [`Shell::set_login_shell`] directly rather than through
+    /// [`run`]. Everything a script can *observe* about it is pinned against
+    /// bash in `tests/corpus/logout.sh`, which reaches a login shell by
+    /// re-invoking `$BASH -l`; this covers the in-process half.
+    #[test]
+    fn a_login_shell_reports_itself_and_lets_logout_work() {
+        let out = |sh: &mut Shell, src: &str| -> (String, i32) {
+            let buf = capture_sink();
+            let status = {
+                let mut o = Out::Capture(buf.clone());
+                sh.run_source_out(src, &mut o, 0)
+            };
+            (String::from_utf8_lossy(&take_capture(&buf)).into_owned(), status)
+        };
+
+        let mut sh = Shell::new();
+        sh.set_login_shell();
+        assert_eq!(out(&mut sh, "shopt login_shell"), ("login_shell    \ton\n".to_string(), 0));
+        assert_eq!(out(&mut sh, "shopt -p login_shell").0, "shopt -s login_shell\n");
+        assert!(out(&mut sh, "echo $BASHOPTS").0.contains("login_shell"));
+        // Still read-only: `shopt -u` is accepted and does nothing, exactly as
+        // `shopt -s` is on a shell that was not started as a login shell.
+        assert_eq!(out(&mut sh, "shopt -u login_shell; shopt login_shell").0, "login_shell    \ton\n");
+        // And `logout` is now `exit` — the refusal is gone, and the status is
+        // the operand's.
+        let mut sh = Shell::new();
+        sh.set_login_shell();
+        assert_eq!(out(&mut sh, "logout 7; echo not-reached").1, 7);
+        let mut sh = Shell::new();
+        sh.set_login_shell();
+        assert_eq!(out(&mut sh, "logout 7; echo not-reached").0, "");
+    }
+
+    #[test]
+    fn logout_outside_a_login_shell_refuses_before_reading_its_operand() {
+        // The gate comes first, so a bad operand is never even looked at: all
+        // three of these are the same one-line refusal with status 1, and none
+        // of them ends the shell.
+        for src in ["logout", "logout abc", "logout 3 4"] {
+            let (o, st) = run(&format!("{src} 2>&1; echo \"rc=$?\"; echo alive"));
+            assert_eq!(o, "osh: logout: not login shell: use `exit'\nrc=1\nalive\n", "{src}");
+            assert_eq!(st, 0, "{src}");
+        }
+    }
+
+    #[test]
+    fn a_second_status_operand_discards_the_unit_instead_of_exiting() {
+        // bash's `no_args`: "too many arguments", then `top_level_cleanup()` +
+        // `jump_to_top_level(DISCARD)`. Not an exit — the rest of the current
+        // top-level unit goes, the next one runs, and the status is 1.
+        for name in ["exit", "return"] {
+            let (o, st) = run(&format!("{name} 3 4 2>&1; echo same-unit\necho next-unit rc=$?\n"));
+            assert_eq!(o, format!("osh: {name}: too many arguments\nnext-unit rc=1\n"), "{name}");
+            assert_eq!(st, 0, "{name}");
+        }
+        // The `--` form is stripped first, so the second operand is still found.
+        assert_eq!(
+            run("exit -- 3 4 2>&1\necho after\n").0,
+            "osh: exit: too many arguments\nafter\n"
+        );
+        // Because of the cleanup the unwind escapes an enclosing `eval` — it is
+        // `Flow::Abort`, not the `Flow::Discard` an expansion error raises, so
+        // the `echo` *after* the eval on the same unit goes too.
+        assert_eq!(
+            run("eval \"exit 1 2\nnot-run\" 2>&1; echo also-not-run\necho after\n").0,
+            "osh: exit: too many arguments\nafter\n"
+        );
+        // A non-numeric operand is checked first and returns immediately, so it
+        // never reaches the too-many test — and it still exits, with 2.
+        let (o, st) = run("exit abc def 2>&1; echo not-reached\n");
+        assert_eq!(o, "osh: exit: abc: numeric argument required\n");
+        assert_eq!(st, 2);
     }
 
     #[test]

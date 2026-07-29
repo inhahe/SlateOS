@@ -7136,6 +7136,18 @@ synopsis) instead of the bare synopsis. Verified against bash for `return`,
    `cd [-L|[-P [-e]] [-@]] [dir]`, and `[ expr ]` vs bash's `[ arg... ]`. The
    `NAME:` prefix now matches, but the synopsis body after it still differs for
    these builtins.
+3. **No long description** (noticed 2026-07-29 while adding `logout`).
+   `HELP_TABLE` is `(name, usage, short)`, so a plain `help NAME` prints the
+   `NAME: <usage>` line and the one-line short description and stops. bash also
+   prints a blank line and then a paragraph — for `logout`, "Exits a login shell
+   with exit status N.  Returns an error if not executed in a login shell." —
+   and, for most builtins, an `Exit Status:` note under that. `help -s NAME`
+   and `help -d NAME` *do* byte-match, because they ask for exactly the two
+   pieces the table holds; only the full form is short. Corpus cases must
+   therefore use `help -s`/`help -d` rather than bare `help NAME`
+   (`tests/corpus/logout.sh` does, with no comment — this entry is the reason).
+   The proper fix is a fourth `HELP_TABLE` column holding bash's paragraph text
+   verbatim for each of the ~58 builtins.
 
 **Impact:** very low — cosmetic stdout text only; `help` output isn't machine-parsed
 and the exit status matches. Shows up only when diffing raw `help` output against bash.
@@ -7927,7 +7939,7 @@ a second `=` in the value, every working subscript spelling as a control
 subscript as command and as a `declare` operand, and the empty *expansion* that
 must still index. Full differential corpus: 108 matched, 0 failed.
 
-### TD-OILS-MISSING-INTERACTIVE-BUILTINS. `history` now exists; `bind`, `fc`, `logout` and `suspend` still do not — PARTIAL 2026-07-29
+### TD-OILS-MISSING-INTERACTIVE-BUILTINS. `history`, `fc` and `logout` now exist; `bind` and `suspend` still do not — PARTIAL 2026-07-29
 
 **Where:** `userspace/oils/src/interp.rs` — `BUILTIN_NAMES`, `HELP_TABLE`, the
 dispatch in `run_builtin`,
@@ -7943,7 +7955,7 @@ absent, which is invisible until something enumerates the builtin set:
 
 ```
 $ bash -c 'compgen -b | wc -l'   # 61
-$ osh  -c 'compgen -b | wc -l'   # 57 as of 2026-07-29 (was 56)
+$ osh  -c 'compgen -b | wc -l'   # 59 as of 2026-07-29 (was 56)
 ```
 bash also carries a `%` help topic (the job-spec syntax) that osh does not.
 
@@ -8154,17 +8166,113 @@ replayed temporary file. bash names that file in diagnostics from the replayed
 code, but the name is randomly generated and therefore unpinnable, and a frame
 would perturb `BASH_SOURCE`/`FUNCNAME`/`caller` for no benefit.
 
+**Done (2026-07-29) — Stage 4 (first half): `logout`, and the login-shell state
+it reads.** `logout` is `exit` with a gate in front of it, but the gate needed
+something osh did not have: a real notion of a **login shell**. A shell is one
+because of how it was *started* — `-l`/`--login`, or an `argv[0]` beginning with
+`-`, which is how `login(1)` marks it — so `Shell::login_shell` is set once by
+the binary and there is no way back. `shopt login_shell` now answers truthfully
+(through `shopt_default`, since [`shopt_is_read_only`] guarantees nothing can
+shadow it), `shopt -p login_shell` renders the matching `shopt -s` line, and it
+appears in `$BASHOPTS` — while `shopt -s`/`-u login_shell` stay the accepted
+no-ops bash makes them. `-l` joins `-i` as an invocation-only cluster letter
+(`-lc` works, and bash accepts `+l` and does nothing with it); `--login` is the
+long spelling. `logout` outside a login shell is `logout: not login shell: use
+`exit'` with status 1, and the gate runs **before** the operand is read, so
+`logout abc` and `logout 3 4` are that same single line.
+
+Making `logout` share `exit`'s operand reading turned up a real bug in `exit`
+and `return`: bash reads all three through `get_exitstat`, whose second-operand
+check is `no_args()` — which reports "too many arguments" and then does
+`top_level_cleanup()` + `jump_to_top_level(DISCARD)`. That is **not an exit**.
+osh was exiting with the first operand's status instead (`exit 3 4` left 3).
+It now raises `Flow::Abort`, the variant already modelling exactly this unwind
+for `break 1 2`: the rest of the current top-level parse unit is discarded, the
+next unit runs, the status is 1, and because of the cleanup it escapes an
+enclosing `eval`/`source`. So `exit 3 4; echo x` on one line prints neither and
+a following line still runs, and `exit 9 9` inside a `for` takes the whole loop
+with it. A *non-numeric* operand is checked first and returns immediately, so it
+never reaches that test — `exit abc def` is only the numeric complaint, and it
+still exits, with 2. The three-way answer is `ExitArg::{Status, BadNumber,
+TooMany}` from the new `Shell::exit_status_arg`, shared by all three builtins.
+
+`tests/corpus/logout.sh` pins the lot. The login-shell half is reached by
+re-invoking `"$BASH" -l -c …` — `$BASH` is each shell's own path, so both sides
+run *themselves* — with the child's output marker-filtered so a reference bash
+that chatters from `/etc/profile` cannot break the case. The in-process half
+(`Shell::set_login_shell`, which no script can reach) is covered by
+`a_login_shell_reports_itself_and_lets_logout_work` in `interp.rs`.
+
 **Still to do.**
-* *Stage 4:* `logout` (a one-line refusal outside a login shell), then
-  `bind` (needs a readline binding table) and `suspend` (needs job control to
-  have a parent shell to stop) alongside the interactive line editor.
+* *Stage 4 (remainder):* `bind` (needs a readline binding table) and `suspend`
+  (needs job control to have a parent shell to stop), alongside the interactive
+  line editor.
 
 **Impact.** Nothing a script does today is affected — these are all interactive
-tools. `compgen -b` is now 58 against bash's 61, the three being exactly the
-Stage 4 list. The cost is coverage rather than correctness: `compgen -b`, `compgen -c`
+tools. `compgen -b` is now 59 against bash's 61, the two being exactly the
+Stage 4 remainder. The cost is coverage rather than correctness: `compgen -b`, `compgen -c`
 and `compgen -A helptopic` can only appear in
 `tests/corpus/compgen-actions.sh` behind a prefix the two shells happen to
 agree on, so the corpus pins less of them than it otherwise would.
+
+### TD-OILS-NO-STARTUP-FILES. `osh` reads no startup files at all, and so has none of the flags that suppress or redirect them — OPEN 2026-07-29
+
+**Where:** `userspace/oils/src/main.rs` — the option loop and the
+`import_environment()` / mode-dispatch sequence that follows it. Nothing in
+`interp.rs` is involved yet; the state a startup file would set already exists,
+only the reading of one does not.
+
+**What.** bash picks its startup files from *how it was started*, and osh reads
+none of them:
+
+| How started | bash reads | osh reads |
+|---|---|---|
+| login shell | `/etc/profile`, then the first of `~/.bash_profile`, `~/.bash_login`, `~/.profile` that exists; `~/.bash_logout` on exit | nothing |
+| interactive non-login | `/etc/bash.bashrc` (Debian-patched builds), `~/.bashrc` | nothing |
+| non-interactive with `$BASH_ENV` set | the expanded value of `$BASH_ENV` | nothing |
+| `sh`-named non-interactive with `$ENV` set | the expanded value of `$ENV` | nothing |
+
+Consequently osh also rejects the four invocation flags whose entire job is to
+change that behaviour — `--noprofile`, `--norc`, `--rcfile FILE`,
+`--init-file FILE` (the last two synonyms) — with its
+"invalid option" diagnostic. `scripts/osh-bash-diff.py` papers over the
+difference by forcing `BASH_ENV=""` and `ENV=""` for both shells, and by passing
+`--norc --noprofile` to the *reference bash only*; a corpus case that re-invokes
+`"$BASH" -l -c …` must therefore marker-filter the child's output, because the
+reference side may chatter from a real `/etc/profile` while osh cannot.
+
+**Why it is not just a missing flag.** Adding `--norc`/`--noprofile` as accepted
+no-ops would make osh *claim* a behaviour it does not have: a script probing
+`--norc` would conclude rc files exist and are suppressed, when in fact none are
+ever read. The flags are meaningless until the reading exists, so they are
+deliberately still errors.
+
+**Proper fix.** Implement the reading, then the flags fall out of it:
+
+1. Add a `Shell::run_startup_file(path, missing_ok)` that is `source` with the
+   not-found case silenced — same `source_stack` push, same `$0`/`$LINENO`
+   handling, same `Flow::Abort` propagation, so a syntax error in `~/.bashrc`
+   behaves as bash's does.
+2. In `main.rs`, after `import_environment()` and after the option loop has
+   settled `login_shell`/interactivity but *before* the `-c` string or script
+   file is read, run the table above. Word-expand `$BASH_ENV`/`$ENV` first
+   (bash expands but does not path-search them).
+3. Register `~/.bash_logout` as a login-shell exit action next to the existing
+   `EXIT` trap firing, so it runs last and only for a login shell.
+4. Accept `--noprofile`, `--norc`, `--rcfile FILE` and `--init-file FILE` in the
+   long-option arm beside `--login`, each simply suppressing or replacing one row
+   of the table.
+5. The paths are host-dependent, so put the two absolute ones
+   (`/etc/profile`, `/etc/bash.bashrc`) behind a single constant that the
+   slateos target and the Windows dev host can spell differently — the corpus
+   runs on the host, where `/etc/profile` is MSYS's.
+
+**Impact.** None on script semantics — every corpus case and every unit test
+runs a shell that would read nothing anyway. It bites the moment osh is a *user's*
+login shell on SlateOS: `PATH`, `PS1`, aliases and shell functions from
+`/etc/profile` and `~/.bashrc` would all be silently ignored. It also caps how
+much of the invocation surface the differential corpus can pin, since the flags
+that control startup are the ones osh rejects.
 
 ### TD-OILS-FD0-WRITE. fd 0 has no write side, so `>&0` silently writes to stdout instead of the descriptor — ✅ RESOLVED 2026-07-28
 

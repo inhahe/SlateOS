@@ -132,6 +132,60 @@ sensitive to scheduling jitter, which is what the long sleeps were buying.
 else is compiling. Do not read a lone `jobs-listing` timeout as a regression —
 re-run it alone first.
 
+### TD-OILS-NO-HISTEXPAND. `!`-style history expansion is unimplemented; `set -o histexpand` / `set -H` are inert — 2026-07-29 — OPEN
+
+**Symptom.** osh lists `histexpand` in `set -o` but never acts on it. A script
+that turns on both history options and then uses an event designator gets the
+literal text through to the parser instead of the recalled command:
+
+```sh
+set -o history; set -H
+echo one
+!!            # bash: re-runs `echo one`; osh: tries to run a command named `!!`
+```
+
+`set -H` is accepted (it is swallowed by the `STANDARD_SET_O_OPTIONS` no-op arm
+in `set_named_option`, `userspace/oils/src/interp.rs:18796`), and
+`option_enabled` hard-codes `histexpand` to `false` (`interp.rs:18913`), so the
+option can be neither observed nor used.
+
+**Measured bash model (dev-host MSYS bash 5.2, 2026-07-29).** History expansion
+*is* reachable non-interactively, which is what makes it testable in the corpus
+the same way `set -o history` already is. Both options default **off** in a
+non-interactive shell and must be turned on explicitly. Then, per line, before
+parsing:
+
+- Event designators: `!!` (previous entry), `!n` (absolute history number),
+  `!-n` (n entries back), `!string` (most recent entry *starting with* string),
+  `!?string?` (most recent *containing* string), and `^old^new^` quick
+  substitution applied to the previous entry.
+- Word designators: `!$` (last word), `!^` / `!!:1` (first argument), `!*`,
+  and `!!:n` plus ranges.
+- Quoting: **single quotes and a backslash suppress expansion; double quotes do
+  NOT** — `echo "!!"` expands, `echo '!!'` and `echo \!\!` do not. This is the
+  rule most likely to be got wrong, because it is the opposite of every other
+  expansion osh implements.
+- When an expansion changes the line, bash echoes the resulting line before
+  running it.
+
+**Proper fix.** Two parts. (1) Give `histexpand` real state — a `histexpand:
+bool` field beside `hist_on` (`interp.rs:2344`), wired through
+`set_named_option`, `option_enabled`, `$-` and `SHELLOPTS`. (2) Expand each
+top-level line *as it is read*, before it is lexed. This is the architecturally
+interesting half: expansion depends on the history built by the lines that
+already ran, so it cannot be done up front over the whole source, and
+`run_source_flow_out` (`interp.rs:3099`) currently hands the entire `src` to
+`IncrementalParser::new` and pulls whole parse units out of it. The parser needs
+a hook to expand a raw line before it is lexed, which is also the right place
+for the "echo the expanded line" behaviour. The expansion engine itself is pure
+and should be unit-tested independently of the parser hook.
+
+**Impact.** Interactive-shell parity gap. Scripts that use `!` history recall
+fail; the far more common case — a `!` appearing literally in a double-quoted
+string — is *unaffected today* but will start expanding once this lands, so the
+quoting rules above must be implemented exactly, and the corpus case added with
+it.
+
 ### TD-OILS-NAMEREF-WARNING-COUNT. bash prints its circular-nameref warning twice for some expansions; osh prints it once — 2026-07-28 — OPEN
 
 **Symptom.** With `declare -n a=b; declare -n b=a`, bash 5.2 emits *two*

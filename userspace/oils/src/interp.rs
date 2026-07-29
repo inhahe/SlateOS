@@ -561,6 +561,30 @@ enum Flow {
     /// the error site. Only the top-level item loop (`exec_program_top`) resumes
     /// after it; nested blocks propagate it like `Exit`.
     Discard,
+    /// The same abort as [`Flow::Discard`], but one that unwinds *past* a
+    /// nested read-eval loop instead of being caught by it.
+    ///
+    /// bash raises `jump_to_top_level(DISCARD)` from two different depths. An
+    /// expansion error is caught by `parse_and_execute`, which is what `eval`
+    /// and `.`/`source` run their input through — so it aborts only the string
+    /// being eval'd. A special-builtin *usage* error instead calls
+    /// `top_level_cleanup()` first, which pops that handler, so the jump lands
+    /// in the outermost read-eval loop and takes the rest of the caller's parse
+    /// unit with it:
+    ///
+    /// ```sh
+    /// eval "for i in 1; do break 1 2; done
+    /// echo next"; echo done=$?
+    /// # bash: only the error line — `echo next` AND `echo done` are discarded.
+    /// ```
+    ///
+    /// So this variant is caught by `exec_items` only at a top level that is
+    /// *not* inside an `eval`/`source` (see `Shell::at_outermost_read_eval`);
+    /// everywhere else it propagates like `Exit`. Because `eval` and `source`
+    /// are builtins, and a builtin handler can only return an `i32`, they
+    /// re-raise it through the `Shell::pending_abort` side channel — the same
+    /// shape `pending_builtin_exit` uses for `Exit`.
+    Abort,
 }
 
 /// Where a command's standard output should go.
@@ -1285,6 +1309,11 @@ pub struct Shell {
     /// The simple-command driver, the bare-assignment path and the prefix-value
     /// path each take the flag after expansion and return `Flow::Discard`.
     discard_error: Option<i32>,
+    /// Set when a [`Flow::Abort`] has to cross a builtin boundary. `eval` and
+    /// `.`/`source` are builtins, so the flow their input produced is lost at
+    /// the `i32` return; this carries the abort so the post-builtin teardown
+    /// can re-raise it, exactly as `pending_builtin_exit` does for `Exit`.
+    pending_abort: bool,
     /// Source text of the word (or double-quoted section) currently being
     /// expanded, for the "bad substitution" diagnostic. bash names the *whole*
     /// string its `expand_word_internal` was handed, not just the offending
@@ -1652,6 +1681,7 @@ impl Shell {
             errexit_suppress: 0,
             unbound_error: None,
             discard_error: None,
+            pending_abort: false,
             bad_sub_word: None,
             cond_regex_error: false,
             arith_cmd: None,
@@ -2291,6 +2321,17 @@ impl Shell {
         self.exec_items(&prog.items, out, stdin, true)
     }
 
+    /// Whether the top level currently executing is the shell's *outermost*
+    /// read-eval loop — the script, `-c` string, or stdin — rather than one
+    /// opened by `eval` or `.`/`source`.
+    ///
+    /// This is the boundary [`Flow::Abort`] is defined against: bash's
+    /// `top_level_cleanup()` pops the handler that `eval`/`source` install, so
+    /// an abort raised under them lands here instead of ending their string.
+    fn at_outermost_read_eval(&self) -> bool {
+        self.eval_depth == 0 && self.source_stack.is_empty()
+    }
+
     fn exec_items(
         &mut self,
         items: &[crate::ast::Item],
@@ -2331,6 +2372,24 @@ impl Shell {
                     // diagnostic was already printed and `last_status` set to 1.
                     skip_line = Some(item.line);
                     continue;
+                }
+                // The same, but only once the unwind has left every `eval` and
+                // `source`: inside one it keeps propagating, so the string's
+                // *caller* is what loses the rest of its parse unit.
+                //
+                // The whole remaining unit goes, not just the rest of this
+                // source line: the `eval` and the `echo` after it can sit on
+                // different lines and still be one unit, because the newline
+                // that separates them is inside the eval'd string.
+                Flow::Abort if top_level && self.at_outermost_read_eval() => {
+                    // A `-c` shell has no read-eval loop for the jump to land
+                    // in — `parse_and_execute` *is* its top level, and
+                    // `top_level_cleanup()` popped it — so the shell exits.
+                    // A script or stdin resumes with the next unit.
+                    if self.command_mode {
+                        return Flow::Exit(self.last_status);
+                    }
+                    return Flow::Next;
                 }
                 other => return other,
             }
@@ -3088,7 +3147,10 @@ impl Shell {
         };
         if rest.len() > 1 {
             self.errln(&format!("{}{name}: too many arguments", self.err_prefix()));
-            return Err((Flow::Discard, 1));
+            // bash's `no_args()` runs `top_level_cleanup()` before jumping, which
+            // pops `parse_and_execute`'s handler — so this abort escapes an
+            // enclosing `eval`/`source` rather than ending just that string.
+            return Err((Flow::Abort, 1));
         }
         if n <= 0 {
             self.errln(&format!(
@@ -4406,6 +4468,7 @@ impl Shell {
             errexit_suppress: self.errexit_suppress,
             unbound_error: None,
             discard_error: None,
+            pending_abort: false,
             bad_sub_word: None,
             cond_regex_error: false,
             arith_cmd: None,
@@ -11191,6 +11254,13 @@ impl Shell {
                         self.pending_builtin_exit = Some(code);
                         code
                     }
+                    // An abort that reached here was raised past this `eval`'s
+                    // handler on purpose; re-raise it so the caller's parse unit
+                    // is discarded too (see [`Flow::Abort`]).
+                    Flow::Abort => {
+                        self.pending_abort = true;
+                        self.last_status
+                    }
                     _ => self.last_status,
                 }
             }
@@ -11493,7 +11563,14 @@ impl Shell {
         // builtin's own `flow` and the arithmetic-error discard below.
         if let Some(code) = self.pending_builtin_exit.take() {
             self.discard_error = None;
+            self.pending_abort = false;
             return Flow::Exit(code);
+        }
+        // An abort raised through `eval`/`source` (see [`Flow::Abort`]) resumes
+        // here, after the same teardown, so it unwinds the caller as well.
+        if std::mem::take(&mut self.pending_abort) {
+            self.discard_error = None;
+            return Flow::Abort;
         }
         // An arithmetic error while binding an integer-attribute value
         // (`declare -i k="3 apples"`, `local -i n=1/0`, `declare -ia a=(x)`)
@@ -17956,6 +18033,12 @@ impl Shell {
                     Flow::Exit(n) => {
                         self.pending_builtin_exit = Some(n);
                         n
+                    }
+                    // Raised past this `source`'s handler on purpose, so it
+                    // keeps unwinding into the caller (see [`Flow::Abort`]).
+                    Flow::Abort => {
+                        self.pending_abort = true;
+                        self.last_status
                     }
                     _ => self.last_status,
                 };

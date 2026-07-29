@@ -124,6 +124,52 @@ behaviour. Left as-is deliberately. The affected shapes are therefore kept out
 of `tests/corpus/nameref.sh` (which probes only the single-warning forms) — if
 they are ever added, this is why they would fail.
 
+### TD-OILS-CMDSUB-ABORT-LINENO. bash inflates the reported line number for a special-builtin usage error inside `$( )`; osh reports the true line — 2026-07-28 — OPEN (diagnostic wording only)
+
+**Symptom.** A three-line script whose middle line is a command substitution
+containing a `break`/`continue` usage error:
+
+```
+echo start
+x=$(for i in 1; do break 1 2; done; echo body)
+echo "cs=[$x] rc=$?"
+```
+
+```
+$ bash ta.sh          $ osh ta.sh
+start                 start
+ta.sh: line 4: ...    ta.sh: line 2: ...
+cs=[] rc=1            cs=[] rc=1
+```
+
+bash blames **line 4** of a file that has only three lines; osh blames line 2,
+where the error actually is. Everything else — the message text, the empty
+capture, the caller's `rc=1`, the fact that the caller survives — matches
+byte-for-byte.
+
+**Scope: it is specific to this one error class inside a command
+substitution.** The same abort at top level (no `$( )`) agrees on line 2 in
+both shells, and a *different* error inside the same command substitution — an
+arithmetic `$((1/0))` — also agrees on line 2 in both. So the divergence needs
+both ingredients: a special-builtin usage error (the `jump_to_top_level(DISCARD)`
+that runs `top_level_cleanup()` first, see BUG-OILS-EVAL-DISCARD-SCOPE) *and* a
+command-substitution frame around it.
+
+**Where.** `userspace\oils\src\interp.rs` — the line recorded in
+`Shell::err_prefix()` when the abort is raised inside `command_subst`. Nothing
+in osh is wrong here; the entry exists so a future corpus case that trips over
+it is recognised rather than "fixed" into agreement.
+
+**Proper fix.** Almost certainly none. bash's number comes from its
+command-substitution body being handed to a fresh `parse_and_execute` whose line
+counter is seeded from the caller and then advanced again by the body's own
+parse — an implementation artifact, not a behaviour, and reproducing it would
+mean deliberately reporting a line that does not exist. Left as-is deliberately,
+in the same spirit as TD-OILS-NAMEREF-WARNING-COUNT above. The consequence is
+that `tests/corpus/eval-discard-scope.sh` deliberately omits the
+command-substitution shape even though osh handles it correctly; if that case is
+ever added it must carry an `# EXPECT-DIFF:` waiver pointing here.
+
 ### BUG-OILS-DEVFD-IS-A-DUP-NOT-A-REOPEN. `> /dev/stdout` duplicates fd 1 where a host with a real `/dev/fd` re-opens it, so the two descriptors share an offset instead of getting independent ones — 2026-07-28 — APPROXIMATION
 
 **Symptom.** With fd 1 on a *regular file*:
@@ -159,7 +205,7 @@ documents, so it is the behaviour osh implements deliberately rather than
 an oversight. Revisit only if SlateOS grows a `/dev/fd` and something is
 found to depend on the independent-offset flavour.
 
-### BUG-OILS-EVAL-DISCARD-SCOPE. A `Flow::Discard` raised inside `eval` aborts only the current *line* of the eval'd string, where bash unwinds the whole `eval` and the rest of the caller's list — 2026-07-27 — OPEN
+### BUG-OILS-EVAL-DISCARD-SCOPE. A `Flow::Discard` raised inside `eval` aborts only the current *line* of the eval'd string, where bash unwinds the whole `eval` and the rest of the caller's list — 2026-07-27 — ✅ RESOLVED 2026-07-28
 
 **Symptom.** Two of bash's `jump_to_top_level(DISCARD)` sites unwind to
 different depths, and osh models both with a single `Flow::Discard` that
@@ -211,6 +257,54 @@ it is. Worth doing together with a survey of bash's other
 `top_level_cleanup()` callers (`no_args`, `sh_needarg` in special
 builtins, `assignment_error` under POSIX mode) so the classification is
 made once rather than one site at a time.
+
+**✅ RESOLVED 2026-07-28.** Done as described: `Flow::Abort` joins
+`Flow::Discard`, and `loop_count_arg`'s too-many-arguments site — bash's
+`no_args()`, the one `top_level_cleanup()` caller osh currently reaches —
+raises it. `exec_items` catches it only at a top level that is *not*
+inside an `eval`/`source` (`Shell::at_outermost_read_eval`); everywhere
+else it propagates like `Exit`. Because `eval` and `.`/`source` are
+builtins that can only return an `i32`, each re-raises it through the new
+`Shell::pending_abort` side channel, which the post-builtin teardown turns
+back into `Flow::Abort` — the same shape `pending_builtin_exit` already
+used for `Exit`.
+
+Two things the original write-up did not anticipate, both found by
+measuring rather than reasoning:
+
+*The unit is not the line.* `Discard` approximates "rest of the current
+top-level parse unit" by skipping items sharing the offending item's
+source line. That is wrong for this case: the `eval` and the `echo` after
+it are one unit but two lines, because the newline between them is inside
+the eval'd string. `Abort` therefore abandons the whole remaining
+`Program` instead of filtering by line.
+
+*`-c` is not a script.* bash's jump lands in whatever read-eval loop is
+left, and a `-c` shell has none — `parse_and_execute` *is* its top level
+and the cleanup popped it — so the shell exits with the error status,
+while a script or stdin resumes with the next unit. Measured:
+
+```sh
+$ bash    -c 'eval "…break 1 2…"; echo done=$?
+echo after'          # → error only, exit 1   (osh now identical)
+$ bash script                                 # → error, then `after`, exit 0
+$ … | bash                                    # → like the script, not like -c
+```
+
+`Shell::command_mode` already distinguished the two, so the catch arm
+returns `Flow::Exit(last_status)` there and `Flow::Next` otherwise.
+Subshell and command-substitution boundaries needed no change: `Abort`
+falls into the same catch-alls `Exit` does, so the child fails with status
+1 and the parent carries on, which is what bash does.
+
+**Coverage.** `tests/corpus/eval-discard-scope.sh` pins the expansion-error
+scope (unchanged), the usage-error scope through both `eval` and `source`,
+the subshell boundary, and the plain top-level discard. Full differential
+corpus: 107 matched, 0 failed; 840 unit tests pass. Two things are not
+corpus-testable and are therefore recorded above instead: the `-c`/stdin
+split (the harness runs every case as a script file), and the
+command-substitution shape (bash's line number for it is off the end of
+the file — TD-OILS-CMDSUB-ABORT-LINENO).
 
 ### BUG-OILS-SUBSHELL-SHARES-PROCESS-CWD. `cd` inside a subshell escapes it, because osh emulates subshells in-process and the working directory is process-global — 2026-07-27 — ✅ RESOLVED 2026-07-27
 

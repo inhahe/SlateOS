@@ -33,13 +33,39 @@ use std::collections::BTreeMap;
 pub struct ParseError {
     pub msg: String,
     pub line: Option<u32>,
+    /// True when the error was found inside a `$( … )` or `<( … )` body, which
+    /// bash treats as fatal to whatever was reading that body.
+    ///
+    /// bash parses a substitution body by recursing into the parser mid-word,
+    /// and a failure there has no grammar-level way back — it calls
+    /// `jump_to_top_level(DISCARD)` after `top_level_cleanup()`, so the unwind
+    /// runs *past* the handler `eval` and `.`/`source` install and takes the
+    /// shell (or the enclosing subshell) with it:
+    ///
+    /// ```sh
+    /// echo A; eval 'echo $( ! )'; echo B    # bash prints A and the error, then exits
+    /// echo A; eval 'for';         echo B    # an ordinary syntax error: B still runs
+    /// ```
+    ///
+    /// A backtick body is *not* marked: bash does not parse one until the word
+    /// is expanded, so its failure is an expansion-time diagnostic that leaves
+    /// the substitution empty and the command running (see
+    /// TD-OILS-CMDSUB-ERR-FATALITY item 1, still open).
+    pub fatal: bool,
 }
 
 impl ParseError {
     /// A parse error with no known line (the common construction site inside
     /// the grammar; [`parse_tokens`] stamps the line afterwards).
     pub fn new(msg: String) -> Self {
-        Self { msg, line: None }
+        Self { msg, line: None, fatal: false }
+    }
+
+    /// Mark this error as raised from inside a `$( … )`/`<( … )` body, so the
+    /// caller unwinds instead of merely recording status 2. See [`Self::fatal`].
+    fn in_paren_body(mut self) -> Self {
+        self.fatal = true;
+        self
     }
 
     /// Attach a source line, but only if one is not already set — so an inner
@@ -91,6 +117,7 @@ impl From<crate::lexer::LexError> for ParseError {
         Self {
             msg: e.msg,
             line: e.line,
+            fatal: false,
         }
     }
 }
@@ -136,9 +163,10 @@ pub fn parse_opts(src: &str, opts: LexOpts) -> Result<Program, ParseError> {
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error in the body.
 pub fn parse_procsub_body(src: &str, open_line: u32, opts: LexOpts) -> Result<Program, ParseError> {
-    let (mut toks, mut lines) = tokenize_paren_body(src, opts).map_err(ParseError::from)?;
+    let (mut toks, mut lines) = tokenize_paren_body(src, opts)
+        .map_err(|e| ParseError::from(e).in_paren_body())?;
     shift_lines(&mut toks, &mut lines, open_line.saturating_sub(1));
-    parse_tokens_ending(toks, lines, opts, true)
+    parse_tokens_ending(toks, lines, opts, true).map_err(ParseError::in_paren_body)
 }
 
 /// Parse shell source with strict here-document lexing: an unterminated
@@ -544,7 +572,11 @@ pub fn parse_cmdsub_body(
     } else {
         tokenize_paren_body(src, opts)
     };
-    let (mut toks, lines) = lexed.map_err(ParseError::from)?;
+    let (mut toks, lines) = lexed
+        .map_err(|e| {
+            let e = ParseError::from(e);
+            if backtick { e } else { e.in_paren_body() }
+        })?;
     let map = CmdSubLineMap::build(&toks, &lines, close_line);
     let lines = lines.iter().map(|&l| map.map(l)).collect();
     for t in &mut toks {
@@ -567,6 +599,7 @@ pub fn parse_cmdsub_body(
             e
         }
     })
+    .map_err(|e| if backtick { e } else { e.in_paren_body() })
 }
 
 /// The body-line → `$LINENO` translation described on [`parse_cmdsub_body`].
@@ -3919,6 +3952,8 @@ mod tests {
         ] {
             let e = parse(src).unwrap_err();
             assert_eq!(e.msg, "syntax error near unexpected token `)'", "{src}");
+            // Found inside the body, so it is fatal to whoever was reading it.
+            assert!(e.fatal, "{src} should be a fatal substitution error");
         }
         // A backtick body really is lexed on its own, so the implicit newline
         // stands and `!` has its terminator.
@@ -3927,6 +3962,20 @@ mod tests {
             parse("echo `for`").unwrap_err().msg,
             "syntax error near unexpected token `newline'"
         );
+    }
+
+    #[test]
+    fn only_a_paren_body_error_is_fatal_to_its_reader() {
+        // bash unwinds past `eval`/`source` for a `$( … )`/`<( … )` body error
+        // but not for an ordinary one; `ParseError::fatal` is what carries that
+        // apart. A backtick body is not marked: bash defers parsing it to
+        // expansion time, so its failure never reaches the reader at all.
+        for src in ["echo $( ! )", "cat <( ! )", "cat >(for)", "echo $( echo $(if) )"] {
+            assert!(parse(src).unwrap_err().fatal, "{src}");
+        }
+        for src in ["for", "echo a | | b", "echo `for`", "echo )", "if true"] {
+            assert!(!parse(src).unwrap_err().fatal, "{src}");
+        }
     }
 
     #[test]

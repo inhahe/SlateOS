@@ -3213,7 +3213,7 @@ lexer now keeps the verbatim span alongside the unescaped body
 unparser echoes it. Corpus `declare-f-backtick.sh`; test
 `interp::declare_f_prints_backticks_from_the_source`.
 
-### TD-OILS-CMDSUB-ERR-FATALITY. `osh` reports a command-substitution syntax error at parse time in both spellings; bash defers the backtick form and makes the `$( )` form fatal to the caller — 2026-07-28 — OPEN
+### TD-OILS-CMDSUB-ERR-FATALITY. `osh` reports a command-substitution syntax error at parse time in both spellings; bash defers the backtick form and makes the `$( )` form fatal to the caller — 2026-07-28 — PARTIALLY RESOLVED (item 2 fixed same day; item 1 OPEN)
 
 **Where:** `userspace/oils/src/parser.rs` `parse_cmdsub_body` / `seg_to_part`;
 `userspace/oils/src/interp.rs` (`eval` builtin, `command_sub`).
@@ -3221,31 +3221,118 @@ unparser echoes it. Corpus `declare-f-backtick.sh`; test
 **What:** The *message* now matches bash for both spellings — a `$( … )` body
 that runs out mid-construct is blamed on the substitution's closing `)`,
 because bash parses that body in the enclosing token stream, while a backtick
-body is blamed on its own end of input. Two behavioural differences remain,
+body is blamed on its own end of input. Two behavioural differences remained,
 both only observable when the substitution is inside `eval`; at script level
 the whole unit fails to parse in either shell, so they agree there.
 
-1. **bash parses a backtick body lazily.** ``echo `if` `` in bash prints
+1. **bash parses a backtick body lazily.** — **STILL OPEN.** ``echo `if` `` in
+   bash prints
    `<name>: command substitution: line 2: syntax error: unexpected end of file`
    at *expansion* time and then runs `echo` with an empty substitution, so the
    command succeeds. osh parses the body up front, so the command never runs.
    The proper fix is to store the backtick body unparsed — the verbatim source
-   is already kept, for printing — and parse it in `command_sub`, with a cache
-   so a substitution inside a loop is not re-parsed per iteration.
-2. **A `$( )` body error is fatal to bash's caller.** `( eval 'echo $(if)' )`
-   exits the subshell with status 1 in bash, whose comsub parser calls
-   `jump_to_top_level` and unwinds past `eval`; osh returns 2 from `eval` and
-   carries on. Matching this needs a "fatal parse error" flow that unwinds
-   through `eval`/`source` to the shell, distinct from the ordinary status-2
-   parse error.
+   is already kept, for printing — and parse it in `command_sub`. No cache:
+   bash re-parses on every expansion, which is also the *correct* thing to do,
+   because a `shopt -s extglob` between two expansions changes how the body
+   lexes.
+2. **A `$( )` body error is fatal to bash's caller.** — **RESOLVED
+   2026-07-28.** `( eval 'echo $(if)' )` exits the subshell with status 1 in
+   bash, whose comsub parser calls `jump_to_top_level` and unwinds past `eval`;
+   osh returned 2 from `eval` and carried on.
+
+**Reproduce (item 1 only, now):**
+```sh
+( eval 'echo `if`'; echo "inner:$?" ); echo "sub:$?"
+# bash: `command substitution:` error, blank line, inner:0
+# osh:  `eval:` error, no blank line, inner:2
+```
+
+**Fix (item 2).** `ParseError` gained a `fatal` flag, set by
+`parse_cmdsub_body` (non-backtick) and `parse_procsub_body` on everything they
+return — the *body* is the thing whose failure has no way back through the word
+being read, which is exactly what bash's `jump_to_top_level(DISCARD)` after
+`top_level_cleanup()` expresses. `Shell::parse_error_flow` turns the flag into
+control flow at the one place every read-eval loop reports a parse error
+(`Shell::run_source_flow_out`): `Flow::Exit`, which `eval` and `.`/`source`
+already forward through `pending_builtin_exit`, so the unwind crosses them and
+takes the shell — or the nearest subshell — with it.
+
+Statuses, all measured against bash 5.2:
+
+| context | direct | inside `eval`/`source` |
+|---|---|---|
+| `bash -c` | 127 | 127, shell exits |
+| script / stdin | 2 | 1, shell exits |
+| inside a subshell / cmdsub / pipeline stage | — | 1, that child exits |
+
+The `direct` column is the outermost read-eval loop, where there is no caller
+to unwind to — abandoning the rest of the input is the whole effect, and osh
+already did that — so only the status differs, and only under `-c`. (bash's
+`-c` really does use 127 rather than the 1 its own `run_one_command` would
+suggest: an `EXIT` trap sees `$?` = 127 there, and 257 = `EX_BADSYNTAX` in a
+script. osh reports 1 for the script case rather than 257 — `$?` above 255 is
+not representable in its status model, and the truncated exit code agrees.)
+
+Two adjacent bugs fell out of the same measurement and are fixed with it:
+
+* `Shell::syntax_error_prefix` tagged a diagnostic from inside a **sourced
+  file** with the outer shell's `-c` token — `./bad.sh: -c: line 2:` where bash
+  says `./bad.sh: line 2:`. The token names the *input source* being reported,
+  so it is now dropped once `source_stack` is non-empty. (An `eval` inside a
+  sourced file still says `eval`: that is then the innermost source.)
+* The `$( )` probes in `tests/corpus/cmdsub-paren-terminator.sh` had their
+  statuses deliberately unprinted because of this divergence; the header now
+  points at the new corpus file instead.
+
+**Coverage:** `tests/corpus/cmdsub-error-fatality.sh` (eval, nested eval,
+function, sourced file, command substitution, pipeline stage, and the
+non-fatal ordinary syntax error for contrast);
+`parser::only_a_paren_body_error_is_fatal_to_its_reader`; the `fatal`
+assertions in `parser::cmdsub_body_is_terminated_by_its_closing_paren`.
+
+**Not covered — see `TD-OILS-SYNTAX-ERR-ERREXIT-ECHO`:** under `set -e` bash
+reports 2 for every row of the table above, so the corpus file avoids errexit.
+
+### TD-OILS-SYNTAX-ERR-ERREXIT-ECHO. bash drops the echoed source line from *every* syntax error once `set -e` is on, and forces the status to 2 — 2026-07-28 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` `Shell::format_parse_error` (the
+`syntax error near ` second line) and `Shell::parse_error_flow`.
+
+**What:** bash normally reports a syntax error on two lines — the message, then
+the offending source line echoed back:
+
+```
+bash: -c: line 1: syntax error near unexpected token `newline'
+bash: -c: line 1: `for'
+```
+
+With `set -e` in effect the *second* line disappears, for every syntax error,
+not just command-substitution ones. It is not about the error being fatal:
+`bash -e -c 'for'` and `set -e` at the top of a script both lose it, and a
+plain `bash -c 'for'` keeps it. On top of that, the fatal
+command-substitution status (see `TD-OILS-CMDSUB-ERR-FATALITY` item 2) collapses
+to 2 under errexit wherever it would otherwise be 127 or 1 — *except* inside a
+command substitution, where it stays 1 and the echoed line comes back.
 
 **Reproduce:**
 ```sh
-( eval 'echo A; echo $(if); echo B'; echo "inner:$?" ); echo "sub:$?"
-# bash: error, no `inner:`, sub:1     osh: error, inner:2, sub:0
-( eval 'echo `if`'; echo "inner:$?" ); echo "sub:$?"
-# bash: `command substitution:` error, blank line, inner:0
+bash    -c 'for'                    # two lines, status 2
+bash -e -c 'for'                    # ONE line, status 2
+bash    -c 'eval "echo \$( ! )"'    # two lines, status 127
+bash -e -c 'eval "echo \$( ! )"'    # ONE line, status 2
+bash -e -c 'x=$(eval "echo \$( ! )"); echo st=$?'   # two lines again, st=1
 ```
+
+**Assessment:** this looks like a bash bug rather than a designed behaviour —
+`-e` has no business changing how a *parse* diagnostic is worded, and the
+inconsistency inside a command substitution is the tell (bash almost certainly
+frees or resets `shell_input_line` on the errexit path before
+`report_syntax_error` reaches the echo). osh currently keeps the echoed line
+and its own status in all of these. Before emulating it, decide whether we
+want bug-for-bug parity here at all; if we do, the change belongs in
+`format_parse_error` (suppress the echo when `errexit`) and in
+`parse_error_flow` (status 2 when `errexit` and not inside a command
+substitution), and needs a corpus file of its own.
 
 ### TD-OILS-CASE-PATTERN-EOF. `osh` blames end of file where bash blames the newline after an unterminated `case` pattern — 2026-07-28 — RESOLVED same day
 

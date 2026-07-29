@@ -2215,9 +2215,11 @@ impl Shell {
     }
 
     /// Parse and execute `src` in the *current* shell, returning its control
-    /// flow uncollapsed. A parse error is reported, records status 2, and yields
+    /// flow uncollapsed. A parse error is reported and turned into flow by
+    /// [`Shell::parse_error_flow`]: an ordinary one records status 2 and yields
     /// `Flow::Next` (a syntax error in an `eval`/`source`/trap body does not
-    /// unwind the shell).
+    /// unwind the shell), while one raised inside a `$( … )`/`<( … )` body
+    /// unwinds past this read-eval loop as bash's does.
     ///
     /// This is how every piece of internally-generated shell code runs — `eval`,
     /// `.`/`source`, a trap handler, a `mapfile -C` callback — so it takes the
@@ -2259,8 +2261,7 @@ impl Shell {
                 Ok(p) => p,
                 Err(e) => {
                     self.errln(&self.format_parse_error(&e, src, line_base));
-                    self.last_status = 2;
-                    return Flow::Next;
+                    return self.parse_error_flow(&e);
                 }
             };
             match self.exec_program_top(&prog, out, stdin) {
@@ -2268,6 +2269,54 @@ impl Shell {
                 other => return other,
             }
         }
+    }
+
+    /// The control flow — and status — that follows a top-level parse error.
+    ///
+    /// An ordinary syntax error abandons the rest of *this* input and nothing
+    /// more: status 2, and the caller of an `eval`/`.`/`source` carries on
+    /// (`eval 'for'; echo B` still prints `B`). A failure inside a `$( … )` or
+    /// `<( … )` body is different, because bash's parser recursed into the body
+    /// mid-word and has no grammar-level way back: it calls
+    /// `jump_to_top_level(DISCARD)` after `top_level_cleanup()`, which pops the
+    /// handler `eval`/`source` installed, so the unwind takes the whole shell —
+    /// or, inside one, the enclosing subshell. See
+    /// [`crate::parser::ParseError::fatal`].
+    ///
+    /// The status splits by invocation mode exactly as a fatal expansion abort
+    /// does (see [`Shell::fatal_abort_status`]), verified against bash 5.2:
+    ///
+    /// | context | direct | inside `eval`/`source` |
+    /// |---|---|---|
+    /// | `bash -c` | 127 | 127, shell exits |
+    /// | script / stdin | 2 | 1, shell exits |
+    /// | inside a subshell | — | 1, subshell exits |
+    ///
+    /// The `direct` column is the outermost read-eval loop, where there is no
+    /// caller to unwind to: abandoning the rest of the input — which
+    /// [`Flow::Next`] already does here — *is* the whole effect, so only the
+    /// status can differ, and only `-c` differs from a plain syntax error.
+    ///
+    /// Not modelled: under `set -e` bash reports 2 for every one of these and
+    /// also drops the echoed source line from the diagnostic, which it does for
+    /// *all* syntax errors under errexit — a separate divergence, tracked as
+    /// `TD-OILS-SYNTAX-ERR-ERREXIT-ECHO`.
+    fn parse_error_flow(&mut self, e: &crate::parser::ParseError) -> Flow {
+        if !e.fatal {
+            self.last_status = 2;
+            return Flow::Next;
+        }
+        let code = if self.command_mode && self.subshell_depth == 0 {
+            127
+        } else {
+            1
+        };
+        if self.at_outermost_read_eval() {
+            self.last_status = if self.command_mode { code } else { 2 };
+            return Flow::Next;
+        }
+        self.last_status = code;
+        Flow::Exit(code)
     }
 
     /// Resolve the exit status of a fatal word-expansion abort (nounset,
@@ -19464,9 +19513,14 @@ impl Shell {
         let name = self.error_source();
         // `eval` wins over the outer `-c`/script token (bash reports `eval:`
         // even for an `eval` run from a script).
+        // The `-c` token names the *input source* being reported, so it drops
+        // away once that source is a file: a `-c` shell running `. ./bad.sh`
+        // reports `./bad.sh: line 2:`, not `./bad.sh: -c: line 2:`. (An `eval`
+        // inside a sourced file still says `eval`, because that is then the
+        // innermost source.)
         let token = if self.eval_depth > 0 {
             Some("eval")
-        } else if self.command_mode {
+        } else if self.command_mode && self.source_stack.is_empty() {
             Some("-c")
         } else {
             None

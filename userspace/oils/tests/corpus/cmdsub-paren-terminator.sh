@@ -6,9 +6,9 @@
 # very place a bare `!` on a line of its own is a valid (false) command.
 #
 # Each rejected probe runs inside `( eval … )`: a `$( )` parse error is fatal to
-# bash's caller, so the subshell is what absorbs it. Its status is deliberately
-# not printed — bash exits 1 there and osh 2, see TD-OILS-CMDSUB-ERR-FATALITY in
-# known-issues.md.
+# bash's caller, so the subshell is what absorbs it — see
+# tests/corpus/cmdsub-error-fatality.sh, which is where that unwind is measured.
+# Here only the diagnostic matters, so the status is not printed.
 
 echo "=== a prefix with no pipeline has no terminator to stand on"
 ( eval 'echo A$( ! )B' )

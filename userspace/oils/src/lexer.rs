@@ -136,8 +136,15 @@ pub enum Seg {
     /// whichever form the source wrote, so the distinction must survive here.
     Arith(String, bool),
     /// `<( … )` / `>( … )` process substitution — the `bool` is `true` for the
-    /// input form `<(…)`, and the `String` is the raw inner command source.
-    ProcSub(bool, String),
+    /// input form `<(…)`, the `String` is the raw inner command source, and the
+    /// `u32` is the 1-based source line the `<(`/`>(` opens on.
+    ///
+    /// bash blames a syntax error in the body on the body's own line, counted in
+    /// the enclosing source; the body is lexed on its own, so the parser needs
+    /// the opening line to shift it back (`parser::parse_procsub_body`). Unlike
+    /// a `$( … )` body there is no rank-based renumbering — this really is a
+    /// plain offset.
+    ProcSub(bool, String, u32),
 }
 
 /// One token.
@@ -232,6 +239,11 @@ struct Lexer {
     /// than executing an empty here-doc. The normal (lenient) mode matches bash's
     /// script/`-c` behaviour of accepting a here-doc cut off by real EOF.
     strict_heredoc_eof: bool,
+    /// When `true`, the source is the body of a `$( … )` or `<( … )`
+    /// substitution, so the token that follows it is that construct's own `)`
+    /// rather than the implicit newline every other input ends with. See
+    /// [`tokenize_paren_body`].
+    paren_body: bool,
 }
 
 /// A here-document awaiting its body (collected when the introducing line ends).
@@ -260,6 +272,7 @@ impl Lexer {
             opts,
             extpat_next: false,
             strict_heredoc_eof: false,
+            paren_body: false,
         }
     }
 
@@ -267,6 +280,13 @@ impl Lexer {
     /// than leniently accepted. See [`tokenize_spanned_strict`].
     fn strict_heredoc(src: &str, opts: LexOpts) -> Self {
         Self { strict_heredoc_eof: true, ..Self::new(src, opts) }
+    }
+
+    /// As [`Lexer::new`], but the stream is closed with the `)` that ends the
+    /// enclosing substitution rather than with an implicit newline. See
+    /// [`tokenize_paren_body`].
+    fn paren_body(src: &str, opts: LexOpts) -> Self {
+        Self { paren_body: true, ..Self::new(src, opts) }
     }
 }
 
@@ -288,6 +308,30 @@ pub fn tokenize(src: &str, opts: LexOpts) -> Result<Vec<Tok>, LexError> {
 /// Returns [`LexError`] on an unterminated quote or substitution.
 pub fn tokenize_spanned(src: &str, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
     let mut lx = Lexer::new(src, opts);
+    lx.run()
+}
+
+/// Tokenize the body of a `$( … )` or `<( … )` substitution, closing the stream
+/// with that construct's own `)` instead of the implicit trailing newline
+/// [`tokenize_spanned`] appends.
+///
+/// bash scans such a body in the enclosing token stream, so the token after the
+/// body's last command is that `)`. It ends the body's list — `$(echo x)` and
+/// `$(echo x; )` are both fine — but it is not a `list_terminator`, so the
+/// productions that let `!` and `time` stand alone (`BANG list_terminator`,
+/// `timespec list_terminator`) have nothing to match: `$( ! )`, `$( ! ! )`,
+/// `$(time)` and `$( echo x; ! )` are all syntax errors named on the `)`, even
+/// though `!` alone is a valid command anywhere a real line end can follow it.
+/// The same `)` is what bash names for a body that ends mid-construct
+/// (`$(for)`, `<(for)`), where a stream ended by a newline would name `newline`.
+///
+/// The backtick spelling is *not* read this way: bash lexes that body on its
+/// own, and accepts `` `!` ``.
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated quote or substitution.
+pub fn tokenize_paren_body(src: &str, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+    let mut lx = Lexer::paren_body(src, opts);
     lx.run()
 }
 
@@ -907,7 +951,23 @@ impl Lexer {
         // of file, and the difference decides whether the REPL offers to
         // continue the line. Without this the two spellings of the same script
         // diverge, which they must not.
-        if !matches!(out.last(), None | Some(Tok::Newline)) {
+        //
+        // A `$( … )` body is the one input that does *not* end that way: bash
+        // reads it in the enclosing token stream, so what follows its last
+        // command is the substitution's own `)`. That token closes the body's
+        // list but is not a `list_terminator`, which is exactly why `$( ! )`
+        // and `$(time)` are syntax errors while a bare `!` on a line of its own
+        // is a perfectly good (false) command. Closing the stream with the `)`
+        // reproduces both halves of that. (A backtick body really is lexed on
+        // its own — bash accepts `` `!` `` — so it keeps the newline.)
+        if self.paren_body {
+            let start_pos = self.pos;
+            if !self.pending_heredocs.is_empty() {
+                self.collect_heredocs(out)?;
+            }
+            out.push(Tok::Op(Op::RParen));
+            self.stamp_lines(out, lines, offsets, self.line, start_pos);
+        } else if !matches!(out.last(), None | Some(Tok::Newline)) {
             let start_pos = self.pos;
             out.push(Tok::Newline);
             if !self.pending_heredocs.is_empty() {
@@ -1364,10 +1424,11 @@ impl Lexer {
                 // (verified against bash 5.2: `cat <(echo a` on line 2 of a
                 // 3-line script reports line 4). A nested construct that closed
                 // first stamps its own line and `at` will not overwrite it.
+                let open_line = self.cur_line();
                 let raw = self
                     .read_balanced('(', ')')
                     .map_err(|e| e.at(self.eof_line()))?;
-                segs.push(Seg::ProcSub(input, raw));
+                segs.push(Seg::ProcSub(input, raw, open_line));
                 continue;
             }
             match c {

@@ -16,7 +16,7 @@ use crate::ast::{
 };
 use crate::lexer::{
     LexOpts, Op, Seg, Tok, Tokenized, expand_aliases, expand_aliases_tracked, tokenize,
-    tokenize_deferred, tokenize_spanned, word_is_assignment,
+    tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
 use std::collections::BTreeMap;
 
@@ -117,6 +117,28 @@ pub fn parse(src: &str) -> Result<Program, ParseError> {
 pub fn parse_opts(src: &str, opts: LexOpts) -> Result<Program, ParseError> {
     let (toks, lines) = tokenize_spanned(src, opts).map_err(ParseError::from)?;
     parse_tokens(toks, lines, opts)
+}
+
+/// Parse the body of a `<( … )` / `>( … )` process substitution.
+///
+/// Like a `$( … )` body, it is read in the enclosing token stream, so what
+/// follows its last command is the construct's own `)` — which ends the body's
+/// list but is not a `list_terminator`. `<( ! )`, `<( time )` and `<(for)` are
+/// therefore syntax errors named on that `)`. See [`tokenize_paren_body`].
+///
+/// `open_line` is the 1-based line the `<(`/`>(` sits on, in the enclosing
+/// source. The body is lexed on its own and so numbers its lines from 1; bash
+/// blames an error in it on the line it is *written* on, so the body's numbering
+/// is shifted back into the enclosing source's. That is a plain offset, unlike
+/// [`parse_cmdsub_body`]'s rank-based renumbering — a process substitution runs
+/// as a child command, not as a body bash re-reads after the enclosing scan.
+///
+/// # Errors
+/// Returns [`ParseError`] on a lexing or grammar error in the body.
+pub fn parse_procsub_body(src: &str, open_line: u32, opts: LexOpts) -> Result<Program, ParseError> {
+    let (mut toks, mut lines) = tokenize_paren_body(src, opts).map_err(ParseError::from)?;
+    shift_lines(&mut toks, &mut lines, open_line.saturating_sub(1));
+    parse_tokens_ending(toks, lines, opts, true)
 }
 
 /// Parse shell source with strict here-document lexing: an unterminated
@@ -513,18 +535,27 @@ pub fn parse_cmdsub_body(
     backtick: bool,
     opts: LexOpts,
 ) -> Result<Program, ParseError> {
-    let (mut toks, lines) = tokenize_spanned(src, opts).map_err(ParseError::from)?;
+    // The `$( )` body is lexed with the substitution's own `)` standing where
+    // the implicit trailing newline would otherwise go, because that is the
+    // token bash's parser sees after the body's last command; a backtick body
+    // really is lexed on its own. See [`tokenize_paren_body`].
+    let lexed = if backtick {
+        tokenize_spanned(src, opts)
+    } else {
+        tokenize_paren_body(src, opts)
+    };
+    let (mut toks, lines) = lexed.map_err(ParseError::from)?;
     let map = CmdSubLineMap::build(&toks, &lines, close_line);
     let lines = lines.iter().map(|&l| map.map(l)).collect();
     for t in &mut toks {
         map.rebase_tok(t);
     }
-    parse_tokens(toks, lines, opts).map_err(|e| {
-        // bash parses a `$( … )` body in the *enclosing* token stream, so a body
-        // that ends mid-construct is not an end of file there: the next token is
-        // the substitution's own `)`, and that is what bash names. A backtick
-        // body really is parsed on its own, and there bash does report end of
-        // file — which is why only the `$( )` spelling is rewritten here.
+    parse_tokens_ending(toks, lines, opts, !backtick).map_err(|e| {
+        // A body that ends mid-construct is not an end of file in bash either:
+        // the next token is the `)`, and that is what bash names. Most such
+        // errors already say so, because the `)` really is in the stream — but
+        // a construct that swallows it (an unclosed quote's re-lex, say) can
+        // still bottom out at end of input, so the wording is normalised here.
         //
         // The distinction matters beyond wording: an error naming a token is not
         // continuable, so the REPL must not offer a PS2 prompt for one. Neither
@@ -598,6 +629,7 @@ impl CmdSubLineMap {
         for seg in segs {
             match seg {
                 Seg::CmdSub(_, close, _) => *close = self.map(*close),
+                Seg::ProcSub(_, _, open) => *open = self.map(*open),
                 Seg::Dq(inner) => self.rebase_segs(inner),
                 _ => {}
             }
@@ -615,9 +647,10 @@ impl CmdSubLineMap {
 /// later called from (bash numbers a body relative to the source that *defined*
 /// it, verified against bash 5.2).
 ///
-/// [`Seg::CmdSub`]'s recorded close line is shifted too: [`parse_cmdsub_body`]
-/// rebases a substitution body relative to it, so leaving it alone would reset
-/// the body's numbering back to the fragment's.
+/// The lines recorded on [`Seg::CmdSub`] (its closing delimiter) and
+/// [`Seg::ProcSub`] (its opening one) are shifted too: [`parse_cmdsub_body`] and
+/// [`parse_procsub_body`] renumber a body relative to them, so leaving them
+/// alone would reset the body's numbering back to the fragment's.
 fn shift_lines(toks: &mut [Tok], lines: &mut [u32], base: u32) {
     if base == 0 {
         return;
@@ -642,6 +675,7 @@ fn shift_segs(segs: &mut [Seg], base: u32) {
     for seg in segs {
         match seg {
             Seg::CmdSub(_, close, _) => *close = close.saturating_add(base),
+            Seg::ProcSub(_, _, open) => *open = open.saturating_add(base),
             Seg::Dq(inner) => shift_segs(inner, base),
             _ => {}
         }
@@ -649,14 +683,31 @@ fn shift_segs(segs: &mut [Seg], base: u32) {
 }
 
 fn parse_tokens(toks: Vec<Tok>, lines: Vec<u32>, opts: LexOpts) -> Result<Program, ParseError> {
+    parse_tokens_ending(toks, lines, opts, false)
+}
+
+/// [`parse_tokens`], but `ends_at_paren` says the stream's final token is the
+/// `)` that closes a `$( … )` body ([`tokenize_paren_body`]). That token is the
+/// end of the program rather than a leftover, so it is excluded from the
+/// "everything consumed?" check — while remaining a real token everywhere else,
+/// which is what makes `$( ! )` and `$(for)` name it.
+fn parse_tokens_ending(
+    toks: Vec<Tok>,
+    lines: Vec<u32>,
+    opts: LexOpts,
+    ends_at_paren: bool,
+) -> Result<Program, ParseError> {
     let mut p = Parser {
         toks,
         lines,
         pos: 0,
         opts,
     };
+    // The closing `)` is consumed by nothing, so a complete body leaves the
+    // cursor on it rather than past it.
+    let end = p.toks.len().saturating_sub(usize::from(ends_at_paren));
     let parsed = match p.parse_program(&[], true) {
-        Ok(_prog) if p.pos != p.toks.len() => {
+        Ok(_prog) if p.pos != end => {
             // Leftover tokens — typically an unmatched `)` or a stray reserved
             // word. bash names the offending token (`near unexpected token \`)'`).
             Err(p.unexpected_here())
@@ -987,8 +1038,12 @@ impl Parser {
         // A prefix with nothing after it is the `list_terminator` case above:
         // the flags apply to a null command, which succeeds — so a bare `!` is
         // status 1 and a bare `time` reports a timing and status 0. Only `;` or
-        // a line end may stand here; `! && x`, `time | cat` and `( ! )` are all
-        // syntax errors, which `parse_command` reports for us.
+        // a line end may stand here; `! && x`, `time | cat`, `( ! )` and
+        // `$( ! )` are all syntax errors, which `parse_command` reports for us.
+        // The last of those is why a `$( … )` body's stream ends with the
+        // substitution's `)` rather than an implicit newline
+        // ([`crate::lexer::tokenize_paren_body`]) — with a newline there, the
+        // prefix would find a terminator bash does not give it.
         if prefixed && matches!(self.peek(), None | Some(Tok::Newline) | Some(Tok::Op(Op::Semi))) {
             let commands = vec![Command::Simple(SimpleCommand::default())];
             return Ok(Pipeline { negated, timed, time_posix, commands });
@@ -2367,9 +2422,9 @@ fn seg_to_part(seg: &Seg, opts: LexOpts) -> Result<WordPart, ParseError> {
             expr: raw.clone(),
             bracket: *bracket,
         },
-        Seg::ProcSub(input, raw) => WordPart::ProcSub {
+        Seg::ProcSub(input, raw, open_line) => WordPart::ProcSub {
             input: *input,
-            body: parse_opts(raw, opts)?,
+            body: parse_procsub_body(raw, *open_line, opts)?,
         },
     })
 }
@@ -3828,6 +3883,50 @@ mod tests {
             panic!();
         };
         assert!(matches!(sc.words[1].parts[0], WordPart::CommandSub { .. }));
+    }
+
+    /// A `$( … )` body is closed by the substitution's `)`, which ends its list
+    /// but is not a `list_terminator`. So the body needs no terminator of its
+    /// own, yet `!`/`time` standing alone — which do need one — are refused,
+    /// and a body that stops mid-construct is blamed on the `)` rather than on
+    /// the implicit newline every other input ends with.
+    #[test]
+    fn cmdsub_body_is_terminated_by_its_closing_paren() {
+        for src in [
+            "echo $(echo x)",
+            "echo $(echo x; )",
+            "echo $( )",
+            "echo $( !; echo x )",
+            "cat <(echo x)",
+            "cat <( !; echo x )",
+        ] {
+            assert!(parse(src).is_ok(), "{src} should parse");
+        }
+        for src in [
+            "echo $( ! )",
+            "echo $(!)",
+            "echo $( ! ! )",
+            "echo $(time)",
+            "echo $( time -p )",
+            "echo $( echo x; ! )",
+            "echo $(for)",
+            "echo $(case)",
+            // A process substitution body is read the same way.
+            "cat <( ! )",
+            "cat <( time )",
+            "cat <(for)",
+            "cat >( ! )",
+        ] {
+            let e = parse(src).unwrap_err();
+            assert_eq!(e.msg, "syntax error near unexpected token `)'", "{src}");
+        }
+        // A backtick body really is lexed on its own, so the implicit newline
+        // stands and `!` has its terminator.
+        assert!(parse("echo `!`").is_ok());
+        assert_eq!(
+            parse("echo `for`").unwrap_err().msg,
+            "syntax error near unexpected token `newline'"
+        );
     }
 
     #[test]

@@ -565,11 +565,20 @@ impl IncrementalParser {
 ///
 /// `close_line` comes from the lexer ([`Seg::CmdSub`]'s second field).
 ///
-/// Nested substitutions are rebased through the same map: their own recorded
-/// close line is body-relative, so it is translated before being handed to the
-/// recursive parse. A body line with no command of its own (possible only for
-/// the tail of a nested construct) takes the rank of the nearest preceding
-/// command-bearing line.
+/// That rank rule is what the *returned map* describes, and it applies to the
+/// second read — the one at expansion time, which is the one that runs (see
+/// [`CmdSubBody`]). The eager parse this function performs is the *first* read,
+/// which happens in the enclosing token stream, and bash numbers it plainly:
+/// a syntax error the enclosing scan raises names the body's true physical
+/// line, not a ranked one. So the program is renumbered by an ordinary offset
+/// from the line the body opens on, which is `close_line` less the body's own
+/// newlines. (The eager program's lines are otherwise unobservable — it exists
+/// only to raise that error, to be re-printed by `declare -f`, and to answer
+/// the `$(< file)` peek — so this is the only thing they have to get right.)
+///
+/// Nested substitutions are renumbered through the same offset, so their
+/// recorded close lines are physical too and a nested body computes its own
+/// offset the same way.
 ///
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error in the body.
@@ -585,7 +594,12 @@ pub fn parse_cmdsub_body(
     let (mut toks, mut lines) = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
     let map = build_cmdsub_line_map(&toks, &lines, close_line);
-    map_lines(&mut toks, &mut lines, &map);
+    // The body's line 1 is the line `$(` sits on: the closing `)` is on the
+    // body's last line, so stepping back over the body's newlines lands there.
+    let newlines =
+        u32::try_from(src.bytes().filter(|&b| b == b'\n').count()).unwrap_or(u32::MAX);
+    let phys = LineMap::Offset(close_line.saturating_sub(newlines).saturating_sub(1));
+    map_lines(&mut toks, &mut lines, &phys);
     let prog = parse_tokens_ending(toks, lines, opts, true)
         .map_err(|e| {
             // A body that ends mid-construct is not an end of file in bash
@@ -3946,6 +3960,30 @@ mod tests {
             "syntax error near unexpected token `newline'"
         );
         assert!(backtick_unit("!", 1).is_ok());
+    }
+
+    /// The two reads of a `$( … )` body number its lines differently, and the
+    /// *eager* one — this parse, in the enclosing token stream — is the plain
+    /// one: an error it raises names the body's true physical line. (The
+    /// rank-based numbering belongs to the map this parse returns, which the
+    /// interpreter uses for the expansion-time re-read; see
+    /// `parse_cmdsub_body`.) Getting this wrong is invisible in a one-line
+    /// script and off by the body's length in a real one.
+    #[test]
+    fn an_eager_cmdsub_body_error_names_its_physical_line() {
+        // `for` is on line 4 of the enclosing source; the body's own numbering
+        // would call it line 3, and the rank rule would call it 7.
+        let src = "echo one\nx=$(echo a\necho b\nfor\necho d)\n";
+        assert_eq!(parse(src).unwrap_err().line, Some(4));
+        // The body's first line, and a body that opens on a line of its own.
+        assert_eq!(parse("echo one\nx=$(for\necho b)\n").unwrap_err().line, Some(2));
+        assert_eq!(parse("echo one\nx=$(\necho a\n\nfor\n)\n").unwrap_err().line, Some(5));
+        // A nested body is numbered against the outer body's physical lines,
+        // not against its own first line.
+        let nested = "echo one\nx=$(echo a\necho $(echo b\nfor\necho c)\necho d)\n";
+        assert_eq!(parse(nested).unwrap_err().line, Some(4));
+        // A process substitution body was always numbered this way.
+        assert_eq!(parse("echo one\ncat <(echo a\nfor\n)\n").unwrap_err().line, Some(3));
     }
 
     #[test]

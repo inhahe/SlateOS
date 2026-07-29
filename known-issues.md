@@ -184,6 +184,30 @@ a hook to expand a raw line before it is lexed, which is also the right place
 for the "echo the expanded line" behaviour. The expansion engine itself is pure
 and should be unit-tested independently of the parser hook.
 
+**Design notes for part (2) (from reading the parser, 2026-07-29).**
+
+- The mechanism already exists. `IncrementalParser` lexes the whole source up
+  front into `orig`, but `relex` (`parser.rs:402`) re-tokenizes `src[off..]`
+  from the first unconsumed token and rebases the offsets — that is how a
+  mid-script `shopt -s extglob` changes how later lines lex. History expansion
+  needs the same thing plus a *source edit*: replace the upcoming line's span in
+  `src` with the expanded text, then relex the tail. So the new parser API is
+  roughly `peek_raw_line()` + `replace_raw_line(text, opts)`, built on `relex`.
+- **Expansion must be line-at-a-time, not unit-at-a-time**, even though it is
+  tempting to do a whole parse unit at once. Within one unit the two are
+  equivalent — history is recorded per *unit* (`record_history`, called once per
+  `next_unit`), so every line of a multi-line unit sees the same history, and a
+  `!!` on line 2 of a unit correctly refers to the previous *unit*, not to line
+  1. The reason it still has to be per line is the chicken-and-egg: the unit's
+  extent is only known by lexing it, but expansion changes the text and
+  therefore the lexing. bash avoids this by expanding each physical line as its
+  reader hands it over. So the loop is: expand the next physical line, splice,
+  relex, attempt a unit; if the unit is still incomplete, expand the next
+  physical line and repeat.
+- `!#` (the current line so far) is the one designator whose value differs
+  between the two granularities, and is the reason not to "optimise" this back
+  into a per-unit pass later.
+
 **Impact.** Interactive-shell parity gap. Scripts that use `!` history recall
 fail; the far more common case — a `!` appearing literally in a double-quoted
 string — is *unaffected today* but will start expanding once this lands, so the

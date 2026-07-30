@@ -5188,6 +5188,77 @@ Same root cause and disposition as `TD-OILS-PRINTF-QUOTE-CHAR` and
 for SlateOS, which has no C/POSIX byte locale), so the MSYS byte-wise result is
 a host-locale artifact, not an osh divergence. No action needed.
 
+### TD-OILS-BYTE-STRINGS. A byte that is not valid UTF-8 cannot survive osh: a script holding one is refused outright, and data holding one is replaced or dropped — OPEN 2026-07-30
+
+**Where:** the representation itself — osh stores a shell word, a variable value
+and a captured stream as a Rust `String`, which cannot hold invalid UTF-8. The
+observable boundaries are:
+- `userspace/oils/src/main.rs:517` (`Plan::Script` → `fs::read_to_string`) and
+  `interp.rs:3199` / `3962` / `4059` / `21523` / `25789` (`.`/`source`, and the
+  other file readers) — these **refuse** the file.
+- `interp.rs` `substitute_file` (~13203), `finish_comsub` (~13278),
+  `builtin_mapfile` (~21455) and `read_record` (~26401) — these are
+  `String::from_utf8_lossy`, so the byte becomes U+FFFD.
+- `read_one_line` (~26337) used `BufRead::read_line` with `.ok()?`, which turned
+  the UTF-8 error into a *fake EOF*. Fixed 2026-07-30 (see below); the remaining
+  two behaviours stand.
+
+**What.** Against bash 5.2.37, with `d.bin` = `a\xa9b\ncr\n` (`\xa9` is a lone
+continuation-less high byte):
+
+| | bash | osh |
+|---|---|---|
+| `osh d.bin` where the *script* holds `\xa9` | runs it, `echo` writes the raw byte | `osh: d.bin: stream did not contain valid UTF-8`, nothing runs |
+| `. ./d.bin` | runs it | same refusal, tagged `osh: line 1: .:` |
+| `v=$(cat d.bin)` | `a \xa9 b \n c` | `a \xef\xbf\xbd b \n c` (U+FFFD) |
+| `v=$(<d.bin)` | same as bash's above | U+FFFD |
+| `mapfile -t a < d.bin` | element 0 = `a\xa9b` | element 0 = `a\xef\xbf\xbdb` |
+| `IFS= read -r l < d.bin` | status 0, `l=a\xa9b` | *was* status 1 with `l` empty; now U+FFFD, status 0 |
+| `printf %s $'\xa9'` | one byte `a9` | two bytes `c2 a9` (U+00A9) |
+
+The `read` row was the damaging one: `read_line` consumes the bytes and *then*
+reports `InvalidData`, which `.ok()?` mapped to `None` — the same value a real
+EOF returns. So `while IFS= read -r l; do …; done < file` stopped at the first
+non-UTF-8 line and reported success, silently processing a prefix of the file.
+That is now lossy like every other reader (see the fix note); it still is not
+bash, but it no longer truncates a loop or invents an EOF.
+
+The last row is the same defect seen from the writing side and was already noted
+as a "known remaining gap" under the ANSI-C escape work (~line 965); it is
+folded in here so the family has one home.
+
+**Why it matters beyond bash fidelity.** CLAUDE.md rule 7 is explicit: OS-boundary
+data — paths, environment values, pipe contents — is bytes, and
+`from_utf8_lossy` is silent data corruption. SlateOS paths allow every byte but
+`/` and NUL, so a shell that cannot carry `a\xffb` cannot name every file its own
+filesystem permits. `find … -print0 | while read -r -d ''` over a directory
+holding a Latin-1-named file corrupts the name and then operates on the wrong
+path — the failure mode is a wrong-file write, not a diagnostic.
+
+**Proper fix.** Move the shell's string type from `String` to a byte string.
+Concretely: introduce a `ShellStr`/`ShellString` newtype over `Vec<u8>`/`[u8]`
+with the handful of operations osh actually needs (the UTF-8-aware character
+counting that `${#x}`/`${x:o:l}` rely on stays, operating on the byte string and
+treating an invalid sequence as one character per byte, which is what bash in a
+UTF-8 locale does), then convert outward from the boundaries: the file readers
+(`read_to_string` → `read`), `finish_comsub`/`substitute_file`/`mapfile`/`read`
+(drop the `from_utf8_lossy`), the lexer's input, `WordPart::Literal`, and
+`Shell::vars`/`arrays`/`assoc`. Everything that today writes bytes out
+(`emit_stderr` and friends already take `&[u8]`) is unaffected.
+
+This is the single largest refactor left in oils and touches nearly every
+function in `interp.rs`, so it wants to be its own task rather than a rider on
+another change. Two things make it tractable: the write side is already
+byte-oriented, and the escape layer already masks `\xHH`/`\nnn` to a byte
+(`escape::ansi_c_unescape`), so only the materialisation step needs changing
+once a word can hold the byte. Do **not** attempt it piecemeal — a half-converted
+`vars` map with a `String`-typed lexer is worse than either end state.
+
+**Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
+`TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts
+where osh already matches UTF-8-locale bash, and the byte-string move must
+preserve their current character-wise answers.
+
 ### TD-OILS-XTRACE-PIPE-ORDER. `set -x` traces multi-stage pipeline commands in reverse (last-stage-first) order rather than bash's left-to-right — cosmetic / documented tradeoff — 2026-07-20
 
 **Where:** `userspace/oils/src/interp.rs` — `exec_threaded_pipeline` (and the

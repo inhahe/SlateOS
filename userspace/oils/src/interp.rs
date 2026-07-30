@@ -26336,14 +26336,29 @@ fn pipe_reader_readable_now(_r: &io::PipeReader) -> bool {
 /// when the input ended (EOF) before any newline. `read` reports status 1 for
 /// an unterminated final line (matching bash), so the caller needs to know
 /// which case occurred. Returns `None` only on immediate EOF with no bytes.
+///
+/// Reads *bytes* rather than going through `BufRead::read_line`: that returns
+/// `InvalidData` for a line that is not valid UTF-8, having already consumed it,
+/// and mapping the error to `None` made a non-UTF-8 line indistinguishable from
+/// end-of-input — so `while IFS= read -r l` stopped at such a line and reported
+/// success, silently processing only a prefix of the file. The bytes are instead
+/// converted the way every other reader in osh converts them (lossily), which is
+/// still not bash's raw byte but is at least a value rather than a fake EOF. See
+/// TD-OILS-BYTE-STRINGS for the representation change that would carry the byte.
 fn read_one_line<R: BufRead>(r: &mut R) -> Option<(String, bool)> {
-    let mut line = String::new();
-    let n = r.read_line(&mut line).ok()?;
+    let mut bytes: Vec<u8> = Vec::new();
+    let n = r.read_until(b'\n', &mut bytes).ok()?;
     if n == 0 {
         return None;
     }
+    let mut line = String::from_utf8_lossy(&bytes).into_owned();
+    // Only the delimiter comes off. A `\r` before it is ordinary data that bash
+    // keeps — `printf 'a\r\n' | read -r l` leaves `l` two characters long — and
+    // stripping it lost the byte for anything reading CRLF-framed input (an HTTP
+    // response header, a `.csv` written on Windows). It also disagreed with
+    // `read_record`, the `-d`/`-n`/`-N` path, which never stripped it.
     let terminated = line.ends_with('\n');
-    while line.ends_with('\n') || line.ends_with('\r') {
+    if terminated {
         line.pop();
     }
     Some((line, terminated))
@@ -30592,6 +30607,62 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn read_custom_ifs() {
         let (o, _) = run("IFS=: read a b c <<< '1:2:3'; echo \"$a-$b-$c\"");
         assert_eq!(o, "1-2-3\n");
+    }
+
+    /// `read` strips its *delimiter* and nothing else. A `\r` before the newline
+    /// is ordinary data that bash keeps, so CRLF-framed input (an HTTP header, a
+    /// Windows-written `.csv`) arrives intact; stripping it also disagreed with
+    /// the `-d`/`-n`/`-N` record path, which never stripped it.
+    #[test]
+    fn read_keeps_a_carriage_return_before_the_newline() {
+        assert_eq!(run(r#"printf 'a\r\n' | { IFS= read -r l; printf '[%s]' "$l"; }"#).0, "[a\r]");
+        // Default IFS does not list `\r`, so splitting does not remove it either.
+        assert_eq!(run(r#"printf 'a\r\n' | { read -r l; printf '[%s]' "$l"; }"#).0, "[a\r]");
+        // Interior and repeated CRs are data too.
+        assert_eq!(
+            run(r#"printf 'p\r\rq\n' | { IFS= read -r l; printf '[%s]' "$l"; }"#).0,
+            "[p\r\rq]"
+        );
+        // A CR at EOF with no newline: still a partial read (status 1), CR kept.
+        assert_eq!(
+            run(r#"printf 'x\r' | { IFS= read -r l; printf '%d[%s]' "$?" "$l"; }"#).0,
+            "1[x\r]"
+        );
+        // The record path agrees, as it always did.
+        assert_eq!(
+            run(r#"printf 'a\r\n' | { read -r -n 3 l; printf '[%s]' "$l"; }"#).0,
+            "[a\r]"
+        );
+        // A `\r` *chosen* as the delimiter is consumed, like any delimiter.
+        assert_eq!(
+            run("printf 'a\\r\\n' | { read -r -d $'\\r' l; printf '[%s]' \"$l\"; }").0,
+            "[a]"
+        );
+    }
+
+    /// A line that is not valid UTF-8 must not read as end-of-input. `read` went
+    /// through `BufRead::read_line`, which consumes the line and *then* reports
+    /// `InvalidData` — indistinguishable from EOF once the error was dropped — so
+    /// a `while read` loop stopped at the first such line and reported success,
+    /// silently processing a prefix of its input. The byte itself still cannot be
+    /// carried (it becomes U+FFFD): see TD-OILS-BYTE-STRINGS.
+    #[test]
+    fn read_does_not_mistake_a_non_utf8_line_for_eof() {
+        // Three lines, the first holding a lone high byte: all three are read.
+        assert_eq!(
+            run(r#"printf 'a\xa9b\ncr\nlast\n' | { n=0; while IFS= read -r l; do n=$((n+1)); done; echo "$n"; }"#).0,
+            "3\n"
+        );
+        // The line is assigned, and reports success rather than a partial read.
+        assert_eq!(
+            run(r#"printf 'a\xa9b\n' | { IFS= read -r l; printf '%d %d' "$?" "${#l}"; }"#).0,
+            "0 3"
+        );
+        // The bytes after the offending one are not lost with it.
+        assert_eq!(
+            run(r#"printf 'a\xa9b\n' | { IFS= read -r l; printf '%s' "${l%?b}${l#a?}"; }"#).0,
+            "ab"
+        );
     }
 
     #[test]

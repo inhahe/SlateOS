@@ -50,6 +50,22 @@ printf 'partial' > f6
 read -r last < f6
 echo "eof-status=$? last=[$last]"
 
+# Only the *delimiter* comes off the line. A `\r` before the newline is ordinary
+# data, so CRLF-framed input arrives intact — and the `-n`/`-d` record path
+# agrees. (Piped through `od` because a bare CR would rewrite the line on a
+# terminal; `$( )` is avoided here because MSYS bash strips a trailing CR from a
+# command substitution, which real bash and osh do not.)
+printf 'a\r\nb\r\n' > f8
+IFS= read -r cr1 < f8
+printf '%s' "$cr1" | od -An -c
+read -r -n 3 cr2 < f8
+printf '%s' "$cr2" | od -An -c
+read -r -d $'\r' cr3 < f8
+printf '%s' "$cr3" | od -An -c
+n=0
+while IFS= read -r ln; do n=$((n + 1)); done < f8
+echo "crlf-lines=$n"
+
 # The classic while-read loop over a file, and the fact that it consumes the
 # whole file in one subshell-free pass.
 printf 'l1\nl2\nl3\n' > f7

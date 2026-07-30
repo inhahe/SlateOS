@@ -6883,9 +6883,26 @@ impl Shell {
             self.exported.insert(a.name.clone());
         }
         let is_assoc = self.assoc.contains_key(&a.name);
+        // A failing expansion in the value arms an abort (`discard_error`); what
+        // it *returns* is a fabricated stand-in (`0` for arithmetic). Storing that
+        // would overwrite the variable with a fiction, so the assignment has to be
+        // abandoned instead — bash leaves the old value in place. Snapshot the
+        // flag so an abort already armed before this assignment is not mistaken
+        // for one this value raised.
+        let armed = self.discard_error;
+        macro_rules! bail_if_expansion_failed {
+            () => {
+                if armed.is_none() && self.discard_error.is_some() {
+                    return false;
+                }
+            };
+        }
         match &a.value {
             AssignRhs::Scalar(w) => {
                 let val = self.expand_assignment_value(w);
+                // Before the `set -x` trace, because bash does not trace an
+                // assignment it did not make.
+                bail_if_expansion_failed!();
                 // `set -x` trace for a plain scalar (`x=…`/`x+=…`): the expanded
                 // RHS, minimally quoted, emitted once here so no re-expansion.
                 if trace_scalar {
@@ -7121,8 +7138,6 @@ impl Shell {
             }
             AssignRhs::Array(items) if is_assoc => {
                 // Associative literal: `m=([k]=v …)` (m already `declare -A`).
-                // The literal (even the empty `m=()`) gives the array a value.
-                self.array_valued.insert(a.name.clone());
                 // bash computes the whole literal before it touches the table,
                 // and for a non-append associative one it builds the new table
                 // off to the side and swaps it in. Two things follow, and both
@@ -7156,7 +7171,15 @@ impl Shell {
                     // element per field, and the pairing runs over the fields —
                     // not over the pre-expansion elements.
                     let mut words: Vec<String> = Vec::new();
+                    // An associative literal is bound element by element, so a
+                    // failed expansion stops the flattening where it happened
+                    // rather than abandoning the whole list: the words before it
+                    // still pair up and bind (measured — `m+=(pk pv j$((a+)) x)`
+                    // leaves `m[pk]` set to `pv` in bash), the failing word and
+                    // everything after it do not, and the assignment fails.
+                    let mut failed = false;
                     for e in items {
+                        let before = words.len();
                         match e {
                             ArrayElem::Positional(w) => {
                                 for bw in self.expand_braces_opt(w) {
@@ -7174,6 +7197,11 @@ impl Shell {
                                 words.push(format!("[{idx}]={val}"));
                             }
                         }
+                        if armed.is_none() && self.discard_error.is_some() {
+                            words.truncate(before);
+                            failed = true;
+                            break;
+                        }
                     }
                     let mut it = words.into_iter();
                     while let Some(key) = it.next() {
@@ -7187,12 +7215,21 @@ impl Shell {
                             pending.push((key, val));
                         }
                     }
+                    if failed {
+                        // Non-append: `pending` is dropped here, so the swap
+                        // below never happens and the table is left as it was.
+                        return false;
+                    }
                 } else {
                     for e in items {
                         match e {
                             ArrayElem::Keyed { index, value } => {
                                 let key = self.expand_to_string(index);
                                 let val = self.expand_to_string(value);
+                                // Element by element here too: an append has
+                                // already bound the earlier pairs, and a
+                                // non-append drops `pending` with the swap.
+                                bail_if_expansion_failed!();
                                 let Some(val) = self.apply_value_attrs(&a.name, val) else {
                                     return false;
                                 };
@@ -7222,6 +7259,13 @@ impl Shell {
                         }
                     }
                 }
+                // A failed expansion anywhere in the literal abandons the swap,
+                // so the table is left exactly as it was.
+                bail_if_expansion_failed!();
+                // The literal (even the empty `m=()`) gives the array a value —
+                // recorded here rather than on entry, so an assignment abandoned
+                // by a failed expansion leaves an unvalued array unvalued.
+                self.array_valued.insert(a.name.clone());
                 if !a.append {
                     self.assoc.insert(a.name.clone(), Vec::new());
                     for (key, val) in pending {
@@ -7244,7 +7288,6 @@ impl Shell {
                 // fails part-way leaves both the clearing and the elements before
                 // the failure behind, which is why the second phase writes
                 // straight into the array instead of accumulating.
-                self.array_valued.insert(a.name.clone());
                 // Phase 1 — expand. `None` is a positional element, which takes
                 // whatever the running index is when it is bound.
                 let mut expanded: Vec<(Option<i64>, String)> = Vec::new();
@@ -7267,6 +7310,15 @@ impl Shell {
                         }
                     }
                 }
+                // A failed expansion abandons phase 2 entirely — including the
+                // clear, which is the observable part: bash leaves the old
+                // elements in place rather than emptying the array.
+                bail_if_expansion_failed!();
+                // The literal (even the empty `a=()`) gives the array a value —
+                // recorded here rather than before phase 1, so an assignment
+                // abandoned by a failed expansion leaves an unvalued array
+                // unvalued.
+                self.array_valued.insert(a.name.clone());
                 // Phase 2 — clear, then bind.
                 if !a.append {
                     self.arrays.insert(a.name.clone(), BTreeMap::new());
@@ -29738,6 +29790,79 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // conditional reports non-zero but the following command still runs.
         assert_eq!(run("[[ \"3 x\" -eq 5 ]] 2>/dev/null; echo after").0, "after\n");
         assert_eq!(run("[ \"3 x\" -eq 5 ] 2>/dev/null; echo after").0, "after\n");
+    }
+
+    #[test]
+    fn a_failed_expansion_abandons_the_assignment() {
+        // A failing arithmetic expansion still has to return something, and that
+        // something is `0`. Storing it would leave the variable reading as a
+        // plausible wrong value instead of its old one, so the assignment is
+        // abandoned entirely — bash parity. (The failure discards the rest of the
+        // parse unit, so every read-back here is on a line of its own.)
+        assert_eq!(run("x=old\nx=$(( a + ))\necho \"[$x]\"").0, "[old]\n");
+        assert_eq!(run("x=old\nx=$(( 1/0 ))\necho \"[$x]\"").0, "[old]\n");
+        // The fabricated value would otherwise show up mid-word, glued onto an
+        // append, or evaluated under the integer attribute.
+        assert_eq!(run("y=old\ny=p$(( a + ))q\necho \"[$y]\"").0, "[old]\n");
+        assert_eq!(run("z=old\nz+=$(( a + ))\necho \"[$z]\"").0, "[old]\n");
+        assert_eq!(run("declare -i n=7\nn=$(( a + ))\necho \"[$n]\"").0, "[7]\n");
+        // Element assignments, both array kinds.
+        assert_eq!(
+            run("a=(o1 o2)\na[0]=$(( a + ))\necho \"[${a[*]}]\"").0,
+            "[o1 o2]\n"
+        );
+        assert_eq!(
+            run("declare -A m=([k]=o)\nm[k]=$(( a + ))\necho \"[${m[k]}]\"").0,
+            "[o]\n"
+        );
+        // An indexed literal is expanded whole, so nothing binds — not even the
+        // clearing a non-append literal would do first.
+        assert_eq!(
+            run("b=(o1 o2)\nb=( p$(( a + ))q z )\necho \"[${b[*]}]\"").0,
+            "[o1 o2]\n"
+        );
+        assert_eq!(
+            run("c=(o1)\nc+=( good x$(( a + )) )\necho \"[${c[*]}]\"").0,
+            "[o1]\n"
+        );
+        // An associative literal binds element by element, so an append keeps
+        // the pairs before the failing one — the one place a partial result
+        // survives. A non-append one swaps at the end, so nothing survives.
+        assert_eq!(
+            run("declare -A p=([k]=o)\np+=( [i]=good [j]=$(( a + )) )\necho \"${#p[@]} [${p[i]}]\"").0,
+            "2 [good]\n"
+        );
+        assert_eq!(
+            run("declare -A q=([k]=o)\nq+=( pk pv j$(( a + )) x )\necho \"${#q[@]} [${q[pk]}]\"").0,
+            "2 [pv]\n"
+        );
+        assert_eq!(
+            run("declare -A r=([k]=o)\nr=( [i]=good [j]=$(( a + )) )\necho \"${#r[@]} [${r[k]}]\"").0,
+            "1 [o]\n"
+        );
+        // A name that did not exist is not created, and an array that had no
+        // value yet does not acquire an empty one.
+        assert_eq!(
+            run("NEW=$(( a + ))\ndeclare -p NEW 2>/dev/null\necho \"rc=$?\"").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("declare -a ea\nea=( x$(( a + )) )\ndeclare -p ea").0,
+            "declare -a ea\n"
+        );
+        assert_eq!(
+            run("declare -A em\nem=( [k]=$(( a + )) )\ndeclare -p em").0,
+            "declare -A em\n"
+        );
+        // `declare`/`export` and a command prefix agree.
+        assert_eq!(run("d=old\ndeclare d=$(( a + ))\necho \"[$d]\"").0, "[old]\n");
+        assert_eq!(run("export e=old\nexport e=$(( a + ))\necho \"[$e]\"").0, "[old]\n");
+        assert_eq!(run("p=old\np=$(( a + )) true\necho \"[$p]\"").0, "[old]\n");
+        // An assignment that is not made is not traced, either.
+        assert_eq!(
+            run("t=old\nset -x\nt=$(( a + ))\nset +x\necho \"[$t]\"").0,
+            "[old]\n"
+        );
     }
 
     #[test]

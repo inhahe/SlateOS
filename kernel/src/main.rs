@@ -1654,6 +1654,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: fortify printf (ring 3) self-test failed: {:?}", e);
     }
 
+    // The scanf side of the same varargs ABI. It gets its own fixture because
+    // its failure mode is not a wrong number printed but a wild address
+    // written through: every scanf argument is a destination pointer.
+    if let Err(e) = proc::spawn::self_test_cscanf() {
+        serial_println!("WARNING: scanf (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
     // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
     // memfs and exits with the byte count read back, proving the full path

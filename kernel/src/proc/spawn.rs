@@ -7088,6 +7088,111 @@ pub fn self_test_cfortify() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the sysroot's **scanf trampolines**.
+///
+/// `sscanf`, `scanf` and `fscanf` are assembly trampolines — `va_trampoline!`
+/// in `posix/src/scanf.rs` — that spill the argument registers into a System V
+/// register save area, build a `va_list` over it and call the matching
+/// `v*scanf`.  They exist only on the bare-metal target, so `cargo test` can
+/// drive the `v*` functions but can never prove the trampolines hand them a
+/// correct `va_list`.
+///
+/// This matters more than it does for printf.  Every scanf argument is a
+/// *destination pointer*, so an argument taken from the wrong slot is a wrong
+/// address **written through**, not a wrong number printed.  That is precisely
+/// what made BUG-POSIX-SCANF-ARG-ARRAY-OOB an arbitrary stack write: the
+/// engine used to flatten the pointers into a `[u64; 8]`, and the ninth
+/// conversion stored through whatever stack word sat past the end of it.
+///
+/// The fixture therefore concentrates past the sixth pointer, where arguments
+/// stop coming from the register save area and start coming from the caller's
+/// overflow area, and brackets its destinations with canaries so an
+/// off-by-one store is caught as corruption of a neighbour.
+///
+/// Exit code 42 means every check passed; any other code names the failing
+/// step (see the FAIL diagnostic below and `services/ctest-scanf/main.c`).
+pub fn self_test_cscanf() -> KernelResult<()> {
+    let ctest_elf = match load_test_elf("ctest-scanf") {
+        Some(v) => v,
+        None => {
+            serial_println!("[spawn] SKIP ctest-scanf: fixture absent on /mnt/tests (lean build)");
+            return Ok(());
+        }
+    };
+
+    serial_println!(
+        "[spawn] Running scanf (ring 3, C) integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after all of its ABI checks pass.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-scanf"];
+    let envp: &[&[u8]] = &[];
+    // The `fscanf` band writes then re-reads a scratch file, so unlike the
+    // other C fixtures this one needs a wildcard File capability (resource_id
+    // 0) to pass `require_cap_type(File, ...)` in `sys_fs_open`.  Without it
+    // the `fopen` fails and the fixture exits 50 before reaching `fscanf`.
+    let caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "ctest-scanf",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-scanf spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-scanf (ring 3) — expected Zombie, got {:?}. A fault is the              *expected* shape of a broken scanf trampoline: a destination pointer read from the              wrong slot is a wild address the engine then writes through, so this fixture              crashes where the printf ones would merely print nonsense",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-scanf (ring 3) — reached Zombie but exit code was {:?},              expected {}. Code bands: 10-13 = basics inside the register-passed range, 20-23 =              past the eighth conversion, which the old flat [u64; 8] could not represent (21 is              a wrong value, 22 is a canary clobbered by an off-by-one store, 23 is the mixed              %d/%ld/%s form where a miscount corrupts a differently-sized neighbour), 30-32 =              %*d suppression and a %n stored through the eleventh pointer, 40-41 = float              destinations, which are pointers and so must travel the INTEGER path rather than              consult fp_offset, 50-53 = fscanf, a separate trampoline reading a real file (50/51 mean the scratch file could not be opened at all, so the ABI checks above are still valid). See              services/ctest-scanf/main.c",
+            exit_code, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   scanf (ring 3: the sscanf/fscanf assembly trampolines hand their v*scanf a          correct va_list past the six-register boundary, so destination pointers come from the          caller's overflow area rather than a stack word past a fixed array): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that fastpy **pure-mode file I/O** works on-target.
 ///
 /// This is the first proof that the whole pure-mode file path runs natively on

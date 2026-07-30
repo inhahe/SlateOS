@@ -102,7 +102,7 @@ in each of `err.rs`, `error.rs` and `syslog.rs`. The printf test module's
 hand the engine a real `va_list`, so ~20 000 existing assertions exercise the
 production argument path instead of a test-only one.
 
-**Not fixed here: the same bug in `scanf`.** See
+**The same bug in `scanf`** was fixed separately the same day; see
 BUG-POSIX-SCANF-ARG-ARRAY-OOB below.
 
 ### BUG-POSIX-SCANF-ARG-ARRAY-OOB. `sscanf` with more than 8 conversions reads a garbage pointer off the stack and writes through it — 2026-07-30 — ✅ **RESOLVED 2026-07-30**

@@ -405,6 +405,7 @@ fn parse(expr: &str, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
         pos: 0,
         last_op_start: 0,
         last_atom_start: 0,
+        last_tok_start: 0,
         vars,
     };
     p.skip_ws();
@@ -439,16 +440,26 @@ struct AParser<'a> {
     /// operand-expected diagnostic falls back to this position at EOF.
     last_op_start: usize,
     /// Start position of the most recently begun leaf atom (number/variable).
-    /// bash's error token for a missing `)` is the last operand it parsed.
+    /// Used for the `name[` subscript diagnostic, which reports from the name.
     last_atom_start: usize,
+    /// Start position of the most recently consumed token of *any* kind —
+    /// operand, operator or parenthesis. A missing `)` reported at end of input
+    /// names this token, because that is the one bash's lexer is still holding:
+    /// `(2+3` names `3`, but `((2+3)` names the `)`.
+    last_tok_start: usize,
     vars: &'a dyn VarLookup,
 }
 
 /// Does `c` begin a token bash's arithmetic lexer recognises? Used to classify
 /// a trailing-input error as "syntax error in expression" (recognised token)
 /// versus "invalid arithmetic operator" (an untokenisable character).
+///
+/// Brackets are *not* recognised: `a[0]` is lexed as one name-with-subscript
+/// token, so a `[` or `]` reached in operator position is a character bash's
+/// lexer has no token for — `let '2+3]'` is "invalid arithmetic operator",
+/// while `let '2+3:'` (a real token) is "syntax error in expression".
 fn is_arith_token_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || "+-*/%|^&<>=!~()[]?:,".contains(c)
+    c.is_ascii_alphanumeric() || c == '_' || "+-*/%|^&<>=!~()?:,".contains(c)
 }
 
 /// Binding power (and right-associativity) of a binary operator, or `None` if
@@ -500,6 +511,24 @@ impl AParser<'_> {
         self.chars[start..].iter().collect()
     }
 
+    /// Record the operator token starting at the cursor.
+    fn mark_op(&mut self) {
+        self.last_op_start = self.pos;
+        self.last_tok_start = self.pos;
+    }
+
+    /// Record the leaf atom (number, or name with its optional subscript)
+    /// starting at `start`.
+    fn mark_atom(&mut self, start: usize) {
+        self.last_atom_start = start;
+        self.last_tok_start = start;
+    }
+
+    /// Record a token that is neither operand nor operator — a parenthesis.
+    fn mark_tok(&mut self, start: usize) {
+        self.last_tok_start = start;
+    }
+
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
     }
@@ -537,7 +566,7 @@ impl AParser<'_> {
                 // Record the comma as the last operator so a missing operand
                 // after it (`3 ,`) reports bash's error token `, ` (from the
                 // comma) rather than the whole expression.
-                self.last_op_start = self.pos;
+                self.mark_op();
                 self.pos += 1;
                 let r = self.parse_assign()?;
                 e = Expr::Comma(Box::new(e), Box::new(r));
@@ -568,7 +597,7 @@ impl AParser<'_> {
             // Record the assignment operator's position: if its right-hand side
             // is missing (`x = `, `y += `), bash's operand-expected error token
             // runs from the operator (`= `, `+= `), not the whole expression.
-            self.last_op_start = self.pos;
+            self.mark_op();
             self.pos += op.chars().count();
             let rhs = self.parse_assign()?;
             return Ok(Expr::Assign(lv, assign_base(&op), Box::new(rhs)));
@@ -664,7 +693,7 @@ impl AParser<'_> {
             if bp < min_bp {
                 break;
             }
-            self.last_op_start = self.pos;
+            self.mark_op();
             self.pos += op.chars().count();
             let next_min = if right { bp } else { bp + 1 };
             self.skip_ws();
@@ -696,7 +725,7 @@ impl AParser<'_> {
             && (op == "++" || op == "--")
             && self.lvalue_follows(2)
         {
-            self.last_op_start = self.pos;
+            self.mark_op();
             self.pos += 2;
             let operand = self.parse_unary()?;
             let lv = lvalue_of(operand)?;
@@ -704,22 +733,22 @@ impl AParser<'_> {
         }
         match self.peek() {
             Some('-') => {
-                self.last_op_start = self.pos;
+                self.mark_op();
                 self.pos += 1;
                 Ok(Expr::Neg(Box::new(self.parse_unary()?)))
             }
             Some('+') => {
-                self.last_op_start = self.pos;
+                self.mark_op();
                 self.pos += 1;
                 self.parse_unary()
             }
             Some('!') => {
-                self.last_op_start = self.pos;
+                self.mark_op();
                 self.pos += 1;
                 Ok(Expr::Not(Box::new(self.parse_unary()?)))
             }
             Some('~') => {
-                self.last_op_start = self.pos;
+                self.mark_op();
                 self.pos += 1;
                 Ok(Expr::BitNot(Box::new(self.parse_unary()?)))
             }
@@ -761,34 +790,49 @@ impl AParser<'_> {
 
     fn parse_atom(&mut self) -> Result<Expr, ArithError> {
         self.skip_ws();
-        // Remember where this atom begins: a missing `)` reports the last atom
-        // parsed as its error token (`(2+3` → token `3`), and `name[` reports
-        // the subscript expression from the name.
+        // Remember where this atom begins: `name[` reports the subscript
+        // expression from the name, and a name with a subscript is one token.
         let atom_start = self.pos;
         match self.peek() {
             Some('(') => {
+                self.mark_tok(atom_start);
                 self.pos += 1;
                 // A parenthesised group is a full expression: ternary, comma,
                 // and assignment are allowed inside.
                 let e = self.parse_comma()?;
                 self.skip_ws();
                 if self.peek() != Some(')') {
-                    // bash: "missing `)'"; the error token is the source of the
-                    // last operand parsed inside the group.
-                    return Err(ArithError::with_token(
-                        "missing `)'",
-                        self.rest_from(self.last_atom_start),
-                    ));
+                    // bash names the token it is standing on when the `)` fails
+                    // to appear (`( a b` → `b`, `((1)(2)` → `(2)`). At end of
+                    // input it is standing on nothing, so it names the last
+                    // token it did lex — which is why `(2+3` names `3` but
+                    // `((2+3)` names the `)`.
+                    let token = if self.pos == self.chars.len() {
+                        self.rest_from(self.last_tok_start)
+                    } else {
+                        self.rest_from(self.pos)
+                    };
+                    // A character the lexer has no token for never reaches the
+                    // missing-`)` check in bash: the lexer rejects it first, so
+                    // `(1 @` and `(2+3]` are "invalid arithmetic operator".
+                    let body = match self.peek() {
+                        Some(c) if !is_arith_token_char(c) => {
+                            "syntax error: invalid arithmetic operator"
+                        }
+                        _ => "missing `)'",
+                    };
+                    return Err(ArithError::with_token(body, token));
                 }
+                self.mark_tok(self.pos);
                 self.pos += 1;
                 Ok(e)
             }
             Some(c) if c.is_ascii_digit() => {
-                self.last_atom_start = atom_start;
+                self.mark_atom(atom_start);
                 Ok(Expr::Num(self.parse_number()?))
             }
             Some(c) if c.is_ascii_alphabetic() || c == '_' => {
-                self.last_atom_start = atom_start;
+                self.mark_atom(atom_start);
                 let mut name = String::new();
                 while let Some(c) = self.peek() {
                     if c.is_ascii_alphanumeric() || c == '_' {
@@ -1863,6 +1907,76 @@ mod tests {
             let e = eval(src, &mut Map::default()).unwrap_err();
             assert_eq!(&e.to_string(), want, "expr {src:?}");
         }
+    }
+
+    #[test]
+    fn a_missing_close_paren_reports_from_the_cursor() {
+        // The error token is the source from wherever the parser was standing
+        // when the `)` failed to appear — not the group's first token, and not
+        // the last operand it happened to parse.
+        let cases: &[(&str, &str)] = &[
+            ("( a b", "missing `)' (error token is \"b\")"),
+            ("(1 2", "missing `)' (error token is \"2\")"),
+            ("(2+3 4", "missing `)' (error token is \"4\")"),
+            ("(1,2 3", "missing `)' (error token is \"3\")"),
+            ("(1?2:3 4", "missing `)' (error token is \"4\")"),
+            ("(x=1 2", "missing `)' (error token is \"2\")"),
+            ("(a[0] b", "missing `)' (error token is \"b\")"),
+            ("((1)(2)", "missing `)' (error token is \"(2)\")"),
+            ("(2 3)", "missing `)' (error token is \"3)\")"),
+            // A nested group fails first and reports from inside itself.
+            ("( (1 2) 3", "missing `)' (error token is \"2) 3\")"),
+            ("( ( a b ) )", "missing `)' (error token is \"b ) )\")"),
+            ("1 + ( a b )", "missing `)' (error token is \"b )\")"),
+            ("( a b ) + 1", "missing `)' (error token is \"b ) + 1\")"),
+            // At end of input the parser stands on nothing, so the token is the
+            // last one it read. For `(2+3` that is the operand…
+            ("(2+3", "missing `)' (error token is \"3\")"),
+            ("(1", "missing `)' (error token is \"1\")"),
+            ("(a", "missing `)' (error token is \"a\")"),
+            // …the `-` is an operator, so the last token is the `1` after it…
+            ("(-1", "missing `)' (error token is \"1\")"),
+            // …a name with a subscript is a single token…
+            ("(a[0]", "missing `)' (error token is \"a[0]\")"),
+            // …and here it is a close paren rather than an operand.
+            ("((2+3)", "missing `)' (error token is \")\")"),
+            // A character the lexer has no token for is rejected before the
+            // missing-`)` check is ever reached.
+            (
+                "(1 @",
+                "syntax error: invalid arithmetic operator (error token is \"@\")",
+            ),
+            (
+                "(1;2",
+                "syntax error: invalid arithmetic operator (error token is \";2\")",
+            ),
+            // Brackets belong to `a[0]`, which is lexed as one token, so a
+            // bracket reached in operator position is not a token at all —
+            // inside a group or out of one.
+            (
+                "(2+3]",
+                "syntax error: invalid arithmetic operator (error token is \"]\")",
+            ),
+            (
+                "2+3]",
+                "syntax error: invalid arithmetic operator (error token is \"]\")",
+            ),
+            (
+                "2+3[",
+                "syntax error: invalid arithmetic operator (error token is \"[\")",
+            ),
+            // `:` *is* a token, so it stays an expression error.
+            ("2+3:", "syntax error in expression (error token is \":\")"),
+            ("(2+3))", "syntax error in expression (error token is \")\")"),
+        ];
+        for (src, want) in cases {
+            let e = eval(src, &mut Map::default()).unwrap_err();
+            assert_eq!(&e.to_string(), want, "expr {src:?}");
+        }
+        // A balanced group still evaluates.
+        assert_eq!(ev("(2+3)"), 5);
+        assert_eq!(ev("((2+3))"), 5);
+        assert_eq!(ev("(1,2 )"), 2);
     }
 
     #[test]

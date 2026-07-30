@@ -3880,4 +3880,46 @@ mod tests {
             assert_eq!(back.to_bits(), v.to_bits(), "%a round trip of {text}");
         }
     }
+
+    /// The point of it all: `%a` writes an exact form and `strtod` reads it
+    /// back, so the pair must be the identity on every bit pattern.
+    #[test]
+    fn fmt_a_round_trips_through_strtod() {
+        let mut seed: u64 = 0xfeed_face_dead_beef;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut values = vec![
+            0.0f64,
+            -0.0,
+            1.0,
+            -1.0,
+            0.1,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            f64::from_bits(0x000f_ffff_ffff_ffff),
+        ];
+        for _ in 0..2000 {
+            let v = f64::from_bits(next());
+            if v.is_finite() {
+                values.push(v);
+            }
+        }
+
+        for v in values {
+            let mut text = fmt_a(b"%a", v).into_bytes();
+            text.push(0);
+            let back = unsafe { crate::stdlib::strtod(text.as_ptr(), core::ptr::null_mut()) };
+            assert_eq!(
+                back.to_bits(),
+                v.to_bits(),
+                "%a round trip of {}",
+                core::str::from_utf8(&text[..text.len() - 1]).unwrap()
+            );
+        }
+    }
 }

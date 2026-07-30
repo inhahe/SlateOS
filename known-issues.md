@@ -18387,6 +18387,161 @@ overflow / underflow, the `f32` double-rounding counterexample through
 `wcstof`, and a 4000-value sweep of both functions against Rust's correctly
 rounded `str::parse`. 20 088 posix tests pass; clippy clean.
 
+### BUG-POSIX-NO-HEX-FLOATS. Hexadecimal floating point was missing in both directions: `printf %a` printed nothing and `strtod`/`scanf` could not read `0x1.8p+3` — 2026-07-30 — ✅ **RESOLVED 2026-07-30**
+
+**Where:** `posix/src/printf.rs` (no `b'a' | b'A'` arm in the conversion
+dispatch), `posix/src/decfloat.rs` (the scanner had only a decimal grammar),
+`posix/src/scanf.rs::scan_float_digits`.
+
+**What it was:** C99 added `%a`/`%A` and the matching `0x…p±d` input syntax to
+`strtod` and `scanf`. We had neither. `printf("%a", 1.5)` fell through the
+dispatch and emitted nothing at all — not even the literal `%a` — and
+`strtod("0x1.8p+1", &end)` stopped at the `0`, returning 0.0 with `end`
+pointing at the `x`.
+
+The pair matters more than either half. Hexadecimal is the one textual form of
+a `double` that is *exact*: sixteen is a power of two, so the digits are the
+bits and there is no base conversion to round. Every finite `double` has an
+exact `%a` form in at most 13 fraction digits, so `%a` → `strtod` is the
+identity — which is what makes it the format for serialising floats, for test
+vectors, and for reading a value out of a debugger or a standard's text. It is
+also what glibc's own test suites and many ported build systems print with.
+
+**Fix (DONE).**
+
+*Output* — `format_float_hex` in `printf.rs`, following glibc: `[-]0xh.hhhhp±d`
+with leading digit `1` for normals and `0` for zero and subnormals, a
+subnormal's exponent pinned at `p-1022` rather than normalised, an absent
+precision meaning the shortest exact form (trailing zero digits dropped), and
+an always-signed exponent of at least one digit. `emit_float_padded` grew a
+prefixed form so `0x` lands after the sign but before zero padding, which is
+where `%016a` has to put it.
+
+One subtlety cost a rewrite: rounding is ties-to-even on the last *retained*
+digit, and at precision 0 that digit is the **leading** one, not part of the
+fraction. `%.0a` of 3.0 (`0x1.8p+1`) is an exact tie whose leading `1` is odd,
+so it rounds up to `0x2p+1` — carried into the leading digit rather than
+renormalised. Checked against glibc before the test was written.
+
+*Input* — `scan_hex_body`/`hex_to_binary` in `decfloat.rs`. `DigitCollector`
+gained a `hex` flag; in that mode its exponent counts powers of two, each digit
+shifts the accumulator by 4, and the result goes through the same
+`round_to_binary` as the decimal path, so all four conversions (decimal and hex
+× `f64` and `f32`) round exactly once, in their own precision. Only
+`MAX_HEX_DIGITS = 20` digits are kept — 80 bits, well past a `double`'s 53 plus
+guard — because with no base conversion a more distant digit can only make the
+tail nonzero, which is what the sticky bit already records. Saturating
+arithmetic in the rounder makes `0x1p1000000000000` → inf and
+`0x1p-1000000000000` → 0 fall out without a special case.
+
+**Verification:** `%a` is tested against glibc's output on plain values, the
+whole exponent range, subnormals, ties, over-long precisions, `#`/`+`/space
+flags and zero padding; then round-tripped over 2000+ random bit patterns
+twice — once through an independent reference parser written for the test (so
+two matching bugs cannot agree), once through the real `strtod`. Parsing is
+tested for `endptr` placement, ties-to-even, the full range, `ERANGE`, `f32`
+precision, and backing out of an incomplete `0x` prefix. 20 112 posix tests
+pass; clippy clean.
+
+### BUG-POSIX-SCANF-EOF-VS-MATCHING-FAILURE. `scanf` returned EOF for a matching failure that happened to end at end of input — 2026-07-30 — ✅ **RESOLVED 2026-07-30**
+
+**Where:** `posix/src/scanf.rs::scan_core`, the final
+`if ctx.assigned == 0 && ctx.peek() == 0 { -1 }`.
+
+**What it was:** C distinguishes an *input* failure — the input ran out before
+a directive matched anything — from a *matching* failure, where characters were
+read but formed no valid item. Only the first returns `EOF`; the second returns
+the number of assignments made, usually 0. We approximated this with "nothing
+assigned and we are at end of input", which conflates them whenever the
+unmatchable text sits at the end of the string:
+
+```
+sscanf("0x", "%lf", &v)   ours (before): -1    glibc: 0
+sscanf("+",  "%lf", &v)   ours (before): -1    glibc: 0
+sscanf("",   "",   )      ours (before): -1    glibc: 0
+```
+
+A caller looping `while (sscanf(...) != EOF)` therefore exited on malformed
+input instead of reporting it, and one testing `== EOF` to mean "no more data"
+saw garbage as end-of-stream. The hex-float work made it easy to hit, because
+`0x` with nothing after it is precisely a directive that consumes characters
+and then finds no value in them.
+
+**Fix (DONE).** `ScanCtx::stopped_at_end_of_input` classifies a failure by
+whether *anything was matched*, not by where the cursor is: the directive's
+start offset is recorded, and the failure is an input failure only if the input
+is exhausted **and** every byte consumed since that point was leading
+whitespace (which no directive counts as part of its item). So `sscanf("   ",
+"%lf")` is still `EOF` while `sscanf("0x", "%lf")` is 0. The per-conversion
+`if !scan_x(...) { break; }` ladder collapsed into one `match` producing a
+`bool`, so there is a single place where a failure is classified.
+
+**Verification:** `scan_distinguishes_input_failure_from_matching_failure`
+covers empty input, whitespace-only input, an unmatched literal, `%%` at end of
+input, an empty format, and the four matching-failure cases above — all
+compared against glibc.
+
+### BUG-POSIX-SCANF-LONGEST-PREFIX. `%f` rolled back an exponent marker and accepted a partial `infinity`, leaving fragments for the next conversion — 2026-07-30 — ✅ **RESOLVED 2026-07-30**
+
+**Where:** `posix/src/scanf.rs::scan_float_exponent` (a `saved_si`/`saved_count`
+rollback) and `scan_float_named` (`let _ = match_word(ctx, …, b"inity");`).
+
+**What it was:** a `scanf` directive takes the longest sequence that *is, or is
+a prefix of*, a matching sequence (C11 7.21.6.2p9) — not the longest sequence
+that is itself valid. We implemented the latter, in two places:
+
+```
+sscanf("1.5e",   "%lf%s", &v, s)   ours (before): n=2, v=1.5, s="e"   glibc: n=1, v=1.5
+sscanf("1.25e34","%5lf%s",&v, s)   ours (before): n=2, v=1.25, s="e34" glibc: n=2, v=1.25, s="34"
+sscanf("infix",  "%lf%s", &v, s)   ours (before): n=2, v=inf, s="ix"   glibc: n=0
+```
+
+Both leak a fragment into the following conversion, which is the failure mode
+that derails every directive after it rather than just the one. The width case
+is the sharper one: with `%6lf` on `"0x1.8p+1"` the field is `"0x1.8p"` and it
+was the *width*, not the input, that ended the exponent — rolling the `p` back
+there is plainly wrong.
+
+**Fix (DONE).** `scan_float_exponent` consumes the marker and its sign
+unconditionally and simply does not apply an exponent when no digits follow;
+the digits read before the marker still give the value. `scan_float_named`
+gained `match_prefix`, which keeps a partial match, and returns the new
+`NamedScan::Failed` when the extension of `inf` towards `infinity` stops
+part-way — `"infi"` and `"infinit"` are prefixes of a matching sequence but not
+matching sequences, so they are consumed and then reported as a matching
+failure.
+
+**Verification:** `scan_f_swallows_a_dangling_exponent_marker` and
+`scan_f_rejects_a_partial_infinity`, both written from glibc runs, plus the
+updated width test.
+
+### TD-POSIX-SCANF-GLIBC-DIGITLESS-HEX. `scanf` reports a matching failure where glibc converts a digit-less `0x.` to zero — ACCEPTED DIVERGENCE 2026-07-30
+
+**Where:** `posix/src/scanf.rs::scan_hex_float_digits`.
+
+**What it is:** glibc consumes a `0x` followed by a point but no hex digit and
+converts it to 0.0, where we consume the prefix and report a matching failure:
+
+```
+sscanf("0x.z",   "%lf%s", &v, s)   ours: n=0            glibc: n=2, v=0, s="z"
+sscanf("0x.8p1", "%3lf%s",&v, s)   ours: n=2, v=0, s="x.8p1"   glibc: n=2, v=0, s="8p1"
+```
+
+C requires a hex digit in the subject sequence, so `0x.` is not a matching
+sequence and a matching failure is the conformant answer; glibc's own
+`0x` case (no point) agrees with us and returns 0, which makes its `0x.`
+behaviour an internal inconsistency rather than a rule worth copying. Recorded
+because a program written against glibc could depend on it.
+
+**Also divergent, same reasoning:** glibc's `scanf` does not consume a
+`nan(n-char-sequence)` payload at all — `sscanf("nan(ab)x", "%lf%s", &v, s)`
+leaves `"(ab)x"` for the `%s` — although C says `%f` matches `strtod`'s subject
+sequence, which includes the payload. We consume it, as musl does.
+
+**Proper fix (if ever wanted):** none for the payload — ours is right. For
+`0x.`, matching glibc would mean converting a digit-less sequence to zero,
+which we should only do if a real port needs it.
+
 ### TD-OPENAT2-BENEATH-INROOT. `openat2` `RESOLVE_BENEATH`/`RESOLVE_IN_ROOT` are safely refused, not implemented — ACCEPTED LIMITATION 2026-07-22
 
 **Where:** `kernel/src/syscall/linux.rs::sys_openat2` (the resolve-flag gates).

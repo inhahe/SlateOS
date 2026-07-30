@@ -322,6 +322,32 @@ impl ScanCtx<'_, '_> {
             self.advance();
         }
     }
+
+    /// Did the directive that just failed fail because the input ran out?
+    ///
+    /// C distinguishes an *input* failure — the input ended before the
+    /// directive matched anything — from a *matching* failure, where
+    /// characters were read but did not form a valid item.  Only the former
+    /// makes `scanf` return `EOF`; a matching failure returns the number of
+    /// items assigned so far, which is often zero.
+    ///
+    /// The distinction is not simply "are we at end of input": `sscanf("0x",
+    /// "%lf")` ends at end of input and still returns 0, because the directive
+    /// consumed `0x` before discovering there was no value there.  What makes
+    /// it an input failure is that *nothing was matched*, so the test is
+    /// whether everything consumed since the directive started was leading
+    /// whitespace — which no directive treats as part of its item.
+    fn stopped_at_end_of_input(&self, started_at: usize) -> bool {
+        if self.peek() != 0 {
+            return false;
+        }
+        (started_at..self.si).all(|i| {
+            // SAFETY: `i` is below `self.si`, so it names a byte this scan has
+            // already read from the caller's NUL-terminated string.
+            let byte = unsafe { *self.input.add(i) };
+            matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +357,9 @@ impl ScanCtx<'_, '_> {
 /// Main scan loop.
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
 fn scan_core(ctx: &mut ScanCtx<'_, '_>) -> i32 {
+    // Set when the scan stopped because the input ran out rather than because
+    // it held something that did not match.  Only the former yields EOF.
+    let mut input_failure = false;
     loop {
         let fc = ctx.fmt_peek();
         if fc == 0 {
@@ -357,6 +386,7 @@ fn scan_core(ctx: &mut ScanCtx<'_, '_>) -> i32 {
                 ctx.fmt_advance();
                 if ctx.peek() != b'%' {
                     // Input mismatch.
+                    input_failure = ctx.peek() == 0;
                     break;
                 }
                 ctx.advance();
@@ -423,53 +453,18 @@ fn scan_core(ctx: &mut ScanCtx<'_, '_>) -> i32 {
             }
             ctx.fmt_advance();
 
-            match conv {
-                b'd' => {
-                    if !scan_signed_int(ctx, suppress, width, long_mod) {
-                        break;
-                    }
-                }
-                b'i' => {
-                    // %i auto-detects base: 0x/0X → hex, 0 → octal, else decimal.
-                    if !scan_signed_int_auto(ctx, suppress, width, long_mod) {
-                        break;
-                    }
-                }
-                b'u' => {
-                    if !scan_unsigned_int(ctx, suppress, width, long_mod, 10) {
-                        break;
-                    }
-                }
-                b'x' | b'X' => {
-                    if !scan_unsigned_int(ctx, suppress, width, long_mod, 16) {
-                        break;
-                    }
-                }
-                b'o' => {
-                    if !scan_unsigned_int(ctx, suppress, width, long_mod, 8) {
-                        break;
-                    }
-                }
-                b's' => {
-                    if !scan_string(ctx, suppress, width) {
-                        break;
-                    }
-                }
-                b'c' => {
-                    if !scan_char(ctx, suppress, width, has_width) {
-                        break;
-                    }
-                }
-                b'[' => {
-                    if !scan_scanset(ctx, suppress, width) {
-                        break;
-                    }
-                }
-                b'f' | b'e' | b'g' | b'a' => {
-                    if !scan_float(ctx, suppress, width, long_mod) {
-                        break;
-                    }
-                }
+            let started_at = ctx.si;
+            let matched = match conv {
+                b'd' => scan_signed_int(ctx, suppress, width, long_mod),
+                // %i auto-detects base: 0x/0X → hex, 0 → octal, else decimal.
+                b'i' => scan_signed_int_auto(ctx, suppress, width, long_mod),
+                b'u' => scan_unsigned_int(ctx, suppress, width, long_mod, 10),
+                b'x' | b'X' => scan_unsigned_int(ctx, suppress, width, long_mod, 16),
+                b'o' => scan_unsigned_int(ctx, suppress, width, long_mod, 8),
+                b's' => scan_string(ctx, suppress, width),
+                b'c' => scan_char(ctx, suppress, width, has_width),
+                b'[' => scan_scanset(ctx, suppress, width),
+                b'f' | b'e' | b'g' | b'a' => scan_float(ctx, suppress, width, long_mod),
                 b'n' => {
                     // %n: store characters consumed so far.
                     if !suppress {
@@ -481,15 +476,19 @@ fn scan_core(ctx: &mut ScanCtx<'_, '_>) -> i32 {
                         }
                     }
                     // %n does NOT count toward assigned.
+                    true
                 }
-                _ => {
-                    // Unknown specifier — stop.
-                    break;
-                }
+                // Unknown specifier — stop.
+                _ => false,
+            };
+            if !matched {
+                input_failure = ctx.stopped_at_end_of_input(started_at);
+                break;
             }
         } else {
             // Literal character — must match input exactly.
             if ctx.peek() != fc {
+                input_failure = ctx.peek() == 0;
                 break;
             }
             ctx.advance();
@@ -497,8 +496,11 @@ fn scan_core(ctx: &mut ScanCtx<'_, '_>) -> i32 {
         }
     }
 
-    // Return assigned count, or EOF if nothing was assigned and input ended.
-    if ctx.assigned == 0 && ctx.peek() == 0 {
+    // EOF is reported only when the input ran out before anything matched;
+    // a directive that read characters and then found them unusable is a
+    // matching failure and reports the assignments made so far — zero,
+    // usually.  See `ScanCtx::stopped_at_end_of_input`.
+    if ctx.assigned == 0 && input_failure {
         -1 // EOF
     } else {
         ctx.assigned
@@ -858,9 +860,43 @@ fn match_word(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize, word: 
     true
 }
 
+/// Consume as much of `word` as the input matches, and report how much.
+///
+/// Unlike [`match_word`] this keeps a partial match.  Its one caller is the
+/// `infinity` extension of `inf`, which needs the longest-prefix rule:
+/// `"infi"` is a prefix of a matching sequence, so it belongs to the
+/// conversion even though the conversion then has no value to produce.
+fn match_prefix(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize, word: &[u8]) -> usize {
+    let mut k = 0usize;
+    for &want in word {
+        if count.wrapping_add(k) >= width {
+            break;
+        }
+        let c = ctx.peek_at(k);
+        if c == 0 || (c | 0x20) != want {
+            break;
+        }
+        k = k.wrapping_add(1);
+    }
+    ctx.si = ctx.si.wrapping_add(k);
+    *count = count.wrapping_add(k);
+    k
+}
+
+/// What [`scan_float_named`] found.
+enum NamedScan {
+    /// The input does not begin with `inf`/`nan`; try the digit grammar.
+    NotNamed,
+    /// A named value was matched and consumed.
+    Value(f64),
+    /// A partial `infinity` was consumed, which is a prefix of a matching
+    /// sequence but not one itself — a matching failure.
+    Failed,
+}
+
 /// Match `INF`/`INFINITY` or `NAN[(n-char-sequence)]`, as `strtod` does.
 #[allow(clippy::arithmetic_side_effects)]
-fn scan_float_named(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize) -> Option<f64> {
+fn scan_float_named(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize) -> NamedScan {
     if match_word(ctx, count, width, b"nan") {
         // The optional payload is consumed only if it is properly closed;
         // otherwise the '(' belongs to whatever comes next in the input.
@@ -882,22 +918,32 @@ fn scan_float_named(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize) 
                 k += 1;
             }
         }
-        return Some(f64::NAN);
+        return NamedScan::Value(f64::NAN);
     }
     if match_word(ctx, count, width, b"inf") {
-        // "infinity" extends "inf"; the longer match wins, and failing to
-        // match the rest simply leaves it in the input.
-        let _ = match_word(ctx, count, width, b"inity");
-        return Some(f64::INFINITY);
+        // "infinity" extends "inf", and the longest prefix of it wins.  Stop
+        // after zero extra characters and the item is "inf"; after all five
+        // and it is "infinity".  Anything in between — "infi", "infinit" — is
+        // a prefix of a matching sequence and so is consumed, but is not
+        // itself one, which makes it a matching failure.  Treating it as a
+        // plain "inf" instead would hand "ix" to the next conversion out of
+        // `sscanf("infix", "%lf%s", ...)`; glibc reports the failure.
+        let extra = match_prefix(ctx, count, width, b"inity");
+        if extra == 0 || extra == b"inity".len() {
+            return NamedScan::Value(f64::INFINITY);
+        }
+        return NamedScan::Failed;
     }
-    None
+    NamedScan::NotNamed
 }
 
-/// Match `digits[.digits][e[sign]digits]`, accumulating into `acc`.
+/// Scan the digits of a float into `acc`, honouring the field width.
 ///
-/// The conversion is left to the caller so it can round in the destination's
-/// own precision: `%f` must round to `f32` straight from the digits, because
-/// rounding to `f64` and narrowing afterwards rounds twice.
+/// Accepts either a decimal literal or a C99 hexadecimal one (`0x1.8p+3`).
+/// Returns false if there was no digit at all, in which case the caller has a
+/// matching failure.
+// `*count` only ever rises towards `width`, so it cannot overflow: the input
+// would have to be 2^64 bytes long first.
 #[allow(clippy::arithmetic_side_effects)]
 fn scan_float_digits(
     ctx: &mut ScanCtx<'_, '_>,
@@ -905,6 +951,12 @@ fn scan_float_digits(
     width: usize,
     acc: &mut crate::decfloat::DigitCollector,
 ) -> bool {
+    match scan_hex_float_digits(ctx, count, width, acc) {
+        HexScan::Converted => return true,
+        HexScan::Failed => return false,
+        HexScan::NotHex => {}
+    }
+
     let mut has_digits = false;
 
     while *count < width && ctx.peek().is_ascii_digit() {
@@ -929,40 +981,147 @@ fn scan_float_digits(
         return false;
     }
 
-    // Exponent.  Only consume the 'e'/sign prefix if actual exponent digits
-    // follow; otherwise leave them in the input (scanf consumes the longest
-    // *valid* prefix, and "1.5e" is not one — only "1.5" is).
-    if *count < width && (ctx.peek() == b'e' || ctx.peek() == b'E') {
-        let saved_si = ctx.si;
-        let saved_count = *count;
+    scan_float_exponent(ctx, count, width, acc, b'e');
+    true
+}
+
+/// What [`scan_hex_float_digits`] found.
+enum HexScan {
+    /// Not a hex literal; nothing was consumed and the decimal grammar
+    /// should be tried instead.
+    NotHex,
+    /// A hex literal was read into the collector.
+    Converted,
+    /// A `0x` prefix was consumed but no digit followed it, so there is no
+    /// value — a matching failure.
+    Failed,
+}
+
+/// Scan a `0x`-prefixed hexadecimal float, if that is what comes next.
+///
+/// `scanf` consumes the longest sequence that is *a prefix of* a matching
+/// input sequence, so unlike `strtod` it cannot back out of a `0x` once it has
+/// read it: `sscanf("0xz", "%lf", &v)` consumes `0x`, finds no digit and
+/// reports a matching failure rather than converting the `0` and leaving `xz`
+/// behind. That is the [`HexScan::Failed`] case.
+///
+/// The field width is different: it truncates the input rather than describing
+/// it, so a width that stops before the first hex digit means the literal was
+/// never there — `sscanf("0x1", "%2lf", &v)` converts `0` and leaves `x1`.
+// `*count` only ever rises towards `width`; see `scan_float_digits`.
+#[allow(clippy::arithmetic_side_effects)]
+fn scan_hex_float_digits(
+    ctx: &mut ScanCtx<'_, '_>,
+    count: &mut usize,
+    width: usize,
+    acc: &mut crate::decfloat::DigitCollector,
+) -> HexScan {
+    if ctx.peek() != b'0' || (ctx.peek_at(1) | 0x20) != b'x' {
+        return HexScan::NotHex;
+    }
+    // Where the first significant digit would be: after `0x`, or after a
+    // point that immediately follows it.
+    let probe = if ctx.peek_at(2) == b'.' { 3 } else { 2 };
+    let have_digit = ctx.peek_at(probe).is_ascii_hexdigit();
+
+    if !have_digit {
+        // No digit anywhere after the prefix.  Consuming `0x` is what the
+        // longest-prefix rule demands, and it leaves nothing to convert.
+        if width.saturating_sub(*count) < 2 {
+            return HexScan::NotHex;
+        }
+        ctx.advance();
+        ctx.advance();
+        *count += 2;
+        return HexScan::Failed;
+    }
+    if width.saturating_sub(*count) <= probe {
+        // The width stops short of the digit, so only the leading `0` is
+        // really in the field.
+        return HexScan::NotHex;
+    }
+
+    acc.set_hex();
+    ctx.advance();
+    ctx.advance();
+    *count += 2;
+
+    while *count < width && ctx.peek().is_ascii_hexdigit() {
+        acc.push_integer(ctx.peek());
         ctx.advance();
         *count += 1;
-        let exp_neg = ctx.peek() == b'-';
-        if (exp_neg || ctx.peek() == b'+') && *count < width {
+    }
+    if *count < width && ctx.peek() == b'.' {
+        ctx.advance();
+        *count += 1;
+        while *count < width && ctx.peek().is_ascii_hexdigit() {
+            acc.push_fraction(ctx.peek());
             ctx.advance();
             *count += 1;
         }
-        if *count < width && ctx.peek().is_ascii_digit() {
-            let mut exp_val: i32 = 0;
-            while *count < width && ctx.peek().is_ascii_digit() {
-                exp_val = exp_val
-                    .saturating_mul(10)
-                    .saturating_add(i32::from(ctx.peek().wrapping_sub(b'0')));
-                ctx.advance();
-                *count += 1;
-            }
-            acc.apply_exponent(if exp_neg {
-                exp_val.saturating_neg()
-            } else {
-                exp_val
-            });
-        } else {
-            ctx.si = saved_si;
-            *count = saved_count;
-        }
     }
 
-    true
+    scan_float_exponent(ctx, count, width, acc, b'p');
+    HexScan::Converted
+}
+
+/// Scan an optional `[marker][sign]digits` exponent and apply it to `acc`.
+///
+/// `marker` is the lowercase form; both cases are accepted.
+///
+/// The marker and its sign are consumed even when no digits follow them.  A
+/// directive takes the longest sequence that *is, or is a prefix of*, a
+/// matching sequence (C11 7.21.6.2p9), and `"1.5e+"` is a prefix of
+/// `"1.5e+1"`, so all of it belongs to this conversion.  The digits read
+/// before the marker still give a value, so `sscanf("1.5e", "%lf", &v)` yields
+/// 1.5 and leaves nothing behind — as glibc does.  Rolling the marker back
+/// instead would hand a stray `e` to the next directive.
+///
+/// The same rule is what makes a field width cut cleanly: with `%6lf` on
+/// `"0x1.8p+1"` the field is `"0x1.8p"`, and the trailing `p` is consumed
+/// because it was the width, not the input, that ended the exponent.
+// `*count` only ever rises towards `width`; see `scan_float_digits`.  The
+// exponent value itself accumulates with saturating arithmetic.
+#[allow(clippy::arithmetic_side_effects)]
+fn scan_float_exponent(
+    ctx: &mut ScanCtx<'_, '_>,
+    count: &mut usize,
+    width: usize,
+    acc: &mut crate::decfloat::DigitCollector,
+    marker: u8,
+) {
+    if *count >= width || (ctx.peek() | 0x20) != marker {
+        return;
+    }
+
+    ctx.advance();
+    *count += 1;
+
+    let mut exp_neg = false;
+    if *count < width && matches!(ctx.peek(), b'+' | b'-') {
+        exp_neg = ctx.peek() == b'-';
+        ctx.advance();
+        *count += 1;
+    }
+
+    let mut exp_val: i32 = 0;
+    let mut has_digits = false;
+    while *count < width && ctx.peek().is_ascii_digit() {
+        exp_val = exp_val
+            .saturating_mul(10)
+            .saturating_add(i32::from(ctx.peek().wrapping_sub(b'0')));
+        ctx.advance();
+        *count += 1;
+        has_digits = true;
+    }
+
+    if has_digits {
+        acc.apply_exponent(if exp_neg {
+            exp_val.saturating_neg()
+        } else {
+            exp_val
+        });
+    }
 }
 
 /// Raise `ERANGE` if a conversion said it was out of range, and pass the
@@ -1005,7 +1164,11 @@ fn scan_float(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, long_mod:
     }
 
     let mut acc = crate::decfloat::DigitCollector::new();
-    let named = scan_float_named(ctx, &mut count, width);
+    let named = match scan_float_named(ctx, &mut count, width) {
+        NamedScan::Value(v) => Some(v),
+        NamedScan::Failed => return false,
+        NamedScan::NotNamed => None,
+    };
     if named.is_none() && !scan_float_digits(ctx, &mut count, width, &mut acc) {
         return false;
     }
@@ -1738,6 +1901,87 @@ mod tests {
         assert_eq!(&word[..4], b"rest");
     }
 
+
+    // -----------------------------------------------------------------------
+    // %f with hexadecimal floats
+    //
+    // Expectations follow glibc, which was run on each of these inputs.  The
+    // two documented divergences are noted where they arise.
+    // -----------------------------------------------------------------------
+
+    /// Scan one `%lf` plus a trailing `%s`, and report `(n, value, rest)`.
+    fn scan_hex(input: &str, fmt: &[u8]) -> (i32, f64, String) {
+        let mut inp = input.as_bytes().to_vec();
+        inp.push(0);
+        let mut val: f64 = -1.0;
+        let mut word = [0u8; 32];
+        let args = [&raw mut val as u64, word.as_mut_ptr() as u64];
+        let n = sscanf_va(inp.as_ptr(), fmt.as_ptr(), &args);
+        let end = word.iter().position(|&b| b == 0).unwrap_or(word.len());
+        (n, val, String::from_utf8_lossy(&word[..end]).into_owned())
+    }
+
+    #[test]
+    fn scan_f_reads_hexadecimal_floats() {
+        assert_eq!(scan_hex("0x1.8p+1rest", b"%lf%s\0"), (2, 3.0, "rest".into()));
+        assert_eq!(scan_hex("0x1", b"%lf%s\0").1, 1.0);
+        assert_eq!(scan_hex("0X1P+3", b"%lf%s\0").1, 8.0);
+        assert_eq!(scan_hex("0x.8", b"%lf%s\0").1, 0.5);
+        assert_eq!(scan_hex("0x1.8", b"%lf%s\0").1, 1.5);
+        // 'e' is a hex digit, and the literal stops at the second 'x'.
+        assert_eq!(scan_hex("0x1e5", b"%lf%s\0").1, 485.0);
+        assert_eq!(scan_hex("0x1x", b"%lf%s\0"), (2, 1.0, "x".into()));
+    }
+
+    /// `scanf` consumes the longest sequence that is a *prefix* of a matching
+    /// one, so a `0x` with no digit after it is consumed and then fails —
+    /// it cannot back out the way `strtod` does.
+    #[test]
+    fn scan_f_fails_on_a_bare_hex_prefix() {
+        assert_eq!(scan_hex("0xz", b"%lf%s\0").0, 0);
+        assert_eq!(scan_hex("0x", b"%lf%s\0").0, 0);
+    }
+
+    /// A field width is a truncation of the input rather than a description of
+    /// it, so a width stopping before the first hex digit leaves an ordinary
+    /// decimal `0` with the `x` unread.
+    #[test]
+    fn scan_f_hex_respects_the_field_width() {
+        assert_eq!(scan_hex("0x1", b"%2lf%s\0"), (2, 0.0, "x1".into()));
+        assert_eq!(scan_hex("0x1", b"%1lf%s\0"), (2, 0.0, "x1".into()));
+        assert_eq!(scan_hex("0x1", b"%3lf%s\0"), (1, 1.0, String::new()));
+        // The width can also cut inside the literal.
+        assert_eq!(scan_hex("0x1.8p+1", b"%4lf%s\0"), (2, 1.0, "8p+1".into()));
+        assert_eq!(scan_hex("0x1.8p+1", b"%6lf%s\0"), (2, 1.5, "+1".into()));
+        assert_eq!(scan_hex("0x1p+1", b"%5lf%s\0"), (2, 1.0, "1".into()));
+    }
+
+    #[test]
+    fn scan_f_hex_is_correctly_rounded() {
+        // The same ties the strtod tests pin, reached through scanf.
+        assert_eq!(scan_hex("0x1.00000000000008p+0", b"%lf%s\0").1, 1.0);
+        assert_eq!(
+            scan_hex("0x1.00000000000018p+0", b"%lf%s\0").1,
+            f64::from_bits(1.0f64.to_bits() + 2)
+        );
+        assert_eq!(scan_hex("0x1p-1075", b"%lf%s\0").1, 0.0);
+        assert_eq!(scan_hex("0x1.8p-1075", b"%lf%s\0").1, f64::from_bits(1));
+        assert_eq!(scan_hex("0x1.fffffffffffffp+1023", b"%lf%s\0").1, f64::MAX);
+    }
+
+    /// `%f` without a length modifier stores an `f32`, rounded once from the
+    /// hex digits rather than narrowed from an `f64`.
+    #[test]
+    fn scan_f_hex_rounds_to_f32_directly() {
+        let mut inp = b"0x1.999999999999ap-4\0".to_vec();
+        inp.push(0);
+        let mut val: f32 = -1.0;
+        let args = [&raw mut val as u64];
+        let n = sscanf_va(inp.as_ptr(), b"%f\0".as_ptr(), &args);
+        assert_eq!(n, 1);
+        assert_eq!(val, 0.1f32);
+    }
+
     #[test]
     fn scan_f_is_correctly_rounded() {
         // Delegating to the exact converter means %lf reaches the ends of the
@@ -1813,8 +2057,11 @@ mod tests {
         assert_eq!(sscanf_va(b"1.25e34\0".as_ptr(), b"%6lf\0".as_ptr(), &args), 1);
         assert_eq!(c, 1250.0);
 
-        // Five characters reach "1.25e", which is not: the 'e' must be rolled
-        // back rather than swallowed, leaving "e34" for the next conversion.
+        // Five characters reach "1.25e", which is not — but the 'e' is still
+        // consumed, because a directive takes the longest sequence that is a
+        // *prefix* of a matching one and "1.25e" is a prefix of "1.25e3".  The
+        // value comes from the digits actually read, so "34" is what is left.
+        // (glibc agrees: n=2, d=1.25, rest "34".)
         let mut d: f64 = 0.0;
         let mut word = [0u8; 8];
         let args = [&raw mut d as u64, word.as_mut_ptr() as u64];
@@ -1823,7 +2070,74 @@ mod tests {
             2
         );
         assert_eq!(d, 1.25);
-        assert_eq!(&word[..3], b"e34");
+        assert_eq!(&word[..2], b"34");
+    }
+
+    /// The exponent marker is part of the item even when nothing follows it,
+    /// so it does not leak into the next conversion.  All of these were run
+    /// against glibc.
+    #[test]
+    fn scan_f_swallows_a_dangling_exponent_marker() {
+        assert_eq!(scan_hex("1.5e", b"%lf%s\0"), (1, 1.5, String::new()));
+        assert_eq!(scan_hex("1.5e+", b"%lf%s\0"), (1, 1.5, String::new()));
+        assert_eq!(scan_hex("1.5e-", b"%lf%s\0"), (1, 1.5, String::new()));
+        assert_eq!(scan_hex("1.5ex", b"%lf%s\0"), (2, 1.5, "x".into()));
+        assert_eq!(scan_hex("1.5e+x", b"%lf%s\0"), (2, 1.5, "x".into()));
+        assert_eq!(scan_hex("0x1.8p", b"%lf%s\0"), (1, 1.5, String::new()));
+        assert_eq!(scan_hex("0x1.8p+", b"%lf%s\0"), (1, 1.5, String::new()));
+        assert_eq!(scan_hex("0x1.8px", b"%lf%s\0"), (2, 1.5, "x".into()));
+    }
+
+    /// `inf` may be extended to `infinity`, and a *partial* extension is
+    /// consumed but has no value — a matching failure.  Checked against glibc.
+    #[test]
+    fn scan_f_rejects_a_partial_infinity() {
+        assert_eq!(scan_hex("infix", b"%lf%s\0").0, 0);
+        assert_eq!(scan_hex("infinit", b"%lf%s\0").0, 0);
+        assert_eq!(scan_hex("INFI", b"%lf%s\0").0, 0);
+        assert_eq!(scan_hex("infinity", b"%4lf%s\0").0, 0);
+        assert_eq!(scan_hex("infinity", b"%7lf%s\0").0, 0);
+        // A complete "inf" or "infinity" still converts, and a width that
+        // stops exactly at "inf" leaves the rest for the next conversion.
+        assert_eq!(scan_hex("infx", b"%lf%s\0"), (2, f64::INFINITY, "x".into()));
+        assert_eq!(
+            scan_hex("infinityx", b"%lf%s\0"),
+            (2, f64::INFINITY, "x".into())
+        );
+        assert_eq!(
+            scan_hex("infinity", b"%3lf%s\0"),
+            (2, f64::INFINITY, "inity".into())
+        );
+        assert_eq!(
+            scan_hex("infinity", b"%8lf%s\0"),
+            (1, f64::INFINITY, String::new())
+        );
+        // Too short to be even "inf"/"nan": nothing is consumed, so the
+        // digit grammar is tried and finds nothing.
+        assert_eq!(scan_hex("inf", b"%2lf%s\0").0, 0);
+        assert_eq!(scan_hex("nan", b"%2lf%s\0").0, 0);
+    }
+
+    /// EOF (-1) is reserved for an input failure — the input running out
+    /// before a directive matched anything.  A directive that read characters
+    /// and then found no value in them is a *matching* failure and reports the
+    /// assignment count, even though it too ends at end of input.
+    #[test]
+    fn scan_distinguishes_input_failure_from_matching_failure() {
+        // Nothing at all, or only whitespace: input failure.
+        assert_eq!(scan_hex("", b"%lf\0").0, -1);
+        assert_eq!(scan_hex("   ", b"%lf\0").0, -1);
+        assert_eq!(scan_hex("", b"%d\0").0, -1);
+        // A literal that never got its character is an input failure too.
+        assert_eq!(scan_hex("", b"x\0").0, -1);
+        assert_eq!(scan_hex("", b"%%\0").0, -1);
+        // Characters were read: matching failure, so 0 rather than EOF.
+        assert_eq!(scan_hex("0x", b"%lf\0").0, 0);
+        assert_eq!(scan_hex("+", b"%lf\0").0, 0);
+        assert_eq!(scan_hex("abc", b"%d\0").0, 0);
+        assert_eq!(scan_hex("a", b"%%\0").0, 0);
+        // An empty format assigns nothing but never reports EOF.
+        assert_eq!(scan_hex("", b"\0").0, 0);
     }
 
     #[test]

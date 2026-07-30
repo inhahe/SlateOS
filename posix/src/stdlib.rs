@@ -4573,6 +4573,121 @@ mod tests {
         unsafe { strtod(z.as_ptr(), core::ptr::null_mut()) }
     }
 
+
+    // -----------------------------------------------------------------------
+    // Hexadecimal floats (C99 7.20.1.3)
+    //
+    // Every expectation is glibc's own behaviour for the same input, captured
+    // by running the equivalent C program.  Hex is the exact form: the radix
+    // is a power of the base, so parsing is pure bit assembly with no base
+    // conversion, and %a output must read back bit-for-bit identical.
+    // -----------------------------------------------------------------------
+
+    /// Parse and report where the scan stopped.
+    fn parse_end(text: &str) -> (f64, usize) {
+        let mut z = text.as_bytes().to_vec();
+        z.push(0);
+        let mut end: *const u8 = core::ptr::null();
+        let v = unsafe { strtod(z.as_ptr(), &raw mut end) };
+        let consumed = if end.is_null() {
+            0
+        } else {
+            (end as usize).wrapping_sub(z.as_ptr() as usize)
+        };
+        (v, consumed)
+    }
+
+    #[test]
+    fn strtod_reads_hex_floats() {
+        assert_eq!(parse("0x1p+0"), 1.0);
+        assert_eq!(parse("0x1"), 1.0); // the binary exponent is optional
+        assert_eq!(parse("0X1P0"), 1.0);
+        assert_eq!(parse("0x1.8p+1"), 3.0);
+        assert_eq!(parse("0x.8p1"), 1.0); // a point may lead the significand
+        assert_eq!(parse("0x1.8"), 1.5);
+        assert_eq!(parse("0x0p+0"), 0.0);
+        assert_eq!(parse("-0x1.8p+0"), -1.5);
+        assert_eq!(parse("0xabcdefp0"), 11_259_375.0);
+        assert_eq!(parse("0xABCDEFp0"), 11_259_375.0);
+        // 'e' is a hex digit here, not an exponent marker.
+        assert_eq!(parse("0x1e5"), 485.0);
+        assert_eq!(parse("0x0.5p1"), 0.625);
+    }
+
+    #[test]
+    fn strtod_hex_rounds_ties_to_even() {
+        // Exactly one ulp below the tie, at the tie, and just above it.
+        assert_eq!(parse("0x1.00000000000008p+0"), 1.0); // tie, 1.0 is even
+        assert_eq!(
+            parse("0x1.00000000000018p+0"),
+            f64::from_bits(1.0f64.to_bits() + 2)
+        );
+        // Half of the least subnormal is a tie against zero.
+        assert_eq!(parse("0x1p-1075"), 0.0);
+        assert_eq!(parse("0x1.8p-1075"), f64::from_bits(1));
+        assert_eq!(parse("0x1p-1074"), f64::from_bits(1));
+        assert_eq!(parse("0x0.0000000000001p-1022"), f64::from_bits(1));
+    }
+
+    #[test]
+    fn strtod_hex_spans_the_whole_range() {
+        assert_eq!(parse("0x1.fffffffffffffp+1023"), f64::MAX);
+        assert_eq!(parse("0x1.fffffffffffff8p+1023"), f64::INFINITY);
+        assert_eq!(parse("0x1p+1024"), f64::INFINITY);
+        assert_eq!(parse("0x1p-1022"), f64::MIN_POSITIVE);
+        // Exponents far outside anything representable must saturate, not wrap.
+        assert_eq!(parse("0x1p1000000000000"), f64::INFINITY);
+        assert_eq!(parse("0x1p-1000000000000"), 0.0);
+        // 26 digits: past the 20 that are stored, so the rest ride the
+        // exponent.  16^25 is 2^100 exactly.
+        assert_eq!(parse("0x10000000000000000000000000p0"), 2f64.powi(100));
+    }
+
+    #[test]
+    fn strtod_backs_out_of_an_incomplete_hex_prefix() {
+        // "0x" with no digit is not a prefix at all: the subject sequence is
+        // the single "0" and the "x" is left for the caller.
+        assert_eq!(parse_end("0xg"), (0.0, 1));
+        assert_eq!(parse_end("0x"), (0.0, 1));
+        assert_eq!(parse_end("0x.p1"), (0.0, 1));
+        // A "p" with no digits is likewise not consumed.
+        assert_eq!(parse_end("0x1p"), (1.0, 3));
+        assert_eq!(parse_end("0x1pz"), (1.0, 3));
+        assert_eq!(parse_end("0x1.8p+1"), (3.0, 8));
+        assert_eq!(parse_end("0x1x"), (1.0, 3));
+    }
+
+    #[test]
+    fn strtod_hex_sets_erange_like_the_decimal_path() {
+        crate::errno::set_errno(0);
+        assert_eq!(parse("0x1p+1024"), f64::INFINITY);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+
+        crate::errno::set_errno(0);
+        assert_eq!(parse("0x1p-2000"), 0.0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+
+        crate::errno::set_errno(0);
+        assert_eq!(parse("0x1p+0"), 1.0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn strtof_reads_hex_floats_in_its_own_precision() {
+        let f = |text: &str| {
+            let mut z = text.as_bytes().to_vec();
+            z.push(0);
+            unsafe { strtof(z.as_ptr(), core::ptr::null_mut()) }
+        };
+        assert_eq!(f("0x1p+0"), 1.0f32);
+        assert_eq!(f("0x1.8p+1"), 3.0f32);
+        // Rounded to f32 straight from the digits, as glibc's strtof does.
+        assert_eq!(f("0x1.999999999999ap-4"), 0.1f32);
+        assert_eq!(f("0x1p+128"), f32::INFINITY);
+        assert_eq!(f("0x1p-149"), f32::from_bits(1));
+        assert_eq!(f("0x1p-150"), 0.0f32); // tie against zero, rounds down
+    }
+
     #[test]
     fn strtod_reaches_dbl_max() {
         // The old parser multiplied by 10^308 and overflowed to infinity.

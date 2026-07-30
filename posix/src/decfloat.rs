@@ -494,22 +494,29 @@ impl Decimal {
     }
 }
 
-/// Accumulates the decimal digits of a floating-point literal exactly.
+/// Accumulates the significant digits of a floating-point literal exactly.
 ///
-/// `strtod` and `scanf`'s `%f`/`%e`/`%g` read their input from different
-/// places — a C string and a scan context — but the digit bookkeeping is
-/// identical, and getting it subtly wrong is exactly how a parser loses
-/// precision.  Driving one collector from both keeps them in step.
+/// `strtod`, `wcstod` and `scanf`'s `%f`/`%e`/`%g` read their input from
+/// different places — a C string, a wide string and a scan context — but the
+/// digit bookkeeping is identical, and getting it subtly wrong is exactly how
+/// a parser loses precision.  Driving one collector from all of them keeps
+/// them in step.
 ///
-/// The value accumulated is exactly `digits * 10^exp10`.  Digits past
-/// [`MAX_PARSE_DIGITS`] are not stored — they cannot change which `f64` the
-/// input rounds to, only whether it lands on a tie — but they are still
-/// accounted for, either in the exponent or in the sticky bit.
+/// A literal is either decimal or hexadecimal, and the collector holds both:
+/// the value is `digits * 10^exp` for the first and `digits * 2^exp` for the
+/// second, where a hex digit moves the point by four bits rather than one
+/// decimal place.  Digits past the cap are not stored — they cannot change
+/// *which* value the input rounds to, only whether it lands on a rounding
+/// boundary — but they are still accounted for, either in the exponent or in
+/// the sticky bit.
 pub(crate) struct DigitCollector {
+    /// Significant digits as ASCII, most significant first.
     digits: [u8; MAX_PARSE_DIGITS],
     len: usize,
-    exp10: i32,
+    /// Power of ten for a decimal literal, power of two for a hex one.
+    exp: i32,
     truncated: bool,
+    hex: bool,
 }
 
 impl DigitCollector {
@@ -517,78 +524,152 @@ impl DigitCollector {
         Self {
             digits: [b'0'; MAX_PARSE_DIGITS],
             len: 0,
-            exp10: 0,
+            exp: 0,
             truncated: false,
+            hex: false,
         }
     }
 
-    /// Add a digit that appeared before the decimal point.
+    /// Switch to hexadecimal, on seeing a `0x` prefix.
+    ///
+    /// Must be called before any digit is pushed; the scanner does so as soon
+    /// as it commits to the hex grammar.
+    pub(crate) fn set_hex(&mut self) {
+        self.hex = true;
+    }
+
+    /// How many digits fit, and what one digit is worth in the exponent.
+    ///
+    /// Hex digits are capped far lower because they carry four bits each: 20
+    /// of them are 80 bits, already more than a significand plus its guard and
+    /// round bits, and unlike a decimal literal there is no base conversion
+    /// that could let a distant digit matter.
+    const fn shape(&self) -> (usize, i32) {
+        if self.hex {
+            (MAX_HEX_DIGITS, 4)
+        } else {
+            (MAX_PARSE_DIGITS, 1)
+        }
+    }
+
+    /// Add a digit that appeared before the point.
     ///
     /// One that does not fit still scales everything already stored, hence the
     /// exponent bump; only its own contribution is lost, to the sticky bit.
     pub(crate) fn push_integer(&mut self, ascii: u8) {
+        let (cap, step) = self.shape();
         if self.len == 0 && ascii == b'0' {
             // A leading zero contributes nothing at all.
-        } else if self.len < MAX_PARSE_DIGITS {
+        } else if self.len < cap {
             if let Some(slot) = self.digits.get_mut(self.len) {
                 *slot = ascii;
             }
             self.len = self.len.saturating_add(1);
         } else {
-            self.exp10 = self.exp10.saturating_add(1);
+            self.exp = self.exp.saturating_add(step);
             if ascii != b'0' {
                 self.truncated = true;
             }
         }
     }
 
-    /// Add a digit that appeared after the decimal point.
+    /// Add a digit that appeared after the point.
     ///
     /// Each stored digit moves the point one place right, and so does each
     /// leading zero that precedes the first significant digit.  A digit that
     /// does not fit sits entirely below the last stored one, so it is pure
     /// sticky and does not touch the exponent.
     pub(crate) fn push_fraction(&mut self, ascii: u8) {
+        let (cap, step) = self.shape();
         if self.len == 0 && ascii == b'0' {
-            self.exp10 = self.exp10.saturating_sub(1);
-        } else if self.len < MAX_PARSE_DIGITS {
+            self.exp = self.exp.saturating_sub(step);
+        } else if self.len < cap {
             if let Some(slot) = self.digits.get_mut(self.len) {
                 *slot = ascii;
             }
             self.len = self.len.saturating_add(1);
-            self.exp10 = self.exp10.saturating_sub(1);
+            self.exp = self.exp.saturating_sub(step);
         } else if ascii != b'0' {
             self.truncated = true;
         }
     }
 
-    /// Apply an explicit `e[+-]NN` exponent.
+    /// Apply an explicit `e[+-]NN` (decimal) or `p[+-]NN` (hex) exponent.
     pub(crate) fn apply_exponent(&mut self, exp: i32) {
-        self.exp10 = self.exp10.saturating_add(exp);
+        self.exp = self.exp.saturating_add(exp);
+    }
+
+    fn stored(&self) -> &[u8] {
+        self.digits.get(..self.len).unwrap_or(&[])
     }
 
     /// Round the accumulated value to the nearest `f64`, ties to even.
     ///
     /// Returns `(value, out_of_range)` as [`decimal_to_f64`] does.
     pub(crate) fn to_f64(&self) -> (f64, bool) {
-        decimal_to_f64(
-            self.digits.get(..self.len).unwrap_or(&[]),
-            self.exp10,
-            self.truncated,
-        )
+        if self.hex {
+            let (bits, oor) = hex_to_binary(self.stored(), self.exp, self.truncated, &F64_FORMAT);
+            (f64::from_bits(bits), oor)
+        } else {
+            decimal_to_f64(self.stored(), self.exp, self.truncated)
+        }
     }
 
     /// Round the accumulated value to the nearest `f32`, ties to even.
     ///
-    /// Rounds straight from the decimal rather than by way of `f64`; see
+    /// Rounds straight from the literal rather than by way of `f64`; see
     /// [`decimal_to_f32`] for why that distinction matters.
     pub(crate) fn to_f32(&self) -> (f32, bool) {
-        decimal_to_f32(
-            self.digits.get(..self.len).unwrap_or(&[]),
-            self.exp10,
-            self.truncated,
-        )
+        if self.hex {
+            let (bits, oor) = hex_to_binary(self.stored(), self.exp, self.truncated, &F32_FORMAT);
+            #[allow(clippy::cast_possible_truncation)]
+            (f32::from_bits(bits as u32), oor)
+        } else {
+            decimal_to_f32(self.stored(), self.exp, self.truncated)
+        }
     }
+}
+
+/// Largest number of significant hex digits that can affect the result.
+///
+/// Twenty digits are 80 bits: more than a `double`'s 53-bit significand plus
+/// the guard bit, with room to spare.  Anything past that can only tell the
+/// rounding whether the tail is nonzero, which is what the sticky bit is for.
+const MAX_HEX_DIGITS: usize = 20;
+
+/// Limbs needed for [`MAX_HEX_DIGITS`] digits: 80 bits fits in two.
+const HEX_LIMBS: usize = 2;
+
+/// The value of an ASCII hexadecimal digit.
+// The subtractions cannot wrap and the additions cannot overflow: each arm
+// has already established the range `ascii` is in.
+#[allow(clippy::arithmetic_side_effects)]
+const fn hex_val(ascii: u8) -> u64 {
+    match ascii {
+        b'0'..=b'9' => (ascii - b'0') as u64,
+        b'a'..=b'f' => (ascii - b'a' + 10) as u64,
+        b'A'..=b'F' => (ascii - b'A' + 10) as u64,
+        _ => 0,
+    }
+}
+
+/// Convert `digits * 2^exp2` — the digits being hexadecimal — to `fmt`.
+///
+/// Hexadecimal is where floating-point text becomes easy: sixteen is a power
+/// of two, so the digits *are* the bits and there is no base conversion at
+/// all.  The whole job is to assemble them into an integer and hand it to the
+/// same rounder the decimal path uses, which is what makes `%a` output read
+/// back bit-for-bit identical.
+///
+/// `truncated` is the sticky bit for digits the caller could not store.
+/// Returns `(bits, out_of_range)` as [`decimal_to_binary`] does.
+fn hex_to_binary(digits: &[u8], exp2: i32, truncated: bool, fmt: &Format) -> (u64, bool) {
+    let mut b = Big::<HEX_LIMBS>::from_u64(0);
+    for &d in digits {
+        b.mul_small(16);
+        b.add_small(hex_val(d));
+    }
+    round_to_binary(&b, exp2, truncated, fmt)
 }
 
 // ---------------------------------------------------------------------------
@@ -709,6 +790,25 @@ pub(crate) fn scan_float_token<S: ByteSource + ?Sized>(
         }
     }
 
+    // Hexadecimal: a `0x` significand with an optional `p` exponent.  C99
+    // requires `strtod` to accept this — it is how `%a` output reads back —
+    // and unlike a source-code constant the binary exponent is optional here.
+    //
+    // A `0x` not followed by a hex digit is not a prefix at all: the subject
+    // sequence is then just the `0`, and the `x` stays unconsumed.  Falling
+    // through to the decimal loop below produces exactly that.
+    if src.byte_at(i) == b'0' && (src.byte_at(i.wrapping_add(1)) | 0x20) == b'x' {
+        let after_x = i.wrapping_add(2);
+        let first = if src.byte_at(after_x) == b'.' {
+            after_x.wrapping_add(1)
+        } else {
+            after_x
+        };
+        if src.byte_at(first).is_ascii_hexdigit() {
+            return (FloatToken::Number, negative, scan_hex_body(src, acc, after_x));
+        }
+    }
+
     // Digits, collected exactly: no floating-point arithmetic happens until
     // the caller's single correctly-rounded conversion.
     let mut has_digits = false;
@@ -733,36 +833,77 @@ pub(crate) fn scan_float_token<S: ByteSource + ?Sized>(
         return (FloatToken::None, negative, 0);
     }
 
-    // Exponent.  Save the position before 'e' so it can be restored if no
-    // exponent digits follow (POSIX: 'e' without digits is not consumed).
-    let c = src.byte_at(i);
-    if c == b'e' || c == b'E' {
-        let before_exp = i;
-        i = i.wrapping_add(1);
-        let exp_neg = src.byte_at(i) == b'-';
-        if exp_neg || src.byte_at(i) == b'+' {
-            i = i.wrapping_add(1);
-        }
+    (FloatToken::Number, negative, scan_exponent(src, acc, i, b'e'))
+}
 
-        if src.byte_at(i).is_ascii_digit() {
-            let mut exp_val: i32 = 0;
-            while src.byte_at(i).is_ascii_digit() {
-                exp_val = exp_val
-                    .saturating_mul(10)
-                    .saturating_add(i32::from(src.byte_at(i).wrapping_sub(b'0')));
-                i = i.wrapping_add(1);
-            }
-            acc.apply_exponent(if exp_neg {
-                exp_val.saturating_neg()
-            } else {
-                exp_val
-            });
-        } else {
-            i = before_exp;
+/// Scan the body of a hex float after its `0x`, and return where it ended.
+///
+/// The caller has already checked that a hex digit follows, so there is no
+/// failure case: a hex float always has a subject sequence once the prefix is
+/// established.
+fn scan_hex_body<S: ByteSource + ?Sized>(
+    src: &S,
+    acc: &mut DigitCollector,
+    after_x: usize,
+) -> usize {
+    acc.set_hex();
+    let mut i = after_x;
+
+    while src.byte_at(i).is_ascii_hexdigit() {
+        acc.push_integer(src.byte_at(i));
+        i = i.wrapping_add(1);
+    }
+    if src.byte_at(i) == b'.' {
+        i = i.wrapping_add(1);
+        while src.byte_at(i).is_ascii_hexdigit() {
+            acc.push_fraction(src.byte_at(i));
+            i = i.wrapping_add(1);
         }
     }
 
-    (FloatToken::Number, negative, i)
+    scan_exponent(src, acc, i, b'p')
+}
+
+/// Scan an optional `[marker][sign]digits` exponent and apply it to `acc`.
+///
+/// `marker` is the lowercase form; both cases are accepted.  A marker with no
+/// digits after it is not part of the subject sequence at all — `"1e"`
+/// converts as `1` with the `e` left unconsumed — so the index rolls back.
+/// Returns where the scan ended.
+#[allow(clippy::arithmetic_side_effects)]
+fn scan_exponent<S: ByteSource + ?Sized>(
+    src: &S,
+    acc: &mut DigitCollector,
+    start: usize,
+    marker: u8,
+) -> usize {
+    let mut i = start;
+    if (src.byte_at(i) | 0x20) != marker {
+        return i;
+    }
+    i = i.wrapping_add(1);
+
+    let exp_neg = src.byte_at(i) == b'-';
+    if exp_neg || src.byte_at(i) == b'+' {
+        i = i.wrapping_add(1);
+    }
+    if !src.byte_at(i).is_ascii_digit() {
+        return start;
+    }
+
+    let mut exp_val: i32 = 0;
+    while src.byte_at(i).is_ascii_digit() {
+        exp_val = exp_val
+            .saturating_mul(10)
+            .saturating_add(i32::from(src.byte_at(i).wrapping_sub(b'0')));
+        i = i.wrapping_add(1);
+    }
+    acc.apply_exponent(if exp_neg {
+        exp_val.saturating_neg()
+    } else {
+        exp_val
+    });
+    i
 }
 
 /// Convert `digits * 10^exp10` to the nearest value of `fmt`, ties to even.

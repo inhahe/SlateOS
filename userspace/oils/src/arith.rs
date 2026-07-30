@@ -393,11 +393,15 @@ fn plain_decimal(t: &str) -> Option<i64> {
 /// Parse an arithmetic expression into an AST (no evaluation, no mutation).
 fn parse(expr: &str, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
     let mut p = AParser {
-        // bash deletes double quotes from an arithmetic expression before
-        // evaluating it: `$(( "3" + "4" ))` → 7 and `$(( 1"2"3 ))` → 123 (the
-        // quotes are removed, not treated as whitespace, so adjacent digits
-        // fuse). Single quotes stay literal (and thus an error, as in bash).
-        chars: expr.chars().filter(|&c| c != '"').collect(),
+        // Quotes reach here only if something *upstream* left them, and then
+        // they are ordinary (invalid) characters. It is the expansion pass in
+        // front of the evaluator that removes double quotes, not the evaluator:
+        // `$(( "3" + "4" ))` is 7 because expansion hands over `3 + 4`, while a
+        // value the evaluator reads for itself keeps them and is rejected —
+        // `x='"3"'; $(( x+1 ))` is `"3": syntax error: operand expected`, as is
+        // `let 'y="3"+4'`, whose argument no expansion pass ever saw. Single
+        // quotes are never removed by either.
+        chars: expr.chars().collect(),
         pos: 0,
         last_op_start: 0,
         last_atom_start: 0,
@@ -1561,17 +1565,27 @@ mod tests {
     }
 
     #[test]
-    fn double_quotes_are_stripped() {
-        // bash deletes double quotes from an arithmetic expression before
-        // evaluating: quoted operands and even quotes mid-number are removed.
-        assert_eq!(ev(r#""3" + "4""#), 7);
-        assert_eq!(ev(r#"2 + "3 * 4""#), 14);
-        assert_eq!(ev(r#""3"4"#), 34);
-        assert_eq!(ev(r#"1"2"3"#), 123);
-        assert_eq!(ev(r#"""+5"#), 5);
-        // Adjacent quoted numbers with no operator are still a syntax error
-        // (the quotes vanish but leave `3 4`).
-        assert!(eval(r#""3" "4""#, &mut Map::default()).is_err());
+    fn quotes_are_not_the_evaluators_to_remove() {
+        // It is the *expansion* pass in front of the evaluator that deletes
+        // double quotes, not the evaluator — so `$(( "3" + "4" ))` is 7 only
+        // because expansion hands over `3 + 4` (see
+        // `interp::tests::an_arithmetic_string_is_dequoted_by_whoever_expands_it`).
+        // Text the evaluator reads for itself keeps its quotes and is rejected,
+        // which is what makes `x='"3"'; $(( x+1 ))` and `let 'y="3"+4'` errors in
+        // bash where osh used to answer 4 and 7.
+        // A quote where an operand belongs is an unexpected operand…
+        for bad in [r#""3" + "4""#, r#""3""#, r#"'3'"#] {
+            let e = eval(bad, &mut Map::default()).unwrap_err();
+            assert_eq!(e.msg, "syntax error: operand expected", "{bad}");
+        }
+        // …and one after a complete operand is an unexpected *operator*, which is
+        // how bash words `1"2"3` too.
+        let e = eval(r#"1"2"3"#, &mut Map::default()).unwrap_err();
+        assert_eq!(e.msg, "syntax error: invalid arithmetic operator");
+        assert_eq!(e.token.as_deref(), Some(r#""2"3"#));
+        // The error token starts at the quote, so the diagnostic shows it.
+        let e = eval(r#"y="3"+4"#, &mut Map::default()).unwrap_err();
+        assert_eq!(e.token.as_deref(), Some(r#""3"+4"#));
     }
 
     #[test]

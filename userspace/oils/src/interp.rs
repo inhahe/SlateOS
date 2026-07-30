@@ -13215,11 +13215,27 @@ impl Shell {
     ///
     /// Tilde expansion is likewise not performed: `~` has no meaning in an
     /// arithmetic expression.
+    ///
+    /// A backslash escape is *not* the same thing as a single-quoted run here,
+    /// even though the lexer stores both as [`WordPart::SingleQuoted`]: the
+    /// backslash follows double-quoting's rules, so it disappears before a `$`,
+    /// `` ` ``, `"` or `\` and survives before anything else. `${a[\$n]}` is
+    /// therefore `$n: syntax error` (a literal `$` that did *not* expand), while
+    /// `${a[\1]}` is `\1: syntax error` — the backslash is still there.
     fn expand_to_arith_string(&mut self, w: &Word) -> String {
         let mut out = String::new();
         for part in &w.parts {
             match part {
                 WordPart::Literal(s) => out.push_str(s),
+                WordPart::SingleQuoted {
+                    text: s,
+                    escaped: true,
+                } => {
+                    if !matches!(s.as_str(), "$" | "`" | "\"" | "\\") {
+                        out.push('\\');
+                    }
+                    out.push_str(s);
+                }
                 WordPart::SingleQuoted { text: s, .. } => {
                     out.push('\'');
                     out.push_str(s);
@@ -13290,11 +13306,56 @@ impl Shell {
     /// identifiers (no `$`) are left for the arithmetic evaluator to resolve via
     /// `VarLookup`. Command substitutions and nested arithmetic must be expanded
     /// here (before evaluation) so `$(( $(f) + $((n-1)) ))` works.
+    ///
+    /// This pass also *dequotes*, because it is the only thing standing between
+    /// the raw section text and the evaluator, and bash's `expand_arith_string`
+    /// does both. The rules are double-quoting's: a `"` is removed outright (so
+    /// `(( "3" + "4" ))` is 7 and `(( 1"2"3 ))` is 123 — removed, not turned into
+    /// whitespace), a `'` is an ordinary character the evaluator will reject, and
+    /// a backslash escapes only what double quoting makes special. Leaving any of
+    /// that to the evaluator would be wrong twice over: the quote would show up in
+    /// the diagnostic, and `\$n` would expand instead of reaching the evaluator as
+    /// a literal `$n` for it to complain about.
     fn expand_arith_params(&mut self, expr: &str) -> String {
         let chars: Vec<char> = expr.chars().collect();
         let mut out = String::new();
         let mut i = 0;
         while i < chars.len() {
+            if chars[i] == '\\' {
+                match chars.get(i + 1) {
+                    // Line continuation — both characters disappear, so
+                    // `(( 1 + \<newline>2 ))` is 3.
+                    Some('\n') => i += 2,
+                    // The escape bites only before the characters double quoting
+                    // makes special. The backslash goes and what follows stays
+                    // *literal*, which is what stops `\$n` from expanding.
+                    Some(c @ ('$' | '`' | '"' | '\\')) => {
+                        out.push(*c);
+                        i += 2;
+                    }
+                    // Anywhere else the backslash is just a character, and
+                    // survives together with the one after it: `\q` stays `\q`.
+                    Some(c) => {
+                        out.push('\\');
+                        out.push(*c);
+                        i += 2;
+                    }
+                    None => {
+                        out.push('\\');
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            if chars[i] == '"' {
+                // Removed here rather than by the evaluator, so the text a
+                // diagnostic blames has no quotes in it. No open/closed state is
+                // needed: the rules inside and outside double quotes are the same
+                // in an arithmetic string — a `'` is literal either way, and
+                // expansion happens either way.
+                i += 1;
+                continue;
+            }
             if chars[i] == '`' {
                 // Backtick command substitution: consume up to the next backtick.
                 let start = i + 1;
@@ -40768,6 +40829,108 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -A m; m['two words']=w; m['1']=b; echo \"${m['two words']} ${m[1]} ${#m[@]}\"").0,
             "w b 2\n"
+        );
+    }
+
+    #[test]
+    fn an_arithmetic_string_is_dequoted_by_whoever_expands_it() {
+        // Removing double quotes is the *expansion* pass's job, not the
+        // evaluator's — the same split as BUG-OILS-ARITH-WHO-EXPANDS. So a
+        // `(( … ))` section, whose text the shell expands itself, loses its
+        // quotes…
+        assert_eq!(run("echo \"[$(( \"3\" + \"4\" ))] [$(( 1\"2\"3 ))]\"").0, "[7] [123]\n");
+        assert_eq!(run("q=7; (( \"q\" )); echo \"rc=$?\"").0, "rc=0\n");
+        // …while text the evaluator reads for *itself* keeps them and is
+        // rejected. osh used to filter quotes out inside the evaluator, so all
+        // four of these quietly answered a number.
+        let (o, _) = run("x='\"3\"'\n{ echo \"[$((x+1))]\"; } 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o,
+            "osh: \"3\": syntax error: operand expected (error token is \"\"3\"\")\nrc=1\n"
+        );
+        let (o2, _) = run("{ let 'y=\"3\"+4'; } 2>&1\necho \"rc=$? y=[$y]\"");
+        assert_eq!(
+            o2,
+            "osh: let: y=\"3\"+4: syntax error: operand expected (error token is \"\"3\"+4\")\nrc=1 y=[]\n"
+        );
+        let (o3, _) = run("{ declare -i k='\"3\"+4'; } 2>&1\necho \"rc=$? k=[$k]\"");
+        assert_eq!(
+            o3,
+            "osh: declare: \"3\"+4: syntax error: operand expected (error token is \"\"3\"+4\")\nrc=1 k=[]\n"
+        );
+        let (o4, _) = run("{ [[ '\"3\"' -eq 3 ]]; } 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o4,
+            "osh: [[: \"3\": syntax error: operand expected (error token is \"\"3\"\")\nrc=1\n"
+        );
+    }
+
+    #[test]
+    fn a_backslash_in_an_arithmetic_string_follows_double_quoting_rules() {
+        // A `(( … ))` section is raw text the shell expands itself, so it also
+        // has to *dequote* it — and the rules are double-quoting's: the escape
+        // bites only before `$`, a backtick, `"` or `\`. Before anything else the
+        // backslash is an ordinary character and stays.
+        //
+        // The `\$` case is the one that matters: the escape has to survive the
+        // expansion pass, so the evaluator receives a literal `$n` to complain
+        // about. osh used to expand it and hand over `\5`.
+        //
+        // Note the trailing space in every subject and error token below: the
+        // blank before `))` is part of the section's text, and neither the
+        // expansion pass nor the evaluator trims it before blaming it.
+        let (o, _) = run("n=5\n{ (( \\$n )); } 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o,
+            "osh: ((: $n : syntax error: operand expected (error token is \"$n \")\nrc=1\n"
+        );
+        // Quoting the same text cannot hide the escape, because the quotes are
+        // removed by the very pass that honours it.
+        let (o2, _) = run("n=5\n{ (( \"\\$n\" )); } 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o2,
+            "osh: ((: $n : syntax error: operand expected (error token is \"$n \")\nrc=1\n"
+        );
+        // `\"` leaves a literal quote behind, which the evaluator then rejects —
+        // the opposite of an unescaped `"1"`, which is index 1.
+        let (o3, _) = run("q=7\n{ (( \\\"q\\\" )); } 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o3,
+            "osh: ((: \"q\" : syntax error: operand expected (error token is \"\"q\" \")\nrc=1\n"
+        );
+        // A backtick escaped is not a command substitution.
+        let (o4, _) = run("{ (( \\`echo 1\\` )); } 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o4,
+            "osh: ((: `echo 1` : syntax error: operand expected (error token is \"`echo 1` \")\nrc=1\n"
+        );
+        // Before an ordinary character the backslash survives…
+        let (o5, _) = run("{ (( \\q )); } 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o5,
+            "osh: ((: \\q : syntax error: operand expected (error token is \"\\q \")\nrc=1\n"
+        );
+        // …and `\<newline>` is a line continuation, so it disappears entirely.
+        assert_eq!(run("(( 1 + \\\n2 )); echo \"rc=$?\"").0, "rc=0\n");
+        // A subscript is expanded the same way — and the lexer storing a
+        // backslash escape as a single-quoted segment must not leak that
+        // spelling into the diagnostic (osh used to blame `'$'n`).
+        let (o6, _) = run("a=(zero one)\nn=5\n{ echo \"[${a[\\$n]}]\"; } 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o6,
+            "osh: $n: syntax error: operand expected (error token is \"$n\")\nrc=1\n"
+        );
+        let (o7, _) = run("a=(zero one)\n{ echo \"[${a[\\1]}]\"; } 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o7,
+            "osh: \\1: syntax error: operand expected (error token is \"\\1\")\nrc=1\n"
+        );
+        // A genuine single-quoted run is still re-emitted with its quotes, which
+        // is what makes `a['1']` an error while `a[\1]` blames a backslash.
+        let (o8, _) = run("a=(zero one)\n{ echo \"[${a['1']}]\"; } 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o8,
+            "osh: '1': syntax error: operand expected (error token is \"'1'\")\nrc=1\n"
         );
     }
 

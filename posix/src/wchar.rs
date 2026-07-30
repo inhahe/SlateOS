@@ -1557,90 +1557,129 @@ pub unsafe extern "C" fn wcstoull(
     unsafe { wcstoul(nptr, endptr, base) }
 }
 
+/// A wide string as a source of bytes for the shared float scanner.
+///
+/// Every character a float literal can contain is ASCII, so a wide character
+/// outside that range can only end the subject sequence — reporting it as 0
+/// makes the scanner stop there, which is what it does for a terminator too.
+/// Because each accepted byte is exactly one wide character, an index into
+/// this source doubles as an index into the wide string.
+struct WideSource(*const WcharT);
+
+impl crate::decfloat::ByteSource for WideSource {
+    fn byte_at(&self, i: usize) -> u8 {
+        // SAFETY: the constructor's contract is that `self.0` is a valid
+        // null-terminated wide string, and the scanner stops at the first 0 it
+        // sees, so `i` never runs past the terminator.
+        let wc = unsafe { *self.0.add(i) };
+        if (1..0x80).contains(&wc) {
+            // Truncation is exact: the range check keeps this under 0x80.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                wc as u8
+            }
+        } else {
+            0
+        }
+    }
+}
+
 /// `wcstod` — convert a wide string to `f64`.
 ///
-/// Parses `[sign] digits [. digits] [e [sign] digits]`.  Uses a small
-/// byte buffer to convert the ASCII-range wide characters to a multibyte
-/// string, then delegates to `strtod`.
+/// Parses the same subject sequence as [`crate::stdlib::strtod`] — including
+/// `inf`, `infinity` and `nan(chars)` — by driving the same scanner over the
+/// wide characters, so the two cannot drift apart. The digits are collected
+/// exactly and rounded once, and there is no intermediate buffer to overflow:
+/// this used to copy at most 62 characters into a fixed array and silently
+/// truncate anything longer, turning `1.<70 digits>e300` into a wildly wrong
+/// value (BUG-POSIX-WCSTOD-TRUNCATED).
 ///
 /// # Safety
 ///
 /// `nptr` must point to a valid null-terminated wide string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn wcstod(nptr: *const WcharT, endptr: *mut *const WcharT) -> f64 {
-    if nptr.is_null() {
-        if !endptr.is_null() {
-            unsafe {
-                *endptr = nptr;
+    let mut acc = crate::decfloat::DigitCollector::new();
+    // SAFETY: forwarding this function's own contract.
+    let (token, negative) = unsafe { scan_wide_float(nptr, endptr, &mut acc) };
+    let value = match token {
+        crate::decfloat::FloatToken::None => return 0.0,
+        crate::decfloat::FloatToken::Nan => return f64::NAN,
+        crate::decfloat::FloatToken::Infinity => f64::INFINITY,
+        crate::decfloat::FloatToken::Number => {
+            let (v, out_of_range) = acc.to_f64();
+            if out_of_range {
+                crate::errno::set_errno(crate::errno::ERANGE);
             }
+            v
         }
-        return 0.0;
-    }
-
-    let mut i = unsafe { wc_skip_ws(nptr, 0) };
-    let start = i;
-
-    // Collect ASCII-range float characters into a byte buffer.
-    let mut buf = [0u8; 64];
-    let mut bi: usize = 0;
-
-    while bi < 62 {
-        let wc = unsafe { *nptr.add(i) };
-        if wc == 0 {
-            break;
-        }
-        match wc {
-            // '+', '-', '.', '0'-'9', 'E', 'e', plus 'i','n','f','a','t','y'
-            // for "inf"/"infinity"/"nan" parsing.
-            0x2b | 0x2d | 0x2e | 0x30..=0x39 | 0x45 | 0x65
-            | 0x49 | 0x69 | 0x4e | 0x6e | 0x46 | 0x66
-            | 0x41 | 0x61 | 0x54 | 0x74 | 0x59 | 0x79
-            | 0x28 | 0x29 // '(' and ')' for nan(payload)
-            => {
-                buf[bi] = wc as u8;
-                bi = bi.wrapping_add(1);
-                i = i.wrapping_add(1);
-            }
-            _ => break,
-        }
-    }
-    buf[bi] = 0;
-
-    if bi == 0 {
-        if !endptr.is_null() {
-            unsafe {
-                *endptr = nptr;
-            }
-        }
-        return 0.0;
-    }
-
-    let mut byte_end: *const u8 = core::ptr::null();
-    let val = unsafe { crate::stdlib::strtod(buf.as_ptr(), &raw mut byte_end) };
-
-    if !endptr.is_null() {
-        let bytes_consumed = if byte_end.is_null() {
-            0usize
-        } else {
-            unsafe { byte_end.offset_from(buf.as_ptr()) as usize }
-        };
-        unsafe {
-            *endptr = nptr.add(start.wrapping_add(bytes_consumed));
-        }
-    }
-
-    val
+    };
+    if negative { -value } else { value }
 }
 
 /// `wcstof` — convert a wide string to `f32`.
+///
+/// Rounds to `f32` directly rather than narrowing a `wcstod` result: two
+/// roundings are not one, and a value a hair above an `f32` midpoint can land
+/// exactly on that midpoint in `f64` and then be sent the wrong way by
+/// ties-to-even.
 ///
 /// # Safety
 ///
 /// `nptr` must point to a valid null-terminated wide string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcstof(nptr: *const WcharT, endptr: *mut *const WcharT) -> f32 {
-    unsafe { wcstod(nptr, endptr) as f32 }
+    let mut acc = crate::decfloat::DigitCollector::new();
+    // SAFETY: forwarding this function's own contract.
+    let (token, negative) = unsafe { scan_wide_float(nptr, endptr, &mut acc) };
+    let value = match token {
+        crate::decfloat::FloatToken::None => return 0.0,
+        crate::decfloat::FloatToken::Nan => return f32::NAN,
+        crate::decfloat::FloatToken::Infinity => f32::INFINITY,
+        crate::decfloat::FloatToken::Number => {
+            let (v, out_of_range) = acc.to_f32();
+            if out_of_range {
+                crate::errno::set_errno(crate::errno::ERANGE);
+            }
+            v
+        }
+    };
+    if negative { -value } else { value }
+}
+
+/// Scan a float subject sequence from a wide string and set `*endptr`.
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated wide string, and `endptr` either
+/// null or writable.
+unsafe fn scan_wide_float(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    acc: &mut crate::decfloat::DigitCollector,
+) -> (crate::decfloat::FloatToken, bool) {
+    if nptr.is_null() {
+        if !endptr.is_null() {
+            // SAFETY: the caller promises `endptr` is writable.
+            unsafe {
+                *endptr = nptr;
+            }
+        }
+        return (crate::decfloat::FloatToken::None, false);
+    }
+
+    let (token, negative, consumed) = crate::decfloat::scan_float_token(&WideSource(nptr), acc);
+
+    if !endptr.is_null() {
+        // SAFETY: the caller promises `endptr` is writable.  One accepted byte
+        // is one wide character, so `consumed` is a wide-character count, and
+        // it never passes the terminator because the scanner stops there.
+        unsafe {
+            *endptr = nptr.add(consumed);
+        }
+    }
+
+    (token, negative)
 }
 
 // ---------------------------------------------------------------------------
@@ -3322,6 +3361,131 @@ mod tests {
         let mut end: *const WcharT = core::ptr::null();
         let val = unsafe { wcstod(core::ptr::null(), &raw mut end) };
         assert_eq!(val, 0.0);
+    }
+
+    /// An ASCII string as a null-terminated wide string.
+    fn wide(text: &str) -> Vec<WcharT> {
+        let mut v: Vec<WcharT> = text.bytes().map(WcharT::from).collect();
+        v.push(0);
+        v
+    }
+
+    fn parse_wide(text: &str) -> f64 {
+        let s = wide(text);
+        unsafe { wcstod(s.as_ptr(), core::ptr::null_mut()) }
+    }
+
+    /// The old implementation copied the subject sequence into a `[u8; 64]`
+    /// and stopped after 62 characters, so a long literal lost its exponent
+    /// entirely and came back off by hundreds of orders of magnitude.
+    #[test]
+    fn wcstod_reads_a_number_longer_than_any_buffer() {
+        let text = "1.234567890123456789012345678901234567890123456789012345678901234567890e300";
+        assert!(text.len() > 62, "the test must exceed the old buffer");
+        assert_eq!(parse_wide(text), text.parse::<f64>().unwrap());
+
+        // 800 digits — past MAX_PARSE_DIGITS, so the sticky path runs too.
+        let mut long = String::from("1.");
+        for i in 0..800 {
+            long.push(char::from(b'0' + (i % 10) as u8));
+        }
+        long.push_str("e-5");
+        assert_eq!(parse_wide(&long), long.parse::<f64>().unwrap());
+    }
+
+    /// `endptr` must land after the whole number, however long it is.
+    #[test]
+    fn wcstod_places_endptr_after_a_long_number() {
+        let digits = "3.14159265358979323846264338327950288419716939937510582097e-40";
+        let s = wide(&format!("   {digits}xyz"));
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstod(s.as_ptr(), &raw mut end) };
+        assert_eq!(val, digits.parse::<f64>().unwrap());
+        // Three spaces plus the digits; the trailing "xyz" is not consumed.
+        assert_eq!(end, unsafe { s.as_ptr().add(3 + digits.len()) });
+    }
+
+    /// A non-ASCII wide character ends the subject sequence rather than being
+    /// truncated into some unrelated byte.
+    #[test]
+    fn wcstod_stops_at_a_non_ascii_character() {
+        let s: &[WcharT] = &[b'1' as i32, b'2' as i32, 0x00e9, b'3' as i32, 0];
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstod(s.as_ptr(), &raw mut end) };
+        assert_eq!(val, 12.0);
+        assert_eq!(end, unsafe { s.as_ptr().add(2) });
+    }
+
+    /// The named values go through the shared scanner, payload and all.
+    #[test]
+    fn wcstod_accepts_inf_and_nan() {
+        assert!(parse_wide("INFINITY").is_infinite() && parse_wide("INFINITY") > 0.0);
+        assert!(parse_wide("-inf").is_infinite() && parse_wide("-inf") < 0.0);
+        assert!(parse_wide("nan(0x7)").is_nan());
+
+        let s = wide("nan(0x7)tail");
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstod(s.as_ptr(), &raw mut end) };
+        assert!(val.is_nan());
+        assert_eq!(end, unsafe { s.as_ptr().add(8) });
+    }
+
+    /// Delegating to `wcstod` and narrowing rounded twice: this value sits a
+    /// quarter of an `f64` ulp above the midpoint between `1.0f32` and its
+    /// successor, so it must round *up*, but in `f64` it lands exactly on the
+    /// midpoint and ties-to-even then sends it back down to `1.0f32`.
+    #[test]
+    fn wcstof_rounds_once_not_twice() {
+        let text = "1.000000059604644830901776231257827021181583404541015625";
+        let s = wide(text);
+        let val = unsafe { wcstof(s.as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(val.to_bits(), 0x3f80_0001, "expected the successor of 1.0f32");
+        assert_eq!(val, text.parse::<f32>().unwrap());
+    }
+
+    /// The extremes of the range, which the old buffer could not even spell.
+    #[test]
+    fn wcstod_spans_the_whole_range() {
+        let dbl_max = "1.7976931348623157e308";
+        assert_eq!(parse_wide(dbl_max), f64::MAX);
+        // The smallest subnormal, written out in full: 751 characters.
+        let denorm_min = format!("{:.1074}", f64::from_bits(1));
+        assert!(denorm_min.len() > 700);
+        assert_eq!(parse_wide(&denorm_min), f64::from_bits(1));
+        assert_eq!(parse_wide("1e309"), f64::INFINITY);
+        assert_eq!(parse_wide("1e-400"), 0.0);
+    }
+
+    /// Rust's parser is correctly rounded, so it is the oracle.
+    #[test]
+    fn wcstod_matches_rusts_parser_over_a_sweep() {
+        let mut seed: u64 = 0x5eed_1234_9abc_def0;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..4000 {
+            let digits = 1 + (next() % 40) as usize;
+            let mut text = String::new();
+            for _ in 0..digits {
+                text.push(char::from(b'0' + (next() % 10) as u8));
+            }
+            text.push('.');
+            for _ in 0..digits {
+                text.push(char::from(b'0' + (next() % 10) as u8));
+            }
+            let exp = (next() % 61) as i32 - 30;
+            text.push_str(&format!("e{exp}"));
+
+            let expected: f64 = text.parse().unwrap();
+            assert_eq!(parse_wide(&text), expected, "wcstod({text})");
+
+            let s = wide(&text);
+            let got32 = unsafe { wcstof(s.as_ptr(), core::ptr::null_mut()) };
+            assert_eq!(got32, text.parse::<f32>().unwrap(), "wcstof({text})");
+        }
     }
 
     // -----------------------------------------------------------------------

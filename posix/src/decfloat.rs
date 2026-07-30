@@ -591,6 +591,180 @@ impl DigitCollector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Subject-sequence scanner
+// ---------------------------------------------------------------------------
+
+/// A source of bytes for [`scan_float_token`].
+///
+/// `strtod` reads a C string and `wcstod` a wide one, but the grammar they
+/// accept is identical and only the fetch differs.  Indices count *elements* of
+/// the source, so a caller can turn the returned length straight into a pointer
+/// offset.  A wide character outside ASCII reports as 0 and thereby ends the
+/// subject sequence, exactly as a terminator does — no float syntax uses one.
+pub(crate) trait ByteSource {
+    /// The byte at `i`, or 0 at and past the end of the string.
+    fn byte_at(&self, i: usize) -> u8;
+}
+
+/// What a floating-point subject sequence turned out to be.
+///
+/// `strtod`, `strtof` and `wcstod` differ only in the format they round to, so
+/// the scan is shared and each finishes it in its own precision.  Rounding to
+/// `f64` and narrowing afterwards would round twice, which is not the same as
+/// rounding once — see [`decimal_to_f32`].
+pub(crate) enum FloatToken {
+    /// No valid subject sequence.
+    None,
+    Nan,
+    Infinity,
+    /// Digits, accumulated into the caller's collector.
+    Number,
+}
+
+/// ASCII whitespace, the set `strtod` skips before the subject sequence.
+const fn is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+/// Scan a `strtod` subject sequence and report what it was.
+///
+/// Accepts `[whitespace][sign]` followed by `digits[.digits][e[sign]digits]`,
+/// `inf`/`infinity`, or `nan[(n-char-sequence)]`, the last two
+/// case-insensitively.  Hex floats (`0x1p3`) are not supported.
+///
+/// Returns `(token, negative, consumed)`.  `consumed` counts the elements that
+/// belong to the subject sequence, and is 0 when there was none, which is
+/// exactly where C says `*endptr` should land in each case.  The sign is
+/// reported rather than applied so the caller negates in its own precision,
+/// and the digits go into `acc` without being converted here.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
+pub(crate) fn scan_float_token<S: ByteSource + ?Sized>(
+    src: &S,
+    acc: &mut DigitCollector,
+) -> (FloatToken, bool, usize) {
+    let mut i: usize = 0;
+
+    // Skip whitespace.
+    while is_space(src.byte_at(i)) {
+        i = i.wrapping_add(1);
+    }
+
+    // Sign.
+    let negative = src.byte_at(i) == b'-';
+    if negative || src.byte_at(i) == b'+' {
+        i = i.wrapping_add(1);
+    }
+
+    // "inf", "infinity", "nan" (case-insensitive).  Bytes are compared one at
+    // a time and never past a terminator, which could sit at the end of a
+    // mapped page.
+    let c0 = src.byte_at(i);
+    if c0 == 0 {
+        // Empty subject string — fall through to digit parsing.
+    } else if (c0 | 0x20) == b'i' {
+        let c1 = src.byte_at(i.wrapping_add(1));
+        if c1 != 0 {
+            let c2 = src.byte_at(i.wrapping_add(2));
+            if c2 != 0 && (c1 | 0x20) == b'n' && (c2 | 0x20) == b'f' {
+                i = i.wrapping_add(3);
+                // "infinity" extends "inf"; the longer match wins, but a
+                // partial one must leave its bytes in place.
+                let inity: [u8; 5] = *b"inity";
+                let mut j: usize = 0;
+                let mut all_match = true;
+                while j < 5 {
+                    let ch = src.byte_at(i.wrapping_add(j));
+                    let expected = inity.get(j).copied().unwrap_or(0);
+                    if ch == 0 || (ch | 0x20) != expected {
+                        all_match = false;
+                        break;
+                    }
+                    j = j.wrapping_add(1);
+                }
+                if all_match {
+                    i = i.wrapping_add(5);
+                }
+                return (FloatToken::Infinity, negative, i);
+            }
+        }
+    } else if (c0 | 0x20) == b'n' {
+        let c1 = src.byte_at(i.wrapping_add(1));
+        if c1 != 0 {
+            let c2 = src.byte_at(i.wrapping_add(2));
+            if c2 != 0 && (c1 | 0x20) == b'a' && (c2 | 0x20) == b'n' {
+                i = i.wrapping_add(3);
+                // Skip the optional (chars) payload per C99.
+                if src.byte_at(i) == b'(' {
+                    let mut j = i.wrapping_add(1);
+                    while src.byte_at(j) != 0 && src.byte_at(j) != b')' {
+                        j = j.wrapping_add(1);
+                    }
+                    if src.byte_at(j) == b')' {
+                        i = j.wrapping_add(1);
+                    }
+                }
+                return (FloatToken::Nan, negative, i);
+            }
+        }
+    }
+
+    // Digits, collected exactly: no floating-point arithmetic happens until
+    // the caller's single correctly-rounded conversion.
+    let mut has_digits = false;
+
+    while src.byte_at(i).is_ascii_digit() {
+        acc.push_integer(src.byte_at(i));
+        has_digits = true;
+        i = i.wrapping_add(1);
+    }
+
+    if src.byte_at(i) == b'.' {
+        i = i.wrapping_add(1);
+        while src.byte_at(i).is_ascii_digit() {
+            acc.push_fraction(src.byte_at(i));
+            has_digits = true;
+            i = i.wrapping_add(1);
+        }
+    }
+
+    if !has_digits {
+        // No conversion performed: the caller leaves `*endptr` at the start.
+        return (FloatToken::None, negative, 0);
+    }
+
+    // Exponent.  Save the position before 'e' so it can be restored if no
+    // exponent digits follow (POSIX: 'e' without digits is not consumed).
+    let c = src.byte_at(i);
+    if c == b'e' || c == b'E' {
+        let before_exp = i;
+        i = i.wrapping_add(1);
+        let exp_neg = src.byte_at(i) == b'-';
+        if exp_neg || src.byte_at(i) == b'+' {
+            i = i.wrapping_add(1);
+        }
+
+        if src.byte_at(i).is_ascii_digit() {
+            let mut exp_val: i32 = 0;
+            while src.byte_at(i).is_ascii_digit() {
+                exp_val = exp_val
+                    .saturating_mul(10)
+                    .saturating_add(i32::from(src.byte_at(i).wrapping_sub(b'0')));
+                i = i.wrapping_add(1);
+            }
+            acc.apply_exponent(if exp_neg {
+                exp_val.saturating_neg()
+            } else {
+                exp_val
+            });
+        } else {
+            i = before_exp;
+        }
+    }
+
+    (FloatToken::Number, negative, i)
+}
+
 /// Convert `digits * 10^exp10` to the nearest value of `fmt`, ties to even.
 ///
 /// `digits` holds the ASCII decimal digits of the significant part; `exp10` is

@@ -106,13 +106,224 @@ pub enum Expansion {
     NotFound(String),
 }
 
-/// Split a command into words the way history expansion counts them.
+/// readline's `history_word_delimiters` — what ends a word when nothing is
+/// quoting it. Note that it holds the shell's operator characters as well as
+/// whitespace, which is why an operator becomes a word of its own.
+const WORD_DELIMITERS: &[u8] = b" \t\n;&()|<>";
+
+/// The characters which, immediately followed by `(`, open a span that readline
+/// scans through to the matching `)`: command and process substitution and the
+/// extended-glob groups.
+const SUBST_OPENERS: &[u8] = b"<>$!@?+*";
+
+/// The byte at `i`, or `None` past the end.
 ///
-/// This is a deliberately simple whitespace split rather than a real lex: the
-/// words are being sliced out of an already-recorded command line, and bash's
-/// own word designators operate on the same shallow notion.
+/// Every character the tokenizer tests for is ASCII, and no byte of a
+/// multi-byte UTF-8 sequence is ever ASCII, so scanning bytes can neither match
+/// inside a character nor split one: the indices handed back to [`words`] are
+/// always character boundaries.
+fn byte_at(s: &[u8], i: usize) -> Option<u8> {
+    s.get(i).copied()
+}
+
+/// Split a command into words the way history expansion counts them — a port of
+/// readline's `history_tokenize_word`, which is what `!!:1`, `!$`, `!*` and the
+/// rest are numbering.
+///
+/// This is emphatically *not* a whitespace split. `history_word_delimiters`
+/// includes the shell's operator characters, so each operator is a word of its
+/// own, and the scanner knows enough shell syntax to keep quoted and
+/// substituted spans intact. The rules below were measured against bash 5.2
+/// rather than read off the source, because several of them are surprising:
+///
+/// * `(`, `)` and a newline are always one-character words, wherever they sit.
+/// * A doubled operator is one two-character word — so `;;;` is `;;` then `;`,
+///   and `&&&&` is `&&` then `&&`. `<<<` and `<<-` are three characters, but
+///   `>>-` is `>>` then `-`, since the third-character rule is `<`-only.
+/// * `>&`, `<&`, `&>` and `>|` absorb trailing digits and `-`, so `2>&1` and
+///   `>&-` are each one word, and `>&12y` is `>&12` then `y`.
+/// * Its neighbours are *not* grouped: `<>`, `<|`, `&<`, `&|`, `|&`, `;&` and
+///   `;|` all split.
+/// * A leading digit run counts as a file descriptor only at the start of a
+///   word and only before `<` or `>`: `2>&1` is one word but `a2>b` is `a2`,
+///   `>`, `b`, and `12ab;c` is `12ab`, `;`, `c`.
+/// * `'…'`, `"…"`, `` `…` ``, `$'…'`, `$"…"` and `$( … )` protect delimiters
+///   and keep their quotes; an unterminated one swallows the rest of the line.
+///   `${ … }` does *not* protect, so `${a;b}` is `${a`, `;`, `b}`.
+/// * A `#` that starts a word ends the line: `echo a # b c` has two words.
 fn words(s: &str) -> Vec<&str> {
-    s.split_whitespace().collect()
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    loop {
+        // Only spaces and tabs are skipped between words; a newline is a word.
+        while matches!(byte_at(bytes, i), Some(b' ' | b'\t')) {
+            i = i.saturating_add(1);
+        }
+        // `history_comment_char` at the start of a word ends the tokenization
+        // outright — the rest of the line is not words at all. One inside a
+        // word (`a' #'b`) is just a character, since this test is only reached
+        // between words.
+        if matches!(byte_at(bytes, i), None | Some(b'#')) {
+            return out;
+        }
+        let start = i;
+        i = tokenize_word(bytes, start);
+        // Every branch of `tokenize_word` consumes at least one byte, but a
+        // zero-width word would spin forever, so refuse to accept one.
+        if i <= start {
+            return out;
+        }
+        if let Some(w) = s.get(start..i) {
+            out.push(w);
+        }
+    }
+}
+
+/// Scan the one word starting at `start`, returning the index just past it.
+fn tokenize_word(s: &[u8], start: usize) -> usize {
+    let mut i = start;
+
+    // `(`, `)` and a newline stand alone.
+    if matches!(byte_at(s, i), Some(b'(' | b')' | b'\n')) {
+        return i.saturating_add(1);
+    }
+
+    // A leading digit run is a file descriptor when a redirection follows it.
+    // Either way the scan resumes at the first non-digit, which is why the rule
+    // fires only at the start of a word: in `a2>b` the digit is reached by the
+    // ordinary scan below and gets no special treatment.
+    if byte_at(s, i).is_some_and(|c| c.is_ascii_digit()) {
+        let mut j = i;
+        while byte_at(s, j).is_some_and(|c| c.is_ascii_digit()) {
+            j = j.saturating_add(1);
+        }
+        // Digits running to the end of the line are the whole word.
+        if byte_at(s, j).is_none() {
+            return j;
+        }
+        i = j;
+        if !matches!(byte_at(s, j), Some(b'<' | b'>')) {
+            return scan_word(s, i);
+        }
+    }
+
+    // The operators. Anything not matched here falls through to `scan_word`,
+    // which will stop at it as a delimiter if it is one.
+    if let Some(c) = byte_at(s, i).filter(|c| b"<>;&|".contains(c)) {
+        let peek = byte_at(s, i.saturating_add(1));
+        // A lone `<` or `>` before `(` is process substitution, and the ordinary
+        // scan takes it through the matching `)`. Only a lone one: `>>(`, `<<(`
+        // and `>&(` all keep their operator reading and leave the `(` behind as
+        // a word. The other operators are not substitution openers at all, so
+        // `&(`, `;(` and `|(` split too.
+        if SUBST_OPENERS.contains(&c) && peek == Some(b'(') {
+            return scan_word(s, i);
+        }
+        if peek == Some(c) {
+            // A third character joins a doubled `<` only — `<<<` and `<<-` are
+            // here-document operators, while `>>-` is `>>` and then a `-`.
+            if c == b'<' && matches!(byte_at(s, i.saturating_add(2)), Some(b'-' | b'<')) {
+                i = i.saturating_add(1);
+            }
+            return i.saturating_add(2);
+        }
+        // The pairs that name a file descriptor, and so absorb one.
+        if matches!((c, peek), (b'&', Some(b'>')) | (b'>', Some(b'&' | b'|')) | (b'<', Some(b'&'))) {
+            i = i.saturating_add(2);
+            while byte_at(s, i).is_some_and(|c| c.is_ascii_digit() || c == b'-') {
+                i = i.saturating_add(1);
+            }
+            return i;
+        }
+        return i.saturating_add(1);
+    }
+
+    scan_word(s, i)
+}
+
+/// Scan an ordinary word from `i` — readline's `get_word` tail, which tracks
+/// one open span at a time and stops at the first unquoted delimiter.
+fn scan_word(s: &[u8], mut i: usize) -> usize {
+    // The byte that will close the span we are in, and — for `$( … )` — the
+    // matching opener, so that a nested one can be counted.
+    let mut delimiter: Option<u8> = None;
+    let mut delimopen: Option<u8> = None;
+    let mut nestdelim = 0usize;
+
+    // A word that begins with a quote opens it immediately.
+    if let Some(q) = byte_at(s, i).filter(|c| matches!(c, b'\'' | b'"' | b'`')) {
+        delimiter = Some(q);
+        i = i.saturating_add(1);
+    }
+
+    while let Some(c) = byte_at(s, i) {
+        // A `\<newline>` is a continuation, and both characters belong to the
+        // word. (A newline closes no span, so this needs no quote test.)
+        if c == b'\\' && byte_at(s, i.saturating_add(1)) == Some(b'\n') {
+            i = i.saturating_add(2);
+            continue;
+        }
+        // Elsewhere a backslash escapes whatever follows — except inside `'…'`,
+        // where nothing does. (readline also tests `slashify_in_quotes` for the
+        // `"…"` case, but it tests the *backslash*, which is always a member,
+        // so that arm never fires; and the only character whose escaping is
+        // observable inside `"…"` is the closing `"`, which is a member anyway.)
+        if c == b'\\' && delimiter != Some(b'\'') {
+            i = i.saturating_add(2);
+            continue;
+        }
+        // `$( … )` and friends. Quotes win, so this is inert inside `'…'` and
+        // `"…"` — but one *inside* such a span nests, which is what keeps
+        // `$(a $(b;c) d)` a single word.
+        if (delimiter.is_none() || delimiter == Some(b')'))
+            && SUBST_OPENERS.contains(&c)
+            && byte_at(s, i.saturating_add(1)) == Some(b'(')
+        {
+            delimopen = Some(b'(');
+            delimiter = Some(b')');
+            nestdelim = nestdelim.saturating_add(1);
+            // readline steps past the two-character opener and *then* takes its
+            // loop's own increment, so the character right after `$(` is never
+            // examined. That is not cosmetic: it is exactly why `$((a;b))` ends
+            // at the first `)` — the inner `(` is skipped, so it never nests —
+            // while in `$(a (b;c) d)` the `(` *is* seen and does.
+            i = i.saturating_add(3);
+            continue;
+        }
+        // A second opener inside `$( … )` deepens it.
+        if delimiter.is_some() && Some(c) == delimopen {
+            nestdelim = nestdelim.saturating_add(1);
+            i = i.saturating_add(1);
+            continue;
+        }
+        if Some(c) == delimiter {
+            nestdelim = nestdelim.saturating_sub(1);
+            if nestdelim == 0 {
+                delimiter = None;
+                delimopen = None;
+            }
+            i = i.saturating_add(1);
+            continue;
+        }
+        if delimiter.is_none() {
+            if WORD_DELIMITERS.contains(&c) {
+                break;
+            }
+            // A quote opened mid-word protects up to its close, and stays part
+            // of the word: `a'b;c'd` is one word, quotes and all.
+            if matches!(c, b'\'' | b'"' | b'`') {
+                delimiter = Some(c);
+                delimopen = None;
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    // Two branches above step over more than one byte, so a line ending mid-way
+    // through a `\x` or a `$(` leaves `i` past the end. bash keeps the truncated
+    // word (`echo $(` has two words, the second `$(`), so clamp rather than let
+    // the caller's slice fail and drop it.
+    i.min(s.len())
 }
 
 /// Apply a `:h`/`:t`/`:r`/`:e` pathname modifier.
@@ -339,15 +550,11 @@ fn apply_modifiers(
                 print_only = true;
                 i = j.saturating_add(1);
             }
-            // `:q` quotes the result as one word, `:x` as one word per
-            // whitespace-separated field, so a later expansion pass leaves it
-            // alone. bash uses single quotes for both.
+            // `:q` quotes the result as one word; `:x` quotes it so that its
+            // whitespace still separates words. Either way a later expansion
+            // pass leaves the text alone. bash uses single quotes for both.
             Some(&c @ ('q' | 'x')) => {
-                text = if c == 'q' {
-                    single_quote(&text)
-                } else {
-                    words(&text).iter().map(|w| single_quote(w)).collect::<Vec<_>>().join(" ")
-                };
+                text = if c == 'q' { single_quote(&text) } else { quote_breaks(&text) };
                 i = j.saturating_add(1);
             }
             Some('s') => {
@@ -408,6 +615,32 @@ fn single_quote(s: &str) -> String {
             out.push_str("'\\''");
         } else {
             out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Quote `s` the way `:x` does — readline's `quote_breaks`.
+///
+/// This looks like "quote each word" and is not: the *whole* string gets one
+/// pair of single quotes, and each whitespace character is individually lifted
+/// back out of them. On `a b` the two readings agree (`'a' 'b'`), but they part
+/// company as soon as the text is less tidy — `a  b` becomes `'a' '' 'b'`, a
+/// tab stays a tab, and `a;b` stays the single item `'a;b'` even though
+/// [`words`] would split it in three. Measured against bash 5.2.
+fn quote_breaks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().saturating_add(2));
+    out.push('\'');
+    for c in s.chars() {
+        match c {
+            '\'' => out.push_str("'\\''"),
+            ' ' | '\t' | '\n' => {
+                out.push('\'');
+                out.push(c);
+                out.push('\'');
+            }
+            _ => out.push(c),
         }
     }
     out.push('\'');
@@ -746,6 +979,134 @@ mod tests {
 
     fn hist(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// Every expectation here was measured against bash 5.2 by recording the
+    /// line and reading back `!!:0`, `!!:1`, … until the specifier went bad.
+    #[test]
+    fn words_are_readlines_history_tokens_not_a_whitespace_split() {
+        // The base case: operators are words, a quoted span is not split.
+        assert_eq!(
+            words(": a=(x y z) b<c d|e f&&g h>>i \"s t\" j&k"),
+            vec![
+                ":", "a=", "(", "x", "y", "z", ")", "b", "<", "c", "d", "|", "e", "f", "&&", "g",
+                "h", ">>", "i", "\"s t\"", "j", "&", "k"
+            ]
+        );
+
+        // Doubled operators group; a third character joins only a doubled `<`.
+        assert_eq!(words("a;;;b"), vec!["a", ";;", ";", "b"]);
+        assert_eq!(words("a&&&&b"), vec!["a", "&&", "&&", "b"]);
+        assert_eq!(words("a<<<b"), vec!["a", "<<<", "b"]);
+        assert_eq!(words("a<<-b"), vec!["a", "<<-", "b"]);
+        assert_eq!(words("a>>-b"), vec!["a", ">>", "-b"]);
+
+        // The file-descriptor pairs absorb digits and `-`; their neighbours do
+        // not group at all.
+        assert_eq!(words("cmd 2>&1"), vec!["cmd", "2>&1"]);
+        assert_eq!(words("cmd >&12y"), vec!["cmd", ">&12", "y"]);
+        assert_eq!(words("cmd >&-"), vec!["cmd", ">&-"]);
+        assert_eq!(words("a<>b"), vec!["a", "<", ">", "b"]);
+        assert_eq!(words("a|&b"), vec!["a", "|", "&", "b"]);
+        assert_eq!(words("a;&b"), vec!["a", ";", "&", "b"]);
+        assert_eq!(words("a&<b"), vec!["a", "&", "<", "b"]);
+
+        // A digit run is a file descriptor only at the start of a word.
+        assert_eq!(words("a2>b"), vec!["a2", ">", "b"]);
+        assert_eq!(words("12ab;c"), vec!["12ab", ";", "c"]);
+        assert_eq!(words("12"), vec!["12"]);
+
+        // Quoting protects delimiters and stays in the word.
+        assert_eq!(words("x 'a;b' y"), vec!["x", "'a;b'", "y"]);
+        assert_eq!(words("x a'b;c'd y"), vec!["x", "a'b;c'd", "y"]);
+        assert_eq!(words("x $'a;b' y"), vec!["x", "$'a;b'", "y"]);
+        assert_eq!(words("x $\"a;b\" y"), vec!["x", "$\"a;b\"", "y"]);
+        // An unterminated quote swallows the rest of the line.
+        assert_eq!(words("x 'a b y"), vec!["x", "'a b y"]);
+        // …and a backslash does not rescue it, since nothing escapes inside
+        // `'…'` — so the second quote here closes and the `;` then splits.
+        assert_eq!(words("x 'a\\'b;c' y"), vec!["x", "'a\\'b", ";", "c' y"]);
+        // Inside `"…"` a backslash does escape.
+        assert_eq!(words("x \"a\\\"b;c\" y"), vec!["x", "\"a\\\"b;c\"", "y"]);
+        // An escaped quote never opens one at all.
+        assert_eq!(words("x \\'a;b y"), vec!["x", "\\'a", ";", "b", "y"]);
+        // A backslash escapes a delimiter directly.
+        assert_eq!(words("x a\\;b y"), vec!["x", "a\\;b", "y"]);
+        assert_eq!(words("x a\\ b y"), vec!["x", "a\\ b", "y"]);
+
+        // `$( … )` nests on a further `$(`, and on a bare `(` too — but not on
+        // the one immediately after the opener, which readline steps over. That
+        // asymmetry is the whole reason `$((…))` and `$(… (…) …)` differ.
+        assert_eq!(words("x $(a $(b;c) d) y"), vec!["x", "$(a $(b;c) d)", "y"]);
+        assert_eq!(words("x $(a (b;c) d) y"), vec!["x", "$(a (b;c) d)", "y"]);
+        assert_eq!(words("x $((a;b)) y"), vec!["x", "$((a;b)", ")", "y"]);
+        // Every extended-glob opener behaves the same way, and so do the two
+        // process-substitution ones — even though `<` and `>` would otherwise
+        // have been claimed as operators.
+        for open in ["@", "!", "?", "+", "*", "<", ">"] {
+            assert_eq!(words(&format!("x {open}(a;b) y")), vec!["x", &format!("{open}(a;b)"), "y"]);
+        }
+        // Only a *lone* `<`/`>` yields to it: doubled or paired forms keep the
+        // operator reading and leave the `(` behind as a word of its own.
+        assert_eq!(words("x >>(a;b) y"), vec!["x", ">>", "(", "a", ";", "b", ")", "y"]);
+        assert_eq!(words("x <<(a;b) y"), vec!["x", "<<", "(", "a", ";", "b", ")", "y"]);
+        assert_eq!(words("x >&(a;b) y"), vec!["x", ">&", "(", "a", ";", "b", ")", "y"]);
+        // …and the operators that are not substitution openers never yield.
+        for open in ["&", ";", "|"] {
+            assert_eq!(
+                words(&format!("x {open}(a;b) y")),
+                vec!["x", open, "(", "a", ";", "b", ")", "y"]
+            );
+        }
+        // A file descriptor still reaches the substitution through the digits.
+        assert_eq!(words("x 2<(a;b) y"), vec!["x", "2<(a;b)", "y"]);
+        assert_eq!(words("x 2>(a;b) y"), vec!["x", "2>(a;b)", "y"]);
+        // But a digit run before a bare `(` is just a word.
+        assert_eq!(words("x 2(a;b) y"), vec!["x", "2", "(", "a", ";", "b", ")", "y"]);
+        assert_eq!(words("x a<(b;c) y"), vec!["x", "a<(b;c)", "y"]);
+        // A quote outranks it, so `$(` inside one is inert.
+        assert_eq!(words("x '$(a;b)' y"), vec!["x", "'$(a;b)'", "y"]);
+        assert_eq!(words("x \"$(a;b)\" y"), vec!["x", "\"$(a;b)\"", "y"]);
+        // `${ … }` protects nothing.
+        assert_eq!(words("x ${a;b} y"), vec!["x", "${a", ";", "b}", "y"]);
+
+        // A `#` starting a word ends the line; one inside a word does not.
+        assert_eq!(words("echo a # b c"), vec!["echo", "a"]);
+        assert_eq!(words("echo a #b c"), vec!["echo", "a"]);
+        assert_eq!(words("echo a' #'b c"), vec!["echo", "a' #'b", "c"]);
+
+        // Tabs separate; a newline is a word of its own.
+        assert_eq!(words("x\ta\tb"), vec!["x", "a", "b"]);
+        assert_eq!(words("a\nb"), vec!["a", "\n", "b"]);
+
+        // Multi-byte text is never split inside a character.
+        assert_eq!(words("echo héllo;wörld"), vec!["echo", "héllo", ";", "wörld"]);
+
+        // A line that stops part-way through a construct keeps the truncated
+        // word rather than losing it — the scan must not run off the end.
+        assert_eq!(words("echo a\\"), vec!["echo", "a\\"]);
+        assert_eq!(words("echo $("), vec!["echo", "$("]);
+        assert_eq!(words("echo a$("), vec!["echo", "a$("]);
+        assert_eq!(words("echo '"), vec!["echo", "'"]);
+        assert_eq!(words("echo \""), vec!["echo", "\""]);
+        assert_eq!(words("echo `"), vec!["echo", "`"]);
+        assert_eq!(words("echo 2>&"), vec!["echo", "2>&"]);
+        assert_eq!(words("echo <"), vec!["echo", "<"]);
+    }
+
+    /// `:x` is readline's `quote_breaks`, which is not "quote each word".
+    #[test]
+    fn quote_breaks_lifts_each_whitespace_character_out_of_the_quotes() {
+        assert_eq!(quote_breaks("a b c d"), "'a' 'b' 'c' 'd'");
+        // Two spaces leave an empty item between them, which a split would not.
+        assert_eq!(quote_breaks("a  b"), "'a' '' 'b'");
+        assert_eq!(quote_breaks("a\tb"), "'a'\t'b'");
+        // Operators are not whitespace, so they stay inside the quotes even
+        // though `words` would split on them.
+        assert_eq!(quote_breaks("a;b"), "'a;b'");
+        assert_eq!(quote_breaks("a|b&c"), "'a|b&c'");
+        assert_eq!(quote_breaks("a'b"), "'a'\\''b'");
+        assert_eq!(quote_breaks("a'b c"), "'a'\\''b' 'c'");
     }
 
     /// [`expand`] with a throwaway last-substitution state, for the cases that

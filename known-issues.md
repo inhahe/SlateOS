@@ -8577,34 +8577,106 @@ through `expand_one`; `apply_word_designator` needs the same reference and a `%`
 arm returning it (empty when unset). Deliberately left out of the inhibition fix
 above to keep that change bisectable.
 
-### TD-OILS-HISTEXPAND-WORD-SPLITTING. history word splitting does not use `history_word_delimiters`, so ranges over a line containing `(`/`;` differ — OPEN 2026-07-29
+### TD-OILS-HISTEXPAND-WORD-SPLITTING. history word splitting did not use `history_word_delimiters`, so ranges over a line containing `(`/`;` differed — ✅ RESOLVED 2026-07-29
 
-**Where:** `userspace/oils/src/histexpand.rs` — `words()`, and the leading-`-`
-arm of `apply_word_designator()`.
+**Where:** `userspace/oils/src/histexpand.rs` — `words()`.
 
-**What.** readline splits a history line into words on
-`history_word_delimiters` (`" \t\n;&()|<>"`), not on whitespace alone, so for the
-event `arr=(x y z)` bash's words are `arr=` `(` `x` `y` `z)`. osh splits on
-whitespace, giving `arr=(x` `y` `z)`. Two consequences, both measured with
-`arr=(x y z)` as the previous event:
+**What.** readline splits a history line into words with a tokenizer of its own,
+`history_tokenize_word`, whose delimiter set (`history_word_delimiters` =
+`" \t\n;&()|<>"`) holds the shell's operator characters as well as its
+whitespace. osh split on whitespace alone, so for the event `arr=(x y z)` bash
+numbered six words (`arr=` `(` `x` `y` `z` `)`) where osh numbered three
+(`arr=(x` `y` `z)`) — every designator over such a line named the wrong text:
 
 ```
 $ echo !a-b
 bash → echo arr= ( x y zb     osh → echo arr=(x y z)b
 ```
 
-That line also shows the second bug: a leading `-` with no number (`!a-b`, where
-`b` is not a digit) selects words 0 through *last-1* in bash, whereas osh's
-`read_point(...).unwrap_or(last)` selects 0 through last. osh's `n-` arm already
-gets this right, so the two arms disagree with each other.
+**Fix (2026-07-29).** `words()` is now a port of `history_tokenize_word`, with
+`tokenize_word()` for the operator/file-descriptor prefix and `scan_word()` for
+readline's `get_word` tail. Every rule was **measured** against bash 5.2 (record
+a line, read back `!!:0`, `!!:1`, … until the specifier goes bad) rather than
+recalled from the source, which paid off repeatedly — the shape of the code is
+readline's, but four of its behaviours are not what the source reads like:
 
-**Proper fix.** Give `words()` the `is_word_delimiter()` predicate that
-`expand_one` and the comment rule already share, keeping the delimiters as their
-own words (readline does), and change the leading-`-` arm to
-`.unwrap_or(last.saturating_sub(1))`. Both need a corpus case over an event
-containing `(`, `;` and `|`. Found while extending
-`tests/corpus/histexpand-inhibit.sh`; that case now uses search strings that
-match nothing so it pins only the terminator set.
+* **`$(` skips the character after it.** readline steps past the two-character
+  opener and *then* takes its own loop increment, so the byte right after `$(`
+  is never examined. That is not cosmetic: it is exactly why `$((a;b))`
+  tokenizes as `$((a;b)` + `)` (the inner `(` is stepped over, so it never
+  nests) while `$(a (b;c) d)` is a single word (that `(` *is* seen, and does).
+* **Process substitution outranks the operator reading of `<`/`>`, but only when
+  lone.** `<(a;b)` and `2>(a;b)` are single words; `>>(a;b)`, `<<(a;b)` and
+  `>&(a;b)` keep the operator and leave the `(` behind. `&(`, `;(` and `|(`
+  split, since those are not substitution openers.
+* **The file-descriptor pairs are exactly `>&`, `<&`, `&>`, `>|`** — and they
+  absorb trailing digits and `-`, so `2>&1` and `>&-` are one word each and
+  `>&12y` is `>&12` + `y`. The near neighbours `<>`, `<|`, `&<`, `&|`, `|&`,
+  `;&` and `;|` do *not* group.
+* **A third character joins a doubled `<` only.** `<<<` and `<<-` are
+  three-character words; `>>-` is `>>` and then `-b`.
+
+**`:x` had to be decoupled from `words()` in the same change**, because it was
+implemented as "quote each word" and switching `words()` to the real tokenizer
+would have made `:x` on `a;b` produce `'a' ';' 'b'`. bash gives `'a;b'`: `:x` is
+readline's `quote_breaks`, which wraps the *whole* text in one pair of single
+quotes and lifts each whitespace character individually back out of them. On
+tidy input that is indistinguishable from a word split (`a b` → `'a' 'b'`), but
+`a  b` → `'a' '' 'b'` and a tab stays a tab. Now `quote_breaks()`.
+
+**Tests.** `tests/corpus/histexpand-words.sh` (34 probe lines, all using
+`history -s` to record an event without running it and `history -p` to expand
+without running the result, so the file has no side effects at all and can
+safely cover shapes like `>>-b` and `${a;b}`), plus the unit tests
+`histexpand::tests::words_are_readlines_history_tokens_not_a_whitespace_split`
+and `quote_breaks_lifts_each_whitespace_character_out_of_the_quotes`.
+
+**Note.** This entry previously also carried the leading-`-` arm of
+`apply_word_designator()` (`!a-b` selecting words 0..last rather than
+0..last-1). That turned out to be one symptom of a broader divergence in how
+word-designator *ranges* and out-of-range errors work, so it is tracked on its
+own as TD-OILS-HISTEXPAND-WORD-RANGE below and is **not** fixed here.
+
+### TD-OILS-HISTEXPAND-WORD-RANGE. word-designator ranges clamp where bash errors, and `-`/`$` endpoints are off — OPEN 2026-07-29
+
+**Where:** `userspace/oils/src/histexpand.rs` — `apply_word_designator()`: the
+`pick` closure, the leading-`-` arm, and `read_point`.
+
+**What.** Three separate divergences, all measured against bash 5.2 with
+`a b c d` as the previous event (probe: record the line, then read back the
+stderr echo of `: mark !!<designator>`):
+
+* **Out of range is an error, not an empty selection.** osh's `pick` clamps with
+  `to.min(last)` and returns the empty string when `from > to`. bash refuses the
+  line: `!!:4` on a four-word event, `!!:9`, `!!:1-9`, `!!:0-9`, `!!:3-1` (from >
+  to) and `!!:^` on a one-word event all print `<spec>: bad word specifier` and
+  run nothing. The message body quotes the designator back *including* its
+  leading `:`. Two shapes are genuinely empty rather than errors, so the rule is
+  not simply "clamp → error": `!!:*` on a one-word event, and `!!:2-` on a
+  three-word event.
+* **A bare leading `-` ends at last-1, not last.** `!!:-` on `a b c d` gives
+  `a b c`, and on a one-word event gives the empty string; osh's
+  `read_point(...).unwrap_or(last)` gives all four. osh's `n-` arm already gets
+  this right, so the two arms disagree with each other.
+* **`$` does not let a following `-`, `*` or `$` be read as a range.** After a
+  `$` endpoint the next character is left alone: `!!:$-` is `d-`, `!!:$*` is
+  `d*`, `!!:$$` is `d$`. But `!!:*-` is `b c d-` and `!!:--` is `a b c-`, so the
+  suppression is specific to `$`.
+
+Other endpoints measured and already correct: `!!:-$` → `a b c d`, `!!:-^` →
+`a b`, `!!:^-` → `b c`, `!!:1-` → `b c`, `!!:^-$` → `b c d`, `!!:^-2` → `b c`,
+`!$` → `d`, `!^` → `b`, `!*` → `b c d`.
+
+**Proper fix.** Make `pick` return `Result`, with the error carrying the
+`bad word specifier` body built from `spec_text()` (already used for the
+substitution diagnostics), and thread it out through `apply_word_designator` as
+an `Expansion::NotFound`-style failure — the existing `NotFound` variant already
+carries a whole message body, so no new variant is needed. Change the leading-`-`
+arm to `.unwrap_or(last.saturating_sub(1))`, and have `read_point` report whether
+it consumed a `$` so the range scan can decline to look further. Needs a corpus
+case; keep it separate from `tests/corpus/histexpand-words.sh`, which
+deliberately uses only in-range designators so that the tokenizer and the range
+semantics stay independently bisectable.
 
 ### TD-OILS-HISTEXPAND-MODIFIERS. the `:h`/`:t`/`:r`/`:e` modifiers were pathname-aware, and an unknown modifier was silently ignored — ✅ RESOLVED 2026-07-29
 

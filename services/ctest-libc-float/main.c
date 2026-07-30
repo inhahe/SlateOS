@@ -166,5 +166,75 @@ int main(void)
         return 60;
     }
 
+    /*
+     * ---- hexadecimal floating point (C99 %a and 0x1.8p+3 input) ----
+     *
+     * This is the one textual form of a double that is exact, so the checks
+     * below compare with `==` rather than a tolerance: there is nothing to
+     * round.  It is also the strongest ABI test in the file, because a value
+     * that survives %a and comes back bit-identical cannot have passed
+     * through a soft-float helper on the way.
+     */
+    memset(buf, 0, sizeof buf);
+    snprintf(buf, sizeof buf, "%a", 1.5);
+    if (strcmp(buf, "0x1.8p+0") != 0) {
+        return 70;
+    }
+    memset(buf, 0, sizeof buf);
+    snprintf(buf, sizeof buf, "%A", -0.5);
+    if (strcmp(buf, "-0X1P-1") != 0) {
+        return 71;
+    }
+    memset(buf, 0, sizeof buf);
+    snprintf(buf, sizeof buf, "%a", 0.0);
+    if (strcmp(buf, "0x0p+0") != 0) {
+        return 72;
+    }
+
+    end = NULL;
+    d = strtod("0x1.8p+1", &end);
+    if (d != 3.0) {
+        return 73;
+    }
+    if (end == NULL || *end != '\0') {
+        return 74;
+    }
+
+    /* An incomplete prefix is not a hex literal: strtod backs off to the 0. */
+    end = NULL;
+    d = strtod("0xg", &end);
+    if (d != 0.0) {
+        return 75;
+    }
+    if (end == NULL || strcmp(end, "xg") != 0) {
+        return 76;
+    }
+
+    /* %a → strtod must be the identity, subnormals and extremes included. */
+    {
+        static const double values[] = {
+            1.0, -1.0, 0.1, 3.0, 1e300, 1e-300, 123456.78125,
+        };
+        for (unsigned i = 0; i < sizeof values / sizeof values[0]; i++) {
+            memset(buf, 0, sizeof buf);
+            snprintf(buf, sizeof buf, "%a", values[i]);
+            end = NULL;
+            if (strtod(buf, &end) != values[i]) {
+                return 77;
+            }
+            if (end == NULL || *end != '\0') {
+                return 78;
+            }
+        }
+    }
+
+    /* scanf reads the same syntax. */
+    {
+        double got = -1.0;
+        if (sscanf("0x1.8p+1", "%lf", &got) != 1 || got != 3.0) {
+            return 79;
+        }
+    }
+
     return 42;
 }

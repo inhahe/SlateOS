@@ -6601,6 +6601,11 @@ pub fn self_test_ctls_thread() -> KernelResult<()> {
 /// integer/float vararg list, where the two argument classes are counted
 /// separately by the ABI).
 ///
+/// It also covers hexadecimal floating point (`%a`/`%A` and `0x1.8p+1` input),
+/// which doubles as the sharpest ABI check in the fixture: hexadecimal is an
+/// *exact* textual form of a `double`, so the round trip is compared with `==`
+/// and a value that survives it cannot have been through a soft-float helper.
+///
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-libc-float/main.c`).
 pub fn self_test_clibc_float() -> KernelResult<()> {
@@ -6683,8 +6688,13 @@ pub fn self_test_clibc_float() -> KernelResult<()> {
              test — integer arguments, double result), 142 = difftime(0,0) != 0, \
              50/52/54 = snprintf formatted a double wrongly (varargs *argument* \
              direction), 51/53/55 = snprintf's return length disagrees with the string it \
-             wrote, 60 = the format/parse round trip lost the value. See \
-             BUG-SYSROOT-SOFT-FLOAT-ABI in known-issues.md",
+             wrote, 60 = the format/parse round trip lost the value, \
+             70/71/72 = printf %a/%A formatted a hexadecimal float wrongly, \
+             73/74 = strtod could not read one back, 75/76 = strtod mishandled \
+             an incomplete 0x prefix, 77/78 = the %a round trip is not the \
+             identity (it must be — hexadecimal is exact), 79 = sscanf %lf \
+             cannot read hexadecimal. See BUG-SYSROOT-SOFT-FLOAT-ABI and \
+             BUG-POSIX-NO-HEX-FLOATS in known-issues.md",
             exit_code, EXPECTED
         );
         return Err(KernelError::InternalError);

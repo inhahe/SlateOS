@@ -16,7 +16,7 @@ use crate::ast::{
     Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
 use crate::lexer::{
-    LexOpts, Op, Seg, Tok, Tokenized, expand_aliases, expand_aliases_tracked, tokenize,
+    HeredocEof, LexOpts, Op, Seg, Tok, Tokenized, expand_aliases, expand_aliases_tracked, tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
 use std::collections::BTreeMap;
@@ -361,6 +361,18 @@ pub struct IncrementalParser {
     /// the complete lines before it have been handed out and executed, because
     /// bash reports it only after running them.
     pending_lex_err: Option<ParseError>,
+    /// Here-documents the input ended before delimiting, with their line numbers
+    /// already run through `line_map`. Held back for the same reason as
+    /// `pending_lex_err` and released by the same rule bash's reader implies: a
+    /// warning is printed only once the unit containing its `<<` is handed out, so
+    /// it lands after the output of every earlier line and not at all if a syntax
+    /// error on an earlier line means that line is never reached.
+    pending_heredoc_eof: Vec<HeredocEof>,
+    /// Warnings whose unit [`Self::next_unit`] has just handed out, awaiting
+    /// [`Self::take_heredoc_eof`]. Always drained by the caller before the next
+    /// call, which is why a [`Self::relex`] (that discards `pending_heredoc_eof`
+    /// wholesale) cannot lose one.
+    ready_heredoc_eof: Vec<HeredocEof>,
 }
 
 impl IncrementalParser {
@@ -387,9 +399,11 @@ impl IncrementalParser {
             offsets: orig_offsets,
             ends: orig_ends,
             conts: orig_conts,
+            heredoc_eof,
             err,
         } = tokenize_deferred(src, opts);
         map_lines(&mut orig, &mut orig_lines, &line_map);
+        let pending_heredoc_eof = map_heredoc_eof(heredoc_eof, &line_map);
         Self {
             src: src.chars().collect(),
             opts,
@@ -414,6 +428,8 @@ impl IncrementalParser {
                     line: e.line.map(|l| line_map.map(l)),
                     ..e
                 }),
+            pending_heredoc_eof,
+            ready_heredoc_eof: Vec::new(),
             line_map,
         }
     }
@@ -455,9 +471,14 @@ impl IncrementalParser {
             mut offsets,
             mut ends,
             conts,
+            heredoc_eof,
             err,
         } = tokenize_deferred(&tail, opts);
         map_lines(&mut orig, &mut orig_lines, &map);
+        // The re-lex is the authoritative read of the tail, so its record replaces
+        // the old one outright — the `tok_index`es are indices into the *new*
+        // stream, and `pos` is about to restart at 0 to match.
+        self.pending_heredoc_eof = map_heredoc_eof(heredoc_eof, &map);
         let delta = u32::try_from(off).unwrap_or(u32::MAX);
         for o in offsets.iter_mut().chain(ends.iter_mut()) {
             *o = o.saturating_add(delta);
@@ -740,6 +761,23 @@ impl IncrementalParser {
             .next()
             .copied()
             .unwrap_or(self.orig.len());
+        // Release the warnings for every here-document whose `<<` this unit
+        // reached. The frontier is `next_orig` rather than `self.pos`, because the
+        // error arm below forces `self.pos` to the end of the stream to abandon the
+        // rest of the input — and input bash abandons is input it never read, so it
+        // never warns about it either. `echo one )` followed by an unterminated
+        // here-document prints the syntax error and nothing else.
+        if !self.pending_heredoc_eof.is_empty() {
+            let mut keep = Vec::new();
+            for h in std::mem::take(&mut self.pending_heredoc_eof) {
+                if h.tok_index < next_orig {
+                    self.ready_heredoc_eof.push(h);
+                } else {
+                    keep.push(h);
+                }
+            }
+            self.pending_heredoc_eof = keep;
+        }
         self.unit_lines.clear();
         self.unit_raw.clear();
         match outcome {
@@ -760,9 +798,29 @@ impl IncrementalParser {
                 // far in *this* unit — bash never runs a partially-parsed line.
                 self.wpos = self.work.len();
                 self.pos = self.orig.len();
+                // Input bash abandons is input it never reads, so it never warns
+                // about a here-document there either. Dropping these here rather
+                // than letting the frontier sweep them up is the difference
+                // between matching bash on `echo one )` + `cat <<EOF` (silent
+                // apart from the syntax error) and warning about a line that was
+                // never reached.
+                self.pending_heredoc_eof.clear();
                 Some(Err(e))
             }
         }
+    }
+
+    /// The unterminated here-documents belonging to the unit [`Self::next_unit`]
+    /// last returned, drained.
+    ///
+    /// Call this after every `next_unit` and warn about each entry *before*
+    /// running the unit (but after a `set -v` echo of it, which bash emits first
+    /// — the echo is the reader handing the line over, the warning is the reader
+    /// having run out). Entries only appear for a unit that was actually reached,
+    /// so a caller that abandons the input on a syntax error need do nothing
+    /// special.
+    pub fn take_heredoc_eof(&mut self) -> Vec<HeredocEof> {
+        std::mem::take(&mut self.ready_heredoc_eof)
     }
 
     /// The top-level lines of the unit [`Self::next_unit`] last returned, for a
@@ -1032,6 +1090,18 @@ fn build_cmdsub_line_map(toks: &[Tok], lines: &[u32], close_line: u32) -> LineMa
         }
     }
     LineMap::CmdSub { pre: 0, close_line, ranked }
+}
+
+/// Renumber the two lines each unterminated-here-document warning carries
+/// through `map`, for the same reason [`map_lines`] exists: the lexer numbers a
+/// fragment from 1, and a warning has to name the line of the input the fragment
+/// came from. `tok_index` is an index, not a line, and is left alone.
+fn map_heredoc_eof(mut hd: Vec<HeredocEof>, map: &LineMap) -> Vec<HeredocEof> {
+    for h in &mut hd {
+        h.body_line = map.map(h.body_line);
+        h.eof_line = map.map(h.eof_line);
+    }
+    hd
 }
 
 /// Renumber every source line recorded in a token stream through `map`.

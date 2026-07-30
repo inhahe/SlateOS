@@ -267,6 +267,41 @@ struct Lexer {
     /// too, but its offsets are relative to that string and are simply dropped
     /// with the lexer.
     conts: Vec<u32>,
+    /// Every here-document whose delimiter the input ended before reaching, in
+    /// the order the bodies were collected. Only filled in lenient mode (see
+    /// `strict_heredoc_eof`), since strict mode raises instead. bash warns about
+    /// each of these, so the reader needs the record; see [`HeredocEof`].
+    heredoc_eof: Vec<HeredocEof>,
+}
+
+/// A here-document whose delimiter never arrived: the input ran out first.
+///
+/// bash accepts the partial body and runs the command, but warns — and the
+/// warning carries *two* different line numbers, neither of which is the line the
+/// `<<` operator sits on. Both are "the last input line bash had **fetched**" at
+/// a particular moment, which is what [`Lexer::fetched_line`] computes.
+#[derive(Clone, Debug)]
+pub struct HeredocEof {
+    /// The delimiter that was wanted, in its unquoted form (`<<"EOF"` wants
+    /// `EOF`).
+    pub delim: String,
+    /// The line named *inside* the message (`here-document at line N`): the last
+    /// line fetched when body collection **began**. For a lone here-document that
+    /// is the operator's own line, but for the second of two it is the line the
+    /// first one's body stopped on — `cat <<A <<B` / `one` / `A` / `two` blames
+    /// B on line 3.
+    pub body_line: u32,
+    /// The line in the message's *prefix*: the last line fetched when the input
+    /// ran out, i.e. the number of lines the input has.
+    pub eof_line: u32,
+    /// Index into the token stream of the here-document's placeholder token — the
+    /// same `tok_index` the pending record carried. The reader uses it to decide
+    /// *when* to print: bash warns as it reads, so the warning belongs to the
+    /// parse unit containing this token and must not be printed before the
+    /// commands on earlier lines have run. (Nor at all, if a syntax error on an
+    /// earlier line means bash never reaches this line: `echo one )` followed by
+    /// an unterminated here-document warns not at all.)
+    pub tok_index: usize,
 }
 
 /// A here-document awaiting its body (collected when the introducing line ends).
@@ -297,6 +332,7 @@ impl Lexer {
             strict_heredoc_eof: false,
             paren_body: false,
             conts: Vec::new(),
+            heredoc_eof: Vec::new(),
         }
     }
 
@@ -385,6 +421,12 @@ pub struct Tokenized {
     /// *not* deleted and so is not listed here, which is exactly the
     /// distinction bash's own history draws.
     pub conts: Vec<u32>,
+    /// Every here-document the input ended before delimiting, in body-collection
+    /// order. bash warns about each; the reader
+    /// ([`crate::parser::IncrementalParser`]) holds them until the parse unit
+    /// owning each `tok_index` is handed out, since bash's warning comes from its
+    /// *reader* and so lands after the output of every earlier line.
+    pub heredoc_eof: Vec<HeredocEof>,
     /// `Some((error, line))` when lexing stopped early. `toks` is then cut back
     /// to the last **complete** logical line, because that is the granularity
     /// at which bash stops executing: in `echo two; echo three 'unterm`
@@ -415,8 +457,9 @@ pub fn tokenize_deferred(src: &str, opts: LexOpts) -> Tokenized {
     let mut conts = std::mem::take(&mut lx.conts);
     conts.sort_unstable();
     conts.dedup();
+    let heredoc_eof = std::mem::take(&mut lx.heredoc_eof);
     let Err(e) = res else {
-        return Tokenized { toks, lines, offsets, ends, conts, err: None };
+        return Tokenized { toks, lines, offsets, ends, conts, heredoc_eof, err: None };
     };
     // The failing token's own line is the fallback when the raise site did not
     // name one. `Lexer::line` only advances at the end of each `run_into`
@@ -444,7 +487,12 @@ pub fn tokenize_deferred(src: &str, opts: LexOpts) -> Tokenized {
     // The continuations are keyed by source offset rather than by token index, so
     // the ones past the cut simply describe text no caller will slice; leaving
     // them costs nothing and keeps the list a faithful record of the whole scan.
-    Tokenized { toks, lines, offsets, ends, conts, err: Some((e, line)) }
+    // A here-document that reached EOF cannot coexist with a deferred lexer error
+    // — the scan would have had to run past the unclosed construct to get there —
+    // but if one ever did, its token is beyond the cut and so names input that
+    // never runs. The reader's `tok_index` gate keeps it quiet on its own, which is
+    // the same rule that keeps bash quiet after `echo one )`.
+    Tokenized { toks, lines, offsets, ends, conts, heredoc_eof, err: Some((e, line)) }
 }
 
 /// Which quote, if any, the reader is still *inside* after `src` — `Some('\'')`
@@ -1151,6 +1199,32 @@ impl Lexer {
         let ends_with_newline = self.chars.last() == Some(&'\n');
         self.cur_line()
             .saturating_add(u32::from(!ends_with_newline))
+    }
+
+    /// The last input line bash would have **fetched** by the time its reader
+    /// reached the cursor — the value its `line_number` holds, and so the line
+    /// every unterminated-here-document warning is stamped with.
+    ///
+    /// It differs from [`Lexer::cur_line`] by whether the cursor's own line
+    /// counts. bash reads a whole line at a time, so a cursor *anywhere within* a
+    /// line means that line has been fetched; but a cursor sitting exactly at a
+    /// line's start has only consumed the previous line's newline, and the line it
+    /// is poised on has not been asked for yet. Hence: `cur_line()` normally,
+    /// one less at a line boundary. (End of input needs no special case — a
+    /// source with no trailing newline leaves the cursor mid-line, so its final
+    /// partial line counts, and one with a trailing newline leaves it at a
+    /// boundary, so the empty line past the end does not. That is exactly why
+    /// `cat <<EOF` / `body` and `cat <<EOF` / `body` / `` both say `line 2`.)
+    ///
+    /// This is *not* [`Lexer::eof_line`]'s rule, which is one past the last line:
+    /// bash bumps `line_number` for the input line it asks for and does not get
+    /// when a `$( … )` is left unclosed, but a here-document's reader has already
+    /// stopped by then and reports the line it last had.
+    fn fetched_line(&self) -> u32 {
+        let at_line_start = self.pos == 0 || self.chars.get(self.pos.wrapping_sub(1)) == Some(&'\n');
+        self.cur_line()
+            .saturating_sub(u32::from(at_line_start))
+            .max(1)
     }
 
     /// After one `run` iteration, stamp every token appended since the iteration
@@ -2191,6 +2265,12 @@ impl Lexer {
         let pending = core::mem::take(&mut self.pending_heredocs);
         for ph in pending {
             let mut body = String::new();
+            // Captured before the first body line is read, because that is the
+            // moment bash's message names — and it cannot be recovered afterwards.
+            // For the *second* of two here-documents it is not the operator's line
+            // at all but wherever the first one's body left the cursor, which is
+            // why `cat <<A <<B` is the shape to test against.
+            let body_line = self.fetched_line();
             loop {
                 if self.pos >= self.chars.len() {
                     // EOF before the delimiter. In strict mode (REPL
@@ -2198,13 +2278,20 @@ impl Lexer {
                     // here-doc body is still being typed — so surface an
                     // "unexpected EOF" that the REPL treats as "keep reading".
                     // In lenient mode (script/`-c`) bash accepts the partial
-                    // body, so we do too.
+                    // body, so we do too — but it also warns, so record what the
+                    // warning needs. See [`HeredocEof`].
                     if self.strict_heredoc_eof {
                         return Err(LexError::new(format!(
                             "unexpected EOF while looking for `{}'",
                             ph.delim
                         )));
                     }
+                    self.heredoc_eof.push(HeredocEof {
+                        delim: ph.delim.clone(),
+                        body_line,
+                        eof_line: self.fetched_line(),
+                        tok_index: ph.tok_index,
+                    });
                     break;
                 }
                 let start = self.pos;
@@ -2698,5 +2785,66 @@ mod tests {
     fn here_string_op() {
         let toks = tokenize("cmd <<< word").unwrap();
         assert!(toks.iter().any(|t| matches!(t, Tok::Op(Op::TLess))));
+    }
+
+    /// The two line numbers bash's unterminated-here-document warning carries are
+    /// both "the last line the reader had **fetched**" — one at the moment body
+    /// collection began, one at the moment the input ran out — and neither is the
+    /// line the `<<` sits on. Every row below is measured from bash 5.2.
+    #[test]
+    fn unterminated_heredoc_records_both_warning_lines() {
+        /// One expected warning: the delimiter wanted, the line named inside the
+        /// message, and the line named in its prefix.
+        type Want<'a> = (&'a str, u32, u32);
+        // (source, the warnings it must produce, in order)
+        let cases: &[(&str, &[Want<'_>])] = &[
+            // The base shape. The body began after line 1 and input ran out on 2.
+            ("cat <<EOF\nbody", &[("EOF", 1, 2)]),
+            // A trailing newline adds no line: the cursor stops at a line
+            // *boundary*, and the empty line past the end is never fetched.
+            ("cat <<EOF\nbody\n", &[("EOF", 1, 2)]),
+            // Conversely a source with no trailing newline still has a final
+            // partial line, and that one *has* been fetched.
+            ("echo hi\ncat <<EOF\nbody", &[("EOF", 2, 3)]),
+            // An empty body: the operator's line is the last one either way, so
+            // both numbers coincide — the case that proves `eof_line` is not
+            // `body_line + 1`.
+            ("echo hi\necho ho\ncat <<EOF", &[("EOF", 3, 3)]),
+            // The second of two here-documents is blamed on wherever the *first*
+            // one's body left the cursor, not on the shared operator line. This is
+            // the shape that forces `body_line` to be captured when collection
+            // begins rather than reconstructed from the `<<`.
+            ("cat <<A <<B\none\nA\ntwo", &[("B", 3, 4)]),
+            // Both unterminated: A stops at EOF mid-line 2, so B's body "begins"
+            // there and is blamed on line 2 — while both share the same eof line.
+            ("cat <<A <<B\none", &[("A", 1, 2), ("B", 2, 2)]),
+            // The same with a trailing newline: A's body ends at a boundary, so B
+            // is blamed on line 2 by the boundary rule instead.
+            ("cat <<A <<B\none\n", &[("A", 1, 2), ("B", 2, 2)]),
+            // A terminated here-document earlier in the input does not shift the
+            // arithmetic — the numbers are absolute, not relative to the operator.
+            ("cat <<EOF\nbody\nEOF\ncat <<X\nmore", &[("X", 4, 5)]),
+            // A quoted delimiter is wanted in its *unquoted* spelling, and `<<-`
+            // changes nothing about the lines.
+            ("cat <<\"EOF\"\nbody", &[("EOF", 1, 2)]),
+            ("cat <<-EOF\n\tbody", &[("EOF", 1, 2)]),
+            // CRLF: the `\r` is insignificant whitespace and must not be counted
+            // as a line of its own.
+            ("cat <<EOF\r\nbody\r\n", &[("EOF", 1, 2)]),
+            // A here-document inside a construct the input also cuts off still
+            // reports its own lines; the syntax error is a separate diagnostic.
+            ("if true; then\ncat <<EOF\nbody", &[("EOF", 2, 3)]),
+            // Terminated: no record at all.
+            ("cat <<EOF\nbody\nEOF\n", &[]),
+        ];
+        for (src, want) in cases {
+            let tk = tokenize_deferred(src, LexOpts::default());
+            let got: Vec<Want<'_>> = tk
+                .heredoc_eof
+                .iter()
+                .map(|h| (h.delim.as_str(), h.body_line, h.eof_line))
+                .collect();
+            assert_eq!(got, *want, "{src:?}");
+        }
     }
 }

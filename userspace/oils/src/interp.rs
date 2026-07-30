@@ -3563,6 +3563,22 @@ impl Shell {
                     self.emit_stderr(&bytes);
                 }
             }
+            // A here-document the input ended before delimiting is a warning from
+            // the *reader*, so it belongs here: after the `set -v` echo of the
+            // lines it read (bash emits the echo first, then runs out), before the
+            // unit runs, and before a parse error the same unit may also carry —
+            // `f() { cat <<EOF` warns and *then* reports the unexpected end of
+            // file. The parser only releases a warning once the unit holding its
+            // `<<` is handed out, which is what keeps it behind the output of
+            // earlier lines.
+            for hd in ip.take_heredoc_eof() {
+                self.errln(&format!(
+                    "{}warning: here-document at line {} delimited by end-of-file (wanted `{}')",
+                    self.err_prefix_at(hd.eof_line),
+                    hd.body_line,
+                    hd.delim
+                ));
+            }
             // bash records a line when it *reads* it, before it runs — which is
             // why `history` lists the `history` call that printed the list, and
             // why `$HISTCMD` already counts the line it appears on.
@@ -22740,6 +22756,21 @@ impl Shell {
     /// since byte-matching bash's name is impossible anyway (osh's `$0` is `osh`,
     /// not `bash`) and osh's own name is the more meaningful diagnostic.
     fn err_prefix(&self) -> String {
+        self.err_prefix_at(self.current_line)
+    }
+
+    /// [`Shell::err_prefix`] with an explicit line instead of the currently
+    /// executing one, for a diagnostic raised by the *reader* rather than by a
+    /// command — the unterminated-here-document warning, whose line is where the
+    /// input ran out and which is emitted before the unit runs at all.
+    ///
+    /// Note this is [`Shell::err_prefix`]'s shape, not
+    /// [`Shell::syntax_error_prefix`]'s: bash prints
+    /// `bash: line 2: warning: here-document …` with no `-c`/`eval` input-source
+    /// token, even from `-c` and even from inside an `eval`. (Measured; the token
+    /// belongs to bash's `parser_error`, and this warning is a plain
+    /// `internal_warning`.)
+    fn err_prefix_at(&self, line: u32) -> String {
         // bash labels a diagnostic with the source of the *currently-executing
         // frame* (its `get_name_for_error`): at the top level that is the shell
         // or script name (`$0`), but *inside a function* it is the function's
@@ -22758,7 +22789,7 @@ impl Shell {
         if self.is_interactive() {
             format!("{src}: ")
         } else {
-            format!("{src}: line {}: ", self.current_line)
+            format!("{src}: line {line}: ")
         }
     }
 
@@ -28315,6 +28346,59 @@ mod tests {
         }
         // The error also ends the iteration.
         assert!(ip.next_unit(None, crate::lexer::LexOpts::default()).is_none());
+    }
+
+    /// An unterminated-here-document warning comes from bash's *reader*, so its
+    /// timing is observable in two directions and the parser owes the caller both:
+    /// it must not be released before the units on earlier lines have run, and it
+    /// must not be released at all when a syntax error on an earlier line means
+    /// bash never reads that far.
+    #[test]
+    fn heredoc_eof_warning_is_released_with_its_own_unit() {
+        let opts = crate::lexer::LexOpts::default();
+        let unit = |ip: &mut crate::parser::IncrementalParser| {
+            let u = ip.next_unit(None, opts);
+            let warned: Vec<String> = ip
+                .take_heredoc_eof()
+                .iter()
+                .map(|h| format!("{}/{}/{}", h.delim, h.body_line, h.eof_line))
+                .collect();
+            (u.is_some(), u.is_some_and(|r| r.is_err()), warned)
+        };
+
+        // Two units: `echo hi` must be handed out (and so run) with nothing said,
+        // and the warning released only with the unit that owns the `<<`.
+        let mut ip =
+            crate::parser::IncrementalParser::new("echo hi\ncat <<EOF\nbody", 0, opts);
+        assert_eq!(unit(&mut ip), (true, false, vec![]));
+        assert_eq!(unit(&mut ip), (true, false, vec!["EOF/2/3".to_string()]));
+        assert_eq!(unit(&mut ip), (false, false, vec![]));
+
+        // A unit that both warns and fails to parse releases the warning anyway:
+        // bash prints it *before* the `unexpected end of file`.
+        let mut ip =
+            crate::parser::IncrementalParser::new("if true; then\ncat <<EOF\nbody", 0, opts);
+        assert_eq!(unit(&mut ip), (true, true, vec!["EOF/2/3".to_string()]));
+
+        // …but a syntax error on an *earlier* line suppresses it entirely, because
+        // bash abandons the input without ever reading the here-document's line.
+        // (Measured: `echo one )` + an unterminated here-doc warns not at all.)
+        let mut ip =
+            crate::parser::IncrementalParser::new("echo one )\ncat <<EOF\nbody", 0, opts);
+        assert_eq!(unit(&mut ip), (true, true, vec![]));
+        assert_eq!(unit(&mut ip), (false, false, vec![]));
+
+        // Both here-documents of one command are released together, in body order.
+        let mut ip = crate::parser::IncrementalParser::new("cat <<A <<B\none", 0, opts);
+        assert_eq!(
+            unit(&mut ip),
+            (true, false, vec!["A/1/2".to_string(), "B/2/2".to_string()])
+        );
+
+        // The line numbers pass through the `LineMap`, so an `eval` body reports
+        // the lines of the input it was written on rather than its own.
+        let mut ip = crate::parser::IncrementalParser::new("cat <<EOF\nbody", 1, opts);
+        assert_eq!(unit(&mut ip), (true, false, vec!["EOF/2/3".to_string()]));
     }
 
     #[test]

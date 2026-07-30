@@ -8207,63 +8207,139 @@ three stages, both flavours, both append modes, plus the empty literal) and
 rather than `${!m[*]}`, because associative key order is bash's hash order and
 osh's insertion order — see TD-OILS-ASSOC-ORDER, which is not this bug.
 
-### BUG-OILS-HEREDOC-EOF-WARNING. An unterminated here-document produces no warning at all — 2026-07-30 — OPEN
+### BUG-OILS-HEREDOC-EOF-WARNING. An unterminated here-document produced no warning at all — ✅ RESOLVED 2026-07-30
 
-**Where:** `userspace/oils/src/lexer.rs` — the here-document body collection,
-which stops at end of input silently.
+**Where:** `userspace/oils/src/lexer.rs` (`collect_heredocs`, `Lexer::fetched_line`,
+`HeredocEof`, `Tokenized::heredoc_eof`), `userspace/oils/src/parser.rs`
+(`IncrementalParser::take_heredoc_eof`) and `userspace/oils/src/interp.rs`
+(`Shell::err_prefix_at`, the emission point in `run_source_flow_out`).
 
-**What.** When input runs out before a here-doc's delimiter is seen, bash is not
-silent: it warns, and then runs the command with the body it managed to collect.
-osh collects the same body and runs the same command, but says nothing.
+**Symptom.** When input ran out before a here-document's delimiter was seen, bash
+warned and then ran the command with the partial body; osh collected the same body
+and ran the same command in silence.
 
 ```
 $ bash -c 'cat <<EOF
 body'
 bash: line 2: warning: here-document at line 1 delimited by end-of-file (wanted `EOF')
 body
-$ osh -c 'cat <<EOF
-body'
-body
 ```
 
-Everything except the warning already matches — the collected body, the exit
-status, and the ordering of the warning relative to the command's own output
-(the warning comes first, since it is emitted at parse time).
+**The two line numbers turned out to be one rule.** This entry originally described
+them as different things — "where input ran out" and "the line whose newline began
+the body" — and gave the second an awkward off-by-one definition ("one before the
+body's first line"). Measuring more shapes showed both are the *same* quantity
+sampled at two moments: **the last input line bash had fetched**, once when body
+collection began and once when the input ran out. bash reads a whole line at a
+time, so:
 
-**The two line numbers.** Both are needed and they are not the same thing:
+* a cursor anywhere *within* a line means that line has been fetched;
+* a cursor sitting exactly at a line's start has only consumed the previous line's
+  newline — the line it is poised on has not been asked for yet.
 
-* the one in the prefix (`line 2:` above) is the line at which **input ran out**;
-* the one in the message (`at line 1`) is the line **whose newline began the
-  body** — i.e. one before the body's first line, which for a lone here-doc is
-  the operator's own line but for a *second* here-doc is the line of the first
-  one's terminator. `cat <<A <<B` / `one` / `A` / `two` warns
-  ``line 4: warning: here-document at line 3 delimited by end-of-file (wanted `B')``:
-  B's operator is on line 1, but its body began after line 3.
+That single rule (`Lexer::fetched_line` = `cur_line()`, minus one at a line
+boundary) reproduces every measured case, including the ones the old description
+could not:
 
-A trailing newline on the input does not add a line: `cat <<EOF\nbody` and
-`cat <<EOF\nbody\n` both say `line 2`.
+| input | prefix line | message line | why |
+|---|---|---|---|
+| `cat <<EOF` / `body` | 2 | 1 | ends mid-line 2; body began at line 2's start |
+| `cat <<EOF` / `body` / `` | 2 | 1 | the trailing newline leaves the cursor at a boundary, so the empty line past the end is never fetched |
+| `echo hi` / `echo ho` / `cat <<EOF` | **3** | **3** | empty body: the operator's line is the last one either way — the case proving the prefix line is *not* the message line plus one |
+| `cat <<A <<B` / `one` / `A` / `two` | 4 | 3 | B's body began where A's terminator left the cursor |
+| `cat <<A <<B` / `one` | 2 | 1 (A), **2** (B) | A stops at EOF *mid-line*, so B's body "begins" on line 2 |
+| `cat <<A <<B` / `one` / `` | 2 | 1 (A), 2 (B) | same answer, by the boundary rule instead |
+| `cat <<EOF` / `body` / `EOF` / `cat <<X` / `more` | 5 | 4 | absolute, not relative to the operator |
 
-**Measured shapes that all warn** (verified against MSYS bash 5.2, all
-byte-identical to osh apart from the missing warning): a bare `cat <<EOF`; a
-body with and without a trailing newline; a quoted delimiter `<<"EOF"`; the
-tab-stripping `<<-EOF`; a here-doc followed by another command on the same line
-(`cat <<EOF; echo after`); the second of two here-docs; and one inside an
-unterminated function body, where the warning precedes the resulting
-`syntax error: unexpected end of file`. A properly terminated here-doc warns not
-at all.
+Note this is deliberately **not** `Lexer::eof_line`'s rule (one *past* the last
+line). bash bumps `line_number` for an input line it asks for and does not get,
+which is why an unclosed `$( … )` is blamed one past the end — but a
+here-document's reader has already stopped by then and reports the line it last
+had.
 
-**Proper fix.** The here-doc reader needs to report, when it hits end of input,
-the delimiter it wanted plus the two line numbers above. The body-start line has
-to be recorded when body collection *begins* (it cannot be recovered afterwards,
-which is why the second-here-doc case is the one to test against), and the
-end-of-input line is the lexer's current line at that point. Emitting it is a
-warning, not an error: parsing continues and the command still runs.
+**Timing is observable in two directions,** because the warning comes from bash's
+*reader* rather than from the parser or the command:
 
-**Impact.** A missing diagnostic only — no behavioural difference. Found while
-measuring TD-OILS-SYNTAX-ERR-ERREXIT-ECHO, which needed a single-line diagnostic
-to check that errexit leaves those alone; `cat <<EOF` was the example chosen, and
-it turned out to produce no line at all. Kept out of
-`tests/corpus/errexit-syntax-error.sh` for that reason.
+* it must land **after** the output of earlier lines (`echo hi` / `cat <<EOF` /
+  `body` prints `hi` first) and after a `set -v` echo of the lines it read, but
+  **before** the unit runs and before a syntax error the same unit also carries
+  (`f() { cat <<EOF` warns, *then* reports the unexpected end of file);
+* it must **not be printed at all** when a syntax error on an earlier line means
+  bash never reads that far: `echo one )` followed by an unterminated here-document
+  prints only the syntax error.
+
+osh lexes a whole input up front, so neither falls out for free. The lexer records
+each cut-off here-document (`HeredocEof`, carrying the delimiter, both lines, and
+the `tok_index` of its placeholder token); `IncrementalParser` holds the records
+back and releases one only when the parse unit containing that token is handed out,
+and *discards* them when a parse error makes it abandon the rest of the input. The
+reader-level driver `run_source_flow_out` drains and prints them between the
+`set -v` echo and the unit's execution.
+
+The prefix is `Shell::err_prefix`'s shape, not `syntax_error_prefix`'s: bash prints
+`bash: line 2: warning: here-document …` with **no** `-c`/`eval` input-source
+token, even from `-c` and even inside an `eval` (the token belongs to bash's
+`parser_error`; this is a plain `internal_warning`). `err_prefix` was refactored
+into `err_prefix_at(line)`, since the warning's line is the reader's rather than
+the currently-executing command's.
+
+**Verified** byte-identical to MSYS bash 5.2 across eighteen contexts: `-c`, a
+script file, `.`/`source`, `eval`, a plain `( … )` subshell, piped stdin, CRLF
+input, `<<"EOF"`, `<<-EOF`, `cat <<EOF; echo after`, two here-documents (one
+terminated, both terminated, neither), an empty body, an unterminated function
+body, an unterminated loop body, under `set -v`, under `set -x`, and under
+`set -e`. Tests: `unterminated_heredoc_records_both_warning_lines` (lexer, the
+line table above), `heredoc_eof_warning_is_released_with_its_own_unit` (parser, the
+release timing including the suppression case), and the
+`tests/corpus/heredoc-eof-warning.sh` corpus case, whose every probe is an `eval`
+or a sourced file because each needs an input of its own that *ends*.
+
+**Found** while measuring TD-OILS-SYNTAX-ERR-ERREXIT-ECHO, which needed a
+single-line diagnostic to check that errexit leaves those alone; `cat <<EOF` was
+the example chosen, and it produced no line at all.
+
+### TD-OILS-HEREDOC-IN-CMDSUB-STOPS-AT-PAREN. a here-document inside `$( … )` does not swallow the closing paren — 2026-07-30 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `tokenize_paren_body` and the scan that
+finds a `$( … )` body's extent, which locates the closing `)` without knowing that a
+pending here-document's body may run straight through it.
+
+**Symptom.** bash reads a command substitution's body in the *enclosing* input
+stream, so a here-document inside one whose delimiter never arrives eats the `)` as
+another body line — and the outer command is then unterminated:
+
+```
+$ bash -c 'x=$(cat <<EOF
+body
+); echo "x=[$x]"'
+bash: line 3: warning: here-document at line 1 delimited by end-of-file (wanted `EOF')
+bash: -c: line 4: unexpected EOF while looking for matching `)'
+$ osh -c 'x=$(cat <<EOF
+body
+); echo "x=[$x]"'
+osh: line 3: warning: here-document at line 3 delimited by end-of-file (wanted `EOF')
+x=[body]
+```
+
+osh lexes the substitution body as a *separate* source that stops at the `)`, so the
+here-document ends there, the substitution succeeds, and `echo` runs. The warning's
+message line differs for the same reason: the body is numbered through
+`LineMap::CmdSub` rather than absolutely.
+
+A plain `( … )` subshell already matches, because osh lexes that inline — which is
+the shape of the fix.
+
+**Proper fix.** Stop scanning a `$( … )` body out as an independent string: the
+paren-body extent scan has to collect pending here-document bodies the way the main
+loop does, so a body that reaches end of input consumes the `)` and leaves the
+substitution unterminated. That is a real change to how command substitutions are
+delimited, so it is worth doing on its own rather than as a rider on the warning.
+
+**Impact.** Small and adversarial — it needs an unterminated here-document inside a
+command substitution. It is the one context (of eighteen measured) where the
+unterminated-here-document warning does not match bash, and it is deliberately kept
+out of `tests/corpus/heredoc-eof-warning.sh`. Found while fixing
+BUG-OILS-HEREDOC-EOF-WARNING.
 
 ### BUG-OILS-EMPTY-SUBSCRIPT. A lexically empty subscript `a[]` was read as index 0, and `${a[]}` was a fatal *parse* error that killed the script — ✅ RESOLVED 2026-07-30
 

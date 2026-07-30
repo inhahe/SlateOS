@@ -28399,6 +28399,19 @@ mod tests {
         // the lines of the input it was written on rather than its own.
         let mut ip = crate::parser::IncrementalParser::new("cat <<EOF\nbody", 1, opts);
         assert_eq!(unit(&mut ip), (true, false, vec!["EOF/2/3".to_string()]));
+
+        // A here-document declared inside a `$( … )` is read by the *enclosing*
+        // scan, so an unterminated one leaves the substitution open too: the unit
+        // is the lexer's `unexpected EOF while looking for matching `)'`, and the
+        // warning has to ride out with it even though the truncation to the last
+        // complete line has left no token for the record to name. `echo hi` still
+        // runs first, silently — measured against bash, which prints `one`, then
+        // the warning, then the syntax error.
+        let mut ip =
+            crate::parser::IncrementalParser::new("echo hi\nx=$(cat <<EOF\nbody", 0, opts);
+        assert_eq!(unit(&mut ip), (true, false, vec![]));
+        assert_eq!(unit(&mut ip), (true, true, vec!["EOF/2/3".to_string()]));
+        assert_eq!(unit(&mut ip), (false, false, vec![]));
     }
 
     #[test]

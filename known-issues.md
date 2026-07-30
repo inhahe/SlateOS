@@ -8298,15 +8298,15 @@ or a sourced file because each needs an input of its own that *ends*.
 single-line diagnostic to check that errexit leaves those alone; `cat <<EOF` was
 the example chosen, and it produced no line at all.
 
-### TD-OILS-HEREDOC-IN-CMDSUB-STOPS-AT-PAREN. a here-document inside `$( … )` does not swallow the closing paren — 2026-07-30 — OPEN
+### TD-OILS-HEREDOC-IN-CMDSUB-STOPS-AT-PAREN. a here-document inside `$( … )` did not swallow the closing paren — ✅ RESOLVED 2026-07-30
 
-**Where:** `userspace/oils/src/lexer.rs` — `tokenize_paren_body` and the scan that
-finds a `$( … )` body's extent, which locates the closing `)` without knowing that a
-pending here-document's body may run straight through it.
+**Where:** `userspace/oils/src/lexer.rs` — the scan that finds a `$( … )` / `<( … )`
+body's extent, which located the closing `)` without knowing that a pending
+here-document's body may run straight through it.
 
-**Symptom.** bash reads a command substitution's body in the *enclosing* input
-stream, so a here-document inside one whose delimiter never arrives eats the `)` as
-another body line — and the outer command is then unterminated:
+**Symptom.** bash reads a substitution's body in the *enclosing* input stream, so a
+here-document declared inside one takes its body from the lines that follow — and
+those lines can run past the `)`, which is then body text:
 
 ```
 $ bash -c 'x=$(cat <<EOF
@@ -8314,32 +8314,152 @@ body
 ); echo "x=[$x]"'
 bash: line 3: warning: here-document at line 1 delimited by end-of-file (wanted `EOF')
 bash: -c: line 4: unexpected EOF while looking for matching `)'
-$ osh -c 'x=$(cat <<EOF
-body
-); echo "x=[$x]"'
+$ osh -c '…'   # before
 osh: line 3: warning: here-document at line 3 delimited by end-of-file (wanted `EOF')
 x=[body]
 ```
 
-osh lexes the substitution body as a *separate* source that stops at the `)`, so the
-here-document ends there, the substitution succeeds, and `echo` runs. The warning's
-message line differs for the same reason: the body is numbered through
-`LineMap::CmdSub` rather than absolutely.
+Measuring the whole shape (twelve `$( … )` contexts plus five procsub/nesting ones)
+turned up four more divergences the entry had not named, all worse than this one:
 
-A plain `( … )` subshell already matches, because osh lexes that inline — which is
-the shape of the fix.
+| input | bash | osh (before) |
+|---|---|---|
+| `$(cat <<EOF` / `body` / `); echo inner` / `EOF` / `echo after` | `unexpected EOF … matching )` | ran `inner`, then `EOF: command not found`, then `after` |
+| `$(cat <<EOF` / `) one` / `EOF` / `echo …` | same | ran `one` **and** `EOF` as commands |
+| `cat <(cat <<EOF` / `body` / `); echo after` | warning + `unexpected EOF` | silently ran the substitution and `after`, no warning |
+| `$(echo \))` | `)` | `syntax error near unexpected token )` |
 
-**Proper fix.** Stop scanning a `$( … )` body out as an independent string: the
-paren-body extent scan has to collect pending here-document bodies the way the main
-loop does, so a body that reaches end of input consumes the `)` and leaves the
-substitution unterminated. That is a real change to how command substitutions are
-delimited, so it is worth doing on its own rather than as a rider on the warning.
+**Fix.** `Lexer::read_subst_body` — a here-document-aware mode of
+`read_balanced` used by the `$( … )`, `<( … )`/`>( … )` and `${…$(…)…}` call sites.
+It consumes each declared here-document's body from the enclosing input at the next
+newline and appends the lines **verbatim** to the substitution's raw text, so they
+sit exactly where an inline body would have and the later re-lex of that text finds
+them, while the scan resumes looking for the `)` from *after* them.
 
-**Impact.** Small and adversarial — it needs an unterminated here-document inside a
-command substitution. It is the one context (of eighteen measured) where the
-unterminated-here-document warning does not match bash, and it is deliberately kept
-out of `tests/corpus/heredoc-eof-warning.sh`. Found while fixing
-BUG-OILS-HEREDOC-EOF-WARNING.
+Finding a `<<` at all is what forces the rest: the mode has to recognise the places
+one can sit without being an operator — a comment, a `<<<` here-string (consumed
+whole, so its second `<` is never read as the first of a `<<`), a shift inside
+`$(( … ))` / `(( … ))` (tracked by the paren depth the span began at), a `${ … }`
+body, a backtick body (bash lexes those on their own, so the here-document inside
+one is *its* business and the closing backtick is found lexically), and a backslash
+escape. Handling the last two also fixed `$(echo \))` and
+`` $(echo `echo )`) `` as a by-product.
+
+Two supporting changes:
+
+* `Lexer::next_tok_index` — the index of the token the current `run_into` iteration
+  is about to push. The word readers are not given `out`, so a reader-level record
+  raised deep inside a word (the here-document EOF warning) had no other way to name
+  the token it belongs to.
+* `IncrementalParser::next_unit` — a parked lexer error about to be *reported* now
+  lifts the release frontier to `usize::MAX`. Reaching it means the reader consumed
+  the whole input, bodies included; and when the failing scan is the one that
+  swallowed the body, the cut back to the last complete line has dropped the very
+  token the record names (the stream can be empty, making `orig.len()` 0 and the
+  `tok_index < next_orig` gate unsatisfiable). Without this the warning was recorded
+  and never printed.
+
+**Verified:** `tests/corpus/heredoc-in-cmdsub.sh` (byte-for-byte, including the
+warning-then-syntax-error order and the earlier lines running first) and
+`lexer::tests::substitution_body_reaches_past_a_here_document`. Three divergences in
+the same scanner remain, each logged on its own below:
+TD-OILS-CMDSUB-HEREDOC-PAST-CLOSE, TD-OILS-CMDSUB-CASE-PATTERN-PAREN,
+TD-OILS-CMDSUB-ARITH-CMD-MESSAGE. Found while fixing BUG-OILS-HEREDOC-EOF-WARNING.
+
+### TD-OILS-CMDSUB-HEREDOC-PAST-CLOSE. a here-document whose `)` is on its own line is not fed from past that line — 2026-07-30 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `read_subst_body`, which drops the
+here-documents still pending when the `)` arrives.
+
+**Symptom.** When the `<<` and the `)` are on the *same* line, the body lies after
+the `)` — outside the substitution's own text entirely. bash notices, warns in a
+shape it uses nowhere else, and then *still* delivers the body:
+
+```
+$ bash -c 'x=$(cat <<EOF); echo "x=[$x]"
+body
+EOF'
+bash: line 1: warning: command substitution: 1 unterminated here-document
+x=[body]
+$ osh -c '…'
+osh: line 1: warning: here-document at line 1 delimited by end-of-file (wanted `EOF')
+x=[]
+osh: line 2: body: command not found
+osh: line 3: EOF: command not found
+```
+
+bash's own reader is doing something slightly incoherent here — the scan of the
+substitution body reaches `)` with the here-document ungathered (hence the warning),
+but the enclosing line's gather then picks the body up and it reaches the inner
+`cat` anyway. Both the warning and the working body are observable, so both count.
+
+**Proper fix.** The pending record has to outlive the scan: keep it (delim, strip,
+and where in the substitution's raw text the body belongs) and splice the body in
+when the enclosing newline collects it, then emit the `command substitution: N
+unterminated here-document` warning at the substitution's line. The splice is the
+awkward part — the raw text is already inside a `Seg::CmdSub` nested in a
+`Tok::Word`, so it needs either a stable handle to that segment or a deferred
+"patch this token's Nth substitution" record.
+
+**Impact.** Adversarial: it needs `<<` and the closing `)` on one line with the body
+after. Deliberately kept out of `tests/corpus/heredoc-in-cmdsub.sh`.
+
+### TD-OILS-CMDSUB-CASE-PATTERN-PAREN. a `case` pattern's `)` inside `$( … )` closes the substitution — 2026-07-30 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `read_balanced_inner`, which finds the
+end of a substitution by counting parentheses.
+
+**Symptom.** A `case` pattern's `)` has no opening mate, so the count reaches zero
+early and the substitution ends in the middle of the `case`:
+
+```
+$ bash -c 'x=$(case b in a) echo A;; b) echo B;; esac); echo "x=[$x]"'
+x=[B]
+$ osh -c '…'
+osh: line 1: syntax error near unexpected token `)'
+```
+
+This is a common idiom (`x=$(case $y in …) … esac)`), so it matters more than its
+neighbours here. It is *not* a here-document problem — it is the other half of "which
+`)` closes the construct", and the two are independent: the here-document question is
+about where the body *text* comes from (a reader-level question), this one about the
+*grammar*.
+
+**Proper fix.** Stop deciding the extent by counting characters. The only thing that
+knows which `)` closes a substitution is the grammar, so the scan has to become
+token-level and `case`-aware: track a stack of "inside a `case` pattern list" states
+in the lexer (as `cond_depth` already does for `[[ … ]]`) and let a `)` in that state
+be a pattern terminator rather than a group close. bash gets this for free because
+its `$( … )` extent scan (`parse_comsub`) runs the real parser. Doing the same here
+would mean the lexer asking the parser where the body ends, which the current layering
+(parser depends on lexer) forbids — hence the lexer-side `case` state machine.
+
+**Impact.** Any `case` inside a `$( … )`, `<( … )` or `>( … )` fails to parse. A
+`case` inside a plain `( … )` subshell or a function body is fine — those are lexed
+inline, with the real token loop.
+
+### TD-OILS-CMDSUB-ARITH-CMD-MESSAGE. `$(((` reports a malformed arithmetic expansion where bash reports an unmatched `)` — 2026-07-30 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `read_arith`, reached because
+`read_dollar` commits to `$((` on sight.
+
+**Symptom.** `$(( ` and `$( (` are ambiguous until the close, and bash backtracks:
+
+```
+$ bash -c 'x=$(((1 << 3)); echo "x=[$x]"'
+bash: -c: line 1: unexpected EOF while looking for matching `)'
+$ osh -c '…'
+osh: line 1: syntax error: malformed arithmetic expansion
+```
+
+Both reject it and both score 2; only the message differs.
+
+**Proper fix.** On a `read_arith` failure, rewind to just past the `$(` and re-scan
+as a command substitution, which is what bash's `parse_dollar_paren` does. The rewind
+is cheap (`self.pos` and `self.line` are the only state the scan advances), but it has
+to be careful not to re-report a *nested* error the first attempt already stamped.
+
+**Impact.** Message text only, on input every shell rejects.
 
 ### BUG-OILS-EMPTY-SUBSCRIPT. A lexically empty subscript `a[]` was read as index 0, and `${a[]}` was a fatal *parse* error that killed the script — ✅ RESOLVED 2026-07-30
 

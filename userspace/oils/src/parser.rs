@@ -740,6 +740,12 @@ impl IncrementalParser {
         self.wpos = p.pos;
         self.work = p.toks;
         self.work_lines = p.lines;
+        // Whether this call is about to end the input by reporting the parked lexer
+        // error — either in place of a grammar error that only happened because the
+        // stream was truncated, or as the end-of-input result itself. Sampled before
+        // the two arms that consume it.
+        let lex_err_now =
+            self.pending_lex_err.is_some() && (items.is_empty() || (outcome.is_err() && ran_out));
         // A parked lexer error wins over a grammar error that only happened
         // because the token stream was *truncated* at the unclosed construct
         // (`if true; then` + `echo 'unterm` leaves a `then` with no body). Such
@@ -767,10 +773,18 @@ impl IncrementalParser {
         // rest of the input — and input bash abandons is input it never read, so it
         // never warns about it either. `echo one )` followed by an unterminated
         // here-document prints the syntax error and nothing else.
+        //
+        // A parked lexer error about to be reported lifts the frontier entirely:
+        // reaching it means the reader consumed the whole input, here-document
+        // bodies included, and the record's token may not even be *in* the stream —
+        // when the failing scan was the one that swallowed the body (an
+        // unterminated here-document inside a `$( … )`), the cut back to the last
+        // complete line drops the token the record names.
+        let frontier = if lex_err_now { usize::MAX } else { next_orig };
         if !self.pending_heredoc_eof.is_empty() {
             let mut keep = Vec::new();
             for h in std::mem::take(&mut self.pending_heredoc_eof) {
-                if h.tok_index < next_orig {
+                if h.tok_index < frontier {
                     self.ready_heredoc_eof.push(h);
                 } else {
                     keep.push(h);

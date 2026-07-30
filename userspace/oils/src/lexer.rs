@@ -272,6 +272,13 @@ struct Lexer {
     /// `strict_heredoc_eof`), since strict mode raises instead. bash warns about
     /// each of these, so the reader needs the record; see [`HeredocEof`].
     heredoc_eof: Vec<HeredocEof>,
+    /// Index in the output token stream of the token the current
+    /// [`Lexer::run_into`] iteration is about to push. The word readers are not
+    /// given `out`, so a reader-level record raised deep inside a word — an
+    /// unterminated here-document declared inside a `$( … )`, whose body the
+    /// enclosing scan consumes — has no other way to name the token it belongs
+    /// to. Left at 0 by the lexers that never run the token loop.
+    next_tok_index: usize,
 }
 
 /// A here-document whose delimiter never arrived: the input ran out first.
@@ -333,6 +340,7 @@ impl Lexer {
             paren_body: false,
             conts: Vec::new(),
             heredoc_eof: Vec::new(),
+            next_tok_index: 0,
         }
     }
 
@@ -929,6 +937,7 @@ impl Lexer {
             let start_line = self.line;
             let start_pos = self.pos;
             self.iter_start = start_pos;
+            self.next_tok_index = out.len();
             // RHS of `=~`: read the regex as one word so that `|` and the rest
             // of the regex alphabet are literal rather than shell operators,
             // and so a `( … )` group holds on to the blanks inside it.
@@ -1677,9 +1686,7 @@ impl Lexer {
                 // 3-line script reports line 4). A nested construct that closed
                 // first stamps its own line and `at` will not overwrite it.
                 let open_line = self.cur_line();
-                let raw = self
-                    .read_balanced('(', ')')
-                    .map_err(|e| e.at(self.eof_line()))?;
+                let raw = self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
                 segs.push(Seg::ProcSub(input, raw, open_line));
                 continue;
             }
@@ -1930,9 +1937,7 @@ impl Lexer {
                     // after the outer scan, by which point the line counter has
                     // moved on. (An unterminated quote *inside* the body still
                     // reports its own line — `at` will not overwrite.)
-                    let raw = self
-                        .read_balanced('(', ')')
-                        .map_err(|e| e.at(self.eof_line()))?;
+                    let raw = self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
                     Ok(Some(Seg::CmdSub(raw, self.cur_line(), None)))
                 }
             }
@@ -1970,8 +1975,57 @@ impl Lexer {
     /// at the quote's own opening line, and `LexError::at` never overwrites, so
     /// the caller's stamp cannot displace them.
     fn read_balanced(&mut self, open: char, close: char) -> Result<String, LexError> {
+        self.read_balanced_inner(open, close, false)
+    }
+
+    /// [`Lexer::read_balanced`] for the body of a `$( … )` or `<( … )`
+    /// substitution, which bash reads in the **enclosing** input stream — so a
+    /// here-document declared inside the body takes its body from the lines that
+    /// follow, and those lines can run straight past the `)`:
+    ///
+    /// ```text
+    /// x=$(cat <<EOF        # the body of the here-document is `body\n); echo hi\n`,
+    /// body                 # so the `)` is body text: the substitution never closes
+    /// ); echo hi           # and bash reports an unmatched `)` at end of input.
+    /// EOF
+    /// ```
+    ///
+    /// The bodies are consumed here and appended to the raw text verbatim, which
+    /// puts them exactly where an inline here-document's body would have sat — so
+    /// the later re-lex of that text finds them — while this scan carries on
+    /// looking for the `)` from *after* them.
+    ///
+    /// Having to find a `<<` is also why this mode must recognise the places one
+    /// can sit without being a here-document operator: a comment, a `<<<`
+    /// here-string, a `<<` shift inside `$(( … ))`, a `${ … }` body, a backtick
+    /// body (bash lexes those on their own — the here-document inside one is *its*
+    /// business, and its closing backtick is found lexically), and a backslash
+    /// escape. Those are copied whole rather than character by character, which
+    /// incidentally makes `$(echo \))` and `` $(echo `echo )`) `` scan correctly.
+    fn read_subst_body(&mut self) -> Result<String, LexError> {
+        self.read_balanced_inner('(', ')', true)
+    }
+
+    fn read_balanced_inner(
+        &mut self,
+        open: char,
+        close: char,
+        heredocs: bool,
+    ) -> Result<String, LexError> {
         let mut depth = 1usize;
         let mut raw = String::new();
+        // Here-documents declared in this body whose bodies the next newline will
+        // bring. Deliberately *not* `self.pending_heredocs`: the enclosing lexer's
+        // own pending here-documents belong to the line the substitution sits on
+        // and must still be collected after it, in that order (`cat <<A $(cat <<B`
+        // collects B first, then A).
+        let mut pending: Vec<(String, bool)> = Vec::new();
+        // `#` starts a comment, and `<<` a here-document, only at a word's start.
+        let mut word_start = true;
+        // The paren depth the innermost `$(( … ))` / `(( … ))` began at, if any. A
+        // `<<` in there is a left shift and a `#` a base marker (`16#ff`), so
+        // neither introduces anything.
+        let mut arith_from: Option<usize> = None;
         loop {
             let Some(c) = self.bump() else {
                 return Err(eof_matching(close));
@@ -1990,6 +2044,7 @@ impl Lexer {
                         None => return Err(eof_matching('\'').at(q_open)),
                     }
                 }
+                word_start = false;
                 continue;
             }
             if c == '"' {
@@ -2011,7 +2066,104 @@ impl Lexer {
                         None => return Err(eof_matching('"').at(q_open)),
                     }
                 }
+                word_start = false;
                 continue;
+            }
+            if heredocs {
+                let in_arith = arith_from.is_some();
+                match c {
+                    '\n' => {
+                        raw.push('\n');
+                        if !pending.is_empty() {
+                            self.consume_subst_heredoc_bodies(&mut pending, &mut raw)?;
+                        }
+                        word_start = true;
+                        continue;
+                    }
+                    // Copied verbatim so the re-lex still sees the comment, but not
+                    // scanned: a `<<` inside one introduces nothing.
+                    '#' if word_start && !in_arith => {
+                        raw.push('#');
+                        while !matches!(self.peek(), None | Some('\n')) {
+                            if let Some(n) = self.bump() {
+                                raw.push(n);
+                            }
+                        }
+                        continue;
+                    }
+                    // A backslash escapes the next character, `)` included.
+                    '\\' => {
+                        raw.push('\\');
+                        if let Some(n) = self.bump() {
+                            raw.push(n);
+                        }
+                        word_start = false;
+                        continue;
+                    }
+                    '`' => {
+                        let (_, verbatim) = self.read_backtick()?;
+                        raw.push('`');
+                        raw.push_str(&verbatim);
+                        raw.push('`');
+                        word_start = false;
+                        continue;
+                    }
+                    '$' if self.peek() == Some('{') => {
+                        self.pos += 1;
+                        let inner = self.read_dollar_brace()?;
+                        raw.push_str("${");
+                        raw.push_str(&inner);
+                        raw.push('}');
+                        word_start = false;
+                        continue;
+                    }
+                    // `$((` / `((` open an arithmetic span. The parens are left to
+                    // the depth counting below, which is what tells us where the
+                    // span ends; only the suppression is recorded here.
+                    '$' if self.peek() == Some('(') && self.peek_at(1) == Some('(') => {
+                        arith_from = arith_from.or(Some(depth));
+                        raw.push('$');
+                        word_start = false;
+                        continue;
+                    }
+                    '(' if word_start && self.peek() == Some('(') => {
+                        arith_from = arith_from.or(Some(depth));
+                    }
+                    // A `<<<` here-string is consumed whole, so that its second `<`
+                    // is never mistaken for the first of a `<<`.
+                    '<' if self.peek() == Some('<') && self.peek_at(1) == Some('<') => {
+                        self.pos += 2;
+                        raw.push_str("<<<");
+                        word_start = false;
+                        continue;
+                    }
+                    // `<<`: a here-document, whose body the next newline brings from
+                    // the enclosing input.
+                    '<' if !in_arith && self.peek() == Some('<') => {
+                        self.pos += 1;
+                        raw.push_str("<<");
+                        let strip = self.peek() == Some('-');
+                        if strip {
+                            self.pos += 1;
+                            raw.push('-');
+                        }
+                        while matches!(self.peek(), Some(' ' | '\t')) {
+                            if let Some(n) = self.bump() {
+                                raw.push(n);
+                            }
+                        }
+                        // Copy the delimiter word as written — quotes and all, since
+                        // the re-lex has to draw the same expand/no-expand
+                        // conclusion from it that `read_heredoc_delim` just did.
+                        let word = self.pos;
+                        let (delim, _) = self.read_heredoc_delim();
+                        raw.extend(self.chars.get(word..self.pos).unwrap_or(&[]).iter());
+                        pending.push((delim, strip));
+                        word_start = false;
+                        continue;
+                    }
+                    _ => {}
+                }
             }
             if c == open {
                 depth += 1;
@@ -2020,9 +2172,64 @@ impl Lexer {
                 if depth == 0 {
                     return Ok(raw);
                 }
+                if arith_from == Some(depth) {
+                    arith_from = None;
+                }
             }
             raw.push(c);
+            if heredocs {
+                word_start = matches!(c, ' ' | '\t' | ';' | '&' | '|' | '(' | ')');
+            }
         }
+    }
+
+    /// Consume the bodies of here-documents declared inside a `$( … )` / `<( … )`
+    /// body, appending every line **verbatim** — the delimiter line included — to
+    /// the substitution's raw text. See [`Lexer::read_subst_body`].
+    fn consume_subst_heredoc_bodies(
+        &mut self,
+        pending: &mut Vec<(String, bool)>,
+        raw: &mut String,
+    ) -> Result<(), LexError> {
+        for (delim, strip) in core::mem::take(pending) {
+            // The moment bash's warning names; see [`Lexer::collect_heredocs`],
+            // which captures the same thing for a here-document read inline.
+            let body_line = self.fetched_line();
+            loop {
+                if self.pos >= self.chars.len() {
+                    if self.strict_heredoc_eof {
+                        return Err(LexError::new(format!(
+                            "unexpected EOF while looking for `{delim}'"
+                        )));
+                    }
+                    self.heredoc_eof.push(HeredocEof {
+                        delim: delim.clone(),
+                        body_line,
+                        eof_line: self.fetched_line(),
+                        tok_index: self.next_tok_index,
+                    });
+                    break;
+                }
+                let start = self.pos;
+                while !matches!(self.peek(), None | Some('\n')) {
+                    self.pos += 1;
+                }
+                let eol = self.pos;
+                if self.peek() == Some('\n') {
+                    self.pos += 1;
+                }
+                raw.extend(self.chars.get(start..self.pos).unwrap_or(&[]).iter());
+                let mut line: String = self.chars.get(start..eol).unwrap_or(&[]).iter().collect();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+                let content = if strip { line.trim_start_matches('\t') } else { line.as_str() };
+                if content == delim {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Read the body of a `${ … }` parameter expansion (`self.pos` is just
@@ -2138,9 +2345,12 @@ impl Lexer {
                                 raw.push_str(&inner);
                                 raw.push_str("))");
                             } else {
-                                let inner = self
-                                    .read_balanced('(', ')')
-                                    .map_err(|e| e.at(self.eof_line()))?;
+                                // The same substitution as anywhere else, so it
+                                // reads a here-document declared inside it the same
+                                // way — the body lines land in this `${ … }`'s raw
+                                // text, right where the nested re-lex expects them.
+                                let inner =
+                                    self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
                                 raw.push_str(&inner);
                                 raw.push(')');
                             }
@@ -2845,6 +3055,75 @@ mod tests {
                 .map(|h| (h.delim.as_str(), h.body_line, h.eof_line))
                 .collect();
             assert_eq!(got, *want, "{src:?}");
+        }
+    }
+
+    /// A here-document declared inside a `$( … )` or `<( … )` takes its body from
+    /// the *enclosing* input, so the body lines — and not the first `)` after the
+    /// operator — decide where the substitution ends. Every expectation is measured
+    /// from bash 5.2. See [`Lexer::read_subst_body`].
+    #[test]
+    fn substitution_body_reaches_past_a_here_document() {
+        // (source, the raw substitution body the scan must capture)
+        let bodies: &[(&str, &str)] = &[
+            // The common idiom: the `)` sits after the delimiter line, so the body
+            // is everything up to it — which is what a naive paren scan also gets.
+            ("x=$(cat <<EOF\nbody\nEOF\n)", "cat <<EOF\nbody\nEOF\n"),
+            // Now the `)` is *inside* the here-document's body, so it is body text
+            // and the substitution runs on to the next one.
+            ("x=$(cat <<EOF\nbody\n); echo hi\nEOF\n)", "cat <<EOF\nbody\n); echo hi\nEOF\n"),
+            // `<<-` and a quoted delimiter behave the same, and the delimiter word
+            // must be copied *as written* so the re-lex draws the same conclusion
+            // about expansion from it.
+            ("x=$(cat <<-\"EOF\"\n\t)\n\tEOF\n)", "cat <<-\"EOF\"\n\t)\n\tEOF\n"),
+            // Two here-documents in one body, collected in order at the newline.
+            ("x=$(cat <<A <<B\n)\nA\n)\nB\n)", "cat <<A <<B\n)\nA\n)\nB\n"),
+            // Places a `<<` can sit without being an operator. Each of these would
+            // otherwise send the scan hunting for a delimiter that never comes and
+            // swallow the rest of the input.
+            ("x=$(cat <<<')'\n)", "cat <<<')'\n"),
+            ("x=$(echo hi # <<Z\n)", "echo hi # <<Z\n"),
+            ("x=$(echo $((1 << 3))\n)", "echo $((1 << 3))\n"),
+            ("x=$(echo ${y:-<<Z}\n)", "echo ${y:-<<Z}\n"),
+            // A backtick body is lexed on its own, so a here-document inside one is
+            // that body's business and its closing backtick is found lexically.
+            ("x=$(echo `cat <<Z` hi\n)", "echo `cat <<Z` hi\n"),
+            // A backslash escapes the `)` rather than closing the substitution.
+            ("x=$(echo \\)); echo hi", "echo \\)"),
+            // Process substitution reads its body the same way.
+            ("cat <(cat <<EOF\n)\nEOF\n)", "cat <<EOF\n)\nEOF\n"),
+        ];
+        for (src, want) in bodies {
+            let tk = tokenize_deferred(src, LexOpts::default());
+            assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);
+            let raw = tk
+                .toks
+                .iter()
+                .find_map(|t| match t {
+                    Tok::Word(segs) => segs.iter().find_map(|s| match s {
+                        Seg::CmdSub(raw, _, None) | Seg::ProcSub(_, raw, _) => Some(raw.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no substitution segment in {src:?}: {:?}", tk.toks));
+            assert_eq!(raw, *want, "{src:?}");
+        }
+        // When the body runs to end of input the substitution never closes, and
+        // bash reports the unmatched `)` — one line past the last, as it does for
+        // every unterminated `$( … )`. The here-document warning is recorded too,
+        // in the *enclosing* line numbers, and comes out first.
+        for src in ["x=$(cat <<EOF\nbody\n); echo hi", "cat <(cat <<EOF\nbody\n); echo hi"] {
+            let tk = tokenize_deferred(src, LexOpts::default());
+            let (e, line) = tk.err.as_ref().unwrap_or_else(|| panic!("{src:?} must fail"));
+            assert_eq!(e.to_string(), "unexpected EOF while looking for matching `)'");
+            assert_eq!(*line, 4, "{src:?}");
+            let got: Vec<_> = tk
+                .heredoc_eof
+                .iter()
+                .map(|h| (h.delim.as_str(), h.body_line, h.eof_line))
+                .collect();
+            assert_eq!(got, vec![("EOF", 1, 3)], "{src:?}");
         }
     }
 }

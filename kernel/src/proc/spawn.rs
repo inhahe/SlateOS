@@ -6961,6 +6961,133 @@ pub fn self_test_clongdouble() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the sysroot's **`_FORTIFY_SOURCE` printf ABI**.
+///
+/// The six `__*_chk` entry points (`__printf_chk`, `__fprintf_chk`,
+/// `__dprintf_chk`, `__asprintf_chk`, `__sprintf_chk`, `__snprintf_chk`) are
+/// assembly trampolines — `va_trampoline!` in `posix/src/fortify_printf.rs` —
+/// that spill the argument registers into a System V register save area, build
+/// a `va_list` over it and delegate to the matching `__v*_chk`.  They exist
+/// only on the bare-metal target, so `cargo test` can reach the `__v*_chk`
+/// Rust functions but never the trampolines themselves.
+///
+/// That leaves twelve hard-coded numbers unverified by the host suite: each
+/// trampoline's initial `gp_offset` (8 x the count of *named integer*
+/// arguments) and the register its `va_list*` travels in.  An off-by-one there
+/// does not fault; it reads the varargs one slot early or late, so
+/// `__snprintf_chk(buf, n, flag, slen, "%d", 7)` quietly prints `slen`.  Only
+/// a caller that believes the real C ABI can catch it, hence a plain-C fixture.
+///
+/// The fixture declares the glibc prototypes by hand rather than relying on
+/// `-D_FORTIFY_SOURCE=2`: musl, whose headers `zig cc` uses, deliberately
+/// implements no fortification and would rewrite nothing.  Calling them
+/// directly also pins the exact ABI a fortified glibc object file expects,
+/// which is what we must match in order to link one.
+///
+/// It also re-runs the float-ABI rules of [`self_test_clongdouble`] through
+/// this family, because they were previously *unreachable* here: the old
+/// trampolines flattened varargs into fixed integer/float arrays, which cannot
+/// represent a MEMORY-class `long double` at all.
+///
+/// Exit code 42 means every check passed; any other code names the failing
+/// step (see the FAIL diagnostic below and `services/ctest-fortify/main.c`).
+pub fn self_test_cfortify() -> KernelResult<()> {
+    let ctest_elf = match load_test_elf("ctest-fortify") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP ctest-fortify: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+
+    serial_println!(
+        "[spawn] Running fortify printf (ring 3, C) integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after all of its ABI checks pass.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-fortify"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-fortify",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-fortify spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Formatting plus two heap allocations (`__asprintf_chk`), none of which
+    // can block; the bounded budget matches the other ring-3 fixtures so a
+    // fault can never wedge boot.
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-fortify (ring 3) — expected Zombie, got {:?}. Nothing this \
+             fixture does can block, so a non-zombie state means it faulted — most likely a \
+             trampoline whose stack adjustment or `movaps` spill is misaligned (the register \
+             save area must be 16-byte aligned or `movaps` #GPs)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-fortify (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {}. Code bands: 10-16 = __snprintf_chk, the five-named-argument case with \
+             the least register slack (12 spills past the six GP slots into the overflow area; \
+             13-15 are the slen/maxlen bounding that is the wrapper's whole purpose), 20-22 = \
+             __sprintf_chk, 30-32 = __asprintf_chk (the only allocating one), 33-35 = the \
+             stdout-writing three, asserted on their reported byte counts, 40-46 = floats \
+             through the fortified path (41/43-46 are `long double`, which the old flattening \
+             trampolines could not represent at all — see BUG-POSIX-LONG-DOUBLE-ABI), 50-51 = \
+             __vsnprintf_chk called with a compiler-built va_list, so a pass there next to a \
+             failure above localises the fault to the assembly. See \
+             services/ctest-fortify/main.c",
+            exit_code, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   fortify printf (ring 3: all six __*_chk assembly trampolines hand their \
+         __v*_chk a correct va_list — gp_offset, register and overflow area — including \
+         MEMORY-class long doubles): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that fastpy **pure-mode file I/O** works on-target.
 ///
 /// This is the first proof that the whole pure-mode file path runs natively on

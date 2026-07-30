@@ -1645,6 +1645,15 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: long double (ring 3) self-test failed: {:?}", e);
     }
 
+    // The three fixtures above all reach the sysroot through the plain printf
+    // family. A program compiled with _FORTIFY_SOURCE calls `__snprintf_chk`
+    // and friends instead, which have their own assembly trampolines and their
+    // own hard-coded gp_offset/register pairs — unreachable from `cargo test`,
+    // because they only exist on the bare-metal target. Bounded yield loop.
+    if let Err(e) = proc::spawn::self_test_cfortify() {
+        serial_println!("WARNING: fortify printf (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
     // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
     // memfs and exits with the byte count read back, proving the full path

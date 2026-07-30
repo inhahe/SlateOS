@@ -120,6 +120,14 @@ pub struct ArithError {
     /// since neither the command nor any token is what went wrong. `None` for
     /// the ordinary errors, which are about the expression and echo it.
     pub subject: Option<String>,
+    /// Set when the failure happened while evaluating an array *subscript*.
+    /// bash evaluates a subscript through a separate entry point from the
+    /// expression around it, and every diagnostic from there differs twice
+    /// over: no builtin tag is applied (`((a[1/0]=9))` reports plain
+    /// `1/0: division by 0`, not `((: a[1/0]=9: …`), and the failure is fatal
+    /// to the command list the way an expansion error is, rather than merely
+    /// giving `let`/`(( ))` a non-zero status. See [`Sub`].
+    pub in_subscript: bool,
 }
 
 impl ArithError {
@@ -131,6 +139,7 @@ impl ArithError {
             truncate_leading: false,
             expr_override: None,
             subject: None,
+            in_subscript: false,
         }
     }
 
@@ -142,6 +151,7 @@ impl ArithError {
             truncate_leading: false,
             expr_override: None,
             subject: None,
+            in_subscript: false,
         }
     }
 
@@ -154,6 +164,7 @@ impl ArithError {
             truncate_leading: true,
             expr_override: None,
             subject: None,
+            in_subscript: false,
         }
     }
 
@@ -167,6 +178,7 @@ impl ArithError {
             truncate_leading: false,
             expr_override: None,
             subject: Some(name.into()),
+            in_subscript: false,
         }
     }
 }
@@ -187,7 +199,7 @@ enum Expr {
     /// Bare scalar variable.
     Var(String),
     /// Indexed array element `name[index]` (subscript is arithmetic).
-    Index(String, Box<Expr>),
+    Index(String, Box<Sub>),
     /// Associative array element `name[key]` (subscript is a literal key).
     Assoc(String, String),
     Neg(Box<Expr>),
@@ -218,8 +230,51 @@ enum Expr {
 #[derive(Debug, Clone)]
 enum Lvalue {
     Var(String),
-    Index(String, Box<Expr>),
+    Index(String, Box<Sub>),
     Assoc(String, String),
+}
+
+/// An array subscript: the parsed expression together with its raw source text.
+///
+/// bash evaluates a subscript through an entry point of its own rather than as
+/// part of the expression around it, and that shows in every diagnostic it
+/// produces — see [`ArithError::in_subscript`]. Keeping the raw text beside the
+/// AST is what lets [`Sub`] restore the context the separate entry point would
+/// have carried.
+#[derive(Debug, Clone)]
+struct Sub {
+    expr: Expr,
+    raw: Box<str>,
+}
+
+impl Sub {
+    /// Parse `raw` as a subscript expression. A *parse* failure is a subscript
+    /// failure too: `((a[1+]=9))` reports `1+: syntax error: operand expected`.
+    fn parse(raw: &str, vars: &dyn VarLookup) -> Result<Self, ArithError> {
+        let expr = parse(raw, vars).map_err(|e| tag_subscript(e, raw))?;
+        Ok(Self {
+            expr,
+            raw: raw.into(),
+        })
+    }
+
+    fn eval(&self, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
+        eval_expr(&self.expr, vars, depth).map_err(|e| tag_subscript(e, &self.raw))
+    }
+}
+
+/// Mark `e` as having come from evaluating a subscript, and blame the
+/// subscript's own text.
+///
+/// The innermost subscript wins — `a[b[1/0]]` blames `1/0`, not `b[1/0]` — and a
+/// failure deeper still keeps what it recorded: for `x="1/0"; ((a[x]=9))` bash
+/// blames the *value* `1/0` that `str_to_val` recorded, not the subscript `x`.
+fn tag_subscript(mut e: ArithError, raw: &str) -> ArithError {
+    if e.expr_override.is_none() {
+        e.expr_override = Some(raw.to_string());
+    }
+    e.in_subscript = true;
+    e
 }
 
 /// A resolved location — array subscripts already evaluated to a concrete
@@ -742,8 +797,8 @@ impl AParser<'_> {
                     }
                     // Indexed: parse the subscript as its own arithmetic
                     // expression (evaluated later against the live environment).
-                    let sub_ast = parse(&raw, self.vars)?;
-                    return Ok(Expr::Index(name, Box::new(sub_ast)));
+                    let sub = Sub::parse(&raw, self.vars)?;
+                    return Ok(Expr::Index(name, Box::new(sub)));
                 }
                 Ok(Expr::Var(name))
             }
@@ -974,7 +1029,7 @@ fn eval_expr(e: &Expr, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
             None => Ok(0),
         },
         Expr::Index(n, ix) => {
-            let i = eval_expr(ix, vars, depth)?;
+            let i = ix.eval(vars, depth)?;
             match vars.get_index_str(n, i) {
                 Some(s) => str_to_val(&s, vars, depth),
                 None => Ok(0),
@@ -1066,7 +1121,7 @@ fn resolve_lv(lv: &Lvalue, vars: &mut dyn VarLookup, depth: u32) -> Result<Resol
     Ok(match lv {
         Lvalue::Var(n) => ResolvedLv::Var(n.clone()),
         Lvalue::Index(n, ix) => {
-            let i = eval_expr(ix, vars, depth)?;
+            let i = ix.eval(vars, depth)?;
             ResolvedLv::Index(n.clone(), i)
         }
         Lvalue::Assoc(n, k) => ResolvedLv::Assoc(n.clone(), k.clone()),
@@ -1231,6 +1286,45 @@ mod tests {
         assert_eq!(eval("a[10]", &mut m).unwrap(), 0); // out of range → 0
         // Missing ']' is a syntax error.
         assert!(eval("a[1", &mut m).is_err());
+    }
+
+    #[test]
+    fn a_subscript_failure_blames_the_subscript() {
+        // bash evaluates a subscript through an entry point of its own, so an
+        // error raised inside one is *about the subscript*: the text blamed is
+        // the subscript's, not the expression's, and the flag that tells the
+        // shell to drop its builtin tag and abandon the command list is set.
+        let mut m = ArrMap {
+            scalars: HashMap::new(),
+            a: vec![10, 20, 30],
+        };
+        for src in ["a[1/0] = 9", "a[1/0]", "b = a[1/0]", "a[1/0]++", "a[1/0] += 2"] {
+            let e = eval(src, &mut m).expect_err(src);
+            assert_eq!(e.expr_override.as_deref(), Some("1/0"), "{src}");
+            assert!(e.in_subscript, "{src}");
+            assert_eq!(e.msg, "division by 0");
+        }
+        // A *parse* failure inside the subscript counts too, and the raw text is
+        // kept verbatim — trailing blanks and all, which is what reproduces
+        // bash's `1/0  : division by 0 (error token is "0  ")`.
+        let e = eval("a[1+] = 9", &mut m).unwrap_err();
+        assert_eq!(e.expr_override.as_deref(), Some("1+"));
+        assert!(e.in_subscript);
+        let e = eval("a[  1/0  ] = 9", &mut m).unwrap_err();
+        assert_eq!(e.expr_override.as_deref(), Some("  1/0  "));
+        // The innermost subscript wins…
+        let e = eval("a[a[1/0]] = 9", &mut m).unwrap_err();
+        assert_eq!(e.expr_override.as_deref(), Some("1/0"));
+        // …and a failure deeper still — a variable whose *value* is a bad
+        // expression — keeps the value `str_to_val` recorded.
+        m.scalars.insert("x".to_string(), 0);
+        let e = eval("a[x/0] = 9", &mut m).unwrap_err();
+        assert_eq!(e.expr_override.as_deref(), Some("x/0"));
+        // An error *outside* any subscript is untouched: it blames the whole
+        // expression (the shell's caller-supplied source) and is not fatal.
+        let e = eval("a[0] = 1/0", &mut m).unwrap_err();
+        assert_eq!(e.expr_override, None);
+        assert!(!e.in_subscript);
     }
 
     #[test]

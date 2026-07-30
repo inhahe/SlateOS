@@ -5324,9 +5324,6 @@ impl Shell {
         i32::from(last == 0)
     }
 
-    /// Evaluate a raw arithmetic section (expand `$params`, then evaluate),
-    /// mutating shell state for any assignment/increment operators. Returns the
-    /// value, or `None` after printing the error.
     /// Evaluate an arithmetic string with a builtin/context tag set for the
     /// duration (bash's `this_command_name`) — used by the `(( … ))` command and
     /// the C-style `for (( … ))` sections, whose errors bash tags with `((`.
@@ -5338,6 +5335,9 @@ impl Shell {
         r
     }
 
+    /// Evaluate a raw arithmetic section (expand `$params`, then evaluate),
+    /// mutating shell state for any assignment/increment operators. Returns the
+    /// value, or `None` after printing the error.
     fn eval_arith_raw(&mut self, raw: &str) -> Option<i64> {
         // `(( … ))` commands, `let`, and arithmetic array subscripts report
         // their own errors and set their own status — a nested `$(( … ))` here
@@ -5354,8 +5354,35 @@ impl Shell {
                 // enclosing command — bash silences `let "3 x" 2>/dev/null`,
                 // `declare -i k="3 x" 2>/dev/null`, `(( 3 x )) 2>/dev/null`, etc.
                 self.emit_arith_error(&expanded, &e);
+                // An ordinary arithmetic error only gives `let` / `(( … ))` a
+                // non-zero status, but one raised inside a *subscript* is fatal
+                // to the command list, as an expansion error is — bash reaches
+                // the subscript through the same path. The driver turns the flag
+                // into a `Flow::Exit(1)`.
+                if e.in_subscript {
+                    self.discard_error = Some(1);
+                }
                 None
             }
+        }
+    }
+
+    /// Turn a pending expansion-style abort into a [`Flow::Discard`] for a
+    /// compound command that has no simple-command driver to consume the flag.
+    ///
+    /// `(( … ))`, `[[ … ]]` and `for (( … ))` evaluate arithmetic themselves, and
+    /// two things they can hit there are fatal to the whole parse unit rather
+    /// than merely to the command: a failure inside an array *subscript* (see
+    /// [`arith::ArithError::in_subscript`]) and a nested `$(( … ))` expansion
+    /// error. Without this, the flag would stay armed and be consumed by whatever
+    /// *next* command ran — which silently swallowed a following line.
+    fn arith_discard_flow(&mut self) -> Flow {
+        match self.discard_error.take() {
+            Some(code) => {
+                self.last_status = code;
+                Flow::Discard
+            }
+            None => Flow::Next,
         }
     }
 
@@ -5397,7 +5424,7 @@ impl Shell {
         trace_section(self, &c.init);
         if !c.init.is_empty() && self.eval_arith_cmd(&c.init, "((").is_none() {
             self.last_status = 1;
-            return Flow::Next;
+            return self.arith_discard_flow();
         }
         loop {
             trace_section(self, &c.cond);
@@ -5407,7 +5434,7 @@ impl Shell {
                     Some(_) => {}
                     None => {
                         self.last_status = 1;
-                        return Flow::Next;
+                        return self.arith_discard_flow();
                     }
                 }
             }
@@ -5430,7 +5457,7 @@ impl Shell {
             trace_section(self, &c.update);
             if !c.update.is_empty() && self.eval_arith_cmd(&c.update, "((").is_none() {
                 self.last_status = 1;
-                return Flow::Next;
+                return self.arith_discard_flow();
             }
         }
         Flow::Next
@@ -5967,7 +5994,7 @@ impl Shell {
         // A `=~` RHS that failed to compile as a regex makes bash return 2, not
         // the ordinary 1 "expression false" — surface that distinct status.
         self.last_status = if self.cond_regex_error { 2 } else { i32::from(!ok) };
-        Flow::Next
+        self.arith_discard_flow()
     }
 
     /// Execute a `(( … ))` arithmetic command: exit 0 if the value is non-zero.
@@ -5984,10 +6011,17 @@ impl Shell {
             Err(e) => {
                 self.emit_arith_error(&expanded, &e);
                 self.last_status = 1;
+                // A bad expression only fails the command, but a failure inside
+                // an array *subscript* abandons the rest of the parse unit the
+                // way an expansion error does — bash evaluates the subscript
+                // through that same path. See `arith::ArithError::in_subscript`.
+                if e.in_subscript {
+                    self.discard_error = Some(1);
+                }
             }
         }
         self.arith_cmd = saved_arith_cmd;
-        Flow::Next
+        self.arith_discard_flow()
     }
 
     /// Evaluate a `[[ … ]]` conditional expression tree to a boolean.
@@ -8471,7 +8505,9 @@ impl Shell {
         // top-level parse unit — but does NOT exit the shell (a following line
         // still runs). Arithmetic *commands* (`(( ))`, `let`, `for ((`) never set
         // this flag — only the `$(( … ))`/`$[ … ]` expansion path (`arith_sub`)
-        // does. Prefix assignment-value errors are checked after their own
+        // does, plus the arithmetic *subscript* path, which bash reaches through
+        // its own entry point and treats as an expansion error wherever it
+        // appears (`arith::ArithError::in_subscript`). Prefix assignment-value errors are checked after their own
         // expansion.
         if let Some(code) = self.discard_error.take() {
             self.last_status = code;
@@ -13029,6 +13065,10 @@ impl Shell {
             Ok(v) => Some(v),
             Err(e) => {
                 self.emit_arith_error(s, &e);
+                // …unless it came from a subscript, which is fatal even here.
+                if e.in_subscript {
+                    self.discard_error = Some(1);
+                }
                 None
             }
         };
@@ -22664,7 +22704,16 @@ impl Shell {
         {
             expr = &expr[..pos + tok.len()];
         }
-        let line = match self.arith_cmd.clone() {
+        // A failure inside an array *subscript* wears no builtin tag: bash
+        // evaluates the subscript through its own entry point, which never sees
+        // the `((`/`let`/`[[`/`declare` name the enclosing expression was
+        // evaluated under. See [`arith::ArithError::in_subscript`].
+        let tag = if e.in_subscript {
+            None
+        } else {
+            self.arith_cmd.clone()
+        };
+        let line = match tag {
             Some(tag) => format!("{prefix}{tag}: {expr}: {e}"),
             None => format!("{prefix}{expr}: {e}"),
         };
@@ -28220,6 +28269,108 @@ mod tests {
         assert_eq!(
             run_cmd(r#"x="5 apples"; declare -i z=x 2>&1"#),
             "osh: line 1: declare: 5 apples: syntax error in expression (error token is \"apples\")\n"
+        );
+    }
+
+    #[test]
+    fn arith_subscript_error_is_untagged_and_fatal() {
+        // An array subscript reaches bash's arithmetic evaluator through an
+        // entry point of its own (`array_expand_index`), and both halves of that
+        // show in the diagnostic: the subscript's own text is echoed rather than
+        // the expression around it, no builtin tag is applied even inside
+        // `((`/`let`/`[[`, and the failure is fatal to the rest of the parse unit
+        // the way an expansion error is — not merely a non-zero status.
+        fn run_cmd(src: &str) -> (String, i32) {
+            let mut sh = Shell::new();
+            sh.set_command_mode();
+            sh.set_interactive_shell(false);
+            let buf = capture_sink();
+            let status = {
+                let mut out = Out::Capture(buf.clone());
+                sh.run_source_out(src, &mut out, 0)
+            };
+            let buf = take_capture(&buf);
+            (String::from_utf8_lossy(&buf).into_owned(), status)
+        }
+        // `after` never runs, and the `((` tag is gone.
+        assert_eq!(
+            run_cmd("{ (( a[1/0]=9 )); echo after; } 2>&1"),
+            (
+                "osh: line 1: 1/0: division by 0 (error token is \"0\")\n".to_string(),
+                1
+            )
+        );
+        // The control: the same error *outside* the subscript is tagged and only
+        // fails its own command, so `after` still runs.
+        assert_eq!(
+            run_cmd("{ (( a[0]=1/0 )); echo after; } 2>&1"),
+            (
+                "osh: line 1: ((: a[0]=1/0 : division by 0 (error token is \"0 \")\nafter\n"
+                    .to_string(),
+                0
+            )
+        );
+        // Same rule under `let`, `[[ … ]]`, a read (no assignment), and a
+        // subscript on the right-hand side.
+        for src in [
+            "{ let 'a[1/0]=9'; echo after; } 2>&1",
+            "{ [[ a[1/0] -eq 1 ]]; echo after; } 2>&1",
+            "{ (( a[1/0] )); echo after; } 2>&1",
+            "{ (( b=a[1/0] )); echo after; } 2>&1",
+        ] {
+            assert_eq!(
+                run_cmd(src),
+                (
+                    "osh: line 1: 1/0: division by 0 (error token is \"0\")\n".to_string(),
+                    1
+                ),
+                "{src}"
+            );
+        }
+        // A parse error in the subscript blames the subscript too…
+        assert_eq!(
+            run_cmd("{ (( a[1+]=9 )); } 2>&1").0,
+            "osh: line 1: 1+: syntax error: operand expected (error token is \"+\")\n"
+        );
+        // …as does a rejected number literal, whose echoed text is truncated at
+        // the literal's end within the *subscript*, not within the expression.
+        assert_eq!(
+            run_cmd("{ (( a[2#9]=9 )); } 2>&1").0,
+            "osh: line 1: 2#9: value too great for base (error token is \"2#9\")\n"
+        );
+        // The subscript's raw text is echoed with its inner blanks intact.
+        assert_eq!(
+            run_cmd("{ ((  a[  1/0  ]  =9 )); } 2>&1").0,
+            "osh: line 1: 1/0  : division by 0 (error token is \"0  \")\n"
+        );
+        // Nesting blames the innermost subscript; a variable whose value is the
+        // bad expression blames that value.
+        assert_eq!(
+            run_cmd("{ (( a[b[1/0]]=9 )); } 2>&1").0,
+            "osh: line 1: 1/0: division by 0 (error token is \"0\")\n"
+        );
+        assert_eq!(
+            run_cmd("x=1/0; { (( a[x]=9 )); } 2>&1").0,
+            "osh: line 1: 1/0: division by 0 (error token is \"0\")\n"
+        );
+        // A refused write *inside* a subscript keeps the readonly wording (which
+        // never had a tag) but becomes fatal, where the same refusal outside one
+        // only fails the command.
+        assert_eq!(
+            run_cmd("readonly ro=1; { (( a[ro=5]=9 )); echo after; } 2>&1"),
+            ("osh: line 1: ro: readonly variable\n".to_string(), 1)
+        );
+        assert_eq!(
+            run_cmd("readonly ro=1; { (( ro=5 )); echo after; } 2>&1"),
+            (
+                "osh: line 1: ro: readonly variable\nafter\n".to_string(),
+                0
+            )
+        );
+        // A well-formed subscript is of course unaffected.
+        assert_eq!(
+            run_cmd("(( a[1+1]=9 )); echo \"${a[2]}\"").0,
+            "9\n"
         );
     }
 

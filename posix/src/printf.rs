@@ -919,6 +919,14 @@ fn dispatch_spec(
             format_float_general(dst, val, ch == b'G', &spec.flags, spec.width, prec);
         }
 
+        b'a' | b'A' => {
+            let bits = if spec.long_double { args.long_double() } else { args.double() };
+            let val = f64::from_bits(bits);
+            // No default precision: C99 says an absent one means "as many
+            // digits as it takes to be exact", which is not any fixed number.
+            format_float_hex(dst, val, ch == b'A', &spec.flags, spec.width, spec.precision);
+        }
+
         _ => {
             // Unknown specifier or premature end — emit raw.
             emit_byte(dst, b'%');
@@ -1476,6 +1484,137 @@ fn format_float_general(
     emit_float_padded(dst, &buf, text, negative, flags, width);
 }
 
+/// Format a floating-point value as a C99 hexadecimal float (`%a`/`%A`).
+///
+/// The form is `0xh.hhhhp±d`: a hex significand scaled by a power of two.
+/// Because the radix is a power of the base, *every* `double` has an exact
+/// such representation in at most 13 fraction digits — the significand is 52
+/// bits — and no rounding of any kind is involved in producing it. That is
+/// what `%a` is for: it is the only `printf` conversion guaranteed to
+/// round-trip a `double` through a short string, which is why C99 requires it
+/// and why the standard's own `strtod` must read it back.
+///
+/// Omitting the precision asks for exactly that shortest exact form, with
+/// trailing zeros dropped. Giving one rounds the significand to that many hex
+/// digits, ties to even, and the carry can reach the leading digit — `%.0a` of
+/// `0x1.fp+0` is `0x2p+0`.
+///
+/// The leading digit is `1` for a normal value and `0` for zero and the
+/// subnormals, which is how glibc writes them; a subnormal's exponent is then
+/// pinned at the format's minimum (`p-1022`) rather than normalised away.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+fn format_float_hex(
+    dst: &mut FmtOutput,
+    val: f64,
+    upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+    precision: Option<usize>,
+) {
+    if val.is_nan() {
+        let s = if upper { b"NAN" } else { b"nan" };
+        format_float_special(dst, s, false, flags, width);
+        return;
+    }
+    let negative = val.is_sign_negative();
+    if val.is_infinite() {
+        let s = if upper { b"INF" } else { b"inf" };
+        format_float_special(dst, s, negative, flags, width);
+        return;
+    }
+
+    /// Fraction bits in an `f64` significand.
+    const FRAC_BITS: u32 = 52;
+    /// Hex digits those bits make: 52 / 4, exactly.
+    const HEX_DIGITS: usize = 13;
+
+    let bits = if negative { (-val).to_bits() } else { val.to_bits() };
+    let exp_field = (bits >> FRAC_BITS) & 0x7ff;
+    let mant = bits & ((1u64 << FRAC_BITS) - 1);
+
+    // The leading digit and the power of two, before any rounding.
+    let (mut lead, exp2) = if exp_field == 0 {
+        // Zero prints as `0x0p+0`; a subnormal keeps the minimum exponent
+        // instead of being normalised, so its digits show where it sits in
+        // the subnormal range.
+        (0u64, if mant == 0 { 0i32 } else { -1022 })
+    } else {
+        (1u64, i32::try_from(exp_field).unwrap_or(0).wrapping_sub(1023))
+    };
+
+    // Fraction digits, rounded to `precision` if one was given.  `kept` holds
+    // them right-aligned, `digits` says how many there are and `pad` how many
+    // further zeros the precision asks for beyond the 13 that can differ.
+    let (kept, digits, pad) = match precision {
+        Some(p) if p < HEX_DIGITS => {
+            let dropped = FRAC_BITS - (u32::try_from(p).unwrap_or(0) * 4);
+            let keep = mant >> dropped;
+            let rest = mant & ((1u64 << dropped) - 1);
+            let half = 1u64 << (dropped - 1);
+            // Ties to even, matching every other rounding in this library.
+            // "Even" is a property of the last *retained* digit, which at
+            // precision 0 is the leading one and not part of `keep` at all:
+            // `%.0a` of 3.0 (`0x1.8p+1`) is an exact tie whose leading `1` is
+            // odd, so it rounds to `0x2p+1`.
+            let last = if p == 0 { lead } else { keep };
+            let round_up = rest > half || (rest == half && (last & 1) == 1);
+            let mut keep = keep;
+            if round_up {
+                keep = keep.wrapping_add(1);
+                if keep >> (u32::try_from(p).unwrap_or(0) * 4) != 0 {
+                    // The carry left the fraction: it lands on the leading
+                    // digit, which C leaves as `2` rather than renormalising.
+                    keep = 0;
+                    lead = lead.wrapping_add(1);
+                }
+            }
+            (keep, p, 0usize)
+        }
+        Some(p) => (mant, HEX_DIGITS, p.wrapping_sub(HEX_DIGITS)),
+        None if mant == 0 => (0, 0, 0usize),
+        None => {
+            // Shortest exact form: drop whole trailing zero digits.  `mant` is
+            // 52 bits and nonzero here, so at most 12 of the 13 can go.
+            let zero_digits = (mant.trailing_zeros() / 4) as usize;
+            (mant >> (zero_digits * 4), HEX_DIGITS - zero_digits, 0usize)
+        }
+    };
+
+    let hex =if upper { b"0123456789ABCDEF" } else { b"0123456789abcdef" };
+    let mut buf = [0u8; FLOAT_BUF];
+    let mut pos = 0usize;
+
+    put(&mut buf, &mut pos, hex.get(lead as usize % 16).copied().unwrap_or(b'0'));
+
+    if digits > 0 || pad > 0 || flags.alt_form {
+        put(&mut buf, &mut pos, b'.');
+    }
+    let mut i = digits;
+    while i > 0 {
+        i -= 1;
+        let nibble = (kept >> (i * 4)) & 0xf;
+        put(&mut buf, &mut pos, hex.get(nibble as usize).copied().unwrap_or(b'0'));
+    }
+
+    // The omitted zeros belong here, between the last digit and the `p`.
+    let zeros_at = pos;
+
+    put(&mut buf, &mut pos, if upper { b'P' } else { b'p' });
+    put(&mut buf, &mut pos, if exp2 < 0 { b'-' } else { b'+' });
+    let mut dec_buf = [0u8; NUM_BUF_SIZE];
+    let mag = u64::from(exp2.unsigned_abs());
+    let dec_len = u64_to_dec(mag, &mut dec_buf);
+    let mut j = NUM_BUF_SIZE.wrapping_sub(dec_len);
+    while j < NUM_BUF_SIZE {
+        put(&mut buf, &mut pos, dec_buf.get(j).copied().unwrap_or(b'0'));
+        j = j.wrapping_add(1);
+    }
+
+    let text = FloatText { len: pos, zeros_at, zeros: pad };
+    let prefix: &[u8] = if upper { b"0X" } else { b"0x" };
+    emit_float_padded_prefixed(dst, prefix, &buf, text, negative, flags, width);
+}
+
 /// Emit special float strings (nan, inf) with sign and padding.
 fn format_float_special(
     dst: &mut FmtOutput,
@@ -1546,9 +1685,26 @@ fn trim_float_text(buf: &mut [u8], text: FloatText) -> FloatText {
 }
 
 /// Emit a formatted float with sign, padding, and alignment.
-#[allow(clippy::arithmetic_side_effects)]
 fn emit_float_padded(
     dst: &mut FmtOutput,
+    buf: &[u8],
+    text: FloatText,
+    negative: bool,
+    flags: &FormatFlags,
+    width: usize,
+) {
+    emit_float_padded_prefixed(dst, &[], buf, text, negative, flags, width);
+}
+
+/// Emit a formatted float that carries a base prefix, such as `%a`'s `0x`.
+///
+/// The prefix sits between the sign and the digits and is part of the field
+/// width, so zero padding goes *after* it — `%012a` of 1.0 is `0x0001p+0`,
+/// not `0000x1p+0`.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+fn emit_float_padded_prefixed(
+    dst: &mut FmtOutput,
+    prefix: &[u8],
     buf: &[u8],
     text: FloatText,
     negative: bool,
@@ -1566,7 +1722,7 @@ fn emit_float_padded(
     };
     let sign_len = usize::from(sign.is_some());
     // The zeros `FloatText` recorded but did not write still occupy columns.
-    let total = sign_len + text.len + text.zeros;
+    let total = sign_len + prefix.len() + text.len + text.zeros;
 
     let pad_char = if flags.zero_pad && !flags.left_align {
         b'0'
@@ -1580,6 +1736,7 @@ fn emit_float_padded(
     if let Some(s) = sign {
         emit_byte(dst, s);
     }
+    emit_bytes(dst, prefix);
     if !flags.left_align && width > total && pad_char == b'0' {
         emit_padding(dst, b'0', width.wrapping_sub(total));
     }
@@ -3547,5 +3704,180 @@ mod tests {
         // precision larger than any buffer still prints them all.
         assert_eq!(fmt_f(b"%.60f ", 0.5), format!("0.5{}", "0".repeat(59)));
         assert_eq!(fmt_f(b"%.400f ", 0.25).len(), 402);
+    }
+
+    // -----------------------------------------------------------------------
+    // %a / %A — C99 hexadecimal floats
+    //
+    // Every expectation below is the byte-for-byte output of glibc's printf
+    // for the same format and value, captured by compiling the equivalent C
+    // program.  %a is the one conversion whose exact spelling programs depend
+    // on for round-tripping, so matching a reference implementation is the
+    // only meaningful standard.
+    // -----------------------------------------------------------------------
+
+    /// Format one `double` with a `%a`-style spec.
+    fn fmt_a(spec: &[u8], v: f64) -> String {
+        let mut fmt = spec.to_vec();
+        fmt.push(0);
+        snprintf_str(&fmt, &[], &[v.to_bits()]).0
+    }
+
+    #[test]
+    fn fmt_a_matches_glibc_on_plain_values() {
+        assert_eq!(fmt_a(b"%a", 1.0), "0x1p+0");
+        assert_eq!(fmt_a(b"%a", 2.0), "0x1p+1");
+        assert_eq!(fmt_a(b"%a", 0.5), "0x1p-1");
+        assert_eq!(fmt_a(b"%a", 0.0), "0x0p+0");
+        assert_eq!(fmt_a(b"%a", -0.0), "-0x0p+0");
+        assert_eq!(fmt_a(b"%a", -1.5), "-0x1.8p+0");
+        assert_eq!(fmt_a(b"%a", 255.5), "0x1.ffp+7");
+        assert_eq!(fmt_a(b"%a", 0.1), "0x1.999999999999ap-4");
+    }
+
+    #[test]
+    fn fmt_a_upper_case_raises_every_letter() {
+        // The `x` and the `p` are part of it, not just the digits.
+        assert_eq!(fmt_a(b"%A", 0.1), "0X1.999999999999AP-4");
+        assert_eq!(fmt_a(b"%A", 1.0), "0X1P+0");
+    }
+
+    #[test]
+    fn fmt_a_spans_the_whole_exponent_range() {
+        // A subnormal keeps the minimum exponent instead of normalising, so
+        // the leading digit is 0 and the digits show where in the subnormal
+        // range it sits.
+        assert_eq!(fmt_a(b"%a", f64::from_bits(1)), "0x0.0000000000001p-1022");
+        assert_eq!(fmt_a(b"%a", f64::MIN_POSITIVE), "0x1p-1022");
+        assert_eq!(fmt_a(b"%a", f64::MAX), "0x1.fffffffffffffp+1023");
+        assert_eq!(fmt_a(b"%a", f64::INFINITY), "inf");
+        assert_eq!(fmt_a(b"%a", f64::NEG_INFINITY), "-inf");
+        assert_eq!(fmt_a(b"%a", f64::NAN), "nan");
+        assert_eq!(fmt_a(b"%A", f64::INFINITY), "INF");
+    }
+
+    #[test]
+    fn fmt_a_rounds_the_significand_ties_to_even() {
+        // The carry can leave the fraction entirely: C leaves the result as a
+        // leading `2` rather than renormalising to `0x1.0p+1`.
+        assert_eq!(fmt_a(b"%.0a", 1.9375), "0x2p+0");
+        assert_eq!(fmt_a(b"%.0a", 1.0), "0x1p+0");
+        // 3.0 is 0x1.8p+1 — an exact tie at precision 0, where the last
+        // retained digit is the *leading* one.  It is odd, so this rounds up.
+        assert_eq!(fmt_a(b"%.0a", 3.0), "0x2p+1");
+        // The same tie one digit further in, both ways.
+        assert_eq!(fmt_a(b"%.1a", 1.09375), "0x1.2p+0"); // 0x1.18, last digit odd
+        assert_eq!(fmt_a(b"%.1a", 1.03125), "0x1.0p+0"); // 0x1.08, last digit even
+        assert_eq!(fmt_a(b"%.1a", 1.0625), "0x1.1p+0"); // exact, no tie
+        assert_eq!(fmt_a(b"%.1a", 0.1), "0x1.ap-4");
+        assert_eq!(fmt_a(b"%.3a", 0.1), "0x1.99ap-4");
+        // 13 digits is the whole significand: nothing left to round.
+        assert_eq!(fmt_a(b"%.13a", 0.1), "0x1.999999999999ap-4");
+    }
+
+    #[test]
+    fn fmt_a_pads_a_precision_past_the_significand() {
+        assert_eq!(fmt_a(b"%.2a", 1.0), "0x1.00p+0");
+        assert_eq!(fmt_a(b"%.20a", 1.0), "0x1.00000000000000000000p+0");
+        // A precision far larger than any buffer still prints every zero.
+        assert_eq!(fmt_a(b"%.400a", 1.0).len(), "0x1.p+0".len() + 400);
+    }
+
+    #[test]
+    fn fmt_a_honours_the_alt_form_and_sign_flags() {
+        assert_eq!(fmt_a(b"%#a", 1.0), "0x1.p+0");
+        assert_eq!(fmt_a(b"%#.0a", 1.0), "0x1.p+0");
+        assert_eq!(fmt_a(b"%#.0a", 0.0), "0x0.p+0");
+        assert_eq!(fmt_a(b"%+a", 1.0), "+0x1p+0");
+        assert_eq!(fmt_a(b"% a", 1.0), " 0x1p+0");
+    }
+
+    #[test]
+    fn fmt_a_zero_pads_after_the_prefix() {
+        // The `0x` is part of the number, so the zeros go inside it.
+        assert_eq!(fmt_a(b"%20a", 1.0), "              0x1p+0");
+        assert_eq!(fmt_a(b"%-20a", 1.0), "0x1p+0              ");
+        assert_eq!(fmt_a(b"%020a", 1.0), "0x000000000000001p+0");
+        assert_eq!(fmt_a(b"%020a", -1.0), "-0x00000000000001p+0");
+        assert_eq!(fmt_a(b"%020a", 1.0).len(), 20);
+    }
+
+    #[test]
+    fn fmt_a_subnormals_round_like_everything_else() {
+        assert_eq!(fmt_a(b"%.1a", f64::from_bits(1)), "0x0.0p-1022");
+        assert_eq!(fmt_a(b"%.0a", f64::from_bits(1)), "0x0p-1022");
+    }
+
+    /// Read back a `%a` string.  Deliberately a separate, dead-simple parser
+    /// rather than the library's own, so the round-trip test below cannot be
+    /// satisfied by two matching bugs.
+    fn parse_hex_float(text: &str) -> f64 {
+        let (neg, rest) = match text.strip_prefix('-') {
+            Some(r) => (true, r),
+            None => (false, text),
+        };
+        let rest = rest.strip_prefix("0x").expect("0x prefix");
+        let (sig, exp) = rest.split_once('p').expect("p exponent");
+        let exp: i32 = exp.parse().expect("exponent digits");
+        let (int_part, frac) = sig.split_once('.').unwrap_or((sig, ""));
+
+        // Build the significand as an exact rational: mantissa * 2^-(4*frac).
+        let mut mantissa: u128 = 0;
+        for c in int_part.chars().chain(frac.chars()) {
+            mantissa = mantissa * 16 + u128::from(c.to_digit(16).expect("hex digit"));
+        }
+        let shift = i32::try_from(frac.len()).expect("frac length") * 4;
+
+        // Every value this test feeds in has at most 53 significant bits, so
+        // the conversion below is exact and needs no rounding.
+        let mut v = mantissa as f64;
+        let mut e = exp - shift;
+        while e > 0 {
+            v *= 2.0;
+            e -= 1;
+        }
+        while e < 0 {
+            v /= 2.0;
+            e += 1;
+        }
+        if neg { -v } else { v }
+    }
+
+    #[test]
+    fn fmt_a_round_trips_every_bit_pattern() {
+        // The point of %a: the default form is exact, so reading it back must
+        // give the identical double, sign and all.
+        let mut seed: u64 = 0x1234_5678_9abc_def1;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let mut fixed = vec![
+            0.0f64,
+            -0.0,
+            1.0,
+            -1.0,
+            0.1,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            f64::from_bits(0x000f_ffff_ffff_ffff), // largest subnormal
+        ];
+        for _ in 0..3000 {
+            let bits = next();
+            let v = f64::from_bits(bits);
+            if v.is_finite() {
+                fixed.push(v);
+            }
+        }
+
+        for v in fixed {
+            let text = fmt_a(b"%a", v);
+            let back = parse_hex_float(&text);
+            assert_eq!(back.to_bits(), v.to_bits(), "%a round trip of {text}");
+        }
     }
 }

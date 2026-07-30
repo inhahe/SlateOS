@@ -16242,15 +16242,32 @@ impl Shell {
         // wait polls, and a job announced meanwhile (see
         // `notify_signalled_jobs`) leaves the table, which would shift every
         // index after it.
+        //
+        // A job whose status has already been *reported* is not a candidate. `-n`
+        // answers with the next job to finish, and one whose death has been
+        // announced already did that; a row lingering unswept after the
+        // announcement (see `notified`) is there for a `jobs`/`wait %1` to read,
+        // not for `-n` to re-report. bash goes as far as denying it exists:
+        // `( exit 3 ) & p=$!; sleep .3; wait; jobs; wait -n $p` reports
+        // `wait: <pid>: no such job` and 127, where osh answered 3. That
+        // *timing*-dependent leftover is what made
+        // `wait_without_operands_names_no_job` flake under parallel test load:
+        // an operand-less `wait` spares the `$!` job from being marked reported
+        // only when it had already finished before the wait, so whether a later
+        // `-n` found a stale row came down to how fast the job's thread ran.
         let candidates: Vec<usize> = if operands.is_empty() {
-            self.jobs.iter().map(|j| j.id).collect()
+            self.jobs
+                .iter()
+                .filter(|j| !j.notified)
+                .map(|j| j.id)
+                .collect()
         } else {
             let mut v = Vec::new();
             for spec in operands {
                 match self.lookup_job(spec, BareNumber::Pid) {
-                    JobLookup::Found(idx) => v.push(self.jobs[idx].id),
+                    JobLookup::Found(idx) if !self.jobs[idx].notified => v.push(self.jobs[idx].id),
                     JobLookup::Ambiguous(text) => self.ambiguous_job_spec("wait", &text),
-                    JobLookup::NotFound => {
+                    JobLookup::Found(_) | JobLookup::NotFound => {
                         self.emit_stderr(format!("{}wait: {spec}: no such job\n", self.err_prefix()).as_bytes());
                     }
                 }
@@ -39770,13 +39787,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.run_source("( exit 3 ) &");
         assert_eq!(sh.run_source("wait $!"), 3);
         // `-p VAR` is cleared up front, so a `wait` that names no job unsets it…
-        sh.run_source("VAR=stale; ( exit 3 ) &");
+        // The job body sleeps so that it is *certainly* still running when the
+        // `wait` arrives: an operand-less `wait` marks every job it actually
+        // waited for as reported, and only spares one that had already finished
+        // (see below). Without the sleep, which branch this took depended on how
+        // fast the job's thread ran, and the `-n` assertion below flaked under
+        // parallel test load.
+        sh.run_source("VAR=stale; ( sleep 0.1; exit 3 ) &");
         assert_eq!(sh.run_source("wait -p VAR"), 0);
         assert!(!sh.vars.contains_key("VAR"), "operand-less wait leaves -p VAR unset");
         // …and so does a `-n` with nothing left to wait for.
         sh.run_source("VAR=stale");
         assert_eq!(sh.run_source("wait -n -p VAR 2>/dev/null"), 127);
         assert!(!sh.vars.contains_key("VAR"), "`wait -n` with no jobs leaves -p VAR unset");
+    }
+
+    #[test]
+    fn wait_n_ignores_a_job_whose_status_was_already_reported() {
+        // `-n` answers with the *next* job to finish, so a job whose death has
+        // already been announced is not a candidate — even though its row can
+        // still be sitting in the table unswept (bash's `J_NOTIFIED`, which a
+        // `jobs`/`wait %1` may read once more before it goes).
+        let mut sh = Shell::new();
+        // An operand-less `wait` spares the `$!` job from being marked reported
+        // when it had already finished, so the status is still `-n`-answerable…
+        sh.run_source("( exit 3 ) & sleep 0.2");
+        assert_eq!(sh.run_source("wait"), 0);
+        assert_eq!(sh.run_source("wait -n"), 3, "spared job is still answerable");
+        // …until a `jobs` listing announces it, after which bash denies the job
+        // exists at all: 127 from a bare `-n`, and `no such job` for one named by
+        // pid — while a *targeted* `wait PID` still replays the status.
+        sh.run_source("( exit 5 ) & p=$!; sleep 0.2");
+        assert_eq!(sh.run_source("wait"), 0);
+        assert_eq!(listing(&mut sh, "jobs").lines().count(), 1);
+        assert!(
+            listing(&mut sh, "wait -n $p 2>&1").ends_with(": no such job\n"),
+            "a pid naming a reported job is unknown to `wait -n`"
+        );
+        assert_eq!(sh.run_source("wait -n"), 127);
+        assert_eq!(sh.run_source("wait $p"), 5, "a targeted wait still answers");
+        // A reported job does not shadow a live one: `-n` waits for the live one.
+        sh.run_source("( exit 7 ) & sleep 0.2");
+        assert_eq!(sh.run_source("wait"), 0);
+        assert_eq!(listing(&mut sh, "jobs").lines().count(), 1);
+        sh.run_source("( sleep 0.1; exit 9 ) &");
+        assert_eq!(sh.run_source("wait -n"), 9);
     }
 
     /// Run `src` and return what it wrote to stdout — for the `jobs` tests,

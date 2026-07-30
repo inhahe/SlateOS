@@ -167,6 +167,35 @@ echo "cmdsub-bg=$val"
 ( exit 9 ) &
 wait -n; echo "wait-n=$?"
 
+# `-n` answers with the *next* job to finish, so a job whose status has already
+# been reported is not one it can answer with — even while the row is still in
+# the table for a `jobs` to read one last time. An operand-less `wait` reports
+# every job it actually waited for, but spares the one holding `$!` if that job
+# had already finished, so the sleeps below decide the branch rather than the
+# scheduler: the spared status is still `-n`-answerable…
+( exit 3 ) &
+sleep 0.3
+wait; echo "spared-wait=$?"
+wait -n; echo "spared-n=$?"
+# …until a listing announces it, after which the job does not exist as far as
+# `-n` is concerned — 127 for a bare one, `no such job` for one named by pid —
+# while a *targeted* `wait PID` still replays the remembered status.
+( exit 5 ) &
+p5=$!
+sleep 0.3
+wait; echo "reported-wait=$?"
+jobs >/dev/null
+wait -n "$p5" 2>/dev/null; echo "reported-n-pid=$?"
+wait -n; echo "reported-n=$?"
+wait "$p5"; echo "reported-targeted=$?"
+# A reported job does not shadow a live one: `-n` waits for the live one.
+( exit 7 ) &
+sleep 0.3
+wait; echo "shadow-wait=$?"
+jobs >/dev/null
+( sleep 0.2; exit 9 ) &
+wait -n; echo "shadow-n=$?"
+
 # Traps still fire for a backgrounded subshell's own EXIT trap, and the output
 # lands in the file rather than racing the parent's stdout.
 ( trap 'echo "bg-exit-trap" >> t.txt' EXIT; echo "bg-body" >> t.txt ) &

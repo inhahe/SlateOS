@@ -2900,10 +2900,25 @@ fn matching_subscript_close(bytes: &[char], open: usize) -> Option<usize> {
     None
 }
 
+/// The verdict of [`split_name_subscript`].
+enum NameSubscript {
+    /// The body split cleanly into a name, an optional `[subscript]`, and
+    /// whatever text followed the subscript.
+    Split(String, Option<ArrayIndex>, Vec<char>),
+    /// The body is well-formed enough to *parse* but cannot be interpreted, so
+    /// bash defers the complaint to expansion time. The only such case here is
+    /// an empty subscript (`${a[]}`), which bash parses happily — a guarded
+    /// `if false; then echo "${a[]}"; fi` is silent — and only rejects when the
+    /// word is expanded, as a runtime "bad substitution". Every caller turns
+    /// this into [`WordPart::BadSubst`]. Note the check is purely lexical:
+    /// `${a[  ]}` is *not* empty, and arithmetic-evaluates its blanks to index 0.
+    Deferred,
+}
+
 fn split_name_subscript(
     bytes: &[char],
     opts: LexOpts,
-) -> Result<(String, Option<ArrayIndex>, Vec<char>), ParseError> {
+) -> Result<NameSubscript, ParseError> {
     if bytes.is_empty() {
         return Err(ParseError::new("empty '${}' expansion".into()));
     }
@@ -2928,15 +2943,19 @@ fn split_name_subscript(
         let index = match inner.as_str() {
             "@" => ArrayIndex::All,
             "*" => ArrayIndex::Star,
-            "" => return Err(ParseError::new("empty array subscript '[]'".into())),
+            "" => return Ok(NameSubscript::Deferred),
             // Verbatim so an associative read `${h[ x ]}` keys on the literal
             // ` x ` (bash preserves subscript whitespace); indexed reads
             // arithmetic-evaluate, which ignores the whitespace.
             _ => ArrayIndex::Index(Box::new(word_verbatim_from_source(&inner, opts)?)),
         };
-        return Ok((name, Some(index), bytes[close + 1..].to_vec()));
+        return Ok(NameSubscript::Split(
+            name,
+            Some(index),
+            bytes[close + 1..].to_vec(),
+        ));
     }
-    Ok((name, None, bytes[i..].to_vec()))
+    Ok(NameSubscript::Split(name, None, bytes[i..].to_vec()))
 }
 
 /// Parse the `offset[:length]` portion of a substring/slice expansion (the
@@ -2965,7 +2984,11 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
             return Ok(WordPart::Param("#".into()));
         }
         let bytes: Vec<char> = after_hash.chars().collect();
-        let (name, subscript, remaining) = split_name_subscript(&bytes, opts)?;
+        let NameSubscript::Split(name, subscript, remaining) =
+            split_name_subscript(&bytes, opts)?
+        else {
+            return Ok(WordPart::BadSubst(raw.to_string()));
+        };
         if let Some(index) = subscript {
             if !remaining.is_empty() {
                 // bash accepts this at parse time and rejects it only during
@@ -3011,7 +3034,11 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
         }
         // `${!name[@]}` / `${!name[*]}` — the keys/indices of an array.
         let bytes: Vec<char> = after_bang.chars().collect();
-        let (name, subscript, remaining) = split_name_subscript(&bytes, opts)?;
+        let NameSubscript::Split(name, subscript, remaining) =
+            split_name_subscript(&bytes, opts)?
+        else {
+            return Ok(WordPart::BadSubst(raw.to_string()));
+        };
         if let Some(index) = &subscript
             && remaining.is_empty()
             && matches!(index, ArrayIndex::All | ArrayIndex::Star)
@@ -3075,7 +3102,9 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
         return Ok(WordPart::BadSubst(raw.to_string()));
     }
     let bytes: Vec<char> = raw.chars().collect();
-    let (name, subscript, rest) = split_name_subscript(&bytes, opts)?;
+    let NameSubscript::Split(name, subscript, rest) = split_name_subscript(&bytes, opts)? else {
+        return Ok(WordPart::BadSubst(raw.to_string()));
+    };
     // A subscript may be combined with an operator: `${a[i]:-def}`, `${a[i]#pat}`,
     // etc. Only a specific `[expr]` index is allowed with an operator — `[@]`/`[*]`
     // + operator (bulk transform) is not supported.

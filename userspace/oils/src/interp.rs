@@ -23205,6 +23205,23 @@ impl VarLookup for Shell {
         self.assoc_set(&base, key.to_string(), value.to_string(), false);
         Ok(())
     }
+
+    fn warn_empty_subscript_read(&mut self, name: &str) {
+        // Two lines, because bash validates the subscript both when resolving
+        // the reference and when fetching its value, and complains in each —
+        // see the trait's doc. The name is blamed exactly as written: bash
+        // rejects the empty subscript before it resolves anything, so a nameref
+        // is *not* followed (`declare -n r=x; (( r[] ))` blames `r[]`).
+        let line = format!("{}{name}[]: bad array subscript", self.err_prefix());
+        self.errln(&line);
+        self.errln(&line);
+    }
+
+    fn refuse_empty_subscript_store(&mut self, name: &str) {
+        // Same wording, tag and drop-the-store behaviour as an assignment
+        // through a nameref that already names an element.
+        self.warn_elem_not_identifier(&format!("{name}[]"));
+    }
 }
 
 // ---- free helpers -----------------------------------------------------------
@@ -36858,6 +36875,73 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The diagnostic comes from expanding the word, so it precedes the
         // line `echo` then writes (bash prints the same order).
         assert_eq!(o2, "osh: m: bad array subscript\nr=[]\ns=0\n");
+    }
+
+    #[test]
+    fn a_lexically_empty_subscript_is_refused_rather_than_read_as_zero() {
+        // `a[]` is not index 0. bash refuses it — but only complains: a *read*
+        // yields 0 and a *write* is dropped, and either way the expression keeps
+        // going and the command keeps its status. osh used to quietly treat the
+        // empty subscript as 0, so `(( a[]=9 ))` silently wrote element 0.
+        //
+        // The read complaint is printed twice, because bash validates the
+        // subscript both when resolving the reference and when fetching its
+        // value.
+        let (o, _) = run("a=(one two)\n(( a[] )) 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o,
+            "osh: a[]: bad array subscript\nosh: a[]: bad array subscript\nrc=1\n"
+        );
+        // A store is tagged with the enclosing builtin and drops the element,
+        // while the expression still carries the value it assigned.
+        let (o2, _) = run("a=(one two)\n(( a[]=9 )) 2>&1\necho \"rc=$? n=${#a[@]}\"");
+        assert_eq!(o2, "osh: ((: `a[]': not a valid identifier\nrc=0 n=2\n");
+        let (o3, _) = run("a=(one two)\n{ x=$(( a[]=3 )); } 2>&1\necho \"rc=$? x=[$x]\"");
+        assert_eq!(o3, "osh: `a[]': not a valid identifier\nrc=0 x=[3]\n");
+        let (o4, _) = run("let 'a[]=5' 2>&1\necho \"rc=$?\"");
+        assert_eq!(o4, "osh: let: `a[]': not a valid identifier\nrc=0\n");
+        // A read-modify-write does both: it reads (twice-complained), then the
+        // store is refused. `a[]+=2` is therefore worth 0+2, so the `((`
+        // succeeds.
+        let (o5, _) = run("a=(one two)\n(( a[]+=2 )) 2>&1\necho \"rc=$?\"");
+        assert_eq!(
+            o5,
+            "osh: a[]: bad array subscript\nosh: a[]: bad array subscript\nosh: ((: `a[]': not a valid identifier\nrc=0\n"
+        );
+        // The refusal does not depend on the name: an unset name, a scalar and
+        // an associative array are all refused the same way, and a nameref is
+        // *not* followed — the name is blamed exactly as written.
+        let (o6, _) = run("declare -A m=([k]=v)\n(( m[]=1 )) 2>&1\necho \"rc=$? n=${#m[@]}\"");
+        assert_eq!(o6, "osh: ((: `m[]': not a valid identifier\nrc=0 n=1\n");
+        let (o7, _) = run("declare -n r=x\nx=(7 8)\n(( r[]=1 )) 2>&1\necho \"rc=$? n=${#x[@]}\"");
+        assert_eq!(o7, "osh: ((: `r[]': not a valid identifier\nrc=0 n=2\n");
+        // Lazily: a short-circuited read is never reached, so never complained
+        // about. And the check is purely lexical — `a[  ]` is not empty, and its
+        // blanks arithmetic-evaluate to index 0 as usual.
+        let (o8, _) = run("a=(one two)\n(( 1 ? 7 : a[] )) 2>&1\necho \"rc=$?\"");
+        assert_eq!(o8, "rc=0\n");
+        let (o9, _) = run("a=(1 2)\necho \"[${a[  ]}] [$(( a[  ]+1 ))]\"");
+        assert_eq!(o9, "[1] [2]\n");
+    }
+
+    #[test]
+    fn an_empty_subscript_in_a_brace_expansion_is_a_runtime_bad_substitution() {
+        // `${a[]}` parses fine in bash and is only rejected when the word is
+        // expanded, as a DISCARD-class "bad substitution" — so a guarded
+        // occurrence is silent, and a reached one abandons its parse unit
+        // without exiting the shell. osh used to make it a *parse* error, which
+        // killed the whole script with status 2 before it ran a line.
+        let (o, _) = run("if false; then echo \"${a[]}\"; fi\necho \"rc=$?\"\necho after");
+        assert_eq!(o, "rc=0\nafter\n");
+        // The subject named is the whole word with its quotes removed, as for
+        // every other bad substitution.
+        let (o2, _) = run("a=(one two)\n{ echo \"X${a[]}Y\"; echo unreachable; } 2>&1\necho \"rc=$?\"\necho after");
+        assert_eq!(o2, "osh: X${a[]}Y: bad substitution\nrc=1\nafter\n");
+        // Every brace form that can carry a subscript defers the same way.
+        for form in ["${#a[]}", "${!a[]}", "${a[]:-def}", "${a[]#o}"] {
+            let (o3, _) = run(&format!("a=(one two)\n{{ echo \"{form}\"; }} 2>&1\necho after"));
+            assert_eq!(o3, format!("osh: {form}: bad substitution\nafter\n"));
+        }
     }
 
     #[test]

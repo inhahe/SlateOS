@@ -81,6 +81,26 @@ pub trait VarLookup {
         let _ = (name, key, value);
         Ok(())
     }
+
+    /// Complain about *reading* through an empty subscript (`(( a[] ))`) — bash
+    /// prints `NAME[]: bad array subscript`, untagged, and the read then yields
+    /// 0. See [`Expr::EmptySub`].
+    ///
+    /// bash emits that line **twice** for each such read (it validates the
+    /// subscript once when resolving the reference and again when fetching the
+    /// value), so an implementation mirroring bash writes two lines per call.
+    /// The evaluator calls this once per read reached.
+    fn warn_empty_subscript_read(&mut self, name: &str) {
+        let _ = name;
+    }
+
+    /// Refuse a *store* through an empty subscript (`(( a[]=9 ))`) — bash prints
+    /// `` `NAME[]': not a valid identifier ``, tagged with the enclosing builtin,
+    /// and drops the store while letting the expression keep its value. See
+    /// [`Expr::EmptySub`].
+    fn refuse_empty_subscript_store(&mut self, name: &str) {
+        let _ = name;
+    }
 }
 
 /// An arithmetic evaluation error.
@@ -202,6 +222,16 @@ enum Expr {
     Index(String, Box<Sub>),
     /// Associative array element `name[key]` (subscript is a literal key).
     Assoc(String, String),
+    /// A reference whose subscript is *lexically empty* — `a[]`. bash refuses
+    /// this rather than reading it as index 0, and the refusal is a complaint
+    /// rather than an error: the expression carries on with the value 0 (a read)
+    /// or with the store dropped (a write). Which of the two it is only becomes
+    /// clear later, so the emptiness is recorded here and acted on by
+    /// [`eval_expr`] / [`store_rlv`]. The check is purely lexical, so `a[  ]` is
+    /// *not* this — whitespace arithmetic-evaluates to index 0 as usual — and it
+    /// does not depend on the name at all: an unset name, a scalar and an
+    /// associative array are all refused identically.
+    EmptySub(String),
     Neg(Box<Expr>),
     Not(Box<Expr>),
     BitNot(Box<Expr>),
@@ -232,6 +262,9 @@ enum Lvalue {
     Var(String),
     Index(String, Box<Sub>),
     Assoc(String, String),
+    /// `a[] = …` — see [`Expr::EmptySub`]. Assignable only in the sense that
+    /// bash parses it and then drops the store.
+    EmptySub(String),
 }
 
 /// An array subscript: the parsed expression together with its raw source text.
@@ -284,6 +317,8 @@ enum ResolvedLv {
     Var(String),
     Index(String, i64),
     Assoc(String, String),
+    /// `a[]` — see [`Expr::EmptySub`]. There is no index to resolve.
+    EmptySub(String),
 }
 
 /// Evaluate an arithmetic expression string against a mutable variable
@@ -792,6 +827,12 @@ impl AParser<'_> {
                     }
                     let raw: String = self.chars[sub_start..self.pos].iter().collect();
                     self.pos += 1; // consume the closing ']'
+                    if raw.is_empty() {
+                        // `a[]` — see `Expr::EmptySub`. Deliberately ahead of the
+                        // indexed/associative split, because bash refuses it
+                        // without looking at the name.
+                        return Ok(Expr::EmptySub(name));
+                    }
                     if self.vars.is_assoc(&name) {
                         return Ok(Expr::Assoc(name, raw.trim().to_string()));
                     }
@@ -1005,7 +1046,10 @@ fn digit_value(c: char, base: u32) -> Option<u32> {
 /// Is `e` assignable — that is, would [`lvalue_of`] accept it? Lets the parser
 /// ask before committing an expression it may still need.
 fn is_lvalue(e: &Expr) -> bool {
-    matches!(e, Expr::Var(_) | Expr::Index(..) | Expr::Assoc(..))
+    matches!(
+        e,
+        Expr::Var(_) | Expr::Index(..) | Expr::Assoc(..) | Expr::EmptySub(_)
+    )
 }
 
 /// Convert a parsed expression into an lvalue, or error if it is not
@@ -1015,6 +1059,7 @@ fn lvalue_of(e: Expr) -> Result<Lvalue, ArithError> {
         Expr::Var(n) => Ok(Lvalue::Var(n)),
         Expr::Index(n, ix) => Ok(Lvalue::Index(n, ix)),
         Expr::Assoc(n, k) => Ok(Lvalue::Assoc(n, k)),
+        Expr::EmptySub(n) => Ok(Lvalue::EmptySub(n)),
         _ => Err(ArithError::new("attempted assignment to non-variable")),
     }
 }
@@ -1039,6 +1084,12 @@ fn eval_expr(e: &Expr, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
             Some(s) => str_to_val(&s, vars, depth),
             None => Ok(0),
         },
+        // Complained about only when actually reached, so a short-circuited
+        // `(( 1 ? 7 : a[] ))` is silent.
+        Expr::EmptySub(n) => {
+            vars.warn_empty_subscript_read(n);
+            Ok(0)
+        }
         Expr::Neg(x) => Ok(eval_expr(x, vars, depth)?.wrapping_neg()),
         Expr::Not(x) => Ok(i64::from(eval_expr(x, vars, depth)? == 0)),
         Expr::BitNot(x) => Ok(!eval_expr(x, vars, depth)?),
@@ -1125,6 +1176,7 @@ fn resolve_lv(lv: &Lvalue, vars: &mut dyn VarLookup, depth: u32) -> Result<Resol
             ResolvedLv::Index(n.clone(), i)
         }
         Lvalue::Assoc(n, k) => ResolvedLv::Assoc(n.clone(), k.clone()),
+        Lvalue::EmptySub(n) => ResolvedLv::EmptySub(n.clone()),
     })
 }
 
@@ -1142,6 +1194,13 @@ fn load_rlv(loc: &ResolvedLv, vars: &mut dyn VarLookup, depth: u32) -> Result<i6
             Some(s) => str_to_val(&s, vars, depth),
             None => Ok(0),
         },
+        // A read-modify-write (`a[]++`, `a[]+=2`) reads first, so it earns the
+        // read complaint *and* the store refusal `store_rlv` adds below — which
+        // is what bash prints for it too.
+        ResolvedLv::EmptySub(n) => {
+            vars.warn_empty_subscript_read(n);
+            Ok(0)
+        }
     }
 }
 
@@ -1154,6 +1213,12 @@ fn store_rlv(loc: &ResolvedLv, v: i64, vars: &mut dyn VarLookup) -> Result<(), A
         ResolvedLv::Var(n) => vars.set(n, v),
         ResolvedLv::Index(n, i) => vars.set_index(n, *i, v),
         ResolvedLv::Assoc(n, k) => vars.set_assoc(n, k, v),
+        // Nowhere to store — but not an error: bash complains and carries on
+        // with the value, so `x=$(( a[]=3 ))` still yields 3 and succeeds.
+        ResolvedLv::EmptySub(n) => {
+            vars.refuse_empty_subscript_store(n);
+            Ok(())
+        }
     }
 }
 

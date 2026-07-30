@@ -4,6 +4,12 @@
 # timing — every `sleep` either finishes long before it is looked at or outlives
 # the whole line that starts it. `disown -a` between lines empties the table, so
 # each line starts from the same state.
+#
+# The sleeps are individually short, but there are many of them and each one
+# costs a process spawn, which is dear on Windows. The total lands close enough
+# to the harness's 20s default to trip it when the machine is busy, so this case
+# states a budget of its own.
+# TIMEOUT: 60
 
 echo "=== reporting a job by name loses it at once, in a bare listing it lingers"
 # The jobspec form lists first and sweeps after, so there is nothing left for

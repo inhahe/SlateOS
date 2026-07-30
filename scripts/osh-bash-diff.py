@@ -11,12 +11,15 @@ Corpus
 ------
 Cases live in `userspace/oils/tests/corpus/*.sh`; one case per file, run with
 `<shell> case.sh` in a fresh temporary working directory (so a case may create
-files without disturbing the next one). Two magic comments are recognised:
+files without disturbing the next one). Three magic comments are recognised:
 
     # STDIN: <text>          feed <text> plus a newline to the shell's stdin
                              (repeatable — each line appends)
     # EXPECT-DIFF: <reason>  this case is *known* to differ; the run fails if it
                              stops differing (so stale waivers can't hide a fix)
+    # TIMEOUT: <seconds>     this case needs longer than the 20s default (it
+                             waits on jobs, sleeps, etc.); a case that exceeds
+                             its budget twice in a row is reported as a hang
 
 Reference shell
 ---------------
@@ -68,6 +71,9 @@ BASH_CANDIDATES = [
 ]
 
 # A case that takes longer than this is treated as a hang, not a divergence.
+# A case that legitimately needs longer — one that waits on jobs, say — declares
+# its own budget with a `# TIMEOUT: N` line rather than pushing this default up
+# for all 150 cases, which would turn every real hang into a long stall.
 CASE_TIMEOUT = 20
 
 
@@ -77,6 +83,7 @@ class Case:
     source: str
     stdin: str
     expect_diff: str | None
+    timeout: int
 
     @property
     def name(self) -> str:
@@ -88,6 +95,7 @@ class Run:
     stdout: str
     stderr: str
     status: int
+    timed_out: bool = False
 
 
 def load_cases(pattern: str | None) -> list[Case]:
@@ -98,14 +106,31 @@ def load_cases(pattern: str | None) -> list[Case]:
         source = path.read_text(encoding="utf-8")
         stdin_lines: list[str] = []
         expect_diff: str | None = None
+        timeout = CASE_TIMEOUT
         for line in source.splitlines():
             stripped = line.strip()
             if stripped.startswith("# STDIN:"):
                 stdin_lines.append(stripped[len("# STDIN:"):].lstrip())
             elif stripped.startswith("# EXPECT-DIFF:"):
                 expect_diff = stripped[len("# EXPECT-DIFF:"):].strip()
+            elif stripped.startswith("# TIMEOUT:"):
+                field = stripped[len("# TIMEOUT:"):].strip()
+                if not field.isdigit() or int(field) < 1:
+                    sys.exit(
+                        f"osh-bash-diff: {path.name}: `# TIMEOUT: {field}` is not a"
+                        " positive number of seconds"
+                    )
+                timeout = int(field)
         stdin = "".join(f"{line}\n" for line in stdin_lines)
-        cases.append(Case(path=path, source=source, stdin=stdin, expect_diff=expect_diff))
+        cases.append(
+            Case(
+                path=path,
+                source=source,
+                stdin=stdin,
+                expect_diff=expect_diff,
+                timeout=timeout,
+            )
+        )
     return cases
 
 
@@ -155,17 +180,38 @@ def run_case(shell: Path, case: Case) -> Run:
                 cwd=workdir,
                 input=case.stdin.encode(),
                 capture_output=True,
-                timeout=CASE_TIMEOUT,
+                timeout=case.timeout,
                 env=env,
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            return Run(stdout="", stderr=f"<timed out after {CASE_TIMEOUT}s>", status=-1)
+            return Run(
+                stdout="",
+                stderr=f"<timed out after {case.timeout}s>",
+                status=-1,
+                timed_out=True,
+            )
     return Run(
         stdout=proc.stdout.decode("utf-8", "replace"),
         stderr=proc.stderr.decode("utf-8", "replace"),
         status=proc.returncode,
     )
+
+
+def measure(shell: Path, case: Case) -> Run:
+    """Run one case, retrying once if it times out.
+
+    A timeout is not an answer to compare against — it says the measurement
+    itself failed to complete, and the usual cause is the machine being busy
+    (both shells run every case, and a full sweep is minutes of load) rather
+    than anything wrong with the shell. So retry once: that costs nothing on a
+    healthy run, and a case that exceeds its budget twice in a row is a real
+    hang rather than a slow moment.
+    """
+    run = run_case(shell, case)
+    if run.timed_out:
+        run = run_case(shell, case)
+    return run
 
 
 def normalise_stderr(text: str, shell_name: str) -> str:
@@ -236,8 +282,8 @@ def main() -> int:
     failures = 0
     waived = 0
     for case in cases:
-        bash_run = run_case(bash, case)
-        osh_run = run_case(osh, case)
+        bash_run = measure(bash, case)
+        osh_run = measure(osh, case)
         diffs = compare(case, bash_run, osh_run)
         if case.expect_diff and diffs:
             waived += 1

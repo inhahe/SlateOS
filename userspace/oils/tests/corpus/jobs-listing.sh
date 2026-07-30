@@ -3,6 +3,11 @@
 # enough that its state at the moment `jobs` runs is not in doubt — "short" jobs
 # are already over by the time anything looks, "long" ones are still running —
 # so the listing is reproducible.
+#
+# Those deliberate lifetimes add up, and each `sleep` costs a process spawn on
+# top, so the case runs long enough to trip the harness's 20s default when the
+# machine is busy. It states a budget of its own instead.
+# TIMEOUT: 60
 
 echo "=== one job is the current job"
 sleep 0.7 & jobs

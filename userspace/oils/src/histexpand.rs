@@ -427,12 +427,46 @@ fn parse_subst(chars: &[char], mut i: usize) -> Option<(String, String, usize)> 
     Some((old, new, i))
 }
 
+/// Where a word range ends.
+enum RangeEnd {
+    /// Written out in the designator — a number, `^`, `$`, or the last word
+    /// implied by a `*`. bash range-checks these against the event.
+    Given(usize),
+    /// Defaulted by a trailing `-` to the second-to-last word. bash lets this
+    /// one fall before the start of the range without complaining, which is why
+    /// `!!:3-` on a four-word event is empty while `!!:3-1` is an error.
+    SecondToLast,
+}
+
 /// Select the words of `event` named by a word designator, returning the
 /// selected text and the index just past the designator.
 ///
 /// bash lets the `:` be omitted when the designator begins with `^`, `$`, `*`
-/// or `-`, which is what makes `!$` and `!!:1` both work.
-fn apply_word_designator(event: &str, chars: &[char], start: usize) -> (String, usize) {
+/// or `-`, which is what makes `!$` and `!!:1` both work. A *number* needs the
+/// colon, though: `!!1` is the whole event with a literal `1` stuck on it.
+///
+/// A designator that names a word the event does not have fails the whole
+/// expansion, the way a missing event does — bash does not silently clamp. The
+/// `Err` carries the message body, which quotes back the designator alone
+/// (`!!:4:h` reports `:4: bad word specifier`, not `:4:h`).
+///
+/// The grammar was measured against bash 5.2 rather than taken from the manual,
+/// which describes only `x-y`. Three corners it does not mention:
+///
+/// * `$` and `*` end the designator outright — no range is read after either, so
+///   the `-` of `!!:$-` and of `!!:*-` is literal text. `^` does not stop the
+///   scan (`!!:^-` is a range), and neither does a number (`!!:2-` is a range).
+/// * a `^` may stand in for `-^` as the end of a range: `!!:0^` is words 0
+///   through 1. A `$` gets no such treatment (`!!:2$` is word 2 and a literal
+///   `$`), and neither does a number (`!!:^2` is word 1 and a literal `2`).
+/// * `*` never fails, not even the start-of-range check that every other shape
+///   is subject to: on a one-word event `!!:*` is empty where `!!:^` is an
+///   error, though both reach for word 1.
+fn apply_word_designator(
+    event: &str,
+    chars: &[char],
+    start: usize,
+) -> Result<(String, usize), String> {
     let ws = words(event);
     let last = ws.len().saturating_sub(1);
     let mut i = start;
@@ -441,8 +475,10 @@ fn apply_word_designator(event: &str, chars: &[char], start: usize) -> (String, 
         i = i.saturating_add(1);
     }
 
-    // Parse an endpoint: a number, `^` (1), `$` (last).
-    let read_point = |chars: &[char], i: &mut usize| -> Option<usize> {
+    // Parse the *end* of a range: a number, `^` (the first argument) or `$`
+    // (the last word). Unlike the start of a range, a number here needs no
+    // preceding colon — `!!-2` is words 0 through 2.
+    let read_end = |chars: &[char], i: &mut usize| -> Option<usize> {
         match chars.get(*i) {
             Some('^') => {
                 *i = i.saturating_add(1);
@@ -464,58 +500,99 @@ fn apply_word_designator(event: &str, chars: &[char], start: usize) -> (String, 
         }
     };
 
-    let pick = |from: usize, to: usize| -> String {
-        let to = to.min(last);
-        if from > to {
-            return String::new();
+    // Join words `from..=to` — an empty range is an empty string, not an error.
+    let join = |from: usize, to: Option<usize>| -> String {
+        match to {
+            Some(to) if from <= to => ws.get(from..=to).unwrap_or(&[]).join(" "),
+            _ => String::new(),
         }
-        ws.get(from..=to).unwrap_or(&[]).join(" ")
+    };
+
+    // Range-check and join. A start past the last word is always an error; a
+    // written-out end must also be no later than the last word and no earlier
+    // than the start.
+    let take = |from: usize, to: &RangeEnd, end: usize| -> Result<(String, usize), String> {
+        let bad = from > last
+            || match *to {
+                RangeEnd::Given(to) => to > last || to < from,
+                RangeEnd::SecondToLast => false,
+            };
+        if bad {
+            return Err(format!("{}: bad word specifier", spec_text(chars, start, end)));
+        }
+        let to = match *to {
+            RangeEnd::Given(to) => Some(to),
+            RangeEnd::SecondToLast => last.checked_sub(1),
+        };
+        Ok((join(from, to), end))
+    };
+
+    // A range start, once one of the leading special forms has been ruled out.
+    // `$` is not here because it terminates the designator on its own.
+    let read_start = |chars: &[char], i: &mut usize| -> Option<usize> {
+        match chars.get(*i) {
+            Some('^') => {
+                *i = i.saturating_add(1);
+                Some(1)
+            }
+            // A bare number is a word number only after a `:`.
+            Some(c) if had_colon && c.is_ascii_digit() => read_end(chars, i),
+            _ => None,
+        }
     };
 
     match chars.get(i) {
-        // `*` — all arguments, i.e. words 1..last. Empty when there are none.
+        // `*` — all arguments, i.e. words 1 through the last. Alone among the
+        // designators it never fails: on a one-word event it is simply empty.
         Some('*') => {
             i = i.saturating_add(1);
-            (pick(1, last), i)
+            Ok((join(1, Some(last)), i))
+        }
+        // `$` — the last word, and the end of the designator.
+        Some('$') => {
+            i = i.saturating_add(1);
+            take(last, &RangeEnd::Given(last), i)
         }
         // `-m` — words 0 through m.
         Some('-') => {
             i = i.saturating_add(1);
-            let end = read_point(chars, &mut i).unwrap_or(last);
-            (pick(0, end), i)
+            let end = read_end(chars, &mut i).map_or(RangeEnd::SecondToLast, RangeEnd::Given);
+            take(0, &end, i)
         }
         Some(_) => {
-            let Some(from) = read_point(chars, &mut i) else {
+            let Some(from) = read_start(chars, &mut i) else {
                 // Not a word designator after all; leave the whole event and let
                 // the caller reconsider this position as a modifier.
                 if had_colon {
                     i = start;
                 }
-                return (event.to_string(), i);
+                return Ok((event.to_string(), i));
             };
             match chars.get(i) {
-                // `n*` — from n to the end.
+                // `n*` — from n to the last word.
                 Some('*') => {
                     i = i.saturating_add(1);
-                    (pick(from, last), i)
+                    take(from, &RangeEnd::Given(last), i)
+                }
+                // `n^` — from n to the first argument; see the note above.
+                Some('^') => {
+                    i = i.saturating_add(1);
+                    take(from, &RangeEnd::Given(1), i)
                 }
                 Some('-') => {
                     i = i.saturating_add(1);
-                    match read_point(chars, &mut i) {
-                        // `n-m` — an explicit range.
-                        Some(to) => (pick(from, to), i),
-                        // `n-` — from n to the second-to-last word.
-                        None => (pick(from, last.saturating_sub(1)), i),
-                    }
+                    let end =
+                        read_end(chars, &mut i).map_or(RangeEnd::SecondToLast, RangeEnd::Given);
+                    take(from, &end, i)
                 }
                 // A single word.
-                _ => (pick(from, from), i),
+                _ => take(from, &RangeEnd::Given(from), i),
             }
         }
         // Nothing after the `:` at all. Like the non-designator case above, hand
         // the position back unconsumed so the modifier scan sees the `:` and
         // rejects it (bash: `: unrecognized history modifier`).
-        None => (event.to_string(), start),
+        None => Ok((event.to_string(), start)),
     }
 }
 
@@ -960,11 +1037,13 @@ fn expand_one(
         None => return Err(missing("!")),
     };
 
-    let (selected, after_words) = apply_word_designator(&event, chars, i);
+    let (selected, after_words) = apply_word_designator(&event, chars, i)?;
     apply_modifiers(selected, chars, after_words, last_subst)
 }
 
-/// The raw text of a designator, for an "event not found" message.
+/// The raw text of a designator, for the message of a failed expansion — bash
+/// quotes back exactly the part it could not use (`!999: event not found`,
+/// `:4: bad word specifier`, `:gs/nope/x/: substitution failed`).
 fn spec_text(chars: &[char], start: usize, end: usize) -> String {
     chars.get(start..end).unwrap_or(&[]).iter().collect()
 }
@@ -1400,6 +1479,144 @@ mod tests {
         // event — that is what makes `!:0` and `!$` work.
         assert_eq!(expanded("echo !:0", &["first alpha beta"]), "echo first");
         assert_eq!(expanded("echo !$", &["first alpha beta"]), "echo beta");
+    }
+
+    /// Word designators: which words each shape names, and which shapes bash
+    /// rejects outright with `bad word specifier` instead of clamping.
+    ///
+    /// Every expectation was measured against bash 5.2 by recording `a b c d`
+    /// (and a one-word event, to reach the "no such word" edges) with
+    /// `history -s` and reading back `echo X!!:…X` from an interactive shell —
+    /// the interactive path, because `history -p` masks the message body with
+    /// its own `history expansion failed`.
+    #[test]
+    fn word_designators_name_a_range_and_reject_one_that_is_out_of_range() {
+        let four = hist(&["a b c d"]);
+        let one = hist(&["onlyone"]);
+        let sel = |items: &[String], spec: &str| -> Result<String, String> {
+            let line = format!("echo X{spec}X");
+            match expand1(&line, &ctx(items)) {
+                Expansion::Changed(s) | Expansion::ChangedQuietly(s) => Ok(s
+                    .strip_prefix("echo X")
+                    .and_then(|s| s.strip_suffix('X'))
+                    .unwrap_or(&s)
+                    .to_string()),
+                Expansion::NotFound(e) => Err(e),
+                other => panic!("unexpected {other:?} for {spec}"),
+            }
+        };
+        // The plain shapes. Note `!!:$-` and `!!:*-`: a `$` or `*` ends the
+        // designator, so the following `-` survives as literal text, while a
+        // `^` or a number does not (`!!:^-`, `!!:2-` are ranges).
+        for (spec, want) in [
+            ("!!:0", "a"),
+            ("!!:1", "b"),
+            ("!!:3", "d"),
+            ("!!:^", "b"),
+            ("!!:$", "d"),
+            ("!!:*", "b c d"),
+            ("!$", "d"),
+            ("!^", "b"),
+            ("!*", "b c d"),
+            ("!!^", "b"),
+            ("!!$", "d"),
+            ("!!*", "b c d"),
+            ("!!-", "a b c"),
+            // A number, unlike `^`/`$`/`*`/`-`, needs the colon: without one it
+            // is literal text after the whole event.
+            ("!!1", "a b c d1"),
+            ("!!2", "a b c d2"),
+            // Ranges.
+            ("!!:1-2", "b c"),
+            ("!!:0-0", "a"),
+            ("!!:3-3", "d"),
+            ("!!:0-$", "a b c d"),
+            ("!!:^-$", "b c d"),
+            ("!!:^-^", "b"),
+            ("!!:1-^", "b"),
+            ("!!:2-", "c"),
+            ("!!:0-", "a b c"),
+            // A start with no end at all runs to the second-to-last word, which
+            // may be *before* the start — empty, and not an error.
+            ("!!:3-", ""),
+            ("!!:^-", "b c"),
+            ("!!:-", "a b c"),
+            ("!!:-0", "a"),
+            ("!!:-2", "a b c"),
+            ("!!:-$", "a b c d"),
+            ("!!:-^", "a b"),
+            ("!!-2", "a b c"),
+            ("!!-$", "a b c d"),
+            ("!!^-2", "b c"),
+            // `n*` — to the last word.
+            ("!!:0*", "a b c d"),
+            ("!!:3*", "d"),
+            ("!!:^*", "b c d"),
+            // A bare `^` may stand in for `-^` as the end of a range…
+            ("!!:0^", "a b"),
+            ("!!:1^", "b"),
+            ("!!:^^", "b"),
+            // …but only one of them, and a `$` or a number never does.
+            ("!!:^^^", "b^"),
+            ("!!:^2", "b2"),
+            ("!!:2$", "c$"),
+            ("!!:^$", "b$"),
+            ("!!:1-^^", "b^"),
+            ("!!:-^^", "a b^"),
+            // `$`, `*` and a defaulted range end all stop the scan.
+            ("!!:$-", "d-"),
+            ("!!:$$", "d$"),
+            ("!!:$^", "d^"),
+            ("!!:$*", "d*"),
+            ("!!:$z", "dz"),
+            ("!!$-", "d-"),
+            ("!!:*-", "b c d-"),
+            ("!!:*$", "b c d$"),
+            ("!!:*^", "b c d^"),
+            ("!!:*x", "b c dx"),
+            ("!!*-", "b c d-"),
+            ("!!:--", "a b c-"),
+            ("!!:1-*", "b c*"),
+            ("!!:^z", "bz"),
+            ("!!:^-z", "b cz"),
+            ("!!:2*x", "c dx"),
+        ] {
+            assert_eq!(sel(&four, spec).as_deref(), Ok(want), "for {spec}");
+        }
+        // Out of range: a start past the last word, an end past the last word,
+        // or a written-out end before the start. The message quotes back the
+        // designator only — `!!:4:h` reports `:4`, not `:4:h`.
+        for spec in ["!!:4", "!!:9", "!!:1-9", "!!:0-9", "!!:3-1", "!!:4-", "!!:9*", "!!:4*"] {
+            let body = spec.strip_prefix("!!").unwrap_or(spec);
+            assert_eq!(
+                sel(&four, spec),
+                Err(format!("{body}: bad word specifier")),
+                "for {spec}"
+            );
+        }
+        assert_eq!(sel(&four, "!!:4:h"), Err(":4: bad word specifier".to_string()));
+        assert_eq!(sel(&four, "!!:-9"), Err(":-9: bad word specifier".to_string()));
+        // The same edges on a one-word event, where word 1 does not exist. `*`
+        // is the exception: it names words 1 through the last and is simply
+        // empty here rather than an error — and so is a defaulted range end.
+        for (spec, want) in
+            [("!!:0", "onlyone"), ("!!:$", "onlyone"), ("!$", "onlyone"), ("!!:*", ""), ("!*", "")]
+        {
+            assert_eq!(sel(&one, spec).as_deref(), Ok(want), "for {spec}");
+        }
+        for (spec, want) in
+            [("!!:-", ""), ("!!:-0", "onlyone"), ("!!:0-0", "onlyone"), ("!!:0*", "onlyone")]
+        {
+            assert_eq!(sel(&one, spec).as_deref(), Ok(want), "for {spec}");
+        }
+        for spec in ["!!:^", "!^", "!!:2-", "!!:3-", "!!:3*", "!!:-2", "!!:1-2", "!!:^-$", "!!:^-^"]
+        {
+            assert!(sel(&one, spec).is_err(), "{spec} should be out of range");
+        }
+        // `$` still ends the designator on a one-word event.
+        assert_eq!(sel(&one, "!!:$-").as_deref(), Ok("onlyone-"));
+        assert_eq!(sel(&one, "!!:*-").as_deref(), Ok("-"));
+        assert_eq!(sel(&one, "!!:--").as_deref(), Ok("-"));
     }
 
     /// readline's `history_comment_char`: an unquoted `#` starting a word makes

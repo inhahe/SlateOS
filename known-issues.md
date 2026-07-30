@@ -8683,7 +8683,7 @@ and `quote_breaks_lifts_each_whitespace_character_out_of_the_quotes`.
 word-designator *ranges* and out-of-range errors work, so it is tracked on its
 own as TD-OILS-HISTEXPAND-WORD-RANGE below and is **not** fixed here.
 
-### TD-OILS-HISTEXPAND-WORD-RANGE. word-designator ranges clamp where bash errors, and `-`/`$` endpoints are off — OPEN 2026-07-29
+### TD-OILS-HISTEXPAND-WORD-RANGE. word-designator ranges clamp where bash errors, and `-`/`$` endpoints are off — ✅ RESOLVED 2026-07-29
 
 **Where:** `userspace/oils/src/histexpand.rs` — `apply_word_designator()`: the
 `pick` closure, the leading-`-` arm, and `read_point`.
@@ -8713,16 +8713,55 @@ Other endpoints measured and already correct: `!!:-$` → `a b c d`, `!!:-^` →
 `a b`, `!!:^-` → `b c`, `!!:1-` → `b c`, `!!:^-$` → `b c d`, `!!:^-2` → `b c`,
 `!$` → `d`, `!^` → `b`, `!*` → `b c d`.
 
-**Proper fix.** Make `pick` return `Result`, with the error carrying the
-`bad word specifier` body built from `spec_text()` (already used for the
-substitution diagnostics), and thread it out through `apply_word_designator` as
-an `Expansion::NotFound`-style failure — the existing `NotFound` variant already
-carries a whole message body, so no new variant is needed. Change the leading-`-`
-arm to `.unwrap_or(last.saturating_sub(1))`, and have `read_point` report whether
-it consumed a `$` so the range scan can decline to look further. Needs a corpus
-case; keep it separate from `tests/corpus/histexpand-words.sh`, which
-deliberately uses only in-range designators so that the tokenizer and the range
-semantics stay independently bisectable.
+**Fixed.** `apply_word_designator` now returns `Result<(String, usize), String>`,
+`?`-ed at its single call site in `expand_one`, so an out-of-range designator
+fails the whole expansion the way a missing event does — the existing
+`Expansion::NotFound` already carries a whole message body, so no new variant was
+needed. The range is now carried as a `RangeEnd` enum rather than a bare number,
+which is what makes the tolerant case expressible: `RangeEnd::Given` is
+range-checked, `RangeEnd::SecondToLast` (the end bash *defaults* for a trailing
+`-`) is not, so `!!:3-` is empty while `!!:3-1` is an error. `$` and `*` became
+their own arms, terminating the designator instead of falling into the range scan.
+
+Widening the probe from ~20 shapes to ~150 turned up four *more* divergences that
+the entry above did not know about, none of them guessable from the manual (which
+documents only `x-y`):
+
+* **A bare number needs the colon.** `!!1` is the whole event with a literal `1`
+  stuck on the end, not word 1 — osh answered `b`. `^`, `$`, `*` and `-` do not
+  need it, so the reader for the *start* of a range now takes `had_colon` into
+  account while the reader for the *end* does not (`!!-2` is words 0 through 2).
+* **A bare `^` can stand in for `-^` as the end of a range.** `!!:0^` is words 0
+  through 1 and `!!:^^` is word 1; `!!:2^` is the `bad word specifier` you would
+  expect of a backwards range. Only one may — the second `^` of `!!:^^^` is
+  literal — and neither `$` nor a number gets the same treatment (`!!:2$` is word
+  2 and a literal `$`, `!!:^2` is word 1 and a literal `2`).
+* **`*` never fails.** It is exempt even from the start-of-range check: on a
+  one-word event `!!:*` is empty where `!!:^` is an error, though both reach for
+  word 1.
+* **`*` also terminates the designator**, exactly as `$` does — `!!:*-` is
+  `b c d-`. The entry above had this backwards, reading `!!:*-` as evidence that
+  the suppression was specific to `$`; in fact the `-` is literal in both, and
+  what makes `!!:--` come out as `a b c-` is the *bare leading* `-` form
+  consuming the first `-` and defaulting its end.
+
+**Tests.** `word_designators_name_a_range_and_reject_one_that_is_out_of_range`
+(≈120 assertions over both a four-word and a one-word event, including the exact
+message bodies) plus `tests/corpus/histexpand-word-range.sh`, kept separate from
+`histexpand-words.sh` so the tokenizer and the range semantics stay independently
+bisectable.
+
+**Measurement note worth keeping.** `history -p` masks the message body with its
+own `history expansion failed`, so the exact `:4: bad word specifier` text can
+only be seen on the *interactive* path — probes were run as
+`printf … | bash --norc --noprofile -i`, reading the echoed line back off stderr.
+And a first draft of the corpus case failed for a reason that has nothing to do
+with designators: **a script line is added to the history as it is read**, so in
+two consecutive `history -p` lines the `!!` of the second names the *first line*
+rather than the recorded event. Every probe therefore re-records the event with
+its own `history -s` on the line immediately before it. (Both shells agree on
+this, so it is a property of the harness, not a divergence — but it silently
+turns a designator test into a test of something else.)
 
 ### TD-OILS-HISTEXPAND-MODIFIERS. the `:h`/`:t`/`:r`/`:e` modifiers were pathname-aware, and an unknown modifier was silently ignored — ✅ RESOLVED 2026-07-29
 

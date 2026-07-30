@@ -6143,7 +6143,9 @@ impl Shell {
             CondExpr::Word(w) => {
                 let arg = self.expand_to_string(w);
                 self.cond_trace_unary(invert, "-n", &arg);
-                !arg.is_empty() != invert
+                // `-n` is true for a non-empty operand, so `invert` flips it:
+                // spelled as an equality because clippy rejects `!x != y`.
+                arg.is_empty() == invert
             }
             // Parentheses only shaped the tree, which parsing already did — but
             // they do absorb a pending `!`, so the terms inside start clean.

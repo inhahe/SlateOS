@@ -19514,22 +19514,37 @@ impl Shell {
         // As with scalar `declare`, an array declaration inside a function is
         // local by default unless `-g` was given.
         let make_local = is_local || (!global && !self.local_frames.is_empty());
-        // Apply flags + any scalar operands (e.g. `declare -x FOO=bar`). For
-        // `readonly`/`export`, route scalar operands through their own builtin —
-        // but only when a non-flag operand is present, so an array-literal-only
-        // invocation (`readonly arr=(1 2)`) never slips into listing mode.
-        let has_scalar_operand = argv[1..]
-            .iter()
-            .any(|a| a != "--" && !a.starts_with(['-', '+']));
-        let status = match cmd {
-            "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir),
-            "export" if has_scalar_operand => self.builtin_export(&argv[1..], out, redir),
-            "readonly" | "export" => 0,
-            _ => self.builtin_declare(&argv[1..], is_local, cmd),
-        };
-        // Mark each array name's kind + attributes before applying the literal,
-        // so `apply_assignment` routes to the right store and (for `-i`)
-        // evaluates the values arithmetically.
+        // Phase 1 — the *compound* operands, in operand order, before the builtin
+        // runs at all.
+        //
+        // bash performs a compound assignment during the word-expansion pass of
+        // the command, not inside the builtin: only a compound operand can bind a
+        // whole array, so it is bound in place while the words are being expanded,
+        // whereas a *scalar* operand is merely expanded to a `name=value` string
+        // and handed to the builtin to assign. Three consequences, all measured
+        // against bash 5.2 and all wrong in osh before this ordering:
+        //
+        //   * A compound sees an earlier compound's binding —
+        //     `declare -a x=(1 2) y=(${x[1]})` gives `y=([0]="2")` — which osh
+        //     already got right, since the loop below is in operand order.
+        //   * A compound does *not* see a scalar operand of the same command, even
+        //     one written to its left: `c=old; declare -a b=($c) c=2` binds
+        //     `b=([0]="old")`, where osh bound `([0]="2")` because the builtin had
+        //     already assigned `c` by the time the loop ran.
+        //   * A compound that *fails* (readonly target, array-kind conflict) stops
+        //     the command there: the earlier compounds stay bound, the later ones
+        //     never bind, the builtin never runs, and the rest of the parse unit is
+        //     discarded with status 1. `readonly r=1; declare -a f=(0) r=(2)
+        //     ok=(3); echo next` leaves `ok` unset and never echoes. osh bound
+        //     `ok`, ran the builtin and reported 0.
+        //
+        // Because the builtin never runs on that failure path, the attributes only
+        // *it* applies are not applied either — which is why `-x`/`-r`/`-n` are
+        // deferred to phase 3 below while the kind (`-a`/`-A`) and the
+        // value-transforming attributes (`-i`/`-l`/`-u`/`-c`) are applied here:
+        // those have to be in force before the literal binds, and bash likewise
+        // shows them on a survivor of a failed later operand
+        // (`declare -ail g=(2+3) r=(1)` → `declare -ail g=([0]="5")`, no `x`).
         for a in decl_arrays {
             // A function-local array declaration shadows the name in the current
             // frame first.
@@ -19597,6 +19612,46 @@ impl Shell {
                 }
                 None => {}
             }
+            // Default (no flag): an array literal makes an indexed array — which
+            // `apply_assignment` already does for a name absent from `assoc`.
+            // `trace = false`: the `declare`/`local` command itself is traced via
+            // the command path, so the inner assignment must not trace again.
+            let saved_decl_ctx = self.decl_builtin_ctx;
+            self.decl_builtin_ctx = true;
+            let bound = self.apply_assignment(a, false);
+            self.decl_builtin_ctx = saved_decl_ctx;
+            // A rejected compound operand (the readonly guard in
+            // `apply_assignment`, which has already emitted its diagnostic) ends
+            // the command exactly as the kind conflict above does: no further
+            // operand binds, the builtin does not run, and the rest of the parse
+            // unit is discarded.
+            if !bound {
+                self.last_status = 1;
+                return Flow::Discard;
+            }
+        }
+        // Phase 2 — the builtin: the flags, and any *scalar* operands
+        // (e.g. `declare -x FOO=bar`). For `readonly`/`export`, route scalar
+        // operands through their own builtin — but only when a non-flag operand is
+        // present, so an array-literal-only invocation (`readonly arr=(1 2)`) never
+        // slips into listing mode.
+        let has_scalar_operand = argv[1..]
+            .iter()
+            .any(|a| a != "--" && !a.starts_with(['-', '+']));
+        let status = match cmd {
+            "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir),
+            "export" if has_scalar_operand => self.builtin_export(&argv[1..], out, redir),
+            "readonly" | "export" => 0,
+            _ => self.builtin_declare(&argv[1..], is_local, cmd),
+        };
+        // Phase 3 — the attributes the *builtin* applies, which it can only apply
+        // to the scalar operands it was given: the array names live in
+        // `decl_arrays`, so they are marked here instead. `readonly` in particular
+        // has to come after the value is bound, since a readonly guard in
+        // `apply_assignment` would otherwise reject the initializer — and an
+        // array-literal-only `readonly arr=(1 2)` has no builtin call at all to
+        // rely on.
+        for a in decl_arrays {
             if nameref {
                 self.nameref_attr.insert(a.name.clone());
             } else if unset_nameref {
@@ -19605,16 +19660,6 @@ impl Shell {
             if export {
                 self.exported.insert(a.name.clone());
             }
-            // Default (no flag): an array literal makes an indexed array — which
-            // `apply_assignment` already does for a name absent from `assoc`.
-            // `trace = false`: the `declare`/`local` command itself is traced via
-            // the command path, so the inner assignment must not trace again.
-            let saved_decl_ctx = self.decl_builtin_ctx;
-            self.decl_builtin_ctx = true;
-            self.apply_assignment(a, false);
-            self.decl_builtin_ctx = saved_decl_ctx;
-            // `readonly` is applied *after* the value is bound (a readonly guard
-            // in `apply_assignment` would otherwise reject the initializer).
             if readonly {
                 self.readonly.insert(a.name.clone());
             }
@@ -37915,6 +37960,62 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("z=(1 2); readonly z=5; declare -p z").0,
             "declare -ar z=([0]=\"5\" [1]=\"2\")\n"
         );
+    }
+
+    #[test]
+    fn a_compound_operand_binds_before_the_declaration_builtin_runs() {
+        // A compound operand is bound during the command's word-expansion pass,
+        // not by the builtin — only a compound can bind a whole array, and there
+        // is no way to hand one to a builtin as an argv string. So compounds bind
+        // in operand order and a later one sees an earlier one's value.
+        assert_eq!(
+            run("declare -a x=(1 2) y=(\"${x[1]}\" \"${#x[@]}\"); declare -p y").0,
+            "declare -a y=([0]=\"2\" [1]=\"2\")\n"
+        );
+        // A *scalar* operand, by contrast, is only expanded there and left for the
+        // builtin to assign — so no compound of the same command can see it, not
+        // even one written to its right. osh ran the builtin first and bound `b`
+        // to the *new* `c`.
+        assert_eq!(
+            run("c=old; declare -a b=($c) c=2; declare -p b c").0,
+            "declare -a b=([0]=\"old\")\ndeclare -a c=([0]=\"2\")\n"
+        );
+        assert_eq!(
+            run("c=old; declare -a c=2 b=($c); declare -p b").0,
+            "declare -a b=([0]=\"old\")\n"
+        );
+        // The kind and the value-transforming attributes are in force while the
+        // literal binds, so the stored values are already evaluated and folded.
+        assert_eq!(
+            run("declare -ai n=(1+1 3*3); declare -al lo=(AB); declare -p n lo").0,
+            "declare -ai n=([0]=\"2\" [1]=\"9\")\ndeclare -al lo=([0]=\"ab\")\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_compound_operand_discards_the_rest_of_the_parse_unit() {
+        // Binding during expansion means a compound that *fails* stops the command
+        // dead, the way the array-kind conflict already did: the earlier operands
+        // stay bound, the later ones never bind, the builtin never runs, and the
+        // rest of the parse unit goes with it — so the `echo` never speaks and
+        // `ok` is unset. osh bound `ok`, ran the builtin and reported 0.
+        let (o, rc) = run(
+            "readonly r=1\ndeclare -a first=(0) r=(2) ok=(3); echo never\necho \"status=$?\"\ndeclare -p first\ndeclare -p ok 2>/dev/null; echo \"ok=$?\"",
+        );
+        assert_eq!(o, "status=1\ndeclare -a first=([0]=\"0\")\nok=1\n");
+        assert_eq!(rc, 0, "the discard ends the command, not the script");
+        // Because the builtin never ran, the attributes only *it* applies were
+        // never applied to the survivor either — `-x`/`-r`/`-n` are missing while
+        // `-i`/`-l`, in force at bind time, are there. bash reports exactly this
+        // split, and it is the observable proof of where each attribute is applied.
+        assert_eq!(
+            run("readonly r=1\ndeclare -ailx g=(2+3 AB) r=(1)\ndeclare -p g").0,
+            "declare -ail g=([0]=\"5\" [1]=\"0\")\n"
+        );
+        // The *builtin* failing is milder: status 1, no discard, and the compound
+        // bound before it keeps the attributes the builtin did apply.
+        let (o2, _) = run("readonly s=1; declare -ax v=(1) s=2; echo \"rc=$?\"; declare -p v");
+        assert_eq!(o2, "rc=1\ndeclare -ax v=([0]=\"1\")\n");
     }
 
     #[test]

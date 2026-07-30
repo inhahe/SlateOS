@@ -3563,21 +3563,30 @@ impl Shell {
                     self.emit_stderr(&bytes);
                 }
             }
-            // A here-document the input ended before delimiting is a warning from
-            // the *reader*, so it belongs here: after the `set -v` echo of the
-            // lines it read (bash emits the echo first, then runs out), before the
-            // unit runs, and before a parse error the same unit may also carry —
-            // `f() { cat <<EOF` warns and *then* reports the unexpected end of
+            // A here-document body that did not turn out as declared is a warning
+            // from the *reader*, so it belongs here: after the `set -v` echo of
+            // the lines it read (bash emits the echo first, then runs out), before
+            // the unit runs, and before a parse error the same unit may also carry
+            // — `f() { cat <<EOF` warns and *then* reports the unexpected end of
             // file. The parser only releases a warning once the unit holding its
             // `<<` is handed out, which is what keeps it behind the output of
             // earlier lines.
-            for hd in ip.take_heredoc_eof() {
-                self.errln(&format!(
-                    "{}warning: here-document at line {} delimited by end-of-file (wanted `{}')",
-                    self.err_prefix_at(hd.eof_line),
-                    hd.body_line,
-                    hd.delim
-                ));
+            for w in ip.take_reader_warnings() {
+                let msg = match w {
+                    crate::lexer::ReaderWarning::HeredocEof(hd) => format!(
+                        "{}warning: here-document at line {} delimited by end-of-file (wanted `{}')",
+                        self.err_prefix_at(hd.eof_line),
+                        hd.body_line,
+                        hd.delim
+                    ),
+                    crate::lexer::ReaderWarning::SubstHeredoc(s) => format!(
+                        "{}warning: command substitution: {} unterminated here-document{}",
+                        self.err_prefix_at(s.line),
+                        s.count,
+                        if s.count == 1 { "" } else { "s" }
+                    ),
+                };
+                self.errln(&msg);
             }
             // bash records a line when it *reads* it, before it runs — which is
             // why `history` lists the `history` call that printed the list, and
@@ -28411,9 +28420,16 @@ mod tests {
         let unit = |ip: &mut crate::parser::IncrementalParser| {
             let u = ip.next_unit(None, opts);
             let warned: Vec<String> = ip
-                .take_heredoc_eof()
+                .take_reader_warnings()
                 .iter()
-                .map(|h| format!("{}/{}/{}", h.delim, h.body_line, h.eof_line))
+                .map(|w| match w {
+                    crate::lexer::ReaderWarning::HeredocEof(h) => {
+                        format!("{}/{}/{}", h.delim, h.body_line, h.eof_line)
+                    }
+                    crate::lexer::ReaderWarning::SubstHeredoc(s) => {
+                        format!("subst/{}/{}", s.count, s.line)
+                    }
+                })
                 .collect();
             (u.is_some(), u.is_some_and(|r| r.is_err()), warned)
         };

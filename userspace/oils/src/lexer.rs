@@ -267,11 +267,21 @@ struct Lexer {
     /// too, but its offsets are relative to that string and are simply dropped
     /// with the lexer.
     conts: Vec<u32>,
-    /// Every here-document whose delimiter the input ended before reaching, in
-    /// the order the bodies were collected. Only filled in lenient mode (see
-    /// `strict_heredoc_eof`), since strict mode raises instead. bash warns about
-    /// each of these, so the reader needs the record; see [`HeredocEof`].
-    heredoc_eof: Vec<HeredocEof>,
+    /// Reader-level warnings raised during the scan, in the order they happened.
+    /// The here-document-at-EOF ones are only filled in lenient mode (see
+    /// `strict_heredoc_eof`), since strict mode raises instead. See
+    /// [`ReaderWarning`].
+    warnings: Vec<ReaderWarning>,
+    /// Set while the here-document reader has run **ahead** of the token cursor.
+    ///
+    /// bash reads a line at a time, so gathering a body in the middle of a line
+    /// — which is what a `$( … )` closing over an ungathered here-document
+    /// forces — fetches the *following* lines without disturbing the line being
+    /// parsed. Our cursor is a single index into a flat buffer, so the read-ahead
+    /// is recorded here instead: the token cursor stays where it was and jumps to
+    /// `pos` the moment it reaches the end of the line it is on. See
+    /// [`Lexer::gather_ahead`] and [`Lexer::sync_ahead`].
+    hd_ahead: Option<HdAhead>,
     /// Index in the output token stream of the token the current
     /// [`Lexer::run_into`] iteration is about to push. The word readers are not
     /// given `out`, so a reader-level record raised deep inside a word — an
@@ -279,6 +289,34 @@ struct Lexer {
     /// enclosing scan consumes — has no other way to name the token it belongs
     /// to. Left at 0 by the lexers that never run the token loop.
     next_tok_index: usize,
+}
+
+/// A warning bash raises from its **reader** rather than from the parse or the
+/// run: something about a here-document's body, noticed while fetching lines.
+///
+/// The two kinds share one ordered channel because their relative order is
+/// observable — `x=$(cat <<EOF)` at the end of input warns about the
+/// substitution first and about the missing delimiter second — and because they
+/// are released by the same rule: only once the parse unit containing their
+/// token is handed out, so a warning lands after the output of every earlier
+/// line and not at all if a syntax error means bash never reads that far.
+#[derive(Clone, Debug)]
+pub enum ReaderWarning {
+    /// A here-document whose delimiter never arrived.
+    HeredocEof(HeredocEof),
+    /// A `$( … )` that closed with here-documents still ungathered.
+    SubstHeredoc(SubstHeredoc),
+}
+
+impl ReaderWarning {
+    /// The token whose parse unit this warning is released with.
+    #[must_use]
+    pub fn tok_index(&self) -> usize {
+        match self {
+            Self::HeredocEof(h) => h.tok_index,
+            Self::SubstHeredoc(s) => s.tok_index,
+        }
+    }
 }
 
 /// A here-document whose delimiter never arrived: the input ran out first.
@@ -308,6 +346,38 @@ pub struct HeredocEof {
     /// commands on earlier lines have run. (Nor at all, if a syntax error on an
     /// earlier line means bash never reaches this line: `echo one )` followed by
     /// an unterminated here-document warns not at all.)
+    pub tok_index: usize,
+}
+
+/// How far the here-document reader has run ahead of the token cursor.
+#[derive(Clone, Copy, Debug)]
+struct HdAhead {
+    /// Where the read-ahead stopped: the token cursor jumps here when it reaches
+    /// the end of the line it is on.
+    pos: usize,
+    /// The line the reader had fetched when it stopped — [`Lexer::fetched_line`]
+    /// answers with this while the token cursor is still behind, because that is
+    /// what bash's `line_number` holds.
+    line: u32,
+}
+
+/// A `$( … )` whose `)` arrived while here-documents declared inside it were
+/// still waiting for their bodies — because the `<<` and the `)` are on the same
+/// line, so the body can only lie *past* the substitution's own text.
+///
+/// bash reads whole lines, so this is recoverable: it warns, then fetches the
+/// following lines right there and gives the bodies to the substitution anyway,
+/// leaving the line it was parsing to resume after the `)`. See
+/// [`Lexer::gather_ahead`].
+#[derive(Clone, Debug)]
+pub struct SubstHeredoc {
+    /// How many were outstanding. bash prints the count, and pluralises on it.
+    pub count: usize,
+    /// The line bash had fetched when the `)` was reached — which for the
+    /// *second* such substitution on a line is not that line at all but wherever
+    /// the first one's bodies left the reader.
+    pub line: u32,
+    /// The token the warning is released with; see [`HeredocEof::tok_index`].
     pub tok_index: usize,
 }
 
@@ -564,7 +634,8 @@ impl Lexer {
             strict_heredoc_eof: false,
             paren_body: false,
             conts: Vec::new(),
-            heredoc_eof: Vec::new(),
+            warnings: Vec::new(),
+            hd_ahead: None,
             next_tok_index: 0,
         }
     }
@@ -654,12 +725,11 @@ pub struct Tokenized {
     /// *not* deleted and so is not listed here, which is exactly the
     /// distinction bash's own history draws.
     pub conts: Vec<u32>,
-    /// Every here-document the input ended before delimiting, in body-collection
-    /// order. bash warns about each; the reader
+    /// Every warning the reader raised, in the order it raised them. The reader
     /// ([`crate::parser::IncrementalParser`]) holds them until the parse unit
     /// owning each `tok_index` is handed out, since bash's warning comes from its
     /// *reader* and so lands after the output of every earlier line.
-    pub heredoc_eof: Vec<HeredocEof>,
+    pub warnings: Vec<ReaderWarning>,
     /// `Some((error, line))` when lexing stopped early. `toks` is then cut back
     /// to the last **complete** logical line, because that is the granularity
     /// at which bash stops executing: in `echo two; echo three 'unterm`
@@ -690,9 +760,9 @@ pub fn tokenize_deferred(src: &str, opts: LexOpts) -> Tokenized {
     let mut conts = std::mem::take(&mut lx.conts);
     conts.sort_unstable();
     conts.dedup();
-    let heredoc_eof = std::mem::take(&mut lx.heredoc_eof);
+    let warnings = std::mem::take(&mut lx.warnings);
     let Err(e) = res else {
-        return Tokenized { toks, lines, offsets, ends, conts, heredoc_eof, err: None };
+        return Tokenized { toks, lines, offsets, ends, conts, warnings, err: None };
     };
     // The failing token's own line is the fallback when the raise site did not
     // name one. `Lexer::line` only advances at the end of each `run_into`
@@ -725,7 +795,7 @@ pub fn tokenize_deferred(src: &str, opts: LexOpts) -> Tokenized {
     // but if one ever did, its token is beyond the cut and so names input that
     // never runs. The reader's `tok_index` gate keeps it quiet on its own, which is
     // the same rule that keeps bash quiet after `echo one )`.
-    Tokenized { toks, lines, offsets, ends, conts, heredoc_eof, err: Some((e, line)) }
+    Tokenized { toks, lines, offsets, ends, conts, warnings, err: Some((e, line)) }
 }
 
 /// Which quote, if any, the reader is still *inside* after `src` — `Some('\'')`
@@ -1082,7 +1152,24 @@ impl Lexer {
         if c.is_some() {
             self.pos += 1;
         }
+        // Reaching the end of a line is where a read-ahead is redeemed: the lines
+        // the here-document reader already took lie behind the cursor now, and it
+        // must not read them a second time as input. See [`Lexer::sync_ahead`].
+        if c == Some('\n') {
+            self.sync_ahead();
+        }
         c
+    }
+
+    /// Move the token cursor to wherever the here-document reader has already
+    /// read, now that the cursor has finished the line it was standing on.
+    ///
+    /// A no-op unless a `$( … )` closed over an ungathered here-document, which
+    /// is the only thing that puts the reader ahead. See [`Lexer::gather_ahead`].
+    fn sync_ahead(&mut self) {
+        if let Some(a) = self.hd_ahead.take() {
+            self.pos = self.pos.max(a.pos);
+        }
     }
 
     /// Record the `\<newline>` the caller just consumed and discarded.
@@ -1181,6 +1268,11 @@ impl Lexer {
             match c {
                 '\n' => {
                     self.pos += 1;
+                    // Before the collection below, so a here-document still
+                    // pending from earlier on the line reads from *after* the
+                    // bodies a `$( … )` on it already took, not from the top of
+                    // them again.
+                    self.sync_ahead();
                     out.push(Tok::Newline);
                     if !self.pending_heredocs.is_empty() {
                         self.collect_heredocs(out)?;
@@ -1455,6 +1547,13 @@ impl Lexer {
     /// when a `$( … )` is left unclosed, but a here-document's reader has already
     /// stopped by then and reports the line it last had.
     fn fetched_line(&self) -> u32 {
+        // While the here-document reader is ahead of the token cursor, *it* is
+        // what has fetched lines — the cursor's own line says nothing about how
+        // far the input has been read. This is why the second `$(cat <<X)` on a
+        // line is blamed past the first one's body rather than on its own line.
+        if let Some(a) = &self.hd_ahead {
+            return a.line;
+        }
         let at_line_start = self.pos == 0 || self.chars.get(self.pos.wrapping_sub(1)) == Some(&'\n');
         self.cur_line()
             .saturating_sub(u32::from(at_line_start))
@@ -1497,7 +1596,15 @@ impl Lexer {
             .iter()
             .filter(|&&ch| ch == '\n')
             .count();
-        let end_line = start_line.saturating_add(u32::try_from(inner).unwrap_or(u32::MAX));
+        let mut end_line = start_line.saturating_add(u32::try_from(inner).unwrap_or(u32::MAX));
+        // A here-document gathered from past the `)` of a `$( … )` leaves the
+        // reader ahead of the cursor, and the line a token carries is the last
+        // line the *reader* had fetched — so the rest of this line is stamped
+        // with the body's last line, not with its own. (`x=$(cat <<EOF); echo
+        // $LINENO` over a two-line body reports 3.) See [`Lexer::gather_ahead`].
+        if let Some(a) = &self.hd_ahead {
+            end_line = end_line.max(a.line);
+        }
         let start = u32::try_from(start_pos).unwrap_or(u32::MAX);
         while lines.len() < out.len() {
             lines.push(end_line);
@@ -2273,6 +2380,16 @@ impl Lexer {
         // `<<` in there is a left shift and a `#` a base marker (`16#ff`), so
         // neither introduces anything.
         let mut arith_from: Option<usize> = None;
+        // The depths opened by a *nested* `$(`, `<(` or `>(`. Their bodies are
+        // re-lexed as inputs of their own, so a here-document declared inside one
+        // is that lex's to report — this scan still has to consume the body (it is
+        // the only reader that can), but warning here as well would double it.
+        // A plain `( … )` group is not on this stack: it is re-lexed as part of
+        // this same text, so nothing else would report it.
+        let mut nested: Vec<usize> = Vec::new();
+        // How many of `pending` were declared directly in this body, and so are
+        // this scan's to warn about. See [`Lexer::gather_ahead`].
+        let mut own = 0usize;
         // Which `)` closes a group and which terminates a `case` pattern.
         let mut cases = CaseScan::new();
         loop {
@@ -2327,6 +2444,7 @@ impl Lexer {
                         raw.push('\n');
                         if !pending.is_empty() {
                             self.consume_subst_heredoc_bodies(&mut pending, &mut raw)?;
+                            own = 0;
                         }
                         word_start = true;
                         cases.finish_word(depth);
@@ -2418,6 +2536,9 @@ impl Lexer {
                         let (delim, _) = self.read_heredoc_delim();
                         raw.extend(self.chars.get(word..self.pos).unwrap_or(&[]).iter());
                         pending.push((delim, strip));
+                        if nested.is_empty() {
+                            own += 1;
+                        }
                         word_start = false;
                         continue;
                     }
@@ -2455,6 +2576,19 @@ impl Lexer {
                 // A `case` pattern's optional `(` has no mate of its own.
                 if !(heredocs && cases.is_pattern_open(depth)) {
                     depth += 1;
+                    // `$(`, `<(` and `>(` — the sigil is the character before the
+                    // paren the cursor has just stepped over. An arithmetic `$((`
+                    // is excluded: it opens no reader of its own, and a `<<` in it
+                    // is a left shift anyway.
+                    if heredocs
+                        && arith_from.is_none()
+                        && matches!(
+                            self.chars.get(self.pos.wrapping_sub(2)),
+                            Some('$' | '<' | '>')
+                        )
+                    {
+                        nested.push(depth);
+                    }
                 }
             } else if c == close {
                 // A pattern's `)` closes the pattern, not a group — this is the
@@ -2471,7 +2605,18 @@ impl Lexer {
                         if heredocs && cases.open_at_close() {
                             raw.push(close);
                         }
+                        // A here-document declared in this body but never
+                        // delimited inside it: its `<<` and this `)` are on one
+                        // line, so the body can only lie past the substitution's
+                        // own text. bash reads whole lines, so it fetches it
+                        // anyway — after warning that it had to.
+                        if !pending.is_empty() {
+                            self.gather_ahead(&mut pending, own, &mut raw)?;
+                        }
                         return Ok(raw);
+                    }
+                    if nested.last() == Some(&(depth + 1)) {
+                        nested.pop();
                     }
                     if arith_from == Some(depth) {
                         arith_from = None;
@@ -2483,6 +2628,63 @@ impl Lexer {
                 word_start = matches!(c, ' ' | '\t' | ';' | '&' | '|' | '(' | ')');
             }
         }
+    }
+
+    /// Fetch the bodies of here-documents that a `$( … )` closed over, from the
+    /// lines *after* the one the cursor is parsing, and append them to the
+    /// substitution's raw text.
+    ///
+    /// `x=$(cat <<EOF); echo "$x"` / `body` / `EOF` is the shape: the `<<` and the
+    /// `)` share a line, so the body is not inside the substitution at all. bash
+    /// reads a line at a time, so its reader can simply fetch the next ones and
+    /// hand them over — which it does, after warning that it had to. The line
+    /// being parsed then resumes after the `)`, unaffected.
+    ///
+    /// Our cursor is one index into a flat buffer, so "read the next lines
+    /// without disturbing this one" is done by moving it to the next line, doing
+    /// the ordinary gather, and recording where it got to as a read-ahead before
+    /// putting it back. [`Lexer::sync_ahead`] redeems that record when the cursor
+    /// reaches the end of its line, so the lines are read exactly once.
+    ///
+    /// `own` counts the here-documents this substitution declared *directly*.
+    /// Ones from a nested `$( … )` have to be fetched too — they are in the text
+    /// this scan is copying — but the warning about them is the nested reader's,
+    /// and it is issued when that body is lexed as an input of its own.
+    fn gather_ahead(
+        &mut self,
+        pending: &mut Vec<(String, bool)>,
+        own: usize,
+        raw: &mut String,
+    ) -> Result<(), LexError> {
+        if own > 0 {
+            self.warnings.push(ReaderWarning::SubstHeredoc(SubstHeredoc {
+                count: own,
+                line: self.fetched_line(),
+                tok_index: self.next_tok_index,
+            }));
+        }
+        let resume = self.pos;
+        // An earlier substitution on this line may already have taken lines; carry
+        // on from where it stopped rather than re-reading them.
+        self.pos = match self.hd_ahead.take() {
+            Some(a) => a.pos,
+            None => {
+                let mut p = self.pos;
+                while !matches!(self.chars.get(p), None | Some('\n')) {
+                    p += 1;
+                }
+                p.saturating_add(usize::from(p < self.chars.len()))
+            }
+        };
+        // The body belongs where an inline here-document's would have sat: on the
+        // lines after the command, which the re-lex of this text finds only if the
+        // command is terminated first. The scan stopped at `)`, so it never
+        // reached a newline of its own to supply that.
+        raw.push('\n');
+        let gathered = self.consume_subst_heredoc_bodies(pending, raw);
+        self.hd_ahead = Some(HdAhead { pos: self.pos, line: self.fetched_line() });
+        self.pos = resume;
+        gathered
     }
 
     /// Consume the bodies of here-documents declared inside a `$( … )` / `<( … )`
@@ -2504,12 +2706,20 @@ impl Lexer {
                             "unexpected EOF while looking for `{delim}'"
                         )));
                     }
-                    self.heredoc_eof.push(HeredocEof {
+                    self.warnings.push(ReaderWarning::HeredocEof(HeredocEof {
                         delim: delim.clone(),
                         body_line,
                         eof_line: self.fetched_line(),
                         tok_index: self.next_tok_index,
-                    });
+                    }));
+                    // Close the body off with the delimiter the input never
+                    // supplied. This text is re-lexed when the substitution runs,
+                    // and that lex would otherwise run out of input in the same
+                    // place and warn a second time about the one here-document —
+                    // whereas the warning already recorded here is the reader's,
+                    // raised once, which is what bash prints.
+                    raw.push_str(&delim);
+                    raw.push('\n');
                     break;
                 }
                 let start = self.pos;
@@ -2798,12 +3008,12 @@ impl Lexer {
                             ph.delim
                         )));
                     }
-                    self.heredoc_eof.push(HeredocEof {
+                    self.warnings.push(ReaderWarning::HeredocEof(HeredocEof {
                         delim: ph.delim.clone(),
                         body_line,
                         eof_line: self.fetched_line(),
                         tok_index: ph.tok_index,
-                    });
+                    }));
                     break;
                 }
                 let start = self.pos;
@@ -3354,6 +3564,22 @@ mod tests {
         assert!(toks.iter().any(|t| matches!(t, Tok::Op(Op::TLess))));
     }
 
+    /// The unterminated-here-document warnings of a scan, in order, as
+    /// (delimiter, body line, EOF line). The other kind of reader warning is
+    /// filtered out so a test that is about here-document lines does not have to
+    /// spell out the enum.
+    fn heredoc_eofs(tk: &Tokenized) -> Vec<(&str, u32, u32)> {
+        tk.warnings
+            .iter()
+            .filter_map(|w| match w {
+                ReaderWarning::HeredocEof(h) => {
+                    Some((h.delim.as_str(), h.body_line, h.eof_line))
+                }
+                ReaderWarning::SubstHeredoc(_) => None,
+            })
+            .collect()
+    }
+
     /// The two line numbers bash's unterminated-here-document warning carries are
     /// both "the last line the reader had **fetched**" — one at the moment body
     /// collection began, one at the moment the input ran out — and neither is the
@@ -3406,11 +3632,7 @@ mod tests {
         ];
         for (src, want) in cases {
             let tk = tokenize_deferred(src, LexOpts::default());
-            let got: Vec<Want<'_>> = tk
-                .heredoc_eof
-                .iter()
-                .map(|h| (h.delim.as_str(), h.body_line, h.eof_line))
-                .collect();
+            let got: Vec<Want<'_>> = heredoc_eofs(&tk);
             assert_eq!(got, *want, "{src:?}");
         }
     }
@@ -3475,13 +3697,105 @@ mod tests {
             let (e, line) = tk.err.as_ref().unwrap_or_else(|| panic!("{src:?} must fail"));
             assert_eq!(e.to_string(), "unexpected EOF while looking for matching `)'");
             assert_eq!(*line, 4, "{src:?}");
-            let got: Vec<_> = tk
-                .heredoc_eof
-                .iter()
-                .map(|h| (h.delim.as_str(), h.body_line, h.eof_line))
-                .collect();
-            assert_eq!(got, vec![("EOF", 1, 3)], "{src:?}");
+            assert_eq!(heredoc_eofs(&tk), vec![("EOF", 1, 3)], "{src:?}");
         }
+    }
+
+    /// A here-document whose `<<` and whose substitution's `)` share a line has
+    /// nowhere inside the substitution to put its body. bash's reader fetches the
+    /// following lines anyway — **at the `)`**, not at the enclosing newline — and
+    /// warns that it had to. Every expectation is measured from bash 5.2. See
+    /// [`Lexer::gather_ahead`].
+    #[test]
+    fn a_substitution_gathers_a_here_document_from_past_its_close() {
+        /// The raw text of each substitution in the input, then the
+        /// `(count, line)` of each `command substitution:` warning raised.
+        type Want<'a> = (&'a [&'a str], &'a [(usize, u32)]);
+        let cases: &[(&str, Want<'_>)] = &[
+            // The base shape: the body sits after the line the `)` is on, and
+            // the substitution's text ends up holding it all the same — with a
+            // newline spliced in, since the scan stopped at `)` and never
+            // reached one to terminate the command with.
+            (
+                "x=$(cat <<EOF); echo hi\nbody\nEOF\n",
+                (&["cat <<EOF\nbody\nEOF\n"], &[(1, 1)]),
+            ),
+            // Two of them are one warning naming both, and the bodies follow in
+            // declaration order.
+            (
+                "x=$(cat <<A; cat <<B); echo hi\naaa\nA\nbbb\nB\n",
+                (&["cat <<A; cat <<B\naaa\nA\nbbb\nB\n"], &[(2, 1)]),
+            ),
+            // Two substitutions on one line take successive pairs of lines: the
+            // second gather resumes where the first stopped rather than
+            // re-reading from the line being parsed. That is also why the second
+            // warning is blamed on line 3 — the reader was already there.
+            (
+                "x=$(cat <<A) $(cat <<C); echo hi\naaa\nA\nccc\nC\n",
+                (&["cat <<A\naaa\nA\n", "cat <<C\nccc\nC\n"], &[(1, 1), (1, 3)]),
+            ),
+            // A nested substitution's here-document has to be fetched by the
+            // outer scan — the text it is copying runs over those lines — but
+            // the *warning* is the inner reader's, raised when that body is
+            // lexed as an input of its own. So the outer scan says nothing.
+            (
+                "x=$(echo $(cat <<A) tail); echo hi\naaa\nA\n",
+                (&["echo $(cat <<A) tail\naaa\nA\n"], &[]),
+            ),
+        ];
+        for (src, (raws, warned)) in cases {
+            let tk = tokenize_deferred(src, LexOpts::default());
+            assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);
+            let got: Vec<String> = tk
+                .toks
+                .iter()
+                .filter_map(|t| match t {
+                    Tok::Word(segs) => Some(segs),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|s| match s {
+                    Seg::CmdSub(raw, _, None) => Some(raw.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(got, *raws, "{src:?}");
+            let got: Vec<(usize, u32)> = tk
+                .warnings
+                .iter()
+                .filter_map(|w| match w {
+                    ReaderWarning::SubstHeredoc(s) => Some((s.count, s.line)),
+                    ReaderWarning::HeredocEof(_) => None,
+                })
+                .collect();
+            assert_eq!(got, *warned, "{src:?}");
+            // The fetched lines were consumed by the gather, so nothing on them
+            // is tokenized a second time as a command of the enclosing input.
+            assert_eq!(
+                tk.toks.iter().filter(|t| matches!(t, Tok::Newline)).count(),
+                1,
+                "{src:?} must yield one logical line: {:?}",
+                tk.toks
+            );
+        }
+
+        // The reader ends up ahead of the cursor, and a token's line is the last
+        // line the *reader* has fetched — so the rest of the substitution's line
+        // is stamped with the body's last line, and the next line follows from
+        // there. (`$LINENO` reports 3 and 4 for this input, measured.)
+        let src = "x=$(cat <<EOF); echo hi\nbody\nEOF\necho ho\n";
+        let tk = tokenize_deferred(src, LexOpts::default());
+        let after: Vec<u32> = tk
+            .toks
+            .iter()
+            .zip(&tk.lines)
+            .filter(|(t, _)| {
+                matches!(t, Tok::Word(w)
+                    if matches!(w.first(), Some(Seg::Lit(l)) if l == "hi" || l == "ho"))
+            })
+            .map(|(_, &l)| l)
+            .collect();
+        assert_eq!(after, vec![3, 4]);
     }
 
     /// A `case` pattern's `)` has no opening mate, so the extent scan cannot end

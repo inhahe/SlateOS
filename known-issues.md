@@ -8376,9 +8376,9 @@ Two supporting changes:
 **Verified:** `tests/corpus/heredoc-in-cmdsub.sh` (byte-for-byte, including the
 warning-then-syntax-error order and the earlier lines running first) and
 `lexer::tests::substitution_body_reaches_past_a_here_document`. Three divergences in
-the same scanner remain, each logged on its own below:
-TD-OILS-CMDSUB-HEREDOC-PAST-CLOSE, TD-OILS-CMDSUB-CASE-PATTERN-PAREN (since fixed),
-TD-OILS-CMDSUB-ARITH-VS-SUBSHELL (since fixed). Found while fixing
+the same scanner remained, each logged on its own below and all three since fixed:
+TD-OILS-CMDSUB-HEREDOC-PAST-CLOSE, TD-OILS-CMDSUB-CASE-PATTERN-PAREN,
+TD-OILS-CMDSUB-ARITH-VS-SUBSHELL. Found while fixing
 BUG-OILS-HEREDOC-EOF-WARNING.
 
 ### BUG-OILS-ASSIGN-KEEPS-FAILED-EXPANSION. An assignment whose value fails to expand still assigns, clobbering the old value — ✅ RESOLVED 2026-07-30
@@ -8436,10 +8436,7 @@ one:
 Covered by `interp.rs::a_failed_expansion_abandons_the_assignment` and the corpus
 case `tests/corpus/assign-failed-expansion.sh`.
 
-### TD-OILS-CMDSUB-HEREDOC-PAST-CLOSE. a here-document whose `)` is on its own line is not fed from past that line — 2026-07-30 — OPEN
-
-**Where:** `userspace/oils/src/lexer.rs` — `read_subst_body`, which drops the
-here-documents still pending when the `)` arrives.
+### TD-OILS-CMDSUB-HEREDOC-PAST-CLOSE. a here-document whose `)` is on its own line is not fed from past that line — 2026-07-30 — ✅ RESOLVED 2026-07-30
 
 **Symptom.** When the `<<` and the `)` are on the *same* line, the body lies after
 the `)` — outside the substitution's own text entirely. bash notices, warns in a
@@ -8458,21 +8455,105 @@ osh: line 2: body: command not found
 osh: line 3: EOF: command not found
 ```
 
-bash's own reader is doing something slightly incoherent here — the scan of the
-substitution body reaches `)` with the here-document ungathered (hence the warning),
-but the enclosing line's gather then picks the body up and it reaches the inner
-`cat` anyway. Both the warning and the working body are observable, so both count.
+**Cause.** The extent scan reached `)` with the here-document still pending and
+simply dropped it, so the body lines stayed in the enclosing input and were run as
+commands.
 
-**Proper fix.** The pending record has to outlive the scan: keep it (delim, strip,
-and where in the substitution's raw text the body belongs) and splice the body in
-when the enclosing newline collects it, then emit the `command substitution: N
-unterminated here-document` warning at the substitution's line. The splice is the
-awkward part — the raw text is already inside a `Seg::CmdSub` nested in a
-`Tok::Word`, so it needs either a stable handle to that segment or a deferred
-"patch this token's Nth substitution" record.
+**Impact (before the fix).** Adversarial: it needs `<<` and the closing `)` on one
+line with the body after. Deliberately kept out of
+`tests/corpus/heredoc-in-cmdsub.sh` at the time.
 
-**Impact.** Adversarial: it needs `<<` and the closing `)` on one line with the body
-after. Deliberately kept out of `tests/corpus/heredoc-in-cmdsub.sh`.
+**Fixed.** The original write-up above guessed that the *enclosing line's* gather
+picks the body up, which would have needed a deferred splice into an already-built
+`Seg::CmdSub`. Measurement disproved it: bash gathers **at the `)`**. (Proof:
+`x=$(cat <<A) $(cat <<C)` over four body lines blames the second warning on line 3,
+so the reader had already consumed A's body before the second `$(` was scanned.)
+That makes the fix local:
+
+- `Lexer::gather_ahead` — at the `)`, warn, jump the cursor to the start of the
+  next line, run the ordinary `consume_subst_heredoc_bodies` into the
+  substitution's raw text (prefixed with a `\n`, since the scan stopped at `)`
+  and never reached one to terminate the command with), then put the cursor back
+  and record where the reader got to in `Lexer::hd_ahead`.
+- `Lexer::sync_ahead` redeems that record when the cursor reaches the end of its
+  line, so a body is read exactly once and a second substitution on the same line
+  resumes from where the first stopped rather than re-reading.
+- `Lexer::fetched_line` and `Lexer::stamp_lines` consult `hd_ahead`, because
+  bash's `line_number` is the last line the *reader* fetched: `$LINENO` and any
+  diagnostic from the rest of that line name the body's last line.
+- `read_balanced_inner` counts here-documents declared *directly* in this body
+  (`own`) apart from a nested substitution's. Both have to be fetched — the text
+  being copied runs over those lines — but only the direct ones are this
+  reader's to warn about; the nested ones are warned about when that body is
+  re-lexed as an input of its own.
+- `Lexer::heredoc_eof` became `Lexer::warnings: Vec<ReaderWarning>`, a single
+  ordered channel, because the relative order of the two warning kinds is
+  observable (`x=$(cat <<EOF); …` with no body prints `command substitution:`
+  first, then `here-document … delimited by end-of-file`).
+- `consume_subst_heredoc_bodies` appends the missing delimiter line when a body
+  runs to EOF, so the captured raw text is self-contained and the re-lex of it
+  does not warn a second time.
+
+**Verified:** `tests/corpus/heredoc-past-close.sh` (byte-for-byte) and
+`lexer::tests::a_substitution_gathers_a_here_document_from_past_its_close`, plus 23
+of 24 hand-measured shapes against bash 5.2.37. The 24th is logged as
+TD-OILS-CMDSUB-HEREDOC-NESTED-GATHER-ORDER below.
+
+### TD-OILS-CMDSUB-HEREDOC-NESTED-GATHER-ORDER. two nested substitutions, each with a here-document past its close, warn in the wrong order and name the wrong lines — 2026-07-30 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `read_balanced_inner` / `gather_ahead`.
+The extent scan of a `$( … )` copies its text and gathers the here-documents
+declared *directly* in it, leaving a nested substitution's to be gathered when
+that body is re-lexed (see TD-OILS-CMDSUB-HEREDOC-PAST-CLOSE). bash's reader is
+line-based and shared across the nesting, so it does the nested gather *first* —
+during the outer scan, at the nested `)` — and the outer scan's own warning is
+therefore blamed on a line the reader has already advanced to.
+
+**Symptom.** Diagnostics only; the bodies, the output and the exit status all
+match. It takes a here-document past the close at *two* nesting levels on one
+line:
+
+```
+$ cat y1.sh
+x=$(cat <<A; echo $(cat <<B) mid); echo "x=[$x]"
+aaa
+A
+bbb
+B
+$ bash y1.sh
+y1.sh: line 1: warning: command substitution: 1 unterminated here-document   # the nested one
+y1.sh: line 5: warning: command substitution: 1 unterminated here-document   # the outer one
+y1.sh: line 5: warning: here-document at line 5 delimited by end-of-file (wanted `A')
+x=[aaa A bbb mid]
+$ osh y1.sh
+y1.sh: line 1: warning: command substitution: 1 unterminated here-document   # the outer one
+y1.sh: line 1: warning: command substitution: 1 unterminated here-document   # the nested one
+y1.sh: line 2: warning: here-document at line 2 delimited by end-of-file (wanted `A')
+x=[aaa A bbb mid]
+```
+
+**Cause.** Our scan warns for the outer substitution at its `)` (reader still on
+line 1) and defers the nested one to the re-lex, so the two warnings come out in
+the opposite order and the outer one — and the end-of-file warning that follows
+from it — carry the un-advanced line.
+
+**Proper fix.** Model bash's reader position through the nesting instead of
+deferring: when the outer scan meets a *nested* `)` with here-documents pending
+at that level, advance the reader over their bodies there and then, so the
+reader's line is right for every later warning, and raise the nested warning from
+the outer scan. The re-lex of the nested body must then be silent, which needs a
+way to say "these were already reported" — the natural one is to suppress
+`ReaderWarning::SubstHeredoc` in a lexer created by `Lexer::paren_body`, since
+that is exactly the re-lex case. The awkward part is the raw text: the nested
+body would have to be spliced at the end of the *outer* body rather than at the
+nested `)`, so the ordering of the two gathers and the ordering of the two body
+texts come apart and `consume_subst_heredoc_bodies` would need to take them
+separately.
+
+**Impact.** Very narrow — one line has to carry two levels of substitution and a
+here-document past the close at each. Everything except the two warning lines and
+their order is already correct, so nothing observable to a script is wrong. Not
+covered by a corpus case for that reason; the repro above is the whole of it.
 
 ### TD-OILS-CMDSUB-CASE-PATTERN-PAREN. a `case` pattern's `)` inside `$( … )` closes the substitution — ✅ RESOLVED 2026-07-30
 

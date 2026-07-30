@@ -2152,9 +2152,28 @@ impl Lexer {
             }
             Some('(') => {
                 if self.peek_at(1) == Some('(') {
-                    self.pos += 2;
-                    let raw = self.read_arith()?;
-                    Ok(Some(Seg::Arith(raw, false)))
+                    // `$((` is ambiguous: arithmetic, or a substitution whose
+                    // body opens with a parenthesised group (`$(( cmd ) | cmd )`,
+                    // which bash runs). Nothing local tells them apart, so read it
+                    // as arithmetic and, if that does not reach a `))`, rewind and
+                    // read it again as a substitution — the backtrack bash's
+                    // `parse_dollar_paren` does. Note what does *not* backtrack:
+                    // `$(( echo a ))` reaches its `))`, so it stays arithmetic and
+                    // fails at evaluation, in bash too.
+                    let subst_from = self.pos.saturating_add(1);
+                    let open = self.cur_line();
+                    self.pos = self.pos.saturating_add(2);
+                    if let Ok(raw) = self.read_arith() {
+                        return Ok(Some(Seg::Arith(raw, false)));
+                    }
+                    // Only `self.pos` moved: `cur_line` is derived from it, and
+                    // the arithmetic scan records nothing else.
+                    self.pos = subst_from;
+                    // Blamed on the opening line, unlike a plain `$( … )` — bash
+                    // has already failed the arithmetic reading by this point, and
+                    // that error is stamped where the `$((` is.
+                    let raw = self.read_subst_body().map_err(|e| e.at(open))?;
+                    Ok(Some(Seg::CmdSub(raw, self.cur_line(), None)))
                 } else {
                     self.pos += 1;
                     // `$( … )` is the one construct bash blames on the *end* of
@@ -3147,6 +3166,61 @@ mod tests {
         } else {
             panic!("expected word");
         }
+    }
+
+    #[test]
+    fn dollar_paren_paren_backtracks_to_a_substitution() {
+        // `$((` is two constructs sharing a prefix. The reading commits to
+        // arithmetic and only rewinds when the arithmetic scan fails to reach
+        // its `))`, so what decides the shape is the *whole* text, not the
+        // next character — same as bash's `parse_dollar_paren`.
+        let seg = |src: &str| -> Seg {
+            let toks = tokenize(src).unwrap();
+            match &toks[1] {
+                Tok::Word(segs) => segs[0].clone(),
+                other => panic!("expected a word, got {other:?}"),
+            }
+        };
+
+        // Arithmetic, because the scan reaches `))`.
+        for src in [
+            "echo $((1 + 2))",
+            // A parenthesised sub-expression is still arithmetic.
+            "echo $(((1 + 2) * 3))",
+            // Nothing here is a valid *expression*, but the scan does reach
+            // `))`, so it stays arithmetic and fails at evaluation — as it
+            // does in bash. Reaching the end is the whole test.
+            "echo $(( echo a ))",
+        ] {
+            assert!(
+                matches!(seg(src), Seg::Arith(_, false)),
+                "{src} should read as arithmetic, got {:?}",
+                seg(src)
+            );
+        }
+
+        // A substitution whose body opens with a group: the arithmetic scan
+        // runs off the end, and the rewind re-reads from the inner `(`.
+        for (src, body) in [
+            (
+                "echo $(( echo a; echo b ) | tr a-z A-Z)",
+                "( echo a; echo b ) | tr a-z A-Z",
+            ),
+            ("echo $(( echo a ) && echo b)", "( echo a ) && echo b"),
+            ("echo $(( echo a ); echo b)", "( echo a ); echo b"),
+            ("echo $(( echo a ); ( echo b ))", "( echo a ); ( echo b )"),
+        ] {
+            match seg(src) {
+                Seg::CmdSub(raw, ..) => assert_eq!(raw, body, "body of {src}"),
+                other => panic!("{src} should read as a substitution, got {other:?}"),
+            }
+        }
+
+        // The rewind restores only `self.pos`, so a later construct on the
+        // same input still lexes.
+        let toks = tokenize("echo $(( echo a ) | cat) $((1 + 1))\necho done").unwrap();
+        assert!(matches!(&toks[1], Tok::Word(s) if matches!(s[0], Seg::CmdSub(..))));
+        assert!(matches!(&toks[2], Tok::Word(s) if matches!(s[0], Seg::Arith(_, false))));
     }
 
     #[test]

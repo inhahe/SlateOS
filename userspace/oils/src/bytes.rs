@@ -224,6 +224,125 @@ pub fn char_at(s: BStr<'_>, n: usize) -> Str {
     char_slice(s, n, 1)
 }
 
+/// One character of a shell string.
+///
+/// A shell string is bytes, but several shell operations are defined over
+/// *characters*: glob's `?` matches one, `${#v}` counts them, `${v^^}` cases
+/// them. A byte string need not be text, so "character" here means either a
+/// decoded Unicode scalar ([`Ch::U`]) or a single byte that begins no valid
+/// UTF-8 sequence ([`Ch::B`]) — which is exactly bash's rule.
+///
+/// The distinction is carried rather than flattened to raw bytes because
+/// flattening would make `?` match a third of an `é`; and it is not flattened
+/// to `char` either, because U+FFFD is a real character a value may legitimately
+/// contain, so it cannot double as "some byte I could not decode".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Ch {
+    /// A decoded Unicode scalar value.
+    U(char),
+    /// A byte that is not part of any valid UTF-8 sequence.
+    B(u8),
+}
+
+impl Ch {
+    /// Append this character's bytes to `out`.
+    pub fn push_to(self, out: &mut Str) {
+        match self {
+            Ch::U(c) => {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+            Ch::B(b) => out.push(b),
+        }
+    }
+
+    /// This character's bytes, as an owned string.
+    #[must_use]
+    pub fn to_str(self) -> Str {
+        let mut out = Str::new();
+        self.push_to(&mut out);
+        out
+    }
+
+    /// How many bytes this character occupies.
+    #[must_use]
+    pub fn byte_len(self) -> usize {
+        match self {
+            Ch::U(c) => c.len_utf8(),
+            Ch::B(_) => 1,
+        }
+    }
+
+    /// The ASCII character this is, or `None` for anything else.
+    ///
+    /// Shell *syntax* — glob metacharacters, `[a-z]` range punctuation, IFS
+    /// defaults — is entirely ASCII, so this is how a matcher asks "is this the
+    /// `*` I care about" without having to think about encoding at all.
+    #[must_use]
+    pub fn as_ascii(self) -> Option<char> {
+        match self {
+            Ch::U(c) if c.is_ascii() => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The `char` this character is, for the Unicode-defined operations
+    /// (case folding, `[[:alpha:]]`). An undecodable byte is not any character,
+    /// so it answers `None` and those operations leave it alone.
+    #[must_use]
+    pub fn as_char(self) -> Option<char> {
+        match self {
+            Ch::U(c) => Some(c),
+            Ch::B(_) => None,
+        }
+    }
+}
+
+impl From<char> for Ch {
+    fn from(c: char) -> Self {
+        Ch::U(c)
+    }
+}
+
+impl PartialEq<char> for Ch {
+    fn eq(&self, other: &char) -> bool {
+        matches!(*self, Ch::U(c) if c == *other)
+    }
+}
+
+/// Decode `s` into characters under [`Ch`]'s rule.
+///
+/// This is the byte-string counterpart of `str::chars()`, and the iterator every
+/// character-wise shell operation should walk instead of `bstr`'s
+/// `chars()` — which reports an undecodable byte as U+FFFD and so cannot tell it
+/// apart from a value that really contains U+FFFD.
+pub fn chars(s: BStr<'_>) -> impl Iterator<Item = Ch> + '_ {
+    char_positions(s).map(|(_, c)| c)
+}
+
+/// [`chars`], but each character paired with its starting byte offset.
+pub fn char_positions(s: BStr<'_>) -> impl Iterator<Item = (usize, Ch)> + '_ {
+    s.char_indices().map(|(start, end, c)| {
+        // `char_indices` signals "not decodable" by yielding U+FFFD; the span it
+        // covers is what says whether the value truly held one.
+        let ch = if c == '\u{fffd}' && s.get(start..end) != Some("\u{fffd}".as_bytes()) {
+            Ch::B(s.get(start).copied().unwrap_or(0))
+        } else {
+            Ch::U(c)
+        };
+        (start, ch)
+    })
+}
+
+/// Collect the characters of `s` back into a byte string.
+pub fn from_chars<I: IntoIterator<Item = Ch>>(chars: I) -> Str {
+    let mut out = Str::new();
+    for c in chars {
+        c.push_to(&mut out);
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -286,6 +405,45 @@ mod tests {
         assert_eq!(char_slice("héllo".as_bytes(), 1, 2), "él".as_bytes().to_vec());
         assert_eq!(char_at(LONE, 1), b"\xff".to_vec());
         assert_eq!(char_at(LONE, 9), Str::new());
+    }
+
+    #[test]
+    fn chars_distinguishes_an_undecodable_byte_from_a_real_replacement_char() {
+        use super::{Ch, chars, from_chars};
+        assert_eq!(
+            chars(LONE).collect::<Vec<_>>(),
+            vec![Ch::U('a'), Ch::B(0xff), Ch::U('b')]
+        );
+        // A value that genuinely contains U+FFFD must not be mistaken for a
+        // decode failure — that is the whole reason `Ch` is not just `char`.
+        assert_eq!(
+            chars("\u{fffd}".as_bytes()).collect::<Vec<_>>(),
+            vec![Ch::U('\u{fffd}')]
+        );
+        // Round trip: characters back to the same bytes.
+        for s in [LONE, "héllo".as_bytes(), b"\x80\x80", b"", "\u{fffd}".as_bytes()] {
+            assert_eq!(from_chars(chars(s)), s.to_vec());
+        }
+    }
+
+    #[test]
+    fn ch_answers_only_for_what_it_really_is() {
+        use super::{Ch, char_positions};
+        assert_eq!(Ch::B(0xff).as_char(), None);
+        assert_eq!(Ch::B(0xff).as_ascii(), None);
+        // A multibyte character is not ASCII, so glob syntax never sees it.
+        assert_eq!(Ch::U('é').as_ascii(), None);
+        assert_eq!(Ch::U('é').as_char(), Some('é'));
+        assert_eq!(Ch::U('*').as_ascii(), Some('*'));
+        assert_eq!(Ch::U('é').byte_len(), 2);
+        assert_eq!(Ch::B(0xff).byte_len(), 1);
+        assert_eq!(Ch::B(0xff).to_str(), b"\xff".to_vec());
+        assert!(Ch::U('*') == '*');
+        assert!(Ch::B(b'*') != '*');
+        assert_eq!(
+            char_positions("hé\u{ff}".as_bytes()).collect::<Vec<_>>(),
+            vec![(0, Ch::U('h')), (1, Ch::U('é')), (3, Ch::U('\u{ff}'))]
+        );
     }
 
     #[test]

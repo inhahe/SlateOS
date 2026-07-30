@@ -6329,7 +6329,7 @@ pub fn self_test_linux_argv0_deref() -> KernelResult<()> {
 /// native static binary gets **no thread pointer** from the kernel (exec
 /// zeroes `fs_base`) and has no aux vector to discover `PT_TLS`, so without
 /// the crt's main-thread TLS setup (see `posix/src/crt.rs
-/// ::setup_main_thread_tls`, which walks the program headers via
+/// ::setup_main_thread`, which walks the program headers via
 /// `__ehdr_start` and installs the thread pointer through the native
 /// `SYS_SET_FS_BASE` syscall) the very first `__thread` access — or the
 /// stack-protector canary at `%fs:0x28` — faults immediately.
@@ -6436,6 +6436,126 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
          ELF TLS via SYS_SET_FS_BASE, read its {}-element argv via sys.argv, and ran to \
          exit(argc)): OK",
         EXPECTED_ARGC
+    );
+    Ok(())
+}
+
+/// Ring-3 end-to-end test that **child threads** get ELF TLS, not just the
+/// main thread.
+///
+/// The sibling `self_test_fastpy_slateos_tls` proves the *main* thread's
+/// thread pointer is installed by the crt.  This one proves the other half:
+/// a thread created by `pthread_create` also gets its own variant-II TLS
+/// block and its own `%fs` base.  Until this was fixed, `spawn_user` handed
+/// every new task `fs_base == 0`, so a threaded C program crashed on the
+/// very first instruction of its start routine.
+///
+/// The fixture (`services/ctest-tls-thread/ctest-tls-thread.elf`) is plain C
+/// on purpose — only a C compiler emits the two constructs the test is
+/// about, and `build.py` compiles it with `-fstack-protector-all` so *every*
+/// function prologue reads the canary from `%fs:0x28`.  Together with a
+/// `__thread` variable that is read in the child, this means a child with no
+/// thread pointer faults immediately rather than failing subtly.
+///
+/// Beyond "it didn't fault", the fixture checks the *contents* of the child's
+/// block: the `.tdata` initialiser image is present (not zeros, not the
+/// parent's mutated value), `.tbss` is zero, writes in the child stick and do
+/// not disturb the parent's copies, and a second thread created after the
+/// first was joined gets a fresh block too (so reclaiming the first thread's
+/// combined stack+TLS mapping neither corrupted nor leaked anything).
+///
+/// Exit code 42 means every check passed; any other code names the failing
+/// step (see the FAIL diagnostic below and `services/ctest-tls-thread/main.c`).
+pub fn self_test_ctls_thread() -> KernelResult<()> {
+    let ctest_elf = match load_test_elf("ctest-tls-thread") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP ctest-tls-thread: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+
+    serial_println!(
+        "[spawn] Running child-thread ELF TLS (ring 3, C) integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after all of its TLS checks pass.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-tls-thread"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-tls-thread",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-tls-thread spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Two create/join round-trips, so the main thread blocks on the kernel
+    // joiner twice; give it the same generous bounded budget the other
+    // ring-3 fixtures get so a hang can't wedge the boot.
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-tls-thread (ring 3) — expected Zombie, got {:?}. A \
+             non-zombie state is the signature failure of this test: the child thread ran \
+             with fs_base == 0 and faulted on its stack-protector canary load from %fs:0x28 \
+             (or on the __thread access right after), so pthread_create's TLS setup in \
+             posix/src/pthread.rs is broken",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-tls-thread (ring 3) — reached Zombie but exit code was \
+             {:?}, expected {}. Codes: 10/14 = pthread_create failed, 11/15 = pthread_join \
+             failed, 12/16 = the start routine never ran, 13/17 = the child wrote through to \
+             the parent's TLS block (both threads share one block), 21/31 = the child's \
+             .tdata copy is missing the initialiser image, 22/32 = the child's .tbss is not \
+             zero-filled, 23/33 = TLS writes in the child don't stick. The 1x/2x codes are \
+             the first thread, 3x the second (post-reclaim) one",
+            exit_code, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   child-thread ELF TLS (ring 3: two pthread_create'd C threads each got \
+         their own %fs base, .tdata init image and zeroed .tbss, isolated from the parent's \
+         block): OK"
     );
     Ok(())
 }

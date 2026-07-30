@@ -1605,6 +1605,16 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: fastpy-on-SlateOS TLS (ring 3) self-test failed: {:?}", e);
     }
 
+    // The other half of the TLS story: a native C binary whose *child*
+    // threads (pthread_create) each need their own variant-II TLS block and
+    // %fs base.  Compiled with -fstack-protector-all so a child with no
+    // thread pointer faults on the very first canary load from %fs:0x28; the
+    // fixture also verifies the block's contents and isolation from the
+    // parent's.  Bounded yield loop, so it can never hang the boot.
+    if let Err(e) = proc::spawn::self_test_ctls_thread() {
+        serial_println!("WARNING: child-thread ELF TLS (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
     // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
     // memfs and exits with the byte count read back, proving the full path

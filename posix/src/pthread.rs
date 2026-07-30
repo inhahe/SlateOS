@@ -207,10 +207,17 @@ const STATE_EXITED: u8 = 2;
 struct ThreadSlot {
     /// Kernel task id, or `SLOT_EMPTY` / `SLOT_RESERVED`.
     task_id: AtomicU64,
-    /// Base address of the thread's mmap'd stack.
+    /// Base address of the thread's mmap'd stack — also the base of the
+    /// whole mapping (see `map_size`).
     stack_base: AtomicUsize,
-    /// Size of the thread's stack in bytes.
+    /// Size of the *usable stack* portion in bytes, as reported by
+    /// `pthread_getattr_np`.  Smaller than `map_size`: the thread's TLS
+    /// block and TCB sit above the stack in the same mapping.
     stack_size: AtomicUsize,
+    /// Size of the whole mapping in bytes (stack + TLS block + TCB).  This
+    /// is what gets unmapped; freeing only `stack_size` would leak the TLS
+    /// tail.
+    map_size: AtomicUsize,
     /// Lifecycle state (`STATE_*`).
     state: AtomicU8,
 }
@@ -221,6 +228,7 @@ impl ThreadSlot {
             task_id: AtomicU64::new(SLOT_EMPTY),
             stack_base: AtomicUsize::new(0),
             stack_size: AtomicUsize::new(0),
+            map_size: AtomicUsize::new(0),
             state: AtomicU8::new(STATE_JOINABLE),
         }
     }
@@ -243,8 +251,17 @@ static THREAD_TABLE: [ThreadSlot; MAX_THREADS] = [const { ThreadSlot::new() }; M
 
 /// Claim a free slot for a newly created thread and publish its metadata.
 ///
+/// `stack_base`/`map_size` describe the whole mapping (the unit that gets
+/// unmapped); `stack_size` is just its usable-stack prefix.
+///
 /// Returns `true` on success, `false` if the table is full.
-fn store_thread_info(task_id: u64, stack_base: usize, stack_size: usize, detached: bool) -> bool {
+fn store_thread_info(
+    task_id: u64,
+    stack_base: usize,
+    stack_size: usize,
+    map_size: usize,
+    detached: bool,
+) -> bool {
     for slot in THREAD_TABLE.iter() {
         // Claim an empty slot atomically (EMPTY -> RESERVED).
         if slot
@@ -259,6 +276,7 @@ fn store_thread_info(task_id: u64, stack_base: usize, stack_size: usize, detache
         {
             slot.stack_base.store(stack_base, Ordering::Relaxed);
             slot.stack_size.store(stack_size, Ordering::Relaxed);
+            slot.map_size.store(map_size, Ordering::Relaxed);
             slot.state.store(
                 if detached {
                     STATE_DETACHED
@@ -308,16 +326,15 @@ fn find_thread_info(task_id: u64) -> Option<ThreadInfo> {
 // ---------------------------------------------------------------------------
 
 // The trampoline runs in ring 3 on the new thread's user stack.
-// Stack layout at entry:
-//   [RSP]     = arg pointer         (for start_routine)
-//   [RSP + 8] = start_routine ptr   (function to call)
+// Stack layout at entry (all three words pushed by `pthread_create`):
+//   [RSP]      = arg pointer         (for start_routine)
+//   [RSP + 8]  = start_routine ptr   (function to call)
+//   [RSP + 16] = thread pointer      (this thread's %fs base, pre-built)
 //
-// The trampoline:
-//   1. Pops arg into RDI (first C argument register)
-//   2. Pops start_routine into RSI
-//   3. Swaps them so RDI = start_routine, RSI = arg
-//   4. Calls `__pthread_thread_start(start_routine, arg)`, which runs the
-//      routine, executes TSD destructors, and issues SYS_THREAD_EXIT.
+// The trampoline pops the three words straight into the SysV argument
+// registers and calls `__pthread_thread_start(start_routine, arg, tp)`,
+// which installs the thread pointer, runs the routine, executes TSD
+// destructors, and issues SYS_THREAD_EXIT.
 //
 // Routing the return path through a Rust entry (rather than the old
 // inline `call start_routine; SYS_THREAD_EXIT`) is what lets us run
@@ -325,17 +342,17 @@ fn find_thread_info(task_id: u64) -> Option<ThreadInfo> {
 // requires that returning from the start routine behave exactly like
 // `pthread_exit(return_value)`.
 //
-// Stack alignment: after two pops RSP is 16-byte aligned (the mmap'd
-// stack top is page-aligned), so the CALL satisfies the SysV ABI
-// requirement.
+// Stack alignment: after the three pops RSP is back at the thread's stack
+// top, which `pthread_create` places at a 16-byte boundary, so the CALL
+// satisfies the SysV ABI requirement.
 #[cfg(target_os = "none")]
 core::arch::global_asm!(
     ".global _pthread_trampoline",
     ".type _pthread_trampoline, @function",
     "_pthread_trampoline:",
-    "    pop rdi",                  // rdi = arg
-    "    pop rsi",                  // rsi = start_routine
-    "    xchg rdi, rsi",            // rdi = start_routine, rsi = arg
+    "    pop rsi",                  // rsi = arg            (2nd C argument)
+    "    pop rdi",                  // rdi = start_routine  (1st C argument)
+    "    pop rdx",                  // rdx = thread pointer (3rd C argument)
     "    call __pthread_thread_start", // never returns
     "    ud2",                      // unreachable
 );
@@ -349,15 +366,19 @@ unsafe extern "C" {
 // Detached-thread self-unmap primitive
 // ---------------------------------------------------------------------------
 //
-// A detached thread must free its *own* stack as its final act (no joiner
-// will do it).  This is the glibc `__unmapself` pattern: unmap the stack
-// and exit without ever touching the (now-freed) stack between the two
-// syscalls.  We carry `retval` across the SYS_MUNMAP call in R12 — a
+// A detached thread must free its *own* mapping as its final act (no joiner
+// will do it).  This is the glibc `__unmapself` pattern: unmap the region
+// and exit without ever touching the (now-freed) memory between the two
+// syscalls.  The region covers the thread's stack *and* its TLS block/TCB
+// (one mapping — see `crate::tls`), so past the munmap neither the stack nor
+// `%fs`-relative memory may be touched; the code below touches only
+// registers, and the kernel never dereferences a task's saved `fs_base` (it
+// only writes the MSR).  We carry `retval` across the SYS_MUNMAP call in R12 — a
 // callee-saved register the kernel's SYSCALL entry stub preserves (it
 // pushes/pops rbx/rbp/r12-r15 around the handler, see kernel
 // syscall/entry.rs) — so nothing is stashed on the doomed stack.
 //
-// Register in (SysV): rdi=stack_base, rsi=stack_size, rdx=retval.
+// Register in (SysV): rdi=map_base, rsi=map_size, rdx=retval.
 //
 // Why this is safe even though we unmap the running stack:
 // - The SYS_MUNMAP syscall runs on the *kernel* stack; on SYSRET the CPU
@@ -386,24 +407,42 @@ core::arch::global_asm!(
 
 #[cfg(target_os = "none")]
 unsafe extern "C" {
-    /// Free `[stack_base, stack_base+stack_size)` then terminate the calling
-    /// thread with `retval`, never touching the stack between the two
+    /// Free `[map_base, map_base+map_size)` then terminate the calling
+    /// thread with `retval`, never touching that memory between the two
     /// syscalls.  Never returns.  Caller must guarantee the region is this
-    /// thread's own stack and that no other party will also free it.
-    fn __pthread_exit_unmap(stack_base: usize, stack_size: usize, retval: u64);
+    /// thread's own stack+TLS mapping and that no other party will also free
+    /// it.
+    fn __pthread_exit_unmap(map_base: usize, map_size: usize, retval: u64);
 }
 
 /// Rust entry point for a newly created thread (called by the assembly
-/// trampoline).  Runs the user start routine, then exits via
-/// [`pthread_exit`] so that thread-specific-data destructors run before
-/// the kernel tears the thread down.  Returning from `start` is, per
-/// POSIX, equivalent to `pthread_exit(start(arg))`.
+/// trampoline).  Installs the thread pointer, runs the user start routine,
+/// then exits via [`pthread_exit`] so that thread-specific-data destructors
+/// run before the kernel tears the thread down.  Returning from `start` is,
+/// per POSIX, equivalent to `pthread_exit(start(arg))`.
+///
+/// `tp` is the thread pointer `pthread_create` built for us: the block and
+/// TCB are already initialised (in the creating thread), so all that is
+/// left is to point `%fs` at them.  This **must** be the first thing the
+/// new thread does — every C function compiled with a stack protector reads
+/// `%fs:0x28` in its prologue, and any `__thread` access is a `%fs`-relative
+/// load, so until `fs_base` is installed the thread can only safely execute
+/// code that touches neither.  This function qualifies: Rust emits no stack
+/// canary (the target spec enables no stack protector) and posix's Rust code
+/// uses no `#[thread_local]`.
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn __pthread_thread_start(
     start: extern "C" fn(*mut u8) -> *mut u8,
     arg: *mut u8,
+    tp: u64,
 ) -> ! {
+    // A zero `tp` means the creator could not allocate TLS; it never starts
+    // a thread in that case (`pthread_create` fails with EAGAIN), so this is
+    // only a defensive guard against a bad `fs_base` install.
+    if tp != 0 {
+        let _ = crate::tls::install(tp);
+    }
     let ret = start(arg);
     pthread_exit(ret);
 }
@@ -414,9 +453,16 @@ pub extern "C" fn __pthread_thread_start(
 
 /// Create a new thread.
 ///
-/// Allocates a user-mode stack, sets up the trampoline arguments, and
-/// issues `SYS_THREAD_CREATE`.  On success, stores the new thread's
+/// Allocates one mapping holding the new thread's stack *and* its ELF TLS
+/// block + TCB, initialises the TLS block, sets up the trampoline arguments,
+/// and issues `SYS_THREAD_CREATE`.  On success, stores the new thread's
 /// kernel task ID in `*thread`.
+///
+/// The TLS block is deliberately built here, in the creating thread, rather
+/// than by the child: it is the only place a failure can be reported
+/// (`EAGAIN`), and folding it into the stack mapping means the existing
+/// join/detach stack-reclaim protocol frees it too — one mapping, one owner
+/// (see [`crate::tls`] for the layout).
 ///
 /// Returns 0 on success, or a POSIX error number on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -426,10 +472,15 @@ pub extern "C" fn pthread_create(
     start: extern "C" fn(*mut u8) -> *mut u8,
     arg: *mut u8,
 ) -> i32 {
-    // Allocate a user-mode stack.
+    // Reserve the thread's stack plus room for its TLS block and TCB above
+    // it.  `usize` cannot overflow here: both terms are small constants
+    // derived from DEFAULT_THREAD_STACK_SIZE and the program's PT_TLS.
+    let tls_img = crate::tls::image();
+    let map_size = DEFAULT_THREAD_STACK_SIZE.wrapping_add(tls_img.reserve() as usize);
+
     let stack = crate::mman::mmap(
         core::ptr::null_mut(),
-        DEFAULT_THREAD_STACK_SIZE,
+        map_size,
         crate::mman::PROT_READ | crate::mman::PROT_WRITE,
         crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
         -1,
@@ -441,18 +492,41 @@ pub extern "C" fn pthread_create(
     }
 
     let stack_base = stack as usize;
-    let stack_top = stack_base.wrapping_add(DEFAULT_THREAD_STACK_SIZE);
+    // Variant-II layout: TLS block immediately below the thread pointer,
+    // TCB at and above it, both above the stack.  The stack therefore ends
+    // where the TLS block begins — rounded *down* to 16, because the TLS
+    // block's start only inherits the segment's `p_align`, which the psABI
+    // permits to be as weak as 1.  SysV requires RSP+8 to be 16-byte aligned
+    // at a function's entry, and the trampoline pops exactly three words
+    // before its `call`, so RSP at `__pthread_thread_start` is
+    // `stack_top - 8`: an unaligned `stack_top` would misalign every SSE
+    // spill in the child.  Rounding down costs at most 15 bytes of stack and
+    // never encroaches on the TLS block above.
+    let tp = tls_img.thread_pointer(stack_base as u64, DEFAULT_THREAD_STACK_SIZE as u64);
+    let stack_top = (tp.wrapping_sub(tls_img.block_size()) as usize) & !0xf;
+    let stack_size = stack_top.wrapping_sub(stack_base);
 
-    // Push start_routine and arg onto the new stack for the trampoline.
+    // Initialise the child's TLS block and TCB before it can run.
+    // SAFETY: mmap succeeded, so [stack_base, stack_base + map_size) is
+    // valid; `thread_pointer`'s contract puts [tp - block_size, tp +
+    // TCB_SIZE) inside that range, and no thread uses it yet.
+    unsafe {
+        crate::tls::init_block(tp, &tls_img);
+    }
+
+    // Push arg, start_routine and the thread pointer onto the new stack for
+    // the trampoline (see its stack-layout comment).
     // SAFETY: mmap succeeded → [stack_base, stack_top) is valid memory.
     unsafe {
-        let fn_slot = stack_top.wrapping_sub(8) as *mut u64;
-        let arg_slot = stack_top.wrapping_sub(16) as *mut u64;
+        let tp_slot = stack_top.wrapping_sub(8) as *mut u64;
+        let fn_slot = stack_top.wrapping_sub(16) as *mut u64;
+        let arg_slot = stack_top.wrapping_sub(24) as *mut u64;
+        core::ptr::write(tp_slot, tp);
         core::ptr::write(fn_slot, start as usize as u64);
         core::ptr::write(arg_slot, arg as u64);
     }
 
-    let user_rsp = stack_top.wrapping_sub(16) as u64;
+    let user_rsp = stack_top.wrapping_sub(24) as u64;
 
     // Get the trampoline's address.
     #[cfg(target_os = "none")]
@@ -469,15 +543,15 @@ pub extern "C" fn pthread_create(
     );
 
     if ret < 0 {
-        let _ = crate::mman::munmap(stack, DEFAULT_THREAD_STACK_SIZE);
+        let _ = crate::mman::munmap(stack, map_size);
         return errno::EAGAIN;
     }
 
     let task_id = ret as u64;
 
     // Track the thread for later cleanup (best effort — if the table
-    // is full the thread runs but its stack leaks on join).
-    let _ = store_thread_info(task_id, stack_base, DEFAULT_THREAD_STACK_SIZE, false);
+    // is full the thread runs but its mapping leaks on join).
+    let _ = store_thread_info(task_id, stack_base, stack_size, map_size, false);
 
     if !thread.is_null() {
         // SAFETY: caller guarantees thread points to valid PthreadT.
@@ -520,12 +594,13 @@ pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32
         }
     }
 
-    // Free the thread's stack.  SYS_THREAD_JOIN has confirmed the thread
-    // has exited (it is off its stack), so the unmap is safe.  Release the
-    // slot before unmapping so it can be reused promptly.
+    // Free the thread's mapping (stack + TLS block + TCB).  SYS_THREAD_JOIN
+    // has confirmed the thread has exited — it is off its stack and no
+    // longer reads its TLS — so the unmap is safe.  Release the slot before
+    // unmapping so it can be reused promptly.
     if let Some(slot) = find_slot(thread_id) {
         let base = slot.stack_base.load(Ordering::Relaxed);
-        let size = slot.stack_size.load(Ordering::Relaxed);
+        let size = slot.map_size.load(Ordering::Relaxed);
         release_slot(slot);
         if base != 0 {
             let _ = crate::mman::munmap(base as *mut core::ffi::c_void, size);
@@ -565,7 +640,7 @@ pub extern "C" fn pthread_detach(thread_id: PthreadT) -> i32 {
         Err(STATE_EXITED) => {
             let _ = syscall::syscall1(syscall::SYS_THREAD_JOIN, thread_id);
             let base = slot.stack_base.load(Ordering::Relaxed);
-            let size = slot.stack_size.load(Ordering::Relaxed);
+            let size = slot.map_size.load(Ordering::Relaxed);
             release_slot(slot);
             if base != 0 {
                 let _ = crate::mman::munmap(base as *mut core::ffi::c_void, size);
@@ -624,7 +699,7 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
             // no longer safely touch memory).
             Err(STATE_DETACHED) => {
                 let base = slot.stack_base.load(Ordering::Relaxed);
-                let size = slot.stack_size.load(Ordering::Relaxed);
+                let size = slot.map_size.load(Ordering::Relaxed);
                 release_slot(slot);
                 if base != 0 {
                     self_unmap = Some((base, size));
@@ -638,12 +713,14 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
 
     #[cfg(target_os = "none")]
     if let Some((base, size)) = self_unmap {
-        // SAFETY: (base, size) describes this thread's own mmap'd stack,
-        // and the STATE_DETACHED arbitration above guarantees no other
-        // party will free it.  `__pthread_exit_unmap` issues SYS_MUNMAP
-        // then SYS_THREAD_EXIT without touching the (freed) stack between
-        // the two, carrying `retval` in a callee-saved register.  Never
-        // returns.
+        // SAFETY: (base, size) describes this thread's own mmap'd
+        // stack+TLS region, and the STATE_DETACHED arbitration above
+        // guarantees no other party will free it.  `__pthread_exit_unmap`
+        // issues SYS_MUNMAP then SYS_THREAD_EXIT without touching the
+        // (freed) stack or TLS between the two, carrying `retval` in a
+        // callee-saved register.  Never returns.  All code that may touch
+        // TLS — including the user's TSD destructors — has already run
+        // above.
         unsafe {
             __pthread_exit_unmap(base, size, retval as u64);
         }
@@ -4884,12 +4961,25 @@ mod tests {
     #[test]
     fn test_thread_slot_store_find_release() {
         let tid: u64 = 0x5100_0001;
-        assert!(store_thread_info(tid, 0x1_0000, DEFAULT_THREAD_STACK_SIZE, false));
+        assert!(store_thread_info(
+            tid,
+            0x1_0000,
+            DEFAULT_THREAD_STACK_SIZE,
+            DEFAULT_THREAD_STACK_SIZE + 0x80,
+            false
+        ));
         let slot = find_slot(tid).expect("slot should be found after store");
         assert_eq!(slot.stack_base.load(Ordering::Relaxed), 0x1_0000);
         assert_eq!(
             slot.stack_size.load(Ordering::Relaxed),
             DEFAULT_THREAD_STACK_SIZE
+        );
+        // The mapping is larger than the usable stack: the TLS block and TCB
+        // live above it in the same region, and the whole region is what gets
+        // unmapped.
+        assert_eq!(
+            slot.map_size.load(Ordering::Relaxed),
+            DEFAULT_THREAD_STACK_SIZE + 0x80
         );
         assert_eq!(slot.state.load(Ordering::Relaxed), STATE_JOINABLE);
         release_slot(slot);
@@ -4900,7 +4990,7 @@ mod tests {
     fn test_detach_marks_state_detached() {
         let tid: u64 = 0x5100_0002;
         // base = 0 so the (never-reached) reclaim path won't call munmap.
-        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, false));
+        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, DEFAULT_THREAD_STACK_SIZE, false));
         assert_eq!(pthread_detach(tid), 0);
         let slot = find_slot(tid).expect("detached thread stays tracked");
         assert_eq!(slot.state.load(Ordering::Acquire), STATE_DETACHED);
@@ -4919,7 +5009,7 @@ mod tests {
     #[test]
     fn test_double_detach_is_einval() {
         let tid: u64 = 0x5100_0003;
-        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, false));
+        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, DEFAULT_THREAD_STACK_SIZE, false));
         assert_eq!(pthread_detach(tid), 0);
         assert_eq!(pthread_detach(tid), crate::errno::EINVAL);
         let slot = find_slot(tid).expect("still tracked");
@@ -4929,7 +5019,7 @@ mod tests {
     #[test]
     fn test_join_rejects_detached_thread() {
         let tid: u64 = 0x5100_0004;
-        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, false));
+        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, DEFAULT_THREAD_STACK_SIZE, false));
         assert_eq!(pthread_detach(tid), 0);
         // Joining a detached thread must be rejected before any syscall.
         let mut rv: *mut u8 = core::ptr::null_mut();
@@ -4942,7 +5032,7 @@ mod tests {
     fn test_detach_after_joinable_exit_reaps() {
         let tid: u64 = 0x5100_0005;
         // base = 0 so detach's reclaim path skips the host munmap call.
-        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, false));
+        assert!(store_thread_info(tid, 0, DEFAULT_THREAD_STACK_SIZE, DEFAULT_THREAD_STACK_SIZE, false));
         // Simulate the exit path winning the race: it marks the slot EXITED
         // and leaves the stack for a reaper.
         let slot = find_slot(tid).expect("tracked");

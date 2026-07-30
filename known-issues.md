@@ -14808,7 +14808,52 @@ usage stays bounded.
 limitation` in `pthread_detach`'s doc comment; promoted to tracked tech
 debt while implementing per-thread TSD).
 
-### D-NATIVE-CHILD-THREAD-TLS. Native `pthread_create` child threads have no compiler-`__thread` ELF TLS (only the main thread does) — 2026-07-21
+### D-NATIVE-CHILD-THREAD-TLS. Native `pthread_create` child threads have no compiler-`__thread` ELF TLS (only the main thread does) — 2026-07-21 — **RESOLVED 2026-07-30**
+
+**Resolution (2026-07-30):** Fixed as designed below, plus one extra
+correctness fix the work uncovered.
+
+- New shared module `posix/src/tls.rs` owns the whole variant-II layout
+  (`TlsImage`, `image()` — the `__ehdr_start` `PT_TLS` walk —
+  `init_block()`, `install()`, `setup_main_thread()`).  `crt.rs`'s
+  `setup_main_thread_tls` was deleted and `__libc_start_main` now calls
+  `tls::setup_main_thread()`.
+- `pthread_create` allocates the child's stack **and** its TLS block/TCB
+  as **one** mapping (the musl approach): `map_size =
+  DEFAULT_THREAD_STACK_SIZE + img.reserve()`, TLS at the top.  The parent
+  initialises the block and passes the thread pointer to the child via a
+  third word pushed on its stack; `__pthread_thread_start` installs it
+  with `SYS_SET_FS_BASE` as its very first action.  One mapping means one
+  owner and one `munmap`, so the existing join/detach reclaim protocol
+  frees the TLS too and there is no window where an exiting thread has
+  unmapped its TLS but still runs `%fs`-touching code.  `ThreadSlot`
+  gained `map_size` (what gets unmapped) alongside `stack_size` (the
+  usable-stack prefix reported by `pthread_getattr_np`).
+- **Latent bug found while validating** (present in the old
+  `setup_main_thread_tls` too, so it also affected *main*-thread TLS):
+  the block offset was computed with `max(p_align, 16)`.  The linker
+  assigns `__thread` offsets relative to `TP - round_up(p_memsz,
+  p_align)` using the segment's *own* `p_align`, so any binary with
+  `p_align < 16` had its entire TLS block placed at the wrong distance
+  below TP — the init image was copied to one address and every access
+  read another.  It never showed because fastpy binaries happen to have
+  `p_align == 0x10`.  `normalise_align` now preserves weak alignments and
+  the 16-byte TCB floor is a separate `TlsImage::tp_align()`.  Because
+  the block start can now be as weakly aligned as `p_align`,
+  `pthread_create` rounds the child's `stack_top` down to 16 to keep the
+  SysV entry-RSP alignment.
+- Regression test: `services/ctest-tls-thread/` — a plain-C fixture
+  (`zig cc`, `-fstack-protector-all` so *every* prologue reads
+  `%fs:0x28`) that runs two sequential `pthread_create`/`pthread_join`
+  cycles and checks the child's `.tdata` init image, zeroed `.tbss`,
+  write-back, and isolation from the parent's block; exit 42 == all
+  checks passed.  Run on-target by
+  `kernel/src/proc/spawn.rs::self_test_ctls_thread`, staged into
+  `/tests` by the new `services/ctest-*` loop in
+  `scripts/create-ext4-rootfs.sh`.  It reproduced the alignment bug
+  (exit 21) before the fix and passes in the QEMU boot test after.
+
+Original report follows.
 
 **Where:** `posix/src/crt.rs` (`setup_main_thread_tls`, added for
 initiative F / Q31) sets up variant-II ELF TLS + the thread pointer via
@@ -14845,6 +14890,65 @@ QEMU boot self-test that spawns a native thread which reads/writes a
 `__thread` variable and joins, asserting no fault. Deferred now because
 the initiative-F milestone (first real fastpy component) is
 single-threaded, so this isn't yet on the critical path.
+
+### D-PTHREAD-SLOT-PUBLISH-RACE. A child thread can outrun the publication of its own `ThreadSlot` — 2026-07-30
+
+**Where:** `posix/src/pthread.rs`, `pthread_create`. The sequence is
+`mmap` the combined stack+TLS region → `SYS_THREAD_CREATE` → *then*
+`store_thread_info(task_id, stack_base, stack_size, map_size, detached)`.
+The `task_id` only exists after the syscall returns, so the slot cannot
+be published before the child is runnable.
+
+**Effect:** the child is scheduled the instant `SYS_THREAD_CREATE`
+returns in the kernel, so on a multi-CPU (or preempting) system it can
+reach `pthread_exit` — which looks its own slot up to decide who frees
+the mapping — *before* the parent has written that slot. Consequences,
+all rare but real:
+
+- A **detached** thread that exits inside this window finds no slot, so
+  it takes the "joinable" path and leaves its stack+TLS mapping for a
+  joiner that will never come: an unbounded leak of
+  `DEFAULT_THREAD_STACK_SIZE + PT_TLS reserve` per occurrence.
+- The parent's late `store_thread_info` then publishes a slot for a
+  task id that has already exited, which a later `pthread_join` would
+  arbitrate against a dead thread (and, once task ids wrap, potentially
+  against a *different* thread).
+- Symmetrically, `pthread_detach` called immediately after
+  `pthread_create` can lose to the child.
+
+This is **pre-existing** — it predates the combined stack+TLS mapping
+(D-NATIVE-CHILD-THREAD-TLS) and is not caused by it; the TLS work only
+widened what leaks from "stack" to "stack + TLS block". It has not been
+observed in practice because the current boot self-tests are effectively
+single-CPU and every child does enough work to lose the race.
+
+**Proper fix:** publish the slot *before* the child can run, which means
+the slot must be keyed by something the parent knows up front rather
+than by the kernel's task id. Two workable shapes:
+
+1. **Reserve then fill.** Allocate the `ThreadSlot` before
+   `SYS_THREAD_CREATE` in a `RESERVED` state that carries the mapping
+   details, and hand the child its slot *index* through the same stack
+   words that already carry `arg`, `start` and the thread pointer. The
+   child claims its slot by index — no lookup by task id, no window.
+   The parent fills in `task_id` afterwards purely for `pthread_join`'s
+   benefit, and `pthread_exit` CASes the slot state so exactly one of
+   {joiner, self-unmap} frees the mapping.
+2. **Gate the child.** Have the child spin/futex-wait on a per-slot
+   "published" flag written by the parent before touching any slot
+   state. Simpler, but it burns a scheduling slice and still needs the
+   slot allocated up front, so shape 1 dominates.
+
+Either way this should land together with the atomic detach/exit
+arbitration already described under the detached-thread stack-leak entry
+above — they touch the same state and the same window — plus a QEMU
+self-test that spawns a detached thread whose start routine is a bare
+`return`, in a loop, and asserts the address space stays bounded.
+
+**Discovered:** 2026-07-30, while implementing child-thread ELF TLS
+(D-NATIVE-CHILD-THREAD-TLS); reading the reclaim protocol to decide
+where the TLS mapping should be freed made the publication order
+visible.
 
 ### D-CRT-INIT-ARRAY. `.init_array`/`.preinit_array` constructor + `.fini_array` destructor support — MECHANISM LANDED (end-to-end C/C++ validation pending a consumer)
 

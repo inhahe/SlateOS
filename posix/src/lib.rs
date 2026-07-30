@@ -2608,6 +2608,7 @@ pub mod sysv_shm;
 pub mod tar;
 pub mod termios;
 pub mod time;
+pub mod tls;
 pub mod types;
 pub mod uchar;
 pub mod ulimit;

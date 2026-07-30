@@ -826,6 +826,26 @@ if [ "$PROMOTED_COUNT" -gt 0 ]; then
     echo "[rootfs] installed $PROMOTED_COUNT promoted fastpy command(s) into /bin"
 fi
 
+# --- native C ring-3 fixtures (services/ctest-*) ------------------------------
+# A few self-tests need constructs only a C compiler emits — e.g. a `__thread`
+# access plus a `%fs:0x28` stack-protector canary load in a *child* thread (see
+# services/ctest-tls-thread/).  These are built by their own build.py with
+# `zig cc` and linked against the same posix libc.a, and are staged exactly
+# like the fastpy fixtures: /tests/<name>.elf, found by the kernel's
+# `load_test_elf`, which self-skips when the file is absent.
+CTEST_COUNT=0
+for elf in "$ROOT_DIR"/services/ctest-*/*.elf; do
+    [ -e "$elf" ] || continue
+    name="$(basename "$elf" .elf)"          # e.g. ctest-tls-thread
+    cp -L "$elf" "$STAGE/tests/$name.elf"
+    CTEST_COUNT=$((CTEST_COUNT + 1))
+done
+if [ "$CTEST_COUNT" -gt 0 ]; then
+    echo "[rootfs] staged $CTEST_COUNT native C self-test ELF(s) into /tests"
+else
+    echo "[rootfs] WARNING: no services/ctest-*/*.elf found — C self-tests will self-skip"
+fi
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find . -type f -printf '  %-52p %10s bytes\n' )
 

@@ -53,9 +53,16 @@ echo "=== losing a marked job costs both markers, losing an unmarked one neither
 # shows no marker at all: with nothing running there is nothing to re-mark.
 sleep 0.05 & sleep 0.06 & sleep 0.3; jobs %1; echo "--"; jobs; disown -a
 # With something still running, that running job takes both markers.
-sleep 0.5 & sleep 0.05 & sleep 0.3; jobs %2; echo "--"; jobs; wait; disown -a
+#
+# These two lines are the only ones in the file that need a *timed* gate to land
+# strictly between two live jobs: the `sleep 0.3` has to outlast `sleep 0.05` and
+# be outlasted by the first job. 0.5 s left only ~0.2 s of margin on the second
+# half, and three process spawns on a loaded machine can eat that — the job then
+# reads `Done` instead of `Running`. 1.2 s buys ~0.9 s of margin on both sides at
+# the cost of ~0.7 s of wall clock each (the trailing `wait` pays it).
+sleep 1.2 & sleep 0.05 & sleep 0.3; jobs %2; echo "--"; jobs; wait; disown -a
 # Naming the running job reports it without dropping it, so nothing moves.
-sleep 0.5 & sleep 0.05 & sleep 0.3; jobs %1; echo "--"; jobs; wait; disown -a
+sleep 1.2 & sleep 0.05 & sleep 0.3; jobs %1; echo "--"; jobs; wait; disown -a
 
 echo "=== forgetting jobs wholesale gives up the markers before selecting any"
 # `-r` finds nothing running to forget, and still leaves the job unmarked…

@@ -2484,10 +2484,12 @@ pub struct Shell {
     /// not. Read through [`Shell::histexpand`] rather than directly.
     histexpand: Option<bool>,
     /// The last `s/old/new/` any history expansion performed, which a later
-    /// `:&` (or an empty `:s//new/`) repeats. bash keeps this for the life of
-    /// the shell rather than of one line, so it lives here rather than inside
+    /// `:&` (or an empty `:s//new/`) repeats, and the most recent `?string?`
+    /// event search, which an empty `!??` repeats and a `%` word designator
+    /// names a word of. bash keeps all of it for the life of the shell rather
+    /// than of one line, so it lives here rather than inside
     /// [`crate::histexpand::expand`].
-    hist_last_subst: crate::histexpand::LastSubst,
+    hist_state: crate::histexpand::HistState,
     /// `set -v` / `set -o verbose`: echo each unit of input to stderr as the
     /// reader consumes it, before it runs. Unlike `set -x` this is a property of
     /// *reading*, so it echoes the raw source — comments, blank lines,
@@ -2735,7 +2737,7 @@ impl Shell {
             hist_saved: 0,
             hist_on: None,
             histexpand: None,
-            hist_last_subst: crate::histexpand::LastSubst::default(),
+            hist_state: crate::histexpand::HistState::default(),
             verbose: false,
             login_shell: false,
             logout_pending: None,
@@ -3608,8 +3610,8 @@ impl Shell {
         loop {
             let Some(raw) = ip.peek_raw_line() else { return };
             // Lifted out and put back so the expander can hold `&mut` on the
-            // last-substitution state while `HistCtx` borrows the history list.
-            let mut last = std::mem::take(&mut self.hist_last_subst);
+            // cross-line expansion state while `HistCtx` borrows the history list.
+            let mut state = std::mem::take(&mut self.hist_state);
             let expanded = {
                 let ctx = HistCtx {
                     entries: &self.history,
@@ -3622,9 +3624,9 @@ impl Shell {
                     // line of `echo 'a` / `!!'` would expand.
                     open_quote: crate::lexer::open_quote(&accum, opts),
                 };
-                crate::histexpand::expand(&raw.text, &ctx, &mut last)
+                crate::histexpand::expand(&raw.text, &ctx, &mut state)
             };
-            self.hist_last_subst = last;
+            self.hist_state = state;
             match expanded {
                 Expansion::Unchanged => {
                     ip.commit_raw_line(None, opts);
@@ -6430,7 +6432,7 @@ impl Shell {
             hist_saved: self.hist_saved,
             hist_on: self.hist_on,
             histexpand: self.histexpand,
-            hist_last_subst: self.hist_last_subst.clone(),
+            hist_state: self.hist_state.clone(),
             verbose: self.verbose,
             login_shell: self.login_shell,
             // A subshell's `exit` does not read `~/.bash_logout`: bash's
@@ -16718,7 +16720,7 @@ impl Shell {
             }
             let mut status = 0;
             for a in rest {
-                let mut last = std::mem::take(&mut self.hist_last_subst);
+                let mut state = std::mem::take(&mut self.hist_state);
                 let expanded = {
                     let ctx = HistCtx {
                         entries: &self.history,
@@ -16729,9 +16731,9 @@ impl Shell {
                         // quote in one operand does not reach the next.
                         open_quote: None,
                     };
-                    crate::histexpand::expand(a, &ctx, &mut last)
+                    crate::histexpand::expand(a, &ctx, &mut state)
                 };
-                self.hist_last_subst = last;
+                self.hist_state = state;
                 let text = match expanded {
                     Expansion::Unchanged => a.clone(),
                     // A `:p` argument prints like any other here; the modifier

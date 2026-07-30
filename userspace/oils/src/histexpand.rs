@@ -152,6 +152,14 @@ fn byte_at(s: &[u8], i: usize) -> Option<u8> {
 ///   `${ … }` does *not* protect, so `${a;b}` is `${a`, `;`, `b}`.
 /// * A `#` that starts a word ends the line: `echo a # b c` has two words.
 fn words(s: &str) -> Vec<&str> {
+    word_spans(s).into_iter().filter_map(|(a, b)| s.get(a..b)).collect()
+}
+
+/// The byte ranges of the words of `s`, which is [`words`] before the slicing.
+///
+/// Kept separate because a `%` word designator has to answer "which word is byte
+/// *n* in?", and the whitespace between two words is in neither.
+fn word_spans(s: &str) -> Vec<(usize, usize)> {
     let bytes = s.as_bytes();
     let mut out = Vec::new();
     let mut i = 0usize;
@@ -174,10 +182,30 @@ fn words(s: &str) -> Vec<&str> {
         if i <= start {
             return out;
         }
-        if let Some(w) = s.get(start..i) {
-            out.push(w);
-        }
+        out.push((start, i));
     }
+}
+
+/// The word bash remembers for a later `%`, given the line a `?string?` search
+/// matched and the string it searched for.
+///
+/// readline scans the matched line *backwards* for the search string, so it is
+/// the **last** occurrence that counts: `!?a?` against `xa ya za` remembers
+/// `za`, not `xa`. The word is then the one holding the first character of that
+/// match — which may be an operator word, since [`words`] makes those words of
+/// their own (`!?; b?` against `a; b` remembers `;`), and which is nothing at
+/// all when the match starts on the whitespace between two words (`!? b?`).
+/// Measured against bash 5.2.
+fn search_match(line: &str, needle: &str) -> String {
+    let Some(at) = line.rfind(needle) else {
+        return String::new();
+    };
+    word_spans(line)
+        .into_iter()
+        .find(|&(a, b)| at >= a && at < b)
+        .and_then(|(a, b)| line.get(a..b))
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Scan the one word starting at `start`, returning the index just past it.
@@ -378,16 +406,35 @@ fn substitute(text: &str, old: &str, new: &str, global: bool) -> String {
     }
 }
 
-/// The most recent `s/old/new/`, remembered so a later `:&` can repeat it.
+/// What one history expansion leaves behind for the next one.
 ///
-/// bash keeps this for the life of the *shell*, not of one expansion: a `:&` on
-/// one line repeats the `:s` from a line expanded earlier, and an empty pattern
-/// (`:s//new/`) reuses that same `old`. So the caller owns it and threads it
-/// through every [`expand`] call.
+/// bash keeps all of this for the life of the *shell*, not of one expansion, so
+/// the caller owns it and threads it through every [`expand`] call. Two
+/// independent pairs live here:
+///
+/// * the most recent `s/old/new/`, so a `:&` on a later line can repeat it and
+///   an empty pattern (`:s//new/`) can reuse its `old`;
+/// * the most recent `?string?` event search — both the string, which an empty
+///   `!??` searches for again, and the *word* it matched, which is what a `%`
+///   word designator expands to.
+///
+/// Only a **successful** search updates the search pair: after a `!?nope?` that
+/// found nothing, `!??` still searches for the string before it and `%` still
+/// names the word that one matched. A search that succeeds updates them even if
+/// the rest of the expansion then fails, because the record is made when the
+/// event is found and nothing rolls it back.
 #[derive(Default, Clone)]
-pub struct LastSubst {
-    old: String,
-    new: String,
+pub struct HistState {
+    /// The `old` of the most recent `s/old/new/`.
+    subst_old: String,
+    /// Its `new`.
+    subst_new: String,
+    /// The string of the most recent successful `?string?` search.
+    search_string: String,
+    /// The word that search matched — bash's `search_match`. Empty when there
+    /// has been no search, and also when the match began on whitespace, which
+    /// belongs to no word.
+    search_match: String,
 }
 
 /// Read a delimited `s`/`&` modifier body starting just past the `s`, e.g.
@@ -462,10 +509,15 @@ enum RangeEnd {
 /// * `*` never fails, not even the start-of-range check that every other shape
 ///   is subject to: on a one-word event `!!:*` is empty where `!!:^` is an
 ///   error, though both reach for word 1.
+///
+/// `%` is the odd one out: it does not name a word of `event` at all but the
+/// word a previous `?string?` search matched, which is what `search_match`
+/// carries. Like `*` it never fails, and like `$` it ends the designator.
 fn apply_word_designator(
     event: &str,
     chars: &[char],
     start: usize,
+    search_match: &str,
 ) -> Result<(String, usize), String> {
     let ws = words(event);
     let last = ws.len().saturating_sub(1);
@@ -553,6 +605,14 @@ fn apply_word_designator(
             i = i.saturating_add(1);
             take(last, &RangeEnd::Given(last), i)
         }
+        // `%` — the word the last `?string?` search matched, from whichever
+        // event that was. Nothing about the event in hand is consulted, so no
+        // range check applies and there is nothing to fail: with no prior
+        // search this is simply empty.
+        Some('%') => {
+            i = i.saturating_add(1);
+            Ok((search_match.to_string(), i))
+        }
         // `-m` — words 0 through m.
         Some('-') => {
             i = i.saturating_add(1);
@@ -607,7 +667,7 @@ fn apply_modifiers(
     mut text: String,
     chars: &[char],
     mut i: usize,
-    last: &mut LastSubst,
+    state: &mut HistState,
 ) -> Result<(String, usize, bool), String> {
     let mut print_only = false;
     while chars.get(i) == Some(&':') {
@@ -643,7 +703,7 @@ fn apply_modifiers(
                 };
                 // An empty pattern reuses the previous one, as in bash.
                 let reused = old.is_empty();
-                let old = if reused { last.old.clone() } else { old };
+                let old = if reused { state.subst_old.clone() } else { old };
                 if old.is_empty() {
                     return Err(format!("{}: no previous substitution", spec_text(chars, i, end)));
                 }
@@ -651,18 +711,19 @@ fn apply_modifiers(
                     return Err(format!("{}: substitution failed", spec_text(chars, i, end)));
                 }
                 text = substitute(&text, &old, &new, global);
-                *last = LastSubst { old, new };
+                state.subst_old = old;
+                state.subst_new = new;
                 i = end;
             }
             Some('&') => {
                 let end = j.saturating_add(1);
-                if last.old.is_empty() {
+                if state.subst_old.is_empty() {
                     return Err(format!("{}: no previous substitution", spec_text(chars, i, end)));
                 }
-                if !text.contains(&last.old) {
+                if !text.contains(&state.subst_old) {
                     return Err(format!("{}: substitution failed", spec_text(chars, i, end)));
                 }
-                text = substitute(&text, &last.old, &last.new, global);
+                text = substitute(&text, &state.subst_old, &state.subst_new, global);
                 i = end;
             }
             // A `:` commits to a modifier, so anything else after it — an
@@ -724,12 +785,6 @@ fn quote_breaks(s: &str) -> String {
     out
 }
 
-/// Expand `line` against `ctx`.
-///
-/// Returns [`Expansion::Unchanged`] when the line held no history reference, so
-/// the caller can skip the "echo the expanded line" behaviour entirely.
-///
-/// `last` carries the most recent `:s` across calls — see [`LastSubst`].
 /// Whether the `!` at `chars[i]` is a literal `!` rather than the start of an
 /// event designator.
 ///
@@ -804,9 +859,12 @@ fn inhibited(chars: &[char], i: usize, extglob: bool, dquote: bool) -> bool {
 
 /// Run history expansion over one physical input line.
 ///
-/// `last` carries the most recent `:s` substitution across calls, so a later
-/// `:&` can repeat it.
-pub fn expand(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
+/// Returns [`Expansion::Unchanged`] when the line held no history reference, so
+/// the caller can skip the "echo the expanded line" behaviour entirely.
+///
+/// `state` carries what one expansion leaves for the next — the most recent
+/// `:s` and the most recent `?string?` search. See [`HistState`].
+pub fn expand(line: &str, ctx: &HistCtx, state: &mut HistState) -> Expansion {
     // `^old^new^` is not a form of its own: readline implements it by *textually*
     // prefixing `!!:s` and running the ordinary expander over the result. Three
     // observable consequences follow, all of which would need special-casing if
@@ -837,7 +895,6 @@ pub fn expand(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
     // Tracked *only* for the comment rule below — a `!` in a double-quoted string
     // is still expanded, because the rewrite happens before quote removal.
     let mut in_double = ctx.open_quote == Some('"');
-    let last_subst = last;
 
     while let Some(&c) = chars.get(i) {
         // A backslash suppresses the history character — and is left in place,
@@ -902,7 +959,7 @@ pub fn expand(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
             continue;
         }
 
-        match expand_one(&chars, i, ctx, last_subst, in_double) {
+        match expand_one(&chars, i, ctx, state, in_double) {
             Ok((text, end, p)) => {
                 out.push_str(&text);
                 i = end;
@@ -937,7 +994,7 @@ fn expand_one(
     chars: &[char],
     start: usize,
     ctx: &HistCtx,
-    last_subst: &mut LastSubst,
+    state: &mut HistState,
     dquote: bool,
 ) -> Result<(String, usize, bool), String> {
     let mut i = start.saturating_add(1);
@@ -987,18 +1044,36 @@ fn expand_one(
         // `!?string?` — the most recent event containing string.
         Some('?') => {
             i = i.saturating_add(1);
-            let mut needle = String::new();
+            let mut written = String::new();
             while let Some(&c) = chars.get(i) {
                 if c == '?' {
                     i = i.saturating_add(1);
                     break;
                 }
-                needle.push(c);
+                written.push(c);
                 i = i.saturating_add(1);
             }
-            ctx.by_substring(&needle)
-                .map(str::to_string)
-                .ok_or_else(|| missing(&format!("!?{needle}?")))?
+            // An empty search string means the previous one, exactly as an empty
+            // `:s//new/` pattern does — `!??` after a `!?bet?` searches for
+            // `bet` again. With no previous search there is nothing to reuse, and
+            // readline will not search for nothing even though every event
+            // contains the empty string: `!??` and `!?` both fail outright.
+            let needle = if written.is_empty() { state.search_string.clone() } else { written };
+            // The diagnostic quotes back exactly what was written: `!??` rather
+            // than the string it stood for, and `!?zzz` without a `?` that the
+            // designator never had.
+            let spec = spec_text(chars, spec_start, i);
+            if needle.is_empty() {
+                return Err(missing(&spec));
+            }
+            let found =
+                ctx.by_substring(&needle).map(str::to_string).ok_or_else(|| missing(&spec))?;
+            // bash records the match here, at search time, and a `%` later in
+            // *this* line already sees it (`!?gam?:%`). Note that it is a plain
+            // string: it survives into lines whose own event has no such word.
+            state.search_match = search_match(&found, &needle);
+            state.search_string = needle;
+            found
         }
         // `!$`, `!^`, `!*` — word designators against the previous command.
         Some('$' | '^' | '*') => ctx
@@ -1037,8 +1112,11 @@ fn expand_one(
         None => return Err(missing("!")),
     };
 
-    let (selected, after_words) = apply_word_designator(&event, chars, i)?;
-    apply_modifiers(selected, chars, after_words, last_subst)
+    // The `%` arm needs the search match, so this cannot be borrowed for the
+    // whole call: clone the one string out first.
+    let matched = state.search_match.clone();
+    let (selected, after_words) = apply_word_designator(&event, chars, i, &matched)?;
+    apply_modifiers(selected, chars, after_words, state)
 }
 
 /// The raw text of a designator, for the message of a failed expansion — bash
@@ -1191,7 +1269,7 @@ mod tests {
     /// [`expand`] with a throwaway last-substitution state, for the cases that
     /// do not exercise a `:&` carried over from an earlier line.
     fn expand1(line: &str, ctx: &HistCtx) -> Expansion {
-        expand(line, ctx, &mut LastSubst::default())
+        expand(line, ctx, &mut HistState::default())
     }
 
     fn expanded(line: &str, items: &[&str]) -> String {
@@ -1309,7 +1387,7 @@ mod tests {
     #[test]
     fn ampersand_repeats_a_substitution_from_an_earlier_line() {
         let h = hist(&["echo one two"]);
-        let mut last = LastSubst::default();
+        let mut last = HistState::default();
         match expand("!!:s/one/ONE/", &ctx(&h), &mut last) {
             Expansion::Changed(s) => assert_eq!(s, "echo ONE two"),
             _ => panic!("expected a rewrite"),
@@ -1617,6 +1695,117 @@ mod tests {
         assert_eq!(sel(&one, "!!:$-").as_deref(), Ok("onlyone-"));
         assert_eq!(sel(&one, "!!:*-").as_deref(), Ok("-"));
         assert_eq!(sel(&one, "!!:--").as_deref(), Ok("-"));
+    }
+
+    /// `%` — the word the most recent `?string?` search matched. Measured
+    /// against bash 5.2 with `history -p`; the cross-line half of it by
+    /// following one `history -p` with another, since the memory outlives the
+    /// line that set it. See `tests/corpus/histexpand-percent.sh`.
+    #[test]
+    fn a_percent_designator_names_the_word_the_last_search_matched() {
+        // Which word: the one holding the *last* occurrence of the search
+        // string, because readline scans the matched line backwards.
+        assert_eq!(search_match("xa ya za", "a"), "za");
+        assert_eq!(search_match("alpha beta gamma", "ha bet"), "alpha");
+        assert_eq!(search_match("alpha beta gamma", "gam"), "gamma");
+        // An operator is a word of its own, so a match starting on one is that
+        // word; whitespace is in no word, so a match starting there is nothing.
+        assert_eq!(search_match("alpha; beta gamma", "; bet"), ";");
+        assert_eq!(search_match("alpha (beta) gamma", "(bet"), "(");
+        assert_eq!(search_match("alpha beta gamma", " bet"), "");
+        assert_eq!(search_match("alpha beta gamma", "nope"), "");
+
+        // The history is fixed; only the shell's expansion state carries over,
+        // which is exactly what these sequences exercise.
+        let items = hist(&["alpha beta gamma", "one two three"]);
+        let run = |lines: &[&str]| -> Vec<Result<String, String>> {
+            let mut state = HistState::default();
+            lines
+                .iter()
+                .map(|line| match expand(line, &ctx(&items), &mut state) {
+                    Expansion::Changed(s)
+                    | Expansion::ChangedQuietly(s)
+                    | Expansion::PrintOnly(s) => Ok(s),
+                    Expansion::Unchanged => Ok((*line).to_string()),
+                    Expansion::NotFound(e) => Err(e),
+                })
+                .collect()
+        };
+        let one = |line: &str| -> Result<String, String> {
+            run(&[line]).pop().unwrap_or_else(|| panic!("no result for {line}"))
+        };
+
+        // With no search yet it is empty — and empty is not a failure, on any
+        // event, including one that has no word 1 to reach for.
+        assert_eq!(one("echo X!%X").as_deref(), Ok("echo XX"));
+        assert_eq!(one("echo X!!:%X").as_deref(), Ok("echo XX"));
+        assert_eq!(one("echo X!!%X").as_deref(), Ok("echo XX"));
+
+        // A search records the word, for this line and for later ones. Note the
+        // third line: the event it applies to has no `gamma` in it at all.
+        assert_eq!(
+            run(&["echo !?gam?:%", "echo X!%X", "echo X!!:%X !!:1"]),
+            [
+                Ok("echo gamma".to_string()),
+                Ok("echo XgammaX".to_string()),
+                Ok("echo XgammaX two".to_string()),
+            ]
+        );
+
+        // Like `$` it ends the designator, so what follows is literal text; and
+        // where a range endpoint would go it is literal too, leaving the range
+        // with the end it would have had with nothing there.
+        for (spec, want) in [
+            ("!!:%*", "gamma*"),
+            ("!!:%-", "gamma-"),
+            ("!!:%%", "gamma%"),
+            ("!!:%1", "gamma1"),
+            ("!!:1%", "two%"),
+            ("!!:1-%", "two%"),
+            ("!!:-%", "one two%"),
+            ("!!:*%", "two three%"),
+            ("!!:$%", "three%"),
+            ("!!:%:q", "'gamma'"),
+        ] {
+            let got = run(&["echo !?gam?:%", &format!("echo X{spec}X")]).pop();
+            assert_eq!(got.as_ref().map(|r| r.as_deref()), Some(Ok(&*format!("echo X{want}X"))));
+        }
+
+        // A prefix search does not record one, and neither does a quick
+        // substitution: both leave the previous match in place.
+        assert_eq!(
+            run(&["echo !?gam?:%", "echo !one", "echo X!%X"]).pop(),
+            Some(Ok("echo XgammaX".to_string()))
+        );
+        assert_eq!(
+            run(&["echo !?gam?:%", "^one^ONE^", "echo X!%X"]).pop(),
+            Some(Ok("echo XgammaX".to_string()))
+        );
+        // A failed search leaves it alone too…
+        let after_failure = run(&["echo !?gam?:%", "echo !?zzz?", "echo X!%X"]);
+        assert_eq!(after_failure.get(1), Some(&Err("!?zzz?: event not found".to_string())));
+        assert_eq!(after_failure.get(2).map(|r| r.as_deref()), Some(Ok("echo XgammaX")));
+        // …while a search that succeeds and only then fails still records it.
+        let then_bad = run(&["echo !?gam?:9", "echo X!%X"]);
+        assert_eq!(then_bad.first(), Some(&Err(":9: bad word specifier".to_string())));
+        assert_eq!(then_bad.get(1).map(|r| r.as_deref()), Some(Ok("echo XgammaX")));
+
+        // An empty search string means the previous one, so `!??` finds the
+        // older event rather than the most recent — and a `!??` that finds
+        // nothing quotes back what was written, not what it searched for.
+        assert_eq!(
+            run(&["echo !?gam?:%", "echo !??"]).pop(),
+            Some(Ok("echo alpha beta gamma".to_string()))
+        );
+        assert_eq!(one("echo !??"), Err("!??: event not found".to_string()));
+        assert_eq!(one("echo !?"), Err("!?: event not found".to_string()));
+        // Whatever the failure, the body is the designator as written.
+        assert_eq!(one("echo !?zzz"), Err("!?zzz: event not found".to_string()));
+        assert_eq!(one("echo x !?zzz?y"), Err("!?zzz?: event not found".to_string()));
+        assert_eq!(
+            run(&["echo !?zzz?:%", "echo !??"]).pop(),
+            Some(Err("!??: event not found".to_string()))
+        );
     }
 
     /// readline's `history_comment_char`: an unquoted `#` starting a word makes

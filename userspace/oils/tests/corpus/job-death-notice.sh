@@ -44,13 +44,22 @@ echo "=== the announcement is the report, so a wait is left with nothing to say"
 
 echo "=== …and its number is free for the next job"
 { sleep 5 & sleep 0.1; kill -HUP %1; sleep 0.1; :; } 2>/dev/null; sleep 5 & jobs; kill %1
+# …and then reap it, because a TERM is *not* announced: nothing else forces the
+# shell to notice this death, so without the `wait` the row would linger in the
+# table for an unbounded time and every section below would be numbered around
+# it or not, depending on how quickly the shell got round to it. That is a real
+# race and not a theoretical one — bash still lists this job as `Running` a fifth
+# of a second after the kill on roughly a third of runs under load.
+wait %1 2>/dev/null
 
 echo "=== a signal the listing can word is not announced at all"
 # These stay in the table, still owed to whoever asks — the contrast that says
-# the announcement above was a report and not merely a death. (The table is no
-# longer empty here, so each job is named by the number the listing gives it.)
-{ sleep 5 & sleep 0.1; kill -TERM %2; sleep 0.1; jobs; } 2>/dev/null
-{ sleep 5 & sleep 0.1; kill -PIPE %1; sleep 0.1; jobs; } 2>/dev/null
+# the announcement above was a report and not merely a death. Each block runs in
+# a subshell and makes *both* of the jobs it names, so it starts from an empty
+# table and leaves nothing behind: the survivor of a block like this is precisely
+# the row that would otherwise make the next section's numbering a race.
+( sleep 5 & sleep 5 & sleep 0.1; kill -TERM %2; sleep 0.1; jobs ) 2>/dev/null
+( sleep 5 & sleep 5 & sleep 0.1; kill -PIPE %1; sleep 0.1; jobs ) 2>/dev/null
 
 echo "=== only the killed job goes; the rest keep their numbers"
 { sleep 5 & sleep 5 & sleep 5 & sleep 0.1; kill -HUP %2; sleep 0.1; :; } 2>/dev/null; jobs

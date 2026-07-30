@@ -550,6 +550,80 @@ unsafe fn va_arg_double(va: &mut VaList) -> u64 {
     }
 }
 
+/// Pull the next `long double` (x87 80-bit) argument from a `va_list`,
+/// returning it narrowed to the bit pattern of an `f64`.
+///
+/// `long double` classifies as X87/X87UP, which the SysV ABI resolves to
+/// MEMORY: it is *never* passed in a register, so this touches neither
+/// `gp_offset` nor `fp_offset`. It always comes from the overflow area,
+/// 16-byte aligned and 16 bytes wide (10 significant, 6 padding) — which is
+/// why skipping the `L` and treating the value as a `double` did not merely
+/// lose precision, it desynchronised every argument after it.
+///
+/// The narrowing to `f64` is the sysroot's documented `long double`
+/// limitation; see [`crate::x87`] and `TD-POSIX-LONG-DOUBLE-PRECISION`.
+///
+/// # Safety
+/// Same contract as [`va_arg_int`], except the argument occupies 16 bytes.
+unsafe fn va_arg_long_double(va: &mut VaList) -> u64 {
+    let area = va.overflow_arg_area;
+    if area.is_null() {
+        return 0;
+    }
+    // Round the cursor up to the ABI's 16-byte alignment for this argument.
+    let aligned = (area as usize).wrapping_add(15) & !15usize;
+    let p = aligned as *const u8;
+    va.overflow_arg_area = aligned.wrapping_add(16) as *mut u8;
+    // SAFETY: the slot holds a 16-byte `long double`; we read its 10
+    // meaningful bytes with unaligned reads so no alignment claim is needed.
+    let significand = unsafe { p.cast::<u64>().read_unaligned() };
+    // SAFETY: as above; bytes 8..10 of the same 16-byte slot.
+    let sign_exp = unsafe { p.add(8).cast::<u16>().read_unaligned() };
+    crate::x87::to_f64(crate::x87::LongDouble {
+        significand,
+        sign_exp,
+        pad: [0; 6],
+    })
+    .to_bits()
+}
+
+/// Consume the length modifier at `*fpos`, reporting whether it was `L`.
+///
+/// `L` is the only modifier that changes an argument's *size*: on LP64 every
+/// integer type occupies one 8-byte slot however it is spelled, but `L` on a
+/// floating conversion promotes it to a 16-byte, stack-passed `long double`.
+/// Both the collection pass and the formatting pass must skip the modifier
+/// identically, so they share this function.
+///
+/// # Safety
+/// `fmt` must be NUL-terminated and `*fpos` a valid index into it.
+unsafe fn skip_length_modifier(fmt: *const u8, fpos: &mut usize) -> bool {
+    // SAFETY: caller guarantees fmt is NUL-terminated and fpos in range.
+    match unsafe { *fmt.add(*fpos) } {
+        b'l' => {
+            *fpos = fpos.wrapping_add(1);
+            // SAFETY: as above.
+            if unsafe { *fmt.add(*fpos) } == b'l' {
+                *fpos = fpos.wrapping_add(1);
+            }
+        }
+        b'h' => {
+            *fpos = fpos.wrapping_add(1);
+            // SAFETY: as above.
+            if unsafe { *fmt.add(*fpos) } == b'h' {
+                *fpos = fpos.wrapping_add(1);
+            }
+        }
+        b'z' | b'j' | b't' => *fpos = fpos.wrapping_add(1),
+        b'L' => {
+            *fpos = fpos.wrapping_add(1);
+            return true;
+        }
+        _ => {}
+    }
+    false
+}
+
 /// Flatten the arguments referenced by `fmt` out of `va` into the integer and
 /// float arrays expected by [`format_core`].
 ///
@@ -627,23 +701,11 @@ pub unsafe fn va_collect(fmt: *const u8, va: &mut VaList) -> ([u64; 8], [u64; 8]
             }
         }
 
-        // Length modifiers (consume no args — sizes are uniform on LP64).
-        match unsafe { *fmt.add(fpos) } {
-            b'l' => {
-                fpos = fpos.wrapping_add(1);
-                if unsafe { *fmt.add(fpos) } == b'l' {
-                    fpos = fpos.wrapping_add(1);
-                }
-            }
-            b'h' => {
-                fpos = fpos.wrapping_add(1);
-                if unsafe { *fmt.add(fpos) } == b'h' {
-                    fpos = fpos.wrapping_add(1);
-                }
-            }
-            b'z' | b'j' | b't' => fpos = fpos.wrapping_add(1),
-            _ => {}
-        }
+        // Length modifiers. Only `L` changes an argument's size: every integer
+        // type occupies one 8-byte slot on LP64 however it is spelled, but a
+        // `long double` is 16 bytes on the stack.
+        // SAFETY: fmt is NUL-terminated and fpos is in range.
+        let long_double = unsafe { skip_length_modifier(fmt, &mut fpos) };
 
         // Conversion specifier.
         let conv = unsafe { *fmt.add(fpos) };
@@ -659,7 +721,11 @@ pub unsafe fn va_collect(fmt: *const u8, va: &mut VaList) -> ([u64; 8], [u64; 8]
             }
             b'f' | b'F' | b'e' | b'E' | b'g' | b'G' => {
                 // SAFETY: va contract upheld by caller.
-                let v = unsafe { va_arg_double(va) };
+                let v = if long_double {
+                    unsafe { va_arg_long_double(va) }
+                } else {
+                    unsafe { va_arg_double(va) }
+                };
                 if let Some(slot) = float_args.get_mut(fidx) {
                     *slot = v;
                 }
@@ -867,25 +933,12 @@ fn parse_spec(
         }
     }
 
-    // Length modifier (ignored on LP64 — all int types are 8 bytes in args).
-    match unsafe { *fmt.add(*fpos) } {
-        b'l' => {
-            *fpos = fpos.wrapping_add(1);
-            if unsafe { *fmt.add(*fpos) } == b'l' {
-                *fpos = fpos.wrapping_add(1);
-            }
-        }
-        b'h' => {
-            *fpos = fpos.wrapping_add(1);
-            if unsafe { *fmt.add(*fpos) } == b'h' {
-                *fpos = fpos.wrapping_add(1);
-            }
-        }
-        b'z' | b'j' | b't' => {
-            *fpos = fpos.wrapping_add(1);
-        }
-        _ => {}
-    }
+    // Length modifier. Nothing here needs to know *which* one it was: every
+    // integer type occupies one 8-byte slot on LP64, and `va_collect` has
+    // already narrowed a `long double` argument to f64 bits, so the formatting
+    // pass only has to skip the modifier to land on the conversion character.
+    // SAFETY: fmt is NUL-terminated and fpos is in range.
+    let _ = unsafe { skip_length_modifier(fmt, fpos) };
 
     FormatSpec {
         flags,
@@ -3381,6 +3434,153 @@ mod tests {
         assert_eq!(n, 5);
         assert_eq!(&buf[..5], b"n=123");
         assert_eq!(buf[5], 0); // NUL terminator
+    }
+
+    // -----------------------------------------------------------------------
+    // `long double` (%L) — stack-passed, 16-byte-aligned arguments.
+    // -----------------------------------------------------------------------
+
+    /// An overflow area with the ABI's 16-byte alignment, so that a
+    /// `long double` slot placed at an aligned *offset* is also at an aligned
+    /// *address* — which is what `va_arg_long_double` actually rounds up to.
+    #[repr(C, align(16))]
+    struct OverflowArea([u8; 256]);
+
+    /// One argument in the overflow (stack) area.
+    enum Stacked {
+        /// A single 8-byte slot: integer, pointer, or promoted `double`.
+        Word(u64),
+        /// A `long double`: 16 bytes, 16-byte aligned.
+        LongDouble(f64),
+    }
+
+    /// Like [`run_vsnprintf`], but lets the caller lay out the overflow area
+    /// explicitly so mixed 8- and 16-byte stack slots can be exercised.
+    fn run_vsnprintf_stack(fmt: &[u8], ints: &[u64], floats: &[f64], stack: &[Stacked]) -> String {
+        let mut reg = [0u8; 176];
+        let mut overflow = OverflowArea([0u8; 256]);
+
+        for (i, &v) in ints.iter().enumerate().take(6) {
+            let off = i * 8;
+            reg[off..off + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        for (i, &v) in floats.iter().enumerate().take(8) {
+            let off = 48 + i * 16;
+            reg[off..off + 8].copy_from_slice(&v.to_bits().to_le_bytes());
+        }
+
+        let mut pos = 0usize;
+        for item in stack {
+            match *item {
+                Stacked::Word(v) => {
+                    overflow.0[pos..pos + 8].copy_from_slice(&v.to_le_bytes());
+                    pos += 8;
+                }
+                Stacked::LongDouble(v) => {
+                    pos = (pos + 15) & !15;
+                    let ld = crate::x87::from_f64(v);
+                    overflow.0[pos..pos + 8].copy_from_slice(&ld.significand.to_le_bytes());
+                    overflow.0[pos + 8..pos + 10].copy_from_slice(&ld.sign_exp.to_le_bytes());
+                    pos += 16;
+                }
+            }
+        }
+
+        let mut va = VaList {
+            gp_offset: 0,
+            fp_offset: 48,
+            overflow_arg_area: overflow.0.as_mut_ptr(),
+            reg_save_area: reg.as_mut_ptr(),
+        };
+
+        let mut buf = [0u8; 512];
+        // SAFETY: va points at the buffers above, which outlive the call and
+        // hold enough args for `fmt`.
+        let n = unsafe { vsnprintf(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), &mut va) };
+        let len = if n >= 0 && (n as usize) < buf.len() {
+            n as usize
+        } else {
+            buf.len().wrapping_sub(1)
+        };
+        core::str::from_utf8(&buf[..len])
+            .unwrap_or("<invalid utf8>")
+            .to_string()
+    }
+
+    #[test]
+    fn vsnprintf_long_double_basic() {
+        // `%Lf` must consume a 16-byte x87 slot from the overflow area, not
+        // fall through with `L` treated as the conversion character.
+        let s = run_vsnprintf_stack(b"%.2Lf\0", &[], &[], &[Stacked::LongDouble(3.14159)]);
+        assert_eq!(s, "3.14");
+    }
+
+    #[test]
+    fn vsnprintf_long_double_all_float_conversions() {
+        let s = run_vsnprintf_stack(
+            b"%.3Le %.3Lg %.1LF\0",
+            &[],
+            &[],
+            // All three are exactly representable and none lands on a rounding
+            // tie, so the expectations test the `L` plumbing rather than this
+            // engine's tie-breaking rule (see TD-POSIX-PRINTF-TIE-ROUNDING).
+            &[
+                Stacked::LongDouble(1234.0),
+                Stacked::LongDouble(0.25),
+                Stacked::LongDouble(-2.5),
+            ],
+        );
+        assert_eq!(s, "1.234e+03 0.25 -2.5");
+    }
+
+    #[test]
+    fn vsnprintf_long_double_pair_advances_sixteen_bytes() {
+        // If the cursor advanced by 8 instead of 16, the second value would be
+        // read from the middle of the first slot and come out as garbage.
+        let s = run_vsnprintf_stack(
+            b"%.1Lf %.1Lf\0",
+            &[],
+            &[],
+            &[Stacked::LongDouble(1.5), Stacked::LongDouble(2.5)],
+        );
+        assert_eq!(s, "1.5 2.5");
+    }
+
+    #[test]
+    fn vsnprintf_long_double_does_not_desync_later_stack_args() {
+        // Six `%d` exhaust the GP registers, so the seventh integer comes from
+        // the overflow area — placed *after* the 16-byte long double slot.
+        // This is the regression that made `%Lf` corrupt every later argument.
+        let s = run_vsnprintf_stack(
+            b"%d%d%d%d%d%d %.1Lf %d\0",
+            &[1, 2, 3, 4, 5, 6],
+            &[],
+            &[Stacked::LongDouble(0.5), Stacked::Word(99)],
+        );
+        assert_eq!(s, "123456 0.5 99");
+    }
+
+    #[test]
+    fn vsnprintf_long_double_realigns_after_an_odd_word() {
+        // A single 8-byte stack word leaves the cursor 8-byte aligned; the
+        // ABI requires the long double to skip forward to the next multiple
+        // of 16 rather than start where the previous argument ended.
+        let s = run_vsnprintf_stack(
+            b"%d%d%d%d%d%d %d %.1Lf\0",
+            &[1, 2, 3, 4, 5, 6],
+            &[],
+            &[Stacked::Word(7), Stacked::LongDouble(8.5)],
+        );
+        assert_eq!(s, "123456 7 8.5");
+    }
+
+    #[test]
+    fn vsnprintf_long_double_wide_exponent_survives_the_x87_decode() {
+        // A value far outside f64's *significand* range but inside its
+        // exponent range: proves the 80-bit decode reconstructs the exponent
+        // rather than reinterpreting the bytes as an f64.
+        let s = run_vsnprintf_stack(b"%.3Le\0", &[], &[], &[Stacked::LongDouble(1e300)]);
+        assert_eq!(s, "1.000e+300");
     }
 
     #[test]

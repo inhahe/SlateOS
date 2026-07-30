@@ -14,6 +14,74 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-POSIX-LONG-DOUBLE-ABI. `long double` was treated as if it were `double` — `printf("%Lf")` desynchronised every later argument and `strtold` returned in the wrong register — 2026-07-30 — 🟡 **printf half fixed; `strtold` still broken**
+
+**What.** The sysroot implements `long double` by pretending it is `double`.
+That is a defensible *precision* limitation (see
+TD-POSIX-LONG-DOUBLE-PRECISION), but it was also applied to the **ABI**, where
+it is not a limitation but silent corruption. Two distinct failures:
+
+1. **`printf`/`vsnprintf` never consumed the `L` length modifier.**
+   `posix/src/printf.rs` had two parallel length-modifier parsers — one in
+   `va_collect` (the argument-collection pass) and one in `parse_spec` (the
+   formatting pass) — and *neither* listed `b'L'`. So in `printf("%Lf", x)`
+   the `L` was left in place and read as the **conversion character**. `L`
+   matches no conversion, so the specifier consumed **no argument at all**,
+   emitted nothing useful, and left the `va_list` cursor pointing at the
+   `long double`'s 16 bytes. Every subsequent argument was therefore read
+   16 bytes early — an off-by-two-slots shift that turns integers into
+   fragments of a mantissa and pointers into wild addresses. This is far
+   worse than losing precision: it corrupts unrelated arguments.
+
+2. **`strtold` returns its result in the wrong register.**
+   `posix/src/stdlib.rs:582` is `pub unsafe extern "C" fn strtold(...) -> f64`
+   delegating to `strtod`. Under the SysV x86-64 ABI a `double` return goes in
+   `%xmm0`, but `long double` classifies X87/X87UP and is returned in
+   **`%st(0)`**. Any C caller compiled against a real `<stdlib.h>` reads
+   `%st(0)`, which at that point holds whatever the x87 stack happened to
+   contain — so `strtold` returns garbage regardless of the input string.
+   The same argument applies to every `…l` function the sysroot might grow.
+
+**Why it went unnoticed.** `long double` is rare in the C we currently build,
+and the ring-3 fixtures (`ctest-libc-float`, `ctest-libm`) exercise only
+`double`/`float`. Nothing in the tree calls `%Lf` or `strtold` yet, so the
+corruption had no visible victim — it was waiting for the first port that
+uses `long double`.
+
+**Repro (once a fixture exists).**
+`printf("%Lf %d\n", (long double)1.5, 7)` prints a mangled first field and
+the wrong integer; `strtold("2.5", NULL)` returns a value unrelated to 2.5.
+
+**Fix, part 1 — printf (DONE).** Added `posix/src/x87.rs`: a single home for
+the 80-bit format, with `LongDouble` (`#[repr(C, align(16))]`, explicit
+integer bit) plus `to_f64`/`from_f64` that round **once** directly to the
+target precision (the obvious "convert then `ldexp`" shortcut double-rounds
+and is an ulp off for some subnormals). Then in `printf.rs`: the two
+duplicated length-modifier parsers were replaced by one shared
+`skip_length_modifier`, which reports whether the modifier was `L`, and
+`va_collect` uses `va_arg_long_double` for `L` conversions — reading from the
+overflow area only (X87/X87UP resolves to MEMORY, so it touches neither
+`gp_offset` nor `fp_offset`), rounding the cursor up to 16 and advancing it
+by 16. Six regression tests in `printf::tests` cover the value, all of
+`%Le/%Lg/%LF`, two consecutive long doubles, a long double followed by a
+stack-passed integer, re-alignment after an odd 8-byte word, and a
+wide-exponent value that proves the x87 decode is real.
+
+**Fix, part 2 — `strtold` (TODO).** The Rust function cannot express an
+`%st(0)` return, so it needs an assembly trampoline (target-only). Rename the
+Rust export via
+`#[cfg_attr(target_os = "none", unsafe(export_name = "__strtold_f64"))]`, then
+add a `global_asm!` thunk exporting `strtold` that calls it and pushes the
+result onto the x87 stack:
+`sub $8,%rsp; movabs $__strtold_f64,%rax; call *%rax; movsd %xmm0,(%rsp); fldl (%rsp); add $8,%rsp; ret`
+(AT&T syntax; `movabs` + indirect call because the sysroot is built with
+`code-model=large`).
+
+**Also outstanding:** `scanf`'s `%Lf` must *store* 16 bytes via
+`crate::x87::from_f64`, not 8; and a ring-3 fixture should guard both halves
+end-to-end (argument ordering after `%Lf`, and `strtold`'s `%st(0)` return)
+since neither can be observed from host unit tests.
+
 ### BUG-SYSROOT-SOFT-FLOAT-ABI. The sysroot `libc.a` was compiled soft-float but linked into hard-float programs — `strtod`/`atof`/`difftime`/`printf("%f")` silently returned garbage — 2026-07-30 — ✅ **RESOLVED 2026-07-30**
 
 **What.** `toolchain/build-sysroot.ps1` builds the posix crate for
@@ -17776,6 +17844,79 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 ---
 
 ## Technical Debt
+
+### TD-POSIX-LONG-DOUBLE-PRECISION. `long double` has the right *ABI* but only `double` (53-bit) *precision* — ACCEPTED LIMITATION 2026-07-30
+
+**Where:** `posix/src/x87.rs` (`to_f64`/`from_f64`), `posix/src/printf.rs`
+(`va_arg_long_double`), `posix/src/stdlib.rs` (`strtold`).
+
+**What it is:** the sysroot now moves `long double` values correctly — 16
+bytes, 16-byte aligned, MEMORY class, x87 80-bit encoding — but it does not
+*compute* in 80-bit. Every long double that enters the sysroot is decoded to
+an `f64` at the boundary, processed with 53-bit arithmetic, and (where a long
+double is produced) re-encoded. Consequences:
+
+- `printf("%.25Lf", x)` prints correctly-formed output, but only ~17
+  significant digits are meaningful; the tail is the `f64` rounding of `x`,
+  not `x`.
+- A value with an exponent outside f64's range (|x| > ~1.8e308, or below
+  ~4.9e-324) saturates to ±inf or 0 rather than being represented exactly,
+  even though x87 has the range for it. `to_f64` handles this deterministically
+  (round-to-nearest, overflow → ±inf) rather than producing a wrong finite
+  number, so it degrades predictably.
+- There are no `sqrtl`/`powl`/`fabsl`/… in the sysroot at all. That is the
+  *safe* failure mode: a link error, not a silently wrong answer.
+
+**Why accepted:** the double-precision core is shared with every other float
+path in the sysroot and is well tested; an 80-bit software arithmetic layer
+would be a large, subtle, and — for our workloads — currently unused
+subsystem. The ABI half was the part that was actively corrupting data
+(BUG-POSIX-LONG-DOUBLE-ABI); the precision half only under-delivers.
+
+**Proper fix (when a consumer needs it):** implement arithmetic directly on
+`x87::LongDouble` (64-bit significand + 15-bit exponent) — add/sub/mul/div and
+comparison first, then the `…l` libm entry points — and change
+`va_arg_long_double`/`strtold` to keep the full 64-bit significand instead of
+narrowing. Alternatively, use the FPU: the sysroot runs on x86-64 with a real
+x87 unit, so `fldt`/`fstpt` plus x87 opcodes would give exact 80-bit semantics
+for a fraction of the code, at the cost of having to manage FPU state (control
+word, stack depth) across the ABI boundary. Trigger: the first port that
+genuinely relies on `long double` precision (many numeric C libraries do).
+
+### TD-POSIX-PRINTF-TIE-ROUNDING. The float formatter rounds ties away from zero; glibc/musl round ties to even — 2026-07-30
+
+**Where:** `posix/src/printf.rs::fmt_fixed`, the `if f >= 0.5` test that
+triggers the digit carry (~line 1884), and the `crate::math::round` pre-round
+in the `%e` path (~line 1990).
+
+**What it is:** when the value sits exactly halfway between two representable
+outputs, our engine always rounds away from zero, whereas glibc and musl honour
+the current FPU rounding mode — `FE_TONEAREST`, i.e. ties-to-even. Observed
+divergences (both exactly representable, so this is a genuine tie, not a
+representation artefact):
+
+| format | value | ours | glibc |
+|---|---|---|---|
+| `%.3e` | `1234.5` | `1.235e+03` | `1.234e+03` |
+| `%.1f` | `8.25` | `8.3` | `8.2` |
+| `%.0f` | `2.5` | `3` | `2` |
+
+**Impact:** low but real. C11 §7.21.6.1p13 leaves the tie direction
+unspecified ("in an implementation-defined manner"), so this is not a
+conformance bug — but it *is* an observable behaviour difference that will
+show up as a one-digit diff in any test suite whose expected output was
+generated on Linux. It was found while writing the `%Lf` regression tests
+(two of my first expectations, copied from glibc behaviour, failed).
+
+**Proper fix:** in `fmt_fixed`, replace `if f >= 0.5` with a tie-aware test —
+round up when `f > 0.5`, and when `f == 0.5` only if the last emitted digit is
+odd — and give the `%e` path the same treatment instead of leaning on
+`math::round` (which is `roundeven`-less and rounds half away from zero by
+definition). Note the comparison must be done on the *exact* residue; the
+current running-`f` subtraction accumulates error, so a correct implementation
+probably wants to decide the tie from the original value rather than the
+residue. Deferred because it needs care to avoid regressing the 20 000+
+existing formatting tests, and no consumer is currently affected.
 
 ### TD-OPENAT2-BENEATH-INROOT. `openat2` `RESOLVE_BENEATH`/`RESOLVE_IN_ROOT` are safely refused, not implemented — ACCEPTED LIMITATION 2026-07-22
 

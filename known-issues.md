@@ -14,30 +14,41 @@ work that should be done now."
 
 ## Active Bugs
 
-### TD-POSIX-H-ERRNO-GLOBAL. `h_errno` is a process-global `static mut`, but POSIX/glibc make it per-thread — 2026-07-30 — OPEN
+### BUG-POSIX-H-ERRNO. `h_errno` was a process-global `static mut` that *nothing ever wrote* — every resolver failure reported "no error" — 2026-07-30 — ✅ **RESOLVED 2026-07-30**
 
-**What.** `posix/src/socket.rs` exports `pub static mut h_errno: i32` — one
-variable for the whole process. glibc instead exposes `__h_errno_location()`
-and `#define h_errno (*__h_errno_location())`, giving each thread its own copy,
-exactly as it does for `errno`. Two threads doing concurrent `gethostbyname`
-lookups therefore clobber each other's error code: thread A can read
-`HOST_NOT_FOUND` that thread B stored, or read a stale success while its own
-lookup failed.
+**What.** Two bugs in one variable, found while migrating the netdb result
+buffers (TD-POSIX-TEST-PARALLEL):
 
-**Where.** `posix/src/socket.rs` (search `h_errno`); writers are
-`gethostbyname`/`gethostbyaddr` and friends.
+1. **Never written.** `posix/src/socket.rs` exported `pub static mut h_errno:
+   i32 = 0` and `__h_errno_location()` returning its address, but *no code path
+   assigned to it*. `gethostbyname`/`gethostbyname2`/`gethostbyaddr` all
+   returned NULL on failure and left `h_errno` at whatever it was — normally 0,
+   i.e. "no error". Any C program following the documented idiom (`if (!hp)
+   herror(argv[1]);`) printed **"Resolver Error 0 (no error)"** for every
+   failed lookup. `herror` itself was therefore useless.
+2. **Process-global.** glibc exposes it per-thread via `__h_errno_location()`
+   with `#define h_errno (*__h_errno_location())`. Ours was one variable for
+   the whole process, so once (1) was fixed two threads doing concurrent
+   lookups would clobber each other's error code. This matters more than for
+   most shared state because the codes *numerically overlap* `errno`
+   (`HOST_NOT_FOUND == EPERM == 1`), so a crossed value looks plausible.
 
-**Why it's still open.** The per-thread storage this needs already exists as of
-2026-07-30 — `crate::perthread::PerThread` (see TD-POSIX-TEST-PARALLEL) — so
-the fix is mechanical: add an `h_errno: i32` field to `PerThread`, add
-`__h_errno_location() -> *mut i32` mirroring `__errno_location`, and replace
-every `h_errno = …` write with `(*perthread::current()).h_errno = …`. It was
-deliberately left out of that change to keep one logical change per commit; the
-netdb *result buffers* were migrated, the error variable was not.
-
-**Proper fix.** As above. Keep the `h_errno` symbol itself exported (some C
-code references it directly through the header's macro), but define it as the
-macro over `__h_errno_location()` in the header rather than as a data symbol.
+**✅ RESOLVED 2026-07-30.** Storage moved into `perthread::PerThread` (field
+`h_errno`, next to `errno`); `__h_errno_location()` now returns
+`&raw mut (*perthread::current()).h_errno`. The exported `h_errno` *data*
+symbol was **deleted** rather than kept as a stale alias — a program that
+declares `extern int h_errno;` and reads it directly now gets a link error
+instead of a silently-wrong answer, which is what glibc's macro-only header
+effectively achieves. All three lookup functions now set it: `NO_RECOVERY` for
+caller errors (null pointer, wrong address family/length), `HOST_NOT_FOUND` for
+a name no resolver could answer for, `NO_DATA` for an AF_INET6 lookup (the name
+may be fine — we just have no AAAA path), and for a syscall failure a new
+`resolver_error_for()` mapping `ENOENT → HOST_NOT_FOUND`,
+`EAGAIN`/`ETIMEDOUT`/`ENETUNREACH`/`EHOSTUNREACH` → `TRY_AGAIN`, else
+`NO_RECOVERY`. Success resets it to 0. 8 new tests cover the mapping (including
+`i64::MIN` and out-of-`i32`-range returns, which must not wrap into a retryable
+code), the per-thread isolation, and that `h_errno` and `errno` are distinct
+storage.
 
 ### TD-POSIX-NNP-TEST-ISOLATION. 29 `NO_NEW_PRIVS` tests shared genuinely-process-global state and raced under the parallel harness — 2026-07-30 — ✅ **RESOLVED 2026-07-30**
 
@@ -2852,9 +2863,9 @@ fixture `services/ctest-tls-thread` was extended to assert per-thread `errno`
 (each pthread gets its own `__errno_location()`, distinct from the parent's, and
 starts at 0), and `scripts/boot-test.sh` passes.
 
-**Follow-on:** `h_errno` (`socket.rs`) is still a process-global `static mut`;
-glibc makes it per-thread via `__h_errno_location()`. Same class of bug, not yet
-migrated — see TD-POSIX-H-ERRNO-GLOBAL.
+**Follow-on (done):** `h_errno` was migrated into the same block immediately
+afterwards — which turned up the much worse bug that nothing had ever *written*
+it. See BUG-POSIX-H-ERRNO.
 
 **Note:** while investigating this I also found and fixed a *deterministic*
 stale test (`file::tests::translate_no_flags` asserted the pre-

@@ -3696,17 +3696,23 @@ impl HostentBuf {
 /// result is valid until the *calling thread's* next `gethostbyname` (see
 /// [`HostentBuf`]).
 ///
+/// On failure the calling thread's `h_errno` describes why; on success it is
+/// reset to 0.  `errno` is *not* the resolver's channel.
+///
 /// # Safety
 ///
 /// `name` must be a valid null-terminated hostname string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn gethostbyname(name: *const u8) -> *const Hostent {
     if name.is_null() {
+        set_h_errno(NO_RECOVERY);
         return core::ptr::null();
     }
 
     let name_len = unsafe { crate::string::strlen(name) };
     if name_len == 0 || name_len > 253 {
+        // Not a name any resolver could ever answer for.
+        set_h_errno(HOST_NOT_FOUND);
         return core::ptr::null();
     }
 
@@ -3721,8 +3727,10 @@ pub unsafe extern "C" fn gethostbyname(name: *const u8) -> *const Hostent {
         resolved.as_mut_ptr() as u64,
     );
     if ret < 0 {
+        set_h_errno(resolver_error_for(ret));
         return core::ptr::null();
     }
+    set_h_errno(0);
 
     // SAFETY: `perthread::current()` is valid for this thread and no other
     // thread holds a pointer into this block; `name` is readable for
@@ -3758,10 +3766,16 @@ pub unsafe extern "C" fn gethostbyname2(name: *const u8, af: i32) -> *const Host
             unsafe { gethostbyname(name) }
         }
         AF_INET6 => {
-            // IPv6 not supported by our kernel's DNS resolver.
+            // IPv6 not supported by our kernel's DNS resolver.  The name may
+            // well be valid — we just have no AAAA record for it — which is
+            // exactly what NO_DATA means.
+            set_h_errno(NO_DATA);
             core::ptr::null()
         }
-        _ => core::ptr::null(),
+        _ => {
+            set_h_errno(NO_RECOVERY);
+            core::ptr::null()
+        }
     }
 }
 
@@ -3779,6 +3793,9 @@ pub unsafe extern "C" fn gethostbyname2(name: *const u8, af: i32) -> *const Host
 /// forward and reverse lookups doesn't clobber either result — POSIX makes
 /// no such promise, but callers rely on it and one extra buffer is cheap.
 ///
+/// On failure the calling thread's `h_errno` describes why; on success it is
+/// reset to 0.
+///
 /// # Safety
 ///
 /// `addr` must point to at least `len` (4) bytes.
@@ -3789,6 +3806,7 @@ pub unsafe extern "C" fn gethostbyaddr(
     addr_type: i32,
 ) -> *const Hostent {
     if addr.is_null() || addr_type != AF_INET || len != 4 {
+        set_h_errno(NO_RECOVERY);
         return core::ptr::null();
     }
 
@@ -3816,8 +3834,10 @@ pub unsafe extern "C" fn gethostbyaddr(
         name_buf.len() as u64,
     );
     if ret < 0 {
+        set_h_errno(resolver_error_for(ret));
         return core::ptr::null();
     }
+    set_h_errno(0);
 
     // The kernel reports the name length; clamp it to what it could have
     // written rather than trusting it.
@@ -3849,19 +3869,56 @@ pub const NO_RECOVERY: i32 = 3;
 /// Resolver error: valid name, no data record of requested type.
 pub const NO_DATA: i32 = 4;
 
-/// Thread-local (actually global — single-threaded) resolver error.
+/// Get a pointer to the calling thread's resolver error variable.
 ///
-/// Programs can access this as `extern int h_errno` or via
-/// `*__h_errno_location()`.  Both refer to the same storage.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static mut h_errno: i32 = 0;
-
-/// Get a pointer to the resolver error variable.
+/// C code reaches this through `<netdb.h>`'s `#define h_errno
+/// (*__h_errno_location())`, exactly as glibc defines it.  There is
+/// deliberately **no** exported `h_errno` *data* symbol: a program that
+/// declared `extern int h_errno;` and read it directly would see a variable
+/// nobody ever writes, which is a silent wrong answer.  A link error is the
+/// better failure.
 ///
-/// Used by C code as `extern int h_errno;` via `*__h_errno_location()`.
+/// The storage is per-thread (`crate::perthread`) because two threads doing
+/// concurrent lookups must not overwrite each other's error code.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __h_errno_location() -> *mut i32 {
-    core::ptr::addr_of_mut!(h_errno)
+    // SAFETY: `perthread::current()` is non-null and valid for this thread,
+    // and no other thread holds a pointer into this block.
+    unsafe { &raw mut (*crate::perthread::current()).h_errno }
+}
+
+/// Set the calling thread's resolver error.
+fn set_h_errno(val: i32) {
+    // SAFETY: as in `__h_errno_location`.
+    unsafe { (*crate::perthread::current()).h_errno = val; }
+}
+
+/// Read the calling thread's resolver error.
+#[must_use]
+fn get_h_errno() -> i32 {
+    // SAFETY: as in `__h_errno_location`.
+    unsafe { (*crate::perthread::current()).h_errno }
+}
+
+/// Translate a negative syscall return from the DNS syscalls into the
+/// resolver error code the legacy netdb API reports.
+///
+/// The kernel's resolver reports `NotFound` both for NXDOMAIN and for a
+/// server-side error, so `HOST_NOT_FOUND` is the closest fit; anything
+/// transport-shaped (timeout, unreachable, would-block) is retryable, and
+/// everything else — bad arguments, a missing Socket capability — is not.
+fn resolver_error_for(ret: i64) -> i32 {
+    // The syscall returns a negated errno, but nothing constrains its range:
+    // `i64::MIN` has no positive counterpart and anything past `i32::MAX` is
+    // not an errno at all.  Either way it is not one of the retryable codes.
+    let Some(err) = ret.checked_neg().and_then(|e| i32::try_from(e).ok()) else {
+        return NO_RECOVERY;
+    };
+    match err {
+        errno::ENOENT => HOST_NOT_FOUND,
+        errno::EAGAIN | errno::ETIMEDOUT | errno::ENETUNREACH | errno::EHOSTUNREACH => TRY_AGAIN,
+        _ => NO_RECOVERY,
+    }
 }
 
 /// Return a string describing a resolver error code.
@@ -3888,9 +3945,7 @@ pub extern "C" fn herror(s: *const u8) {
             let _ = syscall2(SYS_CONSOLE_WRITE, b": ".as_ptr() as u64, 2);
         }
     }
-    // SAFETY: single-threaded access.
-    let err = unsafe { *core::ptr::addr_of!(h_errno) };
-    let msg = hstrerror(err);
+    let msg = hstrerror(get_h_errno());
     let msg_len = unsafe { crate::string::strlen(msg) };
     let _ = syscall2(SYS_CONSOLE_WRITE, msg as u64, msg_len as u64);
     let _ = syscall2(SYS_CONSOLE_WRITE, b"\n".as_ptr() as u64, 1);
@@ -7354,6 +7409,111 @@ mod tests {
     fn test_h_errno_location_not_null() {
         let loc = __h_errno_location();
         assert!(!loc.is_null());
+    }
+
+    #[test]
+    fn h_errno_location_is_stable_within_a_thread() {
+        assert_eq!(__h_errno_location(), __h_errno_location());
+    }
+
+    #[test]
+    fn h_errno_is_not_shared_between_threads() {
+        // The whole point of moving it into `perthread`: one thread's
+        // resolver error must not be visible as another's.
+        let mine = __h_errno_location();
+        set_h_errno(TRY_AGAIN);
+        let theirs = std::thread::spawn(|| {
+            let loc = __h_errno_location();
+            let seen = get_h_errno();
+            set_h_errno(NO_DATA);
+            (loc as usize, seen, get_h_errno())
+        })
+        .join()
+        .expect("resolver-error thread panicked");
+        assert_ne!(theirs.0, mine as usize, "threads share one h_errno slot");
+        assert_eq!(theirs.1, 0, "a fresh thread's h_errno must start at 0");
+        assert_eq!(theirs.2, NO_DATA);
+        assert_eq!(get_h_errno(), TRY_AGAIN, "the child clobbered our h_errno");
+    }
+
+    #[test]
+    fn h_errno_is_distinct_storage_from_errno() {
+        // They overlap numerically (HOST_NOT_FOUND == EPERM == 1), so a
+        // shared slot would be an invisible-but-wrong answer.
+        assert_ne!(
+            __h_errno_location() as usize,
+            crate::errno::__errno_location() as usize
+        );
+        set_h_errno(NO_RECOVERY);
+        crate::errno::set_errno(crate::errno::EINVAL);
+        assert_eq!(get_h_errno(), NO_RECOVERY);
+    }
+
+    #[test]
+    fn gethostbyname_rejects_bad_names_with_a_resolver_error() {
+        set_h_errno(0);
+        assert!(unsafe { gethostbyname(core::ptr::null()) }.is_null());
+        assert_eq!(get_h_errno(), NO_RECOVERY);
+
+        assert!(unsafe { gethostbyname(b"\0".as_ptr()) }.is_null());
+        assert_eq!(get_h_errno(), HOST_NOT_FOUND);
+
+        // 254 label bytes — longer than a DNS name can be.
+        let too_long = [b'a'; 255];
+        let mut buf = [0u8; 256];
+        buf[..255].copy_from_slice(&too_long);
+        assert!(unsafe { gethostbyname(buf.as_ptr()) }.is_null());
+        assert_eq!(get_h_errno(), HOST_NOT_FOUND);
+    }
+
+    #[test]
+    fn gethostbyname2_reports_no_data_for_ipv6() {
+        set_h_errno(0);
+        assert!(unsafe { gethostbyname2(b"example.com\0".as_ptr(), AF_INET6) }.is_null());
+        assert_eq!(get_h_errno(), NO_DATA);
+
+        assert!(unsafe { gethostbyname2(b"example.com\0".as_ptr(), 0xbeef) }.is_null());
+        assert_eq!(get_h_errno(), NO_RECOVERY);
+    }
+
+    #[test]
+    fn gethostbyaddr_rejects_bad_arguments_with_a_resolver_error() {
+        let addr = [127u8, 0, 0, 1];
+        set_h_errno(0);
+        assert!(unsafe { gethostbyaddr(core::ptr::null(), 4, AF_INET) }.is_null());
+        assert_eq!(get_h_errno(), NO_RECOVERY);
+
+        assert!(unsafe { gethostbyaddr(addr.as_ptr(), 16, AF_INET6) }.is_null());
+        assert_eq!(get_h_errno(), NO_RECOVERY);
+
+        assert!(unsafe { gethostbyaddr(addr.as_ptr(), 3, AF_INET) }.is_null());
+        assert_eq!(get_h_errno(), NO_RECOVERY);
+    }
+
+    #[test]
+    fn resolver_error_for_maps_transport_failures_to_try_again() {
+        assert_eq!(resolver_error_for(-i64::from(errno::ENOENT)), HOST_NOT_FOUND);
+        assert_eq!(resolver_error_for(-i64::from(errno::ETIMEDOUT)), TRY_AGAIN);
+        assert_eq!(resolver_error_for(-i64::from(errno::EAGAIN)), TRY_AGAIN);
+        assert_eq!(resolver_error_for(-i64::from(errno::ENETUNREACH)), TRY_AGAIN);
+        assert_eq!(resolver_error_for(-i64::from(errno::EHOSTUNREACH)), TRY_AGAIN);
+        assert_eq!(resolver_error_for(-i64::from(errno::EINVAL)), NO_RECOVERY);
+        assert_eq!(resolver_error_for(-i64::from(errno::EACCES)), NO_RECOVERY);
+        // Nonsense returns must not panic or wrap into a retryable code.
+        assert_eq!(resolver_error_for(i64::MIN), NO_RECOVERY);
+        assert_eq!(resolver_error_for(-(i64::from(i32::MAX) + 1)), NO_RECOVERY);
+        assert_eq!(resolver_error_for(0), NO_RECOVERY);
+    }
+
+    #[test]
+    fn herror_accepts_every_resolver_code() {
+        // Exercises the `get_h_errno` read path for each code; `herror`
+        // writes to the console, which on the host is a no-op syscall stub.
+        for code in [0, HOST_NOT_FOUND, TRY_AGAIN, NO_RECOVERY, NO_DATA, 99] {
+            set_h_errno(code);
+            herror(b"test\0".as_ptr());
+            assert_eq!(get_h_errno(), code, "herror must not clobber h_errno");
+        }
     }
 
     // -- getprotobyname --

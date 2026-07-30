@@ -5981,12 +5981,13 @@ kernel's ELF loader.
 standard says is *per-thread*: `errno` (via `__errno_location`), `gmtime`/
 `localtime`'s `struct tm`, `asctime`/`ctime`'s text buffer, `inet_ntoa`'s
 buffer, and the four netdb result structs (`gethostbyname`, `gethostbyaddr`,
-`getservby*`, `getprotoby*`). Ours were 15 process-wide `static mut`s. That is
+`getservby*`, `getprotoby*`), plus the resolver's `h_errno`. Ours were 16
+process-wide `static mut`s. That is
 a genuine product thread-safety gap on the OS target, and on the host it made
 `cargo test -p posix` flaky under the parallel harness (TD-POSIX-TEST-PARALLEL).
 Fixing it means picking *where per-thread libc storage lives* — a decision that
 binds the whole libc, not just these functions, since everything added later
-(`h_errno`, `strtok`'s cursor, locale state, …) will go in the same place.
+(`strtok`'s cursor, locale state, …) will go in the same place.
 
 **Decision.** One `#[repr(C)] struct PerThread` (`posix/src/perthread.rs`)
 holding every such field, parked at a **fixed offset above the thread
@@ -6049,7 +6050,9 @@ thread can ever observe the flag set without having installed its own TP.
 `AtomicI32` split deleted), `posix/src/time.rs` (`TM_RESULT`, `ASCTIME_BUF`
 deleted), `posix/src/socket.rs` (13 statics replaced by `HostentBuf`/
 `ServentBuf`/`ProtoentBuf`, which also deduplicated ~35 lines of copy-pasted
-pointer-web assembly between `gethostbyname` and `gethostbyaddr`). Host build
+pointer-web assembly between `gethostbyname` and `gethostbyaddr`; and `h_errno`,
+whose exported *data* symbol was deleted outright — see BUG-POSIX-H-ERRNO).
+Host build
 uses a `thread_local!` behind the identical `current()` API. Validated by 10
 consecutive clean parallel `cargo test -p posix` runs (20013 tests each) and,
 on target, by extending `services/ctest-tls-thread` to assert that each pthread

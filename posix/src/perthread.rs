@@ -70,6 +70,14 @@ pub struct PerThread {
     /// `__errno_location` is on the hot path of every failing syscall.
     pub errno: i32,
 
+    /// The thread's `h_errno` — the resolver error set by `gethostbyname` and
+    /// friends.  `__h_errno_location()` returns `&mut` this.
+    ///
+    /// Separate from `errno` because the legacy resolver API reports through
+    /// its own variable (`HOST_NOT_FOUND`/`TRY_AGAIN`/`NO_RECOVERY`/`NO_DATA`,
+    /// which overlap the `errno` numbering and mean something else entirely).
+    pub h_errno: i32,
+
     /// Result buffer for `gmtime`/`localtime`.
     ///
     /// All-zero is not a *meaningful* `struct tm` (`tm_mday == 0` is out of
@@ -109,6 +117,7 @@ impl PerThread {
     /// fresh anonymous memory and is never explicitly initialised.
     pub const ZERO: Self = Self {
         errno: 0,
+        h_errno: 0,
         tm: crate::time::Tm {
             tm_sec: 0,
             tm_min: 0,

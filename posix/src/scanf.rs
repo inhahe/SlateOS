@@ -1,18 +1,18 @@
 //! Scanf family: `sscanf`, `scanf`, `fscanf` via assembly trampoline.
 //!
-//! Like printf, scanf is variadic in C.  We use assembly wrappers
-//! to capture the variadic output-pointer arguments into an array,
-//! then pass that to a Rust scanning engine.
+//! `scanf` is variadic in C, so the three direct entry points are assembly
+//! trampolines that perform a real System V `va_start` and tail-call the
+//! corresponding `v*` function.  There is exactly one scanning engine, and it
+//! pulls each destination pointer from the `va_list` at the point of use.
 //!
 //! `scanf` and `fscanf` read a line from stdin/stream into a stack
 //! buffer, then scan it with the same engine as `sscanf`.
 //!
-//! The `v*` variants (`vsscanf`, `vscanf`, `vfscanf`) take a `va_list`
-//! instead of `...`.  Since a `va_list` parameter decays to a pointer on the
-//! x86_64 System V ABI, they are ordinary Rust functions: they flatten the
-//! destination pointers out of the `va_list` (every scanf argument is a
-//! pointer, so all come from the integer register/overflow path) and delegate
-//! to the same engine.  The glibc `__isoc99_v*scanf` aliases are provided too.
+//! The `v*` variants (`vsscanf`, `vscanf`, `vfscanf`) take that `va_list`
+//! directly.  Since a `va_list` parameter decays to a pointer on the x86_64
+//! System V ABI, they are ordinary Rust functions — and therefore the whole
+//! family is reachable from host `cargo test`.  The glibc `__isoc99_v*scanf`
+//! aliases are provided too.
 //!
 //! ## Supported Format Specifiers
 //!
@@ -40,96 +40,26 @@
 // Assembly trampolines
 // ---------------------------------------------------------------------------
 
-// sscanf(str, fmt, ...) → _sscanf_impl(str, fmt, args_ptr)
-// scanf(fmt, ...) → reads from stdin (stub)
+// The three direct entry points share `printf.rs`'s `va_trampoline!`: each
+// spills the argument registers into a System V register save area, builds a
+// `va_list` over it and calls the matching `v*` function below.  Named-argument
+// counts, which set the initial `gp_offset` and decide which register carries
+// the `va_list*`:
+//   sscanf(str, fmt, ...)      2 named -> gp_offset 16, ap in rdx
+//   scanf(fmt, ...)            1 named -> gp_offset 8,  ap in rsi
+//   fscanf(stream, fmt, ...)   2 named -> gp_offset 16, ap in rdx
+#[cfg(target_os = "none")]
+use crate::printf::va_trampoline;
 
-// The `_*_impl` symbols defined in this module are the Rust-side targets of
-// the assembly variadic trampolines.  The leading underscore is part of the
-// ABI contract.
-#![allow(clippy::used_underscore_items)]
+#[cfg(target_os = "none")]
+va_trampoline!("sscanf", "vsscanf", "16", "rdx");
+#[cfg(target_os = "none")]
+va_trampoline!("scanf", "vscanf", "8", "rsi");
+#[cfg(target_os = "none")]
+va_trampoline!("fscanf", "vfscanf", "16", "rdx");
 
 #[cfg(target_os = "none")]
 core::arch::global_asm!(
-    // sscanf(str, fmt, ...) → _sscanf_impl(str, fmt, args_ptr)
-    ".global sscanf",
-    ".type sscanf, @function",
-    "sscanf:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 64",
-    "mov [rsp], rdx",    // vararg 0
-    "mov [rsp+8], rcx",  // vararg 1
-    "mov [rsp+16], r8",  // vararg 2
-    "mov [rsp+24], r9",  // vararg 3
-    "mov rax, [rbp+16]", // vararg 4 (stack)
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+24]", // vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+32]", // vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+40]", // vararg 7
-    "mov [rsp+56], rax",
-    // rdi = str, rsi = fmt (already set)
-    "mov rdx, rsp", // args array
-    "call _sscanf_impl",
-    "add rsp, 64",
-    "pop rbp",
-    "ret",
-    // scanf(fmt, ...) → _scanf_impl(fmt, args_ptr)
-    // Like printf: rdi = fmt, rsi..r9 = first 5 varargs.
-    ".global scanf",
-    ".type scanf, @function",
-    "scanf:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 64",
-    "mov [rsp], rsi",    // vararg 0
-    "mov [rsp+8], rdx",  // vararg 1
-    "mov [rsp+16], rcx", // vararg 2
-    "mov [rsp+24], r8",  // vararg 3
-    "mov [rsp+32], r9",  // vararg 4
-    "mov rax, [rbp+16]", // vararg 5 (stack)
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+24]", // vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+32]", // vararg 7
-    "mov [rsp+56], rax",
-    // rdi = fmt (already set)
-    "mov rsi, rsp", // args array
-    "call _scanf_impl",
-    "add rsp, 64",
-    "pop rbp",
-    "ret",
-    // fscanf(stream, fmt, ...) → _fscanf_impl(stream, fmt, args_ptr)
-    // rdi = stream, rsi = fmt, rdx..r9 = first 4 varargs.
-    ".global fscanf",
-    ".type fscanf, @function",
-    "fscanf:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 64",
-    "mov [rsp], rdx",    // vararg 0
-    "mov [rsp+8], rcx",  // vararg 1
-    "mov [rsp+16], r8",  // vararg 2
-    "mov [rsp+24], r9",  // vararg 3
-    "mov rax, [rbp+16]", // vararg 4 (stack)
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+24]", // vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+32]", // vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+40]", // vararg 7
-    "mov [rsp+56], rax",
-    // rdi = stream, rsi = fmt (already set)
-    "mov rdx, rsp", // args array
-    "call _fscanf_impl",
-    "add rsp, 64",
-    "pop rbp",
-    "ret",
-    // -----------------------------------------------------------------------
-    // glibc C99 aliases — identical to the above, just different names.
-    // Programs compiled with -std=c99 or later link against __isoc99_*.
-    // -----------------------------------------------------------------------
     ".global __isoc99_sscanf",
     ".type __isoc99_sscanf, @function",
     "__isoc99_sscanf:",
@@ -159,115 +89,8 @@ core::arch::global_asm!(
 );
 
 // ---------------------------------------------------------------------------
-// Rust entry point (called by assembly)
+// The scanning engine's three entry shapes
 // ---------------------------------------------------------------------------
-
-/// `sscanf(str, fmt, ...)` — parse formatted input from a string.
-///
-/// Returns the number of items successfully assigned, or EOF (-1)
-/// if the input is exhausted before the first conversion.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn _sscanf_impl(input: *const u8, fmt: *const u8, args: *const u64) -> i32 {
-    if input.is_null() || fmt.is_null() {
-        return -1;
-    }
-
-    let mut ctx = ScanCtx {
-        input,
-        fmt,
-        args,
-        si: 0,       // Position in input string.
-        fi: 0,       // Position in format string.
-        ai: 0,       // Position in args array.
-        assigned: 0, // Number of successful assignments.
-    };
-
-    scan_core(&mut ctx)
-}
-
-/// Buffer size for reading a line from stdin/stream for scanf/fscanf.
-const SCANF_LINE_BUF: usize = 4096;
-
-/// `scanf(fmt, ...)` — parse formatted input from stdin.
-///
-/// Reads a line from stdin, then scans it using the same engine as
-/// `sscanf`.  Returns the number of items successfully assigned,
-/// or EOF (-1) if stdin is at end-of-file.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn _scanf_impl(fmt: *const u8, args: *const u64) -> i32 {
-    if fmt.is_null() {
-        return -1;
-    }
-
-    // Read a line from stdin (fd 0) into a stack buffer.
-    let mut buf = [0u8; SCANF_LINE_BUF];
-    let n = read_line_from_fd(0, &mut buf);
-    if n == 0 {
-        return -1; // EOF
-    }
-
-    let mut ctx = ScanCtx {
-        input: buf.as_ptr(),
-        fmt,
-        args,
-        si: 0,
-        fi: 0,
-        ai: 0,
-        assigned: 0,
-    };
-
-    scan_core(&mut ctx)
-}
-
-/// `fscanf(stream, fmt, ...)` — parse formatted input from a stream.
-///
-/// Reads a line from the given stream, then scans it.  The stream
-/// pointer is interpreted as a FILE* (our stdio fd encoding).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn _fscanf_impl(stream: *mut u8, fmt: *const u8, args: *const u64) -> i32 {
-    if fmt.is_null() {
-        return -1;
-    }
-
-    // Extract fd from FILE*.
-    let fd = crate::stdio::fileno(stream);
-    if fd < 0 {
-        return -1;
-    }
-
-    let mut buf = [0u8; SCANF_LINE_BUF];
-    let n = read_line_from_fd(fd, &mut buf);
-    if n == 0 {
-        return -1; // EOF
-    }
-
-    let mut ctx = ScanCtx {
-        input: buf.as_ptr(),
-        fmt,
-        args,
-        si: 0,
-        fi: 0,
-        ai: 0,
-        assigned: 0,
-    };
-
-    scan_core(&mut ctx)
-}
-
-// ---------------------------------------------------------------------------
-// va_list support — the v* scanf family
-// ---------------------------------------------------------------------------
-//
-// `vsscanf`/`vscanf`/`vfscanf` receive an already-initialised `va_list`
-// (which decays to a pointer on the x86_64 System V ABI) instead of `...`, so
-// they are plain Rust functions — host-testable.  Every scanf argument is an
-// output *pointer* (integer class), so flattening is simpler than printf's:
-// we walk the format string once, mirroring `scan_core`'s specifier parsing,
-// and pull one pointer per non-suppressed conversion via the SysV `va_arg`
-// integer path into the same flat `[u64; 8]` array the engine consumes.
 
 use crate::printf::{self, VaList};
 
@@ -278,139 +101,75 @@ use crate::printf::{self, VaList};
 // `LEN_LONG` is 64-bit on LP64.  Only `scan_float` looks at the exact value,
 // because only it can be handed something wider than 64 bits.
 
-/// No modifier: `%d` → `i32`, `%f` → `f32`.
+/// No modifier: `%d` -> `i32`, `%f` -> `f32`.
 const LEN_DEFAULT: u8 = 0;
-/// `l` (and `z`/`j`/`t`, all 64-bit here): `%ld` → `i64`, `%lf` → `f64`.
+/// `l` (and `z`/`j`/`t`, all 64-bit here): `%ld` -> `i64`, `%lf` -> `f64`.
 const LEN_LONG: u8 = 1;
-/// `ll`: `%lld` → `i64`.
+/// `ll`: `%lld` -> `i64`.
 const LEN_LONG_LONG: u8 = 2;
-/// `L`: `%Lf` → a 16-byte x87 `long double`.  On the integer conversions this
+/// `L`: `%Lf` -> a 16-byte x87 `long double`.  On the integer conversions this
 /// behaves like `ll`, matching glibc's treatment of `L` as a deprecated
 /// synonym for `ll` (C leaves it undefined there).
 const LEN_LONG_DOUBLE: u8 = 3;
 
-/// Flatten the destination pointers referenced by `fmt` out of `va` into the
-/// array `_sscanf_impl` expects.
-///
-/// Mirrors `scan_core`: `%*` suppresses (no pointer), `%%` and literal text
-/// consume nothing, an unknown conversion stops the scan (so we stop pulling),
-/// and every other conversion (`d i u x X o s c [ f e g a n`) consumes exactly
-/// one pointer.  At most 8 are stored (the engine's fixed-array contract).
-///
-/// # Safety
-/// `va` must be a valid `va_list` holding pointer arguments matching `fmt`.
-#[allow(clippy::arithmetic_side_effects)]
-unsafe fn va_collect_scanf(fmt: *const u8, va: &mut VaList) -> [u64; 8] {
-    let mut args = [0u64; 8];
-    let mut idx: usize = 0;
+/// Buffer size for reading a line from stdin/stream for scanf/fscanf.
+const SCANF_LINE_BUF: usize = 4096;
 
-    if fmt.is_null() {
-        return args;
+/// Scan `input` against `fmt`, storing through pointers pulled from `args`.
+///
+/// Returns the number of items successfully assigned, or EOF (-1) if the
+/// input is exhausted before the first conversion.
+fn scan_string_source(input: *const u8, fmt: *const u8, args: &mut printf::Args) -> i32 {
+    if input.is_null() || fmt.is_null() {
+        return -1;
     }
 
-    let mut fi: usize = 0;
-    loop {
-        // SAFETY: fmt is NUL-terminated; the loop stops at the NUL.
-        let fc = unsafe { *fmt.add(fi) };
-        if fc == 0 {
-            break;
-        }
-        if fc != b'%' {
-            fi = fi.wrapping_add(1);
-            continue;
-        }
-        fi = fi.wrapping_add(1); // skip '%'
+    let mut ctx = ScanCtx {
+        input,
+        fmt,
+        args,
+        si: 0,       // Position in input string.
+        fi: 0,       // Position in format string.
+        assigned: 0, // Number of successful assignments.
+    };
 
-        let spec = unsafe { *fmt.add(fi) };
-        if spec == 0 {
-            break;
-        }
-        if spec == b'%' {
-            // Literal percent — consumes no argument.
-            fi = fi.wrapping_add(1);
-            continue;
-        }
-
-        // Suppression flag.
-        let suppress = spec == b'*';
-        if suppress {
-            fi = fi.wrapping_add(1);
-        }
-
-        // Field width (digits — never an arg in scanf).
-        while unsafe { *fmt.add(fi) }.is_ascii_digit() {
-            fi = fi.wrapping_add(1);
-        }
-
-        // Length modifiers (consume no args — every scanf argument is a
-        // pointer, so the modifier changes what is *stored*, never the
-        // argument's size).  `L` must be listed even though it is only
-        // meaningful on the float conversions: leaving it in place would make
-        // it read as the conversion character, which matches nothing, so
-        // `%Lf` would silently count zero arguments.
-        match unsafe { *fmt.add(fi) } {
-            b'l' => {
-                fi = fi.wrapping_add(1);
-                if unsafe { *fmt.add(fi) } == b'l' {
-                    fi = fi.wrapping_add(1);
-                }
-            }
-            b'h' => {
-                fi = fi.wrapping_add(1);
-                if unsafe { *fmt.add(fi) } == b'h' {
-                    fi = fi.wrapping_add(1);
-                }
-            }
-            b'L' | b'z' | b'j' | b't' => fi = fi.wrapping_add(1),
-            _ => {}
-        }
-
-        let conv = unsafe { *fmt.add(fi) };
-        if conv == 0 {
-            break;
-        }
-        fi = fi.wrapping_add(1);
-
-        // Skip a scanset body so its contents aren't reparsed as conversions.
-        if conv == b'[' {
-            if unsafe { *fmt.add(fi) } == b'^' {
-                fi = fi.wrapping_add(1);
-            }
-            // A ']' immediately after '[' (or '[^') is a literal set member.
-            if unsafe { *fmt.add(fi) } == b']' {
-                fi = fi.wrapping_add(1);
-            }
-            loop {
-                let c = unsafe { *fmt.add(fi) };
-                if c == 0 || c == b']' {
-                    break;
-                }
-                fi = fi.wrapping_add(1);
-            }
-            if unsafe { *fmt.add(fi) } == b']' {
-                fi = fi.wrapping_add(1);
-            }
-        }
-
-        match conv {
-            b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b's' | b'c' | b'[' | b'f' | b'e' | b'g'
-            | b'a' | b'n' => {
-                if !suppress {
-                    // SAFETY: va contract upheld by the caller.
-                    let v = unsafe { printf::va_arg_int(va) };
-                    if let Some(slot) = args.get_mut(idx) {
-                        *slot = v;
-                    }
-                    idx = idx.wrapping_add(1);
-                }
-            }
-            // Unknown conversion: scan_core stops here, so we stop too.
-            _ => break,
-        }
-    }
-
-    args
+    scan_core(&mut ctx)
 }
+
+/// Read one line from `fd` into a stack buffer and scan it.
+///
+/// Shared by `vscanf` (fd 0) and `vfscanf` (the stream's fd): both differ from
+/// `vsscanf` only in where the bytes come from.
+fn scan_fd_source(fd: i32, fmt: *const u8, args: &mut printf::Args) -> i32 {
+    if fmt.is_null() {
+        return -1;
+    }
+
+    let mut buf = [0u8; SCANF_LINE_BUF];
+    if read_line_from_fd(fd, &mut buf) == 0 {
+        return -1; // EOF
+    }
+
+    scan_string_source(buf.as_ptr(), fmt, args)
+}
+
+// ---------------------------------------------------------------------------
+// va_list support -- the v* scanf family
+// ---------------------------------------------------------------------------
+//
+// `vsscanf`/`vscanf`/`vfscanf` receive an already-initialised `va_list` (which
+// decays to a pointer on the x86_64 System V ABI), so they are plain Rust
+// functions -- host-testable, and the sole route into the engine: the direct
+// `sscanf`/`scanf`/`fscanf` trampolines above synthesise a `va_list` and call
+// straight into these.
+//
+// An earlier design instead flattened the destination pointers into a fixed
+// `[u64; 8]` by pre-walking the format string.  That was strictly worse than
+// printf's equivalent bug (BUG-POSIX-SCANF-ARG-ARRAY-OOB): a ninth conversion
+// read past the array and used whatever stack word it found as a destination
+// pointer *to write through*, turning `sscanf` with nine conversions into an
+// arbitrary stack write.  Pulling each pointer at the point of use removes the
+// array, and with it the bound.
 
 /// `vsscanf(str, fmt, ap)` — `sscanf` with a `va_list`.
 ///
@@ -423,8 +182,8 @@ pub unsafe extern "C" fn vsscanf(input: *const u8, fmt: *const u8, ap: *mut VaLi
         return -1;
     }
     // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let args = unsafe { va_collect_scanf(fmt, &mut *ap) };
-    _sscanf_impl(input, fmt, args.as_ptr())
+    let mut args = unsafe { printf::Args::from_raw(ap) };
+    scan_string_source(input, fmt, &mut args)
 }
 
 /// `vscanf(fmt, ap)` — `scanf` with a `va_list` (reads from stdin).
@@ -437,8 +196,8 @@ pub unsafe extern "C" fn vscanf(fmt: *const u8, ap: *mut VaList) -> i32 {
         return -1;
     }
     // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let args = unsafe { va_collect_scanf(fmt, &mut *ap) };
-    _scanf_impl(fmt, args.as_ptr())
+    let mut args = unsafe { printf::Args::from_raw(ap) };
+    scan_fd_source(0, fmt, &mut args)
 }
 
 /// `vfscanf(stream, fmt, ap)` — `fscanf` with a `va_list`.
@@ -450,9 +209,15 @@ pub unsafe extern "C" fn vfscanf(stream: *mut u8, fmt: *const u8, ap: *mut VaLis
     if ap.is_null() {
         return -1;
     }
+    // The fd must be resolved before the format check so a bad stream is
+    // reported as an error rather than as EOF.
+    let fd = crate::stdio::fileno(stream);
+    if fd < 0 {
+        return -1;
+    }
     // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let args = unsafe { va_collect_scanf(fmt, &mut *ap) };
-    _fscanf_impl(stream, fmt, args.as_ptr())
+    let mut args = unsafe { printf::Args::from_raw(ap) };
+    scan_fd_source(fd, fmt, &mut args)
 }
 
 /// Read bytes from a file descriptor until newline or buffer full.
@@ -490,17 +255,19 @@ fn read_line_from_fd(fd: i32, buf: &mut [u8; SCANF_LINE_BUF]) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Bundles all mutable state for the scanning engine.
-struct ScanCtx {
+///
+/// The destination pointers are not held here: `args` is the caller's live
+/// `va_list`, and each conversion pulls its own pointer out of it as it runs.
+struct ScanCtx<'a, 'v> {
     input: *const u8,
     fmt: *const u8,
-    args: *const u64,
+    args: &'a mut printf::Args<'v>,
     si: usize,
     fi: usize,
-    ai: usize,
     assigned: i32,
 }
 
-impl ScanCtx {
+impl ScanCtx<'_, '_> {
     /// Read the current input byte (0 if past end).
     #[inline]
     fn peek(&self) -> u8 {
@@ -526,12 +293,15 @@ impl ScanCtx {
         self.fi = self.fi.wrapping_add(1);
     }
 
-    /// Consume the next arg pointer.
+    /// Consume the next destination pointer from the caller's `va_list`.
+    ///
+    /// A `va_list` cannot report exhaustion, so a caller that passes fewer
+    /// pointers than `fmt` has conversions gets garbage here exactly as it
+    /// would from glibc.  Every store site null-checks, which at least makes
+    /// the common "passed a NULL" mistake a no-op rather than a fault.
     #[inline]
     fn next_arg(&mut self) -> u64 {
-        let v = unsafe { *self.args.add(self.ai) };
-        self.ai = self.ai.wrapping_add(1);
-        v
+        self.args.int()
     }
 
     /// Skip ASCII whitespace in input.
@@ -560,7 +330,7 @@ fn buf_put(buf: &mut [u8; 64], bi: &mut usize, byte: u8) {
 
 /// Main scan loop.
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
-fn scan_core(ctx: &mut ScanCtx) -> i32 {
+fn scan_core(ctx: &mut ScanCtx<'_, '_>) -> i32 {
     loop {
         let fc = ctx.fmt_peek();
         if fc == 0 {
@@ -743,7 +513,7 @@ fn scan_core(ctx: &mut ScanCtx) -> i32 {
 ///
 /// Always base 10.  Returns true if conversion succeeded (even if suppressed).
 #[allow(clippy::arithmetic_side_effects)]
-fn scan_signed_int(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> bool {
+fn scan_signed_int(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, long_mod: u8) -> bool {
     ctx.skip_ws();
     if ctx.peek() == 0 {
         return false;
@@ -812,7 +582,7 @@ fn scan_signed_int(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8
 /// - `0` (without x) → octal (base 8)
 /// - otherwise → decimal (base 10)
 #[allow(clippy::arithmetic_side_effects)]
-fn scan_signed_int_auto(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> bool {
+fn scan_signed_int_auto(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, long_mod: u8) -> bool {
     ctx.skip_ws();
     if ctx.peek() == 0 {
         return false;
@@ -912,7 +682,7 @@ fn scan_signed_int_auto(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mo
 /// Scan an unsigned integer in a given base.
 #[allow(clippy::arithmetic_side_effects)]
 fn scan_unsigned_int(
-    ctx: &mut ScanCtx,
+    ctx: &mut ScanCtx<'_, '_>,
     suppress: bool,
     width: usize,
     long_mod: u8,
@@ -991,7 +761,7 @@ fn scan_unsigned_int(
 
 /// Scan a whitespace-delimited string.
 #[allow(clippy::arithmetic_side_effects)]
-fn scan_string(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
+fn scan_string(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize) -> bool {
     ctx.skip_ws();
     if ctx.peek() == 0 {
         return false;
@@ -1033,7 +803,7 @@ fn scan_string(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
 
 /// Scan character(s).
 #[allow(clippy::arithmetic_side_effects)]
-fn scan_char(ctx: &mut ScanCtx, suppress: bool, width: usize, has_width: bool) -> bool {
+fn scan_char(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, has_width: bool) -> bool {
     // %c does NOT skip whitespace (unlike %s, %d, etc.).
     let n = if has_width { width } else { 1 };
 
@@ -1074,7 +844,7 @@ fn scan_char(ctx: &mut ScanCtx, suppress: bool, width: usize, has_width: bool) -
 /// Parses `[sign]digits[.digits][e[sign]digits]` and stores as f32
 /// or f64 (depending on length modifier).
 #[allow(clippy::arithmetic_side_effects)]
-fn scan_float(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> bool {
+fn scan_float(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, long_mod: u8) -> bool {
     ctx.skip_ws();
     if ctx.peek() == 0 {
         return false;
@@ -1212,7 +982,7 @@ fn scan_float(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> 
 ///
 /// The scanset is stored as a 256-bit bitmap (32 bytes) for O(1) lookup.
 #[allow(clippy::arithmetic_side_effects)]
-fn scan_scanset(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
+fn scan_scanset(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize) -> bool {
     // %[ does NOT skip whitespace (like %c).
 
     // Build the character class bitmap from the format string.
@@ -1339,13 +1109,49 @@ fn scan_scanset(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
 mod tests {
     use super::*;
 
+    /// Drive `vsscanf` with a synthetic, ABI-shaped `va_list` over `ptrs`.
+    ///
+    /// These tests used to call an `_sscanf_impl` that took a flat pointer
+    /// array — a representation the engine no longer has.  Laying out the real
+    /// System V register save area here means every assertion below exercises
+    /// the same argument path a compiled C caller reaches through the `sscanf`
+    /// trampoline, rather than a test-only shortcut.
+    ///
+    /// Every scanf argument is a pointer, hence INTEGER class: the first six
+    /// go in the GP slots at 0..48 and the rest spill to the overflow area.
+    fn sscanf_va(input: *const u8, fmt: *const u8, ptrs: &[u64]) -> i32 {
+        let mut reg = [0u8; 176];
+        let mut overflow = [0u8; 512];
+
+        for (i, &v) in ptrs.iter().take(6).enumerate() {
+            let off = i * 8;
+            reg[off..off + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        for (i, &v) in ptrs.iter().skip(6).enumerate() {
+            let off = i * 8;
+            assert!(off + 8 <= overflow.len(), "overflow area too small");
+            overflow[off..off + 8].copy_from_slice(&v.to_le_bytes());
+        }
+
+        let mut va = VaList {
+            gp_offset: 0,
+            fp_offset: 48,
+            overflow_arg_area: overflow.as_mut_ptr(),
+            reg_save_area: reg.as_mut_ptr(),
+        };
+        // SAFETY: `va` describes the two buffers above, which outlive the call
+        // and are laid out exactly as the ABI specifies.  No conversion pulls
+        // a float argument, so the XMM half is never consulted.
+        unsafe { vsscanf(input, fmt, &raw mut va) }
+    }
+
     // -- %d signed integer tests --
 
     #[test]
     fn scan_d_basic() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"42\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"42\0".as_ptr(), b"%d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 42);
     }
@@ -1354,7 +1160,7 @@ mod tests {
     fn scan_d_negative() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"-17\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"-17\0".as_ptr(), b"%d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, -17);
     }
@@ -1363,7 +1169,7 @@ mod tests {
     fn scan_d_positive_sign() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"+99\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"+99\0".as_ptr(), b"%d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 99);
     }
@@ -1372,7 +1178,7 @@ mod tests {
     fn scan_d_leading_whitespace() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"   123\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"   123\0".as_ptr(), b"%d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 123);
     }
@@ -1381,7 +1187,7 @@ mod tests {
     fn scan_d_zero() {
         let mut val: i32 = 99;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"0\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"0\0".as_ptr(), b"%d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 0);
     }
@@ -1391,7 +1197,7 @@ mod tests {
         let mut a: i32 = 0;
         let mut b: i32 = 0;
         let args = [&raw mut a as u64, &raw mut b as u64];
-        let n = _sscanf_impl(b"10 20\0".as_ptr(), b"%d %d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"10 20\0".as_ptr(), b"%d %d\0".as_ptr(), &args);
         assert_eq!(n, 2);
         assert_eq!(a, 10);
         assert_eq!(b, 20);
@@ -1401,7 +1207,7 @@ mod tests {
     fn scan_d_stops_at_non_digit() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"42abc\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"42abc\0".as_ptr(), b"%d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 42);
     }
@@ -1410,7 +1216,7 @@ mod tests {
     fn scan_d_empty_input_eof() {
         let mut val: i32 = 99;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"\0".as_ptr(), b"%d\0".as_ptr(), &args);
         assert_eq!(n, -1); // EOF
         assert_eq!(val, 99); // Unchanged.
     }
@@ -1419,7 +1225,7 @@ mod tests {
     fn scan_d_no_digits() {
         let mut val: i32 = 99;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"abc\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"abc\0".as_ptr(), b"%d\0".as_ptr(), &args);
         assert_eq!(n, 0);
         assert_eq!(val, 99);
     }
@@ -1428,7 +1234,7 @@ mod tests {
     fn scan_d_with_width() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"12345\0".as_ptr(), b"%3d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"12345\0".as_ptr(), b"%3d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 123);
     }
@@ -1437,7 +1243,7 @@ mod tests {
     fn scan_ld_long() {
         let mut val: i64 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"999999999999\0".as_ptr(), b"%ld\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"999999999999\0".as_ptr(), b"%ld\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 999_999_999_999i64);
     }
@@ -1448,7 +1254,7 @@ mod tests {
     fn scan_u_basic() {
         let mut val: u32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"65535\0".as_ptr(), b"%u\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"65535\0".as_ptr(), b"%u\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 65535);
     }
@@ -1459,7 +1265,7 @@ mod tests {
     fn scan_x_basic() {
         let mut val: u32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"ff\0".as_ptr(), b"%x\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"ff\0".as_ptr(), b"%x\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 0xFF);
     }
@@ -1468,7 +1274,7 @@ mod tests {
     fn scan_x_prefix() {
         let mut val: u32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"0xFF\0".as_ptr(), b"%x\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"0xFF\0".as_ptr(), b"%x\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 0xFF);
     }
@@ -1477,7 +1283,7 @@ mod tests {
     fn scan_x_upper() {
         let mut val: u32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"DEADBEEF\0".as_ptr(), b"%X\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"DEADBEEF\0".as_ptr(), b"%X\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 0xDEAD_BEEFu32);
     }
@@ -1488,7 +1294,7 @@ mod tests {
     fn scan_o_basic() {
         let mut val: u32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"77\0".as_ptr(), b"%o\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"77\0".as_ptr(), b"%o\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 0o77);
     }
@@ -1499,7 +1305,7 @@ mod tests {
     fn scan_i_decimal() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"42\0".as_ptr(), b"%i\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"42\0".as_ptr(), b"%i\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 42);
     }
@@ -1508,7 +1314,7 @@ mod tests {
     fn scan_i_hex() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"0xff\0".as_ptr(), b"%i\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"0xff\0".as_ptr(), b"%i\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 255);
     }
@@ -1517,7 +1323,7 @@ mod tests {
     fn scan_i_octal() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"010\0".as_ptr(), b"%i\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"010\0".as_ptr(), b"%i\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 8);
     }
@@ -1526,7 +1332,7 @@ mod tests {
     fn scan_i_negative_hex() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"-0x10\0".as_ptr(), b"%i\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"-0x10\0".as_ptr(), b"%i\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, -16);
     }
@@ -1537,7 +1343,7 @@ mod tests {
     fn scan_s_basic() {
         let mut buf = [0u8; 64];
         let args = [buf.as_mut_ptr() as u64];
-        let n = _sscanf_impl(b"hello\0".as_ptr(), b"%s\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"hello\0".as_ptr(), b"%s\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(&buf[..5], b"hello");
         assert_eq!(buf[5], 0);
@@ -1547,7 +1353,7 @@ mod tests {
     fn scan_s_stops_at_whitespace() {
         let mut buf = [0u8; 64];
         let args = [buf.as_mut_ptr() as u64];
-        let n = _sscanf_impl(b"hello world\0".as_ptr(), b"%s\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"hello world\0".as_ptr(), b"%s\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(&buf[..5], b"hello");
         assert_eq!(buf[5], 0);
@@ -1557,7 +1363,7 @@ mod tests {
     fn scan_s_with_width() {
         let mut buf = [0u8; 64];
         let args = [buf.as_mut_ptr() as u64];
-        let n = _sscanf_impl(b"longstring\0".as_ptr(), b"%4s\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"longstring\0".as_ptr(), b"%4s\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(&buf[..4], b"long");
         assert_eq!(buf[4], 0);
@@ -1568,10 +1374,9 @@ mod tests {
         let mut buf1 = [0u8; 64];
         let mut buf2 = [0u8; 64];
         let args = [buf1.as_mut_ptr() as u64, buf2.as_mut_ptr() as u64];
-        let n = _sscanf_impl(
+        let n = sscanf_va(
             b"hello world\0".as_ptr(),
-            b"%s %s\0".as_ptr(),
-            args.as_ptr(),
+            b"%s %s\0".as_ptr(), &args,
         );
         assert_eq!(n, 2);
         assert_eq!(&buf1[..5], b"hello");
@@ -1582,7 +1387,7 @@ mod tests {
     fn scan_s_leading_whitespace() {
         let mut buf = [0u8; 64];
         let args = [buf.as_mut_ptr() as u64];
-        let n = _sscanf_impl(b"  \t  foo\0".as_ptr(), b"%s\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"  \t  foo\0".as_ptr(), b"%s\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(&buf[..3], b"foo");
     }
@@ -1593,7 +1398,7 @@ mod tests {
     fn scan_c_single() {
         let mut ch: u8 = 0;
         let args = [&raw mut ch as u64];
-        let n = _sscanf_impl(b"A\0".as_ptr(), b"%c\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"A\0".as_ptr(), b"%c\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(ch, b'A');
     }
@@ -1602,7 +1407,7 @@ mod tests {
     fn scan_c_no_whitespace_skip() {
         let mut ch: u8 = 0;
         let args = [&raw mut ch as u64];
-        let n = _sscanf_impl(b" X\0".as_ptr(), b"%c\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b" X\0".as_ptr(), b"%c\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(ch, b' ');
     }
@@ -1611,7 +1416,7 @@ mod tests {
     fn scan_c_with_width() {
         let mut buf = [0u8; 8];
         let args = [buf.as_mut_ptr() as u64];
-        let n = _sscanf_impl(b"ABCDE\0".as_ptr(), b"%3c\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"ABCDE\0".as_ptr(), b"%3c\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(&buf[..3], b"ABC");
     }
@@ -1623,10 +1428,9 @@ mod tests {
         let mut val: i32 = 0;
         let mut pos: i32 = 0;
         let args = [&raw mut val as u64, &raw mut pos as u64];
-        let n = _sscanf_impl(
+        let n = sscanf_va(
             b"hello 42\0".as_ptr(),
-            b"%*s %d%n\0".as_ptr(),
-            args.as_ptr(),
+            b"%*s %d%n\0".as_ptr(), &args,
         );
         assert_eq!(n, 1);
         assert_eq!(val, 42);
@@ -1639,7 +1443,7 @@ mod tests {
     fn scan_percent_literal() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"%42\0".as_ptr(), b"%%%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"%42\0".as_ptr(), b"%%%d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 42);
     }
@@ -1648,7 +1452,7 @@ mod tests {
     fn scan_percent_mismatch() {
         let mut val: i32 = 99;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"X42\0".as_ptr(), b"%%%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"X42\0".as_ptr(), b"%%%d\0".as_ptr(), &args);
         assert_eq!(n, 0);
         assert_eq!(val, 99);
     }
@@ -1660,7 +1464,7 @@ mod tests {
         let mut a: i32 = 0;
         let mut b: i32 = 0;
         let args = [&raw mut a as u64, &raw mut b as u64];
-        let n = _sscanf_impl(b"10,20\0".as_ptr(), b"%d,%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"10,20\0".as_ptr(), b"%d,%d\0".as_ptr(), &args);
         assert_eq!(n, 2);
         assert_eq!(a, 10);
         assert_eq!(b, 20);
@@ -1671,7 +1475,7 @@ mod tests {
         let mut a: i32 = 0;
         let mut b: i32 = 99;
         let args = [&raw mut a as u64, &raw mut b as u64];
-        let n = _sscanf_impl(b"10;20\0".as_ptr(), b"%d,%d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"10;20\0".as_ptr(), b"%d,%d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(a, 10);
         assert_eq!(b, 99);
@@ -1683,10 +1487,9 @@ mod tests {
     fn scan_suppression() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(
+        let n = sscanf_va(
             b"ignored 42\0".as_ptr(),
-            b"%*s %d\0".as_ptr(),
-            args.as_ptr(),
+            b"%*s %d\0".as_ptr(), &args,
         );
         assert_eq!(n, 1);
         assert_eq!(val, 42);
@@ -1696,7 +1499,7 @@ mod tests {
     fn scan_suppression_int() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"100 200\0".as_ptr(), b"%*d %d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"100 200\0".as_ptr(), b"%*d %d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 200);
     }
@@ -1705,13 +1508,13 @@ mod tests {
 
     #[test]
     fn scan_null_input() {
-        let n = _sscanf_impl(core::ptr::null(), b"%d\0".as_ptr(), [].as_ptr());
+        let n = sscanf_va(core::ptr::null(), b"%d\0".as_ptr(), &[]);
         assert_eq!(n, -1);
     }
 
     #[test]
     fn scan_null_format() {
-        let n = _sscanf_impl(b"42\0".as_ptr(), core::ptr::null(), [].as_ptr());
+        let n = sscanf_va(b"42\0".as_ptr(), core::ptr::null(), &[]);
         assert_eq!(n, -1);
     }
 
@@ -1721,7 +1524,7 @@ mod tests {
     fn scan_f_basic() {
         let mut val: f32 = 0.0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"3.14\0".as_ptr(), b"%f\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"3.14\0".as_ptr(), b"%f\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert!((val - 3.14).abs() < 0.001, "got {val}");
     }
@@ -1730,7 +1533,7 @@ mod tests {
     fn scan_lf_double() {
         let mut val: f64 = 0.0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"2.718281828\0".as_ptr(), b"%lf\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"2.718281828\0".as_ptr(), b"%lf\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert!((val - 2.718281828).abs() < 1e-9, "got {val}");
     }
@@ -1742,7 +1545,7 @@ mod tests {
         // all 16 bytes of an x87 `long double`.
         let mut val = crate::x87::LongDouble::ZERO;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"2.5\0".as_ptr(), b"%Lf\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"2.5\0".as_ptr(), b"%Lf\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(crate::x87::to_f64(val), 2.5);
     }
@@ -1755,7 +1558,7 @@ mod tests {
         // magnitude and sign to make that failure mode detectable.
         let mut val = crate::x87::from_f64(-1e30);
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"0.125\0".as_ptr(), b"%Lf\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"0.125\0".as_ptr(), b"%Lf\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(crate::x87::to_f64(val), 0.125);
     }
@@ -1765,7 +1568,7 @@ mod tests {
         let mut ld = crate::x87::LongDouble::ZERO;
         let mut num: i32 = 0;
         let args = [&raw mut ld as u64, &raw mut num as u64];
-        let n = _sscanf_impl(b"1.5 7\0".as_ptr(), b"%Lf %d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"1.5 7\0".as_ptr(), b"%Lf %d\0".as_ptr(), &args);
         assert_eq!(n, 2);
         assert_eq!(crate::x87::to_f64(ld), 1.5);
         assert_eq!(num, 7);
@@ -1780,10 +1583,9 @@ mod tests {
         let mut b: i64 = 0;
         let mut c: i64 = 0;
         let args = [&raw mut a as u64, &raw mut b as u64, &raw mut c as u64];
-        let n = _sscanf_impl(
+        let n = sscanf_va(
             b"12 -34 56\0".as_ptr(),
-            b"%zu %jd %td\0".as_ptr(),
-            args.as_ptr(),
+            b"%zu %jd %td\0".as_ptr(), &args,
         );
         assert_eq!(n, 3);
         assert_eq!(a, 12);
@@ -1795,7 +1597,7 @@ mod tests {
     fn scan_f_negative() {
         let mut val: f32 = 0.0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"-1.5\0".as_ptr(), b"%f\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"-1.5\0".as_ptr(), b"%f\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert!((val - (-1.5)).abs() < 0.001, "got {val}");
     }
@@ -1804,7 +1606,7 @@ mod tests {
     fn scan_f_scientific() {
         let mut val: f64 = 0.0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"1.5e3\0".as_ptr(), b"%lf\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"1.5e3\0".as_ptr(), b"%lf\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert!((val - 1500.0).abs() < 0.001, "got {val}");
     }
@@ -1813,7 +1615,7 @@ mod tests {
     fn scan_f_integer() {
         let mut val: f32 = 0.0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"42\0".as_ptr(), b"%f\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"42\0".as_ptr(), b"%f\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert!((val - 42.0).abs() < 0.001, "got {val}");
     }
@@ -1824,7 +1626,7 @@ mod tests {
     fn scan_scanset_basic() {
         let mut buf = [0u8; 64];
         let args = [buf.as_mut_ptr() as u64];
-        let n = _sscanf_impl(b"abc123\0".as_ptr(), b"%[abc]\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"abc123\0".as_ptr(), b"%[abc]\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(&buf[..3], b"abc");
         assert_eq!(buf[3], 0);
@@ -1834,10 +1636,9 @@ mod tests {
     fn scan_scanset_negated() {
         let mut buf = [0u8; 64];
         let args = [buf.as_mut_ptr() as u64];
-        let n = _sscanf_impl(
+        let n = sscanf_va(
             b"hello world\0".as_ptr(),
-            b"%[^ ]\0".as_ptr(),
-            args.as_ptr(),
+            b"%[^ ]\0".as_ptr(), &args,
         );
         assert_eq!(n, 1);
         assert_eq!(&buf[..5], b"hello");
@@ -1848,7 +1649,7 @@ mod tests {
     fn scan_scanset_range() {
         let mut buf = [0u8; 64];
         let args = [buf.as_mut_ptr() as u64];
-        let n = _sscanf_impl(b"abcXYZ\0".as_ptr(), b"%[a-z]\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"abcXYZ\0".as_ptr(), b"%[a-z]\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(&buf[..3], b"abc");
         assert_eq!(buf[3], 0);
@@ -1858,7 +1659,7 @@ mod tests {
     fn scan_scanset_leading_bracket() {
         let mut buf = [0u8; 64];
         let args = [buf.as_mut_ptr() as u64];
-        let n = _sscanf_impl(b"]ab\0".as_ptr(), b"%[]ab]\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"]ab\0".as_ptr(), b"%[]ab]\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(&buf[..3], b"]ab");
     }
@@ -1867,7 +1668,7 @@ mod tests {
     fn scan_scanset_digits() {
         let mut buf = [0u8; 64];
         let args = [buf.as_mut_ptr() as u64];
-        let n = _sscanf_impl(b"12345abc\0".as_ptr(), b"%[0-9]\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"12345abc\0".as_ptr(), b"%[0-9]\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(&buf[..5], b"12345");
         assert_eq!(buf[5], 0);
@@ -1885,10 +1686,9 @@ mod tests {
             &raw mut age as u64,
             &raw mut score as u64,
         ];
-        let n = _sscanf_impl(
+        let n = sscanf_va(
             b"Alice 30 95.5\0".as_ptr(),
-            b"%s %d %f\0".as_ptr(),
-            args.as_ptr(),
+            b"%s %d %f\0".as_ptr(), &args,
         );
         assert_eq!(n, 3);
         assert_eq!(&name[..5], b"Alice");
@@ -1901,7 +1701,7 @@ mod tests {
         let mut a: i32 = 0;
         let mut b: i32 = 99;
         let args = [&raw mut a as u64, &raw mut b as u64];
-        let n = _sscanf_impl(b"42 xyz\0".as_ptr(), b"%d %d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"42 xyz\0".as_ptr(), b"%d %d\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(a, 42);
         assert_eq!(b, 99);
@@ -1914,10 +1714,9 @@ mod tests {
         let mut a: i32 = 0;
         let mut b: i32 = 0;
         let args = [&raw mut a as u64, &raw mut b as u64];
-        let n = _sscanf_impl(
+        let n = sscanf_va(
             b"10\t\t\n  20\0".as_ptr(),
-            b"%d %d\0".as_ptr(),
-            args.as_ptr(),
+            b"%d %d\0".as_ptr(), &args,
         );
         assert_eq!(n, 2);
         assert_eq!(a, 10);
@@ -1928,8 +1727,55 @@ mod tests {
 
     #[test]
     fn scan_empty_format() {
-        let n = _sscanf_impl(b"hello\0".as_ptr(), b"\0".as_ptr(), [].as_ptr());
+        let n = sscanf_va(b"hello\0".as_ptr(), b"\0".as_ptr(), &[]);
         assert_eq!(n, 0);
+    }
+
+    /// Regression for BUG-POSIX-SCANF-ARG-ARRAY-OOB.
+    ///
+    /// The engine used to flatten the destination pointers into a `[u64; 8]`.
+    /// The ninth conversion read one word past that array and stored through
+    /// whatever it found — an arbitrary stack write, not merely a wrong value.
+    /// Twelve conversions here exercise both halves of the argument path: six
+    /// pointers come from the integer register save area and six from the
+    /// overflow area.
+    #[test]
+    fn scan_more_than_eight_conversions() {
+        let mut vals = [0i32; 12];
+        let ptrs: Vec<u64> = vals.iter_mut().map(|v| &raw mut *v as u64).collect();
+        let n = sscanf_va(
+            b"1 2 3 4 5 6 7 8 9 10 11 12\0".as_ptr(),
+            b"%d %d %d %d %d %d %d %d %d %d %d %d\0".as_ptr(),
+            &ptrs,
+        );
+        assert_eq!(n, 12);
+        assert_eq!(vals, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    }
+
+    /// The same past-the-eighth path with mixed conversion widths, so a
+    /// miscounted argument shows up as a corrupted neighbour rather than as an
+    /// off-by-one that happens to land on an identically-typed slot.
+    #[test]
+    fn scan_more_than_eight_mixed_conversions() {
+        let mut a = [0i32; 5];
+        let mut wide = [0i64; 3];
+        let mut buf = [0u8; 8];
+        let mut b = [0i32; 3];
+        let mut ptrs: Vec<u64> = a.iter_mut().map(|v| &raw mut *v as u64).collect();
+        ptrs.extend(wide.iter_mut().map(|v| &raw mut *v as u64));
+        ptrs.push(buf.as_mut_ptr() as u64);
+        ptrs.extend(b.iter_mut().map(|v| &raw mut *v as u64));
+
+        let n = sscanf_va(
+            b"1 2 3 4 5 60 70 80 word 9 10 11\0".as_ptr(),
+            b"%d %d %d %d %d %ld %ld %ld %s %d %d %d\0".as_ptr(),
+            &ptrs,
+        );
+        assert_eq!(n, 12);
+        assert_eq!(a, [1, 2, 3, 4, 5]);
+        assert_eq!(wide, [60, 70, 80]);
+        assert_eq!(&buf[..5], b"word\0");
+        assert_eq!(b, [9, 10, 11]);
     }
 
     #[test]
@@ -1938,7 +1784,7 @@ mod tests {
         let mut b: i32 = 0;
         let mut c: i32 = 0;
         let args = [&raw mut a as u64, &raw mut b as u64, &raw mut c as u64];
-        let n = _sscanf_impl(b"1 2 3\0".as_ptr(), b"%d %d %d\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"1 2 3\0".as_ptr(), b"%d %d %d\0".as_ptr(), &args);
         assert_eq!(n, 3);
         assert_eq!(a, 1);
         assert_eq!(b, 2);
@@ -1949,10 +1795,9 @@ mod tests {
     fn scan_hex_long() {
         let mut val: u64 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(
+        let n = sscanf_va(
             b"0xDEADBEEFCAFE\0".as_ptr(),
-            b"%lx\0".as_ptr(),
-            args.as_ptr(),
+            b"%lx\0".as_ptr(), &args,
         );
         assert_eq!(n, 1);
         assert_eq!(val, 0xDEAD_BEEF_CAFEu64);
@@ -1968,7 +1813,7 @@ mod tests {
         // so backtrack and parse "0" as the hex value 0.
         let mut val: u32 = 99;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"0xG\0".as_ptr(), b"%x\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"0xG\0".as_ptr(), b"%x\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 0);
     }
@@ -1978,7 +1823,7 @@ mod tests {
         // "0" alone should parse as hex value 0.
         let mut val: u32 = 99;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"0\0".as_ptr(), b"%x\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"0\0".as_ptr(), b"%x\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 0);
     }
@@ -1989,7 +1834,7 @@ mod tests {
         // The prefix "0x" would need width >= 3 to be useful.
         let mut val: u32 = 99;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"0xFF\0".as_ptr(), b"%1x\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"0xFF\0".as_ptr(), b"%1x\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 0);
     }
@@ -1999,7 +1844,7 @@ mod tests {
         // "%3x" on "0xFF" — width=3: "0x" prefix (2) + "F" (1) = 3 total.
         let mut val: u32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"0xFF\0".as_ptr(), b"%3x\0".as_ptr(), args.as_ptr());
+        let n = sscanf_va(b"0xFF\0".as_ptr(), b"%3x\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert_eq!(val, 0xF);
     }
@@ -2014,10 +1859,9 @@ mod tests {
         // With saturating arithmetic, it becomes usize::MAX (= "no limit").
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(
+        let n = sscanf_va(
             b"42\0".as_ptr(),
-            b"%99999999999999999999d\0".as_ptr(),
-            args.as_ptr(),
+            b"%99999999999999999999d\0".as_ptr(), &args,
         );
         assert_eq!(n, 1);
         assert_eq!(val, 42);

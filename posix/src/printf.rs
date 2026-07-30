@@ -555,7 +555,11 @@ impl<'a> Args<'a> {
     }
 
     /// Next integer/pointer argument.
-    fn int(&mut self) -> u64 {
+    ///
+    /// Pointers share the INTEGER class on System V, so this is also the only
+    /// accessor `scanf.rs` needs: every scanf conversion consumes exactly one
+    /// destination pointer.
+    pub(crate) fn int(&mut self) -> u64 {
         match self.va.as_deref_mut() {
             // SAFETY: the va_list contract is upheld by `Args::new`.
             Some(va) => unsafe { va_arg_int(va) },

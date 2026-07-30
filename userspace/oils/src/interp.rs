@@ -12631,7 +12631,7 @@ impl Shell {
                     let value_str: &str = if idx == 0 {
                         match s.find('=') {
                             Some(eq) => {
-                                out.extend_from_slice(s[..=eq].as_bytes());
+                                out.extend_from_slice(&s.as_bytes()[..=eq]);
                                 &s[eq + 1..]
                             }
                             // No `=` in the first literal (value came from a later
@@ -25920,9 +25920,7 @@ fn select_menu(items: &[Str], cols_avail: usize) -> Str {
             let width = if pos == 0 { first_indices_len } else { indices_len };
             let Some(item) = items.get(ind) else { break };
             let label = (ind + 1).to_string();
-            for _ in label.len()..width {
-                buf.push(b' ');
-            }
+            buf.resize(buf.len() + width.saturating_sub(label.len()), b' ');
             buf.extend_from_slice(label.as_bytes());
             buf.extend_from_slice(b") ");
             buf.extend_from_slice(item);
@@ -29427,6 +29425,22 @@ mod tests {
     use super::*;
     use crate::parser::parse;
 
+    /// A stored value as text, for assertions. Every value these tests store is
+    /// ASCII, so a value that will not decode is itself a test failure — which
+    /// is why this panics rather than approximating.
+    #[track_caller]
+    fn as_text(v: &Str) -> &str {
+        bytes::as_str(v).expect("test value is not text")
+    }
+
+    /// [`Shell::param_value`] as an owned `String`, for assertions. Same rule as
+    /// [`as_text`]: a value these tests set that will not decode is a failure.
+    #[track_caller]
+    fn pval(sh: &Shell, name: &str) -> Option<String> {
+        sh.param_value(name)
+            .map(|v| String::from_utf8(v).expect("test value is not text"))
+    }
+
     /// Serializes tests that read or mutate the process-global current
     /// working directory. Tests that call `set_current_dir` (the directory-
     /// stack test) and tests that create/glob cwd-relative paths must all
@@ -29616,9 +29630,9 @@ mod tests {
         {
             let _g = env_guard();
             let mut sh = Shell::new();
-            sh.vars.insert("HOSTNAME".to_string(), "preset.local".to_string());
+            sh.vars.insert("HOSTNAME".to_string(), b"preset.local".to_vec());
             sh.import_environment();
-            assert_eq!(sh.vars.get("HOSTNAME").map(String::as_str), Some("preset.local"));
+            assert_eq!(sh.vars.get("HOSTNAME").map(as_text), Some("preset.local"));
         }
         // (2) An inherited environment HOSTNAME wins over OS synthesis.
         {
@@ -29629,7 +29643,7 @@ mod tests {
             }
             let mut sh = Shell::new();
             sh.import_environment();
-            let got = sh.vars.get("HOSTNAME").map(String::as_str);
+            let got = sh.vars.get("HOSTNAME").map(as_text);
             // SAFETY: serialised by `env_guard`; restore before releasing the lock.
             unsafe {
                 std::env::remove_var("HOSTNAME");
@@ -29647,7 +29661,10 @@ mod tests {
             }
             let mut sh = Shell::new();
             sh.import_environment();
-            assert_eq!(sh.vars.get("HOSTNAME").cloned(), system_hostname());
+            assert_eq!(
+                sh.vars.get("HOSTNAME").cloned(),
+                system_hostname().map(String::into_bytes)
+            );
         }
     }
 
@@ -31701,7 +31718,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn select_menu_layout_matches_bash() {
-        let items = |s: &str| -> Vec<String> { s.split(' ').map(str::to_string).collect() };
+        let items = |s: &str| -> Vec<Str> { s.split(' ').map(|w| w.as_bytes().to_vec()).collect() };
+        // The menu is bytes (an item is a *value*); every item here is ASCII.
+        let select_menu = |items: &[Str], width: usize| -> String {
+            String::from_utf8(super::select_menu(items, width)).expect("menu is not text")
+        };
         // A list that fits on one row is transposed into one *column* — the
         // familiar `select` look.
         assert_eq!(select_menu(&items("aaaa bbbb cccc"), 80), "1) aaaa\n2) bbbb\n3) cccc\n");
@@ -33862,7 +33883,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn trap_var(src: &str, var: &str) -> Option<String> {
         let mut sh = Shell::new();
         sh.run_source(src);
-        sh.vars.get(var).cloned()
+        sh.vars.get(var).map(|v| as_text(v).to_string())
     }
 
     #[test]
@@ -33914,7 +33935,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // DEBUG trap. (The `f` call itself fired it once before the body ran, but
         // the trap was not yet installed at that point, so it starts counting at
         // the first `:`.)
-        assert_eq!(sh.vars.get("D").map(String::as_str), Some("2"));
+        assert_eq!(sh.vars.get("D").map(as_text), Some("2"));
     }
 
     #[test]
@@ -35588,7 +35609,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
 
         let mut sh = Shell::new();
-        sh.vars.insert("PATH".to_string(), dir.to_string_lossy().into_owned());
+        sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(&dir));
         let cmds = sh.compgen_path_commands("");
         // The executable is offered by its bare name; the `.json` is not (in
         // either its raw or extension-stripped form).
@@ -35624,8 +35645,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
 
         let mut sh = Shell::new();
-        sh.vars.insert("PATH".to_string(), dir.to_string_lossy().into_owned());
-        assert!(sh.find_in_path("mytool").is_some(), "executable not found in PATH");
+        sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(&dir));
+        assert!(sh.find_in_path(b"mytool").is_some(), "executable not found in PATH");
 
         // A non-executable, plain-named data file. On Unix the missing exec bit
         // must make the search skip it (returning None); on Windows executability
@@ -38482,7 +38503,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The handler has not run yet — only stored.
         assert!(!sh.vars.contains_key("TRAP_MARK"));
         sh.run_exit_trap();
-        assert_eq!(sh.vars.get("TRAP_MARK").map(String::as_str), Some("1"));
+        assert_eq!(sh.vars.get("TRAP_MARK").map(as_text), Some("1"));
         // A second call is a no-op (fires at most once).
         sh.vars.remove("TRAP_MARK");
         sh.run_exit_trap();
@@ -38566,7 +38587,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn trap_err_fires_on_failure() {
         let mut sh = Shell::new();
         sh.run_source("trap 'ERR_HIT=1' ERR\nfalse");
-        assert_eq!(sh.vars.get("ERR_HIT").map(String::as_str), Some("1"));
+        assert_eq!(sh.vars.get("ERR_HIT").map(as_text), Some("1"));
 
         // ERR does not fire for a successful command...
         let mut sh = Shell::new();
@@ -38583,7 +38604,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn trap_debug_fires_before_each_command() {
         let mut sh = Shell::new();
         sh.run_source("trap 'DBG=$((DBG+1))' DEBUG\n:\n:\n:");
-        assert_eq!(sh.vars.get("DBG").map(String::as_str), Some("3"));
+        assert_eq!(sh.vars.get("DBG").map(as_text), Some("3"));
     }
 
     #[test]
@@ -38595,7 +38616,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `return_trap_*` tests for the full matrix.
         let mut sh = Shell::new();
         sh.run_source("set -T\ntrap 'RET=1' RETURN\nf() { :; }\nf");
-        assert_eq!(sh.vars.get("RET").map(String::as_str), Some("1"));
+        assert_eq!(sh.vars.get("RET").map(as_text), Some("1"));
     }
 
     #[test]
@@ -38641,7 +38662,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn run_marker(src: &str, var: &str) -> String {
         let mut sh = Shell::new();
         sh.run_source(src);
-        sh.vars.get(var).cloned().unwrap_or_default()
+        sh.vars.get(var).map(|v| as_text(v).to_string()).unwrap_or_default()
     }
 
     #[test]
@@ -38790,7 +38811,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.last_status = 3;
         sh.run_exit_trap();
         assert_eq!(sh.last_status, 3);
-        assert_eq!(sh.vars.get("MARK").map(String::as_str), Some("1"));
+        assert_eq!(sh.vars.get("MARK").map(as_text), Some("1"));
     }
 
     /// A trap handler runs in the current shell, so its output goes to whatever
@@ -38904,7 +38925,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         ));
         assert_eq!(code, 5);
         assert!(sh.exit_requested());
-        assert_eq!(sh.vars.get("CB").map(String::as_str), Some(" 0"), "one callback, then unwind");
+        assert_eq!(sh.vars.get("CB").map(as_text), Some(" 0"), "one callback, then unwind");
         assert!(sh.arrays.get("arr").is_none_or(BTreeMap::is_empty), "array not assigned");
         assert!(!sh.vars.contains_key("AFTER"), "commands after the mapfile do not run");
         let _ = std::fs::remove_file(&path);
@@ -41685,7 +41706,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(first == 5 || first == 6, "unexpected status {first}");
         assert_eq!(sh.jobs.len(), 1);
         // The pid variable was set to a plausible pid.
-        assert!(sh.vars.get("done_pid").is_some_and(|p| p.parse::<u32>().is_ok()));
+        assert!(
+            sh.vars
+                .get("done_pid")
+                .is_some_and(|p| as_text(p).parse::<u32>().is_ok())
+        );
         let second = sh.run_source("wait -n");
         assert!(second == 5 || second == 6);
         assert_ne!(first, second);
@@ -45069,7 +45094,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Interactive non-login: the rc file only.
         let files = StartupFiles { interactive: true, ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&files), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("bashrc"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("bashrc"));
 
         // A login shell never reads the rc file, and takes the *first* profile
         // that exists — `.bash_profile` is absent, so `.bash_login` wins over
@@ -45077,13 +45102,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.run_source("unset SAW");
         sh.set_login_shell();
         assert_eq!(sh.run_startup_files(&files), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("bash_login"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("bash_login"));
 
         // Adding the earlier name pre-empts it.
         write_startup(&home, ".bash_profile", "SAW=bash_profile");
         sh.run_source("unset SAW");
         assert_eq!(sh.run_startup_files(&files), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("bash_profile"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("bash_profile"));
     }
 
     /// `--noprofile`/`--norc` suppress their own set, and a non-interactive
@@ -45096,12 +45121,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         let norc = StartupFiles { interactive: true, no_rc: true, ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&norc), None);
-        assert_eq!(sh.param_value("SAW"), None);
+        assert_eq!(pval(&sh, "SAW"), None);
 
         // Non-interactive: no rc file even without `--norc`.
         let plain = StartupFiles::default();
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(sh.param_value("SAW"), None);
+        assert_eq!(pval(&sh, "SAW"), None);
 
         // `--rcfile` names a different file, and only an interactive shell uses it.
         write_startup(&home, "my.rc", "SAW=my_rc");
@@ -45109,7 +45134,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let named =
             StartupFiles { interactive: true, rc_file: Some(&rcfile), ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&named), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("my_rc"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("my_rc"));
 
         // Login + `--noprofile`: nothing at all, the rc file included.
         sh.run_source("unset SAW");
@@ -45117,7 +45142,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let noprofile =
             StartupFiles { interactive: true, no_profile: true, ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&noprofile), None);
-        assert_eq!(sh.param_value("SAW"), None);
+        assert_eq!(pval(&sh, "SAW"), None);
     }
 
     /// `$BASH_ENV` is for non-interactive shells, is read *after* any profile,
@@ -45132,20 +45157,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let plain = StartupFiles::default();
         sh.run_source(&format!("BASH_ENV='{home}/env.sh'"));
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("env"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("env"));
 
         // After the profile, so the profile's assignment is the one it appends to.
         sh.run_source("unset SAW");
         sh.set_login_shell();
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("profenv"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("profenv"));
 
         // Never for an interactive shell.
         sh.run_source("unset SAW");
         let inter =
             StartupFiles { interactive: true, no_profile: true, no_rc: true, rc_file: None };
         assert_eq!(sh.run_startup_files(&inter), None);
-        assert_eq!(sh.param_value("SAW"), None);
+        assert_eq!(pval(&sh, "SAW"), None);
 
         // A parameter expansion in the value applies (single quotes here so the
         // *shell running the test* does not expand it first — the point is that
@@ -45153,24 +45178,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         write_startup(&home, "e nv.sh", "SAW=${SAW:-}spaced");
         sh.run_source(&format!("V=nv\nBASH_ENV='{home}/e${{V}}.sh'\nunset SAW"));
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("profenv"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("profenv"));
 
         // …and the result is *not* split on the space in the name, so a path
         // with a space in it is found.
         sh.run_source(&format!("unset SAW\nBASH_ENV='{home}/e nv.sh'"));
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("profspaced"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("profspaced"));
 
         // A leading `~` expands even though it would not inside real double
         // quotes: bash tilde-expands the *result* of the expansion.
         sh.run_source("unset SAW\nBASH_ENV='~/env.sh'");
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("profenv"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("profenv"));
 
         // An empty value, and a name that does not exist, are both silent.
         sh.run_source("unset SAW\nBASH_ENV=");
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("prof"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("prof"));
     }
 
     /// `exit` in a startup file terminates the shell — the caller must not run
@@ -45181,7 +45206,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         write_startup(&home, ".bashrc", "SAW=rc\nexit 7\nSAW=not_reached");
         let files = StartupFiles { interactive: true, ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&files), Some(7));
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("rc"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("rc"));
 
         // `return` stops the file too, but the shell carries on with the status
         // untouched: bash reads these files without `FEVAL_BUILTIN`, so the
@@ -45189,7 +45214,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (mut sh, home) = startup_home("ret");
         write_startup(&home, ".bashrc", "true\nreturn 5\nSAW=not_reached");
         assert_eq!(sh.run_startup_files(&files), None);
-        assert_eq!(sh.param_value("SAW"), None);
+        assert_eq!(pval(&sh, "SAW"), None);
         assert_eq!(sh.last_status, 0);
     }
 
@@ -45203,30 +45228,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // Nothing armed it: not read at all.
         assert_eq!(sh.run_logout_file(), None);
-        assert_eq!(sh.param_value("SAW"), None);
+        assert_eq!(pval(&sh, "SAW"), None);
 
         // A login shell's `exit` arms it, and the file sees the pre-`exit` status.
         sh.set_login_shell();
         assert_eq!(sh.run_source("false; exit 5"), 5);
         assert_eq!(sh.run_logout_file(), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("logout1"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("logout1"));
 
         // Reading it disarms it, so a second call does nothing.
         sh.run_source("unset SAW");
         assert_eq!(sh.run_logout_file(), None);
-        assert_eq!(sh.param_value("SAW"), None);
+        assert_eq!(pval(&sh, "SAW"), None);
 
         // An `exit` *in* the logout file replaces the shell's status.
         write_startup(&home, ".bash_logout", "SAW=lo\nexit 9");
         assert_eq!(sh.run_source("exit 4"), 4);
         assert_eq!(sh.run_logout_file(), Some(9));
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("lo"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("lo"));
 
         // A merely *failing* command in it does not.
         write_startup(&home, ".bash_logout", "SAW=lo2\nfalse");
         assert_eq!(sh.run_source("exit 4"), 4);
         assert_eq!(sh.run_logout_file(), None);
-        assert_eq!(sh.param_value("SAW").as_deref(), Some("lo2"));
+        assert_eq!(pval(&sh, "SAW").as_deref(), Some("lo2"));
     }
 
     /// A startup file that is a directory is reported and skipped, not fatal —

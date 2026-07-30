@@ -7099,9 +7099,18 @@ impl Shell {
                 // Associative literal: `m=([k]=v …)` (m already `declare -A`).
                 // The literal (even the empty `m=()`) gives the array a value.
                 self.array_valued.insert(a.name.clone());
-                if !a.append {
-                    self.assoc.insert(a.name.clone(), Vec::new());
-                }
+                // bash computes the whole literal before it touches the table,
+                // and for a non-append associative one it builds the new table
+                // off to the side and swaps it in. Two things follow, and both
+                // are observable: the values still read the *old* table
+                // (`h=([n]=${h[k]})` keeps the old `h[k]`), and a literal that
+                // fails part-way — a bad `-i` value is the only way — leaves the
+                // table exactly as it was. `+=` binds in place instead, so a
+                // failure there keeps whatever it had already stored.
+                //
+                // `pending` is where a non-append literal's pairs wait; an empty
+                // `m=()` still clears, because the swap happens regardless.
+                let mut pending: Vec<(String, String)> = Vec::new();
                 // bash picks one of two modes from the *first* element, and the
                 // choice governs the whole list:
                 //
@@ -7148,7 +7157,11 @@ impl Shell {
                         let Some(val) = self.apply_value_attrs(&a.name, val) else {
                             return false;
                         };
-                        self.assoc_set(&a.name, key, val, false);
+                        if a.append {
+                            self.assoc_set(&a.name, key, val, false);
+                        } else {
+                            pending.push((key, val));
+                        }
                     }
                 } else {
                     for e in items {
@@ -7159,7 +7172,11 @@ impl Shell {
                                 let Some(val) = self.apply_value_attrs(&a.name, val) else {
                                     return false;
                                 };
-                                self.assoc_set(&a.name, key, val, false);
+                                if a.append {
+                                    self.assoc_set(&a.name, key, val, false);
+                                } else {
+                                    pending.push((key, val));
+                                }
                             }
                             ArrayElem::Positional(w) => {
                                 let word = self.expand_to_string(w);
@@ -7181,6 +7198,12 @@ impl Shell {
                         }
                     }
                 }
+                if !a.append {
+                    self.assoc.insert(a.name.clone(), Vec::new());
+                    for (key, val) in pending {
+                        self.assoc_set(&a.name, key, val, false);
+                    }
+                }
             }
             AssignRhs::Array(items) => {
                 // Indexed literal: positional elements append at the running
@@ -7188,14 +7211,19 @@ impl Shell {
                 // sparsely (a BTreeMap), so gaps between explicit indices are
                 // absent rather than filled with empty strings. The literal
                 // (even the empty `a=()`) gives the array a value.
+                //
+                // Two phases, because bash has two: it expands the *entire*
+                // literal first (so `a=(9 ${a[0]})` still reads the old `a`, and
+                // `a=([${#a[@]}]=x)` still counts the old elements), then clears
+                // a non-append literal, then binds element by element —
+                // evaluating an `-i` value as each is bound. So a literal that
+                // fails part-way leaves both the clearing and the elements before
+                // the failure behind, which is why the second phase writes
+                // straight into the array instead of accumulating.
                 self.array_valued.insert(a.name.clone());
-                let mut elems: BTreeMap<usize, String> = if a.append {
-                    self.arrays.get(&a.name).cloned().unwrap_or_default()
-                } else {
-                    BTreeMap::new()
-                };
-                // Append continues after the highest existing index.
-                let mut next = elems.keys().next_back().map_or(0, |k| k.saturating_add(1));
+                // Phase 1 — expand. `None` is a positional element, which takes
+                // whatever the running index is when it is bound.
+                let mut expanded: Vec<(Option<i64>, String)> = Vec::new();
                 for e in items {
                     match e {
                         ArrayElem::Positional(w) => {
@@ -7204,30 +7232,48 @@ impl Shell {
                             // words before parameter/other expansion.
                             for bw in self.expand_braces_opt(w) {
                                 for v in self.expand_word(&bw, true) {
-                                    let Some(v) = self.apply_value_attrs(&a.name, v) else {
-                                        return false;
-                                    };
-                                    elems.insert(next, v);
-                                    next = next.saturating_add(1);
+                                    expanded.push((None, v));
                                 }
                             }
                         }
                         ArrayElem::Keyed { index, value } => {
                             let idx = self.eval_arith_index(index);
                             let val = self.expand_to_string(value);
-                            let Some(val) = self.apply_value_attrs(&a.name, val) else {
-                                return false;
-                            };
-                            if let Ok(idx) = usize::try_from(idx) {
-                                elems.insert(idx, val);
-                                next = idx.saturating_add(1);
-                            } else {
-                                self.errln(&format!("{}{}: bad array subscript", self.err_prefix(), a.name));
-                            }
+                            expanded.push((Some(idx), val));
                         }
                     }
                 }
-                self.arrays.insert(a.name.clone(), elems);
+                // Phase 2 — clear, then bind.
+                if !a.append {
+                    self.arrays.insert(a.name.clone(), BTreeMap::new());
+                }
+                // Append continues after the highest existing index.
+                let mut next = self
+                    .arrays
+                    .get(&a.name)
+                    .and_then(|elems| elems.keys().next_back().copied())
+                    .map_or(0, |k| k.saturating_add(1));
+                for (idx, val) in expanded {
+                    let Some(val) = self.apply_value_attrs(&a.name, val) else {
+                        return false;
+                    };
+                    let at = match idx {
+                        None => next,
+                        Some(idx) => match usize::try_from(idx) {
+                            Ok(idx) => idx,
+                            Err(_) => {
+                                self.errln(&format!(
+                                    "{}{}: bad array subscript",
+                                    self.err_prefix(),
+                                    a.name
+                                ));
+                                continue;
+                            }
+                        },
+                    };
+                    self.arrays.entry(a.name.clone()).or_default().insert(at, val);
+                    next = at.saturating_add(1);
+                }
             }
         }
         true
@@ -28615,6 +28661,82 @@ mod tests {
         );
         // The control: a good expression of course still stores.
         assert_eq!(run_cmd("declare -i v=7; v=1+1; echo \"[$v]\""), "[2]\n");
+    }
+
+    #[test]
+    fn a_compound_array_literal_binds_in_three_stages() {
+        // A compound assignment expands the *whole* literal first (so the values
+        // still read the array being replaced), then clears a non-append literal,
+        // then binds element by element — evaluating an `-i` value as each is
+        // bound. Only that last stage can fail, and it fails part-way, so the
+        // clearing and the elements before the failure survive. The exception is
+        // a non-append *associative* literal, which bash builds off to the side
+        // and swaps in, making that one shape all-or-nothing.
+        fn run_cmd(src: &str) -> String {
+            let mut sh = Shell::new();
+            sh.set_command_mode();
+            sh.set_interactive_shell(false);
+            let buf = capture_sink();
+            {
+                let mut out = Out::Capture(buf.clone());
+                sh.run_source_out(src, &mut out, 0);
+            }
+            let buf = take_capture(&buf);
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        // Stage 1: the values — and a keyed element's subscript — see the old
+        // array, which they could not if the clearing came first.
+        assert_eq!(run_cmd("a=(1 2)\na=(9 ${a[0]})\necho \"[${a[*]}]\""), "[9 1]\n");
+        assert_eq!(
+            run_cmd("declare -A h=([k]=old)\nh=([n]=${h[k]})\necho \"[${h[n]}]\""),
+            "[old]\n"
+        );
+        assert_eq!(
+            run_cmd("c=(7 7 7)\nc=([${#c[@]}]=x)\necho \"[${!c[*]}]\""),
+            "[3]\n"
+        );
+        // Stage 3, indexed: the clearing and the first element survive the
+        // failure on the second. (The reader is on its own line — the failure is
+        // fatal to the list it is in.)
+        assert_eq!(
+            run_cmd("declare -ia d=(5 6)\n{ d=(1 1/0 3); } 2>/dev/null\necho \"[${d[*]}]\""),
+            "[1]\n"
+        );
+        assert_eq!(
+            run_cmd(
+                "declare -ia e=(7 7)\n{ e=([2]=1 [3]=1/0); } 2>/dev/null\n\
+echo \"[${e[*]}] [${!e[*]}]\""
+            ),
+            "[1] [2]\n"
+        );
+        // `+=` binds in place too, so the append that got through stays.
+        assert_eq!(
+            run_cmd("declare -ia f=(7 7 7)\n{ f+=(1 1/0); } 2>/dev/null\necho \"[${f[*]}]\""),
+            "[7 7 7 1]\n"
+        );
+        // Stage 3, associative `=`: neither the clearing nor the first element
+        // happened — the table is untouched.
+        assert_eq!(
+            run_cmd(
+                "declare -iA g=([a]=9)\n{ g=([x]=1 [y]=1/0); } 2>/dev/null\n\
+echo \"[${g[a]}] [${g[x]-absent}]\""
+            ),
+            "[9] [absent]\n"
+        );
+        // …but `+=` on the same array binds in place, so `x` is there.
+        assert_eq!(
+            run_cmd(
+                "declare -iA i=([a]=9)\n{ i+=([x]=1 [y]=1/0); } 2>/dev/null\n\
+echo \"[${i[a]}] [${i[x]-absent}]\""
+            ),
+            "[9] [1]\n"
+        );
+        // The empty literal still clears, in both flavours.
+        assert_eq!(run_cmd("a=(1 2 3); a=(); echo \"[${a[*]}] ${#a[@]}\""), "[] 0\n");
+        assert_eq!(
+            run_cmd("declare -A m=([k]=v); m=(); echo \"[${m[k]-absent}] ${#m[@]}\""),
+            "[absent] 0\n"
+        );
     }
 
     #[test]

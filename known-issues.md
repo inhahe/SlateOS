@@ -8028,7 +8028,7 @@ construction" was supposed to mean.
 `interp::tests::an_indirect_referents_subscript_is_expanded_and_fatal_when_bad`,
 and `tests/corpus/arith-no-expansion.sh`.
 
-### TD-OILS-ARITH-ARRAY-LITERAL-PARTIAL-COMMIT. A compound array assignment that fails part-way discards the whole literal, where bash keeps what it had already stored — OPEN 2026-07-30
+### TD-OILS-ARITH-ARRAY-LITERAL-PARTIAL-COMMIT. A compound array assignment that fails part-way discards the whole literal, where bash keeps what it had already stored — ✅ RESOLVED 2026-07-30
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::apply_assignment`, the
 `AssignRhs::Array(items)` and `AssignRhs::Assoc(items)` arms.
@@ -8058,14 +8058,40 @@ build a fresh hash table for the assoc-`=` case and swap it in at the end, and t
 bind in place everywhere else. osh currently has the atomic behaviour everywhere,
 which is right for exactly one of the five shapes.
 
-**Proper fix.** Bind elements in place for the three incremental shapes rather
-than accumulating into a local map: clear first for a non-append indexed literal,
-then write each element into `self.arrays` / the assoc table as it is computed, so
-a mid-literal bail-out leaves the partial state behind. Keep the accumulate-then-
-swap shape for the assoc-`=` case, which is the one bash makes atomic. A corpus
-case should pin all five rows above (each probe on its own line), and it is worth
-re-measuring whether anything *other* than a bad `-i` value can fail mid-literal
-— a bad subscript in `[i]=v` currently only warns and skips the element.
+**Fixed (2026-07-30).** Measuring the ordering turned up a *second*, unrelated
+divergence in the same code and named the real structure: a compound assignment
+has three stages, not one.
+
+1. The **whole literal is expanded** — before anything is cleared. Both flavours
+   need this: `a=(1 2); a=(9 ${a[0]})` gives `(9 1)`, `c=(7 7 7);
+   c=([${#c[@]}]=x)` puts `x` at index 3, and `declare -A h=([k]=old);
+   h=([n]=${h[k]})` keeps `old`. osh's indexed path got this right by accident
+   (it accumulated into a local map), but the **associative path cleared the
+   table first**, so `h=([n]=${h[k]})` read an already-emptied `h` and stored
+   the empty string. That was the second bug, and it needed no failure at all to
+   show.
+2. A non-append literal **clears** the variable.
+3. Each element is **bound in turn**, and an `-i` value is evaluated as it is
+   bound — which is the only stage that can fail.
+
+So the fix splits `apply_assignment`'s two literal arms along those stages. The
+indexed arm expands into a `Vec<(Option<i64>, String)>` (`None` = positional,
+taking the running index at bind time), then clears, then writes each element
+straight into `self.arrays` — so a bail-out leaves the clearing and the earlier
+elements behind. The associative arm moves its clearing to *after* the loop and,
+for `=` only, holds the computed pairs in a `pending` vec that is installed once
+the whole list is known; `+=` binds in place as it goes. That reproduces all five
+rows above, including the asymmetry between the two associative forms.
+
+Nothing other than a bad `-i` value can fail mid-literal: a keyed element whose
+subscript is out of range still only warns and skips that element (`continue`),
+which is unchanged.
+
+**Tests.** `interp::tests::a_compound_array_literal_binds_in_three_stages` (all
+three stages, both flavours, both append modes, plus the empty literal) and
+`tests/corpus/array-literal-partial.sh`. The corpus probes read *named* keys
+rather than `${!m[*]}`, because associative key order is bash's hash order and
+osh's insertion order — see TD-OILS-ASSOC-ORDER, which is not this bug.
 
 ### TD-OILS-NAMEREF-ELEM-ARITH-LVALUE. `((ref[i]=v))` through a nameref that names an element writes an element where bash refuses the name — 2026-07-28 — ✅ RESOLVED 2026-07-28
 

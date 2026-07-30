@@ -15,16 +15,49 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $sysroot = Join-Path $PSScriptRoot "sysroot\lib"
 
-Write-Host "=== Building POSIX library (code-model=large) ===" -ForegroundColor Cyan
+# The sysroot is compiled for `x86_64-unknown-none` but *linked into*
+# `x86_64-slateos` programs, so its codegen options must match that target's
+# ABI (toolchain/x86_64-slateos.json), not unknown-none's defaults.  Setting
+# $env:RUSTFLAGS replaces the `[target.x86_64-unknown-none]` rustflags in
+# .cargo/config.toml wholesale, which is what we want here — those are tuned
+# for the kernel and the bare-metal services, which really are soft-float.
+#
+#   code-model=large        unknown-none defaults to `kernel`; our programs
+#                           are loaded high, so they need `large`.
+#   relocation-model=static unknown-none is PIE-by-default, so libc.a came
+#                           out PIC and only linked because lld happened to
+#                           relax the GOT/TLS accesses at static-link time.
+#                           x86_64-slateos is `relocation-model: static`
+#                           with PIE off; match it rather than rely on that.
+#   +sse,+sse2,-soft-float  THE IMPORTANT ONE.  `x86_64-unknown-none` is
+#                           `-sse,+soft-float`, so every libc function with a
+#                           float in its signature was compiled to the
+#                           soft-float ABI: `strtod`/`strtof`/`atof`/
+#                           `difftime` returned their result in %rax and
+#                           printf's `%f` read varargs from the wrong place.
+#                           Callers are x86_64-slateos (`+sse,+sse2`) and C
+#                           fixtures built by `zig cc` (SSE2 is x86-64
+#                           baseline), which all read %xmm0 — so every one of
+#                           those calls silently returned garbage.  See
+#                           BUG-SYSROOT-SOFT-FLOAT-ABI in known-issues.md.
+$sysrootFlags = "-C code-model=large " +
+                "-C relocation-model=static " +
+                "-C target-feature=+sse,+sse2,-soft-float"
+
+Write-Host "=== Building POSIX library ($sysrootFlags) ===" -ForegroundColor Cyan
 Push-Location (Join-Path $root "posix")
-$env:RUSTFLAGS = "-C code-model=large"
+$env:RUSTFLAGS = $sysrootFlags
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "posix build failed" }
 Pop-Location
 
 Write-Host ""
+# Same flags: libstubs.a is linked into the same x86_64-slateos programs, so
+# it needs the same ABI.  ($env:RUSTFLAGS is still set from above; assigning
+# it again makes that deliberate rather than incidental.)
 Write-Host "=== Building stubs library ===" -ForegroundColor Cyan
 Push-Location (Join-Path $PSScriptRoot "stubs")
+$env:RUSTFLAGS = $sysrootFlags
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "stubs build failed" }
 Pop-Location

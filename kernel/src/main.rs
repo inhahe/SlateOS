@@ -1615,6 +1615,16 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: child-thread ELF TLS (ring 3) self-test failed: {:?}", e);
     }
 
+    // The sysroot is compiled for x86_64-unknown-none (soft-float) but linked
+    // into x86_64-slateos programs and zig-cc C objects (both hard-float), so
+    // every libc function with a float in its signature used to return its
+    // result in the wrong register. Nothing catches that at link time — an ABI
+    // mismatch has no symbol to complain about — so this C fixture checks it
+    // from the far side of the boundary. Bounded yield loop; can never hang.
+    if let Err(e) = proc::spawn::self_test_clibc_float() {
+        serial_println!("WARNING: libc float ABI (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
     // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
     // memfs and exits with the byte count read back, proving the full path

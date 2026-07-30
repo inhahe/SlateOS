@@ -6572,6 +6572,132 @@ pub fn self_test_ctls_thread() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test that the sysroot's **float ABI** matches its
+/// callers'.
+///
+/// The posix crate is compiled for `x86_64-unknown-none`, whose target spec is
+/// `-sse,+soft-float`, but the `libc.a` it produces is linked into
+/// `x86_64-slateos` programs (`+sse,+sse2`) and into C objects built by
+/// `zig cc` (SSE2 is x86-64 baseline).  Under the SysV x86-64 ABI a `double`
+/// is returned in `%xmm0` and passed in `%xmm0`-`%xmm7`; under soft-float LLVM
+/// uses the general-purpose registers and compiler-rt helpers instead.  So
+/// every libc function with a float in its signature had a silently mismatched
+/// ABI — `difftime` computed an integer difference and returned it via `%rax`,
+/// while its caller read `%xmm0` and got whatever happened to be there.
+/// `strtod`, `strtof` and `atof` were wrong the same way, and `printf("%f")`
+/// read its varargs from a register save area a soft-float build never emits.
+///
+/// Nothing caught it, because both sides compiled and linked cleanly: an ABI
+/// mismatch has no symbol to complain about.  `toolchain/build-sysroot.ps1`
+/// now forces `-C target-feature=+sse,+sse2,-soft-float` on the sysroot build,
+/// and this test is what keeps it that way.
+///
+/// The fixture (`services/ctest-libc-float/ctest-libc-float.elf`) is plain C
+/// on purpose: the bug is a *cross-toolchain* boundary, so the caller has to
+/// be built by a different compiler than the callee.  A Rust caller from this
+/// workspace would prove nothing — and LLVM could see through the call
+/// entirely.  It exercises both directions (returns via `strtod`/`strtof`/
+/// `atof`/`difftime`, arguments via `snprintf("%f", …)` including a mixed
+/// integer/float vararg list, where the two argument classes are counted
+/// separately by the ABI).
+///
+/// Exit code 42 means every check passed; any other code names the failing
+/// step (see the FAIL diagnostic below and `services/ctest-libc-float/main.c`).
+pub fn self_test_clibc_float() -> KernelResult<()> {
+    let ctest_elf = match load_test_elf("ctest-libc-float") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP ctest-libc-float: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+
+    serial_println!(
+        "[spawn] Running libc float-ABI (ring 3, C) integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after all of its float checks pass.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-libc-float"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-libc-float",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-libc-float spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Straight-line arithmetic with no blocking calls, but keep the same
+    // bounded budget the other ring-3 fixtures use so a fault can't wedge boot.
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-libc-float (ring 3) — expected Zombie, got {:?}. This \
+             fixture does nothing that can block, so a non-zombie state means it faulted: \
+             most likely an SSE instruction trapped because the sysroot and the program \
+             disagree about whether SSE is available at all",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-libc-float (ring 3) — reached Zombie but exit code was \
+             {:?}, expected {}. Codes: 10/12/13 = strtod returned the wrong value (the \
+             signature of a soft-float sysroot: the callee wrote %rax, we read %xmm0), \
+             11/15 = strtod's endptr is wrong, 14 = strtod stopped at the wrong place, \
+             20/21 = atof, 30/31 = strtof, 40/41 = difftime (the purest return-register \
+             test — integer arguments, double result), 142 = difftime(0,0) != 0, \
+             50/52/54 = snprintf formatted a double wrongly (varargs *argument* \
+             direction), 51/53/55 = snprintf's return length disagrees with the string it \
+             wrote, 60 = the format/parse round trip lost the value. See \
+             BUG-SYSROOT-SOFT-FLOAT-ABI in known-issues.md",
+            exit_code, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   libc float ABI (ring 3: a C caller built by zig cc agrees with the \
+         sysroot on %xmm0 returns from strtod/strtof/atof/difftime and on varargs doubles \
+         through snprintf): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that fastpy **pure-mode file I/O** works on-target.
 ///
 /// This is the first proof that the whole pure-mode file path runs natively on

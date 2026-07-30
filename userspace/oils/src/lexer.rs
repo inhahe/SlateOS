@@ -23,12 +23,22 @@ pub struct LexError {
     /// opening line, and stamping only ever *fills* a `None` — so the innermost
     /// construct, which fails first, keeps its line as the error unwinds.
     pub line: Option<u32>,
+    /// The delimiter the lexer was still looking for, for the "unexpected EOF"
+    /// errors that name one — the same character the message quotes back.
+    ///
+    /// Kept structurally rather than re-parsed out of `msg` because it is not
+    /// only a diagnostic: history expansion has to know which quote the reader is
+    /// *inside* when it expands a continuation line, and this is where that
+    /// answer lives (see [`open_quote`]). An error propagates outward untouched,
+    /// so the innermost unclosed construct — the one that failed first — is the
+    /// one whose delimiter survives, which is the one wanted.
+    pub looking_for: Option<char>,
 }
 
 impl LexError {
     /// A lexer error with no line preference; the caller's fallback applies.
     pub(crate) fn new(msg: impl Into<String>) -> Self {
-        Self { msg: msg.into(), line: None }
+        Self { msg: msg.into(), line: None, looking_for: None }
     }
 
     /// Fill in the reporting line if the raise site did not already choose one.
@@ -50,7 +60,11 @@ impl core::fmt::Display for LexError {
 /// looking for matching `)'` — a single backtick, the closing char, then a
 /// single quote — so a `$(`/`(` reports `)`, `${` reports `}`, `"` reports `"`.
 fn eof_matching(close: char) -> LexError {
-    LexError::new(format!("unexpected EOF while looking for matching `{close}'"))
+    LexError {
+        msg: format!("unexpected EOF while looking for matching `{close}'"),
+        line: None,
+        looking_for: Some(close),
+    }
 }
 
 /// Shell operators recognised outside of words.
@@ -431,6 +445,36 @@ pub fn tokenize_deferred(src: &str, opts: LexOpts) -> Tokenized {
     // the ones past the cut simply describe text no caller will slice; leaving
     // them costs nothing and keeps the list a faithful record of the whole scan.
     Tokenized { toks, lines, offsets, ends, conts, err: Some((e, line)) }
+}
+
+/// Which quote, if any, the reader is still *inside* after `src` — `Some('\'')`
+/// or `Some('"')` when the input ended within an unclosed single- or
+/// double-quoted span, `None` otherwise.
+///
+/// This exists for history expansion. readline expands each physical line of a
+/// multi-line command with `history_quoting_state` set from the reader's
+/// delimiter stack, so a `!` on a continuation line is expanded knowing it sits
+/// inside a quote opened on an earlier line: bash's `!` is inert in `'…'` and
+/// live (but with `\!` left alone) in `"…"`, and that stays true across the
+/// newline. Resetting the state per line — which is what osh did before this
+/// existed — makes `echo 'a` / `!!'` expand a `!!` bash leaves literal.
+///
+/// The delimiter is read out of the deferred lexer error, which is the only
+/// place that knows it, and it is filtered to the two quote characters because
+/// those are the only states readline tracks: an unclosed `$(`, `${`, `(` or
+/// **backtick** yields `None`. That is not a simplification but the measured
+/// behaviour — a quote opened inside `$( … )` *is* carried (bash recurses into
+/// the parser there, pushing the inner quote) while one opened inside a
+/// backtick body is *not* (that body is scanned as a flat matched pair), and
+/// reporting only the innermost unclosed delimiter reproduces both, since the
+/// backtick scan never descends into the quote to begin with.
+#[must_use]
+pub fn open_quote(src: &str, opts: LexOpts) -> Option<char> {
+    let (err, _line) = tokenize_deferred(src, opts).err?;
+    match err.looking_for {
+        Some(q @ ('\'' | '"')) => Some(q),
+        _ => None,
+    }
 }
 
 /// Like [`tokenize_spanned`] but reports an unterminated here-document (its
@@ -2291,6 +2335,34 @@ mod tests {
         );
         toks.pop();
         toks
+    }
+
+    /// [`open_quote`] — the reader state history expansion needs. The `$(` vs
+    /// backquote split is bash's own and is the reason this reports only the
+    /// *innermost* unclosed delimiter (see the function's docs).
+    #[test]
+    fn open_quote_reports_the_innermost_unclosed_quote() {
+        let q = |src: &str| super::open_quote(src, LexOpts::default());
+        assert_eq!(q("echo 'x\n"), Some('\''));
+        assert_eq!(q("echo \"x\n"), Some('"'));
+        // A quote inside `$( … )` is the reader's state; one inside a backquote
+        // body is not, because that body is scanned as a flat matched pair and
+        // so the backtick is what the lexer is still looking for.
+        assert_eq!(q("echo $(echo 'x\n"), Some('\''));
+        assert_eq!(q("echo `echo 'y\n"), None);
+        // Innermost wins over the construct enclosing it — but a `'` inside a
+        // double-quoted string is not a quote at all, so the state stays `"`.
+        // (readline's *in-line* scan does toggle on it, which is a separate rule
+        // and is why `echo "a 'b` / `c' !!` leaves the `!!` literal.)
+        assert_eq!(q("echo \"a 'b\n"), Some('"'));
+        assert_eq!(q("echo $(echo \"a 'b\n"), Some('"'));
+        // Everything that is not a quote reports nothing, including the other
+        // unclosed constructs and a plain incomplete compound command.
+        for src in ["echo $(x\n", "echo ${x\n", "if true; then\n", "echo x |\n", "echo x \\\n"] {
+            assert_eq!(q(src), None, "{src:?}");
+        }
+        // A complete line has no state to carry.
+        assert_eq!(q("echo 'x'\n"), None);
     }
 
     /// `extglob` is a lexing option, so with it off `@(` is an ordinary `@` word

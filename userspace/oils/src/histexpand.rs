@@ -27,6 +27,19 @@ pub struct HistCtx<'a> {
     /// a negated extended-glob pattern rather than an event designator. See
     /// [`inhibited`].
     pub extglob: bool,
+    /// The quote the reader is already *inside* when this line is expanded, for
+    /// the continuation lines of a multi-line command — readline's
+    /// `history_quoting_state`, which bash sets from its delimiter stack before
+    /// each `history_expand` call. `Some('\'')` makes the whole line inert;
+    /// `Some('"')` keeps expansion live but suppresses the `#`-comment rule and
+    /// leaves `\!` as two characters. `None` for a first line, and for callers
+    /// with no reader context (`history -p`, which bash likewise expands with a
+    /// cleared state).
+    ///
+    /// Without this a quote is silently closed at each newline, so `echo 'a`
+    /// followed by `!!'` expands a `!!` that bash passes through literally.
+    /// See [`crate::lexer::open_quote`], which computes it.
+    pub open_quote: Option<char>,
 }
 
 impl HistCtx<'_> {
@@ -507,10 +520,13 @@ pub fn expand(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
     let mut i = 0usize;
     let mut changed = false;
     let mut print_only = false;
-    let mut in_single = false;
+    // Seeded from the reader's delimiter stack, not from zero: a quote opened on
+    // an earlier physical line of the same command is still open here. See
+    // `HistCtx::open_quote`.
+    let mut in_single = ctx.open_quote == Some('\'');
     // Tracked *only* for the comment rule below — a `!` in a double-quoted string
     // is still expanded, because the rewrite happens before quote removal.
-    let mut in_double = false;
+    let mut in_double = ctx.open_quote == Some('"');
     let last_subst = last;
 
     while let Some(&c) = chars.get(i) {
@@ -725,7 +741,7 @@ mod tests {
     use super::*;
 
     fn ctx(entries: &[String]) -> HistCtx<'_> {
-        HistCtx { entries, base: 1, extglob: false }
+        HistCtx { entries, base: 1, extglob: false, open_quote: None }
     }
 
     fn hist(items: &[&str]) -> Vec<String> {
@@ -745,6 +761,50 @@ mod tests {
             Expansion::Unchanged => line.to_string(),
             Expansion::PrintOnly(s) => panic!("unexpected print-only: {s}"),
             Expansion::NotFound(e) => panic!("unexpected not-found: {e}"),
+        }
+    }
+
+    /// `HistCtx::open_quote` — readline's `history_quoting_state`. Every case
+    /// was measured by feeding the two lines to `bash --norc --noprofile` as a
+    /// script with `set -o history; set -H` and `echo one` recorded before them.
+    #[test]
+    fn a_carried_quote_state_is_honoured() {
+        let h = hist(&["echo one"]);
+        let with = |q: Option<char>, line: &str| {
+            let c = HistCtx { entries: &h, base: 1, extglob: false, open_quote: q };
+            expand1(line, &c)
+        };
+        // Inside a carried single quote the whole line is inert, so even an
+        // event that does not exist is not an error…
+        for line in ["!!'", "!! z'", "!zz'"] {
+            assert!(matches!(with(Some('\''), line), Expansion::Unchanged), "{line}");
+        }
+        // …but only up to the quote's close: what follows expands normally.
+        match with(Some('\''), "y' !!") {
+            Expansion::Changed(s) => assert_eq!(s, "y' echo one"),
+            other => panic!("expected an expansion past the close, got {other:?}"),
+        }
+        // A carried double quote leaves expansion live — including the rule that
+        // a `#` inside quotes does not start a comment, so the `!!` after one is
+        // still reached.
+        match with(Some('"'), "#!!") {
+            Expansion::Changed(s) => assert_eq!(s, "#echo one"),
+            other => panic!("expected a quoted # not to comment, got {other:?}"),
+        }
+        // …and a lone `!` before the closing quote is still literal, because `"`
+        // is one of the characters a bare `!` may precede.
+        assert!(matches!(with(Some('"'), "!\""), Expansion::Unchanged));
+        // The `^old^new^` rewrite is still performed inside a carried quote —
+        // the `!!` it prefixes is simply quoted, so the literal spec is what
+        // runs and nothing is echoed.
+        match with(Some('\''), "^one^two^'") {
+            Expansion::ChangedQuietly(s) => assert_eq!(s, "!!:s^one^two^'"),
+            other => panic!("expected a quiet rewrite, got {other:?}"),
+        }
+        // With no carried state the same lines expand (or fail) as first lines.
+        match with(None, "!!'") {
+            Expansion::Changed(s) => assert_eq!(s, "echo one'"),
+            other => panic!("expected a first-line expansion, got {other:?}"),
         }
     }
 
@@ -887,7 +947,7 @@ mod tests {
     fn shell_syntax_inhibits_expansion() {
         let h = hist(&["one"]);
         let unchanged = |line: &str, extglob: bool| {
-            let c = HistCtx { entries: &h, base: 1, extglob };
+            let c = HistCtx { entries: &h, base: 1, extglob, open_quote: None };
             matches!(expand1(line, &c), Expansion::Unchanged)
         };
         // `$!` is the last background pid — including after a `$$`.
@@ -988,7 +1048,7 @@ mod tests {
     fn a_comment_makes_the_rest_of_the_line_literal() {
         let h = hist(&["one"]);
         let unchanged = |line: &str| {
-            let c = HistCtx { entries: &h, base: 1, extglob: false };
+            let c = HistCtx { entries: &h, base: 1, extglob: false, open_quote: None };
             matches!(expand1(line, &c), Expansion::Unchanged)
         };
         // At index 0, and after each of readline's `history_word_delimiters`.
@@ -1014,7 +1074,7 @@ mod tests {
         assert!(!unchanged("echo \"text # !q\""), "a quoted # should not comment");
         assert!(!unchanged(": '#' !q"), "a quoted # should not comment");
         // A comment only shields what follows it: an earlier `!` still expands.
-        let c = HistCtx { entries: &h, base: 1, extglob: false };
+        let c = HistCtx { entries: &h, base: 1, extglob: false, open_quote: None };
         match expand1("echo !! # !q", &c) {
             Expansion::Changed(s) => assert_eq!(s, "echo one # !q"),
             _ => panic!("expected the leading !! to expand"),
@@ -1189,6 +1249,7 @@ mod tests {
             entries: &entries,
             base: 5,
             extglob: false,
+            open_quote: None,
         };
         match expand1("!5", &c) {
             Expansion::Changed(s) => assert_eq!(s, "five"),

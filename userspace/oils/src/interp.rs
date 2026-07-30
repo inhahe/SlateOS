@@ -3597,6 +3597,12 @@ impl Shell {
                     entries: &self.history,
                     base: self.hist_base,
                     extglob: self.shopt.get("extglob").copied().unwrap_or(false),
+                    // The lines already read are the reader's delimiter stack, so
+                    // a quote they left open is one this line is *inside*. bash
+                    // hands readline the same information through
+                    // `history_quoting_state`; without it a `!!` on the second
+                    // line of `echo 'a` / `!!'` would expand.
+                    open_quote: crate::lexer::open_quote(&accum, opts),
                 };
                 crate::histexpand::expand(&raw.text, &ctx, &mut last)
             };
@@ -16690,10 +16696,14 @@ impl Shell {
                 let mut last = std::mem::take(&mut self.hist_last_subst);
                 let expanded = {
                     let ctx = HistCtx {
-                    entries: &self.history,
-                    base: self.hist_base,
-                    extglob: self.shopt.get("extglob").copied().unwrap_or(false),
-                };
+                        entries: &self.history,
+                        base: self.hist_base,
+                        extglob: self.shopt.get("extglob").copied().unwrap_or(false),
+                        // `history -p` is not the reader: bash expands each
+                        // operand with a cleared quoting state, so an unclosed
+                        // quote in one operand does not reach the next.
+                        open_quote: None,
+                    };
                     crate::histexpand::expand(a, &ctx, &mut last)
                 };
                 self.hist_last_subst = last;

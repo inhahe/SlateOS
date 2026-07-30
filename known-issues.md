@@ -8686,7 +8686,7 @@ measurement above.
 `quick_substitution_keeps_what_follows_the_delimiter` and
 `quick_substitution_failures_name_the_rewritten_spec`.
 
-### TD-OILS-HISTEXPAND-LINE-QUOTE-STATE. history expansion resets the quote state at every physical line, so a `!` on a continuation line is judged out of context — OPEN 2026-07-29
+### TD-OILS-HISTEXPAND-LINE-QUOTE-STATE. history expansion resets the quote state at every physical line, so a `!` on a continuation line is judged out of context — ✅ RESOLVED 2026-07-29
 
 **Where:** `userspace/oils/src/histexpand.rs` — `expand()` starts every call with
 `in_single`/`in_double` false; `userspace/oils/src/interp.rs` —
@@ -8717,19 +8717,81 @@ The last row is the interesting one: a quote opened inside a `` ` `` body does
 matched pair, while `$( … )` recurses into the parser and does push its inner
 quotes. Backslash continuations, `$( … )` and compound commands already agree.
 
-**Proper fix.** The delimiter is what the lexer was looking for when the input
-ran out, so `LexError` should carry it structurally (it is already in the message
-text that `eof_matching` builds) and `lexer.rs` should expose an
-`open_quote(src, opts) -> Option<char>` over `tokenize_deferred`. Innermost wins,
-which the existing never-overwrite discipline on `LexError::line` already gives.
-`expand_history_lines` then passes `open_quote(&accum, opts)` into a new
-`HistCtx` field, and `expand()` seeds `in_single`/`in_double` from it. The in-line
-rules stay as they are — readline toggles single quotes even inside double ones,
-which osh already does, and which is why `echo "a 'b` / `c' !!"` agrees today.
+**Fix (2026-07-29).** `LexError` now carries the delimiter it was still looking
+for (`looking_for`), set in the single `eof_matching` funnel, and `lexer.rs`
+exposes `open_quote(src, opts) -> Option<char>` over `tokenize_deferred`.
+`expand_history_lines` passes `open_quote(&accum, opts)` into the new
+`HistCtx::open_quote`, and `expand()` seeds `in_single`/`in_double` from it;
+`history -p` passes `None`, since bash expands each operand with a cleared state.
 
-Note the interaction with `Expansion::ChangedQuietly`
-(TD-OILS-HISTEXPAND-QUICKSUB above): the `^one^two^` row is the case that variant
-exists for, and is currently unreachable.
+Two properties of the existing lexer make this fall out rather than needing
+special cases. The error propagates outward untouched, so the *innermost*
+unclosed construct — the one that failed first — is the one whose delimiter
+survives; and `read_backtick` scans its body as one flat span while
+`read_balanced` (the `$( … )` scanner) descends into quotes. Filtering the
+answer to `'` and `"` therefore reproduces bash's `$(`-vs-backquote split
+exactly: `echo $(echo 'x` carries the `'`, `` echo `echo 'y `` carries nothing.
+
+Note that a `'` inside a double-quoted string is not a quote, so `echo "a 'b`
+carries `"`. readline's *in-line* scan does toggle on it, which is a separate
+rule osh already had — and is why `echo "a 'b` / `c' !!` leaves the `!!`
+literal. The in-line rules were not touched.
+
+This is also what makes `Expansion::ChangedQuietly`
+(TD-OILS-HISTEXPAND-QUICKSUB above) reachable: the `^one^two^` row is its only
+case.
+
+**Tests.** `tests/corpus/histexpand-continuation.sh` (new) covers nine of the
+ten measured shapes, plus unit tests
+`histexpand::tests::a_carried_quote_state_is_honoured` and
+`lexer::tests::open_quote_reports_the_innermost_unclosed_quote`.
+
+**Discovered while measuring:** the tenth row of the table above is wrong. A
+backslash continuation does *not* agree — see TD-OILS-HISTEXPAND-BACKSLASH-LINE
+below, which is a separate bug in the reader's frontier rather than in the quote
+state, and which this change neither caused nor fixed.
+
+### TD-OILS-HISTEXPAND-BACKSLASH-LINE. A line ending in `\` is treated as complete, so the continuation line after it never reaches history expansion — OPEN 2026-07-29
+
+**Where:** `userspace/oils/src/interp.rs` — `needs_more_lines()`, and through it
+the loop in `expand_history_lines()`.
+
+**What.** With `set -o history; set -H` and `echo one` recorded:
+
+```
+echo x \
+!!
+```
+
+bash prints `x echo one` (echoing the rewritten `echo one` first); osh prints
+`x !!` and echoes nothing.
+
+The reader loop in `expand_history_lines` offers one physical line at a time and
+stops as soon as `needs_more_lines(&accum)` says the lines so far form a runnable
+command. `needs_more_lines` answers by parsing, and the lexer *deletes* a
+`\<newline>` as a line continuation — so `"echo x \\\n"` parses as the
+complete command `echo x`, the loop returns, and the `!!` on the next line is never
+offered. The parser then joins the two lines itself and runs the `!!` literally.
+
+Note this is *not* the quote-state bug (TD-OILS-HISTEXPAND-LINE-QUOTE-STATE,
+resolved above): `lexer::open_quote` correctly reports `None` here, and the
+continuation line simply never gets expanded at all. It is the reader's
+*frontier* that is wrong, not the context it expands in.
+
+**Proper fix.** A trailing unescaped `\` means the reader needs another line
+regardless of what the joined text parses as, which is exactly what bash's
+`\<newline>`-at-end-of-input handling does. `lexer.rs` already has the predicate
+(`ends_with_continuation`, currently private); `needs_more_lines` should return
+`true` when the final physical line of `src` ends in one. Note the check has to
+be on the *last* line of the accumulated text and must not fire for a `\` that is
+itself inside `'…'` or a quoted here-document delimiter, where the lexer does not
+delete it — the `conts` list `tokenize_deferred` already returns records exactly
+which backslashes were deleted, so an offset-based check against it is the
+faithful test rather than a textual one.
+
+**Test to add.** The section removed from
+`tests/corpus/histexpand-continuation.sh` (the `echo x \` / `!!` case), which is
+measured and ready to paste back.
 
 ### TD-OILS-FD0-WRITE. fd 0 has no write side, so `>&0` silently writes to stdout instead of the descriptor — ✅ RESOLVED 2026-07-28
 

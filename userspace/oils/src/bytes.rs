@@ -18,6 +18,10 @@
 //!   one character.
 //! * [`bfmt!`] — a concatenating byte-string builder, because `format!` has no
 //!   byte-string counterpart and `Display for BStr` is *lossy*.
+//! * [`Ch`] — the *character* of a byte string, for the operations bash defines
+//!   over characters rather than bytes (glob's `?`, `${#v}`, `${v^^}`).
+//! * [`os_to_bytes`] / [`bytes_to_path`] — the boundary with `std::fs`, where a
+//!   filesystem name becomes a shell value and back.
 //!
 //! **Names are not values.** Variable, function and option names stay `String`:
 //! the grammar already restricts them to the portable character set, and
@@ -341,6 +345,56 @@ pub fn from_chars<I: IntoIterator<Item = Ch>>(chars: I) -> Str {
         c.push_to(&mut out);
     }
     out
+}
+
+/// A host path/OS string as shell bytes.
+///
+/// SlateOS is `target-family = ["unix"]` (see `toolchain/x86_64-slateos.json`),
+/// so on the real target this is the identity: `OsStr` *is* the byte sequence
+/// the kernel handed back, and a directory entry named `a\xffb` survives
+/// `read_dir` → glob → `open` unchanged. That round trip is the entire point of
+/// TD-OILS-BYTE-STRINGS.
+///
+/// The Windows *development* host is the exception, and unavoidably so: its
+/// filesystem names are UTF-16, not bytes, so there is no byte sequence to
+/// recover and `to_string_lossy` is the only thing to do. It costs nothing in
+/// practice — a Windows path cannot contain an unpaired byte to begin with.
+#[cfg(unix)]
+#[must_use]
+pub fn os_to_bytes(s: &std::ffi::OsStr) -> Str {
+    std::os::unix::ffi::OsStrExt::as_bytes(s).to_vec()
+}
+
+#[cfg(not(unix))]
+#[must_use]
+pub fn os_to_bytes(s: &std::ffi::OsStr) -> Str {
+    s.to_string_lossy().into_owned().into_bytes()
+}
+
+/// Shell bytes as a host OS string. The inverse of [`os_to_bytes`], with the
+/// same platform caveat.
+#[cfg(unix)]
+#[must_use]
+pub fn bytes_to_os(b: BStr<'_>) -> std::ffi::OsString {
+    <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(b.to_vec())
+}
+
+#[cfg(not(unix))]
+#[must_use]
+pub fn bytes_to_os(b: BStr<'_>) -> std::ffi::OsString {
+    std::ffi::OsString::from(String::from_utf8_lossy(b).into_owned())
+}
+
+/// Shell bytes as a host path, for handing to `std::fs`.
+#[must_use]
+pub fn bytes_to_path(b: BStr<'_>) -> std::path::PathBuf {
+    std::path::PathBuf::from(bytes_to_os(b))
+}
+
+/// A host path as shell bytes. See [`os_to_bytes`].
+#[must_use]
+pub fn path_to_bytes(p: &std::path::Path) -> Str {
+    os_to_bytes(p.as_os_str())
 }
 
 #[cfg(test)]

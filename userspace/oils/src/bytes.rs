@@ -132,6 +132,26 @@ macro_rules! push_bytes_via_display {
 }
 push_bytes_via_display!(i8, i16, i32, i64, i128, isize, u16, u32, u64, u128, usize);
 
+/// **Refactor scaffolding — every call site is a bug until it is gone.**
+///
+/// Reinterpret a shell string as a Rust `String`, replacing anything that is
+/// not valid UTF-8. That is exactly the silent corruption TD-OILS-BYTE-STRINGS
+/// exists to remove, so this function must not survive the conversion: it is
+/// here only to keep the tree compiling while osh is converted module by
+/// module, at the seams where a byte-native producer still feeds a
+/// `String`-typed consumer.
+///
+/// It is `#[deprecated]` on purpose — the resulting warnings *are* the list of
+/// seams that remain, and the conversion is finished when the compiler stops
+/// printing them and this function is deleted.
+#[deprecated(
+    note = "byte-string refactor scaffolding: this call site must become byte-native \
+            before TD-OILS-BYTE-STRINGS can land"
+)]
+pub fn scaffold_lossy_string(v: BStr<'_>) -> String {
+    String::from_utf8_lossy(v).into_owned()
+}
+
 /// Case-map `s`, applying `map` to each `char` of every valid UTF-8 run and
 /// passing invalid bytes through unchanged.
 ///

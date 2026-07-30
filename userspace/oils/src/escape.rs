@@ -25,10 +25,26 @@
 //!   also terminates the string: `$'ab\c'` is the four-character word `ab\c`
 //!   (a dangling `\c`, not a control escape that eats the quote), and `$'\c\'`
 //!   really does run to end-of-input.
-//! * **Numeric escapes name bytes, not code points.** `\xHH` and `\nnn` are
-//!   masked to 8 bits, so `$'\401'` is `\001` and `$'\400'` is a NUL. A value
-//!   above 0x7F is still materialised as the *code point* of that byte, since a
-//!   shell word here is a Rust `String`; see `Lexer::read_ansi_c_quote`.
+//! * **Numeric escapes name bytes, not code points.** `\xHH`, `\nnn` and `\cX`
+//!   produce exactly one byte, masked to 8 bits, so `$'\401'` is `\001`,
+//!   `$'\400'` is a NUL and `$'\xff'` is the single byte 0xff. Only `\u`/`\U`
+//!   name a code point, and they emit its UTF-8 encoding. This is why the
+//!   decoder works over [`crate::bytes::Str`] rather than `String`: a shell
+//!   word is a byte string, and `\xff` has no code point to be.
+
+use crate::bytes::Str;
+
+/// A cursor over the source of an escape sequence.
+///
+/// Bytes, not `char`s: every escape's syntax is ASCII, and anything that is not
+/// part of an escape must pass through untouched — including a byte that is not
+/// valid UTF-8 and therefore has no `char` to be decoded into.
+pub(crate) type Cursor<'a> = std::iter::Peekable<std::iter::Copied<std::slice::Iter<'a, u8>>>;
+
+/// Open a [`Cursor`] over `s`.
+pub(crate) fn cursor(s: &[u8]) -> Cursor<'_> {
+    s.iter().copied().peekable()
+}
 
 /// Which flavour of backslash-escape decoding [`decode_escape`] performs. See
 /// the module docs for the table of differences.
@@ -73,22 +89,23 @@ pub(crate) struct Decoded {
     pub bad: Option<&'static str>,
 }
 
-/// Append the code point named by `v` to `out`. Callers mask to a byte first
-/// where byte semantics apply.
-fn push_code(out: &mut String, v: u32) {
+/// Append the *code point* named by `v` as UTF-8. Only `\u`/`\U` use this; the
+/// byte-valued escapes push their byte directly.
+fn push_char(out: &mut Str, v: u32) {
     if let Some(ch) = char::from_u32(v) {
-        out.push(ch);
+        let mut buf = [0u8; 4];
+        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
     }
 }
 
 /// Read up to `max` hex digits from `chars`, returning their value, or `None`
 /// when there was no hex digit at all (so the caller can keep the escape
 /// literal).
-fn read_hex(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, max: usize) -> Option<u32> {
+fn read_hex(chars: &mut Cursor<'_>, max: usize) -> Option<u32> {
     let mut val: u32 = 0;
     let mut count = 0;
     while count < max {
-        let Some(d) = chars.peek().and_then(|c| c.to_digit(16)) else {
+        let Some(d) = chars.peek().and_then(|&b| char::from(b).to_digit(16)) else {
             break;
         };
         val = val.wrapping_mul(16).wrapping_add(d);
@@ -98,88 +115,86 @@ fn read_hex(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, max: usize) ->
     (count > 0).then_some(val)
 }
 
+/// The low byte of `v`. `\xHH` and `\nnn` name a byte, so a value that overflows
+/// one is masked rather than rejected.
+fn low_byte(v: u32) -> u8 {
+    u8::try_from(v & 0xff).unwrap_or(0)
+}
+
 /// Decode the ANSI-C `\c` control-character escape, whose operand is whatever
 /// follows. Three wrinkles, all of them bash's: `\c?` is DEL rather than
 /// `'?' & 0x1f`; a `\c` whose operand is an escaped backslash (`\c\\`) consumes
 /// *both* backslashes and yields 0x1c; and a `\c` with nothing after it stays
 /// literal — which is why `$'ab\c'` is a four-character word, not a lexer error.
-fn decode_control(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, out: &mut String) {
-    if chars.peek() == Some(&'\\') {
+fn decode_control(chars: &mut Cursor<'_>, out: &mut Str) {
+    if chars.peek() == Some(&b'\\') {
         // Only `\c\\` collapses. `\c\n` is 0x1c followed by a literal `n`, so
         // look one further before swallowing the first backslash.
         let mut probe = chars.clone();
         probe.next();
-        if probe.peek() == Some(&'\\') {
+        if probe.peek() == Some(&b'\\') {
             chars.next();
         }
     }
     match chars.next() {
-        Some('?') => out.push('\u{7f}'),
+        Some(b'?') => out.push(0x7f),
         // The uppercasing is bash's; for the low five bits it is a no-op, but
-        // keep it so the intent survives.
-        Some(ctrl) => push_code(out, (ctrl.to_ascii_uppercase() as u32) & 0x1f),
-        None => {
-            out.push('\\');
-            out.push('c');
-        }
+        // keep it so the intent survives. The operand is a *byte*: `\c` applied
+        // to a multibyte character masks that character's first byte, which is
+        // what bash does too.
+        Some(ctrl) => out.push(ctrl.to_ascii_uppercase() & 0x1f),
+        None => out.extend_from_slice(b"\\c"),
     }
 }
 
 /// Decode a single backslash escape. `chars` is positioned immediately after the
-/// `\`; the decoded text is appended to `out`.
-pub(crate) fn decode_escape(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    out: &mut String,
-    mode: EscapeMode,
-) -> Decoded {
+/// `\`; the decoded bytes are appended to `out`.
+pub(crate) fn decode_escape(chars: &mut Cursor<'_>, out: &mut Str, mode: EscapeMode) -> Decoded {
     let Some(c) = chars.next() else {
         // A trailing backslash is literal in every mode.
-        out.push('\\');
+        out.push(b'\\');
         return Decoded::default();
     };
     match c {
-        'n' => out.push('\n'),
-        't' => out.push('\t'),
-        'r' => out.push('\r'),
-        'a' => out.push('\u{07}'),
-        'b' => out.push('\u{08}'),
-        'e' | 'E' => out.push('\u{1b}'),
-        'f' => out.push('\u{0c}'),
-        'v' => out.push('\u{0b}'),
-        '\\' => out.push('\\'),
-        '\'' | '"' | '?' if mode.ansi_c_family() => out.push(c),
-        'c' => match mode {
+        b'n' => out.push(b'\n'),
+        b't' => out.push(b'\t'),
+        b'r' => out.push(b'\r'),
+        b'a' => out.push(0x07),
+        b'b' => out.push(0x08),
+        b'e' | b'E' => out.push(0x1b),
+        b'f' => out.push(0x0c),
+        b'v' => out.push(0x0b),
+        b'\\' => out.push(b'\\'),
+        b'\'' | b'"' | b'?' if mode.ansi_c_family() => out.push(c),
+        b'c' => match mode {
             EscapeMode::PrintfB | EscapeMode::EchoE => {
                 return Decoded { stop: true, bad: None };
             }
             // printf's FORMAT string has no `\c` at all.
-            EscapeMode::PrintfFormat => {
-                out.push('\\');
-                out.push('c');
-            }
+            EscapeMode::PrintfFormat => out.extend_from_slice(b"\\c"),
             EscapeMode::AnsiC => decode_control(chars, out),
         },
-        'x' => match read_hex(chars, 2) {
-            // A byte, not a code point: `\xff` names 0xff.
-            Some(v) => push_code(out, v & 0xff),
+        b'x' => match read_hex(chars, 2) {
+            // A byte, not a code point: `\xff` names the single byte 0xff.
+            Some(v) => out.push(low_byte(v)),
             None => {
-                out.push('\\');
-                out.push('x');
+                out.extend_from_slice(b"\\x");
                 if mode.reports_bad_escape() {
                     return Decoded { stop: false, bad: Some("missing hex digit for \\x") };
                 }
             }
         },
-        'u' | 'U' => {
-            let max = if c == 'u' { 4 } else { 8 };
+        b'u' | b'U' => {
+            let max = if c == b'u' { 4 } else { 8 };
             match read_hex(chars, max) {
-                // `\u`/`\U` name a code point, so these are *not* masked.
-                Some(v) => push_code(out, v),
+                // `\u`/`\U` name a code point, so these are *not* masked, and
+                // the result is its UTF-8 encoding rather than a single byte.
+                Some(v) => push_char(out, v),
                 None => {
-                    out.push('\\');
+                    out.push(b'\\');
                     out.push(c);
                     if mode.reports_bad_escape() {
-                        let msg = if c == 'u' {
+                        let msg = if c == b'u' {
                             "missing unicode digit for \\u"
                         } else {
                             "missing unicode digit for \\U"
@@ -189,34 +204,39 @@ pub(crate) fn decode_escape(
                 }
             }
         }
-        '0'..='7' => {
-            let mut oct = String::new();
+        b'0'..=b'7' => {
+            // Accumulate in a `u8` so the 8-bit masking the escape calls for is
+            // the arithmetic's own behaviour: `\400` wraps to NUL and `\401` to
+            // 0x01, with no separate truncation step to forget.
+            let mut val: u8 = 0;
+            let mut digits = 0usize;
             match mode {
                 // `\0nnn`: the `0` is a prefix, not one of the three digits.
-                EscapeMode::PrintfB | EscapeMode::EchoE if c == '0' => {}
+                EscapeMode::PrintfB | EscapeMode::EchoE if c == b'0' => {}
                 // `echo -e` accepts *only* the `\0nnn` form, so `\101` is the
                 // four literal characters `\101` (unlike `printf %b`, which
                 // takes both spellings).
                 EscapeMode::EchoE => {
-                    out.push('\\');
+                    out.push(b'\\');
                     out.push(c);
                     return Decoded::default();
                 }
-                _ => oct.push(c),
+                _ => {
+                    val = c.wrapping_sub(b'0');
+                    digits = 1;
+                }
             }
-            while oct.len() < 3 && chars.peek().is_some_and(|c| ('0'..='7').contains(c)) {
-                oct.push(chars.next().unwrap_or('0'));
+            while digits < 3 && chars.peek().is_some_and(|b| (b'0'..=b'7').contains(b)) {
+                let d = chars.next().unwrap_or(b'0');
+                val = val.wrapping_mul(8).wrapping_add(d.wrapping_sub(b'0'));
+                digits = digits.saturating_add(1);
             }
-            if oct.is_empty() {
-                // A `\0` with no octal digits after it is a NUL byte.
-                out.push('\0');
-            } else if let Ok(v) = u32::from_str_radix(&oct, 8) {
-                // Octal names a byte too: `\400` is NUL and `\401` is 0x01.
-                push_code(out, v & 0xff);
-            }
+            // `val` is 0 when there were no digits at all, which is the right
+            // answer: a bare `\0` is a NUL byte.
+            out.push(val);
         }
         other => {
-            out.push('\\');
+            out.push(b'\\');
             out.push(other);
         }
     }
@@ -224,11 +244,11 @@ pub(crate) fn decode_escape(
 }
 
 /// ANSI-C (`$'…'` / `${v@E}`) backslash-escape expansion.
-pub(crate) fn ansi_c_unescape(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars().peekable();
+pub(crate) fn ansi_c_unescape(s: &[u8]) -> Str {
+    let mut out = Str::new();
+    let mut chars = cursor(s);
     while let Some(c) = chars.next() {
-        if c != '\\' {
+        if c != b'\\' {
             out.push(c);
             continue;
         }
@@ -238,7 +258,7 @@ pub(crate) fn ansi_c_unescape(s: &str) -> String {
     // so bytes produced after the first NUL are dropped — `$'a\0b'` is just `a`.
     // This is specific to ANSI-C quoting: `printf %b '\0'` really does write a
     // NUL to stdout.
-    if let Some(nul) = out.find('\0') {
+    if let Some(nul) = out.iter().position(|&b| b == 0) {
         out.truncate(nul);
     }
     out
@@ -246,8 +266,8 @@ pub(crate) fn ansi_c_unescape(s: &str) -> String {
 
 /// The result of decoding one `echo`-family string (`printf %b` or `echo -e`).
 pub(crate) struct EchoUnescaped {
-    /// The decoded text.
-    pub text: String,
+    /// The decoded bytes.
+    pub text: Str,
     /// A `\c` was seen: the caller must stop producing any further output.
     pub stopped: bool,
     /// Malformed `\x`/`\u`/`\U` escapes, as (offset within `text`, message).
@@ -258,12 +278,12 @@ pub(crate) struct EchoUnescaped {
 /// `printf %b` / `echo -e` backslash-escape expansion. `mode` must be
 /// [`EscapeMode::PrintfB`] or [`EscapeMode::EchoE`]; they differ in octal
 /// syntax and in whether a malformed `\x`/`\u` is reported.
-pub(crate) fn unescape_echo(s: &str, mode: EscapeMode) -> EchoUnescaped {
-    let mut text = String::new();
+pub(crate) fn unescape_echo(s: &[u8], mode: EscapeMode) -> EchoUnescaped {
+    let mut text = Str::new();
     let mut bad = Vec::new();
-    let mut chars = s.chars().peekable();
+    let mut chars = cursor(s);
     while let Some(c) = chars.next() {
-        if c != '\\' {
+        if c != b'\\' {
             text.push(c);
             continue;
         }
@@ -283,113 +303,126 @@ pub(crate) fn unescape_echo(s: &str, mode: EscapeMode) -> EchoUnescaped {
 #[cfg(test)]
 mod tests {
     use super::{EscapeMode, ansi_c_unescape, unescape_echo};
+    use crate::bytes::Str;
 
-    fn hex(s: &str) -> String {
-        s.bytes().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+    fn hex(s: &[u8]) -> String {
+        s.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
     }
 
-    fn echo_b(s: &str) -> String {
+    fn echo_b(s: &[u8]) -> Str {
         unescape_echo(s, EscapeMode::PrintfB).text
     }
 
-    fn echo_e(s: &str) -> String {
+    fn echo_e(s: &[u8]) -> Str {
         unescape_echo(s, EscapeMode::EchoE).text
     }
 
     #[test]
     fn ansi_c_control_escapes_match_bash() {
         // `\cX` is `X & 0x1f`, case-insensitively.
-        assert_eq!(hex(&ansi_c_unescape("a\\cAb")), "61 01 62");
-        assert_eq!(hex(&ansi_c_unescape("a\\cab")), "61 01 62");
-        assert_eq!(hex(&ansi_c_unescape("a\\cb\\cc")), "61 02 03");
-        assert_eq!(hex(&ansi_c_unescape("\\c0")), "10");
-        assert_eq!(hex(&ansi_c_unescape("\\c{")), "1b");
+        assert_eq!(hex(&ansi_c_unescape(b"a\\cAb")), "61 01 62");
+        assert_eq!(hex(&ansi_c_unescape(b"a\\cab")), "61 01 62");
+        assert_eq!(hex(&ansi_c_unescape(b"a\\cb\\cc")), "61 02 03");
+        assert_eq!(hex(&ansi_c_unescape(b"\\c0")), "10");
+        assert_eq!(hex(&ansi_c_unescape(b"\\c{")), "1b");
         // `\c?` is DEL, not `'?' & 0x1f`.
-        assert_eq!(hex(&ansi_c_unescape("\\c?")), "7f");
+        assert_eq!(hex(&ansi_c_unescape(b"\\c?")), "7f");
         // `\c\\` consumes both backslashes; `\c\n` consumes only one, leaving a
         // literal `n`.
-        assert_eq!(hex(&ansi_c_unescape("\\c\\\\")), "1c");
-        assert_eq!(hex(&ansi_c_unescape("x\\c\\nz")), "78 1c 6e 7a");
-        assert_eq!(hex(&ansi_c_unescape("\\c\\t")), "1c 74");
+        assert_eq!(hex(&ansi_c_unescape(b"\\c\\\\")), "1c");
+        assert_eq!(hex(&ansi_c_unescape(b"x\\c\\nz")), "78 1c 6e 7a");
+        assert_eq!(hex(&ansi_c_unescape(b"\\c\\t")), "1c 74");
         // A dangling `\c` stays literal.
-        assert_eq!(hex(&ansi_c_unescape("ab\\c")), "61 62 5c 63");
+        assert_eq!(hex(&ansi_c_unescape(b"ab\\c")), "61 62 5c 63");
     }
 
     #[test]
     fn ansi_c_numeric_escapes_name_bytes() {
         // Octal is masked to 8 bits, so `\400` is a NUL — which truncates.
-        assert_eq!(hex(&ansi_c_unescape("\\400")), "");
-        assert_eq!(hex(&ansi_c_unescape("a\\401b")), "61 01 62");
+        assert_eq!(hex(&ansi_c_unescape(b"\\400")), "");
+        assert_eq!(hex(&ansi_c_unescape(b"a\\401b")), "61 01 62");
         // At most three octal digits, and a leading `0` is one of them.
-        assert_eq!(hex(&ansi_c_unescape("\\0101")), "08 31");
-        // `\u` names a code point, so it is *not* masked.
-        assert_eq!(hex(&ansi_c_unescape("\\u0041")), "41");
-        assert_eq!(hex(&ansi_c_unescape("\\x41\\x42")), "41 42");
+        assert_eq!(hex(&ansi_c_unescape(b"\\0101")), "08 31");
+        // `\u` names a code point, so it is *not* masked, and it encodes as
+        // UTF-8 rather than as one byte.
+        assert_eq!(hex(&ansi_c_unescape(b"\\u0041")), "41");
+        assert_eq!(hex(&ansi_c_unescape(b"\\u00e9")), "c3 a9");
+        assert_eq!(hex(&ansi_c_unescape(b"\\x41\\x42")), "41 42");
+        // …whereas `\xHH` above 0x7f is one raw byte. This is the regression
+        // that motivated TD-OILS-BYTE-STRINGS: while a shell word was a
+        // `String`, `\xe9` came out as U+00E9's two bytes.
+        assert_eq!(hex(&ansi_c_unescape(b"\\xe9")), "e9");
+        assert_eq!(hex(&ansi_c_unescape(b"\\xff\\377")), "ff ff");
         // A NUL anywhere truncates the rest of the string.
-        assert_eq!(hex(&ansi_c_unescape("a\\0b")), "61");
+        assert_eq!(hex(&ansi_c_unescape(b"a\\0b")), "61");
+    }
+
+    #[test]
+    fn ansi_c_passes_invalid_utf8_through_untouched() {
+        assert_eq!(hex(&ansi_c_unescape(b"a\xffb")), "61 ff 62");
+        assert_eq!(hex(&ansi_c_unescape(b"\x80\\t\xfe")), "80 09 fe");
     }
 
     #[test]
     fn ansi_c_unknown_escapes_keep_the_backslash() {
-        assert_eq!(ansi_c_unescape("\\q\\z"), "\\q\\z");
-        assert_eq!(ansi_c_unescape("\\8"), "\\8");
-        assert_eq!(ansi_c_unescape("\\xg"), "\\xg");
-        assert_eq!(ansi_c_unescape("a\\"), "a\\");
+        assert_eq!(ansi_c_unescape(b"\\q\\z"), b"\\q\\z".to_vec());
+        assert_eq!(ansi_c_unescape(b"\\8"), b"\\8".to_vec());
+        assert_eq!(ansi_c_unescape(b"\\xg"), b"\\xg".to_vec());
+        assert_eq!(ansi_c_unescape(b"a\\"), b"a\\".to_vec());
         // …but `\?`, `\'` and `\"` are real escapes here.
-        assert_eq!(ansi_c_unescape("\\?"), "?");
-        assert_eq!(ansi_c_unescape("\\'\\\""), "'\"");
+        assert_eq!(ansi_c_unescape(b"\\?"), b"?".to_vec());
+        assert_eq!(ansi_c_unescape(b"\\'\\\""), b"'\"".to_vec());
     }
 
     #[test]
     fn echo_family_drops_the_ansi_c_only_escapes() {
         // `\?`, `\'` and `\"` are *not* escapes for `%b` / `echo -e`.
-        for f in [echo_b as fn(&str) -> String, echo_e] {
-            assert_eq!(f("\\?"), "\\?");
-            assert_eq!(f("\\'"), "\\'");
-            assert_eq!(f("\\\""), "\\\"");
-            assert_eq!(hex(&f("\\e|\\a|\\v")), "1b 7c 07 7c 0b");
-            assert_eq!(hex(&f("\\x41")), "41");
-            assert_eq!(hex(&f("\\u0041")), "41");
-            assert_eq!(f("\\8"), "\\8");
-            assert_eq!(f("a\\"), "a\\");
+        for f in [echo_b as fn(&[u8]) -> Str, echo_e] {
+            assert_eq!(f(b"\\?"), b"\\?".to_vec());
+            assert_eq!(f(b"\\'"), b"\\'".to_vec());
+            assert_eq!(f(b"\\\""), b"\\\"".to_vec());
+            assert_eq!(hex(&f(b"\\e|\\a|\\v")), "1b 7c 07 7c 0b");
+            assert_eq!(hex(&f(b"\\x41")), "41");
+            assert_eq!(hex(&f(b"\\u0041")), "41");
+            assert_eq!(f(b"\\8"), b"\\8".to_vec());
+            assert_eq!(f(b"a\\"), b"a\\".to_vec());
         }
     }
 
     #[test]
     fn echo_family_octal_differs_between_printf_b_and_echo_e() {
         // `%b` takes both spellings…
-        assert_eq!(hex(&echo_b("\\0101")), "41");
-        assert_eq!(hex(&echo_b("\\101")), "41");
+        assert_eq!(hex(&echo_b(b"\\0101")), "41");
+        assert_eq!(hex(&echo_b(b"\\101")), "41");
         // …but `echo -e` accepts only the `\0`-prefixed one.
-        assert_eq!(hex(&echo_e("\\0101")), "41");
-        assert_eq!(hex(&echo_e("\\101")), "5c 31 30 31");
-        // Masked to a byte, like ANSI-C: `\0777` is 0x1ff & 0xff = 0xff. (It
-        // then encodes as U+00FF — the documented byte-vs-code-point gap — so
-        // compare the code point, not the UTF-8 bytes.)
-        assert_eq!(echo_b("\\0777").chars().next(), Some('\u{ff}'));
+        assert_eq!(hex(&echo_e(b"\\0101")), "41");
+        assert_eq!(hex(&echo_e(b"\\101")), "5c 31 30 31");
+        // Masked to a byte, like ANSI-C: `\0777` is 0x1ff & 0xff = 0xff — and
+        // that is now one byte, not U+00FF's two.
+        assert_eq!(hex(&echo_b(b"\\0777")), "ff");
         // A NUL is emitted here, not truncating as ANSI-C quoting would.
-        assert_eq!(hex(&echo_b("a\\0b")), "61 00 62");
-        assert_eq!(hex(&echo_b("\\09")), "00 39");
+        assert_eq!(hex(&echo_b(b"a\\0b")), "61 00 62");
+        assert_eq!(hex(&echo_b(b"\\09")), "00 39");
     }
 
     #[test]
     fn echo_family_c_stops_output() {
-        let r = unescape_echo("a\\cb", EscapeMode::PrintfB);
-        assert_eq!(r.text, "a");
+        let r = unescape_echo(b"a\\cb", EscapeMode::PrintfB);
+        assert_eq!(r.text, b"a".to_vec());
         assert!(r.stopped);
-        let r = unescape_echo("a\\cb", EscapeMode::EchoE);
-        assert_eq!(r.text, "a");
+        let r = unescape_echo(b"a\\cb", EscapeMode::EchoE);
+        assert_eq!(r.text, b"a".to_vec());
         assert!(r.stopped);
     }
 
     #[test]
     fn only_printf_reports_a_malformed_hex_escape() {
-        let r = unescape_echo("a\\xg", EscapeMode::PrintfB);
-        assert_eq!(r.text, "a\\xg");
+        let r = unescape_echo(b"a\\xg", EscapeMode::PrintfB);
+        assert_eq!(r.text, b"a\\xg".to_vec());
         assert_eq!(r.bad, vec![(3, "missing hex digit for \\x")]);
         // `echo -e` keeps the literal but says nothing.
-        let r = unescape_echo("a\\xg", EscapeMode::EchoE);
-        assert_eq!(r.text, "a\\xg");
+        let r = unescape_echo(b"a\\xg", EscapeMode::EchoE);
+        assert_eq!(r.text, b"a\\xg".to_vec());
         assert!(r.bad.is_empty());
     }
 }

@@ -2146,10 +2146,10 @@ impl Lexer {
     /// `ab\c` (a dangling `\c`, not a control escape consuming the quote), and
     /// `$'\c\'` really does run to end-of-input.
     ///
-    /// Note: byte escapes (`\xHH`, `\nnn`) naming a value above 0x7F are
-    /// materialised as the Unicode code point of that value — the shell stores
-    /// words as UTF-8 `String`, not raw bytes, so `$'\xff'` yields U+00FF where
-    /// bash yields the single byte 0xff.
+    /// Note: byte escapes (`\xHH`, `\nnn`) naming a value above 0x7F decode to
+    /// that single byte, as bash does — but the lexer still stores words as a
+    /// UTF-8 `String`, so the byte is re-encoded here (TD-OILS-BYTE-STRINGS
+    /// scaffold: this seam disappears when `WordPart::Literal` becomes bytes).
     fn read_ansi_c_quote(&mut self) -> Result<String, LexError> {
         let open = self.cur_line();
         let mut raw = String::new();
@@ -2158,7 +2158,11 @@ impl Lexer {
                 return Err(eof_matching('\'').at(open));
             };
             if c == '\'' {
-                return Ok(crate::escape::ansi_c_unescape(&raw));
+                // TD-OILS-BYTE-STRINGS scaffold: `raw` is still a `String`.
+                #[allow(deprecated)]
+                return Ok(crate::bytes::scaffold_lossy_string(
+                    &crate::escape::ansi_c_unescape(raw.as_bytes()),
+                ));
             }
             raw.push(c);
             if c == '\\' {

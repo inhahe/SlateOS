@@ -105,6 +105,8 @@ use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
 use std::sync::{Arc, Mutex};
 
 use crate::arith::{self, VarLookup};
+use crate::bfmt;
+use crate::bytes::{self, Str};
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseTerm,
     CmdSubBody, Command,
@@ -8589,7 +8591,7 @@ impl Shell {
                     chars.next();
                 }
                 'd' => {
-                    out.push_str(&format_strftime("%a %b %e", epoch));
+                    push_prompt_strftime(&mut out, b"%a %b %e", epoch);
                     chars.next();
                 }
                 'D' => {
@@ -8606,25 +8608,25 @@ impl Shell {
                             fmt.push(fc);
                         }
                         let fmt = if fmt.is_empty() { "%H:%M:%S" } else { &fmt };
-                        out.push_str(&format_strftime(fmt, epoch));
+                        push_prompt_strftime(&mut out, fmt.as_bytes(), epoch);
                     } else {
                         out.push_str("\\D");
                     }
                 }
                 't' => {
-                    out.push_str(&format_strftime("%H:%M:%S", epoch));
+                    push_prompt_strftime(&mut out, b"%H:%M:%S", epoch);
                     chars.next();
                 }
                 'T' => {
-                    out.push_str(&format_strftime("%I:%M:%S", epoch));
+                    push_prompt_strftime(&mut out, b"%I:%M:%S", epoch);
                     chars.next();
                 }
                 '@' => {
-                    out.push_str(&format_strftime("%I:%M %p", epoch));
+                    push_prompt_strftime(&mut out, b"%I:%M %p", epoch);
                     chars.next();
                 }
                 'A' => {
-                    out.push_str(&format_strftime("%H:%M", epoch));
+                    push_prompt_strftime(&mut out, b"%H:%M", epoch);
                     chars.next();
                 }
                 'h' => {
@@ -8823,7 +8825,11 @@ impl Shell {
             // (`${x@l}` is a "bad substitution"), so the parser never routes it
             // here (see `is_valid_transform_op`).
             'L' => value.chars().flat_map(char::to_lowercase).collect(),
-            'E' => crate::escape::ansi_c_unescape(value),
+            // TD-OILS-BYTE-STRINGS scaffold: `value` is still a `String`.
+            #[allow(deprecated)]
+            'E' => crate::bytes::scaffold_lossy_string(&crate::escape::ansi_c_unescape(
+                value.as_bytes(),
+            )),
             // `K`/`k` on a *scalar* or single array element behave like `@Q`:
             // bash quotes the value (`${v@K}` on `v=abc` → `'abc'`). The
             // key-aware array form (`${a[@]@K}`) is intercepted earlier in the
@@ -18418,19 +18424,20 @@ impl Shell {
             }
         }
         let joined = args[start..].join(" ");
-        let mut line = if interpret {
-            let r = crate::escape::unescape_echo(&joined, crate::escape::EscapeMode::EchoE);
+        let mut line: Str = if interpret {
+            let r =
+                crate::escape::unescape_echo(joined.as_bytes(), crate::escape::EscapeMode::EchoE);
             if r.stopped {
                 newline = false;
             }
             r.text
         } else {
-            joined
+            joined.into_bytes()
         };
         if newline {
-            line.push('\n');
+            line.push(b'\n');
         }
-        self.write_bytes(out, redir, line.as_bytes())
+        self.write_bytes(out, redir, &line)
     }
 
     fn builtin_printf(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -18500,7 +18507,16 @@ impl Shell {
         // status at 0), and at most one fatal malformed-conversion error (which
         // aborts printf). Each carries the byte offset at which it arose.
         let mut diags = PrintfDiags::default();
-        let text = format_printf(fmt, &args[i + 1..], &mut diags);
+        // The operands arrive as `String` (the word expander is not byte-native
+        // yet) but printf is: `String → bytes` is lossless, so this widening
+        // costs nothing and disappears when `Word` expansion returns `Str`.
+        let fargs: Vec<Str> = args
+            .get(i + 1..)
+            .unwrap_or_default()
+            .iter()
+            .map(|a| a.clone().into_bytes())
+            .collect();
+        let text = format_printf(fmt.as_bytes(), &fargs, &mut diags);
         let PrintfDiags { errors, warnings, notes, fatal, .. } = diags;
         let num_status = i32::from(!errors.is_empty() || fatal.is_some());
         // Merge errors and warnings into one offset-ordered message stream so
@@ -18509,25 +18525,25 @@ impl Shell {
         // `1`, then the error, then `0`, then `2` — not all output then all
         // errors. A stable sort keeps an error ahead of a warning at the same
         // offset (matching the order they were generated).
-        let mut messages: Vec<(usize, String)> =
+        let mut messages: Vec<(usize, Str)> =
             Vec::with_capacity(errors.len() + warnings.len() + notes.len() + 1);
         for (off, e) in errors.iter().chain(notes.iter()) {
-            messages.push((*off, format!("{}printf: {e}\n", self.err_prefix())));
+            messages.push((*off, bfmt![self.err_prefix(), b"printf: ", e, b"\n"]));
         }
         for (off, w) in &warnings {
-            messages.push((*off, format!("{}printf: warning: {w}\n", self.err_prefix())));
+            messages.push((*off, bfmt![self.err_prefix(), b"printf: warning: ", w, b"\n"]));
         }
         messages.sort_by_key(|(off, _)| *off);
         if let Some(msg) = &fatal {
             // A fatal directive truncates the output at its position, so its
             // message follows everything produced before it.
-            messages.push((text.len(), format!("{}printf: {msg}\n", self.err_prefix())));
+            messages.push((text.len(), bfmt![self.err_prefix(), b"printf: ", msg, b"\n"]));
         }
         if let Some(name) = assign_var {
             // `-v` captures stdout into a variable; diagnostics still go to
             // stderr, in the order they occurred.
             for (_, msg) in &messages {
-                self.emit_stderr(msg.as_bytes());
+                self.emit_stderr(msg);
             }
             // `-v` may target an array element: `printf -v 'arr[2]' …`.
             let (base, index) = match (name.find('['), name.strip_suffix(']')) {
@@ -18548,6 +18564,10 @@ impl Shell {
             }
             // A subscript that names nowhere fails the builtin (status 1) with
             // its own complaint; the line carries on.
+            // TD-OILS-BYTE-STRINGS scaffold: variable *values* are still
+            // `String`, so `printf -v` cannot yet store a non-UTF-8 byte.
+            #[allow(deprecated)]
+            let text = crate::bytes::scaffold_lossy_string(&text);
             if !self.assign_elem(&base, &index, text) {
                 return 1;
             }
@@ -18555,9 +18575,8 @@ impl Shell {
         } else {
             // Interleave stdout and stderr the way bash does (see
             // `printf_output_segments`): emit each ordered segment to its stream.
-            let bytes = text.as_bytes();
             let mut write_status = 0;
-            for seg in printf_output_segments(bytes, &messages) {
+            for seg in printf_output_segments(&text, &messages) {
                 match seg {
                     PrintfSeg::Out(b) => {
                         let s = self.write_bytes(out, redir, b);
@@ -18565,7 +18584,7 @@ impl Shell {
                             write_status = s;
                         }
                     }
-                    PrintfSeg::Err(m) => self.emit_stderr(m.as_bytes()),
+                    PrintfSeg::Err(m) => self.emit_stderr(m),
                 }
             }
             // A write error dominates; otherwise report the numeric-parse status.
@@ -27301,21 +27320,21 @@ fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<Str
 /// absolute position.
 #[derive(Default)]
 struct PrintfDiags {
-    errors: Vec<(usize, String)>,
-    warnings: Vec<(usize, String)>,
+    errors: Vec<(usize, Str)>,
+    warnings: Vec<(usize, Str)>,
     /// Messages that print like an error (`printf: <msg>`, with no `warning:`
     /// tag) but leave the exit status at 0 — currently only the malformed
     /// `\x`/`\u`/`\U` escape notices, which bash reports without failing.
-    notes: Vec<(usize, String)>,
-    fatal: Option<String>,
+    notes: Vec<(usize, Str)>,
+    fatal: Option<Str>,
     base: usize,
 }
 
-fn format_printf(fmt: &str, args: &[String], diags: &mut PrintfDiags) -> String {
+fn format_printf(fmt: &[u8], args: &[Str], diags: &mut PrintfDiags) -> Str {
     // Bash reuses the format string until all arguments are consumed. Repeat the
     // format while arguments remain, stopping if a pass consumes none (the
     // format has no argument-consuming conversions) to avoid an infinite loop.
-    let mut out = String::new();
+    let mut out = Str::new();
     let mut arg_i = 0;
     loop {
         let start = arg_i;
@@ -27325,7 +27344,7 @@ fn format_printf(fmt: &str, args: &[String], diags: &mut PrintfDiags) -> String 
         // `builtin_printf`).
         diags.base = out.len();
         let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, diags);
-        out.push_str(&chunk);
+        out.extend_from_slice(&chunk);
         // A `%b` argument containing `\c` halts all further output, format
         // recycling included. A malformed conversion (`fatal`) aborts printf
         // entirely, keeping only the text produced before the bad directive.
@@ -27340,7 +27359,7 @@ fn format_printf(fmt: &str, args: &[String], diags: &mut PrintfDiags) -> String 
 /// single stderr diagnostic. See [`printf_output_segments`].
 enum PrintfSeg<'a> {
     Out(&'a [u8]),
-    Err(&'a str),
+    Err(&'a [u8]),
 }
 
 /// Split `printf`'s produced `text` and its offset-tagged `diags` into the
@@ -27353,7 +27372,7 @@ enum PrintfSeg<'a> {
 /// at-or-before each diagnostic's offset, then emitting the diagnostic, with any
 /// remaining text following the final diagnostic. `diags` must be sorted by
 /// offset (which the caller guarantees).
-fn printf_output_segments<'a>(text: &'a [u8], diags: &'a [(usize, String)]) -> Vec<PrintfSeg<'a>> {
+fn printf_output_segments<'a>(text: &'a [u8], diags: &'a [(usize, Str)]) -> Vec<PrintfSeg<'a>> {
     let mut segs = Vec::with_capacity(diags.len() * 2 + 1);
     let mut cursor = 0usize;
     for (off, msg) in diags {
@@ -27377,29 +27396,31 @@ fn printf_output_segments<'a>(text: &'a [u8], diags: &'a [(usize, String)]) -> V
 /// Render one pass over the format string. Returns the produced text and whether
 /// a `\c` (in a `%b` argument) requested that output stop.
 fn format_printf_once(
-    fmt: &str,
-    args: &[String],
+    fmt: &[u8],
+    args: &[Str],
     arg_i: &mut usize,
     diags: &mut PrintfDiags,
-) -> (String, bool) {
-    let mut out = String::new();
-    let mut chars = fmt.chars().peekable();
+) -> (Str, bool) {
+    let mut out = Str::new();
+    // A format string is a shell word: its *syntax* is ASCII, but its literal
+    // text may hold any byte, so it is scanned as bytes.
+    let mut chars = crate::escape::cursor(fmt);
     while let Some(c) = chars.next() {
         match c {
             // FORMAT-string escapes use ANSI-C rules (octal `\nnn`, `\xHH`,
             // `\uHHHH`, `\UHHHHHHHH`, and the named escapes) — except that `\c`
             // is not an escape here, and a malformed `\x`/`\u` is reported.
-            '\\' => {
+            b'\\' => {
                 let d = crate::escape::decode_escape(
                     &mut chars,
                     &mut out,
                     crate::escape::EscapeMode::PrintfFormat,
                 );
                 if let Some(msg) = d.bad {
-                    diags.notes.push((diags.base + out.len(), msg.to_string()));
+                    diags.notes.push((diags.base + out.len(), msg.as_bytes().to_vec()));
                 }
             }
-            '%' => {
+            b'%' => {
                 if format_conversion(&mut chars, args, arg_i, &mut out, diags) {
                     return (out, true);
                 }
@@ -27419,21 +27440,21 @@ fn format_printf_once(
 /// dynamic from an argument), and the conversions `% s d i u x X o c b q f e g E G`.
 /// Returns `true` when a `%b` argument's `\c` requested that output stop.
 fn format_conversion(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    args: &[String],
+    chars: &mut crate::escape::Cursor<'_>,
+    args: &[Str],
     arg_i: &mut usize,
-    out: &mut String,
+    out: &mut Str,
     diags: &mut PrintfDiags,
 ) -> bool {
     // Literal `%%` short-circuit (no flags/width may precede it).
-    if chars.peek() == Some(&'%') {
+    if chars.peek() == Some(&b'%') {
         chars.next();
-        out.push('%');
+        out.push(b'%');
         return false;
     }
 
     // Collect flags.
-    let mut spec = String::from("%");
+    let mut spec: Str = b"%".to_vec();
     let mut left = false;
     let mut zero = false;
     let mut plus = false;
@@ -27441,15 +27462,15 @@ fn format_conversion(
     let mut hash = false;
     while let Some(&c) = chars.peek() {
         match c {
-            '-' => left = true,
-            '0' => zero = true,
-            '+' => plus = true,
-            ' ' => space = true,
-            '#' => hash = true,
+            b'-' => left = true,
+            b'0' => zero = true,
+            b'+' => plus = true,
+            b' ' => space = true,
+            b'#' => hash = true,
             // Thousands-grouping flag. We run in the C locale, which has no
             // grouping, so accept and ignore it (bash: `printf "%'d" 1234567`
             // prints `1234567` unless a grouping locale is active).
-            '\'' => {}
+            b'\'' => {}
             _ => break,
         }
         spec.push(c);
@@ -27457,9 +27478,9 @@ fn format_conversion(
     }
     // Width. A `*` takes the width from the next argument (bash: a negative
     // dynamic width means left-justify with the absolute magnitude).
-    let mut width = String::new();
+    let mut width = Str::new();
     let mut star_left = false;
-    if chars.peek() == Some(&'*') {
+    if chars.peek() == Some(&b'*') {
         chars.next();
         let raw = args.get(*arg_i).cloned().unwrap_or_default();
         *arg_i += 1;
@@ -27467,7 +27488,7 @@ fn format_conversion(
         if n < 0 {
             star_left = true;
         }
-        width = n.unsigned_abs().to_string();
+        width = n.unsigned_abs().to_string().into_bytes();
     } else {
         while let Some(&c) = chars.peek() {
             if c.is_ascii_digit() {
@@ -27483,19 +27504,19 @@ fn format_conversion(
     }
     // Precision. A `*` takes the precision from the next argument; a negative
     // dynamic precision is treated as if no precision were given (bash/C).
-    let mut prec: Option<String> = None;
-    if chars.peek() == Some(&'.') {
+    let mut prec: Option<Str> = None;
+    if chars.peek() == Some(&b'.') {
         chars.next();
-        if chars.peek() == Some(&'*') {
+        if chars.peek() == Some(&b'*') {
             chars.next();
             let raw = args.get(*arg_i).cloned().unwrap_or_default();
             *arg_i += 1;
             let n = parse_printf_int(&raw);
             if n >= 0 {
-                prec = Some(n.to_string());
+                prec = Some(n.to_string().into_bytes());
             }
         } else {
-            let mut p = String::new();
+            let mut p = Str::new();
             while let Some(&c) = chars.peek() {
                 if c.is_ascii_digit() {
                     p.push(c);
@@ -27508,25 +27529,30 @@ fn format_conversion(
         }
     }
 
-    let width_n: usize = width.parse().unwrap_or(0);
-    let prec_n: Option<usize> = prec.as_ref().map(|p| p.parse().unwrap_or(0));
+    // The width and precision are runs of ASCII digits collected just above, so
+    // reading them back as text cannot fail on a non-UTF-8 byte.
+    let digits_to_usize = |d: &[u8]| -> usize {
+        std::str::from_utf8(d).ok().and_then(|t| t.parse().ok()).unwrap_or(0)
+    };
+    let width_n: usize = digits_to_usize(&width);
+    let prec_n: Option<usize> = prec.as_ref().map(|p| digits_to_usize(p));
 
     // `%(FORMAT)T` — strftime-style time conversion. The parenthesised format
     // occupies the position of the conversion character and is followed by `T`.
     // It consumes one argument: seconds since the Unix epoch (missing, empty, or
     // a negative value ⇒ the current time; bash's `-2` "shell start" is
     // approximated as now here). Time is rendered in UTC.
-    if chars.peek() == Some(&'(') {
+    if chars.peek() == Some(&b'(') {
         chars.next();
-        let mut tfmt = String::new();
+        let mut tfmt = Str::new();
         let mut depth = 1usize;
         for c in chars.by_ref() {
             match c {
-                '(' => {
+                b'(' => {
                     depth += 1;
                     tfmt.push(c);
                 }
-                ')' => {
+                b')' => {
                     depth -= 1;
                     if depth == 0 {
                         break;
@@ -27537,7 +27563,7 @@ fn format_conversion(
             }
         }
         // Consume the trailing `T` conversion letter if present.
-        if chars.peek() == Some(&'T') {
+        if chars.peek() == Some(&b'T') {
             chars.next();
         }
         let secs: i64 = {
@@ -27557,18 +27583,18 @@ fn format_conversion(
         };
         let rendered = format_strftime(&tfmt, secs);
         // String-style field-width padding (never zero-padded).
-        let len = rendered.chars().count();
+        let len = bytes::char_count(&rendered);
         if len < width_n {
             let pad = width_n - len;
             if left {
-                out.push_str(&rendered);
-                out.extend(std::iter::repeat_n(' ', pad));
+                out.extend_from_slice(&rendered);
+                out.extend(std::iter::repeat_n(b' ', pad));
             } else {
-                out.extend(std::iter::repeat_n(' ', pad));
-                out.push_str(&rendered);
+                out.extend(std::iter::repeat_n(b' ', pad));
+                out.extend_from_slice(&rendered);
             }
         } else {
-            out.push_str(&rendered);
+            out.extend_from_slice(&rendered);
         }
         return false;
     }
@@ -27576,9 +27602,9 @@ fn format_conversion(
     // C length modifiers (`l ll h hh L j t z`) may precede the conversion; bash
     // accepts and ignores them (`printf %ld 42` → `42`, `%zx` → hex). Consume a
     // run of them so the conversion character that follows is what's rendered.
-    let mut mods = String::new();
+    let mut mods = Str::new();
     while let Some(&c) = chars.peek() {
-        if matches!(c, 'l' | 'h' | 'L' | 'j' | 't' | 'z') {
+        if matches!(c, b'l' | b'h' | b'L' | b'j' | b't' | b'z') {
             mods.push(c);
             chars.next();
         } else {
@@ -27587,14 +27613,14 @@ fn format_conversion(
     }
 
     // Reconstruct the directive text seen so far, for diagnostics.
-    let partial_spec = || -> String {
+    let partial_spec = || -> Str {
         let mut s = spec.clone();
-        s.push_str(&width);
+        s.extend_from_slice(&width);
         if let Some(p) = &prec {
-            s.push('.');
-            s.push_str(p);
+            s.push(b'.');
+            s.extend_from_slice(p);
         }
-        s.push_str(&mods);
+        s.extend_from_slice(&mods);
         s
     };
 
@@ -27602,11 +27628,11 @@ fn format_conversion(
         // No conversion character before the end of the format: bash aborts with
         // `` `%…': missing format character `` and exit status 1, keeping any
         // text produced before this directive.
-        diags.fatal = Some(format!("`{}': missing format character", partial_spec()));
+        diags.fatal = Some(bfmt![b"`", partial_spec(), b"': missing format character"]);
         return false;
     };
 
-    let next_arg = |arg_i: &mut usize| -> String {
+    let next_arg = |arg_i: &mut usize| -> Str {
         let v = args.get(*arg_i).cloned().unwrap_or_default();
         *arg_i += 1;
         v
@@ -27621,18 +27647,21 @@ fn format_conversion(
     // Sign/base prefix rendered separately from the digit body so that
     // zero-padding can insert zeros *between* the prefix and the body
     // (e.g. `%+05d` on 5 → `+0005`, `%#06x` on 255 → `0x00ff`).
-    let mut num_prefix = String::new();
+    let mut num_prefix = Str::new();
     // Set when a `%b` argument's `\c` truncates output.
     let mut stop = false;
     let mut rendered = match conv {
-        's' => {
+        b's' => {
             let mut s = next_arg(arg_i);
             if let Some(p) = prec_n {
+                // C's `%.Ns` counts bytes, and so does bash in the C locale.
+                // (As a `String` this line could also *panic* on a multibyte
+                // boundary; over bytes it cannot.)
                 s.truncate(p);
             }
             s
         }
-        'b' => {
+        b'b' => {
             // Interpret `echo -e`-style backslash escapes in the argument; `\c`
             // stops all further output. Unlike `echo -e`, `%b` also accepts
             // octal without the `\0` prefix and reports a malformed `\x`/`\u`.
@@ -27642,123 +27671,137 @@ fn format_conversion(
             );
             stop = r.stopped;
             for (off, msg) in r.bad {
-                diags.notes.push((field_off + off, msg.to_string()));
+                diags.notes.push((field_off + off, msg.as_bytes().to_vec()));
             }
             r.text
         }
-        'q' => printf_quote(&next_arg(arg_i)),
-        'c' => next_arg(arg_i).chars().next().map_or(String::new(), |c| c.to_string()),
-        'd' | 'i' => {
+        b'q' => {
+            // TD-OILS-BYTE-STRINGS: the `%q` / `${v@Q}` / `declare -p` quoting
+            // family is still `String`-based, so a non-UTF-8 byte is mangled
+            // here. Goes away with that family.
+            #[allow(deprecated)]
+            printf_quote(&crate::bytes::scaffold_lossy_string(&next_arg(arg_i))).into_bytes()
+        }
+        // bash's `%c` writes the first *character* of the argument, so a
+        // multibyte character is written whole; a byte that is not part of one
+        // is itself the character (see `bytes::char_at`).
+        b'c' => bytes::char_at(&next_arg(arg_i), 0),
+        b'd' | b'i' => {
             let raw = next_arg(arg_i);
             let n = parse_printf_int_checked(&raw);
             if let Some(kind) = n.invalid {
-                diags.errors.push((field_off, format!("{raw}: {kind}")));
+                diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
             if n.signed_overflow {
-                diags.warnings.push((field_off, format!("{raw}: Numerical result out of range")));
+                diags.warnings
+                    .push((field_off, bfmt![&raw, b": Numerical result out of range"]));
             }
-            let (p, b) = split_sign(n.signed.to_string(), plus, space);
+            let (p, b) = split_sign(&n.signed.to_string(), plus, space);
             num_prefix = p;
             b
         }
-        'u' => {
+        b'u' => {
             let raw = next_arg(arg_i);
             let n = parse_printf_int_checked(&raw);
             if let Some(kind) = n.invalid {
-                diags.errors.push((field_off, format!("{raw}: {kind}")));
+                diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
             if n.unsigned_overflow {
-                diags.warnings.push((field_off, format!("{raw}: Numerical result out of range")));
+                diags.warnings
+                    .push((field_off, bfmt![&raw, b": Numerical result out of range"]));
             }
-            n.unsigned.to_string()
+            n.unsigned.to_string().into_bytes()
         }
-        'x' => {
+        b'x' => {
             let raw = next_arg(arg_i);
             let n = parse_printf_int_checked(&raw);
             if let Some(kind) = n.invalid {
-                diags.errors.push((field_off, format!("{raw}: {kind}")));
+                diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
             if n.unsigned_overflow {
-                diags.warnings.push((field_off, format!("{raw}: Numerical result out of range")));
+                diags.warnings
+                    .push((field_off, bfmt![&raw, b": Numerical result out of range"]));
             }
             let v = n.unsigned;
             // `#` prefixes nonzero hex with `0x` (bash/C: zero gets no prefix).
             if hash && v != 0 {
-                num_prefix.push_str("0x");
+                num_prefix.extend_from_slice(b"0x");
             }
-            format!("{v:x}")
+            format!("{v:x}").into_bytes()
         }
-        'X' => {
+        b'X' => {
             let raw = next_arg(arg_i);
             let n = parse_printf_int_checked(&raw);
             if let Some(kind) = n.invalid {
-                diags.errors.push((field_off, format!("{raw}: {kind}")));
+                diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
             if n.unsigned_overflow {
-                diags.warnings.push((field_off, format!("{raw}: Numerical result out of range")));
+                diags.warnings
+                    .push((field_off, bfmt![&raw, b": Numerical result out of range"]));
             }
             let v = n.unsigned;
             if hash && v != 0 {
-                num_prefix.push_str("0X");
+                num_prefix.extend_from_slice(b"0X");
             }
-            format!("{v:X}")
+            format!("{v:X}").into_bytes()
         }
-        'o' => {
+        b'o' => {
             let raw = next_arg(arg_i);
             let n = parse_printf_int_checked(&raw);
             if let Some(kind) = n.invalid {
-                diags.errors.push((field_off, format!("{raw}: {kind}")));
+                diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
             if n.unsigned_overflow {
-                diags.warnings.push((field_off, format!("{raw}: Numerical result out of range")));
+                diags.warnings
+                    .push((field_off, bfmt![&raw, b": Numerical result out of range"]));
             }
             let v = n.unsigned;
             // `#` forces a leading `0` on octal; applied after precision below
             // so `%#.1o 8` → `010` (precision body `10`, then forced `0`).
-            format!("{v:o}")
+            format!("{v:o}").into_bytes()
         }
-        'f' | 'F' => {
+        b'f' | b'F' => {
             let raw = next_arg(arg_i);
             let (f, err) = parse_printf_float_checked(&raw);
             if let Some(kind) = err {
-                diags.errors.push((field_off, format!("{raw}: {kind}")));
+                diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
-            let (p, b) = split_sign(format!("{:.*}", prec_n.unwrap_or(6), f), plus, space);
+            let (p, b) = split_sign(&format!("{:.*}", prec_n.unwrap_or(6), f), plus, space);
             num_prefix = p;
             b
         }
-        'e' | 'E' => {
+        b'e' | b'E' => {
             let raw = next_arg(arg_i);
             let (f, err) = parse_printf_float_checked(&raw);
             if let Some(kind) = err {
-                diags.errors.push((field_off, format!("{raw}: {kind}")));
+                diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
             let s = format!("{:.*e}", prec_n.unwrap_or(6), f);
             let s = normalize_exp(&s);
-            let s = if conv == 'E' { s.to_uppercase() } else { s };
-            let (p, b) = split_sign(s, plus, space);
+            let s = if conv == b'E' { s.to_uppercase() } else { s };
+            let (p, b) = split_sign(&s, plus, space);
             num_prefix = p;
             b
         }
-        'g' | 'G' => {
+        b'g' | b'G' => {
             let raw = next_arg(arg_i);
             let (f, err) = parse_printf_float_checked(&raw);
             if let Some(kind) = err {
-                diags.errors.push((field_off, format!("{raw}: {kind}")));
+                diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
-            let s = format_g(f, prec_n.unwrap_or(6), conv == 'G', hash);
-            let (p, b) = split_sign(s, plus, space);
+            let s = format_g(f, prec_n.unwrap_or(6), conv == b'G', hash);
+            let (p, b) = split_sign(&s, plus, space);
             num_prefix = p;
             b
         }
-        'a' | 'A' => {
+        b'a' | b'A' => {
             let raw = next_arg(arg_i);
             let (f, err) = parse_printf_float_checked(&raw);
             if let Some(kind) = err {
-                diags.errors.push((field_off, format!("{raw}: {kind}")));
+                diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
-            let s = format_a(f, prec_n, conv == 'A');
-            let (p, b) = split_sign(s, plus, space);
+            let s = format_a(f, prec_n, conv == b'A');
+            let (p, b) = split_sign(&s, plus, space);
             num_prefix = p;
             b
         }
@@ -27766,7 +27809,7 @@ fn format_conversion(
             // An unrecognized conversion character is a fatal error in bash:
             // `` `X': invalid format character ``, exit 1, and the rest of the
             // format is abandoned (only text before this directive is kept).
-            diags.fatal = Some(format!("`{other}': invalid format character"));
+            diags.fatal = Some(bfmt![b"`", other, b"': invalid format character"]);
             return false;
         }
     };
@@ -27777,53 +27820,67 @@ fn format_conversion(
     // to the value 0 yields no digits at all (C/bash: `printf %.0d 0` → ``).
     // When a precision is present the `0` flag is ignored for integers, so
     // width is space-padded (`%08.3d 42` → `     042`).
-    if matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X' | 'o') {
+    if matches!(conv, b'd' | b'i' | b'u' | b'x' | b'X' | b'o') {
         if let Some(p) = prec_n {
             zero = false;
-            let cur = rendered.chars().count();
-            if p == 0 && rendered == "0" {
+            let cur = rendered.len();
+            if p == 0 && rendered == b"0" {
                 rendered.clear();
             } else if cur < p {
-                let mut padded = String::with_capacity(p);
-                padded.extend(std::iter::repeat_n('0', p - cur));
-                padded.push_str(&rendered);
+                let mut padded = Str::with_capacity(p);
+                padded.extend(std::iter::repeat_n(b'0', p - cur));
+                padded.extend_from_slice(&rendered);
                 rendered = padded;
             }
         }
         // `#` on octal forces the (precision-padded) body to begin with a `0`,
         // even when precision-0 emptied it (`printf %#.0o 0` → `0`).
-        if hash && conv == 'o' && !rendered.starts_with('0') {
-            rendered.insert(0, '0');
+        if hash && conv == b'o' && rendered.first() != Some(&b'0') {
+            rendered.insert(0, b'0');
         }
     }
 
     // Apply field width padding. The sign/base prefix and the digit body are
     // padded as a unit; for zero-padding the zeros go between them.
-    let total_len = num_prefix.chars().count() + rendered.chars().count();
+    // Field width counts *characters*, so a multibyte `%s` argument pads to the
+    // width bash would give it rather than to its byte length.
+    let total_len = bytes::char_count(&num_prefix) + bytes::char_count(&rendered);
     if total_len < width_n {
         let pad = width_n - total_len;
         if left {
-            out.push_str(&num_prefix);
-            out.push_str(&rendered);
-            out.extend(std::iter::repeat_n(' ', pad));
+            out.extend_from_slice(&num_prefix);
+            out.extend_from_slice(&rendered);
+            out.extend(std::iter::repeat_n(b' ', pad));
         } else if zero
             && matches!(
                 conv,
-                'd' | 'i' | 'u' | 'x' | 'X' | 'o' | 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A'
+                b'd' | b'i'
+                    | b'u'
+                    | b'x'
+                    | b'X'
+                    | b'o'
+                    | b'f'
+                    | b'F'
+                    | b'e'
+                    | b'E'
+                    | b'g'
+                    | b'G'
+                    | b'a'
+                    | b'A'
             )
         {
             // Zero-pad: prefix, then the padding zeros, then the body.
-            out.push_str(&num_prefix);
-            out.extend(std::iter::repeat_n('0', pad));
-            out.push_str(&rendered);
+            out.extend_from_slice(&num_prefix);
+            out.extend(std::iter::repeat_n(b'0', pad));
+            out.extend_from_slice(&rendered);
         } else {
-            out.extend(std::iter::repeat_n(' ', pad));
-            out.push_str(&num_prefix);
-            out.push_str(&rendered);
+            out.extend(std::iter::repeat_n(b' ', pad));
+            out.extend_from_slice(&num_prefix);
+            out.extend_from_slice(&rendered);
         }
     } else {
-        out.push_str(&num_prefix);
-        out.push_str(&rendered);
+        out.extend_from_slice(&num_prefix);
+        out.extend_from_slice(&rendered);
     }
     stop
 }
@@ -27833,15 +27890,15 @@ fn format_conversion(
 /// `-` always becomes the prefix; otherwise `+` (then space) is added if the
 /// corresponding flag is set. Keeping the sign separate lets zero-padding place
 /// the fill zeros after the sign (`%+05d` on 5 → `+0005`, not `000+5`).
-fn split_sign(s: String, plus: bool, space: bool) -> (String, String) {
+fn split_sign(s: &str, plus: bool, space: bool) -> (Str, Str) {
     if let Some(rest) = s.strip_prefix('-') {
-        ("-".to_string(), rest.to_string())
+        (b"-".to_vec(), rest.as_bytes().to_vec())
     } else if plus {
-        ("+".to_string(), s)
+        (b"+".to_vec(), s.as_bytes().to_vec())
     } else if space {
-        (" ".to_string(), s)
+        (b" ".to_vec(), s.as_bytes().to_vec())
     } else {
-        (String::new(), s)
+        (Str::new(), s.as_bytes().to_vec())
     }
 }
 
@@ -27904,17 +27961,30 @@ fn iso_week(year: i64, yday: i64, wday: usize) -> (i64, i64) {
 /// %j %u %w %s %z %Z %V %G %g %n %t %F %T %R %D %r %c %x %X %%`; an unknown
 /// specifier is emitted verbatim. Zone-dependent output (`%z` `%Z`) reflects the
 /// UTC rendering (`+0000` / `UTC`).
-fn format_strftime(fmt: &str, epoch: i64) -> String {
-    const WDAY_FULL: [&str; 7] = [
-        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+/// Append a strftime rendering to a prompt buffer.
+///
+/// **TD-OILS-BYTE-STRINGS scaffold.** Prompt expansion is still `String`-based,
+/// so a `\D{…}` format carrying a non-UTF-8 byte is mangled here. The five
+/// fixed formats the other prompt escapes use (`%a %b %e`, `%H:%M:%S`, …) render
+/// pure ASCII and so pass through unharmed; this whole helper disappears when
+/// prompt expansion becomes byte-native.
+#[allow(deprecated)]
+fn push_prompt_strftime(out: &mut String, fmt: &[u8], epoch: i64) {
+    out.push_str(&crate::bytes::scaffold_lossy_string(&format_strftime(fmt, epoch)));
+}
+
+fn format_strftime(fmt: &[u8], epoch: i64) -> Str {
+    const WDAY_FULL: [&[u8]; 7] = [
+        b"Sunday", b"Monday", b"Tuesday", b"Wednesday", b"Thursday", b"Friday", b"Saturday",
     ];
-    const WDAY_ABBR: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MON_FULL: [&str; 12] = [
-        "January", "February", "March", "April", "May", "June", "July", "August", "September",
-        "October", "November", "December",
+    const WDAY_ABBR: [&[u8]; 7] = [b"Sun", b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat"];
+    const MON_FULL: [&[u8]; 12] = [
+        b"January", b"February", b"March", b"April", b"May", b"June", b"July", b"August",
+        b"September", b"October", b"November", b"December",
     ];
-    const MON_ABBR: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    const MON_ABBR: [&[u8]; 12] = [
+        b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov",
+        b"Dec",
     ];
 
     let days = epoch.div_euclid(86_400);
@@ -27928,121 +27998,125 @@ fn format_strftime(fmt: &str, epoch: i64) -> String {
     let yday = days - days_from_civil(year, 1, 1) + 1;
     let mon_i = (month.max(1) - 1) as usize;
 
+    /// Append a numeric field. Every strftime field is ASCII by construction,
+    /// so building it with `format!` and taking its bytes is lossless.
+    fn num(out: &mut Str, s: &str) {
+        out.extend_from_slice(s.as_bytes());
+    }
+
     // Render one specifier letter to `out`. `%F`/`%T`/`%R`/`%D` recurse.
-    fn emit(out: &mut String, c: char, ctx: &StrftimeCtx) {
+    fn emit(out: &mut Str, c: u8, ctx: &StrftimeCtx) {
         match c {
-            'Y' => out.push_str(&ctx.year.to_string()),
-            'C' => out.push_str(&format!("{:02}", ctx.year.div_euclid(100))),
-            'y' => out.push_str(&format!("{:02}", ctx.year.rem_euclid(100))),
-            'm' => out.push_str(&format!("{:02}", ctx.month)),
-            'd' => out.push_str(&format!("{:02}", ctx.day)),
-            'e' => out.push_str(&format!("{:2}", ctx.day)),
-            'H' => out.push_str(&format!("{:02}", ctx.hour)),
-            'I' => {
+            b'Y' => num(out, &ctx.year.to_string()),
+            b'C' => num(out, &format!("{:02}", ctx.year.div_euclid(100))),
+            b'y' => num(out, &format!("{:02}", ctx.year.rem_euclid(100))),
+            b'm' => num(out, &format!("{:02}", ctx.month)),
+            b'd' => num(out, &format!("{:02}", ctx.day)),
+            b'e' => num(out, &format!("{:2}", ctx.day)),
+            b'H' => num(out, &format!("{:02}", ctx.hour)),
+            b'I' => {
                 let h12 = match ctx.hour % 12 {
                     0 => 12,
                     h => h,
                 };
-                out.push_str(&format!("{h12:02}"));
+                num(out, &format!("{h12:02}"));
             }
-            'k' => out.push_str(&format!("{:2}", ctx.hour)),
-            'l' => {
+            b'k' => num(out, &format!("{:2}", ctx.hour)),
+            b'l' => {
                 let h12 = match ctx.hour % 12 {
                     0 => 12,
                     h => h,
                 };
-                out.push_str(&format!("{h12:2}"));
+                num(out, &format!("{h12:2}"));
             }
-            'M' => out.push_str(&format!("{:02}", ctx.minute)),
-            'S' => out.push_str(&format!("{:02}", ctx.second)),
-            'p' => out.push_str(if ctx.hour < 12 { "AM" } else { "PM" }),
-            'P' => out.push_str(if ctx.hour < 12 { "am" } else { "pm" }),
-            'A' => out.push_str(ctx.wday_full),
-            'a' => out.push_str(ctx.wday_abbr),
-            'B' => out.push_str(ctx.mon_full),
-            'b' | 'h' => out.push_str(ctx.mon_abbr),
-            'j' => out.push_str(&format!("{:03}", ctx.yday)),
-            'u' => out.push_str(&(if ctx.wday == 0 { 7 } else { ctx.wday }).to_string()),
-            'w' => out.push_str(&ctx.wday.to_string()),
-            's' => out.push_str(&ctx.epoch.to_string()),
+            b'M' => num(out, &format!("{:02}", ctx.minute)),
+            b'S' => num(out, &format!("{:02}", ctx.second)),
+            b'p' => out.extend_from_slice(if ctx.hour < 12 { b"AM" } else { b"PM" }),
+            b'P' => out.extend_from_slice(if ctx.hour < 12 { b"am" } else { b"pm" }),
+            b'A' => out.extend_from_slice(ctx.wday_full),
+            b'a' => out.extend_from_slice(ctx.wday_abbr),
+            b'B' => out.extend_from_slice(ctx.mon_full),
+            b'b' | b'h' => out.extend_from_slice(ctx.mon_abbr),
+            b'j' => num(out, &format!("{:03}", ctx.yday)),
+            b'u' => num(out, &(if ctx.wday == 0 { 7 } else { ctx.wday }).to_string()),
+            b'w' => num(out, &ctx.wday.to_string()),
+            b's' => num(out, &ctx.epoch.to_string()),
             // osh renders all times in UTC (see TD-OILS9), so the zone offset is
             // always +0000 and the zone name is UTC. bash would use the shell's
             // local zone; matching that is gated on a timezone database.
-            'z' => out.push_str("+0000"),
-            'Z' => out.push_str("UTC"),
+            b'z' => out.extend_from_slice(b"+0000"),
+            b'Z' => out.extend_from_slice(b"UTC"),
             // ISO 8601 week date: %V = week number (01-53), %G = week-based year,
             // %g = week-based year mod 100.
-            'V' => {
+            b'V' => {
                 let (_, week) = iso_week(ctx.year, ctx.yday, ctx.wday);
-                out.push_str(&format!("{week:02}"));
+                num(out, &format!("{week:02}"));
             }
-            'G' => {
+            b'G' => {
                 let (iso_year, _) = iso_week(ctx.year, ctx.yday, ctx.wday);
-                out.push_str(&iso_year.to_string());
+                num(out, &iso_year.to_string());
             }
-            'g' => {
+            b'g' => {
                 let (iso_year, _) = iso_week(ctx.year, ctx.yday, ctx.wday);
-                out.push_str(&format!("{:02}", iso_year.rem_euclid(100)));
+                num(out, &format!("{:02}", iso_year.rem_euclid(100)));
             }
-            'n' => out.push('\n'),
-            't' => out.push('\t'),
-            '%' => out.push('%'),
-            'F' => {
-                for k in ['Y', '-', 'm', '-', 'd'] {
-                    if k == '-' {
-                        out.push('-');
-                    } else {
-                        emit(out, k, ctx);
-                    }
-                }
+            b'n' => out.push(b'\n'),
+            b't' => out.push(b'\t'),
+            b'%' => out.push(b'%'),
+            b'F' => {
+                emit(out, b'Y', ctx);
+                out.push(b'-');
+                emit(out, b'm', ctx);
+                out.push(b'-');
+                emit(out, b'd', ctx);
             }
-            'T' => {
-                emit(out, 'H', ctx);
-                out.push(':');
-                emit(out, 'M', ctx);
-                out.push(':');
-                emit(out, 'S', ctx);
+            b'T' => {
+                emit(out, b'H', ctx);
+                out.push(b':');
+                emit(out, b'M', ctx);
+                out.push(b':');
+                emit(out, b'S', ctx);
             }
-            'R' => {
-                emit(out, 'H', ctx);
-                out.push(':');
-                emit(out, 'M', ctx);
+            b'R' => {
+                emit(out, b'H', ctx);
+                out.push(b':');
+                emit(out, b'M', ctx);
             }
-            'D' => {
-                emit(out, 'm', ctx);
-                out.push('/');
-                emit(out, 'd', ctx);
-                out.push('/');
-                emit(out, 'y', ctx);
+            b'D' => {
+                emit(out, b'm', ctx);
+                out.push(b'/');
+                emit(out, b'd', ctx);
+                out.push(b'/');
+                emit(out, b'y', ctx);
             }
             // `%r` — 12-hour clock time: `%I:%M:%S %p` (C locale).
-            'r' => {
-                emit(out, 'I', ctx);
-                out.push(':');
-                emit(out, 'M', ctx);
-                out.push(':');
-                emit(out, 'S', ctx);
-                out.push(' ');
-                emit(out, 'p', ctx);
+            b'r' => {
+                emit(out, b'I', ctx);
+                out.push(b':');
+                emit(out, b'M', ctx);
+                out.push(b':');
+                emit(out, b'S', ctx);
+                out.push(b' ');
+                emit(out, b'p', ctx);
             }
             // `%c` — C-locale date and time: `%a %b %e %H:%M:%S %Y`.
-            'c' => {
-                emit(out, 'a', ctx);
-                out.push(' ');
-                emit(out, 'b', ctx);
-                out.push(' ');
-                emit(out, 'e', ctx);
-                out.push(' ');
-                emit(out, 'T', ctx);
-                out.push(' ');
-                emit(out, 'Y', ctx);
+            b'c' => {
+                emit(out, b'a', ctx);
+                out.push(b' ');
+                emit(out, b'b', ctx);
+                out.push(b' ');
+                emit(out, b'e', ctx);
+                out.push(b' ');
+                emit(out, b'T', ctx);
+                out.push(b' ');
+                emit(out, b'Y', ctx);
             }
             // `%x` — C-locale date: `%m/%d/%y` (same as `%D`).
-            'x' => emit(out, 'D', ctx),
+            b'x' => emit(out, b'D', ctx),
             // `%X` — C-locale time: `%H:%M:%S` (same as `%T`).
-            'X' => emit(out, 'T', ctx),
+            b'X' => emit(out, b'T', ctx),
             other => {
-                out.push('%');
+                out.push(b'%');
                 out.push(other);
             }
         }
@@ -28063,13 +28137,16 @@ fn format_strftime(fmt: &str, epoch: i64) -> String {
         mon_full: MON_FULL[mon_i],
         mon_abbr: MON_ABBR[mon_i],
     };
-    let mut out = String::new();
-    let mut chars = fmt.chars().peekable();
+    let mut out = Str::new();
+    // Bytes, not chars: the format's *syntax* is ASCII, but its literal text
+    // comes from a shell word and may hold any byte, which passes through
+    // untouched.
+    let mut chars = crate::escape::cursor(fmt);
     while let Some(c) = chars.next() {
-        if c == '%' {
+        if c == b'%' {
             match chars.next() {
                 Some(sp) => emit(&mut out, sp, &ctx),
-                None => out.push('%'),
+                None => out.push(b'%'),
             }
         } else {
             out.push(c);
@@ -28090,13 +28167,13 @@ struct StrftimeCtx {
     wday: usize,
     yday: i64,
     epoch: i64,
-    wday_full: &'static str,
-    wday_abbr: &'static str,
-    mon_full: &'static str,
-    mon_abbr: &'static str,
+    wday_full: &'static [u8],
+    wday_abbr: &'static [u8],
+    mon_full: &'static [u8],
+    mon_abbr: &'static [u8],
 }
 
-fn parse_printf_int(s: &str) -> i64 {
+fn parse_printf_int(s: &[u8]) -> i64 {
     parse_printf_int_checked(s).signed
 }
 
@@ -28130,7 +28207,7 @@ struct PrintfInt {
     invalid: Option<&'static str>,
 }
 
-fn parse_printf_int_checked(s: &str) -> PrintfInt {
+fn parse_printf_int_checked(s: &[u8]) -> PrintfInt {
     let plain = |signed: i64, unsigned: u64| PrintfInt {
         signed,
         unsigned,
@@ -28140,36 +28217,36 @@ fn parse_printf_int_checked(s: &str) -> PrintfInt {
     };
     // strtoimax skips *leading* whitespace but treats trailing whitespace as
     // junk, so trim only the front. An empty/blank argument is a valid 0.
-    let t = s.trim_start();
+    let t = s.trim_ascii_start();
     if t.is_empty() {
         return plain(0, 0);
     }
     // `'c` / `"c` yields the numeric code of the first character (always valid,
     // always a non-negative scalar value that fits both i64 and u64).
-    if let Some(rest) = t.strip_prefix('\'').or_else(|| t.strip_prefix('"')) {
-        let cp = rest.chars().next().map_or(0u32, u32::from);
+    if let Some(rest) = t.strip_prefix(b"'").or_else(|| t.strip_prefix(b"\"")) {
+        let cp = first_char_code(rest);
         return plain(i64::from(cp), u64::from(cp));
     }
-    let (neg, body) = match t.strip_prefix('-') {
+    let (neg, body) = match t.strip_prefix(b"-") {
         Some(r) => (true, r),
-        None => (false, t.strip_prefix('+').unwrap_or(t)),
+        None => (false, t.strip_prefix(b"+").unwrap_or(t)),
     };
-    let (radix, digits, kind) = if let Some(h) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X"))
+    let (radix, digits, kind) = if let Some(h) =
+        body.strip_prefix(b"0x").or_else(|| body.strip_prefix(b"0X"))
     {
         (16u32, h, "invalid hex number")
-    } else if body.len() > 1 && body.starts_with('0') && body.as_bytes()[1].is_ascii_digit() {
+    } else if body.first() == Some(&b'0') && body.get(1).is_some_and(u8::is_ascii_digit) {
         // Octal only when a digit follows the `0` (`08`, `019`); a `0` followed
         // by a letter (`0b101`) is decimal-with-junk, so bash reports the
         // generic "invalid number", not "invalid octal number".
-        (8u32, &body[1..], "invalid octal number")
+        (8u32, body.get(1..).unwrap_or_default(), "invalid octal number")
     } else {
         (10u32, body, "invalid number")
     };
-    // Consume the leading run of digits valid for the radix. These are ASCII,
-    // so the char count equals the byte length of the consumed prefix.
-    let valid_len = digits.chars().take_while(|c| c.is_digit(radix)).count();
-    let consumed = &digits[..valid_len];
-    let remaining = &digits[valid_len..];
+    // Consume the leading run of digits valid for the radix.
+    let valid_len = digits.iter().take_while(|&&b| char::from(b).is_digit(radix)).count();
+    let consumed = digits.get(..valid_len).unwrap_or_default();
+    let remaining = digits.get(valid_len..).unwrap_or_default();
     let invalid = if consumed.is_empty() || !remaining.is_empty() {
         Some(kind)
     } else {
@@ -28179,8 +28256,8 @@ fn parse_printf_int_checked(s: &str) -> PrintfInt {
     // past u64 without wrapping. `consumed` holds only radix-valid digits.
     let u64_max = u128::from(u64::MAX);
     let mut mag: u128 = 0;
-    for ch in consumed.chars() {
-        let d = u128::from(ch.to_digit(radix).unwrap_or(0));
+    for &b in consumed {
+        let d = u128::from(char::from(b).to_digit(radix).unwrap_or(0));
         mag = mag.saturating_mul(u128::from(radix)).saturating_add(d);
         if mag > u64_max {
             // Clamp to a sentinel just past u64::MAX; the exact magnitude beyond
@@ -28224,26 +28301,50 @@ fn parse_printf_int_checked(s: &str) -> PrintfInt {
 /// report validity. Like [`parse_printf_int_checked`], leading whitespace is
 /// skipped and the value is the longest parseable leading prefix; the `Option`
 /// is `Some("invalid number")` when trailing junk remains.
-fn parse_printf_float_checked(s: &str) -> (f64, Option<&'static str>) {
-    let t = s.trim_start();
+fn parse_printf_float_checked(s: &[u8]) -> (f64, Option<&'static str>) {
+    /// Parse a byte slice as an `f64`. A byte string that is not valid UTF-8 is
+    /// not the spelling of any number, so it simply fails to parse — no
+    /// transcoding, and therefore no chance of a mangled value quietly
+    /// succeeding.
+    fn parse(b: &[u8]) -> Option<f64> {
+        std::str::from_utf8(b).ok()?.parse::<f64>().ok()
+    }
+    let t = s.trim_ascii_start();
     if t.is_empty() {
         return (0.0, None);
     }
-    if let Some(rest) = t.strip_prefix('\'').or_else(|| t.strip_prefix('"')) {
-        return (rest.chars().next().map_or(0.0, |c| f64::from(u32::from(c))), None);
+    if let Some(rest) = t.strip_prefix(b"'").or_else(|| t.strip_prefix(b"\"")) {
+        return (f64::from(first_char_code(rest)), None);
     }
-    if let Ok(v) = t.parse::<f64>() {
+    if let Some(v) = parse(t) {
         return (v, None);
     }
     // Fall back to the longest leading prefix that parses (strtod partial value).
     let mut best = 0.0;
-    for (i, c) in t.char_indices() {
-        let end = i.saturating_add(c.len_utf8());
-        if let Ok(v) = t[..end].parse::<f64>() {
+    for end in 1..=t.len() {
+        if let Some(v) = t.get(..end).and_then(parse) {
             best = v;
         }
     }
     (best, Some("invalid number"))
+}
+
+/// The numeric code of the first character of `s`, for printf's `'c` / `"c`
+/// argument form (and 0 for an empty argument).
+///
+/// bash reads one *character* here, so a multibyte character yields its code
+/// point — but a byte that is not part of any character is not a character, and
+/// bash falls back to the byte's own value for it. `char_indices` marks such a
+/// byte by reporting U+FFFD over a span that is not U+FFFD's own encoding.
+fn first_char_code(s: &[u8]) -> u32 {
+    use bstr::ByteSlice as _;
+    match s.char_indices().next() {
+        Some((_, end, '\u{fffd}')) if s.get(..end) != Some("\u{fffd}".as_bytes()) => {
+            u32::from(s.first().copied().unwrap_or(0))
+        }
+        Some((_, _, ch)) => u32::from(ch),
+        None => 0,
+    }
 }
 
 /// Rust formats exponents as `1.5e2`; C/bash use `1.5e+02`. Normalize to the
@@ -28801,6 +28902,22 @@ mod tests {
         };
         let buf = take_capture(&buf);
         (String::from_utf8_lossy(&buf).into_owned(), status)
+    }
+
+    /// [`run`], but returning stdout as raw bytes.
+    ///
+    /// [`run`] lossily decodes what the shell wrote, which is exactly the thing
+    /// TD-OILS-BYTE-STRINGS is about: a test that wants to prove `printf
+    /// '\xff'` emitted *one* byte cannot ask a `String` about it, because the
+    /// lossy decode would have already replaced that byte with U+FFFD.
+    fn run_raw(src: &str) -> (Str, i32) {
+        let mut sh = Shell::new();
+        let buf = capture_sink();
+        let status = {
+            let mut out = Out::Capture(buf.clone());
+            sh.run_source_out(src, &mut out, 0)
+        };
+        (take_capture(&buf), status)
     }
 
     /// [`run`] for a *non-interactive* shell, i.e. what a script file gets.
@@ -32657,16 +32774,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // (The `run` harness captures stdout/stderr into *separate* buffers, so
         // it cannot exercise this ordering — hence a direct unit test.)
         fn merged(text: &str, diags: &[(usize, &str)]) -> String {
-            let owned: Vec<(usize, String)> =
-                diags.iter().map(|(o, m)| (*o, (*m).to_string())).collect();
-            let mut s = String::new();
+            let owned: Vec<(usize, Str)> =
+                diags.iter().map(|(o, m)| (*o, (*m).as_bytes().to_vec())).collect();
+            let mut s = Str::new();
             for seg in printf_output_segments(text.as_bytes(), &owned) {
                 match seg {
-                    PrintfSeg::Out(b) => s.push_str(std::str::from_utf8(b).unwrap()),
-                    PrintfSeg::Err(m) => s.push_str(m),
+                    PrintfSeg::Out(b) | PrintfSeg::Err(b) => s.extend_from_slice(b),
                 }
             }
-            s
+            String::from_utf8(s).unwrap()
         }
         // `printf '%d\n' 1 bad 2` → text "1\n0\n2\n", error tagged at offset 2
         // (start of the 2nd field, just after the flushed "1\n").
@@ -32855,6 +32971,42 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("printf '\\0'").0, "\0");
         // Escapes and conversions interleave.
         assert_eq!(run("printf '%d\\n\\101' 5").0, "5\nA");
+    }
+
+    #[test]
+    fn printf_byte_escapes_emit_one_byte_not_a_code_point() {
+        // TD-OILS-BYTE-STRINGS: `\xHH` and `\nnn` name a *byte*. Before the
+        // refactor the shell turned 0xa9 into U+00A9 and wrote its two-byte
+        // UTF-8 encoding, so every high byte was silently doubled — a
+        // `printf '\xff' > f` produced a file bash would not have produced.
+        assert_eq!(run_raw("printf '\\xa9'").0, b"\xa9");
+        assert_eq!(run_raw("printf '\\xff'").0, b"\xff");
+        // Octal likewise: `\377` is one byte, and `\0377` (echo-style prefix)
+        // is the same byte, not 0x1f followed by `7`.
+        assert_eq!(run_raw("printf '\\377'").0, b"\xff");
+        assert_eq!(run_raw("printf '%b' '\\0377'").0, b"\xff");
+        // `\u`/`\U` name a *code point*, so they still UTF-8 encode.
+        assert_eq!(run_raw("printf '\\u00e9'").0, b"\xc3\xa9");
+        assert_eq!(run_raw("printf '%b' '\\u00e9'").0, b"\xc3\xa9");
+        // `echo -e` shares the decoder and the same distinction.
+        assert_eq!(run_raw("echo -e '\\xff'").0, b"\xff\n");
+        assert_eq!(run_raw("echo -ne '\\xc3'").0, b"\xc3");
+    }
+
+    #[test]
+    fn printf_field_ops_do_not_split_or_panic_on_stray_bytes() {
+        // `%c` writes the first *character*, so a multibyte character is
+        // written whole rather than cut to its lead byte.
+        assert_eq!(run_raw("printf '%c' \"$(printf '\\u00e9x')\"").0, b"\xc3\xa9");
+        // (The companion case — a lone 0xff as the *argument*, which `%c` must
+        // treat as one character — cannot be staged from shell source yet:
+        // command substitution still captures into a `String`, so the byte is
+        // replaced before printf sees it. `bytes::char_at` covers it directly
+        // until the capture path is byte-native.)
+        // `%.Ns` truncates by bytes (C semantics). Landing mid-character used
+        // to panic — `String::truncate` rejects a non-boundary index; over
+        // bytes it simply cuts.
+        assert_eq!(run_raw("printf '%.1s' \"$(printf '\\u00e9')\"").0, b"\xc3");
     }
 
     #[test]

@@ -345,6 +345,39 @@ enum ExitArg {
     TooMany,
 }
 
+/// The system-wide profile a **login** shell reads before the user's own, and
+/// the only startup file whose path is absolute rather than `$HOME`-relative.
+///
+/// Deliberately the *vanilla* bash set: bash also reads `/etc/bash.bashrc` for
+/// interactive shells, but only when built with `-DSYS_BASHRC`, which is a
+/// distribution patch (Debian, MSYS) rather than upstream behaviour. SlateOS
+/// gets one system-wide startup file, this one, so that "what runs at login" has
+/// a single answer.
+const SYSTEM_PROFILE: &str = "/etc/profile";
+
+/// The invocation facts that decide *which* startup files a shell reads, passed
+/// to [`Shell::run_startup_files`]. Everything here comes from how the binary
+/// was invoked, which is why the binary supplies it rather than the shell
+/// deriving it.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StartupFiles<'a> {
+    /// bash's `interactive_shell`: `-i`/`+i` if either was given, else whether
+    /// stdin *and* stderr are both terminals.
+    ///
+    /// This is **not** [`Shell::is_interactive`], which additionally excludes
+    /// `-c` and script shells — `bash -i -c cmd` reads `~/.bashrc` (so it is
+    /// `interactive_shell`) yet prompts for nothing and traces its errors with
+    /// `line N:` (so it is not "interactive" in the sense that matters
+    /// everywhere else). Startup-file selection wants the first meaning.
+    pub interactive: bool,
+    /// `--noprofile`: skip the login-shell files, and only those.
+    pub no_profile: bool,
+    /// `--norc`: skip the interactive shell's rc file, `--rcfile` included.
+    pub no_rc: bool,
+    /// `--rcfile FILE` / `--init-file FILE`: read `FILE` instead of `~/.bashrc`.
+    pub rc_file: Option<&'a str>,
+}
+
 /// Drop a single leading `--`, bash's end-of-options marker.
 ///
 /// Exactly one: a second `--` is an ordinary argument, so `exit -- -- 3` is a
@@ -1691,6 +1724,13 @@ struct SourceFrame {
     call_line: u32,
     /// `fn_stack.len()` at the moment this frame was pushed.
     fn_depth: usize,
+    /// Set for a **startup file** ([`Shell::run_startup_file`]) rather than a
+    /// `.`/`source`. The one thing that distinguishes them is `return`: bash
+    /// reads a startup file with `_evalfile` *without* `FEVAL_BUILTIN`, and only
+    /// that flag makes it adopt `return_catch_value` — so `return N` stops the
+    /// file but its operand is thrown away, leaving `$?` as the last real
+    /// command left it (`true; return 5` in `~/.bash_profile` is `$? == 0`).
+    startup: bool,
 }
 
 /// Snapshot of the `set`-controlled shell options, captured by `local -` and
@@ -2418,9 +2458,20 @@ pub struct Shell {
     /// an `argv[0]` beginning with `-`, which is how `login(1)` marks it. It
     /// says how the shell was *started*, so nothing can change it afterwards:
     /// `shopt -s login_shell` is one of the two options bash gives a setter that
-    /// silently does nothing (see [`shopt_is_read_only`]). The only behaviour
-    /// hanging off it today is `logout`, which refuses to work anywhere else.
+    /// silently does nothing (see [`shopt_is_read_only`]). Two behaviours hang
+    /// off it: `logout`, which refuses to work anywhere else, and the choice of
+    /// startup files (see [`Shell::run_startup_files`]).
     login_shell: bool,
+    /// Armed by the `exit`/`logout` builtin in a **login** shell, carrying the
+    /// `$?` that was current when it fired. It is what makes `~/.bash_logout`
+    /// run, and *only* that path does: bash calls `bash_logout()` from
+    /// `exit_or_logout()` in `builtins/exit.def`, so a script or `-c` string that
+    /// simply runs off its end never reads the file, while an `exit` anywhere —
+    /// including inside a function, a `source`d file or a startup file — does.
+    /// See [`Shell::run_logout_file`], which is also where the carried status
+    /// matters: bash has not yet recorded the exit operand when the file runs, so
+    /// `$?` inside `~/.bash_logout` is the status of the last *real* command.
+    logout_pending: Option<i32>,
     /// Builtins disabled via `enable -n NAME`. A name present here is treated as
     /// *not* a builtin during command resolution, so a same-named external is
     /// run instead. Cloned into subshells (bash inherits the enable state).
@@ -2644,6 +2695,7 @@ impl Shell {
             hist_last_subst: crate::histexpand::LastSubst::default(),
             verbose: false,
             login_shell: false,
+            logout_pending: None,
             disabled_builtins: HashSet::new(),
             aliases: BTreeMap::new(),
             traps: HashMap::new(),
@@ -2872,6 +2924,27 @@ impl Shell {
         self.set_named_option(name, enable)
     }
 
+    /// The listing an `-o`/`+o` *with no following word* prints on the command
+    /// line, e.g. `osh -o`. bash routes this through the same
+    /// `list_minus_o_opts` the `set` builtin uses, so the two always agree:
+    /// `-o` gives `name<pad>on|off` columns, `+o` re-inputtable `set ±o name`
+    /// lines. Note it is a listing, not an error — the shell carries on.
+    pub fn format_named_option_list(&self, enable: bool) -> String {
+        self.format_option_list(!enable)
+    }
+
+    /// The same for `-O`/`+O` with no following word (`osh -O`), matching the
+    /// `shopt` builtin's listing: `-O` gives columns, `+O` re-inputtable
+    /// `shopt -s/-u name` lines.
+    pub fn format_shopt_list(&self, enable: bool) -> String {
+        let mut listing = String::new();
+        for &(opt, _) in SHOPT_TABLE {
+            let on = self.shopt.get(opt).copied().unwrap_or_else(|| self.shopt_default(opt));
+            listing.push_str(&shopt_line(opt, on, !enable));
+        }
+        listing
+    }
+
     /// Apply a `-O NAME` / `+O NAME` shopt option from the command line
     /// (`bash -O extglob`). Returns `false` for an unrecognised name. Mirrors
     /// the `shopt -s/-u` builtin, including the extdebug base-frame capture.
@@ -2927,6 +3000,175 @@ impl Shell {
     pub fn set_login_shell(&mut self) {
         self.login_shell = true;
         self.refresh_bashopts();
+    }
+
+    /// Read and run the startup files this shell's *invocation* selects, in
+    /// bash's order. Called once by the binary, after `$0`/the positional
+    /// parameters and every command-line option are in place — bash's startup
+    /// files see both (`bash -l script.sh a b` runs `~/.bash_profile` with `$0`
+    /// already the script and `$# == 2`) — and before the `-c` string, the
+    /// script or the REPL runs.
+    ///
+    /// Which files, exactly, depends on two independent facts:
+    ///
+    /// * A **login** shell reads `/etc/profile`, then the *first* of
+    ///   `~/.bash_profile`, `~/.bash_login`, `~/.profile` that exists — and
+    ///   never `~/.bashrc`, interactive or not. `--noprofile` skips all of them.
+    /// * An **interactive non-login** shell reads `~/.bashrc` (or `--rcfile`'s
+    ///   argument instead). `--norc` skips it.
+    /// * A **non-interactive** shell — login or not — additionally reads the file
+    ///   `$BASH_ENV` names, after any profile. This is the only one a plain
+    ///   `osh -c …`/`osh script` ever reads, and the reason the differential
+    ///   harness forces `BASH_ENV=""`.
+    ///
+    /// A missing file is silent; that is the whole point of bash calling
+    /// `maybe_execute_file` for each. Returns `Some(status)` if one of the files
+    /// exited the shell, in which case the caller must not run the command or
+    /// script it was about to.
+    ///
+    /// Not modelled: `$ENV`, which bash reads *instead* of `~/.bashrc` for an
+    /// interactive shell in POSIX mode or named `sh`. osh has neither, so
+    /// there is no state that could select it — see known-issues
+    /// TD-OILS-NO-STARTUP-FILES.
+    pub fn run_startup_files(&mut self, files: &StartupFiles<'_>) -> Option<i32> {
+        if self.login_shell {
+            if !files.no_profile {
+                if let Err(code) = self.run_startup_file(SYSTEM_PROFILE) {
+                    return Some(code);
+                }
+                // bash chains these with `&&` on "did not run", so the first one
+                // that exists is the only one read.
+                for path in ["~/.bash_profile", "~/.bash_login", "~/.profile"] {
+                    match self.run_startup_file(path) {
+                        Err(code) => return Some(code),
+                        Ok(true) => break,
+                        Ok(false) => {}
+                    }
+                }
+            }
+        } else if files.interactive && !files.no_rc {
+            let rc = files.rc_file.unwrap_or("~/.bashrc");
+            if let Err(code) = self.run_startup_file(rc) {
+                return Some(code);
+            }
+        }
+        if !files.interactive
+            && let Some(spec) = self.param_value("BASH_ENV")
+            && let Err(code) = self.run_env_file(&spec)
+        {
+            return Some(code);
+        }
+        None
+    }
+
+    /// Read `~/.bash_logout`, but only if the `exit`/`logout` builtin armed it
+    /// (see [`Shell::logout_pending`]). Called once by the binary as the shell
+    /// terminates, *before* the `EXIT` trap — bash runs the logout file from
+    /// inside `exit_or_logout`, so it goes first and the trap then sees the real
+    /// pending status.
+    ///
+    /// Returns `Some(status)` only if the file itself ran `exit`, which is the
+    /// one way it can change the shell's status: an ordinary failing command in
+    /// it does not (`~/.bash_logout` ending in `false` still lets `logout 4`
+    /// exit 4).
+    pub fn run_logout_file(&mut self) -> Option<i32> {
+        let seen = self.logout_pending.take()?;
+        // The status the *shell* is exiting with is already recorded; the file
+        // sees the one from before the `exit`, because bash has not stored the
+        // operand yet when it calls `bash_logout()`.
+        let pending = std::mem::replace(&mut self.last_status, seen);
+        let over = self.run_startup_file("~/.bash_logout");
+        self.last_status = pending;
+        // An `exit` in the logout file must not re-arm it; nothing would read
+        // the flag again, but leaving it set would be a lie about the state.
+        self.logout_pending = None;
+        match over {
+            Err(code) => {
+                self.last_status = code;
+                Some(code)
+            }
+            Ok(_) => None,
+        }
+    }
+
+    /// Read and run one startup file, bash's `maybe_execute_file`.
+    ///
+    /// `Ok(true)` means the file existed and was run (whatever it did),
+    /// `Ok(false)` that it was absent, unreadable, or a directory, and
+    /// `Err(status)` that it ran `exit` and the shell must terminate.
+    ///
+    /// This is `.`/`source` minus two things. There are no arguments, so the
+    /// positional parameters are the caller's throughout; and `return`'s operand
+    /// is discarded (see [`SourceFrame::startup`]). A source frame *is* pushed,
+    /// so diagnostics from the file name the file, `${BASH_SOURCE[0]}` is it,
+    /// and `return` is legal at all.
+    fn run_startup_file(&mut self, path: &str) -> Result<bool, i32> {
+        let path = self.tilde_expand(path);
+        let host = self.host_path(&path);
+        if std::fs::metadata(&host).is_ok_and(|m| m.is_dir()) {
+            // bash reports this one with `internal_error`, which carries the
+            // shell name but *not* the `line N:` token every command-level
+            // diagnostic has — there is no command yet.
+            self.errln(&format!("{}: {path}: is a directory", self.error_source()));
+            return Ok(false);
+        }
+        // Absent or unreadable is silent, by design: every shell has startup
+        // files it does not have.
+        let Ok(src) = std::fs::read_to_string(&host) else {
+            return Ok(false);
+        };
+        self.source_stack.push(SourceFrame {
+            path: path.clone(),
+            call_line: self.current_line,
+            fn_depth: self.fn_stack.len(),
+            startup: true,
+        });
+        self.refresh_funcname();
+        let mut out = Out::Inherit;
+        // `HistRead::Off`: a startup file's lines are not history, and no `!`
+        // history expansion happens in it — it is not the top-level reader.
+        let flow = self.run_source_flow_out(
+            &src,
+            &mut out,
+            &StdinSrc::Inherit,
+            &LineMap::Offset(0),
+            HistRead::Off,
+        );
+        self.source_stack.pop();
+        self.refresh_funcname();
+        // A `Flow::Abort` (an expansion error, or `exit 3 4`) abandons the rest
+        // of the file and nothing more: there is no enclosing unit to discard.
+        match flow {
+            Flow::Exit(code) => Err(code),
+            _ => Ok(true),
+        }
+    }
+
+    /// Read the file `$BASH_ENV` names, expanding the value first.
+    ///
+    /// bash expands it as if it were inside double quotes
+    /// (`expand_string_unsplit_to_string(…, Q_DOUBLE_QUOTES)`): parameter,
+    /// command and arithmetic substitutions all apply, but quote characters stay
+    /// literal, the result is never split into words and never globbed — so
+    /// `BASH_ENV='$HOME/rc'` works, `BASH_ENV='/a b/rc'` finds a path with a
+    /// space in it, and `BASH_ENV='"/a/rc"'` looks for a file whose name starts
+    /// with a quote. Only then is the result tilde-expanded, which is why
+    /// `BASH_ENV='~/rc'` works even though a tilde inside double quotes would
+    /// not. Wrapping the value in real double quotes reproduces all of that,
+    /// needing only the one escape a `"` in the value itself does.
+    fn run_env_file(&mut self, spec: &str) -> Result<bool, i32> {
+        if spec.is_empty() {
+            return Ok(false);
+        }
+        let quoted = format!("\"{}\"", spec.replace('"', "\\\""));
+        let Ok(word) = crate::parser::word_verbatim_from_source(&quoted, self.lex_opts()) else {
+            return Ok(false);
+        };
+        let path = self.expand_to_string(&word);
+        if path.is_empty() {
+            return Ok(false);
+        }
+        self.run_startup_file(&path)
     }
 
     /// Whether this shell is *interactive* in bash's sense: not a `-c` command
@@ -6088,6 +6330,10 @@ impl Shell {
             hist_last_subst: self.hist_last_subst.clone(),
             verbose: self.verbose,
             login_shell: self.login_shell,
+            // A subshell's `exit` does not read `~/.bash_logout`: bash's
+            // `bash_logout()` runs only when `subshell_environment == 0`, so
+            // `( exit 2 )` and `$( exit 2 )` in a login shell are silent.
+            logout_pending: None,
             disabled_builtins: self.disabled_builtins.clone(),
             aliases: self.aliases.clone(),
             // A subshell resets non-ignored traps to their default disposition
@@ -13414,7 +13660,18 @@ impl Shell {
                     // second operand does not exit at all (see
                     // `exit_status_arg`). A bare `exit` uses `$?`, and so does
                     // `exit --`.
-                    match self.exit_status_arg(name, args) {
+                    let arg = self.exit_status_arg(name, args);
+                    // Arm `~/.bash_logout` for the two branches that really
+                    // exit, carrying the `$?` bash's logout file would see —
+                    // which is the *current* one, before this builtin's own
+                    // status is recorded (see `logout_pending`). The
+                    // too-many-arguments branch never reaches bash's
+                    // `bash_logout()` call, because `no_args` unwinds out of
+                    // `exit_or_logout` before it.
+                    if self.login_shell && !matches!(arg, ExitArg::TooMany) {
+                        self.logout_pending = Some(self.last_status);
+                    }
+                    match arg {
                         ExitArg::Status(code) => {
                             flow = Flow::Exit(code);
                             code
@@ -13459,7 +13716,22 @@ impl Shell {
                     }
                     Some(code) => {
                         flow = Flow::Return;
-                        code
+                        // In a *startup* file the operand is dropped and `$?`
+                        // stays as the last real command left it — bash reads
+                        // those files without the flag that makes it adopt
+                        // `return_catch_value` (see [`SourceFrame::startup`]).
+                        // Only when the startup file's own frame is the innermost
+                        // one: a `return` inside a function the file defined and
+                        // called is an ordinary function return.
+                        if self
+                            .source_stack
+                            .last()
+                            .is_some_and(|f| f.startup && self.fn_stack.len() == f.fn_depth)
+                        {
+                            self.last_status
+                        } else {
+                            code
+                        }
                     }
                 }
             }
@@ -20655,6 +20927,7 @@ impl Shell {
                     path: path.clone(),
                     call_line: self.current_line,
                     fn_depth: self.fn_stack.len(),
+                    startup: false,
                 });
                 self.refresh_funcname();
                 // bash treats a sourced script like a function frame for the
@@ -41054,5 +41327,228 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let st = sh.run_source("exec no_such_command_xyz_123\nAFTER=1");
         assert_eq!(st, 127);
         assert!(!sh.vars.contains_key("AFTER"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Startup files
+    // -----------------------------------------------------------------------
+
+    /// A private `$HOME` for one startup-file test, plus a `Shell` whose `HOME`
+    /// points at it.
+    ///
+    /// `run_startup_file` writes to `Out::Inherit` — a startup file's output goes
+    /// to the shell's real stdout, as it must — so these tests observe *state*
+    /// (a variable the file set) and the returned status rather than text. The
+    /// output shapes are pinned end-to-end by `tests/corpus/startup-files.sh` and
+    /// `tests/cli_options.rs`.
+    fn startup_home(tag: &str) -> (Shell, String) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("osh_startup_{tag}_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let home = dir.to_string_lossy().replace('\\', "/");
+        let mut sh = Shell::new();
+        // Assigning through the shell keeps `HOME` an ordinary shell variable,
+        // which is all `tilde_expand` looks at.
+        sh.run_source(&format!("HOME='{home}'"));
+        (sh, home)
+    }
+
+    /// Write `body` to `name` under `home`, as a startup file.
+    fn write_startup(home: &str, name: &str, body: &str) {
+        std::fs::write(format!("{home}/{name}"), body).expect("write startup file");
+    }
+
+    /// The four kinds of shell read four different sets of files, and the two
+    /// facts that decide it — login and interactive — are independent.
+    #[test]
+    fn startup_files_follow_the_login_and_interactive_split() {
+        let (mut sh, home) = startup_home("split");
+        write_startup(&home, ".bash_login", "SAW=bash_login");
+        write_startup(&home, ".profile", "SAW=profile");
+        write_startup(&home, ".bashrc", "SAW=bashrc");
+
+        // Interactive non-login: the rc file only.
+        let files = StartupFiles { interactive: true, ..StartupFiles::default() };
+        assert_eq!(sh.run_startup_files(&files), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("bashrc"));
+
+        // A login shell never reads the rc file, and takes the *first* profile
+        // that exists — `.bash_profile` is absent, so `.bash_login` wins over
+        // `.profile`.
+        sh.run_source("unset SAW");
+        sh.set_login_shell();
+        assert_eq!(sh.run_startup_files(&files), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("bash_login"));
+
+        // Adding the earlier name pre-empts it.
+        write_startup(&home, ".bash_profile", "SAW=bash_profile");
+        sh.run_source("unset SAW");
+        assert_eq!(sh.run_startup_files(&files), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("bash_profile"));
+    }
+
+    /// `--noprofile`/`--norc` suppress their own set, and a non-interactive
+    /// shell has no rc file to suppress in the first place.
+    #[test]
+    fn noprofile_and_norc_suppress_their_own_files() {
+        let (mut sh, home) = startup_home("suppress");
+        write_startup(&home, ".bashrc", "SAW=bashrc");
+        write_startup(&home, ".bash_profile", "SAW=bash_profile");
+
+        let norc = StartupFiles { interactive: true, no_rc: true, ..StartupFiles::default() };
+        assert_eq!(sh.run_startup_files(&norc), None);
+        assert_eq!(sh.param_value("SAW"), None);
+
+        // Non-interactive: no rc file even without `--norc`.
+        let plain = StartupFiles::default();
+        assert_eq!(sh.run_startup_files(&plain), None);
+        assert_eq!(sh.param_value("SAW"), None);
+
+        // `--rcfile` names a different file, and only an interactive shell uses it.
+        write_startup(&home, "my.rc", "SAW=my_rc");
+        let rcfile = format!("{home}/my.rc");
+        let named =
+            StartupFiles { interactive: true, rc_file: Some(&rcfile), ..StartupFiles::default() };
+        assert_eq!(sh.run_startup_files(&named), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("my_rc"));
+
+        // Login + `--noprofile`: nothing at all, the rc file included.
+        sh.run_source("unset SAW");
+        sh.set_login_shell();
+        let noprofile =
+            StartupFiles { interactive: true, no_profile: true, ..StartupFiles::default() };
+        assert_eq!(sh.run_startup_files(&noprofile), None);
+        assert_eq!(sh.param_value("SAW"), None);
+    }
+
+    /// `$BASH_ENV` is for non-interactive shells, is read *after* any profile,
+    /// and its value is expanded as if double-quoted: substitutions yes, word
+    /// splitting and globbing no, and a leading tilde afterwards.
+    #[test]
+    fn bash_env_is_expanded_as_if_double_quoted() {
+        let (mut sh, home) = startup_home("bashenv");
+        write_startup(&home, "env.sh", "SAW=${SAW:-}env");
+        write_startup(&home, ".bash_profile", "SAW=prof");
+
+        let plain = StartupFiles::default();
+        sh.run_source(&format!("BASH_ENV='{home}/env.sh'"));
+        assert_eq!(sh.run_startup_files(&plain), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("env"));
+
+        // After the profile, so the profile's assignment is the one it appends to.
+        sh.run_source("unset SAW");
+        sh.set_login_shell();
+        assert_eq!(sh.run_startup_files(&plain), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("profenv"));
+
+        // Never for an interactive shell.
+        sh.run_source("unset SAW");
+        let inter =
+            StartupFiles { interactive: true, no_profile: true, no_rc: true, rc_file: None };
+        assert_eq!(sh.run_startup_files(&inter), None);
+        assert_eq!(sh.param_value("SAW"), None);
+
+        // A parameter expansion in the value applies (single quotes here so the
+        // *shell running the test* does not expand it first — the point is that
+        // `run_env_file` does).
+        write_startup(&home, "e nv.sh", "SAW=${SAW:-}spaced");
+        sh.run_source(&format!("V=nv\nBASH_ENV='{home}/e${{V}}.sh'\nunset SAW"));
+        assert_eq!(sh.run_startup_files(&plain), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("profenv"));
+
+        // …and the result is *not* split on the space in the name, so a path
+        // with a space in it is found.
+        sh.run_source(&format!("unset SAW\nBASH_ENV='{home}/e nv.sh'"));
+        assert_eq!(sh.run_startup_files(&plain), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("profspaced"));
+
+        // A leading `~` expands even though it would not inside real double
+        // quotes: bash tilde-expands the *result* of the expansion.
+        sh.run_source("unset SAW\nBASH_ENV='~/env.sh'");
+        assert_eq!(sh.run_startup_files(&plain), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("profenv"));
+
+        // An empty value, and a name that does not exist, are both silent.
+        sh.run_source("unset SAW\nBASH_ENV=");
+        assert_eq!(sh.run_startup_files(&plain), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("prof"));
+    }
+
+    /// `exit` in a startup file terminates the shell — the caller must not run
+    /// the command it was about to — while `return`'s operand is thrown away.
+    #[test]
+    fn exit_in_a_startup_file_stops_the_shell_but_return_does_not() {
+        let (mut sh, home) = startup_home("exit");
+        write_startup(&home, ".bashrc", "SAW=rc\nexit 7\nSAW=not_reached");
+        let files = StartupFiles { interactive: true, ..StartupFiles::default() };
+        assert_eq!(sh.run_startup_files(&files), Some(7));
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("rc"));
+
+        // `return` stops the file too, but the shell carries on with the status
+        // untouched: bash reads these files without `FEVAL_BUILTIN`, so the
+        // operand never reaches it.
+        let (mut sh, home) = startup_home("ret");
+        write_startup(&home, ".bashrc", "true\nreturn 5\nSAW=not_reached");
+        assert_eq!(sh.run_startup_files(&files), None);
+        assert_eq!(sh.param_value("SAW"), None);
+        assert_eq!(sh.last_status, 0);
+    }
+
+    /// `~/.bash_logout` is read only when the `exit`/`logout` builtin armed it,
+    /// which is what confines it to a login shell leaving through that builtin.
+    /// Inside it `$?` is the status from *before* the `exit`.
+    #[test]
+    fn the_logout_file_is_read_only_when_the_exit_builtin_armed_it() {
+        let (mut sh, home) = startup_home("logout");
+        write_startup(&home, ".bash_logout", "SAW=logout$?");
+
+        // Nothing armed it: not read at all.
+        assert_eq!(sh.run_logout_file(), None);
+        assert_eq!(sh.param_value("SAW"), None);
+
+        // A login shell's `exit` arms it, and the file sees the pre-`exit` status.
+        sh.set_login_shell();
+        assert_eq!(sh.run_source("false; exit 5"), 5);
+        assert_eq!(sh.run_logout_file(), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("logout1"));
+
+        // Reading it disarms it, so a second call does nothing.
+        sh.run_source("unset SAW");
+        assert_eq!(sh.run_logout_file(), None);
+        assert_eq!(sh.param_value("SAW"), None);
+
+        // An `exit` *in* the logout file replaces the shell's status.
+        write_startup(&home, ".bash_logout", "SAW=lo\nexit 9");
+        assert_eq!(sh.run_source("exit 4"), 4);
+        assert_eq!(sh.run_logout_file(), Some(9));
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("lo"));
+
+        // A merely *failing* command in it does not.
+        write_startup(&home, ".bash_logout", "SAW=lo2\nfalse");
+        assert_eq!(sh.run_source("exit 4"), 4);
+        assert_eq!(sh.run_logout_file(), None);
+        assert_eq!(sh.param_value("SAW").as_deref(), Some("lo2"));
+    }
+
+    /// A startup file that is a directory is reported and skipped, not fatal —
+    /// and a missing one is silent, because every shell has startup files it
+    /// does not have.
+    #[test]
+    fn a_directory_startup_file_is_skipped_and_a_missing_one_is_silent() {
+        let (mut sh, home) = startup_home("dir");
+        std::fs::create_dir_all(format!("{home}/dir.rc")).expect("mkdir");
+        let rcfile = format!("{home}/dir.rc");
+        let files =
+            StartupFiles { interactive: true, rc_file: Some(&rcfile), ..StartupFiles::default() };
+        assert_eq!(sh.run_startup_files(&files), None);
+
+        // Nothing planted: no file exists, and that is not an error either.
+        let (mut sh, _home) = startup_home("absent");
+        sh.set_login_shell();
+        let files = StartupFiles { interactive: true, ..StartupFiles::default() };
+        assert_eq!(sh.run_startup_files(&files), None);
     }
 }

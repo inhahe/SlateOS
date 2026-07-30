@@ -9,9 +9,16 @@
 //!   osh SCRIPT [ARG…]        Run SCRIPT, with ARG… as positional parameters.
 //!   osh --version | --help
 //!
-//! Leading `set` options (`-e`, `-x`, …), `-i`/`+i` and `-l` may be bundled
-//! with the `-c`/`-s` mode letter into a single cluster, getopt-style (`-ec`,
-//! `-ic`, `-lc`, `-cx`), matching bash.
+//! The command line is parsed in bash's two passes: [`parse_long_options`] takes
+//! the GNU-style long options (`--norc`, `--rcfile FILE`, …) off the front, then
+//! a getopt-style loop takes the single-letter ones. `set` options (`-e`, `-x`,
+//! …), `-i`/`+i` and `-l` may be bundled with the `-c`/`-s` mode letter into a
+//! single cluster (`-ec`, `-ic`, `-lc`, `-cx`). Because the passes are ordered,
+//! a long option written *after* a short one is an error, as in bash.
+//!
+//! Once the options are settled the shell reads its startup files
+//! ([`Shell::run_startup_files`]) and, on `exit` from a login shell,
+//! `~/.bash_logout` ([`Shell::run_logout_file`]).
 //!
 //! See `design-decisions.md §72` for why this is a Rust reimplementation of the
 //! OSH language rather than a cross-compile of upstream Oils.
@@ -19,7 +26,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::process;
 
-use osh::Shell;
+use osh::{Shell, StartupFiles};
 
 const VERSION: &str = concat!("osh (Oils for SlateOS) ", env!("CARGO_PKG_VERSION"));
 
@@ -51,6 +58,152 @@ enum InvokeMode {
     Command,
     /// `-s`: read commands from stdin, with the operands as positional params.
     Stdin,
+}
+
+/// What the shell will execute once its startup files have been read.
+///
+/// The two are separated because bash settles `$0`, the positional parameters
+/// and the shell's mode *before* it reads any startup file, and that is
+/// observable: `osh -l script.sh a b` runs `~/.bash_profile` with `$0` already
+/// `script.sh` and `$# == 2`, and `osh -l nosuchfile` reads the profile and only
+/// *then* reports the missing script. So each mode arm prepares the shell and
+/// returns one of these, rather than running anything itself.
+enum Plan<'a> {
+    /// `-c`: the command string to run.
+    Command(&'a str),
+    /// A named script file, not yet opened.
+    Script(&'a str),
+    /// Read commands from stdin (the REPL, `-s`, or a bare `-`).
+    Repl,
+}
+
+/// One recognised GNU-style long option, after its leading dashes are stripped.
+/// Mirrors bash's `long_args[]` table in `shell.c`, restricted to the options
+/// osh can honour truthfully — bash's `--posix`, `--restricted`, `--debugger`,
+/// `--wordexp` and friends are deliberately absent rather than accepted as
+/// no-ops, because accepting them would claim behaviour osh does not have.
+#[derive(Clone, Copy)]
+enum LongOpt {
+    /// `--help`
+    Help,
+    /// `--login`, the long spelling of `-l`.
+    Login,
+    /// `--noediting`. osh has no line editor, so there is nothing to switch
+    /// off — but the resulting shell *does* behave as asked, which is why this
+    /// one is accepted where `--posix` is not.
+    NoEditing,
+    /// `--noprofile`
+    NoProfile,
+    /// `--norc`
+    NoRc,
+    /// `--rcfile FILE` / `--init-file FILE` (synonyms in bash too).
+    RcFile,
+    /// `--verbose`, the long spelling of `set -v`.
+    Verbose,
+    /// `--version`
+    Version,
+}
+
+impl LongOpt {
+    /// The table lookup, on the name with its dashes already removed.
+    fn lookup(name: &str) -> Option<Self> {
+        Some(match name {
+            "help" => Self::Help,
+            "init-file" | "rcfile" => Self::RcFile,
+            "login" => Self::Login,
+            "noediting" => Self::NoEditing,
+            "noprofile" => Self::NoProfile,
+            "norc" => Self::NoRc,
+            "verbose" => Self::Verbose,
+            "version" => Self::Version,
+            _ => return None,
+        })
+    }
+
+    /// Whether the option consumes the following word as its argument.
+    fn takes_arg(self) -> bool {
+        matches!(self, Self::RcFile)
+    }
+}
+
+/// Everything the long-option pass can record, to be applied once the pass has
+/// finished (bash keeps these in globals for the same reason: `--version` must
+/// not short-circuit a later `--badopt` in the same pass).
+#[derive(Default)]
+struct LongOptions {
+    help: bool,
+    version: bool,
+    login: bool,
+    verbose: bool,
+    no_profile: bool,
+    no_rc: bool,
+    /// The argument of the last `--rcfile`/`--init-file`.
+    rc_file: Option<String>,
+}
+
+/// bash's `parse_long_options` (`shell.c`): a first pass over the command line
+/// that consumes *only* GNU-style long options, stopping at the first word that
+/// is not one. Returns the index of the first unconsumed word, or `Err(status)`
+/// if the pass is fatal.
+///
+/// Being a separate, earlier pass has consequences that scripts depend on, so
+/// osh reproduces all of them:
+///
+/// * **Long options must precede every short one.** `osh -x --norc -c cmd` never
+///   reaches this table for `--norc`; the letter loop below gets it instead and
+///   reports `--: invalid option`, exactly as bash does.
+/// * **One dash is as good as two:** `-login` == `--login`. bash steps over a
+///   second dash only when there is one, then compares the tail.
+/// * **A missing argument names the table entry, not the token** — `rcfile:
+///   option requires an argument`, with no dashes and no usage summary.
+/// * **An unmatched two-dash word is fatal** (with the original token in the
+///   message, dashes included); an unmatched one-dash word merely ends the pass,
+///   so the letter loop can have it.
+/// * **`-` and `--` alone are not long options** — there is no tail to match —
+///   so they end the pass and are handled by the letter loop.
+/// * `--help`/`--version` are recorded, not acted on: bash finishes the pass
+///   first, so `osh --version --bogus` still reports the bad option, while `osh
+///   --version -q` prints the version and never reaches the letter loop.
+fn parse_long_options(args: &[String], opts: &mut LongOptions) -> Result<usize, i32> {
+    let mut i = 1;
+    while let Some(arg) = args.get(i) {
+        if !arg.starts_with('-') {
+            break;
+        }
+        // `--name` matches `name`, and so does `-name`. `--` and `-` have an
+        // empty tail, which matches nothing.
+        let two_dash = arg.starts_with("--") && arg.len() > 2;
+        let name = if two_dash { &arg[2..] } else { &arg[1..] };
+        let Some(opt) = LongOpt::lookup(name) else {
+            if two_dash {
+                eprintln!("osh: {arg}: invalid option");
+                eprint_option_usage();
+                return Err(2);
+            }
+            break;
+        };
+        let mut value = None;
+        if opt.takes_arg() {
+            let Some(v) = args.get(i + 1) else {
+                eprintln!("osh: {name}: option requires an argument");
+                return Err(2);
+            };
+            value = Some(v.clone());
+            i += 1;
+        }
+        match opt {
+            LongOpt::Help => opts.help = true,
+            LongOpt::Login => opts.login = true,
+            LongOpt::NoEditing => {}
+            LongOpt::NoProfile => opts.no_profile = true,
+            LongOpt::NoRc => opts.no_rc = true,
+            LongOpt::RcFile => opts.rc_file = value,
+            LongOpt::Verbose => opts.verbose = true,
+            LongOpt::Version => opts.version = true,
+        }
+        i += 1;
+    }
+    Ok(i)
 }
 
 fn main() {
@@ -90,14 +243,37 @@ fn run(args: &[String]) -> i32 {
         sh.set_login_shell();
     }
 
-    // Consume leading `set`/`shopt`-style option flags (`bash -e`, `-x`, `-eu`,
-    // `-o pipefail`, `-O extglob`, `+O nocasematch`, `-n`, …), applying each to
-    // the shell before the mode token (`-c`, a script path, …) is dispatched.
-    // `base` advances past them so the mode token and its arguments keep their
-    // normal relative positions. `--` ends option processing; `-c`, `-s`, the
-    // long options, and any unrecognised token are handled by the dispatch
-    // below, so we stop at them.
-    let mut base = 1;
+    // First pass: the GNU-style long options (see `parse_long_options`).
+    let mut long = LongOptions::default();
+    let mut base = match parse_long_options(args, &mut long) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    // bash acts on these the moment the long-option pass returns, before the
+    // letter loop runs at all, so `osh --help -q` prints help and exits 0.
+    if long.help {
+        print_help();
+        return 0;
+    }
+    if long.version {
+        println!("{VERSION}");
+        return 0;
+    }
+    if long.login {
+        sh.set_login_shell();
+    }
+    if long.verbose {
+        // `--verbose` is exactly `set -v`; there is no separate state.
+        let _ = sh.apply_short_options("v", true);
+    }
+
+    // Second pass: leading `set`/`shopt`-style option flags (`bash -e`, `-x`,
+    // `-eu`, `-o pipefail`, `-O extglob`, `+O nocasematch`, `-n`, …), applying
+    // each to the shell before the mode token (`-c`, a script path, …) is
+    // dispatched. `base` advances past them so the mode token and its arguments
+    // keep their normal relative positions. `--` ends option processing; `-c`,
+    // `-s`, and any unrecognised token are handled by the dispatch below, so we
+    // stop at them.
     // Set once `--` is seen: everything after it is operands, so the token at
     // `base` is a script path even if it begins with `-` (`osh -- -c` opens a
     // *file* named `-c`, matching bash), and the flag arms below are skipped.
@@ -105,72 +281,67 @@ fn run(args: &[String]) -> i32 {
     // `-i` / `+i` force interactivity on/off, overriding tty detection for the
     // REPL (bash's `--force-interactive`). `None` = decide by isatty.
     let mut force_interactive: Option<bool> = None;
-    // The mode selected by a `-c`/`-s` letter (default: REPL / script). bash
-    // parses these getopt-style, so they may be bundled with `set` options and
-    // `-i` in a single cluster (`-ec`, `-ic`, `-cs`); the mode letter can sit
-    // anywhere in the cluster and the command/operands still come from the
-    // following words.
-    let mut mode = InvokeMode::Repl;
+    // bash's `want_pending_command` and `read_from_stdin`. These are two
+    // independent flags, not one mode: the letters may be bundled with `set`
+    // options and with each other in any order (`-ec`, `-ic`, `-cs`, `-sc`), and
+    // when both are given `-c` wins whichever came first, because bash tests for
+    // a pending command string before it looks at `read_from_stdin`.
+    let mut want_command = false;
+    let mut read_stdin = false;
+    // Bare `-` also selects stdin, and unlike the letters it *does* end option
+    // processing (bash returns from `parse_shell_options` on it).
     while let Some(arg) = args.get(base) {
         match arg.as_str() {
-            "--" => {
+            // `--` and a bare `-` are the same thing: bash's option walk returns
+            // on either, with no flag set. A bare `-` reads commands from stdin
+            // only because nothing is *left* to run as a script — the classic `sh
+            // -` spelling — so `osh - script.sh` runs the script, and `osh - -x`
+            // looks for a file called `-x` rather than applying `-x`.
+            "--" | "-" => {
                 base += 1;
                 opts_ended = true;
                 break;
             }
-            // `-o NAME` / `+o NAME` (long `set` option), `-O NAME` / `+O NAME`
-            // (shopt option). Each consumes the following word as its name.
-            "-o" | "+o" | "-O" | "+O" => {
-                let enable = arg.starts_with('-');
-                let is_shopt = arg.ends_with('O');
-                let Some(name) = args.get(base + 1) else {
-                    eprintln!("osh: {arg}: option requires an argument");
-                    return 2;
-                };
-                let ok = if is_shopt {
-                    sh.apply_shopt_option(name, enable)
-                } else {
-                    sh.apply_named_option(name, enable)
-                };
-                if !ok {
-                    if is_shopt {
-                        eprintln!("osh: {name}: invalid shell option name");
-                    } else {
-                        eprintln!("osh: {name}: invalid option name");
-                    }
-                    return 2;
-                }
-                base += 2;
-            }
-            // Bare `-`: end option processing and read commands from stdin,
-            // like `-s` with no operands (a legacy bash spelling). The operands
-            // that follow become positional parameters.
-            "-" => {
-                base += 1;
-                mode = InvokeMode::Stdin;
-                break;
-            }
-            // osh's `-V` version shorthand is not a `set` letter; keep it out of
-            // the option-cluster parser so it reaches the version dispatch below.
-            "-V" => break,
-            // The long spelling of `-l`. Like the letter it is invocation-only
-            // and does not end option processing, so a script/`-c` may follow.
-            "--login" => {
-                sh.set_login_shell();
-                base += 1;
+            // osh's `-V` version shorthand, an extension: bash has no `-V` and
+            // rejects it. Acted on here rather than left for the dispatch below so
+            // it works in any option position, like `--version`. After `--` it is
+            // a filename again, because that arm breaks out first.
+            "-V" => {
+                println!("{VERSION}");
+                return 0;
             }
             // A `-`/`+` cluster of single-letter invocation options: `set`
             // letters (`-e`, `-x`, `-eux`, `+x`), `-i`/`+i` (force
-            // interactivity), and — for `-` — the mode letters `-c`/`-s`, which
-            // may be bundled (`-ec`, `-ic`, `-cs`). bash parses these getopt-
-            // style: valid letters are applied left-to-right, and the first
-            // unrecognised letter aborts with `<opt>: invalid option` (exit 2),
-            // still having applied the good letters before it.
-            s if (s.starts_with('-') || s.starts_with('+')) && s.len() > 1 && !s.starts_with("--") => {
+            // interactivity), `-o`/`-O` with a following name, and — for `-` —
+            // the mode letters `-c`/`-s`, which may be bundled (`-ec`, `-ic`,
+            // `-cs`). bash parses these getopt-style: valid letters are applied
+            // left-to-right, and the first unrecognised letter aborts with
+            // `<opt>: invalid option` (exit 2), still having applied the good
+            // letters before it.
+            //
+            // A mode letter does *not* end the pass — bash's `case 'c'` only sets
+            // a flag and the argv walk continues — so `osh -c -x 'echo hi'` traces
+            // `echo hi` rather than trying to run `-x`, and `osh -s -x` applies
+            // `-x` instead of making it `$1`. Only `--`, `-`, or a word that
+            // starts with neither `-` nor `+` ends it.
+            //
+            // A long option reaching here — `osh -x --norc` — is *not* excluded:
+            // getopt sees `--norc` as the letters `-`, `n`, `o`, … and the very
+            // first one is invalid, so bash reports `--: invalid option`. Letting
+            // the cluster loop have it reproduces that wording exactly.
+            s if (s.starts_with('-') || s.starts_with('+')) && s.len() > 1 => {
                 let enable = s.starts_with('-');
                 let sign = if enable { '-' } else { '+' };
+                // bash's `next_arg` cursor. `o`/`O` take the *next word* — never
+                // the rest of the cluster — and each one seen advances the cursor,
+                // so `osh -oo pipefail xtrace` sets both. It is also where a `-c`
+                // command starts, which is why `osh -oc pipefail 'echo hi'` runs
+                // `echo hi`: the cursor is past `pipefail` by then.
+                let mut next_arg = base + 1;
+                // `set` letters are gathered and applied together, but flushed
+                // first whenever something else in the cluster acts, so the
+                // left-to-right order bash applies them in is preserved.
                 let mut set_letters = String::new();
-                let mut found_mode = false;
                 for c in s[1..].chars() {
                     match c {
                         'i' => force_interactive = Some(enable),
@@ -185,13 +356,39 @@ fn run(args: &[String]) -> i32 {
                             }
                         }
                         // Mode letters only select a mode with the `-` sign.
-                        'c' if enable => {
-                            mode = InvokeMode::Command;
-                            found_mode = true;
-                        }
-                        's' if enable => {
-                            mode = InvokeMode::Stdin;
-                            found_mode = true;
+                        'c' if enable => want_command = true,
+                        's' if enable => read_stdin = true,
+                        // `o` selects a `set -o` option by name, `O` a shopt one;
+                        // both read the next *word*. With no word left bash
+                        // *lists* the options instead of failing, and carries on.
+                        'o' | 'O' => {
+                            if !set_letters.is_empty() {
+                                let _ = sh.apply_short_options(&set_letters, enable);
+                                set_letters.clear();
+                            }
+                            let is_shopt = c == 'O';
+                            let Some(name) = args.get(next_arg) else {
+                                if is_shopt {
+                                    print!("{}", sh.format_shopt_list(enable));
+                                } else {
+                                    print!("{}", sh.format_named_option_list(enable));
+                                }
+                                continue;
+                            };
+                            let ok = if is_shopt {
+                                sh.apply_shopt_option(name, enable)
+                            } else {
+                                sh.apply_named_option(name, enable)
+                            };
+                            if !ok {
+                                if is_shopt {
+                                    eprintln!("osh: {name}: invalid shell option name");
+                                } else {
+                                    eprintln!("osh: {name}: invalid option name");
+                                }
+                                return 2;
+                            }
+                            next_arg += 1;
                         }
                         _ if SET_OPTION_LETTERS.contains(c) => set_letters.push(c),
                         // First invalid letter: apply the good ones gathered so
@@ -209,18 +406,42 @@ fn run(args: &[String]) -> i32 {
                 if !set_letters.is_empty() {
                     let _ = sh.apply_short_options(&set_letters, enable);
                 }
-                base += 1;
-                // A mode letter ends option processing: the following words are
-                // its command/operands, not more options.
-                if found_mode {
-                    break;
-                }
+                // Past this cluster *and* every word its `o`/`O` letters ate.
+                base = next_arg;
             }
             _ => break,
         }
     }
 
-    let code = match mode {
+    // `-c` beats `-s` in either order (bash tests `command_execution_string`
+    // before `read_from_stdin`), and both beat the default script/REPL.
+    let mode = if want_command {
+        InvokeMode::Command
+    } else if read_stdin {
+        InvokeMode::Stdin
+    } else {
+        InvokeMode::Repl
+    };
+
+    // bash's `interactive_shell` (main.c): `-i` forces it, otherwise there must
+    // be no `-c` string, nothing left to run as a script (or `-s`, which reads
+    // stdin whatever the operands are), and both stdin *and* stderr must be
+    // terminals. Computed here, before the dispatch, because the startup files
+    // need it too — `osh -i -c cmd` is a non-REPL shell that still reads
+    // `~/.bashrc`. A piped/redirected REPL (`echo cmd | osh`, `osh < file`) is
+    // non-interactive: no prompts, aliases off by default, `line N:` in errors.
+    let interactive = force_interactive.unwrap_or_else(|| {
+        let reads_stdin = match mode {
+            InvokeMode::Command => false,
+            InvokeMode::Stdin => true,
+            InvokeMode::Repl => args.get(base).is_none(),
+        };
+        reads_stdin && io::stdin().is_terminal() && io::stderr().is_terminal()
+    });
+
+    // Settle `$0`, the positional parameters and the shell's mode, but run
+    // nothing yet: the startup files must see all of it (see `Plan`).
+    let plan = match mode {
         InvokeMode::Command => {
             let Some(command) = args.get(base) else {
                 eprintln!("osh: -c: option requires an argument");
@@ -236,63 +457,71 @@ fn run(args: &[String]) -> i32 {
                     args.get(base + 2..).map(<[String]>::to_vec).unwrap_or_default(),
                 );
             }
-            sh.run_source(command)
+            Plan::Command(command)
         }
         InvokeMode::Stdin => {
             // `osh -s [arg…]`: read commands from stdin like the bare REPL, but
             // with the operands bound as positional parameters ($1, $2, …).
-            // Interactivity is still decided by `-i`/isatty, matching bash.
             sh.set_positional(args.get(base..).map(<[String]>::to_vec).unwrap_or_default());
-            let interactive = force_interactive
-                .unwrap_or_else(|| io::stdin().is_terminal() && io::stderr().is_terminal());
             sh.set_repl_interactive(interactive);
-            repl(&mut sh)
+            Plan::Repl
         }
         InvokeMode::Repl => match args.get(base).map(String::as_str) {
-            Some("--version" | "-V") if !opts_ended => {
-                println!("{VERSION}");
-                0
-            }
-            Some("--help" | "-h") if !opts_ended => {
-                print_help();
-                0
-            }
             Some(path) if opts_ended || !path.starts_with('-') => {
-                match std::fs::read_to_string(path) {
-                    Ok(src) => {
-                        sh.set_name(path.to_string());
-                        sh.set_script_mode();
-                        sh.set_positional(
-                            args.get(base + 1..).map(<[String]>::to_vec).unwrap_or_default(),
-                        );
-                        sh.run_source(&src)
-                    }
-                    Err(e) => {
-                        eprintln!("osh: {path}: {e}");
-                        127
-                    }
-                }
+                sh.set_name(path.to_string());
+                sh.set_script_mode();
+                sh.set_positional(
+                    args.get(base + 1..).map(<[String]>::to_vec).unwrap_or_default(),
+                );
+                Plan::Script(path)
             }
             Some(other) => {
-                // An unrecognised long option (`--foo`); bare `-`/`--`, `-V`,
-                // and short clusters are handled above. Match bash's
-                // `<opt>: invalid option` wording and usage summary.
+                // A backstop only: every `-`-prefixed word is claimed by the
+                // long-option pass, the `-`/`--`/`-V`/`-o` arms, or the letter
+                // cluster, each with bash's own wording. Kept so a future hole in
+                // that coverage still produces a diagnostic rather than an
+                // attempt to open the option as a script.
                 eprintln!("osh: {other}: invalid option");
                 eprint_option_usage();
-                2
+                return 2;
             }
             None => {
-                // Interactive iff `-i` forced it, else bash's rule: stdin AND
-                // stderr are both terminals. A piped/redirected REPL
-                // (`echo cmd | osh`, `osh < file`) is non-interactive — no
-                // prompts, aliases off by default, `line N:` shown in errors.
-                let interactive = force_interactive
-                    .unwrap_or_else(|| io::stdin().is_terminal() && io::stderr().is_terminal());
                 sh.set_repl_interactive(interactive);
-                repl(&mut sh)
+                Plan::Repl
             }
         },
     };
+
+    // `/etc/profile` + `~/.bash_profile`, or `~/.bashrc`, or `$BASH_ENV` —
+    // whichever this invocation selects. A file that runs `exit` pre-empts the
+    // command/script/REPL entirely, but still gets the EXIT trap below.
+    let startup = StartupFiles {
+        interactive,
+        no_profile: long.no_profile,
+        no_rc: long.no_rc,
+        rc_file: long.rc_file.as_deref(),
+    };
+    let code = if let Some(status) = sh.run_startup_files(&startup) {
+        status
+    } else {
+        match plan {
+            Plan::Command(command) => sh.run_source(command),
+            // The script is opened only now: bash reads the startup files first,
+            // so `osh -l nosuchfile` runs `~/.bash_profile` before reporting 127.
+            Plan::Script(path) => match std::fs::read_to_string(path) {
+                Ok(src) => sh.run_source(&src),
+                Err(e) => {
+                    eprintln!("osh: {path}: {e}");
+                    127
+                }
+            },
+            Plan::Repl => repl(&mut sh),
+        }
+    };
+    // `~/.bash_logout` comes first and only for a login shell that actually ran
+    // `exit`/`logout`: bash reads it from inside that builtin, so it precedes the
+    // EXIT trap and sees the status from before the `exit`.
+    let code = sh.run_logout_file().unwrap_or(code);
     // Fire the EXIT trap (if any) once, on true shell exit. It preserves the
     // pending exit status, so `code` remains the shell's final status — unless
     // the handler itself ran `exit N`, which replaces it (bash: `trap 'exit 9'
@@ -415,9 +644,12 @@ fn print_continuation() {
 /// bash emits after an `invalid option` error (adapted to osh's own option set).
 /// Kept short on purpose — the full feature list lives in `--help`.
 fn eprint_option_usage() {
-    eprintln!("Usage:\tosh [option] ... [script-file [arg ...]]");
-    eprintln!("\tosh [option] ... -c command [name [arg ...]]");
-    eprintln!("\tosh [option] ... -s [arg ...]");
+    eprintln!("Usage:\tosh [long option] [option] ... [script-file [arg ...]]");
+    eprintln!("\tosh [long option] [option] ... -c command [name [arg ...]]");
+    eprintln!("\tosh [long option] [option] ... -s [arg ...]");
+    eprintln!("Long options (must come first):");
+    eprintln!("\t--help --init-file --login --noediting --noprofile");
+    eprintln!("\t--norc --rcfile --verbose --version");
     eprintln!("Shell options:");
     eprintln!("\t-abefhkmnptuvxBCEHPT or -o option");
     eprintln!("\t-ils or -c command\t(invocation only)");
@@ -443,6 +675,18 @@ fn print_help() {
     println!("  -o NAME / +o NAME            Enable/disable a `set -o` option (e.g. pipefail).");
     println!("  -O NAME / +O NAME            Enable/disable a shopt option (e.g. extglob).");
     println!("  --                           End option processing.");
+    println!();
+    println!("Long options (must precede every single-letter option, as in bash):");
+    println!("  --noprofile                  Skip /etc/profile and ~/.bash_profile etc.");
+    println!("  --norc                       Skip ~/.bashrc in an interactive shell.");
+    println!("  --rcfile FILE                Read FILE instead of ~/.bashrc.");
+    println!("  --init-file FILE             Synonym for --rcfile.");
+    println!("  --verbose                    Same as -v (echo input lines as read).");
+    println!("  --noediting                  Accepted; osh has no line editor.");
+    println!();
+    println!("Startup files (login shells read the profiles, interactive non-login");
+    println!("shells read ~/.bashrc, non-interactive shells read $BASH_ENV; a login");
+    println!("shell reads ~/.bash_logout when `exit`/`logout` ends it).");
     println!();
     println!("A bash/POSIX-superset shell (OSH). Supports pipes, redirections,");
     println!("here-documents and here-strings, variables and parameter expansion,");

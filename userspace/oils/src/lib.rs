@@ -28,5 +28,5 @@ pub mod lexer;
 pub mod parser;
 pub mod unparse;
 
-pub use interp::Shell;
+pub use interp::{Shell, StartupFiles};
 pub use parser::parse;

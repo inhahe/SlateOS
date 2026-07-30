@@ -1,18 +1,86 @@
 //! End-to-end tests for `osh`'s command-line option parsing — in particular
 //! the getopt-style bundling of `set` options with the mode letters `-c`/`-s`
-//! and `-i` (e.g. `-ec`, `-ic`, `-cx`), which bash accepts as a single cluster.
+//! and `-i` (e.g. `-ec`, `-ic`, `-cx`), which bash accepts as a single cluster —
+//! and for the startup files the invocation selects.
 //!
 //! These drive the real binary (via `CARGO_BIN_EXE_osh`) because the option
 //! parser lives in `main.rs`'s `run()` entry point, not the library.
+//!
+//! Every `osh` here is launched with `HOME` pointed at a throwaway directory and
+//! `BASH_ENV`/`ENV` cleared. That is not tidiness: without it a shell started
+//! `-i` would source the *developer's* real `~/.bashrc`, so the tests' results
+//! would depend on whose machine they run on.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// A throwaway directory used as `$HOME` (and as the cwd) for one test, removed
+/// when the test's binding is dropped.
+struct TempHome(PathBuf);
+
+impl TempHome {
+    fn new(tag: &str) -> Self {
+        // Cargo runs the tests as threads of one process, so the pid alone would
+        // let two of them share (and delete) one directory.
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("osh-cli-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp home");
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Write `body` to `name` inside the home, as a startup file would be.
+    fn write(&self, name: &str, body: &str) {
+        std::fs::write(self.0.join(name), body).expect("write startup file");
+    }
+}
+
+impl Drop for TempHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// Run the built `osh` binary with `args`, feeding `stdin_data` to its stdin,
-/// and return `(stdout, stderr, exit_code)`.
+/// and return `(stdout, stderr, exit_code)`. `$HOME` is an empty throwaway
+/// directory, so no startup file exists unless the test makes one.
 fn run_osh(args: &[&str], stdin_data: &str) -> (String, String, i32) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_osh"))
-        .args(args)
+    let home = TempHome::new("plain");
+    run_osh_in(&home, args, stdin_data)
+}
+
+/// The same, but with `home` as both `$HOME` and the working directory, so a
+/// test can plant `.bashrc`/`.bash_profile`/… and see them read.
+fn run_osh_in(home: &TempHome, args: &[&str], stdin_data: &str) -> (String, String, i32) {
+    run_osh_env(home, &[], args, stdin_data)
+}
+
+/// The fullest form: `envs` are set *after* the isolation, so a test can put
+/// `BASH_ENV` back deliberately.
+fn run_osh_env(
+    home: &TempHome,
+    envs: &[(&str, &str)],
+    args: &[&str],
+    stdin_data: &str,
+) -> (String, String, i32) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_osh"));
+    cmd.args(args)
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env_remove("BASH_ENV")
+        .env_remove("ENV");
+    for &(k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -120,12 +188,38 @@ fn unknown_long_option_reports_invalid_option() {
     assert_eq!(err.lines().next().unwrap_or(""), "osh: --nope: invalid option");
 }
 
+/// A bare `-` is *only* end-of-options — it is not a spelling of `-s`. bash's
+/// `parse_shell_options` treats `-` exactly like `--` (both have an empty tail,
+/// so the walk stops), and the shell then reads stdin merely because no operand
+/// is *left* to run as a script. So the word after `-` is a filename, not a
+/// command, and not `$1`.
 #[test]
-fn bare_dash_reads_commands_from_stdin() {
-    // `osh -` (legacy): end options, read stdin, operands become $1….
-    let (out, _err, code) = run_osh(&["-", "aa", "bb"], "echo \"$1-$2\"\n");
-    assert_eq!(out, "aa-bb\n");
+fn bare_dash_is_end_of_options_not_dash_s() {
+    // Alone: nothing left to run, so stdin — and no positional parameters.
+    let (out, _err, code) = run_osh(&["-"], "echo \"[$1]\"\n");
+    assert_eq!(out, "[]\n");
     assert_eq!(code, 0);
+
+    // With operands, the first is a *script path*; the rest are its arguments.
+    // bash: `bash - aa bb` fails to open `aa` (127), having set $1=bb.
+    let (_out, err, code) = run_osh(&["-", "nosuch_script_xyz", "bb"], "");
+    assert_eq!(code, 127, "the operand must be opened as a script: {err:?}");
+    assert!(err.contains("nosuch_script_xyz"), "error should name it: {err:?}");
+
+    // Same word after `--`, same outcome: the two are interchangeable here.
+    let (_out, _err, code) = run_osh(&["--", "nosuch_script_xyz"], "");
+    assert_eq!(code, 127);
+}
+
+/// A named script really does receive the operands, and `-`'s script form is
+/// the ordinary one: `$0` is the path and `$@` the words after it.
+#[test]
+fn bare_dash_script_gets_dollar0_and_args() {
+    let home = TempHome::new("dash-script");
+    home.write("s.sh", "echo \"[$0] [$*]\"\n");
+    let (out, err, code) = run_osh_in(&home, &["-", "s.sh", "aa", "bb"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "[s.sh] [aa bb]\n");
 }
 
 /// `exit` read from stdin must end the shell, not merely set `$?`: the loop
@@ -234,4 +328,369 @@ fn stdin_repl_leaves_line_continuations_to_the_lexer() {
     // An unquoted here-doc body honours the continuation too.
     let (out, _err, _code) = run_osh(&["-s"], "cat <<E\na\\\nb\nE\n");
     assert_eq!(out, "ab\n");
+}
+
+// ---------------------------------------------------------------------------
+// The letter pass (bash's `parse_shell_options`)
+// ---------------------------------------------------------------------------
+
+/// `case 'c'` and `case 's'` only *set a flag* — they do not stop the argv walk.
+/// So options may follow the mode letter in later words, and the command string
+/// is whatever word the cursor has reached by the end.
+#[test]
+fn a_mode_letter_does_not_end_the_option_walk() {
+    // `-c -x cmd`: the `-x` is an option, not the command; the command traces.
+    let (out, err, code) = run_osh(&["-c", "-x", "echo hi"], "");
+    assert_eq!(out, "hi\n");
+    assert!(err.contains("echo hi"), "xtrace trace missing: {err:?}");
+    assert_eq!(code, 0);
+
+    // `-s -x`: `-x` is applied rather than becoming $1.
+    let (out, err, code) = run_osh(&["-s", "-x"], "echo \"[$1]\"\n");
+    assert_eq!(out, "[]\n");
+    assert!(err.contains("echo"), "xtrace trace missing: {err:?}");
+    assert_eq!(code, 0);
+}
+
+/// `-c` and `-s` are independent flags, not one setting, and a pending command
+/// string is looked for *before* `read_from_stdin` — so `-c` wins either way
+/// round and the stdin script is never read.
+#[test]
+fn dash_c_beats_dash_s_in_either_order() {
+    for args in [["-cs", "echo from-c"], ["-sc", "echo from-c"]] {
+        let (out, err, code) = run_osh(&args, "echo from-stdin\n");
+        assert_eq!(out, "from-c\n", "for {args:?}: {err:?}");
+        assert_eq!(code, 0);
+    }
+}
+
+/// `-o`/`-O` are letters like any other, so they bundle; each takes the *next
+/// word* (never the rest of its own cluster) and advances the cursor.
+#[test]
+fn named_option_letters_bundle_and_take_the_next_word() {
+    let (out, err, code) = run_osh(&["-eo", "pipefail", "-c", "shopt -op pipefail"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "set -o pipefail\n");
+
+    // Two in one cluster consume two following words, in order.
+    let (out, err, code) =
+        run_osh(&["-oo", "pipefail", "xtrace", "-c", "shopt -op pipefail"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "set -o pipefail\n");
+
+    // `-O`/`+O` do the same for shopt names.
+    let (out, err, code) = run_osh(&["-O", "extglob", "-c", "shopt -p extglob"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "shopt -s extglob\n");
+    // `shopt -p` reports a *disabled* option with status 1, so only the text is
+    // interesting here — bash does the same.
+    let (out, err, _code) =
+        run_osh(&["+O", "expand_aliases", "-c", "shopt -p expand_aliases"], "");
+    assert_eq!(out, "shopt -u expand_aliases\n", "stderr: {err:?}");
+}
+
+/// Because each `-o` seen advances the cursor, the cursor is also what decides
+/// where a *bundled* `-c`'s command string starts.
+#[test]
+fn the_cursor_o_advances_is_where_a_bundled_command_starts() {
+    let (out, err, code) = run_osh(&["-oc", "pipefail", "echo ok; shopt -op pipefail"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "ok\nset -o pipefail\n");
+}
+
+/// With no word left, `-o`/`-O` *list* the options instead of failing, and the
+/// shell carries on to run whatever it was going to run.
+#[test]
+fn a_trailing_option_letter_lists_instead_of_failing() {
+    let (out, err, code) = run_osh(&["-s", "-o"], "echo ran-on\n");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert!(out.contains("braceexpand"), "no listing: {out:?}");
+    assert!(out.ends_with("ran-on\n"), "shell did not carry on: {out:?}");
+
+    // `+o` gives the re-inputtable form; `-O`/`+O` the shopt equivalents.
+    let (out, _err, code) = run_osh(&["-s", "+o"], "");
+    assert_eq!(code, 0);
+    assert!(out.contains("set -o braceexpand"), "not re-inputtable: {out:?}");
+    let (out, _err, code) = run_osh(&["-s", "-O"], "");
+    assert_eq!(code, 0);
+    assert!(out.contains("expand_aliases"), "no shopt listing: {out:?}");
+    let (out, _err, code) = run_osh(&["-s", "+O"], "");
+    assert_eq!(code, 0);
+    assert!(out.contains("shopt -"), "not re-inputtable: {out:?}");
+}
+
+/// A bad *name*, on the other hand, is fatal — and before the command runs.
+#[test]
+fn a_bad_option_name_is_fatal_before_the_command_runs() {
+    let (out, err, code) = run_osh(&["-o", "bogus", "-c", "echo not-reached"], "");
+    assert_ne!(code, 0);
+    assert_eq!(out, "", "the command must not have run");
+    assert!(err.contains("bogus"), "error should name it: {err:?}");
+
+    let (out, err, code) = run_osh(&["-O", "bogus", "-c", "echo not-reached"], "");
+    assert_ne!(code, 0);
+    assert_eq!(out, "");
+    assert!(err.contains("bogus"), "error should name it: {err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The long-option pass (bash's `parse_long_options`)
+// ---------------------------------------------------------------------------
+
+/// The long options are read in an *earlier, separate* pass, so they must come
+/// before every single-letter one. Once the letter parser has the cursor, a
+/// following `--norc` is just a word starting with `-`, and its empty tail ends
+/// the walk — bash reports `--`, not `--norc`.
+#[test]
+fn long_options_must_precede_every_letter_option() {
+    let (_out, err, code) = run_osh(&["--norc", "-c", "echo ok"], "");
+    assert_eq!(code, 0, "the accepted order must work: {err:?}");
+
+    let (_out, err, code) = run_osh(&["-x", "--norc", "-c", "true"], "");
+    assert_eq!(code, 2);
+    assert!(err.contains("--: invalid option"), "expected `--`: {err:?}");
+}
+
+/// One dash is as good as two for a long option name.
+#[test]
+fn a_single_dash_long_option_is_accepted() {
+    let (out, err, code) = run_osh(&["-norc", "-c", "echo ok"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "ok\n");
+}
+
+/// A missing argument names the option *without* its dashes and prints no usage
+/// summary — the long pass's diagnostics differ from the letter parser's.
+#[test]
+fn a_long_option_missing_its_argument_names_it_undashed() {
+    for name in ["rcfile", "init-file"] {
+        let (_out, err, code) = run_osh(&[&format!("--{name}")], "");
+        assert_eq!(code, 2, "for --{name}");
+        assert_eq!(err, format!("osh: {name}: option requires an argument\n"));
+    }
+}
+
+/// An unmatched *two*-dash word is fatal with a usage summary, but an unmatched
+/// *one*-dash word merely ends the long pass and falls through to the letters.
+#[test]
+fn an_unmatched_long_option_is_fatal_only_with_two_dashes() {
+    let (_out, err, code) = run_osh(&["--bogus"], "");
+    assert_eq!(code, 2);
+    assert!(err.starts_with("osh: --bogus: invalid option"), "{err:?}");
+    assert!(err.contains("Usage:"), "usage summary missing: {err:?}");
+
+    // `-xz`, not `-bogus`: the letter parser would read `bogus`'s `o` as `-o`
+    // and eat the next word, which is a different case entirely.
+    let (_out, err, code) = run_osh(&["-xz"], "");
+    assert_eq!(code, 2);
+    assert!(err.starts_with("osh: -z: invalid option"), "{err:?}");
+}
+
+/// `--version`/`--help` are *recorded* by the pass and acted on after it ends,
+/// so they win over anything after them but not over an error before them.
+#[test]
+fn version_and_help_win_over_later_words_but_not_earlier_errors() {
+    let (out, _err, code) = run_osh(&["--version", "-q"], "");
+    assert_eq!(code, 0);
+    assert!(!out.is_empty(), "version not printed");
+
+    let (out, _err, code) = run_osh(&["--help", "-q"], "");
+    assert_eq!(code, 0);
+    assert!(out.contains("Usage:"), "help not printed: {out:?}");
+
+    // The error comes first in argv order, so it wins.
+    let (_out, err, code) = run_osh(&["--bogus", "--version"], "");
+    assert_eq!(code, 2);
+    assert!(err.contains("--bogus"), "{err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Startup files
+// ---------------------------------------------------------------------------
+
+/// An interactive non-login shell reads `~/.bashrc` — and only it.
+#[test]
+fn an_interactive_shell_reads_bashrc() {
+    let home = TempHome::new("bashrc");
+    home.write(".bashrc", "echo from-bashrc\n");
+    home.write(".bash_profile", "echo from-profile\n");
+    let (out, err, code) = run_osh_in(&home, &["-i", "-c", "echo cmd"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "from-bashrc\ncmd\n");
+
+    // `--norc` skips it; `--rcfile` replaces it.
+    let (out, _err, _code) = run_osh_in(&home, &["--norc", "-i", "-c", "echo cmd"], "");
+    assert_eq!(out, "cmd\n");
+    home.write("my.rc", "echo from-my-rc\n");
+    for opt in ["--rcfile", "--init-file"] {
+        let (out, err, code) = run_osh_in(&home, &[opt, "my.rc", "-i", "-c", "echo cmd"], "");
+        assert_eq!(code, 0, "{opt}: {err:?}");
+        assert_eq!(out, "from-my-rc\ncmd\n", "for {opt}");
+    }
+}
+
+/// A non-interactive shell reads neither, whatever `--rcfile` says.
+#[test]
+fn a_non_interactive_shell_reads_no_rc_file() {
+    let home = TempHome::new("norc");
+    home.write(".bashrc", "echo from-bashrc\n");
+    home.write("my.rc", "echo from-my-rc\n");
+    let (out, err, code) = run_osh_in(&home, &["--rcfile", "my.rc", "-c", "echo cmd"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "cmd\n");
+}
+
+/// A login shell reads the *first* profile that exists and never `~/.bashrc`.
+#[test]
+fn a_login_shell_reads_the_first_profile_and_never_bashrc() {
+    let home = TempHome::new("login");
+    home.write(".bashrc", "echo from-bashrc\n");
+    home.write(".bash_login", "echo from-bash_login\n");
+    home.write(".profile", "echo from-profile\n");
+
+    // `.bash_profile` absent, so `.bash_login` is next.
+    let (out, err, code) = run_osh_in(&home, &["-l", "-c", "echo cmd"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "from-bash_login\ncmd\n");
+
+    // Adding `.bash_profile` pre-empts it.
+    home.write(".bash_profile", "echo from-bash_profile\n");
+    let (out, _err, _code) = run_osh_in(&home, &["-l", "-c", "echo cmd"], "");
+    assert_eq!(out, "from-bash_profile\ncmd\n");
+
+    // `--noprofile` skips them all, and still no `.bashrc`.
+    let (out, _err, _code) = run_osh_in(&home, &["--noprofile", "-l", "-c", "echo cmd"], "");
+    assert_eq!(out, "cmd\n");
+}
+
+/// `$BASH_ENV` is for *non-interactive* shells, and is read after any profile.
+/// Its value is expanded as if double-quoted: substitutions yes, splitting and
+/// globbing no.
+#[test]
+fn bash_env_is_read_by_non_interactive_shells_only() {
+    let home = TempHome::new("bashenv");
+    home.write("env.sh", "echo from-env\n");
+    home.write(".bashrc", "echo from-bashrc\n");
+
+    let (out, err, code) =
+        run_osh_env(&home, &[("BASH_ENV", "./env.sh")], &["-c", "echo cmd"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "from-env\ncmd\n");
+
+    // Interactive: the rc file instead, never $BASH_ENV.
+    let (out, _err, _code) =
+        run_osh_env(&home, &[("BASH_ENV", "./env.sh")], &["-i", "-c", "echo cmd"], "");
+    assert_eq!(out, "from-bashrc\ncmd\n");
+
+    // A parameter expansion in the value is performed; the word is not split.
+    home.write("e nv.sh", "echo from-spaced\n");
+    let (out, _err, _code) = run_osh_env(
+        &home,
+        &[("V", "nv"), ("BASH_ENV", "./e${V}.sh")],
+        &["-c", "true"],
+        "",
+    );
+    assert_eq!(out, "from-env\n");
+    let (out, _err, _code) =
+        run_osh_env(&home, &[("BASH_ENV", "./e nv.sh")], &["-c", "true"], "");
+    assert_eq!(out, "from-spaced\n");
+
+    // A missing file is silent, and so is an empty value.
+    let (out, err, code) =
+        run_osh_env(&home, &[("BASH_ENV", "./nosuch.sh")], &["-c", "echo cmd"], "");
+    assert_eq!((out.as_str(), code), ("cmd\n", 0), "stderr: {err:?}");
+    let (out, _err, _code) = run_osh_env(&home, &[("BASH_ENV", "")], &["-c", "echo cmd"], "");
+    assert_eq!(out, "cmd\n");
+}
+
+/// Startup files see `$0` and the positional parameters already set, and they
+/// run before the script file is even opened.
+#[test]
+fn startup_files_run_before_the_script_is_opened() {
+    let home = TempHome::new("beforescript");
+    home.write(".bash_profile", "echo \"prof dollar0=$0 args=[$*]\"\n");
+    home.write("s.sh", "echo script\n");
+
+    let (out, err, code) = run_osh_in(&home, &["-l", "s.sh", "a", "b"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "prof dollar0=s.sh args=[a b]\nscript\n");
+
+    // The profile still runs when the script cannot be opened at all.
+    let (out, _err, code) = run_osh_in(&home, &["-l", "nosuch_xyz.sh"], "");
+    assert_eq!(code, 127);
+    assert_eq!(out, "prof dollar0=nosuch_xyz.sh args=[]\n");
+}
+
+/// `return` stops a startup file but its operand is discarded (bash reads these
+/// files without `FEVAL_BUILTIN`, so `return`'s status never reaches the shell);
+/// `exit` in one pre-empts the command entirely and its status *is* kept.
+#[test]
+fn return_in_a_startup_file_discards_its_operand_but_exit_does_not() {
+    let home = TempHome::new("returnexit");
+    home.write(".bash_profile", "true\nreturn 5\necho not-reached\n");
+    let (out, err, code) = run_osh_in(&home, &["-l", "-c", "echo \"rc=$?\""], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "rc=0\n");
+
+    home.write(".bash_profile", "echo prof\nexit 7\n");
+    let (out, _err, code) = run_osh_in(&home, &["-l", "-c", "echo not-reached"], "");
+    assert_eq!(out, "prof\n");
+    assert_eq!(code, 7);
+}
+
+/// `~/.bash_logout` is read from inside the `exit`/`logout` builtin, so only a
+/// *login* shell leaving through that builtin reads it — never on falling off
+/// the end, never for a subshell, never for a non-login shell. Being inside the
+/// builtin also puts it *before* the EXIT trap and leaves `$?` at the status
+/// from before the `exit`.
+#[test]
+fn bash_logout_is_read_only_by_a_login_shells_exit_builtin() {
+    let home = TempHome::new("logout");
+    home.write(".bash_logout", "echo \"logout rc=$?\"\n");
+
+    let (out, err, code) = run_osh_in(
+        &home,
+        &["--noprofile", "-l", "-c", "trap 'echo trap' EXIT; false; exit 5"],
+        "",
+    );
+    assert_eq!(code, 5, "stderr: {err:?}");
+    assert_eq!(out, "logout rc=1\ntrap\n");
+
+    // The `logout` builtin is the same path.
+    let (out, _err, code) =
+        run_osh_in(&home, &["--noprofile", "-l", "-c", "true; logout 6"], "");
+    assert_eq!(out, "logout rc=0\n");
+    assert_eq!(code, 6);
+
+    // Falling off the end is not an exit; nor is a subshell's.
+    let (out, _err, _code) = run_osh_in(&home, &["--noprofile", "-l", "-c", "echo end"], "");
+    assert_eq!(out, "end\n");
+    let (out, _err, _code) =
+        run_osh_in(&home, &["--noprofile", "-l", "-c", "(exit 3); echo after"], "");
+    assert_eq!(out, "after\n");
+
+    // And a non-login shell never reads it.
+    let (out, _err, code) = run_osh_in(&home, &["--noprofile", "-c", "exit 4"], "");
+    assert_eq!(out, "");
+    assert_eq!(code, 4);
+
+    // A failing command in it does not change the status; an `exit` does.
+    home.write(".bash_logout", "echo lo\nfalse\n");
+    let (_out, _err, code) = run_osh_in(&home, &["--noprofile", "-l", "-c", "exit 4"], "");
+    assert_eq!(code, 4);
+    home.write(".bash_logout", "echo lo\nexit 9\n");
+    let (_out, _err, code) = run_osh_in(&home, &["--noprofile", "-l", "-c", "exit 4"], "");
+    assert_eq!(code, 9);
+}
+
+/// An rc file that is a directory is reported, and the shell carries on.
+#[test]
+fn a_directory_rc_file_is_reported_and_survived() {
+    let home = TempHome::new("dirrc");
+    std::fs::create_dir_all(home.path().join("dir.rc")).expect("mkdir");
+    let (out, err, code) =
+        run_osh_in(&home, &["--rcfile", "dir.rc", "-i", "-c", "echo cmd"], "");
+    assert_eq!(code, 0, "the shell must carry on: {err:?}");
+    assert_eq!(out, "cmd\n");
+    assert!(err.contains("is a directory"), "not reported: {err:?}");
 }

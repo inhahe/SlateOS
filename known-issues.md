@@ -8215,7 +8215,74 @@ and `compgen -A helptopic` can only appear in
 `tests/corpus/compgen-actions.sh` behind a prefix the two shells happen to
 agree on, so the corpus pins less of them than it otherwise would.
 
-### TD-OILS-NO-STARTUP-FILES. `osh` reads no startup files at all, and so has none of the flags that suppress or redirect them — OPEN 2026-07-29
+### TD-OILS-NO-STARTUP-FILES. `osh` reads no startup files at all, and so has none of the flags that suppress or redirect them — ✅ RESOLVED 2026-07-29
+
+**Fix (2026-07-29).** osh now reads bash's startup files, and the two facts that
+select them — *login* and *interactive* — are supplied by the binary rather than
+guessed at by the interpreter, because both describe how the shell was
+**started**:
+
+* `Shell::run_startup_files(&StartupFiles)` (`interp.rs`) runs the table below in
+  bash's order and returns `Some(status)` if one of the files exited, so the
+  caller knows not to run the `-c` string/script it was about to.
+  `StartupFiles { interactive, no_profile, no_rc, rc_file }` is built in
+  `main.rs` from the parsed command line.
+* `Shell::run_startup_file(path)` is `source` minus two things: there are no
+  arguments (so the positional parameters stay the caller's) and `return`'s
+  operand is **discarded** — bash reads these files with `_evalfile` *without*
+  `FEVAL_BUILTIN`, so `return 5` in `~/.bash_profile` stops the file but leaves
+  `$?` alone. That is what the new `SourceFrame::startup` flag marks. A frame
+  *is* pushed, so diagnostics name the file, `${BASH_SOURCE[0]}` is it, and
+  `return` is legal at all. Absent/unreadable is silent; a directory is reported
+  with bash's `internal_error` shape (no `line N:` token — there is no command
+  yet) and skipped, not fatal.
+* `Shell::run_env_file` expands `$BASH_ENV` the way bash does
+  (`expand_string_unsplit_to_string(…, Q_DOUBLE_QUOTES)` then
+  `bash_tilde_expand`): substitutions yes, word splitting and globbing no, and a
+  leading `~` afterwards. Reproduced by wrapping the value in real double quotes
+  and parsing it, so `BASH_ENV='$HOME/rc'`, `BASH_ENV='/a b/rc'` and
+  `BASH_ENV='~/rc'` all behave.
+* `~/.bash_logout` is *not* part of that table. bash reads it from inside the
+  `exit`/`logout` builtin (`exit_or_logout` → `bash_logout`), which is what
+  confines it to a **login** shell leaving through that builtin — never on
+  falling off the end of a script, never for a subshell's exit. So the builtin
+  *arms* a new `Shell::logout_pending: Option<i32>` and `run_logout_file()`
+  (called by the binary before the `EXIT` trap) reads it. Being inside the
+  builtin also explains its two odd details, both reproduced: it goes **before**
+  the EXIT trap, and `$?` inside it is the status from *before* the `exit`,
+  because the operand has not been recorded yet.
+* The four flags now exist for real — `--noprofile`, `--norc`,
+  `--rcfile FILE`/`--init-file FILE` — plus `--verbose` (= `set -v`) and
+  `--noediting` (accepted, no line editor to disable).
+
+Only the *vanilla* bash set is implemented: `/etc/bash.bashrc` is a distro
+`-DSYS_BASHRC` patch, not upstream behaviour, so osh does not read it.
+
+**Not fixed here** (each small, none blocking): `$ENV`, which bash reads
+*instead* of `~/.bashrc` for an interactive shell in POSIX mode or named `sh` —
+osh has neither state, so nothing could select it; and bash's remaining long
+options (`--posix`, `--restricted`, `--debugger`, `--wordexp`), deliberately
+still errors for the same reason the startup flags used to be: accepting them
+would make osh *claim* behaviour it lacks.
+
+**Where the fix landed:** `interp.rs` (`run_startup_files`, `run_logout_file`,
+`run_startup_file`, `run_env_file`, `StartupFiles`, `SourceFrame::startup`,
+`logout_pending`, the armed `exit`/`logout` arm and the startup-aware `return`
+arm), `main.rs` (a rewritten two-pass command line — see
+TD-OILS-INVOKE-OPTION-PASS for the four parser bugs that rewrite exposed), and
+`lib.rs` (re-exports `StartupFiles`).
+
+**Tests.** `tests/corpus/startup-files.sh` (new, byte-identical to bash 5.2)
+covers the whole table plus the long-option pass's diagnostics; 8 new tests in
+`tests/cli_options.rs` drive the real binary with an isolated `$HOME`; 6 new
+unit tests in `interp.rs` exercise the library API directly. The corpus harness
+still forces `BASH_ENV=""`/`ENV=""` for both shells, and a case that re-invokes
+`"$BASH" -l …` must still marker-filter the child's output, because a real
+`/etc/profile` exists on the reference system and not under osh.
+
+---
+
+**Original report.**
 
 **Where:** `userspace/oils/src/main.rs` — the option loop and the
 `import_environment()` / mode-dispatch sequence that follows it. Nothing in
@@ -8273,6 +8340,108 @@ login shell on SlateOS: `PATH`, `PS1`, aliases and shell functions from
 `/etc/profile` and `~/.bashrc` would all be silently ignored. It also caps how
 much of the invocation surface the differential corpus can pin, since the flags
 that control startup are the ones osh rejects.
+
+### TD-OILS-INVOKE-OPTION-PASS. Four bugs in the single-letter invocation pass — `-o`/`-O` could not bundle, `-c`/`-s` ended the walk, `-cs` was last-wins, and bare `-` meant `-s` — ✅ RESOLVED 2026-07-29
+
+**Where:** `userspace/oils/src/main.rs`, the letter loop in `run()`.
+
+**What.** Rewriting the command line for TD-OILS-NO-STARTUP-FILES needed the
+letter pass measured properly, and doing so exposed four pre-existing
+divergences from bash's `parse_shell_options`. All four came from the same
+misreading: that the pass is a *loop over words that stops at the first
+non-option*, when in fact it is a **cursor** that individual letters may advance
+and that only `--`, a bare `-`, or a word starting with neither `-` nor `+`
+stops.
+
+1. **`-o`/`-O` could not be bundled and did not take the next word.** osh had a
+   standalone `"-o" | "+o" | "-O" | "+O"` arm, so `osh -eo pipefail` and
+   `osh -oc pipefail cmd` failed. In bash they are letters like any other, each
+   taking `argv[next_arg]` — the *next word*, never the rest of its own cluster
+   — and each one seen advancing the cursor. That cursor is also what decides
+   where a bundled `-c`'s command string starts, which is why `-oc pipefail cmd`
+   runs `cmd`. With no word left they **list** the options (`-o` columns, `+o`
+   re-inputtable `set ±o name`, `-O`/`+O` the `shopt` equivalents) and the shell
+   *carries on* rather than failing.
+2. **`-c`/`-s` wrongly ended option processing.** bash's `case 'c'`/`case 's'`
+   only set a flag, so the walk continues into the *next word*: `bash -c -x
+   'echo hi'` traces the command instead of trying to run `-x`, and `bash -s -x`
+   applies `-x` rather than making it `$1`. osh broke out of the loop, so both
+   were wrong.
+3. **`-cs` was last-wins.** `-c` and `-s` are independent flags, not one
+   setting, and bash looks for a pending command string *before* it looks at
+   `read_from_stdin` — so `-c` wins in either order. osh let the later letter
+   win, making `osh -sc cmd` read stdin.
+4. **A bare `-` was treated as `-s`.** It is purely end-of-options, identical to
+   `--` (both have an empty tail, so the walk stops). A shell started that way
+   reads stdin only because nothing is *left* to run as a script, which is why
+   the word after it is a **filename**: `bash - s.sh a b` runs `s.sh` with
+   `$1=a`. osh read stdin and made `s.sh` into `$1`.
+
+**Fix.** One cursor (`next_arg`) threaded through the cluster loop, `'o' | 'O'`
+handled as an ordinary letter that consumes the next word (falling back to
+`Shell::format_named_option_list` / `Shell::format_shopt_list` when there is
+none), `'c'`/`'s'` setting flags without breaking, `-c` resolved before `-s` in
+the mode decision, and `"-"` merged into the `"--"` end-of-options arm.
+
+**Not reproduced.** bash prefixes the `-o`/`-O` **bad name** diagnostics with
+`line 0: ` and, for `-o`, repeats the shell name
+(`bash: line 0: bash: bogus: invalid option name` vs osh's
+`osh: bogus: invalid option name`). That is `builtin_error` firing with
+`this_command_name` set and no line number yet; it is cosmetic, affects only the
+error path, and is not worth threading a fake line number through for. The
+corpus case pins the *status* (2) and the fact that the command does not run.
+
+**Tests.** `tests/corpus/invoke-options.sh` (new, byte-identical to bash 5.2)
+pins all four, plus `$-`'s letters and the "unrecognised letter aborts having
+applied the ones before it" rule; 10 new tests in `tests/cli_options.rs` drive
+the same shapes through the real binary.
+
+### TD-OILS-INTERACTIVE-SHELL-VS-INTERACTIVE. `-i -c` does not report `i` (or `H`) in `$-`, because one flag models two of bash's — OPEN 2026-07-29
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::is_interactive()` (≈ line
+3180), which is `!self.command_mode && !self.script_mode && self.repl_interactive`,
+and every caller of it.
+
+**What.** bash has *two* globals here, and they are not the same thing:
+
+* `interactive_shell` — "was this shell **started** interactively", i.e. `-i` or
+  a tty with no script/`-c`. Set once at startup and never changed. It is what
+  puts `i` in `$-`, what turns `histexpand` (`H`) on by default, and what
+  `~/.bashrc` reading keys off.
+* `interactive` — "is the shell **currently** reading from a prompt". False
+  inside a `-c` string, a sourced file, a function, a subshell.
+
+osh has one flag standing in for both, so an `-i -c` shell reports neither:
+
+```
+$ bash --noprofile -i -c 'echo "[$-]"'    →  [hiBHc]
+$ osh  --noprofile -i -c 'echo "[$-]"'    →  [hBc]
+```
+
+**Impact.** Small but real. `$-` is the documented way a script asks "am I
+interactive", and the idiom `case $- in *i*) …` is common in `~/.bashrc` files —
+under osh such a file would take the non-interactive branch even in an
+interactive shell. `H` is wrong for the same reason. Note this is *not*
+TD-OILS-INTERACTIVE-DETECT (fixed 2026-07-20), which was about *detecting*
+interactivity from the tty; this is about osh collapsing two distinct pieces of
+state into one field.
+
+**Proper fix.** Split the field: keep `repl_interactive` as bash's
+`interactive` (dynamic, already correct for the prompt loop) and add an
+`interactive_shell: bool` set once by `main.rs` from the same computation that
+already feeds `StartupFiles::interactive` — which is exactly bash's rule, so the
+value is available and merely not stored. Then audit every
+`Shell::is_interactive()` caller and route each to whichever of the two it
+actually means: `$-`'s `i`, the `histexpand`/`expand_aliases` defaults and the
+startup-file choice want `interactive_shell`; job-control messages, the
+`ignoreeof` handling and prompt printing want `interactive`. The audit is the
+work — the field is trivial — which is why it was kept out of the startup-files
+commit rather than done half-way.
+
+**Deferred alongside it:** osh does not validate a `-O` name against
+`SHOPT_TABLE` any earlier than `apply_shopt_option` does, so a name that is a
+*valid* shopt but unimplemented would be accepted where bash might not. No known
+divergence; noted only so the next reader does not assume it was checked.
 
 ### TD-OILS-FD0-WRITE. fd 0 has no write side, so `>&0` silently writes to stdout instead of the descriptor — ✅ RESOLVED 2026-07-28
 

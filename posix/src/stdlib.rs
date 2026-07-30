@@ -579,22 +579,60 @@ pub unsafe extern "C" fn strtof(nptr: *const u8, endptr: *mut *const u8) -> f32 
     f
 }
 
-/// Convert a C string to a long double (`strtold`).
+/// Convert a C string to a long double — the `f64` core of `strtold`.
 ///
-/// On x86_64, `long double` is 80-bit extended precision in the C ABI.
-/// Rust does not have native 80-bit float support, so we delegate to
-/// `strtod` (64-bit `f64`).  This loses precision for values that
-/// require more than 53 bits of mantissa, but covers the vast majority
-/// of real-world uses.
+/// On x86_64 a `long double` is 80-bit extended precision, classified
+/// X87/X87UP, and is **returned in `%st(0)`** — never in `%xmm0`. Rust has no
+/// 80-bit float type and cannot express that return convention, so this
+/// function is *not* `strtold`: it is exported as `__strtold_f64` and returns
+/// the value in `%xmm0` like any other `f64`. The `strtold` symbol a C caller
+/// links against is the assembly thunk below, which calls this and pushes the
+/// result onto the x87 stack.
+///
+/// (Before this split, the Rust function was exported as `strtold` directly,
+/// so every C caller read `%st(0)` — whatever stale value the x87 stack
+/// happened to hold — and got garbage regardless of the input string. See
+/// BUG-POSIX-LONG-DOUBLE-ABI.)
+///
+/// The value itself is computed by `strtod`, so it carries only `f64`
+/// precision; that is the sysroot's documented limitation
+/// (TD-POSIX-LONG-DOUBLE-PRECISION), and unlike the return-register bug it
+/// degrades gracefully rather than corrupting.
 ///
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[cfg_attr(target_os = "none", unsafe(export_name = "__strtold_f64"))]
 pub unsafe extern "C" fn strtold(nptr: *const u8, endptr: *mut *const u8) -> f64 {
     // SAFETY: strtod safety requirements are identical.
     unsafe { strtod(nptr, endptr) }
 }
+
+// `strtold` returns a `long double` in `%st(0)`. Rust cannot express that, so
+// the exported symbol is this thunk: it forwards `nptr`/`endptr` untouched in
+// `%rdi`/`%rsi`, takes the `f64` back in `%xmm0`, and re-loads it through
+// memory with `fld qword` — which widens exactly, since every f64 is
+// representable in the 80-bit format.
+//
+// Stack discipline: `push rbp; mov rbp, rsp` leaves `%rsp` 16-byte aligned, so
+// the `call` below satisfies the ABI's alignment requirement. The 16-byte
+// frame is the spill slot for `%xmm0` (8 needed, 16 to keep the alignment).
+// Exactly one x87 register is live on return, as the ABI requires.
+#[cfg(target_os = "none")]
+core::arch::global_asm!(
+    ".global strtold",
+    ".type strtold, @function",
+    "strtold:",
+    "push rbp",
+    "mov rbp, rsp",
+    "sub rsp, 16",
+    "call __strtold_f64",
+    "movsd [rsp], xmm0",
+    "fld qword ptr [rsp]",
+    "add rsp, 16",
+    "pop rbp",
+    "ret",
+);
 
 /// Convert a C string to a double (`atof`).
 ///

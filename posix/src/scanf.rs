@@ -271,6 +271,24 @@ pub extern "C" fn _fscanf_impl(stream: *mut u8, fmt: *const u8, args: *const u64
 
 use crate::printf::{self, VaList};
 
+// Length-modifier codes threaded through the `scan_*` helpers as `long_mod`.
+//
+// The ordering is load-bearing: the integer scanners test `>= LEN_LONG` to
+// decide between a 32- and a 64-bit store, and every modifier at or above
+// `LEN_LONG` is 64-bit on LP64.  Only `scan_float` looks at the exact value,
+// because only it can be handed something wider than 64 bits.
+
+/// No modifier: `%d` → `i32`, `%f` → `f32`.
+const LEN_DEFAULT: u8 = 0;
+/// `l` (and `z`/`j`/`t`, all 64-bit here): `%ld` → `i64`, `%lf` → `f64`.
+const LEN_LONG: u8 = 1;
+/// `ll`: `%lld` → `i64`.
+const LEN_LONG_LONG: u8 = 2;
+/// `L`: `%Lf` → a 16-byte x87 `long double`.  On the integer conversions this
+/// behaves like `ll`, matching glibc's treatment of `L` as a deprecated
+/// synonym for `ll` (C leaves it undefined there).
+const LEN_LONG_DOUBLE: u8 = 3;
+
 /// Flatten the destination pointers referenced by `fmt` out of `va` into the
 /// array `_sscanf_impl` expects.
 ///
@@ -324,7 +342,12 @@ unsafe fn va_collect_scanf(fmt: *const u8, va: &mut VaList) -> [u64; 8] {
             fi = fi.wrapping_add(1);
         }
 
-        // Length modifiers (consume no args).
+        // Length modifiers (consume no args — every scanf argument is a
+        // pointer, so the modifier changes what is *stored*, never the
+        // argument's size).  `L` must be listed even though it is only
+        // meaningful on the float conversions: leaving it in place would make
+        // it read as the conversion character, which matches nothing, so
+        // `%Lf` would silently count zero arguments.
         match unsafe { *fmt.add(fi) } {
             b'l' => {
                 fi = fi.wrapping_add(1);
@@ -338,6 +361,7 @@ unsafe fn va_collect_scanf(fmt: *const u8, va: &mut VaList) -> [u64; 8] {
                     fi = fi.wrapping_add(1);
                 }
             }
+            b'L' | b'z' | b'j' | b't' => fi = fi.wrapping_add(1),
             _ => {}
         }
 
@@ -589,21 +613,38 @@ fn scan_core(ctx: &mut ScanCtx) -> i32 {
                 width = usize::MAX; // No limit.
             }
 
-            // Parse length modifier.
-            let mut long_mod = 0u8; // 0=none, 1=l, 2=ll
-            if ctx.fmt_peek() == b'l' {
-                long_mod = 1;
-                ctx.fmt_advance();
-                if ctx.fmt_peek() == b'l' {
-                    long_mod = 2;
+            // Parse length modifier.  See the LEN_* constants: everything from
+            // LEN_LONG upward stores 64 bits, so the integer scanners only
+            // test `>= LEN_LONG`; only the float path distinguishes further.
+            let mut long_mod = LEN_DEFAULT;
+            match ctx.fmt_peek() {
+                b'l' => {
+                    long_mod = LEN_LONG;
+                    ctx.fmt_advance();
+                    if ctx.fmt_peek() == b'l' {
+                        long_mod = LEN_LONG_LONG;
+                        ctx.fmt_advance();
+                    }
+                }
+                b'h' => {
+                    ctx.fmt_advance();
+                    if ctx.fmt_peek() == b'h' {
+                        ctx.fmt_advance();
+                    }
+                    // We treat h/hh the same as default (store as i32/u32).
+                }
+                // `size_t`, `intmax_t` and `ptrdiff_t` are all 64-bit on LP64.
+                // Without these the modifier was read as the conversion
+                // character, so `%zu` matched nothing and stored nothing.
+                b'z' | b'j' | b't' => {
+                    long_mod = LEN_LONG;
                     ctx.fmt_advance();
                 }
-            } else if ctx.fmt_peek() == b'h' {
-                ctx.fmt_advance();
-                if ctx.fmt_peek() == b'h' {
+                b'L' => {
+                    long_mod = LEN_LONG_DOUBLE;
                     ctx.fmt_advance();
                 }
-                // We treat h/hh the same as default (store as i32/u32).
+                _ => {}
             }
 
             let conv = ctx.fmt_peek();
@@ -744,7 +785,7 @@ fn scan_signed_int(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8
 
     if !suppress {
         let ptr = ctx.next_arg();
-        if long_mod >= 1 {
+        if long_mod >= LEN_LONG {
             let p = ptr as *mut i64;
             if !p.is_null() {
                 unsafe {
@@ -848,7 +889,7 @@ fn scan_signed_int_auto(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mo
 
     if !suppress {
         let ptr = ctx.next_arg();
-        if long_mod >= 1 {
+        if long_mod >= LEN_LONG {
             let p = ptr as *mut i64;
             if !p.is_null() {
                 unsafe {
@@ -928,7 +969,7 @@ fn scan_unsigned_int(
 
     if !suppress {
         let ptr = ctx.next_arg();
-        if long_mod >= 1 {
+        if long_mod >= LEN_LONG {
             let p = ptr as *mut u64;
             if !p.is_null() {
                 unsafe {
@@ -1120,7 +1161,24 @@ fn scan_float(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> 
         // Parse the collected string using strtod.
         let val = unsafe { crate::stdlib::strtod(buf.as_ptr(), core::ptr::null_mut()) };
         let ptr = ctx.next_arg();
-        if long_mod >= 1 {
+        if long_mod == LEN_LONG_DOUBLE {
+            // %Lf → a 16-byte x87 `long double`.  Storing only the 8 bytes of
+            // an f64 here would leave the destination's exponent/sign half
+            // holding whatever was there before, so the caller would read a
+            // value unrelated to the input — hence the explicit re-encode.
+            // The value itself still carries only f64 precision; see
+            // TD-POSIX-LONG-DOUBLE-PRECISION.
+            let p = ptr as *mut crate::x87::LongDouble;
+            if !p.is_null() {
+                // SAFETY: `%Lf` promises a writable `long double *`, which is
+                // exactly `LongDouble`'s 16 bytes.  Written unaligned because
+                // `LongDouble` declares `align(16)` and we would rather not
+                // make a UB claim about a pointer that came from C.
+                unsafe {
+                    p.write_unaligned(crate::x87::from_f64(val));
+                }
+            }
+        } else if long_mod >= LEN_LONG {
             // %lf → f64
             let p = ptr as *mut f64;
             if !p.is_null() {
@@ -1678,6 +1736,62 @@ mod tests {
     }
 
     #[test]
+    fn scan_capital_l_stores_a_full_long_double() {
+        // `%Lf` must consume the `L` (otherwise it reads as the conversion
+        // character, matches nothing, and assigns zero fields) and then store
+        // all 16 bytes of an x87 `long double`.
+        let mut val = crate::x87::LongDouble::ZERO;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"2.5\0".as_ptr(), b"%Lf\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(crate::x87::to_f64(val), 2.5);
+    }
+
+    #[test]
+    fn scan_capital_l_overwrites_a_stale_exponent() {
+        // Storing only 8 bytes would leave the previous sign/exponent half in
+        // place, so the destination would decode as something unrelated to
+        // the input.  Pre-poison it with a value of a very different
+        // magnitude and sign to make that failure mode detectable.
+        let mut val = crate::x87::from_f64(-1e30);
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"0.125\0".as_ptr(), b"%Lf\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(crate::x87::to_f64(val), 0.125);
+    }
+
+    #[test]
+    fn scan_capital_l_does_not_desync_later_fields() {
+        let mut ld = crate::x87::LongDouble::ZERO;
+        let mut num: i32 = 0;
+        let args = [&raw mut ld as u64, &raw mut num as u64];
+        let n = _sscanf_impl(b"1.5 7\0".as_ptr(), b"%Lf %d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 2);
+        assert_eq!(crate::x87::to_f64(ld), 1.5);
+        assert_eq!(num, 7);
+    }
+
+    #[test]
+    fn scan_size_and_intmax_modifiers() {
+        // z/j/t were never consumed either, so `%zu` read `z` as the
+        // conversion character and assigned nothing.  All three are 64-bit
+        // on LP64.
+        let mut a: u64 = 0;
+        let mut b: i64 = 0;
+        let mut c: i64 = 0;
+        let args = [&raw mut a as u64, &raw mut b as u64, &raw mut c as u64];
+        let n = _sscanf_impl(
+            b"12 -34 56\0".as_ptr(),
+            b"%zu %jd %td\0".as_ptr(),
+            args.as_ptr(),
+        );
+        assert_eq!(n, 3);
+        assert_eq!(a, 12);
+        assert_eq!(b, -34);
+        assert_eq!(c, 56);
+    }
+
+    #[test]
     fn scan_f_negative() {
         let mut val: f32 = 0.0;
         let args = [&raw mut val as u64];
@@ -1990,6 +2104,23 @@ mod tests {
         let n = run_vsscanf(b"3.5\0", b"%f\0", &[&raw mut f as u64]);
         assert_eq!(n, 1);
         assert!((f - 3.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vsscanf_long_double_and_size_modifiers() {
+        // The va_list prescan has its own copy of the modifier parser; if it
+        // did not skip `L`/`z` it would hand out the wrong pointers and the
+        // second field would be written through the first field's address.
+        let mut ld = crate::x87::LongDouble::ZERO;
+        let mut sz: u64 = 0;
+        let n = run_vsscanf(
+            b"6.25 99\0",
+            b"%Lf %zu\0",
+            &[&raw mut ld as u64, &raw mut sz as u64],
+        );
+        assert_eq!(n, 2);
+        assert_eq!(crate::x87::to_f64(ld), 6.25);
+        assert_eq!(sz, 99);
     }
 
     #[test]

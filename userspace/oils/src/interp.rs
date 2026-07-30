@@ -106,7 +106,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::arith::{self, VarLookup};
 use crate::bfmt;
-use crate::bytes::{self, Str};
+use crate::bytes::{self, BStr, Ch, Str};
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseTerm,
     CmdSubBody, Command,
@@ -463,7 +463,11 @@ fn shell_cwd() -> String {
 /// The Windows forms matter only on the development host, but they have to be
 /// recognised or [`Shell::resolve`] would glue `C:/x` onto the end of the cwd.
 fn path_is_rooted(p: &str) -> bool {
-    let b = p.as_bytes();
+    path_is_rooted_b(p.as_bytes())
+}
+
+/// [`path_is_rooted`] over a byte path.
+fn path_is_rooted_b(b: BStr<'_>) -> bool {
     match b {
         [b'/' | b'\\', ..] => true,
         // `C:` — drive-qualified, whether or not a separator follows. `C:x` is
@@ -482,16 +486,32 @@ fn path_is_rooted(p: &str) -> bool {
 /// rebased through here. An empty `cwd` means "not tracking" (the process cwd
 /// is authoritative) and leaves the path untouched.
 fn resolve_against(cwd: &str, path: &str) -> String {
-    if path_is_rooted(path) || cwd.is_empty() {
-        return path.to_string();
+    // Joining two `&str`s with a `/` yields UTF-8 by construction, so this
+    // decode cannot fail; the fallback exists only because `from_utf8` returns
+    // a `Result`. (This `&str` form goes away with TD-OILS-BYTE-STRINGS —
+    // `resolve_against_b` is the real one.)
+    String::from_utf8(resolve_against_b(cwd.as_bytes(), path.as_bytes())).unwrap_or_default()
+}
+
+/// [`resolve_against`] over byte paths — the form every byte-native caller
+/// (the glob engine, and eventually every filesystem access) uses. A path is
+/// bytes: on SlateOS any byte but `/` and NUL may appear in one.
+fn resolve_against_b(cwd: BStr<'_>, path: BStr<'_>) -> Str {
+    if path_is_rooted_b(path) || cwd.is_empty() {
+        return path.to_vec();
     }
     // An empty path stays empty: the OS must be the one to reject it, so
     // `cd -P ""` and `< ""` keep reporting ENOENT rather than opening the
     // current directory.
     if path.is_empty() {
-        return String::new();
+        return Str::new();
     }
-    format!("{}/{path}", cwd.trim_end_matches('/'))
+    let base = match cwd.iter().rposition(|&b| b != b'/') {
+        Some(last) => cwd.get(..=last).unwrap_or(cwd),
+        // An all-`/` cwd trims to nothing, and `//x` must not become `x`.
+        None => b"",
+    };
+    bfmt![base, b"/", path]
 }
 
 /// Whether two paths name the same directory. bash compares device+inode; the
@@ -5603,7 +5623,7 @@ impl Shell {
         if self.xtrace {
             self.xtrace_emit(&format!("case {} in", crate::unparse::word_src(&c.word)));
         }
-        let subject: Vec<char> = self.expand_to_string(&c.word).chars().collect();
+        let subject: Vec<Ch> = bytes::chars(self.expand_to_string(&c.word).as_bytes()).collect();
         // `shopt -s nocasematch` makes `case` (and `[[ == ]]`) matching
         // case-insensitive.
         let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
@@ -6377,7 +6397,8 @@ impl Shell {
     fn cond_binary(&mut self, l: &Word, op: CondBinary, r: &Word, invert: bool) -> bool {
         match op.op {
             CondBinOp::StrEq | CondBinOp::StrNe => {
-                let subject: Vec<char> = self.expand_to_string(l).chars().collect();
+                let subject_s = self.expand_to_string(l);
+                let subject: Vec<Ch> = bytes::chars(subject_s.as_bytes()).collect();
                 // `shopt -s nocasematch` folds case for both the literal and the
                 // glob comparison.
                 let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
@@ -6390,16 +6411,18 @@ impl Shell {
                 // here: a character a quote (or a backslash) made literal appears
                 // backslash-escaped, so `[[ ab == "a"b ]]` traces `[[ ab == \ab ]]`.
                 if self.xtrace {
-                    let lhs: String = subject.iter().collect();
-                    let rhs = cond_trace_pattern(&pat);
-                    self.cond_trace_binary(invert, &lhs, op.text, &rhs);
+                    // TD-OILS-BYTE-STRINGS scaffold: `cond_trace_binary` still
+                    // speaks `&str`.
+                    #[allow(deprecated)]
+                    let rhs = crate::bytes::scaffold_lossy_string(&cond_trace_pattern(&pat));
+                    self.cond_trace_binary(invert, &subject_s, op.text, &rhs);
                 }
                 // A fully-quoted RHS is a literal; otherwise it is a glob pattern.
                 let matched = if word_is_all_quoted(r) {
-                    let lhs: String = subject.iter().collect();
-                    let rhs: String = pat.iter().map(|e| e.c).collect();
+                    let lhs = subject_s.as_bytes();
+                    let rhs = echars_text(&pat);
                     if ci {
-                        lhs.to_lowercase() == rhs.to_lowercase()
+                        bytes::to_lowercase(lhs) == bytes::to_lowercase(&rhs)
                     } else {
                         lhs == rhs
                     }
@@ -7976,7 +7999,15 @@ impl Shell {
                 pattern,
             } => {
                 let pat = self.expand_word_pattern(pattern);
-                param_trim(value, &pat, *suffix, *longest, extglob)
+                // TD-OILS-BYTE-STRINGS scaffold: element values are still `String`.
+                #[allow(deprecated)]
+                crate::bytes::scaffold_lossy_string(&param_trim(
+                    value.as_bytes(),
+                    &pat,
+                    *suffix,
+                    *longest,
+                    extglob,
+                ))
             }
             BulkOp::Replace {
                 all,
@@ -7987,7 +8018,16 @@ impl Shell {
                 let pat = self.expand_word_pattern(pattern);
                 let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
                 let repl = self.expand_replacement(replacement, patsub);
-                param_replace(value, &pat, &repl, *all, *anchor, extglob)
+                // TD-OILS-BYTE-STRINGS scaffold: element values are still `String`.
+                #[allow(deprecated)]
+                crate::bytes::scaffold_lossy_string(&param_replace(
+                    value.as_bytes(),
+                    &pat,
+                    &repl,
+                    *all,
+                    *anchor,
+                    extglob,
+                ))
             }
             BulkOp::Case {
                 mode,
@@ -7995,7 +8035,15 @@ impl Shell {
                 pattern,
             } => {
                 let pat = self.expand_word_pattern(pattern);
-                param_case(value, &pat, *mode, *all, extglob)
+                // TD-OILS-BYTE-STRINGS scaffold: element values are still `String`.
+                #[allow(deprecated)]
+                crate::bytes::scaffold_lossy_string(&param_case(
+                    value.as_bytes(),
+                    &pat,
+                    *mode,
+                    *all,
+                    extglob,
+                ))
             }
             BulkOp::Transform { op } => Self::transform_value(value, *op),
             // Handled collection-wide in `bulk_elements` before per-element
@@ -12038,7 +12086,13 @@ impl Shell {
             if self.noglob {
                 // `set -f`: pathname expansion is disabled; each field keeps its
                 // literal (quote-removed) text without glob matching.
-                return fields.iter().map(|f| f.iter().map(|e| e.c).collect()).collect();
+                // TD-OILS-BYTE-STRINGS scaffold: `expand_word` still returns
+                // `Vec<String>`.
+                #[allow(deprecated)]
+                return fields
+                    .iter()
+                    .map(|f| crate::bytes::scaffold_lossy_string(&echars_text(f)))
+                    .collect();
             }
             let nullglob = self.shopt.get("nullglob").copied().unwrap_or(false);
             let failglob = self.shopt.get("failglob").copied().unwrap_or(false);
@@ -12055,23 +12109,42 @@ impl Shell {
             let globignore_val = self.vars.get("GLOBIGNORE").filter(|v| !v.is_empty());
             let globignore_active = globignore_val.is_some();
             let globignore: Vec<GlobIgnorePat> = globignore_val
-                .map(|v| build_globignore(v, extglob))
+                .map(|v| build_globignore(v.as_bytes(), extglob))
                 .unwrap_or_default();
-            let mut out = Vec::new();
-            let mut failed = None;
+            let mut out: Vec<Str> = Vec::new();
+            let mut failed: Option<Str> = None;
             for f in fields {
                 glob_or_literal(
-                    &self.cwd, &f, &mut out, nullglob, failglob, dotglob, nocaseglob, extglob,
-                    globstar, globignore_active, &globignore, &mut failed,
+                    self.cwd.as_bytes(),
+                    &f,
+                    &mut out,
+                    nullglob,
+                    failglob,
+                    dotglob,
+                    nocaseglob,
+                    extglob,
+                    globstar,
+                    globignore_active,
+                    &globignore,
+                    &mut failed,
                 );
             }
             // `failglob`: a pattern that matched nothing is a fatal expansion
             // error. Record it for the simple-command driver, which reports it
             // and aborts the command list (like a non-interactive bash).
             if let Some(pat) = failed {
+                // TD-OILS-BYTE-STRINGS scaffold: `glob_error` is still a `String`.
+                #[allow(deprecated)]
+                let pat = crate::bytes::scaffold_lossy_string(&pat);
                 self.glob_error = Some(pat);
             }
-            return out;
+            // TD-OILS-BYTE-STRINGS scaffold: `expand_word` still returns
+            // `Vec<String>`.
+            #[allow(deprecated)]
+            return out
+                .iter()
+                .map(|f| crate::bytes::scaffold_lossy_string(f))
+                .collect();
         }
         // Non-splitting context (assignment values, redirect targets, `[[ ]]`
         // operands): concatenate everything into one field, no splitting/glob.
@@ -12126,7 +12199,7 @@ impl Shell {
                     open = true;
                 }
                 WordPart::SingleQuoted { text: s, .. } => {
-                    push_chars(&mut cur, s, true);
+                    push_chars(&mut cur, s.as_bytes(), true);
                     open = true;
                 }
                 WordPart::DoubleQuoted(parts) => {
@@ -12201,12 +12274,12 @@ impl Shell {
                             if i > 0 {
                                 fields.push(std::mem::take(&mut cur));
                             }
-                            push_chars(&mut cur, &el, true);
+                            push_chars(&mut cur, el.as_bytes(), true);
                             open = true;
                         }
                     } else {
                         let s = self.expand_double_quoted(parts);
-                        push_chars(&mut cur, &s, true);
+                        push_chars(&mut cur, s.as_bytes(), true);
                         open = true;
                     }
                 }
@@ -12229,9 +12302,15 @@ impl Shell {
                         .get("IFS")
                         .cloned()
                         .unwrap_or_else(|| " \t\n".to_string());
-                    let is_ws = |c: char| matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
-                    let is_nonws = |c: char| !matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
-                    let cv: Vec<char> = val.chars().collect();
+                    // An undecodable byte is never an IFS delimiter: IFS holds
+                    // characters, and `Ch::B` equals no character.
+                    let is_ws = |c: Ch| {
+                        matches!(c.as_char(), Some(c) if matches!(c, ' ' | '\t' | '\n') && ifs.contains(c))
+                    };
+                    let is_nonws = |c: Ch| {
+                        matches!(c.as_char(), Some(c) if !matches!(c, ' ' | '\t' | '\n') && ifs.contains(c))
+                    };
+                    let cv: Vec<Ch> = bytes::chars(val.as_bytes()).collect();
                     let n = cv.len();
                     let mut i = 0;
                     while i < n {
@@ -12426,10 +12505,10 @@ impl Shell {
     fn push_literal_annotated(&self, buf: &mut Vec<EChar>, s: &str, leading: bool) {
         match if leading { self.tilde_split(s) } else { None } {
             Some((dir, rest)) => {
-                push_chars(buf, &dir, true);
-                push_chars(buf, rest, false);
+                push_chars(buf, dir.as_bytes(), true);
+                push_chars(buf, rest.as_bytes(), false);
             }
-            None => push_chars(buf, s, false),
+            None => push_chars(buf, s.as_bytes(), false),
         }
     }
 
@@ -12438,14 +12517,14 @@ impl Shell {
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => self.push_literal_annotated(&mut buf, s, idx == 0),
-                WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text, true),
+                WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text.as_bytes(), true),
                 WordPart::DoubleQuoted(parts) => {
                     let s = self.expand_double_quoted(parts);
-                    push_chars(&mut buf, &s, true);
+                    push_chars(&mut buf, s.as_bytes(), true);
                 }
                 other => {
                     let s = self.expand_dynamic(other);
-                    push_chars(&mut buf, &s, false);
+                    push_chars(&mut buf, s.as_bytes(), false);
                 }
             }
         }
@@ -12491,11 +12570,11 @@ impl Shell {
                     // Unquoted literal text. The replacement lexer preserved
                     // `\&`/`\\`; collapse them here so a following scan cannot
                     // mistake the resulting `&`/`\` for an active ampersand.
-                    let cs: Vec<char> = s.chars().collect();
+                    let cs: Vec<Ch> = bytes::chars(s.as_bytes()).collect();
                     let mut i = 0;
                     while i < cs.len() {
                         let c = cs[i];
-                        if c == '\\' && matches!(cs.get(i + 1), Some('&' | '\\')) {
+                        if c == '\\' && matches!(cs.get(i + 1).and_then(|c| c.as_char()), Some('&' | '\\')) {
                             out.push(ReplTok::Lit(cs[i + 1]));
                             i += 2;
                         } else if c == '&' && patsub {
@@ -12509,22 +12588,24 @@ impl Shell {
                 }
                 WordPart::SingleQuoted { text: s, .. } => {
                     // Single-quoted: fully literal, including any `&`.
-                    out.extend(s.chars().map(ReplTok::Lit));
+                    out.extend(bytes::chars(s.as_bytes()).map(ReplTok::Lit));
                 }
                 WordPart::DoubleQuoted(parts) => {
                     // Double-quoted: the expansion is quoted, so `&` is literal.
                     let s = self.expand_double_quoted(parts);
-                    out.extend(s.chars().map(ReplTok::Lit));
+                    out.extend(bytes::chars(s.as_bytes()).map(ReplTok::Lit));
                 }
                 other => {
                     // Unquoted parameter/command/arithmetic expansion.
                     let s = self.expand_dynamic(other);
                     if patsub {
-                        let cs: Vec<char> = s.chars().collect();
+                        let cs: Vec<Ch> = bytes::chars(s.as_bytes()).collect();
                         let mut i = 0;
                         while i < cs.len() {
                             let c = cs[i];
-                            if c == '\\' && matches!(cs.get(i + 1), Some('&' | '\\')) {
+                            if c == '\\'
+                                && matches!(cs.get(i + 1).and_then(|c| c.as_char()), Some('&' | '\\'))
+                            {
                                 out.push(ReplTok::Lit(cs[i + 1]));
                                 i += 2;
                             } else if c == '&' {
@@ -12536,7 +12617,7 @@ impl Shell {
                             }
                         }
                     } else {
-                        out.extend(s.chars().map(ReplTok::Lit));
+                        out.extend(bytes::chars(s.as_bytes()).map(ReplTok::Lit));
                     }
                 }
             }
@@ -12601,7 +12682,15 @@ impl Shell {
                 let value = self.op_operand(operand, name, index).unwrap_or_default();
                 let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
-                param_trim(&value, &pat, *suffix, *longest, extglob)
+                // TD-OILS-BYTE-STRINGS scaffold: expansion values are still `String`.
+                #[allow(deprecated)]
+                crate::bytes::scaffold_lossy_string(&param_trim(
+                    value.as_bytes(),
+                    &pat,
+                    *suffix,
+                    *longest,
+                    extglob,
+                ))
             }
             WordPart::ParamSubstr {
                 name,
@@ -12621,8 +12710,11 @@ impl Shell {
                 let len = length
                     .as_ref()
                     .map(|l| self.eval_arith_substr_bound(l, &param_ref));
-                match param_substr(&value, off, len) {
-                    Ok(s) => s,
+                match param_substr(value.as_bytes(), off, len) {
+                    // TD-OILS-BYTE-STRINGS scaffold: expansion values are still
+                    // `String`.
+                    #[allow(deprecated)]
+                    Ok(s) => crate::bytes::scaffold_lossy_string(&s),
                     Err(bad_len) => {
                         self.errln(&format!(
                             "{}{bad_len}: substring expression < 0",
@@ -12651,7 +12743,16 @@ impl Shell {
                 let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
                 let repl = self.expand_replacement(replacement, patsub);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
-                param_replace(&value, &pat, &repl, *all, *anchor, extglob)
+                // TD-OILS-BYTE-STRINGS scaffold: expansion values are still `String`.
+                #[allow(deprecated)]
+                crate::bytes::scaffold_lossy_string(&param_replace(
+                    value.as_bytes(),
+                    &pat,
+                    &repl,
+                    *all,
+                    *anchor,
+                    extglob,
+                ))
             }
             WordPart::ParamCase {
                 name,
@@ -12663,7 +12764,15 @@ impl Shell {
                 let value = self.op_operand(operand, name, index).unwrap_or_default();
                 let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
-                param_case(&value, &pat, *mode, *all, extglob)
+                // TD-OILS-BYTE-STRINGS scaffold: expansion values are still `String`.
+                #[allow(deprecated)]
+                crate::bytes::scaffold_lossy_string(&param_case(
+                    value.as_bytes(),
+                    &pat,
+                    *mode,
+                    *all,
+                    extglob,
+                ))
             }
             WordPart::ParamTransform { name, index, op } => {
                 self.param_transform(name, index, *op, operand)
@@ -16983,7 +17092,7 @@ impl Shell {
         let mut text = String::new();
         for pat in &patterns {
             let is_glob = pat.contains(['*', '?']);
-            let pat_chars: Vec<char> = pat.chars().collect();
+            let pat_chars: Vec<Ch> = bytes::chars(pat.as_bytes()).collect();
             // bash prefers an exact topic-name match: `help for` resolves to the
             // `for` topic alone, never the longer `for ((` (and `help time` not
             // `times`). Only when no topic name equals the pattern does it fall
@@ -16996,7 +17105,7 @@ impl Shell {
                     .iter()
                     .filter(|(name, _, _)| {
                         if is_glob {
-                            glob_match(&pat_chars, &name.chars().collect::<Vec<_>>(), false)
+                            glob_match(&pat_chars, &bytes::chars(name.as_bytes()).collect::<Vec<_>>(), false)
                         } else {
                             name.starts_with(pat.as_str())
                         }
@@ -22354,9 +22463,10 @@ impl Shell {
         // The word never narrows this one: bash hands back everything the
         // pattern expanded to, and hands it back in reverse.
         if let Some(pat) = &globpat {
-            let field: Vec<EChar> = pat.chars().map(|c| EChar { c, quoted: false }).collect();
+            let field: Vec<EChar> =
+                bytes::chars(pat.as_bytes()).map(|c| EChar { c, quoted: false }).collect();
             let mut m = glob_expand_field(
-                &self.cwd,
+                self.cwd.as_bytes(),
                 &field,
                 self.shopt.get("dotglob").copied().unwrap_or(false),
                 self.shopt.get("nocaseglob").copied().unwrap_or(false),
@@ -22365,7 +22475,10 @@ impl Shell {
             );
             m.sort();
             m.reverse();
-            list.extend(m);
+            // TD-OILS-BYTE-STRINGS scaffold: the completion list is still
+            // `Vec<String>`.
+            #[allow(deprecated)]
+            list.extend(m.iter().map(|s| crate::bytes::scaffold_lossy_string(s)));
         }
 
         // ---- -W wordlist, split on IFS ----
@@ -22388,9 +22501,9 @@ impl Shell {
                 Some(rest) => (true, rest),
                 None => (false, pat.as_str()),
             };
-            let pchars: Vec<char> = p.chars().collect();
+            let pchars: Vec<Ch> = bytes::chars(p.as_bytes()).collect();
             list.retain(|c| {
-                let tchars: Vec<char> = c.chars().collect();
+                let tchars: Vec<Ch> = bytes::chars(c.as_bytes()).collect();
                 let m = glob_match(&pchars, &tchars, extglob);
                 // Default: drop matches. `!pat`: keep only matches.
                 if invert { m } else { !m }
@@ -24371,15 +24484,20 @@ enum ExtraFdOp {
 /// and pathname (glob) expansion — a quoted `*` matches a literal `*`.
 #[derive(Clone, Copy)]
 struct EChar {
-    c: char,
+    c: Ch,
     quoted: bool,
 }
 
 /// Append the characters of `s` to `buf`, tagging each with `quoted`.
-fn push_chars(buf: &mut Vec<EChar>, s: &str, quoted: bool) {
-    for c in s.chars() {
+fn push_chars(buf: &mut Vec<EChar>, s: BStr<'_>, quoted: bool) {
+    for c in bytes::chars(s) {
         buf.push(EChar { c, quoted });
     }
+}
+
+/// The literal text of an annotated field: its characters with quoting dropped.
+fn echars_text(field: &[EChar]) -> Str {
+    bytes::from_chars(field.iter().map(|e| e.c))
 }
 
 /// Apply pathname expansion to one annotated field, pushing the results (or the
@@ -24394,18 +24512,18 @@ fn field_has_glob_meta(field: &[EChar], extglob: bool) -> bool {
         if e.quoted {
             return false;
         }
-        matches!(e.c, '*' | '?' | '[')
+        matches!(e.c.as_ascii(), Some('*' | '?' | '['))
             || (extglob
-                && matches!(e.c, '?' | '*' | '+' | '@' | '!')
+                && matches!(e.c.as_ascii(), Some('?' | '*' | '+' | '@' | '!'))
                 && matches!(field.get(i + 1), Some(n) if !n.quoted && n.c == '('))
     })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn glob_or_literal(
-    cwd: &str,
+    cwd: BStr<'_>,
     field: &[EChar],
-    out: &mut Vec<String>,
+    out: &mut Vec<Str>,
     nullglob: bool,
     failglob: bool,
     dotglob: bool,
@@ -24414,10 +24532,10 @@ fn glob_or_literal(
     globstar: bool,
     globignore_active: bool,
     globignore: &[GlobIgnorePat],
-    failed: &mut Option<String>,
+    failed: &mut Option<Str>,
 ) {
     let has_meta = field_has_glob_meta(field, extglob);
-    let literal: String = field.iter().map(|e| e.c).collect();
+    let literal = echars_text(field);
     if !has_meta {
         out.push(literal);
         return;
@@ -24431,8 +24549,10 @@ fn glob_or_literal(
         // and `..` entries (bash ignores them whenever GLOBIGNORE is non-null,
         // even for a leading-dot pattern like `.*`).
         matches.retain(|m| {
-            let base = m.rsplit('/').next().unwrap_or(m.as_str());
-            base != "." && base != ".." && !globignore.iter().any(|p| p.matches_path(m))
+            let base = m.rsplit(|&b| b == b'/').next().unwrap_or(m.as_slice());
+            base != b".".as_slice()
+                && base != b"..".as_slice()
+                && !globignore.iter().any(|p| p.matches_path(m))
         });
     }
     if matches.is_empty() {
@@ -24465,13 +24585,13 @@ struct GlobIgnorePat {
 
 impl GlobIgnorePat {
     /// Whether `path` matches this pattern with pathname-style semantics.
-    fn matches_path(&self, path: &str) -> bool {
-        let parts: Vec<&str> = path.split('/').collect();
+    fn matches_path(&self, path: BStr<'_>) -> bool {
+        let parts: Vec<&[u8]> = path.split(|&b| b == b'/').collect();
         if parts.len() != self.comps.len() {
             return false;
         }
         parts.iter().zip(&self.comps).all(|(seg, toks)| {
-            let chars: Vec<char> = seg.chars().collect();
+            let chars: Vec<Ch> = bytes::chars(seg).collect();
             match_glob_toks(toks, &chars)
         })
     }
@@ -24480,16 +24600,16 @@ impl GlobIgnorePat {
 /// Compile a `GLOBIGNORE` variable value (a `:`-separated list) into a set of
 /// [`GlobIgnorePat`]s. Empty entries (e.g. a leading/trailing/doubled `:`) are
 /// skipped. Each pattern's characters are treated as unquoted glob text.
-fn build_globignore(value: &str, extglob: bool) -> Vec<GlobIgnorePat> {
+fn build_globignore(value: BStr<'_>, extglob: bool) -> Vec<GlobIgnorePat> {
     value
-        .split(':')
+        .split(|&b| b == b':')
         .filter(|p| !p.is_empty())
         .map(|pat| {
             let comps = pat
-                .split('/')
+                .split(|&b| b == b'/')
                 .map(|comp| {
                     let echars: Vec<EChar> =
-                        comp.chars().map(|c| EChar { c, quoted: false }).collect();
+                        bytes::chars(comp).map(|c| EChar { c, quoted: false }).collect();
                     compile_glob(&echars, extglob)
                 })
                 .collect();
@@ -24505,7 +24625,7 @@ enum PatTok {
     /// `?` — match any single character.
     Any,
     /// A literal character (either an ordinary char or a quoted metacharacter).
-    Lit(char),
+    Lit(Ch),
     /// `[...]` character class.
     Class { negate: bool, items: Vec<ClassItem> },
     /// An `extglob` group: `?(list)`, `*(list)`, `+(list)`, `@(list)`, or
@@ -24529,8 +24649,8 @@ enum ExtKind {
 }
 
 enum ClassItem {
-    Ch(char),
-    Range(char, char),
+    Ch(Ch),
+    Range(Ch, Ch),
     /// A POSIX character class such as `[:space:]` (stored as the name between
     /// the inner colons, e.g. `"space"`). Matched by [`posix_class_matches`].
     Posix(String),
@@ -24551,7 +24671,7 @@ fn compile_glob(comp: &[EChar], extglob: bool) -> Vec<PatTok> {
         }
         // extglob: `X(` where X ∈ ?*+@! and the paren is unquoted.
         if extglob
-            && matches!(e.c, '?' | '*' | '+' | '@' | '!')
+            && matches!(e.c.as_ascii(), Some('?' | '*' | '+' | '@' | '!'))
             && matches!(comp.get(i + 1), Some(n) if !n.quoted && n.c == '(')
             && let Some((tok, next)) = compile_ext_group(comp, i, extglob)
         {
@@ -24559,26 +24679,26 @@ fn compile_glob(comp: &[EChar], extglob: bool) -> Vec<PatTok> {
             i = next;
             continue;
         }
-        match e.c {
-            '*' => {
+        match e.c.as_ascii() {
+            Some('*') => {
                 toks.push(PatTok::Star);
                 i += 1;
             }
-            '?' => {
+            Some('?') => {
                 toks.push(PatTok::Any);
                 i += 1;
             }
-            '[' => {
+            Some('[') => {
                 if let Some((tok, next)) = compile_class(comp, i) {
                     toks.push(tok);
                     i = next;
                 } else {
-                    toks.push(PatTok::Lit('['));
+                    toks.push(PatTok::Lit(Ch::U('[')));
                     i += 1;
                 }
             }
-            c => {
-                toks.push(PatTok::Lit(c));
+            _ => {
+                toks.push(PatTok::Lit(e.c));
                 i += 1;
             }
         }
@@ -24593,12 +24713,12 @@ fn compile_glob(comp: &[EChar], extglob: bool) -> Vec<PatTok> {
 /// `None` if the group is unterminated (caller then treats the operator char
 /// literally).
 fn compile_ext_group(comp: &[EChar], start: usize, extglob: bool) -> Option<(PatTok, usize)> {
-    let kind = match comp[start].c {
-        '?' => ExtKind::Optional,
-        '*' => ExtKind::Star,
-        '+' => ExtKind::Plus,
-        '@' => ExtKind::Once,
-        '!' => ExtKind::Not,
+    let kind = match comp[start].c.as_ascii() {
+        Some('?') => ExtKind::Optional,
+        Some('*') => ExtKind::Star,
+        Some('+') => ExtKind::Plus,
+        Some('@') => ExtKind::Once,
+        Some('!') => ExtKind::Not,
         _ => return None,
     };
     let mut i = start + 2; // past the operator char and '('
@@ -24610,12 +24730,12 @@ fn compile_ext_group(comp: &[EChar], start: usize, extglob: bool) -> Option<(Pat
         if e.quoted {
             cur.push(e);
         } else {
-            match e.c {
-                '(' => {
+            match e.c.as_ascii() {
+                Some('(') => {
                     depth += 1;
                     cur.push(e);
                 }
-                ')' => {
+                Some(')') => {
                     depth -= 1;
                     if depth == 0 {
                         alts.push(cur);
@@ -24624,7 +24744,7 @@ fn compile_ext_group(comp: &[EChar], start: usize, extglob: bool) -> Option<(Pat
                     }
                     cur.push(e);
                 }
-                '|' if depth == 1 => {
+                Some('|') if depth == 1 => {
                     alts.push(std::mem::take(&mut cur));
                 }
                 _ => cur.push(e),
@@ -24640,7 +24760,7 @@ fn compile_ext_group(comp: &[EChar], start: usize, extglob: bool) -> Option<(Pat
 fn compile_class(comp: &[EChar], start: usize) -> Option<(PatTok, usize)> {
     let mut i = start + 1;
     let mut negate = false;
-    if matches!(comp.get(i).map(|e| e.c), Some('!' | '^')) {
+    if matches!(comp.get(i).and_then(|e| e.c.as_ascii()), Some('!' | '^')) {
         negate = true;
         i += 1;
     }
@@ -24656,12 +24776,15 @@ fn compile_class(comp: &[EChar], start: usize) -> Option<(PatTok, usize)> {
         // closing `:]`. If no terminator is found, fall through and treat the
         // `[` literally.
         if c == '['
-            && matches!(comp.get(i + 1).map(|e| e.c), Some(':'))
+            && matches!(comp.get(i + 1).and_then(|e| e.c.as_ascii()), Some(':'))
             && let Some(end) = (i + 2..comp.len()).find(|&k| {
-                comp[k].c == ':' && matches!(comp.get(k + 1).map(|e| e.c), Some(']'))
+                comp[k].c == ':'
+                    && matches!(comp.get(k + 1).and_then(|e| e.c.as_ascii()), Some(']'))
             })
         {
-            let name: String = comp[i + 2..end].iter().map(|e| e.c).collect();
+            // A POSIX class name is ASCII; anything else names no class, and
+            // `posix_class_matches` then matches nothing — as bash does.
+            let name: String = comp[i + 2..end].iter().filter_map(|e| e.c.as_ascii()).collect();
             items.push(ClassItem::Posix(name));
             first = false;
             i = end + 2; // past `:]`
@@ -24684,7 +24807,7 @@ fn compile_class(comp: &[EChar], start: usize) -> Option<(PatTok, usize)> {
 /// backtracking over alternatives and repetitions — are handled uniformly with
 /// `*`. Patterns and names are short (one path component / one field), so the
 /// worst-case backtracking cost is not a concern in practice.
-fn match_glob_toks(toks: &[PatTok], name: &[char]) -> bool {
+fn match_glob_toks(toks: &[PatTok], name: &[Ch]) -> bool {
     let Some((first, rest)) = toks.split_first() else {
         return name.is_empty();
     };
@@ -24702,9 +24825,9 @@ fn match_glob_toks(toks: &[PatTok], name: &[char]) -> bool {
 }
 
 /// Match an `extglob` group followed by `rest` against `name`.
-fn match_ext_group(kind: ExtKind, alts: &[Vec<PatTok>], rest: &[PatTok], name: &[char]) -> bool {
+fn match_ext_group(kind: ExtKind, alts: &[Vec<PatTok>], rest: &[PatTok], name: &[Ch]) -> bool {
     // Whether any alternative matches the whole slice `sub`.
-    let any_alt = |sub: &[char]| alts.iter().any(|a| match_glob_toks(a, sub));
+    let any_alt = |sub: &[Ch]| alts.iter().any(|a| match_glob_toks(a, sub));
     match kind {
         // Exactly one occurrence: some prefix matches an alternative, rest matches the tail.
         ExtKind::Once => {
@@ -24731,7 +24854,7 @@ fn match_ext_group(kind: ExtKind, alts: &[Vec<PatTok>], rest: &[PatTok], name: &
 
 /// Match zero or more repetitions of any alternative, then `rest`. Each
 /// repetition consumes at least one character (`k >= 1`), guaranteeing progress.
-fn match_star_group(alts: &[Vec<PatTok>], rest: &[PatTok], name: &[char]) -> bool {
+fn match_star_group(alts: &[Vec<PatTok>], rest: &[PatTok], name: &[Ch]) -> bool {
     if match_glob_toks(rest, name) {
         return true;
     }
@@ -24741,7 +24864,7 @@ fn match_star_group(alts: &[Vec<PatTok>], rest: &[PatTok], name: &[char]) -> boo
     })
 }
 
-fn class_matches(items: &[ClassItem], ch: char) -> bool {
+fn class_matches(items: &[ClassItem], ch: Ch) -> bool {
     items.iter().any(|it| match it {
         ClassItem::Ch(c) => *c == ch,
         ClassItem::Range(a, b) => *a <= ch && ch <= *b,
@@ -24752,7 +24875,13 @@ fn class_matches(items: &[ClassItem], ch: char) -> bool {
 /// Whether `ch` belongs to the POSIX character class `name` (the text between
 /// the inner colons of `[:name:]`). Unknown class names match nothing, matching
 /// bash's behavior of treating an unrecognized class as an empty set.
-fn posix_class_matches(name: &str, ch: char) -> bool {
+fn posix_class_matches(name: &str, ch: Ch) -> bool {
+    // A byte that decodes to no character belongs to no class: it is not a
+    // letter, not a digit and not printable. bash's `iswalpha` family answers
+    // the same way for a byte the locale cannot decode.
+    let Some(ch) = ch.as_char() else {
+        return false;
+    };
     match name {
         "alnum" => ch.is_alphanumeric(),
         "alpha" => ch.is_alphabetic(),
@@ -24773,7 +24902,7 @@ fn posix_class_matches(name: &str, ch: char) -> bool {
 /// Whether a compiled component's first token is a literal `.` — controls the
 /// hidden-file rule (a leading `.` in a name is only matched explicitly).
 fn glob_starts_with_dot(toks: &[PatTok]) -> bool {
-    matches!(toks.first(), Some(PatTok::Lit('.')))
+    matches!(toks.first(), Some(PatTok::Lit(c)) if *c == '.')
 }
 
 /// Expand an annotated field containing at least one unquoted metacharacter
@@ -24784,13 +24913,13 @@ fn glob_starts_with_dot(toks: &[PatTok]) -> bool {
 /// rebased onto it so a subshell that has `cd`-ed elsewhere globs its own
 /// directory rather than the process's.
 fn glob_expand_field(
-    cwd: &str,
+    cwd: BStr<'_>,
     field: &[EChar],
     dotglob: bool,
     nocaseglob: bool,
     extglob: bool,
     globstar: bool,
-) -> Vec<String> {
+) -> Vec<Str> {
     let absolute = field.first().is_some_and(|e| e.c == '/');
     // Split into non-empty components on '/'.
     let mut comps: Vec<Vec<EChar>> = Vec::new();
@@ -24811,7 +24940,7 @@ fn glob_expand_field(
         return Vec::new();
     }
     let last = comps.len().saturating_sub(1);
-    let mut cands: Vec<String> = vec![if absolute { "/".to_string() } else { String::new() }];
+    let mut cands: Vec<Str> = vec![if absolute { b"/".to_vec() } else { Str::new() }];
     for (ci, comp) in comps.iter().enumerate() {
         // `**` with `globstar` matches across directory levels: as an
         // intermediate component it stands for the base plus every descendant
@@ -24819,7 +24948,7 @@ fn glob_expand_field(
         // for every descendant file *and* directory.
         if globstar && is_globstar_comp(comp) {
             let terminal = ci == last;
-            let mut next: Vec<String> = Vec::new();
+            let mut next: Vec<Str> = Vec::new();
             for base in &cands {
                 globstar_walk(cwd, base, dotglob, terminal, &mut next);
             }
@@ -24829,11 +24958,11 @@ fn glob_expand_field(
             continue;
         }
         let has_meta = field_has_glob_meta(comp, extglob);
-        let comp_literal: String = comp.iter().map(|e| e.c).collect();
-        let mut next: Vec<String> = Vec::new();
+        let comp_literal = echars_text(comp);
+        let mut next: Vec<Str> = Vec::new();
         for base in &cands {
             if has_meta {
-                let dir = if base.is_empty() { "." } else { base.as_str() };
+                let dir: BStr<'_> = if base.is_empty() { b"." } else { base.as_slice() };
                 let toks = compile_glob(comp, extglob);
                 // With `nocaseglob`, match against an ASCII-lowercased copy of
                 // both the pattern and each filename (token structure is kept
@@ -24847,28 +24976,36 @@ fn glob_expand_field(
                             quoted: e.quoted,
                         })
                         .collect();
+
                     compile_glob(&low, extglob)
                 });
                 // A leading `.` in a filename is only matched when the pattern
                 // itself begins with a literal dot, or when `dotglob` is set.
                 // Even with `dotglob`, `.` and `..` are never matched by a glob.
                 let allow_dot = dotglob || glob_starts_with_dot(&toks);
-                let Ok(rd) = std::fs::read_dir(resolve_against(cwd, dir)) else {
+                let Ok(rd) = std::fs::read_dir(bytes::bytes_to_path(&resolve_against_b(cwd, dir)))
+                else {
                     continue;
                 };
-                let mut names: Vec<String> = Vec::new();
+                let mut names: Vec<Str> = Vec::new();
                 for ent in rd.flatten() {
-                    let name = ent.file_name().to_string_lossy().into_owned();
-                    let nch: Vec<char> = name.chars().collect();
-                    if nch.first() == Some(&'.') && !allow_dot {
+                    // A directory entry is bytes, not text: `to_string_lossy`
+                    // here is what used to make the shell glob up a name it
+                    // could then not open (TD-OILS-BYTE-STRINGS).
+                    let name = bytes::os_to_bytes(&ent.file_name());
+                    let nch: Vec<Ch> = bytes::chars(&name).collect();
+                    if nch.first() == Some(&Ch::U('.')) && !allow_dot {
                         continue;
                     }
-                    if dotglob && !glob_starts_with_dot(&toks) && (name == "." || name == "..") {
+                    if dotglob
+                        && !glob_starts_with_dot(&toks)
+                        && (name == b"." || name == b"..")
+                    {
                         continue;
                     }
                     let matched = match &toks_ci {
                         Some(tci) => {
-                            let low: Vec<char> =
+                            let low: Vec<Ch> =
                                 nch.iter().map(|c| c.to_ascii_lowercase()).collect();
                             match_glob_toks(tci, &low)
                         }
@@ -24884,7 +25021,7 @@ fn glob_expand_field(
                 }
             } else {
                 let joined = join_glob(base, &comp_literal);
-                if std::path::Path::new(&resolve_against(cwd, &joined)).exists() {
+                if bytes::bytes_to_path(&resolve_against_b(cwd, &joined)).exists() {
                     next.push(joined);
                 }
             }
@@ -24900,17 +25037,18 @@ fn is_globstar_comp(comp: &[EChar]) -> bool {
     comp.len() == 2 && comp.iter().all(|e| e.c == '*' && !e.quoted)
 }
 
+
 /// Expand a `**` (globstar) component under `base`. When `terminal` (the last
 /// path component), appends every descendant file and directory of `base`;
 /// otherwise appends `base` itself (the zero-levels case) plus every descendant
 /// directory — the candidate directories for the following component. Dotfiles
 /// are skipped unless `dotglob`. Symlinked directories are not recursed into
 /// (matching bash ≥ 4.3), which also prevents symlink-loop infinite recursion.
-fn globstar_walk(cwd: &str, base: &str, dotglob: bool, terminal: bool, out: &mut Vec<String>) {
+fn globstar_walk(cwd: BStr<'_>, base: BStr<'_>, dotglob: bool, terminal: bool, out: &mut Vec<Str>) {
     if !terminal
-        && (base.is_empty() || std::path::Path::new(&resolve_against(cwd, base)).is_dir())
+        && (base.is_empty() || bytes::bytes_to_path(&resolve_against_b(cwd, base)).is_dir())
     {
-        out.push(base.to_string());
+        out.push(base.to_vec());
     }
     globstar_descend(cwd, base, dotglob, terminal, out);
 }
@@ -24918,15 +25056,21 @@ fn globstar_walk(cwd: &str, base: &str, dotglob: bool, terminal: bool, out: &mut
 /// Recursive worker for [`globstar_walk`]: descends `base`, pushing matching
 /// descendants. In terminal mode every entry is pushed; otherwise only
 /// directories (which are also the ones recursed into).
-fn globstar_descend(cwd: &str, base: &str, dotglob: bool, terminal: bool, out: &mut Vec<String>) {
-    let dir = if base.is_empty() { "." } else { base };
-    let Ok(rd) = std::fs::read_dir(resolve_against(cwd, dir)) else {
+fn globstar_descend(
+    cwd: BStr<'_>,
+    base: BStr<'_>,
+    dotglob: bool,
+    terminal: bool,
+    out: &mut Vec<Str>,
+) {
+    let dir: BStr<'_> = if base.is_empty() { b"." } else { base };
+    let Ok(rd) = std::fs::read_dir(bytes::bytes_to_path(&resolve_against_b(cwd, dir))) else {
         return;
     };
-    let mut entries: Vec<(String, bool)> = Vec::new();
+    let mut entries: Vec<(Str, bool)> = Vec::new();
     for ent in rd.flatten() {
-        let name = ent.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') && !dotglob {
+        let name = bytes::os_to_bytes(&ent.file_name());
+        if name.first() == Some(&b'.') && !dotglob {
             continue;
         }
         let is_dir = ent.file_type().is_ok_and(|t| t.is_dir());
@@ -24945,15 +25089,13 @@ fn globstar_descend(cwd: &str, base: &str, dotglob: bool, terminal: bool, out: &
 
 /// Join a base path and a component with a single `/` separator, preserving a
 /// leading-`/` (absolute) base and cwd-relative (empty) base.
-fn join_glob(base: &str, name: &str) -> String {
+fn join_glob(base: BStr<'_>, name: BStr<'_>) -> Str {
     if base.is_empty() {
-        name.to_string()
-    } else if base == "/" {
-        format!("/{name}")
-    } else if base.ends_with('/') {
-        format!("{base}{name}")
+        name.to_vec()
+    } else if base.last() == Some(&b'/') {
+        bfmt![base, name]
     } else {
-        format!("{base}/{name}")
+        bfmt![base, b"/", name]
     }
 }
 
@@ -24975,16 +25117,16 @@ fn word_is_all_quoted(w: &Word) -> bool {
 /// matching — the quoting flag is preserved across the fold so a quoted `*`
 /// stays literal — matching the case-folded `case`/`[[ == ]]` semantics.
 /// `extglob` enables the extended pattern operators.
-fn glob_match_echars_ci(pattern: &[EChar], text: &[char], ci: bool, extglob: bool) -> bool {
+fn glob_match_echars_ci(pattern: &[EChar], text: &[Ch], ci: bool, extglob: bool) -> bool {
     if ci {
         let p: Vec<EChar> = pattern
             .iter()
             .flat_map(|e| {
                 let quoted = e.quoted;
-                e.c.to_lowercase().map(move |c| EChar { c, quoted })
+                e.c.to_lowercase().into_iter().map(move |c| EChar { c, quoted })
             })
             .collect();
-        let t: Vec<char> = text.iter().flat_map(|c| c.to_lowercase()).collect();
+        let t: Vec<Ch> = text.iter().flat_map(|c| c.to_lowercase()).collect();
         match_glob_toks(&compile_glob(&p, extglob), &t)
     } else {
         match_glob_toks(&compile_glob(pattern, extglob), text)
@@ -24996,7 +25138,7 @@ fn glob_match_echars_ci(pattern: &[EChar], text: &[char], ci: bool, extglob: boo
 /// `case` patterns and `[[ … == … ]]` require). The pattern chars are treated as
 /// unquoted (quoting is resolved before this point) and compiled to the same
 /// [`PatTok`] engine used for pathname expansion.
-fn glob_match(pattern: &[char], text: &[char], extglob: bool) -> bool {
+fn glob_match(pattern: &[Ch], text: &[Ch], extglob: bool) -> bool {
     let comp: Vec<EChar> = pattern
         .iter()
         .map(|&c| EChar { c, quoted: false })
@@ -25010,14 +25152,14 @@ fn glob_match(pattern: &[char], text: &[char], extglob: bool) -> bool {
 /// literally while an unquoted one — including any produced by a nested
 /// expansion (`${x#$p}`) — stays live. Used by the parameter-expansion pattern
 /// operators (`#`/`%`/`/`/`^`/`,`).
-fn glob_match_e(pattern: &[EChar], text: &[char], extglob: bool) -> bool {
+fn glob_match_e(pattern: &[EChar], text: &[Ch], extglob: bool) -> bool {
     match_glob_toks(&compile_glob(pattern, extglob), text)
 }
 
 /// Longest match of `pattern` starting at `text[start]`; returns the end index
 /// (exclusive) of the match, or `None`. Used by `${…/…/…}` substitution. The
 /// pattern carries per-character quoting (see [`glob_match_e`]).
-fn glob_match_at(pattern: &[EChar], text: &[char], start: usize, extglob: bool) -> Option<usize> {
+fn glob_match_at(pattern: &[EChar], text: &[Ch], start: usize, extglob: bool) -> Option<usize> {
     for j in (start..=text.len()).rev() {
         if glob_match_e(pattern, &text[start..j], extglob) {
             return Some(j);
@@ -25028,8 +25170,14 @@ fn glob_match_at(pattern: &[EChar], text: &[char], start: usize, extglob: bool) 
 
 /// `${name#pat}` / `${name##pat}` / `${name%pat}` / `${name%%pat}`. The pattern
 /// carries per-character quoting (see [`glob_match_e`]).
-fn param_trim(value: &str, pattern: &[EChar], suffix: bool, longest: bool, extglob: bool) -> String {
-    let v: Vec<char> = value.chars().collect();
+fn param_trim(
+    value: BStr<'_>,
+    pattern: &[EChar],
+    suffix: bool,
+    longest: bool,
+    extglob: bool,
+) -> Str {
+    let v: Vec<Ch> = bytes::chars(value).collect();
     if suffix {
         // Remove a matching suffix `v[k..]`, keeping `v[..k]`. Shortest match =
         // largest k; longest match = smallest k.
@@ -25040,7 +25188,7 @@ fn param_trim(value: &str, pattern: &[EChar], suffix: bool, longest: bool, extgl
         };
         for k in range {
             if glob_match_e(pattern, &v[k..], extglob) {
-                return v[..k].iter().collect();
+                return bytes::from_chars(v[..k].iter().copied());
             }
         }
     } else {
@@ -25053,11 +25201,11 @@ fn param_trim(value: &str, pattern: &[EChar], suffix: bool, longest: bool, extgl
         };
         for k in range {
             if glob_match_e(pattern, &v[..k], extglob) {
-                return v[k..].iter().collect();
+                return bytes::from_chars(v[k..].iter().copied());
             }
         }
     }
-    value.to_string()
+    value.to_vec()
 }
 
 /// `${name^pat}` / `${name^^pat}` (upper) / `${name,pat}` / `${name,,pat}`
@@ -25067,46 +25215,46 @@ fn param_trim(value: &str, pattern: &[EChar], suffix: bool, longest: bool, extgl
 /// first character of the value is considered (and only converted if it
 /// matches `pattern`).
 fn param_case(
-    value: &str,
+    value: BStr<'_>,
     pattern: &[EChar],
     mode: crate::ast::CaseMode,
     all: bool,
     extglob: bool,
-) -> String {
+) -> Str {
     use crate::ast::CaseMode;
     // An empty pattern matches every character (bash: `^^`/`,,`/`~~` with no
     // pattern transforms the whole value).
-    let matches_char = |ch: char| pattern.is_empty() || glob_match_e(pattern, &[ch], extglob);
-    let convert = |ch: char| {
+    let matches_char = |ch: Ch| pattern.is_empty() || glob_match_e(pattern, &[ch], extglob);
+    let convert = |ch: Ch| -> Vec<Ch> {
         // `char::to_uppercase`/`to_lowercase` can yield multiple chars
         // (e.g. 'ß' → "SS"); bash uses towupper/towlower per rune, but the
         // multi-char expansion is the closest correct Unicode behavior.
+        // A byte that begins no valid sequence has no case; it is passed
+        // through unchanged.
         match mode {
-            CaseMode::Upper => ch.to_uppercase().collect::<String>(),
-            CaseMode::Lower => ch.to_lowercase().collect::<String>(),
+            CaseMode::Upper => ch.to_uppercase(),
+            CaseMode::Lower => ch.to_lowercase(),
             // Toggle: upper-case letters become lower-case and vice versa;
             // characters that are neither are left unchanged.
-            CaseMode::Toggle => {
-                if ch.is_uppercase() {
-                    ch.to_lowercase().collect::<String>()
-                } else if ch.is_lowercase() {
-                    ch.to_uppercase().collect::<String>()
-                } else {
-                    ch.to_string()
-                }
-            }
+            CaseMode::Toggle => match ch.as_char() {
+                Some(c) if c.is_uppercase() => ch.to_lowercase(),
+                Some(c) if c.is_lowercase() => ch.to_uppercase(),
+                _ => vec![ch],
+            },
         }
     };
-    let mut out = String::with_capacity(value.len());
+    let mut out = Str::with_capacity(value.len());
     let mut done = false;
-    for ch in value.chars() {
+    for ch in bytes::chars(value) {
         if !done && matches_char(ch) {
-            out.push_str(&convert(ch));
+            for c in convert(ch) {
+                c.push_to(&mut out);
+            }
             if !all {
                 done = true;
             }
         } else {
-            out.push(ch);
+            ch.push_to(&mut out);
             if !all {
                 // For the single-char form only the first character is
                 // eligible; everything after is copied verbatim.
@@ -25692,13 +25840,13 @@ fn cond_trace_arg(s: &str) -> &str {
 /// quoting visible where it matters: `[[ ab == "a"b ]]` traces `[[ ab == \ab ]]`
 /// and `[[ 'a*' == 'a*' ]]` traces `[[ a* == \a\* ]]`, so the reader can tell a
 /// live metacharacter from a literal one.
-fn cond_trace_pattern(pat: &[EChar]) -> String {
-    let mut out = String::with_capacity(pat.len());
+fn cond_trace_pattern(pat: &[EChar]) -> Str {
+    let mut out = Str::with_capacity(pat.len());
     for e in pat {
         if e.quoted {
-            out.push('\\');
+            out.push(b'\\');
         }
-        out.push(e.c);
+        e.c.push_to(&mut out);
     }
     out
 }
@@ -25843,8 +25991,8 @@ fn ansic_quote(s: &str) -> String {
 /// the computed end before the start (or before 0), bash rejects it as a fatal
 /// "substring expression < 0" word-expansion error; this returns `Err(len)`
 /// carrying the offending length so the caller can emit that diagnostic.
-fn param_substr(value: &str, offset: i64, length: Option<i64>) -> Result<String, i64> {
-    let chars: Vec<char> = value.chars().collect();
+fn param_substr(value: BStr<'_>, offset: i64, length: Option<i64>) -> Result<Str, i64> {
+    let chars: Vec<Ch> = bytes::chars(value).collect();
     let n = chars.len() as i64;
     let mut start = offset;
     if start < 0 {
@@ -25854,7 +26002,7 @@ fn param_substr(value: &str, offset: i64, length: Option<i64>) -> Result<String,
         // does NOT clamp the start to 0 and return the whole value. (A positive
         // offset past the end still clamps to `n`, giving empty naturally.)
         if start < 0 {
-            return Ok(String::new());
+            return Ok(Str::new());
         }
     }
     start = start.min(n);
@@ -25873,7 +26021,13 @@ fn param_substr(value: &str, offset: i64, length: Option<i64>) -> Result<String,
         Some(len) => (start + len).min(n),
     };
     let end = end.clamp(start, n);
-    Ok(chars[start as usize..end as usize].iter().collect())
+    Ok(bytes::from_chars(
+        chars
+            .get(start as usize..end as usize)
+            .unwrap_or_default()
+            .iter()
+            .copied(),
+    ))
 }
 
 /// One unit of an expanded `${var/pat/repl}` replacement. [`ReplTok::Amp`]
@@ -25884,16 +26038,20 @@ enum ReplTok {
     /// The matched text (an active `&`).
     Amp,
     /// A literal character.
-    Lit(char),
+    Lit(Ch),
 }
 
 /// Build one replacement instance, splicing `matched` in for each `&` token.
-fn build_repl(replacement: &[ReplTok], matched: &[char]) -> String {
-    let mut s = String::new();
+fn build_repl(replacement: &[ReplTok], matched: &[Ch]) -> Str {
+    let mut s = Str::new();
     for tok in replacement {
         match tok {
-            ReplTok::Amp => s.extend(matched.iter()),
-            ReplTok::Lit(c) => s.push(*c),
+            ReplTok::Amp => {
+                for c in matched {
+                    c.push_to(&mut s);
+                }
+            }
+            ReplTok::Lit(c) => c.push_to(&mut s),
         }
     }
     s
@@ -25902,35 +26060,37 @@ fn build_repl(replacement: &[ReplTok], matched: &[char]) -> String {
 /// `${name/pat/repl}` and friends. `replacement` is a token stream so an
 /// unquoted `&` can expand to the matched text at each occurrence.
 fn param_replace(
-    value: &str,
+    value: BStr<'_>,
     pattern: &[EChar],
     replacement: &[ReplTok],
     all: bool,
     anchor: ReplaceAnchor,
     extglob: bool,
-) -> String {
-    let v: Vec<char> = value.chars().collect();
+) -> Str {
+    let v: Vec<Ch> = bytes::chars(value).collect();
     match anchor {
         ReplaceAnchor::Start => {
             if let Some(end) = glob_match_at(pattern, &v, 0, extglob) {
                 let mut s = build_repl(replacement, &v[..end]);
-                s.extend(v[end..].iter());
+                for c in &v[end..] {
+                    c.push_to(&mut s);
+                }
                 return s;
             }
-            value.to_string()
+            value.to_vec()
         }
         ReplaceAnchor::End => {
             for i in 0..=v.len() {
                 if glob_match_e(pattern, &v[i..], extglob) {
-                    let mut s: String = v[..i].iter().collect();
-                    s.push_str(&build_repl(replacement, &v[i..]));
+                    let mut s = bytes::from_chars(v[..i].iter().copied());
+                    s.extend_from_slice(&build_repl(replacement, &v[i..]));
                     return s;
                 }
             }
-            value.to_string()
+            value.to_vec()
         }
         ReplaceAnchor::None => {
-            let mut result = String::new();
+            let mut result = Str::new();
             let mut i = 0;
             let mut done = false;
             while i < v.len() {
@@ -25940,7 +26100,7 @@ fn param_replace(
                 {
                     if end > i {
                         // Non-empty match: consume the matched span.
-                        result.push_str(&build_repl(replacement, &v[i..end]));
+                        result.extend_from_slice(&build_repl(replacement, &v[i..end]));
                         i = end;
                         done = true;
                         continue;
@@ -25953,14 +26113,14 @@ fn param_replace(
                         // *empty* pattern (`${x//​/-}`) is exempt: bash treats it
                         // as a no-op, so it falls through to the literal copy. A
                         // zero-width match makes `&` expand to the empty string.
-                        result.push_str(&build_repl(replacement, &[]));
-                        result.push(v[i]);
+                        result.extend_from_slice(&build_repl(replacement, &[]));
+                        v[i].push_to(&mut result);
                         i += 1;
                         done = true;
                         continue;
                     }
                 }
-                result.push(v[i]);
+                v[i].push_to(&mut result);
                 i += 1;
             }
             result
@@ -36516,8 +36676,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn glob_match_basics() {
         let g = |p: &str, t: &str| {
             glob_match(
-                &p.chars().collect::<Vec<_>>(),
-                &t.chars().collect::<Vec<_>>(),
+                &bytes::chars(p.as_bytes()).collect::<Vec<_>>(),
+                &bytes::chars(t.as_bytes()).collect::<Vec<_>>(),
                 false,
             )
         };
@@ -36533,12 +36693,72 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(!g("file.txt", "file.md"));
     }
 
+    /// A filename on this OS is any byte sequence without `/` or NUL, so the
+    /// glob engine must match one that is not valid UTF-8 — and must treat an
+    /// undecodable byte as exactly one *character*, so `?` neither swallows
+    /// two of them nor matches a third of a multi-byte character.
+    #[test]
+    fn glob_matches_a_name_that_is_not_utf8() {
+        let g = |p: &[u8], t: &[u8]| {
+            glob_match(
+                &bytes::chars(p).collect::<Vec<_>>(),
+                &bytes::chars(t).collect::<Vec<_>>(),
+                false,
+            )
+        };
+        // `?` is one character: one undecodable byte, or one whole `é`.
+        assert!(g(b"?", b"\xff"));
+        assert!(!g(b"??", b"\xff"));
+        assert!(g(b"?", "\u{e9}".as_bytes()));
+        assert!(!g(b"??", "\u{e9}".as_bytes()));
+        // An undecodable byte falls in no character range and matches no
+        // class: it is not a letter, and it is not U+FFFD either.
+        assert!(!g(b"[a-z]", b"\xff"));
+        assert!(!g(b"[[:alpha:]]", b"\xff"));
+        assert!(!g(b"\xef\xbf\xbd", b"\xff"));
+        assert!(g(b"[!a-z]", b"\xff"));
+        // The interesting case: the byte survives both sides of the match.
+        assert!(g(b"a?b", b"a\xffb"));
+        assert!(g(b"a*b", b"a\xff\xfeb"));
+        assert!(g(b"a\xffb", b"a\xffb"));
+        assert!(!g(b"a\xffb", b"a\xfeb"));
+    }
+
+    /// The parameter-expansion operators are character-defined, so they must
+    /// agree with the glob engine that an undecodable byte is one character —
+    /// and must pass it through untouched rather than case-fold or drop it.
+    #[test]
+    fn param_operators_pass_an_undecodable_byte_through() {
+        // `${v^^}` upper-cases the letters and leaves the stray byte alone.
+        assert_eq!(
+            param_case(b"a\xffb", &[], crate::ast::CaseMode::Upper, true, false),
+            b"A\xffB"
+        );
+        // `${v:1:1}` counts that byte as exactly one character.
+        assert_eq!(param_substr(b"a\xffb", 1, Some(1)), Ok(b"\xff".to_vec()));
+        assert_eq!(param_substr(b"a\xffb", 2, None), Ok(b"b".to_vec()));
+        // `${v#?}` strips it as a single character.
+        assert_eq!(param_trim(b"\xffab", &field_lit("?"), false, false, false), b"ab");
+        // `${v//?/-}` replaces it with one replacement, not three.
+        assert_eq!(
+            param_replace(
+                b"a\xffb",
+                &field_lit("?"),
+                &[ReplTok::Lit(Ch::U('-'))],
+                true,
+                ReplaceAnchor::None,
+                false,
+            ),
+            b"---"
+        );
+    }
+
     #[test]
     fn glob_posix_char_classes() {
         let g = |p: &str, t: &str| {
             glob_match(
-                &p.chars().collect::<Vec<_>>(),
-                &t.chars().collect::<Vec<_>>(),
+                &bytes::chars(p.as_bytes()).collect::<Vec<_>>(),
+                &bytes::chars(t.as_bytes()).collect::<Vec<_>>(),
                 false,
             )
         };
@@ -36557,9 +36777,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(g("[a-c[:digit:]]", "7"));
         // The classic left-trim idiom: strip everything from the first
         // non-space onward, leaving the leading whitespace.
-        assert_eq!(param_trim("  trim  ", &field_lit("[![:space:]]*"), true, true, false), "  ");
+        assert_eq!(param_trim(b"  trim  ", &field_lit("[![:space:]]*"), true, true, false), b"  ");
         // Shortest leading-whitespace `#` strip removes just one space char.
-        assert_eq!(param_trim("  trim  ", &field_lit("[[:space:]]*"), false, false, false), " trim  ");
+        assert_eq!(
+            param_trim(b"  trim  ", &field_lit("[[:space:]]*"), false, false, false),
+            b" trim  "
+        );
     }
 
     #[test]
@@ -37023,7 +37246,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     fn field_lit(s: &str) -> Vec<EChar> {
-        s.chars().map(|c| EChar { c, quoted: false }).collect()
+        bytes::chars(s.as_bytes()).map(|c| EChar { c, quoted: false }).collect()
     }
 
     #[test]
@@ -37031,7 +37254,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let f = |p: &str, n: &str| {
             match_glob_toks(
                 &compile_glob(&field_lit(p), false),
-                &n.chars().collect::<Vec<_>>(),
+                &bytes::chars(n.as_bytes()).collect::<Vec<_>>(),
             )
         };
         assert!(f("*.txt", "a.txt"));
@@ -37047,10 +37270,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn glob_quoted_metachar_is_literal() {
         // A quoted `*` is a literal star, never a pattern.
         let mut field = field_lit("");
-        field.push(EChar { c: '*', quoted: true });
+        field.push(EChar { c: Ch::U('*'), quoted: true });
         let toks = compile_glob(&field, false);
-        assert!(match_glob_toks(&toks, &['*']));
-        assert!(!match_glob_toks(&toks, &['a']));
+        assert!(match_glob_toks(&toks, &[Ch::U('*')]));
+        assert!(!match_glob_toks(&toks, &[Ch::U('a')]));
     }
 
     #[test]
@@ -37072,24 +37295,25 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             std::fs::File::create(dir.join(n)).expect("touch");
         }
 
-        let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+        let basename = |p: &Str| p.rsplit(|&b| b == b'/').next().unwrap_or(p).to_vec();
 
         // `*.txt` matches the two text files (sorted), not the log or hidden.
-        let mut txt: Vec<String> = glob_expand_field("", &field_lit(&format!("{uniq}/*.txt")), false, false, false, false)
-            .iter()
-            .map(|p| basename(p))
-            .collect();
+        let mut txt: Vec<Str> =
+            glob_expand_field(b"", &field_lit(&format!("{uniq}/*.txt")), false, false, false, false)
+                .iter()
+                .map(&basename)
+                .collect();
         txt.sort();
-        assert_eq!(txt, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        assert_eq!(txt, vec![b"a.txt".to_vec(), b"b.txt".to_vec()]);
 
         // `*` honors the leading-dot rule (no `.hidden`).
-        let all = glob_expand_field("", &field_lit(&format!("{uniq}/*")), false, false, false, false);
-        assert!(all.iter().all(|p| !p.ends_with(".hidden")));
+        let all = glob_expand_field(b"", &field_lit(&format!("{uniq}/*")), false, false, false, false);
+        assert!(all.iter().all(|p| !p.ends_with(b".hidden")));
         assert_eq!(all.len(), 3);
 
         // An explicit leading `.` matches hidden files.
-        let dot = glob_expand_field("", &field_lit(&format!("{uniq}/.*")), false, false, false, false);
-        assert!(dot.iter().any(|p| p.ends_with(".hidden")));
+        let dot = glob_expand_field(b"", &field_lit(&format!("{uniq}/.*")), false, false, false, false);
+        assert!(dot.iter().any(|p| p.ends_with(b".hidden")));
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -37159,24 +37383,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn globignore_pattern_matching() {
         // Pathname-style: `*` does not cross `/`.
-        let pats = build_globignore("*.log", false);
+        let pats = build_globignore(b"*.log", false);
         assert_eq!(pats.len(), 1);
-        assert!(pats[0].matches_path("c.log"));
-        assert!(!pats[0].matches_path("sub/e.log"));
-        assert!(!pats[0].matches_path("a.txt"));
+        assert!(pats[0].matches_path(b"c.log"));
+        assert!(!pats[0].matches_path(b"sub/e.log"));
+        assert!(!pats[0].matches_path(b"a.txt"));
 
         // A `/`-bearing pattern matches component-for-component.
-        let pats = build_globignore("sub/*.log", false);
-        assert!(pats[0].matches_path("sub/e.log"));
-        assert!(!pats[0].matches_path("e.log"));
-        assert!(!pats[0].matches_path("sub/d.txt"));
+        let pats = build_globignore(b"sub/*.log", false);
+        assert!(pats[0].matches_path(b"sub/e.log"));
+        assert!(!pats[0].matches_path(b"e.log"));
+        assert!(!pats[0].matches_path(b"sub/d.txt"));
 
         // `:` separates multiple patterns; empty entries are skipped.
-        let pats = build_globignore("*.log::*.txt:", false);
+        let pats = build_globignore(b"*.log::*.txt:", false);
         assert_eq!(pats.len(), 2);
-        assert!(pats.iter().any(|p| p.matches_path("c.log")));
-        assert!(pats.iter().any(|p| p.matches_path("a.txt")));
-        assert!(!pats.iter().any(|p| p.matches_path("keep.md")));
+        assert!(pats.iter().any(|p| p.matches_path(b"c.log")));
+        assert!(pats.iter().any(|p| p.matches_path(b"a.txt")));
+        assert!(!pats.iter().any(|p| p.matches_path(b"keep.md")));
     }
 
     #[test]
@@ -37195,15 +37419,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         for n in ["a.txt", "b.txt", "c.log", ".hidden"] {
             std::fs::File::create(dir.join(n)).expect("touch");
         }
-        let basename = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+        let basename = |p: &Str| p.rsplit(|&b| b == b'/').next().unwrap_or(p).to_vec();
 
         // GLOBIGNORE=*.log active: drops c.log, and the dotglob effect surfaces
         // .hidden (which `*` would normally skip).
-        let gi = build_globignore(&format!("{uniq}/*.log"), false);
+        let gi = build_globignore(format!("{uniq}/*.log").as_bytes(), false);
         let mut out = Vec::new();
         let mut failed = None;
         glob_or_literal(
-            "",
+            b"",
             &field_lit(&format!("{uniq}/*")),
             &mut out,
             false,
@@ -37216,18 +37440,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             &gi,
             &mut failed,
         );
-        let mut names: Vec<String> = out.iter().map(|p| basename(p)).collect();
+        let mut names: Vec<Str> = out.iter().map(&basename).collect();
         names.sort();
         assert_eq!(
             names,
-            vec![".hidden".to_string(), "a.txt".to_string(), "b.txt".to_string()]
+            vec![b".hidden".to_vec(), b"a.txt".to_vec(), b"b.txt".to_vec()]
         );
 
         // With GLOBIGNORE active, a `.*` pattern still excludes `.` and `..`.
         let mut out = Vec::new();
         let mut failed = None;
         glob_or_literal(
-            "",
+            b"",
             &field_lit(&format!("{uniq}/.*")),
             &mut out,
             false,
@@ -37240,9 +37464,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             &[],
             &mut failed,
         );
-        let names: Vec<String> = out.iter().map(|p| basename(p)).collect();
-        assert!(names.iter().all(|n| n != "." && n != ".."));
-        assert!(names.contains(&".hidden".to_string()));
+        let names: Vec<Str> = out.iter().map(&basename).collect();
+        assert!(names.iter().all(|n| n != b"." && n != b".."));
+        assert!(names.contains(&b".hidden".to_vec()));
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -37267,7 +37491,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // `root/**/*.rs` with globstar finds every .rs at any depth.
         let mut rs = glob_expand_field(
-            "",
+            b"",
             &field_lit(&format!("{uniq}/**/*.rs")),
             false,
             false,
@@ -37278,26 +37502,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             rs,
             vec![
-                format!("{uniq}/a.rs"),
-                format!("{uniq}/sub/b.rs"),
-                format!("{uniq}/sub/deep/c.rs"),
+                format!("{uniq}/a.rs").into_bytes(),
+                format!("{uniq}/sub/b.rs").into_bytes(),
+                format!("{uniq}/sub/deep/c.rs").into_bytes(),
             ]
         );
 
         // Without globstar, `**` behaves like `*` (single level only).
         let one = glob_expand_field(
-            "",
+            b"",
             &field_lit(&format!("{uniq}/**/*.rs")),
             false,
             false,
             false,
             false,
         );
-        assert_eq!(one, vec![format!("{uniq}/sub/b.rs")]);
+        assert_eq!(one, vec![format!("{uniq}/sub/b.rs").into_bytes()]);
 
         // Terminal `**` lists every descendant file and directory.
         let mut all = glob_expand_field(
-            "",
+            b"",
             &field_lit(&format!("{uniq}/**")),
             false,
             false,
@@ -37308,11 +37532,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             all,
             vec![
-                format!("{uniq}/a.rs"),
-                format!("{uniq}/sub"),
-                format!("{uniq}/sub/b.rs"),
-                format!("{uniq}/sub/deep"),
-                format!("{uniq}/sub/deep/c.rs"),
+                format!("{uniq}/a.rs").into_bytes(),
+                format!("{uniq}/sub").into_bytes(),
+                format!("{uniq}/sub/b.rs").into_bytes(),
+                format!("{uniq}/sub/deep").into_bytes(),
+                format!("{uniq}/sub/deep/c.rs").into_bytes(),
             ]
         );
 
@@ -37338,12 +37562,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // Case-sensitive: lowercase pattern misses the uppercase-extension file.
         let field = field_lit(&format!("{uniq}/*.txt"));
-        let cs = glob_expand_field("", &field, false, false, false, false);
+        let cs = glob_expand_field(b"", &field, false, false, false, false);
         assert!(cs.is_empty());
         // With nocaseglob, `*.txt` matches `Notes.TXT`.
-        let ci = glob_expand_field("", &field, false, true, false, false);
+        let ci = glob_expand_field(b"", &field, false, true, false, false);
         assert_eq!(ci.len(), 1);
-        assert!(ci[0].ends_with("Notes.TXT"));
+        assert!(ci[0].ends_with(b"Notes.TXT"));
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -37460,13 +37684,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Without dotglob, `*` skips the dotfile; with it, the dotfile is
         // included (but never `.`/`..`).
         let field = field_lit(&format!("{uniq}/*"));
-        let plain = glob_expand_field("", &field, false, false, false, false);
-        assert!(plain.iter().all(|p| !p.ends_with(".hidden")));
-        let with_dot = glob_expand_field("", &field, true, false, false, false);
-        assert!(with_dot.iter().any(|p| p.ends_with(".hidden")));
+        let plain = glob_expand_field(b"", &field, false, false, false, false);
+        assert!(plain.iter().all(|p| !p.ends_with(b".hidden")));
+        let with_dot = glob_expand_field(b"", &field, true, false, false, false);
+        assert!(with_dot.iter().any(|p| p.ends_with(b".hidden")));
         assert!(with_dot.iter().all(|p| {
-            let b = p.rsplit('/').next().unwrap_or(p);
-            b != "." && b != ".."
+            let b = p.rsplit(|&b| b == b'/').next().unwrap_or(p);
+            b != b"." && b != b".."
         }));
 
         std::fs::remove_dir_all(dir).ok();

@@ -240,6 +240,12 @@ pub fn char_at(s: BStr<'_>, n: usize) -> Str {
 /// flattening would make `?` match a third of an `é`; and it is not flattened
 /// to `char` either, because U+FFFD is a real character a value may legitimately
 /// contain, so it cannot double as "some byte I could not decode".
+///
+/// The derived `Ord` — every [`Ch::U`] below every [`Ch::B`], each ordered by
+/// its own value — is what a glob range like `[a-z]` compares with. Both
+/// endpoints of a written range are always characters, so the useful part is
+/// that an undecodable byte falls in no such range, which is right: it is not a
+/// letter, and bash's collation would not place it among them either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Ch {
     /// A decoded Unicode scalar value.
@@ -298,6 +304,36 @@ impl Ch {
         match self {
             Ch::U(c) => Some(c),
             Ch::B(_) => None,
+        }
+    }
+
+    /// ASCII-only case folding, for `nocaseglob`-style matching that must keep
+    /// the pattern's token structure 1:1 with the original.
+    #[must_use]
+    pub fn to_ascii_lowercase(self) -> Ch {
+        match self {
+            Ch::U(c) => Ch::U(c.to_ascii_lowercase()),
+            Ch::B(b) => Ch::B(b.to_ascii_lowercase()),
+        }
+    }
+
+    /// Unicode lowercase mapping. Returns a `Vec` because one character can map
+    /// to several (`İ` → `i̇`); a byte that is no character has no case and maps
+    /// to itself.
+    #[must_use]
+    pub fn to_lowercase(self) -> Vec<Ch> {
+        match self {
+            Ch::U(c) => c.to_lowercase().map(Ch::U).collect(),
+            Ch::B(_) => vec![self],
+        }
+    }
+
+    /// Unicode uppercase mapping. See [`Ch::to_lowercase`].
+    #[must_use]
+    pub fn to_uppercase(self) -> Vec<Ch> {
+        match self {
+            Ch::U(c) => c.to_uppercase().map(Ch::U).collect(),
+            Ch::B(_) => vec![self],
         }
     }
 }

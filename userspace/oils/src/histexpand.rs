@@ -23,6 +23,10 @@
 pub struct HistCtx<'a> {
     pub entries: &'a [String],
     pub base: usize,
+    /// Whether `shopt -s extglob` is in effect, which makes `!(` the opening of
+    /// a negated extended-glob pattern rather than an event designator. See
+    /// [`inhibited`].
+    pub extglob: bool,
 }
 
 impl HistCtx<'_> {
@@ -374,6 +378,78 @@ fn single_quote(s: &str) -> String {
 /// the caller can skip the "echo the expanded line" behaviour entirely.
 ///
 /// `last` carries the most recent `:s` across calls — see [`LastSubst`].
+/// Whether the `!` at `chars[i]` is a literal `!` rather than the start of an
+/// event designator.
+///
+/// This is bash's `history_no_expand_chars` set plus its
+/// `history_inhibit_expansion_function` hook (`bash_history_inhibit_expansion`
+/// in `bashhist.c`), which exists precisely because the shell gives `!` four
+/// other meanings. Every rule below was **measured** against
+/// `bash --norc --noprofile -i` on this machine — reading a line and looking for
+/// `bash: …: event not found` — because the obvious guesses are wrong in both
+/// directions: `(` is *not* in bash's no-expand set (a bare `echo !(zzz)` with
+/// `extglob` off really does try to expand), while `$!` and `x[!a]` are
+/// inhibited even though nothing about the `!` itself says so, and double quotes
+/// inhibit nothing at all.
+fn inhibited(chars: &[char], i: usize, extglob: bool, dquote: bool) -> bool {
+    let next = chars.get(i.saturating_add(1)).copied();
+    // bash's `history_no_expand_chars`, " \t\n\r=", plus end of line. `\r` is in
+    // the set even though a line read by the shell never contains one.
+    if matches!(next, None | Some(' ' | '\t' | '\n' | '\r' | '=')) {
+        return true;
+    }
+    // Inside a double-quoted string the closing quote joins that set, so
+    // `echo "x !"` is left alone — but only when it comes *immediately* after the
+    // `!`. In `echo "x !a"b` the quote merely ends the search string, and `!a` is
+    // a real (failing) event reference.
+    if dquote && next == Some('"') {
+        return true;
+    }
+    // `!(pat)` is an extended-glob negation — but only once `extglob` is on, only
+    // when the group is *closed* on the line, and (bash's own `i > 1`) only when
+    // the `!` is at least two characters in: `echo !(zzz)` inhibits, while
+    // `echo !(zzz`, `!(zzz)` at the start of a line and `x!(y)` all expand and
+    // report `!: event not found`. `!()` counts as closed, so there is no "empty
+    // pattern" exception.
+    if extglob
+        && i >= 2
+        && next == Some('(')
+        && chars
+            .get(i.saturating_add(2)..)
+            .unwrap_or_default()
+            .contains(&')')
+    {
+        return true;
+    }
+    let prev = i.checked_sub(1).and_then(|p| chars.get(p)).copied();
+    // `$!` is the last background pid, so a `!` directly after a `$` is never an
+    // event — including in `$$!q`, where the `!` follows the second `$`.
+    if prev == Some('$') {
+        return true;
+    }
+    // `${!name}` / `${!name[@]}` / `${!pre*}` is indirect expansion, and `[!…]`
+    // is a negated glob bracket. Both are inhibited only when the construct is
+    // actually *closed* on this line: `echo ${!q` and `echo [!q` (no `}` / `]`)
+    // do expand, and so does `${a!b}` or `${ !q}`, where the `!` is not directly
+    // after the opener.
+    //
+    // bash finds the `}` with `skip_to_delim`, which respects nesting and
+    // quoting; a plain forward scan differs only for a `}` that appears solely
+    // inside quotes or a nested expansion within the same word, which no real
+    // input hits.
+    let rest = chars.get(i.saturating_add(1)..).unwrap_or_default();
+    if prev == Some('{')
+        && i.checked_sub(2).and_then(|p| chars.get(p)).copied() == Some('$')
+        && rest.contains(&'}')
+    {
+        return true;
+    }
+    if prev == Some('[') && rest.contains(&']') {
+        return true;
+    }
+    false
+}
+
 pub fn expand(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
     // `^old^new^` is a whole-line form: it only applies when it is the first
     // thing on the line.
@@ -390,6 +466,9 @@ pub fn expand(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
     let mut changed = false;
     let mut print_only = false;
     let mut in_single = false;
+    // Tracked *only* for the comment rule below — a `!` in a double-quoted string
+    // is still expanded, because the rewrite happens before quote removal.
+    let mut in_double = false;
     let last_subst = last;
 
     while let Some(&c) = chars.get(i) {
@@ -415,6 +494,33 @@ pub fn expand(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
             i = i.saturating_add(1);
             continue;
         }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            out.push(c);
+            i = i.saturating_add(1);
+            continue;
+        }
+        // readline's `history_comment_char`: an unquoted `#` that starts a word
+        // makes the rest of the line literal, so a `!` in a trailing comment is
+        // never an event. "Starts a word" means at index 0 or right after one of
+        // readline's `history_word_delimiters`; measured against bash, `echo x #
+        // !q`, `echo x;# !q`, `: $(echo z)#!q` and `(:)#!q` are all inhibited,
+        // while `echo a#!q` and `echo "text # !q"` still fail with
+        // `!q: event not found`.
+        //
+        // Unlike the `!` rules above, this one *does* respect double quotes,
+        // which is why they are tracked at all. `expand` is handed one raw input
+        // line at a time, so "the rest of the line" is the rest of the string.
+        if c == '#'
+            && !in_single
+            && !in_double
+            && i.checked_sub(1)
+                .and_then(|p| chars.get(p))
+                .is_none_or(|&p| is_word_delimiter(p))
+        {
+            out.extend(chars.get(i..).unwrap_or_default());
+            break;
+        }
         // Single quotes suppress expansion; double quotes deliberately do not.
         if c != '!' || in_single {
             out.push(c);
@@ -422,16 +528,13 @@ pub fn expand(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
             continue;
         }
 
-        // A `!` that cannot begin a designator is literal: at end of line, or
-        // before whitespace, `=` or `(`.
-        let next = chars.get(i.saturating_add(1)).copied();
-        if matches!(next, None | Some(' ' | '\t' | '\n' | '=' | '(')) {
+        if inhibited(&chars, i, ctx.extglob, in_double) {
             out.push(c);
             i = i.saturating_add(1);
             continue;
         }
 
-        match expand_one(&chars, i, ctx, last_subst) {
+        match expand_one(&chars, i, ctx, last_subst, in_double) {
             Ok((text, end, p)) => {
                 out.push_str(&text);
                 i = end;
@@ -452,11 +555,18 @@ pub fn expand(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
 /// Expand the single designator starting at `chars[start]` (which is the `!`).
 /// On success returns the replacement text and the index just past it; on
 /// failure the whole message body bash would print (see [`Expansion::NotFound`]).
+/// readline's `history_word_delimiters`, `" \t\n;&()|<>"`. It ends an event
+/// search string and marks where a `#` may start a comment.
+fn is_word_delimiter(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | ';' | '&' | '(' | ')' | '|' | '<' | '>')
+}
+
 fn expand_one(
     chars: &[char],
     start: usize,
     ctx: &HistCtx,
     last_subst: &mut LastSubst,
+    dquote: bool,
 ) -> Result<(String, usize, bool), String> {
     let mut i = start.saturating_add(1);
     // Remember where the spec began so a failure can quote it back.
@@ -526,12 +636,27 @@ fn expand_one(
         // `!string` — the most recent event starting with string.
         Some(_) => {
             let mut prefix = String::new();
+            let mut hit_delimiter = false;
             while let Some(&c) = chars.get(i) {
-                if c.is_whitespace() || matches!(c, ':' | '^' | '$' | '*' | '!' | '"' | '\'') {
+                if is_word_delimiter(c) || (dquote && c == '"') {
+                    hit_delimiter = true;
+                    break;
+                }
+                // `:^$*%-` introduce a word designator or modifier, so they end
+                // the search string without being a hard delimiter: an empty
+                // search string before one of them still means "the previous
+                // event", which is what makes `!:0` and `!$` work.
+                if matches!(c, ':' | '^' | '$' | '*' | '%' | '-') {
                     break;
                 }
                 prefix.push(c);
                 i = i.saturating_add(1);
+            }
+            // A search string that is empty because a word delimiter came first
+            // (`!(zzz)` with `extglob` off, `!;x`, `!|x`) matches nothing at all,
+            // and bash quotes back just the `!`.
+            if prefix.is_empty() && hit_delimiter {
+                return Err(missing("!"));
             }
             ctx.by_prefix(&prefix)
                 .map(str::to_string)
@@ -585,7 +710,7 @@ mod tests {
     use super::*;
 
     fn ctx(entries: &[String]) -> HistCtx<'_> {
-        HistCtx { entries, base: 1 }
+        HistCtx { entries, base: 1, extglob: false }
     }
 
     fn hist(items: &[&str]) -> Vec<String> {
@@ -732,11 +857,152 @@ mod tests {
     #[test]
     fn bare_bang_is_literal() {
         let h = hist(&["one"]);
-        for line in ["echo hi ! there", "echo trailing !", "a != b", "x=!("] {
+        for line in ["echo hi ! there", "echo trailing !", "a != b", "a\t!\tb"] {
             assert!(
                 matches!(expand1(line, &ctx(&h)), Expansion::Unchanged),
                 "{line} should not expand"
             );
+        }
+    }
+
+    /// The [`inhibited`] hook — bash's `bash_history_inhibit_expansion`. Every
+    /// case here was measured by feeding the line to
+    /// `bash --norc --noprofile -i` and watching for `event not found`.
+    #[test]
+    fn shell_syntax_inhibits_expansion() {
+        let h = hist(&["one"]);
+        let unchanged = |line: &str, extglob: bool| {
+            let c = HistCtx { entries: &h, base: 1, extglob };
+            matches!(expand1(line, &c), Expansion::Unchanged)
+        };
+        // `$!` is the last background pid — including after a `$$`.
+        for line in ["echo $!", "echo a$!b", "echo \"$!\"", "echo $$!q", "echo ${a[$!]-n}"] {
+            assert!(unchanged(line, false), "{line} should not expand");
+        }
+        // `${!name}` indirect expansion, in all its spellings.
+        for line in ["echo ${!ref}", "echo ${!pre_*}", "echo ${!pre_@}", "echo ${!a[@]}"] {
+            assert!(unchanged(line, false), "{line} should not expand");
+        }
+        // …but only directly after the `${`, and only when the `}` is on the line.
+        for line in ["echo ${!q", "echo ${a!b}", "echo ${ !q}", "echo ${x:-!q}", "echo ${x#!}"] {
+            assert!(!unchanged(line, false), "{line} should expand");
+        }
+        // `[!…]` is a negated glob bracket — closing `]` required, and the `!`
+        // must be the first thing in the bracket. Double quotes do not matter,
+        // because history expansion runs before quote removal.
+        for line in ["echo [!q]", "echo x[!a]y", "echo \"x[!a]\"", "echo ${a[!1]-n}"] {
+            assert!(unchanged(line, false), "{line} should not expand");
+        }
+        for line in ["echo [!q", "echo a[b!c]"] {
+            assert!(!unchanged(line, false), "{line} should expand");
+        }
+        // `!(pat)` is inhibited only once `extglob` is on: `(` is *not* one of
+        // bash's `history_no_expand_chars`, so with extglob off even `[[ x ==
+        // !(y) ]]` and `case x in !(y))` are event references that fail. An
+        // empty `!()` is inhibited too.
+        for line in ["echo !(zzz)", "echo x!(y)", "echo !()", "[[ x == !(y) ]]"] {
+            assert!(unchanged(line, true), "{line} should not expand with extglob");
+            assert!(!unchanged(line, false), "{line} should expand without extglob");
+        }
+        // An assignment does not inhibit anything.
+        assert!(!unchanged("x=!q", false), "x=!q should expand");
+        assert!(!unchanged("x=!(", false), "x=!( should expand");
+    }
+
+    /// How much of the line a `!string` event takes as its search string, which
+    /// is visible in the "event not found" message. Measured against bash.
+    #[test]
+    fn event_search_string_ends_at_a_delimiter() {
+        let h = hist(&["one"]);
+        let failure = |line: &str| match expand1(line, &ctx(&h)) {
+            Expansion::NotFound(e) => e,
+            _ => panic!("{line} should have failed"),
+        };
+        // `history_word_delimiters` and the word-designator/modifier introducers
+        // end it…
+        for (line, spec) in [
+            ("echo !zz(q)", "!zz"),
+            ("echo !zz)", "!zz"),
+            ("echo !zz;b", "!zz"),
+            ("echo !zz&b", "!zz"),
+            ("echo !zz|b", "!zz"),
+            ("echo !zz<b", "!zz"),
+            ("echo !zz>b", "!zz"),
+            ("echo !zz-b", "!zz"),
+            ("echo !zz%b", "!zz"),
+            ("echo !zz*b", "!zz"),
+            ("echo !zz:0", "!zz"),
+            ("echo !zz b", "!zz"),
+            // …and nothing else does, not even a `!` or a single quote.
+            ("echo !zz=b", "!zz=b"),
+            ("echo !zz{b}", "!zz{b}"),
+            ("echo !zz[b]", "!zz[b]"),
+            ("echo !zz!b", "!zz!b"),
+            ("echo !zz'b'", "!zz'b'"),
+            ("echo !zz\"b\"", "!zz\"b\""),
+            ("echo !zz#b", "!zz#b"),
+            ("echo !zz?b", "!zz?b"),
+            ("echo !zz.b", "!zz.b"),
+            ("echo !zz/b", "!zz/b"),
+            ("echo !zz,b", "!zz,b"),
+            ("echo !zz+b", "!zz+b"),
+            ("echo !zz@b", "!zz@b"),
+            ("echo !zz~b", "!zz~b"),
+            // A double quote ends it only inside a double-quoted string, where
+            // it is the closing delimiter.
+            ("echo \"x !zz\"b", "!zz"),
+            // An empty search string before a delimiter matches nothing, and the
+            // message is a bare `!`.
+            ("echo !(zzz)", "!"),
+            ("echo !;x", "!"),
+            ("echo !|x", "!"),
+            ("echo !)", "!"),
+        ] {
+            assert_eq!(failure(line), format!("{spec}: event not found"), "for {line}");
+        }
+        // Before a designator, though, an empty search string means the previous
+        // event — that is what makes `!:0` and `!$` work.
+        assert_eq!(expanded("echo !:0", &["first alpha beta"]), "echo first");
+        assert_eq!(expanded("echo !$", &["first alpha beta"]), "echo beta");
+    }
+
+    /// readline's `history_comment_char`: an unquoted `#` starting a word makes
+    /// the rest of the line literal. Measured the same way as
+    /// [`shell_syntax_inhibits_expansion`].
+    #[test]
+    fn a_comment_makes_the_rest_of_the_line_literal() {
+        let h = hist(&["one"]);
+        let unchanged = |line: &str| {
+            let c = HistCtx { entries: &h, base: 1, extglob: false };
+            matches!(expand1(line, &c), Expansion::Unchanged)
+        };
+        // At index 0, and after each of readline's `history_word_delimiters`.
+        for line in [
+            "#!q",
+            "# !q",
+            "echo x # !q",
+            "echo x\t#!q",
+            "echo x;# !q",
+            "echo x&#!q",
+            ": $(echo z)#!q",
+            "(:)#!q",
+            ": a|#!q",
+            ": <<<x #!q",
+            "echo a >f #!q",
+        ] {
+            assert!(unchanged(line), "{line} should not expand");
+        }
+        // A `#` that does not start a word is not a comment…
+        assert!(!unchanged("echo a#!q"), "echo a#!q should expand");
+        // …and quoting the `#` takes its comment power away, in either quote,
+        // even though double quotes do not protect the `!` itself.
+        assert!(!unchanged("echo \"text # !q\""), "a quoted # should not comment");
+        assert!(!unchanged(": '#' !q"), "a quoted # should not comment");
+        // A comment only shields what follows it: an earlier `!` still expands.
+        let c = HistCtx { entries: &h, base: 1, extglob: false };
+        match expand1("echo !! # !q", &c) {
+            Expansion::Changed(s) => assert_eq!(s, "echo one # !q"),
+            _ => panic!("expected the leading !! to expand"),
         }
     }
 
@@ -799,6 +1065,7 @@ mod tests {
         let c = HistCtx {
             entries: &entries,
             base: 5,
+            extglob: false,
         };
         match expand1("!5", &c) {
             Expansion::Changed(s) => assert_eq!(s, "five"),

@@ -132,6 +132,27 @@ sensitive to scheduling jitter, which is what the long sleeps were buying.
 else is compiling. Do not read a lone `jobs-listing` timeout as a regression —
 re-run it alone first.
 
+### TD-OILS-WAIT-NO-OPERANDS-FLAKE. `wait_without_operands_names_no_job` failed once in a full parallel run — 2026-07-29 — OPEN (flaky test, cause unconfirmed)
+
+**Symptom.** One `cargo test -p oils` run failed
+`interp::tests::wait_without_operands_names_no_job` with `left: 3, right: 127`.
+The same test passed in isolation immediately afterwards and has not recurred
+across every run since (including the full suite several times).
+
+**Suspected cause.** The test really does spawn background children (`( exit 3 )
+&` and friends) and then `wait`s for them, so it depends on the child being
+reaped by *this* shell's bookkeeping. `127` is "command not found", which is what
+`wait` reports for a job it does not know about — consistent with the child's
+record having been consumed or the spawn having lost a race with the reaper while
+the machine was busy running 900-odd other tests in parallel.
+
+**How to act on it.** If it recurs, run it under `--test-threads=1` to confirm
+the parallel dependency, then instrument the reaper's bookkeeping rather than the
+test: a `wait` that cannot see its own just-spawned child is a real bug in the
+job table, not merely a slow machine. Logged rather than fixed because a single
+non-reproducing observation is not enough to tell a test-harness race from a job-
+table race, and guessing would mean editing production code on speculation.
+
 ### TD-OILS-NO-HISTEXPAND. `!`-style history expansion — 2026-07-29 — RESOLVED 2026-07-29
 
 **Was.** osh listed `histexpand` in `set -o` but never acted on it: with both
@@ -8396,7 +8417,7 @@ pins all four, plus `$-`'s letters and the "unrecognised letter aborts having
 applied the ones before it" rule; 10 new tests in `tests/cli_options.rs` drive
 the same shapes through the real binary.
 
-### TD-OILS-INTERACTIVE-SHELL-VS-INTERACTIVE. `-i -c` does not report `i` (or `H`) in `$-`, because one flag models two of bash's — OPEN 2026-07-29
+### TD-OILS-INTERACTIVE-SHELL-VS-INTERACTIVE. `-i -c` does not report `i` (or `H`) in `$-`, because one flag models two of bash's — ✅ RESOLVED 2026-07-29
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::is_interactive()` (≈ line
 3180), which is `!self.command_mode && !self.script_mode && self.repl_interactive`,
@@ -8426,22 +8447,164 @@ TD-OILS-INTERACTIVE-DETECT (fixed 2026-07-20), which was about *detecting*
 interactivity from the tty; this is about osh collapsing two distinct pieces of
 state into one field.
 
-**Proper fix.** Split the field: keep `repl_interactive` as bash's
-`interactive` (dynamic, already correct for the prompt loop) and add an
-`interactive_shell: bool` set once by `main.rs` from the same computation that
-already feeds `StartupFiles::interactive` — which is exactly bash's rule, so the
-value is available and merely not stored. Then audit every
-`Shell::is_interactive()` caller and route each to whichever of the two it
-actually means: `$-`'s `i`, the `histexpand`/`expand_aliases` defaults and the
-startup-file choice want `interactive_shell`; job-control messages, the
-`ignoreeof` handling and prompt printing want `interactive`. The audit is the
-work — the field is trivial — which is why it was kept out of the startup-files
-commit rather than done half-way.
+**Fix (2026-07-29).** `Shell::interactive_shell` is now bash's startup-time
+global — set once by `main.rs` from the same computation that feeds
+`StartupFiles::interactive`, never changed afterwards — and `is_interactive()`
+returns it directly. bash's *dynamic* `interactive` turned out not to need a
+field of its own: the only places that want it are the ones that already test
+the condition explicitly (`eval_depth > 0` and a backtick body both force the
+`line N:` token, because bash clears `interactive` for the duration of a command
+substitution), and the prompt loop, which is only ever entered by a REPL. So the
+old mode-derived `repl_interactive` was folded away rather than kept alongside —
+two fields where one is enough would have been the same trap in a new shape.
+`$-`'s `i`, the `expand_aliases`/`histexpand`/`history` defaults, prompt
+printing, and the `line N:` token now all key off `interactive_shell`. A
+separate `reads_stdin` field carries bash's third, independent flag
+(`read_from_stdin` — `-s`, or no operand left to run as a script), which is what
+lets `-cs` report both `c` and `s`. `set_interactive_shell()`
+refreshes **both** option snapshots, because `$BASHOPTS` carries
+`expand_aliases` and `$SHELLOPTS` carries `histexpand` and `history` — missing
+the second one left `$SHELLOPTS` stale, which is how the bug was found.
+
+The whole `$-` matrix was measured against bash and now matches byte-for-byte:
+`-c`→`hBc`, `-i -c`→`hiBHc`, `-cs`→`hBcs`, `-i -cs`→`hiBHcs`, `-H -c`→`hBHc`,
+`-i +H -c`→`hiBc`, a script→`hB`, `-i script`→`hiBH`, and `-s`/`-`/bare
+stdin→`hBs`. There is no `m` even under `-i`, because job control cannot be
+enabled on a pipe.
+
+Two knock-on notes:
+
+* `Shell::new()`'s default is *interactive*, which is the pre-existing contract
+  the test harness documents (`run()` is a prompt, `run_script()` is a script).
+  `run_script()` now calls `set_interactive_shell(false)` and its doc comment
+  lists all five ways the two now differ — the difference set grew, so it had to
+  become visible. The 11 test-module `set_command_mode()`/`set_script_mode()` call
+  sites say `set_interactive_shell(false)` explicitly rather than having
+  `set_command_mode()` imply it, because that implication is the coupling that
+  caused this bug in the first place.
+* `job_control_enabled` was deliberately left alone. bash on this machine (MSYS)
+  does not enable job control even under `-i`, and slateos has no job control at
+  all, so there is nothing to route it to yet.
+
+**Remaining deliberate divergences in this area** (all verified, none accidental):
+
+* `$SHELLOPTS` omits `emacs`. bash lists it because readline is compiled in;
+  osh has no line editor, so claiming `emacs` would make `[[ -o emacs ]]` lie.
+* Under `-i`, bash shortens `$0` in diagnostics to `bash` where osh prints the
+  full program path. Pre-existing and tracked separately.
 
 **Deferred alongside it:** osh does not validate a `-O` name against
 `SHOPT_TABLE` any earlier than `apply_shopt_option` does, so a name that is a
 *valid* shopt but unimplemented would be accepted where bash might not. No known
 divergence; noted only so the next reader does not assume it was checked.
+
+### TD-OILS-HISTEXPAND-INHIBITION. history expansion ignored most of the shell syntax that gives `!` another meaning — ✅ RESOLVED 2026-07-29
+
+**Where:** `userspace/oils/src/histexpand.rs` — `inhibited()` (bash's
+`bash_history_inhibit_expansion`) and the `!string` scan in `expand_one`.
+
+**How it surfaced.** Turning the `history`/`histexpand` defaults on for an
+interactive shell (TD-OILS-INTERACTIVE-SHELL-VS-INTERACTIVE, above) made osh's
+REPL actually *run* history expansion for the first time, and 34 tests went red.
+The old code only checked bash's `history_no_expand_chars`, so `echo ${!ref}`
+died with `!ref}: event not found`.
+
+**Fix (2026-07-29).** Every rule was **measured** against
+`bash --norc --noprofile` (a script with `set -o history; set -H` triggers
+expansion too, which is what makes it differentially testable), because the
+obvious guesses were wrong in both directions. A `!` is literal when:
+
+* the next character is end-of-line, space, tab, newline, CR or `=`
+  (`history_no_expand_chars`);
+* it is inside a double-quoted string and the next character is the closing `"`
+  (one character further along the quote merely ends the search string, so
+  `echo "x !"` is literal but `echo "x !a"b` is a real reference);
+* the previous character is `$` (`$!`, including `$$!q`);
+* the previous two are `${` **and** a `}` follows on the line;
+* the previous character is `[` **and** a `]` follows;
+* `extglob` is on, the next character is `(`, a `)` follows it, **and** the `!`
+  is at least two characters into the line (bash's own `i > 1`, so `!(x)` at the
+  start of a line and `x!(y)` both still expand).
+
+Notably *not* inhibited: `${x#!}`, `${x:-!q}`, `${a!b}`, `${ !q}`, an unclosed
+`${!q` or `[!q`, `a[b!c]`, `"!q"` (double quotes protect nothing — the rewrite
+runs before quote removal), `x=!q`, and `!(zzz)` with `extglob` **off**.
+
+Two further real bugs came out of the same measurement pass:
+
+* **readline's `history_comment_char` was missing entirely**, so osh expanded `!`
+  inside comments — including in the new corpus case's own comments. A `#` that
+  is outside single *and* double quotes and sits at index 0 or right after a
+  `history_word_delimiters` character (`" \t\n;&()|<>"`) now makes the rest of
+  the line literal. This is the only rule that respects double quotes, which is
+  why `expand()` tracks them at all.
+* **The `!string` search string ended at the wrong characters.** It now ends at a
+  `history_word_delimiters` character, at a word-designator/modifier introducer
+  (`:^$*%-`), or at the closing `"` when the `!` is inside double quotes — and
+  nowhere else, so `echo !zz!b` reports `!zz!b: event not found` rather than
+  `!zz`. An empty search string before a *delimiter* matches nothing and is
+  reported as a bare `!` (`echo !(zzz)` with extglob off, `echo !;x`), while
+  before a *designator* it still means the previous event, which is what makes
+  `!:0` and `!$` work.
+
+**Tests.** `tests/corpus/histexpand-inhibit.sh` (new, 132-case corpus, zero
+waivers) pins the whole matrix differentially, including bash's line-number lag —
+a line that fails expansion does not advance the counter. Unit tests
+`shell_syntax_inhibits_expansion`, `a_comment_makes_the_rest_of_the_line_literal`
+and `event_search_string_ends_at_a_delimiter` cover the same ground in-process.
+
+### TD-OILS-HISTEXPAND-PERCENT-DESIGNATOR. `!%` and `:%` (the last `?str?` match) are unimplemented — OPEN 2026-07-29
+
+**Where:** `userspace/oils/src/histexpand.rs` — `apply_word_designator()` has no
+`%` arm, and nothing records what a `!?string?` search matched.
+
+**What.** bash remembers the *word* that the most recent `?string?` event search
+matched, and `%` — either as the whole event (`!%`) or as a word designator
+(`!!:%`) — expands to it. With no prior search it expands to nothing.
+
+```
+$ first alpha beta ; : !?lph? ; echo "[!!:%]"
+bash → [alpha]        osh → [!echo …:%]   (literal, then a bogus re-scan)
+$ echo !%
+bash → (empty line)   osh → !%: event not found
+```
+
+**Proper fix.** `!?string?` must record the matched word — bash's `search_match`,
+computed at *search* time, not at `%` time (measured: `!!:%` still yields the
+searched word even when the event it is applied to does not contain the search
+string). The natural home is `LastSubst`, which is already threaded `&mut`
+through `expand_one`; `apply_word_designator` needs the same reference and a `%`
+arm returning it (empty when unset). Deliberately left out of the inhibition fix
+above to keep that change bisectable.
+
+### TD-OILS-HISTEXPAND-WORD-SPLITTING. history word splitting does not use `history_word_delimiters`, so ranges over a line containing `(`/`;` differ — OPEN 2026-07-29
+
+**Where:** `userspace/oils/src/histexpand.rs` — `words()`, and the leading-`-`
+arm of `apply_word_designator()`.
+
+**What.** readline splits a history line into words on
+`history_word_delimiters` (`" \t\n;&()|<>"`), not on whitespace alone, so for the
+event `arr=(x y z)` bash's words are `arr=` `(` `x` `y` `z)`. osh splits on
+whitespace, giving `arr=(x` `y` `z)`. Two consequences, both measured with
+`arr=(x y z)` as the previous event:
+
+```
+$ echo !a-b
+bash → echo arr= ( x y zb     osh → echo arr=(x y z)b
+```
+
+That line also shows the second bug: a leading `-` with no number (`!a-b`, where
+`b` is not a digit) selects words 0 through *last-1* in bash, whereas osh's
+`read_point(...).unwrap_or(last)` selects 0 through last. osh's `n-` arm already
+gets this right, so the two arms disagree with each other.
+
+**Proper fix.** Give `words()` the `is_word_delimiter()` predicate that
+`expand_one` and the comment rule already share, keeping the delimiters as their
+own words (readline does), and change the leading-`-` arm to
+`.unwrap_or(last.saturating_sub(1))`. Both need a corpus case over an event
+containing `(`, `;` and `|`. Found while extending
+`tests/corpus/histexpand-inhibit.sh`; that case now uses search strings that
+match nothing so it pins only the terminator set.
 
 ### TD-OILS-FD0-WRITE. fd 0 has no write side, so `>&0` silently writes to stdout instead of the descriptor — ✅ RESOLVED 2026-07-28
 

@@ -430,14 +430,24 @@ fn run(args: &[String]) -> i32 {
     // need it too — `osh -i -c cmd` is a non-REPL shell that still reads
     // `~/.bashrc`. A piped/redirected REPL (`echo cmd | osh`, `osh < file`) is
     // non-interactive: no prompts, aliases off by default, `line N:` in errors.
+    //
+    // bash's `read_from_stdin` is a *separate* flag: `-s` sets it, and so does
+    // having no operand left to run as a script — but a `-c` string does not
+    // clear it, which is why `osh -cs cmd` reports both `c` and `s` in `$-`.
+    let reads_stdin = read_stdin || (!want_command && args.get(base).is_none());
+    // A pending `-c` string keeps the shell non-interactive whatever else is
+    // true (bash's `!command_execution_string` clause), which is why `-cs` on a
+    // terminal is not an interactive shell even though it reports `s`.
     let interactive = force_interactive.unwrap_or_else(|| {
-        let reads_stdin = match mode {
-            InvokeMode::Command => false,
-            InvokeMode::Stdin => true,
-            InvokeMode::Repl => args.get(base).is_none(),
-        };
-        reads_stdin && io::stdin().is_terminal() && io::stderr().is_terminal()
+        !want_command && reads_stdin && io::stdin().is_terminal() && io::stderr().is_terminal()
     });
+    // Both describe how the shell was *started*, so they are recorded before any
+    // mode dispatch: the startup files need `interactive`, and `-i -c cmd` is an
+    // interactive shell despite running a `-c` string.
+    sh.set_interactive_shell(interactive);
+    if reads_stdin {
+        sh.set_reads_stdin();
+    }
 
     // Settle `$0`, the positional parameters and the shell's mode, but run
     // nothing yet: the startup files must see all of it (see `Plan`).
@@ -463,7 +473,6 @@ fn run(args: &[String]) -> i32 {
             // `osh -s [arg…]`: read commands from stdin like the bare REPL, but
             // with the operands bound as positional parameters ($1, $2, …).
             sh.set_positional(args.get(base..).map(<[String]>::to_vec).unwrap_or_default());
-            sh.set_repl_interactive(interactive);
             Plan::Repl
         }
         InvokeMode::Repl => match args.get(base).map(String::as_str) {
@@ -485,10 +494,7 @@ fn run(args: &[String]) -> i32 {
                 eprint_option_usage();
                 return 2;
             }
-            None => {
-                sh.set_repl_interactive(interactive);
-                Plan::Repl
-            }
+            None => Plan::Repl,
         },
     };
 

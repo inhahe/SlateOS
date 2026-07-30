@@ -2139,19 +2139,33 @@ pub struct Shell {
     /// execution; `-c` and interactive shells omit it. Set once at startup by
     /// the binary. See `refresh_funcname`.
     script_mode: bool,
-    /// Whether the REPL's stdin (and stderr) is a real terminal. bash decides
-    /// *interactivity* by `isatty(0) && isatty(2)` (plus the `-i` flag), and an
-    /// interactive shell differs observably from one reading a pipe/redirected
-    /// file: it expands aliases by default, prints `PS1`/`PS2` prompts, enables
-    /// job control, and omits the `line N:` token from error messages. Only the
-    /// REPL path can be interactive (`-c` and script files never are), so this
-    /// flag is meaningful only when neither `command_mode` nor `script_mode` is
-    /// set; the binary sets it from tty detection (or the `-i` override) before
-    /// entering the REPL. Defaults `true` so the unit-test harness (which builds
-    /// a `Shell` directly and runs source without a mode) behaves interactively,
-    /// matching bash's tty-attached default. See [`Shell::is_interactive`] and
-    /// known-issues TD-OILS-INTERACTIVE-DETECT.
-    repl_interactive: bool,
+    /// Whether the shell was **started** interactively — bash's
+    /// `interactive_shell`, set once at startup and never changed afterwards.
+    /// It is `-i`, or else a shell that takes its commands from a terminal
+    /// (`isatty(0) && isatty(2)` with no `-c` string and nothing to run as a
+    /// script). An interactive shell differs observably: it reports `i` in `$-`,
+    /// expands aliases and history (`H`) by default, prints `PS1`/`PS2` prompts,
+    /// enables job control, and omits the `line N:` token from diagnostics.
+    ///
+    /// This is deliberately **not** derived from `command_mode`/`script_mode`.
+    /// bash's `-i` is orthogonal to how the commands arrive, so `osh -i -c cmd`
+    /// is an interactive shell that runs a `-c` string — it reads `~/.bashrc`,
+    /// reports `i` in `$-`, and drops the line number from its errors. Deriving
+    /// interactivity from the mode is what made that case wrong (known-issues
+    /// TD-OILS-INTERACTIVE-SHELL-VS-INTERACTIVE); the binary now computes bash's
+    /// rule once and stores the answer here.
+    ///
+    /// Defaults `true` so the unit-test harness (which builds a `Shell` directly
+    /// and runs source without a mode) behaves like bash attached to a tty.
+    /// See [`Shell::is_interactive`] and known-issues TD-OILS-INTERACTIVE-DETECT.
+    interactive_shell: bool,
+    /// The shell takes its commands from **stdin** — bash's `read_from_stdin`,
+    /// which is `-s`, or a shell with no operand left to run as a script (a bare
+    /// `osh`, or `osh -` with nothing after it). Reported as `s` in `$-`, after
+    /// `c`; the two can coexist, because `-cs` sets both flags even though `-c`
+    /// is the one that wins. Consulted only by `option_flags`. Set once at
+    /// startup by the binary.
+    reads_stdin: bool,
     /// Nesting depth of `eval` (and `eval`-like) execution. While `> 0`, a
     /// syntax error is tagged with bash's `eval:` input-source token
     /// (`<name>: eval: line N: …`) instead of the outer `-c`/script token.
@@ -2431,16 +2445,26 @@ pub struct Shell {
     /// file than the last one read starts past its end and sees nothing.
     hist_saved: usize,
     /// `set -o history`: whether the *top-level* input stream's lines are
-    /// recorded. Off by default, as in a non-interactive bash. A `source`d
-    /// file, an `eval` string and a function body are never recorded whatever
-    /// this says — only the call that reached them is.
-    hist_on: bool,
+    /// recorded. A `source`d file, an `eval` string and a function body are
+    /// never recorded whatever this says — only the call that reached them is.
+    ///
+    /// `None` means "not chosen", in which case the answer is
+    /// [`Shell::interactive_shell`]: bash turns `history` on for an interactive
+    /// shell and leaves it off otherwise, and `set ±o history` overrides that
+    /// either way. Read through [`Shell::hist_on`] rather than directly.
+    hist_on: Option<bool>,
     /// `set -H` / `set -o histexpand`: whether `!`-style history expansion is
-    /// performed on a top-level line before it is parsed. Off by default, as in
-    /// a non-interactive bash. Tracked separately from [`Shell::hist_on`]
-    /// because the two are independent switches: bash will happily have one on
-    /// and the other off, and `set -o` lists them separately.
-    histexpand: bool,
+    /// performed on a top-level line before it is parsed. Tracked separately
+    /// from [`Shell::hist_on`] because the two are independent switches: bash
+    /// will happily have one on and the other off, and `set -o` lists them
+    /// separately.
+    ///
+    /// `None` means "not chosen", in which case the answer is
+    /// [`Shell::interactive_shell`] — bash's default is on for an interactive
+    /// shell and off otherwise, and `-H`/`+H` (or `set ±H`) override it either
+    /// way, so `bash -H -c …` *does* expand history and `bash -i +H -c …` does
+    /// not. Read through [`Shell::histexpand`] rather than directly.
+    histexpand: Option<bool>,
     /// The last `s/old/new/` any history expansion performed, which a later
     /// `:&` (or an empty `:s//new/`) repeats. bash keeps this for the life of
     /// the shell rather than of one line, so it lives here rather than inside
@@ -2648,7 +2672,8 @@ impl Shell {
             monitor: false,
             command_mode: false,
             script_mode: false,
-            repl_interactive: true,
+            interactive_shell: true,
+            reads_stdin: false,
             eval_depth: 0,
             errexit_suppress: 0,
             unbound_error: None,
@@ -2690,8 +2715,8 @@ impl Shell {
             hist_file_seen: None,
             hist_session: 0,
             hist_saved: 0,
-            hist_on: false,
-            histexpand: false,
+            hist_on: None,
+            histexpand: None,
             hist_last_subst: crate::histexpand::LastSubst::default(),
             verbose: false,
             login_shell: false,
@@ -2980,15 +3005,29 @@ impl Shell {
         self.refresh_bashopts();
     }
 
-    /// Record whether the REPL is attached to a terminal (bash's `isatty(0) &&
-    /// isatty(2)`), or force-interactivity via `-i`. Called once by the binary
-    /// before entering the REPL. Recomputes `BASHOPTS` because the
-    /// `expand_aliases` default is interactivity-dependent. Has no effect on
-    /// `-c`/script shells, which are never interactive regardless of this flag
-    /// (see [`Self::is_interactive`]).
-    pub fn set_repl_interactive(&mut self, interactive: bool) {
-        self.repl_interactive = interactive;
+    /// Record whether this shell was **started** interactively — bash's
+    /// `interactive_shell`, i.e. `-i`, or a terminal-attached shell
+    /// (`isatty(0) && isatty(2)`) with no `-c` string and nothing to run as a
+    /// script. Called once by the binary, before the startup files, because they
+    /// need the same answer.
+    ///
+    /// It applies to *every* mode, not just the REPL: `osh -i -c cmd` is an
+    /// interactive shell that happens to run a `-c` string.
+    ///
+    /// Recomputes both option snapshots, because each has an
+    /// interactivity-dependent default: `$BASHOPTS` for `expand_aliases`, and
+    /// `$SHELLOPTS` for `histexpand` and `history`.
+    pub fn set_interactive_shell(&mut self, interactive: bool) {
+        self.interactive_shell = interactive;
         self.refresh_bashopts();
+        self.refresh_shellopts();
+    }
+
+    /// Record that this shell's commands come from **stdin** — bash's
+    /// `read_from_stdin`, set by `-s` or by having no operand left to run as a
+    /// script. Reported as `s` in `$-`. Called once by the binary.
+    pub fn set_reads_stdin(&mut self) {
+        self.reads_stdin = true;
     }
 
     /// Mark this shell as a **login** shell — `-l`/`--login`, or an `argv[0]`
@@ -3171,14 +3210,33 @@ impl Shell {
         self.run_startup_file(&path)
     }
 
-    /// Whether this shell is *interactive* in bash's sense: not a `-c` command
-    /// and not a script file, and its REPL stdin/stderr is a terminal (or `-i`
-    /// forced it). Governs alias-expansion default, prompt printing, job
-    /// control, and the `line N:` error token. Mirrors bash's `interactive`
-    /// global. See known-issues TD-OILS-INTERACTIVE-DETECT.
+    /// Whether this shell is *interactive* in bash's sense — its
+    /// `interactive_shell` global, set once from how the shell was started
+    /// (see [`Shell::set_interactive_shell`]).
+    ///
+    /// Governs the `i` letter in `$-`, the `expand_aliases` and `histexpand`
+    /// defaults, prompt printing, job control, and whether diagnostics carry the
+    /// `line N:` token. Note it is *not* conditioned on the mode: `osh -i -c
+    /// cmd` answers `true` here, exactly as bash does.
     #[must_use]
     pub fn is_interactive(&self) -> bool {
-        !self.command_mode && !self.script_mode && self.repl_interactive
+        self.interactive_shell
+    }
+
+    /// Whether `!`-style history expansion is in effect — `set -H` /
+    /// `set -o histexpand`, defaulting to [`Shell::is_interactive`] when neither
+    /// the command line nor `set` has chosen (bash's default is on for an
+    /// interactive shell, off otherwise).
+    fn histexpand(&self) -> bool {
+        self.histexpand.unwrap_or(self.interactive_shell)
+    }
+
+    /// Whether top-level input lines are recorded in the history list —
+    /// `set -o history`, defaulting to [`Shell::is_interactive`] when `set` has
+    /// not chosen. bash enables recording for an interactive shell (that is what
+    /// makes `history` list anything at a prompt) and leaves it off otherwise.
+    fn hist_on(&self) -> bool {
+        self.hist_on.unwrap_or(self.interactive_shell)
     }
 
     /// Set a shell variable.
@@ -3462,7 +3520,7 @@ impl Shell {
             // read, before the lexer sees it — so it runs here, ahead of the
             // unit, and only for the top-level reader (`record`), which is the
             // only input bash expands. See [`Shell::expand_history_lines`].
-            if hist == HistRead::Reader && self.hist_on && self.histexpand {
+            if hist == HistRead::Reader && self.hist_on() && self.histexpand() {
                 self.expand_history_lines(&mut ip, opts);
             }
             let aliases = if self.aliases_enabled() { Some(&self.aliases) } else { None };
@@ -3488,7 +3546,7 @@ impl Shell {
             // bash records a line when it *reads* it, before it runs — which is
             // why `history` lists the `history` call that printed the list, and
             // why `$HISTCMD` already counts the line it appears on.
-            if hist.records(self.hist_on) {
+            if hist.records(self.hist_on()) {
                 self.record_history(ip.last_unit_lines());
             }
             let prog = match unit {
@@ -3535,7 +3593,11 @@ impl Shell {
             // last-substitution state while `HistCtx` borrows the history list.
             let mut last = std::mem::take(&mut self.hist_last_subst);
             let expanded = {
-                let ctx = HistCtx { entries: &self.history, base: self.hist_base };
+                let ctx = HistCtx {
+                    entries: &self.history,
+                    base: self.hist_base,
+                    extglob: self.shopt.get("extglob").copied().unwrap_or(false),
+                };
                 crate::histexpand::expand(&raw.text, &ctx, &mut last)
             };
             self.hist_last_subst = last;
@@ -3766,7 +3828,7 @@ impl Shell {
     /// behind. With the `history` option off the line was never recorded and
     /// there is nothing to drop.
     fn hist_drop_own_entry(&mut self) {
-        if !self.hist_on || self.history.pop().is_none() {
+        if !self.hist_on() || self.history.pop().is_none() {
             return;
         }
         self.hist_session = self.hist_session.saturating_sub(1);
@@ -6256,7 +6318,8 @@ impl Shell {
             monitor: self.monitor,
             command_mode: self.command_mode,
             script_mode: self.script_mode,
-            repl_interactive: self.repl_interactive,
+            interactive_shell: self.interactive_shell,
+            reads_stdin: self.reads_stdin,
             eval_depth: self.eval_depth,
             // A subshell inherits the parent's errexit-ignore depth: per POSIX a
             // compound command (including `( … )`) executed where `set -e` is
@@ -12437,11 +12500,17 @@ impl Shell {
     fn option_flags(&self) -> String {
         let mut s = String::new();
         // (letter, enabled) in bash's canonical relative order.
-        let flags: [(char, bool); 14] = [
+        let flags: [(char, bool); 15] = [
             ('a', self.allexport),
             ('e', self.errexit),
             ('f', self.noglob),
             ('h', true),
+            // bash's `shell_flags[]` keeps the standard sh letters in
+            // alphabetical order, so `i` sits between `h` and `m`: an interactive
+            // shell with `set -m` reports `himBH…`. It is not a `set`-settable
+            // option (bash rejects `set -i`) but a report of how the shell was
+            // started, so it reads `interactive_shell` directly.
+            ('i', self.interactive_shell),
             ('m', self.monitor),
             ('n', self.noexec),
             ('u', self.nounset),
@@ -12454,7 +12523,7 @@ impl Shell {
             // (histexpand) which precedes `T` (with the unmodeled `P` between
             // `H` and `T`).
             ('E', self.errtrace),
-            ('H', self.histexpand),
+            ('H', self.histexpand()),
             ('T', self.functrace),
         ];
         for (c, on) in flags {
@@ -12462,10 +12531,15 @@ impl Shell {
                 s.push(c);
             }
         }
-        // Bash appends `c` (invoked via `-c`) last, after every `set`-toggled
-        // option letter, e.g. `hBc`, `ehBc`, `hBCc`.
+        // Bash appends `c` (invoked via `-c`) then `s` (commands come from
+        // stdin) last, after every `set`-toggled option letter: `hBc`, `ehBc`,
+        // `hBs`. Both can be present — `-cs` sets both flags, and reports
+        // `hBcs`, even though `-c` is the one that decides what runs.
         if self.command_mode {
             s.push('c');
+        }
+        if self.reads_stdin {
+            s.push('s');
         }
         s
     }
@@ -16608,7 +16682,11 @@ impl Shell {
             for a in rest {
                 let mut last = std::mem::take(&mut self.hist_last_subst);
                 let expanded = {
-                    let ctx = HistCtx { entries: &self.history, base: self.hist_base };
+                    let ctx = HistCtx {
+                    entries: &self.history,
+                    base: self.hist_base,
+                    extglob: self.shopt.get("extglob").copied().unwrap_or(false),
+                };
                     crate::histexpand::expand(a, &ctx, &mut last)
                 };
                 self.hist_last_subst = last;
@@ -16765,7 +16843,7 @@ impl Shell {
         // the newest entry and has to be skipped. With recording off nothing was
         // added, and bash's "back up past the NULL terminator" loop lands on the
         // true newest entry.
-        let last_hist = if self.hist_on { len - 2 } else { len - 1 };
+        let last_hist = if self.hist_on() { len - 2 } else { len - 1 };
         if last_hist < 0 {
             // bash returns -1 here: not one of the error sentinels, so a caller
             // that is listing clamps it to the oldest entry, while `fc -s`
@@ -16931,7 +17009,7 @@ impl Shell {
         // bash floors `last_hist` at 0 here (but not in `fc_gethnum`), which is
         // why `fc -l` in a shell whose only entry is the `fc` line lists that
         // line.
-        let last_hist = if self.hist_on { len - 2 } else { len - 1 }.max(0);
+        let last_hist = if self.hist_on() { len - 2 } else { len - 1 }.max(0);
 
         let (beg, end) = match rest.first() {
             Some(s) => {
@@ -16980,7 +17058,7 @@ impl Shell {
         // never grow it, so the endpoints are pulled back to the new newest
         // entry — which is index -1, i.e. nothing to run, when the `fc` line was
         // all there was.
-        if !listing && self.hist_on {
+        if !listing && self.hist_on() {
             self.hist_drop_own_entry();
             let new_last = isize::try_from(self.history.len()).unwrap_or(isize::MAX) - 1;
             if end >= new_last {
@@ -19750,7 +19828,7 @@ impl Shell {
             // `set -m`: job control (equivalent to `set -o monitor`).
             'm' => self.monitor = enable,
             // `set -H`: history expansion (equivalent to `set -o histexpand`).
-            'H' => self.histexpand = enable,
+            'H' => self.histexpand = Some(enable),
             // `set -v`: echo input as it is read (`set -o verbose`).
             'v' => self.verbose = enable,
             // Accepted by bash (`-abefhkmnptuvxBCEHPT`) but not modelled here.
@@ -19785,7 +19863,7 @@ impl Shell {
             // Recording begins with the *next* line, since this one was read
             // before it ran.
             "history" => {
-                self.hist_on = enable;
+                self.hist_on = Some(enable);
                 // Turning history on is where bash first materialises the two
                 // sizing variables, at readline's defaults, so `${!HIST*}`
                 // starts listing them. An existing value is left alone, and
@@ -19801,7 +19879,7 @@ impl Shell {
             // `set -o histexpand` (`set -H`): enable `!`-style history
             // expansion of top-level lines. Independent of `history` — bash
             // tracks and lists the two separately.
-            "histexpand" => self.histexpand = enable,
+            "histexpand" => self.histexpand = Some(enable),
             // `set -o verbose` (`set -v`): echo input as the reader consumes it.
             "verbose" => self.verbose = enable,
             // Standard bash option names osh does not model (line-editing
@@ -19876,10 +19954,10 @@ impl Shell {
         if self.monitor {
             opts.push("monitor");
         }
-        if self.hist_on {
+        if self.hist_on() {
             opts.push("history");
         }
-        if self.histexpand {
+        if self.histexpand() {
             opts.push("histexpand");
         }
         if self.verbose {
@@ -19930,18 +20008,23 @@ impl Shell {
             "functrace" => self.functrace,
             "errtrace" => self.errtrace,
             "monitor" => self.monitor,
-            "history" => self.hist_on,
-            "histexpand" => self.histexpand,
+            "history" => self.hist_on(),
+            "histexpand" => self.histexpand(),
             "verbose" => self.verbose,
             // Always-on defaults for a non-interactive shell, mirroring bash's
             // `-c`/script `set -o` output (these have no osh-tunable state but
             // must report their true default so listings match bash).
             "hashall" | "interactive-comments" => true,
-            // Remaining standard options are modeled as off (their bash default
-            // in non-interactive mode): emacs/vi/histexpand line-editing,
-            // job-control (monitor/notify), posix, and the rare toggles. They are
-            // listed by `set -o` for compatibility but are currently inert; see
-            // the STANDARD_SET_O_OPTIONS note.
+            // Remaining standard options are modeled as off: job control's
+            // `notify`, `posix`, and the rare toggles. They are listed by
+            // `set -o` for compatibility but are currently inert; see the
+            // STANDARD_SET_O_OPTIONS note.
+            //
+            // `emacs`/`vi` stay off even in an interactive shell, where bash
+            // reports `emacs` on: bash sets them from readline being active, and
+            // osh has no line editor at all, so answering "on" would make
+            // `[[ -o emacs ]]` — the usual "is line editing available?" probe —
+            // lie. Tracked in known-issues.md as a deliberate divergence.
             _ => false,
         }
     }
@@ -27457,14 +27540,21 @@ mod tests {
 
     /// [`run`] for a *non-interactive* shell, i.e. what a script file gets.
     ///
-    /// [`run`] leaves the shell interactive (its default), which differs from a
-    /// script in exactly one place: `expand_aliases` defaults on for an
-    /// interactive shell and off for a script (see `Shell::shopt_default`). Any
-    /// test about alias expansion or `type`/`command -v` reporting aliases must
-    /// therefore use this helper to see the script-mode default.
+    /// [`run`] leaves the shell interactive (its default). Everything bash keys
+    /// off `interactive_shell` therefore differs between the two, and any test
+    /// about one of these must use this helper to see the script-mode default:
+    ///
+    /// - `expand_aliases` defaults on interactively, off in a script
+    ///   (`Shell::shopt_default`) — so also `type` / `command -v` / `alias`
+    ///   reporting aliases at all;
+    /// - `$-` carries `i` and `H` interactively (`Shell::option_flags`);
+    /// - `$SHELLOPTS` lists `histexpand` and `history` interactively
+    ///   (`Shell::histexpand` / `Shell::hist_on`), and the history list records
+    ///   top-level lines, which shifts what `history` and `fc` see;
+    /// - diagnostics drop bash's `line N:` token interactively.
     fn run_script(src: &str) -> (String, i32) {
         let mut sh = Shell::new();
-        sh.set_repl_interactive(false);
+        sh.set_interactive_shell(false);
         let buf = capture_sink();
         let status = {
             let mut out = Out::Capture(buf.clone());
@@ -27630,6 +27720,7 @@ mod tests {
     fn run_cmd_mode(src: &str) -> (String, i32) {
         let mut sh = Shell::new();
         sh.set_command_mode();
+        sh.set_interactive_shell(false);
         let buf = capture_sink();
         let prog = parse(src).expect("parse");
         {
@@ -27667,6 +27758,7 @@ mod tests {
         // `near unexpected token` family. osh mirrors all three with its `$0`.
         let mut sh = Shell::new();
         sh.set_command_mode();
+        sh.set_interactive_shell(false);
 
         // near-token, single line: `-c` token, line 1, second-line echo.
         let src = "echo hello world (";
@@ -27725,6 +27817,7 @@ mod tests {
         // 5.2). Each case: the parser message + the echoed source line.
         let mut sh = Shell::new();
         sh.set_command_mode();
+        sh.set_interactive_shell(false);
         let check = |sh: &Shell, src: &str, want: &str| {
             let e = parse(src).unwrap_err();
             assert_eq!(sh.format_parse_error(&e, src, &LineMap::Offset(0)), want, "src: {src}");
@@ -27802,6 +27895,7 @@ mod tests {
         // bash's input-source token from the prefix.
         let mut sh = Shell::new();
         sh.set_command_mode();
+        sh.set_interactive_shell(false);
         let src = "a=(1 2";
         let e = parse(src).unwrap_err();
         assert_eq!(e.line, Some(1));
@@ -27912,6 +28006,7 @@ mod tests {
         fn run_cmd(src: &str) -> String {
             let mut sh = Shell::new();
             sh.set_command_mode();
+            sh.set_interactive_shell(false);
             let buf = capture_sink();
             let prog = parse(src).expect("parse");
             {
@@ -27964,6 +28059,7 @@ mod tests {
         fn run_cmd(src: &str) -> String {
             let mut sh = Shell::new();
             sh.set_command_mode();
+            sh.set_interactive_shell(false);
             let buf = capture_sink();
             let prog = parse(src).expect("parse");
             {
@@ -28007,6 +28103,7 @@ mod tests {
         fn run_cmd(src: &str) -> String {
             let mut sh = Shell::new();
             sh.set_command_mode();
+            sh.set_interactive_shell(false);
             let buf = capture_sink();
             let prog = parse(src).expect("parse");
             {
@@ -28241,6 +28338,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // expanding, which is what `run_with_aliases` exercises elsewhere.
         let mut sh = Shell::new();
         sh.set_command_mode();
+        sh.set_interactive_shell(false);
         sh.run_source("alias g='echo hi'");
         let buf = capture_sink();
         {
@@ -28264,13 +28362,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // TD-OILS-INTERACTIVE-DETECT: a REPL reading a *pipe* (non-tty stdin)
         // is non-interactive in bash, so `expand_aliases` defaults OFF there —
         // just like `-c`/script mode, and unlike a tty REPL. Simulate the
-        // piped-stdin case with `set_repl_interactive(false)` (no `-c`/script).
+        // piped-stdin case with `set_interactive_shell(false)` (no `-c`/script).
         let mut sh = Shell::new();
         // Default (tty-like) REPL: interactive, aliases on.
         assert!(sh.is_interactive(), "default REPL should be interactive");
         assert!(sh.aliases_enabled(), "interactive REPL expands aliases by default");
         // Flip to non-interactive (piped stdin): aliases now default off.
-        sh.set_repl_interactive(false);
+        sh.set_interactive_shell(false);
         assert!(!sh.is_interactive(), "piped-stdin REPL is non-interactive");
         assert!(
             !sh.aliases_enabled(),
@@ -28282,16 +28380,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
-    fn command_and_script_modes_are_never_interactive() {
-        // `-c` and script shells are non-interactive regardless of the tty flag.
+    fn interactivity_is_orthogonal_to_the_mode() {
+        // bash's `interactive_shell` says how the shell was *started*, not where
+        // its commands come from, so `-i` applies to a `-c`/script shell too:
+        // `bash -i -c 'echo $-'` reports `hiBHc`. Deriving interactivity from the
+        // mode instead is the bug TD-OILS-INTERACTIVE-SHELL-VS-INTERACTIVE
+        // records; these assertions are what stops it coming back.
         let mut sh = Shell::new();
         sh.set_command_mode();
-        sh.set_repl_interactive(true); // force flag is ignored for `-c`
-        assert!(!sh.is_interactive(), "`-c` shell is never interactive");
+        sh.set_interactive_shell(true);
+        assert!(sh.is_interactive(), "`-i -c` is an interactive shell");
+        assert!(sh.aliases_enabled(), "…so aliases expand by default");
         let mut sh2 = Shell::new();
         sh2.set_script_mode();
-        sh2.set_repl_interactive(true);
-        assert!(!sh2.is_interactive(), "script shell is never interactive");
+        sh2.set_interactive_shell(true);
+        assert!(sh2.is_interactive(), "`-i script` is an interactive shell too");
+
+        // Without `-i` the binary computes `false` for both, which is the case
+        // every ordinary `-c`/script invocation takes.
+        let mut sh3 = Shell::new();
+        sh3.set_command_mode();
+        sh3.set_interactive_shell(false);
+        assert!(!sh3.is_interactive());
+        assert!(!sh3.aliases_enabled());
     }
 
     #[test]
@@ -28302,7 +28413,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // stderr diagnostic into the captured stdout buffer.
         fn run_repl(interactive: bool, src: &str) -> String {
             let mut sh = Shell::new();
-            sh.set_repl_interactive(interactive);
+            sh.set_interactive_shell(interactive);
             let buf = capture_sink();
             let prog = parse(src).expect("parse");
             {
@@ -29618,8 +29729,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "y\n"
         );
         // `!(...)` negation and `*.@(...)` alternation, still with extglob off.
+        // `run_script`, not `run`: with extglob off, `!(` is an *event
+        // designator* to history expansion (`(` is not one of bash's
+        // `history_no_expand_chars`), so an interactive bash rejects this very
+        // line with `!: event not found` before the parser ever sees it. The
+        // pattern behaviour under test is a script's.
         assert_eq!(
-            run("shopt -u extglob; [[ hello == !(foo) ]] && echo y || echo n").0,
+            run_script("shopt -u extglob; [[ hello == !(foo) ]] && echo y || echo n").0,
             "y\n"
         );
         assert_eq!(
@@ -29722,13 +29838,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("shopt -s extglob; [[ ababab == *(ab) ]] && echo y || echo n").0,
             "y\n"
         );
-        // !(...) negation.
+        // !(...) negation. `run_script`, not `run`: history expansion runs on the
+        // whole physical line *before* the `shopt` on it has run, so to an
+        // interactive shell this line's `!(` is still an event designator and
+        // fails with `!: event not found` (measured in bash). Keeping the `shopt`
+        // on the same line is the point of the assertion — `[[ ]]` matching picks
+        // the setting up immediately, unlike `case`, whose lexing does not — so
+        // the script shell is the right one to ask.
         assert_eq!(
-            run("shopt -s extglob; [[ foo == !(bar) ]] && echo y || echo n").0,
+            run_script("shopt -s extglob; [[ foo == !(bar) ]] && echo y || echo n").0,
             "y\n"
         );
         assert_eq!(
-            run("shopt -s extglob; [[ bar == !(bar) ]] && echo y || echo n").0,
+            run_script("shopt -s extglob; [[ bar == !(bar) ]] && echo y || echo n").0,
             "n\n"
         );
         // In `case` — but only from the *next* unit, since `extglob` decides how
@@ -29967,11 +30089,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `$` and `!` are NOT valid indirect referents. Like bash, osh parses
         // the form and reports a *runtime* "bad substitution" (DISCARD-class,
         // status 1) at expansion time rather than a parse error.
+        //
+        // `run_script`, not `run`: history expansion inhibits only the `!` that
+        // directly follows the `${`, so in `${!!}` the *second* `!` is still an
+        // event designator and an interactive bash rewrites the line before
+        // parsing it (measured: it substitutes the previous history entry).
         assert!(parse("echo ${!$}").is_ok());
         assert!(parse("echo ${!!}").is_ok());
-        let (o1, s1) = run("echo ${!$} 2>/dev/null; echo after");
+        let (o1, s1) = run_script("echo ${!$} 2>/dev/null; echo after");
         assert_eq!((o1.as_str(), s1), ("", 1));
-        assert_eq!(run("{ echo ${!!}; } 2>&1").0, "osh: ${!!}: bad substitution\n");
+        assert_eq!(
+            run_script("{ echo ${!!}; } 2>&1").0,
+            "osh: line 1: ${!!}: bad substitution\n"
+        );
     }
 
     #[test]
@@ -31523,6 +31653,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let mut sh = Shell::new();
             sh.set_name("scr.sh");
             sh.set_script_mode();
+            sh.set_interactive_shell(false);
             let buf = capture_sink();
             let mut out = Out::Capture(buf.clone());
             let prog = parse(src).expect("parse");
@@ -31660,6 +31791,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // ordinary reassignable variable and appears under `${!BASH*}`.
         let mut sh = Shell::new();
         sh.set_command_mode();
+        sh.set_interactive_shell(false);
         sh.set_execution_string("echo hi");
         let buf = capture_sink();
         let prog = parse("echo \"[$BASH_EXECUTION_STRING]\"; echo ${!BASH*}").expect("parse");
@@ -32686,13 +32818,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn special_var_dash_flags() {
         // $- reports enabled single-letter option flags; h and B are always on.
-        assert_eq!(run("echo $-").0, "hB\n");
+        assert_eq!(run_script("echo $-").0, "hB\n");
         // set -e adds 'e' in the fixed flag order (a e f h u x B C).
-        assert_eq!(run("set -e; echo $-").0, "ehB\n");
+        assert_eq!(run_script("set -e; echo $-").0, "ehB\n");
         // Multiple flags appear in canonical order, not the order set.
-        assert_eq!(run("set -xu; echo $-").0, "huxB\n");
+        assert_eq!(run_script("set -xu; echo $-").0, "huxB\n");
         // Disabling drops the flag again.
-        assert_eq!(run("set -e; set +e; echo $-").0, "hB\n");
+        assert_eq!(run_script("set -e; set +e; echo $-").0, "hB\n");
+    }
+
+    #[test]
+    fn special_var_dash_reports_interactivity() {
+        // An interactive shell adds `i` (from bash's `interactive_shell`) and `H`
+        // (whose default *is* `interactive_shell`), in the canonical letter order
+        // `a e f h i m n u v x B C E H T`. Measured against
+        // `bash --norc --noprofile -i -c 'echo $-'` on a pipe, which reports
+        // `hiBHc`: no `m`, because job control cannot be enabled there — so osh
+        // must not invent it either.
+        assert_eq!(run("echo $-").0, "hiBH\n");
+        assert_eq!(run("set -e; echo $-").0, "ehiBH\n");
+        assert_eq!(run("set -u; echo $-").0, "hiuBH\n");
+        // `+H` overrides the interactive default, and `-H` overrides the script
+        // one, so the letter tracks the option rather than the shell.
+        assert_eq!(run("set +H; echo $-").0, "hiB\n");
+        assert_eq!(run_script("set -H; echo $-").0, "hBH\n");
     }
 
     #[test]
@@ -32701,6 +32850,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let cmd_dash = |src: &str| {
             let mut sh = Shell::new();
             sh.set_command_mode();
+            sh.set_interactive_shell(false);
             let buf = capture_sink();
             let mut out = Out::Capture(buf.clone());
             let prog = parse(src).expect("parse");
@@ -33668,32 +33818,41 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // parse time); it is a runtime "bad substitution" — a DISCARD-class
         // word-expansion error printing `${raw}: bad substitution`, status 1,
         // aborting the current parse unit but not exiting the shell.
+        //
+        // `run_script` throughout, not `run`: history expansion inhibits `!` only
+        // directly after a `${`, so the `!` in `${x!}` is an event designator that
+        // an interactive shell rewrites (or rejects) before the parser ever sees
+        // the word — measured in bash, which answers `!}: event not found`.
         assert!(parse("echo ${x!}").is_ok());
-        let (o, s) = run("echo ${x!} 2>/dev/null; echo after");
+        let (o, s) = run_script("echo ${x!} 2>/dev/null; echo after");
         assert_eq!(o, "");
         assert_eq!(s, 1);
-        // The raw inner text is reproduced verbatim in the diagnostic.
-        // (The `run` harness is stdin/interactive-like, so `err_prefix` carries
-        // no `line N:` — that appears only in `-c`/script mode.)
+        // The raw inner text is reproduced verbatim in the diagnostic, behind
+        // bash's `line N:` token — which a *non-interactive* shell prints even
+        // when its input is stdin rather than a named script (measured:
+        // `echo 'echo ${x!}' | bash` answers `bash: line 1: …`).
         assert_eq!(
-            run("{ echo ${x!}; } 2>&1").0,
-            "osh: ${x!}: bad substitution\n"
+            run_script("{ echo ${x!}; } 2>&1").0,
+            "osh: line 1: ${x!}: bad substitution\n"
         );
         assert_eq!(
-            run("x=hi; { echo ${!x*junk}; } 2>&1").0,
-            "osh: ${!x*junk}: bad substitution\n"
+            run_script("x=hi; { echo ${!x*junk}; } 2>&1").0,
+            "osh: line 1: ${!x*junk}: bad substitution\n"
         );
         // A trailing remnant after a `${#name[i]}` length is also bad.
         assert_eq!(
-            run("{ echo ${#a[0]extra}; } 2>&1").0,
-            "osh: ${#a[0]extra}: bad substitution\n"
+            run_script("{ echo ${#a[0]extra}; } 2>&1").0,
+            "osh: line 1: ${#a[0]extra}: bad substitution\n"
         );
         // DISCARD semantics: a following *line* still runs (not fatal).
-        let (o2, s2) = run("echo ${x!} 2>/dev/null\necho after");
+        let (o2, s2) = run_script("echo ${x!} 2>/dev/null\necho after");
         assert_eq!(o2, "after\n");
         assert_eq!(s2, 0);
         // A subshell contains the error; the parent survives.
-        assert_eq!(run("( echo ${x!} ) 2>/dev/null; echo parent").0, "parent\n");
+        assert_eq!(
+            run_script("( echo ${x!} ) 2>/dev/null; echo parent").0,
+            "parent\n"
+        );
     }
 
     #[test]
@@ -36930,30 +37089,57 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // separated, alphabetically-sorted list. A non-interactive shell's
         // default is braceexpand:hashall:interactive-comments.
         assert_eq!(
-            run("echo \"[$SHELLOPTS]\"").0,
+            run_script("echo \"[$SHELLOPTS]\"").0,
             "[braceexpand:hashall:interactive-comments]\n"
         );
         // Enabling an option inserts its long name in sorted position.
         assert_eq!(
-            run("set -u; echo \"$SHELLOPTS\"").0,
+            run_script("set -u; echo \"$SHELLOPTS\"").0,
             "braceexpand:hashall:interactive-comments:nounset\n"
         );
         assert_eq!(
-            run("set -f -a -C -x; echo \"$SHELLOPTS\"").0,
+            run_script("set -f -a -C -x; echo \"$SHELLOPTS\"").0,
             "allexport:braceexpand:hashall:interactive-comments:noclobber:noglob:xtrace\n"
         );
         // Disabling removes it again.
         assert_eq!(
-            run("set -u; set +u; echo \"$SHELLOPTS\"").0,
+            run_script("set -u; set +u; echo \"$SHELLOPTS\"").0,
             "braceexpand:hashall:interactive-comments\n"
         );
         // `declare -p` renders it readonly (not exported).
         assert_eq!(
-            run("set -u; declare -p SHELLOPTS").0,
+            run_script("set -u; declare -p SHELLOPTS").0,
             "declare -r SHELLOPTS=\"braceexpand:hashall:interactive-comments:nounset\"\n"
         );
         // It cannot be assigned to.
-        assert_eq!(run("SHELLOPTS=foo; echo after").1, 1);
+        assert_eq!(run_script("SHELLOPTS=foo; echo after").1, 1);
+    }
+
+    #[test]
+    fn shellopts_gains_the_interactive_defaults() {
+        // `histexpand` and `history` default to the shell's interactivity, so an
+        // interactive shell lists both. Measured:
+        // `bash --norc --noprofile -i -c 'echo $SHELLOPTS'` reports
+        // braceexpand:emacs:hashall:histexpand:history:interactive-comments.
+        // osh omits `emacs` on purpose — it has no line editor, so claiming the
+        // option would make `[[ -o emacs ]]` lie (see `shell_option_enabled`).
+        assert_eq!(
+            run("echo \"$SHELLOPTS\"").0,
+            "braceexpand:hashall:histexpand:history:interactive-comments\n"
+        );
+        // `set +o` on either one overrides the interactive default…
+        assert_eq!(
+            run("set +H; set +o history; echo \"$SHELLOPTS\"").0,
+            "braceexpand:hashall:interactive-comments\n"
+        );
+        // …and `set -o` overrides the script default the same way.
+        assert_eq!(
+            run_script("set -o history; set -H; echo \"$SHELLOPTS\"").0,
+            "braceexpand:hashall:histexpand:history:interactive-comments\n"
+        );
+        // `[[ -o NAME ]]` agrees with the listing, both ways round.
+        assert_eq!(run("[[ -o histexpand ]] && [[ -o history ]]; echo $?").0, "0\n");
+        assert_eq!(run_script("[[ -o histexpand ]] || [[ -o history ]]; echo $?").0, "1\n");
     }
 
     #[test]
@@ -39369,18 +39555,37 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn history_records_only_with_the_option_on() {
-        // Off by default, as in a non-interactive bash, and `HISTCMD` reads 0.
-        assert_eq!(run("echo a\nhistory").0, "a\n");
-        assert_eq!(run("echo $HISTCMD").0, "0\n");
+        // Off by default in a *non-interactive* shell, and `HISTCMD` reads 0.
+        // (Hence `run_script` throughout: the default follows the shell's
+        // interactivity, so the interactive `run` harness records from its first
+        // line — see `history_records_by_default_when_interactive`.)
+        assert_eq!(run_script("echo a\nhistory").0, "a\n");
+        assert_eq!(run_script("echo $HISTCMD").0, "0\n");
         // Recording starts with the line *after* `set -o history`, and a line is
         // recorded when it is read, so `history` lists itself.
         assert_eq!(
-            run("set -o history\necho a\nhistory").0,
+            run_script("set -o history\necho a\nhistory").0,
             "a\n    1  echo a\n    2  history\n"
         );
-        assert_eq!(run("set -o history\necho $HISTCMD").0, "1\n");
+        assert_eq!(run_script("set -o history\necho $HISTCMD").0, "1\n");
         // The option shows up in `SHELLOPTS` and in `set -o`.
-        assert!(run("set -o history\necho $SHELLOPTS").0.contains("history"));
+        assert!(run_script("set -o history\necho $SHELLOPTS").0.contains("history"));
+    }
+
+    #[test]
+    fn history_records_by_default_when_interactive() {
+        // bash's `remember_on_history` starts at `interactive_shell`, which is
+        // what makes `history` list anything at a prompt without the user ever
+        // running `set -o history`. So an interactive shell records from its very
+        // first line, and `$HISTCMD` counts the line it appears on.
+        assert_eq!(run("echo a\nhistory").0, "a\n    1  echo a\n    2  history\n");
+        assert_eq!(run("echo $HISTCMD").0, "1\n");
+        // `set +o history` turns it back off, and (because a line is recorded when
+        // it is *read*) the `set +o` line itself is the last entry recorded.
+        assert_eq!(
+            run("set +o history\necho a\nhistory").0,
+            "a\n    1  set +o history\n"
+        );
     }
 
     #[test]
@@ -39388,27 +39593,27 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `;` normally, a plain space after a line that cannot take one, and a
         // real newline where a `;` would be swallowed or a body must start.
         assert_eq!(
-            run("set -o history\nfor i in 1 2\ndo\n:\ndone\nhistory").0,
+            run_script("set -o history\nfor i in 1 2\ndo\n:\ndone\nhistory").0,
             "    1  for i in 1 2; do :; done\n    2  history\n"
         );
         // A `\<newline>` is joined away before the line is stored, so the two
         // physical lines become one entry with no backslash left in it.
         assert_eq!(
-            run("set -o history\n: a && \\\n:\nhistory").0,
+            run_script("set -o history\n: a && \\\n:\nhistory").0,
             "    1  : a && :\n    2  history\n"
         );
         // A comment belongs to the line it trails; each line is its own entry.
         assert_eq!(
-            run("set -o history\n: # note\n: b\nhistory").0,
+            run_script("set -o history\n: # note\n: b\nhistory").0,
             "    1  : # note\n    2  : b\n    3  history\n"
         );
         // A here-document body travels with the line that introduced it.
         assert_eq!(
-            run("set -o history\ncat <<E\nbody\nE\nhistory").0,
+            run_script("set -o history\ncat <<E\nbody\nE\nhistory").0,
             "body\n    1  cat <<E\nbody\nE\n\n    2  history\n"
         );
         // Blank lines are dropped entirely.
-        assert_eq!(run("set -o history\n\n\n: x\nhistory").0.lines().count(), 2);
+        assert_eq!(run_script("set -o history\n\n\n: x\nhistory").0.lines().count(), 2);
     }
 
     #[test]
@@ -39416,12 +39621,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Only the top-level reader records; the `eval` call is an entry, the
         // string it ran is not.
         assert_eq!(
-            run("set -o history\neval ': a\n: b'\nhistory").0,
+            run_script("set -o history\neval ': a\n: b'\nhistory").0,
             "    1  eval ': a\n: b'\n    2  history\n"
         );
         // A function body is likewise invisible; only its definition and call.
         assert_eq!(
-            run("set -o history\nf() { :; }\nf\nhistory").0,
+            run_script("set -o history\nf() { :; }\nf\nhistory").0,
             "    1  f() { :; }\n    2  f\n    3  history\n"
         );
     }
@@ -39432,39 +39637,39 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A positive offset, a negative one counting back from the newest, and
         // an inclusive range. Deleting renumbers what follows.
         assert_eq!(
-            run(&format!("{list}history -d 2\nhistory 2")).0,
+            run_script(&format!("{list}history -d 2\nhistory 2")).0,
             "    4  history -d 2\n    5  history 2\n"
         );
         assert_eq!(
-            run(&format!("{list}history -d -1\nhistory 1")).0,
+            run_script(&format!("{list}history -d -1\nhistory 1")).0,
             "    5  history 1\n"
         );
         assert_eq!(
-            run(&format!("{list}history -d 1-3\nhistory 1")).0,
+            run_script(&format!("{list}history -d 1-3\nhistory 1")).0,
             "    3  history 1\n"
         );
         // A start below the oldest entry is clamped rather than rejected.
-        assert_eq!(run(&format!("{list}history -d 0-2")).1, 0);
+        assert_eq!(run_script(&format!("{list}history -d 0-2")).1, 0);
         // Everything unreachable is a "position out of range", and a reversed
         // range fails silently.
-        assert_eq!(run(&format!("{list}history -d 0")).1, 1);
-        assert_eq!(run(&format!("{list}history -d 99")).1, 1);
-        assert_eq!(run(&format!("{list}history -d foo")).1, 1);
-        assert_eq!(run(&format!("{list}history -d 3-")).1, 1);
-        assert_eq!(run(&format!("{list}history -d 9-8")), (String::new(), 1));
+        assert_eq!(run_script(&format!("{list}history -d 0")).1, 1);
+        assert_eq!(run_script(&format!("{list}history -d 99")).1, 1);
+        assert_eq!(run_script(&format!("{list}history -d foo")).1, 1);
+        assert_eq!(run_script(&format!("{list}history -d 3-")).1, 1);
+        assert_eq!(run_script(&format!("{list}history -d 9-8")), (String::new(), 1));
     }
 
     #[test]
     fn history_clear_store_and_print() {
         // `-c` empties the list and restarts the numbering.
-        assert_eq!(run("set -o history\n: a\nhistory -c\n: b\nhistory").0, "    1  : b\n    2  history\n");
+        assert_eq!(run_script("set -o history\n: a\nhistory -c\n: b\nhistory").0, "    1  : b\n    2  history\n");
         // `-s` replaces the entry its own line made.
         assert_eq!(
-            run("set -o history\n: a\nhistory -s new text\nhistory").0,
+            run_script("set -o history\n: a\nhistory -s new text\nhistory").0,
             "    1  : a\n    2  new text\n    3  history\n"
         );
         // `-p` prints its arguments and records nothing.
-        assert_eq!(run("set -o history\nhistory -p one two").0, "one\ntwo\n");
+        assert_eq!(run_script("set -o history\nhistory -p one two").0, "one\ntwo\n");
         // Bad usage is a usage error; a bad count operand is not.
         assert_eq!(run("history -z").1, 2);
         assert_eq!(run("history -d").1, 2);
@@ -39475,24 +39680,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn history_size_stifles_and_renumbers() {
         // `HISTSIZE` caps the list; the numbers keep climbing past the cap.
         assert_eq!(
-            run("HISTSIZE=2\nset -o history\n: a\n: b\n: c\nhistory").0,
+            run_script("HISTSIZE=2\nset -o history\n: a\n: b\n: c\nhistory").0,
             "    3  : c\n    4  history\n"
         );
         // Assigning `HISTSIZE` renumbers the survivors from `len - cap` rather
         // than preserving their numbers — readline's `stifle_history`.
         assert_eq!(
-            run("set -o history\n: a\n: b\n: c\nHISTSIZE=2\nhistory").0,
+            run_script("set -o history\n: a\n: b\n: c\nHISTSIZE=2\nhistory").0,
             "    3  HISTSIZE=2\n    4  history\n"
         );
         // `HISTSIZE=0` stores nothing and leaves `$HISTCMD` one below the count.
-        assert_eq!(run("set -o history\n: a\nHISTSIZE=0\n: b\necho $HISTCMD\nhistory").0, "1\n");
+        assert_eq!(run_script("set -o history\n: a\nHISTSIZE=0\n: b\necho $HISTCMD\nhistory").0, "1\n");
         // Unset, empty and negative all unstifle; a non-number is ignored.
         assert_eq!(
-            run("HISTSIZE=2\nset -o history\n: a\n: b\nHISTSIZE=abc\n: c\nhistory").0.lines().count(),
+            run_script("HISTSIZE=2\nset -o history\n: a\n: b\nHISTSIZE=abc\n: c\nhistory").0.lines().count(),
             2
         );
         assert_eq!(
-            run("HISTSIZE=2\nset -o history\n: a\n: b\nHISTSIZE=\n: c\nhistory").0.lines().count(),
+            run_script("HISTSIZE=2\nset -o history\n: a\n: b\nHISTSIZE=\n: c\nhistory").0.lines().count(),
             4
         );
     }
@@ -39516,7 +39721,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `-w` writes the whole list, one entry per line, and `-r` appends every
         // non-empty line of the file back onto it.
         assert_eq!(
-            run(&format!(
+            run_script(&format!(
                 "set -o history\n: one\n: two\nhistory -w {d}/f\nhistory -c\nhistory -r {d}/f\nhistory"
             ))
             .0,
@@ -39526,20 +39731,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A wholly empty line is not an entry; a blank one is.
         std::fs::write(dir.join("b"), "x1\n\n  \nx2\n").expect("write");
         assert_eq!(
-            run(&format!("set -o history\nhistory -c\nhistory -r {d}/b\nhistory")).0,
+            run_script(&format!("set -o history\nhistory -c\nhistory -r {d}/b\nhistory")).0,
             format!("    1  history -r {d}/b\n    2  x1\n    3    \n    4  x2\n    5  history\n")
         );
         // With no operand the file is `$HISTFILE`.
         assert_eq!(
-            run(&format!(
+            run_script(&format!(
                 "set -o history\nHISTFILE={d}/h\n: kept\nhistory -w\nhistory -c\nhistory -r\nhistory"
             ))
             .0,
             format!("    1  history -r\n    2  HISTFILE={d}/h\n    3  : kept\n    4  history -w\n    5  history\n")
         );
         // A file that cannot be read or written fails quietly, status 1.
-        assert_eq!(run(&format!("history -r {d}/nope")), (String::new(), 1));
-        assert_eq!(run(&format!("history -w {d}/no/dir")), (String::new(), 1));
+        assert_eq!(run_script(&format!("history -r {d}/nope")), (String::new(), 1));
+        assert_eq!(run_script(&format!("history -w {d}/no/dir")), (String::new(), 1));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -39622,22 +39827,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn history_store_and_print_drop_their_own_line() {
         // `-s` and `-p` each un-record the line they were written on, and `-s`
         // wins over both `-p` and `-d`.
-        assert_eq!(run("set -o history\n: a\nhistory -p one\nhistory").0, "one\n    1  : a\n    2  history\n");
+        assert_eq!(run_script("set -o history\n: a\nhistory -p one\nhistory").0, "one\n    1  : a\n    2  history\n");
         assert_eq!(
-            run("set -o history\n: a\nhistory -s -p one\nhistory").0,
+            run_script("set -o history\n: a\nhistory -s -p one\nhistory").0,
             "    1  : a\n    2  one\n    3  history\n"
         );
         assert_eq!(
-            run("set -o history\n: a\nhistory -d 1 -s foo\nhistory").0,
+            run_script("set -o history\n: a\nhistory -d 1 -s foo\nhistory").0,
             "    1  : a\n    2  foo\n    3  history\n"
         );
         // With no arguments at all they keep their own line.
-        assert_eq!(run("set -o history\nhistory -p\nhistory -s\nhistory").0.lines().count(), 3);
+        assert_eq!(run_script("set -o history\nhistory -p\nhistory -s\nhistory").0.lines().count(), 3);
         // Options cluster getopt-style, and `-d` takes an attached offset.
-        assert_eq!(run("set -o history\n: a\n: b\nhistory -d1\nhistory").0, "    1  : b\n    2  history -d1\n    3  history\n");
+        assert_eq!(run_script("set -o history\n: a\n: b\nhistory -d1\nhistory").0, "    1  : b\n    2  history -d1\n    3  history\n");
         // `-c` returns before `-s` is looked at, so a clustered `-cs` clears and
         // stores nothing — but the `-cs` line's own entry went with the clear.
-        assert_eq!(run("set -o history\n: a\nhistory -cs stored\nhistory").0, "    1  history\n");
+        assert_eq!(run_script("set -o history\n: a\nhistory -cs stored\nhistory").0, "    1  history\n");
     }
 
     #[test]

@@ -694,3 +694,95 @@ fn a_directory_rc_file_is_reported_and_survived() {
     assert_eq!(out, "cmd\n");
     assert!(err.contains("is a directory"), "not reported: {err:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Interactivity (bash's `interactive_shell` vs `interactive`)
+// ---------------------------------------------------------------------------
+
+/// `$-`'s `i`, `H` and `s` letters across every way of starting a shell.
+///
+/// These three are the observable face of the two globals bash keeps apart:
+/// `i` is `interactive_shell` (*how the shell was started*), `s` is
+/// `read_from_stdin`, and `H` merely *defaults* to `interactive_shell`. Crucially
+/// `i` is not a function of the mode — `-i -c cmd` really is an interactive shell
+/// running a `-c` string — which is what osh used to get wrong.
+///
+/// Every expectation below was measured with
+/// `bash --norc --noprofile <args>` on this machine; all eleven agree
+/// byte-for-byte with osh. Note the absence of `m`: job control cannot be
+/// enabled when stdio is a pipe, so even `-i` does not add it.
+#[test]
+fn dollar_dash_reports_how_the_shell_was_started() {
+    let home = TempHome::new("dashi");
+    home.write("d.sh", "echo $-\n");
+    let cmd = "echo $-";
+    for (args, want) in [
+        // A `-c` string is not interactive on its own…
+        (vec!["-c", cmd], "hBc"),
+        // …but `-i` makes it one, `H` following along.
+        (vec!["-i", "-c", cmd], "hiBHc"),
+        // `-s` alongside `-c` sets `read_from_stdin` too, so both letters show.
+        (vec!["-cs", cmd], "hBcs"),
+        (vec!["-i", "-cs", cmd], "hiBHcs"),
+        // `-H`/`+H` override the interactivity-derived default either way.
+        (vec!["-H", "-c", cmd], "hBHc"),
+        (vec!["-i", "+H", "-c", cmd], "hiBc"),
+        // A script file: not interactive, and no `s` — there is an operand.
+        (vec!["d.sh"], "hB"),
+        (vec!["-i", "d.sh"], "hiBH"),
+    ] {
+        let (out, err, code) = run_osh_in(&home, &args, "");
+        assert_eq!(code, 0, "{args:?}: {err:?}");
+        assert_eq!(out, format!("{want}\n"), "for {args:?}");
+    }
+    // Reading commands from stdin sets `s` however it was asked for — `-s`, a
+    // bare `-`, or simply having no operand. None of the three is interactive
+    // here, because the test harness gives the shell a pipe, not a terminal.
+    for args in [vec!["-s"], vec!["-"], vec![]] {
+        let (out, err, code) = run_osh_in(&home, &args, "echo $-\n");
+        assert_eq!(code, 0, "{args:?}: {err:?}");
+        assert_eq!(out, "hBs\n", "for {args:?}");
+    }
+}
+
+/// The two other things `-i` changes, both measured against bash: aliases expand
+/// by default, and diagnostics lose bash's `line N:` token.
+#[test]
+fn interactivity_reaches_aliases_and_diagnostics() {
+    let home = TempHome::new("iface");
+    let src = "alias g='echo hi'\ng";
+
+    // Non-interactive: `expand_aliases` is off, so `g` is not a command…
+    let (out, err, code) = run_osh_in(&home, &["--norc", "-c", src], "");
+    assert_eq!(out, "");
+    assert_eq!(code, 127);
+    // …and the diagnostic carries the line number.
+    assert_eq!(err, "osh: line 2: g: command not found\n");
+
+    // Interactive: the alias expands, so nothing is reported at all.
+    let (out, err, code) = run_osh_in(&home, &["--norc", "-i", "-c", src], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "hi\n");
+    assert_eq!(err, "");
+
+    // The dropped `line N:` token is a property of interactivity, not of the
+    // alias: an interactive shell reports a missing command without it.
+    let (_out, err, code) = run_osh_in(&home, &["--norc", "-i", "-c", "nosuchcmd_zz"], "");
+    assert_eq!(code, 127);
+    assert_eq!(err, "osh: nosuchcmd_zz: command not found\n");
+
+    // `shopt`/`$SHELLOPTS` agree with the behaviour: `expand_aliases`,
+    // `histexpand` and `history` are all on for an interactive shell. (bash also
+    // lists `emacs`; osh has no line editor, so it truthfully does not.)
+    let (out, err, code) = run_osh_in(
+        &home,
+        &["--norc", "-i", "-c", "shopt -p expand_aliases; echo \"$SHELLOPTS\""],
+        "",
+    );
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(
+        out,
+        "shopt -s expand_aliases\n\
+         braceexpand:hashall:histexpand:history:interactive-comments\n"
+    );
+}

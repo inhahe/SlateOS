@@ -6097,8 +6097,8 @@ impl Shell {
             CondExpr::Not(inner) => !self.cond_eval(inner),
             CondExpr::And(a, b) => self.cond_eval(a) && self.cond_eval(b),
             CondExpr::Or(a, b) => self.cond_eval(a) || self.cond_eval(b),
-            CondExpr::Unary(op, w) => self.cond_unary(*op, w),
-            CondExpr::Binary(l, op, r) => self.cond_binary(l, *op, r),
+            CondExpr::Unary(op, w) => self.cond_unary(op.op, w),
+            CondExpr::Binary(l, op, r) => self.cond_binary(l, op.op, r),
             CondExpr::Regex(l, r) => self.cond_regex(l, r),
         }
     }

@@ -35,6 +35,24 @@ c() {
 }
 declare -f c
 
+echo "=== an operator prints with the spelling it was written with"
+# `=`/`==` and `-h`/`-L` are the same test under two names; bash keeps the
+# source word in the node and echoes it back, so a reprint must not normalise
+# one spelling into the other.
+d() {
+	[[ a = b ]]
+	[[ a == b ]]
+	[[ -h /x ]]
+	[[ -L /x ]]
+	[[ a != b ]]
+	[[ a < b ]]
+	[[ a > b ]]
+	[[ 1 -eq 1 ]]
+}
+declare -f d
+eval "$(declare -f d)"
+declare -f d
+
 echo "=== and the printed form tests the same thing"
 x=q
 [[ ( -z "" || -n "" ) && -n "$x" ]] && echo s1

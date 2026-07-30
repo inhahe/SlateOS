@@ -8,7 +8,7 @@ use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseItem,
     CaseTerm, CmdSubBody,
     Command,
-    CondBinOp,
+    CondBinOp, CondBinary, CondUnary,
     CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, LineMap,
     LoopClause,
     ParamOp,
@@ -2193,7 +2193,7 @@ impl Parser {
         }
         // Otherwise: WORD [ binop WORD ].
         let left = self.expect_cond_word(CondPos::Primary)?;
-        if let Some(op) = self.peek_cond_binop() {
+        if let Some((op, op_text)) = self.peek_cond_binop() {
             self.advance_cond_binop();
             let right = self.expect_cond_word(CondPos::Binary)?;
             self.skip_cond_newlines();
@@ -2202,7 +2202,7 @@ impl Parser {
             }
             return Ok(CondExpr::Binary(
                 Box::new(left),
-                op.into_bin_op(),
+                op.into_bin_op(op_text),
                 Box::new(right),
             ));
         }
@@ -2331,10 +2331,10 @@ impl Parser {
     }
 
     /// Peek at a binary operator following an operand, without consuming.
-    fn peek_cond_binop(&self) -> Option<RawBinOp> {
+    fn peek_cond_binop(&self) -> Option<(RawBinOp, &'static str)> {
         match self.peek() {
-            Some(Tok::Op(Op::Less)) => Some(RawBinOp::StrLt),
-            Some(Tok::Op(Op::Great)) => Some(RawBinOp::StrGt),
+            Some(Tok::Op(Op::Less)) => Some((RawBinOp::StrLt, "<")),
+            Some(Tok::Op(Op::Great)) => Some((RawBinOp::StrGt, ">")),
             Some(Tok::Word(segs)) => {
                 if let [Seg::Lit(s)] = segs.as_slice() {
                     raw_binop_from(s)
@@ -3707,24 +3707,32 @@ fn dup_target_is_fd(target: &Word) -> bool {
     }
 }
 
-/// Map a `[[ … ]]` unary operator string to its [`UnaryOp`].
-fn unary_op_from(s: &str) -> Option<UnaryOp> {
-    Some(match s {
-        "-e" => UnaryOp::Exists,
-        "-f" => UnaryOp::File,
-        "-d" => UnaryOp::Dir,
-        "-r" => UnaryOp::Readable,
-        "-w" => UnaryOp::Writable,
-        "-x" => UnaryOp::Executable,
-        "-s" => UnaryOp::NonEmptyFile,
-        "-z" => UnaryOp::ZeroLen,
-        "-n" => UnaryOp::NonZeroLen,
-        "-v" => UnaryOp::VarSet,
-        "-o" => UnaryOp::OptionSet,
-        "-L" | "-h" => UnaryOp::Symlink,
-        "-t" => UnaryOp::Terminal,
-        _ => return None,
-    })
+/// Map a `[[ … ]]` unary operator string to its [`CondUnary`], keeping the
+/// spelling it was written with (`-h` and `-L` are the same test but must print
+/// back differently).
+fn unary_op_from(s: &str) -> Option<CondUnary> {
+    // A table rather than a `match`, because the spelling has to come back out
+    // as a `&'static str`: `-L` and `-h` select the same test but are distinct
+    // entries so that each keeps its own name.
+    const OPS: &[(&str, UnaryOp)] = &[
+        ("-e", UnaryOp::Exists),
+        ("-f", UnaryOp::File),
+        ("-d", UnaryOp::Dir),
+        ("-r", UnaryOp::Readable),
+        ("-w", UnaryOp::Writable),
+        ("-x", UnaryOp::Executable),
+        ("-s", UnaryOp::NonEmptyFile),
+        ("-z", UnaryOp::ZeroLen),
+        ("-n", UnaryOp::NonZeroLen),
+        ("-v", UnaryOp::VarSet),
+        ("-o", UnaryOp::OptionSet),
+        ("-L", UnaryOp::Symlink),
+        ("-h", UnaryOp::Symlink),
+        ("-t", UnaryOp::Terminal),
+    ];
+    OPS.iter()
+        .find(|(text, _)| *text == s)
+        .map(|&(text, op)| CondUnary { op, text })
 }
 
 /// Where inside a `[[ … ]]` conditional an operand was expected — selects the
@@ -3762,8 +3770,8 @@ enum RawBinOp {
 }
 
 impl RawBinOp {
-    fn into_bin_op(self) -> CondBinOp {
-        match self {
+    fn into_bin_op(self, text: &'static str) -> CondBinary {
+        let op = match self {
             RawBinOp::StrEq => CondBinOp::StrEq,
             RawBinOp::StrNe => CondBinOp::StrNe,
             RawBinOp::StrLt => CondBinOp::StrLt,
@@ -3779,27 +3787,31 @@ impl RawBinOp {
             RawBinOp::FileNewer => CondBinOp::FileNewer,
             RawBinOp::FileOlder => CondBinOp::FileOlder,
             RawBinOp::SameFile => CondBinOp::SameFile,
-        }
+        };
+        CondBinary { op, text }
     }
 }
 
-/// Map a `[[ … ]]` binary operator word to its [`RawBinOp`].
-fn raw_binop_from(s: &str) -> Option<RawBinOp> {
-    Some(match s {
-        "==" | "=" => RawBinOp::StrEq,
-        "!=" => RawBinOp::StrNe,
-        "=~" => RawBinOp::Regex,
-        "-eq" => RawBinOp::NumEq,
-        "-ne" => RawBinOp::NumNe,
-        "-lt" => RawBinOp::NumLt,
-        "-le" => RawBinOp::NumLe,
-        "-gt" => RawBinOp::NumGt,
-        "-ge" => RawBinOp::NumGe,
-        "-nt" => RawBinOp::FileNewer,
-        "-ot" => RawBinOp::FileOlder,
-        "-ef" => RawBinOp::SameFile,
-        _ => return None,
-    })
+/// Map a `[[ … ]]` binary operator word to its [`RawBinOp`] and the spelling it
+/// was written with — `==` and `=` are the same comparison under two names, and
+/// bash prints back whichever one the source used.
+fn raw_binop_from(s: &str) -> Option<(RawBinOp, &'static str)> {
+    const OPS: &[(&str, RawBinOp)] = &[
+        ("==", RawBinOp::StrEq),
+        ("=", RawBinOp::StrEq),
+        ("!=", RawBinOp::StrNe),
+        ("=~", RawBinOp::Regex),
+        ("-eq", RawBinOp::NumEq),
+        ("-ne", RawBinOp::NumNe),
+        ("-lt", RawBinOp::NumLt),
+        ("-le", RawBinOp::NumLe),
+        ("-gt", RawBinOp::NumGt),
+        ("-ge", RawBinOp::NumGe),
+        ("-nt", RawBinOp::FileNewer),
+        ("-ot", RawBinOp::FileOlder),
+        ("-ef", RawBinOp::SameFile),
+    ];
+    OPS.iter().find(|(text, _)| *text == s).map(|&(text, op)| (op, text))
 }
 
 #[cfg(test)]
@@ -4575,7 +4587,39 @@ mod tests {
         else {
             panic!("expected cond binary");
         };
-        assert_eq!(*op, CondBinOp::StrEq);
+        assert_eq!(op.op, CondBinOp::StrEq);
+        assert_eq!(op.text, "==");
+    }
+
+    /// A synonym must keep the spelling it was written with: bash echoes the
+    /// operator's source word back verbatim, both when `declare -f` reprints a
+    /// function and in a `set -x` trace, so `-h` never becomes `-L` nor `=`
+    /// become `==`.
+    #[test]
+    fn cond_operator_keeps_its_spelling() {
+        let binop = |src: &str| {
+            let prog = parse(src).unwrap();
+            let Command::Cond(CondExpr::Binary(_, op, _)) = &prog.items[0].list.first.commands[0]
+            else {
+                panic!("expected cond binary");
+            };
+            (op.op, op.text)
+        };
+        assert_eq!(binop("[[ a = b ]]"), (CondBinOp::StrEq, "="));
+        assert_eq!(binop("[[ a == b ]]"), (CondBinOp::StrEq, "=="));
+        assert_eq!(binop("[[ a < b ]]"), (CondBinOp::StrLt, "<"));
+        assert_eq!(binop("[[ a -ef b ]]"), (CondBinOp::SameFile, "-ef"));
+
+        let unop = |src: &str| {
+            let prog = parse(src).unwrap();
+            let Command::Cond(CondExpr::Unary(op, _)) = &prog.items[0].list.first.commands[0] else {
+                panic!("expected cond unary");
+            };
+            (op.op, op.text)
+        };
+        assert_eq!(unop("[[ -h f ]]"), (UnaryOp::Symlink, "-h"));
+        assert_eq!(unop("[[ -L f ]]"), (UnaryOp::Symlink, "-L"));
+        assert_eq!(unop("[[ -n f ]]"), (UnaryOp::NonZeroLen, "-n"));
     }
 
     #[test]

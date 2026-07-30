@@ -112,9 +112,9 @@ pub enum CondExpr {
     /// A single word — true if it expands to a non-empty string.
     Word(Word),
     /// Unary file/string test: `-e -f -d -r -w -x -s` (file), `-z -n` (string).
-    Unary(UnaryOp, Word),
+    Unary(CondUnary, Word),
     /// Binary comparison between two words.
-    Binary(Box<Word>, CondBinOp, Box<Word>),
+    Binary(Box<Word>, CondBinary, Box<Word>),
     /// `lhs =~ rhs` — POSIX-ERE regex match. The RHS undergoes parameter
     /// expansion; on a successful match the interpreter populates the
     /// `BASH_REMATCH` array with the whole match and capture groups.
@@ -133,6 +133,33 @@ pub enum CondExpr {
     /// would be worse than untidy, because `( a || b ) && c` reprinted without
     /// the parentheses is `a || (b && c)`, a different test.
     Group(Box<CondExpr>),
+}
+
+/// A `[[ … ]]` unary test operator together with the spelling it was written
+/// with.
+///
+/// bash keeps the operator's source word in the node and echoes it back
+/// verbatim — both in a `set -x` trace and when `declare -f` reprints the
+/// function — so a synonym must survive parsing: `[[ -h f ]]` comes back out as
+/// `-h`, never normalised to its twin `-L`. The [`UnaryOp`] carries the
+/// semantics, `text` only the spelling; nothing should dispatch on `text`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CondUnary {
+    /// Which test to perform.
+    pub op: UnaryOp,
+    /// The operator exactly as written (`-h` vs. `-L`).
+    pub text: &'static str,
+}
+
+/// A `[[ … ]]` binary operator together with the spelling it was written with —
+/// the binary counterpart of [`CondUnary`], so that `[[ a = b ]]` is not
+/// reprinted as `[[ a == b ]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CondBinary {
+    /// Which comparison to perform.
+    pub op: CondBinOp,
+    /// The operator exactly as written (`=` vs. `==`).
+    pub text: &'static str,
 }
 
 /// Unary test operators inside `[[ … ]]`.

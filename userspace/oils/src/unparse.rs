@@ -22,8 +22,8 @@
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseMode, CmdSubBody,
     Command,
-    CondBinOp, CondExpr, Item, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor,
-    SimpleCommand, UnaryOp, Word, WordPart,
+    CondExpr, Item, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor,
+    SimpleCommand, Word, WordPart,
 };
 
 /// Deparse a `${…}` case-modification operator: `^`/`^^` (upper), `,`/`,,`
@@ -770,51 +770,18 @@ fn cond_src(expr: &CondExpr) -> String {
         // means rather than as written — one of the few places its printer
         // normalises instead of echoing the source.
         CondExpr::Word(w) => format!("-n {}", word_src(w)),
-        CondExpr::Unary(op, w) => format!("{} {}", unary_op_str(*op), word_src(w)),
+        // Operators print with the spelling they were written with, which the
+        // AST kept for exactly this reason: `[[ -h f ]]` and `[[ a = b ]]` must
+        // not come back out as `-L` and `==`.
+        CondExpr::Unary(op, w) => format!("{} {}", op.text, word_src(w)),
         CondExpr::Binary(l, op, r) => {
-            format!("{} {} {}", word_src(l), bin_op_str(*op), word_src(r))
+            format!("{} {} {}", word_src(l), op.text, word_src(r))
         }
         CondExpr::Regex(l, r) => format!("{} =~ {}", word_src(l), word_src(r)),
         CondExpr::Not(e) => format!("! {}", cond_src(e)),
         CondExpr::And(a, b) => format!("{} && {}", cond_src(a), cond_src(b)),
         CondExpr::Or(a, b) => format!("{} || {}", cond_src(a), cond_src(b)),
         CondExpr::Group(e) => format!("( {} )", cond_src(e)),
-    }
-}
-
-fn unary_op_str(op: UnaryOp) -> &'static str {
-    match op {
-        UnaryOp::Exists => "-e",
-        UnaryOp::File => "-f",
-        UnaryOp::Dir => "-d",
-        UnaryOp::Readable => "-r",
-        UnaryOp::Writable => "-w",
-        UnaryOp::Executable => "-x",
-        UnaryOp::NonEmptyFile => "-s",
-        UnaryOp::ZeroLen => "-z",
-        UnaryOp::NonZeroLen => "-n",
-        UnaryOp::VarSet => "-v",
-        UnaryOp::OptionSet => "-o",
-        UnaryOp::Symlink => "-L",
-        UnaryOp::Terminal => "-t",
-    }
-}
-
-fn bin_op_str(op: CondBinOp) -> &'static str {
-    match op {
-        CondBinOp::StrEq => "==",
-        CondBinOp::StrNe => "!=",
-        CondBinOp::StrLt => "<",
-        CondBinOp::StrGt => ">",
-        CondBinOp::NumEq => "-eq",
-        CondBinOp::NumNe => "-ne",
-        CondBinOp::NumLt => "-lt",
-        CondBinOp::NumLe => "-le",
-        CondBinOp::NumGt => "-gt",
-        CondBinOp::NumGe => "-ge",
-        CondBinOp::FileNewer => "-nt",
-        CondBinOp::FileOlder => "-ot",
-        CondBinOp::SameFile => "-ef",
     }
 }
 

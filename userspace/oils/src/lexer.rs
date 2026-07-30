@@ -477,6 +477,48 @@ pub fn open_quote(src: &str, opts: LexOpts) -> Option<char> {
     }
 }
 
+/// Whether `src` ends in a `\<newline>` that the lexer **deleted** as a line
+/// continuation, so a line-at-a-time reader must take another line even though
+/// what remains after the deletion may well parse as a complete command.
+///
+/// This is the other half of the reader state history expansion needs (see
+/// [`open_quote`] for the quote half). `echo x \` joined to nothing is just
+/// `echo x`, a runnable command — so a caller that decides "do I need another
+/// line?" by parsing will stop there and never offer the continuation line for
+/// expansion, which is how `echo x \` / `!!` came to run its `!!` literally
+/// where bash expands it.
+///
+/// The test is deliberately not textual. A trailing `\` is *not* always a
+/// continuation: inside `'…'` or a quoted-delimiter here-document body the
+/// lexer keeps it, and at end of input with no newline after it there is
+/// nothing to continue onto. So this asks the lexer what it actually deleted —
+/// `conts` records the offset of every such backslash — rather than
+/// re-deriving the rule and risking the two drifting apart.
+#[must_use]
+pub fn ends_in_continuation(src: &str, opts: LexOpts) -> bool {
+    let chars: Vec<char> = src.chars().collect();
+    // The `\` must be the last character before the final newline.
+    let Some(nl) = chars.len().checked_sub(1) else {
+        return false;
+    };
+    if chars.get(nl) != Some(&'\n') {
+        return false;
+    }
+    // Immediately before it — a `\<CR><LF>` is *not* a continuation, because the
+    // `\` escapes the CR and the newline then ends the line. Verified against
+    // bash: a CRLF script's `echo x \` prints `x \r` and does not join.
+    let Some(bs) = nl.checked_sub(1) else {
+        return false;
+    };
+    if chars.get(bs) != Some(&'\\') {
+        return false;
+    }
+    let Ok(bs) = u32::try_from(bs) else {
+        return false;
+    };
+    tokenize_deferred(src, opts).conts.binary_search(&bs).is_ok()
+}
+
 /// Like [`tokenize_spanned`] but reports an unterminated here-document (its
 /// delimiter never reached before the input ends) as a [`LexError`] instead of
 /// leniently accepting the partial body. Used only by the interactive REPL's
@@ -2363,6 +2405,35 @@ mod tests {
         }
         // A complete line has no state to carry.
         assert_eq!(q("echo 'x'\n"), None);
+    }
+
+    /// [`ends_in_continuation`] — the other half of the reader state. The point
+    /// of asking the lexer rather than the text is the negative cases: a `\`
+    /// the lexer *keeps* is not a continuation, so the reader must not wait.
+    #[test]
+    fn ends_in_continuation_asks_which_backslashes_were_deleted() {
+        let c = |src: &str| super::ends_in_continuation(src, LexOpts::default());
+        assert!(c("echo x \\\n"));
+        // `\<CR><LF>` is not one: the `\` escapes the CR. Measured — a CRLF
+        // script's `echo x \` prints `x \r` in bash too, joined to nothing.
+        assert!(!c("echo x \\\r\n"));
+        // An escaped backslash is a literal one, so the line is finished.
+        assert!(!c("echo x \\\\\n"));
+        assert!(c("echo x \\\\\\\n"));
+        // Nothing to continue onto: no newline after the `\`, or no `\` at all.
+        assert!(!c("echo x \\"));
+        assert!(!c("echo x\n"));
+        assert!(!c(""));
+        // A `\` the lexer keeps is not a continuation — inside `'…'` it is a
+        // literal backslash, and inside a quoted-delimiter here-document body
+        // the whole body is literal.
+        assert!(!c("echo 'x \\\n"));
+        assert!(!c("cat <<'E'\nx \\\n"));
+        // …but an unquoted here-doc delimiter makes its body join lines, so there
+        // the same text *is* a continuation.
+        assert!(c("cat <<E\nx \\\n"));
+        // Only the final line counts: an earlier continuation is already joined.
+        assert!(!c("echo x \\\ny\n"));
     }
 
     /// `extglob` is a lexing option, so with it off `@(` is an ordinary `@` word

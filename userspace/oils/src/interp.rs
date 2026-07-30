@@ -3677,8 +3677,17 @@ impl Shell {
     /// here-document lexing, so `cat <<EOF` counts as complete and the body that
     /// follows is left for the parser to swallow rather than being offered for
     /// history expansion.
+    ///
+    /// Parsing alone is not enough, though: the lexer *deletes* a `\<newline>`,
+    /// so `echo x \` parses as the complete command `echo x` even though bash's
+    /// reader is plainly still waiting for the joined line. That is asked
+    /// separately, of the lexer rather than of the text, so the two agree on
+    /// which backslashes are continuations at all.
     fn needs_more_lines(&self, src: &str) -> bool {
         let opts = self.lex_opts();
+        if crate::lexer::ends_in_continuation(src, opts) {
+            return true;
+        }
         let parsed = if self.aliases_enabled() {
             parse_with_aliases(src, &self.aliases, opts)
         } else {

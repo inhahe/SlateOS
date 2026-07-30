@@ -8748,10 +8748,10 @@ ten measured shapes, plus unit tests
 
 **Discovered while measuring:** the tenth row of the table above is wrong. A
 backslash continuation does *not* agree — see TD-OILS-HISTEXPAND-BACKSLASH-LINE
-below, which is a separate bug in the reader's frontier rather than in the quote
-state, and which this change neither caused nor fixed.
+below, a separate bug in the reader's *frontier* rather than in the quote state,
+which this change neither caused nor fixed and which was fixed straight after.
 
-### TD-OILS-HISTEXPAND-BACKSLASH-LINE. A line ending in `\` is treated as complete, so the continuation line after it never reaches history expansion — OPEN 2026-07-29
+### TD-OILS-HISTEXPAND-BACKSLASH-LINE. A line ending in `\` is treated as complete, so the continuation line after it never reaches history expansion — ✅ RESOLVED 2026-07-29
 
 **Where:** `userspace/oils/src/interp.rs` — `needs_more_lines()`, and through it
 the loop in `expand_history_lines()`.
@@ -8778,20 +8778,28 @@ resolved above): `lexer::open_quote` correctly reports `None` here, and the
 continuation line simply never gets expanded at all. It is the reader's
 *frontier* that is wrong, not the context it expands in.
 
-**Proper fix.** A trailing unescaped `\` means the reader needs another line
-regardless of what the joined text parses as, which is exactly what bash's
-`\<newline>`-at-end-of-input handling does. `lexer.rs` already has the predicate
-(`ends_with_continuation`, currently private); `needs_more_lines` should return
-`true` when the final physical line of `src` ends in one. Note the check has to
-be on the *last* line of the accumulated text and must not fire for a `\` that is
-itself inside `'…'` or a quoted here-document delimiter, where the lexer does not
-delete it — the `conts` list `tokenize_deferred` already returns records exactly
-which backslashes were deleted, so an offset-based check against it is the
-faithful test rather than a textual one.
+**Fix (2026-07-29).** `lexer.rs` gained
+`ends_in_continuation(src, opts) -> bool`, and `needs_more_lines` returns `true`
+when it says so, before parsing at all.
 
-**Test to add.** The section removed from
-`tests/corpus/histexpand-continuation.sh` (the `echo x \` / `!!` case), which is
-measured and ready to paste back.
+The test is deliberately not textual, because a trailing `\` is not always a
+continuation: inside `'…'` or a quoted-delimiter here-document body the lexer
+keeps it, and with no newline after it there is nothing to continue onto. So the
+predicate asks the lexer what it *actually deleted* — `tokenize_deferred` already
+returns `conts`, the offset of every backslash whose `\<newline>` it removed —
+rather than re-deriving the rule and risking the two drifting apart.
+
+One measured detail: `\<CR><LF>` is **not** a continuation. The `\` escapes the CR
+and the newline then ends the line, so a CRLF script's `echo x \` prints `x \r`
+and joins nothing — bash on this host does the same. The predicate therefore
+keys only on a `\` immediately before the final `\n`.
+
+**Tests.** The `echo x \` / `!!` section of
+`tests/corpus/histexpand-continuation.sh`, together with the `echo 'x \` / `!!'`
+negative case, plus the unit test
+`lexer::tests::ends_in_continuation_asks_which_backslashes_were_deleted` (which
+covers the `'…'`, quoted-here-doc, escaped-backslash, no-newline and
+already-joined cases).
 
 ### TD-OILS-FD0-WRITE. fd 0 has no write side, so `>&0` silently writes to stdout instead of the descriptor — ✅ RESOLVED 2026-07-28
 

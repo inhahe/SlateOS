@@ -59,6 +59,18 @@ echo one
 echo `echo 'y
 !!'`
 
+# --- a `\` continuation still offers the joined line for expansion ------------
+# The lexer *deletes* the `\<newline>`, so the text so far parses as the complete
+# command `echo x` — but the reader is still waiting, and the `!!` expands.
+echo one
+echo x \
+!!
+# A `\` inside a single-quoted string is not a continuation, so nothing is
+# carried and the closing line is an ordinary one.
+echo one
+echo 'x \
+!!'
+
 # --- a compound command's later lines are outside any quote ------------------
 echo one
 if true; then

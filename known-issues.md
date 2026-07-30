@@ -6063,6 +6063,60 @@ byte-oriented, and the escape layer already masks `\xHH`/`\nnn` to a byte
 once a word can hold the byte. Do **not** attempt it piecemeal — a half-converted
 `vars` map with a `String`-typed lexer is worse than either end state.
 
+**Progress (branch `oils-byte-strings`).** Done so far, each its own green
+commit (build + test + clippy on `x86_64-pc-windows-gnu` *and* `x86_64-slateos`):
+
+1. `bytes.rs` — the foundation: `Str = Vec<u8>` / `BStr<'a> = &'a [u8]`, the
+   `bfmt!` concatenating macro (there is deliberately no format-string macro:
+   `Display for bstr::BStr` is lossy, so a `{}` that silently accepted a
+   `String` would reintroduce the bug), `char_count`/`char_slice`, and the
+   `#[deprecated] scaffold_lossy_string` seam marker.
+2. `escape.rs` + `printf` — byte-native. `\xa9`/`\377` now emit **one** byte.
+3. `bytes::Ch` — the character of a byte string: `Ch::U(char)` for a decoded
+   scalar, `Ch::B(u8)` for a byte that begins no valid sequence. Needed because
+   `?`, `${#v}` and `${v^^}` are character-defined; a raw `u8` would let `?`
+   match a third of a two-byte character, and a plain `char` could not tell a
+   decode failure from a real U+FFFD in the data.
+4. The byte-to-`OsStr`/`Path` boundary. On the real target the target JSON says
+   `"target-family": ["unix"]`, so `os_to_bytes` is the identity — this is what
+   makes the whole refactor worth doing. The Windows dev host stays lossy
+   (its names are UTF-16; there are no bytes to recover).
+5. The glob/pattern engine and the character-defined parameter operators
+   (`${v#p}`, `${v:o:l}`, `${v/p/r}`, `${v^^}`) run on `Ch` end-to-end. This
+   removed the two `to_string_lossy` calls on directory entries that made the
+   shell glob up a name it could then not open.
+
+**Remaining, in order.** The next step is the keystone and must be done as one
+commit, because expansion and the variable store are each other's main producer
+and consumer — converting either alone needs a scaffold at every site the other
+would have satisfied for free:
+
+6. **The value layer.** `Shell::vars`/`arrays`/`assoc`/`positional`/`cwd` to
+   `Str`, and `expand_word`/`expand_to_string`/`expand_dynamic`/
+   `expand_double_quoted` to `Str`. Measured cost: flipping just the four field
+   types produces **159** lib errors (plus test-code fallout), so budget a
+   mechanical grind rather than a quick edit. Watch for the sites that need a
+   real decision rather than a widening: `declare -p`/`export -p` output, the
+   numeric parses (`.parse::<i64>()` on a value), `IFS` handling, and anything
+   that hands a value to `Command::arg` (needs `bytes::bytes_to_os`, never a
+   lossy string).
+7. The file readers: `main.rs:517`, `interp.rs:3199`/`3962`/`4059`/`21523`/
+   `25789`, `substitute_file`, `finish_comsub`, `builtin_mapfile`,
+   `read_record` — the `read_to_string`/`from_utf8_lossy` sites listed above.
+   These are cheap *once* step 6 lands and impossible before it.
+8. `lexer.rs` + `ast.rs` + `parser.rs` (`WordPart::Literal(Str)`,
+   `SingleQuoted { text: Str }`), dragging `brace.rs` and `unparse.rs`.
+9. `arith.rs`, `histexpand.rs`, `ere.rs`, `main.rs`.
+10. The diagnostic layer (`errln`, `err_prefix`, `write_line`) — ~378 sites,
+    almost all `format!` with static text, so it wants a `berrln!` macro rather
+    than 378 hand edits.
+
+**Gate.** The branch does not merge until `scaffold_lossy_string` is deleted and
+a grep for it outside `bytes.rs` returns nothing. That grep count *is* the
+tracker — because each seam needs `#[allow(deprecated)]` to keep the build
+warning-free, the deprecation warning itself never accumulates. Count after
+step 5: **17**.
+
 **Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
 `TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts
 where osh already matches UTF-8-locale bash, and the byte-string move must

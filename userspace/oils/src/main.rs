@@ -228,6 +228,17 @@ fn main() {
     process::exit(code);
 }
 
+/// The operands trailing the shell's own options, as the byte-typed positional
+/// parameters the shell stores.
+///
+/// A positional parameter is a *value* — routinely a path — so the shell holds
+/// it as bytes. The widening is lossless; what is still narrow is the argv this
+/// process was handed, read through `std::env::args()`
+/// (TD-OILS-BYTE-STRINGS step 9 moves that to `args_os`).
+fn positional_args(args: Option<&[String]>) -> Vec<Vec<u8>> {
+    args.unwrap_or_default().iter().map(|a| a.clone().into_bytes()).collect()
+}
+
 fn run(args: &[String]) -> i32 {
     let mut sh = Shell::new();
     // Take ownership of the inherited process environment: environment
@@ -463,25 +474,21 @@ fn run(args: &[String]) -> i32 {
             sh.set_execution_string(command.clone());
             if let Some(name) = args.get(base + 1) {
                 sh.set_name(name.clone());
-                sh.set_positional(
-                    args.get(base + 2..).map(<[String]>::to_vec).unwrap_or_default(),
-                );
+                sh.set_positional(positional_args(args.get(base + 2..)));
             }
             Plan::Command(command)
         }
         InvokeMode::Stdin => {
             // `osh -s [arg…]`: read commands from stdin like the bare REPL, but
             // with the operands bound as positional parameters ($1, $2, …).
-            sh.set_positional(args.get(base..).map(<[String]>::to_vec).unwrap_or_default());
+            sh.set_positional(positional_args(args.get(base..)));
             Plan::Repl
         }
         InvokeMode::Repl => match args.get(base).map(String::as_str) {
             Some(path) if opts_ended || !path.starts_with('-') => {
                 sh.set_name(path.to_string());
                 sh.set_script_mode();
-                sh.set_positional(
-                    args.get(base + 1..).map(<[String]>::to_vec).unwrap_or_default(),
-                );
+                sh.set_positional(positional_args(args.get(base + 1..)));
                 Plan::Script(path)
             }
             Some(other) => {

@@ -156,6 +156,65 @@ pub fn scaffold_lossy_string(v: BStr<'_>) -> String {
     String::from_utf8_lossy(v).into_owned()
 }
 
+/// Append a `char`'s UTF-8 spelling to a byte string.
+///
+/// The counterpart of `String::push` for the many loops that walk *source* text
+/// (which the parser still hands over as `&str`) while building a *value*
+/// (which is bytes). Lossless in both directions: a `char` is by definition
+/// encodable, and what comes back out through [`chars`] is the same character.
+pub fn push_char(out: &mut Str, c: char) {
+    let mut buf = [0u8; 4];
+    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+}
+
+/// Borrow `s` as `&str` when — and only when — it is valid UTF-8.
+///
+/// This is the *honest* counterpart to [`scaffold_lossy_string`]: it never
+/// invents a replacement character, it reports that the bytes are not text.
+/// Use it where a value has to be interpreted as text to mean anything at all
+/// — a numeric parse, a `strftime` format, a lookup in a `HashMap<String, _>`
+/// keyed by a portable identifier — because for those the correct answer for
+/// non-UTF-8 input is "this is not a number / not that name", not "here is a
+/// mangled approximation".
+#[must_use]
+pub fn as_str(s: BStr<'_>) -> Option<&str> {
+    std::str::from_utf8(s).ok()
+}
+
+/// Parse a shell value as a decimal integer the way the shell's numeric
+/// contexts do: surrounding ASCII whitespace is ignored, and anything that is
+/// not a well-formed number — including bytes that are not text at all —
+/// yields `None`.
+#[must_use]
+pub fn parse_i64(s: BStr<'_>) -> Option<i64> {
+    as_str(trim(s))?.parse::<i64>().ok()
+}
+
+/// Drop leading ASCII whitespace.
+///
+/// ASCII and not Unicode, because that is what bash trims: it reads a value one
+/// byte at a time through `isspace`, which in the C locale is exactly
+/// `\t \n \v \f \r` and the space. (`bstr`'s `trim_start` would need the
+/// `unicode` feature, and would also trim characters bash keeps.)
+#[must_use]
+pub fn trim_start(s: BStr<'_>) -> BStr<'_> {
+    let i = s.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(s.len());
+    s.get(i..).unwrap_or_default()
+}
+
+/// Drop trailing ASCII whitespace. See [`trim_start`].
+#[must_use]
+pub fn trim_end(s: BStr<'_>) -> BStr<'_> {
+    let i = s.iter().rposition(|b| !b.is_ascii_whitespace()).map_or(0, |i| i + 1);
+    s.get(..i).unwrap_or_default()
+}
+
+/// Drop ASCII whitespace from both ends. See [`trim_start`].
+#[must_use]
+pub fn trim(s: BStr<'_>) -> BStr<'_> {
+    trim_end(trim_start(s))
+}
+
 /// Case-map `s`, applying `map` to each `char` of every valid UTF-8 run and
 /// passing invalid bytes through unchanged.
 ///
@@ -304,6 +363,22 @@ impl Ch {
         match self {
             Ch::U(c) => Some(c),
             Ch::B(_) => None,
+        }
+    }
+
+    /// Whether this is a control character, for the quoters that switch to the
+    /// ANSI-C `$'…'` form when a value holds one.
+    ///
+    /// A byte that decodes to nothing is *not* a control character: every C0/C1
+    /// control is a Unicode scalar value, so an undecodable byte is by
+    /// definition none of them, and bash — reading the same bytes with
+    /// `iscntrl` in the C locale — says the same, since an undecodable byte is
+    /// always ≥ 0x80 while `iscntrl` there covers only 0x00–0x1F and 0x7F.
+    #[must_use]
+    pub fn is_control(self) -> bool {
+        match self {
+            Ch::U(c) => c.is_control(),
+            Ch::B(_) => false,
         }
     }
 

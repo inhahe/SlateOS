@@ -333,6 +333,31 @@ pub fn eval(expr: &str, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
     eval_expr(&ast, vars, 0)
 }
 
+/// [`eval`] on an expression that arrives as *bytes* — the ordinary case for the
+/// shell, whose arithmetic text is assembled from variable values and command
+/// substitutions and so may hold any byte at all.
+///
+/// A byte that decodes to no character cannot be part of a well-formed
+/// expression: every arithmetic operator, digit and identifier character is
+/// ASCII, so such a byte is exactly the "invalid arithmetic operator" the lexer
+/// rejects — which is also what bash, reading the same bytes in the C locale,
+/// reports. Answering that is the honest result; converting the byte to U+FFFD
+/// and evaluating the mangled text could instead yield a *number*, and a wrong
+/// number is worse than an error.
+///
+/// TD-OILS-BYTE-STRINGS step 9 makes the lexer itself byte-native, at which
+/// point this becomes a thin wrapper and the diagnostic regains its
+/// `(error token is "…")` suffix, which cannot be built from a `String` today.
+///
+/// # Errors
+/// As [`eval`], plus a syntax error for an expression that is not text.
+pub fn eval_bytes(expr: crate::bytes::BStr<'_>, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
+    let Some(expr) = crate::bytes::as_str(expr) else {
+        return Err(ArithError::new("syntax error: invalid arithmetic operator"));
+    };
+    eval(expr, vars)
+}
+
 /// Maximum depth of recursive variable evaluation (`b=a; a=b` would loop
 /// forever). bash reports "expression recursion level exceeded" at a similar
 /// bound. Each level re-parses the value string (itself a recursive-descent

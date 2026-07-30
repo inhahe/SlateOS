@@ -96,6 +96,8 @@
 //! - Background (`&`) runs a single external command asynchronously; compound
 //!   background jobs run synchronously.
 
+use bstr::ByteSlice;
+
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -436,15 +438,18 @@ fn io_error_message(e: &std::io::Error) -> String {
 /// leak into `$PWD`, `$OLDPWD`, `pwd`, `$DIRSTACK` and `dirs` output and silently
 /// break all of the above. Windows accepts `/` in every path API, so the
 /// converted form still round-trips as a real path.
-fn shell_path(p: &std::path::Path) -> String {
-    let s = p.to_string_lossy();
+fn shell_path(p: &std::path::Path) -> Str {
+    let s = bytes::path_to_bytes(p);
     // `canonicalize` on Windows returns the `\\?\` (or `\\?\UNC\`) form; strip
     // it so the reported path is the one the user could have typed.
-    let s = s
-        .strip_prefix(r"\\?\UNC\")
-        .map(|rest| format!(r"\\{rest}"))
-        .unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
-    s.replace('\\', "/")
+    let s = if let Some(rest) = s.strip_prefix(br"\\?\UNC\".as_slice()) {
+        bfmt![br"\\", rest]
+    } else if let Some(rest) = s.strip_prefix(br"\\?\".as_slice()) {
+        rest.to_vec()
+    } else {
+        s
+    };
+    s.replace(b"\\", b"/")
 }
 
 /// The current working directory as a shell-facing path (see [`shell_path`]),
@@ -453,7 +458,7 @@ fn shell_path(p: &std::path::Path) -> String {
 ///
 /// Only used to *seed* [`Shell::cwd`] at construction. Everything after that
 /// reads the shell's own directory, which is per-`Shell` (see the field docs).
-fn shell_cwd() -> String {
+fn shell_cwd() -> Str {
     std::env::current_dir().as_deref().map(shell_path).unwrap_or_default()
 }
 
@@ -462,12 +467,7 @@ fn shell_cwd() -> String {
 ///
 /// The Windows forms matter only on the development host, but they have to be
 /// recognised or [`Shell::resolve`] would glue `C:/x` onto the end of the cwd.
-fn path_is_rooted(p: &str) -> bool {
-    path_is_rooted_b(p.as_bytes())
-}
-
-/// [`path_is_rooted`] over a byte path.
-fn path_is_rooted_b(b: BStr<'_>) -> bool {
+fn path_is_rooted(b: BStr<'_>) -> bool {
     match b {
         [b'/' | b'\\', ..] => true,
         // `C:` — drive-qualified, whether or not a separator follows. `C:x` is
@@ -485,19 +485,8 @@ fn path_is_rooted_b(b: BStr<'_>) -> bool {
 /// in-process subshell) carries its own `cwd`, and every filesystem access is
 /// rebased through here. An empty `cwd` means "not tracking" (the process cwd
 /// is authoritative) and leaves the path untouched.
-fn resolve_against(cwd: &str, path: &str) -> String {
-    // Joining two `&str`s with a `/` yields UTF-8 by construction, so this
-    // decode cannot fail; the fallback exists only because `from_utf8` returns
-    // a `Result`. (This `&str` form goes away with TD-OILS-BYTE-STRINGS —
-    // `resolve_against_b` is the real one.)
-    String::from_utf8(resolve_against_b(cwd.as_bytes(), path.as_bytes())).unwrap_or_default()
-}
-
-/// [`resolve_against`] over byte paths — the form every byte-native caller
-/// (the glob engine, and eventually every filesystem access) uses. A path is
-/// bytes: on SlateOS any byte but `/` and NUL may appear in one.
-fn resolve_against_b(cwd: BStr<'_>, path: BStr<'_>) -> Str {
-    if path_is_rooted_b(path) || cwd.is_empty() {
+fn resolve_against(cwd: BStr<'_>, path: BStr<'_>) -> Str {
+    if path_is_rooted(path) || cwd.is_empty() {
         return path.to_vec();
     }
     // An empty path stays empty: the OS must be the one to reject it, so
@@ -519,8 +508,11 @@ fn resolve_against_b(cwd: BStr<'_>, path: BStr<'_>) -> Str {
 /// so canonicalised paths are the stand-in (the same approximation `test -ef`
 /// already uses — see known-issues TD-OILS12). A path that cannot be
 /// canonicalised (missing, or not readable) is never "the same".
-fn same_directory(a: &str, b: &str) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+fn same_directory(a: BStr<'_>, b: BStr<'_>) -> bool {
+    match (
+        std::fs::canonicalize(bytes::bytes_to_path(a)),
+        std::fs::canonicalize(bytes::bytes_to_path(b)),
+    ) {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
     }
@@ -533,35 +525,35 @@ fn same_directory(a: &str, b: &str) -> bool {
 ///
 /// A leading `..` that cannot be cancelled is kept (it can only appear when the
 /// path is relative, which callers avoid by resolving against an absolute cwd).
-fn normalize_logical(path: &str) -> String {
-    let rooted = path.starts_with('/');
+fn normalize_logical(path: BStr<'_>) -> Str {
+    let rooted = path.starts_with(b"/");
     // Keep any leading `C:` / `//host` prefix out of the component walk.
-    let (prefix, rest) = match path.as_bytes() {
+    let (prefix, rest) = match path {
         [c, b':', ..] if c.is_ascii_alphabetic() => path.split_at(2),
-        _ => ("", path),
+        _ => (b"".as_slice(), path),
     };
-    let mut parts: Vec<&str> = Vec::new();
-    for c in rest.split('/') {
+    let mut parts: Vec<BStr<'_>> = Vec::new();
+    for c in rest.split_str(b"/") {
         match c {
-            "" | "." => {}
-            ".." => {
+            b"" | b"." => {}
+            b".." => {
                 // `..` above the root is the root itself (POSIX).
-                if matches!(parts.last(), Some(&last) if last != "..") {
+                if matches!(parts.last(), Some(&last) if last != b"..") {
                     parts.pop();
-                } else if !rest.starts_with('/') {
-                    parts.push("..");
+                } else if !rest.starts_with(b"/") {
+                    parts.push(b"..");
                 }
             }
             other => parts.push(other),
         }
     }
-    let joined = parts.join("/");
-    if rest.starts_with('/') || rooted {
-        format!("{prefix}/{joined}")
+    let joined = parts.join(&b'/');
+    if rest.starts_with(b"/") || rooted {
+        bfmt![prefix, b"/", &joined]
     } else if joined.is_empty() {
-        format!("{prefix}.")
+        bfmt![prefix, b"."]
     } else {
-        format!("{prefix}{joined}")
+        bfmt![prefix, &joined]
     }
 }
 
@@ -625,13 +617,13 @@ const STANDARD_SET_O_OPTIONS: &[&str] = &[
 ///     ENOENT, `Permission denied` / `Is a directory` etc. (126) otherwise.
 ///
 /// The returned string has no `err_prefix`; the caller prepends it.
-fn spawn_error_message(word: &str, e: &std::io::Error) -> (String, i32) {
-    let is_path = word.contains('/') || word.contains('\\');
+fn spawn_error_message(word: BStr<'_>, e: &std::io::Error) -> (Str, i32) {
+    let is_path = word.contains(&b'/') || word.contains(&b'\\');
     if e.kind() == std::io::ErrorKind::NotFound && !is_path {
-        return (format!("{word}: command not found"), 127);
+        return (bfmt![word, b": command not found"], 127);
     }
     let status = if e.kind() == std::io::ErrorKind::NotFound { 127 } else { 126 };
-    (format!("{word}: {}", io_error_message(e)), status)
+    (bfmt![word, b": ", io_error_message(e)], status)
 }
 
 /// Non-local control flow produced while executing statements.
@@ -717,10 +709,11 @@ enum Out {
 /// diagnostic it had emitted along the way (bash interleaves the two). Holding
 /// the handle instead lets a builtin write as it goes.
 struct BuiltinStdout {
-    /// The path the plan named, kept verbatim so the handle can only ever serve
-    /// the redirect it was installed for — a builtin that writes through some
-    /// other plan falls back to opening for itself.
-    path: String,
+    /// The path the plan named, kept verbatim (and as bytes — it is a path) so
+    /// the handle can only ever serve the redirect it was installed for — a
+    /// builtin that writes through some other plan falls back to opening for
+    /// itself.
+    path: Str,
     append: bool,
     /// Opened at the first write rather than on entry: a builtin that produces
     /// no output must not report a failure to open a file it never used. (The
@@ -1525,9 +1518,9 @@ fn child_out_from_write_fd(w: &WriteFd, what: &str) -> Result<ChildOut, String> 
 /// associative array, export flag), captured when `local` shadows the name
 /// inside a function so it can be restored when the function returns.
 struct VarSnapshot {
-    scalar: Option<String>,
-    indexed: Option<BTreeMap<usize, String>>,
-    assoc: Option<Vec<(String, String)>>,
+    scalar: Option<Str>,
+    indexed: Option<BTreeMap<usize, Str>>,
+    assoc: Option<Vec<(Str, Str)>>,
     exported: bool,
     // Attribute flags, so `local -i`/`-l`/`-u`/`-n` scope to the function call
     // and are restored on return (bash: attributes set on a local are local).
@@ -1869,18 +1862,18 @@ const COMP_ACTIONS: &[(&str, char)] = &[
 
 /// The shell interpreter and its mutable session state.
 pub struct Shell {
-    vars: HashMap<String, String>,
+    vars: HashMap<String, Str>,
     /// Indexed arrays: `name=(a b c)` and `name[i]=v`. Kept separate from
     /// `vars`; `${name}` reads element 0, `${name[@]}`/`${name[*]}` read all.
     /// Sparse by construction: an ordered `index → value` map, so `a=([5]=x)`
     /// stores a single entry at 5 (no gap-filling) and `${!a[@]}` lists only the
     /// indices actually assigned. `BTreeMap` keeps iteration in ascending-index
     /// order, matching bash's `${a[@]}`/`${!a[@]}` traversal.
-    arrays: HashMap<String, BTreeMap<usize, String>>,
+    arrays: HashMap<String, BTreeMap<usize, Str>>,
     /// Associative arrays (`declare -A m; m[key]=v`). Insertion-ordered
     /// key/value pairs for deterministic iteration. A name present here is
     /// associative: subscripts are string keys, not arithmetic indices.
-    assoc: HashMap<String, Vec<(String, String)>>,
+    assoc: HashMap<String, Vec<(Str, Str)>>,
     exported: HashSet<String>,
     /// True once the real process environment has been imported into `vars`
     /// (via [`Shell::import_environment`], called by the binary at startup).
@@ -1902,7 +1895,7 @@ pub struct Shell {
     /// body execution. Kept as a parallel map (rather than folding into
     /// `funcs`) so the many `self.funcs.get()` sites stay unchanged.
     func_redirects: HashMap<String, Vec<Redirect>>,
-    positional: Vec<String>,
+    positional: Vec<Str>,
     name: String,
     /// The shell's working directory — absolute, `/`-separated, no trailing
     /// slash (see [`shell_path`]).
@@ -1915,7 +1908,7 @@ pub struct Shell {
     /// data race between them. Every filesystem path osh opens is resolved
     /// against this field by [`Shell::resolve`]; the *process* directory is
     /// only ever read once, to seed the top-level shell.
-    cwd: String,
+    cwd: Str,
     last_status: i32,
     /// Monotonic count of command substitutions performed. Used to detect
     /// whether a pure assignment's value contained a `$(...)`/backtick — bash
@@ -2326,7 +2319,7 @@ pub struct Shell {
     /// re-run any command substitution in it (bash emits those `++` lines exactly
     /// once, before the operand's line). So the rendering is recorded at the one
     /// point where the right data exists: the expansion pass itself.
-    xtrace_compound: Option<Vec<String>>,
+    xtrace_compound: Option<Vec<Str>>,
     /// Set by [`Shell::compound_expansion_done`] when a compound assignment's
     /// word-expansion pass completes, i.e. when its *binding* pass begins. A
     /// declaration builtin's compound operand needs the distinction: a failure in
@@ -2339,7 +2332,9 @@ pub struct Shell {
     /// in a command word matches nothing. The simple-command driver reports
     /// `no match: PATTERN` and aborts the command list (`Flow::Exit(1)`) after
     /// expansion, matching a non-interactive bash under `failglob`.
-    glob_error: Option<String>,
+    /// The `failglob` pattern that matched nothing, as bytes: it is a path
+    /// pattern, and a path may hold any byte.
+    glob_error: Option<Str>,
     /// Stack of function-local variable scopes. Each frame records the variables
     /// shadowed by `local` in that function call and their prior state, restored
     /// on return. Non-empty exactly while executing a function body.
@@ -2379,7 +2374,7 @@ pub struct Shell {
     /// frame with count `c` at the front of `bash_argc`, its arguments occupy the
     /// first `c` entries of `bash_argv` (reversed within the frame). Materialised
     /// into `arrays["BASH_ARGV"]` by `refresh_bash_arg_arrays`.
-    bash_argv: Vec<String>,
+    bash_argv: Vec<Str>,
     /// Parallel to `fn_stack`: whether each active call pushed an arg frame onto
     /// `bash_argc`/`bash_argv` (true iff extdebug was on at call time). A call's
     /// return pops its arg frame only when its recorded flag is true, so toggling
@@ -2483,7 +2478,9 @@ pub struct Shell {
     /// `pushd`/`popd`/`dirs`. Element 0 is the directory `popd` would return to;
     /// the *current* directory (the process cwd) is conceptually the top of the
     /// stack and is not stored here. Cloned into subshells.
-    dir_stack: Vec<String>,
+    /// The saved directory stack (`pushd`/`popd`), as bytes: every entry is a
+    /// path.
+    dir_stack: Vec<Str>,
     /// The command history, oldest first, as recorded while `set -o history` is
     /// in effect. An entry's *number* is [`Shell::hist_base`] plus its index, so
     /// deleting one renumbers every entry after it — which is what bash does,
@@ -2506,12 +2503,12 @@ pub struct Shell {
     /// a `for` variable — so rather than hook every one of them,
     /// [`Shell::hist_sync`] re-derives the cap once per simple command (and
     /// whenever the history is touched in between).
-    hist_seen: Option<String>,
+    hist_seen: Option<Str>,
     /// The `HISTFILESIZE` text its truncation was last performed for. Assigning
     /// `HISTFILESIZE` truncates the *file* `$HISTFILE` names to that many lines,
     /// which is why the value has to be watched rather than read on demand: the
     /// effect lands on the filesystem, where anything can see it.
-    hist_file_seen: Option<String>,
+    hist_file_seen: Option<Str>,
     /// How many entries have been added since the last `history -a`/`-w`, which
     /// is exactly what `history -a` appends. `history -c` resets it, so a
     /// cleared list appends only what follows the clear.
@@ -2842,8 +2839,7 @@ impl Shell {
         // being bash. Computed once so both the string and the array agree.
         let advertise_bash = bash_compat_enabled();
         if advertise_bash {
-            self.vars
-                .insert("BASH_VERSION".to_string(), BASH_VERSION.to_string());
+            self.put_var("BASH_VERSION", BASH_VERSION);
         }
         // IFS is a *real* variable in bash, initialised to the default
         // space-tab-newline, not merely an implicit splitting default. Scripts
@@ -2852,14 +2848,14 @@ impl Shell {
         // that idiom restore an *empty* IFS, silently disabling field splitting.
         // Seeded before `import_environment`, whose `or_insert` cannot override
         // it — matching bash, which always resets IFS and never inherits it.
-        self.vars.insert("IFS".to_string(), " \t\n".to_string());
+        self.put_var("IFS".to_string(), " \t\n".to_string());
         // PS4 is a real variable too, initialised to `+ ` — `declare -p PS4`
         // shows it even in a non-interactive shell, and `set -x` reads it from
         // there rather than from a hard-coded fallback. That distinction is
         // observable: `unset PS4` leaves *no* prefix on a trace line, it does
         // not revert to `+ `. Unlike IFS this is a soft default that an
         // inherited value replaces — see [`SOFT_DEFAULT_VARS`].
-        self.vars.insert("PS4".to_string(), "+ ".to_string());
+        self.put_var("PS4".to_string(), "+ ".to_string());
         // Platform identity strings bash always defines at startup. We report
         // SlateOS's own values (not the host build's), so scripts that branch on
         // `$OSTYPE`/`$MACHTYPE` see the target platform. bash leaves these as
@@ -2870,7 +2866,7 @@ impl Shell {
             ("OSTYPE", "slateos"),
             ("MACHTYPE", "x86_64-slateos"),
         ] {
-            self.vars.insert(name.to_string(), val.to_string());
+            self.put_var(name.to_string(), val.to_string());
         }
         // UID / EUID: bash defines these as readonly integer shell variables
         // (`declare -ir`) reporting the real and effective user IDs. They are
@@ -2884,8 +2880,8 @@ impl Shell {
         // `declare -p` renders `declare -ir` and reassignment is rejected,
         // matching bash exactly.
         let (uid, euid) = reported_identity();
-        self.vars.insert("UID".to_string(), uid.to_string());
-        self.vars.insert("EUID".to_string(), euid.to_string());
+        self.put_var("UID".to_string(), uid.to_string());
+        self.put_var("EUID".to_string(), euid.to_string());
         self.integer_attr.insert("UID".to_string());
         self.integer_attr.insert("EUID".to_string());
         self.readonly.insert("UID".to_string());
@@ -2905,7 +2901,7 @@ impl Shell {
             ];
             let mut arr = BTreeMap::new();
             for (i, v) in versinfo {
-                arr.insert(i, v.to_string());
+                arr.insert(i, v.as_bytes().to_vec());
             }
             self.arrays.insert("BASH_VERSINFO".to_string(), arr);
             // bash marks BASH_VERSINFO readonly; match that so scripts probing
@@ -2929,8 +2925,8 @@ impl Shell {
         let bash_path = std::env::current_exe()
             .as_deref()
             .map(shell_path)
-            .unwrap_or_else(|_| "osh".to_string());
-        self.vars.insert("BASH".to_string(), bash_path);
+            .unwrap_or_else(|_| b"osh".to_vec());
+        self.put_var("BASH".to_string(), bash_path);
         // BASHOPTS: bash exposes the enabled `shopt` options as a readonly,
         // colon-separated, alphabetically-sorted list. Seed it from the current
         // (default) shopt state; `refresh_bashopts` keeps it current as options
@@ -2957,10 +2953,10 @@ impl Shell {
     /// out in `self.aliases` (BTreeMap) sorted order — bash uses its internal
     /// hash order, an unspecified/cosmetic difference; sorted is deterministic.
     fn sync_bash_aliases(&mut self) {
-        let v: Vec<(String, String)> = self
+        let v: Vec<(Str, Str)> = self
             .aliases
             .iter()
-            .map(|(k, val)| (k.clone(), val.clone()))
+            .map(|(k, val)| (k.clone().into_bytes(), val.clone().into_bytes()))
             .collect();
         self.assoc.insert("BASH_ALIASES".to_string(), v);
         // Mark has-a-value so `declare -p` renders `=()` even when empty.
@@ -2971,10 +2967,13 @@ impl Shell {
     /// `cmd_hash` is a `HashMap`, so its iteration order is nondeterministic;
     /// sort by key for stable output (bash uses hash order, unspecified).
     fn sync_bash_cmds(&mut self) {
-        let mut v: Vec<(String, String)> = self
+        // A hashed command's path is a *path*, i.e. bytes — `to_string_lossy`
+        // here would hand the script a mangled path it could not exec
+        // (TD-OILS-BYTE-STRINGS).
+        let mut v: Vec<(Str, Str)> = self
             .cmd_hash
             .iter()
-            .map(|(k, (p, _))| (k.clone(), p.to_string_lossy().into_owned()))
+            .map(|(k, (p, _))| (k.clone().into_bytes(), bytes::path_to_bytes(p)))
             .collect();
         v.sort_by(|a, b| a.0.cmp(&b.0));
         self.assoc.insert("BASH_CMDS".to_string(), v);
@@ -2987,7 +2986,7 @@ impl Shell {
     }
 
     /// Set the positional parameters (`$1`, `$2`, …).
-    pub fn set_positional(&mut self, args: Vec<String>) {
+    pub fn set_positional(&mut self, args: Vec<Str>) {
         self.positional = args;
     }
 
@@ -3164,12 +3163,12 @@ impl Shell {
     pub fn run_startup_files(&mut self, files: &StartupFiles<'_>) -> Option<i32> {
         if self.login_shell {
             if !files.no_profile {
-                if let Err(code) = self.run_startup_file(SYSTEM_PROFILE) {
+                if let Err(code) = self.run_startup_file(SYSTEM_PROFILE.as_bytes()) {
                     return Some(code);
                 }
                 // bash chains these with `&&` on "did not run", so the first one
                 // that exists is the only one read.
-                for path in ["~/.bash_profile", "~/.bash_login", "~/.profile"] {
+                for path in [b"~/.bash_profile".as_slice(), b"~/.bash_login", b"~/.profile"] {
                     match self.run_startup_file(path) {
                         Err(code) => return Some(code),
                         Ok(true) => break,
@@ -3179,7 +3178,7 @@ impl Shell {
             }
         } else if files.interactive && !files.no_rc {
             let rc = files.rc_file.unwrap_or("~/.bashrc");
-            if let Err(code) = self.run_startup_file(rc) {
+            if let Err(code) = self.run_startup_file(rc.as_bytes()) {
                 return Some(code);
             }
         }
@@ -3208,7 +3207,7 @@ impl Shell {
         // sees the one from before the `exit`, because bash has not stored the
         // operand yet when it calls `bash_logout()`.
         let pending = std::mem::replace(&mut self.last_status, seen);
-        let over = self.run_startup_file("~/.bash_logout");
+        let over = self.run_startup_file(b"~/.bash_logout");
         self.last_status = pending;
         // An `exit` in the logout file must not re-arm it; nothing would read
         // the flag again, but leaving it set would be a lie about the state.
@@ -3233,14 +3232,19 @@ impl Shell {
     /// is discarded (see [`SourceFrame::startup`]). A source frame *is* pushed,
     /// so diagnostics from the file name the file, `${BASH_SOURCE[0]}` is it,
     /// and `return` is legal at all.
-    fn run_startup_file(&mut self, path: &str) -> Result<bool, i32> {
+    fn run_startup_file(&mut self, path: BStr<'_>) -> Result<bool, i32> {
         let path = self.tilde_expand(path);
-        let host = self.host_path(&path);
+        let host = bytes::bytes_to_path(&self.host_path(&path));
         if std::fs::metadata(&host).is_ok_and(|m| m.is_dir()) {
             // bash reports this one with `internal_error`, which carries the
             // shell name but *not* the `line N:` token every command-level
             // diagnostic has — there is no command yet.
-            self.errln(&format!("{}: {path}: is a directory", self.error_source()));
+            self.berrln(&bfmt![
+                self.error_source(),
+                b": ",
+                &path,
+                b": is a directory"
+            ]);
             return Ok(false);
         }
         // Absent or unreadable is silent, by design: every shell has startup
@@ -3249,7 +3253,10 @@ impl Shell {
             return Ok(false);
         };
         self.source_stack.push(SourceFrame {
-            path: path.clone(),
+            // Seam: the source-name / diagnostic layer is still `String`
+            // (TD-OILS-BYTE-STRINGS step 10).
+            #[allow(deprecated)]
+            path: bytes::scaffold_lossy_string(&path),
             call_line: self.current_line,
             fn_depth: self.fn_stack.len(),
             startup: true,
@@ -3287,10 +3294,15 @@ impl Shell {
     /// `BASH_ENV='~/rc'` works even though a tilde inside double quotes would
     /// not. Wrapping the value in real double quotes reproduces all of that,
     /// needing only the one escape a `"` in the value itself does.
-    fn run_env_file(&mut self, spec: &str) -> Result<bool, i32> {
+    fn run_env_file(&mut self, spec: BStr<'_>) -> Result<bool, i32> {
         if spec.is_empty() {
             return Ok(false);
         }
+        // `$BASH_ENV` is re-parsed as shell source, so it has to be text to
+        // mean anything; bytes that are not are not a path we could have run.
+        let Some(spec) = bytes::as_str(spec) else {
+            return Ok(false);
+        };
         let quoted = format!("\"{}\"", spec.replace('"', "\\\""));
         let Ok(word) = crate::parser::word_verbatim_from_source(&quoted, self.lex_opts()) else {
             return Ok(false);
@@ -3332,7 +3344,23 @@ impl Shell {
     }
 
     /// Set a shell variable.
-    pub fn set_var(&mut self, name: impl Into<String>, value: impl Into<String>) {
+    pub fn set_var(&mut self, name: impl Into<String>, value: impl Into<Str>) {
+        self.put_var(name, value);
+    }
+
+    /// Store a variable value and return the previous one (`HashMap::insert`'s
+    /// contract), for the callers that have to restore it afterwards — a
+    /// builtin's temporary assignment prefix, most of all.
+    fn replace_var(&mut self, name: impl Into<String>, value: impl Into<Str>) -> Option<Str> {
+        self.vars.insert(name.into(), value.into())
+    }
+
+    /// Store a variable value. A *name* is restricted to the portable
+    /// identifier set by the grammar, so it stays a `String`; a *value* is
+    /// arbitrary bytes (TD-OILS-BYTE-STRINGS), so it is a [`Str`]. Taking
+    /// `impl Into<Str>` lets the many call sites that build a value from a
+    /// literal or a `format!` keep reading naturally.
+    fn put_var(&mut self, name: impl Into<String>, value: impl Into<Str>) {
         self.vars.insert(name.into(), value.into());
     }
 
@@ -3341,7 +3369,7 @@ impl Shell {
     /// (unset for scripts and interactive shells); it is an ordinary,
     /// reassignable variable, so we simply seed it into the variable namespace.
     pub fn set_execution_string(&mut self, src: impl Into<String>) {
-        self.vars.insert("BASH_EXECUTION_STRING".to_string(), src.into());
+        self.put_var("BASH_EXECUTION_STRING".to_string(), src.into());
     }
 
     /// Import the real process environment into the shell variable namespace,
@@ -3363,9 +3391,22 @@ impl Shell {
                 self.vars.remove(*name);
             }
         }
-        for (k, v) in std::env::vars() {
-            self.vars.entry(k.clone()).or_insert(v);
-            self.exported.insert(k);
+        // `vars_os`, not `vars`: an environment *value* is bytes, and
+        // `std::env::vars` panics outright on one that is not UTF-8. A shell
+        // that dies because a parent exported a Latin-1 filename is worse than
+        // useless, and re-encoding it would hand the script a value that names
+        // a different file (TD-OILS-BYTE-STRINGS). A *name* stays a `String`:
+        // the shell grammar cannot spell a non-UTF-8 identifier, so such an
+        // entry is unnameable and unusable here — it is skipped rather than
+        // mangled (see known-issues TD-OILS-NONUTF8-ENV-NAME).
+        for (k, v) in std::env::vars_os() {
+            let Some(name) = bytes::as_str(&bytes::os_to_bytes(&k)).map(str::to_owned) else {
+                continue;
+            };
+            self.vars
+                .entry(name.clone())
+                .or_insert_with(|| bytes::os_to_bytes(&v));
+            self.exported.insert(name);
         }
         // bash increments $SHLVL for each nested shell invocation: an unset or
         // non-numeric value becomes 1, otherwise the inherited level + 1. The
@@ -3373,11 +3414,11 @@ impl Shell {
         let next_lvl = self
             .vars
             .get("SHLVL")
-            .and_then(|v| v.trim().parse::<i64>().ok())
+            .and_then(|v| bytes::parse_i64(v))
             .unwrap_or(0)
             .saturating_add(1)
             .max(1);
-        self.vars.insert("SHLVL".to_string(), next_lvl.to_string());
+        self.put_var("SHLVL".to_string(), next_lvl.to_string());
         self.exported.insert("SHLVL".to_string());
         // HOSTNAME: bash sets this from gethostname(2) at startup, but only when
         // the environment does not already supply it (an inherited HOSTNAME
@@ -3394,7 +3435,7 @@ impl Shell {
             && let Some(host) = system_hostname()
             && !host.is_empty()
         {
-            self.vars.insert("HOSTNAME".to_string(), host);
+            self.put_var("HOSTNAME".to_string(), host);
         }
         self.seed_startup_dirs();
         self.env_imported = true;
@@ -3422,7 +3463,7 @@ impl Shell {
         match inherited {
             Some(p) => self.cwd = p,
             None => {
-                self.vars.insert("PWD".to_string(), real);
+                self.put_var("PWD".to_string(), real);
             }
         }
         self.exported.insert("PWD".to_string());
@@ -3900,11 +3941,11 @@ impl Shell {
             return None;
         }
         let max = match text.as_deref() {
-            None | Some("") => None,
-            Some(t) => match t.trim().parse::<i64>() {
-                Ok(n) if n < 0 => None,
-                Ok(n) => Some(usize::try_from(n).unwrap_or(usize::MAX)),
-                Err(_) => self.hist_max,
+            None | Some(b"") => None,
+            Some(t) => match bytes::parse_i64(t) {
+                Some(n) if n < 0 => None,
+                Some(n) => Some(usize::try_from(n).unwrap_or(usize::MAX)),
+                None => self.hist_max,
             },
         };
         let Some(cap) = max else {
@@ -3985,15 +4026,15 @@ impl Shell {
     /// The file `history -a/-n/-r/-w` acts on: the operand, else `$HISTFILE`,
     /// else `$HOME/.history` — readline's fallback, and the one a
     /// non-interactive shell always lands on, since it never sets `HISTFILE`.
-    fn hist_file(&self, arg: Option<&String>) -> Option<String> {
+    fn hist_file(&self, arg: Option<&String>) -> Option<Str> {
         if let Some(a) = arg {
-            return Some(a.clone());
+            return Some(a.clone().into_bytes());
         }
         if let Some(f) = self.param_value("HISTFILE").filter(|f| !f.is_empty()) {
             return Some(f);
         }
         let home = self.param_value("HOME").filter(|h| !h.is_empty())?;
-        Some(format!("{}/.history", home.trim_end_matches('/')))
+        Some(bfmt![home.trim_end_with(|c| c == '/'), b"/.history"])
     }
 
     /// `history -a|-n|-r|-w [FILE]` — move entries between the list and a file.
@@ -4005,7 +4046,7 @@ impl Shell {
         let Some(path) = self.hist_file(arg) else {
             return 1;
         };
-        let host = self.host_path(&path);
+        let host = bytes::bytes_to_path(&self.host_path(&path));
         match op {
             'r' | 'n' => {
                 let Ok(text) = std::fs::read_to_string(&host) else {
@@ -4050,14 +4091,16 @@ impl Shell {
                 if self.hist_session == 0 || self.hist_session > self.history.len() {
                     return 0;
                 }
-                if !std::path::Path::new(&host).exists()
+                if !host.exists()
                     && let Err(e) = std::fs::File::create(&host)
                 {
-                    self.errln(&format!(
-                        "{}history: {path}: cannot create: {}",
+                    self.berrln(&bfmt![
                         self.err_prefix(),
+                        b"history: ",
+                        &path,
+                        b": cannot create: ",
                         io_error_message(&e)
-                    ));
+                    ]);
                     return 1;
                 }
                 let from = self.history.len().saturating_sub(self.hist_session);
@@ -4096,7 +4139,7 @@ impl Shell {
         self.hist_file_seen = text.clone();
         let Some(keep) = text
             .as_deref()
-            .and_then(|t| t.trim().parse::<i64>().ok())
+            .and_then(bytes::parse_i64)
             .and_then(|n| usize::try_from(n).ok())
         else {
             return;
@@ -4104,7 +4147,7 @@ impl Shell {
         let Some(path) = self.param_value("HISTFILE").filter(|f| !f.is_empty()) else {
             return;
         };
-        let host = self.host_path(&path);
+        let host = bytes::bytes_to_path(&self.host_path(&path));
         let Ok(text) = std::fs::read_to_string(&host) else {
             return;
         };
@@ -4469,8 +4512,7 @@ impl Shell {
         {
             for cmd in &pipe.commands {
                 if let Some(sc) = Self::stage_simple(cmd) {
-                    self.vars
-                        .insert("BASH_COMMAND".to_string(), crate::unparse::simple_src(sc));
+                    self.put_var("BASH_COMMAND", crate::unparse::simple_src(sc));
                     // An `exit N` in the handler unwinds the shell before the
                     // pipeline runs at all (bash), so no stage is started.
                     if let Flow::Exit(code) = self.fire_trap_flow("DEBUG", out, stdin) {
@@ -4541,7 +4583,7 @@ impl Shell {
             statuses
                 .iter()
                 .enumerate()
-                .map(|(i, s)| (i, s.to_string()))
+                .map(|(i, s)| (i, s.to_string().into_bytes()))
                 .collect(),
         );
         self.last_status = if self.pipefail {
@@ -4832,11 +4874,11 @@ impl Shell {
             let Command::Simple(sc) = cmd else {
                 continue; // guaranteed Simple by the classifier
             };
-            let mut argv: Vec<String> = Vec::new();
+            let mut argv: Vec<Str> = Vec::new();
             for w in &sc.words {
                 argv.extend(self.expand_word(w, true));
             }
-            let assigns: Vec<(String, String)> = sc
+            let assigns: Vec<(String, Str)> = sc
                 .assignments
                 .iter()
                 .map(|a| self.assignment_prefix_value(a))
@@ -4848,25 +4890,12 @@ impl Shell {
                 continue;
             };
 
-            let mut pc = PCommand::new(self.resolve_program(program));
-            pc.args(&argv[1..]);
+            let mut pc = PCommand::new(bytes::bytes_to_os(&self.resolve_program(program)));
+            pc.args(argv[1..].iter().map(|a| bytes::bytes_to_os(a)));
             // The child inherits *this* shell's directory, which is not the
             // process's once we are inside a subshell clone.
-            pc.current_dir(&self.cwd);
-            // When the shell owns its environment (imported at startup), spawn
-            // from a cleared base so an `unset`/non-exported variable does not
-            // leak in via the parent process's inherited environment.
-            if self.env_imported {
-                pc.env_clear();
-            }
-            for (k, v) in &self.vars {
-                if self.exported.contains(k) {
-                    pc.env(k, v);
-                }
-            }
-            for (k, v) in &assigns {
-                pc.env(k, v);
-            }
+            pc.current_dir(bytes::bytes_to_path(&self.cwd));
+            self.apply_child_env(&mut pc, &assigns);
 
             // stdin: the first stage takes the pipeline's own input; later
             // stages read the previous pipe (or a closed/null stream if the
@@ -4900,7 +4929,7 @@ impl Shell {
                 }
                 Err(e) => {
                     let (msg, status) = spawn_error_message(program, &e);
-                    self.errln(&format!("{}{msg}", self.err_prefix()));
+                    self.berrln(&bfmt![self.err_prefix(), msg]);
                     prev_stdout = None;
                     stage_status[i] = status;
                 }
@@ -5200,7 +5229,7 @@ impl Shell {
     }
 
     fn exec_for(&mut self, c: &ForClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
-        let items: Vec<String> = match &c.words {
+        let items: Vec<Str> = match &c.words {
             Some(words) => {
                 let mut v = Vec::new();
                 for w in words {
@@ -5216,7 +5245,8 @@ impl Shell {
         // error — discard the loop before running the body (bash aborts the
         // enclosing parse unit but does not exit the shell).
         if let Some(pat) = self.glob_error.take() {
-            self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
+            let msg = bfmt![self.err_prefix(), b"no match: ", &pat, b"\n"];
+            self.emit_stderr(&msg);
             self.last_status = 1;
             return Flow::Discard;
         }
@@ -5237,7 +5267,8 @@ impl Shell {
         for item in items {
             if let Some(h) = &header {
                 let prefix = self.xtrace_prefix();
-                self.emit_stderr(format!("{prefix}{h}\n").as_bytes());
+                let line = bfmt![prefix, h.as_str(), b"\n"];
+                self.emit_stderr(&line);
             }
             // A readonly loop variable cannot be bound. bash finds this out at
             // the moment it first tries — so the word list is expanded either
@@ -5292,18 +5323,21 @@ impl Shell {
         // takes an optional sign and stops at the first non-digit — so `40x` is
         // 40 while `abc` is 0. A leading `-` leaves no digits here, which lands
         // on the same "not positive, use the default" branch bash takes.
-        let raw = self.vars.get("COLUMNS").map_or("", String::as_str);
-        let t = raw.trim_start();
-        let t = t.strip_prefix('+').unwrap_or(t);
-        let digits: String = t.chars().take_while(char::is_ascii_digit).collect();
-        match digits.parse::<usize>() {
-            Ok(0) => 80,
-            Ok(c) => c,
+        let raw: BStr<'_> = self.vars.get("COLUMNS").map_or(b"".as_slice(), Vec::as_slice);
+        let t = bytes::trim_start(raw);
+        let t = t.strip_prefix(b"+".as_slice()).unwrap_or(t);
+        // `atoi` reads *bytes*: the digit run is ASCII by construction, so a
+        // byte that is not text stops the scan exactly as any other non-digit
+        // would — and the run that was collected is always borrowable as text.
+        let digits: Str = t.iter().copied().take_while(u8::is_ascii_digit).collect();
+        match bytes::as_str(&digits).and_then(|d| d.parse::<usize>().ok()) {
+            Some(0) => 80,
+            Some(c) => c,
             // No digits at all, or a run too long for `usize`. The former is
             // bash's `atoi` returning 0; the latter is a terminal wider than
             // any list, which lays out like any very large width.
-            Err(_) if digits.is_empty() => 80,
-            Err(_) => usize::MAX,
+            None if digits.is_empty() => 80,
+            None => usize::MAX,
         }
     }
 
@@ -5315,7 +5349,7 @@ impl Shell {
     /// EOF or `break`. The loop's exit status is the last body execution (0 if the
     /// body never runs).
     fn exec_select(&mut self, c: &SelectClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
-        let items: Vec<String> = match &c.words {
+        let items: Vec<Str> = match &c.words {
             Some(words) => {
                 let mut v = Vec::new();
                 for w in words {
@@ -5341,7 +5375,7 @@ impl Shell {
             };
             self.xtrace_emit(&format!("select {} in {words}", c.var));
         }
-        let ps3 = self.vars.get("PS3").cloned().unwrap_or_else(|| "#? ".to_string());
+        let ps3 = self.vars.get("PS3").cloned().unwrap_or_else(|| b"#? ".to_vec());
         let redir = RedirPlan::default();
         let mut show_menu = true;
         loop {
@@ -5349,10 +5383,10 @@ impl Shell {
                 // bash re-reads `COLS` on every menu print, so a body that
                 // reassigns `COLUMNS` changes the next menu's layout.
                 let menu = select_menu(&items, self.menu_columns());
-                self.emit_stderr(menu.as_bytes());
+                self.emit_stderr(&menu);
                 show_menu = false;
             }
-            self.emit_stderr(ps3.as_bytes());
+            self.emit_stderr(&ps3);
             let line = match self.read_line(stdin, &redir) {
                 Some((l, _)) => l,
                 None => {
@@ -5365,21 +5399,23 @@ impl Shell {
                     //   * the status is 1, distinguishing "the user ran out of
                     //     input" from a loop the body left via `break`.
                     self.write_bytes(out, &redir, b"\n");
-                    self.vars.insert("REPLY".to_string(), String::new());
+                    self.put_var("REPLY".to_string(), Str::new());
                     self.last_status = 1;
                     return Flow::Next;
                 }
             };
-            self.vars.insert("REPLY".to_string(), line.clone());
-            let trimmed = line.trim();
+            self.put_var("REPLY".to_string(), line.clone());
+            let trimmed = bytes::trim(&line);
             if trimmed.is_empty() {
                 // A blank line reprints the menu without running the body.
                 show_menu = true;
                 continue;
             }
-            let choice = match trimmed.parse::<usize>() {
-                Ok(n) if n >= 1 && n <= items.len() => items[n - 1].clone(),
-                _ => String::new(),
+            // A reply that is not text cannot be an item number, and so selects
+            // nothing — the same answer `foo` gets.
+            let choice = match bytes::as_str(trimmed).and_then(|t| t.parse::<usize>().ok()) {
+                Some(n) if n >= 1 && n <= items.len() => items[n - 1].clone(),
+                _ => Str::new(),
             };
             // Binding the selection is an assignment like the `for` loop's, and
             // fails the same way: a readonly name is reported once the choice
@@ -5430,7 +5466,7 @@ impl Shell {
         }
         let mut last = 0i64;
         for arg in args {
-            match self.eval_arith_expanded(arg) {
+            match self.eval_arith_expanded(arg.as_bytes()) {
                 Some(v) => last = v,
                 None => return 1, // the arithmetic error was already reported
             }
@@ -5480,8 +5516,8 @@ impl Shell {
     /// ordinary words. bash performs no further expansion on these, so a `$` that
     /// survived quoting reaches the evaluator, which rejects it — `let 'x=$n+1'`
     /// is `let: x=$n+1: syntax error: operand expected`, not `x=6`.
-    fn eval_arith_expanded(&mut self, expanded: &str) -> Option<i64> {
-        match arith::eval(expanded, self) {
+    fn eval_arith_expanded(&mut self, expanded: BStr<'_>) -> Option<i64> {
+        match arith::eval_bytes(expanded, self) {
             Ok(v) => Some(v),
             Err(e) => {
                 // Route through `emit_arith_error` (not `eprintln!`) so the
@@ -5533,7 +5569,7 @@ impl Shell {
     /// `None` means the expression was bad, and the caller must then store
     /// *nothing*: bash leaves the variable exactly as it was, so
     /// `declare -i p=7; p=1/0` keeps `p` at 7 rather than zeroing it.
-    fn eval_int_assign(&mut self, raw: &str) -> Option<i64> {
+    fn eval_int_assign(&mut self, raw: BStr<'_>) -> Option<i64> {
         let v = self.eval_arith_expanded(raw);
         if v.is_none() {
             self.discard_error = Some(1);
@@ -5772,7 +5808,8 @@ impl Shell {
             match open_out(&self.cwd, path, *append) {
                 Ok(f) => stdout_file = Some(Arc::new(f)),
                 Err(e) => {
-                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                    let line = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                    self.berrln(&line);
                     self.last_status = 1;
                     return Flow::Next;
                 }
@@ -5810,7 +5847,8 @@ impl Shell {
                     pushed_stderr = true;
                 }
                 Err(e) => {
-                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                    let line = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                    self.berrln(&line);
                     self.last_status = 1;
                     return Flow::Next;
                 }
@@ -6099,7 +6137,8 @@ impl Shell {
                         self.open_write_fds.insert(*fd, WriteFd::File(std::sync::Arc::new(f)));
                     }
                     Err(e) => {
-                        self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                        let line = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                        self.berrln(&line);
                         self.last_status = 1;
                     }
                 },
@@ -6213,17 +6252,17 @@ impl Shell {
     }
 
     /// Print a one-operand `[[ … ]]` term for `set -x` (`[[ -n foo ]]`).
-    fn cond_trace_unary(&mut self, invert: bool, op: &str, arg: &str) {
+    fn cond_trace_unary(&mut self, invert: bool, op: &str, arg: BStr<'_>) {
         if self.xtrace {
-            let body = format!("{op} {}", cond_trace_arg(arg));
+            let body = bfmt![op, b" ", cond_trace_arg(arg)];
             self.cond_trace_term(invert, &body);
         }
     }
 
     /// Print a two-operand `[[ … ]]` term for `set -x` (`[[ a == b ]]`).
-    fn cond_trace_binary(&mut self, invert: bool, l: &str, op: &str, r: &str) {
+    fn cond_trace_binary(&mut self, invert: bool, l: BStr<'_>, op: &str, r: BStr<'_>) {
         if self.xtrace {
-            let body = format!("{} {op} {}", cond_trace_arg(l), cond_trace_arg(r));
+            let body = bfmt![cond_trace_arg(l), b" ", op, b" ", cond_trace_arg(r)];
             self.cond_trace_term(invert, &body);
         }
     }
@@ -6236,9 +6275,10 @@ impl Shell {
     /// appears is each operand's expansion rather than the source that produced
     /// it. Unlike a command word, an operand is printed with no quoting at all
     /// (`[[ a b == c ]]`); the sole concession is that an empty one shows as `''`.
-    fn cond_trace_term(&mut self, invert: bool, body: &str) {
-        let bang = if invert { "! " } else { "" };
-        self.xtrace_emit(&format!("[[ {bang}{body} ]]"));
+    fn cond_trace_term(&mut self, invert: bool, body: BStr<'_>) {
+        let bang: &[u8] = if invert { b"! " } else { b"" };
+        let line = bfmt![b"[[ ", bang, body, b" ]]"];
+        self.bxtrace_emit(&line);
     }
 
     /// Evaluate `lhs =~ rhs` (POSIX-ERE match). On success, populate the
@@ -6262,7 +6302,17 @@ impl Shell {
         self.cond_trace_binary(invert, &subject, "=~", &pattern);
         // `shopt -s nocasematch` also makes `=~` case-insensitive.
         let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
-        let re = match crate::ere::Regex::new_flags(&pattern, ci) {
+        // TD-OILS-BYTE-STRINGS step 9: `crate::ere` still matches over `&str`,
+        // so a pattern or a subject that is not text cannot be handed to it. The
+        // honest answers are the ones the engine would give for input it cannot
+        // represent — an unrepresentable *pattern* is an uncompilable RHS, and
+        // an unrepresentable *subject* matches nothing — never a mangled
+        // approximation that might match a different string than the user has.
+        let Some(pattern) = bytes::as_str(&pattern) else {
+            self.cond_regex_error = true;
+            return false;
+        };
+        let re = match crate::ere::Regex::new_flags(pattern, ci) {
             Ok(re) => re,
             Err(_) => {
                 // bash: an uncompilable `=~` RHS makes `[[` exit 2 (distinct from
@@ -6273,14 +6323,14 @@ impl Shell {
                 return false;
             }
         };
-        match re.captures(&subject) {
+        match bytes::as_str(&subject).and_then(|s| re.captures(s)) {
             Some(groups) => {
                 // Each capture slot maps 1:1 to a BASH_REMATCH index; unmatched
                 // optional groups are stored as empty strings, as bash does.
-                let elems: BTreeMap<usize, String> = groups
+                let elems: BTreeMap<usize, Str> = groups
                     .into_iter()
                     .enumerate()
-                    .map(|(i, g)| (i, g.unwrap_or_default()))
+                    .map(|(i, g)| (i, g.unwrap_or_default().into_bytes()))
                     .collect();
                 self.arrays.insert("BASH_REMATCH".to_string(), elems);
                 true
@@ -6300,28 +6350,30 @@ impl Shell {
     /// metacharacters are backslash-escaped — while *unquoted* parts (bare
     /// literals and unquoted `$var`/`$(…)` expansions) contribute active regex
     /// syntax. No field splitting or globbing is performed (this is `[[ … ]]`).
-    fn regex_pattern_from_rhs(&mut self, word: &Word) -> String {
-        fn escape_ere(s: &str, out: &mut String) {
-            for c in s.chars() {
+    fn regex_pattern_from_rhs(&mut self, word: &Word) -> Str {
+        fn escape_ere(s: BStr<'_>, out: &mut Str) {
+            for c in bytes::chars(s) {
                 // The full ERE metacharacter set; escaping any other char is a
                 // no-op but escaping these makes the segment match literally.
                 if matches!(
-                    c,
-                    '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
-                        | '|'
+                    c.as_ascii(),
+                    Some(
+                        '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{'
+                            | '}' | '|'
+                    )
                 ) {
-                    out.push('\\');
+                    out.push(b'\\');
                 }
-                out.push(c);
+                c.push_to(out);
             }
         }
-        let mut pattern = String::new();
+        let mut pattern = Str::new();
         for part in &word.parts {
             match part {
                 // Unquoted literal text is live regex syntax.
-                WordPart::Literal(s) => pattern.push_str(s),
+                WordPart::Literal(s) => pattern.extend_from_slice(s.as_bytes()),
                 // Single quotes: everything literal.
-                WordPart::SingleQuoted { text, .. } => escape_ere(text, &mut pattern),
+                WordPart::SingleQuoted { text, .. } => escape_ere(text.as_bytes(), &mut pattern),
                 // Double quotes: expand (params/cmd-sub run) but the result is
                 // matched literally, per bash.
                 WordPart::DoubleQuoted(parts) => {
@@ -6331,7 +6383,7 @@ impl Shell {
                 // Unquoted dynamic parts (`$var`, `${…}`, `$(…)`, `$((…))`):
                 // their expansion is live regex, so a variable can carry a
                 // pattern (`p='^h.*o$'; [[ hello =~ $p ]]`).
-                other => pattern.push_str(&self.expand_dynamic(other)),
+                other => pattern.extend(self.expand_dynamic(other)),
             }
         }
         pattern
@@ -6348,10 +6400,14 @@ impl Shell {
             UnaryOp::ZeroLen => arg.is_empty(),
             UnaryOp::NonZeroLen => !arg.is_empty(),
             // `-v name` tests whether the shell variable/element is set; the
-            // operand is the *name*, not a value to expand to.
-            UnaryOp::VarSet => self.var_is_set(&arg),
+            // operand is the *name*, not a value to expand to. A name is always
+            // text (the grammar cannot spell any other kind), so an operand
+            // that is not text names nothing and the test is false.
+            UnaryOp::VarSet => bytes::as_str(&arg).is_some_and(|n| self.var_is_set(n)),
             // `-o optname` tests whether the named shell option is enabled.
-            UnaryOp::OptionSet => self.shell_option_enabled(&arg),
+            UnaryOp::OptionSet => {
+                bytes::as_str(&arg).is_some_and(|n| self.shell_option_enabled(n))
+            }
             // `-L`/`-h` — the operand is a path; test whether it is a symlink
             // (without following the final component).
             UnaryOp::Symlink => {
@@ -6361,10 +6417,10 @@ impl Shell {
                     .unwrap_or(false)
             }
             // `-t fd` — the operand is a descriptor number, not a path.
-            UnaryOp::Terminal => match arg.parse::<i32>() {
-                Ok(0) => io::stdin().is_terminal(),
-                Ok(1) => io::stdout().is_terminal(),
-                Ok(2) => io::stderr().is_terminal(),
+            UnaryOp::Terminal => match bytes::parse_i64(&arg) {
+                Some(0) => io::stdin().is_terminal(),
+                Some(1) => io::stdout().is_terminal(),
+                Some(2) => io::stderr().is_terminal(),
                 _ => false,
             },
             _ => {
@@ -6398,7 +6454,7 @@ impl Shell {
         match op.op {
             CondBinOp::StrEq | CondBinOp::StrNe => {
                 let subject_s = self.expand_to_string(l);
-                let subject: Vec<Ch> = bytes::chars(subject_s.as_bytes()).collect();
+                let subject: Vec<Ch> = bytes::chars(&subject_s).collect();
                 // `shopt -s nocasematch` folds case for both the literal and the
                 // glob comparison.
                 let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
@@ -6411,15 +6467,12 @@ impl Shell {
                 // here: a character a quote (or a backslash) made literal appears
                 // backslash-escaped, so `[[ ab == "a"b ]]` traces `[[ ab == \ab ]]`.
                 if self.xtrace {
-                    // TD-OILS-BYTE-STRINGS scaffold: `cond_trace_binary` still
-                    // speaks `&str`.
-                    #[allow(deprecated)]
-                    let rhs = crate::bytes::scaffold_lossy_string(&cond_trace_pattern(&pat));
+                    let rhs = cond_trace_pattern(&pat);
                     self.cond_trace_binary(invert, &subject_s, op.text, &rhs);
                 }
                 // A fully-quoted RHS is a literal; otherwise it is a glob pattern.
                 let matched = if word_is_all_quoted(r) {
-                    let lhs = subject_s.as_bytes();
+                    let lhs = subject_s.as_slice();
                     let rhs = echars_text(&pat);
                     if ci {
                         bytes::to_lowercase(lhs) == bytes::to_lowercase(&rhs)
@@ -6789,13 +6842,13 @@ impl Shell {
     /// value about to be stored. Lowercase (`-l`), uppercase (`-u`) and
     /// capitalize (`-c`) are mutually exclusive in bash; if several are somehow
     /// set, uppercase wins, then capitalize, then lowercase.
-    fn fold_case_attr(&self, name: &str, val: String) -> String {
+    fn fold_case_attr(&self, name: &str, val: Str) -> Str {
         if self.upper_attr.contains(name) {
-            val.to_uppercase()
+            bytes::to_uppercase(&val)
         } else if self.capcase_attr.contains(name) {
             capcase(&val)
         } else if self.lower_attr.contains(name) {
-            val.to_lowercase()
+            bytes::to_lowercase(&val)
         } else {
             val
         }
@@ -6815,9 +6868,9 @@ impl Shell {
     ///
     /// `None` means a bad `-i` expression, whose value must not be stored at all
     /// (see [`Self::eval_int_assign`]).
-    fn apply_value_attrs(&mut self, name: &str, val: String) -> Option<String> {
+    fn apply_value_attrs(&mut self, name: &str, val: Str) -> Option<Str> {
         if self.integer_attr.contains(name) {
-            Some(self.eval_int_assign(&val)?.to_string())
+            Some(self.eval_int_assign(&val)?.to_string().into_bytes())
         } else {
             Some(self.fold_case_attr(name, val))
         }
@@ -6831,25 +6884,23 @@ impl Shell {
     fn appended_attributed_value(
         &mut self,
         name: &str,
-        cur: Option<String>,
-        val: String,
+        cur: Option<Str>,
+        val: Str,
         append: bool,
-    ) -> Option<String> {
+    ) -> Option<Str> {
         let val = self.apply_value_attrs(name, val)?;
         if !append {
             return Some(val);
         }
         if self.integer_attr.contains(name) {
-            let cur = cur
-                .and_then(|s| s.trim().parse::<i64>().ok())
-                .unwrap_or_default();
+            let cur = cur.as_deref().and_then(bytes::parse_i64).unwrap_or_default();
             // `apply_value_attrs` has already reduced `val` to a decimal integer.
-            let add = val.parse::<i64>().unwrap_or_default();
-            return Some(cur.wrapping_add(add).to_string());
+            let add = bytes::parse_i64(&val).unwrap_or_default();
+            return Some(cur.wrapping_add(add).to_string().into_bytes());
         }
         Some(match cur {
             Some(mut cur) => {
-                cur.push_str(&val);
+                cur.extend_from_slice(&val);
                 cur
             }
             None => val,
@@ -6891,7 +6942,7 @@ impl Shell {
     ///
     /// Returns `false` when an element destination's subscript named nowhere and
     /// the write was refused (the diagnostic has already been given).
-    fn scalar_write_store(&mut self, dest: &ScalarDest, val: String) -> bool {
+    fn scalar_write_store(&mut self, dest: &ScalarDest, val: Str) -> bool {
         let base = dest.base().to_string();
         // `set -a` (allexport): any assigned variable is given the export
         // attribute automatically.
@@ -6921,7 +6972,7 @@ impl Shell {
     /// target is readonly. Used by write paths outside `apply_assignment` — the
     /// `read` builtin and temporary `NAME=val cmd` env prefixes — so a readonly
     /// variable cannot be overwritten there either (bash rejects both).
-    fn set_scalar_checked(&mut self, name: &str, val: String) -> bool {
+    fn set_scalar_checked(&mut self, name: &str, val: Str) -> bool {
         // A circular nameref names nothing to write to: report it and fail,
         // exactly as bash does for `a=5` through a cycle.
         let Some(dest) = self.scalar_write_dest(name) else {
@@ -7017,7 +7068,7 @@ impl Shell {
     /// scalar assignment to an existing *indexed* array updates element 0 (so
     /// `a=(1 2 3); a=x` leaves `${a[@]}` == `x 2 3` and `$a` == `x`). For a
     /// non-array name (or an associative array) it stores an ordinary scalar.
-    fn set_scalar_store(&mut self, name: &str, val: String) {
+    fn set_scalar_store(&mut self, name: &str, val: Str) {
         if self.arrays.contains_key(name) {
             self.arrays
                 .entry(name.to_string())
@@ -7026,20 +7077,20 @@ impl Shell {
         } else if self.assoc.contains_key(name) {
             // A subscript-less `name=value` on an existing associative array
             // targets key "0" (bash: `declare -A b; b=a` yields `b[0]=a`).
-            self.assoc_set(name, "0".to_string(), val, false);
+            self.assoc_set(name, b"0".to_vec(), val, false);
         } else {
-            self.vars.insert(name.to_string(), val);
+            self.put_var(name.to_string(), val);
         }
     }
 
     /// The value a subscript-less reference to `name` sees — the inverse of
     /// [`Shell::set_scalar_store`], so it reads element/key `0` of an array
     /// rather than the (unreachable) scalar slot of the same name.
-    fn scalar_store(&self, name: &str) -> Option<String> {
+    fn scalar_store(&self, name: &str) -> Option<Str> {
         if self.arrays.contains_key(name) {
             self.array_element(name, 0)
         } else if self.assoc.contains_key(name) {
-            self.assoc_element(name, "0")
+            self.assoc_element(name, b"0")
         } else {
             self.vars.get(name).cloned()
         }
@@ -7048,13 +7099,13 @@ impl Shell {
     /// Record one expanded element of a compound assignment for the `set -x` line,
     /// if one is being collected (see [`Shell::xtrace_compound`]). `index` is the
     /// subscript's expanded text for a keyed element, `None` for a positional one.
-    fn xtrace_compound_elem(&mut self, index: Option<&str>, value: &str) {
+    fn xtrace_compound_elem(&mut self, index: Option<BStr<'_>>, value: BStr<'_>) {
         let Some(buf) = self.xtrace_compound.as_mut() else {
             return;
         };
         let v = xtrace_compound_quote(value);
         buf.push(match index {
-            Some(i) => format!("[{}]={v}", xtrace_compound_quote(i)),
+            Some(i) => bfmt![b"[", xtrace_compound_quote(i), b"]=", v],
             None => v,
         });
     }
@@ -7081,8 +7132,9 @@ impl Shell {
             return;
         };
         let prefix = self.xtrace_prefix();
-        let op = if a.append { "+=" } else { "=" };
-        self.emit_stderr(format!("{prefix}{}{op}({})\n", a.name, buf.join(" ")).as_bytes());
+        let op: &[u8] = if a.append { b"+=" } else { b"=" };
+        let line = bfmt![prefix, &a.name, op, b"(", buf.join(&b' '), b")\n"];
+        self.emit_stderr(&line);
     }
 
     /// Apply a variable assignment. `trace` is true only for a *bare* assignment
@@ -7123,7 +7175,8 @@ impl Shell {
             trace && self.xtrace && a.index.is_none() && matches!(a.value, AssignRhs::Scalar(_));
         if trace && self.xtrace && !trace_scalar {
             let prefix = self.xtrace_prefix();
-            self.emit_stderr(format!("{prefix}{}\n", crate::unparse::assignment_src(a)).as_bytes());
+            let line = bfmt![prefix, crate::unparse::assignment_src(a), b"\n"];
+            self.emit_stderr(&line);
         }
         // A readonly variable cannot be reassigned; report and leave it intact.
         if self.readonly.contains(&a.name) {
@@ -7160,10 +7213,9 @@ impl Shell {
                 // RHS, minimally quoted, emitted once here so no re-expansion.
                 if trace_scalar {
                     let prefix = self.xtrace_prefix();
-                    let op = if a.append { "+=" } else { "=" };
-                    self.emit_stderr(
-                        format!("{prefix}{}{op}{}\n", a.name, xtrace_quote_value(&val)).as_bytes(),
-                    );
+                    let op: &[u8] = if a.append { b"+=" } else { b"=" };
+                    let line = bfmt![prefix, &a.name, op, xtrace_quote_value(&val), b"\n"];
+                    self.emit_stderr(&line);
                 }
                 // `BASH_ARGV0=name` sets `$0` (the shell/script name used in
                 // diagnostics and `$0` expansion). It is dynamic — not stored in
@@ -7176,6 +7228,10 @@ impl Shell {
                 // predictable append instead. See known-issues TD-OILS-MISSING-
                 // SPECIAL-ARRAYS.)
                 if a.index.is_none() && a.name == "BASH_ARGV0" {
+                    // TD-OILS-BYTE-STRINGS step 10: `$0` doubles as the label
+                    // the diagnostic layer prints (`osh: line 3: …`), which is
+                    // still `String`; the seam closes when that layer converts.
+                    let val = bytes::scaffold_lossy_string(&val);
                     self.name = if a.append {
                         format!("{}{val}", self.name)
                     } else {
@@ -7188,13 +7244,19 @@ impl Shell {
                 // `vars` (reads go through `param_value`'s special arms).
                 if a.index.is_none() && !a.append {
                     if a.name == "RANDOM" {
-                        if let Ok(seed) = val.trim().parse::<u32>() {
+                        // A value that is not a number leaves the seed alone,
+                        // and a value that is not text is not a number.
+                        if let Some(seed) =
+                            bytes::as_str(bytes::trim(&val)).and_then(|s| s.parse::<u32>().ok())
+                        {
                             self.rng.set(seed);
                         }
                         return true;
                     }
                     if a.name == "SECONDS" {
-                        self.seconds_base = val.trim().parse::<u64>().unwrap_or(0);
+                        self.seconds_base = bytes::as_str(bytes::trim(&val))
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(0);
                         self.seconds_anchor = std::time::Instant::now();
                         return true;
                     }
@@ -7249,7 +7311,7 @@ impl Shell {
                         let stored = if is_int {
                             let base = if a.append {
                                 self.assoc_element(&a.name, &key)
-                                    .and_then(|s| s.trim().parse::<i64>().ok())
+                                    .and_then(|s| bytes::parse_i64(&s))
                                     .unwrap_or(0)
                             } else {
                                 0
@@ -7257,7 +7319,7 @@ impl Shell {
                             let Some(n) = self.eval_int_assign(&val) else {
                                 return false;
                             };
-                            base.wrapping_add(n).to_string()
+                            base.wrapping_add(n).to_string().into_bytes()
                         } else {
                             val
                         };
@@ -7298,11 +7360,14 @@ impl Shell {
                             // NOT end the shell; as a `declare`/`local` operand
                             // it only fails the builtin and the line carries on.
                             let src = self.expand_to_string(idx_word);
-                            self.errln(&format!(
-                                "{}{}[{src}]: bad array subscript",
+                            let line = bfmt![
                                 self.err_prefix(),
-                                a.name
-                            ));
+                                &a.name,
+                                b"[",
+                                &src,
+                                b"]: bad array subscript"
+                            ];
+                            self.berrln(&line);
                             if !self.decl_builtin_ctx {
                                 self.discard_error = Some(1);
                             }
@@ -7313,7 +7378,7 @@ impl Shell {
                                 self.arrays
                                     .get(&a.name)
                                     .and_then(|arr| arr.get(&idx))
-                                    .and_then(|s| s.trim().parse::<i64>().ok())
+                                    .and_then(|s| bytes::parse_i64(s))
                                     .unwrap_or(0)
                             } else {
                                 0
@@ -7332,10 +7397,10 @@ impl Shell {
                         let arr = self.arrays.entry(a.name.clone()).or_default();
                         match int_val {
                             Some(n) => {
-                                arr.insert(idx, n.to_string());
+                                arr.insert(idx, n.to_string().into_bytes());
                             }
                             None if a.append => {
-                                arr.entry(idx).or_default().push_str(&val);
+                                arr.entry(idx).or_default().extend_from_slice(&val);
                             }
                             None => {
                                 arr.insert(idx, val);
@@ -7349,42 +7414,43 @@ impl Shell {
                     if self.assoc.contains_key(&a.name) {
                         if is_int {
                             let base = self
-                                .assoc_element(&a.name, "0")
-                                .and_then(|s| s.trim().parse::<i64>().ok())
+                                .assoc_element(&a.name, b"0")
+                                .and_then(|s| bytes::parse_i64(&s))
                                 .unwrap_or(0);
                             let Some(n) = self.eval_int_assign(&val) else {
                                 return false;
                             };
                             let sum = base.wrapping_add(n);
-                            self.assoc_set(&a.name, "0".to_string(), sum.to_string(), false);
+                            self.assoc_set(&a.name, b"0".to_vec(), sum.to_string().into_bytes(), false);
                         } else {
-                            self.assoc_set(&a.name, "0".to_string(), val, true);
+                            self.assoc_set(&a.name, b"0".to_vec(), val, true);
                         }
                     } else if is_int {
                         let base = self
                             .vars
                             .get(&a.name)
-                            .and_then(|c| c.trim().parse::<i64>().ok())
+                            .and_then(|c| bytes::parse_i64(c))
                             .unwrap_or(0);
                         let Some(n) = self.eval_int_assign(&val) else {
                             return false;
                         };
                         let sum = base.wrapping_add(n);
-                        self.vars.insert(a.name.clone(), sum.to_string());
+                        self.put_var(a.name.clone(), sum.to_string().into_bytes());
                     } else if self.arrays.contains_key(&a.name) {
                         self.array_valued.insert(a.name.clone());
                         if let Some(arr) = self.arrays.get_mut(&a.name) {
-                            arr.entry(0).or_default().push_str(&val);
+                            arr.entry(0).or_default().extend_from_slice(&val);
                         }
                     } else {
-                        let cur = self.vars.get(&a.name).cloned().unwrap_or_default();
-                        self.vars.insert(a.name.clone(), cur + &val);
+                        let mut cur = self.vars.get(&a.name).cloned().unwrap_or_default();
+                        cur.extend_from_slice(&val);
+                        self.put_var(a.name.clone(), cur);
                     }
                 } else if is_int {
                     let Some(n) = self.eval_int_assign(&val) else {
                         return false;
                     };
-                    self.set_scalar_store(&a.name, n.to_string());
+                    self.set_scalar_store(&a.name, n.to_string().into_bytes());
                 } else {
                     self.set_scalar_store(&a.name, val);
                 }
@@ -7402,7 +7468,7 @@ impl Shell {
                 //
                 // `pending` is where a non-append literal's pairs wait; an empty
                 // `m=()` still clears, because the swap happens regardless.
-                let mut pending: Vec<(String, String)> = Vec::new();
+                let mut pending: Vec<(Str, Str)> = Vec::new();
                 // bash picks one of two modes from the *first* element, and the
                 // choice governs the whole list:
                 //
@@ -7423,7 +7489,7 @@ impl Shell {
                     // like a command word, so `m=($pairs)` contributes one
                     // element per field, and the pairing runs over the fields —
                     // not over the pre-expansion elements.
-                    let mut words: Vec<String> = Vec::new();
+                    let mut words: Vec<Str> = Vec::new();
                     // An associative literal is bound element by element, so a
                     // failed expansion stops the flattening where it happened
                     // rather than abandoning the whole list: the words before it
@@ -7447,7 +7513,7 @@ impl Shell {
                                 // whole word.
                                 let idx = self.expand_to_string(index);
                                 let val = self.expand_to_string(value);
-                                words.push(format!("[{idx}]={val}"));
+                                words.push(bfmt![b"[", &idx, b"]=", &val]);
                             }
                         }
                         if armed.is_none() && self.discard_error.is_some() {
@@ -7502,7 +7568,7 @@ impl Shell {
                     // leaves `d` untouched and reports only the division, where the
                     // interleaved shape below would have bound `[a]` and named
                     // `loose`.
-                    let mut elems: Vec<(Option<String>, String)> = Vec::new();
+                    let mut elems: Vec<(Option<Str>, Str)> = Vec::new();
                     for e in items {
                         match e {
                             ArrayElem::Keyed { index, value } => {
@@ -7587,7 +7653,7 @@ impl Shell {
                 // straight into the array instead of accumulating.
                 // Phase 1 — expand. `None` is a positional element, which takes
                 // whatever the running index is when it is bound.
-                let mut expanded: Vec<(Option<i64>, String)> = Vec::new();
+                let mut expanded: Vec<(Option<i64>, Str)> = Vec::new();
                 for e in items {
                     match e {
                         ArrayElem::Positional(w) => {
@@ -7680,24 +7746,27 @@ impl Shell {
     fn assoc_keyed_element(
         &mut self,
         a: &Assignment,
-        pending: &mut Vec<(String, String)>,
-        key: Option<String>,
-        val: String,
+        pending: &mut Vec<(Str, Str)>,
+        key: Option<Str>,
+        val: Str,
     ) -> bool {
         let Some(key) = key else {
             // bash quotes the offending word only when the literal came from a
             // `declare`/`local` operand (which the builtin re-parses); a bare
             // `m=(…)` compound assignment names it unquoted.
             let shown = if self.decl_builtin_ctx {
-                format!("'{val}'")
+                bfmt![b"'", &val, b"'"]
             } else {
                 val
             };
-            self.errln(&format!(
-                "{}{}: {shown}: must use subscript when assigning associative array",
+            let line = bfmt![
                 self.err_prefix(),
-                a.name
-            ));
+                &a.name,
+                b": ",
+                &shown,
+                b": must use subscript when assigning associative array"
+            ];
+            self.berrln(&line);
             // Not fatal: bash skips the element, binds the rest and reports 0.
             return true;
         };
@@ -7713,13 +7782,17 @@ impl Shell {
     }
 
     /// Set an associative-array element, creating the array if needed.
-    fn assoc_set(&mut self, name: &str, key: String, val: String, append: bool) {
+    fn assoc_set(&mut self, name: &str, key: Str, val: Str, append: bool) {
         // BASH_ALIASES / BASH_CMDS are live mirrors of the alias/command-hash
         // tables. A write like `BASH_ALIASES[ll]="ls -l"` must mutate the source
         // table (creating a real alias), not the mirror — otherwise the next
         // sync would overwrite it. Route the write to the source, then rebuild
         // the mirror so the change is immediately visible on read.
         if name == "BASH_ALIASES" {
+            // TD-OILS-BYTE-STRINGS step 8: an alias body is *source text* the
+            // lexer re-reads, and the alias table is typed to match the lexer.
+            let key = bytes::scaffold_lossy_string(&key);
+            let val = bytes::scaffold_lossy_string(&val);
             let final_val = if append {
                 let cur = self.aliases.get(&key).cloned().unwrap_or_default();
                 format!("{cur}{val}")
@@ -7731,18 +7804,23 @@ impl Shell {
             return;
         }
         if name == "BASH_CMDS" {
-            let final_val = if append {
-                let cur = self
+            // The hashed *path* is an OS path, so it is carried as bytes the
+            // whole way: a hash entry has to name the file it was resolved to.
+            // TD-OILS-BYTE-STRINGS step 7 converts the command *name* alongside
+            // the rest of the argv surface.
+            let key = bytes::scaffold_lossy_string(&key);
+            let final_val: Str = if append {
+                let mut cur = self
                     .cmd_hash
                     .get(&key)
-                    .map(|(p, _)| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                format!("{cur}{val}")
+                    .map_or_else(Str::new, |(p, _)| bytes::path_to_bytes(p));
+                cur.extend_from_slice(&val);
+                cur
             } else {
                 val
             };
             self.cmd_hash
-                .insert(key, (std::path::PathBuf::from(&final_val), 0));
+                .insert(key, (bytes::bytes_to_path(&final_val), 0));
             self.sync_bash_cmds();
             return;
         }
@@ -7752,7 +7830,7 @@ impl Shell {
         let map = self.assoc.entry(name.to_string()).or_default();
         if let Some(slot) = map.iter_mut().find(|(k, _)| *k == key) {
             if append {
-                slot.1.push_str(&val);
+                slot.1.extend_from_slice(&val);
             } else {
                 slot.1 = val;
             }
@@ -7763,25 +7841,25 @@ impl Shell {
 
     /// Collapse an assignment into a `(name, value)` pair for command-prefix use
     /// (`FOO=bar cmd`). Arrays join their elements with a single space.
-    fn assignment_prefix_value(&mut self, a: &Assignment) -> (String, String) {
+    fn assignment_prefix_value(&mut self, a: &Assignment) -> (String, Str) {
         let val = match &a.value {
             AssignRhs::Scalar(w) => self.expand_to_string(w),
             AssignRhs::Array(items) => {
-                let mut elems: Vec<String> = Vec::new();
+                let mut elems: Vec<Str> = Vec::new();
                 for e in items {
                     match e {
                         ArrayElem::Positional(w) => elems.extend(self.expand_word(w, true)),
                         ArrayElem::Keyed { value, .. } => elems.push(self.expand_to_string(value)),
                     }
                 }
-                elems.join(" ")
+                elems.join(&b' ')
             }
         };
         (a.name.clone(), val)
     }
 
     /// All values of `name`, treating a plain scalar as a one-element array.
-    fn array_elements(&self, name: &str) -> Vec<String> {
+    fn array_elements(&self, name: &str) -> Vec<Str> {
         let Some(name) = &self.resolve_ref_use(name) else {
             return Vec::new();
         };
@@ -7807,8 +7885,8 @@ impl Shell {
         star: bool,
         offset: &Word,
         length: &Option<Box<Word>>,
-    ) -> Vec<String> {
-        let elems: Vec<String> = if name == "@" || name == "*" {
+    ) -> Vec<Str> {
+        let elems: Vec<Str> = if name == "@" || name == "*" {
             let mut v = vec![self.param_value("0").unwrap_or_default()];
             v.extend(self.positional.iter().cloned());
             v
@@ -7864,7 +7942,7 @@ impl Shell {
     /// [`BulkOp`] to each (`${a[@]#pat}`, `${@/x/y}`, `${a[*]^^}`, …). For `@`/
     /// `*` the list is the positional parameters (matching bash — unlike a
     /// slice, `$0` is *not* included here).
-    fn bulk_elements(&mut self, name: &str, op: &BulkOp) -> Vec<String> {
+    fn bulk_elements(&mut self, name: &str, op: &BulkOp) -> Vec<Str> {
         // `@k` / `@K` are key-aware: they interleave subscripts and values
         // rather than transforming each value in place. This is an *array*-only
         // transform, though: on the positional parameters (`${@@k}`/`${*@K}`)
@@ -7899,7 +7977,7 @@ impl Shell {
             }
             return Vec::new();
         }
-        let elems: Vec<String> = if name == "@" || name == "*" {
+        let elems: Vec<Str> = if name == "@" || name == "*" {
             self.positional.clone()
         } else {
             self.array_elements(name)
@@ -7920,7 +7998,7 @@ impl Shell {
     /// matching bash. `@a` yields one attribute-letter field per element (the
     /// array's flag letters, e.g. `a`/`A`/`ar`); positional params have no
     /// attributes, so each field is empty.
-    fn bulk_attr_transform(&mut self, name: &str, op: char) -> Vec<String> {
+    fn bulk_attr_transform(&mut self, name: &str, op: char) -> Vec<Str> {
         let Some(name) = &self.resolve_ref_use(name) else {
             return Vec::new();
         };
@@ -7937,8 +8015,8 @@ impl Shell {
                     .iter()
                     .map(|v| shell_quote(v))
                     .collect::<Vec<_>>()
-                    .join(" ");
-                return vec![format!("set -- {body}")];
+                    .join(&b' ');
+                return vec![bfmt![b"set -- ", &body]];
             }
             return self.format_declare_def(name).map_or_else(Vec::new, |s| vec![s]);
         }
@@ -7948,7 +8026,12 @@ impl Shell {
         } else {
             self.array_elements(name).len()
         };
-        let letters = if positional { String::new() } else { self.attr_flag_letters(name) };
+        // Attribute letters are ASCII by construction.
+        let letters: Str = if positional {
+            Str::new()
+        } else {
+            self.attr_flag_letters(name).into_bytes()
+        };
         vec![letters; count]
     }
 
@@ -7957,10 +8040,10 @@ impl Shell {
     /// *separate* word (`0 x 1 y`); `@K` yields a single field holding the pairs
     /// with each value double-quoted (`0 "x" 1 "y"`), matching bash's
     /// re-inputtable form.
-    fn bulk_keyvalue(&mut self, name: &str, quoted: bool) -> Vec<String> {
-        let (keys, values): (Vec<String>, Vec<String>) = if name == "@" || name == "*" {
+    fn bulk_keyvalue(&mut self, name: &str, quoted: bool) -> Vec<Str> {
+        let (keys, values): (Vec<Str>, Vec<Str>) = if name == "@" || name == "*" {
             let vals = self.positional.clone();
-            let keys = (1..=vals.len()).map(|i| i.to_string()).collect();
+            let keys = (1..=vals.len()).map(|i| i.to_string().into_bytes()).collect();
             (keys, vals)
         } else {
             (self.array_keys(name), self.array_elements(name))
@@ -7969,16 +8052,16 @@ impl Shell {
             let mut body = keys
                 .iter()
                 .zip(&values)
-                .map(|(k, v)| format!("{k} {}", quote_declare_value(v)))
+                .map(|(k, v)| bfmt![k, b" ", quote_declare_value(v)])
                 .collect::<Vec<_>>()
-                .join(" ");
+                .join(&b' ');
             // bash appends a trailing space to the `@K` field for an
             // *associative* array (`[m "1" ]`) but not for an indexed array or
             // the positional params (`[0 "x" 1 "y"]`). Mirror that quirk so the
             // re-inputtable form round-trips byte-for-byte.
             let target = self.resolve_ref_name(name);
             if !body.is_empty() && target.is_some_and(|t| self.assoc.contains_key(&t)) {
-                body.push(' ');
+                body.push(b' ');
             }
             vec![body]
         } else {
@@ -7990,7 +8073,7 @@ impl Shell {
     }
 
     /// Apply a single [`BulkOp`] to one element value.
-    fn apply_bulk_op(&mut self, op: &BulkOp, value: &str) -> String {
+    fn apply_bulk_op(&mut self, op: &BulkOp, value: BStr<'_>) -> Str {
         let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
         match op {
             BulkOp::Trim {
@@ -7999,15 +8082,7 @@ impl Shell {
                 pattern,
             } => {
                 let pat = self.expand_word_pattern(pattern);
-                // TD-OILS-BYTE-STRINGS scaffold: element values are still `String`.
-                #[allow(deprecated)]
-                crate::bytes::scaffold_lossy_string(&param_trim(
-                    value.as_bytes(),
-                    &pat,
-                    *suffix,
-                    *longest,
-                    extglob,
-                ))
+                param_trim(value, &pat, *suffix, *longest, extglob)
             }
             BulkOp::Replace {
                 all,
@@ -8018,16 +8093,7 @@ impl Shell {
                 let pat = self.expand_word_pattern(pattern);
                 let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
                 let repl = self.expand_replacement(replacement, patsub);
-                // TD-OILS-BYTE-STRINGS scaffold: element values are still `String`.
-                #[allow(deprecated)]
-                crate::bytes::scaffold_lossy_string(&param_replace(
-                    value.as_bytes(),
-                    &pat,
-                    &repl,
-                    *all,
-                    *anchor,
-                    extglob,
-                ))
+                param_replace(value, &pat, &repl, *all, *anchor, extglob)
             }
             BulkOp::Case {
                 mode,
@@ -8035,34 +8101,26 @@ impl Shell {
                 pattern,
             } => {
                 let pat = self.expand_word_pattern(pattern);
-                // TD-OILS-BYTE-STRINGS scaffold: element values are still `String`.
-                #[allow(deprecated)]
-                crate::bytes::scaffold_lossy_string(&param_case(
-                    value.as_bytes(),
-                    &pat,
-                    *mode,
-                    *all,
-                    extglob,
-                ))
+                param_case(value, &pat, *mode, *all, extglob)
             }
             BulkOp::Transform { op } => Self::transform_value(value, *op),
             // Handled collection-wide in `bulk_elements` before per-element
             // dispatch; it never reaches the per-element mapper.
-            BulkOp::BadTransform { .. } => value.to_string(),
+            BulkOp::BadTransform { .. } => value.to_vec(),
         }
     }
 
     /// The keys (associative) or indices (indexed) of `name`, in order.
-    fn array_keys(&self, name: &str) -> Vec<String> {
+    fn array_keys(&self, name: &str) -> Vec<Str> {
         let Some(name) = &self.resolve_ref_use(name) else {
             return Vec::new();
         };
         if let Some(m) = self.assoc.get(name) {
             m.iter().map(|(k, _)| k.clone()).collect()
         } else if let Some(a) = self.arrays.get(name) {
-            a.keys().map(usize::to_string).collect()
+            a.keys().map(|k| k.to_string().into_bytes()).collect()
         } else if self.vars.contains_key(name) {
-            vec!["0".to_string()]
+            vec![b"0".to_vec()]
         } else {
             Vec::new()
         }
@@ -8110,7 +8168,7 @@ impl Shell {
     /// A single array element by index (scalar acts as a one-element array).
     /// Negative indices count from the end (`-1` = last). `None` if the index
     /// is out of range.
-    fn array_element(&self, name: &str, idx: i64) -> Option<String> {
+    fn array_element(&self, name: &str, idx: i64) -> Option<Str> {
         if let Some(a) = self.arrays.get(name) {
             // Negative indices count back from `highest_index + 1` (bash sparse
             // semantics), not from the element count.
@@ -8129,7 +8187,7 @@ impl Shell {
     }
 
     /// An associative-array value by string key.
-    fn assoc_element(&self, name: &str, key: &str) -> Option<String> {
+    fn assoc_element(&self, name: &str, key: BStr<'_>) -> Option<Str> {
         self.assoc
             .get(name)?
             .iter()
@@ -8147,7 +8205,7 @@ impl Shell {
     /// reads its base value through here, and each of them carries on with the
     /// element treated as unset once the complaint is made — so `${a[-9]-D}`
     /// gives the default and `${a[-9]:?msg}` raises its own error after this one.
-    fn param_elem_value(&mut self, name: &str, index: &Option<Box<Word>>) -> Option<String> {
+    fn param_elem_value(&mut self, name: &str, index: &Option<Box<Word>>) -> Option<Str> {
         match self.param_elem_lookup(name, index) {
             ElemValue::Value(v) => Some(v),
             ElemValue::Absent => None,
@@ -8202,7 +8260,7 @@ impl Shell {
     /// the value, since a caller told the write succeeded would report a value
     /// stored where it is not. The array is not brought into being either: a
     /// write that never happened should leave no trace of having been tried.
-    fn assign_elem(&mut self, name: &str, index: &Option<Box<Word>>, value: String) -> bool {
+    fn assign_elem(&mut self, name: &str, index: &Option<Box<Word>>, value: Str) -> bool {
         // A circular chain names nothing to write to; the read that led here
         // has already reported it.
         let Some(name) = &self.resolve_ref_name(name) else {
@@ -8210,7 +8268,7 @@ impl Shell {
         };
         match index {
             None => {
-                self.vars.insert(name.to_string(), value);
+                self.put_var(name.to_string(), value);
             }
             Some(w) => {
                 if self.assoc.contains_key(name) {
@@ -8232,10 +8290,9 @@ impl Shell {
                     let idx = self.eval_arith_index(w);
                     if self.subscript_is_bad(name, idx) {
                         let src = self.expand_to_string(w);
-                        self.errln(&format!(
-                            "{}{name}[{src}]: bad array subscript",
-                            self.err_prefix()
-                        ));
+                        let line =
+                            bfmt![self.err_prefix(), name, b"[", &src, b"]: bad array subscript"];
+                        self.berrln(&line);
                         return false;
                     }
                     let bound = self.highest_index_bound(name);
@@ -8271,7 +8328,7 @@ impl Shell {
         &mut self,
         refname: &str,
         index: &Option<Box<Word>>,
-    ) -> Result<Option<String>, ()> {
+    ) -> Result<Option<Str>, ()> {
         if index.is_some() && !self.var_is_set(refname) {
             let src = Self::indirect_ref_src(refname, index);
             self.errln(&format!(
@@ -8303,7 +8360,7 @@ impl Shell {
     /// `${!ref}` — indirect expansion: read the variable whose name is the
     /// value of `ref`. The referent may itself name an array element
     /// (`ref=a[0]` / `ref=m[key]`), and so may the pointer (`${!a[0]}`).
-    fn expand_indirect(&mut self, refname: &str, index: &Option<Box<Word>>) -> String {
+    fn expand_indirect(&mut self, refname: &str, index: &Option<Box<Word>>) -> Str {
         // Nameref special case: `${!ref}` where `ref` has the `-n` attribute
         // expands to the *name* of the referenced variable, not a second level
         // of indirection (bash). Only a *bare* reference asks this: with a
@@ -8312,7 +8369,7 @@ impl Shell {
         // name never becomes the answer.
         if index.is_none() && self.nameref_attr.contains(refname) {
             match self.resolve_ref_name(refname) {
-                Some(target) => return target,
+                Some(target) => return target.into_bytes(),
                 None => {
                     // A circular chain has no final name to report. bash does
                     // *not* warn here — it raises the same "invalid indirect
@@ -8326,7 +8383,7 @@ impl Shell {
                         .as_bytes(),
                     );
                     self.discard_error = Some(1);
-                    return String::new();
+                    return Str::new();
                 }
             }
         }
@@ -8336,26 +8393,30 @@ impl Shell {
         // a non-empty-but-malformed target, which is a fatal "invalid variable
         // name"). Handle the empty case here so it never reaches the validator.
         if index.is_none() && (refname == "@" || refname == "*") && self.positional.is_empty() {
-            return String::new();
+            return Str::new();
         }
         // An unset pointer variable is a fatal "invalid indirect expansion":
         // status 1, the rest of the parse unit discarded, but the shell kept
         // alive so the *next* line still runs. An element that is merely absent
         // points at nothing instead, which expands to nothing.
         let Ok(Some(target)) = self.indirect_pointer_value(refname, index) else {
-            return String::new();
+            return Str::new();
         };
         // The resolved name must be a valid parameter name. An empty or
         // malformed name (`ptr=`, `ptr="a b"`, `ptr=1abc`) is a fatal
         // "invalid variable name" error in bash (unlike a valid-but-unset
-        // target such as `ptr=missing`, which quietly expands to empty).
-        if !is_valid_indirect_target(&target) {
-            self.emit_stderr(format!("{}{target}: invalid variable name\n", self.err_prefix()).as_bytes());
+        // target such as `ptr=missing`, which quietly expands to empty). A
+        // pointer whose value is not text is malformed for the same reason —
+        // every character a parameter name may hold is ASCII — so it takes the
+        // same path rather than being mangled into some other variable's name.
+        let Some(name) = bytes::as_str(&target).filter(|t| is_valid_indirect_target(t)) else {
+            let line = bfmt![self.err_prefix(), &target, b": invalid variable name\n"];
+            self.emit_stderr(&line);
             // Non-fatal, like the unset-pointer case above.
             self.discard_error = Some(1);
-            return String::new();
-        }
-        self.indirect_target_value(&target).unwrap_or_default()
+            return Str::new();
+        };
+        self.indirect_target_value(name).unwrap_or_default()
     }
 
     /// The value a resolved indirect *target* holds: a plain variable's, an
@@ -8365,7 +8426,7 @@ impl Shell {
     /// `None` means the target is unset, which is a real answer here rather
     /// than an empty string: a modifier reached through the reference
     /// (`${!ptr:-D}`) has to tell the two apart.
-    fn indirect_target_value(&mut self, target: &str) -> Option<String> {
+    fn indirect_target_value(&mut self, target: &str) -> Option<Str> {
         // The referent may name an array element: `ref=a[0]`, `ref=m[key]`,
         // or a whole-array reference `ref=a[@]` / `ref=a[*]`.
         if let Some(open) = target.find('[')
@@ -8377,7 +8438,7 @@ impl Shell {
             // `${name[@]}`/`${name[*]}` (bash). In this scalar (unjoined) path we
             // join with a space, matching `expand_array_ref`'s `[@]`/`[*]` join.
             if sub == "@" || sub == "*" {
-                return Some(self.array_elements(name).join(" "));
+                return Some(self.array_elements(name).join(&b' '));
             }
             // The base may itself be a nameref — `declare -n b=c; b=(p q)`
             // stores the array on `c` — so a subscript reached through a
@@ -8387,7 +8448,7 @@ impl Shell {
             // lookup that did not, which made `ptr=b[1]; ${!ptr}` read nothing.
             let name = &self.resolve_ref_use(name)?;
             if self.assoc.contains_key(name) {
-                return self.assoc_element(name, sub);
+                return self.assoc_element(name, sub.as_bytes());
             }
             let idx = self.eval_referent_subscript(sub);
             return self.array_element(name, idx);
@@ -8421,7 +8482,7 @@ impl Shell {
         &mut self,
         refname: &str,
         index: &Option<Box<Word>>,
-    ) -> Option<Vec<String>> {
+    ) -> Option<Vec<Str>> {
         if index.is_none() && self.nameref_attr.contains(refname) {
             return None;
         }
@@ -8431,6 +8492,9 @@ impl Shell {
         let ElemValue::Value(target) = self.param_elem_lookup(refname, index) else {
             return None;
         };
+        // A referent is a variable *name*, optionally subscripted, and every
+        // name a shell can hold is text; a value that is not names nothing.
+        let target = bytes::as_str(&target)?;
         if target.is_empty() {
             return None;
         }
@@ -8501,10 +8565,10 @@ impl Shell {
         operand: Operand,
         name: &str,
         index: &Option<Box<Word>>,
-    ) -> Option<String> {
+    ) -> Option<Str> {
         match operand {
             Operand::Param => self.param_elem_value(name, index),
-            Operand::Value(v) => v.map(ToString::to_string),
+            Operand::Value(v) => v.map(<[u8]>::to_vec),
         }
     }
 
@@ -8514,12 +8578,13 @@ impl Shell {
         index: &Option<Box<Word>>,
         op: char,
         operand: Operand,
-    ) -> String {
+    ) -> Str {
         // The `a` (attributes) transform reports type even for an unset scalar.
         // It asks about the *variable*, so an indirection's resolved value is
         // none of its business — `${!r@a}` reports what `r` points at.
         if op == 'a' {
-            return self.attr_flag_letters(name);
+            // Attribute letters are ASCII by construction.
+            return self.attr_flag_letters(name).into_bytes();
         }
         // `@A` recreates an assignment/`declare` statement for the variable.
         // The whole-array forms (`${arr[@]@A}` / `${arr[*]@A}`) are handled in
@@ -8531,10 +8596,17 @@ impl Shell {
         // `${x@Q}` on unset is empty, whereas a set-but-empty variable is still
         // quoted (`${x@Q}` → `''`). Distinguish the two by the Option itself.
         let Some(value) = self.op_operand(operand, name, index) else {
-            return String::new();
+            return Str::new();
         };
         if op == 'P' {
-            return self.prompt_expand(&value);
+            // TD-OILS-BYTE-STRINGS step 8: a prompt string is re-lexed as
+            // double-quoted *source*, which the lexer still types as text. A
+            // value that is not text has no prompt escapes to decode, so it
+            // stands for itself rather than being mangled.
+            let Some(src) = bytes::as_str(&value) else {
+                return value;
+            };
+            return self.prompt_expand(src);
         }
         Self::transform_value(&value, op)
     }
@@ -8547,22 +8619,30 @@ impl Shell {
     /// substitution's body traces one `+` deeper. An unset `PS4` yields no
     /// prefix at all, not the `+ ` it was *seeded* with at startup — the
     /// default lives in the variable, so unsetting it removes it.
-    fn xtrace_prefix(&mut self) -> String {
+    fn xtrace_prefix(&mut self) -> Str {
         let ps4 = self.vars.get("PS4").cloned().unwrap_or_default();
         // Checked before expanding, as bash does: an empty `PS4` is no prefix,
         // and never mind the indirection level.
         if ps4.is_empty() {
-            return String::new();
+            return Str::new();
         }
-        let expanded = self.prompt_expand(&ps4);
-        let Some(first) = expanded.chars().next() else {
+        // TD-OILS-BYTE-STRINGS step 8: `PS4` is re-lexed as double-quoted
+        // source. A `PS4` that is not text has no escapes and no expansions to
+        // find, so it is used as it stands.
+        let expanded = match bytes::as_str(&ps4) {
+            Some(src) => self.prompt_expand(src),
+            None => ps4,
+        };
+        // The repeated character is the first *character*, so an undecodable
+        // byte repeats as that byte — the trace stays byte-faithful either way.
+        let Some(first) = bytes::chars(&expanded).next() else {
             return expanded;
         };
-        let mut out = String::with_capacity(expanded.len() + self.xtrace_level);
+        let mut out = Str::with_capacity(expanded.len() + self.xtrace_level * first.byte_len());
         for _ in 0..self.xtrace_level {
-            out.push(first);
+            first.push_to(&mut out);
         }
-        out.push_str(&expanded);
+        out.extend_from_slice(&expanded);
         out
     }
 
@@ -8570,8 +8650,18 @@ impl Shell {
     /// Callers gate on `self.xtrace` themselves so `text` need not be built when
     /// tracing is off.
     fn xtrace_emit(&mut self, text: &str) {
+        self.bxtrace_emit(text.as_bytes());
+    }
+
+    /// [`Self::xtrace_emit`] for a trace line built from *values* — a `[[ … ]]`
+    /// operand, an expanded word — which may hold any byte. The trace shows the
+    /// bytes the shell actually has, since a mangled trace of a byte-string
+    /// value is worse than none: it would name a file that is not the one the
+    /// command is about to touch.
+    fn bxtrace_emit(&mut self, text: BStr<'_>) {
         let prefix = self.xtrace_prefix();
-        self.emit_stderr(format!("{prefix}{text}\n").as_bytes());
+        let line = bfmt![prefix, text, b"\n"];
+        self.emit_stderr(&line);
     }
 
     /// Expand `s` as a prompt string: decode the prompt escapes, then expand
@@ -8584,12 +8674,20 @@ impl Shell {
     ///
     /// Tracing is suppressed while expanding, as bash suppresses it, so a
     /// `PS4` containing a command substitution cannot trace itself.
-    fn prompt_expand(&mut self, s: &str) -> String {
+    fn prompt_expand(&mut self, s: &str) -> Str {
         let decoded = self.prompt_decode(s);
+        // TD-OILS-BYTE-STRINGS step 8: the decode itself is byte-faithful (a
+        // `\w` inserts the working directory's real bytes), but re-lexing the
+        // result as double-quoted *source* still needs text. A decoded prompt
+        // that is not text is used literally — which is also what an unlexable
+        // one does, just below.
+        let Some(src) = bytes::as_str(&decoded) else {
+            return decoded;
+        };
         // A substitution that cannot even be lexed expands to nothing in bash
         // (it reports a syntax error to stderr; we take the empty string, which
         // is what the failed expansion contributes to the prompt either way).
-        let Ok(word) = crate::parser::dquote_word_from_source(&decoded, self.lex_opts()) else {
+        let Ok(word) = crate::parser::dquote_word_from_source(src, self.lex_opts()) else {
             return decoded;
         };
         let saved = std::mem::replace(&mut self.xtrace, false);
@@ -8603,39 +8701,43 @@ impl Shell {
     /// backslash and following character. Time-based escapes render in UTC (no
     /// local-timezone model yet, consistent with the `%(…)T` printf
     /// conversion — see TD-OILS9).
-    fn prompt_decode(&self, s: &str) -> String {
+    fn prompt_decode(&self, s: &str) -> Str {
         let (epoch, _) = unix_time();
         let epoch = epoch as i64;
-        let mut out = String::new();
+        // The escapes insert *values* — the working directory, `$0`, the host
+        // name — so what comes out is bytes even though the prompt source is
+        // text: `PS1='\w$ '` in a directory whose name is not UTF-8 must still
+        // show the directory the shell is actually in.
+        let mut out = Str::new();
         let mut chars = s.chars().peekable();
         while let Some(c) = chars.next() {
             if c != '\\' {
-                out.push(c);
+                bytes::push_char(&mut out, c);
                 continue;
             }
             let Some(&e) = chars.peek() else {
-                out.push('\\');
+                out.push(b'\\');
                 break;
             };
             match e {
                 'a' => {
-                    out.push('\u{07}');
+                    out.push(0x07);
                     chars.next();
                 }
                 'e' => {
-                    out.push('\u{1b}');
+                    out.push(0x1b);
                     chars.next();
                 }
                 'n' => {
-                    out.push('\n');
+                    out.push(b'\n');
                     chars.next();
                 }
                 'r' => {
-                    out.push('\r');
+                    out.push(b'\r');
                     chars.next();
                 }
                 '\\' => {
-                    out.push('\\');
+                    out.push(b'\\');
                     chars.next();
                 }
                 'd' => {
@@ -8658,7 +8760,7 @@ impl Shell {
                         let fmt = if fmt.is_empty() { "%H:%M:%S" } else { &fmt };
                         push_prompt_strftime(&mut out, fmt.as_bytes(), epoch);
                     } else {
-                        out.push_str("\\D");
+                        out.extend_from_slice(b"\\D");
                     }
                 }
                 't' => {
@@ -8679,54 +8781,57 @@ impl Shell {
                 }
                 'h' => {
                     let host = self.prompt_hostname();
-                    let short = host.split('.').next().unwrap_or(&host);
-                    out.push_str(short);
+                    let short = host.split(|b| *b == b'.').next().unwrap_or(&host);
+                    out.extend_from_slice(short);
                     chars.next();
                 }
                 'H' => {
-                    out.push_str(&self.prompt_hostname());
+                    out.extend_from_slice(&self.prompt_hostname());
                     chars.next();
                 }
                 'u' => {
-                    out.push_str(&self.prompt_username());
+                    out.extend_from_slice(&self.prompt_username());
                     chars.next();
                 }
                 's' => {
                     // Shell name — basename of `$0`.
                     let arg0 = self.param_value("0").unwrap_or_default();
-                    let base = arg0.rsplit(['/', '\\']).next().unwrap_or(&arg0);
-                    out.push_str(base);
+                    let base = arg0
+                        .rsplit(|b| matches!(b, b'/' | b'\\'))
+                        .next()
+                        .unwrap_or(&arg0);
+                    out.extend_from_slice(base);
                     chars.next();
                 }
                 'j' => {
                     let n = self.jobs.iter().filter(|j| j.status.is_none()).count();
-                    out.push_str(&n.to_string());
+                    out.extend_from_slice(n.to_string().as_bytes());
                     chars.next();
                 }
                 'l' => {
-                    out.push_str("tty");
+                    out.extend_from_slice(b"tty");
                     chars.next();
                 }
                 'v' => {
-                    out.push_str("5.2");
+                    out.extend_from_slice(b"5.2");
                     chars.next();
                 }
                 'V' => {
-                    out.push_str("5.2.0");
+                    out.extend_from_slice(b"5.2.0");
                     chars.next();
                 }
                 'w' => {
-                    out.push_str(&self.prompt_cwd(false));
+                    out.extend_from_slice(&self.prompt_cwd(false));
                     chars.next();
                 }
                 'W' => {
-                    out.push_str(&self.prompt_cwd(true));
+                    out.extend_from_slice(&self.prompt_cwd(true));
                     chars.next();
                 }
                 '!' | '#' => {
                     // History / command number — no interactive history model,
                     // so bash's first-command value.
-                    out.push('1');
+                    out.push(b'1');
                     chars.next();
                 }
                 '$' => {
@@ -8738,8 +8843,10 @@ impl Shell {
                     let root = self
                         .vars
                         .get("EUID")
-                        .map_or_else(|| self.prompt_username() == "root", |e| e == "0");
-                    out.push(if root { '#' } else { '$' });
+                        .map_or_else(|| self.prompt_username().as_slice() == b"root", |e| {
+                            e.as_slice() == b"0"
+                        });
+                    out.push(if root { b'#' } else { b'$' });
                     chars.next();
                 }
                 '[' | ']' => {
@@ -8760,13 +8867,16 @@ impl Shell {
                         }
                     }
                     if let Ok(byte) = u8::from_str_radix(&digits, 8) {
-                        out.push(byte as char);
+                        // `\377` is the *byte* 0xFF, not U+00FF: bash writes the
+                        // octal value straight to the prompt, and a byte string
+                        // can finally hold it.
+                        out.push(byte);
                     }
                 }
                 _ => {
                     // Unknown escape: keep the backslash and the character.
-                    out.push('\\');
-                    out.push(e);
+                    out.push(b'\\');
+                    bytes::push_char(&mut out, e);
                     chars.next();
                 }
             }
@@ -8775,15 +8885,15 @@ impl Shell {
     }
 
     /// The host name for prompt `\h`/`\H` — from `$HOSTNAME`, else `localhost`.
-    fn prompt_hostname(&self) -> String {
+    fn prompt_hostname(&self) -> Str {
         self.param_value("HOSTNAME")
             .filter(|h| !h.is_empty())
-            .unwrap_or_else(|| "localhost".to_string())
+            .unwrap_or_else(|| b"localhost".to_vec())
     }
 
     /// The user name for prompt `\u` — from `$USER`, then `$LOGNAME`, else
     /// `user`.
-    fn prompt_username(&self) -> String {
+    fn prompt_username(&self) -> Str {
         // bash reads the name from `getpwuid`, which we have no equivalent for
         // yet; the environment is the next best source. `USERNAME` is included
         // because that — not `USER`/`LOGNAME` — is the name the host sets when
@@ -8791,25 +8901,28 @@ impl Shell {
         ["USER", "LOGNAME", "USERNAME"]
             .into_iter()
             .find_map(|n| self.param_value(n).filter(|u| !u.is_empty()))
-            .unwrap_or_else(|| "user".to_string())
+            .unwrap_or_else(|| b"user".to_vec())
     }
 
     /// The working directory for prompt `\w` (full, `$HOME`→`~`) or `\W`
     /// (basename only).
-    fn prompt_cwd(&self, basename_only: bool) -> String {
+    fn prompt_cwd(&self, basename_only: bool) -> Str {
         let cwd = self.cwd.clone();
         if basename_only {
-            let base = cwd.rsplit(['/', '\\']).next().unwrap_or(&cwd);
-            return if base.is_empty() { "/".to_string() } else { base.to_string() };
+            let base = cwd
+                .rsplit(|b| matches!(b, b'/' | b'\\'))
+                .next()
+                .unwrap_or(&cwd);
+            return if base.is_empty() { b"/".to_vec() } else { base.to_vec() };
         }
         if let Some(home) = self.param_value("HOME").filter(|h| !h.is_empty()) {
             if cwd == home {
-                return "~".to_string();
+                return b"~".to_vec();
             }
-            if let Some(rest) = cwd.strip_prefix(&home)
-                && rest.starts_with(['/', '\\'])
+            if let Some(rest) = cwd.strip_prefix(home.as_slice())
+                && matches!(rest.first(), Some(b'/' | b'\\'))
             {
-                return format!("~{rest}");
+                return bfmt![b"~", rest];
             }
         }
         cwd
@@ -8828,16 +8941,16 @@ impl Shell {
     /// is a re-inputtable full `declare` and is produced by the bulk path
     /// ([`Shell::bulk_attr_transform`]), not here. An unset variable yields the
     /// empty string.
-    fn transform_assign(&mut self, name: &str, index: &Option<Box<Word>>) -> String {
+    fn transform_assign(&mut self, name: &str, index: &Option<Box<Word>>) -> Str {
         if self.assoc.contains_key(name) || self.arrays.contains_key(name) {
             let flags = self.declare_attr_flags(name);
             return match self.param_elem_value(name, index) {
-                Some(v) => format!("declare {flags} {name}={}", shell_quote(&v)),
-                None => format!("declare {flags} {name}"),
+                Some(v) => bfmt![b"declare ", &flags, b" ", name, b"=", shell_quote(&v)],
+                None => bfmt![b"declare ", &flags, b" ", name],
             };
         }
         let Some(v) = self.vars.get(name) else {
-            return String::new();
+            return Str::new();
         };
         let attributed = self.readonly.contains(name)
             || self.exported.contains(name)
@@ -8850,34 +8963,37 @@ impl Shell {
         // scalar forms single-quote the value: bash's `@A` uses sh_single_quote
         // here, unlike `declare -p`, which double-quotes.
         if attributed {
-            format!("declare {} {name}={}", self.declare_attr_flags(name), shell_quote(v))
+            bfmt![
+                b"declare ",
+                self.declare_attr_flags(name),
+                b" ",
+                name,
+                b"=",
+                shell_quote(v)
+            ]
         } else {
-            format!("{name}={}", shell_quote(v))
+            bfmt![name, b"=", shell_quote(v)]
         }
     }
 
     /// Apply a `@`-operator ([`op`]) to a concrete string value. Shared by the
     /// scalar `${x@Q}` path and the bulk `${a[@]@Q}` path.
-    fn transform_value(value: &str, op: char) -> String {
+    fn transform_value(value: BStr<'_>, op: char) -> Str {
         match op {
             'Q' => shell_quote(value),
-            'U' => value.chars().flat_map(char::to_uppercase).collect(),
+            'U' => bytes::to_uppercase(value),
             'u' => {
-                let mut cs = value.chars();
+                let mut cs = bytes::chars(value);
                 match cs.next() {
-                    Some(f) => f.to_uppercase().chain(cs).collect(),
-                    None => String::new(),
+                    Some(f) => bytes::from_chars(f.to_uppercase().into_iter().chain(cs)),
+                    None => Str::new(),
                 }
             }
             // NB: there is no `@l` — bash has no lowercase-first operator
             // (`${x@l}` is a "bad substitution"), so the parser never routes it
             // here (see `is_valid_transform_op`).
-            'L' => value.chars().flat_map(char::to_lowercase).collect(),
-            // TD-OILS-BYTE-STRINGS scaffold: `value` is still a `String`.
-            #[allow(deprecated)]
-            'E' => crate::bytes::scaffold_lossy_string(&crate::escape::ansi_c_unescape(
-                value.as_bytes(),
-            )),
+            'L' => bytes::to_lowercase(value),
+            'E' => crate::escape::ansi_c_unescape(value),
             // `K`/`k` on a *scalar* or single array element behave like `@Q`:
             // bash quotes the value (`${v@K}` on `v=abc` → `'abc'`). The
             // key-aware array form (`${a[@]@K}`) is intercepted earlier in the
@@ -8887,7 +9003,7 @@ impl Shell {
             // `P` (prompt) is handled in `param_transform` (it needs shell
             // state). Anything else: return the value unchanged rather than
             // erroring.
-            _ => value.to_string(),
+            _ => value.to_vec(),
         }
     }
 
@@ -8934,24 +9050,24 @@ impl Shell {
         names
     }
 
-    fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> String {
+    fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> Str {
         let Some(name) = &self.resolve_ref_use(name) else {
             // A circular chain is unset: `${a[@]}` is empty, `${#a[@]}` is 0.
-            return if length { "0".to_string() } else { String::new() };
+            return if length { b"0".to_vec() } else { Str::new() };
         };
         match index {
             ArrayIndex::All | ArrayIndex::Star => {
                 let elems = self.array_elements(name);
                 if length {
-                    elems.len().to_string()
+                    elems.len().to_string().into_bytes()
                 } else if matches!(index, ArrayIndex::Star) {
                     // `${arr[*]}` joins with the first character of `$IFS`
                     // (space when unset, empty when IFS is empty) — bash. The
                     // quoted `"${arr[*]}"` form reaches this scalar path, so the
                     // separator is observable.
-                    elems.join(&self.star_sep())
+                    elems.join(self.star_sep().as_slice())
                 } else {
-                    elems.join(" ")
+                    elems.join(b" ".as_slice())
                 }
             }
             ArrayIndex::Index(w) => {
@@ -8973,7 +9089,7 @@ impl Shell {
                                 crate::unparse::word_src(w)
                             ));
                             self.discard_error = Some(1);
-                            return "0".to_string();
+                            return b"0".to_vec();
                         }
                         self.errln(&format!(
                             "{}{name}: bad array subscript",
@@ -8994,13 +9110,14 @@ impl Shell {
                     //     (`-9]: bad array subscript`), aborts the command.
                     if self.subscript_is_bad(name, idx) {
                         if length {
+                            // The echoed subscript is the *expansion* of the
+                            // subscript word, so it can hold any byte.
                             let src = self.expand_to_string(w);
-                            self.errln(&format!(
-                                "{}{src}]: bad array subscript",
-                                self.err_prefix()
-                            ));
+                            let line =
+                                bfmt![self.err_prefix(), &src, b"]: bad array subscript\n"];
+                            self.emit_stderr(&line);
                             self.discard_error = Some(1);
-                            return "0".to_string();
+                            return b"0".to_vec();
                         }
                         self.errln(&format!("{}{name}: bad array subscript", self.err_prefix()));
                         // It named nothing, so there is nothing to expand to —
@@ -9012,7 +9129,7 @@ impl Shell {
                     }
                 };
                 if length {
-                    val.map_or(0, |v| v.chars().count()).to_string()
+                    val.map_or(0, |v| bytes::char_count(&v)).to_string().into_bytes()
                 } else {
                     val.unwrap_or_default()
                 }
@@ -9061,8 +9178,7 @@ impl Shell {
         // still sees the command that triggered it (bash). Uses the reconstructed
         // *unexpanded* source text, matching bash.
         if !self.in_trap {
-            self.vars
-                .insert("BASH_COMMAND".to_string(), crate::unparse::simple_src(sc));
+            self.put_var("BASH_COMMAND", crate::unparse::simple_src(sc));
         }
         // The DEBUG trap runs before each simple command (guarded so a handler's
         // own commands don't recurse). Suppressed inside an untraced function
@@ -9091,7 +9207,7 @@ impl Shell {
             .first()
             .and_then(word_as_plain_literal)
             .is_some_and(is_declaration_builtin);
-        let mut argv: Vec<String> = Vec::new();
+        let mut argv: Vec<Str> = Vec::new();
         // Where each source word's fields start in `argv`. Only a declaration
         // builtin with compound operands needs it, to put the operands back at
         // their source positions in the `set -x` line — a word can expand to any
@@ -9143,7 +9259,8 @@ impl Shell {
         // word-expansion error — bash reports `no match: PATTERN`, discards the
         // command (and the rest of the current parse unit) and continues.
         if let Some(pat) = self.glob_error.take() {
-            self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
+            let msg = bfmt![self.err_prefix(), b"no match: ", &pat, b"\n"];
+            self.emit_stderr(&msg);
             self.last_status = 1;
             return Flow::Discard;
         }
@@ -9168,7 +9285,8 @@ impl Shell {
             // (`arr=(*.nope)`) discards the command, just like the command-word
             // case (non-fatal: the shell continues with the next parse unit).
             if let Some(pat) = self.glob_error.take() {
-                self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
+                let msg = bfmt![self.err_prefix(), b"no match: ", &pat, b"\n"];
+                self.emit_stderr(&msg);
                 self.discard_error = None;
                 self.last_status = 1;
                 return Flow::Discard;
@@ -9225,7 +9343,7 @@ impl Shell {
 
         // Command present: build scalar env prefixes (`FOO=bar cmd`). Array and
         // indexed prefix assignments collapse to a space-joined scalar.
-        let mut assigns: Vec<(String, String)> = Vec::with_capacity(sc.assignments.len());
+        let mut assigns: Vec<(String, Str)> = Vec::with_capacity(sc.assignments.len());
         for a in &sc.assignments {
             assigns.push(self.assignment_prefix_value(a));
         }
@@ -9257,7 +9375,8 @@ impl Shell {
         // (`x=*.nope cmd`) discards the command, mirroring the command-word case
         // (non-fatal: the shell continues with the next parse unit).
         if let Some(pat) = self.glob_error.take() {
-            self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
+            let msg = bfmt![self.err_prefix(), b"no match: ", &pat, b"\n"];
+            self.emit_stderr(&msg);
             self.last_status = 1;
             return Flow::Discard;
         }
@@ -9298,8 +9417,8 @@ impl Shell {
         // form has to happen inside that function, not here.
         let decl_with_arrays = !sc.decl_arrays.is_empty()
             && matches!(
-                argv[0].as_str(),
-                "declare" | "typeset" | "local" | "readonly" | "export"
+                argv[0].as_slice(),
+                b"declare" | b"typeset" | b"local" | b"readonly" | b"export"
             );
 
         // `set -x`: trace the command before running it. bash emits each temporary
@@ -9308,18 +9427,19 @@ impl Shell {
         if self.xtrace {
             let prefix = self.xtrace_prefix();
             for (k, v) in &assigns {
-                self.emit_stderr(format!("{prefix}{k}={}\n", xtrace_quote_value(v)).as_bytes());
+                let line = bfmt![&prefix, k.as_str(), b"=", xtrace_quote_value(v), b"\n"];
+                self.emit_stderr(&line);
             }
             if !decl_with_arrays {
                 let mut line = prefix;
                 for (i, a) in argv.iter().enumerate() {
                     if i > 0 {
-                        line.push(' ');
+                        line.push(b' ');
                     }
-                    line.push_str(&xtrace_quote(a));
+                    line.extend_from_slice(&xtrace_quote(a));
                 }
-                line.push('\n');
-                self.emit_stderr(line.as_bytes());
+                line.push(b'\n');
+                self.emit_stderr(&line);
             }
         }
 
@@ -9329,7 +9449,7 @@ impl Shell {
         // cannot express. Handle it directly here, before plan resolution.
         // (`exec cmd …`, and the rare `command exec`/`builtin exec` re-dispatch,
         // still go through the plan-based path below.)
-        if argv.len() == 1 && argv[0] == "exec" && !sc.redirects.is_empty() {
+        if argv.len() == 1 && argv[0] == b"exec" && !sc.redirects.is_empty() {
             let rc = self.apply_exec_redirects(&sc.redirects, out);
             self.last_status = rc;
             return Flow::Next;
@@ -9345,6 +9465,13 @@ impl Shell {
         };
 
         let name = argv[0].clone();
+        // A command *name* that is not text can only ever be an external file:
+        // every shell function and every builtin is declared from source text, so
+        // a non-text word cannot name one. Resolving that once here keeps the
+        // name-keyed lookups below honest — they ask about a name that could
+        // exist — while `name` itself stays bytes for the `$PATH` search and the
+        // `execve`, which must name the file the user actually wrote.
+        let name_str = bytes::as_str(&name).map(str::to_owned);
 
         // `$_` tracks the last argument of the most recent simple command, to be
         // read by the *next* command (bash). argv is fully expanded now — and
@@ -9352,7 +9479,7 @@ impl Shell {
         // for the following command. (The startup form, where `$_` is the shell/
         // script pathname, is not modelled.)
         if let Some(last) = argv.last() {
-            self.vars.insert("_".to_string(), last.clone());
+            self.put_var("_".to_string(), last.clone());
         }
 
         // `declare -A m=([k]=v)` one-liner: array-literal operands are attached
@@ -9376,7 +9503,7 @@ impl Shell {
                         .unwrap_or(argv.len())
                         .saturating_add(k)
                         .min(w.len());
-                    w.insert(at, d.assign.name.clone());
+                    w.insert(at, d.assign.name.clone().into_bytes());
                 }
                 w
             });
@@ -9392,10 +9519,10 @@ impl Shell {
         // `command …` (bypass shell functions) and `builtin …` (force builtin
         // lookup) re-dispatch a sub-command, so they are handled before the
         // normal function/builtin/external resolution below.
-        if name == "command" {
+        if name == b"command" {
             return self.exec_command_builtin(&argv, &assigns, out, stdin, &redir);
         }
-        if name == "builtin" {
+        if name == b"builtin" {
             return self.exec_builtin_builtin(&argv, &assigns, out, stdin, &redir);
         }
 
@@ -9403,8 +9530,8 @@ impl Shell {
         // `myfunc 2> err`, `myfunc < in`) apply to the whole function body, so
         // run it inside a redirect scope when any are present. Without redirects,
         // dispatch directly to avoid the scope-setup overhead.
-        if self.funcs.contains_key(&name) {
-            let args: Vec<String> = argv[1..].to_vec();
+        if let Some(name) = name_str.clone().filter(|n| self.funcs.contains_key(n)) {
+            let args: Vec<Str> = argv[1..].to_vec();
             if redir.needs_scope() {
                 return self.exec_with_redirects(redir, out, stdin, move |sh, o, s| {
                     sh.call_function(&name, &args, &assigns, o, s, &RedirPlan::default())
@@ -9415,8 +9542,8 @@ impl Shell {
 
         // Builtin? (unless disabled via `enable -n`, in which case fall through
         // to the same-named external.)
-        if self.builtin_enabled(&name) {
-            return self.run_builtin(&name, &argv, &assigns, out, stdin, &redir);
+        if let Some(name) = name_str.as_deref().filter(|n| self.builtin_enabled(n)) {
+            return self.run_builtin(name, &argv, &assigns, out, stdin, &redir);
         }
 
         // External command. If a bare command name resolves nowhere on `$PATH`
@@ -9425,8 +9552,8 @@ impl Shell {
         // …) instead of reporting "command not found". The cheap function-
         // existence check comes first so the common case never scans `$PATH`
         // twice.
-        if !name.contains('/')
-            && !name.contains('\\')
+        if !name.contains(&b'/')
+            && !name.contains(&b'\\')
             && self.funcs.contains_key("command_not_found_handle")
             && self.find_in_path(&name).is_none()
         {
@@ -9462,15 +9589,15 @@ impl Shell {
     /// valid integer). Read live from the variable each call, as bash does.
     fn funcnest_limit(&self) -> Option<usize> {
         let raw = self.param_value("FUNCNEST")?;
-        let n: i64 = raw.trim().parse().ok()?;
+        let n = bytes::parse_i64(bytes::trim(&raw))?;
         if n > 0 { usize::try_from(n).ok() } else { None }
     }
 
     fn call_function(
         &mut self,
         name: &str,
-        args: &[String],
-        assigns: &[(String, String)],
+        args: &[Str],
+        assigns: &[(String, Str)],
         out: &mut Out,
         stdin: &StdinSrc,
         _redir: &RedirPlan,
@@ -9502,10 +9629,10 @@ impl Shell {
         }
         // Temporarily apply assignments and swap positionals.
         let saved_pos = std::mem::replace(&mut self.positional, args.to_vec());
-        let saved: Vec<(String, Option<String>)> = assigns
+        let saved: Vec<(String, Option<Str>)> = assigns
             .iter()
             .map(|(k, v)| {
-                let old = self.vars.insert(k.clone(), v.clone());
+                let old = self.replace_var(k.clone(), v.clone());
                 (k.clone(), old)
             })
             .collect();
@@ -9655,7 +9782,7 @@ impl Shell {
         for (k, old) in saved {
             match old {
                 Some(v) => {
-                    self.vars.insert(k, v);
+                    self.put_var(k, v);
                 }
                 None => {
                     self.vars.remove(&k);
@@ -9814,28 +9941,28 @@ impl Shell {
     ///   * `FUNCNAME` is left *unset* whenever no function frame is active,
     ///     even inside a sourced file whose frame the other two arrays show.
     fn refresh_funcname(&mut self) {
-        let mut names: BTreeMap<usize, String> = BTreeMap::new();
-        let mut linenos: BTreeMap<usize, String> = BTreeMap::new();
-        let mut sources: BTreeMap<usize, String> = BTreeMap::new();
+        let mut names: BTreeMap<usize, Str> = BTreeMap::new();
+        let mut linenos: BTreeMap<usize, Str> = BTreeMap::new();
+        let mut sources: BTreeMap<usize, Str> = BTreeMap::new();
         let in_function = !self.fn_stack.is_empty();
         let mut idx = 0usize;
         // Walk the merged stack from innermost (last) to outermost (first).
         for (name, src, line) in self.merged_frames().into_iter().rev() {
             if in_function {
-                names.insert(idx, name);
+                names.insert(idx, name.into_bytes());
             }
-            linenos.insert(idx, line.to_string());
-            sources.insert(idx, src);
+            linenos.insert(idx, line.to_string().into_bytes());
+            sources.insert(idx, src.into_bytes());
             idx = idx.saturating_add(1);
         }
         if self.script_mode {
             // FUNCNAME gains `main` only when a function frame sits above it.
             if in_function {
-                names.insert(idx, "main".to_string());
+                names.insert(idx, b"main".to_vec());
             }
             // BASH_SOURCE/BASH_LINENO always carry the script's own base frame.
-            linenos.insert(idx, "0".to_string());
-            sources.insert(idx, self.name.clone());
+            linenos.insert(idx, b"0".to_vec());
+            sources.insert(idx, self.name.clone().into_bytes());
         }
         if names.is_empty() && linenos.is_empty() && sources.is_empty() {
             self.arrays.remove("FUNCNAME");
@@ -9861,7 +9988,7 @@ impl Shell {
     /// count goes to the front of `bash_argc`, and its arguments — reversed — are
     /// prepended to `bash_argv` (so `bash_argv[0]` is the innermost frame's last
     /// argument). Only called while `extdebug` is on.
-    fn push_arg_frame(&mut self, args: &[String]) {
+    fn push_arg_frame(&mut self, args: &[Str]) {
         self.bash_argc.insert(0, args.len());
         // Prepend args in reverse: iterate forward and insert each at the front so
         // the last arg ends up first, matching bash's reversed BASH_ARGV layout.
@@ -9893,13 +10020,13 @@ impl Shell {
             self.arrays.remove("BASH_ARGV");
             return;
         }
-        let argc: BTreeMap<usize, String> = self
+        let argc: BTreeMap<usize, Str> = self
             .bash_argc
             .iter()
             .enumerate()
-            .map(|(i, c)| (i, c.to_string()))
+            .map(|(i, c)| (i, c.to_string().into_bytes()))
             .collect();
-        let argv: BTreeMap<usize, String> = self
+        let argv: BTreeMap<usize, Str> = self
             .bash_argv
             .iter()
             .enumerate()
@@ -9970,7 +10097,7 @@ impl Shell {
         self.assoc.remove(name);
         self.exported.remove(name);
         if let Some(v) = snap.scalar {
-            self.vars.insert(name.to_string(), v);
+            self.put_var(name.to_string(), v);
         }
         if let Some(a) = snap.indexed {
             self.arrays.insert(name.to_string(), a);
@@ -10043,8 +10170,8 @@ impl Shell {
     /// `-v` (terse: name/path) / `-V` (verbose).
     fn exec_command_builtin(
         &mut self,
-        argv: &[String],
-        assigns: &[(String, String)],
+        argv: &[Str],
+        assigns: &[(String, Str)],
         out: &mut Out,
         stdin: &StdinSrc,
         redir: &RedirPlan,
@@ -10052,17 +10179,17 @@ impl Shell {
         let mut i = 1;
         let mut terse = false;
         let mut verbose = false;
-        while i < argv.len() && argv[i].starts_with('-') && argv[i].len() > 1 {
-            match argv[i].as_str() {
-                "-v" => terse = true,
-                "-V" => verbose = true,
-                "-p" => {} // "default PATH" — we use the current PATH.
-                "--" => {
+        while i < argv.len() && argv[i].starts_with(b"-") && argv[i].len() > 1 {
+            match argv[i].as_slice() {
+                b"-v" => terse = true,
+                b"-V" => verbose = true,
+                b"-p" => {} // "default PATH" — we use the current PATH.
+                b"--" => {
                     i += 1;
                     break;
                 }
                 other => {
-                    self.emit_cmd_stderr(out, redir, &format!("{}command: {other}: invalid option", self.err_prefix()));
+                    self.bemit_cmd_stderr(out, redir, &bfmt![self.err_prefix(), b"command: ", other, b": invalid option"]);
                     self.emit_cmd_stderr(out, redir, "command: usage: command [-pVv] command [arg ...]");
                     self.last_status = 2;
                     return Flow::Next;
@@ -10079,9 +10206,13 @@ impl Shell {
             return self.command_describe(target, verbose, out, redir);
         }
         // Run `target` bypassing functions. A disabled builtin (via `enable -n`)
-        // runs the same-named external instead.
-        if self.builtin_enabled(target) {
-            return self.run_builtin(target, rest, assigns, out, stdin, redir);
+        // runs the same-named external instead. A name that is not text cannot
+        // be a builtin's, so it falls through to the external lookup — which
+        // will fail with "command not found", naming the bytes the user wrote.
+        if let Some(name) = bytes::as_str(target).map(str::to_owned)
+            && self.builtin_enabled(&name)
+        {
+            return self.run_builtin(&name, rest, assigns, out, stdin, redir);
         }
         self.run_external(rest, assigns, out, stdin, redir);
         Flow::Next
@@ -10091,8 +10222,8 @@ impl Shell {
     /// of the same name exists.
     fn exec_builtin_builtin(
         &mut self,
-        argv: &[String],
-        assigns: &[(String, String)],
+        argv: &[Str],
+        assigns: &[(String, Str)],
         out: &mut Out,
         stdin: &StdinSrc,
         redir: &RedirPlan,
@@ -10101,16 +10232,19 @@ impl Shell {
         // `-X` (other than `--`) is an invalid option, reported like bash.
         let mut i = 1;
         if let Some(tok) = argv.get(i) {
-            if tok == "--" {
+            if tok == b"--" {
                 i += 1;
-            } else if let Some(c) = tok.strip_prefix('-').and_then(|s| s.chars().next()) {
+            } else if let Some(c) = tok
+                .strip_prefix(b"-".as_slice())
+                .and_then(|s| bytes::chars(s).next())
+            {
                 // `builtin` is dispatched at exec level, so its diagnostics take
                 // the explicit `out`/`redir` path (like `command`), not the
                 // stderr-stack helper used by ordinary builtins.
-                self.emit_cmd_stderr(
+                self.bemit_cmd_stderr(
                     out,
                     redir,
-                    &format!("{}builtin: -{c}: invalid option", self.err_prefix()),
+                    &bfmt![self.err_prefix(), b"builtin: -", c.to_str(), b": invalid option"],
                 );
                 self.emit_cmd_stderr(out, redir, "builtin: usage: builtin [shell-builtin [arg ...]]");
                 self.last_status = 2;
@@ -10121,11 +10255,16 @@ impl Shell {
             self.last_status = 0;
             return Flow::Next;
         };
-        if is_builtin(sub) {
-            let sub = sub.clone();
-            return self.run_builtin(&sub, &argv[i..], assigns, out, stdin, redir);
+        if let Some(name) = bytes::as_str(sub).map(str::to_owned)
+            && is_builtin(&name)
+        {
+            return self.run_builtin(&name, &argv[i..], assigns, out, stdin, redir);
         }
-        self.emit_cmd_stderr(out, redir, &format!("{}builtin: {sub}: not a shell builtin", self.err_prefix()));
+        self.bemit_cmd_stderr(
+            out,
+            redir,
+            &bfmt![self.err_prefix(), b"builtin: ", sub, b": not a shell builtin"],
+        );
         self.last_status = 1;
         Flow::Next
     }
@@ -10151,11 +10290,17 @@ impl Shell {
     /// Nothing found is status 1, with a diagnostic only under `-V`.
     fn command_describe(
         &mut self,
-        target: &str,
+        target: BStr<'_>,
         verbose: bool,
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
+        // A command *name* that is not text can only be a `$PATH` file: no
+        // alias, keyword, function or builtin can be spelled with it.
+        let Some(target) = bytes::as_str(target).map(str::to_owned) else {
+            return self.command_describe_file(&[], verbose, out, redir);
+        };
+        let target = target.as_str();
         if let Some(val) = self.describe_alias(target) {
             let line = if verbose {
                 alias_description(target, val)
@@ -10192,18 +10337,38 @@ impl Shell {
             };
             let _ = self.write_line(out, redir, &line);
             self.last_status = 0;
-        } else if let Some(path) = self.find_in_path(target) {
-            let ps = path.to_string_lossy().into_owned();
+        } else {
+            return self.command_describe_file(target.as_bytes(), verbose, out, redir);
+        }
+        Flow::Next
+    }
+
+    /// The `$PATH`-file arm of [`Shell::command_describe`], split out because it
+    /// is also the *whole* answer for a command name that is not text.
+    fn command_describe_file(
+        &mut self,
+        target: BStr<'_>,
+        verbose: bool,
+        out: &mut Out,
+        redir: &RedirPlan,
+    ) -> Flow {
+        if let Some(path) = self.find_in_path(target) {
+            let ps = bytes::path_to_bytes(&path);
             let line = if verbose {
-                format!("{target} is {ps}")
+                bfmt![target, b" is ", &ps]
             } else {
                 ps
             };
-            let _ = self.write_line(out, redir, &line);
+            let _ = self.bwrite_line(out, redir, &line);
             self.last_status = 0;
         } else {
             if verbose {
-                self.errln(&format!("{}command: {target}: not found", self.err_prefix()));
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"command: ",
+                    target,
+                    b": not found"
+                ]);
             }
             self.last_status = 1;
         }
@@ -10212,8 +10377,8 @@ impl Shell {
 
     /// Search `$PATH` for an executable named `name`. A name containing a slash
     /// is checked directly. Returns the first matching regular file.
-    fn find_in_path(&self, name: &str) -> Option<std::path::PathBuf> {
-        if name.contains('/') || name.contains('\\') {
+    fn find_in_path(&self, name: BStr<'_>) -> Option<std::path::PathBuf> {
+        if name.contains(&b'/') || name.contains(&b'\\') {
             let p = self.resolve(name);
             return p.is_file().then_some(p);
         }
@@ -10222,13 +10387,13 @@ impl Shell {
             // Only consult the real process PATH when the shell has not taken
             // ownership of its environment; once imported, an unset PATH means
             // no path search (bash).
-            None if !self.env_imported => std::env::var("PATH").ok()?,
+            None if !self.env_imported => bytes::os_to_bytes(&std::env::var_os("PATH")?),
             None => return None,
         };
-        for dir in std::env::split_paths(&path) {
+        for dir in std::env::split_paths(&bytes::bytes_to_os(&path)) {
             // A relative `$PATH` entry (`.`, `bin`) is relative to *this*
             // shell's directory, not the process's.
-            let cand = self.resolve(&dir.to_string_lossy()).join(name);
+            let cand = self.resolve(&bytes::path_to_bytes(&dir)).join(bytes::bytes_to_os(name));
             // bash's PATH search skips files it cannot execute (it probes with
             // `access(X_OK)`), so a non-executable data file (e.g. a `*.json`
             // config) sharing a name with a real command in an earlier PATH dir
@@ -10257,16 +10422,22 @@ impl Shell {
     /// count bumped); otherwise a `$PATH` search runs and a hit is remembered.
     /// Returns `None` when the name cannot be resolved — the caller then falls
     /// back to letting the OS attempt the spawn (preserving prior behavior).
-    fn resolve_external(&mut self, name: &str) -> Option<std::path::PathBuf> {
-        if name.contains('/') || name.contains('\\') {
+    fn resolve_external(&mut self, name: BStr<'_>) -> Option<std::path::PathBuf> {
+        if name.contains(&b'/') || name.contains(&b'\\') {
             return self.find_in_path(name);
         }
-        if let Some((path, hits)) = self.cmd_hash.get_mut(name) {
+        // The hash table is keyed by name, and `hash`/`hash -p` reach it through
+        // the builtin argv surface, which is text. A non-text name therefore
+        // cannot have (or gain) an entry — it still resolves, just uncached.
+        let Some(key) = bytes::as_str(name).map(str::to_owned) else {
+            return self.find_in_path(name);
+        };
+        if let Some((path, hits)) = self.cmd_hash.get_mut(&key) {
             *hits += 1;
             return Some(path.clone());
         }
         let path = self.find_in_path(name)?;
-        self.cmd_hash.insert(name.to_string(), (path.clone(), 1));
+        self.cmd_hash.insert(key, (path.clone(), 1));
         // Refresh the BASH_CMDS mirror only when a *new* command is hashed (rare,
         // once per distinct command). The cache-hit branch above mutates only the
         // hit count, which the mirror doesn't expose, so it stays sync-free.
@@ -10277,9 +10448,9 @@ impl Shell {
     /// Like `find_in_path`, but returns *every* matching executable across all
     /// `$PATH` directories in order (used by `type -a`). Duplicate paths are
     /// suppressed while preserving first-seen order.
-    fn find_all_in_path(&self, name: &str) -> Vec<std::path::PathBuf> {
+    fn find_all_in_path(&self, name: BStr<'_>) -> Vec<std::path::PathBuf> {
         let mut out: Vec<std::path::PathBuf> = Vec::new();
-        if name.contains('/') || name.contains('\\') {
+        if name.contains(&b'/') || name.contains(&b'\\') {
             let p = self.resolve(name);
             if p.is_file() {
                 out.push(p);
@@ -10288,14 +10459,14 @@ impl Shell {
         }
         let path = match self.param_value("PATH") {
             Some(p) => p,
-            None if !self.env_imported => match std::env::var("PATH") {
-                Ok(p) => p,
-                Err(_) => return out,
+            None if !self.env_imported => match std::env::var_os("PATH") {
+                Some(p) => bytes::os_to_bytes(&p),
+                None => return out,
             },
             None => return out,
         };
-        for dir in std::env::split_paths(&path) {
-            let cand = self.resolve(&dir.to_string_lossy()).join(name);
+        for dir in std::env::split_paths(&bytes::bytes_to_os(&path)) {
+            let cand = self.resolve(&bytes::path_to_bytes(&dir)).join(bytes::bytes_to_os(name));
             if cand.is_file() && !out.contains(&cand) {
                 out.push(cand.clone());
             }
@@ -10312,8 +10483,8 @@ impl Shell {
 
     fn run_external(
         &mut self,
-        argv: &[String],
-        assigns: &[(String, String)],
+        argv: &[Str],
+        assigns: &[(String, Str)],
         out: &mut Out,
         stdin: &StdinSrc,
         redir: &RedirPlan,
@@ -10331,13 +10502,16 @@ impl Shell {
                 // as arg0. (Unix-only — Windows has no argv[0] override in std,
                 // and on the host the MSYS runtime reconstructs argv[0] itself.)
                 #[cfg(unix)]
-                std::os::unix::process::CommandExt::arg0(&mut c, &argv[0]);
+                std::os::unix::process::CommandExt::arg0(&mut c, bytes::bytes_to_os(&argv[0]));
                 c
             }
-            None => PCommand::new(self.resolve_program(&argv[0])),
+            None => PCommand::new(bytes::bytes_to_os(&self.resolve_program(&argv[0]))),
         };
-        cmd.args(&argv[1..]);
-        cmd.current_dir(&self.cwd);
+        // Every argument crosses the OS boundary as bytes: an argument that is
+        // not UTF-8 must reach the child unchanged, so it goes through
+        // `bytes_to_os` rather than any lossy conversion.
+        cmd.args(argv[1..].iter().map(|a| bytes::bytes_to_os(a)));
+        cmd.current_dir(bytes::bytes_to_path(&self.cwd));
 
         // Environment: exported shell vars + this command's temp assignments.
         // When the shell owns its environment, start from a cleared base so an
@@ -10347,11 +10521,11 @@ impl Shell {
         }
         for (k, v) in &self.vars {
             if self.exported.contains(k) {
-                cmd.env(k, v);
+                cmd.env(k, bytes::bytes_to_os(v));
             }
         }
         for (k, v) in assigns {
-            cmd.env(k, v);
+            cmd.env(k, bytes::bytes_to_os(v));
         }
 
         // stdin — a here-doc/here-string body takes precedence, then a file
@@ -10471,7 +10645,8 @@ impl Shell {
                     cmd.stdout(Stdio::from(f));
                 }
                 Err(e) => {
-                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                    let line = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                    self.berrln(&line);
                     self.last_status = 1;
                     return;
                 }
@@ -10655,7 +10830,8 @@ impl Shell {
                     cmd.stderr(Stdio::from(f));
                 }
                 Err(e) => {
-                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                    let line = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                    self.berrln(&line);
                     self.last_status = 1;
                     return;
                 }
@@ -10761,7 +10937,8 @@ impl Shell {
             Ok(c) => c,
             Err(e) => {
                 let (msg, status) = spawn_error_message(&argv[0], &e);
-                self.emit_cmd_stderr(out, redir, &format!("{}{msg}", self.err_prefix()));
+                let line = bfmt![self.err_prefix(), msg];
+                self.bemit_cmd_stderr(out, redir, &line);
                 self.last_status = status;
                 return;
             }
@@ -10914,8 +11091,12 @@ impl Shell {
             && let Some(w0) = sc.words.first()
             && w0.expansion_is_unobservable()
             && let [name] = self.expand_word(w0, true).as_slice()
-            && !self.funcs.contains_key(name)
-            && !self.builtin_enabled(name)
+            // A non-text command word can name neither a function nor a builtin
+            // (both are declared from source text), so it is only the *lookups*
+            // that need text — the spawn below uses the bytes as written.
+            && bytes::as_str(name).is_none_or(|n| {
+                !self.funcs.contains_key(n) && !self.builtin_enabled(n)
+            })
             // A name that resolves nowhere is *not* handled here: bash reports
             // `command not found` from the forked child, so the status belongs to
             // the job and `command_not_found_handle` may run instead. The general
@@ -10931,9 +11112,9 @@ impl Shell {
             // bash execs the resolved binary but hands the child the command word
             // as typed, exactly as the synchronous path does.
             #[cfg(unix)]
-            std::os::unix::process::CommandExt::arg0(&mut cmd, &argv[0]);
-            cmd.args(&argv[1..]);
-            cmd.current_dir(&self.cwd);
+            std::os::unix::process::CommandExt::arg0(&mut cmd, bytes::bytes_to_os(&argv[0]));
+            cmd.args(argv[1..].iter().map(|a| bytes::bytes_to_os(a)));
+            cmd.current_dir(bytes::bytes_to_path(&self.cwd));
             // A `&` job that carries no redirection of its own reads /dev/null,
             // not the shell's stdin — otherwise it would race the shell for the
             // script it is being read from. (The thread path below does the same
@@ -10945,7 +11126,7 @@ impl Shell {
             }
             for (k, v) in &self.vars {
                 if self.exported.contains(k) {
-                    cmd.env(k, v);
+                    cmd.env(k, bytes::bytes_to_os(v));
                 }
             }
             let id = self.next_job_id();
@@ -10957,7 +11138,7 @@ impl Shell {
                     // reports this from the child it already forked, so the job
                     // exists and has already exited with the failure status.
                     let (msg, code) = spawn_error_message(&argv[0], &e);
-                    self.errln(&format!("{}{msg}", self.err_prefix()));
+                    self.berrln(&bfmt![self.err_prefix(), msg]);
                     let pid = SYNTH_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     (pid, None, Some(code))
                 }
@@ -10966,7 +11147,11 @@ impl Shell {
                 id,
                 pid,
                 child,
-                cmd: argv.join(" "),
+                // `jobs` shows the command as *written*, not as expanded — which
+                // is what bash does, and what the general path below already
+                // records. (It also keeps the label out of the byte-string
+                // world: source text is text.)
+                cmd: crate::unparse::and_or_src(ao),
                 // A job that never got off the ground is one the shell knows
                 // the fate of the moment it exists.
                 exit_seen: status.is_some(),
@@ -11095,10 +11280,10 @@ impl Shell {
         // (best-effort, like other in-process background bodies).
         let synth_pid = SYNTH_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut elems = BTreeMap::new();
-        elems.insert(0usize, read_fd.to_string());
-        elems.insert(1usize, write_fd.to_string());
+        elems.insert(0usize, read_fd.to_string().into_bytes());
+        elems.insert(1usize, write_fd.to_string().into_bytes());
         self.arrays.insert(name.clone(), elems);
-        self.vars.insert(format!("{name}_PID"), synth_pid.to_string());
+        self.put_var(format!("{name}_PID"), synth_pid.to_string().into_bytes());
         self.last_bg_pid = Some(synth_pid);
         self.last_status = 0;
         Flow::Next
@@ -11133,14 +11318,22 @@ impl Shell {
     /// `Err` on assignment to a readonly variable, or a close form whose
     /// variable is unset / non-numeric. For a plain redirect this returns
     /// `r.fd`.
-    fn redir_effective_fd(&mut self, r: &Redirect, reserved: &mut Vec<i32>) -> Result<i32, String> {
+    fn redir_effective_fd(&mut self, r: &Redirect, reserved: &mut Vec<i32>) -> Result<i32, Str> {
         match &r.varfd {
             Some(name) => {
                 if redir_is_close(r) {
                     // `{v}>&-`: operate on the fd currently held in `$v`.
-                    return match self.vars.get(name).and_then(|s| s.parse::<i32>().ok()) {
+                    // A descriptor number is decimal ASCII, so a value that is
+                    // not text cannot name one — the same "ambiguous redirect"
+                    // any other non-numeric value gets.
+                    return match self
+                        .vars
+                        .get(name)
+                        .and_then(|s| bytes::as_str(s))
+                        .and_then(|s| s.parse::<i32>().ok())
+                    {
                         Some(n) => Ok(n),
-                        None => Err(format!("{name}: ambiguous redirect")),
+                        None => Err(bfmt![name, b": ambiguous redirect"]),
                     };
                 }
                 // Pre-check readonly so `set_scalar_checked` (which reports its
@@ -11155,20 +11348,23 @@ impl Shell {
                     // caller prefixes the first line via `err_prefix()`; bake the
                     // prefixed second line into the message so it carries bash's
                     // `line N:` prefix too (TD-OILS-VARFD-RO-MSG).
-                    return Err(format!(
-                        "{target}: readonly variable\n{}{target}: cannot assign fd to variable",
-                        self.err_prefix()
-                    ));
+                    return Err(bfmt![
+                        &target,
+                        b": readonly variable\n",
+                        self.err_prefix(),
+                        &target,
+                        b": cannot assign fd to variable"
+                    ]);
                 }
                 let n = self.alloc_varfd(reserved);
                 reserved.push(n);
-                if self.set_scalar_checked(name, n.to_string()) {
+                if self.set_scalar_checked(name, n.to_string().into_bytes()) {
                     Ok(n)
                 } else {
                     // Readonly was pre-checked above, so the only remaining
                     // failure is a circular nameref — already reported by the
                     // store; report the redirect's own half of it too.
-                    Err(format!("{name}: cannot assign fd to variable"))
+                    Err(bfmt![name, b": cannot assign fd to variable"])
                 }
             }
             None => Ok(r.fd),
@@ -11180,15 +11376,15 @@ impl Shell {
     /// [`Self::apply_exec_redirects`] and the persistent varfd path in
     /// [`Self::resolve_redirects`]. `fd` is the already-resolved descriptor
     /// (varfd-allocated or literal).
-    fn apply_persistent_redirect(&mut self, r: &Redirect, fd: i32, out: &Out) -> Result<(), String> {
+    fn apply_persistent_redirect(&mut self, r: &Redirect, fd: i32, out: &Out) -> Result<(), Str> {
         match r.op {
             RedirectOp::Read => {
                 let path = self.expand_to_string(&r.target);
                 if let Some(n) = special_redirect_fd(&path) {
                     return self.persistent_special_dup(fd, &path, n, true, out);
                 }
-                let f = std::fs::File::open(self.host_path(&path))
-                    .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
+                let f = std::fs::File::open(bytes::bytes_to_path(&self.host_path(&path)))
+                    .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
                 if fd == 0 {
                     self.exec_stdin = Some(file_input(f));
                     // `exec 0< f` reopens fd 0 read-only, dropping any write
@@ -11208,7 +11404,7 @@ impl Shell {
                     return self.persistent_special_dup(fd, &path, n, fd == 0, out);
                 }
                 let (rd, wr) = open_rw_pair(&self.cwd, &path)
-                    .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
+                    .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
                 // fd 0 and fd ≥ 3 keep *both* halves — one open, two duplicates,
                 // one shared offset — so `exec 0<> f; read a; echo x >&0`
                 // overwrites from where the read stopped. fds 1 and 2 have only
@@ -11227,18 +11423,18 @@ impl Shell {
                 }
             }
             RedirectOp::HereDoc | RedirectOp::HereStr => {
-                let bytes = if matches!(r.op, RedirectOp::HereDoc) {
-                    self.expand_double_quoted(&r.target.parts).into_bytes()
+                let body = if matches!(r.op, RedirectOp::HereDoc) {
+                    self.expand_double_quoted(&r.target.parts)
                 } else {
                     let mut s = self.expand_to_string(&r.target);
-                    s.push('\n');
-                    s.into_bytes()
+                    s.push(b'\n');
+                    s
                 };
                 if fd == 0 {
-                    self.exec_stdin = Some(bytes_input(bytes));
+                    self.exec_stdin = Some(bytes_input(body));
                     self.exec_stdin_write = None;
                 } else if fd >= 3 {
-                    self.open_fds.insert(fd, bytes_input(bytes));
+                    self.open_fds.insert(fd, bytes_input(body));
                     self.open_write_fds.remove(&fd);
                 }
             }
@@ -11248,7 +11444,8 @@ impl Shell {
                 if let Some(n) = special_redirect_fd(&target) {
                     return self.persistent_special_dup(fd, &target, n, false, out);
                 }
-                let f = open_out(&self.cwd, &target, append).map_err(|e| format!("{target}: {}", io_error_message(&e)))?;
+                let f = open_out(&self.cwd, &target, append)
+                    .map_err(|e| bfmt![&target, b": ", io_error_message(&e)])?;
                 // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one handle.
                 let a = WriteFd::File(std::sync::Arc::new(f));
                 self.exec_stdout = Some(a.clone());
@@ -11263,13 +11460,14 @@ impl Shell {
                 }
                 if self.noclobber
                     && matches!(r.op, RedirectOp::Write)
-                    && std::path::Path::new(&self.host_path(&target))
+                    && bytes::bytes_to_path(&self.host_path(&target))
                         .metadata()
                         .is_ok_and(|m| m.is_file())
                 {
-                    return Err(format!("{target}: cannot overwrite existing file"));
+                    return Err(bfmt![&target, b": cannot overwrite existing file"]);
                 }
-                let f = open_out(&self.cwd, &target, append).map_err(|e| format!("{target}: {}", io_error_message(&e)))?;
+                let f = open_out(&self.cwd, &target, append)
+                    .map_err(|e| bfmt![&target, b": ", io_error_message(&e)])?;
                 let a = std::sync::Arc::new(f);
                 match fd {
                     0 | 1 => self.exec_stdout = Some(WriteFd::File(a)),
@@ -11301,24 +11499,24 @@ impl Shell {
     fn persistent_special_dup(
         &mut self,
         fd: i32,
-        path: &str,
+        path: BStr<'_>,
         n: i32,
         read: bool,
         out: &Out,
-    ) -> Result<(), String> {
-        let n = n.to_string();
+    ) -> Result<(), Str> {
+        let n = n.to_string().into_bytes();
         let res = if read {
             self.apply_persistent_dup_in(fd, &n)
         } else {
             self.apply_persistent_dup_out(fd, &n, out)
         };
-        res.map_err(|_| format!("{path}: No such file or directory"))
+        res.map_err(|_| bfmt![path, b": No such file or directory"])
     }
 
     /// Point persistent fd `fd` at output descriptor `target` (`exec M>&N`,
     /// `exec M>&-`, and the special filenames that mean the same thing).
-    fn apply_persistent_dup_out(&mut self, fd: i32, target: &str, out: &Out) -> Result<(), String> {
-        if target == "-" {
+    fn apply_persistent_dup_out(&mut self, fd: i32, target: BStr<'_>, out: &Out) -> Result<(), Str> {
+        if target == b"-" {
             // `N>&-` / `N<&-`: close the descriptor.
             match fd {
                 1 => self.exec_stdout = None,
@@ -11328,11 +11526,11 @@ impl Shell {
                     self.open_fds.remove(&fd);
                 }
             }
-        } else if let Ok(n) = target.parse::<i32>() {
+        } else if let Some(n) = bytes::as_str(target).and_then(|t| t.parse::<i32>().ok()) {
             // `M>&N`: fd M becomes a dup of fd N's *current* sink.
             let src = self
-.exec_dup_source(n, out)
-                .map_err(|bad| format!("{bad}: Bad file descriptor"))?;
+                .exec_dup_source(n, out)
+                .map_err(|bad| bfmt![bad, b": Bad file descriptor"])?;
             match fd {
                 1 => self.exec_stdout = src,
                 2 => self.exec_stderr = src,
@@ -11344,7 +11542,7 @@ impl Shell {
                         Some(h) => h,
                         None => WriteFd::File(std::sync::Arc::new(
                             dup_std_handle(n == 1)
-                                .map_err(|e| format!("{fd}: {}", io_error_message(&e)))?,
+                                .map_err(|e| bfmt![fd, b": ", io_error_message(&e)])?,
                         )),
                     };
                     self.open_write_fds.insert(fd, handle);
@@ -11353,20 +11551,21 @@ impl Shell {
             }
         } else if fd == 1 {
             // `1>&$f` (non-numeric expansion): both streams to the file.
-            let f = open_out(&self.cwd, target, false).map_err(|e| format!("{target}: {e}"))?;
+            let f = open_out(&self.cwd, target, false)
+                .map_err(|e| bfmt![target, b": ", e.to_string()])?;
             let a = WriteFd::File(std::sync::Arc::new(f));
             self.exec_stdout = Some(a.clone());
             self.exec_stderr = Some(a);
         } else {
-            return Err(format!("{target}: ambiguous redirect"));
+            return Err(bfmt![target, b": ambiguous redirect"]);
         }
         Ok(())
     }
 
     /// Point persistent fd `fd` at input descriptor `target` (`exec M<&N`,
     /// `exec M<&-`, and the special filenames that mean the same thing).
-    fn apply_persistent_dup_in(&mut self, fd: i32, target: &str) -> Result<(), String> {
-        if target == "-" {
+    fn apply_persistent_dup_in(&mut self, fd: i32, target: BStr<'_>) -> Result<(), Str> {
+        if target == b"-" {
             // `N<&-`: close the input descriptor.
             if fd == 0 {
                 self.exec_stdin = None;
@@ -11375,7 +11574,7 @@ impl Shell {
                 self.open_fds.remove(&fd);
                 self.open_write_fds.remove(&fd);
             }
-        } else if let Ok(n) = target.parse::<i32>() {
+        } else if let Some(n) = bytes::as_str(target).and_then(|t| t.parse::<i32>().ok()) {
             // `M<&N`: fd M becomes a dup of input fd N's *current* source —
             // literally the same descriptor, sharing one position, as `dup2`
             // gives. `exec 4<&3; read -u3 a; read -u4 b` therefore reads two
@@ -11393,7 +11592,7 @@ impl Shell {
                 self.open_write_fds.remove(&fd);
             }
         } else {
-            return Err(format!("{target}: ambiguous redirect"));
+            return Err(bfmt![target, b": ambiguous redirect"]);
         }
         Ok(())
     }
@@ -11404,7 +11603,7 @@ impl Shell {
     ///
     /// The source is *shared*, not copied: a dup names one open file
     /// description, so reading through either descriptor advances both.
-    fn clone_input_fd(&self, n: i32) -> Result<InputFd, String> {
+    fn clone_input_fd(&self, n: i32) -> Result<InputFd, Str> {
         let cur = if n == 0 {
             self.exec_stdin.as_ref()
         } else {
@@ -11415,7 +11614,7 @@ impl Shell {
             // fd 0 with no bound stdin: treat as an empty input stream so a dup
             // of it does not error (bash's stdin would be the terminal).
             None if n == 0 => Ok(bytes_input(Vec::new())),
-            None => Err(format!("{n}: Bad file descriptor")),
+            None => Err(bfmt![n, b": Bad file descriptor"]),
         }
     }
 
@@ -11429,12 +11628,12 @@ impl Shell {
     /// echoes the word **as written** (`>$r` → "$r: ambiguous redirect"), not
     /// the expansion. Here-documents and here-strings are exempt and never routed
     /// through here. On success returns the single expanded field.
-    fn expand_redirect_target(&mut self, w: &Word) -> Result<String, String> {
+    fn expand_redirect_target(&mut self, w: &Word) -> Result<Str, Str> {
         let mut fields = self.expand_word(w, true);
         if fields.len() == 1 {
             Ok(fields.pop().unwrap_or_default())
         } else {
-            Err(format!("{}: ambiguous redirect", crate::unparse::word_src(w)))
+            Err(bfmt![crate::unparse::word_src(w), b": ambiguous redirect"])
         }
     }
 
@@ -11471,10 +11670,10 @@ impl Shell {
     /// sink is pushed onto `stderr_stack` and popped again so the message goes
     /// through the ordinary [`Shell::emit_stderr`] machinery.
     fn report_redirect_failure(&mut self, fail: &RedirFailure, out: &mut Out) -> i32 {
-        let msg = format!("{}{}", self.err_prefix(), fail.msg);
+        let msg = bfmt![self.err_prefix(), &fail.msg];
         let p = &fail.partial;
         let pushed = self.push_partial_stderr(p, out);
-        self.errln(&msg);
+        self.berrln(&msg);
         if pushed {
             self.stderr_stack.pop();
         }
@@ -11554,7 +11753,7 @@ impl Shell {
         plan: &mut RedirPlan,
         reserved: &mut Vec<i32>,
         out: &Out,
-    ) -> Result<(), String> {
+    ) -> Result<(), Str> {
         {
             let fd = self.redir_effective_fd(r, reserved)?;
             // A `{name}>file`-style varfd redirect (open form) binds a *new*
@@ -11582,8 +11781,8 @@ impl Shell {
                         // diagnostic and gives every later reader of the descriptor
                         // the *same* open file description, which is what makes a
                         // child's consumption visible to the shell afterwards.
-                        let f = std::fs::File::open(self.host_path(&path))
-                            .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
+                        let f = std::fs::File::open(bytes::bytes_to_path(&self.host_path(&path)))
+                            .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
                         if fd == 0 {
                             plan.stdin = Some(file_input(f));
                             plan.stdin_data = None;
@@ -11605,7 +11804,7 @@ impl Shell {
                         return Ok(());
                     }
                     let (rd, wr) = open_rw_pair(&self.cwd, &path)
-                        .map_err(|e| format!("{path}: {}", io_error_message(&e)))?;
+                        .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
                     if fd == 0 {
                         // Connect the file to stdin, reading from offset 0 (a
                         // freshly created file is therefore at immediate EOF,
@@ -11642,24 +11841,22 @@ impl Shell {
                         // no tilde expansion, no field splitting, no globbing.
                         let body = self.expand_double_quoted(&r.target.parts);
                         plan.stdin = None;
-                        plan.stdin_data = Some(body.into_bytes());
+                        plan.stdin_data = Some(body);
                     } else if fd >= 3 {
                         let body = self.expand_double_quoted(&r.target.parts);
-                        plan.extra_fds
-                            .push((fd, ExtraFdOp::Input(bytes_input(body.into_bytes()))));
+                        plan.extra_fds.push((fd, ExtraFdOp::Input(bytes_input(body))));
                     }
                 }
                 RedirectOp::HereStr => {
                     if fd == 0 {
                         let mut s = self.expand_to_string(&r.target);
-                        s.push('\n');
+                        s.push(b'\n');
                         plan.stdin = None;
-                        plan.stdin_data = Some(s.into_bytes());
+                        plan.stdin_data = Some(s);
                     } else if fd >= 3 {
                         let mut s = self.expand_to_string(&r.target);
-                        s.push('\n');
-                        plan.extra_fds
-                            .push((fd, ExtraFdOp::Input(bytes_input(s.into_bytes()))));
+                        s.push(b'\n');
+                        plan.extra_fds.push((fd, ExtraFdOp::Input(bytes_input(s))));
                     }
                 }
                 RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
@@ -11704,11 +11901,11 @@ impl Shell {
                     // very file noclobber exists to protect.
                     if self.noclobber
                         && matches!(r.op, RedirectOp::Write)
-                        && std::path::Path::new(&self.host_path(&target))
+                        && bytes::bytes_to_path(&self.host_path(&target))
                             .metadata()
                             .is_ok_and(|m| m.is_file())
                     {
-                        return Err(format!("{target}: cannot overwrite existing file"));
+                        return Err(bfmt![&target, b": cannot overwrite existing file"]);
                     }
                     open_output_target(&self.cwd, &target, append)?;
                     match fd {
@@ -11756,9 +11953,9 @@ impl Shell {
         &mut self,
         r: &Redirect,
         fd: i32,
-        target: &str,
+        target: BStr<'_>,
         plan: &mut RedirPlan,
-    ) -> Result<(), String> {
+    ) -> Result<(), Str> {
         // `2>&1` → stderr follows stdout; `1>&2` → the reverse. When the
         // followed fd already targets a file, copy that file target directly;
         // otherwise flag the dup so the executor routes fd 2→fd 1 (or fd 1→fd 2)
@@ -11770,9 +11967,12 @@ impl Shell {
         // `>&file` (which the parser already rewrote to `WriteBoth` for the
         // no-explicit-fd literal form). On any other fd a non-numeric target is
         // an ambiguous redirect, as bash reports.
-        if target != "-" && target.parse::<i32>().is_err() {
+        // A dup target must be a descriptor number or `-`; a target that is not
+        // text is certainly neither, and takes the non-numeric path below.
+        let target_num = bytes::as_str(target).and_then(|t| t.parse::<i32>().ok());
+        if target != b"-" && target_num.is_none() {
             if fd == 1 {
-                let target = target.to_string();
+                let target = target.to_vec();
                 open_output_target(&self.cwd, &target, false)?;
                 plan.stdout = Some((target.clone(), false));
                 plan.stderr = Some((target, false));
@@ -11784,12 +11984,12 @@ impl Shell {
                 plan.stdout_to_fd = None;
                 plan.stderr_to_fd = None;
             } else {
-                return Err(format!(
-                    "{}: ambiguous redirect",
-                    crate::unparse::word_src(&r.target)
-                ));
+                return Err(bfmt![
+                    crate::unparse::word_src(&r.target),
+                    b": ambiguous redirect"
+                ]);
             }
-        } else if fd == 2 && target == "1" {
+        } else if fd == 2 && target == b"1" {
             // fd 2's destination is being (re)set: drop any earlier stderr
             // file/fd target so this dup wins (last-writer).
             plan.stderr_to_fd = None;
@@ -11802,7 +12002,7 @@ impl Shell {
                 plan.stderr = None;
                 plan.stderr_to_stdout = true;
             }
-        } else if fd == 1 && target == "2" {
+        } else if fd == 1 && target == b"2" {
             plan.stdout_to_fd = None;
             if plan.stderr.is_some() {
                 // `2>file 1>&2`: fd 1 dup's fd 2's file — shared offset.
@@ -11813,19 +12013,19 @@ impl Shell {
                 plan.stdout = None;
                 plan.stdout_to_stderr = true;
             }
-        } else if fd >= 3 && target == "-" {
+        } else if fd >= 3 && target == b"-" {
             // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
             plan.extra_fds.push((fd, ExtraFdOp::Close));
-        } else if fd >= 3 && matches!(target, "0" | "1" | "2") {
+        } else if fd >= 3 && matches!(target, b"0" | b"1" | b"2") {
             // `exec 3>&1` / `exec 3>&2` / `exec 3>&0`: alias a user-space write
             // descriptor to a standard fd. Consumed only by `exec` (and the
             // scoped compound-command path), which snapshots that fd's current
             // sink into `open_write_fds[fd]`. Aliasing fd 0 is legal even when
             // fd 0 is read-only: bash's dup succeeds, and it is the later
             // *write* through fd 3 that reports `EBADF`.
-            let n = target.parse::<i32>().unwrap_or(1);
+            let n = target_num.unwrap_or(1);
             plan.extra_fds.push((fd, ExtraFdOp::AliasStd(n)));
-        } else if let Ok(n) = target.parse::<i32>()
+        } else if let Some(n) = target_num
             && (n >= 3 || n == 0)
         {
             // `M>&N` with N ≥ 3: duplicate fd M onto a user-space write
@@ -11845,10 +12045,10 @@ impl Shell {
             // it is *writable* is settled at write time (see
             // [`Shell::stdin_write_fd`]).
             if n != 0 && !self.open_write_fds.contains_key(&n) && !staged_write {
-                return Err(format!(
-                    "{}: Bad file descriptor",
-                    crate::unparse::word_src(&r.target)
-                ));
+                return Err(bfmt![
+                    crate::unparse::word_src(&r.target),
+                    b": Bad file descriptor"
+                ]);
             }
             if fd == 2 {
                 plan.stderr_to_fd = Some(n);
@@ -11870,21 +12070,21 @@ impl Shell {
         &mut self,
         r: &Redirect,
         fd: i32,
-        target: &str,
+        target: BStr<'_>,
         plan: &mut RedirPlan,
-    ) -> Result<(), String> {
+    ) -> Result<(), Str> {
         // `M<&N` — duplicate an *input* descriptor. `read <&3`, `cat <&$r`. The
         // dup shares the source cursor's offset (see `stdin_from_fd`), matching
         // bash. A `<&-` closes; a non-numeric expansion is an ambiguous
         // redirect.
-        if target == "-" {
+        if target == b"-" {
             if fd >= 3 {
                 // `exec 3<&-`: close descriptor 3 (consumed by `exec`).
                 plan.extra_fds.push((fd, ExtraFdOp::Close));
             }
             // `0<&-` (close stdin) on a non-exec command is a rare corner not
             // modelled here (documented limitation).
-        } else if let Ok(n) = target.parse::<i32>() {
+        } else if let Some(n) = bytes::as_str(target).and_then(|t| t.parse::<i32>().ok()) {
             if fd == 0 && n >= 3 {
                 // fd 0 reads from input descriptor N's shared cursor (a `read
                 // -u`/`exec 3<` byte fd) or, for a `coproc` read end, the live
@@ -11893,10 +12093,10 @@ impl Shell {
                 if !self.open_fds.contains_key(&n) && !self.coproc_read_fds.contains_key(&n) {
                     // Echo the word as written (`<&$r` → "$r"), as bash does,
                     // not the expanded fd number.
-                    return Err(format!(
-                        "{}: Bad file descriptor",
-                        crate::unparse::word_src(&r.target)
-                    ));
+                    return Err(bfmt![
+                        crate::unparse::word_src(&r.target),
+                        b": Bad file descriptor"
+                    ]);
                 }
                 plan.stdin_from_fd = Some(n);
                 plan.stdin = None;
@@ -11910,10 +12110,10 @@ impl Shell {
         } else {
             // A non-numeric input-dup target (`<&file`) is ambiguous; bash
             // echoes the word as written, not the expansion.
-            return Err(format!(
-                "{}: ambiguous redirect",
-                crate::unparse::word_src(&r.target)
-            ));
+            return Err(bfmt![
+                crate::unparse::word_src(&r.target),
+                b": ambiguous redirect"
+            ]);
         }
         Ok(())
     }
@@ -11938,14 +12138,14 @@ impl Shell {
         &mut self,
         r: &Redirect,
         fd: i32,
-        path: &str,
+        path: BStr<'_>,
         read: bool,
         plan: &mut RedirPlan,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, Str> {
         let Some(n) = special_redirect_fd(path) else {
             return Ok(false);
         };
-        let n = n.to_string();
+        let n = n.to_string().into_bytes();
         let res = if read {
             self.resolve_dup_in(r, fd, &n, plan)
         } else {
@@ -11953,7 +12153,7 @@ impl Shell {
         };
         match res {
             Ok(()) => Ok(true),
-            Err(_) => Err(format!("{path}: No such file or directory")),
+            Err(_) => Err(bfmt![path, b": No such file or directory"]),
         }
     }
 
@@ -12006,13 +12206,15 @@ impl Shell {
             let fd = match self.redir_effective_fd(r, &mut reserved) {
                 Ok(n) => n,
                 Err(e) => {
-                    self.errln(&format!("{}{e}", self.err_prefix()));
+                    let line = bfmt![self.err_prefix(), &e];
+                    self.berrln(&line);
                     rc = 1;
                     continue;
                 }
             };
             if let Err(e) = self.apply_persistent_redirect(r, fd, out) {
-                self.errln(&format!("{}{e}", self.err_prefix()));
+                let line = bfmt![self.err_prefix(), &e];
+                self.berrln(&line);
                 rc = 1;
             }
         }
@@ -12071,14 +12273,14 @@ impl Shell {
     /// the whole word, not just the offending `${…}`. It nests: an operand word
     /// (`${y:-${x@Z}}`) is expanded by a recursive call, so the innermost word
     /// in flight wins, exactly as bash's recursive `expand_word_internal` does.
-    fn expand_word(&mut self, word: &Word, split: bool) -> Vec<String> {
+    fn expand_word(&mut self, word: &Word, split: bool) -> Vec<Str> {
         let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
         let fields = self.expand_word_inner(word, split);
         self.bad_sub_word = saved;
         fields
     }
 
-    fn expand_word_inner(&mut self, word: &Word, split: bool) -> Vec<String> {
+    fn expand_word_inner(&mut self, word: &Word, split: bool) -> Vec<Str> {
         if split {
             // Command-argument context: field-split unquoted expansions, then
             // apply pathname (glob) expansion to each resulting field.
@@ -12086,13 +12288,7 @@ impl Shell {
             if self.noglob {
                 // `set -f`: pathname expansion is disabled; each field keeps its
                 // literal (quote-removed) text without glob matching.
-                // TD-OILS-BYTE-STRINGS scaffold: `expand_word` still returns
-                // `Vec<String>`.
-                #[allow(deprecated)]
-                return fields
-                    .iter()
-                    .map(|f| crate::bytes::scaffold_lossy_string(&echars_text(f)))
-                    .collect();
+                return fields.iter().map(|f| echars_text(f)).collect();
             }
             let nullglob = self.shopt.get("nullglob").copied().unwrap_or(false);
             let failglob = self.shopt.get("failglob").copied().unwrap_or(false);
@@ -12109,13 +12305,13 @@ impl Shell {
             let globignore_val = self.vars.get("GLOBIGNORE").filter(|v| !v.is_empty());
             let globignore_active = globignore_val.is_some();
             let globignore: Vec<GlobIgnorePat> = globignore_val
-                .map(|v| build_globignore(v.as_bytes(), extglob))
+                .map(|v| build_globignore(v, extglob))
                 .unwrap_or_default();
             let mut out: Vec<Str> = Vec::new();
             let mut failed: Option<Str> = None;
             for f in fields {
                 glob_or_literal(
-                    self.cwd.as_bytes(),
+                    &self.cwd,
                     &f,
                     &mut out,
                     nullglob,
@@ -12133,44 +12329,36 @@ impl Shell {
             // error. Record it for the simple-command driver, which reports it
             // and aborts the command list (like a non-interactive bash).
             if let Some(pat) = failed {
-                // TD-OILS-BYTE-STRINGS scaffold: `glob_error` is still a `String`.
-                #[allow(deprecated)]
-                let pat = crate::bytes::scaffold_lossy_string(&pat);
                 self.glob_error = Some(pat);
             }
-            // TD-OILS-BYTE-STRINGS scaffold: `expand_word` still returns
-            // `Vec<String>`.
-            #[allow(deprecated)]
-            return out
-                .iter()
-                .map(|f| crate::bytes::scaffold_lossy_string(f))
-                .collect();
+            return out;
         }
         // Non-splitting context (assignment values, redirect targets, `[[ ]]`
         // operands): concatenate everything into one field, no splitting/glob.
-        let mut cur = String::new();
+        let mut cur = Str::new();
         let mut started = false;
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => {
-                    let s = if idx == 0 {
-                        self.tilde_expand(s)
+                    // A tilde expands to `$HOME`/a home directory — a path, and
+                    // so bytes; the literal text around it is source.
+                    if idx == 0 {
+                        cur.extend_from_slice(&self.tilde_expand(s.as_bytes()));
                     } else {
-                        s.clone()
-                    };
-                    cur.push_str(&s);
+                        cur.extend_from_slice(s.as_bytes());
+                    }
                     started = true;
                 }
                 WordPart::SingleQuoted { text: s, .. } => {
-                    cur.push_str(s);
+                    cur.extend_from_slice(s.as_bytes());
                     started = true;
                 }
                 WordPart::DoubleQuoted(parts) => {
-                    cur.push_str(&self.expand_double_quoted(parts));
+                    cur.extend_from_slice(&self.expand_double_quoted(parts));
                     started = true;
                 }
                 other => {
-                    cur.push_str(&self.expand_dynamic(other));
+                    cur.extend_from_slice(&self.expand_dynamic(other));
                     started = true;
                 }
             }
@@ -12212,7 +12400,7 @@ impl Shell {
                     // scalar path below (bash re-enters the quoted run as its
                     // own word).
                     let saved_word = self.bad_sub_word.replace(crate::unparse::parts_src(parts));
-                    let per_element: Option<Vec<String>> = match parts.as_slice() {
+                    let per_element: Option<Vec<Str>> = match parts.as_slice() {
                         [
                             WordPart::ArrayRef {
                                 name,
@@ -12221,9 +12409,12 @@ impl Shell {
                             },
                         ] => Some(self.array_elements(name)),
                         [WordPart::ArrayKeys { name, star: false }] => Some(self.array_keys(name)),
-                        [WordPart::VarNames { prefix, star: false }] => {
-                            Some(self.var_names_with_prefix(prefix))
-                        }
+                        [WordPart::VarNames { prefix, star: false }] => Some(
+                            self.var_names_with_prefix(prefix)
+                                .into_iter()
+                                .map(String::into_bytes)
+                                .collect(),
+                        ),
                         // `"${a[@]:off:len}"` / `"${@:off:len}"` — one field per
                         // sliced element (the `[*]`/`$*` star form joins instead,
                         // handled by the scalar fallback below).
@@ -12274,12 +12465,12 @@ impl Shell {
                             if i > 0 {
                                 fields.push(std::mem::take(&mut cur));
                             }
-                            push_chars(&mut cur, el.as_bytes(), true);
+                            push_chars(&mut cur, &el, true);
                             open = true;
                         }
                     } else {
                         let s = self.expand_double_quoted(parts);
-                        push_chars(&mut cur, s.as_bytes(), true);
+                        push_chars(&mut cur, &s, true);
                         open = true;
                     }
                 }
@@ -12301,16 +12492,19 @@ impl Shell {
                         .vars
                         .get("IFS")
                         .cloned()
-                        .unwrap_or_else(|| " \t\n".to_string());
+                        .unwrap_or_else(|| b" \t\n".to_vec());
                     // An undecodable byte is never an IFS delimiter: IFS holds
-                    // characters, and `Ch::B` equals no character.
+                    // characters, and `Ch::B` equals no character. Membership is
+                    // tested character-wise so a multi-byte IFS entry is matched
+                    // whole rather than by its individual bytes.
+                    let ifs_has = |c: char| bytes::chars(&ifs).any(|i| i.as_char() == Some(c));
                     let is_ws = |c: Ch| {
-                        matches!(c.as_char(), Some(c) if matches!(c, ' ' | '\t' | '\n') && ifs.contains(c))
+                        matches!(c.as_char(), Some(c) if matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
                     };
                     let is_nonws = |c: Ch| {
-                        matches!(c.as_char(), Some(c) if !matches!(c, ' ' | '\t' | '\n') && ifs.contains(c))
+                        matches!(c.as_char(), Some(c) if !matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
                     };
-                    let cv: Vec<Ch> = bytes::chars(val.as_bytes()).collect();
+                    let cv: Vec<Ch> = bytes::chars(&val).collect();
                     let n = cv.len();
                     let mut i = 0;
                     while i < n {
@@ -12361,9 +12555,9 @@ impl Shell {
 
     /// Expand a word to a single string (no field splitting) — used for
     /// assignment values and redirection targets.
-    fn expand_to_string(&mut self, word: &Word) -> String {
+    fn expand_to_string(&mut self, word: &Word) -> Str {
         let fields = self.expand_word(word, false);
-        fields.join("")
+        fields.concat()
     }
 
     /// Expand an assignment RHS to a single string. Like `expand_to_string`, but
@@ -12372,15 +12566,15 @@ impl Shell {
     /// `PATH=~/a:~/b` and `x=$PATH:~/bin` expand every `~`). Only unquoted
     /// literal text is scanned for colon-delimited tilde positions; a `:`
     /// produced by a parameter/command expansion does not create one.
-    fn expand_assignment_value(&mut self, word: &Word) -> String {
+    fn expand_assignment_value(&mut self, word: &Word) -> Str {
         let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
         let out = self.expand_assignment_value_inner(word);
         self.bad_sub_word = saved;
         out
     }
 
-    fn expand_assignment_value_inner(&mut self, word: &Word) -> String {
-        let mut cur = String::new();
+    fn expand_assignment_value_inner(&mut self, word: &Word) -> Str {
+        let mut cur = Str::new();
         // The very start of the value is a tilde position.
         let mut at_tilde_pos = true;
         for part in &word.parts {
@@ -12388,28 +12582,28 @@ impl Shell {
                 WordPart::Literal(s) => {
                     for (i, seg) in s.split(':').enumerate() {
                         if i > 0 {
-                            cur.push(':');
+                            cur.push(b':');
                         }
                         // The first segment inherits the running tilde position;
                         // every later segment follows a literal `:`, so it is one.
                         if i > 0 || at_tilde_pos {
-                            cur.push_str(&self.tilde_expand(seg));
+                            cur.extend_from_slice(&self.tilde_expand(seg.as_bytes()));
                         } else {
-                            cur.push_str(seg);
+                            cur.extend_from_slice(seg.as_bytes());
                         }
                     }
                     at_tilde_pos = s.ends_with(':');
                 }
                 WordPart::SingleQuoted { text: t, .. } => {
-                    cur.push_str(t);
+                    cur.extend_from_slice(t.as_bytes());
                     at_tilde_pos = false;
                 }
                 WordPart::DoubleQuoted(parts) => {
-                    cur.push_str(&self.expand_double_quoted(parts));
+                    cur.extend_from_slice(&self.expand_double_quoted(parts));
                     at_tilde_pos = false;
                 }
                 other => {
-                    cur.push_str(&self.expand_dynamic(other));
+                    cur.extend_from_slice(&self.expand_dynamic(other));
                     at_tilde_pos = false;
                 }
             }
@@ -12425,8 +12619,8 @@ impl Shell {
     /// an unquoted `:` or at the start of the value, exactly like a bare
     /// `NAME=value` assignment (bash treats declaration-builtin operands as
     /// assignments). Returns the single resulting argv string.
-    fn expand_decl_assignment(&mut self, word: &Word) -> String {
-        let mut out = String::new();
+    fn expand_decl_assignment(&mut self, word: &Word) -> Str {
+        let mut out = Str::new();
         let mut at_tilde_pos = true;
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
@@ -12437,7 +12631,7 @@ impl Shell {
                     let value_str: &str = if idx == 0 {
                         match s.find('=') {
                             Some(eq) => {
-                                out.push_str(&s[..=eq]);
+                                out.extend_from_slice(s[..=eq].as_bytes());
                                 &s[eq + 1..]
                             }
                             // No `=` in the first literal (value came from a later
@@ -12449,26 +12643,26 @@ impl Shell {
                     };
                     for (i, seg) in value_str.split(':').enumerate() {
                         if i > 0 {
-                            out.push(':');
+                            out.push(b':');
                         }
                         if i > 0 || at_tilde_pos {
-                            out.push_str(&self.tilde_expand(seg));
+                            out.extend_from_slice(&self.tilde_expand(seg.as_bytes()));
                         } else {
-                            out.push_str(seg);
+                            out.extend_from_slice(seg.as_bytes());
                         }
                     }
                     at_tilde_pos = value_str.ends_with(':');
                 }
                 WordPart::SingleQuoted { text: t, .. } => {
-                    out.push_str(t);
+                    out.extend_from_slice(t.as_bytes());
                     at_tilde_pos = false;
                 }
                 WordPart::DoubleQuoted(parts) => {
-                    out.push_str(&self.expand_double_quoted(parts));
+                    out.extend_from_slice(&self.expand_double_quoted(parts));
                     at_tilde_pos = false;
                 }
                 other => {
-                    out.push_str(&self.expand_dynamic(other));
+                    out.extend_from_slice(&self.expand_dynamic(other));
                     at_tilde_pos = false;
                 }
             }
@@ -12503,10 +12697,14 @@ impl Shell {
     /// unquoted, which is bash's own split — see [`Shell::tilde_split`] for why
     /// the two halves must not be conflated.
     fn push_literal_annotated(&self, buf: &mut Vec<EChar>, s: &str, leading: bool) {
-        match if leading { self.tilde_split(s) } else { None } {
+        match if leading {
+            self.tilde_split(s.as_bytes())
+        } else {
+            None
+        } {
             Some((dir, rest)) => {
-                push_chars(buf, dir.as_bytes(), true);
-                push_chars(buf, rest.as_bytes(), false);
+                push_chars(buf, &dir, true);
+                push_chars(buf, rest, false);
             }
             None => push_chars(buf, s.as_bytes(), false),
         }
@@ -12520,27 +12718,29 @@ impl Shell {
                 WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text.as_bytes(), true),
                 WordPart::DoubleQuoted(parts) => {
                     let s = self.expand_double_quoted(parts);
-                    push_chars(&mut buf, s.as_bytes(), true);
+                    push_chars(&mut buf, &s, true);
                 }
                 other => {
                     let s = self.expand_dynamic(other);
-                    push_chars(&mut buf, s.as_bytes(), false);
+                    push_chars(&mut buf, &s, false);
                 }
             }
         }
         buf
     }
 
-    fn expand_double_quoted(&mut self, parts: &[WordPart]) -> String {
+    fn expand_double_quoted(&mut self, parts: &[WordPart]) -> Str {
         // bash re-enters `expand_word_internal` on the quoted section's
         // *contents*, so a "bad substitution" inside quotes names the section
         // without its quote characters (`a"b${x@Z}"c` → `b${x@Z}`).
         let saved = self.bad_sub_word.replace(crate::unparse::parts_src(parts));
-        let mut s = String::new();
+        let mut s = Str::new();
         for part in parts {
             match part {
-                WordPart::Literal(t) | WordPart::SingleQuoted { text: t, .. } => s.push_str(t),
-                other => s.push_str(&self.expand_dynamic(other)),
+                WordPart::Literal(t) | WordPart::SingleQuoted { text: t, .. } => {
+                    s.extend_from_slice(t.as_bytes());
+                }
+                other => s.extend_from_slice(&self.expand_dynamic(other)),
             }
         }
         self.bad_sub_word = saved;
@@ -12626,32 +12826,34 @@ impl Shell {
     }
 
     /// Expand a dynamic word part (parameter/command/arithmetic) to a string.
-    fn expand_dynamic(&mut self, part: &WordPart) -> String {
+    fn expand_dynamic(&mut self, part: &WordPart) -> Str {
         self.expand_dynamic_with(part, Operand::Param)
     }
 
     /// [`Self::expand_dynamic`] with the text a modifier works on supplied by
     /// the caller — see [`Operand`]. Only the parameter-modifier parts consult
     /// it; every other part expands the same either way.
-    fn expand_dynamic_with(&mut self, part: &WordPart, operand: Operand) -> String {
+    fn expand_dynamic_with(&mut self, part: &WordPart, operand: Operand) -> Str {
         match part {
             WordPart::Param(name) => match self.param_value(name) {
                 Some(v) => v,
                 None => {
                     self.note_unbound(name);
-                    String::new()
+                    Str::new()
                 }
             },
             // `${#@}` / `${#*}` are the *count* of positional parameters, not the
             // length of their joined string.
             WordPart::Length(name) if name == "@" || name == "*" => {
-                self.positional.len().to_string()
+                self.positional.len().to_string().into_bytes()
             }
+            // `${#x}` counts *characters*; a byte that is not part of any
+            // character counts as one, which is what bash's C locale does too.
             WordPart::Length(name) => match self.param_value(name) {
-                Some(v) => v.chars().count().to_string(),
+                Some(v) => bytes::char_count(&v).to_string().into_bytes(),
                 None => {
                     self.note_unbound(name);
-                    "0".to_string()
+                    b"0".to_vec()
                 }
             },
             WordPart::ParamOp {
@@ -12682,15 +12884,7 @@ impl Shell {
                 let value = self.op_operand(operand, name, index).unwrap_or_default();
                 let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
-                // TD-OILS-BYTE-STRINGS scaffold: expansion values are still `String`.
-                #[allow(deprecated)]
-                crate::bytes::scaffold_lossy_string(&param_trim(
-                    value.as_bytes(),
-                    &pat,
-                    *suffix,
-                    *longest,
-                    extglob,
-                ))
+                param_trim(&value, &pat, *suffix, *longest, extglob)
             }
             WordPart::ParamSubstr {
                 name,
@@ -12710,18 +12904,15 @@ impl Shell {
                 let len = length
                     .as_ref()
                     .map(|l| self.eval_arith_substr_bound(l, &param_ref));
-                match param_substr(value.as_bytes(), off, len) {
-                    // TD-OILS-BYTE-STRINGS scaffold: expansion values are still
-                    // `String`.
-                    #[allow(deprecated)]
-                    Ok(s) => crate::bytes::scaffold_lossy_string(&s),
+                match param_substr(&value, off, len) {
+                    Ok(s) => s,
                     Err(bad_len) => {
                         self.errln(&format!(
                             "{}{bad_len}: substring expression < 0",
                             self.err_prefix()
                         ));
                         self.discard_error = Some(1);
-                        String::new()
+                        Str::new()
                     }
                 }
             }
@@ -12743,16 +12934,7 @@ impl Shell {
                 let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
                 let repl = self.expand_replacement(replacement, patsub);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
-                // TD-OILS-BYTE-STRINGS scaffold: expansion values are still `String`.
-                #[allow(deprecated)]
-                crate::bytes::scaffold_lossy_string(&param_replace(
-                    value.as_bytes(),
-                    &pat,
-                    &repl,
-                    *all,
-                    *anchor,
-                    extglob,
-                ))
+                param_replace(&value, &pat, &repl, *all, *anchor, extglob)
             }
             WordPart::ParamCase {
                 name,
@@ -12764,15 +12946,7 @@ impl Shell {
                 let value = self.op_operand(operand, name, index).unwrap_or_default();
                 let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
-                // TD-OILS-BYTE-STRINGS scaffold: expansion values are still `String`.
-                #[allow(deprecated)]
-                crate::bytes::scaffold_lossy_string(&param_case(
-                    value.as_bytes(),
-                    &pat,
-                    *mode,
-                    *all,
-                    extglob,
-                ))
+                param_case(&value, &pat, *mode, *all, extglob)
             }
             WordPart::ParamTransform { name, index, op } => {
                 self.param_transform(name, index, *op, operand)
@@ -12783,7 +12957,7 @@ impl Shell {
                 if self.op_operand(operand, name, index).is_some() {
                     self.bad_transform_substitution(raw)
                 } else {
-                    String::new()
+                    Str::new()
                 }
             }
             WordPart::ArraySlice {
@@ -12791,8 +12965,12 @@ impl Shell {
                 star,
                 offset,
                 length,
-            } => self.slice_elements(name, *star, offset, length).join(" "),
-            WordPart::ArrayBulk { name, op, .. } => self.bulk_elements(name, op).join(" "),
+            } => self
+                .slice_elements(name, *star, offset, length)
+                .join(b" ".as_slice()),
+            WordPart::ArrayBulk { name, op, .. } => {
+                self.bulk_elements(name, op).join(b" ".as_slice())
+            }
             WordPart::ArrayOp {
                 name,
                 star,
@@ -12802,20 +12980,23 @@ impl Shell {
             } => {
                 let fields = self.array_op_fields(name, *star, *op, *colon, arg);
                 if *star {
-                    fields.join(&self.star_sep())
+                    fields.join(self.star_sep().as_slice())
                 } else {
-                    fields.join(" ")
+                    fields.join(b" ".as_slice())
                 }
             }
             WordPart::CommandSub { body } => self.command_sub_body(body),
-            WordPart::ProcSub { input, body } => self.proc_sub(*input, body),
+            // The substitution's path is a temp file name this shell generates,
+            // so it is ASCII by construction — the only place a value's bytes are
+            // known to be text.
+            WordPart::ProcSub { input, body } => self.proc_sub(*input, body).into_bytes(),
             WordPart::ArithSub { expr, .. } => self.arith_sub(expr),
             WordPart::ArrayRef {
                 name,
                 index,
                 length,
             } => self.expand_array_ref(name, index, *length),
-            WordPart::ArrayKeys { name, .. } => self.array_keys(name).join(" "),
+            WordPart::ArrayKeys { name, .. } => self.array_keys(name).join(b" ".as_slice()),
             WordPart::Indirect { refname, index } => self.expand_indirect(refname, index),
             WordPart::IndirectOp { refname, index, target } => {
                 // `${!ref<op>}`: resolve the reference to a target *name* (the
@@ -12830,21 +13011,21 @@ impl Shell {
                 // the variable it resolved to is not theirs to be told about.
                 let label = format!("!{}", Self::indirect_ref_src(refname, index));
                 let nameref = index.is_none() && self.nameref_attr.contains(refname);
-                let pointed_at = if nameref {
+                let pointed_at: Option<Str> = if nameref {
                     match self.resolve_ref_name(refname) {
-                        Some(t) => Some(t),
+                        Some(t) => Some(t.into_bytes()),
                         None => {
                             self.emit_stderr(
                                 format!("{}{refname}: invalid indirect expansion\n", self.err_prefix()).as_bytes(),
                             );
                             self.discard_error = Some(1);
-                            return String::new();
+                            return Str::new();
                         }
                     }
                 } else {
                     match self.indirect_pointer_value(refname, index) {
                         Ok(t) => t,
-                        Err(()) => return String::new(),
+                        Err(()) => return Str::new(),
                     }
                 };
                 // Whether the reference resolved to a real target name at
@@ -12854,15 +13035,24 @@ impl Shell {
                 // one carrying a subscript (`!a[$n]`) would be re-parsed as one
                 // — evaluating the subscript text a second time, unexpanded.
                 let points_nowhere = pointed_at.is_none();
-                let tname = match pointed_at {
+                let tname: String = match pointed_at {
                     Some(t) => {
-                        if !is_valid_indirect_target(&t) {
-                            self.emit_stderr(format!("{}{t}: invalid variable name\n", self.err_prefix()).as_bytes());
-                            // Non-fatal: discards the command, status 1.
-                            self.discard_error = Some(1);
-                            return String::new();
+                        // A variable name is text by construction, so a target
+                        // that is not text cannot be one — it takes the same
+                        // "invalid variable name" path as any other malformed
+                        // target, and the diagnostic still echoes the bytes the
+                        // pointer actually held.
+                        match bytes::as_str(&t).filter(|t| is_valid_indirect_target(t)) {
+                            Some(t) => t.to_owned(),
+                            None => {
+                                let msg =
+                                    bfmt![self.err_prefix(), &t, b": invalid variable name\n"];
+                                self.emit_stderr(&msg);
+                                // Non-fatal: discards the command, status 1.
+                                self.discard_error = Some(1);
+                                return Str::new();
+                            }
                         }
-                        t
                     }
                     // The reference points nowhere, so the modifier has no
                     // variable to work on — and bash gives it one that is simply
@@ -12887,7 +13077,7 @@ impl Shell {
                     && !matches!(**target, WordPart::ParamOp { .. });
                 let reads_name = nameref && !looks_through;
                 let operand = if reads_name {
-                    Some(tname.clone())
+                    Some(tname.clone().into_bytes())
                 } else if points_nowhere {
                     // Unset by construction — see `points_nowhere`.
                     None
@@ -12896,10 +13086,12 @@ impl Shell {
                 };
                 self.expand_dynamic_with(&renamed, Operand::Value(operand.as_deref()))
             }
-            WordPart::VarNames { prefix, .. } => self.var_names_with_prefix(prefix).join(" "),
+            WordPart::VarNames { prefix, .. } => {
+                self.var_names_with_prefix(prefix).join(" ").into_bytes()
+            }
             WordPart::BadSubst(raw) => self.bad_substitution(raw),
             // Literal/quoted handled by callers.
-            WordPart::Literal(s) | WordPart::SingleQuoted { text: s, .. } => s.clone(),
+            WordPart::Literal(s) | WordPart::SingleQuoted { text: s, .. } => s.clone().into_bytes(),
             WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
         }
     }
@@ -12921,9 +13113,9 @@ impl Shell {
     ///
     /// bash aborts the whole expansion at the first such error, so a word with
     /// two of them reports only once; the early return here matches that.
-    fn bad_substitution_with(&mut self, raw: &str, fatal: bool) -> String {
+    fn bad_substitution_with(&mut self, raw: &str, fatal: bool) -> Str {
         if self.unbound_error.is_some() || self.discard_error.is_some() {
-            return String::new();
+            return Str::new();
         }
         let shown = self
             .bad_sub_word
@@ -12935,22 +13127,22 @@ impl Shell {
         } else {
             self.discard_error = Some(1);
         }
-        String::new()
+        Str::new()
     }
 
     /// The non-fatal (DISCARD-class) "bad substitution" — see
     /// [`Shell::bad_substitution_with`].
-    fn bad_substitution(&mut self, raw: &str) -> String {
+    fn bad_substitution(&mut self, raw: &str) -> Str {
         self.bad_substitution_with(raw, false)
     }
 
     /// The fatal "bad substitution" raised by an unrecognised `@` transform
     /// operator — see [`Shell::bad_substitution_with`].
-    fn bad_transform_substitution(&mut self, raw: &str) -> String {
+    fn bad_transform_substitution(&mut self, raw: &str) -> Str {
         self.bad_substitution_with(raw, true)
     }
 
-    fn expand_param_op(&mut self, node: ParamOpNode<'_>, operand: Operand) -> String {
+    fn expand_param_op(&mut self, node: ParamOpNode<'_>, operand: Operand) -> Str {
         let ParamOpNode {
             name,
             index,
@@ -12999,7 +13191,7 @@ impl Shell {
                         };
                         self.errln(&format!("{}{name}: {complaint}", self.err_prefix()));
                         self.discard_error = Some(1);
-                        return String::new();
+                        return Str::new();
                     }
                     // The default has to go somewhere, so a subscript that names
                     // nowhere makes the expansion itself impossible: the
@@ -13007,7 +13199,7 @@ impl Shell {
                     // the way a division by zero is.
                     if !self.assign_elem(name, index, v.clone()) {
                         self.discard_error = Some(1);
-                        return String::new();
+                        return Str::new();
                     }
                     v
                 }
@@ -13016,7 +13208,7 @@ impl Shell {
                 if is_active {
                     self.expand_to_string(arg)
                 } else {
-                    String::new()
+                    Str::new()
                 }
             }
             ParamOp::ErrorIfUnset => {
@@ -13028,12 +13220,14 @@ impl Shell {
                     // colon form (`:?`) tests null-or-unset ("parameter null or
                     // not set"); the colon-less form (`?`) tests only unset
                     // ("parameter not set").
-                    let text = if !msg.is_empty() {
+                    // The caller-supplied message is a *value*, so it may hold
+                    // any byte and the diagnostic carries it through unchanged.
+                    let text: BStr<'_> = if !msg.is_empty() {
                         &msg
                     } else if colon {
-                        "parameter null or not set"
+                        b"parameter null or not set"
                     } else {
-                        "parameter not set"
+                        b"parameter not set"
                     };
                     // bash renders the parameter name with its subscript exactly
                     // as written in source (`${a[$i]?}` → `a[$i]`, unexpanded) —
@@ -13041,13 +13235,14 @@ impl Shell {
                     // actually wrote rather than the name it resolved to.
                     let disp = label
                         .map_or_else(|| crate::unparse::name_sub(name, index), ToString::to_string);
-                    self.emit_stderr(format!("{}{disp}: {text}\n", self.err_prefix()).as_bytes());
+                    let line = bfmt![self.err_prefix(), disp, b": ", text, b"\n"];
+                    self.emit_stderr(&line);
                     // bash: `${var:?word}` on an unset/null parameter writes the
                     // message and, in a non-interactive shell, exits with status
                     // 127. Reuse the nounset abort path so the simple-command
                     // driver terminates the (sub)shell before running the command.
                     self.unbound_error = Some(127);
-                    String::new()
+                    Str::new()
                 }
             }
         }
@@ -13069,7 +13264,7 @@ impl Shell {
         op: ParamOp,
         colon: bool,
         arg: &Word,
-    ) -> Vec<String> {
+    ) -> Vec<Str> {
         // A circular nameref names nothing: `array_elements` below reports it,
         // so resolve silently here and let `None` make the name non-existent.
         let resolved = self.resolve_ref_name(name);
@@ -13081,7 +13276,7 @@ impl Shell {
             // Colon forms test for "null": bash joins the elements with the first
             // `$IFS` char (as `${a[*]}` would) and treats an empty result as null.
             // So `a=("")` is null (`""`), but `a=("" "")` is not (`" "`).
-            !elements.join(&self.star_sep()).is_empty()
+            !elements.join(self.star_sep().as_slice()).is_empty()
         } else {
             // Colon-less forms test only for "unset": an array with at least one
             // element is set; an empty/undefined array counts as unset.
@@ -13116,7 +13311,7 @@ impl Shell {
                     // rejects `[@]`/`[*]` as a subscript to write through.
                     if let Some(resolved) = resolved.filter(|r| self.assoc.contains_key(r)) {
                         let val = self.expand_to_string(arg);
-                        self.assoc_set(&resolved, sub.to_string(), val.clone(), false);
+                        self.assoc_set(&resolved, sub.as_bytes().to_vec(), val.clone(), false);
                         return vec![val];
                     }
                     // Assigning the default would require writing to `a[@]`/`a[*]`,
@@ -13139,14 +13334,25 @@ impl Shell {
                     let msg = self.expand_to_string(arg);
                     // Match bash's colon (null-or-unset) vs colon-less (unset)
                     // default-message distinction — see `expand_param_op`.
-                    let text = if !msg.is_empty() {
+                    // The caller-supplied message is a *value*, so it may hold
+                    // any byte and the diagnostic carries it through unchanged.
+                    let text: BStr<'_> = if !msg.is_empty() {
                         &msg
                     } else if colon {
-                        "parameter null or not set"
+                        b"parameter null or not set"
                     } else {
-                        "parameter not set"
+                        b"parameter not set"
                     };
-                    self.emit_stderr(format!("{}{name}[{sub}]: {text}\n", self.err_prefix()).as_bytes());
+                    let line = bfmt![
+                        self.err_prefix(),
+                        name,
+                        b"[",
+                        sub,
+                        b"]: ",
+                        text,
+                        b"\n"
+                    ];
+                    self.emit_stderr(&line);
                     // `${a[@]:?}` on an unset/null array exits 127, like scalar `:?`.
                     self.unbound_error = Some(127);
                     Vec::new()
@@ -13191,7 +13397,7 @@ impl Shell {
             let base = &name[..open];
             let sub = &name[open + 1..name.len() - 1];
             if let Some(map) = self.assoc.get(base) {
-                return map.iter().any(|(k, _)| k == sub);
+                return map.iter().any(|(k, _)| k.as_slice() == sub.as_bytes());
             }
             if let Some(arr) = self.arrays.get(base) {
                 // `[@]`/`[*]` — set if the array has any element.
@@ -13249,12 +13455,16 @@ impl Shell {
             if seen.contains(&cur) {
                 return None;
             }
-            match self.vars.get(&cur) {
+            // A nameref holds the *name* it points to, and a name is text — so
+            // a value that is not text names nothing, and the walk stops there
+            // exactly as it does on an empty target.
+            match self.vars.get(&cur).and_then(|v| bytes::as_str(v)) {
                 // A nameref naming *itself* is not a cycle: inside a function
                 // `local -n r=r` legitimately means the caller's `r`, and bash
                 // rejects the global form at declaration time instead.
-                Some(target) if !target.is_empty() && target != &cur => {
-                    seen.push(std::mem::replace(&mut cur, target.clone()));
+                Some(target) if !target.is_empty() && target != cur => {
+                    let target = target.to_owned();
+                    seen.push(std::mem::replace(&mut cur, target));
                 }
                 _ => return Some(cur),
             }
@@ -13287,7 +13497,7 @@ impl Shell {
     /// is unset, or because the subscript names nowhere (which is reported here,
     /// as reading it directly would be). The caller falls through to normal
     /// resolution in every case, and finds nothing for the latter two.
-    fn nameref_elem_value(&self, name: &str) -> Option<String> {
+    fn nameref_elem_value(&self, name: &str) -> Option<Str> {
         if !self.nameref_attr.contains(name) {
             return None;
         }
@@ -13299,7 +13509,7 @@ impl Shell {
         let base = &target[..open];
         let sub = &inner[open + 1..];
         if self.assoc.contains_key(base) {
-            return self.assoc_element(base, sub);
+            return self.assoc_element(base, sub.as_bytes());
         }
         // A literal integer subscript (the common `arr[0]` case). Non-numeric
         // subscripts on an indexed array fall back to index 0, as bash does.
@@ -13367,61 +13577,68 @@ impl Shell {
     /// The separator that `"$*"` (and `"${a[*]}"`) uses to join elements: the
     /// first character of `$IFS`. An unset `IFS` joins with a space; an empty
     /// `IFS` joins with nothing (bash).
-    fn star_sep(&self) -> String {
+    fn star_sep(&self) -> Str {
         match self.vars.get("IFS") {
-            None => " ".to_string(),
-            Some(ifs) => ifs.chars().next().map_or(String::new(), |c| c.to_string()),
+            None => b" ".to_vec(),
+            // The separator is the first *character* of `$IFS`, so a multi-byte
+            // one is taken whole; a byte that is not part of any character still
+            // separates, and is emitted as itself.
+            Some(ifs) => bytes::chars(ifs).next().map_or_else(Str::new, bytes::Ch::to_str),
         }
     }
 
-    fn param_value(&self, name: &str) -> Option<String> {
+    fn param_value(&self, name: &str) -> Option<Str> {
         if let Some(v) = self.nameref_elem_value(name) {
             return Some(v);
         }
         let name = &self.resolve_ref_use(name)?;
         match name.as_str() {
-            "?" => Some(self.last_status.to_string()),
-            "#" => Some(self.positional.len().to_string()),
-            "$" => Some(self.pid.to_string()),
-            "!" => self.last_bg_pid.map(|p| p.to_string()),
+            "?" => Some(self.last_status.to_string().into_bytes()),
+            "#" => Some(self.positional.len().to_string().into_bytes()),
+            "$" => Some(self.pid.to_string().into_bytes()),
+            "!" => self.last_bg_pid.map(|p| p.to_string().into_bytes()),
             // `$@` in a single-string context joins with a space; `$*` joins
             // with the first character of `$IFS` (unset ⇒ space, empty ⇒ none).
-            "@" => Some(self.positional.join(" ")),
-            "*" => Some(self.positional.join(&self.star_sep())),
-            "0" => Some(self.name.clone()),
-            "-" => Some(self.option_flags()),
+            "@" => Some(self.positional.join(b" ".as_slice())),
+            "*" => Some(self.positional.join(self.star_sep().as_slice())),
+            "0" => Some(self.name.clone().into_bytes()),
+            "-" => Some(self.option_flags().into_bytes()),
             // `$BASH_ARGV0` mirrors `$0`; assigning it sets `$0` (see the
             // assignment hook in `apply_assignment`).
-            "BASH_ARGV0" => Some(self.name.clone()),
-            "BASHPID" => Some(self.pid.to_string()),
-            "PPID" => Some(self.ppid.to_string()),
-            "BASH_SUBSHELL" => Some(self.subshell_depth.to_string()),
-            "LINENO" => Some(self.current_line.to_string()),
-            "RANDOM" => Some(self.next_random().to_string()),
+            "BASH_ARGV0" => Some(self.name.clone().into_bytes()),
+            "BASHPID" => Some(self.pid.to_string().into_bytes()),
+            "PPID" => Some(self.ppid.to_string().into_bytes()),
+            "BASH_SUBSHELL" => Some(self.subshell_depth.to_string().into_bytes()),
+            "LINENO" => Some(self.current_line.to_string().into_bytes()),
+            "RANDOM" => Some(self.next_random().to_string().into_bytes()),
             "SECONDS" => Some(
                 self.seconds_base
                     .saturating_add(self.seconds_anchor.elapsed().as_secs())
-                    .to_string(),
+                    .to_string()
+                    .into_bytes(),
             ),
             // `$HISTCMD` is the number carried by the entry just recorded, so
             // it keeps climbing past `HISTSIZE` once eviction starts.
-            "HISTCMD" => Some(self.hist_number().to_string()),
-            "EPOCHSECONDS" => Some(unix_time().0.to_string()),
+            "HISTCMD" => Some(self.hist_number().to_string().into_bytes()),
+            "EPOCHSECONDS" => Some(unix_time().0.to_string().into_bytes()),
             "EPOCHREALTIME" => {
                 let (secs, micros) = unix_time();
-                Some(format!("{secs}.{micros:06}"))
+                Some(format!("{secs}.{micros:06}").into_bytes())
             }
             _ => {
                 if let Ok(n) = name.parse::<usize>() {
                     if n == 0 {
-                        return Some(self.name.clone());
+                        return Some(self.name.clone().into_bytes());
                     }
                     return self.positional.get(n - 1).cloned();
                 }
                 // A plain array reference (`$arr` / `${arr}`) reads element 0
                 // (indexed) or the value at key "0" (associative).
                 if let Some(m) = self.assoc.get(name) {
-                    return m.iter().find(|(k, _)| k == "0").map(|(_, v)| v.clone());
+                    return m
+                        .iter()
+                        .find(|(k, _)| k.as_slice() == b"0")
+                        .map(|(_, v)| v.clone());
                 }
                 if let Some(arr) = self.arrays.get(name) {
                     return arr.get(&0).cloned();
@@ -13436,7 +13653,10 @@ impl Shell {
                 if self.env_imported {
                     None
                 } else {
-                    std::env::var(name).ok()
+                    // An environment value crosses the OS boundary, so it is read
+                    // as bytes — a variable holding a non-UTF-8 path must survive
+                    // the fallback intact.
+                    std::env::var_os(name).map(|v| bytes::os_to_bytes(&v))
                 }
             }
         }
@@ -13486,7 +13706,7 @@ impl Shell {
     /// empty string, sets `$?` — 2 for an ordinary syntax error, 1 when the
     /// body's own error was itself fatal (a nested `$( … )`) — and carries on
     /// with the enclosing command.
-    fn command_sub_body(&mut self, body: &CmdSubBody) -> String {
+    fn command_sub_body(&mut self, body: &CmdSubBody) -> Str {
         // Count every command substitution so callers (e.g. pure assignments)
         // can tell whether one ran while expanding a value.
         self.comsub_count = self.comsub_count.wrapping_add(1);
@@ -13524,7 +13744,7 @@ impl Shell {
     /// `read_file` is the already-taken `$(< file)` fast path: a body that is
     /// solely an input redirection reads and substitutes the file's contents
     /// directly, which is what bash does instead of running the null command.
-    fn command_sub(&mut self, src: &str, map: &LineMap, read_file: Option<String>) -> String {
+    fn command_sub(&mut self, src: &str, map: &LineMap, read_file: Option<Str>) -> Str {
         if let Some(path) = read_file {
             return self.substitute_file(&path);
         }
@@ -13562,7 +13782,7 @@ impl Shell {
     /// Aliases are deliberately not expanded for the peek: the shape
     /// [`Shell::comsub_read_file`] accepts has no command word for an alias to
     /// replace, so expansion cannot change the answer.
-    fn comsub_text_read_file(&mut self, src: &str, map: &LineMap) -> Option<String> {
+    fn comsub_text_read_file(&mut self, src: &str, map: &LineMap) -> Option<Str> {
         let opts = self.lex_opts();
         let mut ip = IncrementalParser::new(src, map.clone(), opts);
         let prog = ip.next_unit(None, opts)?.ok()?;
@@ -13574,26 +13794,29 @@ impl Shell {
 
     /// The value of the `$(< file)` fast path: the file's contents with trailing
     /// newlines stripped, or the empty string after reporting a failed open.
-    fn substitute_file(&mut self, path: &str) -> String {
+    fn substitute_file(&mut self, path: BStr<'_>) -> Str {
         // bash opens a *directory* read-only successfully: `$(< dir)` yields
         // the empty string with $? = 0 (no bytes, no error). `std::fs::read`
         // instead fails on a directory, so detect it first and mirror bash.
         // The *opened* path is resolved against the shell's own working
         // directory; the *reported* one stays as the user spelled it.
         let host = self.host_path(path);
+        let host = bytes::bytes_to_path(&host);
         if std::fs::metadata(&host).is_ok_and(|m| m.is_dir()) {
             self.last_status = 0;
-            return String::new();
+            return Str::new();
         }
         match std::fs::read(&host) {
-            Ok(mut bytes) => {
-                self.strip_capture_nuls(&mut bytes);
-                let mut s = String::from_utf8_lossy(&bytes).into_owned();
-                while s.ends_with('\n') {
-                    s.pop();
+            // The file's contents substitute as *bytes*: `$(< f)` on a file that
+            // is not text must yield the bytes it holds, not an approximation of
+            // them (the old `from_utf8_lossy` here silently corrupted them).
+            Ok(mut buf) => {
+                self.strip_capture_nuls(&mut buf);
+                while buf.last() == Some(&b'\n') {
+                    buf.pop();
                 }
                 self.last_status = 0;
-                s
+                buf
             }
             Err(e) => {
                 // bash reports the failed open ("bash: line N: FILE: <msg>")
@@ -13602,9 +13825,10 @@ impl Shell {
                 // command because the input redirect is opened (and fails)
                 // before the stderr redirect takes effect — matching the
                 // plain `< file` redirect-error path.
-                self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                let msg = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                self.berrln(&msg);
                 self.last_status = 1;
-                String::new()
+                Str::new()
             }
         }
     }
@@ -13648,7 +13872,7 @@ impl Shell {
     }
 
     /// Take a finished substitution's status and captured output.
-    fn finish_comsub(&mut self, sub: &mut Shell, cap: &CaptureSink) -> String {
+    fn finish_comsub(&mut self, sub: &mut Shell, cap: &CaptureSink) -> Str {
         // A job started inside the substitution holds a copy of the collecting
         // pipe's write end, so bash's reader does not see EOF — and the
         // substitution does not finish — until that job exits: `x=$(sleep 2 &)`
@@ -13663,17 +13887,19 @@ impl Shell {
         self.last_status = sub.last_status;
         let mut buf = take_capture(cap);
         self.strip_capture_nuls(&mut buf);
-        let mut s = String::from_utf8_lossy(&buf).into_owned();
+        // The captured output substitutes as the bytes the command wrote: a
+        // command that prints a non-UTF-8 filename must round-trip through
+        // `$(…)` unchanged (the old `from_utf8_lossy` here corrupted it).
         // Strip trailing newlines, as command substitution does.
-        while s.ends_with('\n') {
-            s.pop();
+        while buf.last() == Some(&b'\n') {
+            buf.pop();
         }
-        s
+        buf
     }
 
     /// If `prog` is exactly a null command with an input redirection
     /// (`$(< file)`), return the expanded filename to read; otherwise `None`.
-    fn comsub_read_file(&mut self, prog: &Program) -> Option<String> {
+    fn comsub_read_file(&mut self, prog: &Program) -> Option<Str> {
         if prog.items.len() != 1 {
             return None;
         }
@@ -13806,14 +14032,14 @@ impl Shell {
     ///
     /// The word expansion is the caller's job because bash expands *both*
     /// operands before evaluating either (see [`Shell::cond_binary`]).
-    fn eval_arith_cond_operand(&mut self, expanded: &str) -> Option<i64> {
-        let s = expanded.trim();
+    fn eval_arith_cond_operand(&mut self, expanded: BStr<'_>) -> Option<i64> {
+        let s = bytes::trim(expanded);
         if s.is_empty() {
             return Some(0);
         }
         let saved = self.arith_cmd.take();
         self.arith_cmd = Some(Cow::Borrowed("[["));
-        let r = match arith::eval(s, self) {
+        let r = match arith::eval_bytes(s, self) {
             Ok(v) => Some(v),
             Err(e) => {
                 self.emit_arith_error(s, &e);
@@ -13860,32 +14086,32 @@ impl Shell {
     /// `` ` ``, `"` or `\` and survives before anything else. `${a[\$n]}` is
     /// therefore `$n: syntax error` (a literal `$` that did *not* expand), while
     /// `${a[\1]}` is `\1: syntax error` — the backslash is still there.
-    fn expand_to_arith_string(&mut self, w: &Word) -> String {
-        let mut out = String::new();
+    fn expand_to_arith_string(&mut self, w: &Word) -> Str {
+        let mut out = Str::new();
         for part in &w.parts {
             match part {
-                WordPart::Literal(s) => out.push_str(s),
+                WordPart::Literal(s) => out.extend_from_slice(s.as_bytes()),
                 WordPart::SingleQuoted {
                     text: s,
                     escaped: true,
                 } => {
                     if !matches!(s.as_str(), "$" | "`" | "\"" | "\\") {
-                        out.push('\\');
+                        out.push(b'\\');
                     }
-                    out.push_str(s);
+                    out.extend_from_slice(s.as_bytes());
                 }
                 WordPart::SingleQuoted { text: s, .. } => {
-                    out.push('\'');
-                    out.push_str(s);
-                    out.push('\'');
+                    out.push(b'\'');
+                    out.extend_from_slice(s.as_bytes());
+                    out.push(b'\'');
                 }
                 WordPart::DoubleQuoted(parts) => {
                     let s = self.expand_double_quoted(parts);
-                    out.push_str(&s);
+                    out.extend_from_slice(&s);
                 }
                 other => {
                     let s = self.expand_dynamic(other);
-                    out.push_str(&s);
+                    out.extend_from_slice(&s);
                 }
             }
         }
@@ -13905,12 +14131,12 @@ impl Shell {
     /// command substitution in it. `set -x` is the caller: it traces a keyed
     /// compound element as `['1+1']='w'` — the subscript exactly as it read after
     /// word expansion, untrimmed — which the evaluated index cannot reproduce.
-    fn eval_arith_index_text(&mut self, s: &str) -> i64 {
-        let s = s.trim();
+    fn eval_arith_index_text(&mut self, s: BStr<'_>) -> i64 {
+        let s = bytes::trim(s);
         if s.is_empty() {
             return 0;
         }
-        match arith::eval(s, self) {
+        match arith::eval_bytes(s, self) {
             Ok(v) => v,
             Err(e) => {
                 self.emit_arith_error(s, &e);
@@ -13931,12 +14157,12 @@ impl Shell {
         v
     }
 
-    fn arith_sub(&mut self, expr: &str) -> String {
+    fn arith_sub(&mut self, expr: &str) -> Str {
         // Expand `$name` / `${name}` parameters inside the expression first;
         // bare identifiers are resolved by the evaluator via `VarLookup`.
         let expanded = self.expand_arith_params(expr);
-        match arith::eval(&expanded, self) {
-            Ok(v) => v.to_string(),
+        match arith::eval_bytes(&expanded, self) {
+            Ok(v) => v.to_string().into_bytes(),
             Err(e) => {
                 // Route through `emit_arith_error` so an active `2>`/`2>&1`
                 // redirect on the command silences the diagnostic, matching bash.
@@ -13945,7 +14171,7 @@ impl Shell {
                 // makes the whole simple command abort (bash) rather than run
                 // with a fabricated value; the driver consumes this flag.
                 self.discard_error = Some(1);
-                "0".to_string()
+                b"0".to_vec()
             }
         }
     }
@@ -13966,9 +14192,12 @@ impl Shell {
     /// that to the evaluator would be wrong twice over: the quote would show up in
     /// the diagnostic, and `\$n` would expand instead of reaching the evaluator as
     /// a literal `$n` for it to complain about.
-    fn expand_arith_params(&mut self, expr: &str) -> String {
+    fn expand_arith_params(&mut self, expr: &str) -> Str {
         let chars: Vec<char> = expr.chars().collect();
-        let mut out = String::new();
+        // The *source* is text (it came from the parser), but what this pass
+        // substitutes into it — variable values, command-substitution output —
+        // is not, so the result is bytes.
+        let mut out = Str::new();
         let mut i = 0;
         while i < chars.len() {
             if chars[i] == '\\' {
@@ -13980,18 +14209,18 @@ impl Shell {
                     // makes special. The backslash goes and what follows stays
                     // *literal*, which is what stops `\$n` from expanding.
                     Some(c @ ('$' | '`' | '"' | '\\')) => {
-                        out.push(*c);
+                        bytes::push_char(&mut out, *c);
                         i += 2;
                     }
                     // Anywhere else the backslash is just a character, and
                     // survives together with the one after it: `\q` stays `\q`.
                     Some(c) => {
-                        out.push('\\');
-                        out.push(*c);
+                        out.push(b'\\');
+                        bytes::push_char(&mut out, *c);
                         i += 2;
                     }
                     None => {
-                        out.push('\\');
+                        out.push(b'\\');
                         i += 1;
                     }
                 }
@@ -14015,11 +14244,12 @@ impl Shell {
                 }
                 let inner: String = chars[start..j].iter().collect();
                 i = if j < chars.len() { j + 1 } else { j };
-                out.push_str(self.run_command_sub_text(&inner).trim());
+                let sub = self.run_command_sub_text(&inner);
+                out.extend_from_slice(bytes::trim(&sub));
                 continue;
             }
             if chars[i] != '$' {
-                out.push(chars[i]);
+                bytes::push_char(&mut out, chars[i]);
                 i += 1;
                 continue;
             }
@@ -14029,22 +14259,24 @@ impl Shell {
                     // `$((expr))` — nested arithmetic. Find the matching `))`.
                     if let Some((inner, next)) = Self::scan_arith_sub(&chars, i + 3) {
                         let val = self.arith_sub(&inner);
-                        out.push_str(if val.trim().is_empty() { "0" } else { val.trim() });
+                        let val = bytes::trim(&val);
+                        out.extend_from_slice(if val.is_empty() { b"0" } else { val });
                         i = next;
                         continue;
                     }
                     // Unbalanced: fall through and emit the literal `$`.
-                    out.push('$');
+                    out.push(b'$');
                     i += 1;
                 }
                 Some('(') => {
                     // `$(cmd)` — command substitution. Find the matching `)`.
                     if let Some((inner, next)) = Self::scan_paren_group(&chars, i + 2) {
-                        out.push_str(self.run_command_sub_text(&inner).trim());
+                        let sub = self.run_command_sub_text(&inner);
+                        out.extend_from_slice(bytes::trim(&sub));
                         i = next;
                         continue;
                     }
-                    out.push('$');
+                    out.push(b'$');
                     i += 1;
                 }
                 Some('{') => {
@@ -14082,8 +14314,8 @@ impl Shell {
                         // simple cases it can't reach).
                         Err(_) => self.param_value(&inner).unwrap_or_default(),
                     };
-                    let val = val.trim();
-                    out.push_str(if val.is_empty() { "0" } else { val });
+                    let val = bytes::trim(&val);
+                    out.extend_from_slice(if val.is_empty() { b"0" } else { val });
                 }
                 _ => {
                     i += 1;
@@ -14093,8 +14325,8 @@ impl Shell {
                         i += 1;
                     }
                     let val = self.param_value(&n).unwrap_or_default();
-                    let val = val.trim();
-                    out.push_str(if val.is_empty() { "0" } else { val });
+                    let val = bytes::trim(&val);
+                    out.extend_from_slice(if val.is_empty() { b"0" } else { val });
                 }
             }
         }
@@ -14112,9 +14344,9 @@ impl Shell {
     /// so a diagnostic here would be attributed to the wrong place. The eager
     /// parse is only that validity check; the run is incremental, so a `shopt`
     /// or `alias` in the body still affects the rest of it.
-    fn run_command_sub_text(&mut self, text: &str) -> String {
+    fn run_command_sub_text(&mut self, text: &str) -> Str {
         if crate::parser::parse(text).is_err() {
-            return String::new();
+            return Str::new();
         }
         self.comsub_count = self.comsub_count.wrapping_add(1);
         let map = LineMap::Offset(0);
@@ -14163,10 +14395,10 @@ impl Shell {
         None
     }
 
-    fn tilde_expand(&self, s: &str) -> String {
+    fn tilde_expand(&self, s: BStr<'_>) -> Str {
         match self.tilde_split(s) {
-            Some((dir, rest)) => format!("{dir}{rest}"),
-            None => s.to_string(),
+            Some((dir, rest)) => bfmt![&dir, rest],
+            None => s.to_vec(),
         }
     }
 
@@ -14181,18 +14413,22 @@ impl Shell {
     /// of the word is not: with `HOME='a*'`, `echo ~` prints `a*` even when a
     /// file `ab` exists, and `[[ 'a*' == ~ ]]` is *true* — but `~/c*d` still
     /// globs its `c*d`.
-    fn tilde_split<'a>(&self, s: &'a str) -> Option<(String, &'a str)> {
-        let after = s.strip_prefix('~')?;
+    fn tilde_split<'a>(&self, s: &'a [u8]) -> Option<(Str, &'a [u8])> {
+        let after = s.strip_prefix(b"~")?;
         // The tilde-prefix runs from just after `~` to the first `/` (or end);
         // the remainder (including any leading `/`) is appended verbatim.
-        let (prefix, rest) = match after.find('/') {
+        let (prefix, rest) = match after.iter().position(|&b| b == b'/') {
             Some(i) => (&after[..i], &after[i..]),
-            None => (after, ""),
+            None => (after, b"".as_slice()),
         };
+        // A tilde-prefix names a user, a directory-stack slot or one of `+`/`-`,
+        // all of which are text — so a prefix that is not text resolves to
+        // nothing, which is exactly the "no expansion if lookup fails" answer.
+        let prefix = bytes::as_str(prefix)?;
         // Resolve the prefix to a directory. An unrecognised prefix (e.g. a
         // `~user` we cannot resolve — no user database on this target) leaves the
         // word untouched, matching bash's "no expansion if lookup fails" rule.
-        let dir: Option<String> = if prefix.is_empty() {
+        let dir: Option<Str> = if prefix.is_empty() {
             self.param_value("HOME")
         } else if prefix == "+" {
             self.param_value("PWD")
@@ -14233,12 +14469,25 @@ impl Shell {
     fn run_builtin(
         &mut self,
         name: &str,
-        argv: &[String],
-        assigns: &[(String, String)],
+        argv: &[Str],
+        assigns: &[(String, Str)],
         out: &mut Out,
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) -> Flow {
+        // Seam: the builtins themselves are still `String`-typed
+        // (TD-OILS-BYTE-STRINGS step 7 converts them). Until they are, a
+        // builtin cannot be handed an argument that is not text, so `echo`
+        // and friends still mangle one — the conversion is confined to this
+        // one place precisely so that fixing it is a single edit.
+        #[allow(deprecated)]
+        let argv: Vec<String> = argv.iter().map(|a| bytes::scaffold_lossy_string(a)).collect();
+        #[allow(deprecated)]
+        let assigns: Vec<(String, String)> = assigns
+            .iter()
+            .map(|(k, v)| (k.clone(), bytes::scaffold_lossy_string(v)))
+            .collect();
+        let (argv, assigns) = (argv.as_slice(), assigns.as_slice());
         // A write failure inside the builtin is reported as `{name}: write
         // error: …` (see [`Shell::finish_write`]), and the builtin that runs
         // commands of its own must not lend its name to *their* failures — so
@@ -14271,9 +14520,9 @@ impl Shell {
         redir: &RedirPlan,
     ) -> Flow {
         // Apply temporary assignments for the duration of the builtin.
-        let saved: Vec<(String, Option<String>)> = assigns
+        let saved: Vec<(String, Option<Str>)> = assigns
             .iter()
-            .map(|(k, v)| (k.clone(), self.vars.insert(k.clone(), v.clone())))
+            .map(|(k, v)| (k.clone(), self.replace_var(k.clone(), v.clone())))
             .collect();
 
         // Install any fd ≥ 3 dups/opens created by this command's own redirects
@@ -14519,7 +14768,9 @@ impl Shell {
                                 self.exec_stdout = Some(WriteFd::File(std::sync::Arc::new(f)));
                             }
                             Err(e) => {
-                                self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                                let msg =
+                                    bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                                self.berrln(&msg);
                                 rc = 1;
                             }
                         }
@@ -14531,7 +14782,9 @@ impl Shell {
                                 self.exec_stderr = Some(WriteFd::File(std::sync::Arc::new(f)));
                             }
                             Err(e) => {
-                                self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                                let msg =
+                                    bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                                self.berrln(&msg);
                                 rc = 1;
                             }
                         }
@@ -14587,7 +14840,13 @@ impl Shell {
                                             self.open_fds.remove(fd);
                                         }
                                         Err(e) => {
-                                            self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                                            let msg = bfmt![
+                                                self.err_prefix(),
+                                                path,
+                                                b": ",
+                                                io_error_message(&e)
+                                            ];
+                                            self.berrln(&msg);
                                             rc = 1;
                                         }
                                     }
@@ -14629,7 +14888,16 @@ impl Shell {
                     // in-place `execve` that preserves the pid awaits kernel
                     // support; observationally the shell does not continue past
                     // `exec` (a following command never runs).
-                    self.run_external(args, assigns, out, stdin, redir);
+                    // Seam: the builtin argv surface is still `String`-typed
+                    // (TD-OILS-BYTE-STRINGS step 7), so it is widened back to
+                    // bytes here for the runner, which names the file to spawn.
+                    let argv: Vec<Str> =
+                        args.iter().map(|a| a.clone().into_bytes()).collect();
+                    let assigns: Vec<(String, Str)> = assigns
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone().into_bytes()))
+                        .collect();
+                    self.run_external(&argv, &assigns, out, stdin, redir);
                     let code = self.last_status;
                     flow = Flow::Exit(code);
                     code
@@ -14776,7 +15044,7 @@ impl Shell {
         for (k, old) in saved {
             match old {
                 Some(v) => {
-                    self.vars.insert(k, v);
+                    self.put_var(k, v);
                 }
                 None => {
                     self.vars.remove(&k);
@@ -14826,8 +15094,8 @@ impl Shell {
     /// `Shell` clones inside one process, so the *process* directory belongs to
     /// no particular shell (and several may be running at once on different
     /// threads). Absolute paths pass through untouched.
-    fn resolve(&self, path: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(self.resolve_str(path))
+    fn resolve(&self, path: BStr<'_>) -> std::path::PathBuf {
+        bytes::bytes_to_path(&self.resolve_str(path))
     }
 
     /// The program path to hand to `Command::new`.
@@ -14838,11 +15106,34 @@ impl Shell {
     /// is required on the Windows host, where `CreateProcess` looks a relative
     /// application name up against the *calling* process's directory rather
     /// than the one handed to the child.
-    fn resolve_program(&self, name: &str) -> String {
-        if name.contains('/') || name.contains('\\') {
+    fn resolve_program(&self, name: BStr<'_>) -> Str {
+        if name.contains(&b'/') || name.contains(&b'\\') {
             self.resolve_str(name)
         } else {
-            name.to_string()
+            name.to_vec()
+        }
+    }
+
+    /// Apply the shell's exported variables and a command's assignment prefix
+    /// to a child process's environment.
+    ///
+    /// Values go across as `OsString`, never as text: an exported variable may
+    /// hold any byte sequence, and re-encoding it would hand the child a
+    /// different value than the shell holds (TD-OILS-BYTE-STRINGS).
+    fn apply_child_env(&self, pc: &mut PCommand, assigns: &[(String, Str)]) {
+        // When the shell owns its environment (imported at startup), spawn from
+        // a cleared base so an `unset`/non-exported variable does not leak in
+        // via the parent process's inherited environment.
+        if self.env_imported {
+            pc.env_clear();
+        }
+        for (k, v) in &self.vars {
+            if self.exported.contains(k) {
+                pc.env(k, bytes::bytes_to_os(v));
+            }
+        }
+        for (k, v) in assigns {
+            pc.env(k, bytes::bytes_to_os(v));
         }
     }
 
@@ -14850,13 +15141,13 @@ impl Shell {
     /// ([`map_device_path`]): the form to hand to `File::open` / `fs::read` /
     /// `OpenOptions`. Device paths are rooted, so resolving first leaves them
     /// alone and the mapping still fires.
-    fn host_path(&self, path: &str) -> String {
-        map_device_path(&self.resolve_str(path)).to_string()
+    fn host_path(&self, path: BStr<'_>) -> Str {
+        map_device_path(&self.resolve_str(path)).to_vec()
     }
 
     /// [`Shell::resolve`] as a string, for the callers that need to keep
     /// talking about the path in shell terms (`/`-separated).
-    fn resolve_str(&self, path: &str) -> String {
+    fn resolve_str(&self, path: BStr<'_>) -> Str {
         resolve_against(&self.cwd, path)
     }
 
@@ -14868,20 +15159,20 @@ impl Shell {
     /// to the current one and `.`/`..` are folded out textually, so the path
     /// the user typed to reach a symlink is the path they walk back out of.
     /// `cd -P` re-canonicalises afterwards, in [`Shell::builtin_cd`].
-    fn change_dir(&mut self, path: &str) -> Result<String, String> {
+    fn change_dir(&mut self, path: BStr<'_>) -> Result<Str, String> {
         let target = normalize_logical(&self.resolve_str(path));
         // `set_current_dir` used to supply these diagnostics for free; now that
         // the directory is ours, the checks are too. Both messages are bash's.
-        match std::fs::metadata(&target) {
+        match std::fs::metadata(bytes::bytes_to_path(&target)) {
             Ok(m) if m.is_dir() => {}
             Ok(_) => return Err("Not a directory".to_string()),
             Err(e) => return Err(io_error_message(&e)),
         }
         let old = std::mem::replace(&mut self.cwd, target.clone());
         if !old.is_empty() {
-            self.vars.insert("OLDPWD".to_string(), old);
+            self.put_var("OLDPWD".to_string(), old);
         }
-        self.vars.insert("PWD".to_string(), target.clone());
+        self.put_var("PWD".to_string(), target.clone());
         // Keep DIRSTACK[0] (the current dir) in sync on every cwd change.
         self.refresh_dirstack();
         Ok(target)
@@ -14953,7 +15244,7 @@ impl Shell {
         let is_dash = rest.first().map(String::as_str) == Some("-");
         let (mut target, mut echo) = match rest.first().map(String::as_str) {
             None => (
-                self.param_value("HOME").unwrap_or_else(|| "/".to_string()),
+                self.param_value("HOME").unwrap_or_else(|| b"/".to_vec()),
                 false,
             ),
             Some("-") => match self.param_value("OLDPWD") {
@@ -14963,7 +15254,7 @@ impl Shell {
                     return 1;
                 }
             },
-            Some(p) => (p.to_string(), false),
+            Some(p) => (p.as_bytes().to_vec(), false),
         };
 
         // `CDPATH` search: a non-explicit relative target is looked up under
@@ -14973,11 +15264,13 @@ impl Shell {
             && !cd_is_explicit(&target)
             && let Some(cdpath) = self.param_value("CDPATH")
         {
-            for entry in cdpath.split(':') {
-                let base = if entry.is_empty() { "." } else { entry };
-                let candidate = format!("{base}/{target}");
-                if std::path::Path::new(&self.host_path(&candidate)).is_dir() {
-                    if base != "." {
+            // `$CDPATH` holds directory names, so it is split on `:` as bytes —
+            // an entry that is not text still names a directory to search.
+            for entry in cdpath.split(|&b| b == b':') {
+                let base: BStr<'_> = if entry.is_empty() { b"." } else { entry };
+                let candidate = bfmt![base, b"/", &target];
+                if bytes::bytes_to_path(&self.host_path(&candidate)).is_dir() {
+                    if base != b"." {
                         echo = true;
                     }
                     target = candidate;
@@ -14990,20 +15283,21 @@ impl Shell {
             Ok(mut cwd) => {
                 // `-P`: report/store the canonical (symlink-resolved) path.
                 if physical
-                    && let Ok(canon) = std::fs::canonicalize(&cwd)
+                    && let Ok(canon) = std::fs::canonicalize(bytes::bytes_to_path(&cwd))
                 {
                     cwd = shell_path(&canon);
-                    self.vars.insert("PWD".to_string(), cwd.clone());
+                    self.put_var("PWD".to_string(), cwd.clone());
                 }
                 // The echo is ordinary builtin stdout, so it must honour any
                 // redirection on the `cd` itself (`cd - >/dev/null`).
                 if echo {
-                    return self.write_line(out, redir, &cwd);
+                    return self.bwrite_line(out, redir, &cwd);
                 }
                 0
             }
             Err(e) => {
-                self.errln(&format!("{}cd: {target}: {e}", self.err_prefix()));
+                let msg = bfmt![self.err_prefix(), b"cd: ", &target, b": ", e];
+                self.berrln(&msg);
                 1
             }
         }
@@ -15011,24 +15305,24 @@ impl Shell {
 
     /// Render a directory path for `dirs`/`pushd`/`popd` output: unless `long`,
     /// contract a leading `$HOME` to `~` (bash's default short form).
-    fn dirs_render(&self, path: &str, long: bool) -> String {
+    fn dirs_render(&self, path: BStr<'_>, long: bool) -> Str {
         if long {
-            return path.to_string();
+            return path.to_vec();
         }
         if let Some(home) = self.param_value("HOME") {
             if !home.is_empty() && path == home {
-                return "~".to_string();
+                return b"~".to_vec();
             }
-            if let Some(rest) = path.strip_prefix(&format!("{home}/")) {
-                return format!("~/{rest}");
+            if let Some(rest) = path.strip_prefix(bfmt![&home, b"/"].as_slice()) {
+                return bfmt![b"~/", rest];
             }
         }
-        path.to_string()
+        path.to_vec()
     }
 
     /// The current directory stack as a list with the current directory first
     /// (the conceptual top), followed by the saved `dir_stack` entries.
-    fn dir_stack_full(&self) -> Vec<String> {
+    fn dir_stack_full(&self) -> Vec<Str> {
         let cur = self.cwd.clone();
         let mut full = Vec::with_capacity(self.dir_stack.len() + 1);
         full.push(cur);
@@ -15041,7 +15335,7 @@ impl Shell {
     /// the current directory first, then the saved stack. Called whenever the
     /// cwd or the saved stack changes (`cd`, `pushd`, `popd`, `dirs -c`).
     fn refresh_dirstack(&mut self) {
-        let full: std::collections::BTreeMap<usize, String> =
+        let full: std::collections::BTreeMap<usize, Str> =
             self.dir_stack_full().into_iter().enumerate().collect();
         self.arrays.insert("DIRSTACK".to_string(), full);
     }
@@ -15054,8 +15348,8 @@ impl Shell {
             .iter()
             .map(|p| self.dirs_render(p, false))
             .collect::<Vec<_>>()
-            .join(" ");
-        self.write_line(out, redir, &line)
+            .join(b" ".as_slice());
+        self.bwrite_line(out, redir, &line)
     }
 
     /// Resolve a `+N`/`-N` directory-stack index to a position in
@@ -15093,7 +15387,7 @@ impl Shell {
         const USAGE: &str = "pushd [-n] [+N | -N | dir]";
         let mut no_cd = false;
         let mut spec: Option<DirStackSpec> = None;
-        let mut dir: Option<String> = None;
+        let mut dir: Option<Str> = None;
         let mut end_opts = false;
         for a in args {
             if !end_opts {
@@ -15121,7 +15415,7 @@ impl Shell {
                     }
                 }
             }
-            if dir.replace(a.clone()).is_some() {
+            if dir.replace(a.clone().into_bytes()).is_some() {
                 self.errln(&format!("{}pushd: too many arguments", self.err_prefix()));
                 return 1;
             }
@@ -15139,7 +15433,7 @@ impl Shell {
                     Ok(i) => i,
                     Err(rc) => return rc,
                 };
-                let mut rotated: Vec<String> = full[idx..].to_vec();
+                let mut rotated: Vec<Str> = full[idx..].to_vec();
                 rotated.extend_from_slice(&full[..idx]);
                 // Under `-n` the rotation is applied to the saved stack only;
                 // the cwd stays put and therefore remains entry 0. bash also
@@ -15151,7 +15445,8 @@ impl Shell {
                     return 0;
                 }
                 if let Err(e) = self.change_dir(&rotated[0]) {
-                    self.errln(&format!("{}pushd: {}: {e}", self.err_prefix(), rotated[0]));
+                    let msg = bfmt![self.err_prefix(), b"pushd: ", &rotated[0], b": ", e];
+                    self.berrln(&msg);
                     return 1;
                 }
                 self.dir_stack = rotated[1..].to_vec();
@@ -15165,7 +15460,8 @@ impl Shell {
             (None, Some(d)) => match self.change_dir(&d) {
                 Ok(_) => self.dir_stack.insert(0, cur),
                 Err(e) => {
-                    self.errln(&format!("{}pushd: {d}: {e}", self.err_prefix()));
+                    let msg = bfmt![self.err_prefix(), b"pushd: ", &d, b": ", e];
+                    self.berrln(&msg);
                     return 1;
                 }
             },
@@ -15180,7 +15476,8 @@ impl Shell {
                 }
                 let top = self.dir_stack[0].clone();
                 if let Err(e) = self.change_dir(&top) {
-                    self.errln(&format!("{}pushd: {top}: {e}", self.err_prefix()));
+                    let msg = bfmt![self.err_prefix(), b"pushd: ", &top, b": ", e];
+                    self.berrln(&msg);
                     return 1;
                 }
                 self.dir_stack[0] = cur;
@@ -15265,7 +15562,8 @@ impl Shell {
         if no_cd {
             self.refresh_dirstack();
         } else if let Err(e) = self.change_dir(&top) {
-            self.errln(&format!("{}popd: {top}: {e}", self.err_prefix()));
+            let msg = bfmt![self.err_prefix(), b"popd: ", &top, b": ", e];
+            self.berrln(&msg);
             return 1;
         }
         self.print_dirs_line(out, redir)
@@ -15337,27 +15635,30 @@ impl Shell {
                 Err(rc) => return rc,
             };
             let full = self.dir_stack_full();
-            let rendered = full.get(idx).map(|p| self.dirs_render(p, long)).unwrap_or_default();
-            return self.write_line(out, redir, &rendered);
+            let rendered = full
+                .get(idx)
+                .map(|p| self.dirs_render(p, long))
+                .unwrap_or_default();
+            return self.bwrite_line(out, redir, &rendered);
         }
         let full = self.dir_stack_full();
         if per_line || verbose {
-            let mut s = String::new();
+            let mut s = Str::new();
             for (i, p) in full.iter().enumerate() {
                 if verbose {
-                    s.push_str(&format!("{i:2}  "));
+                    s.extend_from_slice(format!("{i:2}  ").as_bytes());
                 }
-                s.push_str(&self.dirs_render(p, long));
-                s.push('\n');
+                s.extend_from_slice(&self.dirs_render(p, long));
+                s.push(b'\n');
             }
-            return self.write_bytes(out, redir, s.as_bytes());
+            return self.write_bytes(out, redir, &s);
         }
         let line = full
             .iter()
             .map(|p| self.dirs_render(p, long))
             .collect::<Vec<_>>()
-            .join(" ");
-        self.write_line(out, redir, &line)
+            .join(b" ".as_slice());
+        self.bwrite_line(out, redir, &line)
     }
 
     /// `trap [-lp] [[action] sigspec ...]` — set, reset, print, or list signal
@@ -16541,7 +16842,7 @@ impl Shell {
                         Some(&status) => {
                             last = status;
                             if let Some(var) = &pid_var {
-                                self.vars.insert(var.clone(), spec.clone());
+                                self.put_var(var.clone(), spec.clone());
                             }
                         }
                         None => last = self.wait_bad_operand(spec),
@@ -16572,7 +16873,7 @@ impl Shell {
             }
             self.reaped_status.insert(pid, last);
             if let Some(var) = &pid_var {
-                self.vars.insert(var.clone(), pid.to_string());
+                self.put_var(var.clone(), pid.to_string());
             }
         }
         last
@@ -16692,7 +16993,7 @@ impl Shell {
                     // status stays answerable for a later `wait PID`.
                     self.reaped_status.insert(pid, status);
                     if let Some(var) = pid_var {
-                        self.vars.insert(var.to_string(), pid.to_string());
+                        self.put_var(var.to_string(), pid.to_string());
                     }
                     return status;
                 }
@@ -17481,7 +17782,7 @@ impl Shell {
         let mut status = 0;
         for name in names {
             self.cmd_hash.remove(name);
-            match self.find_in_path(name) {
+            match self.find_in_path(name.as_bytes()) {
                 Some(path) => {
                     self.cmd_hash.insert(name.clone(), (path, 0));
                 }
@@ -18499,11 +18800,13 @@ impl Shell {
         let cwd = self.cwd.clone();
         // `-P` reports the canonical, symlink-resolved path.
         let cwd = if physical {
-            std::fs::canonicalize(&cwd).map(|p| shell_path(&p)).unwrap_or(cwd)
+            std::fs::canonicalize(bytes::bytes_to_path(&cwd))
+                .map(|p| shell_path(&p))
+                .unwrap_or(cwd)
         } else {
             cwd
         };
-        self.write_line(out, redir, &cwd)
+        self.bwrite_line(out, redir, &cwd)
     }
 
     fn builtin_echo(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -18673,10 +18976,6 @@ impl Shell {
             }
             // A subscript that names nowhere fails the builtin (status 1) with
             // its own complaint; the line carries on.
-            // TD-OILS-BYTE-STRINGS scaffold: variable *values* are still
-            // `String`, so `printf -v` cannot yet store a non-UTF-8 byte.
-            #[allow(deprecated)]
-            let text = crate::bytes::scaffold_lossy_string(&text);
             if !self.assign_elem(&base, &index, text) {
                 return 1;
             }
@@ -18807,12 +19106,12 @@ impl Shell {
                 }
                 let stored = if append {
                     let mut cur = self.vars.get(&k).cloned().unwrap_or_default();
-                    cur.push_str(&v);
+                    cur.extend_from_slice(v.as_bytes());
                     cur
                 } else {
-                    v
+                    v.into_bytes()
                 };
-                self.vars.insert(k.clone(), stored);
+                self.put_var(k.clone(), stored);
                 if unexport {
                     self.exported.remove(&k);
                 } else {
@@ -18843,18 +19142,18 @@ impl Shell {
         let mut names: Vec<String> = self.exported.iter().cloned().collect();
         names.sort();
         names.dedup();
-        let mut listing = String::new();
+        let mut listing = Str::new();
         for name in &names {
             if let Some(def) = self.format_declare_def(name) {
                 // `format_declare_def` already folds in the `x` (and any other)
                 // attribute flags for a set variable.
-                listing.push_str(&def);
-                listing.push('\n');
+                listing.extend_from_slice(&def);
+                listing.push(b'\n');
             } else {
-                listing.push_str(&format!("declare -x {name}\n"));
+                listing.extend_from_slice(format!("declare -x {name}\n").as_bytes());
             }
         }
-        self.write_bytes(out, redir, listing.as_bytes())
+        self.write_bytes(out, redir, &listing)
     }
 
     /// `declare`/`typeset`/`local`: create typed variables. Supports `-A`
@@ -19051,14 +19350,14 @@ impl Shell {
             .into_iter()
             .filter(|n| has_attr(self, n))
             .collect();
-        let mut listing = String::new();
+        let mut listing = Str::new();
         for name in &names {
             if let Some(def) = self.format_declare_def(name) {
-                listing.push_str(&def);
-                listing.push('\n');
+                listing.extend_from_slice(&def);
+                listing.push(b'\n');
             }
         }
-        self.write_bytes(out, redir, listing.as_bytes())
+        self.write_bytes(out, redir, &listing)
     }
 
     /// Every name `declare -p` has something to say about, sorted: the ones with
@@ -19086,14 +19385,14 @@ impl Shell {
         let mut write_status = 0;
         if names.is_empty() {
             // Nothing here can fail, so the whole table is one write.
-            let mut listing = String::new();
+            let mut listing = Str::new();
             for name in self.declare_p_names() {
                 if let Some(def) = self.format_declare_def(&name) {
-                    listing.push_str(&def);
-                    listing.push('\n');
+                    listing.extend_from_slice(&def);
+                    listing.push(b'\n');
                 }
             }
-            write_status = self.write_bytes(out, redir, listing.as_bytes());
+            write_status = self.write_bytes(out, redir, &listing);
         } else {
             // Each name is answered where it is reached, rather than the
             // answers being gathered up and written after every complaint: with
@@ -19101,7 +19400,7 @@ impl Shell {
             // definition first and the complaint after it, as bash does.
             for name in names {
                 if let Some(def) = self.format_declare_def(name) {
-                    let w = self.write_bytes(out, redir, format!("{def}\n").as_bytes());
+                    let w = self.write_bytes(out, redir, &bfmt![&def, b"\n"]);
                     if w != 0 {
                         write_status = w;
                     }
@@ -19124,28 +19423,19 @@ impl Shell {
         if s.is_empty() { "--".to_string() } else { format!("-{s}") }
     }
 
-    fn format_declare_def(&self, name: &str) -> Option<String> {
-        if self.assoc.contains_key(name) {
+    fn format_declare_def(&self, name: &str) -> Option<Str> {
+        if self.assoc.contains_key(name) || self.arrays.contains_key(name) || self.vars.contains_key(name)
+        {
             return self
                 .format_var_assignment(name)
-                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name)));
-        }
-        if self.arrays.contains_key(name) {
-            return self
-                .format_var_assignment(name)
-                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name)));
-        }
-        if self.vars.contains_key(name) {
-            return self
-                .format_var_assignment(name)
-                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name)));
+                .map(|body| bfmt![b"declare ", self.declare_attr_flags(name), b" ", &body]);
         }
         if self.declared.contains(name) {
             // Declared without a value: the name exists, so it is reported —
             // with its attributes, or `--` if it has none — even though it is
             // unset and so has nothing to print on the right of an `=`. See
             // [`Shell::declared`].
-            return Some(format!("declare {} {name}", self.declare_attr_flags(name)));
+            return Some(bfmt![b"declare ", self.declare_attr_flags(name), b" ", name]);
         }
         // Scalar dynamic special variables (`BASHPID`, `RANDOM`, …) have no
         // entry in `self.vars` but still respond to `declare -p NAME` in bash —
@@ -19160,7 +19450,7 @@ impl Shell {
     /// counters like `BASHPID`/`RANDOM`/`SECONDS` print with `-i`; the rest with
     /// `--`), or `None` if `name` is not one of them. Values are read live via
     /// [`Self::param_value`].
-    fn format_scalar_dynamic_declare(&self, name: &str) -> Option<String> {
+    fn format_scalar_dynamic_declare(&self, name: &str) -> Option<Str> {
         let flags = match name {
             // `$PPID` is a readonly integer in bash (`declare -ir`).
             "PPID" => "-ir",
@@ -19169,13 +19459,13 @@ impl Shell {
             _ => return None,
         };
         let val = self.param_value(name)?;
-        Some(format!("declare {flags} {name}=\"{val}\""))
+        Some(bfmt![b"declare ", flags, b" ", name, b"=\"", &val, b"\""])
     }
 
     /// Format a variable as a re-inputtable `name=value` / `name=([i]="v" …)`
     /// assignment (no `declare` prefix or attribute flags), or `None` if unset.
     /// Shared by `declare -p` and the bare `set` variable listing.
-    fn format_var_assignment(&self, name: &str) -> Option<String> {
+    fn format_var_assignment(&self, name: &str) -> Option<Str> {
         if let Some(map) = self.assoc.get(name) {
             // bash distinguishes a never-assigned `declare -A m` (printed as the
             // bare name) from an assigned-but-empty `m=()` (printed `m=()`).
@@ -19185,17 +19475,17 @@ impl Shell {
             // the closing paren (`([k]="v" )`).
             if map.is_empty() {
                 return Some(if self.array_valued.contains(name) {
-                    format!("{name}=()")
+                    bfmt![name, b"=()"]
                 } else {
-                    name.to_string()
+                    name.as_bytes().to_vec()
                 });
             }
             let body = map
                 .iter()
-                .map(|(k, v)| format!("[{}]={}", quote_declare_key(k), quote_declare_value(v)))
+                .map(|(k, v)| bfmt![b"[", quote_declare_key(k), b"]=", quote_declare_value(v)])
                 .collect::<Vec<_>>()
-                .join(" ");
-            return Some(format!("{name}=({body} )"));
+                .join(b" ".as_slice());
+            return Some(bfmt![name, b"=(", &body, b" )"]);
         }
         if let Some(arr) = self.arrays.get(name) {
             // As with associative arrays, an assigned-but-empty indexed array
@@ -19203,20 +19493,20 @@ impl Shell {
             // prints as the bare name.
             if arr.is_empty() {
                 return Some(if self.array_valued.contains(name) {
-                    format!("{name}=()")
+                    bfmt![name, b"=()"]
                 } else {
-                    name.to_string()
+                    name.as_bytes().to_vec()
                 });
             }
             let body = arr
                 .iter()
-                .map(|(i, v)| format!("[{i}]={}", quote_declare_value(v)))
+                .map(|(i, v)| bfmt![b"[", *i, b"]=", quote_declare_value(v)])
                 .collect::<Vec<_>>()
-                .join(" ");
-            return Some(format!("{name}=({body})"));
+                .join(b" ".as_slice());
+            return Some(bfmt![name, b"=(", &body, b")"]);
         }
         if let Some(v) = self.vars.get(name) {
-            return Some(format!("{name}={}", quote_declare_value(v)));
+            return Some(bfmt![name, b"=", quote_declare_value(v)]);
         }
         None
     }
@@ -19225,12 +19515,12 @@ impl Shell {
     /// double-quoted form as `declare -p`, but scalars use bash's minimal
     /// single-quote style (see `quote_set_value`) — e.g. `y=5`, `x='a b'` rather
     /// than `declare -p`'s `y="5"`, `x="a b"`.
-    fn format_var_setline(&self, name: &str) -> Option<String> {
+    fn format_var_setline(&self, name: &str) -> Option<Str> {
         if self.assoc.contains_key(name) || self.arrays.contains_key(name) {
             return self.format_var_assignment(name);
         }
         if let Some(v) = self.vars.get(name) {
-            return Some(format!("{name}={}", quote_set_value(v)));
+            return Some(bfmt![name, b"=", quote_set_value(v)]);
         }
         None
     }
@@ -19289,7 +19579,14 @@ impl Shell {
     ) -> Option<String> {
         let result: Cow<'_, str> = if append {
             match self.vars.get(name) {
-                Some(old) => Cow::Owned(format!("{old}{value}")),
+                // A nameref holds the *name* it points to, and a name is text,
+                // so an existing value that is not text can only append to an
+                // unnameable target — reported as the empty result is, with the
+                // generic "not a valid identifier" wording the append form uses.
+                Some(old) => match bytes::as_str(old) {
+                    Some(old) => Cow::Owned(format!("{old}{value}")),
+                    None => Cow::Borrowed(""),
+                },
                 None => Cow::Borrowed(value),
             }
         } else {
@@ -19648,10 +19945,10 @@ impl Shell {
                     // extends the *name*, which is how `declare -n r=a; declare
                     // -n r+='[1]'` builds the element reference `a[1]` (bash).
                     let v = match self.vars.get(name) {
-                        Some(old) if append => format!("{old}{v}"),
-                        _ => v,
+                        Some(old) if append => bfmt![old, v.as_str()],
+                        _ => v.into_bytes(),
                     };
-                    self.vars.insert(name.to_string(), v);
+                    self.put_var(name.to_string(), v);
                 } else if assoc || indexed {
                     // A string value assigned to an array via `declare`. bash
                     // treats a parenthesized string as a *compound array
@@ -19686,7 +19983,8 @@ impl Shell {
                         // stores `5`, and `declare -ai a+=3` onto a `5` stores `8`
                         // rather than `53`.
                         let cur = if append { self.scalar_store(name) } else { None };
-                        let Some(stored) = self.appended_attributed_value(name, cur, v, append)
+                        let Some(stored) =
+                            self.appended_attributed_value(name, cur, v.into_bytes(), append)
                         else {
                             // A bad `-i` value leaves the array *valued but empty*
                             // (`declare -ai a=2+` reports `declare -ai a=()`) and
@@ -19697,7 +19995,7 @@ impl Shell {
                             break;
                         };
                         if assoc {
-                            self.assoc_set(name, "0".to_string(), stored, false);
+                            self.assoc_set(name, b"0".to_vec(), stored, false);
                         } else {
                             self.array_valued.insert(name.to_string());
                             self.arrays
@@ -19716,9 +20014,9 @@ impl Shell {
                     // afterwards: `declare -i n=2+` then `declare -p n` gives
                     // `declare -i n`.
                     let cur = if append { self.vars.get(name).cloned() } else { None };
-                    match self.appended_attributed_value(name, cur, v, append) {
+                    match self.appended_attributed_value(name, cur, v.into_bytes(), append) {
                         Some(stored) => {
-                            self.vars.insert(name.to_string(), stored);
+                            self.put_var(name.to_string(), stored);
                         }
                         None => {
                             self.declared.insert(name.to_string());
@@ -19730,8 +20028,10 @@ impl Shell {
                     // `+=` the folded value is appended to the current string. No
                     // `-i`, so the arithmetic arm of the helper cannot fail here.
                     let cur = if append { self.vars.get(name).cloned() } else { None };
-                    if let Some(stored) = self.appended_attributed_value(name, cur, v, append) {
-                        self.vars.insert(name.to_string(), stored);
+                    if let Some(stored) =
+                        self.appended_attributed_value(name, cur, v.into_bytes(), append)
+                    {
+                        self.put_var(name.to_string(), stored);
                     }
                 }
             } else if !self.vars.contains_key(name)
@@ -19805,7 +20105,7 @@ impl Shell {
             let carried = self.vars.remove(name);
             self.assoc.entry(name.to_string()).or_default();
             if let Some(v) = carried {
-                self.assoc_set(name, "0".to_string(), v, false);
+                self.assoc_set(name, b"0".to_vec(), v, false);
                 self.array_valued.insert(name.to_string());
             }
         } else {
@@ -19834,12 +20134,20 @@ impl Shell {
     /// trace this command itself.
     fn exec_declare_with_arrays(
         &mut self,
-        argv: &[String],
+        argv: &[Str],
         decl_arrays: &[DeclArray],
-        trace_words: Option<&[String]>,
+        trace_words: Option<&[Str]>,
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
+        // Seam: the declaration builtins this dispatches to (`declare`,
+        // `readonly`, `export`) are still `String`-typed
+        // (TD-OILS-BYTE-STRINGS step 7 converts them), as is this function's
+        // own flag parsing. The `set -x` line below is rendered from the
+        // *byte* words instead, so a non-text operand still traces verbatim.
+        #[allow(deprecated)]
+        let argv_text: Vec<String> = argv.iter().map(|a| bytes::scaffold_lossy_string(a)).collect();
+        let argv = argv_text.as_slice();
         let cmd = argv.first().map(String::as_str).unwrap_or("");
         let is_local = cmd == "local";
         if is_local && self.local_frames.is_empty() {
@@ -20050,7 +20358,8 @@ impl Shell {
             // bash runs normally (`declare -a f=(x $((1/0))); declare -p f` ate the
             // `declare -p`, and under `set -x` it ate the `set +x`).
             let expansion_failure = if let Some(pat) = self.glob_error.take() {
-                self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
+                let msg = bfmt![self.err_prefix(), b"no match: ", &pat, b"\n"];
+                self.emit_stderr(&msg);
                 self.discard_error = None;
                 self.last_status = 1;
                 Some(Flow::Discard)
@@ -20102,12 +20411,12 @@ impl Shell {
             let mut line = self.xtrace_prefix();
             for (i, w) in words.iter().enumerate() {
                 if i > 0 {
-                    line.push(' ');
+                    line.push(b' ');
                 }
-                line.push_str(&xtrace_quote(w));
+                line.extend_from_slice(&xtrace_quote(w));
             }
-            line.push('\n');
-            self.emit_stderr(line.as_bytes());
+            line.push(b'\n');
+            self.emit_stderr(&line);
         }
         // Phase 2 — the builtin: the flags, and any *scalar* operands
         // (e.g. `declare -x FOO=bar`). For `readonly`/`export`, route scalar
@@ -20207,21 +20516,24 @@ impl Shell {
         if names.is_empty() {
             let mut ro: Vec<String> = self.readonly.iter().cloned().collect();
             ro.sort();
-            let mut listing = String::new();
+            let mut listing = Str::new();
             for name in &ro {
                 // bash's `readonly -p` reuses `declare -p` formatting: scalars
                 // as `declare -r name="value"`, arrays as `declare -ar name=(…)`,
                 // and a valueless readonly as a bare `declare -r name`.
                 match self.format_declare_def(name) {
                     Some(def) => {
-                        listing.push_str(&def);
-                        listing.push('\n');
+                        listing.extend_from_slice(&def);
+                        listing.push(b'\n');
                     }
                     None => {
-                        listing.push_str(&format!(
-                            "declare {} {name}\n",
-                            self.declare_attr_flags(name)
-                        ));
+                        listing.extend_from_slice(&bfmt![
+                            b"declare ",
+                            self.declare_attr_flags(name),
+                            b" ",
+                            name,
+                            b"\n"
+                        ]);
                     }
                 }
             }
@@ -20255,10 +20567,10 @@ impl Shell {
             if let Some(v) = value {
                 let stored = if append {
                     let mut cur = self.scalar_store(&name).unwrap_or_default();
-                    cur.push_str(&v);
+                    cur.extend_from_slice(v.as_bytes());
                     cur
                 } else {
-                    v
+                    v.into_bytes()
                 };
                 // Routes to element/key 0 when the name is an array — the same
                 // rule a bare `name=value` follows.
@@ -20480,7 +20792,7 @@ impl Shell {
             }
         }
         on.sort_unstable();
-        self.vars.insert("BASHOPTS".to_string(), on.join(":"));
+        self.put_var("BASHOPTS".to_string(), on.join(":"));
     }
 
     /// `shopt -o …`: the `-o` variant operates on `set -o` options. Handles the
@@ -20840,21 +21152,21 @@ impl Shell {
                 .collect();
             all.sort();
             all.dedup();
-            let mut listing = String::new();
+            let mut listing = Str::new();
             for name in all {
                 if let Some(def) = self.format_var_setline(name) {
-                    listing.push_str(&def);
-                    listing.push('\n');
+                    listing.extend_from_slice(&def);
+                    listing.push(b'\n');
                 }
             }
             let mut fns: Vec<&String> = self.funcs.keys().collect();
             fns.sort();
             for name in fns {
                 if let Some(body) = self.funcs.get(name) {
-                    listing.push_str(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+                    listing.extend_from_slice(crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)).as_bytes());
                 }
             }
-            return self.write_bytes(out, redir, listing.as_bytes());
+            return self.write_bytes(out, redir, &listing);
         }
         // Handle option flags (`-e`/`-u`/`-x`/… as clusters, `-o name`) and, on
         // the first non-option operand, reset the positional parameters. `--`
@@ -20864,7 +21176,7 @@ impl Shell {
             let arg = &args[i];
             match arg.as_str() {
                 "--" => {
-                    self.positional = args[i + 1..].to_vec();
+                    self.positional = args[i + 1..].iter().map(|a| a.clone().into_bytes()).collect();
                     return 0;
                 }
                 "-" | "+" => {
@@ -20937,7 +21249,7 @@ impl Shell {
                     i += 1 + extra_words;
                 }
                 _ => {
-                    self.positional = args[i..].to_vec();
+                    self.positional = args[i..].iter().map(|a| a.clone().into_bytes()).collect();
                     return 0;
                 }
             }
@@ -21101,7 +21413,7 @@ impl Shell {
             opts.push("verbose");
         }
         opts.sort_unstable();
-        self.vars.insert("SHELLOPTS".to_string(), opts.join(":"));
+        self.put_var("SHELLOPTS".to_string(), opts.join(":"));
     }
 
     /// Render the `set -o` / `set +o` option listing. With `reinput` false
@@ -21226,8 +21538,8 @@ impl Shell {
     /// Returns whether the write went through. A refusal costs the *option*
     /// results their status (bash reports 2 rather than 0), but leaves the
     /// out-of-options status at 1: there the 1 is the answer, not the write.
-    fn getopts_bind(&mut self, name: &str, value: &str) -> bool {
-        self.set_scalar_checked(name, value.to_string())
+    fn getopts_bind(&mut self, name: &str, value: BStr<'_>) -> bool {
+        self.set_scalar_checked(name, value.to_vec())
     }
 
     fn builtin_getopts(&mut self, args: &[String]) -> i32 {
@@ -21267,16 +21579,19 @@ impl Shell {
         // "0" (default 1), independently of the leading-colon "silent" mode —
         // silent mode also changes the *reported* value (`?`→`:`, sets OPTARG),
         // whereas OPTERR=0 only mutes the message and keeps non-silent values.
-        let report_errors = self.vars.get("OPTERR").is_none_or(|v| v != "0");
+        let report_errors = self.vars.get("OPTERR").is_none_or(|v| v.as_slice() != b"0");
         // Arguments to scan: explicit args after `name`, else the positionals.
-        let pos: Vec<String> = if args.len() > base + 2 {
-            args[base + 2..].to_vec()
+        // They are *values* — an option-argument is routinely a path — so the
+        // scan is over bytes and `OPTARG` is bound to the bytes it found.
+        let pos: Vec<Str> = if args.len() > base + 2 {
+            args[base + 2..].iter().map(|a| a.clone().into_bytes()).collect()
         } else {
             self.positional.clone()
         };
         let mut optind = self
             .vars
             .get("OPTIND")
+            .and_then(|s| bytes::as_str(s))
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(1);
         if optind == 0 {
@@ -21292,30 +21607,33 @@ impl Shell {
             if optind > pos.len() {
                 self.getopts_col = 0;
                 self.getopts_optind = optind;
-                self.vars.insert("OPTIND".to_string(), optind.to_string());
-                self.getopts_bind(&name, "?");
+                self.put_var("OPTIND".to_string(), optind.to_string());
+                self.getopts_bind(&name, b"?");
                 return 1;
             }
             let arg = &pos[optind - 1].clone();
             if self.getopts_col == 0 {
                 // Start of a fresh argument.
-                if !arg.starts_with('-') || arg == "-" {
+                if !arg.starts_with(b"-") || arg.as_slice() == b"-" {
                     self.getopts_optind = optind;
-                    self.vars.insert("OPTIND".to_string(), optind.to_string());
-                    self.getopts_bind(&name, "?");
+                    self.put_var("OPTIND".to_string(), optind.to_string());
+                    self.getopts_bind(&name, b"?");
                     return 1;
                 }
-                if arg == "--" {
+                if arg.as_slice() == b"--" {
                     optind += 1;
                     self.getopts_col = 0;
                     self.getopts_optind = optind;
-                    self.vars.insert("OPTIND".to_string(), optind.to_string());
-                    self.getopts_bind(&name, "?");
+                    self.put_var("OPTIND".to_string(), optind.to_string());
+                    self.getopts_bind(&name, b"?");
                     return 1;
                 }
                 self.getopts_col = 1;
             }
-            let chars: Vec<char> = arg.chars().collect();
+            // An option is a *character*, so the argument is walked
+            // character-wise; a byte that decodes to none matches no optstring
+            // entry and so takes the "illegal option" path, which is right.
+            let chars: Vec<bytes::Ch> = bytes::chars(arg).collect();
             if self.getopts_col >= chars.len() {
                 // Exhausted this argument's flags; advance to the next.
                 optind += 1;
@@ -21333,7 +21651,7 @@ impl Shell {
                 if c == ':' {
                     continue;
                 }
-                if c == opt {
+                if opt.as_char() == Some(c) {
                     found = true;
                     takes_arg = ospec.get(i + 1) == Some(&':');
                     break;
@@ -21344,10 +21662,12 @@ impl Shell {
 
             if !found {
                 if silent {
-                    self.vars.insert("OPTARG".to_string(), opt.to_string());
+                    self.put_var("OPTARG".to_string(), opt.to_str());
                 } else {
                     if report_errors {
-                        self.errln(&format!("{}: illegal option -- {opt}", self.name));
+                        let msg =
+                            bfmt![self.name.as_str(), b": illegal option -- ", &opt.to_str()];
+                        self.berrln(&msg);
                     }
                     self.vars.remove("OPTARG");
                 }
@@ -21356,44 +21676,49 @@ impl Shell {
                     self.getopts_col = 0;
                 }
                 self.getopts_optind = optind;
-                self.vars.insert("OPTIND".to_string(), optind.to_string());
-                return if self.getopts_bind(&name, "?") { 0 } else { 2 };
+                self.put_var("OPTIND".to_string(), optind.to_string());
+                return if self.getopts_bind(&name, b"?") { 0 } else { 2 };
             }
 
             if takes_arg {
                 if !arg_exhausted {
                     // Remainder of the current argument is the option-argument.
-                    let optarg: String = chars[self.getopts_col..].iter().collect();
-                    self.vars.insert("OPTARG".to_string(), optarg);
+                    let optarg = bytes::from_chars(chars[self.getopts_col..].iter().copied());
+                    self.put_var("OPTARG".to_string(), optarg);
                     optind += 1;
                     self.getopts_col = 0;
                 } else if optind < pos.len() {
                     // The next argument is the option-argument.
                     let optarg = pos[optind].clone();
-                    self.vars.insert("OPTARG".to_string(), optarg);
+                    self.put_var("OPTARG".to_string(), optarg);
                     optind += 2;
                     self.getopts_col = 0;
                 } else {
                     // Missing required argument.
                     optind += 1;
                     self.getopts_col = 0;
-                    let reported = if silent {
-                        self.vars.insert("OPTARG".to_string(), opt.to_string());
-                        ":"
+                    let reported: BStr<'_> = if silent {
+                        self.put_var("OPTARG".to_string(), opt.to_str());
+                        b":"
                     } else {
                         if report_errors {
-                            self.errln(&format!("{}: option requires an argument -- {opt}", self.name));
+                            let msg = bfmt![
+                                self.name.as_str(),
+                                b": option requires an argument -- ",
+                                &opt.to_str()
+                            ];
+                            self.berrln(&msg);
                         }
                         self.vars.remove("OPTARG");
-                        "?"
+                        b"?"
                     };
                     self.getopts_optind = optind;
-                    self.vars.insert("OPTIND".to_string(), optind.to_string());
+                    self.put_var("OPTIND".to_string(), optind.to_string());
                     return if self.getopts_bind(&name, reported) { 0 } else { 2 };
                 }
                 self.getopts_optind = optind;
-                self.vars.insert("OPTIND".to_string(), optind.to_string());
-                return if self.getopts_bind(&name, &opt.to_string()) { 0 } else { 2 };
+                self.put_var("OPTIND".to_string(), optind.to_string());
+                return if self.getopts_bind(&name, &opt.to_str()) { 0 } else { 2 };
             }
 
             // Plain flag with no argument.
@@ -21403,8 +21728,8 @@ impl Shell {
                 self.getopts_col = 0;
             }
             self.getopts_optind = optind;
-            self.vars.insert("OPTIND".to_string(), optind.to_string());
-            return if self.getopts_bind(&name, &opt.to_string()) { 0 } else { 2 };
+            self.put_var("OPTIND".to_string(), optind.to_string());
+            return if self.getopts_bind(&name, &opt.to_str()) { 0 } else { 2 };
         }
     }
 
@@ -21658,15 +21983,15 @@ impl Shell {
         let (line, terminated) = if nchars == Some(0) {
             // Asking for no characters is answered without touching the input,
             // so a following read still sees the whole of it.
-            (String::new(), true)
+            (Str::new(), true)
         } else if delim.is_some() || nchars.is_some() {
             let d = delim.unwrap_or(b'\n');
             self.read_record_input(rd_stdin, rd_redir, d, nchars, exact)
-                .unwrap_or_else(|| (String::new(), false))
+                .unwrap_or_else(|| (Str::new(), false))
         } else {
             // A final line ending at EOF without a newline is a partial read:
             // the value is still assigned, but status is 1 (bash).
-            self.read_line(rd_stdin, rd_redir).unwrap_or_else(|| (String::new(), false))
+            self.read_line(rd_stdin, rd_redir).unwrap_or_else(|| (Str::new(), false))
         };
         // Exit status: for `-N`, success iff exactly N characters were read
         // (a short read at EOF is status 1). For `-d`/`-n`, success iff the
@@ -21674,12 +21999,12 @@ impl Shell {
         // missing delimiter at EOF is a partial read (status 1) but the value
         // is still assigned. The default line path always reports success.
         let eof_status = if exact {
-            i32::from(nchars.is_some_and(|n| line.chars().count() < n))
+            i32::from(nchars.is_some_and(|n| bytes::char_count(&line) < n))
         } else {
             i32::from(!terminated)
         };
 
-        let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
+        let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| b" \t\n".to_vec());
 
         if let Some(arr) = array {
             // `-a` fills a whole array, so it takes a plain name: an element is
@@ -21700,7 +22025,7 @@ impl Shell {
             // into it, so an EOF leaves a defined but empty array.
             // `-N` assigns the raw record without IFS splitting: a single
             // element holding exactly the characters read (bash).
-            let map: BTreeMap<usize, String> = if exact {
+            let map: BTreeMap<usize, Str> = if exact {
                 let v = if raw { line } else { unescape_read_line(&line) };
                 std::iter::once((0usize, v)).collect()
             } else {
@@ -21728,7 +22053,7 @@ impl Shell {
         let fields = if exact {
             let v = if raw { line } else { unescape_read_line(&line) };
             let mut f = vec![v];
-            f.resize(names.len(), String::new());
+            f.resize(names.len(), Str::new());
             f
         } else {
             read_split(&line, &ifs, raw, Some(names.len()))
@@ -21779,7 +22104,7 @@ impl Shell {
                 let Some((text, terminated)) = read_record(r, delim, None, false) else {
                     break;
                 };
-                let mut bytes = text.into_bytes();
+                let mut bytes = text;
                 if terminated {
                     bytes.push(delim);
                 }
@@ -22062,8 +22387,11 @@ impl Shell {
             if count != 0 && idx.saturating_sub(origin) >= count {
                 break;
             }
-            let mut s = String::from_utf8_lossy(&piece).into_owned();
-            if strip && s.as_bytes().last() == Some(&delim) {
+            // The element is the record as read: a line naming a file whose
+            // name is not text has to survive into the array intact (the old
+            // `from_utf8_lossy` here silently corrupted it).
+            let mut s = piece;
+            if strip && s.last() == Some(&delim) {
                 s.pop();
             }
             // The callback runs before *this* element is assigned (so
@@ -22080,7 +22408,13 @@ impl Shell {
                 && assigned.is_multiple_of(quantum)
                 && let Some(cb) = &callback
             {
-                let cmd = format!("{cb} {idx} {}", single_quote(&s));
+                // Seam: the callback is *shell source*, and the parser is
+                // still `str`-typed (TD-OILS-BYTE-STRINGS step 8), so a record
+                // that is not text reaches the callback approximated. What is
+                // *stored* below is the record's own bytes either way.
+                #[allow(deprecated)]
+                let quoted = single_quote(&bytes::scaffold_lossy_string(&s));
+                let cmd = format!("{cb} {idx} {quoted}");
                 // An `exit N` in the callback terminates the *shell* (bash), so
                 // the read loop stops and the array is never assigned at all.
                 // A builtin can only hand back an `i32`, hence the side channel.
@@ -22130,10 +22464,12 @@ impl Shell {
             self.emit_stderr(format!("{tag}: usage: {tag} filename [arguments]\n").as_bytes());
             return 2;
         };
-        match std::fs::read_to_string(self.host_path(path)) {
+        match std::fs::read_to_string(bytes::bytes_to_path(&self.host_path(path.as_bytes()))) {
             Ok(src) => {
                 let saved = if args.len() > 1 {
-                    Some(std::mem::replace(&mut self.positional, args[1..].to_vec()))
+                    let rest: Vec<Str> =
+                        args[1..].iter().map(|a| a.clone().into_bytes()).collect();
+                    Some(std::mem::replace(&mut self.positional, rest))
                 } else {
                     None
                 };
@@ -22483,8 +22819,12 @@ impl Shell {
 
         // ---- -W wordlist, split on IFS ----
         if let Some(wl) = &wordlist {
-            let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| " \t\n".to_string());
-            let ifs_chars: Vec<char> = ifs.chars().collect();
+            let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| b" \t\n".to_vec());
+            // The completion surface is still `String`-typed
+            // (TD-OILS-BYTE-STRINGS), so only IFS's *characters* can delimit a
+            // wordlist here — a byte that is part of none could not appear in
+            // it to be split on anyway.
+            let ifs_chars: Vec<char> = bytes::chars(&ifs).filter_map(Ch::as_char).collect();
             list.extend(
                 wl.split(|c| ifs_chars.contains(&c))
                     .filter(|s| !s.is_empty() && s.starts_with(&word))
@@ -22567,7 +22907,7 @@ impl Shell {
             }
             None => (String::new(), ".".to_string(), word.to_string()),
         };
-        let Ok(rd) = std::fs::read_dir(self.resolve(&dir_path)) else {
+        let Ok(rd) = std::fs::read_dir(self.resolve(dir_path.as_bytes())) else {
             return Vec::new();
         };
         let mut out: Vec<String> = Vec::new();
@@ -22605,15 +22945,17 @@ impl Shell {
     /// (`.exe`/`.cmd`/`.bat`/`.com`) qualify, and that extension is stripped so
     /// the bare command name is offered.
     fn compgen_path_commands(&self, _word: &str) -> Vec<String> {
-        let path = match self.param_value("PATH") {
+        let path: Str = match self.param_value("PATH") {
             Some(p) => p,
-            None if !self.env_imported => std::env::var("PATH").unwrap_or_default(),
+            None if !self.env_imported => {
+                std::env::var_os("PATH").map(|p| bytes::os_to_bytes(&p)).unwrap_or_default()
+            }
             None => return Vec::new(),
         };
         let mut out: Vec<String> = Vec::new();
-        for dir in std::env::split_paths(&path) {
+        for dir in std::env::split_paths(&bytes::bytes_to_os(&path)) {
             // A relative `$PATH` entry is relative to *this shell's* cwd.
-            let Ok(rd) = std::fs::read_dir(self.resolve(&dir.to_string_lossy())) else {
+            let Ok(rd) = std::fs::read_dir(self.resolve(&bytes::path_to_bytes(&dir))) else {
                 continue;
             };
             for ent in rd.flatten() {
@@ -23036,7 +23378,7 @@ impl Shell {
                 || mode_t
                 || (alias.is_none() && !is_kw && !is_fn && !is_bi);
             let files = if need_files {
-                self.find_all_in_path(name)
+                self.find_all_in_path(name.as_bytes())
             } else {
                 Vec::new()
             };
@@ -23279,7 +23621,7 @@ impl Shell {
     /// piece. See [`BuiltinStdout`]. The file is opened here, at the first
     /// write, and only when this is the very redirect the handle was installed
     /// for — a builtin writing through some other plan opens for itself.
-    fn write_redirected(&mut self, path: &str, append: bool, bytes: &[u8]) -> i32 {
+    fn write_redirected(&mut self, path: BStr<'_>, append: bool, bytes: &[u8]) -> i32 {
         // Taken out of `self` for the duration: opening the file, and reporting
         // that it could not be opened, both need `&mut self`. It goes back
         // either way.
@@ -23291,11 +23633,9 @@ impl Shell {
                         Ok(f) => h.file = Some(f),
                         Err(e) => {
                             self.builtin_stdout = held;
-                            self.errln(&format!(
-                                "{}{path}: {}",
-                                self.err_prefix(),
-                                io_error_message(&e)
-                            ));
+                            let msg =
+                                bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                            self.berrln(&msg);
                             return 1;
                         }
                     }
@@ -23316,16 +23656,24 @@ impl Shell {
                 self.finish_write(r)
             }
             Err(e) => {
-                self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                let msg = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                self.berrln(&msg);
                 1
             }
         }
     }
 
     fn write_line(&mut self, out: &mut Out, redir: &RedirPlan, line: &str) -> i32 {
-        let mut s = line.to_string();
-        s.push('\n');
-        self.write_bytes(out, redir, s.as_bytes())
+        self.bwrite_line(out, redir, line.as_bytes())
+    }
+
+    /// [`Shell::write_line`] for a line that carries shell data — a filename, a
+    /// variable value — which may be bytes that are not text
+    /// (TD-OILS-BYTE-STRINGS).
+    fn bwrite_line(&mut self, out: &mut Out, redir: &RedirPlan, line: BStr<'_>) -> i32 {
+        let mut s = line.to_vec();
+        s.push(b'\n');
+        self.write_bytes(out, redir, &s)
     }
 
     fn write_bytes(&mut self, out: &mut Out, redir: &RedirPlan, bytes: &[u8]) -> i32 {
@@ -23590,7 +23938,19 @@ impl Shell {
     /// stderr. Replaces bare `eprintln!` in command-execution paths so shell
     /// error messages honour an active `2>`/`2>&1` redirect, as in bash.
     fn errln(&self, msg: &str) {
-        let mut line = msg.as_bytes().to_vec();
+        self.berrln(msg.as_bytes());
+    }
+
+    /// [`Shell::errln`] for a message that contains shell data.
+    ///
+    /// A diagnostic routinely quotes a filename, a variable value or a word the
+    /// user typed, and any of those may be bytes that are not text
+    /// (TD-OILS-BYTE-STRINGS). bash writes them through unchanged — `ls: cannot
+    /// access 'a\xffb'` names the file you can actually `rm` — so the message is
+    /// assembled with [`bfmt!`] and emitted as bytes rather than being forced
+    /// through `format!`, which would have to mangle them first.
+    fn berrln(&self, msg: BStr<'_>) {
+        let mut line = msg.to_vec();
         line.push(b'\n');
         self.emit_stderr(&line);
     }
@@ -23774,29 +24134,32 @@ impl Shell {
     /// builtin's name is inserted as a tag (see [`Shell::arith_cmd`]). Routed
     /// through `errln` so an active `2>`/`2>&1` redirect on the enclosing
     /// command silences it, as in bash.
-    fn emit_arith_error(&mut self, expr: &str, e: &arith::ArithError) {
+    fn emit_arith_error(&mut self, expr: BStr<'_>, e: &arith::ArithError) {
         let prefix = self.err_prefix();
         // A failure that is a property of a *variable* (a refused write to a
         // readonly one) says so about the name and stops there: no expression
         // echoed, no builtin tag, no error token — none of those is what went
         // wrong. See [`arith::ArithError::subject`].
         if let Some(subject) = &e.subject {
-            let line = format!("{prefix}{subject}: {}", e.msg);
-            self.errln(&line);
+            let line = bfmt![prefix, subject, b": ", &e.msg];
+            self.berrln(&line);
             return;
         }
         // When the failure occurred while recursively evaluating a variable's
         // value as arithmetic, bash echoes that resolved value (e.g. `5 apples`)
         // rather than the top-level source (`x`); `str_to_val` records it here.
-        let mut expr = e.expr_override.as_deref().unwrap_or(expr).trim_start();
+        // The echoed source is *bytes*: an expression assembled from a variable
+        // value can hold any of them, and a mangled echo would name something
+        // other than what the user wrote.
+        let mut expr = bytes::trim_start(e.expr_override.as_ref().map_or(expr, |s| s.as_bytes()));
         // A rejected number literal (`2#12`, `099`) truncates the echoed source
         // at the literal's end — bash reports `5+2#12+9` as `5+2#12`. Ordinary
         // parse/eval errors echo the whole source unchanged.
         if e.truncate_leading
             && let Some(tok) = &e.token
-            && let Some(pos) = expr.find(tok.as_str())
+            && let Some(pos) = expr.find(tok.as_bytes())
         {
-            expr = &expr[..pos + tok.len()];
+            expr = expr.get(..pos + tok.len()).unwrap_or(expr);
         }
         // A failure inside an array *subscript* wears no builtin tag: bash
         // evaluates the subscript through its own entry point, which never sees
@@ -23808,10 +24171,10 @@ impl Shell {
             self.arith_cmd.clone()
         };
         let line = match tag {
-            Some(tag) => format!("{prefix}{tag}: {expr}: {e}"),
-            None => format!("{prefix}{expr}: {e}"),
+            Some(tag) => bfmt![prefix, tag.as_ref(), b": ", expr, b": ", e.to_string()],
+            None => bfmt![prefix, expr, b": ", e.to_string()],
         };
-        self.errln(&line);
+        self.berrln(&line);
     }
 
     /// Write a command-level diagnostic (e.g. `foo: command not found`, or a
@@ -23829,7 +24192,13 @@ impl Shell {
     /// `command`/`builtin` wrappers emit their own usage diagnostics before
     /// delegating, without pushing a scoped stderr redirect.
     fn emit_cmd_stderr(&mut self, out: &mut Out, redir: &RedirPlan, msg: &str) {
-        let mut bytes = msg.as_bytes().to_vec();
+        self.bemit_cmd_stderr(out, redir, msg.as_bytes());
+    }
+
+    /// [`Shell::emit_cmd_stderr`] for a message that carries shell data
+    /// (TD-OILS-BYTE-STRINGS).
+    fn bemit_cmd_stderr(&mut self, out: &mut Out, redir: &RedirPlan, msg: BStr<'_>) {
+        let mut bytes = msg.to_vec();
         bytes.push(b'\n');
         if let Some((path, append)) = &redir.stderr {
             if let Ok(mut f) = open_out(&self.cwd, path, *append) {
@@ -24010,7 +24379,7 @@ impl Shell {
         }
     }
 
-    fn read_line(&self, stdin: &StdinSrc, redir: &RedirPlan) -> Option<(String, bool)> {
+    fn read_line(&self, stdin: &StdinSrc, redir: &RedirPlan) -> Option<(Str, bool)> {
         if let Some(n) = redir.stdin_from_fd {
             // `read <&N`: read from and advance descriptor N's shared source — a
             // live coproc pipe, or a `read -u`/`exec 3<` byte cursor.
@@ -24068,7 +24437,7 @@ impl Shell {
         delim: u8,
         nchars: Option<usize>,
         exact: bool,
-    ) -> Option<(String, bool)> {
+    ) -> Option<(Str, bool)> {
         if let Some(n) = redir.stdin_from_fd {
             if let Some(rd) = self.coproc_read_fds.get(&n) {
                 return read_record(&mut *rd.borrow_mut(), delim, nchars, exact);
@@ -24103,13 +24472,23 @@ impl VarLookup for Shell {
     fn get_str(&self, name: &str) -> Option<String> {
         // Return the raw value string; the arithmetic evaluator recursively
         // evaluates it (`b=a; a=5; $((b))` → 5), including octal/hex literals.
-        self.param_value(name)
+        //
+        // Seam: the arithmetic evaluator is still `str`-typed
+        // (TD-OILS-BYTE-STRINGS step 9). A value that is not text is not an
+        // arithmetic expression either, so approximating it here only decides
+        // *which* syntax error is reported, not whether one is — but the seam
+        // goes away with the evaluator's own conversion.
+        #[allow(deprecated)]
+        self.param_value(name).map(|v| bytes::scaffold_lossy_string(&v))
     }
 
     fn get_index_str(&self, name: &str, index: i64) -> Option<String> {
         match self.arith_elem(name) {
             // `array_element` already applies bash negative-index semantics.
-            ArithElem::Array(base) => self.array_element(&base, index),
+            #[allow(deprecated)]
+            ArithElem::Array(base) => self
+                .array_element(&base, index)
+                .map(|v| bytes::scaffold_lossy_string(&v)),
             // A subscript on a nameref that already designates an element names
             // nothing. Reading it is silent (bash yields 0); only *writing*
             // draws the complaint — see `set_index`.
@@ -24133,7 +24512,10 @@ impl VarLookup for Shell {
         match self.arith_elem(name) {
             // An unset key (or empty value) evaluates to 0; a non-empty value is
             // recursively arithmetic-evaluated by the caller.
-            ArithElem::Array(base) => self.assoc_element(&base, key),
+            #[allow(deprecated)]
+            ArithElem::Array(base) => self
+                .assoc_element(&base, key.as_bytes())
+                .map(|v| bytes::scaffold_lossy_string(&v)),
             ArithElem::Element(_) => None,
         }
     }
@@ -24143,7 +24525,7 @@ impl VarLookup for Shell {
         // left of an `=` would: through namerefs, on element 0 of an existing
         // array, and exported under `set -a`.
         if let Some(dest) = self.arith_write_dest(name)? {
-            self.scalar_write_store(&dest, value.to_string());
+            self.scalar_write_store(&dest, value.to_string().into_bytes());
         }
         Ok(())
     }
@@ -24165,7 +24547,7 @@ impl VarLookup for Shell {
         let arr = self.arrays.entry(base).or_default();
         let bound = arr.keys().next_back().map_or(0, |k| k.saturating_add(1));
         if let Some(real) = Self::resolve_index(index, bound) {
-            arr.insert(real, value.to_string());
+            arr.insert(real, value.to_string().into_bytes());
         }
         Ok(())
     }
@@ -24181,7 +24563,7 @@ impl VarLookup for Shell {
             }
         };
         self.arith_elem_writable(&base)?;
-        self.assoc_set(&base, key.to_string(), value.to_string(), false);
+        self.assoc_set(&base, key.as_bytes().to_vec(), value.to_string().into_bytes(), false);
         Ok(())
     }
 
@@ -24215,7 +24597,7 @@ impl VarLookup for Shell {
 /// the complaint be made once, by whichever caller is doing the real work.
 #[derive(Debug, Clone)]
 enum ElemValue {
-    Value(String),
+    Value(Str),
     /// The parameter or element is unset.
     Absent,
     /// The subscript named nowhere; the string is the name to complain about.
@@ -24237,7 +24619,7 @@ enum Operand<'a> {
     /// Read this text instead. `None` is "the reference reached nothing" —
     /// still worth telling from the empty string, because `${!a[9]:-D}` yields
     /// the default while `${!a[9]:+S}` yields nothing.
-    Value(Option<&'a str>),
+    Value(Option<BStr<'a>>),
 }
 
 /// What an arithmetic element reference `name[sub]` turns out to name, once any
@@ -24328,8 +24710,8 @@ struct RedirPlan {
     /// in [`Shell::open_fds`] (or [`Shell::exec_stdin`] for N == 0), matching
     /// bash's shared-offset dup. Takes precedence over `stdin` / `stdin_data`.
     stdin_from_fd: Option<i32>,
-    stdout: Option<(String, bool)>,
-    stderr: Option<(String, bool)>,
+    stdout: Option<(Str, bool)>,
+    stderr: Option<(Str, bool)>,
     /// True when `stderr`'s file target is a *dup* of `stdout`'s (from `&>file`,
     /// `>file 2>&1`, `2>file 1>&2`, or `1>&file`) — the two fds share one open
     /// file description and therefore one offset, so their writes interleave.
@@ -24424,7 +24806,9 @@ fn builtin_runs_commands(name: &str, args: &[String]) -> bool {
 /// path taken only when a redirect actually fails.
 struct RedirFailure {
     partial: RedirPlan,
-    msg: String,
+    /// The diagnostic, as bytes: it echoes the redirect *target*, which is an
+    /// OS path and may hold any byte.
+    msg: Str,
 }
 
 impl RedirPlan {
@@ -24463,7 +24847,7 @@ enum ExtraFdOp {
     Input(InputFd),
     /// Open fd N for writing to `path` (`N> file` / `N>> file`); the `bool` is
     /// the append flag.
-    OutputFile(String, bool),
+    OutputFile(Str, bool),
     /// Alias fd N to a standard write fd (`exec 3>&1` / `exec 3>&2`): the inner
     /// value is the target standard fd (`1` or `2`). At apply time the target's
     /// *current* sink is duplicated into fd N (a snapshot, matching bash's dup
@@ -24983,7 +25367,7 @@ fn glob_expand_field(
                 // itself begins with a literal dot, or when `dotglob` is set.
                 // Even with `dotglob`, `.` and `..` are never matched by a glob.
                 let allow_dot = dotglob || glob_starts_with_dot(&toks);
-                let Ok(rd) = std::fs::read_dir(bytes::bytes_to_path(&resolve_against_b(cwd, dir)))
+                let Ok(rd) = std::fs::read_dir(bytes::bytes_to_path(&resolve_against(cwd, dir)))
                 else {
                     continue;
                 };
@@ -25021,7 +25405,7 @@ fn glob_expand_field(
                 }
             } else {
                 let joined = join_glob(base, &comp_literal);
-                if bytes::bytes_to_path(&resolve_against_b(cwd, &joined)).exists() {
+                if bytes::bytes_to_path(&resolve_against(cwd, &joined)).exists() {
                     next.push(joined);
                 }
             }
@@ -25046,7 +25430,7 @@ fn is_globstar_comp(comp: &[EChar]) -> bool {
 /// (matching bash ≥ 4.3), which also prevents symlink-loop infinite recursion.
 fn globstar_walk(cwd: BStr<'_>, base: BStr<'_>, dotglob: bool, terminal: bool, out: &mut Vec<Str>) {
     if !terminal
-        && (base.is_empty() || bytes::bytes_to_path(&resolve_against_b(cwd, base)).is_dir())
+        && (base.is_empty() || bytes::bytes_to_path(&resolve_against(cwd, base)).is_dir())
     {
         out.push(base.to_vec());
     }
@@ -25064,7 +25448,7 @@ fn globstar_descend(
     out: &mut Vec<Str>,
 ) {
     let dir: BStr<'_> = if base.is_empty() { b"." } else { base };
-    let Ok(rd) = std::fs::read_dir(bytes::bytes_to_path(&resolve_against_b(cwd, dir))) else {
+    let Ok(rd) = std::fs::read_dir(bytes::bytes_to_path(&resolve_against(cwd, dir))) else {
         return;
     };
     let mut entries: Vec<(Str, bool)> = Vec::new();
@@ -25463,12 +25847,12 @@ fn number_len(n: usize) -> usize {
 
 /// The display width of a menu item — bash's `displen`, which is `wcswidth` of
 /// the decoded string (falling back to the byte length when it will not
-/// decode). Our strings are already Unicode, so this is the character count:
-/// it agrees with bash for everything except zero-width and double-width
-/// characters, where bash's `wcswidth` is finer. See known-issues
-/// TD-OILS-SELECT-DISPLEN.
-fn display_width(s: &str) -> usize {
-    s.chars().count()
+/// decode). [`bytes::char_count`] reproduces that fallback exactly: a byte that
+/// does not decode counts as one character on its own. It agrees with bash for
+/// everything except zero-width and double-width characters, where bash's
+/// `wcswidth` is finer. See known-issues TD-OILS-SELECT-DISPLEN.
+fn display_width(s: BStr<'_>) -> usize {
+    bytes::char_count(s)
 }
 
 /// bash's `indent`: pad from column `from` to column `to`, emitting a *tab*
@@ -25476,15 +25860,15 @@ fn display_width(s: &str) -> usize {
 /// tab stop is hard-coded to 8 in bash 5.2 (the `TABSIZE` variable lookup is
 /// `#if 0`'d out), so a `select` menu is not width-clean if the reader's tabs
 /// are set differently — that is bash's output, and we reproduce it.
-fn indent_to(buf: &mut String, from: usize, to: usize) {
+fn indent_to(buf: &mut Str, from: usize, to: usize) {
     const TABSIZE: usize = 8;
     let mut from = from;
     while from < to {
         if to / TABSIZE > from / TABSIZE {
-            buf.push('\t');
+            buf.push(b'\t');
             from += TABSIZE - from % TABSIZE;
         } else {
-            buf.push(' ');
+            buf.push(b' ');
             from += 1;
         }
     }
@@ -25510,9 +25894,9 @@ fn indent_to(buf: &mut String, from: usize, to: usize) {
 ///
 /// The row loop stops as soon as it runs off the end of the list, so a short
 /// final column simply ends the row — no trailing padding is emitted.
-fn select_menu(items: &[String], cols_avail: usize) -> String {
+fn select_menu(items: &[Str], cols_avail: usize) -> Str {
     if items.is_empty() {
-        return "\n".to_string();
+        return b"\n".to_vec();
     }
     let list_len = items.len();
     let indices_len = number_len(list_len);
@@ -25528,7 +25912,7 @@ fn select_menu(items: &[String], cols_avail: usize) -> String {
         rows = cols;
     }
     let first_indices_len = number_len(rows);
-    let mut buf = String::new();
+    let mut buf = Str::new();
     for row in 0..rows {
         let mut ind = row;
         let mut pos = 0usize;
@@ -25537,11 +25921,11 @@ fn select_menu(items: &[String], cols_avail: usize) -> String {
             let Some(item) = items.get(ind) else { break };
             let label = (ind + 1).to_string();
             for _ in label.len()..width {
-                buf.push(' ');
+                buf.push(b' ');
             }
-            buf.push_str(&label);
-            buf.push_str(") ");
-            buf.push_str(item);
+            buf.extend_from_slice(label.as_bytes());
+            buf.extend_from_slice(b") ");
+            buf.extend_from_slice(item);
             let elem_len = display_width(item) + width + ") ".len();
             ind += rows;
             if ind >= list_len {
@@ -25550,7 +25934,7 @@ fn select_menu(items: &[String], cols_avail: usize) -> String {
             indent_to(&mut buf, pos + elem_len, pos + max_elem_len);
             pos += max_elem_len;
         }
-        buf.push('\n');
+        buf.push(b'\n');
     }
     buf
 }
@@ -25757,13 +26141,13 @@ fn format_compspec(key: &CompKey, sp: &CompSpec) -> String {
 /// character is uppercased and every remaining character lowercased, so
 /// `hELLO` → `Hello` and `hello world` → `Hello world`. Uses Unicode-aware
 /// case mapping (a single source char may map to several).
-fn capcase(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
+fn capcase(s: BStr<'_>) -> Str {
+    let mut out = Str::with_capacity(s.len());
+    let mut chars = bytes::chars(s);
     if let Some(first) = chars.next() {
-        out.extend(first.to_uppercase());
+        out.extend(bytes::from_chars(first.to_uppercase()));
         for c in chars {
-            out.extend(c.to_lowercase());
+            out.extend(bytes::from_chars(c.to_lowercase()));
         }
     }
     out
@@ -25774,32 +26158,34 @@ fn capcase(s: &str) -> String {
 /// each shell-special character is backslash-escaped (bash uses backslash
 /// escaping for `%q`, unlike `${v@Q}`/`shell_quote` which single-quote). The
 /// result re-parses to the original word.
-fn printf_quote(s: &str) -> String {
+fn printf_quote(s: BStr<'_>) -> Str {
     if s.is_empty() {
-        return "''".to_string();
+        return b"''".to_vec();
     }
-    if s.chars().any(char::is_control) {
+    if bytes::chars(s).any(Ch::is_control) {
         // Reuse the ANSI-C form (matches bash, which emits `$'…'` here too).
         return shell_quote(s);
     }
-    let mut out = String::new();
-    for c in s.chars() {
-        // Backslash-escape anything outside the "safe" reusable set.
-        if c.is_ascii_alphanumeric() || "_./,:+-=@%^".contains(c) {
-            out.push(c);
+    let mut out = Str::new();
+    for c in bytes::chars(s) {
+        // Backslash-escape anything outside the "safe" reusable set. A byte
+        // that is no character is certainly not in it, so it is escaped —
+        // which is what bash does with a non-ASCII byte in the C locale.
+        if c.as_ascii().is_some_and(|a| a.is_ascii_alphanumeric() || "_./,:+-=@%^".contains(a)) {
+            c.push_to(&mut out);
         } else {
-            out.push('\\');
-            out.push(c);
+            out.push(b'\\');
+            c.push_to(&mut out);
         }
     }
     out
 }
 
-fn shell_quote(s: &str) -> String {
+fn shell_quote(s: BStr<'_>) -> Str {
     if s.is_empty() {
-        return "''".to_string();
+        return b"''".to_vec();
     }
-    if s.chars().any(char::is_control) {
+    if bytes::chars(s).any(Ch::is_control) {
         // A control byte forces the ANSI-C `$'…'` form. Reuse `ansi_c_quote` so
         // `${v@Q}`/`printf %q` render control chars exactly as bash does — named
         // escapes (`\a \b \t \n \v \f \r \E`) with a 3-digit octal fallback
@@ -25810,15 +26196,15 @@ fn shell_quote(s: &str) -> String {
     // bash's `${v@Q}`/`${v@A}` single-quote every non-empty, control-free value
     // — even a "plain" word like `hi` becomes `'hi'`. (`%q` printf uses a
     // different, backslash-escaping quoter, `printf_quote`.)
-    let mut out = String::from("'");
-    for c in s.chars() {
+    let mut out = b"'".to_vec();
+    for c in bytes::chars(s) {
         if c == '\'' {
-            out.push_str("'\\''");
+            out.extend_from_slice(b"'\\''");
         } else {
-            out.push(c);
+            c.push_to(&mut out);
         }
     }
-    out.push('\'');
+    out.push(b'\'');
     out
 }
 
@@ -25828,8 +26214,8 @@ fn shell_quote(s: &str) -> String {
 /// simply appears, so `[[ a b == c ]]` is what `[[ "$v" == c ]]` traces for
 /// `v='a b'`. The single concession is that an empty operand shows as `''`,
 /// which is the only way to see that the slot was there.
-fn cond_trace_arg(s: &str) -> &str {
-    if s.is_empty() { "''" } else { s }
+fn cond_trace_arg(s: BStr<'_>) -> BStr<'_> {
+    if s.is_empty() { b"''" } else { s }
 }
 
 /// Render an expanded `[[ … ]]` glob pattern for a `set -x` trace: a character
@@ -25862,14 +26248,14 @@ fn cond_trace_pattern(pat: &[EChar]) -> Str {
 /// ordinary text anywhere else. `\t` and `\n` count because they are IFS
 /// whitespace — which is why a word holding a tab is single-quoted rather than
 /// ANSI-C quoted, even though a tab is not printable.
-fn xtrace_meta(c: char, prev: Option<char>) -> bool {
+fn xtrace_meta(c: char, prev: Option<Ch>) -> bool {
     match c {
         ' ' | '\t' | '\n' => true,
         '\'' | '"' | '\\' => true,
         '|' | '&' | ';' | '(' | ')' | '<' | '>' => true,
         '!' | '{' | '}' | '*' | '[' | ']' | '?' | '^' | '$' | '`' => true,
         '#' => prev.is_none(),
-        '~' => matches!(prev, None | Some('=' | ':')),
+        '~' => matches!(prev, None | Some(Ch::U('=' | ':'))),
         _ => false,
     }
 }
@@ -25888,42 +26274,46 @@ fn xtrace_meta(c: char, prev: Option<char>) -> bool {
 /// control character, and bash prints `'a<0x01> b'` — the space wins and the
 /// control character goes out raw. This is distinct from `@Q`/`shell_quote`
 /// (which always quotes) and from `%q` (which backslash-escapes).
-fn xtrace_quote_with(s: &str, empty_bare: bool) -> String {
+fn xtrace_quote_with(s: BStr<'_>, empty_bare: bool) -> Str {
     if s.is_empty() {
-        return if empty_bare { String::new() } else { "''".to_string() };
+        return if empty_bare { Str::new() } else { b"''".to_vec() };
     }
-    let mut prev = None;
-    if s.chars().any(|c| {
-        let meta = xtrace_meta(c, prev);
+    let mut prev: Option<Ch> = None;
+    // A byte that decodes to no character is no metacharacter either — every
+    // one bash tests for is ASCII — so it neither forces quoting nor is
+    // rewritten; it travels through as itself. It still *counts* as a preceding
+    // character, so a `#` after one is not word-initial.
+    if bytes::chars(s).any(|c| {
+        let meta = c.as_ascii().is_some_and(|a| xtrace_meta(a, prev));
         prev = Some(c);
         meta
     }) {
-        let mut out = String::with_capacity(s.len() + 2);
-        out.push('\'');
-        for c in s.chars() {
+        let mut out = Str::with_capacity(s.len() + 2);
+        out.push(b'\'');
+        for c in bytes::chars(s) {
             if c == '\'' {
-                out.push_str("'\\''");
+                out.extend_from_slice(b"'\\''");
             } else {
-                out.push(c);
+                c.push_to(&mut out);
             }
         }
-        out.push('\'');
+        out.push(b'\'');
         return out;
     }
-    if !s.chars().any(char::is_control) {
-        return s.to_string();
+    if !bytes::chars(s).any(Ch::is_control) {
+        return s.to_vec();
     }
     ansic_quote(s)
 }
 
 /// A word for a `set -x` trace: the empty word shows as `''`.
-fn xtrace_quote(s: &str) -> String {
+fn xtrace_quote(s: BStr<'_>) -> Str {
     xtrace_quote_with(s, false)
 }
 
 /// An assignment's value for a `set -x` trace: the empty value shows as nothing
 /// at all, so `x=` traces as `x=` and not as `x=''`.
-fn xtrace_quote_value(s: &str) -> String {
+fn xtrace_quote_value(s: BStr<'_>) -> Str {
     xtrace_quote_with(s, true)
 }
 
@@ -25935,17 +26325,17 @@ fn xtrace_quote_value(s: &str) -> String {
 /// `'1'` — and escapes an embedded `'` the shell-portable way. A control character
 /// stays literal rather than turning into `$'…'`, so a traced element can span
 /// lines (`t=($'x\ny')` traces across two).
-fn xtrace_compound_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
+fn xtrace_compound_quote(s: BStr<'_>) -> Str {
+    let mut out = Str::with_capacity(s.len() + 2);
+    out.push(b'\'');
+    for c in bytes::chars(s) {
         if c == '\'' {
-            out.push_str("'\\''");
+            out.extend_from_slice(b"'\\''");
         } else {
-            out.push(c);
+            c.push_to(&mut out);
         }
     }
-    out.push('\'');
+    out.push(b'\'');
     out
 }
 
@@ -25953,36 +26343,38 @@ fn xtrace_compound_quote(s: &str) -> String {
 /// a letter — `\a \b \E \f \n \r \t \v`, note `\E` and not `\033` for escape —
 /// then `\'` and `\\`, then three-digit **octal** for any other unprintable
 /// character, and the character itself for anything printable.
-fn ansic_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    out.push_str("$'");
-    for c in s.chars() {
-        match c {
-            '\u{7}' => out.push_str("\\a"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{1b}' => out.push_str("\\E"),
-            '\u{c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{b}' => out.push_str("\\v"),
-            '\'' => out.push_str("\\'"),
-            '\\' => out.push_str("\\\\"),
-            c if c.is_control() => {
+fn ansic_quote(s: BStr<'_>) -> Str {
+    let mut out = Str::with_capacity(s.len() + 4);
+    out.extend_from_slice(b"$'");
+    for c in bytes::chars(s) {
+        match c.as_ascii() {
+            Some('\u{7}') => out.extend_from_slice(b"\\a"),
+            Some('\u{8}') => out.extend_from_slice(b"\\b"),
+            Some('\u{1b}') => out.extend_from_slice(b"\\E"),
+            Some('\u{c}') => out.extend_from_slice(b"\\f"),
+            Some('\n') => out.extend_from_slice(b"\\n"),
+            Some('\r') => out.extend_from_slice(b"\\r"),
+            Some('\t') => out.extend_from_slice(b"\\t"),
+            Some('\u{b}') => out.extend_from_slice(b"\\v"),
+            Some('\'') => out.extend_from_slice(b"\\'"),
+            Some('\\') => out.extend_from_slice(b"\\\\"),
+            _ if c.is_control() => {
                 // Octal, three digits. Every character that reaches here is one
                 // of the C0/C1 controls (`char::is_control` is exactly the `Cc`
                 // category), so its value is at most 0o237 and three digits are
                 // always enough and never too few.
-                let v = c as u32;
-                out.push('\\');
-                out.push(char::from(b'0' + u8::try_from((v >> 6) & 7).unwrap_or(0)));
-                out.push(char::from(b'0' + u8::try_from((v >> 3) & 7).unwrap_or(0)));
-                out.push(char::from(b'0' + u8::try_from(v & 7).unwrap_or(0)));
+                let v = c.as_char().map_or(0, u32::from);
+                out.push(b'\\');
+                out.push(b'0' + u8::try_from((v >> 6) & 7).unwrap_or(0));
+                out.push(b'0' + u8::try_from((v >> 3) & 7).unwrap_or(0));
+                out.push(b'0' + u8::try_from(v & 7).unwrap_or(0));
             }
-            c => out.push(c),
+            // A byte that is no character keeps its own value; it re-reads as
+            // itself, since `$'…'` is byte-transparent for anything unescaped.
+            _ => c.push_to(&mut out),
         }
     }
-    out.push('\'');
+    out.push(b'\'');
     out
 }
 
@@ -26592,15 +26984,15 @@ fn unique_temp_path(prefix: &str) -> String {
 /// bash. On Unix and on SlateOS the OS provides `/dev/null` as a real device
 /// node, so the path is returned unchanged.
 #[cfg(windows)]
-fn map_device_path(path: &str) -> &str {
+fn map_device_path(path: BStr<'_>) -> BStr<'_> {
     match path {
-        "/dev/null" => "NUL",
+        b"/dev/null" => b"NUL",
         _ => path,
     }
 }
 
 #[cfg(not(windows))]
-fn map_device_path(path: &str) -> &str {
+fn map_device_path(path: BStr<'_>) -> BStr<'_> {
     path
 }
 
@@ -26620,7 +27012,10 @@ fn map_device_path(path: &str) -> &str {
 /// The fd part must be all digits, as in bash: `/dev/fd/-1` and `/dev/fd/x` are
 /// ordinary filenames. `/dev/null` is deliberately not here — it is a real
 /// device with no dup semantics (see [`map_device_path`]).
-fn special_redirect_fd(path: &str) -> Option<i32> {
+fn special_redirect_fd(path: BStr<'_>) -> Option<i32> {
+    // Every special redirection filename is ASCII, so a path that is not text
+    // is an ordinary file name — which is exactly what `None` means here.
+    let path = bytes::as_str(path)?;
     match path {
         "/dev/stdin" => Some(0),
         "/dev/stdout" => Some(1),
@@ -26683,16 +27078,16 @@ fn nth_source_line(src: &str, line: u32) -> Option<&str> {
 /// non-existent, while `2>err > nodir/f` reports *into* `err`. It also gives
 /// no-output commands (`: > f`, `true 2> e`, a bare `> f`) the create/truncate
 /// bash performs for them.
-fn open_output_target(cwd: &str, path: &str, append: bool) -> Result<(), String> {
+fn open_output_target(cwd: BStr<'_>, path: BStr<'_>, append: bool) -> Result<(), Str> {
     match open_out(cwd, path, append) {
         Ok(_) => Ok(()),
         // The diagnostic names the path as the *user* wrote it, not the
         // cwd-resolved form bash never shows.
-        Err(e) => Err(format!("{path}: {}", io_error_message(&e))),
+        Err(e) => Err(bfmt![path, b": ", io_error_message(&e)]),
     }
 }
 
-fn open_out(cwd: &str, path: &str, append: bool) -> io::Result<std::fs::File> {
+fn open_out(cwd: BStr<'_>, path: BStr<'_>, append: bool) -> io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true);
     if append {
@@ -26700,7 +27095,7 @@ fn open_out(cwd: &str, path: &str, append: bool) -> io::Result<std::fs::File> {
     } else {
         opts.truncate(true);
     }
-    opts.open(map_device_path(&resolve_against(cwd, path)))
+    opts.open(bytes::bytes_to_path(map_device_path(&resolve_against(cwd, path))))
 }
 
 /// Open `path` for both reading and writing (`<>` redirect): create it if it is
@@ -26708,7 +27103,7 @@ fn open_out(cwd: &str, path: &str, append: bool) -> io::Result<std::fs::File> {
 /// from [`open_out`] (which truncates or appends) and from a read-only open
 /// (which errors on a missing file): `<>` guarantees the file exists afterward
 /// while preserving any current contents.
-fn open_rw(cwd: &str, path: &str) -> io::Result<std::fs::File> {
+fn open_rw(cwd: BStr<'_>, path: BStr<'_>) -> io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -26716,7 +27111,7 @@ fn open_rw(cwd: &str, path: &str) -> io::Result<std::fs::File> {
         // `<>` never truncates: existing contents are preserved (writes land at
         // offset 0 and overwrite in place). Spelled out for clippy and clarity.
         .truncate(false)
-        .open(map_device_path(&resolve_against(cwd, path)))
+        .open(bytes::bytes_to_path(map_device_path(&resolve_against(cwd, path))))
 }
 
 /// Open `path` for `<>` and split it into the read and write halves of the
@@ -26732,7 +27127,7 @@ fn open_rw(cwd: &str, path: &str) -> io::Result<std::fs::File> {
 /// The read half is [`rw_input`], which squares its position up after every
 /// read: with the position observable through the write half, read-ahead cannot
 /// be left outstanding.
-fn open_rw_pair(cwd: &str, path: &str) -> io::Result<(InputFd, Arc<File>)> {
+fn open_rw_pair(cwd: BStr<'_>, path: BStr<'_>) -> io::Result<(InputFd, Arc<File>)> {
     let w = open_rw(cwd, path)?;
     let r = w.try_clone()?;
     Ok((rw_input(r), Arc::new(w)))
@@ -27022,23 +27417,21 @@ fn pipe_reader_readable_now(_r: &io::PipeReader) -> bool {
 /// `InvalidData` for a line that is not valid UTF-8, having already consumed it,
 /// and mapping the error to `None` made a non-UTF-8 line indistinguishable from
 /// end-of-input — so `while IFS= read -r l` stopped at such a line and reported
-/// success, silently processing only a prefix of the file. The bytes are instead
-/// converted the way every other reader in osh converts them (lossily), which is
-/// still not bash's raw byte but is at least a value rather than a fake EOF. See
-/// TD-OILS-BYTE-STRINGS for the representation change that would carry the byte.
-fn read_one_line<R: BufRead>(r: &mut R) -> Option<(String, bool)> {
-    let mut bytes: Vec<u8> = Vec::new();
-    let n = r.read_until(b'\n', &mut bytes).ok()?;
+/// success, silently processing only a prefix of the file. The bytes are the
+/// value: a line that is not text reaches the variable exactly as it was read,
+/// so `read -r p; rm "$p"` names the file the input named.
+fn read_one_line<R: BufRead>(r: &mut R) -> Option<(Str, bool)> {
+    let mut line: Str = Vec::new();
+    let n = r.read_until(b'\n', &mut line).ok()?;
     if n == 0 {
         return None;
     }
-    let mut line = String::from_utf8_lossy(&bytes).into_owned();
     // Only the delimiter comes off. A `\r` before it is ordinary data that bash
     // keeps — `printf 'a\r\n' | read -r l` leaves `l` two characters long — and
     // stripping it lost the byte for anything reading CRLF-framed input (an HTTP
     // response header, a `.csv` written on Windows). It also disagreed with
     // `read_record`, the `-d`/`-n`/`-N` path, which never stripped it.
-    let terminated = line.ends_with('\n');
+    let terminated = line.last() == Some(&b'\n');
     if terminated {
         line.pop();
     }
@@ -27056,8 +27449,8 @@ fn read_record<R: BufRead>(
     delim: u8,
     nchars: Option<usize>,
     exact: bool,
-) -> Option<(String, bool)> {
-    let mut bytes: Vec<u8> = Vec::new();
+) -> Option<(Str, bool)> {
+    let mut bytes: Str = Vec::new();
     let mut chars = 0usize;
     let mut hit_delim = false;
     let mut any = false;
@@ -27096,27 +27489,27 @@ fn read_record<R: BufRead>(
     if !any && bytes.is_empty() {
         return None;
     }
-    Some((String::from_utf8_lossy(&bytes).into_owned(), hit_delim))
+    Some((bytes, hit_delim))
 }
 
 /// Quote a value for a `declare`/`readonly -p` listing: wrap in double quotes
 /// and backslash-escape the characters that are special inside double quotes
 /// (`"`, `\`, `$`, and backtick), matching bash's re-inputtable output.
-fn quote_declare_value(v: &str) -> String {
+fn quote_declare_value(v: BStr<'_>) -> Str {
     // A value containing a control character is rendered in ANSI-C `$'…'` form
     // (bash: `declare -- x=$'a\tb'`), not double-quoted with the literal byte.
-    if v.chars().any(char::is_control) {
+    if bytes::chars(v).any(Ch::is_control) {
         return ansi_c_quote(v);
     }
-    let mut out = String::with_capacity(v.len() + 2);
-    out.push('"');
-    for c in v.chars() {
-        if matches!(c, '"' | '\\' | '$' | '`') {
-            out.push('\\');
+    let mut out = Str::with_capacity(v.len() + 2);
+    out.push(b'"');
+    for c in bytes::chars(v) {
+        if matches!(c.as_ascii(), Some('"' | '\\' | '$' | '`')) {
+            out.push(b'\\');
         }
-        out.push(c);
+        c.push_to(&mut out);
     }
-    out.push('"');
+    out.push(b'"');
     out
 }
 
@@ -27124,27 +27517,32 @@ fn quote_declare_value(v: &str) -> String {
 /// as the same bytes. Shared by the `set` scalar listing and `declare -p`
 /// associative-key formatting (both use this form when a control char is
 /// present).
-fn ansi_c_quote(s: &str) -> String {
-    let mut out = String::from("$'");
-    for c in s.chars() {
-        match c {
-            '\u{07}' => out.push_str("\\a"),
-            '\u{08}' => out.push_str("\\b"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\u{0b}' => out.push_str("\\v"),
-            '\u{0c}' => out.push_str("\\f"),
-            '\r' => out.push_str("\\r"),
-            '\u{1b}' => out.push_str("\\E"),
-            '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
+fn ansi_c_quote(s: BStr<'_>) -> Str {
+    let mut out = b"$'".to_vec();
+    for c in bytes::chars(s) {
+        match c.as_ascii() {
+            Some('\u{07}') => out.extend_from_slice(b"\\a"),
+            Some('\u{08}') => out.extend_from_slice(b"\\b"),
+            Some('\t') => out.extend_from_slice(b"\\t"),
+            Some('\n') => out.extend_from_slice(b"\\n"),
+            Some('\u{0b}') => out.extend_from_slice(b"\\v"),
+            Some('\u{0c}') => out.extend_from_slice(b"\\f"),
+            Some('\r') => out.extend_from_slice(b"\\r"),
+            Some('\u{1b}') => out.extend_from_slice(b"\\E"),
+            Some('\\') => out.extend_from_slice(b"\\\\"),
+            Some('\'') => out.extend_from_slice(b"\\'"),
             // bash renders any other control byte as 3-digit octal (`\001`,
             // `\177`), matching its own `$'…'` re-input parser — not `\xHH`.
-            c if c.is_control() => out.push_str(&format!("\\{:03o}", u32::from(c))),
-            c => out.push(c),
+            _ if c.is_control() => {
+                let v = c.as_char().map_or(0, u32::from);
+                out.extend_from_slice(format!("\\{v:03o}").as_bytes());
+            }
+            // A byte that is no character keeps its own value; `$'…'` passes an
+            // unescaped byte through, so it re-reads as itself.
+            _ => c.push_to(&mut out),
         }
     }
-    out.push('\'');
+    out.push(b'\'');
     out
 }
 
@@ -27153,36 +27551,33 @@ fn ansi_c_quote(s: &str) -> String {
 /// containing a control character uses ANSI-C `$'…'` quoting; otherwise a key
 /// holding a shell metacharacter is double-quoted like a value (`["a b"]`). This
 /// makes the printed subscript round-trip back to the same key on re-input.
-fn quote_declare_key(k: &str) -> String {
+fn quote_declare_key(k: BStr<'_>) -> Str {
     if k.is_empty() {
-        return String::from("\"\"");
+        return b"\"\"".to_vec();
     }
-    if k.chars().any(char::is_control) {
+    if bytes::chars(k).any(Ch::is_control) {
         return ansi_c_quote(k);
     }
     // Metacharacters that would break re-parsing of a bare `[subscript]`, so
     // bash double-quotes the key (mirrors `sh_contains_shell_metas`). Note that
     // `.`, `,`, `/`, `:`, `=`, `+`, `%`, `-` do *not* force it, and `@` only
     // does when it is the *whole* key (see below).
-    const KEY_METAS: &[char] = &[
-        ' ', '\t', '"', '\\', '$', '`', '\'', '*', '!', '?', ';', '|', '&', '(', ')', '<', '>',
-        '{', '}', '^', '[', ']',
-    ];
-    if k.chars().any(|c| KEY_METAS.contains(&c)) {
+    const KEY_METAS: &[u8] = b" \t\"\\$`'*!?;|&()<>{}^[]";
+    if k.iter().any(|c| KEY_METAS.contains(c)) {
         return quote_declare_value(k);
     }
     // `#` starts a comment and `~` tilde-expands only in *leading* position, so
     // bash quotes them there and leaves `a#b` / `a~b` bare.
-    if k.starts_with('#') || k.starts_with('~') {
+    if k.starts_with(b"#") || k.starts_with(b"~") {
         return quote_declare_value(k);
     }
     // A lone `@` (like a lone `*`, already covered above) is bash's
     // all-elements subscript, so re-inputting it bare would not name the key.
     // `@@` and `a@b` are unambiguous and stay raw.
-    if k == "@" {
+    if k == b"@" {
         return quote_declare_value(k);
     }
-    k.to_string()
+    k.to_vec()
 }
 
 /// Quote a scalar value the way bash's bare `set` variable listing does — which
@@ -27194,31 +27589,28 @@ fn quote_declare_key(k: &str) -> String {
 ///
 /// The metacharacter set mirrors bash's `sh_contains_shell_metas` as observed
 /// from real `set` output (note: comma does *not* force quoting, matching bash).
-fn quote_set_value(v: &str) -> String {
+fn quote_set_value(v: BStr<'_>) -> Str {
     if v.is_empty() {
-        return String::new();
+        return Str::new();
     }
-    if v.chars().any(char::is_control) {
+    if bytes::chars(v).any(Ch::is_control) {
         return ansi_c_quote(v);
     }
-    const METAS: &[char] = &[
-        ' ', '\'', '"', '\\', '|', '&', ';', '(', ')', '<', '>', '!', '{', '}', '*', '[', '?',
-        ']', '^', '$', '`',
-    ];
-    let leads = v.starts_with('#') || v.starts_with('~');
-    if leads || v.chars().any(|c| METAS.contains(&c)) {
-        let mut out = String::from("'");
-        for c in v.chars() {
+    const METAS: &[u8] = b" '\"\\|&;()<>!{}*[?]^$`";
+    let leads = v.starts_with(b"#") || v.starts_with(b"~");
+    if leads || v.iter().any(|c| METAS.contains(c)) {
+        let mut out = b"'".to_vec();
+        for c in bytes::chars(v) {
             if c == '\'' {
-                out.push_str("'\\''");
+                out.extend_from_slice(b"'\\''");
             } else {
-                out.push(c);
+                c.push_to(&mut out);
             }
         }
-        out.push('\'');
+        out.push(b'\'');
         return out;
     }
-    v.to_string()
+    v.to_vec()
 }
 
 
@@ -27347,17 +27739,19 @@ fn rename_param_target(part: &WordPart, new_name: &str, label: &str) -> WordPart
 }
 
 /// Remove `read`'s backslash escapes from a whole line (non-`-r` mode): a
-/// backslash makes the following character literal.
-fn unescape_read_line(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let mut out = String::with_capacity(chars.len());
+/// backslash makes the following *character* literal — so the line is walked
+/// character-wise, and a byte that is part of no character is carried through
+/// as itself (it can be neither a backslash nor escaped by halves).
+fn unescape_read_line(s: BStr<'_>) -> Str {
+    let chars: Vec<Ch> = bytes::chars(s).collect();
+    let mut out = Str::with_capacity(s.len());
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '\\' && i + 1 < chars.len() {
-            out.push(chars[i + 1]);
+        if chars[i] == Ch::U('\\') && i + 1 < chars.len() {
+            chars[i + 1].push_to(&mut out);
             i += 2;
         } else {
-            out.push(chars[i]);
+            chars[i].push_to(&mut out);
             i += 1;
         }
     }
@@ -27382,22 +27776,29 @@ fn unescape_read_line(s: &str) -> String {
 ///
 /// Without `raw`, a backslash escapes the next character, so it neither
 /// delimits nor is kept in the field.
-fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<String> {
+fn read_split(line: BStr<'_>, ifs: BStr<'_>, raw: bool, limit: Option<usize>) -> Vec<Str> {
     // Empty IFS disables splitting entirely: the whole line is one field.
     if ifs.is_empty() {
-        let whole = if raw { line.to_string() } else { unescape_read_line(line) };
+        let whole = if raw { line.to_vec() } else { unescape_read_line(line) };
         return vec![whole];
     }
-    let ws: Vec<char> = ifs.chars().filter(|c| matches!(c, ' ' | '\t' | '\n')).collect();
-    let other: Vec<char> = ifs.chars().filter(|c| !matches!(c, ' ' | '\t' | '\n')).collect();
-    let is_ws = |c: char| ws.contains(&c);
-    let is_other = |c: char| other.contains(&c);
+    // IFS holds *characters*, and the line is split character-wise, so a
+    // multi-byte IFS entry delimits as a whole rather than by its individual
+    // bytes — and a byte that is part of no character delimits nothing.
+    let ws: Vec<Ch> = bytes::chars(ifs)
+        .filter(|c| matches!(c.as_char(), Some(' ' | '\t' | '\n')))
+        .collect();
+    let other: Vec<Ch> = bytes::chars(ifs)
+        .filter(|c| !matches!(c.as_char(), Some(' ' | '\t' | '\n')))
+        .collect();
+    let is_ws = |c: Ch| ws.contains(&c);
+    let is_other = |c: Ch| other.contains(&c);
 
-    let chars: Vec<char> = line.chars().collect();
+    let chars: Vec<Ch> = bytes::chars(line).collect();
     let n = chars.len();
     // Every field, each paired with where it began, so the last-name rule below
     // can reach back into the line for the raw remainder.
-    let mut fields: Vec<(usize, String)> = Vec::new();
+    let mut fields: Vec<(usize, Str)> = Vec::new();
     let mut i = 0;
     // Leading IFS *whitespace* is trimmed; a leading non-whitespace delimiter is
     // a delimiter like any other, and so opens with an empty field.
@@ -27406,18 +27807,18 @@ fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<Str
     }
     while i < n {
         let start = i;
-        let mut field = String::new();
+        let mut field = Str::new();
         while i < n {
             let c = chars[i];
-            if !raw && c == '\\' && i + 1 < n {
-                field.push(chars[i + 1]);
+            if !raw && c == Ch::U('\\') && i + 1 < n {
+                chars[i + 1].push_to(&mut field);
                 i += 2;
                 continue;
             }
             if is_ws(c) || is_other(c) {
                 break;
             }
-            field.push(c);
+            c.push_to(&mut field);
             i += 1;
         }
         fields.push((start, field));
@@ -27444,7 +27845,7 @@ fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<Str
 
     match limit {
         Some(lim) if lim >= 1 && fields.len() > lim => {
-            let mut out: Vec<String> = Vec::with_capacity(lim);
+            let mut out: Vec<Str> = Vec::with_capacity(lim);
             for (_, f) in fields.iter().take(lim - 1) {
                 out.push(f.clone());
             }
@@ -27455,15 +27856,15 @@ fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<Str
             while end > start && is_ws(chars[end - 1]) {
                 end -= 1;
             }
-            let seg: String = chars[start..end].iter().collect();
+            let seg = bytes::from_chars(chars[start..end].iter().copied());
             out.push(if raw { seg } else { unescape_read_line(&seg) });
             out
         }
         _ => {
-            let mut out: Vec<String> = fields.into_iter().map(|(_, f)| f).collect();
+            let mut out: Vec<Str> = fields.into_iter().map(|(_, f)| f).collect();
             if let Some(lim) = limit {
                 while out.len() < lim {
-                    out.push(String::new());
+                    out.push(Str::new());
                 }
             }
             out
@@ -27835,13 +28236,7 @@ fn format_conversion(
             }
             r.text
         }
-        b'q' => {
-            // TD-OILS-BYTE-STRINGS: the `%q` / `${v@Q}` / `declare -p` quoting
-            // family is still `String`-based, so a non-UTF-8 byte is mangled
-            // here. Goes away with that family.
-            #[allow(deprecated)]
-            printf_quote(&crate::bytes::scaffold_lossy_string(&next_arg(arg_i))).into_bytes()
-        }
+        b'q' => printf_quote(&next_arg(arg_i)),
         // bash's `%c` writes the first *character* of the argument, so a
         // multibyte character is written whole; a byte that is not part of one
         // is itself the character (see `bytes::char_at`).
@@ -28129,8 +28524,8 @@ fn iso_week(year: i64, yday: i64, wday: usize) -> (i64, i64) {
 /// pure ASCII and so pass through unharmed; this whole helper disappears when
 /// prompt expansion becomes byte-native.
 #[allow(deprecated)]
-fn push_prompt_strftime(out: &mut String, fmt: &[u8], epoch: i64) {
-    out.push_str(&crate::bytes::scaffold_lossy_string(&format_strftime(fmt, epoch)));
+fn push_prompt_strftime(out: &mut Str, fmt: &[u8], epoch: i64) {
+    out.extend_from_slice(&format_strftime(fmt, epoch));
 }
 
 fn format_strftime(fmt: &[u8], epoch: i64) -> Str {
@@ -28866,18 +29261,18 @@ fn parse_symbolic_umask(current: u32, spec: &str) -> Result<u32, SymUmaskErr> {
 /// Whether a `cd` target is an *explicit* path (absolute or `.`/`..`-anchored)
 /// for which `CDPATH` is not consulted — matching bash, which searches `CDPATH`
 /// only for a bare relative name like `cd subdir`.
-fn cd_is_explicit(t: &str) -> bool {
-    t == "."
-        || t == ".."
-        || t.starts_with("./")
-        || t.starts_with("../")
-        || t.starts_with('/')
-        || std::path::Path::new(t).is_absolute()
+fn cd_is_explicit(t: BStr<'_>) -> bool {
+    t == b"."
+        || t == b".."
+        || t.starts_with(b"./")
+        || t.starts_with(b"../")
+        || t.starts_with(b"/")
+        || bytes::bytes_to_path(t).is_absolute()
 }
 
-fn eval_unary(cwd: &str, op: &str, x: &str) -> bool {
+fn eval_unary(cwd: BStr<'_>, op: &str, x: &str) -> bool {
     // The filesystem primaries name a path relative to *this shell's* directory.
-    let p = || std::path::PathBuf::from(resolve_against(cwd, x));
+    let p = || bytes::bytes_to_path(&resolve_against(cwd, x.as_bytes()));
     match op {
         "-z" => x.is_empty(),
         "-n" => !x.is_empty(),
@@ -28965,7 +29360,7 @@ fn is_test_unary_op(op: &str) -> bool {
 /// diagnostic body) when an arithmetic comparison is given a non-integer
 /// operand (bash prints `integer expression expected` and exits 2 in that
 /// case).
-fn eval_binary(cwd: &str, l: &str, op: &str, r: &str) -> Result<bool, String> {
+fn eval_binary(cwd: BStr<'_>, l: &str, op: &str, r: &str) -> Result<bool, String> {
     match op {
         "=" | "==" => Ok(l == r),
         "!=" => Ok(l != r),
@@ -28985,7 +29380,7 @@ fn eval_binary(cwd: &str, l: &str, op: &str, r: &str) -> Result<bool, String> {
                 _ => false,
             })
         }
-        "-nt" | "-ot" | "-ef" => Ok(file_cmp(cwd, op, l, r)),
+        "-nt" | "-ot" | "-ef" => Ok(file_cmp(cwd, op, l.as_bytes(), r.as_bytes())),
         // Reached only from the three-argument fallback `[ a b c ]` where the
         // middle token is not a binary operator; bash reports it as such rather
         // than silently succeeding. (The parser paths guard with
@@ -29003,8 +29398,9 @@ fn eval_binary(cwd: &str, l: &str, op: &str, r: &str) -> Result<bool, String> {
 /// device+inode match, which the standard library does not expose across our
 /// host and target (true hard links to *different* names are not detected; see
 /// known-issues TD-OILS12).
-fn file_cmp(cwd: &str, op: &str, l: &str, r: &str) -> bool {
+fn file_cmp(cwd: BStr<'_>, op: &str, l: BStr<'_>, r: BStr<'_>) -> bool {
     let (l, r) = (resolve_against(cwd, l), resolve_against(cwd, r));
+    let (l, r) = (bytes::bytes_to_path(&l), bytes::bytes_to_path(&r));
     let lmtime = std::fs::metadata(&l).and_then(|m| m.modified()).ok();
     let rmtime = std::fs::metadata(&r).and_then(|m| m.modified()).ok();
     match op {

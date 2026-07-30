@@ -477,25 +477,60 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
         }
     }
 
-    // Integer part.
-    let mut int_part: f64 = 0.0;
+    // Digits, collected exactly.  `digits` holds the significant decimal
+    // digits and `exp10` the power of ten they are scaled by, so the parsed
+    // value is exactly `digits * 10^exp10` — no floating-point arithmetic
+    // happens until the single correctly-rounded conversion at the end.
+    //
+    // Past `MAX_PARSE_DIGITS` significant digits no further digit can change
+    // which `f64` the input rounds to; it can only decide a tie.  So overflow
+    // digits are not stored, they just set `truncated`, the sticky bit.
+    let mut digits = [b'0'; crate::decfloat::MAX_PARSE_DIGITS];
+    let mut nd: usize = 0;
+    let mut exp10: i32 = 0;
+    let mut truncated = false;
     let mut has_digits = false;
+
+    // Integer part.  A digit that fits is stored as-is; one that does not
+    // still scales everything already stored, hence the exponent bump.
     while (unsafe { *nptr.add(i) }).is_ascii_digit() {
-        int_part = int_part * 10.0 + f64::from(unsafe { *nptr.add(i) }.wrapping_sub(b'0'));
-        i = i.wrapping_add(1);
+        let d = unsafe { *nptr.add(i) };
         has_digits = true;
+        if nd == 0 && d == b'0' {
+            // Leading zero: contributes nothing at all.
+        } else if nd < digits.len() {
+            if let Some(slot) = digits.get_mut(nd) {
+                *slot = d;
+            }
+            nd = nd.wrapping_add(1);
+        } else {
+            exp10 = exp10.saturating_add(1);
+            if d != b'0' {
+                truncated = true;
+            }
+        }
+        i = i.wrapping_add(1);
     }
 
-    // Fractional part.
-    let mut frac_part: f64 = 0.0;
+    // Fractional part.  Each stored digit moves the point one place right,
+    // and so does each leading zero that precedes the first significant digit.
     if unsafe { *nptr.add(i) } == b'.' {
         i = i.wrapping_add(1);
-        let mut divisor: f64 = 10.0;
         while (unsafe { *nptr.add(i) }).is_ascii_digit() {
-            frac_part += f64::from(unsafe { *nptr.add(i) }.wrapping_sub(b'0')) / divisor;
-            divisor *= 10.0;
-            i = i.wrapping_add(1);
+            let d = unsafe { *nptr.add(i) };
             has_digits = true;
+            if nd == 0 && d == b'0' {
+                exp10 = exp10.saturating_sub(1);
+            } else if nd < digits.len() {
+                if let Some(slot) = digits.get_mut(nd) {
+                    *slot = d;
+                }
+                nd = nd.wrapping_add(1);
+                exp10 = exp10.saturating_sub(1);
+            } else if d != b'0' {
+                truncated = true;
+            }
+            i = i.wrapping_add(1);
         }
     }
 
@@ -508,8 +543,6 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
         }
         return 0.0;
     }
-
-    let mut result = int_part + frac_part;
 
     // Exponent part.  Save position before 'e' so we can restore if no
     // exponent digits follow (POSIX: 'e' without digits is not consumed).
@@ -535,20 +568,25 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
                 exp_val = exp_val.saturating_neg();
             }
 
-            result *= pow10(exp_val);
+            exp10 = exp10.saturating_add(exp_val);
         } else {
             // No exponent digits — roll back.
             i = before_exp;
         }
     }
 
+    let (mut result, out_of_range) =
+        crate::decfloat::decimal_to_f64(digits.get(..nd).unwrap_or(&[]), exp10, truncated);
+
     if negative {
         result = -result;
     }
 
-    // POSIX: set ERANGE on overflow (result is infinite) or underflow
-    // (result rounds to zero but input was nonzero).
-    if result.is_infinite() || (result == 0.0 && (int_part != 0.0 || frac_part != 0.0)) {
+    // POSIX: set ERANGE on overflow (the result is infinite) and on underflow.
+    // `decimal_to_f64` reports both, and also reports a subnormal result, which
+    // is gradual underflow — glibc sets ERANGE for that too.  An all-zero input
+    // is never out of range, so no guard against `strtod("0")` is needed.
+    if out_of_range {
         crate::errno::set_errno(crate::errno::ERANGE);
     }
 
@@ -642,40 +680,6 @@ core::arch::global_asm!(
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn atof(nptr: *const u8) -> f64 {
     unsafe { strtod(nptr, core::ptr::null_mut()) }
-}
-
-/// Compute 10^exp using repeated multiplication.
-///
-/// Handles both positive and negative exponents.
-#[allow(clippy::arithmetic_side_effects)]
-fn pow10(exp: i32) -> f64 {
-    if exp == 0 {
-        return 1.0;
-    }
-    let neg = exp < 0;
-    // Use u32 to hold the absolute value of the exponent.
-    // i32::MIN has no positive i32 counterpart (-2147483648 → 2147483648
-    // which overflows i32), but fits in u32.  Casting through i64 avoids
-    // the saturating_neg trap where i32::MIN.saturating_neg() == i32::MIN.
-    let abs_exp: u32 = if neg {
-        (-i64::from(exp)) as u32
-    } else {
-        exp as u32
-    };
-
-    let mut result: f64 = 1.0;
-    let mut base: f64 = 10.0;
-    let mut e = abs_exp;
-    // Repeated squaring for efficiency.
-    while e > 0 {
-        if e & 1 == 1 {
-            result *= base;
-        }
-        base *= base;
-        e >>= 1;
-    }
-
-    if neg { 1.0 / result } else { result }
 }
 
 // ---------------------------------------------------------------------------
@@ -2320,57 +2324,6 @@ mod tests {
         };
         assert_eq!(idx, 2); // matches "size"
         assert!(!valuep.is_null()); // has value "100"
-    }
-
-    // -- pow10 tests (internal helper) --
-
-    #[test]
-    fn test_pow10_zero() {
-        assert_eq!(pow10(0), 1.0);
-    }
-
-    #[test]
-    fn test_pow10_positive() {
-        assert_eq!(pow10(1), 10.0);
-        assert_eq!(pow10(2), 100.0);
-        assert_eq!(pow10(3), 1000.0);
-    }
-
-    #[test]
-    fn test_pow10_negative() {
-        assert!((pow10(-1) - 0.1).abs() < 1e-15);
-        assert!((pow10(-2) - 0.01).abs() < 1e-15);
-        assert!((pow10(-3) - 0.001).abs() < 1e-15);
-    }
-
-    #[test]
-    fn test_pow10_large_positive() {
-        // 10^308 is near f64::MAX (~1.8e308); should be finite.
-        assert!(pow10(308).is_finite());
-        // 10^309 overflows f64 → infinity.
-        assert!(pow10(309).is_infinite());
-    }
-
-    #[test]
-    fn test_pow10_large_negative() {
-        // 10^(-308) is near f64 min positive subnormal; should be > 0.
-        assert!(pow10(-308) > 0.0);
-        // Very large negative exponents should produce 0.0 or tiny subnormal.
-        assert!(pow10(-400) < 1e-300);
-    }
-
-    #[test]
-    fn test_pow10_i32_min() {
-        // This is the bug case: pow10(i32::MIN) must NOT return 1.0.
-        // 10^(-2147483648) is effectively 0.0 (way below f64 subnormal).
-        let result = pow10(i32::MIN);
-        assert_eq!(result, 0.0, "pow10(i32::MIN) should be 0.0, not 1.0");
-    }
-
-    #[test]
-    fn test_pow10_i32_max() {
-        // 10^(2147483647) overflows f64 → infinity.
-        assert!(pow10(i32::MAX).is_infinite());
     }
 
     // -----------------------------------------------------------------------
@@ -4728,5 +4681,121 @@ mod tests {
         let r = lldiv(-1_000_000_007, 1000);
         assert_eq!(r.quot, -1_000_000);
         assert_eq!(r.rem, -7);
+    }
+
+    // -- strtod is correctly rounded --
+    //
+    // Rust's own `str::parse::<f64>()` is correctly rounded, so it is an
+    // independent oracle: any disagreement is a bug in one of the two, and
+    // these inputs are the ones that historically broke the old
+    // multiply-by-a-power-of-ten parser.
+
+    fn parse(text: &str) -> f64 {
+        let mut z = text.as_bytes().to_vec();
+        z.push(0);
+        unsafe { strtod(z.as_ptr(), core::ptr::null_mut()) }
+    }
+
+    #[test]
+    fn strtod_reaches_dbl_max() {
+        // The old parser multiplied by 10^308 and overflowed to infinity.
+        let s = "1.7976931348623157e308";
+        assert_eq!(parse(s), f64::MAX);
+        assert_eq!(parse(s), s.parse::<f64>().unwrap());
+        assert!(parse(s).is_finite());
+    }
+
+    #[test]
+    fn strtod_reaches_the_subnormals() {
+        // The old parser divided by 10^324, which underflowed to zero, so the
+        // entire subnormal range parsed as 0.
+        for s in [
+            "5e-324",
+            "4.9406564584124654e-324",
+            "1e-310",
+            "2.2250738585072011e-308",
+            "1.2345678901234e-320",
+        ] {
+            let want = s.parse::<f64>().unwrap();
+            assert!(want != 0.0, "oracle says {s} is zero");
+            assert_eq!(parse(s), want, "strtod({s})");
+        }
+    }
+
+    #[test]
+    fn strtod_rounds_the_boundary_cases() {
+        // Exactly half an ulp above zero: a tie, and zero is the even side.
+        let half = "2.470328229206232720882843964341106861825e-324";
+        assert_eq!(parse(half), 0.0);
+        // A hair more, so no longer a tie.
+        let more = "2.470328229206232720882843964341106861826e-324";
+        assert_eq!(parse(more), f64::from_bits(1));
+        // Half-way between 2^53 and 2^53+2 is a tie that must round down.
+        assert_eq!(parse("9007199254740993"), 9007199254740992.0);
+        // 2^53+3 is nearer the odd neighbour above.
+        assert_eq!(parse("9007199254740995"), 9007199254740996.0);
+        // Overflow is decided by rounding, not by magnitude: this is under
+        // the half-way point to infinity and must stay finite.
+        assert_eq!(parse("1.7976931348623158e308"), f64::MAX);
+        assert!(parse("1.7976931348623159e308").is_infinite());
+    }
+
+    #[test]
+    fn strtod_ignores_digits_past_the_deciding_one() {
+        // A long tail cannot move the result, but it can break a tie, and the
+        // parser must not lose track of it once its digit buffer fills.
+        let mut s = String::from("9007199254740992.");
+        s.push_str(&"0".repeat(900));
+        assert_eq!(parse(&s), 9007199254740992.0);
+        let mut s = String::from("9007199254740992.");
+        s.push_str(&"0".repeat(900));
+        s.push('1');
+        assert_eq!(parse(&s), 9007199254740992.0);
+        // 1 followed by 800 zeros, then scaled back: still exactly 1.
+        let mut s = String::from("1");
+        s.push_str(&"0".repeat(800));
+        s.push_str("e-800");
+        assert_eq!(parse(&s), 1.0);
+    }
+
+    #[test]
+    fn strtod_sets_erange_only_when_out_of_range() {
+        crate::errno::set_errno(0);
+        assert_eq!(parse("0"), 0.0);
+        assert_eq!(crate::errno::get_errno(), 0, "plain zero is not ERANGE");
+
+        crate::errno::set_errno(0);
+        assert!(parse("1e400").is_infinite());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+
+        crate::errno::set_errno(0);
+        assert_eq!(parse("1e-400"), 0.0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+
+        // Gradual underflow: nonzero but subnormal, which glibc flags too.
+        crate::errno::set_errno(0);
+        assert_ne!(parse("1e-320"), 0.0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn strtod_matches_rusts_parser_over_a_sweep() {
+        // Pseudo-random bit patterns, each fed back in three textual forms:
+        // shortest round-trip, a 30-digit expansion, and the Debug form.
+        let mut st: u64 = 0x2545_F491_4F6C_DD1D;
+        for _ in 0..4000 {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            let v = f64::from_bits(st);
+            if !v.is_finite() {
+                continue;
+            }
+            let v = v.abs();
+            for text in [format!("{v:e}"), format!("{v:.30e}"), format!("{v:?}")] {
+                let want = text.parse::<f64>().unwrap();
+                assert_eq!(parse(&text), want, "strtod({text})");
+            }
+        }
     }
 }

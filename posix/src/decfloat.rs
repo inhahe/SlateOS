@@ -48,7 +48,17 @@
 /// The worst case is the smallest subnormal: `m` has 53 bits and `5^1074` has
 /// `ceil(1074 * log2 5) = 2495`, for 2548 bits total.  (The large-exponent
 /// case, `m << 971`, needs only 1024.)
-const LIMBS: usize = 40;
+const DEC_LIMBS: usize = 40;
+
+/// Number of limbs for the parsing direction, which scales the significand up
+/// by `2^L` before dividing so that the quotient is long enough to round.
+/// See [`decimal_to_f64`]; the worst case there is about 5165 bits.
+const PARSE_LIMBS: usize = 96;
+
+/// Largest number of significant decimal digits that can affect *which* `f64`
+/// an input rounds to.  Past this, further digits can only decide whether the
+/// value sits exactly on a rounding boundary, which a sticky bit records.
+pub(crate) const MAX_PARSE_DIGITS: usize = 768;
 
 /// Largest number of significant decimal digits a finite `f64` can have.
 ///
@@ -66,15 +76,15 @@ const POW10_CHUNK: u64 = 10_000_000_000_000_000_000;
 const POW10_CHUNK_EXP: usize = 19;
 
 /// A fixed-capacity unsigned big integer, little-endian limbs.
-struct Big {
-    limbs: [u64; LIMBS],
+struct Big<const N: usize> {
+    limbs: [u64; N],
     /// Number of significant limbs; `0` means the value is zero.
     len: usize,
 }
 
-impl Big {
+impl<const N: usize> Big<N> {
     fn from_u64(v: u64) -> Self {
-        let mut limbs = [0u64; LIMBS];
+        let mut limbs = [0u64; N];
         let len = if v == 0 {
             0
         } else {
@@ -89,8 +99,8 @@ impl Big {
     }
 
     /// `self *= x`.  Saturates by dropping the overflow, which cannot happen
-    /// for the inputs this module produces: [`LIMBS`] is sized for the worst
-    /// case and every caller stays inside it.
+    /// for the inputs this module produces: `N` is sized for the worst case
+    /// and every caller stays inside it.
     #[allow(clippy::arithmetic_side_effects)]
     fn mul_small(&mut self, x: u64) {
         if x == 0 || self.is_zero() {
@@ -107,7 +117,7 @@ impl Big {
             *slot = prod as u64;
             carry = prod >> 64;
         }
-        while carry != 0 && self.len < LIMBS {
+        while carry != 0 && self.len < N {
             if let Some(slot) = self.limbs.get_mut(self.len) {
                 *slot = carry as u64;
             }
@@ -128,7 +138,7 @@ impl Big {
 
         // Move limbs up by `whole`, then shift within limbs by `part`.
         let old_len = self.len;
-        let new_len = (old_len + whole + usize::from(part != 0)).min(LIMBS);
+        let new_len = (old_len + whole + usize::from(part != 0)).min(N);
         let mut i = new_len;
         while i > 0 {
             i -= 1;
@@ -169,6 +179,78 @@ impl Big {
         }
         self.normalize();
         rem as u64
+    }
+
+    /// `self += x`.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn add_small(&mut self, x: u64) {
+        if x == 0 {
+            return;
+        }
+        let mut carry = x;
+        let mut i = 0usize;
+        while carry != 0 {
+            let Some(slot) = self.limbs.get_mut(i) else {
+                debug_assert!(false, "big-integer overflow in add_small");
+                return;
+            };
+            let (sum, over) = slot.overflowing_add(carry);
+            *slot = sum;
+            carry = u64::from(over);
+            i += 1;
+        }
+        if i > self.len {
+            self.len = i;
+        }
+    }
+
+    /// Position of the most significant set bit, plus one; `0` when zero.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn bits(&self) -> usize {
+        match self.len.checked_sub(1).and_then(|i| self.limbs.get(i)) {
+            Some(&top) if top != 0 => (self.len - 1) * 64 + (64 - top.leading_zeros() as usize),
+            _ => 0,
+        }
+    }
+
+    /// Is bit `i` set?
+    #[allow(clippy::arithmetic_side_effects)]
+    fn bit(&self, i: usize) -> bool {
+        self.limbs
+            .get(i / 64)
+            .is_some_and(|&w| (w >> (i % 64)) & 1 == 1)
+    }
+
+    /// Is any bit strictly below index `i` set?  This is the sticky test.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn any_bits_below(&self, i: usize) -> bool {
+        let top = i / 64;
+        let off = (i % 64) as u32;
+        for k in 0..top.min(self.len) {
+            if self.limbs.get(k).copied().unwrap_or(0) != 0 {
+                return true;
+            }
+        }
+        off != 0
+            && self
+                .limbs
+                .get(top)
+                .is_some_and(|&w| w & ((1u64 << off) - 1) != 0)
+    }
+
+    /// The 64-bit window of `self` starting at bit `i`, i.e. `(self >> i)` as
+    /// a `u64`.  Callers guarantee the shifted value fits.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn window(&self, i: usize) -> u64 {
+        let idx = i / 64;
+        let off = (i % 64) as u32;
+        let lo = self.limbs.get(idx).copied().unwrap_or(0);
+        if off == 0 {
+            lo
+        } else {
+            let hi = self.limbs.get(idx + 1).copied().unwrap_or(0);
+            (lo >> off) | (hi << (64 - off))
+        }
     }
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -233,7 +315,7 @@ impl Decimal {
         }
 
         // val == big * 10^scale, exactly.
-        let mut big = Big::from_u64(m);
+        let mut big = Big::<DEC_LIMBS>::from_u64(m);
         let scale: i32 = if e >= 0 {
             big.shl(e as u32);
             0
@@ -412,9 +494,191 @@ impl Decimal {
     }
 }
 
+/// Convert `digits * 10^exp10` to the nearest `f64`, ties to even.
+///
+/// `digits` holds the ASCII decimal digits of the significant part; `exp10` is
+/// the power of ten it is scaled by.  `truncated` says the caller had more
+/// nonzero digits than it could store, so the true value is strictly greater
+/// than `digits * 10^exp10`.  That is exactly a sticky bit: past
+/// [`MAX_PARSE_DIGITS`] digits no further digit can move the result to a
+/// different `f64` — it can only decide a tie, and knowing *that* a nonzero
+/// tail exists is enough to decide one.
+///
+/// The conversion is exact-then-round, never a chain of floating-point
+/// multiplies:
+///
+/// ```text
+///   exp10 >= 0:  value = (D * 10^exp10) * 2^0
+///   exp10 <  0:  value = D / 5^Q / 2^Q                     with Q = -exp10
+///                      = floor(D * 2^L / 5^Q) * 2^-(L+Q)   plus a remainder
+/// ```
+///
+/// `L` is chosen so the quotient keeps at least 64 bits — 53 for the
+/// significand, the rest for guard and round — and a nonzero division
+/// remainder feeds the sticky bit, so the final rounding step sees the true
+/// value and not an approximation of it.
+///
+/// Returns `(value, out_of_range)`.  `out_of_range` is the C `ERANGE`
+/// condition: overflow to infinity, underflow to zero, or a subnormal result
+/// (gradual underflow).  glibc reports `ERANGE` for all three.
+#[allow(clippy::arithmetic_side_effects)]
+pub(crate) fn decimal_to_f64(digits: &[u8], exp10: i32, truncated: bool) -> (f64, bool) {
+    let mut sticky = truncated;
+    let mut exp10 = exp10;
+
+    // Leading zeros contribute nothing; trailing zeros move into the exponent,
+    // which keeps the big integer as short as the value allows.
+    let mut start = 0usize;
+    while digits.get(start) == Some(&b'0') {
+        start = start.saturating_add(1);
+    }
+    let mut end = digits.len();
+    while end > start && digits.get(end.saturating_sub(1)) == Some(&b'0') {
+        end = end.saturating_sub(1);
+        exp10 = exp10.saturating_add(1);
+    }
+    let digits = digits.get(start..end).unwrap_or(&[]);
+    if digits.is_empty() {
+        return (0.0, false);
+    }
+
+    // Position of the decimal point: the value lies in `[10^(mag-1), 10^mag)`.
+    // `DBL_MAX` is just under `10^309` and the smallest subnormal is just over
+    // `10^-324`, so these cut-offs are decided by magnitude alone and keep the
+    // big-integer work bounded.
+    let mag = exp10.saturating_add(i32::try_from(digits.len()).unwrap_or(i32::MAX));
+    if mag > 310 {
+        return (f64::INFINITY, true);
+    }
+    if mag < -330 {
+        return (0.0, true);
+    }
+
+    // The exact integer formed by the digits, absorbed 19 at a time because
+    // `10^19` is the largest power of ten that fits in a `u64`.
+    let mut b = Big::<PARSE_LIMBS>::from_u64(0);
+    let mut i = 0usize;
+    while i < digits.len() {
+        let take = POW10_CHUNK_EXP.min(digits.len() - i);
+        let mut chunk = 0u64;
+        let mut scale = 1u64;
+        for k in 0..take {
+            let d = digits.get(i + k).copied().unwrap_or(b'0');
+            chunk = chunk * 10 + u64::from(d.wrapping_sub(b'0'));
+            scale *= 10;
+        }
+        b.mul_small(scale);
+        b.add_small(chunk);
+        i += take;
+    }
+
+    let e: i32;
+    if exp10 >= 0 {
+        let mut left = exp10;
+        while left > 0 {
+            let step = left.min(i32::try_from(POW10_CHUNK_EXP).unwrap_or(19));
+            let mut p = 1u64;
+            for _ in 0..step {
+                p *= 10;
+            }
+            b.mul_small(p);
+            left -= step;
+        }
+        e = 0;
+    } else {
+        let q = exp10.unsigned_abs();
+        // `L = ceil(Q * log2 5) + 64`.  `2321929/10^6` is above `log2 5`, so
+        // the ceiling is never short and the quotient always keeps >= 64 bits.
+        let scaled = (u64::from(q) * 2_321_929 + 999_999) / 1_000_000;
+        let l = u32::try_from(scaled).unwrap_or(u32::MAX).saturating_add(64);
+        b.shl(l);
+        let mut left = q;
+        while left > 0 {
+            let step = left.min(POW5_CHUNK_EXP);
+            let d = if step == POW5_CHUNK_EXP {
+                POW5_CHUNK
+            } else {
+                let mut p = 1u64;
+                for _ in 0..step {
+                    p *= 5;
+                }
+                p
+            };
+            // A nonzero remainder is value we are about to discard, and it
+            // sits below every bit of the quotient: pure sticky.
+            if b.divmod_small(d) != 0 {
+                sticky = true;
+            }
+            left -= step;
+        }
+        e = -i32::try_from(l).unwrap_or(i32::MAX) - i32::try_from(q).unwrap_or(i32::MAX);
+    }
+
+    round_to_f64(&b, e, sticky)
+}
+
+/// Round the exact value `b * 2^e` to the nearest `f64`, ties to even.
+///
+/// `sticky_in` says the true value is strictly greater than `b * 2^e`, by less
+/// than one unit in `b`'s last place.  Returns `(value, out_of_range)` with the
+/// same `ERANGE` meaning as [`decimal_to_f64`].
+#[allow(clippy::arithmetic_side_effects)]
+fn round_to_f64<const N: usize>(b: &Big<N>, e: i32, sticky_in: bool) -> (f64, bool) {
+    let n = b.bits();
+    if n == 0 {
+        return (0.0, false);
+    }
+
+    // Keep the top 53 bits, then, if that lands below the subnormal floor,
+    // drop further bits so the exponent is exactly `-1074`.  Everything below
+    // the cut is summarised by one guard bit and one sticky bit, which is all
+    // round-to-nearest-even needs.
+    let mut drop = n.saturating_sub(53);
+    let mut exp = e.saturating_add(i32::try_from(drop).unwrap_or(i32::MAX));
+    if exp < -1074 {
+        let extra = i64::from(-1074i32).saturating_sub(i64::from(exp));
+        drop = drop.saturating_add(usize::try_from(extra).unwrap_or(usize::MAX));
+        exp = -1074;
+    }
+
+    let mut m = b.window(drop);
+    let guard = drop > 0 && b.bit(drop.saturating_sub(1));
+    let sticky = sticky_in || (drop > 1 && b.any_bits_below(drop.saturating_sub(1)));
+    if guard && (sticky || m & 1 == 1) {
+        m += 1;
+        if m == 1 << 53 {
+            m >>= 1;
+            exp = exp.saturating_add(1);
+        }
+    }
+
+    if m == 0 {
+        return (0.0, true);
+    }
+    // A short significand (fewer than 53 bits, so nothing was dropped and
+    // nothing was rounded) is normalised by scaling up until it reaches the
+    // implicit-bit position or the subnormal floor stops us.
+    while m < 1 << 52 && exp > -1074 {
+        m <<= 1;
+        exp -= 1;
+    }
+    if m < 1 << 52 {
+        // Subnormal: the exponent is pinned at the floor, so `m` *is* the
+        // stored bit pattern.
+        return (f64::from_bits(m), true);
+    }
+
+    let biased = exp.saturating_add(1075);
+    if biased >= 0x7ff {
+        return (f64::INFINITY, true);
+    }
+    let biased = u64::try_from(biased).unwrap_or(0);
+    (f64::from_bits((biased << 52) | (m - (1 << 52))), false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Decimal, decompose};
+    use super::{Decimal, decimal_to_f64, decompose};
 
     /// Render the whole exact expansion the way `%f` would, for comparison
     /// against Rust's own (exact) formatter.
@@ -560,5 +824,84 @@ mod tests {
         assert_eq!(d.len(), 1);
         assert_eq!(d.digit(0), b'1');
         assert_eq!(d.decpt(), 3);
+    }
+
+    // -- decimal -> binary --
+
+    fn conv(digits: &str, exp10: i32) -> (f64, bool) {
+        decimal_to_f64(digits.as_bytes(), exp10, false)
+    }
+
+    #[test]
+    fn conversion_is_exact_where_it_can_be() {
+        assert_eq!(conv("1", 0), (1.0, false));
+        assert_eq!(conv("0", 0), (0.0, false));
+        assert_eq!(conv("", 0), (0.0, false));
+        assert_eq!(conv("000", 5), (0.0, false));
+        assert_eq!(conv("5", -1), (0.5, false));
+        assert_eq!(conv("125", -3), (0.125, false));
+        // Every integer below 2^53 is exact, whatever route it takes.
+        assert_eq!(conv("9007199254740992", 0), (9.007_199_254_740_992e15, false));
+        assert_eq!(conv("90071992547409920000", -4), (9.007_199_254_740_992e15, false));
+    }
+
+    #[test]
+    fn conversion_rounds_ties_to_even() {
+        // 2^53 + 1 is exactly half-way; 2^53 has an even last bit and wins.
+        assert_eq!(conv("9007199254740993", 0).0, 9_007_199_254_740_992.0);
+        // 2^53 + 3 is half-way the other side, where the even neighbour is above.
+        assert_eq!(conv("9007199254740995", 0).0, 9_007_199_254_740_996.0);
+        // A tie broken by a sticky bit the caller reports rather than stores.
+        assert_eq!(
+            decimal_to_f64(b"9007199254740993", 0, true).0,
+            9_007_199_254_740_994.0
+        );
+    }
+
+    #[test]
+    fn conversion_spans_the_whole_exponent_range() {
+        assert_eq!(conv("17976931348623157", 292), (f64::MAX, false));
+        assert_eq!(conv("5", -324), (f64::from_bits(1), true));
+        assert_eq!(conv("1", -310), ("1e-310".parse::<f64>().unwrap(), true));
+        // Just over half an ulp above zero rounds up to the least subnormal.
+        assert_eq!(conv("2470328229206232720882843964341106861826", -363).0, f64::from_bits(1));
+        // Exactly half rounds down, because zero is the even side.
+        assert_eq!(conv("2470328229206232720882843964341106861825", -363).0, 0.0);
+    }
+
+    #[test]
+    fn conversion_reports_the_erange_condition() {
+        assert_eq!(conv("1", 400), (f64::INFINITY, true));
+        assert_eq!(conv("1", -400), (0.0, true));
+        // Normal results are never out of range; subnormals always are.
+        assert!(!conv("1", 0).1);
+        assert!(conv("1", -320).1);
+        assert!(!conv("22250738585072014", -324).1, "least normal is in range");
+    }
+
+    #[test]
+    fn conversion_matches_rusts_parser_over_a_sweep() {
+        // Rust's `str::parse::<f64>()` is correctly rounded, so it decides.
+        let mut st: u64 = 0x0123_4567_89AB_CDEF;
+        for _ in 0..4000 {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            let v = f64::from_bits(st);
+            if !v.is_finite() {
+                continue;
+            }
+            let text = format!("{:.25e}", v.abs());
+            let (mantissa, exponent) = text.split_once('e').unwrap_or((text.as_str(), "0"));
+            let digits: String =
+                mantissa.chars().filter(char::is_ascii_digit).collect();
+            // `{:.25e}` writes one digit before the point and 25 after it.
+            let exp10 = exponent.parse::<i32>().unwrap_or(0) - 25;
+            assert_eq!(
+                decimal_to_f64(digits.as_bytes(), exp10, false).0,
+                text.parse::<f64>().unwrap_or(f64::NAN),
+                "{text}"
+            );
+        }
     }
 }

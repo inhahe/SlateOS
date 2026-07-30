@@ -85,3 +85,34 @@ declare -p h
 declare -p j 2>&1
 echo "j-status=$?"
 echo "still-running"
+
+# The value of a compound operand is computed in full before the variable is
+# touched, so an expansion failure leaves *nothing* behind: not the value, not the
+# array kind, not the value attributes, and not even the name.
+sc=hello
+declare -a sc=(x $((1/0)))
+declare -p sc
+declare -ail nf=(2+3 $((1/0)))
+declare -p nf 2>/dev/null
+echo "nf-status=$?"
+declare -a ea=(AB)
+declare -al ea=(CD $((1/0)))
+declare -p ea
+declare -A pm=([z]=old)
+declare -A pm=(k v j$((1/0)) x)
+declare -p pm
+declare -A sm
+declare -Au sm=([a]=b [c]=$((1/0)))
+declare -p sm
+
+# Failing while *binding* is the other regime: by then the variable really has
+# been written, so whatever bound first stays, attributes included. `-i` evaluates
+# each element as it is stored, so element 1 fails with element 0 already in place.
+declare -ai bp=([0]=1 [1]=2+ [2]=3)
+declare -p bp
+
+# A readonly target is a third: the kind and the value attributes do go on, since
+# the rejection happens at the store rather than during the expansion.
+readonly rs=1
+declare -al rs=(AB)
+declare -p rs

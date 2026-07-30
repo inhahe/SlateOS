@@ -44,6 +44,60 @@ h() { local outer=temp; echo "in-h=$outer"; }
 h
 echo "after-h=$outer"
 
+# The letters come back in bash's *internal attribute-table* order, not the order
+# they were written: the kind, then `n`, `i`, `r`, `x`, and last the case-folding
+# trio `l`/`u`/`c`. `${v@a}` and `${v@A}` use the same order.
+declare -alrx ord1=A
+declare -p ord1
+echo "at=${ord1@a} A=${ord1@A}"
+declare -Aurx ord2
+declare -p ord2
+declare -cirx ord3=q
+declare -p ord3
+echo "at=${ord3@a}"
+declare -lx ord4=q
+declare -p ord4
+
+# A *scalar* operand of an array declaration binds index/key 0 — and the value
+# attributes fold or evaluate it there just as they would a scalar's value, `+=`
+# included (numeric addition under `-i`, concatenation of the folded text
+# otherwise).
+declare -al sa=QQ
+declare -p sa
+declare -Au sb=qq
+declare -p sb
+declare -ac sc=hELLO
+declare -p sc
+declare -ai sd=2+3
+declare -p sd
+declare -ail se=Q
+declare -p se
+declare -ai sf=5
+declare -ai sf+=3
+declare -p sf
+declare -al sg=AB
+declare -al sg+=CD
+declare -p sg
+declare -au sh=(x)
+declare -au sh+=yy
+declare -p sh
+
+# A bad `-i` value discards the command, leaves an array valued-but-empty (a
+# scalar merely created-but-unset), and abandons every operand after it.
+declare -ai bad1=2+ nope1=1
+echo "rc=$?"
+declare -p bad1
+declare -p nope1 2>/dev/null
+echo "nope1=$?"
+declare -i bad2=2+ nope2=1
+declare -p bad2
+declare -p nope2 2>/dev/null
+echo "nope2=$?"
+declare -ai bad3[0]=2+ nope3=1
+declare -p bad3
+declare -p nope3 2>/dev/null
+echo "nope3=$?"
+
 # -x exports; -n makes a nameref.
 declare -x XV=exported
 echo "exported=$(env | grep -c '^XV=exported')"

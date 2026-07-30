@@ -2305,6 +2305,14 @@ pub struct Shell {
     /// once, before the operand's line). So the rendering is recorded at the one
     /// point where the right data exists: the expansion pass itself.
     xtrace_compound: Option<Vec<String>>,
+    /// Set by [`Shell::compound_expansion_done`] when a compound assignment's
+    /// word-expansion pass completes, i.e. when its *binding* pass begins. A
+    /// declaration builtin's compound operand needs the distinction: a failure in
+    /// the expansion pass leaves the variable completely untouched, while one in the
+    /// binding pass (a bad `-i` element value, say) keeps everything bound before
+    /// it. The flag is armed and read by `exec_declare_with_arrays` around each
+    /// operand; nothing else looks at it.
+    compound_expanded: bool,
     /// Set (to the unmatched pattern) when `shopt -s failglob` is on and a glob
     /// in a command word matches nothing. The simple-command driver reports
     /// `no match: PATTERN` and aborts the command list (`Flow::Exit(1)`) after
@@ -2737,6 +2745,7 @@ impl Shell {
             arith_cmd: None,
             decl_builtin_ctx: false,
             xtrace_compound: None,
+            compound_expanded: false,
             glob_error: None,
             local_frames: Vec::new(),
             local_opt_saves: Vec::new(),
@@ -6597,6 +6606,7 @@ impl Shell {
             arith_cmd: None,
             decl_builtin_ctx: false,
             xtrace_compound: None,
+            compound_expanded: false,
             glob_error: None,
             // A subshell body is not itself a function frame; a `local` there is
             // an error until it enters one of its own function calls.
@@ -6775,7 +6785,8 @@ impl Shell {
     ///
     /// The `name=value` assignment command does not come through here: its `-i`
     /// handling has to reach further, since `+=` under the attribute is numeric
-    /// addition rather than string append.
+    /// addition rather than string append — see
+    /// [`Self::appended_attributed_value`].
     ///
     /// `None` means a bad `-i` expression, whose value must not be stored at all
     /// (see [`Self::eval_int_assign`]).
@@ -6785,6 +6796,39 @@ impl Shell {
         } else {
             Some(self.fold_case_attr(name, val))
         }
+    }
+
+    /// [`Self::apply_value_attrs`] with `+=` resolved against `cur`, the current
+    /// contents of the slot being written. The two attribute groups append
+    /// differently: `-i` *adds* numerically (`declare -i a=5; declare -i a+=3`
+    /// gives 8, not `53`), while the case attributes fold the new text and
+    /// concatenate. `cur` is `None` for a plain `=`, or for a `+=` onto nothing.
+    fn appended_attributed_value(
+        &mut self,
+        name: &str,
+        cur: Option<String>,
+        val: String,
+        append: bool,
+    ) -> Option<String> {
+        let val = self.apply_value_attrs(name, val)?;
+        if !append {
+            return Some(val);
+        }
+        if self.integer_attr.contains(name) {
+            let cur = cur
+                .and_then(|s| s.trim().parse::<i64>().ok())
+                .unwrap_or_default();
+            // `apply_value_attrs` has already reduced `val` to a decimal integer.
+            let add = val.parse::<i64>().unwrap_or_default();
+            return Some(cur.wrapping_add(add).to_string());
+        }
+        Some(match cur {
+            Some(mut cur) => {
+                cur.push_str(&val);
+                cur
+            }
+            None => val,
+        })
     }
 
     /// Where a plain scalar write to `name` lands once nameref chains are
@@ -6990,25 +7034,30 @@ impl Shell {
         });
     }
 
-    /// Emit the collected `set -x` line for compound assignment `a` and stop
-    /// collecting, so a later failure cannot add to it.
+    /// Mark the end of compound assignment `a`'s *word-expansion* pass, before any
+    /// of its elements is bound. Two things happen at that instant.
     ///
-    /// Called at the point each literal's *expansion* is complete, which is where
-    /// bash traces: after the `++` lines of any command substitution inside the
-    /// literal, but before the binding — so a bad `-i` value or an unsubscripted
-    /// element of an associative literal is diagnosed *after* the operand's line.
-    /// A literal whose expansion failed is never traced at all (bash emits no line
-    /// for `declare -a f=(x $((1/0)))`), which falls out of the early returns on
-    /// the expansion-failure paths never reaching here.
-    fn flush_xtrace_compound(&mut self, a: &Assignment) {
+    /// It is where bash traces the literal: after the `++` lines of any command
+    /// substitution inside it, but before the binding — so a bad `-i` value or an
+    /// unsubscripted element of an associative literal is diagnosed *after* the
+    /// operand's line. Emitting the collected line here (and clearing the
+    /// collector) also means a literal whose expansion failed is never traced at
+    /// all, matching bash's silence for `declare -a f=(x $((1/0)))`: those paths
+    /// return before reaching here.
+    ///
+    /// It is also the boundary between the two failure regimes a declaration
+    /// builtin's operand has (see `exec_declare_with_arrays`): a failure *before*
+    /// this point leaves the name completely untouched, while one after it keeps
+    /// whatever bound first. `compound_expanded` carries that distinction back to
+    /// the caller, so it is recorded whether or not `set -x` is on.
+    fn compound_expansion_done(&mut self, a: &Assignment) {
+        self.compound_expanded = true;
         let Some(buf) = self.xtrace_compound.take() else {
             return;
         };
         let prefix = self.xtrace_prefix();
         let op = if a.append { "+=" } else { "=" };
-        self.emit_stderr(
-            format!("{prefix}{}{op}({})\n", a.name, buf.join(" ")).as_bytes(),
-        );
+        self.emit_stderr(format!("{prefix}{}{op}({})\n", a.name, buf.join(" ")).as_bytes());
     }
 
     /// Apply a variable assignment. `trace` is true only for a *bare* assignment
@@ -7392,7 +7441,14 @@ impl Shell {
                         if let Some(buf) = self.xtrace_compound.as_mut() {
                             buf.extend(words.iter().map(|w| xtrace_compound_quote(w)));
                         }
-                        self.flush_xtrace_compound(a);
+                        self.compound_expansion_done(a);
+                    } else if self.decl_builtin_ctx {
+                        // As a declaration builtin's operand the flattening is part
+                        // of the command's word expansion, so a failure there aborts
+                        // the command before any pair is bound — measured,
+                        // `declare -A d+=(pk pv j$((a+)) x)` leaves `d` untouched
+                        // where the bare `d+=(…)` below keeps `d[pk]=pv`.
+                        return false;
                     }
                     let mut it = words.into_iter();
                     while let Some(key) = it.next() {
@@ -7411,44 +7467,60 @@ impl Shell {
                         // below never happens and the table is left as it was.
                         return false;
                     }
-                } else {
+                } else if self.decl_builtin_ctx {
+                    // Subscript mode as a *declaration builtin's operand*. bash
+                    // performs this assignment inside the command's word-expansion
+                    // pass: the whole element list is expanded first, and only then
+                    // are the elements processed. So a failure anywhere in the
+                    // expansion aborts before *any* element is bound and before any
+                    // element is diagnosed — measured, `declare -A d=([a]=1 [b]=$((1/0)) loose)`
+                    // leaves `d` untouched and reports only the division, where the
+                    // interleaved shape below would have bound `[a]` and named
+                    // `loose`.
+                    let mut elems: Vec<(Option<String>, String)> = Vec::new();
                     for e in items {
                         match e {
                             ArrayElem::Keyed { index, value } => {
                                 let key = self.expand_to_string(index);
                                 let val = self.expand_to_string(value);
-                                // Element by element here too: an append has
-                                // already bound the earlier pairs, and a
-                                // non-append drops `pending` with the swap.
                                 bail_if_expansion_failed!();
                                 self.xtrace_compound_elem(Some(&key), &val);
-                                let Some(val) = self.apply_value_attrs(&a.name, val) else {
-                                    return false;
-                                };
-                                if a.append {
-                                    self.assoc_set(&a.name, key, val, false);
-                                } else {
-                                    pending.push((key, val));
-                                }
+                                elems.push((Some(key), val));
                             }
                             ArrayElem::Positional(w) => {
                                 let word = self.expand_to_string(w);
+                                bail_if_expansion_failed!();
                                 self.xtrace_compound_elem(None, &word);
-                                // bash quotes the offending word only when the
-                                // literal came from a `declare`/`local` operand
-                                // (which the builtin re-parses); a bare `m=(…)`
-                                // compound assignment names it unquoted.
-                                let shown = if self.decl_builtin_ctx {
-                                    format!("'{word}'")
-                                } else {
-                                    word
-                                };
-                                self.errln(&format!(
-                                    "{}{}: {shown}: must use subscript when assigning associative array",
-                                    self.err_prefix(),
-                                    a.name
-                                ));
+                                elems.push((None, word));
                             }
+                        }
+                    }
+                    // Expansion is complete, so the operand's `set -x` line goes out
+                    // here — before the processing pass, whose diagnostics bash
+                    // likewise reports after it.
+                    self.compound_expansion_done(a);
+                    for (key, val) in elems {
+                        if !self.assoc_keyed_element(a, &mut pending, key, val) {
+                            return false;
+                        }
+                    }
+                } else {
+                    // A *bare* compound assignment expands and processes one element
+                    // at a time, which is observable: `d+=([a]=1 loose [b]=$((1/0)))`
+                    // leaves `d[a]` set and reports `loose` *before* the division,
+                    // so the interleaving has to be preserved here.
+                    for e in items {
+                        let (key, val) = match e {
+                            ArrayElem::Keyed { index, value } => {
+                                let key = self.expand_to_string(index);
+                                let val = self.expand_to_string(value);
+                                (Some(key), val)
+                            }
+                            ArrayElem::Positional(w) => (None, self.expand_to_string(w)),
+                        };
+                        bail_if_expansion_failed!();
+                        if !self.assoc_keyed_element(a, &mut pending, key, val) {
+                            return false;
                         }
                     }
                 }
@@ -7461,7 +7533,7 @@ impl Shell {
                 // one shape this still gets out of order: an unsubscripted element
                 // in subscript mode is diagnosed mid-loop, so its message beats
                 // this line where bash's follows it.
-                self.flush_xtrace_compound(a);
+                self.compound_expansion_done(a);
                 // The literal (even the empty `m=()`) gives the array a value —
                 // recorded here rather than on entry, so an assignment abandoned
                 // by a failed expansion leaves an unvalued array unvalued.
@@ -7522,7 +7594,7 @@ impl Shell {
                 bail_if_expansion_failed!();
                 // Expansion is complete, so this is where bash traces the operand
                 // — before the binding, whose own failures are reported after it.
-                self.flush_xtrace_compound(a);
+                self.compound_expansion_done(a);
                 // The literal (even the empty `a=()`) gives the array a value —
                 // recorded here rather than before phase 1, so an assignment
                 // abandoned by a failed expansion leaves an unvalued array
@@ -7567,6 +7639,50 @@ impl Shell {
                     next = at.saturating_add(1);
                 }
             }
+        }
+        true
+    }
+
+    /// Process one already-expanded element of an associative literal in *subscript*
+    /// mode (`m=([k]=v …)`): bind it, or report the unsubscripted-element error.
+    ///
+    /// `key` is `None` for an element written without a subscript, which subscript
+    /// mode rejects (the first element having chosen the mode for the whole list).
+    /// A non-append literal accumulates into `pending` so the table can be swapped
+    /// in whole; an append binds in place.
+    ///
+    /// Returns `false` when a bad `-i` value abandons the assignment.
+    fn assoc_keyed_element(
+        &mut self,
+        a: &Assignment,
+        pending: &mut Vec<(String, String)>,
+        key: Option<String>,
+        val: String,
+    ) -> bool {
+        let Some(key) = key else {
+            // bash quotes the offending word only when the literal came from a
+            // `declare`/`local` operand (which the builtin re-parses); a bare
+            // `m=(…)` compound assignment names it unquoted.
+            let shown = if self.decl_builtin_ctx {
+                format!("'{val}'")
+            } else {
+                val
+            };
+            self.errln(&format!(
+                "{}{}: {shown}: must use subscript when assigning associative array",
+                self.err_prefix(),
+                a.name
+            ));
+            // Not fatal: bash skips the element, binds the rest and reports 0.
+            return true;
+        };
+        let Some(val) = self.apply_value_attrs(&a.name, val) else {
+            return false;
+        };
+        if a.append {
+            self.assoc_set(&a.name, key, val, false);
+        } else {
+            pending.push((key, val));
         }
         true
     }
@@ -8279,10 +8395,17 @@ impl Shell {
         }
     }
 
-    /// Attribute-flag letters for a variable, in `declare -p` order: the kind
-    /// (`a` indexed / `A` associative) followed by `n` (nameref), `i` (integer),
-    /// `l` (lower), `u` (upper), `r` (readonly), `x` (exported). Empty when the
-    /// variable has no attributes. Shared by the `${var@a}` transform.
+    /// Attribute-flag letters for a variable, in bash's reporting order — which is
+    /// the order of its internal attribute table, not the order the flags were
+    /// given: the kind (`a` indexed / `A` associative), then `n` (nameref),
+    /// `i` (integer), `r` (readonly), `x` (exported), and last the case-folding
+    /// trio `l`/`u`/`c`, which sits *after* `r`/`x` (measured: `declare -alrx v`
+    /// reports `-arxl`, `declare -lx s` reports `-xl`, `declare -cx s` reports
+    /// `-xc`). Empty when the variable has no attributes.
+    ///
+    /// One builder for every consumer — `declare -p`, `readonly -p`, `${var@a}`
+    /// and `${var@A}` all use the same order in bash, and the order had already
+    /// drifted apart once while it was written out twice.
     fn attr_flag_letters(&self, name: &str) -> String {
         let mut s = String::new();
         if self.assoc.contains_key(name) {
@@ -8296,19 +8419,20 @@ impl Shell {
         if self.integer_attr.contains(name) {
             s.push('i');
         }
-        if self.lower_attr.contains(name) {
-            s.push('l');
-        }
-        if self.upper_attr.contains(name) {
-            s.push('u');
-        }
         if self.readonly.contains(name) {
             s.push('r');
         }
         if self.exported.contains(name) {
             s.push('x');
         }
-        // bash orders the capitalize flag after i/r/x (`-ic`→`ic`, `-cx`→`xc`).
+        // Only one of the three can be in force at a time (they cancel each other
+        // out), so their relative order is unobservable.
+        if self.lower_attr.contains(name) {
+            s.push('l');
+        }
+        if self.upper_attr.contains(name) {
+            s.push('u');
+        }
         if self.capcase_attr.contains(name) {
             s.push('c');
         }
@@ -8656,8 +8780,7 @@ impl Shell {
     /// empty string.
     fn transform_assign(&mut self, name: &str, index: &Option<Box<Word>>) -> String {
         if self.assoc.contains_key(name) || self.arrays.contains_key(name) {
-            let kind = if self.assoc.contains_key(name) { "A" } else { "a" };
-            let flags = self.declare_attr_flags(name, kind);
+            let flags = self.declare_attr_flags(name);
             return match self.param_elem_value(name, index) {
                 Some(v) => format!("declare {flags} {name}={}", shell_quote(&v)),
                 None => format!("declare {flags} {name}"),
@@ -8677,7 +8800,7 @@ impl Shell {
         // scalar forms single-quote the value: bash's `@A` uses sh_single_quote
         // here, unlike `declare -p`, which double-quotes.
         if attributed {
-            format!("declare {} {name}={}", self.declare_attr_flags(name, ""), shell_quote(v))
+            format!("declare {} {name}={}", self.declare_attr_flags(name), shell_quote(v))
         } else {
             format!("{name}={}", shell_quote(v))
         }
@@ -18866,33 +18989,10 @@ impl Shell {
     /// Format one variable's `declare` definition, or `None` if it is unset.
     /// Attribute flags (`-r` readonly, `-x` exported, `-a`/`-A` array kind) are
     /// combined into a single flag group, e.g. `declare -rx name="v"`.
-    /// Build the `declare` attribute-flag string for `name` (e.g. `-ir`, `-A`,
-    /// `--` when there are none). `kind` seeds the collection-type letter
-    /// (`"A"`/`"a"` for assoc/indexed arrays, `""` for a scalar).
-    fn declare_attr_flags(&self, name: &str, kind: &str) -> String {
-        let mut s = String::from(kind);
-        if self.nameref_attr.contains(name) {
-            s.push('n');
-        }
-        if self.integer_attr.contains(name) {
-            s.push('i');
-        }
-        if self.lower_attr.contains(name) {
-            s.push('l');
-        }
-        if self.upper_attr.contains(name) {
-            s.push('u');
-        }
-        if self.readonly.contains(name) {
-            s.push('r');
-        }
-        if self.exported.contains(name) {
-            s.push('x');
-        }
-        // bash orders `-c` after i/r/x (`declare -rc`, `declare -xc`, `declare -ic`).
-        if self.capcase_attr.contains(name) {
-            s.push('c');
-        }
+    /// Build the `declare` attribute-flag *group* for `name` — the letters from
+    /// [`Shell::attr_flag_letters`] behind a `-`, or `--` when there are none.
+    fn declare_attr_flags(&self, name: &str) -> String {
+        let s = self.attr_flag_letters(name);
         if s.is_empty() { "--".to_string() } else { format!("-{s}") }
     }
 
@@ -18900,24 +19000,24 @@ impl Shell {
         if self.assoc.contains_key(name) {
             return self
                 .format_var_assignment(name)
-                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name, "A")));
+                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name)));
         }
         if self.arrays.contains_key(name) {
             return self
                 .format_var_assignment(name)
-                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name, "a")));
+                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name)));
         }
         if self.vars.contains_key(name) {
             return self
                 .format_var_assignment(name)
-                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name, "")));
+                .map(|body| format!("declare {} {body}", self.declare_attr_flags(name)));
         }
         if self.declared.contains(name) {
             // Declared without a value: the name exists, so it is reported —
             // with its attributes, or `--` if it has none — even though it is
             // unset and so has nothing to print on the right of an `=`. See
             // [`Shell::declared`].
-            return Some(format!("declare {} {name}", self.declare_attr_flags(name, "")));
+            return Some(format!("declare {} {name}", self.declare_attr_flags(name)));
         }
         // Scalar dynamic special variables (`BASHPID`, `RANDOM`, …) have no
         // entry in `self.vars` but still respond to `declare -p NAME` in bash —
@@ -19390,10 +19490,14 @@ impl Shell {
                     let ok = self.apply_assignment(&assignment, false);
                     self.decl_builtin_ctx = saved_decl_ctx;
                     if self.discard_error.is_some() {
-                        // Malformed subscript/value expression: the command
-                        // driver discards the command; skip export/readonly
-                        // for this argument.
-                        continue;
+                        // Malformed subscript/value expression: the command driver
+                        // discards the command, so this operand's export/readonly is
+                        // skipped — and so is every operand after it, since bash's
+                        // arithmetic error jumps straight out of the builtin
+                        // (`declare -ai a[0]=2+ ok=1` leaves `ok` unset). The array
+                        // is left valued-but-empty, as bash reports it.
+                        self.array_valued.insert(base_name.to_string());
+                        break;
                     }
                     if !ok {
                         status = 1;
@@ -19447,48 +19551,60 @@ impl Shell {
                         {
                             self.apply_assignment(assignment, false);
                         }
-                    } else if assoc {
-                        self.assoc_set(name, "0".to_string(), v, append);
                     } else {
-                        self.array_valued.insert(name.to_string());
-                        let arr = self.arrays.entry(name.to_string()).or_default();
-                        if append {
-                            arr.entry(0).or_default().push_str(&v);
+                        // The element the scalar operand binds gets the name's
+                        // value attributes, exactly as a scalar variable would:
+                        // `declare -al a=QQ` stores `qq`, `declare -ai a=2+3`
+                        // stores `5`, and `declare -ai a+=3` onto a `5` stores `8`
+                        // rather than `53`.
+                        let cur = if append { self.scalar_store(name) } else { None };
+                        let Some(stored) = self.appended_attributed_value(name, cur, v, append)
+                        else {
+                            // A bad `-i` value leaves the array *valued but empty*
+                            // (`declare -ai a=2+` reports `declare -ai a=()`) and
+                            // abandons every operand after it: bash's arithmetic
+                            // error jumps straight out of the builtin, so
+                            // `declare -ai bad=2+ ok=1` leaves `ok` unset.
+                            self.array_valued.insert(name.to_string());
+                            break;
+                        };
+                        if assoc {
+                            self.assoc_set(name, "0".to_string(), stored, false);
                         } else {
-                            arr.insert(0, v);
+                            self.array_valued.insert(name.to_string());
+                            self.arrays
+                                .entry(name.to_string())
+                                .or_default()
+                                .insert(0, stored);
                         }
                     }
                 } else if self.integer_attr.contains(name) {
                     // Integer attribute: the initializer is an arithmetic
                     // expression, evaluated and stored as its decimal value. With
                     // `+=`, the result is added to the current numeric value. A
-                    // bad expression is fatal (bash aborts the shell) — see
-                    // `eval_int_assign`; `run_builtin` turns the flag into an exit.
-                    if let Some(n) = self.eval_int_assign(&v) {
-                        let n = if append {
-                            let cur = self
-                                .vars
-                                .get(name)
-                                .and_then(|s| s.trim().parse::<i64>().ok())
-                                .unwrap_or(0);
-                            cur.wrapping_add(n)
-                        } else {
-                            n
-                        };
-                        self.vars.insert(name.to_string(), n.to_string());
+                    // bad expression discards the command (`eval_int_assign` arms
+                    // the flag, which `run_builtin` turns into the discard) and
+                    // leaves the name created-but-unset, which is what bash reports
+                    // afterwards: `declare -i n=2+` then `declare -p n` gives
+                    // `declare -i n`.
+                    let cur = if append { self.vars.get(name).cloned() } else { None };
+                    match self.appended_attributed_value(name, cur, v, append) {
+                        Some(stored) => {
+                            self.vars.insert(name.to_string(), stored);
+                        }
+                        None => {
+                            self.declared.insert(name.to_string());
+                            break;
+                        }
                     }
                 } else {
-                    // Case attribute (`-l`/`-u`), if any, folds the value. With
-                    // `+=`, the (folded) value is appended to the current string.
-                    let folded = self.fold_case_attr(name, v);
-                    let stored = if append {
-                        let mut cur = self.vars.get(name).cloned().unwrap_or_default();
-                        cur.push_str(&folded);
-                        cur
-                    } else {
-                        folded
-                    };
-                    self.vars.insert(name.to_string(), stored);
+                    // Case attribute (`-l`/`-u`/`-c`), if any, folds the value; with
+                    // `+=` the folded value is appended to the current string. No
+                    // `-i`, so the arithmetic arm of the helper cannot fail here.
+                    let cur = if append { self.vars.get(name).cloned() } else { None };
+                    if let Some(stored) = self.appended_attributed_value(name, cur, v, append) {
+                        self.vars.insert(name.to_string(), stored);
+                    }
                 }
             } else if !self.vars.contains_key(name)
                 && !self.arrays.contains_key(name)
@@ -19699,6 +19815,19 @@ impl Shell {
             if make_local {
                 self.declare_local(&a.name);
             }
+            // The kind and the value attributes have to go on before the literal
+            // binds (the kind picks the binding branch, and `-i`/`-l` transform each
+            // element as it is stored), i.e. before it is known whether the value
+            // will even expand. bash applies them at that point too — a *readonly*
+            // target still gets them (`readonly rs=1; declare -a rs=(2)` leaves
+            // `declare -ar rs=([0]="1")`) — but a failed *expansion* leaves the name
+            // exactly as it was, not even created: `sc=hello; declare -a sc=(x
+            // $((1/0)))` keeps `declare -- sc="hello"` and `declare -ail nf=(2+3
+            // $((1/0)))` leaves `nf` unset. Snapshot the name here — after the
+            // `local` shadow, so restoring undoes only what *this operand* did — so
+            // that one case can be rolled back; every other outcome keeps what was
+            // applied.
+            let snap = self.snapshot_var(&a.name);
             // An array's kind is fixed once set: bash refuses to reinterpret an
             // existing array under the other kind, because the two index spaces
             // have no meaningful mapping. Without this guard `declare -A` on an
@@ -19768,7 +19897,7 @@ impl Shell {
             self.decl_builtin_ctx = true;
             // Under `set -x` the operand gets its own trace line, rendered from the
             // *expanded* fields — which only exist during the expansion below — and
-            // emitted by `flush_xtrace_compound` at the point expansion completes.
+            // emitted by `compound_expansion_done` at the point expansion completes.
             // Arm the collector here; a buffer still present afterwards means the
             // expansion failed before the flush point, and bash emits no line at
             // all in that case, so it is simply dropped.
@@ -19776,7 +19905,11 @@ impl Shell {
             if self.xtrace {
                 self.xtrace_compound = Some(Vec::new());
             }
+            // The same call marks which of the operand's two passes a failure came
+            // from, which decides whether the name is rolled back below.
+            let saved_expanded = std::mem::replace(&mut self.compound_expanded, false);
             let bound = self.apply_assignment(a, false);
+            let expanded = std::mem::replace(&mut self.compound_expanded, saved_expanded);
             self.xtrace_compound = saved_xtrace_compound;
             self.decl_builtin_ctx = saved_decl_ctx;
             // A word-expansion error inside the operand ends the command the same
@@ -19788,23 +19921,40 @@ impl Shell {
             // expansion check in `exec_simple_inner`, which then discarded a command
             // bash runs normally (`declare -a f=(x $((1/0))); declare -p f` ate the
             // `declare -p`, and under `set -x` it ate the `set +x`).
-            if let Some(pat) = self.glob_error.take() {
+            let expansion_failure = if let Some(pat) = self.glob_error.take() {
                 self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
                 self.discard_error = None;
                 self.last_status = 1;
-                return Flow::Discard;
-            }
-            // A nounset reference, a `${var:?}` or a bad substitution is fatal
-            // instead, with the status the flag carries (127 vs. 1).
-            if let Some(code) = self.unbound_error.take() {
+                Some(Flow::Discard)
+            } else if let Some(code) = self.unbound_error.take() {
+                // A nounset reference, a `${var:?}` or a bad substitution is fatal
+                // instead, with the status the flag carries (127 vs. 1).
                 self.discard_error = None;
                 let status = self.fatal_abort_status(code);
                 self.last_status = status;
-                return Flow::Exit(status);
-            }
-            if let Some(code) = self.discard_error.take() {
+                Some(Flow::Exit(status))
+            } else if let Some(code) = self.discard_error.take() {
                 self.last_status = code;
-                return Flow::Discard;
+                Some(Flow::Discard)
+            } else {
+                None
+            };
+            if let Some(flow) = expansion_failure {
+                // A failure in the *expansion* pass rolls the name back to its
+                // pre-operand state: bash computes the whole value before touching
+                // the variable, so nothing is left behind — the kind and value
+                // attributes applied above are undone, and a name that did not exist
+                // stays non-existent rather than being created empty
+                // (`sc=hello; declare -a sc=(x $((1/0)))` keeps
+                // `declare -- sc="hello"`; `declare -ail nf=(2+3 $((1/0)))` leaves
+                // `nf` unset). A failure in the *binding* pass keeps what bound
+                // first, attributes included, because by then the variable really has
+                // been written: `declare -ai b=([0]=1 [1]=2+ [2]=3)` leaves
+                // `declare -ai b=([0]="1")`.
+                if !expanded {
+                    self.restore_var(&a.name, snap);
+                }
+                return flow;
             }
             // A rejected compound operand (the readonly guard in
             // `apply_assignment`, which has already emitted its diagnostic) ends
@@ -19942,7 +20092,7 @@ impl Shell {
                     None => {
                         listing.push_str(&format!(
                             "declare {} {name}\n",
-                            self.declare_attr_flags(name, "")
+                            self.declare_attr_flags(name)
                         ));
                     }
                 }
@@ -35586,8 +35736,31 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("readonly r=1; echo \"${r@a}\"").0, "r\n");
         assert_eq!(run("export e=1; echo \"${e@a}\"").0, "x\n");
         assert_eq!(run("declare -l lo=X; echo \"${lo@a}\"").0, "l\n");
-        // Combined attributes render in declare -p order (kind, n, i, l, u, r, x).
+        // Combined attributes render in bash's reporting order — the kind, then
+        // `n`, `i`, `r`, `x`, and last the case-folding trio `l`/`u`/`c` — not in
+        // the order the flags were written.
         assert_eq!(run("declare -ir z=5; echo \"${z@a}\"").0, "ir\n");
+        assert_eq!(run("declare -alrx v=A; echo \"${v@a}\"").0, "arxl\n");
+        assert_eq!(run("declare -aurx v=(A); echo \"${v@a}\"").0, "arxu\n");
+        assert_eq!(run("declare -lx s=q; echo \"${s@a}\"").0, "xl\n");
+        assert_eq!(run("declare -Acrx m; echo \"${m@a}\"").0, "Arxc\n");
+        // `declare -p`, `readonly -p` and `${v@A}` share the one builder, so they
+        // agree with it.
+        assert_eq!(
+            run("declare -alrx v=A; declare -p v").0,
+            "declare -arxl v=([0]=\"a\")\n"
+        );
+        assert_eq!(
+            run("declare -alrx v=A; echo \"${v@A}\"").0,
+            "declare -arxl v='a'\n"
+        );
+        // `readonly -p` shares it too (its listing also carries the shell's own
+        // readonly variables, so only the new name is asserted here).
+        assert!(
+            run("declare -irx q=5; readonly -p")
+                .0
+                .contains("declare -irx q=\"5\"\n")
+        );
         // A plain scalar has no attribute flags.
         assert_eq!(run("p=1; echo \"[${p@a}]\"").0, "[]\n");
     }
@@ -38264,12 +38437,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "declare -a h=([0]=\"1\")\nj=1\n"
         );
         // Same for an associative operand, whose branch takes a different path.
-        // (What that operand leaves *bound* is TD-OILS-DECL-COMPOUND-NO-BIND-ON-FAIL;
-        // here the point is only that the `echo` on the next line still runs.)
         let (o1, _) = run(
             "declare -A m\nm=([z]=old)\ndeclare -A m+=([a]=1 [b]=$((1/0)))\necho \"st=$?\"\ndeclare -p m",
         );
-        assert!(o1.starts_with("st=1\ndeclare -A m=([z]=\"old\""), "{o1:?}");
+        assert_eq!(o1, "st=1\ndeclare -A m=([z]=\"old\" )\n");
         // The leak was loudest under `set -x`, where the eaten command was the
         // `set +x` meant to stop the tracing. `exec 2>&1` rather than a `{ … }`
         // group, because the discard legitimately takes out the rest of a group
@@ -38284,6 +38455,114 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o3, rc3) = run("set -u\ndeclare -a k=($NOPE)\necho never");
         assert_eq!(o3, "");
         assert_eq!(rc3, 1, "a subshell-less script exits nounset's status");
+    }
+
+    #[test]
+    fn a_failed_operand_expansion_leaves_its_name_exactly_as_it_was() {
+        // A compound operand's value is computed in full before the variable is
+        // touched, so an expansion failure leaves *nothing* behind — not the value,
+        // not the array kind, not the value attributes, and not even the name. osh
+        // used to apply the kind and the attributes on the way in, so a failed
+        // operand converted a scalar to an array and created names out of nothing.
+        //
+        // An existing scalar keeps being a scalar with its old value.
+        assert_eq!(
+            run("sc=hello\ndeclare -a sc=(x $((1/0)))\ndeclare -p sc").0,
+            "declare -- sc=\"hello\"\n"
+        );
+        // A name that did not exist stays non-existent, rather than becoming an
+        // empty `declare -ail`.
+        assert_eq!(
+            run("declare -ail nf=(2+3 $((1/0)))\ndeclare -p nf 2>/dev/null; echo \"nf=$?\"").0,
+            "nf=1\n"
+        );
+        // An existing *array* keeps its old elements and its old attribute set: the
+        // `-l` of the failing declaration does not stick either.
+        assert_eq!(
+            run("declare -a ea=(AB)\ndeclare -al ea=(CD $((1/0)))\ndeclare -p ea").0,
+            "declare -a ea=([0]=\"AB\")\n"
+        );
+        // Same for an associative operand in either of its two modes.
+        assert_eq!(
+            run("declare -A pm=([z]=old)\ndeclare -A pm=(k v j$((1/0)) x)\ndeclare -p pm").0,
+            "declare -A pm=([z]=\"old\" )\n"
+        );
+        assert_eq!(
+            run("declare -A sm\ndeclare -Au sm=([a]=b [c]=$((1/0)))\ndeclare -p sm").0,
+            // Still *unvalued*, as a bare `declare -A sm` leaves it: the abandoned
+            // literal did not even count as giving the array a value.
+            "declare -A sm\n"
+        );
+        // A failure in the *binding* pass is the other regime: by then the variable
+        // really has been written, so what bound first stays, attributes included.
+        // `-i` evaluates each element as it is stored, so `2+` fails at element 1
+        // with element 0 already in place.
+        assert_eq!(
+            run("declare -ai bp=([0]=1 [1]=2+ [2]=3) 2>/dev/null\ndeclare -p bp").0,
+            "declare -ai bp=([0]=\"1\")\n"
+        );
+        // And a *readonly* target is a third: bash applies the kind and the value
+        // attributes there, because the rejection happens at the store rather than
+        // during the expansion.
+        assert_eq!(
+            run("readonly rs=1\ndeclare -a rs=(2) 2>/dev/null\ndeclare -p rs").0,
+            "declare -ar rs=([0]=\"1\")\n"
+        );
+    }
+
+    #[test]
+    fn a_scalar_operand_of_an_array_declaration_gets_the_value_attributes() {
+        // `declare -a name=word` binds `word` at index/key 0 — and the value
+        // attributes apply to it exactly as they would to a scalar. osh used to
+        // store the raw word, so `-l`/`-u`/`-c`/`-i` were silently skipped whenever
+        // the array kind was also given.
+        assert_eq!(
+            run("declare -al a=QQ; declare -p a").0,
+            "declare -al a=([0]=\"qq\")\n"
+        );
+        assert_eq!(
+            run("declare -Au a=qq; declare -p a").0,
+            "declare -Au a=([0]=\"QQ\" )\n"
+        );
+        assert_eq!(
+            run("declare -ac a=hELLO; declare -p a").0,
+            "declare -ac a=([0]=\"Hello\")\n"
+        );
+        assert_eq!(
+            run("declare -ai a=2+3; declare -p a").0,
+            "declare -ai a=([0]=\"5\")\n"
+        );
+        // `-i` beats the case attributes, as it does for a scalar: `Q` is an
+        // (unset) variable name in arithmetic, so it evaluates to 0.
+        assert_eq!(
+            run("declare -ail a=Q; declare -p a").0,
+            "declare -ail a=([0]=\"0\")\n"
+        );
+        // `+=` follows the attribute too: numeric addition under `-i`, and a
+        // concatenation of the *folded* text otherwise.
+        assert_eq!(
+            run("declare -ai a=5; declare -ai a+=3; declare -p a").0,
+            "declare -ai a=([0]=\"8\")\n"
+        );
+        assert_eq!(
+            run("declare -al a=AB; declare -al a+=CD; declare -p a").0,
+            "declare -al a=([0]=\"abcd\")\n"
+        );
+        assert_eq!(
+            run("declare -au a=(x); declare -au a+=yy; declare -p a").0,
+            "declare -au a=([0]=\"XYY\")\n"
+        );
+        // A bad `-i` value discards the command (as it does for a scalar), leaves
+        // the array *valued but empty*, and abandons every operand after it.
+        let (o, _) = run("declare -ai bad=2+ ok=1 2>/dev/null\ndeclare -p bad\ndeclare -p ok 2>/dev/null; echo \"ok=$?\"");
+        assert_eq!(o, "declare -ai bad=()\nok=1\n");
+        // The same for a *scalar* declaration, where the name is left
+        // created-but-unset rather than valued-empty.
+        let (o2, _) = run("declare -i bad=2+ ok=1 2>/dev/null\ndeclare -p bad\ndeclare -p ok 2>/dev/null; echo \"ok=$?\"");
+        assert_eq!(o2, "declare -i bad\nok=1\n");
+        // And for a subscripted operand.
+        let (o3, _) = run("declare -ai b[0]=2+ ok=1 2>/dev/null\ndeclare -p b\ndeclare -p ok 2>/dev/null; echo \"ok=$?\"");
+        assert_eq!(o3, "declare -ai b=()\nok=1\n");
     }
 
     #[test]

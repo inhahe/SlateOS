@@ -4050,10 +4050,11 @@ impl Shell {
     /// [`Flow::Next`] already does here — *is* the whole effect, so only the
     /// status can differ, and only `-c` differs from a plain syntax error.
     ///
-    /// Not modelled: under `set -e` bash reports 2 for every one of these and
-    /// also drops the echoed source line from the diagnostic, which it does for
-    /// *all* syntax errors under errexit — a separate divergence, tracked as
-    /// `TD-OILS-SYNTAX-ERR-ERREXIT-ECHO`.
+    /// Under `set -e` every one of these is worth **2** instead, because the
+    /// shell then leaves through errexit's own exit — which carries the syntax
+    /// error's `$?` of 2 — rather than through the fatality path that would
+    /// carry 127 or 1. errexit also drops the echoed source line from the
+    /// diagnostic; see [`Shell::format_parse_error`] for why that is consistent.
     fn parse_error_flow(&mut self, e: &crate::parser::ParseError) -> Flow {
         // A backtick body's own read-eval loop scores differently, because there
         // is no reader to unwind to and no invocation mode to key off: bash
@@ -4069,7 +4070,14 @@ impl Shell {
             self.last_status = 2;
             return Flow::Next;
         }
-        let code = if self.command_mode && self.subshell_depth == 0 {
+        // Errexit's exit wins over the invocation-mode status: it carries the
+        // syntax error's own `$?` of 2. This cannot fire inside a command
+        // substitution, where errexit is unset — which is why
+        // `-e -c 'x=$(eval "for")'` still scores the inner error 127-style and
+        // exits 2 only at the outer level, via the assignment's status.
+        let code = if self.errexit {
+            2
+        } else if self.command_mode && self.subshell_depth == 0 {
             127
         } else {
             1
@@ -22845,6 +22853,32 @@ impl Shell {
         {
             out.push_str(&format!("\n{prefix}`{text}'"));
         }
+        // Under **errexit** only the *first* line of the whole diagnostic
+        // survives, whatever its shape — the echoed source line, a follow-on
+        // `syntax error near …`, and a trailing `syntax error: unexpected end of
+        // file` are all dropped alike. That uniformity is what shows the rule is
+        // "stop after the first line" rather than "suppress the source echo":
+        // `[[ a b ]]` goes from three lines to one, and `[[ -n a` from two to
+        // one, even though neither of the dropped lines is a source echo.
+        //
+        // The test is the option's state at the moment the error is *reported*,
+        // which is what makes the behaviour consistent rather than arbitrary:
+        //
+        //   * `-c 'set -e; for'` keeps all its lines, because `set -e` and `for`
+        //     are one `;`-separated list and so are parsed together — `set -e`
+        //     has not run yet when the parse fails;
+        //   * the same two commands separated by a *newline* lose them, because
+        //     input is parsed and executed command by command, so `set -e` has
+        //     run by then. (The same reason a script file with `set -e` on its
+        //     first line loses them.)
+        //   * `-e -c 'x=$(eval "for")'` gets them back, because errexit is unset
+        //     inside a command substitution (see `inherit_errexit`), while
+        //     `-e -c '(eval "for")'` does not, because a plain subshell inherits
+        //     it. This last pair looks like a bash bug until you notice `$-`
+        //     really is `hBc` inside `$( … )`.
+        if self.errexit && let Some(nl) = out.find('\n') {
+            out.truncate(nl);
+        }
         out
     }
 
@@ -28098,6 +28132,47 @@ mod tests {
         // A runtime (non-parse) diagnostic must NOT gain the `-c:` token; that is
         // still driven by `err_prefix`, which omits it.
         assert_eq!(sh.err_prefix(), "osh: line 1: ");
+    }
+
+    #[test]
+    fn errexit_keeps_only_the_first_line_of_a_syntax_error() {
+        // bash truncates *every* syntax error to one line once errexit is on, and
+        // it is genuinely "stop after the first line" rather than "drop the source
+        // echo" — the lines lost below include a follow-on message and a trailing
+        // `unexpected end of file`, neither of which is an echo.
+        let mut sh = Shell::new();
+        sh.set_command_mode();
+        sh.set_interactive_shell(false);
+
+        // Each case: the source, then its full diagnostic, then the one line that
+        // survives errexit — which is always the full form's first line.
+        for src in ["echo hello world (", ":\n:\necho a | | b", "if true", "[[ a b ]]"] {
+            let e = parse(src).unwrap_err();
+            sh.errexit = false;
+            let full = sh.format_parse_error(&e, src, &LineMap::Offset(0));
+            sh.errexit = true;
+            let terse = sh.format_parse_error(&e, src, &LineMap::Offset(0));
+            assert_eq!(terse, full.split('\n').next().unwrap(), "{src:?}");
+            assert!(!terse.contains('\n'), "{src:?} -> {terse:?}");
+        }
+        sh.errexit = false;
+
+        // Spot-check one multi-line shape concretely, so a change in the *first*
+        // line cannot pass by agreeing with itself.
+        let src = "echo hello world (";
+        let e = parse(src).unwrap_err();
+        sh.errexit = true;
+        assert_eq!(
+            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            "osh: -c: line 1: syntax error near unexpected token `('"
+        );
+        // A diagnostic that is one line already is untouched.
+        let src = "if true";
+        let e = parse(src).unwrap_err();
+        assert_eq!(
+            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            "osh: -c: line 2: syntax error: unexpected end of file"
+        );
     }
 
     #[test]

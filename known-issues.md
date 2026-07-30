@@ -3644,7 +3644,7 @@ and compute their own offset the same way. Covered by
 nested body, the mid-construct `)` blame, and a process substitution for
 contrast) and `parser::an_eager_cmdsub_body_error_names_its_physical_line`.
 
-### TD-OILS-SYNTAX-ERR-ERREXIT-ECHO. bash drops the echoed source line from *every* syntax error once `set -e` is on, and forces the status to 2 — 2026-07-28 — OPEN
+### TD-OILS-SYNTAX-ERR-ERREXIT-ECHO. bash drops the echoed source line from *every* syntax error once `set -e` is on, and forces the status to 2 — 2026-07-28 — ✅ RESOLVED 2026-07-30
 
 **Where:** `userspace/oils/src/interp.rs` `Shell::format_parse_error` (the
 `syntax error near ` second line) and `Shell::parse_error_flow`.
@@ -3684,6 +3684,74 @@ want bug-for-bug parity here at all; if we do, the change belongs in
 `format_parse_error` (suppress the echo when `errexit`) and in
 `parse_error_flow` (status 2 when `errexit` and not inside a command
 substitution), and needs a corpus file of its own.
+
+**✅ RESOLVED 2026-07-30.** The assessment above was wrong on both counts, and
+re-measuring is what showed it. This is **not** a bash bug and it is **not**
+about the echoed source line.
+
+*It is not about the echo.* The rule is "**keep only the first line of the
+diagnostic**". Multi-line diagnostics discriminate the two models, and every one
+of them collapses to a single line:
+
+| source | plain | under errexit |
+|---|---|---|
+| `for` | message + echoed source line | message only |
+| `[[ -n a` | `unexpected EOF while looking for `]]'` + `syntax error: unexpected end of file` | first only |
+| `[[ a b ]]` | `conditional binary operator expected` + `syntax error near `b'` + echo | first only |
+| `[[ (` | `unexpected token `EOF' …` + `expected `)'` + `unexpected end of file` | first only |
+| `echo "` | one line | unchanged |
+
+Two of those dropped lines are follow-on *messages*, not echoes, so "suppress
+the source echo" cannot explain them.
+
+*It is not arbitrary.* The condition is simply errexit's state **at the moment
+the error is reported**, and every apparent inconsistency follows from that:
+
+* `-c 'set -e; for'` keeps all its lines — `set -e` and `for` are one
+  `;`-separated list, so they are parsed together and `set -e` has not run yet.
+  The same two commands on separate *lines* lose them, because input is parsed
+  and executed command by command. (`-e -c 'set +e; for'` is truncated for the
+  mirror-image reason.) This also disposes of the "`-e` changes how a parse
+  diagnostic is worded" objection: the option is read when the *report* is
+  emitted, not when the text is parsed.
+* the "tell" — `-e -c 'x=$(eval "for")'` getting the full form back while
+  `-e -c '(eval "for")'` does not — is because **errexit is not in effect inside
+  a command substitution**. Measured directly rather than guessed: `$-` is
+  `hBc` (no `e`) inside `$( … )` against `ehBc` inside `( … )`, `set -o` reports
+  `errexit off` there, and `-e -c 'x=$(false; echo reached)'` prints `reached`.
+  That is the default-off `inherit_errexit` shopt, which osh already modelled —
+  so this case needed no special-casing at all, and `shopt -s inherit_errexit`
+  makes the command substitution truncate like the subshell in both shells.
+* it is errexit *specifically*, not "any option": `-u`, `-x`, `-f`, `-n`, `-E`
+  and `-o pipefail` all leave the diagnostic alone; only `-e` / `-o errexit` do
+  this.
+
+*The status.* A syntax error's own `$?` is 2. Where a parse error is **fatal**
+(the command-substitution-body case, `TD-OILS-CMDSUB-ERR-FATALITY` item 2) the
+shell normally leaves by that fatality path carrying 127 (in `-c`) or 1; under
+errexit it leaves by errexit's own exit instead, which carries the 2. So the
+collapse is not a special case for parse errors — it is which of two exit
+mechanisms fires.
+
+**Fix shipped.** Two small changes, both keyed on `self.errexit`:
+
+* `interp.rs` `format_parse_error` — truncate the assembled diagnostic at its
+  first newline. Doing it at the end, after the echo has been appended, is what
+  makes one line of code cover all four shapes above.
+* `interp.rs` `parse_error_flow` — a fatal parse error scores 2 under errexit
+  instead of the invocation-mode 127/1. Nothing was needed for the
+  command-substitution case, since errexit is already unset there.
+
+**Tests.** `interp::tests::errexit_keeps_only_the_first_line_of_a_syntax_error`
+(asserts the terse form *equals the full form's first line* for four shapes, so
+it cannot drift) and `tests/corpus/errexit-syntax-error.sh` (both forms of each
+shape, the `;`-vs-newline timing pair, `set -e; set +e`, the command-substitution
+/ subshell / `inherit_errexit` trio, and the 127→2 collapse).
+
+**Left out of the corpus deliberately:** the `[[ -n a` pair, because osh blames a
+different line number for it than bash — the unrelated residue recorded under
+TD-OILS-CASE-PATTERN-EOF below. The unit test covers that shape instead, where
+the line number is not what is asserted.
 
 ### TD-OILS-CASE-PATTERN-EOF. `osh` blames end of file where bash blames the newline after an unterminated `case` pattern — 2026-07-28 — RESOLVED same day
 
@@ -8092,6 +8160,64 @@ three stages, both flavours, both append modes, plus the empty literal) and
 `tests/corpus/array-literal-partial.sh`. The corpus probes read *named* keys
 rather than `${!m[*]}`, because associative key order is bash's hash order and
 osh's insertion order — see TD-OILS-ASSOC-ORDER, which is not this bug.
+
+### BUG-OILS-HEREDOC-EOF-WARNING. An unterminated here-document produces no warning at all — 2026-07-30 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — the here-document body collection,
+which stops at end of input silently.
+
+**What.** When input runs out before a here-doc's delimiter is seen, bash is not
+silent: it warns, and then runs the command with the body it managed to collect.
+osh collects the same body and runs the same command, but says nothing.
+
+```
+$ bash -c 'cat <<EOF
+body'
+bash: line 2: warning: here-document at line 1 delimited by end-of-file (wanted `EOF')
+body
+$ osh -c 'cat <<EOF
+body'
+body
+```
+
+Everything except the warning already matches — the collected body, the exit
+status, and the ordering of the warning relative to the command's own output
+(the warning comes first, since it is emitted at parse time).
+
+**The two line numbers.** Both are needed and they are not the same thing:
+
+* the one in the prefix (`line 2:` above) is the line at which **input ran out**;
+* the one in the message (`at line 1`) is the line **whose newline began the
+  body** — i.e. one before the body's first line, which for a lone here-doc is
+  the operator's own line but for a *second* here-doc is the line of the first
+  one's terminator. `cat <<A <<B` / `one` / `A` / `two` warns
+  ``line 4: warning: here-document at line 3 delimited by end-of-file (wanted `B')``:
+  B's operator is on line 1, but its body began after line 3.
+
+A trailing newline on the input does not add a line: `cat <<EOF\nbody` and
+`cat <<EOF\nbody\n` both say `line 2`.
+
+**Measured shapes that all warn** (verified against MSYS bash 5.2, all
+byte-identical to osh apart from the missing warning): a bare `cat <<EOF`; a
+body with and without a trailing newline; a quoted delimiter `<<"EOF"`; the
+tab-stripping `<<-EOF`; a here-doc followed by another command on the same line
+(`cat <<EOF; echo after`); the second of two here-docs; and one inside an
+unterminated function body, where the warning precedes the resulting
+`syntax error: unexpected end of file`. A properly terminated here-doc warns not
+at all.
+
+**Proper fix.** The here-doc reader needs to report, when it hits end of input,
+the delimiter it wanted plus the two line numbers above. The body-start line has
+to be recorded when body collection *begins* (it cannot be recovered afterwards,
+which is why the second-here-doc case is the one to test against), and the
+end-of-input line is the lexer's current line at that point. Emitting it is a
+warning, not an error: parsing continues and the command still runs.
+
+**Impact.** A missing diagnostic only — no behavioural difference. Found while
+measuring TD-OILS-SYNTAX-ERR-ERREXIT-ECHO, which needed a single-line diagnostic
+to check that errexit leaves those alone; `cat <<EOF` was the example chosen, and
+it turned out to produce no line at all. Kept out of
+`tests/corpus/errexit-syntax-error.sh` for that reason.
 
 ### BUG-OILS-EMPTY-SUBSCRIPT. A lexically empty subscript `a[]` was read as index 0, and `${a[]}` was a fatal *parse* error that killed the script — ✅ RESOLVED 2026-07-30
 

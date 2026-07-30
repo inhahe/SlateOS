@@ -897,6 +897,19 @@ pub fn lex_word_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
     lx.read_word_verbatim(false)
 }
 
+/// Lex `src` as if it were the body of a double-quoted string that runs to the
+/// end of the input — for the strings bash expands in `Q_DOUBLE_QUOTES` context
+/// without any quotes actually delimiting them (`PS4` before each `set -x`
+/// line, and `${x@P}`). `$…`, `` `…` `` and the double-quote backslash escapes
+/// are live; a `"`, a `'` and any other backslash are literal.
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated substitution.
+pub fn lex_dquote_body(src: &str) -> Result<Vec<Seg>, LexError> {
+    let mut lx = Lexer::new(src, LexOpts::default());
+    lx.read_double_quote_until(false)
+}
+
 /// Lex the *replacement* of `${var/pat/repl}` verbatim, like
 /// [`lex_word_verbatim`] but preserving a literal backslash before `&` or `\`
 /// (`\&` and `\\`) so the replacement's `&`-scan can later distinguish an
@@ -2158,15 +2171,29 @@ impl Lexer {
     }
 
     fn read_double_quote(&mut self) -> Result<Vec<Seg>, LexError> {
+        self.read_double_quote_until(true)
+    }
+
+    /// Read the body of a double-quoted string. With `closed` the body ends at
+    /// the matching `"` (the normal case: reaching EOF first is an error); with
+    /// `closed` false it ends at EOF and a `"` is just another literal
+    /// character — which is how bash expands a string that is *implicitly* in
+    /// double-quote context rather than delimited by quotes (`Q_DOUBLE_QUOTES`:
+    /// `PS4`, `${x@P}`), where a bare `"` in the value stays a `"`.
+    fn read_double_quote_until(&mut self, closed: bool) -> Result<Vec<Seg>, LexError> {
         let open = self.cur_line();
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = String::new();
         loop {
             let Some(c) = self.peek() else {
-                return Err(eof_matching('"').at(open));
+                if closed {
+                    return Err(eof_matching('"').at(open));
+                }
+                flush_lit(&mut segs, &mut lit);
+                return Ok(segs);
             };
             match c {
-                '"' => {
+                '"' if closed => {
                     self.pos += 1;
                     flush_lit(&mut segs, &mut lit);
                     return Ok(segs);

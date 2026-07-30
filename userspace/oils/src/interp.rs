@@ -108,7 +108,7 @@ use crate::arith::{self, VarLookup};
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseTerm,
     CmdSubBody, Command,
-    CondBinOp,
+    CondBinOp, CondBinary, CondUnary,
     CondExpr,
     ForArithClause, ForClause, IfClause, LineMap, LoopClause, ParamOp, Pipeline, Program, Redirect,
     RedirectOp,
@@ -129,6 +129,13 @@ use crate::parser::{
 /// Oils sets these two variables under a `bash_compat` flag that defaults on
 /// for `osh`; see [`bash_compat_enabled`] for our equivalent per-session toggle.
 const BASH_VERSION: &str = "5.2.0(1)-release";
+
+/// Variables seeded with a default at startup that an inherited environment
+/// value *replaces* — bash's `set_if_not`. The default is only a fallback, and
+/// an inherited value keeps its exported attribute, so `PS4='> ' osh` traces
+/// with `> `. Contrast `IFS`, `UID` and friends, which bash resets
+/// unconditionally and never inherits.
+const SOFT_DEFAULT_VARS: &[&str] = &["PS4"];
 
 /// The input-source token bash tags a syntax error in a backtick body with —
 /// `bash: command substitution: line 3: …`. It replaces the `-c`/`eval` token
@@ -2104,6 +2111,14 @@ pub struct Shell {
     /// `set -x` (xtrace): print each simple command (prefixed `+ `) to stderr
     /// before executing it.
     xtrace: bool,
+    /// How many levels of *expansion* the shell is currently executing inside —
+    /// bash's `indirection_level`. Zero at the top level; a command
+    /// substitution (or a process substitution) adds one for the whole of its
+    /// body, nesting included. Every trace line repeats `PS4`'s first character
+    /// this many extra times, which is why `v=$(echo a)` traces `++ echo a` and
+    /// then `+ v=a`. A plain `( … )` subshell, a function call and a pipeline
+    /// are *not* expansions and do not count.
+    xtrace_level: usize,
     /// `set -f` (noglob): disable pathname (glob) expansion — patterns stay
     /// literal. Wired into the glob-expansion entry point.
     noglob: bool,
@@ -2680,6 +2695,7 @@ impl Shell {
             errexit: false,
             nounset: false,
             xtrace: false,
+            xtrace_level: 0,
             noglob: false,
             allexport: false,
             braceexpand: true,
@@ -2788,6 +2804,13 @@ impl Shell {
         // Seeded before `import_environment`, whose `or_insert` cannot override
         // it — matching bash, which always resets IFS and never inherits it.
         self.vars.insert("IFS".to_string(), " \t\n".to_string());
+        // PS4 is a real variable too, initialised to `+ ` — `declare -p PS4`
+        // shows it even in a non-interactive shell, and `set -x` reads it from
+        // there rather than from a hard-coded fallback. That distinction is
+        // observable: `unset PS4` leaves *no* prefix on a trace line, it does
+        // not revert to `+ `. Unlike IFS this is a soft default that an
+        // inherited value replaces — see [`SOFT_DEFAULT_VARS`].
+        self.vars.insert("PS4".to_string(), "+ ".to_string());
         // Platform identity strings bash always defines at startup. We report
         // SlateOS's own values (not the host build's), so scripts that branch on
         // `$OSTYPE`/`$MACHTYPE` see the target platform. bash leaves these as
@@ -3282,6 +3305,15 @@ impl Shell {
     /// base env. A name already defined in `vars` (e.g. set before import) is
     /// left untouched.
     pub fn import_environment(&mut self) {
+        // Drop the soft startup defaults the environment is about to supply, so
+        // the inherited value wins (and is marked exported) rather than losing
+        // to `or_insert`. bash seeds these with `set_if_not` for exactly this
+        // reason: `PS4='> ' osh -c 'set -x; :'` must trace with `> `.
+        for name in SOFT_DEFAULT_VARS {
+            if std::env::var_os(name).is_some() {
+                self.vars.remove(*name);
+            }
+        }
         for (k, v) in std::env::vars() {
             self.vars.entry(k.clone()).or_insert(v);
             self.exported.insert(k);
@@ -6090,17 +6122,72 @@ impl Shell {
 
     /// Evaluate a `[[ … ]]` conditional expression tree to a boolean.
     fn cond_eval(&mut self, e: &CondExpr) -> bool {
+        self.cond_eval_inverted(e, false)
+    }
+
+    /// Evaluate one node of a `[[ … ]]` tree, `invert` carrying a `!` that
+    /// applies to it.
+    ///
+    /// bash records a `!` as a flag on the node it binds to and consults the flag
+    /// where that node is evaluated — which is also where `set -x` prints the
+    /// term, so *which* node holds the flag is observable. `[[ ! x == y ]]`
+    /// traces `[[ ! x == y ]]`, because `!` binds to the primary; but
+    /// `[[ ! ( x == y ) ]]` traces `[[ x == y ]]` with no `!` at all, because
+    /// there the flag sits on the group — which is not a term and prints nothing
+    /// — and the primary inside it was never negated. A doubled `[[ ! ! x ]]`
+    /// cancels out, and prints neither.
+    fn cond_eval_inverted(&mut self, e: &CondExpr, invert: bool) -> bool {
         match e {
-            CondExpr::Word(w) => !self.expand_to_string(w).is_empty(),
-            // Parentheses only shaped the tree, which parsing already did.
-            CondExpr::Group(inner) => self.cond_eval(inner),
-            CondExpr::Not(inner) => !self.cond_eval(inner),
-            CondExpr::And(a, b) => self.cond_eval(a) && self.cond_eval(b),
-            CondExpr::Or(a, b) => self.cond_eval(a) || self.cond_eval(b),
-            CondExpr::Unary(op, w) => self.cond_unary(op.op, w),
-            CondExpr::Binary(l, op, r) => self.cond_binary(l, op.op, r),
-            CondExpr::Regex(l, r) => self.cond_regex(l, r),
+            // bash's parser rewrites a bare word into the `-n` test it means, and
+            // everything downstream sees only the rewrite — the trace included.
+            CondExpr::Word(w) => {
+                let arg = self.expand_to_string(w);
+                self.cond_trace_unary(invert, "-n", &arg);
+                !arg.is_empty() != invert
+            }
+            // Parentheses only shaped the tree, which parsing already did — but
+            // they do absorb a pending `!`, so the terms inside start clean.
+            CondExpr::Group(inner) => self.cond_eval_inverted(inner, false) != invert,
+            CondExpr::Not(inner) => self.cond_eval_inverted(inner, !invert),
+            CondExpr::And(a, b) => {
+                (self.cond_eval_inverted(a, false) && self.cond_eval_inverted(b, false)) != invert
+            }
+            CondExpr::Or(a, b) => {
+                (self.cond_eval_inverted(a, false) || self.cond_eval_inverted(b, false)) != invert
+            }
+            CondExpr::Unary(op, w) => self.cond_unary(*op, w, invert) != invert,
+            CondExpr::Binary(l, op, r) => self.cond_binary(l, *op, r, invert) != invert,
+            CondExpr::Regex(l, r) => self.cond_regex(l, r, invert) != invert,
         }
+    }
+
+    /// Print a one-operand `[[ … ]]` term for `set -x` (`[[ -n foo ]]`).
+    fn cond_trace_unary(&mut self, invert: bool, op: &str, arg: &str) {
+        if self.xtrace {
+            let body = format!("{op} {}", cond_trace_arg(arg));
+            self.cond_trace_term(invert, &body);
+        }
+    }
+
+    /// Print a two-operand `[[ … ]]` term for `set -x` (`[[ a == b ]]`).
+    fn cond_trace_binary(&mut self, invert: bool, l: &str, op: &str, r: &str) {
+        if self.xtrace {
+            let body = format!("{} {op} {}", cond_trace_arg(l), cond_trace_arg(r));
+            self.cond_trace_term(invert, &body);
+        }
+    }
+
+    /// Emit one traced `[[ … ]]` term.
+    ///
+    /// bash traces a conditional per *primary*, once its operands are expanded
+    /// and before they are tested — so a short-circuited `&&` never prints its
+    /// right half, `[[ a || b ]]` can print two lines for one command, and what
+    /// appears is each operand's expansion rather than the source that produced
+    /// it. Unlike a command word, an operand is printed with no quoting at all
+    /// (`[[ a b == c ]]`); the sole concession is that an empty one shows as `''`.
+    fn cond_trace_term(&mut self, invert: bool, body: &str) {
+        let bang = if invert { "! " } else { "" };
+        self.xtrace_emit(&format!("[[ {bang}{body} ]]"));
     }
 
     /// Evaluate `lhs =~ rhs` (POSIX-ERE match). On success, populate the
@@ -6109,7 +6196,7 @@ impl Shell {
     /// pattern sets `cond_regex_error` and yields false; `exec_cond` then reports
     /// status 2 (matching bash, which prints nothing and returns 2 rather than
     /// the ordinary 1 "no match").
-    fn cond_regex(&mut self, l: &Word, r: &Word) -> bool {
+    fn cond_regex(&mut self, l: &Word, r: &Word, invert: bool) -> bool {
         let subject = self.expand_to_string(l);
         // Quote-aware RHS: bash treats *unquoted* portions of the pattern as
         // regex and *quoted* portions (single/double quotes) as literal text —
@@ -6117,6 +6204,11 @@ impl Shell {
         // lets `.` be any char. `regex_pattern_from_rhs` escapes the metacharacters
         // of quoted segments and passes unquoted ones through untouched.
         let pattern = self.regex_pattern_from_rhs(r);
+        // The trace shows the pattern as built, which is exactly what bash prints
+        // here: a regex metacharacter that a quote made literal appears
+        // backslash-escaped (`[[ a.c =~ 'a.c' ]]` traces `a\.c`), while one that
+        // came through unquoted does not.
+        self.cond_trace_binary(invert, &subject, "=~", &pattern);
         // `shopt -s nocasematch` also makes `=~` case-insensitive.
         let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
         let re = match crate::ere::Regex::new_flags(&pattern, ci) {
@@ -6194,46 +6286,40 @@ impl Shell {
         pattern
     }
 
-    fn cond_unary(&mut self, op: UnaryOp, w: &Word) -> bool {
+    fn cond_unary(&mut self, op: CondUnary, w: &Word, invert: bool) -> bool {
+        // bash expands the operand, traces what it expanded to, and only then
+        // runs the test — so any substitution in the operand has already happened
+        // by the time the trace line appears.
+        let arg = self.expand_to_string(w);
+        self.cond_trace_unary(invert, op.text, &arg);
         // `-z`/`-n` operate on the string value; the rest are file tests.
-        match op {
-            UnaryOp::ZeroLen => self.expand_to_string(w).is_empty(),
-            UnaryOp::NonZeroLen => !self.expand_to_string(w).is_empty(),
+        match op.op {
+            UnaryOp::ZeroLen => arg.is_empty(),
+            UnaryOp::NonZeroLen => !arg.is_empty(),
             // `-v name` tests whether the shell variable/element is set; the
             // operand is the *name*, not a value to expand to.
-            UnaryOp::VarSet => {
-                let name = self.expand_to_string(w);
-                self.var_is_set(&name)
-            }
+            UnaryOp::VarSet => self.var_is_set(&arg),
             // `-o optname` tests whether the named shell option is enabled.
-            UnaryOp::OptionSet => {
-                let name = self.expand_to_string(w);
-                self.shell_option_enabled(&name)
-            }
+            UnaryOp::OptionSet => self.shell_option_enabled(&arg),
             // `-L`/`-h` — the operand is a path; test whether it is a symlink
             // (without following the final component).
             UnaryOp::Symlink => {
-                let word = self.expand_to_string(w);
-                let path = self.resolve(&word);
+                let path = self.resolve(&arg);
                 std::fs::symlink_metadata(&path)
                     .map(|m| m.file_type().is_symlink())
                     .unwrap_or(false)
             }
             // `-t fd` — the operand is a descriptor number, not a path.
-            UnaryOp::Terminal => {
-                let fd = self.expand_to_string(w);
-                match fd.parse::<i32>() {
-                    Ok(0) => io::stdin().is_terminal(),
-                    Ok(1) => io::stdout().is_terminal(),
-                    Ok(2) => io::stderr().is_terminal(),
-                    _ => false,
-                }
-            }
+            UnaryOp::Terminal => match arg.parse::<i32>() {
+                Ok(0) => io::stdin().is_terminal(),
+                Ok(1) => io::stdout().is_terminal(),
+                Ok(2) => io::stderr().is_terminal(),
+                _ => false,
+            },
             _ => {
-                let word = self.expand_to_string(w);
-                let path = self.resolve(&word);
+                let path = self.resolve(&arg);
                 let meta = std::fs::metadata(&path);
-                match op {
+                match op.op {
                     UnaryOp::Exists => meta.is_ok(),
                     UnaryOp::File => meta.map(|m| m.is_file()).unwrap_or(false),
                     UnaryOp::Dir => meta.map(|m| m.is_dir()).unwrap_or(false),
@@ -6257,8 +6343,8 @@ impl Shell {
         }
     }
 
-    fn cond_binary(&mut self, l: &Word, op: CondBinOp, r: &Word) -> bool {
-        match op {
+    fn cond_binary(&mut self, l: &Word, op: CondBinary, r: &Word, invert: bool) -> bool {
+        match op.op {
             CondBinOp::StrEq | CondBinOp::StrNe => {
                 let subject: Vec<char> = self.expand_to_string(l).chars().collect();
                 // `shopt -s nocasematch` folds case for both the literal and the
@@ -6269,6 +6355,14 @@ impl Shell {
                 // an unquoted one is a live glob metacharacter. Expanding once
                 // also ensures an RHS `$(cmd)` runs a single time.
                 let pat = self.expand_word_pattern(r);
+                // The trace shows the pattern as built, which is what bash prints
+                // here: a character a quote (or a backslash) made literal appears
+                // backslash-escaped, so `[[ ab == "a"b ]]` traces `[[ ab == \ab ]]`.
+                if self.xtrace {
+                    let lhs: String = subject.iter().collect();
+                    let rhs = cond_trace_pattern(&pat);
+                    self.cond_trace_binary(invert, &lhs, op.text, &rhs);
+                }
                 // A fully-quoted RHS is a literal; otherwise it is a glob pattern.
                 let matched = if word_is_all_quoted(r) {
                     let lhs: String = subject.iter().collect();
@@ -6286,31 +6380,37 @@ impl Shell {
                     // setting, unlike `case`/glob (which gate on it at parse).
                     glob_match_echars_ci(&pat, &subject, ci, true)
                 };
-                if matches!(op, CondBinOp::StrEq) {
+                if matches!(op.op, CondBinOp::StrEq) {
                     matched
                 } else {
                     !matched
                 }
             }
-            CondBinOp::StrLt => self.expand_to_string(l) < self.expand_to_string(r),
-            CondBinOp::StrGt => self.expand_to_string(l) > self.expand_to_string(r),
+            CondBinOp::StrLt | CondBinOp::StrGt => {
+                let (a, b) = (self.expand_to_string(l), self.expand_to_string(r));
+                self.cond_trace_binary(invert, &a, op.text, &b);
+                if matches!(op.op, CondBinOp::StrLt) { a < b } else { a > b }
+            }
             CondBinOp::NumEq
             | CondBinOp::NumNe
             | CondBinOp::NumLt
             | CondBinOp::NumLe
             | CondBinOp::NumGt
             | CondBinOp::NumGe => {
-                // bash evaluates each operand as an arithmetic expression,
-                // left first, and short-circuits: a malformed left operand
-                // prints its diagnostic and the comparison is false without
-                // touching the right operand.
-                let Some(a) = self.eval_arith_cond_operand(l) else {
+                // bash expands *both* operands as words before evaluating either
+                // as arithmetic, so a substitution on the right runs even when the
+                // left turns out to be malformed. Only the arithmetic then
+                // short-circuits: a malformed left operand prints its diagnostic
+                // and the comparison is false without the right being evaluated.
+                let (ls, rs) = (self.expand_to_string(l), self.expand_to_string(r));
+                self.cond_trace_binary(invert, &ls, op.text, &rs);
+                let Some(a) = self.eval_arith_cond_operand(&ls) else {
                     return false;
                 };
-                let Some(b) = self.eval_arith_cond_operand(r) else {
+                let Some(b) = self.eval_arith_cond_operand(&rs) else {
                     return false;
                 };
-                match op {
+                match op.op {
                     CondBinOp::NumEq => a == b,
                     CondBinOp::NumNe => a != b,
                     CondBinOp::NumLt => a < b,
@@ -6320,17 +6420,15 @@ impl Shell {
                     _ => unreachable!(),
                 }
             }
-            CondBinOp::FileNewer => {
+            CondBinOp::FileNewer | CondBinOp::FileOlder | CondBinOp::SameFile => {
                 let (a, b) = (self.expand_to_string(l), self.expand_to_string(r));
-                file_cmp(&self.cwd, "-nt", &a, &b)
-            }
-            CondBinOp::FileOlder => {
-                let (a, b) = (self.expand_to_string(l), self.expand_to_string(r));
-                file_cmp(&self.cwd, "-ot", &a, &b)
-            }
-            CondBinOp::SameFile => {
-                let (a, b) = (self.expand_to_string(l), self.expand_to_string(r));
-                file_cmp(&self.cwd, "-ef", &a, &b)
+                self.cond_trace_binary(invert, &a, op.text, &b);
+                let which = match op.op {
+                    CondBinOp::FileNewer => "-nt",
+                    CondBinOp::FileOlder => "-ot",
+                    _ => "-ef",
+                };
+                file_cmp(&self.cwd, which, &a, &b)
             }
         }
     }
@@ -6448,6 +6546,9 @@ impl Shell {
             errexit: self.errexit,
             nounset: self.nounset,
             xtrace: self.xtrace,
+            // Inherited, not reset: a `( … )` group inside a substitution keeps
+            // tracing at the substitution's depth (bash).
+            xtrace_level: self.xtrace_level,
             noglob: self.noglob,
             allexport: self.allexport,
             braceexpand: self.braceexpand,
@@ -8158,16 +8259,31 @@ impl Shell {
         Self::transform_value(&value, op)
     }
 
-    /// The `set -x` trace-line prefix. bash uses `PS4` (default `+ `), with
-    /// prompt-style backslash escapes expanded; its first character is repeated
-    /// once per level of expansion indirection (we only trace at the top level,
-    /// so it appears once). An unset `PS4` yields the default `+ `; an
-    /// explicitly empty `PS4` yields no prefix. Parameter/arithmetic expansion
-    /// inside `PS4` (e.g. `PS4='+ $LINENO '`) is not modelled — see
-    /// known-issues TD-OILS-XTRACE.
-    fn xtrace_prefix(&self) -> String {
-        let ps4 = self.vars.get("PS4").map_or_else(|| "+ ".to_string(), Clone::clone);
-        self.prompt_expand(&ps4)
+    /// The `set -x` trace-line prefix. bash expands `PS4` (default `+ `) as a
+    /// prompt string before every trace line — prompt escapes *and* parameter,
+    /// command and arithmetic substitution, so `PS4='+ $LINENO '` works. The
+    /// expanded prefix then gets its *first character* repeated once per level
+    /// of expansion indirection ([`Shell::xtrace_level`]), so a command
+    /// substitution's body traces one `+` deeper. An unset `PS4` yields no
+    /// prefix at all, not the `+ ` it was *seeded* with at startup — the
+    /// default lives in the variable, so unsetting it removes it.
+    fn xtrace_prefix(&mut self) -> String {
+        let ps4 = self.vars.get("PS4").cloned().unwrap_or_default();
+        // Checked before expanding, as bash does: an empty `PS4` is no prefix,
+        // and never mind the indirection level.
+        if ps4.is_empty() {
+            return String::new();
+        }
+        let expanded = self.prompt_expand(&ps4);
+        let Some(first) = expanded.chars().next() else {
+            return expanded;
+        };
+        let mut out = String::with_capacity(expanded.len() + self.xtrace_level);
+        for _ in 0..self.xtrace_level {
+            out.push(first);
+        }
+        out.push_str(&expanded);
+        out
     }
 
     /// Emit a single `set -x` trace line (prefix + `text` + newline) to stderr.
@@ -8178,12 +8294,36 @@ impl Shell {
         self.emit_stderr(format!("{prefix}{text}\n").as_bytes());
     }
 
-    /// `${var@P}` — expand `var`'s value as a prompt string, interpreting the
-    /// bash prompt escape sequences (`\u`, `\h`, `\w`, `\t`, `\d`, `\D{fmt}`,
-    /// …). Backslash escapes not recognised keep the backslash and following
-    /// character. Time-based escapes render in UTC (no local-timezone model
-    /// yet, consistent with the `%(…)T` printf conversion — see TD-OILS9).
-    fn prompt_expand(&self, s: &str) -> String {
+    /// Expand `s` as a prompt string: decode the prompt escapes, then expand
+    /// the *result* as if it were inside double quotes. bash does both, in that
+    /// order and over the whole decoded string, so text an escape produced is
+    /// itself rescanned — `\u005f$HOME` yields the user name, a literal `005f`,
+    /// and the home directory. Being double-quote context, the expansion is
+    /// never split into words nor globbed, and a `'` or `"` in the string is
+    /// literal (bash: `Q_DOUBLE_QUOTES`).
+    ///
+    /// Tracing is suppressed while expanding, as bash suppresses it, so a
+    /// `PS4` containing a command substitution cannot trace itself.
+    fn prompt_expand(&mut self, s: &str) -> String {
+        let decoded = self.prompt_decode(s);
+        // A substitution that cannot even be lexed expands to nothing in bash
+        // (it reports a syntax error to stderr; we take the empty string, which
+        // is what the failed expansion contributes to the prompt either way).
+        let Ok(word) = crate::parser::dquote_word_from_source(&decoded, self.lex_opts()) else {
+            return decoded;
+        };
+        let saved = std::mem::replace(&mut self.xtrace, false);
+        let out = self.expand_double_quoted(&word.parts);
+        self.xtrace = saved;
+        out
+    }
+
+    /// Decode the bash prompt escape sequences (`\u`, `\h`, `\w`, `\t`, `\d`,
+    /// `\D{fmt}`, …) in `s`. Backslash escapes not recognised keep the
+    /// backslash and following character. Time-based escapes render in UTC (no
+    /// local-timezone model yet, consistent with the `%(…)T` printf
+    /// conversion — see TD-OILS9).
+    fn prompt_decode(&self, s: &str) -> String {
         let (epoch, _) = unix_time();
         let epoch = epoch as i64;
         let mut out = String::new();
@@ -8364,9 +8504,13 @@ impl Shell {
     /// The user name for prompt `\u` — from `$USER`, then `$LOGNAME`, else
     /// `user`.
     fn prompt_username(&self) -> String {
-        self.param_value("USER")
-            .filter(|u| !u.is_empty())
-            .or_else(|| self.param_value("LOGNAME").filter(|u| !u.is_empty()))
+        // bash reads the name from `getpwuid`, which we have no equivalent for
+        // yet; the environment is the next best source. `USERNAME` is included
+        // because that — not `USER`/`LOGNAME` — is the name the host sets when
+        // running the differential tests on Windows.
+        ["USER", "LOGNAME", "USERNAME"]
+            .into_iter()
+            .find_map(|n| self.param_value(n).filter(|u| !u.is_empty()))
             .unwrap_or_else(|| "user".to_string())
     }
 
@@ -13108,6 +13252,10 @@ impl Shell {
         // *reader* consumed, so it is never echoed, and `$-`/`set -o` inside the
         // substitution report the option off however the caller had it set.
         sub.set_verbose(false);
+        // The body is one level of expansion deeper, so every trace line it
+        // emits repeats `PS4`'s first character once more: `v=$(echo a)` traces
+        // `++ echo a` before `+ v=a` (bash's `indirection_level`).
+        sub.xtrace_level = sub.xtrace_level.saturating_add(1);
         sub
     }
 
@@ -13195,12 +13343,15 @@ impl Shell {
                 // unlike a substitution this runs in the current shell).
                 let saved_exec_stdout = self.exec_stdout.take();
                 // As in a command substitution, bash's subshell here runs with
-                // `-v` cleared; osh runs the body in the current shell, so the
-                // flag is lowered and restored around it.
+                // `-v` cleared and one expansion level deeper (`cat <(echo p)`
+                // traces `++ echo p`); osh runs the body in the current shell,
+                // so both are set and restored around it.
                 let saved_verbose = self.verbose;
                 self.set_verbose(false);
+                self.xtrace_level = self.xtrace_level.saturating_add(1);
                 let mut out = Out::Capture(cap.clone());
                 let _ = self.exec_program(body, &mut out, &StdinSrc::Inherit);
+                self.xtrace_level = self.xtrace_level.saturating_sub(1);
                 self.set_verbose(saved_verbose);
                 self.exec_stdout = saved_exec_stdout;
             }
@@ -13231,9 +13382,11 @@ impl Shell {
             // give each body the `$?` it would have inherited when bash forked it
             // — the status from *before* the enclosing command.
             let enclosing_status = self.last_status;
-            // Same as an input substitution: bash's subshell runs with `-v` off.
+            // Same as an input substitution: bash's subshell runs with `-v` off
+            // and one expansion level deeper (`echo z > >(cat)` traces `++ cat`).
             let saved_verbose = self.verbose;
             self.set_verbose(false);
+            self.xtrace_level = self.xtrace_level.saturating_add(1);
             for (path, body, forked_status) in jobs {
                 if let Ok(bytes) = std::fs::read(&path) {
                     let cursor = bytes_input(bytes);
@@ -13245,6 +13398,7 @@ impl Shell {
                 let _ = std::fs::remove_file(&path);
             }
             self.last_status = enclosing_status;
+            self.xtrace_level = self.xtrace_level.saturating_sub(1);
             self.set_verbose(saved_verbose);
         }
         if self.procsub_in_temps.len() > in_mark {
@@ -13254,18 +13408,18 @@ impl Shell {
         }
     }
 
-    /// Expand a word to a string and evaluate it as an arithmetic expression
-    /// (used for `${name:offset:length}`). Errors/empties yield `0`.
-    /// Evaluate a `[[ … ]]` numeric-comparison operand (`-eq`, `-lt`, …) as an
-    /// arithmetic expression. Bare identifiers resolve to 0 as usual, but a
-    /// *malformed* literal (`10.0`, `2#9`) is an arithmetic error: bash prints
-    /// the diagnostic tagged `[[` and treats the whole comparison as false
-    /// (status 1). Unlike an integer *assignment*, this is non-fatal — it does
-    /// not set `discard_error`/abort — so it returns `None` after emitting the
-    /// message and the caller yields `false`.
-    fn eval_arith_cond_operand(&mut self, w: &Word) -> Option<i64> {
-        let s = self.expand_to_string(w);
-        let s = s.trim();
+    /// Evaluate an already-expanded `[[ … ]]` numeric-comparison operand
+    /// (`-eq`, `-lt`, …) as an arithmetic expression. Bare identifiers resolve
+    /// to 0 as usual, but a *malformed* literal (`10.0`, `2#9`) is an arithmetic
+    /// error: bash prints the diagnostic tagged `[[` and treats the whole
+    /// comparison as false (status 1). Unlike an integer *assignment*, this is
+    /// non-fatal — it does not set `discard_error`/abort — so it returns `None`
+    /// after emitting the message and the caller yields `false`.
+    ///
+    /// The word expansion is the caller's job because bash expands *both*
+    /// operands before evaluating either (see [`Shell::cond_binary`]).
+    fn eval_arith_cond_operand(&mut self, expanded: &str) -> Option<i64> {
+        let s = expanded.trim();
         if s.is_empty() {
             return Some(0);
         }
@@ -25019,6 +25173,35 @@ fn shell_quote(s: &str) -> String {
     out
 }
 
+/// One operand of a traced `[[ … ]]` term.
+///
+/// bash prints a conditional's operands with no quoting at all — a space in one
+/// simply appears, so `[[ a b == c ]]` is what `[[ "$v" == c ]]` traces for
+/// `v='a b'`. The single concession is that an empty operand shows as `''`,
+/// which is the only way to see that the slot was there.
+fn cond_trace_arg(s: &str) -> &str {
+    if s.is_empty() { "''" } else { s }
+}
+
+/// Render an expanded `[[ … ]]` glob pattern for a `set -x` trace: a character
+/// that a quote (or a backslash) made literal shows backslash-escaped, and one
+/// that came through unquoted shows as itself.
+///
+/// This is how bash prints the pattern it is about to match, and it makes the
+/// quoting visible where it matters: `[[ ab == "a"b ]]` traces `[[ ab == \ab ]]`
+/// and `[[ 'a*' == 'a*' ]]` traces `[[ a* == \a\* ]]`, so the reader can tell a
+/// live metacharacter from a literal one.
+fn cond_trace_pattern(pat: &[EChar]) -> String {
+    let mut out = String::with_capacity(pat.len());
+    for e in pat {
+        if e.quoted {
+            out.push('\\');
+        }
+        out.push(e.c);
+    }
+    out
+}
+
 /// `true` when a character forces `set -x` to single-quote the word it is in.
 ///
 /// bash's `sh_contains_shell_metas`, measured character by character over the
@@ -34891,8 +35074,68 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // name from $0), octal, and a literal-preserving unknown escape.
         assert_eq!(run("p='\\061\\062'; echo \"${p@P}\"").0, "12\n"); // \061=1 \062=2
         assert_eq!(run("p='a\\qb'; echo \"${p@P}\"").0, "a\\qb\n"); // unknown escape kept
-        // Defaults when USER/HOSTNAME unset.
-        assert_eq!(run("unset USER LOGNAME; p='\\u'; echo \"${p@P}\"").0, "user\n");
+        // Defaults when every name the user is looked up under is empty. (Set
+        // empty rather than unset: with no environment imported, `param_value`
+        // still falls back to the host environment for an unset name, and the
+        // machine running the tests does have a `USERNAME`.)
+        assert_eq!(
+            run("USER= LOGNAME= USERNAME=; p='\\u'; echo \"${p@P}\"").0,
+            "user\n"
+        );
+        // The decoded prompt is then expanded as if inside double quotes, over
+        // the whole of it — so `$…` from the value *and* from an escape's output
+        // both expand, `'`/`"` stay literal, and nothing is split or globbed.
+        assert_eq!(run("x='a b'; p='<$x>'; echo \"${p@P}\"").0, "<a b>\n");
+        assert_eq!(run("p='$((3*4))'; echo \"${p@P}\"").0, "12\n");
+        assert_eq!(run("p='x$(echo s)y'; echo \"${p@P}\"").0, "xsy\n");
+        assert_eq!(run("p=\"a'b\\\"c\"; echo \"${p@P}\"").0, "a'b\"c\n");
+        assert_eq!(run("p='a\\\\$b'; echo \"${p@P}\"").0, "a$b\n");
+    }
+
+    /// `set -x` reads its prefix out of `PS4`, expanding it as a prompt (escapes
+    /// *and* substitutions) before every line — and `PS4` is a real variable
+    /// seeded with `+ `, so unsetting it leaves no prefix at all.
+    #[test]
+    fn xtrace_prefix_comes_from_ps4() {
+        let trace = |src: &str| run(&format!("{{ set -x; {src}; }} 2>&1")).0;
+        assert_eq!(run("echo \"[$PS4]\"").0, "[+ ]\n");
+        assert_eq!(trace("PS4='T '; :"), "+ PS4='T '\nT :\n");
+        assert_eq!(trace("PS4=; :"), "+ PS4=\n:\n");
+        assert_eq!(trace("unset PS4; :"), "+ unset PS4\n:\n");
+        // Substitution inside PS4: expanded per line, and an empty result
+        // contributes nothing rather than printing the unexpanded text.
+        assert_eq!(trace("PS4='+${x:+ }'; x=; :"), "+ PS4='+${x:+ }'\n+x=\n+:\n");
+        assert_eq!(trace("PS4='+ $((1+1)) '; :"), "+ PS4='+ $((1+1)) '\n+ 2 :\n");
+        // Tracing is off while PS4 expands, so a command substitution in it
+        // cannot trace itself into the prefix.
+        assert_eq!(trace("PS4='+$(echo q) '; :"), "+ PS4='+$(echo q) '\n+q :\n");
+    }
+
+    /// A command substitution's body traces one level deeper: `PS4`'s first
+    /// character is repeated once per level of expansion indirection. A plain
+    /// subshell, a function call and a pipeline are not expansions and do not
+    /// count.
+    #[test]
+    fn xtrace_repeats_the_prefix_inside_a_substitution() {
+        let trace = |src: &str| run(&format!("{{ set -x; {src}; }} 2>&1")).0;
+        assert_eq!(trace("v=$(echo a)"), "++ echo a\n+ v=a\n");
+        assert_eq!(trace("v=`echo c`"), "++ echo c\n+ v=c\n");
+        assert_eq!(
+            trace("v=$(echo $(echo b))"),
+            "+++ echo b\n++ echo b\n+ v=b\n"
+        );
+        // The level is a property of the substitution, not of the shell nesting:
+        // a `( … )` inside one keeps it, a `( … )` outside never had it.
+        assert_eq!(trace("( echo s )"), "+ echo s\ns\n");
+        assert_eq!(trace("v=$( ( echo t ) )"), "++ echo t\n+ v=t\n");
+        assert_eq!(trace("f() { echo F; }; v=$(f)"), "++ f\n++ echo F\n+ v=F\n");
+        // It is the *first character* of the expanded PS4 that repeats, not the
+        // whole prefix — and an empty PS4 stays empty however deep.
+        assert_eq!(
+            trace("PS4='XY '; v=$(echo a)"),
+            "+ PS4='XY '\nXXY echo a\nXY v=a\n"
+        );
+        assert_eq!(trace("PS4=; v=$(echo a)"), "+ PS4=\necho a\nv=a\n");
     }
 
     #[test]

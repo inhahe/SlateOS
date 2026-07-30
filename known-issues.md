@@ -5205,8 +5205,22 @@ but in osh:
 + echo A
 ```
 The trace *content* (fully-expanded, one `+ ` line per stage) is identical; only
-the line ordering within the pipeline differs. Both shells are deterministic
-(bash always left-to-right, osh always last-stage-first).
+the line ordering within the pipeline differs.
+
+**Determinism, re-measured 2026-07-30.** bash is stable left-to-right (5/5 runs
+of a three-stage pipeline). osh is stable only for **two** stages, where the
+reversal is total; with three or more the spawned workers race each other and the
+order is luck — `echo p | cat | cat > /dev/null` happened to come out in bash's
+order in 5/5 runs. So this is not merely "a different deterministic order": for
+n ≥ 3 osh has no order at all. (bash's own order is a race in principle too — its
+children trace after the fork — but it is observably stable, so a corpus case may
+depend on it and osh should reproduce it.)
+
+**Not confined to `xtrace`, also re-measured 2026-07-30.** What is wrong is the
+*stage start order*, so anything a stage writes to stderr shows the same
+reversal (`{ echo A >&2; } | { echo B >&2; }`). The `set -x` case is just the
+easiest one to see, which makes this less cosmetic than the original write-up
+assumed.
 
 **Why it happens:** osh runs the pipeline's **last** stage synchronously on the
 current thread (required so `shopt -s lastpipe` can keep its mutations/flow, and
@@ -5214,17 +5228,28 @@ to avoid an extra thread) while stages `0..n-1` run on worker threads that the O
 has not necessarily scheduled yet. The current thread therefore reaches the last
 stage's `exec_simple` — and emits its trace — before the workers emit theirs.
 
-**Why not fixed now:** matching bash's exact intra-pipeline trace order would
-require either (a) abandoning the "last stage on the current thread" design that
-`lastpipe` and the concurrent-pipeline architecture depend on, or (b) hoisting
-the trace into the parent and expanding each stage's words there — which would
-run each stage's command substitutions **twice** (once for the parent trace,
-once in the child), a correctness regression (verified: bash expands each stage
-exactly once, in the child subshell). Neither is justified for a debugging-only
-cosmetic. The proper fix, if ever pursued, is a per-stage "ready to trace"
-barrier that releases the stages' trace emission left-to-right before their
-bodies run — non-trivial and not worth the added synchronization on the pipeline
-hot path. Deferred.
+**Proper fix (refined 2026-07-30).** Make the stages *begin* in pipeline order,
+which keeps the "last stage on the current thread" design intact. A handshake at
+thread entry (thread `i` waits for thread `i-1` to signal, signals, then runs —
+and the caller waits for the last signal before running stage `n-1`) is the shape
+of it, but for the order to be *guaranteed* rather than merely likely the signal
+must be sent after the stage has emitted the trace for its leading command, not
+merely at thread entry. So the "stage has started" point has to sit inside the
+execution path: a one-shot `Option<Sender<()>>` on the stage's `Shell`, fired
+from `xtrace_emit`/`exec_simple` on the stage's first command *and*
+unconditionally on stage completion, so a stage that traces nothing cannot
+deadlock the chain.
+
+Two approaches to *avoid*: (a) hoisting the trace into the parent and expanding
+each stage's words there would run each stage's command substitutions **twice**
+(verified: bash expands each stage exactly once, in the child subshell); (b)
+pre-tracing only the simple-command stages in the parent, the way the `DEBUG`
+trap loop does, leaves a compound stage (`{ …; …; } | cat`) with no first command
+for the parent to print — the bug would survive for exactly the stages where it
+is hardest to see.
+
+**Blast radius while open.** `tests/corpus/xtrace-ps4.sh` deliberately contains
+no pipeline for this reason; the note there points back here.
 
 ### TD-OILS-HELP-LAYOUT. Bare `help` uses an osh-identity header + single-column listing, not bash's "GNU bash" banner + COLUMNS-wide 2-column truncated layout — INTENTIONAL / documented — 2026-07-20
 
@@ -6765,7 +6790,7 @@ do **not** "fix" osh to emit 127. This joins the other known MSYS host-probe
 false positives (C-locale UTF-8 `$'\uXXXX'`, Windows path/OS-error text, `/tmp`
 path-root, signal-number table, BASH_VERSINFO/BASHPID).
 
-### TD-OILS-XTRACE. `set -x` tracing: no `[[ … ]]` conditional trace, no nested command-substitution trace, no `PS4` parameter expansion — PARTIAL 2026-07-19
+### TD-OILS-XTRACE. `set -x` tracing: no `[[ … ]]` conditional trace, no nested command-substitution trace, no `PS4` parameter expansion — ✅ RESOLVED 2026-07-30
 
 **Where:** `userspace/oils/src/interp.rs` — the `set -x` trace block in
 `exec_simple` (after the readonly-prefix guard), `apply_assignment` (bare-
@@ -6794,28 +6819,80 @@ compound-command tracing now match bash byte-for-byte:
   arithmetic *conditions*, which self-trace via the `(( ))` command path (bash
   emits no separate `while`/`until` header, and neither does `osh`).
 
-Still **missing** relative to bash:
+**Resolution (2026-07-30).** The three gaps this entry was left open for are all
+closed — in one commit, since they interlock: a `[[ … ]]` inside a `$( … )`
+needs the indirection level, and the level is only observable through an
+expanded `PS4`. Each was measured against bash 5.2.37 and is pinned by a corpus
+case (`tests/corpus/xtrace-cond.sh`, `xtrace-ps4.sh`, `xtrace-quoting.sh`) plus
+unit tests. What each turned out to be:
 
-- **`[[ … ]]` conditional tracing.** bash traces `[[ ]]` with the operands
-  *expanded and re-quoted* (`[[ $v == "a b" ]]` → `+ [[ a b == \a\ \b ]]`),
-  inserts `-n` for a bare-word test (`[[ $v ]]` → `+ [[ -n a b ]]`), and splits
-  `&&`/`||` operands into **separate** short-circuit-ordered `[[ … ]]` trace
-  lines. Reproducing bash's exact expansion + pattern-requoting + per-operator
-  splitting is intricate and low-value, so `osh` currently emits nothing for a
-  `[[ … ]]` command under `set -x`. Deferred deliberately; proper fix is a
-  dedicated expanded-cond tracer mirroring `cond_eval`'s evaluation order.
+- **`[[ … ]]` conditional tracing** — `Shell::cond_eval_inverted`
+  and the `cond_trace_*` helpers. bash traces one line **per primary**, emitted
+  after both operands are expanded and before they are tested, so a
+  short-circuited `&&` never prints its right half and an `||` can print two
+  lines for one command. Groups print without their parentheses; a bare word
+  prints as the `-n` it was rewritten to; a `!` is a flag on the node it binds
+  to (`[[ ! ( x == y ) ]]` prints no `!` at all, and `! !` cancels); operands
+  print with **no** quoting except an empty one as `''`; and a pattern RHS
+  backslash-escapes whatever a quote made literal (every such character for
+  `==`/`!=`/`=`, only the regex-special ones for `=~`). Prerequisite: the AST
+  had to start carrying the operator's *spelling* (commit `770b9d755`), since
+  bash echoes back `-h` vs `-L` and `=` vs `==` as written — which also fixed a
+  pre-existing `declare -f`/`type` bug.
+- **Nested command-substitution trace** — new `Shell::xtrace_level`, bash's
+  `indirection_level`. A command substitution (and a process substitution) adds
+  one level for the whole of its body, nesting included, and each level repeats
+  the *first character* of the expanded prefix once more: `v=$(echo a)` traces
+  `++ echo a` then `+ v=a`, `PS4='XY '` gives `XXY `. A `( … )` subshell, a
+  function call and a pipeline are not expansions and add nothing.
+- **`PS4` parameter/arithmetic expansion** — `Shell::prompt_expand` now decodes
+  the prompt escapes and then expands the *result* as if inside double quotes
+  (bash's `Q_DOUBLE_QUOTES`), so `PS4='+ $LINENO '` works and `${x@P}` gained
+  the same behaviour. Nothing is word-split or globbed and a `'`/`"` stays
+  literal; tracing is suppressed during the expansion, so a `$( … )` in `PS4`
+  cannot trace itself. Two related findings came out of the same measurement:
+  `PS4` is a *variable* bash seeds with `+ ` (so `unset PS4` leaves **no**
+  prefix, and `declare -p PS4` prints it) whose inherited value wins — hence
+  `SOFT_DEFAULT_VARS`; and `\u` now also falls back to `$USERNAME`.
+
 - **`if` header.** bash (like `osh`) emits no `if`/`then`/`else` header — the
-  guard and body commands self-trace. Already correct; noted for completeness.
-- **Nested command-substitution trace.** bash raises the PS4 indirection level
-  and traces commands run inside `$(…)` with a doubled first char
-  (`++ echo hi`). `osh` does not trace inside command substitution.
-- **`PS4` parameter/arithmetic expansion.** `xtrace_prefix` runs `PS4` through
-  `prompt_expand` (backslash escapes only). bash also performs parameter,
-  arithmetic, and command expansion on `PS4`, so `PS4='+ $LINENO '` is not
-  expanded here.
+  guard and body commands self-trace. Always was correct; noted for completeness.
 
-The remaining gaps affect only niche `set -x` cases; they are logged so a
-future probe recognising a `[[ ]]`/`$( )`-header trace DIFF knows it is this gap.
+One `set -x` divergence remains, tracked separately because its cause is the
+pipeline executor rather than the tracer: TD-OILS-XTRACE-PIPE-ORDER (stage start
+order). A second, narrower one is open as TD-OILS-XTRACE-ARRAY-DECL below.
+
+### TD-OILS-XTRACE-ARRAY-DECL. `declare -a b=(x "")` traces the `declare` without its arguments, and does not trace the compound value — OPEN 2026-07-30
+
+**Where:** `userspace/oils/src/interp.rs` — the `set -x` trace block in
+`exec_simple`, and the `declare`/`local`/`readonly` argument path.
+
+**Reproduce.**
+
+```
+$ bash -c 'set -x; declare -a b=(x "")'
++ b=('x' '')
++ declare -a b
+$ osh -c 'set -x; declare -a b=(x "")'
++ declare -a
+```
+
+Two separate faults in one line: the `b=(…)` word is dropped from the traced
+`declare` command, and bash's *extra* line for the compound value — traced in the
+`xtrace_print_assignment` style, each element minimally quoted — is not emitted
+at all.
+
+**Contrast:** a plain `arr=(1 "" 3)` (no `declare`) already traces correctly, as
+the verbatim source text, in both shells. So this is specific to a compound
+assignment appearing as an *argument* to a declaration builtin.
+
+**Proper fix.** Trace the declaration builtin's words including the assignment
+word (the drop looks like the assignment-word split treating `b=(…)` as a prefix
+assignment and consuming it), and emit bash's per-element line for a compound
+value before the builtin's own line, reusing `xtrace_quote_value`. Measure the
+element quoting against bash first: the example shows `'x'` quoted where the
+command-word rule would leave `x` bare, so the compound-value line does **not**
+use the same four-branch cascade as `xtrace_print_word_list`.
 
 ### TD-OILS-ERRLINE. Error diagnostics lack bash's `<name>: line N:` prefix — ✅ RESOLVED 2026-07-19
 

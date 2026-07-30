@@ -3583,6 +3583,25 @@ pub(crate) fn word_verbatim_from_source(s: &str, opts: LexOpts) -> Result<Word, 
     Ok(Word { parts })
 }
 
+/// Parse `s` as the body of an unterminated double-quoted string, giving a
+/// [`Word`] whose expansion is what bash produces for a string it expands in
+/// `Q_DOUBLE_QUOTES` context — `PS4` and `${x@P}`. Every part comes back
+/// already quoted, so the result is never split or globbed.
+///
+/// # Errors
+/// Returns [`ParseError`] on an unterminated substitution inside `s`.
+pub(crate) fn dquote_word_from_source(s: &str, opts: LexOpts) -> Result<Word, ParseError> {
+    if s.is_empty() {
+        return Ok(Word::default());
+    }
+    let segs = crate::lexer::lex_dquote_body(s).map_err(|e| ParseError::new(e.msg))?;
+    let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
+    for seg in &segs {
+        parts.push(seg_to_part(seg, opts)?);
+    }
+    Ok(Word { parts })
+}
+
 /// Like [`word_verbatim_from_source`] but for the *replacement* half of
 /// `${var/pat/repl}`: a literal `\&`/`\\` is preserved (not consumed at lex
 /// time) so the runtime `&`-substitution can distinguish an escaped ampersand

@@ -5316,7 +5316,7 @@ impl Shell {
         }
         let mut last = 0i64;
         for arg in args {
-            match self.eval_arith_raw(arg) {
+            match self.eval_arith_expanded(arg) {
                 Some(v) => last = v,
                 None => return 1, // the arithmetic error was already reported
             }
@@ -5335,25 +5335,46 @@ impl Shell {
         r
     }
 
-    /// Evaluate a raw arithmetic section (expand `$params`, then evaluate),
-    /// mutating shell state for any assignment/increment operators. Returns the
-    /// value, or `None` after printing the error.
+    /// Evaluate a raw arithmetic *section* — a `(( … ))` command or a
+    /// `for (( … ))` clause — whose text has not been through word expansion, so
+    /// `$params` are expanded here first (bash's `expand_arith_string`).
+    ///
+    /// The expansion runs with the builtin tag lifted, because a nested
+    /// `$(( … ))` failure is an *expansion* error: bash reports
+    /// `for ((i=$((1/0));…))` as a bare `1/0: division by 0` and abandons the
+    /// parse unit, rather than tagging it `((` and merely failing.
+    ///
+    /// A failed expansion also ends the section then and there — bash's
+    /// `expand_arith_string` longjmps out, so nothing is evaluated and no
+    /// assignment the section would have made takes effect (`x=keep;
+    /// (( x=$((1/0)) ))` leaves `x` as `keep`). The abort the expansion armed is
+    /// left armed for [`Self::arith_discard_flow`] to turn into a `Flow`.
     fn eval_arith_raw(&mut self, raw: &str) -> Option<i64> {
-        // `(( … ))` commands, `let`, and arithmetic array subscripts report
-        // their own errors and set their own status — a nested `$(( … ))` here
-        // must not additionally trip the simple-command abort flag, so save and
-        // restore it around the sub-expansion.
-        let saved_arith_error = self.discard_error;
+        let saved_tag = self.arith_cmd.take();
+        let saved_abort = self.discard_error.take();
         let expanded = self.expand_arith_params(raw);
-        self.discard_error = saved_arith_error;
-        match arith::eval(&expanded, self) {
+        self.arith_cmd = saved_tag;
+        if self.discard_error.is_some() {
+            return None;
+        }
+        self.discard_error = saved_abort;
+        self.eval_arith_expanded(&expanded)
+    }
+
+    /// Evaluate arithmetic text the shell has *already* finished expanding: a
+    /// `let` argument or an integer-assignment value, both of which arrive as
+    /// ordinary words. bash performs no further expansion on these, so a `$` that
+    /// survived quoting reaches the evaluator, which rejects it — `let 'x=$n+1'`
+    /// is `let: x=$n+1: syntax error: operand expected`, not `x=6`.
+    fn eval_arith_expanded(&mut self, expanded: &str) -> Option<i64> {
+        match arith::eval(expanded, self) {
             Ok(v) => Some(v),
             Err(e) => {
                 // Route through `emit_arith_error` (not `eprintln!`) so the
                 // diagnostic honours an active `2>`/`2>&1` redirect on the
                 // enclosing command — bash silences `let "3 x" 2>/dev/null`,
                 // `declare -i k="3 x" 2>/dev/null`, `(( 3 x )) 2>/dev/null`, etc.
-                self.emit_arith_error(&expanded, &e);
+                self.emit_arith_error(expanded, &e);
                 // An ordinary arithmetic error only gives `let` / `(( … ))` a
                 // non-zero status, but one raised inside a *subscript* is fatal
                 // to the command list, as an expansion error is — bash reaches
@@ -5392,11 +5413,30 @@ impl Shell {
     /// `let` / `(( … ))` (which merely return a non-zero status on a bad
     /// expression), an arithmetic error in an integer *assignment* is **fatal**
     /// in bash: the diagnostic is printed and the shell aborts with status 1.
-    /// `eval_arith_raw` deliberately suppresses `discard_error` (so nested
-    /// `$(( … ))` in `let`/`((` don't trip the abort), so this wrapper re-sets
-    /// it on failure. The command driver / `run_builtin` tail consumes the flag
-    /// and turns it into a `Flow::Exit(1)`. Yields 0 as the placeholder value.
-    fn eval_int_assign(&mut self, raw: &str) -> i64 {
+    /// The command driver / `run_builtin` tail consumes the `discard_error`
+    /// flag set here and turns it into a `Flow::Exit(1)`.
+    ///
+    /// `None` means the expression was bad, and the caller must then store
+    /// *nothing*: bash leaves the variable exactly as it was, so
+    /// `declare -i p=7; p=1/0` keeps `p` at 7 rather than zeroing it.
+    fn eval_int_assign(&mut self, raw: &str) -> Option<i64> {
+        let v = self.eval_arith_expanded(raw);
+        if v.is_none() {
+            self.discard_error = Some(1);
+        }
+        v
+    }
+
+    /// Evaluate the subscript of an indirect reference's *referent* — the
+    /// `1` of `ref='a[1]'; ${!ref}`. The text comes from a variable's value, so
+    /// unlike an integer-assignment value (see [`Self::eval_int_assign`]) it has
+    /// not been expanded yet and bash expands it here: `ref='a[$n]'` reads
+    /// `a[1]` when `n` is 1, and `ref='a[$(echo 2)]'` reads `a[2]`.
+    ///
+    /// A bad subscript is fatal and untagged, like any other subscript failure —
+    /// `ref='a[1/0]'; echo "${!ref}"; echo same-line` prints
+    /// `1/0: division by 0` and abandons the rest of the line.
+    fn eval_referent_subscript(&mut self, raw: &str) -> i64 {
         match self.eval_arith_raw(raw) {
             Some(n) => n,
             None => {
@@ -5998,29 +6038,20 @@ impl Shell {
     }
 
     /// Execute a `(( … ))` arithmetic command: exit 0 if the value is non-zero.
+    ///
+    /// A bad expression only fails the command, but two things it can hit
+    /// abandon the rest of the parse unit instead — a failure inside an array
+    /// *subscript* and a failed nested expansion; `arith_discard_flow` turns
+    /// either into a `Flow::Discard`.
     fn exec_arith(&mut self, raw: &str) -> Flow {
         if self.xtrace {
             self.xtrace_emit(&format!("(( {raw} ))"));
         }
-        let expanded = self.expand_arith_params(raw);
         // bash tags `(( … ))`-command arithmetic errors with `((`.
-        let saved_arith_cmd = self.arith_cmd.take();
-        self.arith_cmd = Some(Cow::Borrowed("(("));
-        match arith::eval(&expanded, self) {
-            Ok(v) => self.last_status = i32::from(v == 0),
-            Err(e) => {
-                self.emit_arith_error(&expanded, &e);
-                self.last_status = 1;
-                // A bad expression only fails the command, but a failure inside
-                // an array *subscript* abandons the rest of the parse unit the
-                // way an expansion error does — bash evaluates the subscript
-                // through that same path. See `arith::ArithError::in_subscript`.
-                if e.in_subscript {
-                    self.discard_error = Some(1);
-                }
-            }
-        }
-        self.arith_cmd = saved_arith_cmd;
+        self.last_status = match self.eval_arith_cmd(raw, "((") {
+            Some(v) => i32::from(v == 0),
+            None => 1,
+        };
         self.arith_discard_flow()
     }
 
@@ -6590,11 +6621,14 @@ impl Shell {
     /// The `name=value` assignment command does not come through here: its `-i`
     /// handling has to reach further, since `+=` under the attribute is numeric
     /// addition rather than string append.
-    fn apply_value_attrs(&mut self, name: &str, val: String) -> String {
+    ///
+    /// `None` means a bad `-i` expression, whose value must not be stored at all
+    /// (see [`Self::eval_int_assign`]).
+    fn apply_value_attrs(&mut self, name: &str, val: String) -> Option<String> {
         if self.integer_attr.contains(name) {
-            self.eval_int_assign(&val).to_string()
+            Some(self.eval_int_assign(&val)?.to_string())
         } else {
-            self.fold_case_attr(name, val)
+            Some(self.fold_case_attr(name, val))
         }
     }
 
@@ -6640,7 +6674,11 @@ impl Shell {
         if self.allexport {
             self.exported.insert(base.clone());
         }
-        let val = self.apply_value_attrs(&base, val);
+        // A bad `-i` expression stores nothing; the abort it armed ends the
+        // command, so `false` here needs no diagnostic of its own.
+        let Some(val) = self.apply_value_attrs(&base, val) else {
+            return false;
+        };
         match dest {
             ScalarDest::Var(n) => {
                 self.set_scalar_store(n, val);
@@ -6922,7 +6960,10 @@ impl Shell {
                             } else {
                                 0
                             };
-                            base.wrapping_add(self.eval_int_assign(&val)).to_string()
+                            let Some(n) = self.eval_int_assign(&val) else {
+                                return false;
+                            };
+                            base.wrapping_add(n).to_string()
                         } else {
                             val
                         };
@@ -6983,7 +7024,10 @@ impl Shell {
                             } else {
                                 0
                             };
-                            Some(base.wrapping_add(self.eval_int_assign(&val)))
+                            let Some(n) = self.eval_int_assign(&val) else {
+                                return false;
+                            };
+                            Some(base.wrapping_add(n))
                         } else {
                             None
                         };
@@ -7014,7 +7058,10 @@ impl Shell {
                                 .assoc_element(&a.name, "0")
                                 .and_then(|s| s.trim().parse::<i64>().ok())
                                 .unwrap_or(0);
-                            let sum = base.wrapping_add(self.eval_int_assign(&val));
+                            let Some(n) = self.eval_int_assign(&val) else {
+                                return false;
+                            };
+                            let sum = base.wrapping_add(n);
                             self.assoc_set(&a.name, "0".to_string(), sum.to_string(), false);
                         } else {
                             self.assoc_set(&a.name, "0".to_string(), val, true);
@@ -7025,7 +7072,10 @@ impl Shell {
                             .get(&a.name)
                             .and_then(|c| c.trim().parse::<i64>().ok())
                             .unwrap_or(0);
-                        let sum = base.wrapping_add(self.eval_int_assign(&val));
+                        let Some(n) = self.eval_int_assign(&val) else {
+                            return false;
+                        };
+                        let sum = base.wrapping_add(n);
                         self.vars.insert(a.name.clone(), sum.to_string());
                     } else if self.arrays.contains_key(&a.name) {
                         self.array_valued.insert(a.name.clone());
@@ -7037,7 +7087,9 @@ impl Shell {
                         self.vars.insert(a.name.clone(), cur + &val);
                     }
                 } else if is_int {
-                    let n = self.eval_int_assign(&val);
+                    let Some(n) = self.eval_int_assign(&val) else {
+                        return false;
+                    };
                     self.set_scalar_store(&a.name, n.to_string());
                 } else {
                     self.set_scalar_store(&a.name, val);
@@ -7093,7 +7145,9 @@ impl Shell {
                     let mut it = words.into_iter();
                     while let Some(key) = it.next() {
                         let val = it.next().unwrap_or_default();
-                        let val = self.apply_value_attrs(&a.name, val);
+                        let Some(val) = self.apply_value_attrs(&a.name, val) else {
+                            return false;
+                        };
                         self.assoc_set(&a.name, key, val, false);
                     }
                 } else {
@@ -7102,7 +7156,9 @@ impl Shell {
                             ArrayElem::Keyed { index, value } => {
                                 let key = self.expand_to_string(index);
                                 let val = self.expand_to_string(value);
-                                let val = self.apply_value_attrs(&a.name, val);
+                                let Some(val) = self.apply_value_attrs(&a.name, val) else {
+                                    return false;
+                                };
                                 self.assoc_set(&a.name, key, val, false);
                             }
                             ArrayElem::Positional(w) => {
@@ -7148,7 +7204,9 @@ impl Shell {
                             // words before parameter/other expansion.
                             for bw in self.expand_braces_opt(w) {
                                 for v in self.expand_word(&bw, true) {
-                                    let v = self.apply_value_attrs(&a.name, v);
+                                    let Some(v) = self.apply_value_attrs(&a.name, v) else {
+                                        return false;
+                                    };
                                     elems.insert(next, v);
                                     next = next.saturating_add(1);
                                 }
@@ -7157,7 +7215,9 @@ impl Shell {
                         ArrayElem::Keyed { index, value } => {
                             let idx = self.eval_arith_index(index);
                             let val = self.expand_to_string(value);
-                            let val = self.apply_value_attrs(&a.name, val);
+                            let Some(val) = self.apply_value_attrs(&a.name, val) else {
+                                return false;
+                            };
                             if let Ok(idx) = usize::try_from(idx) {
                                 elems.insert(idx, val);
                                 next = idx.saturating_add(1);
@@ -7825,9 +7885,7 @@ impl Shell {
             if self.assoc.contains_key(name) {
                 return self.assoc_element(name, sub);
             }
-            // A malformed arithmetic subscript in an indirect array reference is
-            // fatal, like a direct `${a[3 x]}` (see `eval_int_assign`).
-            let idx = self.eval_int_assign(sub);
+            let idx = self.eval_referent_subscript(sub);
             return self.array_element(name, idx);
         }
         self.param_value(target)
@@ -12115,6 +12173,13 @@ impl Shell {
                         Err(()) => return String::new(),
                     }
                 };
+                // Whether the reference resolved to a real target name at
+                // all. A reference that points nowhere gets the reference text
+                // as a stand-in name below, and that name must never be *read*:
+                // it is not a variable reference but a fabricated string, and
+                // one carrying a subscript (`!a[$n]`) would be re-parsed as one
+                // — evaluating the subscript text a second time, unexpanded.
+                let points_nowhere = pointed_at.is_none();
                 let tname = match pointed_at {
                     Some(t) => {
                         if !is_valid_indirect_target(&t) {
@@ -12149,6 +12214,9 @@ impl Shell {
                 let reads_name = nameref && !looks_through;
                 let operand = if reads_name {
                     Some(tname.clone())
+                } else if points_nowhere {
+                    // Unset by construction — see `points_nowhere`.
+                    None
                 } else {
                     self.indirect_target_value(&tname)
                 };
@@ -18847,18 +18915,19 @@ impl Shell {
                     // `+=`, the result is added to the current numeric value. A
                     // bad expression is fatal (bash aborts the shell) — see
                     // `eval_int_assign`; `run_builtin` turns the flag into an exit.
-                    let n = self.eval_int_assign(&v);
-                    let n = if append {
-                        let cur = self
-                            .vars
-                            .get(name)
-                            .and_then(|s| s.trim().parse::<i64>().ok())
-                            .unwrap_or(0);
-                        cur.wrapping_add(n)
-                    } else {
-                        n
-                    };
-                    self.vars.insert(name.to_string(), n.to_string());
+                    if let Some(n) = self.eval_int_assign(&v) {
+                        let n = if append {
+                            let cur = self
+                                .vars
+                                .get(name)
+                                .and_then(|s| s.trim().parse::<i64>().ok())
+                                .unwrap_or(0);
+                            cur.wrapping_add(n)
+                        } else {
+                            n
+                        };
+                        self.vars.insert(name.to_string(), n.to_string());
+                    }
                 } else {
                     // Case attribute (`-l`/`-u`), if any, folds the value. With
                     // `+=`, the (folded) value is appended to the current string.
@@ -28371,6 +28440,222 @@ mod tests {
         assert_eq!(
             run_cmd("(( a[1+1]=9 )); echo \"${a[2]}\"").0,
             "9\n"
+        );
+    }
+
+    #[test]
+    fn let_and_integer_assignment_do_no_expansion_of_their_own() {
+        // Two arithmetic entry points, two different inputs. A `(( … ))` command
+        // and a `for (( … ))` clause carry text the parser kept *raw*, so the
+        // shell expands `$params` in it before evaluating (bash's
+        // `expand_arith_string`). A `let` argument and an integer-assignment
+        // value are ordinary *words*, already expanded once on the way in — bash
+        // expands them no further, so a `$` that survived quoting reaches the
+        // evaluator, which has no rule for it.
+        fn run_cmd(src: &str) -> (String, i32) {
+            let mut sh = Shell::new();
+            sh.set_command_mode();
+            sh.set_interactive_shell(false);
+            let buf = capture_sink();
+            let status = {
+                let mut out = Out::Capture(buf.clone());
+                sh.run_source_out(src, &mut out, 0)
+            };
+            let buf = take_capture(&buf);
+            (String::from_utf8_lossy(&buf).into_owned(), status)
+        }
+        // `let`: the whole argument is echoed, tagged `let`, and only the
+        // command fails — `$n` never becomes 5.
+        assert_eq!(
+            run_cmd("n=5; { let 'x=$n+1'; } 2>&1; echo \"rc=$? x=[$x]\""),
+            (
+                "osh: line 1: let: x=$n+1: syntax error: operand expected \
+(error token is \"$n+1\")\nrc=1 x=[]\n"
+                    .to_string(),
+                0
+            )
+        );
+        // `${n}` and even a nested `$(( … ))` are just as opaque here.
+        assert_eq!(
+            run_cmd("n=5; { let 'y=${n}+1'; } 2>&1").0,
+            "osh: line 1: let: y=${n}+1: syntax error: operand expected \
+(error token is \"${n}+1\")\n"
+        );
+        assert_eq!(
+            run_cmd("n=5; { let 'z=$((n))'; } 2>&1").0,
+            "osh: line 1: let: z=$((n)): syntax error: operand expected \
+(error token is \"$((n))\")\n"
+        );
+        // An integer assignment reports only the *value* (the name is not part
+        // of the arithmetic), and unlike `let` it is fatal: `echo after` on the
+        // same list does not run.
+        assert_eq!(
+            run_cmd("n=5; { declare -i k='$n+1'; echo after; } 2>&1"),
+            (
+                "osh: line 1: declare: $n+1: syntax error: operand expected \
+(error token is \"$n+1\")\n"
+                    .to_string(),
+                1
+            )
+        );
+        // The same assignment written without the builtin loses the tag with it.
+        assert_eq!(
+            run_cmd("n=5; declare -i j; { j='$n+1'; echo after; } 2>&1"),
+            (
+                "osh: line 1: $n+1: syntax error: operand expected \
+(error token is \"$n+1\")\n"
+                    .to_string(),
+                1
+            )
+        );
+        // The contrast: the same text inside `(( … ))` *is* expanded, because
+        // the parser handed it over raw.
+        assert_eq!(run_cmd("n=5; (( x=$n+1 )); echo \"$x\"").0, "6\n");
+    }
+
+    #[test]
+    fn a_nested_expansion_failure_in_an_arith_section_is_untagged_and_fatal() {
+        // Expanding a `(( … ))` or `for (( … ))` section can fail on its own,
+        // before any arithmetic is evaluated: a nested `$(( … ))` is an
+        // *expansion*, and its error is an expansion error — reported without
+        // the `((` tag the enclosing command would have added, and fatal to the
+        // parse unit rather than merely failing the command.
+        fn run_cmd(src: &str) -> (String, i32) {
+            let mut sh = Shell::new();
+            sh.set_command_mode();
+            sh.set_interactive_shell(false);
+            let buf = capture_sink();
+            let status = {
+                let mut out = Out::Capture(buf.clone());
+                sh.run_source_out(src, &mut out, 0)
+            };
+            let buf = take_capture(&buf);
+            (String::from_utf8_lossy(&buf).into_owned(), status)
+        }
+        let msg = "osh: line 1: 1/0: division by 0 (error token is \"0\")\n";
+        assert_eq!(
+            run_cmd("{ (( $((1/0)) )); echo after; } 2>&1"),
+            (msg.to_string(), 1)
+        );
+        // Every section of a C-style `for` reaches it the same way.
+        assert_eq!(
+            run_cmd("{ for ((i=$((1/0)); i<1; i++)); do echo body; done; echo after; } 2>&1"),
+            (msg.to_string(), 1)
+        );
+        assert_eq!(
+            run_cmd("{ for ((i=0; i<$((1/0)); i++)); do echo body; done; echo after; } 2>&1"),
+            (msg.to_string(), 1)
+        );
+        // The section is abandoned at the expansion, so nothing in it is
+        // evaluated and no assignment it would have made takes effect — bash's
+        // `expand_arith_string` longjmps out before the evaluator ever runs.
+        // (The `echo` is on a line of its own: the abort is fatal to the list.)
+        assert_eq!(
+            run_cmd("x=keep\n{ (( x=$((1/0)) )); } 2>&1\necho \"x=[$x]\"").0,
+            "osh: line 2: 1/0: division by 0 (error token is \"0\")\nx=[keep]\n"
+        );
+        assert_eq!(
+            run_cmd("y=keep\n{ for ((y=$((1/0)); 0; )); do :; done; } 2>&1\necho \"y=[$y]\"").0,
+            "osh: line 2: 1/0: division by 0 (error token is \"0\")\ny=[keep]\n"
+        );
+        // A well-formed nested expansion is of course just a value.
+        assert_eq!(
+            run_cmd("n=3; for ((i=$((n)); i<4; i++)); do echo \"i=$i\"; done").0,
+            "i=3\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_integer_assignment_stores_nothing() {
+        // An arithmetic error in an integer assignment is fatal, and bash leaves
+        // the variable *exactly* as it was on the way out — it does not fall back
+        // to a zero. Every shape of the assignment answers the same way, so what
+        // is checked here is the surviving value rather than the diagnostic.
+        //
+        // Each probe reads the variable on a *following line*: the failure is
+        // fatal to the list it is in, so an `echo` after a `;` would never run.
+        fn run_cmd(src: &str) -> String {
+            let mut sh = Shell::new();
+            sh.set_command_mode();
+            sh.set_interactive_shell(false);
+            let buf = capture_sink();
+            {
+                let mut out = Out::Capture(buf.clone());
+                sh.run_source_out(src, &mut out, 0);
+            }
+            let buf = take_capture(&buf);
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        // Plain scalar, `+=`, and the `declare` operand form.
+        assert_eq!(
+            run_cmd("declare -i p=7\n{ p=1/0; } 2>/dev/null\necho \"[$p]\""),
+            "[7]\n"
+        );
+        assert_eq!(
+            run_cmd("declare -i q=7\n{ q+=1/0; } 2>/dev/null\necho \"[$q]\""),
+            "[7]\n"
+        );
+        assert_eq!(
+            run_cmd("declare -i r=7\n{ declare -i r=1/0; } 2>/dev/null\necho \"[$r]\""),
+            "[7]\n"
+        );
+        // An element of an integer array, indexed and associative.
+        assert_eq!(
+            run_cmd("declare -ia a=(5 6)\n{ a[1]=1/0; } 2>/dev/null\necho \"[${a[*]}]\""),
+            "[5 6]\n"
+        );
+        assert_eq!(
+            run_cmd("declare -iA m=([k]=5)\n{ m[k]=1/0; } 2>/dev/null\necho \"[${m[k]}]\""),
+            "[5]\n"
+        );
+        // A variable that was never set stays unset, rather than becoming 0.
+        assert_eq!(
+            run_cmd("{ declare -i u=1/0; } 2>/dev/null\necho \"[${u-unset}]\""),
+            "[unset]\n"
+        );
+        // The control: a good expression of course still stores.
+        assert_eq!(run_cmd("declare -i v=7; v=1+1; echo \"[$v]\""), "[2]\n");
+    }
+
+    #[test]
+    fn an_indirect_referents_subscript_is_expanded_and_fatal_when_bad() {
+        // `ref='a[1]'` holds *text*, and the subscript in it has never been
+        // expanded — it came out of a variable, not off the command line. So
+        // bash expands it here, where a direct `${a[$n]}` would already have
+        // been expanded by the word parser.
+        fn run_cmd(src: &str) -> (String, i32) {
+            let mut sh = Shell::new();
+            sh.set_command_mode();
+            sh.set_interactive_shell(false);
+            let buf = capture_sink();
+            let status = {
+                let mut out = Out::Capture(buf.clone());
+                sh.run_source_out(src, &mut out, 0)
+            };
+            let buf = take_capture(&buf);
+            (String::from_utf8_lossy(&buf).into_owned(), status)
+        }
+        assert_eq!(
+            run_cmd("a=(zero one two); n=1; ref='a[$n]'; echo \"[${!ref}]\"").0,
+            "[one]\n"
+        );
+        assert_eq!(
+            run_cmd("a=(zero one two); ref='a[$(echo 2)]'; echo \"[${!ref}]\"").0,
+            "[two]\n"
+        );
+        // A bare name is left to the evaluator, as in any arithmetic string.
+        assert_eq!(
+            run_cmd("a=(zero one two); n=1; ref='a[n]'; echo \"[${!ref}]\"").0,
+            "[one]\n"
+        );
+        // A bad subscript there is a subscript failure like any other: untagged,
+        // and fatal to the rest of the line.
+        assert_eq!(
+            run_cmd("a=(x); ref='a[1/0]'; { echo \"[${!ref}]\"; echo after; } 2>&1"),
+            (
+                "osh: line 1: 1/0: division by 0 (error token is \"0\")\n".to_string(),
+                1
+            )
         );
     }
 

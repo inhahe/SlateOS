@@ -109,7 +109,7 @@ use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseTerm,
     CmdSubBody, Command,
     CondBinOp, CondBinary, CondUnary,
-    CondExpr,
+    CondExpr, DeclArray,
     ForArithClause, ForClause, IfClause, LineMap, LoopClause, ParamOp, Pipeline, Program, Redirect,
     RedirectOp,
     ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
@@ -2288,6 +2288,23 @@ pub struct Shell {
     ///
     /// Saved and restored around the inner `apply_assignment` call.
     decl_builtin_ctx: bool,
+    /// Collects the `set -x` rendering of a compound assignment's elements while
+    /// the literal is being expanded. `Some` only while `apply_assignment` binds a
+    /// *declaration builtin's* compound operand with tracing on.
+    ///
+    /// bash traces such an operand on its own line before the builtin's
+    /// (`+ b=('x' '')`, then `+ declare -a b`), with the elements as *expanded*:
+    /// fields split, globs matched, each wrapped in unconditional single quotes,
+    /// and a keyed element rendered `['idx']='val'` with the subscript as it read
+    /// after word expansion but *before* arithmetic (`['1+1']`, untrimmed).
+    ///
+    /// None of that survives the binding — the stored array has evaluated
+    /// subscripts, `-i`-evaluated and case-folded values, and no record of which
+    /// elements were keyed — and re-expanding the literal to build the line would
+    /// re-run any command substitution in it (bash emits those `++` lines exactly
+    /// once, before the operand's line). So the rendering is recorded at the one
+    /// point where the right data exists: the expansion pass itself.
+    xtrace_compound: Option<Vec<String>>,
     /// Set (to the unmatched pattern) when `shopt -s failglob` is on and a glob
     /// in a command word matches nothing. The simple-command driver reports
     /// `no match: PATTERN` and aborts the command list (`Flow::Exit(1)`) after
@@ -2719,6 +2736,7 @@ impl Shell {
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
+            xtrace_compound: None,
             glob_error: None,
             local_frames: Vec::new(),
             local_opt_saves: Vec::new(),
@@ -6578,6 +6596,7 @@ impl Shell {
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
+            xtrace_compound: None,
             glob_error: None,
             // A subshell body is not itself a function frame; a `local` there is
             // an error until it enters one of its own function calls.
@@ -6957,6 +6976,41 @@ impl Shell {
         }
     }
 
+    /// Record one expanded element of a compound assignment for the `set -x` line,
+    /// if one is being collected (see [`Shell::xtrace_compound`]). `index` is the
+    /// subscript's expanded text for a keyed element, `None` for a positional one.
+    fn xtrace_compound_elem(&mut self, index: Option<&str>, value: &str) {
+        let Some(buf) = self.xtrace_compound.as_mut() else {
+            return;
+        };
+        let v = xtrace_compound_quote(value);
+        buf.push(match index {
+            Some(i) => format!("[{}]={v}", xtrace_compound_quote(i)),
+            None => v,
+        });
+    }
+
+    /// Emit the collected `set -x` line for compound assignment `a` and stop
+    /// collecting, so a later failure cannot add to it.
+    ///
+    /// Called at the point each literal's *expansion* is complete, which is where
+    /// bash traces: after the `++` lines of any command substitution inside the
+    /// literal, but before the binding — so a bad `-i` value or an unsubscripted
+    /// element of an associative literal is diagnosed *after* the operand's line.
+    /// A literal whose expansion failed is never traced at all (bash emits no line
+    /// for `declare -a f=(x $((1/0)))`), which falls out of the early returns on
+    /// the expansion-failure paths never reaching here.
+    fn flush_xtrace_compound(&mut self, a: &Assignment) {
+        let Some(buf) = self.xtrace_compound.take() else {
+            return;
+        };
+        let prefix = self.xtrace_prefix();
+        let op = if a.append { "+=" } else { "=" };
+        self.emit_stderr(
+            format!("{prefix}{}{op}({})\n", a.name, buf.join(" ")).as_bytes(),
+        );
+    }
+
     /// Apply a variable assignment. `trace` is true only for a *bare* assignment
     /// command (`x=5`), which `set -x` echoes: an indexed-element or array
     /// assignment is traced here in source form (bash does not expand it for the
@@ -7328,6 +7382,18 @@ impl Shell {
                             break;
                         }
                     }
+                    // Expansion is complete, so this is where bash traces the
+                    // operand: one quoted field per flattened word, a keyed
+                    // element included as the reassembled `'[a]=1'` literal that
+                    // pair mode treats it as (`pm=(x y [a]=1 z)` traces
+                    // `pm=('x' 'y' '[a]=1' 'z')`). A literal whose expansion
+                    // failed is not traced at all.
+                    if !failed {
+                        if let Some(buf) = self.xtrace_compound.as_mut() {
+                            buf.extend(words.iter().map(|w| xtrace_compound_quote(w)));
+                        }
+                        self.flush_xtrace_compound(a);
+                    }
                     let mut it = words.into_iter();
                     while let Some(key) = it.next() {
                         let val = it.next().unwrap_or_default();
@@ -7355,6 +7421,7 @@ impl Shell {
                                 // already bound the earlier pairs, and a
                                 // non-append drops `pending` with the swap.
                                 bail_if_expansion_failed!();
+                                self.xtrace_compound_elem(Some(&key), &val);
                                 let Some(val) = self.apply_value_attrs(&a.name, val) else {
                                     return false;
                                 };
@@ -7366,6 +7433,7 @@ impl Shell {
                             }
                             ArrayElem::Positional(w) => {
                                 let word = self.expand_to_string(w);
+                                self.xtrace_compound_elem(None, &word);
                                 // bash quotes the offending word only when the
                                 // literal came from a `declare`/`local` operand
                                 // (which the builtin re-parses); a bare `m=(…)`
@@ -7387,6 +7455,13 @@ impl Shell {
                 // A failed expansion anywhere in the literal abandons the swap,
                 // so the table is left exactly as it was.
                 bail_if_expansion_failed!();
+                // Trace the operand (subscript mode reaches here with nothing yet
+                // flushed; pair mode already flushed above, and the flush is
+                // one-shot). See `TD-OILS-DECL-COMPOUND-NO-BIND-ON-FAIL` for the
+                // one shape this still gets out of order: an unsubscripted element
+                // in subscript mode is diagnosed mid-loop, so its message beats
+                // this line where bash's follows it.
+                self.flush_xtrace_compound(a);
                 // The literal (even the empty `m=()`) gives the array a value —
                 // recorded here rather than on entry, so an assignment abandoned
                 // by a failed expansion leaves an unvalued array unvalued.
@@ -7424,13 +7499,19 @@ impl Shell {
                             // words before parameter/other expansion.
                             for bw in self.expand_braces_opt(w) {
                                 for v in self.expand_word(&bw, true) {
+                                    self.xtrace_compound_elem(None, &v);
                                     expanded.push((None, v));
                                 }
                             }
                         }
                         ArrayElem::Keyed { index, value } => {
-                            let idx = self.eval_arith_index(index);
+                            // The subscript's expanded *text* is kept alongside
+                            // the number it evaluates to, because that is what
+                            // `set -x` traces (`['1+1']`, `[' 1 ']`).
+                            let text = self.expand_to_arith_string(index);
+                            let idx = self.eval_arith_index_text(&text);
                             let val = self.expand_to_string(value);
+                            self.xtrace_compound_elem(Some(&text), &val);
                             expanded.push((Some(idx), val));
                         }
                     }
@@ -7439,6 +7520,9 @@ impl Shell {
                 // clear, which is the observable part: bash leaves the old
                 // elements in place rather than emptying the array.
                 bail_if_expansion_failed!();
+                // Expansion is complete, so this is where bash traces the operand
+                // — before the binding, whose own failures are reported after it.
+                self.flush_xtrace_compound(a);
                 // The literal (even the empty `a=()`) gives the array a value —
                 // recorded here rather than before phase 1, so an assignment
                 // abandoned by a failed expansion leaves an unvalued array
@@ -8831,7 +8915,16 @@ impl Shell {
             .and_then(word_as_plain_literal)
             .is_some_and(is_declaration_builtin);
         let mut argv: Vec<String> = Vec::new();
+        // Where each source word's fields start in `argv`. Only a declaration
+        // builtin with compound operands needs it, to put the operands back at
+        // their source positions in the `set -x` line — a word can expand to any
+        // number of fields, so the mapping is not the identity.
+        let mut word_starts: Vec<usize> = Vec::new();
+        let track_words = !sc.decl_arrays.is_empty();
         for (wi, w) in sc.words.iter().enumerate() {
+            if track_words {
+                word_starts.push(argv.len());
+            }
             if is_decl && wi > 0 && is_assignment_word(w) {
                 argv.push(self.expand_decl_assignment(w));
                 continue;
@@ -9020,6 +9113,18 @@ impl Shell {
             }
         }
 
+        // `declare -a x=(1 2)` and friends: the array-literal operands are bound
+        // during this word-expansion pass rather than by the builtin (see
+        // `exec_declare_with_arrays`), and bash traces them accordingly — one
+        // `x=('1' '2')` line per operand, emitted at the point the operand is
+        // expanded, and only then the builtin's own line. So the tracing for this
+        // form has to happen inside that function, not here.
+        let decl_with_arrays = !sc.decl_arrays.is_empty()
+            && matches!(
+                argv[0].as_str(),
+                "declare" | "typeset" | "local" | "readonly" | "export"
+            );
+
         // `set -x`: trace the command before running it. bash emits each temporary
         // prefix assignment (`FOO=bar cmd`) on its own line first, then the
         // command with each argument minimally quoted, all behind the PS4 prefix.
@@ -9028,15 +9133,17 @@ impl Shell {
             for (k, v) in &assigns {
                 self.emit_stderr(format!("{prefix}{k}={}\n", xtrace_quote_value(v)).as_bytes());
             }
-            let mut line = prefix;
-            for (i, a) in argv.iter().enumerate() {
-                if i > 0 {
-                    line.push(' ');
+            if !decl_with_arrays {
+                let mut line = prefix;
+                for (i, a) in argv.iter().enumerate() {
+                    if i > 0 {
+                        line.push(' ');
+                    }
+                    line.push_str(&xtrace_quote(a));
                 }
-                line.push_str(&xtrace_quote(a));
+                line.push('\n');
+                self.emit_stderr(line.as_bytes());
             }
-            line.push('\n');
-            self.emit_stderr(line.as_bytes());
         }
 
         // A redirection-only `exec` (`exec > file`, `exec 3>&1 1>&2 2>&3`,
@@ -9075,13 +9182,34 @@ impl Shell {
         // to the command as `decl_arrays`; apply them with the declared kind.
         // `readonly`/`export` also accept inline array literals (`readonly
         // arr=(1 2)`), applying their implied `-r`/`-x` attribute.
-        if !sc.decl_arrays.is_empty()
-            && matches!(
-                name.as_str(),
-                "declare" | "typeset" | "local" | "readonly" | "export"
-            )
-        {
-            return self.exec_declare_with_arrays(&argv, &sc.decl_arrays, out, &redir);
+        if decl_with_arrays {
+            // The builtin's `set -x` line shows a *bare name* where each compound
+            // operand was written (`+ declare -x SC=1 arr SD=2`), so rebuild the
+            // word list with the names spliced back in at their source positions.
+            // The operands are in source order, so the k-th one lands `k` slots
+            // further right than its recorded position — every earlier operand has
+            // already been spliced in ahead of it. A `word_index` past the last word
+            // means the operand was written after every word, hence appended.
+            let trace_words = self.xtrace.then(|| {
+                let mut w = argv.clone();
+                for (k, d) in sc.decl_arrays.iter().enumerate() {
+                    let at = word_starts
+                        .get(d.word_index)
+                        .copied()
+                        .unwrap_or(argv.len())
+                        .saturating_add(k)
+                        .min(w.len());
+                    w.insert(at, d.assign.name.clone());
+                }
+                w
+            });
+            return self.exec_declare_with_arrays(
+                &argv,
+                &sc.decl_arrays,
+                trace_words.as_deref(),
+                out,
+                &redir,
+            );
         }
 
         // `command …` (bypass shell functions) and `builtin …` (force builtin
@@ -13528,6 +13656,18 @@ impl Shell {
 
     fn eval_arith_index(&mut self, w: &Word) -> i64 {
         let s = self.expand_to_arith_string(w);
+        self.eval_arith_index_text(&s)
+    }
+
+    /// [`Self::eval_arith_index`] on a subscript that has *already* been word-
+    /// expanded.
+    ///
+    /// Split out so a caller that needs the pre-arithmetic text as well as the
+    /// number does not have to expand the word twice, which would re-run any
+    /// command substitution in it. `set -x` is the caller: it traces a keyed
+    /// compound element as `['1+1']='w'` — the subscript exactly as it read after
+    /// word expansion, untrimmed — which the evaluated index cannot reproduce.
+    fn eval_arith_index_text(&mut self, s: &str) -> i64 {
         let s = s.trim();
         if s.is_empty() {
             return 0;
@@ -19442,10 +19582,17 @@ impl Shell {
     /// any scalar/plain operands in `argv` go through [`Shell::builtin_declare`];
     /// each array literal is marked with the declared kind (`-A` → assoc,
     /// `-a`/default → indexed) and applied via [`Shell::apply_assignment`].
+    ///
+    /// `trace_words` is `Some` only under `set -x`: it is `argv` with each compound
+    /// operand's bare name spliced back in at its source position, which is how bash
+    /// renders the builtin's own trace line. That line is emitted here, after the
+    /// per-operand `name=(…)` lines that phase 1 produces, so the caller must not
+    /// trace this command itself.
     fn exec_declare_with_arrays(
         &mut self,
         argv: &[String],
-        decl_arrays: &[Assignment],
+        decl_arrays: &[DeclArray],
+        trace_words: Option<&[String]>,
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
@@ -19545,7 +19692,8 @@ impl Shell {
         // those have to be in force before the literal binds, and bash likewise
         // shows them on a survivor of a failed later operand
         // (`declare -ail g=(2+3) r=(1)` → `declare -ail g=([0]="5")`, no `x`).
-        for a in decl_arrays {
+        for d in decl_arrays {
+            let a = &d.assign;
             // A function-local array declaration shadows the name in the current
             // frame first.
             if make_local {
@@ -19618,7 +19766,18 @@ impl Shell {
             // the command path, so the inner assignment must not trace again.
             let saved_decl_ctx = self.decl_builtin_ctx;
             self.decl_builtin_ctx = true;
+            // Under `set -x` the operand gets its own trace line, rendered from the
+            // *expanded* fields — which only exist during the expansion below — and
+            // emitted by `flush_xtrace_compound` at the point expansion completes.
+            // Arm the collector here; a buffer still present afterwards means the
+            // expansion failed before the flush point, and bash emits no line at
+            // all in that case, so it is simply dropped.
+            let saved_xtrace_compound = self.xtrace_compound.take();
+            if self.xtrace {
+                self.xtrace_compound = Some(Vec::new());
+            }
             let bound = self.apply_assignment(a, false);
+            self.xtrace_compound = saved_xtrace_compound;
             self.decl_builtin_ctx = saved_decl_ctx;
             // A rejected compound operand (the readonly guard in
             // `apply_assignment`, which has already emitted its diagnostic) ends
@@ -19629,6 +19788,21 @@ impl Shell {
                 self.last_status = 1;
                 return Flow::Discard;
             }
+        }
+        // Every compound operand has bound (and traced), so the builtin's own trace
+        // line comes now — after them, and only if the command got this far: bash
+        // does not trace the builtin at all when an operand's binding aborted the
+        // command above.
+        if let Some(words) = trace_words {
+            let mut line = self.xtrace_prefix();
+            for (i, w) in words.iter().enumerate() {
+                if i > 0 {
+                    line.push(' ');
+                }
+                line.push_str(&xtrace_quote(w));
+            }
+            line.push('\n');
+            self.emit_stderr(line.as_bytes());
         }
         // Phase 2 — the builtin: the flags, and any *scalar* operands
         // (e.g. `declare -x FOO=bar`). For `readonly`/`export`, route scalar
@@ -19651,7 +19825,8 @@ impl Shell {
         // `apply_assignment` would otherwise reject the initializer — and an
         // array-literal-only `readonly arr=(1 2)` has no builtin call at all to
         // rely on.
-        for a in decl_arrays {
+        for d in decl_arrays {
+            let a = &d.assign;
             if nameref {
                 self.nameref_attr.insert(a.name.clone());
             } else if unset_nameref {
@@ -25406,6 +25581,28 @@ fn xtrace_quote(s: &str) -> String {
 /// at all, so `x=` traces as `x=` and not as `x=''`.
 fn xtrace_quote_value(s: &str) -> String {
     xtrace_quote_with(s, true)
+}
+
+/// One element (or keyed subscript) of a compound assignment for a `set -x` trace.
+///
+/// Unconditionally single-quoted, unlike [`xtrace_quote`]'s minimal-quoting
+/// cascade: bash's compound-assignment tracer wraps *every* element in `'…'`
+/// whatever it contains — `b=(x "")` traces as `b=('x' '')` and a plain `1` as
+/// `'1'` — and escapes an embedded `'` the shell-portable way. A control character
+/// stays literal rather than turning into `$'…'`, so a traced element can span
+/// lines (`t=($'x\ny')` traces across two).
+fn xtrace_compound_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// `$'…'` ANSI-C quoting, bash's `ansic_quote`: the eight escapes it spells with
@@ -41008,6 +41205,106 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A newline likewise keeps the word single-quoted (it is IFS whitespace),
         // so the trace really does span two lines.
         assert_eq!(trace("true $'a\\nb'"), "+ true 'a\nb'\n");
+    }
+
+    /// An array literal that is an *operand* of a declaration builtin is bound
+    /// during the command's word-expansion pass, and bash traces it accordingly:
+    /// one `name=(…)` line per operand, in operand order, before the builtin's own
+    /// line — which shows a bare name where the operand was written.
+    #[test]
+    fn xtrace_traces_a_declaration_builtins_array_operands() {
+        let trace = |src: &str| run(&format!("{{ set -x; {src}; }} 2>&1")).0;
+        // The operand's line comes first, then the builtin's with a bare name.
+        assert_eq!(trace("declare -a b=(x)"), "+ b=('x')\n+ declare -a b\n");
+        // Unlike a command word, every element is quoted unconditionally.
+        assert_eq!(trace("declare -a b=(x '')"), "+ b=('x' '')\n+ declare -a b\n");
+        assert_eq!(trace("declare -a e=()"), "+ e=()\n+ declare -a e\n");
+        assert_eq!(
+            trace("declare -a q=(\"it's\")"),
+            "+ q=('it'\\''s')\n+ declare -a q\n"
+        );
+        // A control character stays raw — the minimal-quoting cascade that command
+        // words go through (`$'…'` for unprintables) does not apply here.
+        assert_eq!(
+            trace("declare -a c=($'a\\002b')"),
+            "+ c=('a\u{2}b')\n+ declare -a c\n"
+        );
+        // Elements are the expanded *fields*, so splitting and brace expansion are
+        // already done; `+=` is preserved.
+        assert_eq!(
+            trace("two='a b'; declare -a h=($two \"$two\")"),
+            "+ two='a b'\n+ h=('a' 'b' 'a b')\n+ declare -a h\n"
+        );
+        assert_eq!(
+            trace("declare -a br=({1..3})"),
+            "+ br=('1' '2' '3')\n+ declare -a br\n"
+        );
+        assert_eq!(
+            trace("declare -a p=(1); declare -a p+=(2)"),
+            "+ p=('1')\n+ declare -a p\n+ p+=('2')\n+ declare -a p\n"
+        );
+        // A keyed element shows the subscript's post-expansion text, before the
+        // arithmetic runs and without trimming.
+        assert_eq!(
+            trace("declare -A m=([k]=v [1+1]=w)"),
+            "+ m=(['k']='v' ['1+1']='w')\n+ declare -A m\n"
+        );
+        assert_eq!(
+            trace("i=2; declare -a s=([i]=q [$i]=r)"),
+            "+ i=2\n+ s=(['i']='q' ['2']='r')\n+ declare -a s\n"
+        );
+        assert_eq!(
+            trace("declare -a sp=([ 1 ]=v)"),
+            "+ sp=([' 1 ']='v')\n+ declare -a sp\n"
+        );
+        // Pair mode traces one element per flattened field, so a keyed element
+        // among them appears as the reassembled word pair mode treats it as.
+        assert_eq!(
+            trace("declare -A pm; declare -A pm=(x y [a]=1 z)"),
+            "+ declare -A pm\n+ pm=('x' 'y' '[a]=1' 'z')\n+ declare -A pm\n"
+        );
+        // `-i`/`-l` are in force before the literal binds, but the trace shows the
+        // untransformed field.
+        assert_eq!(
+            trace("declare -ai n=(1+1)"),
+            "+ n=('1+1')\n+ declare -ai n\n"
+        );
+        assert_eq!(trace("declare -al f=(AB)"), "+ f=('AB')\n+ declare -al f\n");
+        // A command substitution traces its own `++` line first, exactly once.
+        assert_eq!(
+            trace("declare -a cs=($(echo z))"),
+            "++ echo z\n+ cs=('z')\n+ declare -a cs\n"
+        );
+        // The bare name stands in at the operand's *source* position among the
+        // words, so scalar operands on either side keep their places — and a word
+        // that expands to several fields does not shift it.
+        assert_eq!(
+            trace("declare -x SC=1 arr=(9) SD=2"),
+            "+ arr=('9')\n+ declare -x SC=1 arr SD=2\n"
+        );
+        assert_eq!(
+            trace("declare -a x=(1 2) y=(3)"),
+            "+ x=('1' '2')\n+ y=('3')\n+ declare -a x y\n"
+        );
+        assert_eq!(
+            trace("declare -a p q=(1) r s=(2) t"),
+            "+ q=('1')\n+ s=('2')\n+ declare -a p q r s t\n"
+        );
+        // `readonly`/`export`/`local` take the same path.
+        assert_eq!(
+            trace("readonly -a ro=(5)"),
+            "+ ro=('5')\n+ readonly -a ro\n"
+        );
+        assert_eq!(trace("export -a ex=(6)"), "+ ex=('6')\n+ export -a ex\n");
+        assert_eq!(
+            trace("f() { local -a lo=(7); }; f"),
+            "+ f\n+ lo=('7')\n+ local -a lo\n"
+        );
+        // PS4 applies to the operand line too.
+        assert_eq!(
+            run("{ PS4='T '; set -x; declare -a ps=(1); } 2>&1").0,
+            "T ps=('1')\nT declare -a ps\n"
+        );
     }
 
     #[test]

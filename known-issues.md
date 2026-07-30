@@ -342,9 +342,10 @@ immune.
 flag letters, which would mean threading the pre-expansion word list of a simple
 command into `exec_declare_with_arrays` purely to reproduce a quirk that only
 shows up when a declaration builtin's flags are themselves computed. Worth doing
-only if the same pre-expansion word list is needed for another reason — the
-`decl_arrays` positional info wanted by `TD-OILS-XTRACE-ARRAY-DECL` is the likely
-trigger.
+only if the same pre-expansion word list is needed for another reason. Note the
+`decl_arrays` positional info added for TD-OILS-XTRACE-ARRAY-DECL (`ast::DeclArray`)
+turned out *not* to be that trigger: it records where each compound operand sat
+among the words, not the words' pre-expansion text.
 
 ### TD-OILS-LOCAL-ARRAY-KIND-VALUED. `local -a` on an existing local scalar leaves the name unvalued where bash reports an empty array — 2026-07-30 — OPEN (very low priority)
 
@@ -382,6 +383,110 @@ not actually placed in the environment, and `declare -p` shows
 operand carries a value" rule fixed in `readonly_array_flags_need_a_value_to_take_effect`).
 Measure against a non-MSYS bash first if one becomes available, since this was
 observed only on the MSYS build.
+
+### TD-OILS-DECL-COMPOUND-DISCARD-LEAK. A failed expansion in a declaration builtin's array operand discards the *next* command too — 2026-07-30 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_declare_with_arrays`, which never
+consumes `self.discard_error` after phase 1.
+
+**What.** A word-expansion error inside a compound operand (`declare -a fg=(x
+$((1/0)))`) leaves `self.discard_error` set. `exec_declare_with_arrays` returns
+`Flow::Next`, so the flag survives to the *following* command's word-expansion
+check in `exec_simple_inner`, which then discards a command bash runs normally.
+Reproduce:
+
+```sh
+declare -A ma; ma=([z]=old)
+declare -A ma+=([a]=1 [b]=$((1/0)) [c]=3)
+declare -p ma          # bash prints ma; osh prints nothing — discarded
+echo "st=$?"           # ... and with two statements the echo is eaten instead
+```
+
+It is very visible under `set -x`, where the swallowed command is the `set +x`
+that was supposed to turn tracing off.
+
+**Proper fix.** After phase 1, before the builtin's trace line, take
+`self.discard_error` (and `glob_error`/`unbound_error`, as the bare-assignment
+path at the top of `exec_simple_inner` already does) and return `Flow::Discard`
+(`Flow::Exit` for `unbound_error`) with the carried status. bash's discard ends at
+the end of the parse unit, so a following *line* must still run.
+
+### TD-OILS-DECL-COMPOUND-NO-BIND-ON-FAIL. A failed operand expansion should bind nothing and create nothing — 2026-07-30 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_declare_with_arrays` phase 1
+(the `array_kind_apply` / attribute block that runs *before* `apply_assignment`),
+and the associative keyed-mode branch of `apply_assignment` (~7414).
+
+**What.** Two divergences, both from the same cause: osh applies the declared kind
+and attributes — and, in keyed mode, binds each element as it is expanded — before
+knowing whether the operand's expansion will succeed. bash performs the whole
+compound assignment inside the command's word-expansion pass, so a failure there
+aborts the command before anything is created or bound. Measured:
+
+```sh
+declare -a fg=(x $((1/0))); declare -p fg
+# bash: declare: fg: not found      osh: declare -a fg   (created, empty)
+
+declare -A k3; k3=([z]=old)
+declare -A k3+=([pk]=pv [j$((a+))]=x); declare -p k3
+# bash: declare -A k3=([z]="old" )  osh: ... [pk]="pv" also bound
+```
+
+The incremental binding is *correct* for a **bare** compound assignment —
+`k1=([z]=old); k1+=([pk]=pv [j$((a+))]=x)` does leave `k1[pk]=pv` set in bash, in
+both pair and subscript mode — so the two cases must stay distinguishable.
+`self.decl_builtin_ctx` already marks which one is running.
+
+Also from the same interleaving: the `must use subscript when assigning
+associative array` diagnostic is emitted mid-expansion, where bash emits it during
+the later processing pass. Observable order differences:
+
+```sh
+declare -A z1=([a]=1 bad [b]=$(echo oops >&2))
+# bash: oops, then the diagnostic.  osh: the diagnostic, then oops.
+declare -A z2=([a]=1 bad [b]=$((1/0)))
+# bash: only the div-by-zero.       osh: the diagnostic as well.
+```
+
+Under `set -x` this makes osh print the diagnostic *before* the operand's trace
+line where bash prints it after (`tests/corpus/xtrace-array-decl.sh` deliberately
+avoids the shape).
+
+**Proper fix.** Restructure the associative branch of `apply_assignment` into a
+single expand-all-then-process shape (the indexed branch already has it): expand
+every element into a `Vec<(Option<key>, value)>`, remembering the index at which
+expansion failed, then
+
+* failure + `decl_builtin_ctx` → bind nothing, emit no per-element diagnostics,
+  return false (bash aborts the command during word expansion);
+* failure + bare compound → process the successfully-expanded prefix (so an
+  append keeps it), then return false;
+* no failure → flush the trace line, then process every element, emitting the
+  `must use subscript` diagnostics in element order as part of processing.
+
+Separately, phase 1 of `exec_declare_with_arrays` must not leave the variable
+created when the operand fails. The kind has to be in force *before* the elements
+bind (it selects the assoc vs. indexed branch), so either thread the intended kind
+and value attributes into `apply_assignment` and let it apply them once expansion
+has succeeded, or snapshot and restore the name's storage and attribute-set
+membership around the call.
+
+### TD-OILS-XTRACE-CTLESC-LEAK. bash doubles a literal 0x01 when tracing a compound assignment — 2026-07-30 — WONTFIX (bash bug, not replicated)
+
+**Where:** `userspace/oils/src/interp.rs` — `xtrace_compound_quote`; noted in
+`tests/corpus/xtrace-array-decl.sh`.
+
+**What.** For `set -x; declare -a c=($'a\001b')` bash 5.2 traces
+`+ c=('a\001\001b')` — the byte appears twice — while the value it stores is the
+correct one-byte `$'a\001b'`. 0x01 is bash's internal `CTLESC` marker; the
+compound-assignment printer emits the escaped form without stripping it. Only 0x01
+is affected: `\002`, `\033` and `\177` all come out once.
+
+osh prints the byte once, which is what the value actually is. Not replicating a
+leaked internal escape: it would mean carrying bash's CTLESC representation into
+osh's expansion pipeline purely to reproduce a display bug. Recorded so the
+divergence is not mistaken for an osh defect later, and so the corpus omission is
+explained.
 
 ### TD-OILS-NO-HISTEXPAND. `!`-style history expansion — 2026-07-29 — RESOLVED 2026-07-29
 
@@ -7055,9 +7160,9 @@ unit tests. What each turned out to be:
 
 One `set -x` divergence remains, tracked separately because its cause is the
 pipeline executor rather than the tracer: TD-OILS-XTRACE-PIPE-ORDER (stage start
-order). A second, narrower one is open as TD-OILS-XTRACE-ARRAY-DECL below.
+order).
 
-### TD-OILS-XTRACE-ARRAY-DECL. `declare -a b=(x "")` traces the `declare` without its arguments, and does not trace the compound value — OPEN 2026-07-30
+### TD-OILS-XTRACE-ARRAY-DECL. `declare -a b=(x "")` traces the `declare` without its arguments, and does not trace the compound value — ✅ RESOLVED 2026-07-30
 
 **Where:** `userspace/oils/src/interp.rs` — the `set -x` trace block in
 `exec_simple`, and the `declare`/`local`/`readonly` argument path.
@@ -7081,13 +7186,57 @@ at all.
 the verbatim source text, in both shells. So this is specific to a compound
 assignment appearing as an *argument* to a declaration builtin.
 
-**Proper fix.** Trace the declaration builtin's words including the assignment
-word (the drop looks like the assignment-word split treating `b=(…)` as a prefix
-assignment and consuming it), and emit bash's per-element line for a compound
-value before the builtin's own line, reusing `xtrace_quote_value`. Measure the
-element quoting against bash first: the example shows `'x'` quoted where the
-command-word rule would leave `x` bare, so the compound-value line does **not**
-use the same four-branch cascade as `xtrace_print_word_list`.
+**Resolution (2026-07-30).** Both faults fixed; pinned by
+`xtrace_traces_a_declaration_builtins_array_operands` and the corpus case
+`tests/corpus/xtrace-array-decl.sh` (byte-identical to bash over 40 shapes).
+
+The measured rule, which the implementation follows exactly:
+
+- One `name=(…)` line per compound operand, in operand order, **all before** the
+  builtin's own line. bash performs such an assignment during the command's
+  *word-expansion* pass, not inside the builtin, so this ordering is not cosmetic —
+  it is the same phase split that `exec_declare_with_arrays`'s three phases encode.
+- The elements shown are the fully expanded **fields** (split, globbed,
+  brace-expanded), each wrapped in single quotes **unconditionally**. Confirmed:
+  the compound line does *not* use the four-branch `xtrace_print_word_list`
+  cascade, so a plain `x` prints as `'x'` and a control character stays raw
+  (`c=('a\002b')`, never `$'…'`). Hence a separate `xtrace_compound_quote` rather
+  than a reuse of `xtrace_quote_value`.
+- A keyed element renders `['idx']='val'`, the subscript being its
+  **post-word-expansion, pre-arithmetic, untrimmed** text — `['1+1']`, `[' 1 ']`,
+  and `['2']` for `[$i]` with `i=2`. In associative **pair** mode a keyed element
+  instead renders as the reassembled `'[a]=1'` word that pair mode treats it as.
+- An empty compound traces `name=()`; `+=` is preserved; a command substitution
+  emits its `++` line first and exactly once; a **failed** expansion emits no line
+  at all.
+- The builtin's own line shows a **bare name** where the operand was written, at
+  the operand's original position among the words: `+ declare -x SC=1 arr SD=2`,
+  `+ declare -a p q r s t`.
+
+Implementation notes:
+
+- None of what the line needs survives the binding (the stored array has evaluated
+  subscripts, `-i`-evaluated and case-folded values, and no record of which
+  elements were keyed), and re-expanding the literal would re-run its command
+  substitutions. So the rendering is recorded *during* the expansion pass, through
+  a new `Shell::xtrace_compound: Option<Vec<String>>` side-channel armed by
+  `exec_declare_with_arrays` around each `apply_assignment` — the same idiom as the
+  existing `discard_error`/`glob_error` flags. `xtrace_compound_elem` pushes an
+  element, `flush_xtrace_compound` emits the line at each branch's genuine
+  "expansion complete" point, and it is one-shot so pair mode's earlier flush wins.
+- The operands' *positions* had to be recorded in the AST: the new
+  `ast::DeclArray { assign, word_index }` replaces the bare `Assignment` in
+  `SimpleCommand::decl_arrays`, since the operands live outside `words` but their
+  source order is observable both here and in `$BASH_COMMAND`. `unparse.rs`'s
+  `simple_inline` now splices them back at `word_index` too, which fixes
+  `$BASH_COMMAND` for `declare -x SC=1 arr=(9) SD=2` as a side effect.
+- `eval_arith_index` was split so the keyed path can trace the subscript's text
+  before evaluating it (`eval_arith_index_text`).
+
+Two divergences remain in this area, both from the same interleaving in the
+associative branch and both tracked separately:
+TD-OILS-DECL-COMPOUND-NO-BIND-ON-FAIL and TD-OILS-DECL-COMPOUND-DISCARD-LEAK. One
+bash display bug is deliberately not replicated: TD-OILS-XTRACE-CTLESC-LEAK.
 
 ### TD-OILS-ERRLINE. Error diagnostics lack bash's `<name>: line N:` prefix — ✅ RESOLVED 2026-07-19
 

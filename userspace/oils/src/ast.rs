@@ -239,13 +239,35 @@ pub struct SimpleCommand {
     /// e.g. the `m=([k]=v)` in `declare -A m=([k]=v)`. Only populated when the
     /// command word is a declaration builtin (`declare`/`typeset`/`local`);
     /// the interpreter applies these with the declared array kind.
-    pub decl_arrays: Vec<Assignment>,
+    pub decl_arrays: Vec<DeclArray>,
     /// 1-based source line the command word sits on. Used to keep `$LINENO`
     /// and diagnostics correct *per command* — bash advances `$LINENO` as each
     /// simple command executes, so a multi-line pipeline blames the failing
     /// stage's own line rather than the pipeline's first line. `0` for
     /// synthetically-built commands with no source position.
     pub line: u32,
+}
+
+/// An array-literal operand of a declaration builtin, together with where it sat
+/// among the command's words.
+///
+/// The operand is kept out of [`SimpleCommand::words`] because it is not a word:
+/// its value is bound by the shell during word expansion, and the builtin is
+/// handed only the operand's *name*. But its position among the words is still
+/// observable in two places — `$BASH_COMMAND` reproduces the operand order as
+/// written, and `set -x` traces the builtin's line with a bare name standing in
+/// for the operand at its original spot (`+ declare -x SC=1 arr SD=2`). Hence
+/// `word_index`, without which both render the operands last.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclArray {
+    /// The assignment itself, e.g. the `m=([k]=v)` of `declare -A m=([k]=v)`.
+    pub assign: Assignment,
+    /// How many words preceded the operand: `words[word_index]` is the word that
+    /// followed it, so inserting something at that index restores the source
+    /// order. Several operands may share an index (consecutive operands, with no
+    /// word between them); rendering them in `decl_arrays` order keeps those in
+    /// their own relative order too.
+    pub word_index: usize,
 }
 
 /// A variable assignment: `name=value`, `name+=value`, `name[i]=value`, or an

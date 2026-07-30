@@ -547,11 +547,19 @@ fn simple_inline(sc: &SimpleCommand) -> String {
     for a in &sc.assignments {
         parts.push(assignment_src(a));
     }
-    for w in &sc.words {
+    // A declaration builtin's array-literal operands live outside `words` but were
+    // written among them, so splice each back in at the position the parser
+    // recorded: `declare -x SC=1 arr=(9) SD=2` must read back in that order, not
+    // with `arr=(9)` shunted to the end.
+    let mut decl = sc.decl_arrays.iter().peekable();
+    for (i, w) in sc.words.iter().enumerate() {
+        while let Some(d) = decl.next_if(|d| d.word_index <= i) {
+            parts.push(assignment_src(&d.assign));
+        }
         parts.push(word_src(w));
     }
-    for a in &sc.decl_arrays {
-        parts.push(assignment_src(a));
+    for d in decl {
+        parts.push(assignment_src(&d.assign));
     }
     let mut s = parts.join(" ");
     for r in &sc.redirects {

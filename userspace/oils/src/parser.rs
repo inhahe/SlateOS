@@ -8,7 +8,7 @@ use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseItem,
     CaseTerm, CmdSubBody,
     Command,
-    CondBinOp, CondBinary, CondUnary,
+    CondBinOp, CondBinary, CondUnary, DeclArray,
     CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, LineMap,
     LoopClause,
     ParamOp,
@@ -2448,7 +2448,14 @@ impl Parser {
                         value: AssignRhs::Array(items),
                     };
                     if is_decl_operand {
-                        cmd.decl_arrays.push(assign);
+                        // Record how many words preceded the operand: the builtin
+                        // is handed only its name, but the operand's *position*
+                        // among the words survives into `$BASH_COMMAND` and the
+                        // `set -x` line (see `ast::DeclArray`).
+                        cmd.decl_arrays.push(DeclArray {
+                            assign,
+                            word_index: cmd.words.len(),
+                        });
                     } else {
                         cmd.assignments.push(assign);
                     }
@@ -4367,7 +4374,10 @@ mod tests {
         };
         assert!(sc.assignments.is_empty());
         assert_eq!(sc.decl_arrays.len(), 1);
-        assert_eq!(sc.decl_arrays[0].name, "m");
+        assert_eq!(sc.decl_arrays[0].assign.name, "m");
+        // The operand followed both words (`declare` and `-A`), which is what the
+        // `set -x` line and `$BASH_COMMAND` need to place it back.
+        assert_eq!(sc.decl_arrays[0].word_index, 2);
         // The command word and its flag are ordinary words.
         assert_eq!(sc.words.len(), 2);
     }

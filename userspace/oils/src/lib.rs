@@ -16,10 +16,15 @@
 //! 3. [`interp`] — tree-walking execution via [`interp::Shell`].
 //!
 //! Arithmetic (`$(( … ))`) is handled by [`arith`].
+//!
+//! Shell strings are **bytes**, not Rust `String`s — a SlateOS path may hold
+//! any byte but `/` and NUL, so a shell that cannot carry one cannot name every
+//! file. [`bytes`] defines that type and the operations `bstr` lacks.
 
 pub mod arith;
 pub mod ast;
 pub mod brace;
+pub mod bytes;
 pub mod ere;
 pub(crate) mod escape;
 pub mod histexpand;

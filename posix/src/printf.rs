@@ -1358,18 +1358,16 @@ fn format_float_fixed(
     let abs_val = if negative { -val } else { val };
 
     // Format into a temporary buffer.
-    let mut buf = [0u8; 350]; // Enough for DBL_MAX (~308 digits) + decimal + precision
-    let mut len = fmt_fixed(abs_val, precision, &mut buf);
+    let mut buf = [0u8; FLOAT_BUF];
+    let mut text = fmt_fixed(abs_val, precision, &mut buf);
 
     // C99 '#' flag: always include a decimal point, even when precision is 0.
     if flags.alt_form && precision == 0 {
-        if let Some(slot) = buf.get_mut(len) {
-            *slot = b'.';
-        }
-        len = len.wrapping_add(1);
+        put(&mut buf, &mut text.len, b'.');
+        text.zeros_at = text.len;
     }
 
-    emit_float_padded(dst, &buf, len, negative, flags, width);
+    emit_float_padded(dst, &buf, text, negative, flags, width);
 }
 
 /// Format a floating-point value in scientific notation (%e/%E).
@@ -1396,41 +1394,17 @@ fn format_float_sci(
 
     let abs_val = if negative { -val } else { val };
 
-    let mut buf = [0u8; 350];
-    let mut len = fmt_scientific(abs_val, precision, upper, &mut buf);
+    let mut buf = [0u8; FLOAT_BUF];
+    let mut text = fmt_scientific(abs_val, precision, upper, &mut buf);
 
     // C99 '#' flag: always include a decimal point, even when precision is 0.
-    // Insert '.' before the 'e'/'E' exponent marker.
+    // Insert '.' before the 'e'/'E' exponent marker.  Precision 0 means no
+    // fraction digits were omitted, so there is nothing to keep in step.
     if flags.alt_form && precision == 0 {
-        // Find 'e'/'E' position.
-        let mut epos = 0;
-        while epos < len {
-            if let Some(&b) = buf.get(epos)
-                && (b == b'e' || b == b'E')
-            {
-                break;
-            }
-            epos = epos.wrapping_add(1);
-        }
-        if epos < len {
-            // Shift exponent part right by 1 to make room for '.'.
-            let mut j = len;
-            while j > epos {
-                if let (Some(src), Some(dst_slot)) =
-                    (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j))
-                {
-                    *dst_slot = src;
-                }
-                j = j.wrapping_sub(1);
-            }
-            if let Some(slot) = buf.get_mut(epos) {
-                *slot = b'.';
-            }
-            len = len.wrapping_add(1);
-        }
+        insert_point_before_exponent(&mut buf, &mut text);
     }
 
-    emit_float_padded(dst, &buf, len, negative, flags, width);
+    emit_float_padded(dst, &buf, text, negative, flags, width);
 }
 
 /// Format a floating-point value in %g/%G notation.
@@ -1460,91 +1434,46 @@ fn format_float_general(
 
     let abs_val = if negative { -val } else { val };
 
-    // Determine decimal exponent X (what %e conversion would produce).
-    // C99: use floor(log10(|val|)).  ilogb gives the binary exponent
-    // which is wrong here — e.g. ilogb(9.5)=3 but the decimal exp is 0.
-    let exp = if abs_val == 0.0 {
-        0
+    // C99 7.21.6.1p8: let P be the precision, or 1 if the precision is zero.
+    // The style is chosen from X, the exponent a %e conversion *would* produce
+    // — that is, the exponent after rounding to P significant digits, which is
+    // not always the exponent before (9.99 at P=2 rounds to 1.0e+01).  Reading
+    // it off the rounded expansion gets that right; `log10` got neither that
+    // nor the exact powers of ten.
+    let p = if precision == 0 { 1 } else { precision };
+    let pi = i32::try_from(p).unwrap_or(i32::MAX);
+    let mut dec = crate::decfloat::Decimal::new(abs_val);
+    dec.round_to_significant(pi);
+    let exp = if dec.is_zero() { 0 } else { dec.decpt().wrapping_sub(1) };
+
+    let mut buf = [0u8; FLOAT_BUF];
+    let mut text = if exp < -4 || exp >= pi {
+        // Scientific, with P-1 digits after the point.
+        render_scientific(&dec, p.wrapping_sub(1), upper, &mut buf)
     } else {
-        crate::math::floor(crate::math::log10(abs_val)) as i32
+        // Fixed, with P-1-X digits after the point.  `dec` is already rounded
+        // to P significant digits, and `decpt + (P-1-X) == P`, so that is the
+        // same place: no second rounding is needed or wanted.
+        let fix_prec = usize::try_from(pi.saturating_sub(1).saturating_sub(exp)).unwrap_or(0);
+        render_fixed(&dec, fix_prec, &mut buf)
     };
-    let p = precision as i32;
-
-    let mut buf = [0u8; 350];
-    let mut len;
-
-    if exp < -4 || exp >= p {
-        // Use scientific, but with (precision - 1) digits after '.'.
-        let sci_prec = if precision > 0 {
-            precision.wrapping_sub(1)
-        } else {
-            0
-        };
-        len = fmt_scientific(abs_val, sci_prec, upper, &mut buf);
-    } else {
-        // Use fixed, with (precision - 1 - exp) digits after '.'.
-        let fix_prec = if (p - 1 - exp) > 0 {
-            (p - 1 - exp) as usize
-        } else {
-            0
-        };
-        len = fmt_fixed(abs_val, fix_prec, &mut buf);
-    }
 
     // Remove trailing zeros (unless # flag).
     if !flags.alt_form {
-        len = trim_trailing_zeros(&mut buf, len);
+        text = trim_float_text(&mut buf, text);
     }
 
     // C99 '#' flag for %g: always include a decimal point.
     // When precision is low enough that the computed sub-precision is 0,
     // fmt_fixed / fmt_scientific won't emit a '.'.  Insert one if missing.
     if flags.alt_form {
-        let has_dot = {
-            let mut found = false;
-            let mut k = 0;
-            while k < len {
-                if let Some(&b) = buf.get(k)
-                    && b == b'.'
-                {
-                    found = true;
-                    break;
-                }
-                k = k.wrapping_add(1);
-            }
-            found
-        };
+        let has_dot = buf.get(..text.len).is_some_and(|b| b.contains(&b'.'));
         if !has_dot {
-            // Find 'e'/'E' (scientific) or end of buffer (fixed).
-            let mut insert_at = len;
-            let mut k = 0;
-            while k < len {
-                if let Some(&b) = buf.get(k)
-                    && (b == b'e' || b == b'E')
-                {
-                    insert_at = k;
-                    break;
-                }
-                k = k.wrapping_add(1);
-            }
-            // Shift [insert_at..len] right by 1.
-            let mut j = len;
-            while j > insert_at {
-                if let (Some(src), Some(dst_slot)) =
-                    (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j))
-                {
-                    *dst_slot = src;
-                }
-                j = j.wrapping_sub(1);
-            }
-            if let Some(slot) = buf.get_mut(insert_at) {
-                *slot = b'.';
-            }
-            len = len.wrapping_add(1);
+            insert_point_before_exponent(&mut buf, &mut text);
         }
     }
 
-    emit_float_padded(dst, &buf, len, negative, flags, width);
+    emit_float_padded(dst, &buf, text, negative, flags, width);
 }
 
 /// Emit special float strings (nan, inf) with sign and padding.
@@ -1578,12 +1507,50 @@ fn format_float_special(
     }
 }
 
+/// Insert a `.` at the point where the fraction digits would start.
+///
+/// Used only for the `#` flag at precision 0, where there are no fraction
+/// digits and C still demands the point.  The insertion point is before the
+/// `e`/`E` marker for the scientific styles and at the end otherwise.
+#[allow(clippy::arithmetic_side_effects)]
+fn insert_point_before_exponent(buf: &mut [u8], text: &mut FloatText) {
+    let at = buf
+        .get(..text.len)
+        .and_then(|b| b.iter().position(|&c| c == b'e' || c == b'E'))
+        .unwrap_or(text.len);
+    let mut j = text.len;
+    while j > at {
+        if let (Some(src), Some(slot)) = (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j)) {
+            *slot = src;
+        }
+        j = j.wrapping_sub(1);
+    }
+    if let Some(slot) = buf.get_mut(at) {
+        *slot = b'.';
+    }
+    text.len = text.len.wrapping_add(1);
+    if text.zeros_at >= at {
+        text.zeros_at = text.zeros_at.wrapping_add(1);
+    }
+}
+
+/// `%g` trailing-zero removal, aware of the zeros that were recorded rather
+/// than written.
+///
+/// Every omitted zero is by construction one of the last fraction digits, so
+/// `%g` drops the whole run; what remains in the buffer is then trimmed as
+/// before, which also removes a `.` left with nothing after it.
+fn trim_float_text(buf: &mut [u8], text: FloatText) -> FloatText {
+    let len = trim_trailing_zeros(buf, text.len);
+    FloatText { len, zeros_at: len, zeros: 0 }
+}
+
 /// Emit a formatted float with sign, padding, and alignment.
 #[allow(clippy::arithmetic_side_effects)]
 fn emit_float_padded(
     dst: &mut FmtOutput,
     buf: &[u8],
-    len: usize,
+    text: FloatText,
     negative: bool,
     flags: &FormatFlags,
     width: usize,
@@ -1598,7 +1565,8 @@ fn emit_float_padded(
         None
     };
     let sign_len = usize::from(sign.is_some());
-    let total = sign_len + len;
+    // The zeros `FloatText` recorded but did not write still occupy columns.
+    let total = sign_len + text.len + text.zeros;
 
     let pad_char = if flags.zero_pad && !flags.left_align {
         b'0'
@@ -1615,13 +1583,20 @@ fn emit_float_padded(
     if !flags.left_align && width > total && pad_char == b'0' {
         emit_padding(dst, b'0', width.wrapping_sub(total));
     }
-    // Emit the formatted number from buf.
+    // Emit the formatted number from buf, restoring the omitted zeros at the
+    // offset that was recorded for them.
     let mut i = 0;
-    while i < len {
+    while i < text.len {
+        if i == text.zeros_at {
+            emit_padding(dst, b'0', text.zeros);
+        }
         if let Some(&b) = buf.get(i) {
             emit_byte(dst, b);
         }
         i = i.wrapping_add(1);
+    }
+    if text.zeros_at >= text.len {
+        emit_padding(dst, b'0', text.zeros);
     }
     if flags.left_align && width > total {
         emit_padding(dst, b' ', width.wrapping_sub(total));
@@ -1629,369 +1604,147 @@ fn emit_float_padded(
 }
 
 // ---------------------------------------------------------------------------
-// Ties-to-even support
+// Digit generation
 // ---------------------------------------------------------------------------
 //
-// glibc and musl round a formatted value according to the current FPU rounding
-// mode, which is `FE_TONEAREST` — ties to even.  Doing the same needs an
-// *exact* answer to "is this value precisely halfway between the two candidate
-// outputs?", and the formatter's running remainder cannot supply one: it is
-// built by repeated multiply-and-subtract and drifts.
-//
-// The exact answer is cheap, though, because it is a question about the
-// value's binary representation rather than its decimal expansion.  Write a
-// finite `val` as `m * 2^e` with `m` odd.  Rounding to a multiple of `10^-p`
-// is a tie exactly when `val * 10^p * 2` is an odd integer, and
-//
-//     val * 10^p * 2  =  m * 5^p * 2^(e + p + 1)
-//
-// which is an odd integer iff `e + p + 1 == 0` (and, when `p < 0`, iff `5^-p`
-// also divides `m`, since then the `5^p` factor is a division).  So one
-// exponent comparison decides it, with no dependence on the digit loop.
+// All three float conversions read their digits off `crate::decfloat::Decimal`, the
+// *exact* decimal expansion of the value.  That module explains why an
+// approximate expansion cannot be made correct; the consequence here is that
+// the arithmetic this section used to contain — a `u64` cast for the integer
+// part, a multiply-by-ten loop for the fraction, `log10` for the exponent, and
+// a separate exact-tie test to settle the last digit — is all gone.  Each
+// conversion now rounds the expansion once, at the place its format asks for,
+// and copies digits.
 
-/// Decompose a finite, positive `f64` into `(m, e)` with `val == m * 2^e` and
-/// `m` odd.  Returns `(0, 0)` for zero.
-#[allow(clippy::arithmetic_side_effects)]
-fn decompose(val: f64) -> (u64, i32) {
-    let bits = val.to_bits();
-    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
-    let raw_frac = bits & 0x000f_ffff_ffff_ffff;
+/// Enough for the longest expansion any `f64` has — 309 integer digits, a
+/// point and 1074 fraction digits — plus room for a rounding carry and an
+/// exponent suffix.
+const FLOAT_BUF: usize = 1400;
 
-    // Subnormals have no implicit leading 1 and a fixed exponent; normals get
-    // the hidden bit back.  The -1075 folds together the exponent bias (1023)
-    // and the 52-bit shift that makes the significand an integer.
-    let (mut m, mut e) = if raw_exp == 0 {
-        (raw_frac, -1074)
-    } else {
-        (raw_frac | (1u64 << 52), raw_exp - 1075)
-    };
-
-    if m == 0 {
-        return (0, 0);
+/// Append one byte, ignoring the write if the buffer is full.
+fn put(buf: &mut [u8], pos: &mut usize, b: u8) {
+    if let Some(slot) = buf.get_mut(*pos) {
+        *slot = b;
     }
-
-    let tz = m.trailing_zeros();
-    m >>= tz;
-    e += tz as i32;
-    (m, e)
+    *pos = pos.wrapping_add(1);
 }
 
-/// Is `val` *exactly* halfway between two neighbouring multiples of `10^-p`?
+/// A formatted float: the bytes that were materialised, plus a run of zeros
+/// that was not.
 ///
-/// `p` is the number of decimal places being kept and may be negative, which
-/// is what the `%e` path needs: rounding a mantissa to `precision` places is
-/// rounding the original value to `precision - exponent` places.
+/// A double's exact expansion has at most 1074 fraction digits, but `%.*f`
+/// accepts any precision at all and the difference is always a run of zeros.
+/// Materialising them would make the stack buffer depend on a user-supplied
+/// precision; recording where they belong instead keeps it bounded, and they
+/// are still printed — and still counted for field width.
+#[derive(Clone, Copy)]
+struct FloatText {
+    /// Bytes written to the buffer.
+    len: usize,
+    /// Offset within `buf[..len]` at which the omitted zeros belong.  For `%f`
+    /// that is the end; for `%e` it is just before the exponent marker.
+    zeros_at: usize,
+    /// How many `'0'` bytes were omitted.
+    zeros: usize,
+}
+
+/// Format a non-negative, finite `f64` in fixed notation into `buf`.
+fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> FloatText {
+    let mut dec = crate::decfloat::Decimal::new(val);
+    dec.round_to_place(i32::try_from(precision).unwrap_or(i32::MAX));
+    render_fixed(&dec, precision, buf)
+}
+
+/// Write an already-rounded expansion as `III.FFF` with exactly `precision`
+/// fraction digits.
 #[allow(clippy::arithmetic_side_effects)]
-fn is_half_way(val: f64, p: i32) -> bool {
-    if !val.is_finite() || val <= 0.0 {
-        return false;
-    }
-    let (m, e) = decompose(val);
-    if m == 0 {
-        return false;
-    }
-    // `e` is in [-1074, 971] and `p` is bounded by the caller's precision, so
-    // this cannot overflow for any input the formatter accepts.
-    if e.checked_add(p).and_then(|v| v.checked_add(1)) != Some(0) {
-        return false;
-    }
-    if p >= 0 {
-        return true;
-    }
-    // p < 0: the 5^p factor is a division, so it is only a tie if 5^-p divides
-    // the significand.  `m` has at most 23 factors of five, so this terminates
-    // long before `-p` does.
-    let mut left = -p;
-    let mut rest = m;
-    while left > 0 {
-        if rest % 5 != 0 {
-            return false;
+fn render_fixed(dec: &crate::decfloat::Decimal, precision: usize, buf: &mut [u8]) -> FloatText {
+    let decpt = dec.decpt();
+    let mut pos = 0usize;
+
+    if decpt <= 0 {
+        // The value is below 1, so there is no integer digit to print.
+        put(buf, &mut pos, b'0');
+    } else {
+        let mut i = 0i32;
+        while i < decpt {
+            put(buf, &mut pos, dec.digit(i));
+            i += 1;
         }
-        rest /= 5;
-        left -= 1;
     }
-    true
+    if precision == 0 {
+        return FloatText { len: pos, zeros_at: pos, zeros: 0 };
+    }
+    put(buf, &mut pos, b'.');
+
+    // Fraction digit `j` (1-based) is significant index `decpt + j - 1`, so the
+    // last one that can be nonzero is `j == len - decpt`.  Past that every
+    // digit is a zero the expansion does not hold, and need not be written.
+    let avail = usize::try_from(
+        i64::try_from(dec.len()).unwrap_or(i64::MAX) - i64::from(decpt),
+    )
+    .unwrap_or(0);
+    let emit = precision.min(avail);
+    let mut j = 1i32;
+    let stop = i32::try_from(emit).unwrap_or(i32::MAX);
+    while j <= stop {
+        put(buf, &mut pos, dec.digit(decpt + j - 1));
+        j += 1;
+    }
+    FloatText { len: pos, zeros_at: pos, zeros: precision.wrapping_sub(emit) }
 }
 
-/// Is `x` an odd integer?  Every `f64` at or above 2^53 is an even integer, so
-/// the range check is a correctness guard as well as an overflow guard.
-#[allow(clippy::arithmetic_side_effects, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-fn is_odd_integer(x: f64) -> bool {
-    x >= 1.0 && x < 9_007_199_254_740_992.0 && (x as u64) % 2 == 1
+/// Format a non-negative, finite `f64` in scientific notation into `buf`.
+fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> FloatText {
+    let mut dec = crate::decfloat::Decimal::new(val);
+    // `precision` digits after the point plus the one before it.
+    dec.round_to_significant(i32::try_from(precision).unwrap_or(i32::MAX).saturating_add(1));
+    render_scientific(&dec, precision, upper, buf)
 }
 
-/// Round a non-negative `f64` to an integer, ties to even.
-///
-/// `val - floor(val)` is exact for every finite input (Sterbenz for `val >= 1`,
-/// trivially for `val < 1`), so `== 0.5` here is an exact tie test and this
-/// needs none of the machinery above.
-#[allow(clippy::arithmetic_side_effects)]
-fn round_half_even(val: f64) -> f64 {
-    let floor = crate::math::floor(val);
-    let frac = val - floor;
-    if frac > 0.5 || (frac == 0.5 && is_odd_integer(floor)) {
-        floor + 1.0
-    } else {
-        floor
-    }
-}
+/// Write an already-rounded expansion as `D.FFFe+XX`.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn render_scientific(
+    dec: &crate::decfloat::Decimal,
+    precision: usize,
+    upper: bool,
+    buf: &mut [u8],
+) -> FloatText {
+    // A zero has no exponent of its own; C fixes the output at "0.000e+00".
+    let exp: i32 = if dec.is_zero() { 0 } else { dec.decpt() - 1 };
+    let mut pos = 0usize;
+    put(buf, &mut pos, if dec.is_zero() { b'0' } else { dec.digit(0) });
 
-/// Format a non-negative f64 in fixed notation into buf.
-/// Returns number of bytes written.
-#[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
-fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
-    // When precision is 0, round the value first so that e.g.
-    // printf("%.0f", 3.7) outputs "4" not "3".  The fractional-digit
-    // loop handles rounding for precision > 0 via carry propagation.
-    // `math::round` would be wrong here: it rounds halves away from zero,
-    // where glibc rounds them to even.
-    let original = val;
-    let val = if precision == 0 {
-        round_half_even(val)
-    } else {
-        val
-    };
-
-    // Separate integer and fractional parts.
-    let int_part = val as u64;
-    let frac = val - (int_part as f64);
-
-    let mut pos: usize = 0;
-
-    // Write integer part.
-    if int_part == 0 {
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'0';
-        }
-        pos = pos.wrapping_add(1);
-    } else {
-        // Write digits of integer part (reversed).
-        let mut digits = [0u8; 20];
-        let mut dlen: usize = 0;
-        let mut n = int_part;
-        while n > 0 {
-            if let Some(slot) = digits.get_mut(dlen) {
-                *slot = b'0'.wrapping_add((n % 10) as u8);
-            }
-            dlen = dlen.wrapping_add(1);
-            n /= 10;
-        }
-        // Reverse into buf.
-        let mut k = dlen;
-        while k > 0 {
-            k = k.wrapping_sub(1);
-            if let (Some(slot), Some(&d)) = (buf.get_mut(pos), digits.get(k)) {
-                *slot = d;
-            }
-            pos = pos.wrapping_add(1);
-        }
-    }
-
-    // Decimal point and fractional part.
+    let mut zeros = 0usize;
+    let mut zeros_at = pos;
     if precision > 0 {
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'.';
+        put(buf, &mut pos, b'.');
+        let avail = dec.len().saturating_sub(1);
+        let emit = precision.min(avail);
+        let mut j = 1i32;
+        let stop = i32::try_from(emit).unwrap_or(i32::MAX);
+        while j <= stop {
+            put(buf, &mut pos, dec.digit(j));
+            j += 1;
         }
-        pos = pos.wrapping_add(1);
-
-        let mut f = frac;
-        let mut p = precision;
-        while p > 0 {
-            f *= 10.0;
-            let digit = f as u8;
-            if let Some(slot) = buf.get_mut(pos) {
-                *slot = b'0'.wrapping_add(digit);
-            }
-            f -= f64::from(digit);
-            pos = pos.wrapping_add(1);
-            p = p.wrapping_sub(1);
-        }
-
-        // Round the last digit.  The running remainder `f` decides every
-        // ordinary case, but it has drifted by now and cannot be trusted to
-        // recognise an exact half — so ask the value's binary representation
-        // instead, and break that tie towards an even last digit as glibc
-        // does.  `%.1f` of 8.25 is "8.2", not "8.3".
-        let round_up = if is_half_way(original, i32::try_from(precision).unwrap_or(i32::MAX)) {
-            buf.get(pos.wrapping_sub(1)).is_some_and(|d| (d.wrapping_sub(b'0')) % 2 == 1)
-        } else {
-            f >= 0.5
-        };
-        if round_up {
-            // Propagate rounding.
-            let mut rp = pos.wrapping_sub(1);
-            loop {
-                if let Some(slot) = buf.get_mut(rp) {
-                    if *slot == b'.' {
-                        if rp == 0 {
-                            break;
-                        }
-                        rp = rp.wrapping_sub(1);
-                        continue;
-                    }
-                    if *slot < b'9' {
-                        *slot = slot.wrapping_add(1);
-                        break;
-                    }
-                    *slot = b'0';
-                }
-                if rp == 0 {
-                    // Need to insert a '1' at the front.  Shift everything right.
-                    let mut j = pos;
-                    while j > 0 {
-                        if let (Some(src), Some(dst_slot)) =
-                            (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j))
-                        {
-                            *dst_slot = src;
-                        }
-                        j = j.wrapping_sub(1);
-                    }
-                    if let Some(slot) = buf.get_mut(0) {
-                        *slot = b'1';
-                    }
-                    pos = pos.wrapping_add(1);
-                    break;
-                }
-                rp = rp.wrapping_sub(1);
-            }
-        }
+        zeros = precision.wrapping_sub(emit);
+        zeros_at = pos;
     }
 
-    pos
-}
-
-/// Format a non-negative f64 in scientific notation into buf.
-/// Returns number of bytes written.
-#[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
-fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> usize {
-    if val == 0.0 {
-        let mut pos: usize = 0;
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'0';
-        }
-        pos = pos.wrapping_add(1);
-        if precision > 0 {
-            if let Some(slot) = buf.get_mut(pos) {
-                *slot = b'.';
-            }
-            pos = pos.wrapping_add(1);
-            let mut p = precision;
-            while p > 0 {
-                if let Some(slot) = buf.get_mut(pos) {
-                    *slot = b'0';
-                }
-                pos = pos.wrapping_add(1);
-                p = p.wrapping_sub(1);
-            }
-        }
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = if upper { b'E' } else { b'e' };
-        }
-        pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'+';
-        }
-        pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'0';
-        }
-        pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'0';
-        }
-        pos = pos.wrapping_add(1);
-        return pos;
+    put(buf, &mut pos, if upper { b'E' } else { b'e' });
+    put(buf, &mut pos, if exp < 0 { b'-' } else { b'+' });
+    // An `f64` exponent never leaves [-323, 308], so three digits is the most
+    // that can be needed and the leading one is always in range.
+    let abs_exp = exp.unsigned_abs();
+    debug_assert!(abs_exp < 1000, "decimal exponent out of f64 range");
+    if abs_exp >= 100 {
+        put(buf, &mut pos, b'0'.wrapping_add((abs_exp / 100) as u8));
     }
+    // C requires at least two exponent digits.
+    put(buf, &mut pos, b'0'.wrapping_add(((abs_exp / 10) % 10) as u8));
+    put(buf, &mut pos, b'0'.wrapping_add((abs_exp % 10) as u8));
 
-    // Find decimal exponent: floor(log10(|val|)).
-    // Previous code used ilogb (binary exponent) which is incorrect —
-    // e.g. ilogb(9.5)=3 but the decimal exponent is 0.
-    let mut exp: i32 = crate::math::floor(crate::math::log10(val)) as i32;
-    let mut mantissa = val / crate::math::pow(10.0, f64::from(exp));
-    // Normalize: 1 <= mantissa < 10 (handle floating-point imprecision).
-    while mantissa >= 10.0 {
-        mantissa /= 10.0;
-        exp += 1;
-    }
-    while mantissa < 1.0 && mantissa > 0.0 {
-        mantissa *= 10.0;
-        exp -= 1;
-    }
-
-    // Pre-round mantissa to the requested precision and re-normalize.
-    // Without this, rounding carry in fmt_fixed can push the integer part
-    // to 10 (e.g. mantissa 9.95 with precision 1 → "10.0"), producing
-    // invalid scientific notation like "10.0e+00" instead of "1.0e+01".
-    // Rounding the mantissa to `precision` places is rounding the original
-    // value to `precision - exp` places, so that — not the derived, already
-    // inexact mantissa — is what the tie test must be asked about.
-    let scale = crate::math::pow(10.0, precision as f64);
-    let scaled = mantissa * scale;
-    let floor = crate::math::floor(scaled);
-    let tie_place = i32::try_from(precision)
-        .unwrap_or(i32::MAX)
-        .saturating_sub(exp);
-    let round_up = if is_half_way(val, tie_place) {
-        is_odd_integer(floor)
-    } else {
-        scaled - floor >= 0.5
-    };
-    mantissa = if round_up { floor + 1.0 } else { floor } / scale;
-    if mantissa >= 10.0 {
-        mantissa /= 10.0;
-        exp += 1;
-    }
-
-    // Format mantissa as fixed point with `precision` decimal places.
-    let mut pos = fmt_fixed(mantissa, precision, buf);
-
-    // Exponent.
-    if let Some(slot) = buf.get_mut(pos) {
-        *slot = if upper { b'E' } else { b'e' };
-    }
-    pos = pos.wrapping_add(1);
-    if let Some(slot) = buf.get_mut(pos) {
-        *slot = if exp < 0 { b'-' } else { b'+' };
-    }
-    pos = pos.wrapping_add(1);
-
-    let abs_exp = if exp < 0 { (-exp) as u32 } else { exp as u32 };
-    // At least 2 digits for exponent.
-    if abs_exp < 10 {
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'0';
-        }
-        pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'0'.wrapping_add(abs_exp as u8);
-        }
-        pos = pos.wrapping_add(1);
-    } else if abs_exp < 100 {
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'0'.wrapping_add((abs_exp / 10) as u8);
-        }
-        pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'0'.wrapping_add((abs_exp % 10) as u8);
-        }
-        pos = pos.wrapping_add(1);
-    } else {
-        // 3-digit exponent (values > 1e99).
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'0'.wrapping_add((abs_exp / 100) as u8);
-        }
-        pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'0'.wrapping_add(((abs_exp / 10) % 10) as u8);
-        }
-        pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = b'0'.wrapping_add((abs_exp % 10) as u8);
-        }
-        pos = pos.wrapping_add(1);
-    }
-
-    pos
+    FloatText { len: pos, zeros_at, zeros }
 }
 
 /// Remove trailing zeros after the decimal point in a formatted float.
@@ -3677,43 +3430,122 @@ mod tests {
     }
 
     #[test]
-    fn tie_detection_matches_the_exact_definition() {
-        // 8.25 == 33 * 2^-2, so it is a tie at one decimal place and at no
-        // other non-negative precision.
-        assert!(is_half_way(8.25, 1));
-        assert!(!is_half_way(8.25, 0));
-        assert!(!is_half_way(8.25, 2));
-
-        // 1234.5 == 2469 * 2^-1: a tie at zero places, i.e. at the units.
-        assert!(is_half_way(1234.5, 0));
-        assert!(!is_half_way(1234.5, 1));
-
-        // Negative `p` is the %e case: rounding 1250 to the hundreds is a tie,
-        // because 5^2 divides 1250 / 2^1 = 625.
-        assert!(is_half_way(1250.0, -2));
-        // ...but rounding 1250 to the thousands is not: 1250 is not halfway
-        // between 1000 and 2000.
-        assert!(!is_half_way(1250.0, -3));
-        // 450 is halfway between 400 and 500; 500 is *on* a multiple of 100
-        // and so is not a tie at all.
-        assert!(is_half_way(450.0, -2));
-        assert!(!is_half_way(500.0, -2));
-
-        // 0.1 is not exactly representable, so it is never an exact tie.
-        assert!(!is_half_way(0.1, 1));
-        assert!(!is_half_way(0.0, 0));
-        assert!(!is_half_way(f64::INFINITY, 0));
+    fn ties_at_a_negative_decimal_place() {
+        // The %e path rounds at `precision - exponent` places, which goes
+        // negative for values above the precision.  1250 is exactly halfway
+        // between 1200 and 1300, so `%.1e` — two significant digits — is a
+        // genuine tie and the even neighbour, 1.2, wins.
+        assert_eq!(fmt_f(b"%.1e ", 1250.0), "1.2e+03");
+        assert_eq!(fmt_f(b"%.1e ", 1350.0), "1.4e+03");
+        // At three significant digits 1250 needs no rounding at all.
+        assert_eq!(fmt_f(b"%.2e ", 1250.0), "1.25e+03");
+        // 1250 is *not* halfway between 1000 and 2000, so `%.0e` is an
+        // ordinary round-down rather than a tie.
+        assert_eq!(fmt_f(b"%.0e ", 1250.0), "1e+03");
+        // 0.1 is not exactly representable, so it is never an exact tie: the
+        // true value is just above 0.1 and rounds up regardless of parity.
+        assert_eq!(fmt_f(b"%.1f ", 0.1), "0.1");
     }
 
     #[test]
-    fn decompose_reduces_to_an_odd_significand() {
-        assert_eq!(decompose(1.0), (1, 0));
-        assert_eq!(decompose(2.0), (1, 1));
-        assert_eq!(decompose(0.5), (1, -1));
-        assert_eq!(decompose(8.25), (33, -2));
-        assert_eq!(decompose(1234.5), (2469, -1));
-        assert_eq!(decompose(0.0), (0, 0));
-        // Smallest subnormal: 2^-1074, so m == 1.
-        assert_eq!(decompose(f64::from_bits(1)), (1, -1074));
+    fn huge_magnitudes_print_every_digit() {
+        // The old cast-based integer part saturated at 2^64-1, so everything
+        // from here up printed the same 20 digits of garbage.
+        assert_eq!(fmt_f(b"%.2f ", 1e20), "100000000000000000000.00");
+        assert_eq!(
+            fmt_f(b"%.2f ", 1e25),
+            "10000000000000000905969664.00"
+        );
+        // 2^64 exactly: the first value the old code could not represent.
+        assert_eq!(fmt_f(b"%.0f ", 18_446_744_073_709_551_616.0), "18446744073709551616");
+        // %.0f of DBL_MAX is 309 digits; check the ends and the length.
+        let s = fmt_f(b"%.0f ", f64::MAX);
+        assert_eq!(s.len(), 309);
+        assert!(s.starts_with("179769313486231570814527423731704356798070567525844996598917"));
+        assert!(s.ends_with("858368"));
+    }
+
+    #[test]
+    fn general_style_switches_on_the_exact_exponent() {
+        // %g picks its style from X, the exponent %e would produce.  The
+        // boundaries are exact powers of ten, which is where the old
+        // `floor(log10(v))` was least trustworthy.
+        assert_eq!(fmt_f(b"%g ", 100_000.0), "100000");
+        assert_eq!(fmt_f(b"%g ", 1_000_000.0), "1e+06");
+        assert_eq!(fmt_f(b"%g ", 0.0001), "0.0001");
+        assert_eq!(fmt_f(b"%g ", 0.00001), "1e-05");
+        // X is the exponent *after* rounding to P significant digits, so a
+        // value that carries across a power of ten switches style with it.
+        assert_eq!(fmt_f(b"%.2g ", 99.9), "1e+02");
+        assert_eq!(fmt_f(b"%.3g ", 99.9), "99.9");
+        // C99 7.21.6.1p8: a precision of zero is taken as 1.
+        assert_eq!(fmt_f(b"%.0g ", 0.5), "0.5");
+        assert_eq!(fmt_f(b"%.1g ", 0.5), "0.5");
+        assert_eq!(fmt_f(b"%.0g ", 1234.0), "1e+03");
+        // Trailing zeros go, but not the significant ones.
+        assert_eq!(fmt_f(b"%g ", 0.5), "0.5");
+        assert_eq!(fmt_f(b"%g ", 1.0), "1");
+        assert_eq!(fmt_f(b"%g ", 0.0), "0");
+    }
+
+    #[test]
+    fn conversions_match_rusts_exact_formatter_over_a_sweep() {
+        // Rust's float formatting is exact and rounds ties to even, which is
+        // the contract glibc's printf has, so it is an oracle for the whole
+        // conversion rather than just the digit string.  A large odd stride
+        // walks exponent and significand together without repeating.
+        fn rust_e(v: f64, p: usize) -> String {
+            // Rust writes `1.25e3`; C writes `1.25e+03`.
+            let s = format!("{v:.p$e}");
+            let Some((mantissa, exp)) = s.split_once('e') else {
+                panic!("no exponent in {s}");
+            };
+            let exp: i32 = exp.parse().expect("exponent");
+            let sign = if exp < 0 { '-' } else { '+' };
+            format!("{mantissa}e{sign}{:02}", exp.abs())
+        }
+
+        let mut bits: u64 = 0x3ff0_0000_0000_0001;
+        for _ in 0..600 {
+            let v = f64::from_bits(bits);
+            if v.is_finite() {
+                for &p in &[0usize, 1, 6, 17, 25] {
+                    assert_eq!(
+                        fmt_f(format!("%.{p}f ").as_bytes(), v),
+                        format!("{v:.p$}"),
+                        "%.{p}f of {v:e}"
+                    );
+                    assert_eq!(
+                        fmt_f(format!("%.{p}e ").as_bytes(), v),
+                        rust_e(v, p),
+                        "%.{p}e of {v:e}"
+                    );
+                }
+            }
+            bits = bits.wrapping_add(0x0004_7f3a_91c5_2b17) & 0x7fef_ffff_ffff_ffff;
+        }
+    }
+
+    #[test]
+    fn long_tails_are_the_true_expansion() {
+        // Every f64 has a finite exact decimal expansion, and printf must show
+        // it rather than the drift of a multiply-by-ten loop.  These are the
+        // real digits of the doubles nearest the written literals.
+        assert_eq!(
+            fmt_f(b"%.30f ", 0.1),
+            "0.100000000000000005551115123126"
+        );
+        assert_eq!(
+            fmt_f(b"%.20f ", 1e-20),
+            "0.00000000000000000001"
+        );
+        assert_eq!(
+            fmt_f(b"%.25f ", 1.0 / 3.0),
+            "0.3333333333333333148296163"
+        );
+        // Past the end of the expansion the digits are genuinely zero, and a
+        // precision larger than any buffer still prints them all.
+        assert_eq!(fmt_f(b"%.60f ", 0.5), format!("0.5{}", "0".repeat(59)));
+        assert_eq!(fmt_f(b"%.400f ", 0.25).len(), 402);
     }
 }

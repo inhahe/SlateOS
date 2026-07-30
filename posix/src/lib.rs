@@ -337,6 +337,7 @@ pub mod cpio;
 pub mod crt;
 pub mod crypt;
 pub mod ctype;
+pub(crate) mod decfloat;
 pub mod dirent;
 pub mod dlfcn;
 pub mod endian;

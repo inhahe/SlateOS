@@ -1628,6 +1628,114 @@ fn emit_float_padded(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ties-to-even support
+// ---------------------------------------------------------------------------
+//
+// glibc and musl round a formatted value according to the current FPU rounding
+// mode, which is `FE_TONEAREST` — ties to even.  Doing the same needs an
+// *exact* answer to "is this value precisely halfway between the two candidate
+// outputs?", and the formatter's running remainder cannot supply one: it is
+// built by repeated multiply-and-subtract and drifts.
+//
+// The exact answer is cheap, though, because it is a question about the
+// value's binary representation rather than its decimal expansion.  Write a
+// finite `val` as `m * 2^e` with `m` odd.  Rounding to a multiple of `10^-p`
+// is a tie exactly when `val * 10^p * 2` is an odd integer, and
+//
+//     val * 10^p * 2  =  m * 5^p * 2^(e + p + 1)
+//
+// which is an odd integer iff `e + p + 1 == 0` (and, when `p < 0`, iff `5^-p`
+// also divides `m`, since then the `5^p` factor is a division).  So one
+// exponent comparison decides it, with no dependence on the digit loop.
+
+/// Decompose a finite, positive `f64` into `(m, e)` with `val == m * 2^e` and
+/// `m` odd.  Returns `(0, 0)` for zero.
+#[allow(clippy::arithmetic_side_effects)]
+fn decompose(val: f64) -> (u64, i32) {
+    let bits = val.to_bits();
+    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+    let raw_frac = bits & 0x000f_ffff_ffff_ffff;
+
+    // Subnormals have no implicit leading 1 and a fixed exponent; normals get
+    // the hidden bit back.  The -1075 folds together the exponent bias (1023)
+    // and the 52-bit shift that makes the significand an integer.
+    let (mut m, mut e) = if raw_exp == 0 {
+        (raw_frac, -1074)
+    } else {
+        (raw_frac | (1u64 << 52), raw_exp - 1075)
+    };
+
+    if m == 0 {
+        return (0, 0);
+    }
+
+    let tz = m.trailing_zeros();
+    m >>= tz;
+    e += tz as i32;
+    (m, e)
+}
+
+/// Is `val` *exactly* halfway between two neighbouring multiples of `10^-p`?
+///
+/// `p` is the number of decimal places being kept and may be negative, which
+/// is what the `%e` path needs: rounding a mantissa to `precision` places is
+/// rounding the original value to `precision - exponent` places.
+#[allow(clippy::arithmetic_side_effects)]
+fn is_half_way(val: f64, p: i32) -> bool {
+    if !val.is_finite() || val <= 0.0 {
+        return false;
+    }
+    let (m, e) = decompose(val);
+    if m == 0 {
+        return false;
+    }
+    // `e` is in [-1074, 971] and `p` is bounded by the caller's precision, so
+    // this cannot overflow for any input the formatter accepts.
+    if e.checked_add(p).and_then(|v| v.checked_add(1)) != Some(0) {
+        return false;
+    }
+    if p >= 0 {
+        return true;
+    }
+    // p < 0: the 5^p factor is a division, so it is only a tie if 5^-p divides
+    // the significand.  `m` has at most 23 factors of five, so this terminates
+    // long before `-p` does.
+    let mut left = -p;
+    let mut rest = m;
+    while left > 0 {
+        if rest % 5 != 0 {
+            return false;
+        }
+        rest /= 5;
+        left -= 1;
+    }
+    true
+}
+
+/// Is `x` an odd integer?  Every `f64` at or above 2^53 is an even integer, so
+/// the range check is a correctness guard as well as an overflow guard.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+fn is_odd_integer(x: f64) -> bool {
+    x >= 1.0 && x < 9_007_199_254_740_992.0 && (x as u64) % 2 == 1
+}
+
+/// Round a non-negative `f64` to an integer, ties to even.
+///
+/// `val - floor(val)` is exact for every finite input (Sterbenz for `val >= 1`,
+/// trivially for `val < 1`), so `== 0.5` here is an exact tie test and this
+/// needs none of the machinery above.
+#[allow(clippy::arithmetic_side_effects)]
+fn round_half_even(val: f64) -> f64 {
+    let floor = crate::math::floor(val);
+    let frac = val - floor;
+    if frac > 0.5 || (frac == 0.5 && is_odd_integer(floor)) {
+        floor + 1.0
+    } else {
+        floor
+    }
+}
+
 /// Format a non-negative f64 in fixed notation into buf.
 /// Returns number of bytes written.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
@@ -1635,8 +1743,11 @@ fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
     // When precision is 0, round the value first so that e.g.
     // printf("%.0f", 3.7) outputs "4" not "3".  The fractional-digit
     // loop handles rounding for precision > 0 via carry propagation.
+    // `math::round` would be wrong here: it rounds halves away from zero,
+    // where glibc rounds them to even.
+    let original = val;
     let val = if precision == 0 {
-        crate::math::round(val)
+        round_half_even(val)
     } else {
         val
     };
@@ -1696,8 +1807,17 @@ fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
             p = p.wrapping_sub(1);
         }
 
-        // Round the last digit.
-        if f >= 0.5 {
+        // Round the last digit.  The running remainder `f` decides every
+        // ordinary case, but it has drifted by now and cannot be trusted to
+        // recognise an exact half — so ask the value's binary representation
+        // instead, and break that tie towards an even last digit as glibc
+        // does.  `%.1f` of 8.25 is "8.2", not "8.3".
+        let round_up = if is_half_way(original, i32::try_from(precision).unwrap_or(i32::MAX)) {
+            buf.get(pos.wrapping_sub(1)).is_some_and(|d| (d.wrapping_sub(b'0')) % 2 == 1)
+        } else {
+            f >= 0.5
+        };
+        if round_up {
             // Propagate rounding.
             let mut rp = pos.wrapping_sub(1);
             loop {
@@ -1802,8 +1922,21 @@ fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> us
     // Without this, rounding carry in fmt_fixed can push the integer part
     // to 10 (e.g. mantissa 9.95 with precision 1 → "10.0"), producing
     // invalid scientific notation like "10.0e+00" instead of "1.0e+01".
+    // Rounding the mantissa to `precision` places is rounding the original
+    // value to `precision - exp` places, so that — not the derived, already
+    // inexact mantissa — is what the tie test must be asked about.
     let scale = crate::math::pow(10.0, precision as f64);
-    mantissa = crate::math::round(mantissa * scale) / scale;
+    let scaled = mantissa * scale;
+    let floor = crate::math::floor(scaled);
+    let tie_place = i32::try_from(precision)
+        .unwrap_or(i32::MAX)
+        .saturating_sub(exp);
+    let round_up = if is_half_way(val, tie_place) {
+        is_odd_integer(floor)
+    } else {
+        scaled - floor >= 0.5
+    };
+    mantissa = if round_up { floor + 1.0 } else { floor } / scale;
     if mantissa >= 10.0 {
         mantissa /= 10.0;
         exp += 1;
@@ -3484,5 +3617,103 @@ mod tests {
             &bits,
         );
         assert_eq!(s, "123456789");
+    }
+
+    // -- Ties-to-even (TD-POSIX-PRINTF-TIE-ROUNDING) --------------------------
+    //
+    // Every value below is *exactly* representable, so the halfway point is a
+    // genuine tie rather than an artefact of binary representation, and glibc's
+    // answer is fully determined: round to the even neighbour.
+
+    fn fmt_f(fmt: &[u8], v: f64) -> String {
+        let (s, _) = snprintf_str(fmt, &[], &[v.to_bits()]);
+        s
+    }
+
+    #[test]
+    fn fixed_ties_round_to_even() {
+        // The three divergences recorded in the tech-debt entry.
+        assert_eq!(fmt_f(b"%.1f ", 8.25), "8.2");
+        assert_eq!(fmt_f(b"%.0f ", 2.5), "2");
+        // Same tie, other parity: 8.75 rounds *up* to reach the even digit.
+        assert_eq!(fmt_f(b"%.1f ", 8.75), "8.8");
+        assert_eq!(fmt_f(b"%.0f ", 3.5), "4");
+        // 0.5 -> 0 is the case where ties-away and ties-even differ on the
+        // integer part rather than a fraction digit.
+        assert_eq!(fmt_f(b"%.0f ", 0.5), "0");
+        assert_eq!(fmt_f(b"%.0f ", 1.5), "2");
+    }
+
+    #[test]
+    fn fixed_ties_to_even_carries_through_nines() {
+        // 9.5 is a tie whose even neighbour is 10 — the carry must still run.
+        assert_eq!(fmt_f(b"%.0f ", 9.5), "10");
+        // 0.125 at two places: "0.12" (2 is even), not "0.13".
+        assert_eq!(fmt_f(b"%.2f ", 0.125), "0.12");
+        assert_eq!(fmt_f(b"%.2f ", 0.375), "0.38");
+    }
+
+    #[test]
+    fn fixed_non_ties_are_unaffected() {
+        // Nothing here is halfway, so the ordinary remainder test decides and
+        // the answers must be unchanged by the tie machinery.
+        assert_eq!(fmt_f(b"%.0f ", 3.7), "4");
+        assert_eq!(fmt_f(b"%.0f ", 3.2), "3");
+        assert_eq!(fmt_f(b"%.1f ", 8.26), "8.3");
+        assert_eq!(fmt_f(b"%.1f ", 8.24), "8.2");
+        assert_eq!(fmt_f(b"%.2f ", 1.005), "1.00"); // 1.005 is really 1.00499...
+    }
+
+    #[test]
+    fn scientific_ties_round_to_even() {
+        // The tie is judged on the original value at `precision - exponent`
+        // places, not on the derived mantissa: 1234.5 at %.3e keeps four
+        // significant digits, so the tie is at the units place and 1234 wins.
+        assert_eq!(fmt_f(b"%.3e ", 1234.5), "1.234e+03");
+        assert_eq!(fmt_f(b"%.3e ", 1235.5), "1.236e+03");
+        assert_eq!(fmt_f(b"%.0e ", 2.5), "2e+00");
+        assert_eq!(fmt_f(b"%.0e ", 3.5), "4e+00");
+        assert_eq!(fmt_f(b"%.1e ", 0.125), "1.2e-01");
+    }
+
+    #[test]
+    fn tie_detection_matches_the_exact_definition() {
+        // 8.25 == 33 * 2^-2, so it is a tie at one decimal place and at no
+        // other non-negative precision.
+        assert!(is_half_way(8.25, 1));
+        assert!(!is_half_way(8.25, 0));
+        assert!(!is_half_way(8.25, 2));
+
+        // 1234.5 == 2469 * 2^-1: a tie at zero places, i.e. at the units.
+        assert!(is_half_way(1234.5, 0));
+        assert!(!is_half_way(1234.5, 1));
+
+        // Negative `p` is the %e case: rounding 1250 to the hundreds is a tie,
+        // because 5^2 divides 1250 / 2^1 = 625.
+        assert!(is_half_way(1250.0, -2));
+        // ...but rounding 1250 to the thousands is not: 1250 is not halfway
+        // between 1000 and 2000.
+        assert!(!is_half_way(1250.0, -3));
+        // 450 is halfway between 400 and 500; 500 is *on* a multiple of 100
+        // and so is not a tie at all.
+        assert!(is_half_way(450.0, -2));
+        assert!(!is_half_way(500.0, -2));
+
+        // 0.1 is not exactly representable, so it is never an exact tie.
+        assert!(!is_half_way(0.1, 1));
+        assert!(!is_half_way(0.0, 0));
+        assert!(!is_half_way(f64::INFINITY, 0));
+    }
+
+    #[test]
+    fn decompose_reduces_to_an_odd_significand() {
+        assert_eq!(decompose(1.0), (1, 0));
+        assert_eq!(decompose(2.0), (1, 1));
+        assert_eq!(decompose(0.5), (1, -1));
+        assert_eq!(decompose(8.25), (33, -2));
+        assert_eq!(decompose(1234.5), (2469, -1));
+        assert_eq!(decompose(0.0), (0, 0));
+        // Smallest subnormal: 2^-1074, so m == 1.
+        assert_eq!(decompose(f64::from_bits(1)), (1, -1074));
     }
 }

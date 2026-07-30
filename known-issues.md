@@ -18051,7 +18051,7 @@ for a fraction of the code, at the cost of having to manage FPU state (control
 word, stack depth) across the ABI boundary. Trigger: the first port that
 genuinely relies on `long double` precision (many numeric C libraries do).
 
-### TD-POSIX-PRINTF-TIE-ROUNDING. The float formatter rounds ties away from zero; glibc/musl round ties to even — 2026-07-30
+### TD-POSIX-PRINTF-TIE-ROUNDING. The float formatter rounded ties away from zero; glibc/musl round ties to even — 2026-07-30 — RESOLVED 2026-07-30
 
 **Where:** `posix/src/printf.rs::fmt_fixed`, the `if f >= 0.5` test that
 triggers the digit carry (~line 1884), and the `crate::math::round` pre-round
@@ -18076,15 +18076,42 @@ show up as a one-digit diff in any test suite whose expected output was
 generated on Linux. It was found while writing the `%Lf` regression tests
 (two of my first expectations, copied from glibc behaviour, failed).
 
-**Proper fix:** in `fmt_fixed`, replace `if f >= 0.5` with a tie-aware test —
-round up when `f > 0.5`, and when `f == 0.5` only if the last emitted digit is
-odd — and give the `%e` path the same treatment instead of leaning on
-`math::round` (which is `roundeven`-less and rounds half away from zero by
-definition). Note the comparison must be done on the *exact* residue; the
-current running-`f` subtraction accumulates error, so a correct implementation
-probably wants to decide the tie from the original value rather than the
-residue. Deferred because it needs care to avoid regressing the 20 000+
-existing formatting tests, and no consumer is currently affected.
+**Fix (DONE).** The note above was right that the running remainder cannot be
+trusted to recognise a half — but the exact test turned out to be cheap,
+because "is this a tie?" is a question about the value's *binary*
+representation, not its decimal expansion. Writing a finite `val` as `m * 2^e`
+with `m` odd,
+
+    val * 10^p * 2  =  m * 5^p * 2^(e + p + 1)
+
+and rounding to a multiple of `10^-p` is a tie exactly when that is an odd
+integer — i.e. iff `e + p + 1 == 0`, plus (for negative `p`, where the `5^p`
+is a division) `5^-p | m`. One exponent comparison, no dependence on the digit
+loop. `printf.rs` gained `decompose`, `is_half_way` and `is_odd_integer`
+implementing this, and:
+
+- `fmt_fixed`'s carry test became "if this is an exact half, round towards an
+  even last digit; otherwise the old `f >= 0.5`". Non-tie behaviour is
+  bit-identical to before, which is why all 20 000+ existing assertions passed
+  unchanged.
+- `fmt_fixed`'s `precision == 0` pre-round uses a new `round_half_even` rather
+  than `math::round`. It needs none of the above: `val - floor(val)` is exact
+  for every finite `f64` (Sterbenz for `val >= 1`, trivially below), so
+  `== 0.5` is already an exact tie test there.
+- `fmt_scientific` asks about the **original value at `precision - exp`
+  places** rather than the derived mantissa, which is inexact by the time it
+  exists. That is what makes `%.3e` of `1234.5` come out as `1.234e+03`.
+
+All three divergences in the table above now match glibc, covered by
+`fixed_ties_round_to_even`, `fixed_ties_to_even_carries_through_nines`,
+`scientific_ties_round_to_even`, `fixed_non_ties_are_unaffected` (a guard that
+the ordinary path is untouched), plus unit tests for `is_half_way` and
+`decompose` themselves.
+
+**Still open (separately):** the digit loop's *accuracy* beyond ~15 significant
+digits, which is a different problem — see TD-POSIX-LONG-DOUBLE-PRECISION for
+the related long-double case. The tie test is exact at any precision, but for
+precisions past ~48 the digits it is applied to have already drifted.
 
 ### TD-OPENAT2-BENEATH-INROOT. `openat2` `RESOLVE_BENEATH`/`RESOLVE_IN_ROOT` are safely refused, not implemented — ACCEPTED LIMITATION 2026-07-22
 

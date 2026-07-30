@@ -26684,13 +26684,23 @@ fn unescape_read_line(s: &str) -> String {
 }
 
 /// Split a line the way the `read` builtin does: on `$IFS`, distinguishing
-/// IFS-whitespace (space/tab/newline — runs collapse, and leading/trailing are
-/// trimmed) from non-whitespace IFS characters (each a single delimiter). When
-/// `limit` is `Some(n)`, at most `n` fields are produced and the last captures
-/// the raw remainder (trailing IFS-whitespace stripped) — matching bash's
-/// assignment of the rest of the line to the final variable. Without `raw`, a
-/// backslash escapes the next character (so it neither delimits nor is dropped
-/// from the field boundary logic).
+/// IFS-whitespace (space/tab/newline) from non-whitespace IFS characters.
+///
+/// One *delimiter* is `ws* nonws? ws*` — so IFS whitespace adjacent to a
+/// non-whitespace IFS character belongs to the same delimiter, and `a : b` with
+/// `IFS=': '` is two fields, not four. A delimiter run that reaches the end of
+/// the line ends it rather than opening one final empty field, which is why
+/// `IFS=: read -a` on `a:b:` yields two fields while `a:b::` yields three.
+///
+/// `limit` is the number of names `read` has to fill. bash gives the last name
+/// "the remaining words *and their intervening separators*" — but only when
+/// there are more fields than names; with no more fields than names each name
+/// simply takes its own field. That is the whole of the difference between
+/// `IFS=: read -r x y <<< 'a:b:'` (two fields, so `y=b`) and
+/// `IFS=: read -r x y <<< 'a:b:c:'` (three, so `y=b:c:`).
+///
+/// Without `raw`, a backslash escapes the next character, so it neither
+/// delimits nor is kept in the field.
 fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<String> {
     // Empty IFS disables splitting entirely: the whole line is one field.
     if ifs.is_empty() {
@@ -26704,26 +26714,17 @@ fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<Str
 
     let chars: Vec<char> = line.chars().collect();
     let n = chars.len();
-    let mut fields: Vec<String> = Vec::new();
+    // Every field, each paired with where it began, so the last-name rule below
+    // can reach back into the line for the raw remainder.
+    let mut fields: Vec<(usize, String)> = Vec::new();
     let mut i = 0;
-    // Trim leading IFS whitespace.
+    // Leading IFS *whitespace* is trimmed; a leading non-whitespace delimiter is
+    // a delimiter like any other, and so opens with an empty field.
     while i < n && is_ws(chars[i]) {
         i += 1;
     }
     while i < n {
-        // Last allowed field: take the raw remainder (trailing IFS-ws trimmed).
-        if let Some(lim) = limit
-            && fields.len() + 1 == lim
-        {
-            let mut end = n;
-            while end > i && is_ws(chars[end - 1]) {
-                end -= 1;
-            }
-            let seg: String = chars[i..end].iter().collect();
-            fields.push(if raw { seg } else { unescape_read_line(&seg) });
-            return fields;
-        }
-        // Accumulate one field up to the next delimiter.
+        let start = i;
         let mut field = String::new();
         while i < n {
             let c = chars[i];
@@ -26732,28 +26733,61 @@ fn read_split(line: &str, ifs: &str, raw: bool, limit: Option<usize>) -> Vec<Str
                 i += 2;
                 continue;
             }
-            if is_ws(c) {
-                // Consume the whole run of IFS whitespace.
-                while i < n && is_ws(chars[i]) {
-                    i += 1;
-                }
-                break;
-            }
-            if is_other(c) {
-                i += 1;
+            if is_ws(c) || is_other(c) {
                 break;
             }
             field.push(c);
             i += 1;
         }
-        fields.push(field);
-    }
-    if let Some(lim) = limit {
-        while fields.len() < lim {
-            fields.push(String::new());
+        fields.push((start, field));
+        if i >= n {
+            break;
+        }
+        // Consume exactly one delimiter: any IFS whitespace, then at most one
+        // non-whitespace IFS character, then any IFS whitespace again.
+        while i < n && is_ws(chars[i]) {
+            i += 1;
+        }
+        if i < n && is_other(chars[i]) {
+            i += 1;
+            while i < n && is_ws(chars[i]) {
+                i += 1;
+            }
+        }
+        // Reaching the end inside a delimiter ends the line: the empty field it
+        // would otherwise open is not one bash reports.
+        if i >= n {
+            break;
         }
     }
-    fields
+
+    match limit {
+        Some(lim) if lim >= 1 && fields.len() > lim => {
+            let mut out: Vec<String> = Vec::with_capacity(lim);
+            for (_, f) in fields.iter().take(lim - 1) {
+                out.push(f.clone());
+            }
+            // The last name takes the line from where its field began, keeping
+            // the separators inside it, less any trailing IFS whitespace.
+            let start = fields[lim - 1].0;
+            let mut end = n;
+            while end > start && is_ws(chars[end - 1]) {
+                end -= 1;
+            }
+            let seg: String = chars[start..end].iter().collect();
+            out.push(if raw { seg } else { unescape_read_line(&seg) });
+            out
+        }
+        _ => {
+            let mut out: Vec<String> = fields.into_iter().map(|(_, f)| f).collect();
+            if let Some(lim) = limit {
+                while out.len() < lim {
+                    out.push(String::new());
+                }
+            }
+            out
+        }
+    }
 }
 
 /// Minimal `printf`: handles `%s`, `%d`, `%%`, and common backslash escapes.
@@ -30607,6 +30641,81 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn read_custom_ifs() {
         let (o, _) = run("IFS=: read a b c <<< '1:2:3'; echo \"$a-$b-$c\"");
         assert_eq!(o, "1-2-3\n");
+    }
+
+    /// A delimiter is `ws* nonws? ws*`, so IFS whitespace next to a
+    /// non-whitespace IFS character is part of the *same* delimiter — `a : b`
+    /// with `IFS=': '` is two fields, not four — and a delimiter that runs to
+    /// the end of the line ends it rather than opening a final empty field.
+    #[test]
+    fn read_coalesces_a_delimiter_run_and_drops_a_trailing_one() {
+        let nf = |ifs: &str, input: &str| {
+            run(&format!(
+                "IFS='{ifs}' read -r -a A <<< '{input}'; printf '%d' \"${{#A[@]}}\"; \
+                 for e in \"${{A[@]}}\"; do printf '[%s]' \"$e\"; done"
+            ))
+            .0
+        };
+        // A trailing non-whitespace delimiter closes the last field; it does not
+        // add an empty one. Two of them do add one, between them.
+        assert_eq!(nf(":", "a:b:"), "2[a][b]");
+        assert_eq!(nf(":", "a:b::"), "3[a][b][]");
+        assert_eq!(nf(":", "a:"), "1[a]");
+        // A line that is nothing but delimiters has one field fewer than it has
+        // delimiters, by the same rule.
+        assert_eq!(nf(":", ":"), "1[]");
+        assert_eq!(nf(":", "::"), "2[][]");
+        assert_eq!(nf(":", ":::"), "3[][][]");
+        // Mixed IFS: whitespace either side of the `:` joins that delimiter.
+        assert_eq!(nf(": ", "a : b"), "2[a][b]");
+        assert_eq!(nf(": ", "a  :"), "1[a]");
+        assert_eq!(nf(": ", "a:  "), "1[a]");
+        assert_eq!(nf(": ", " :a: "), "2[][a]");
+        // …but only *one* non-whitespace character per delimiter, so a second
+        // one still opens an empty field.
+        assert_eq!(nf(": ", "a: :b"), "3[a][][b]");
+        assert_eq!(nf(": ", "a: : "), "2[a][]");
+        // Whitespace-only IFS is unchanged: runs collapse, ends are trimmed.
+        assert_eq!(nf(" ", "  a  b  "), "2[a][b]");
+    }
+
+    /// The last name soaks up "the remaining words and their intervening
+    /// separators" — but only when there are more fields than names. With no
+    /// more fields than names each name takes its own field, which is the whole
+    /// of the difference between `a:b:` (two fields, `y=b`) and `a:b:c:`
+    /// (three, so `y` keeps the separators *and* the trailing delimiter).
+    #[test]
+    fn read_last_name_soaks_only_when_fields_outnumber_names() {
+        let r = |ifs: &str, input: &str, names: &str| {
+            let show =
+                names.split(' ').map(|n| format!("printf '[%s]' \"${n}\";")).collect::<String>();
+            run(&format!("IFS='{ifs}' read -r {names} <<< '{input}'; {show}")).0
+        };
+        // Two fields, two names: no soaking, so the trailing `:` is simply gone.
+        assert_eq!(r(":", "a:b:", "x y"), "[a][b]");
+        // Three fields, two names: the second soaks the rest of the line
+        // verbatim — separators and trailing delimiter included.
+        assert_eq!(r(":", "a:b:c:", "x y"), "[a][b:c:]");
+        assert_eq!(r(":", "a:b::", "x y"), "[a][b::]");
+        assert_eq!(r(":", "a::b:", "x y"), "[a][:b:]");
+        // …and with a third name there is nothing left to soak.
+        assert_eq!(r(":", "a:b::", "x y z"), "[a][b][]");
+        assert_eq!(r(":", "a:b:", "x y z"), "[a][b][]");
+        // One name and more than one field: the whole line, unsplit.
+        assert_eq!(r(":", "a:b:", "x"), "[a:b:]");
+        assert_eq!(r(":", ":a:", "x"), "[:a:]");
+        assert_eq!(r(":", "::", "x"), "[::]");
+        // One name and one field: the field, delimiter dropped.
+        assert_eq!(r(":", "a:", "x"), "[a]");
+        assert_eq!(r(":", ":", "x"), "[]");
+        assert_eq!(r(": ", "a:  ", "x"), "[a]");
+        assert_eq!(r(": ", "a  :", "x"), "[a]");
+        // Soaking still strips trailing IFS whitespace from the remainder.
+        assert_eq!(r(" ", "a b ", "x"), "[a b]");
+        assert_eq!(r(":", "a:b: ", "x y"), "[a][b: ]");
+        assert_eq!(r(": ", "a:b: ", "x y"), "[a][b]");
+        // Fewer fields than names leaves the extras empty, as before.
+        assert_eq!(r(":", "a", "x y"), "[a][]");
     }
 
     /// `read` strips its *delimiter* and nothing else. A `\r` before the newline

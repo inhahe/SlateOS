@@ -21,6 +21,58 @@ echo "u=[$u] v=[$v] w=[$w]"
 IFS=: read -r u v <<< 'a:b:c'
 echo "trailing-soak=[$v]"
 
+# One delimiter is `ws* nonws? ws*`: IFS whitespace beside a non-whitespace IFS
+# character belongs to the same delimiter, and a delimiter reaching the end of
+# the line ends it rather than opening one last empty field.
+nf() { # nf <ifs> <line>
+  local IFS=$1
+  read -r -a A <<< "$2"
+  printf '%d fields:' "${#A[@]}"
+  local e; for e in "${A[@]}"; do printf '[%s]' "$e"; done
+  echo
+}
+nf ':' 'a:b:'
+nf ':' 'a:b::'
+nf ':' 'a:'
+nf ':' ':'
+nf ':' '::'
+nf ':' ':::'
+nf ': ' 'a : b'
+nf ': ' 'a  :'
+nf ': ' 'a:  '
+nf ': ' ' :a: '
+nf ': ' 'a: :b'
+nf ': ' 'a: : '
+nf ' ' '  a  b  '
+
+# The last name soaks up the remaining words *and their separators* — but only
+# when there are more fields than names. `a:b:` is two fields, so two names each
+# take one and the trailing delimiter is simply gone; `a:b:c:` is three, so the
+# second name keeps the separators and the trailing delimiter with them.
+soak() { # soak <ifs> <line> <names...>
+  local ifs=$1 line=$2; shift 2
+  printf '%-9s %-9s' "[$line]" "$*"
+  IFS=$ifs read -r "$@" <<< "$line"
+  local v; for v in "$@"; do printf '[%s]' "${!v}"; done
+  echo
+}
+soak ':' 'a:b:'   x y
+soak ':' 'a:b:c:' x y
+soak ':' 'a:b::'  x y
+soak ':' 'a::b:'  x y
+soak ':' 'a:b::'  x y z
+soak ':' 'a:b:'   x
+soak ':' ':a:'    x
+soak ':' '::'     x
+soak ':' 'a:'     x
+soak ':' ':'      x
+soak ': ' 'a:  '  x
+soak ': ' 'a  :'  x
+soak ' ' 'a b '   x
+soak ':' 'a:b: '  x y
+soak ': ' 'a:b: ' x y
+soak ':' 'a'      x y
+
 # Backslash handling: without -r, a backslash escapes the next character (and a
 # backslash-newline continues the line); with -r it is literal.
 printf 'a\\tb\n' > f3

@@ -19779,6 +19779,33 @@ impl Shell {
             let bound = self.apply_assignment(a, false);
             self.xtrace_compound = saved_xtrace_compound;
             self.decl_builtin_ctx = saved_decl_ctx;
+            // A word-expansion error inside the operand ends the command the same
+            // way: bash performs the compound during the expansion pass, so a
+            // failure there means no later operand binds, the builtin never runs,
+            // and the rest of the parse unit goes — but a following *line* still
+            // runs, and `$?` is the carried status. These flags have to be consumed
+            // right here: left set, they were picked up by the *next* command's
+            // expansion check in `exec_simple_inner`, which then discarded a command
+            // bash runs normally (`declare -a f=(x $((1/0))); declare -p f` ate the
+            // `declare -p`, and under `set -x` it ate the `set +x`).
+            if let Some(pat) = self.glob_error.take() {
+                self.emit_stderr(format!("{}no match: {pat}\n", self.err_prefix()).as_bytes());
+                self.discard_error = None;
+                self.last_status = 1;
+                return Flow::Discard;
+            }
+            // A nounset reference, a `${var:?}` or a bad substitution is fatal
+            // instead, with the status the flag carries (127 vs. 1).
+            if let Some(code) = self.unbound_error.take() {
+                self.discard_error = None;
+                let status = self.fatal_abort_status(code);
+                self.last_status = status;
+                return Flow::Exit(status);
+            }
+            if let Some(code) = self.discard_error.take() {
+                self.last_status = code;
+                return Flow::Discard;
+            }
             // A rejected compound operand (the readonly guard in
             // `apply_assignment`, which has already emitted its diagnostic) ends
             // the command exactly as the kind conflict above does: no further
@@ -38213,6 +38240,50 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // bound before it keeps the attributes the builtin did apply.
         let (o2, _) = run("readonly s=1; declare -ax v=(1) s=2; echo \"rc=$?\"; declare -p v");
         assert_eq!(o2, "rc=1\ndeclare -ax v=([0]=\"1\")\n");
+    }
+
+    /// A word-expansion error inside a compound operand ends the command the same
+    /// way a rejected operand does — and, critically, ends there: the discard must
+    /// not reach the *next* command, which is what happened while
+    /// `exec_declare_with_arrays` left `discard_error` set for
+    /// `exec_simple_inner`'s next expansion check to find.
+    #[test]
+    fn a_failed_operand_expansion_discards_only_the_rest_of_the_parse_unit() {
+        // Line 1's operand fails, so `g` never binds and `$?` is 1 — but line 2 and
+        // everything after it still run. osh used to swallow the command right after
+        // the failure (here the `echo`), reporting `status=` from a later line.
+        let (o, rc) = run(
+            "declare -a f=(x $((1/0))) g=(1)\necho \"status=$?\"\ndeclare -p g 2>/dev/null; echo \"g=$?\"",
+        );
+        assert_eq!(o, "status=1\ng=1\n");
+        assert_eq!(rc, 0, "the discard ends the parse unit, not the script");
+        // A survivor to the *left* of the failing operand keeps its binding, and the
+        // command following on a new line is untouched.
+        assert_eq!(
+            run("declare -a h=(1) i=(y $((1/0))) j=(2)\ndeclare -p h\ndeclare -p j 2>/dev/null; echo \"j=$?\"").0,
+            "declare -a h=([0]=\"1\")\nj=1\n"
+        );
+        // Same for an associative operand, whose branch takes a different path.
+        // (What that operand leaves *bound* is TD-OILS-DECL-COMPOUND-NO-BIND-ON-FAIL;
+        // here the point is only that the `echo` on the next line still runs.)
+        let (o1, _) = run(
+            "declare -A m\nm=([z]=old)\ndeclare -A m+=([a]=1 [b]=$((1/0)))\necho \"st=$?\"\ndeclare -p m",
+        );
+        assert!(o1.starts_with("st=1\ndeclare -A m=([z]=\"old\""), "{o1:?}");
+        // The leak was loudest under `set -x`, where the eaten command was the
+        // `set +x` meant to stop the tracing. `exec 2>&1` rather than a `{ … }`
+        // group, because the discard legitimately takes out the rest of a group
+        // (bash does the same — the group is the parse unit).
+        let (o2, _) = run("exec 2>&1\nset -x\ndeclare -a b=(x $((1/0)))\nset +x\necho done");
+        assert!(
+            o2.ends_with("+ set +x\ndone\n"),
+            "`set +x` must still run: {o2:?}"
+        );
+        // `set -u` is fatal instead, with nounset's status — and it aborts before
+        // the following line rather than discarding just the parse unit.
+        let (o3, rc3) = run("set -u\ndeclare -a k=($NOPE)\necho never");
+        assert_eq!(o3, "");
+        assert_eq!(rc3, 1, "a subshell-less script exits nounset's status");
     }
 
     #[test]

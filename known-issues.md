@@ -384,7 +384,7 @@ operand carries a value" rule fixed in `readonly_array_flags_need_a_value_to_tak
 Measure against a non-MSYS bash first if one becomes available, since this was
 observed only on the MSYS build.
 
-### TD-OILS-DECL-COMPOUND-DISCARD-LEAK. A failed expansion in a declaration builtin's array operand discards the *next* command too — 2026-07-30 — OPEN
+### TD-OILS-DECL-COMPOUND-DISCARD-LEAK. A failed expansion in a declaration builtin's array operand discards the *next* command too — 2026-07-30 — ✅ RESOLVED 2026-07-30
 
 **Where:** `userspace/oils/src/interp.rs` — `exec_declare_with_arrays`, which never
 consumes `self.discard_error` after phase 1.
@@ -405,11 +405,21 @@ echo "st=$?"           # ... and with two statements the echo is eaten instead
 It is very visible under `set -x`, where the swallowed command is the `set +x`
 that was supposed to turn tracing off.
 
-**Proper fix.** After phase 1, before the builtin's trace line, take
-`self.discard_error` (and `glob_error`/`unbound_error`, as the bare-assignment
-path at the top of `exec_simple_inner` already does) and return `Flow::Discard`
-(`Flow::Exit` for `unbound_error`) with the carried status. bash's discard ends at
-the end of the parse unit, so a following *line* must still run.
+**Resolution (2026-07-30).** Phase 1 of `exec_declare_with_arrays` now consumes all
+three word-expansion flags right after each `apply_assignment`, in the same order
+and with the same meanings the bare-assignment path at the top of
+`exec_simple_inner` uses: `glob_error` → report `no match:` and `Flow::Discard`
+with status 1, `unbound_error` → `Flow::Exit(fatal_abort_status(code))`,
+`discard_error` → `Flow::Discard` with the carried status. Pinned by
+`a_failed_operand_expansion_discards_only_the_rest_of_the_parse_unit` and an
+extension to `tests/corpus/declare-compound-operands.sh`.
+
+Measured while fixing it, and worth recording: the discard genuinely does take out
+the rest of a `{ … }` group — bash gives nothing at all for
+`{ declare -a a=(1); set -x; declare -a b=(x $((1/0))); set +x; echo done; } 2>&1`
+— because the group *is* the parse unit. Only a following top-level line survives.
+An operand to the left of the failing one keeps its binding; one to the right never
+binds, since bash aborts the command mid-expansion.
 
 ### TD-OILS-DECL-COMPOUND-NO-BIND-ON-FAIL. A failed operand expansion should bind nothing and create nothing — 2026-07-30 — OPEN
 

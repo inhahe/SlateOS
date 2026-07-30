@@ -71,3 +71,17 @@ w[0]=9
 echo "w-status=$?"
 export -a e=(1)
 declare -p e
+
+# A word-expansion error inside a compound operand ends the command the same way,
+# and ends *there*: the next line runs normally. (osh used to leave the
+# discard flag set, so the command right after the failure was eaten too.)
+declare -a ef=(x $((1/0))) eg=(1)
+echo "expand-fail rc=$?"
+declare -p eg 2>&1
+echo "eg-status=$?"
+declare -a h=(1) i=(y $((1/0))) j=(2)
+echo "expand-fail-2 rc=$?"
+declare -p h
+declare -p j 2>&1
+echo "j-status=$?"
+echo "still-running"

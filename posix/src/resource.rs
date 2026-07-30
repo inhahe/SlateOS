@@ -436,11 +436,13 @@ fn kernel_get_nice() -> i32 {
     #[cfg(target_os = "none")]
     {
         let biased = crate::syscall::syscall0(crate::syscall::SYS_PROCESS_GET_NICE);
-        // biased is 0..=39 in practice; recover the signed nice.
+        // The kernel returns the nice value biased by +20, i.e. 0..=39.  Clamp
+        // to that range before narrowing so a malformed (or error-coded)
+        // return can neither truncate into a nonsense value nor overflow the
+        // subtraction; the clamp then makes the cast exact.
         #[allow(clippy::cast_possible_truncation)]
-        {
-            (biased as i32) - 20
-        }
+        let biased = biased.clamp(0, 39) as i32;
+        biased.saturating_sub(20)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -460,13 +462,16 @@ fn kernel_get_nice() -> i32 {
 fn kernel_set_nice(nice: i32) -> i32 {
     #[cfg(target_os = "none")]
     {
+        // The caller has already clamped `nice` to [-20, 19]; bias by +20 for
+        // the kernel's unsigned 0..=39 encoding.  Clamping again makes the
+        // cast provably sign-loss-free rather than relying on the caller.
         #[allow(clippy::cast_sign_loss)]
-        let biased = (nice + 20) as u64;
+        let biased = nice.saturating_add(20).clamp(0, 39) as u64;
         let old_biased = crate::syscall::syscall1(crate::syscall::SYS_PROCESS_SET_NICE, biased);
+        // Same clamp-then-narrow reasoning as `kernel_get_nice`.
         #[allow(clippy::cast_possible_truncation)]
-        {
-            (old_biased as i32) - 20
-        }
+        let old_biased = old_biased.clamp(0, 39) as i32;
+        old_biased.saturating_sub(20)
     }
     #[cfg(not(target_os = "none"))]
     {

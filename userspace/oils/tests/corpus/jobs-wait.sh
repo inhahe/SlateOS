@@ -141,6 +141,21 @@ wait
 # message. Pid 1 exists but is not ours.
 wait 1 2>/dev/null; echo "wait-stranger=$?"
 
+# …and it stays 127 even while a job *numbered* 1 is running, because a bare
+# number is a pid to `wait` and never a job number. bash splits its builtins
+# here: `wait`, `kill` and `disown` take "jobspec or pid" and read a bare number
+# as a pid, while `jobs`, `fg` and `bg` read one as a job number. A `%1` reaches
+# the job from either side. (This split is what made `wait-stranger` above look
+# intermittent rather than plainly wrong: it only diverged on the runs where a
+# job 1 happened to still be in the table.)
+sleep 2 &
+wait 1 2>/dev/null; echo "live-job-not-a-pid=$?"
+kill -0 1 2>/dev/null; echo "kill-bare=$?"
+kill -0 %1 2>/dev/null; echo "kill-spec=$?"
+disown 1 2>/dev/null; echo "disown-bare=$?"
+jobs 1 >/dev/null 2>&1; echo "jobs-bare=$?"
+wait %1; echo "wait-spec=$?"
+
 # Command substitution waits for its own subshell, so a `&` inside one still
 # completes before the substitution's value is taken — provided the job's
 # output is captured through a file the substitution reads after `wait`.

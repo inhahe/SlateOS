@@ -1636,6 +1636,15 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: libm (ring 3) self-test failed: {:?}", e);
     }
 
+    // Both fixtures above move every value through an %xmm register. A `long
+    // double` never touches one — it is X87/X87UP, hence MEMORY: 16 bytes on
+    // the stack, returned in %st(0) — so it is a third, disjoint ABI rule that
+    // neither can observe. This fixture guards it end-to-end through printf
+    // %L, scanf %L and strtold. Bounded yield loop; can never hang.
+    if let Err(e) = proc::spawn::self_test_clongdouble() {
+        serial_println!("WARNING: long double (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
     // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
     // memfs and exits with the byte count read back, proving the full path

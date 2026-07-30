@@ -6827,6 +6827,140 @@ pub fn self_test_clibm() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the sysroot's **`long double` ABI**.
+///
+/// The third fixture in the float-ABI family, and the only one that can see
+/// this class of fault at all.  [`self_test_clibc_float`] covers `double`
+/// returns and varargs doubles; [`self_test_clibm`] covers named float
+/// arguments.  Both move their values through `%xmm` registers — but a
+/// `long double` never touches one: it is classified X87/X87UP, which the
+/// SysV x86-64 ABI resolves to MEMORY, so it is always 16 bytes on the stack
+/// (16-byte aligned, 10 meaningful) and is returned in `%st(0)`.
+///
+/// It guards BUG-POSIX-LONG-DOUBLE-ABI, which was two independent silent
+/// corruptions:
+///
+/// * `printf`/`scanf` never consumed the `L` length modifier, so `L` was read
+///   as the *conversion character*.  It matches no conversion, so the
+///   specifier consumed no argument at all and left the cursor sitting on the
+///   long double's 16 bytes — every argument after it was then read two slots
+///   early.  A corrupted integer three fields later is far worse than a
+///   wrong float in field one, which is why the fixture's central check is
+///   `"%d %.3Lf %s %d"` and asserts on the *trailing* arguments.
+/// * `strtold` was a Rust `-> f64`, returned in `%xmm0`.  C callers read
+///   `%st(0)`, i.e. whatever the x87 stack happened to hold.
+///
+/// Neither is visible to the posix crate's own unit tests, where Rust calls
+/// Rust and both sides share the same wrong convention, so a plain-C caller
+/// built by `zig cc` is the only way to observe them.
+///
+/// Note that the sysroot still *computes* in `double`; that is the documented
+/// TD-POSIX-LONG-DOUBLE-PRECISION limitation and is deliberately not what
+/// this fixture tests.  Every value it uses is exactly representable in
+/// binary64, so a precision shortfall cannot make it fail and an ABI fault
+/// cannot hide behind a loose tolerance.
+///
+/// Exit code 42 means every check passed; any other code names the failing
+/// step (see the FAIL diagnostic below and `services/ctest-longdouble/main.c`).
+pub fn self_test_clongdouble() -> KernelResult<()> {
+    let ctest_elf = match load_test_elf("ctest-longdouble") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP ctest-longdouble: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+
+    serial_println!(
+        "[spawn] Running long double (ring 3, C) integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after all of its ABI checks pass.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-longdouble"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-longdouble",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-longdouble spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Pure formatting and parsing with no blocking calls, but keep the same
+    // bounded budget the other ring-3 fixtures use so a fault can't wedge boot.
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-longdouble (ring 3) — expected Zombie, got {:?}. This \
+             fixture does nothing that can block, so a non-zombie state means it faulted: an \
+             x87 instruction trapping (CR0.EM set, or the FPU never initialised) is the most \
+             likely cause, since this is the only fixture that uses the x87 unit at all",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-longdouble (ring 3) — reached Zombie but exit code was \
+             {:?}, expected {}. Code bands: 10-13 = the type's shape (16 bytes, 16-byte \
+             aligned, and a 15-bit exponent that survives 1e600 — if 12/13 fail the C \
+             compiler is not using x87 at all and nothing below is meaningful), 20-25 = \
+             printf's %L conversions (23 is the regression itself: a %Lf followed by more \
+             arguments, where ignoring the L shifted every later argument two stack slots; \
+             25 mixes a register-passed double with a stack-passed long double in one call), \
+             30-34 = strtold's %st(0) return (34 calls it 32 times, because a thunk that \
+             pushed without the caller popping would overflow the 8-deep x87 stack and start \
+             returning NaN after eight calls), 40-44 = scanf's %L, which must store all 16 \
+             bytes (41 pre-poisons the destination so a partial 8-byte store leaves a \
+             detectable stale exponent), 50 = format-and-reparse round trip. See \
+             BUG-POSIX-LONG-DOUBLE-ABI in known-issues.md and \
+             services/ctest-longdouble/main.c",
+            exit_code, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   long double (ring 3: a zig-cc C caller and the sysroot agree on the \
+         16-byte stack-passed X87 class through printf %L, scanf %L and strtold's %st(0) \
+         return): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that fastpy **pure-mode file I/O** works on-target.
 ///
 /// This is the first proof that the whole pure-mode file path runs natively on

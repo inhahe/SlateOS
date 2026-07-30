@@ -46,234 +46,129 @@
 // Assembly trampolines
 // ---------------------------------------------------------------------------
 //
-// On x86_64 System V ABI, the first 6 integer args go in:
-//   rdi, rsi, rdx, rcx, r8, r9
+// Rust cannot define a C variadic function, so each `printf`-family symbol is
+// an assembly stub.  Each one performs a real SysV `va_start` — spill the six
+// integer argument registers and the eight XMM registers into a register save
+// area, then build the 24-byte `va_list` descriptor pointing at it — and
+// delegates to the matching `v*` function, which is ordinary Rust.
 //
-// For printf(fmt, ...):  rdi=fmt, rsi..r9 = first 5 varargs
-// For fprintf(stream, fmt, ...): rdi=stream, rsi=fmt, rdx..r9 = first 4 varargs
-// For snprintf(buf, size, fmt, ...): rdi=buf, rsi=size, rdx=fmt, rcx..r9 = first 3 varargs
+// This is a rewrite of an earlier design that flattened the arguments into two
+// fixed `[u64; 8]` arrays instead.  That shortcut could not represent a
+// stack-passed argument at all, so `%Lf` (a `long double` is X87/X87UP ->
+// MEMORY, always on the stack) was unreachable from `printf` even after the
+// engine learned to format it — see BUG-POSIX-LONG-DOUBLE-ABI.  It also meant
+// the direct and `v*` families reached the engine by two different routes, so
+// a fix to one silently missed the other.  Going through a genuine `va_list`
+// removes both problems and deletes ~200 lines of near-duplicated assembly.
 //
-// We save up to 8 args (5 register + 3 stack) for printf, fewer for others.
+// Named-argument counts (which set the initial `gp_offset` and decide which
+// register carries the `va_list*`):
+//   printf(fmt, ...)                  1 named -> gp_offset 8,  ap in rsi
+//   fprintf(stream, fmt, ...)         2 named -> gp_offset 16, ap in rdx
+//   dprintf(fd, fmt, ...)             2 named -> gp_offset 16, ap in rdx
+//   snprintf(buf, size, fmt, ...)     3 named -> gp_offset 24, ap in rcx
+//   sprintf(buf, fmt, ...)            2 named -> gp_offset 16, ap in rdx
+//   asprintf(strp, fmt, ...)          2 named -> gp_offset 16, ap in rdx
 
 // The `_*_impl` symbols defined in this module are the Rust-side targets of
-// the assembly variadic trampolines.  The leading underscore is part of the
-// ABI contract and marks them as "private-but-exported" linkage symbols
-// (libc programs link against the un-prefixed `printf`/`fprintf`/...).
+// the fortified (`__*_chk`) trampolines in `fortify_printf.rs`.  The leading
+// underscore is part of the ABI contract and marks them as
+// "private-but-exported" linkage symbols (libc programs link against the
+// un-prefixed `printf`/`fprintf`/...).
 #![allow(clippy::used_underscore_items)]
 
+/// Emit a variadic trampoline that performs a real `va_start` and tail-calls
+/// the corresponding `v*` implementation.
+///
+/// * `$name` — the exported C symbol.
+/// * `$target` — the `v*` function to call; it must take the same named
+///   parameters followed by a `*mut VaList`.
+/// * `$gp_off` — the initial `gp_offset`: 8 × the number of *named* integer
+///   parameters, i.e. how much of the integer register file the named
+///   arguments have already consumed.
+/// * `$ap_reg` — the register that carries the `va_list*` into `$target`,
+///   which is the first integer register after the named parameters.
+///
+/// Frame layout below `%rbp` (208 bytes, chosen so `%rsp` stays 16-byte
+/// aligned for both the `movaps` stores and the `call`):
+///
+/// ```text
+///   [rsp   .. rsp+48 )  integer register save area: rdi rsi rdx rcx r8 r9
+///   [rsp+48.. rsp+176)  SSE register save area:     xmm0..xmm7, 16 bytes each
+///   [rsp+176..rsp+200)  the va_list itself
+/// ```
 #[cfg(target_os = "none")]
-core::arch::global_asm!(
-    // printf(fmt, ...) → _printf_impl(fmt, int_args, float_args)
-    ".global printf",
-    ".type printf, @function",
-    "printf:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128", // 64 bytes int args + 64 bytes float args
-    // Save integer varargs (rsi-r9 = 5, plus 3 from stack = 8).
-    "mov [rsp], rsi",    // int vararg 0
-    "mov [rsp+8], rdx",  // int vararg 1
-    "mov [rsp+16], rcx", // int vararg 2
-    "mov [rsp+24], r8",  // int vararg 3
-    "mov [rsp+32], r9",  // int vararg 4
-    "mov rax, [rbp+16]", // int vararg 5 (stack)
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+24]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+32]", // int vararg 7
-    "mov [rsp+56], rax",
-    // Save XMM varargs (xmm0-xmm7 = 8 doubles).
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi = fmt (already set)
-    "mov rsi, rsp",      // int_args array
-    "lea rdx, [rsp+64]", // float_args array
-    "call _printf_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // fprintf(stream, fmt, ...) → _fprintf_impl(stream, fmt, int_args, float_args)
-    ".global fprintf",
-    ".type fprintf, @function",
-    "fprintf:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rdx",    // int vararg 0
-    "mov [rsp+8], rcx",  // int vararg 1
-    "mov [rsp+16], r8",  // int vararg 2
-    "mov [rsp+24], r9",  // int vararg 3
-    "mov rax, [rbp+16]", // int vararg 4 (stack)
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+24]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+32]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+40]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi = stream, rsi = fmt (already set)
-    "mov rdx, rsp",      // int_args array
-    "lea rcx, [rsp+64]", // float_args array
-    "call _fprintf_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // dprintf(fd, fmt, ...) → _dprintf_impl(fd, fmt, int_args, float_args)
-    ".global dprintf",
-    ".type dprintf, @function",
-    "dprintf:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rdx",    // int vararg 0
-    "mov [rsp+8], rcx",  // int vararg 1
-    "mov [rsp+16], r8",  // int vararg 2
-    "mov [rsp+24], r9",  // int vararg 3
-    "mov rax, [rbp+16]", // int vararg 4 (stack)
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+24]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+32]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+40]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi = fd, rsi = fmt (already set)
-    "mov rdx, rsp",      // int_args array
-    "lea rcx, [rsp+64]", // float_args array
-    "call _dprintf_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // snprintf(buf, size, fmt, ...) → _snprintf_impl(buf, size, fmt, int_args, float_args)
-    ".global snprintf",
-    ".type snprintf, @function",
-    "snprintf:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rcx",    // int vararg 0
-    "mov [rsp+8], r8",   // int vararg 1
-    "mov [rsp+16], r9",  // int vararg 2
-    "mov rax, [rbp+16]", // int vararg 3 (stack)
-    "mov [rsp+24], rax",
-    "mov rax, [rbp+24]", // int vararg 4
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+32]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+40]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+48]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi = buf, rsi = size, rdx = fmt (already set)
-    "mov rcx, rsp",     // int_args array
-    "lea r8, [rsp+64]", // float_args array
-    "call _snprintf_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // sprintf(buf, fmt, ...) → _sprintf_impl(buf, fmt, int_args, float_args)
-    ".global sprintf",
-    ".type sprintf, @function",
-    "sprintf:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rdx",    // int vararg 0
-    "mov [rsp+8], rcx",  // int vararg 1
-    "mov [rsp+16], r8",  // int vararg 2
-    "mov [rsp+24], r9",  // int vararg 3
-    "mov rax, [rbp+16]", // int vararg 4 (stack)
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+24]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+32]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+40]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi = buf, rsi = fmt (already set)
-    "mov rdx, rsp",      // int_args array
-    "lea rcx, [rsp+64]", // float_args array
-    "call _sprintf_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // asprintf(strp, fmt, ...) → _asprintf_impl(strp, fmt, int_args, float_args)
-    // Same register layout as fprintf: 2 fixed args (strp, fmt), rest varargs.
-    ".global asprintf",
-    ".type asprintf, @function",
-    "asprintf:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rdx",    // int vararg 0
-    "mov [rsp+8], rcx",  // int vararg 1
-    "mov [rsp+16], r8",  // int vararg 2
-    "mov [rsp+24], r9",  // int vararg 3
-    "mov rax, [rbp+16]", // int vararg 4 (stack)
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+24]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+32]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+40]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi = strp, rsi = fmt (already set)
-    "mov rdx, rsp",      // int_args array
-    "lea rcx, [rsp+64]", // float_args array
-    "call _asprintf_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-);
+macro_rules! va_trampoline {
+    ($name:literal, $target:literal, $gp_off:literal, $ap_reg:literal) => {
+        core::arch::global_asm!(
+            concat!(".global ", $name),
+            concat!(".type ", $name, ", @function"),
+            concat!($name, ":"),
+            "push rbp",
+            "mov rbp, rsp",
+            "sub rsp, 208",
+            // Spill the integer argument registers first: one of them is about
+            // to be overwritten with the va_list pointer.
+            "mov [rsp], rdi",
+            "mov [rsp+8], rsi",
+            "mov [rsp+16], rdx",
+            "mov [rsp+24], rcx",
+            "mov [rsp+32], r8",
+            "mov [rsp+40], r9",
+            // The ABI lets a callee skip the SSE spill when %al is zero; we
+            // spill unconditionally. It costs eight aligned stores on a path
+            // that is about to do orders of magnitude more work, and it means
+            // a caller that under-reports %al gets a wrong value rather than
+            // whatever happened to be on the stack.
+            "movaps [rsp+48], xmm0",
+            "movaps [rsp+64], xmm1",
+            "movaps [rsp+80], xmm2",
+            "movaps [rsp+96], xmm3",
+            "movaps [rsp+112], xmm4",
+            "movaps [rsp+128], xmm5",
+            "movaps [rsp+144], xmm6",
+            "movaps [rsp+160], xmm7",
+            // va_list.gp_offset / .fp_offset
+            concat!("mov dword ptr [rsp+176], ", $gp_off),
+            "mov dword ptr [rsp+180], 48",
+            // va_list.overflow_arg_area — the first stack argument sits just
+            // past the saved rbp and the return address.
+            "lea rax, [rbp+16]",
+            "mov [rsp+184], rax",
+            // va_list.reg_save_area
+            "mov rax, rsp",
+            "mov [rsp+192], rax",
+            concat!("lea ", $ap_reg, ", [rsp+176]"),
+            concat!("call ", $target),
+            "add rsp, 208",
+            "pop rbp",
+            "ret",
+            concat!(".size ", $name, ", . - ", $name),
+        );
+    };
+}
+
+// Shared with `fortify_printf.rs`, whose `__*_chk` entry points are variadic
+// in exactly the same way and differ only in how many named parameters they
+// have.
+#[cfg(target_os = "none")]
+pub(crate) use va_trampoline;
+
+#[cfg(target_os = "none")]
+va_trampoline!("printf", "vprintf", "8", "rsi");
+#[cfg(target_os = "none")]
+va_trampoline!("fprintf", "vfprintf", "16", "rdx");
+#[cfg(target_os = "none")]
+va_trampoline!("dprintf", "vdprintf", "16", "rdx");
+#[cfg(target_os = "none")]
+va_trampoline!("snprintf", "vsnprintf", "24", "rcx");
+#[cfg(target_os = "none")]
+va_trampoline!("sprintf", "vsprintf", "16", "rdx");
+#[cfg(target_os = "none")]
+va_trampoline!("asprintf", "vasprintf", "16", "rdx");
 
 // ---------------------------------------------------------------------------
-// Rust entry points (called by assembly)
+// Rust entry points (called by the fortified `__*_chk` trampolines)
 // ---------------------------------------------------------------------------
 
 /// Stack buffer size for printf/fprintf (format to buffer, then write).

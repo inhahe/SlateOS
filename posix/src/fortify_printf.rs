@@ -33,371 +33,67 @@
 //! ## Architecture
 //!
 //! Identical to [`crate::printf`]: the variadic `__*_chk` entry points are
-//! assembly trampolines that flatten the register/stack varargs into a single
-//! 16-slot `u64` array (8 integer slots followed by 8 float slots) and call a
-//! Rust `_*_chk_impl`, which splits the halves and delegates to the matching
-//! tested `crate::printf::_*_impl`.  The `__v*_chk` forms take a real
-//! `va_list` (a pointer on x86_64 System V), so they are plain Rust and
-//! host-testable.
+//! assembly trampolines that perform a real `va_start` — spilling the argument
+//! registers into a System V register save area and building a `va_list` over
+//! it — and then call the matching `__v*_chk`.  Those are plain Rust, so the
+//! fortify-specific bounding (`slen`, `min(maxlen, slen)`) and all of the
+//! formatting are host-testable, and there is exactly one argument-delivery
+//! path into the engine.
+//!
+//! Delegating rather than flattening the varargs into fixed integer/float
+//! arrays is what makes `%Lf` reachable here: a `long double` is X87/X87UP and
+//! therefore MEMORY-class, so it is passed only in the overflow area and no
+//! register-array representation can carry it.  See BUG-POSIX-LONG-DOUBLE-ABI
+//! in `known-issues.md`.
 
-// The `_*_impl` symbols defined in this module are deliberately
-// underscore-prefixed: they are the Rust-side targets of the assembly
-// trampolines that implement the glibc `__*_chk` ABI.  The leading
-// underscore marks them as "private-but-exported" linkage symbols rather
+// The `_*_impl` symbols this module calls in `crate::printf` are deliberately
+// underscore-prefixed: they are "private-but-exported" linkage symbols rather
 // than ordinary public API.
 #![allow(clippy::used_underscore_items)]
 
 use crate::printf::{self, VaList};
 
 // ---------------------------------------------------------------------------
-// Assembly trampolines — flatten varargs into a combined 16-slot [u64] array.
+// Assembly trampolines — perform a real `va_start` and tail into `__v*_chk`.
 //
-// Fixed-argument counts (which determine where the varargs start):
-//   __printf_chk   (flag, fmt, …)            : 2 fixed
-//   __fprintf_chk  (fp, flag, fmt, …)         : 3 fixed
-//   __dprintf_chk  (fd, flag, fmt, …)         : 3 fixed
-//   __asprintf_chk (&p, flag, fmt, …)         : 3 fixed
-//   __sprintf_chk  (s, flag, slen, fmt, …)    : 4 fixed
-//   __snprintf_chk (s, n, flag, slen, fmt, …) : 5 fixed
+// Each entry point spills the six integer and eight SSE argument registers
+// into a System V register save area, builds a `va_list` describing it, and
+// calls the matching `__v*_chk`.  That keeps a single argument-delivery path
+// through the formatting engine: a `long double` is MEMORY-class and lives
+// only in the overflow area, which no flattened register array could ever
+// represent.
 //
-// The slot array lives at [rsp..rsp+128]; the Rust impl receives a single
-// pointer to it (passed in the first free integer register) and splits the
-// int/float halves internally.
+// The macro arguments are (symbol, target, initial `gp_offset`, register that
+// carries the `va_list*`).  `gp_offset` is 8 × the number of *named integer*
+// arguments, which is also what fixes the register the `va_list*` goes in:
+//
+//   __printf_chk   (flag, fmt, …)             : 2 fixed → gp 16, ap in rdx
+//   __fprintf_chk  (fp, flag, fmt, …)         : 3 fixed → gp 24, ap in rcx
+//   __dprintf_chk  (fd, flag, fmt, …)         : 3 fixed → gp 24, ap in rcx
+//   __asprintf_chk (&p, flag, fmt, …)         : 3 fixed → gp 24, ap in rcx
+//   __sprintf_chk  (s, flag, slen, fmt, …)    : 4 fixed → gp 32, ap in r8
+//   __snprintf_chk (s, n, flag, slen, fmt, …) : 5 fixed → gp 40, ap in r9
+//
+// The `slen`/`maxlen` bounding that distinguishes the fortified wrappers from
+// the plain ones lives in the `__v*_chk` functions below, so it is applied
+// exactly once and is host-testable.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "none")]
-core::arch::global_asm!(
-    // __printf_chk(flag, fmt, ...) → _printf_chk_impl(flag, fmt, args)
-    // Fixed: rdi=flag, rsi=fmt.  Varargs: rdx,rcx,r8,r9,stack.
-    ".global __printf_chk",
-    ".type __printf_chk, @function",
-    "__printf_chk:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rdx",    // int vararg 0
-    "mov [rsp+8], rcx",  // int vararg 1
-    "mov [rsp+16], r8",  // int vararg 2
-    "mov [rsp+24], r9",  // int vararg 3
-    "mov rax, [rbp+16]", // int vararg 4 (stack)
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+24]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+32]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+40]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi=flag, rsi=fmt already set.
-    "mov rdx, rsp", // args pointer
-    "call _printf_chk_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // __fprintf_chk(fp, flag, fmt, ...) → _fprintf_chk_impl(fp, flag, fmt, args)
-    // Fixed: rdi=fp, rsi=flag, rdx=fmt.  Varargs: rcx,r8,r9,stack.
-    ".global __fprintf_chk",
-    ".type __fprintf_chk, @function",
-    "__fprintf_chk:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rcx",    // int vararg 0
-    "mov [rsp+8], r8",   // int vararg 1
-    "mov [rsp+16], r9",  // int vararg 2
-    "mov rax, [rbp+16]", // int vararg 3 (stack)
-    "mov [rsp+24], rax",
-    "mov rax, [rbp+24]", // int vararg 4
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+32]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+40]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+48]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi=fp, rsi=flag, rdx=fmt already set.
-    "mov rcx, rsp", // args pointer
-    "call _fprintf_chk_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // __dprintf_chk(fd, flag, fmt, ...) → _dprintf_chk_impl(fd, flag, fmt, args)
-    // Same fixed/vararg layout as __fprintf_chk.
-    ".global __dprintf_chk",
-    ".type __dprintf_chk, @function",
-    "__dprintf_chk:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rcx",
-    "mov [rsp+8], r8",
-    "mov [rsp+16], r9",
-    "mov rax, [rbp+16]",
-    "mov [rsp+24], rax",
-    "mov rax, [rbp+24]",
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+32]",
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+40]",
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+48]",
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    "mov rcx, rsp",
-    "call _dprintf_chk_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // __asprintf_chk(&p, flag, fmt, ...) → _asprintf_chk_impl(&p, flag, fmt, args)
-    // Same fixed/vararg layout as __fprintf_chk.
-    ".global __asprintf_chk",
-    ".type __asprintf_chk, @function",
-    "__asprintf_chk:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rcx",
-    "mov [rsp+8], r8",
-    "mov [rsp+16], r9",
-    "mov rax, [rbp+16]",
-    "mov [rsp+24], rax",
-    "mov rax, [rbp+24]",
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+32]",
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+40]",
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+48]",
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    "mov rcx, rsp",
-    "call _asprintf_chk_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // __sprintf_chk(s, flag, slen, fmt, ...) → _sprintf_chk_impl(s, flag, slen, fmt, args)
-    // Fixed: rdi=s, rsi=flag, rdx=slen, rcx=fmt.  Varargs: r8,r9,stack.
-    ".global __sprintf_chk",
-    ".type __sprintf_chk, @function",
-    "__sprintf_chk:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], r8",     // int vararg 0
-    "mov [rsp+8], r9",   // int vararg 1
-    "mov rax, [rbp+16]", // int vararg 2 (stack)
-    "mov [rsp+16], rax",
-    "mov rax, [rbp+24]", // int vararg 3
-    "mov [rsp+24], rax",
-    "mov rax, [rbp+32]", // int vararg 4
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+40]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+48]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+56]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi=s, rsi=flag, rdx=slen, rcx=fmt already set.
-    "mov r8, rsp", // args pointer
-    "call _sprintf_chk_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // __snprintf_chk(s, maxlen, flag, slen, fmt, ...)
-    //   → _snprintf_chk_impl(s, maxlen, flag, slen, fmt, args)
-    // Fixed: rdi=s, rsi=maxlen, rdx=flag, rcx=slen, r8=fmt.  Varargs: r9,stack.
-    ".global __snprintf_chk",
-    ".type __snprintf_chk, @function",
-    "__snprintf_chk:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], r9",     // int vararg 0
-    "mov rax, [rbp+16]", // int vararg 1 (stack)
-    "mov [rsp+8], rax",
-    "mov rax, [rbp+24]", // int vararg 2
-    "mov [rsp+16], rax",
-    "mov rax, [rbp+32]", // int vararg 3
-    "mov [rsp+24], rax",
-    "mov rax, [rbp+40]", // int vararg 4
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+48]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+56]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+64]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi=s, rsi=maxlen, rdx=flag, rcx=slen, r8=fmt already set.
-    "mov r9, rsp", // args pointer
-    "call _snprintf_chk_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-);
+use crate::printf::va_trampoline;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Split the trampoline's combined 16-slot array into integer/float halves.
-fn split_args(args: *const u64) -> (*const u64, *const u64) {
-    if args.is_null() {
-        (core::ptr::null(), core::ptr::null())
-    } else {
-        // SAFETY: the trampoline always provides 16 contiguous slots, so
-        // `args + 8` is in-bounds.  Null is handled above.
-        (args, unsafe { args.add(8) })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Rust entry points (called by the assembly trampolines)
-// ---------------------------------------------------------------------------
-
-/// Backing implementation for `__printf_chk`.
-///
-/// # Safety
-/// `fmt` must be a valid NUL-terminated C string (or null); `args` must point
-/// to at least 16 valid `u64` slots (the trampoline always provides them).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn _printf_chk_impl(_flag: i32, fmt: *const u8, args: *const u64) -> i32 {
-    let (iargs, fargs) = split_args(args);
-    printf::_printf_impl(fmt, iargs, fargs)
-}
-
-/// Backing implementation for `__fprintf_chk`.
-///
-/// # Safety
-/// As [`_printf_chk_impl`]; `stream` is an opaque `FILE*` handled by
-/// `_fprintf_impl`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn _fprintf_chk_impl(
-    stream: *mut u8,
-    _flag: i32,
-    fmt: *const u8,
-    args: *const u64,
-) -> i32 {
-    let (iargs, fargs) = split_args(args);
-    printf::_fprintf_impl(stream, fmt, iargs, fargs)
-}
-
-/// Backing implementation for `__dprintf_chk`.
-///
-/// # Safety
-/// As [`_printf_chk_impl`].
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn _dprintf_chk_impl(
-    fd: i32,
-    _flag: i32,
-    fmt: *const u8,
-    args: *const u64,
-) -> i32 {
-    let (iargs, fargs) = split_args(args);
-    printf::_dprintf_impl(fd, fmt, iargs, fargs)
-}
-
-/// Backing implementation for `__asprintf_chk`.
-///
-/// # Safety
-/// As [`_printf_chk_impl`]; `strp` must be a valid `char**` (or null, which
-/// `_asprintf_impl` rejects).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn _asprintf_chk_impl(
-    strp: *mut *mut u8,
-    _flag: i32,
-    fmt: *const u8,
-    args: *const u64,
-) -> i32 {
-    let (iargs, fargs) = split_args(args);
-    printf::_asprintf_impl(strp, fmt, iargs, fargs)
-}
-
-/// Backing implementation for `__sprintf_chk`.
-///
-/// Bounds the output to `slen` (the destination object size), behaving like
-/// `snprintf(s, slen, fmt, …)`.  Returns the would-be length.
-///
-/// # Safety
-/// As [`_printf_chk_impl`]; `s` must point to at least `slen` writable bytes.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn _sprintf_chk_impl(
-    s: *mut u8,
-    _flag: i32,
-    slen: usize,
-    fmt: *const u8,
-    args: *const u64,
-) -> i32 {
-    let (iargs, fargs) = split_args(args);
-    printf::_snprintf_impl(s, slen, fmt, iargs, fargs)
-}
-
-/// Backing implementation for `__snprintf_chk`.
-///
-/// Uses `min(maxlen, slen)` as the bound so the wrapper never writes past the
-/// destination object even if the caller passed a `maxlen` larger than the
-/// buffer.  Returns the would-be length.
-///
-/// # Safety
-/// As [`_printf_chk_impl`]; `s` must point to at least `min(maxlen, slen)`
-/// writable bytes.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn _snprintf_chk_impl(
-    s: *mut u8,
-    maxlen: usize,
-    _flag: i32,
-    slen: usize,
-    fmt: *const u8,
-    args: *const u64,
-) -> i32 {
-    let (iargs, fargs) = split_args(args);
-    let bound = maxlen.min(slen);
-    printf::_snprintf_impl(s, bound, fmt, iargs, fargs)
-}
+#[cfg(target_os = "none")]
+va_trampoline!("__printf_chk", "__vprintf_chk", "16", "rdx");
+#[cfg(target_os = "none")]
+va_trampoline!("__fprintf_chk", "__vfprintf_chk", "24", "rcx");
+#[cfg(target_os = "none")]
+va_trampoline!("__dprintf_chk", "__vdprintf_chk", "24", "rcx");
+#[cfg(target_os = "none")]
+va_trampoline!("__asprintf_chk", "__vasprintf_chk", "24", "rcx");
+#[cfg(target_os = "none")]
+va_trampoline!("__sprintf_chk", "__vsprintf_chk", "32", "r8");
+#[cfg(target_os = "none")]
+va_trampoline!("__snprintf_chk", "__vsnprintf_chk", "40", "r9");
 
 // ---------------------------------------------------------------------------
 // __v*_chk variants — take a `va_list` (pointer); pure Rust, host-testable.
@@ -552,18 +248,9 @@ mod tests {
     #[test]
     fn sprintf_chk_expands_format() {
         let mut buf = [0u8; 64];
-        let mut slots = [0u64; 16];
-        slots[0] = 42;
-        // _sprintf_chk_impl(s, flag, slen, fmt, args)
-        let n = unsafe {
-            _sprintf_chk_impl(
-                buf.as_mut_ptr(),
-                1,
-                buf.len(),
-                b"n=%d\0".as_ptr(),
-                slots.as_ptr(),
-            )
-        };
+        let n = with_valist(&[42], |va| unsafe {
+            __vsprintf_chk(buf.as_mut_ptr(), 1, 64, b"n=%d\0".as_ptr(), va)
+        });
         assert_eq!(cstr(&buf), b"n=42");
         assert_eq!(n, 4);
     }
@@ -572,52 +259,19 @@ mod tests {
     fn sprintf_chk_string_arg() {
         let mut buf = [0u8; 64];
         let s = b"world\0";
-        let mut slots = [0u64; 16];
-        slots[0] = s.as_ptr() as u64;
-        let n = unsafe {
-            _sprintf_chk_impl(
-                buf.as_mut_ptr(),
-                1,
-                buf.len(),
-                b"hi %s\0".as_ptr(),
-                slots.as_ptr(),
-            )
-        };
+        let n = with_valist(&[s.as_ptr() as u64], |va| unsafe {
+            __vsprintf_chk(buf.as_mut_ptr(), 1, 64, b"hi %s\0".as_ptr(), va)
+        });
         assert_eq!(cstr(&buf), b"hi world");
         assert_eq!(n, 8);
     }
 
     #[test]
-    fn snprintf_chk_uses_min_bound() {
-        // maxlen is large but slen (object size) is tiny: must clamp to slen.
-        let mut buf = [0u8; 64];
-        let mut slots = [0u64; 16];
-        slots[0] = 123456;
-        // bound = min(maxlen=64, slen=4) = 4 → "12" + space for NUL.
-        let n = unsafe {
-            _snprintf_chk_impl(buf.as_mut_ptr(), 64, 1, 4, b"%d\0".as_ptr(), slots.as_ptr())
-        };
-        // snprintf writes at most bound-1 = 3 chars + NUL: "123".
-        assert_eq!(cstr(&buf), b"123");
-        // Return value is the would-be length (6 for "123456").
-        assert_eq!(n, 6);
-    }
-
-    #[test]
     fn snprintf_chk_no_truncation_when_fits() {
         let mut buf = [0u8; 64];
-        let mut slots = [0u64; 16];
-        slots[0] = 7;
-        let n = unsafe {
-            _snprintf_chk_impl(
-                buf.as_mut_ptr(),
-                64,
-                1,
-                64,
-                b"x=%d\0".as_ptr(),
-                slots.as_ptr(),
-            )
-        };
+        let n = with_valist(&[7], |va| unsafe {
+            __vsnprintf_chk(buf.as_mut_ptr(), 64, 1, 64, b"x=%d\0".as_ptr(), va)
+        });
         assert_eq!(cstr(&buf), b"x=7");
         assert_eq!(n, 3);
     }
@@ -661,21 +315,26 @@ mod tests {
     }
 
     #[test]
-    fn printf_chk_impl_returns_length() {
+    fn vprintf_chk_returns_length() {
         // _printf_impl writes to stdout (fd 1); just verify the return value
         // and that it doesn't crash.  Format expansion is tested above.
-        let n = unsafe { _printf_chk_impl(1, b"\0".as_ptr(), core::ptr::null()) };
+        let n = unsafe { __vprintf_chk(1, b"\0".as_ptr(), core::ptr::null_mut()) };
         assert_eq!(n, 0);
     }
 
     #[test]
-    fn asprintf_chk_null_strp_returns_error() {
+    fn vasprintf_chk_null_strp_returns_error() {
         // The host test allocator is inert, so we can't assert a successful
         // allocation here; instead verify the wrapper forwards to
         // `_asprintf_impl`, which rejects a null `strp` with -1.  (Successful
         // asprintf allocation is exercised on the bare-metal target.)
         let n = unsafe {
-            _asprintf_chk_impl(core::ptr::null_mut(), 1, b"x\0".as_ptr(), core::ptr::null())
+            __vasprintf_chk(
+                core::ptr::null_mut(),
+                1,
+                b"x\0".as_ptr(),
+                core::ptr::null_mut(),
+            )
         };
         assert_eq!(n, -1);
     }

@@ -6085,28 +6085,42 @@ commit (build + test + clippy on `x86_64-pc-windows-gnu` *and* `x86_64-slateos`)
    (`${v#p}`, `${v:o:l}`, `${v/p/r}`, `${v^^}`) run on `Ch` end-to-end. This
    removed the two `to_string_lossy` calls on directory entries that made the
    shell glob up a name it could then not open.
+6. **The value layer — done 2026-07-30** (two commits: the lib, then the test
+   suite). `Shell::vars`/`arrays`/`assoc`/`positional`/`cwd` are `Str`, and
+   `expand_word`/`expand_to_string`/`expand_dynamic`/`expand_double_quoted`
+   return `Str`. This also took the file readers that were listed as a separate
+   step, because they are the same edit once the store is byte-typed: it removed
+   the **third** `from_utf8_lossy` corruption bug (`builtin_mapfile` mangled
+   every record that was not text, so an array of filenames read from `find`
+   named different files than the ones on disk) on top of `substitute_file`
+   (`$(< file)`) and `finish_comsub` (`$(cmd)`) fixed in step 5. `read`,
+   `getopts`, `mapfile`, `compgen`, `select` and the `test` file primaries are
+   now byte-correct end to end. Where a value must be *text* to mean anything,
+   the conversion routes through `bytes::as_str` and answers `None` honestly
+   rather than approximating: a nameref's target name, `${!ref}`, a tilde
+   prefix, `OPTIND`/`OPTERR`. Two splits deliberately differ in kind: `$CDPATH`
+   and `$PATH` split on the *byte* `:` (a path list is bytes), while `IFS` and
+   `getopts`' optstring walk *characters* (a multi-byte IFS entry delimits as a
+   whole; a byte that is part of no character delimits nothing and matches no
+   option).
 
-**Remaining, in order.** The next step is the keystone and must be done as one
-commit, because expansion and the variable store are each other's main producer
-and consumer — converting either alone needs a scaffold at every site the other
-would have satisfied for free:
+**Remaining, in order.** Step 6 was the keystone — expansion and the variable
+store are each other's main producer and consumer, so converting either alone
+would have needed a scaffold at every site the other now satisfies for free.
+What is left is narrower and can land one layer per commit:
 
-6. **The value layer.** `Shell::vars`/`arrays`/`assoc`/`positional`/`cwd` to
-   `Str`, and `expand_word`/`expand_to_string`/`expand_dynamic`/
-   `expand_double_quoted` to `Str`. Measured cost: flipping just the four field
-   types produces **159** lib errors (plus test-code fallout), so budget a
-   mechanical grind rather than a quick edit. Watch for the sites that need a
-   real decision rather than a widening: `declare -p`/`export -p` output, the
-   numeric parses (`.parse::<i64>()` on a value), `IFS` handling, and anything
-   that hands a value to `Command::arg` (needs `bytes::bytes_to_os`, never a
-   lossy string).
-7. The file readers: `main.rs:517`, `interp.rs:3199`/`3962`/`4059`/`21523`/
-   `25789`, `substitute_file`, `finish_comsub`, `builtin_mapfile`,
-   `read_record` — the `read_to_string`/`from_utf8_lossy` sites listed above.
-   These are cheap *once* step 6 lands and impossible before it.
+7. **The builtin argv surface.** The remaining `args: &[String]` signatures
+   become `&[Str]`, which deletes the largest scaffold cluster: `run_builtin`
+   (`interp.rs:14484`/`:14488`), `exec_declare_with_arrays` (`:20149`) and the
+   `exec cmd` re-widening. Drags `builtin_let`, `run_builtin_body`, `main.rs`'s
+   `Plan::Script` and `builtin_source`.
 8. `lexer.rs` + `ast.rs` + `parser.rs` (`WordPart::Literal(Str)`,
-   `SingleQuoted { text: Str }`), dragging `brace.rs` and `unparse.rs`.
-9. `arith.rs`, `histexpand.rs`, `ere.rs`, `main.rs`.
+   `SingleQuoted { text: Str }`), dragging `brace.rs` and `unparse.rs`. Closes
+   the alias table, the `PS4`/`PS1` re-lex, `@P`, the `mapfile -C` callback seam
+   (`interp.rs:22416`) and `lexer.rs:2163`.
+9. `arith.rs`, `histexpand.rs`, `ere.rs`, `main.rs`. Closes the `VarLookup`
+   seams (`interp.rs:24482`/`:24491`/`:24518`) and
+   `TD-OILS-ARGV-PANICS-ON-NON-UTF8`.
 10. The diagnostic layer (`errln`, `err_prefix`, `write_line`) — ~378 sites,
     almost all `format!` with static text, so it wants a `berrln!` macro rather
     than 378 hand edits.
@@ -6115,12 +6129,95 @@ would have satisfied for free:
 a grep for it outside `bytes.rs` returns nothing. That grep count *is* the
 tracker — because each seam needs `#[allow(deprecated)]` to keep the build
 warning-free, the deprecation warning itself never accumulates. Count after
-step 5: **17**.
+step 5: **17**. After step 6: **14**.
 
 **Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
 `TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts
 where osh already matches UTF-8-locale bash, and the byte-string move must
 preserve their current character-wise answers.
+
+### TD-OILS-ARGV-PANICS-ON-NON-UTF8. `osh` aborts at startup if any of its own arguments is not UTF-8 — 2026-07-30
+
+**Where:** `userspace/oils/src/main.rs:210` and `:224` —
+`let args: Vec<String> = std::env::args().collect();`
+
+**What:** `std::env::args()` **panics** on an argument that is not valid UTF-8
+(the documented behaviour: it is the checked counterpart of `args_os`). So
+`osh script.sh "$(printf 'a\xffb')"` does not run the script and mis-bind `$1`
+— it kills the shell before it starts, with a Rust panic message rather than a
+diagnostic. On SlateOS, where a filename may contain any byte but `/` and NUL,
+the trigger is an ordinary `osh -c 'cat "$1"' -- <that filename>`.
+
+This is strictly worse than the `from_utf8_lossy` corruption bugs the
+byte-strings work has been removing: those produced a wrong answer, this one
+produces no answer at all. It is also the *only* remaining non-UTF-8 input that
+aborts rather than degrades — the environment already reads through `vars_os`
+(see `interp.rs:3402`), and the value layer is byte-typed as of
+TD-OILS-BYTE-STRINGS step 6.
+
+**Fix:** read `std::env::args_os()` and widen through `bytes::os_to_bytes`. The
+shell's own option parsing (`-c`, `-s`, `-o`, …) can stay text — an option is a
+name — by matching on `bytes::as_str(arg)` and treating a non-text argument as
+"not an option", which is what it is. The operands already have a byte-typed
+destination: `positional_args()` in `main.rs` builds `Vec<Vec<u8>>` and
+`Shell::set_positional` takes it. Scheduled as part of TD-OILS-BYTE-STRINGS
+step 9 (`main.rs`), but it is separable and could land sooner: it does not
+depend on steps 7 or 8.
+
+### TD-OILS-NONUTF8-ENV-NAME. Environment entries whose *name* is not UTF-8 are dropped at import and not re-exported to children — 2026-07-30
+
+**Where:** `userspace/oils/src/interp.rs:3402` — the `std::env::vars_os()` loop
+in the environment import, which does
+`let Some(name) = bytes::as_str(&bytes::os_to_bytes(&k)) else { continue };`.
+
+**What:** the shell grammar cannot spell a non-UTF-8 identifier — `a\xffb=1` is
+not an assignment and `${a\xffb}` is not an expansion — so such a variable is
+unnameable and unusable *inside* osh. Skipping it is therefore right for the
+shell's own purposes, and much better than mangling the name (which would create
+a *different*, spellable variable that then gets exported over the real one).
+
+What is not right is the second-order effect: because the entry never enters
+`self.vars`, it is also absent from the environment osh builds for its children.
+A wrapper script `osh -c 'exec real-program "$@"'` silently strips such
+variables, so `real-program` — which may well be able to read them — sees a
+different environment than it would have without the shell in between. bash on
+Linux passes them through unchanged (it keeps the raw `char *` strings it was
+given and only parses the ones it can).
+
+**Fix:** keep a side table of the raw `(OsString, OsString)` pairs that did not
+decode, and merge it back into the child environment in the process-spawn path
+(`Command::envs` on the `_os` values) so they are inherited verbatim while
+staying invisible to the shell's own name resolution. `export -p`/`env` output
+should list them too, quoted byte-wise, once the diagnostic layer is byte-typed
+(TD-OILS-BYTE-STRINGS step 10). Low priority: the trigger needs a parent that
+exported an unspellable name in the first place.
+
+### TD-OILS-ERE-TEXT-ONLY. `[[ … =~ … ]]` cannot match a non-text subject or pattern — 2026-07-30
+
+**Where:** `userspace/oils/src/interp.rs` — `cond_regex` (~`:6285`), and the
+whole of `userspace/oils/src/ere.rs`, which is `&str`-typed
+(`Regex::new_flags(&str)`, `captures(&str) -> Vec<Option<String>>`).
+
+**What:** with the value layer byte-typed, a subject or pattern can now contain
+a byte that is part of no character. `cond_regex` routes both through
+`bytes::as_str` and, on `None`, gives the answer the engine itself would give
+for input it cannot represent: an unrepresentable **pattern** is an uncompilable
+RHS (`cond_regex_error`, `[[` exits 2, matching bash's behaviour for a bad
+regex), and an unrepresentable **subject** matches nothing. So the failure is
+honest and conservative — it never matches a *different* string than the user
+has, which is what a lossy widening here would do. But it is still a functional
+gap: `[[ $f =~ ^a ]]` is false for a filename with a stray `\xff` in it, where
+bash in the C locale matches.
+
+`BASH_REMATCH` is already `BTreeMap<usize, Str>`, so the store side needs no
+change; only the engine does.
+
+**Fix:** convert `ere.rs` to match over `&[u8]` with `bytes::Ch` for the
+character-defined constructs (`.`, bracket expressions, POSIX classes,
+case-folding under `nocasematch`) — the same treatment the glob engine already
+got in TD-OILS-BYTE-STRINGS step 5, and directly modelled on it. `.` must match
+one `Ch`, so it matches an undecodable byte as a unit rather than a third of a
+character. Scheduled as TD-OILS-BYTE-STRINGS step 9.
 
 ### TD-OILS-XTRACE-PIPE-ORDER. `set -x` traces multi-stage pipeline commands in reverse (last-stage-first) order rather than bash's left-to-right — cosmetic / documented tradeoff — 2026-07-20
 

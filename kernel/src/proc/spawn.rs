@@ -7188,7 +7188,10 @@ pub fn self_test_cscanf() -> KernelResult<()> {
     }
 
     serial_println!(
-        "[spawn]   scanf (ring 3: the sscanf/fscanf assembly trampolines hand their v*scanf a          correct va_list past the six-register boundary, so destination pointers come from the          caller's overflow area rather than a stack word past a fixed array): OK"
+        "[spawn]   scanf (ring 3: the sscanf/fscanf assembly trampolines hand their \
+         v*scanf a correct va_list past the six-register boundary, so destination \
+         pointers come from the caller's overflow area rather than a stack word past \
+         a fixed array): OK"
     );
     Ok(())
 }

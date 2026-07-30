@@ -11699,12 +11699,7 @@ impl Shell {
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => {
-                    let s = if idx == 0 {
-                        self.tilde_expand(s)
-                    } else {
-                        s.clone()
-                    };
-                    push_chars(&mut cur, &s, false);
+                    self.push_literal_annotated(&mut cur, s, idx == 0);
                     open = true;
                 }
                 WordPart::SingleQuoted { text: s, .. } => {
@@ -11999,11 +11994,27 @@ impl Shell {
         buf
     }
 
+    /// Append one unquoted literal word part to a quote-annotated buffer,
+    /// applying tilde expansion when the part is the word's first.
+    ///
+    /// A tilde expansion's result is pushed **quoted** and the remainder
+    /// unquoted, which is bash's own split — see [`Shell::tilde_split`] for why
+    /// the two halves must not be conflated.
+    fn push_literal_annotated(&self, buf: &mut Vec<EChar>, s: &str, leading: bool) {
+        match if leading { self.tilde_split(s) } else { None } {
+            Some((dir, rest)) => {
+                push_chars(buf, &dir, true);
+                push_chars(buf, rest, false);
+            }
+            None => push_chars(buf, s, false),
+        }
+    }
+
     fn expand_word_pattern_inner(&mut self, word: &Word) -> Vec<EChar> {
         let mut buf: Vec<EChar> = Vec::new();
-        for part in &word.parts {
+        for (idx, part) in word.parts.iter().enumerate() {
             match part {
-                WordPart::Literal(s) => push_chars(&mut buf, s, false),
+                WordPart::Literal(s) => self.push_literal_annotated(&mut buf, s, idx == 0),
                 WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text, true),
                 WordPart::DoubleQuoted(parts) => {
                     let s = self.expand_double_quoted(parts);
@@ -13599,9 +13610,25 @@ impl Shell {
     }
 
     fn tilde_expand(&self, s: &str) -> String {
-        let Some(after) = s.strip_prefix('~') else {
-            return s.to_string();
-        };
+        match self.tilde_split(s) {
+            Some((dir, rest)) => format!("{dir}{rest}"),
+            None => s.to_string(),
+        }
+    }
+
+    /// Split a leading tilde-prefix off `s`, returning what it expands to and
+    /// the untouched remainder — or `None` when there is no tilde-prefix or it
+    /// does not resolve, in which case the word stays exactly as written.
+    ///
+    /// Keeping the two apart matters because bash marks the *expansion's result*
+    /// as quoted, exactly as it does the value of a parameter expansion inside
+    /// double quotes, while the remainder is ordinary unquoted text. So a home
+    /// directory holding a glob metacharacter is taken literally where the tail
+    /// of the word is not: with `HOME='a*'`, `echo ~` prints `a*` even when a
+    /// file `ab` exists, and `[[ 'a*' == ~ ]]` is *true* — but `~/c*d` still
+    /// globs its `c*d`.
+    fn tilde_split<'a>(&self, s: &'a str) -> Option<(String, &'a str)> {
+        let after = s.strip_prefix('~')?;
         // The tilde-prefix runs from just after `~` to the first `/` (or end);
         // the remainder (including any leading `/`) is appended verbatim.
         let (prefix, rest) = match after.find('/') {
@@ -13633,10 +13660,7 @@ impl Shell {
         } else {
             None
         };
-        match dir {
-            Some(d) => format!("{d}{rest}"),
-            None => s.to_string(),
-        }
+        Some((dir?, rest))
     }
 
     // ---- builtins -----------------------------------------------------------
@@ -34744,6 +34768,32 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("HOME=/h; x=~/a:'~/b'; echo \"$x\"").0, "/h/a:~/b\n");
         // ~+ / ~- work in assignment position too.
         assert_eq!(run("PWD=/p; x=~+/sub; echo \"$x\"").0, "/p/sub\n");
+    }
+
+    /// bash marks what a tilde expanded to as *quoted*, so it is never re-read
+    /// as a pattern — while the rest of the word, after the tilde-prefix, stays
+    /// unquoted and still globs. A `HOME` holding a glob metacharacter is the
+    /// only way to see the two halves come apart.
+    #[test]
+    fn tilde_expansion_result_is_quoted() {
+        // The expansion is a literal in a `[[ ]]` pattern: it matches itself,
+        // and does not match a string its metacharacter would have globbed.
+        assert_eq!(run("HOME='a*'; [[ 'a*' == ~ ]]; echo $?").0, "0\n");
+        assert_eq!(run("HOME='a*'; [[ ab == ~ ]]; echo $?").0, "1\n");
+        assert_eq!(run("HOME='a*'; [[ 'a*/x' == ~/x ]]; echo $?").0, "0\n");
+        // …but only the prefix is quoted: the tail is a live pattern. (`~*` is
+        // not that case — its tilde-*prefix* is `*`, which resolves to nothing,
+        // so the whole word stays literal.)
+        assert_eq!(run("HOME='a'; [[ 'a/b' == ~/* ]]; echo $?").0, "0\n");
+        assert_eq!(run("HOME='a'; [[ ab == ~* ]]; echo $?").0, "1\n");
+        // The tilde-prefix is expanded in a pattern operand at all, which is the
+        // position it used to be skipped in.
+        assert_eq!(run("HOME=/xyz; [[ /xyz == ~ ]]; echo $?").0, "0\n");
+        assert_eq!(run("HOME=/xyz; [[ /xyz/a == ~/a ]]; echo $?").0, "0\n");
+        // An unresolvable prefix is no expansion, and the word stays as written.
+        assert_eq!(run("[[ '~nosuchuser' == ~nosuchuser ]]; echo $?").0, "0\n");
+        // A tilde that is not in prefix position is ordinary text.
+        assert_eq!(run("HOME=/h; [[ 'a~b' == a~b ]]; echo $?").0, "0\n");
     }
 
     #[test]

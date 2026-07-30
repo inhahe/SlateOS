@@ -25,6 +25,14 @@
  *   - a second thread created after the first was joined gets a fresh
  *     block too (the mapping was really reclaimed and re-established).
  *
+ * Finally it checks the *libc's own* per-thread storage, which rides in the
+ * same mapping just above the TCB (posix/src/perthread.rs): `errno` must be
+ * a distinct lvalue per thread.  That is a separate mechanism from `__thread`
+ * — the libc is built by rustc on stable, which has no `#[thread_local]`, so
+ * it locates its block by hand from `%fs:0`.  A regression there would make
+ * one thread's failed syscall visible as another thread's error, which is
+ * exactly the class of bug POSIX's per-thread errno rule exists to prevent.
+ *
  * Exit codes: 42 = success; anything else identifies the failing step (see
  * the returns below), which the kernel self-test prints verbatim.
  */
@@ -38,6 +46,11 @@ extern int pthread_create(pthread_t *thread, void *attr,
                           void *(*start)(void *), void *arg);
 extern int pthread_join(pthread_t thread, void **retval);
 
+/* The glibc/musl errno ABI our libc implements: a function returning the
+ * address of *this thread's* errno.  <errno.h> would give us musl's. */
+extern int *__errno_location(void);
+#define errno (*__errno_location())
+
 /* .tdata: a non-zero initialiser, so a child that got a zeroed block (or no
  * block at all) is distinguishable from one that got a proper copy. */
 __thread int tls_data = 0x1234;
@@ -48,9 +61,19 @@ __thread int tls_bss;
  * sharing the parent's block. */
 #define PARENT_DATA 0xabcd
 #define PARENT_BSS 7
+#define PARENT_ERRNO 0x3f
+
+/* What the child reports back to the parent.  The errno address is compared,
+ * never dereferenced, after the join — by then the child's mapping is gone. */
+struct probe {
+    int ran;
+    int *child_errno;
+};
 
 static void *worker(void *arg)
 {
+    struct probe *p = (struct probe *)arg;
+
     /* Reaching here at all means %fs is installed: this function's prologue
      * already read the stack-protector canary from %fs:0x28. */
     if (tls_data != 0x1234) {
@@ -66,7 +89,19 @@ static void *worker(void *arg)
         return (void *)3; /* TLS writes don't stick */
     }
 
-    *(int *)arg = 1; /* prove the routine ran to completion */
+    /* The libc's own per-thread block, above the TCB.  The parent set errno
+     * to PARENT_ERRNO before creating us, so a shared block would show that
+     * value here instead of the fresh mapping's zero. */
+    p->child_errno = __errno_location();
+    if (errno != 0) {
+        return (void *)4; /* errno block shared with the parent, or stale */
+    }
+    errno = 0x21;
+    if (errno != 0x21) {
+        return (void *)5; /* errno writes don't stick */
+    }
+
+    p->ran = 1; /* prove the routine ran to completion */
     return (void *)0;
 }
 
@@ -74,7 +109,8 @@ int main(void)
 {
     pthread_t t;
     void *rv;
-    int ran;
+    struct probe p;
+    int *parent_errno = __errno_location();
 
     /* Mutate the *parent's* copies first: if the child saw these values it
      * would mean both threads share one block. */
@@ -82,8 +118,10 @@ int main(void)
     tls_bss = PARENT_BSS;
 
     /* --- first thread ---------------------------------------------- */
-    ran = 0;
-    if (pthread_create(&t, 0, worker, &ran) != 0) {
+    p.ran = 0;
+    p.child_errno = 0;
+    errno = PARENT_ERRNO;
+    if (pthread_create(&t, 0, worker, &p) != 0) {
         return 10;
     }
     rv = (void *)-1;
@@ -91,20 +129,26 @@ int main(void)
         return 11;
     }
     if (rv != (void *)0) {
-        return 20 + (int)(long)rv; /* 21/22/23 — see worker() */
+        return 20 + (int)(long)rv; /* 21..25 — see worker() */
     }
-    if (!ran) {
+    if (!p.ran) {
         return 12;
     }
     if (tls_data != PARENT_DATA || tls_bss != PARENT_BSS) {
         return 13; /* the child wrote through to the parent's block */
     }
+    /* Address comparison only — the child's mapping is unmapped by now. */
+    if (p.child_errno == parent_errno) {
+        return 18; /* one errno lvalue shared by both threads */
+    }
 
     /* --- second thread: the first one's mapping was reclaimed, so this
      * also proves the reclaim didn't corrupt anything and that a fresh
      * block is built each time. ------------------------------------- */
-    ran = 0;
-    if (pthread_create(&t, 0, worker, &ran) != 0) {
+    p.ran = 0;
+    p.child_errno = 0;
+    errno = PARENT_ERRNO;
+    if (pthread_create(&t, 0, worker, &p) != 0) {
         return 14;
     }
     rv = (void *)-1;
@@ -112,13 +156,26 @@ int main(void)
         return 15;
     }
     if (rv != (void *)0) {
-        return 30 + (int)(long)rv; /* 31/32/33 — see worker() */
+        return 30 + (int)(long)rv; /* 31..35 — see worker() */
     }
-    if (!ran) {
+    if (!p.ran) {
         return 16;
     }
     if (tls_data != PARENT_DATA || tls_bss != PARENT_BSS) {
         return 17;
+    }
+    if (p.child_errno == parent_errno) {
+        return 19;
+    }
+
+    /* The parent's own errno slot must still be intact and writable after
+     * two threads have come and gone through the same address range. */
+    if (__errno_location() != parent_errno) {
+        return 40; /* the parent's block moved */
+    }
+    errno = 0x7e;
+    if (errno != 0x7e) {
+        return 41;
     }
 
     return 42;

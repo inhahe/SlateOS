@@ -6464,6 +6464,14 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
 /// first was joined gets a fresh block too (so reclaiming the first thread's
 /// combined stack+TLS mapping neither corrupted nor leaked anything).
 ///
+/// It additionally covers the libc's *own* per-thread storage
+/// (`posix/src/perthread.rs`), which rides in the same mapping just above the
+/// TCB: `errno` must be a distinct lvalue per thread.  That is a separate
+/// mechanism from `__thread` — the libc is built on stable rustc, which has
+/// no `#[thread_local]`, so it finds its block by hand from `%fs:0` — and a
+/// regression there would surface one thread's failed syscall as another
+/// thread's error.
+///
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-tls-thread/main.c`).
 pub fn self_test_ctls_thread() -> KernelResult<()> {
@@ -6543,10 +6551,14 @@ pub fn self_test_ctls_thread() -> KernelResult<()> {
             "[spawn]   FAIL: ctest-tls-thread (ring 3) — reached Zombie but exit code was \
              {:?}, expected {}. Codes: 10/14 = pthread_create failed, 11/15 = pthread_join \
              failed, 12/16 = the start routine never ran, 13/17 = the child wrote through to \
-             the parent's TLS block (both threads share one block), 21/31 = the child's \
-             .tdata copy is missing the initialiser image, 22/32 = the child's .tbss is not \
-             zero-filled, 23/33 = TLS writes in the child don't stick. The 1x/2x codes are \
-             the first thread, 3x the second (post-reclaim) one",
+             the parent's TLS block (both threads share one block), 18/19 = parent and child \
+             share one errno lvalue (posix/src/perthread.rs), 21/31 = the child's .tdata copy \
+             is missing the initialiser image, 22/32 = the child's .tbss is not zero-filled, \
+             23/33 = TLS writes in the child don't stick, 24/34 = the child's errno was not \
+             freshly zero (shared or stale block), 25/35 = errno writes in the child don't \
+             stick, 40 = the parent's errno block moved across thread creation, 41 = the \
+             parent's errno is no longer writable. The 1x/2x codes are the first thread, 3x \
+             the second (post-reclaim) one",
             exit_code, EXPECTED
         );
         return Err(KernelError::InternalError);
@@ -6554,8 +6566,8 @@ pub fn self_test_ctls_thread() -> KernelResult<()> {
 
     serial_println!(
         "[spawn]   child-thread ELF TLS (ring 3: two pthread_create'd C threads each got \
-         their own %fs base, .tdata init image and zeroed .tbss, isolated from the parent's \
-         block): OK"
+         their own %fs base, .tdata init image, zeroed .tbss and private errno, isolated \
+         from the parent's block): OK"
     );
     Ok(())
 }

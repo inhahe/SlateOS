@@ -2523,6 +2523,7 @@ pub mod netinet_in;
 pub mod netinet_tcp;
 pub mod nl_types;
 pub mod paths;
+pub mod perthread;
 pub mod pipe;
 pub mod poll;
 pub mod printf;

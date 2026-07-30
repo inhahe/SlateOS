@@ -4,11 +4,8 @@
 //! indicate which error occurred.  Our native syscalls return negative
 //! error codes directly.  This module translates between the two.
 //!
-//! Since we're `no_std` without threads yet, errno is a simple global.
-//! When threading is added, this will become a thread-local via TLS.
-
-#[cfg(not(test))]
-use core::sync::atomic::{AtomicI32, Ordering};
+//! `errno` itself is per-thread, as POSIX requires: the storage lives in
+//! [`crate::perthread`], inside the thread's own TLS mapping.
 
 // ---------------------------------------------------------------------------
 // POSIX errno values
@@ -153,34 +150,23 @@ pub const ETXTBSY: i32 = 26; // Text file busy
 // Per-thread errno storage
 // ---------------------------------------------------------------------------
 
-// Production: a single global atomic, suitable for the current
-// single-threaded userspace runtime and matching the glibc/musl
-// `*__errno_location()` ABI (which expects a stable address).  When
-// our pthread layer can install real TLS slots this will move there.
+// `errno` is per-thread by definition — POSIX specifies it as a modifiable
+// lvalue "each thread has its own", precisely so that one thread's failing
+// `write` cannot be misread as another thread's.  The storage lives in
+// [`crate::perthread`], which parks it in the thread's own TLS mapping; see
+// that module for the layout and for the no-thread-pointer fallback.
 //
-// Test build: cargo runs tests in parallel threads but they all link
-// into one process, so a single global would let one test's
-// `set_errno(...)` clobber another test's `get_errno()` read mid-
-// assertion.  Use a per-thread `Cell` in test builds so each test
-// gets an isolated errno.
-#[cfg(not(test))]
-static ERRNO: AtomicI32 = AtomicI32::new(0);
-
-#[cfg(test)]
-std::thread_local! {
-    static ERRNO_TLS: core::cell::Cell<i32> = const { core::cell::Cell::new(0) };
-}
+// The value is a plain `i32`, not an atomic: only the owning thread ever
+// reads or writes it, which is also what `__errno_location`'s ABI promises
+// (it hands out a raw pointer that C code assigns through).
 
 /// Set errno.
 #[inline]
 pub fn set_errno(val: i32) {
-    #[cfg(not(test))]
-    {
-        ERRNO.store(val, Ordering::Relaxed);
-    }
-    #[cfg(test)]
-    {
-        ERRNO_TLS.with(|e| e.set(val));
+    // SAFETY: `perthread::current()` is non-null and valid for this thread,
+    // and no other thread holds a pointer into this block.
+    unsafe {
+        (*crate::perthread::current()).errno = val;
     }
 }
 
@@ -188,30 +174,20 @@ pub fn set_errno(val: i32) {
 #[inline]
 #[must_use]
 pub fn get_errno() -> i32 {
-    #[cfg(not(test))]
-    {
-        ERRNO.load(Ordering::Relaxed)
-    }
-    #[cfg(test)]
-    {
-        ERRNO_TLS.with(core::cell::Cell::get)
-    }
+    // SAFETY: as in `set_errno`.
+    unsafe { (*crate::perthread::current()).errno }
 }
 
 /// C-compatible errno access.
 ///
-/// Returns a pointer to the errno variable.  C programs access errno
-/// via `*__errno_location()`.  This is the glibc/musl convention.
-///
-/// Not built for the test target — the TLS-backed test errno doesn't
-/// expose a stable address, and no test references this function.
-#[cfg(not(test))]
+/// Returns a pointer to the calling thread's errno.  C programs access
+/// errno via `*__errno_location()`; this is the glibc/musl convention, and
+/// the pointer stays valid until the thread exits.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __errno_location() -> *mut i32 {
-    // SAFETY: AtomicI32 has the same layout as i32.
-    // The pointer is valid for the lifetime of the program.
-    // Using &raw const to avoid borrow_as_ptr lint (Rust 2024 idiom).
-    (&raw const ERRNO).cast_mut().cast::<i32>()
+    // `errno` is the first field of `PerThread` and the struct is
+    // `repr(C)`, so the block pointer is also the errno pointer.
+    crate::perthread::current().cast::<i32>()
 }
 
 // ---------------------------------------------------------------------------
@@ -352,9 +328,9 @@ pub fn translate(ret: i64) -> i64 {
 mod tests {
     use super::*;
 
-    // In test builds errno is backed by a thread-local Cell, so each
-    // test sees its own isolated errno value with no need for an
-    // external mutex.  Production keeps the global AtomicI32.
+    // errno is per-thread on every build (see `crate::perthread`), so tests
+    // running in parallel on the harness's thread pool cannot clobber each
+    // other's value and need no external mutex.
 
     #[test]
     fn test_set_get_errno() {

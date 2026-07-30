@@ -168,11 +168,17 @@ impl TlsImage {
     }
 
     /// Bytes that must be reserved *above* a thread's usable stack to hold
-    /// the TLS block, the TCB, and worst-case alignment slack.
+    /// the TLS block, the TCB, the libc's own per-thread storage, and
+    /// worst-case alignment slack.
+    ///
+    /// [`crate::perthread`] parks its block immediately above the TCB rather
+    /// than allocating one, so its size is part of this reservation; see that
+    /// module's docs for why.
     #[must_use]
     pub const fn reserve(&self) -> u64 {
         self.block_size()
             .wrapping_add(TCB_SIZE)
+            .wrapping_add(crate::perthread::BLOCK_SIZE)
             .wrapping_add(self.tp_align())
     }
 
@@ -183,7 +189,8 @@ impl TlsImage {
     /// The caller must have mapped at least `stack_size + self.reserve()`
     /// bytes at `base`; the returned TP then satisfies
     /// `base + stack_size <= tp - block_size()` and
-    /// `tp + TCB_SIZE <= base + stack_size + reserve()`.
+    /// `tp + TCB_SIZE + perthread::BLOCK_SIZE <= base + stack_size +
+    /// reserve()`.
     #[must_use]
     pub const fn thread_pointer(&self, base: u64, stack_size: u64) -> u64 {
         round_up(
@@ -304,6 +311,20 @@ pub unsafe fn init_block(tp: u64, img: &TlsImage) {
 #[allow(clippy::missing_const_for_fn)]
 pub unsafe fn init_block(_tp: u64, _img: &TlsImage) {}
 
+/// Whether *any* thread pointer has been installed in this process.
+///
+/// Reading `%fs:0` with `fs_base == 0` faults, so
+/// [`thread_pointer`] needs a way to know that it is safe.  A single
+/// process-global flag is enough — and is exactly right — because the
+/// ordering is fixed: `__libc_start_main` installs the main thread's TP
+/// before anything else runs, and `pthread_create` cannot be reached before
+/// that.  So no thread can observe this flag set without having installed
+/// its own TP first.  A program that never ran the crt (a bare-metal
+/// `services/` binary) leaves it clear forever, which is the correct answer
+/// for it.
+#[cfg(target_os = "none")]
+static TP_INSTALLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Install `tp` as the calling thread's thread pointer (`fs_base`).
 ///
 /// Returns `false` if the kernel rejected the address as non-canonical,
@@ -315,7 +336,47 @@ pub unsafe fn init_block(_tp: u64, _img: &TlsImage) {}
 #[cfg(target_os = "none")]
 pub fn install(tp: u64) -> bool {
     use crate::syscall::{syscall6, SYS_SET_FS_BASE};
-    syscall6(SYS_SET_FS_BASE, tp, 0, 0, 0, 0, 0) == 0
+    let ok = syscall6(SYS_SET_FS_BASE, tp, 0, 0, 0, 0, 0) == 0;
+    if ok {
+        // Release: everything this thread wrote into its own TCB/TLS block
+        // (the self-pointer, the `.tdata` image) must be visible to any
+        // thread that later observes the flag.  In practice the writer is
+        // this thread itself, but `pthread_create` initialises a *child's*
+        // block from the parent, so the pairing is real.
+        TP_INSTALLED.store(true, core::sync::atomic::Ordering::Release);
+    }
+    ok
+}
+
+/// This thread's thread pointer, or 0 if none has been installed.
+///
+/// Reads the psABI self-reference at `%fs:0` that [`init_block`] wrote —
+/// the architecturally-guaranteed way to recover TP without a syscall.
+/// Used by [`crate::perthread`] to find the libc's per-thread block.
+#[cfg(target_os = "none")]
+#[must_use]
+pub fn thread_pointer() -> u64 {
+    if !TP_INSTALLED.load(core::sync::atomic::Ordering::Acquire) {
+        return 0;
+    }
+    let tp: u64;
+    // SAFETY: the flag is only set after a successful `SYS_SET_FS_BASE`, and
+    // `init_block` stored TP at `[TP+0]` before that, so `%fs:0` is mapped,
+    // readable and holds the thread pointer.  The asm reads one word and
+    // touches nothing else.
+    unsafe {
+        core::arch::asm!("mov {}, fs:[0]", out(reg) tp, options(nostack, readonly, preserves_flags));
+    }
+    tp
+}
+
+/// Host build: there is no `%fs` thread pointer, so callers fall back to
+/// their own per-thread storage.
+#[cfg(not(target_os = "none"))]
+#[must_use]
+#[allow(clippy::missing_const_for_fn)]
+pub fn thread_pointer() -> u64 {
+    0
 }
 
 /// Allocate, initialise and install the main thread's TLS.
@@ -358,6 +419,11 @@ pub unsafe fn setup_main_thread() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{normalise_align, round_up, TlsImage, TCB_SIZE};
+
+    /// Everything the reservation must fit *above* the thread pointer: the
+    /// TCB itself plus the libc's per-thread block, which lives immediately
+    /// above it (see [`crate::perthread`]).
+    const ABOVE_TP: u64 = TCB_SIZE + crate::perthread::BLOCK_SIZE;
 
     #[test]
     fn round_up_is_identity_on_multiples() {
@@ -431,7 +497,7 @@ mod tests {
     fn empty_image_still_reserves_a_tcb() {
         let img = TlsImage::EMPTY;
         assert_eq!(img.block_size(), 0);
-        assert_eq!(img.reserve(), TCB_SIZE + 16);
+        assert_eq!(img.reserve(), ABOVE_TP + 16);
     }
 
     #[test]
@@ -443,7 +509,7 @@ mod tests {
             align: 32,
         };
         assert_eq!(img.block_size(), 64);
-        assert_eq!(img.reserve(), 64 + TCB_SIZE + 32);
+        assert_eq!(img.reserve(), 64 + ABOVE_TP + 32);
     }
 
     /// The core invariant: the computed thread pointer leaves room for the
@@ -480,8 +546,8 @@ mod tests {
                             img.block_size()
                         );
                         assert!(
-                            tp + TCB_SIZE <= end,
-                            "TCB past the mapping: tp={tp:#x} end={end:#x}"
+                            tp + ABOVE_TP <= end,
+                            "TCB/per-thread block past the mapping: tp={tp:#x} end={end:#x}"
                         );
                     }
                 }

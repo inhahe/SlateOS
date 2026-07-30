@@ -275,6 +275,18 @@ impl ScanCtx<'_, '_> {
         unsafe { *self.input.add(self.si) }
     }
 
+    /// Read the input byte `off` positions ahead (0 if past end).
+    ///
+    /// Lets a conversion look ahead at a multi-byte token — `infinity`, a
+    /// `nan(...)` payload — and only commit `si` once the whole thing matched.
+    #[inline]
+    fn peek_at(&self, off: usize) -> u8 {
+        // SAFETY: Caller guarantees input is a valid null-terminated string,
+        // and every caller stops at the first NUL, so `si + off` stays inside
+        // it once the bytes before it have been checked.
+        unsafe { *self.input.add(self.si.wrapping_add(off)) }
+    }
+
     /// Read the current format byte.
     #[inline]
     fn fmt_peek(&self) -> u8 {
@@ -310,18 +322,6 @@ impl ScanCtx<'_, '_> {
             self.advance();
         }
     }
-}
-
-/// Write a byte into a fixed-size buffer at position `bi`, then advance.
-///
-/// Uses `.get_mut()` to avoid panicking on out-of-bounds (silently
-/// drops the byte if the buffer is full).
-#[inline]
-fn buf_put(buf: &mut [u8; 64], bi: &mut usize, byte: u8) {
-    if let Some(slot) = buf.get_mut(*bi) {
-        *slot = byte;
-    }
-    *bi = bi.wrapping_add(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -839,10 +839,141 @@ fn scan_char(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, has_width:
     true
 }
 
+/// Match a case-insensitive literal, consuming it only if all of it is there.
+///
+/// `scanf` must not eat a partial token: seeing `in` of `int` and advancing
+/// would corrupt every conversion after it.
+fn match_word(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize, word: &[u8]) -> bool {
+    for (k, &want) in word.iter().enumerate() {
+        if count.wrapping_add(k) >= width {
+            return false;
+        }
+        let c = ctx.peek_at(k);
+        if c == 0 || (c | 0x20) != want {
+            return false;
+        }
+    }
+    ctx.si = ctx.si.wrapping_add(word.len());
+    *count = count.wrapping_add(word.len());
+    true
+}
+
+/// Match `INF`/`INFINITY` or `NAN[(n-char-sequence)]`, as `strtod` does.
+#[allow(clippy::arithmetic_side_effects)]
+fn scan_float_named(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize) -> Option<f64> {
+    if match_word(ctx, count, width, b"nan") {
+        // The optional payload is consumed only if it is properly closed;
+        // otherwise the '(' belongs to whatever comes next in the input.
+        if *count < width && ctx.peek() == b'(' {
+            let mut k = 1usize;
+            loop {
+                if count.wrapping_add(k) >= width {
+                    break;
+                }
+                let c = ctx.peek_at(k);
+                if c == b')' {
+                    ctx.si += k + 1;
+                    *count += k + 1;
+                    break;
+                }
+                if c == 0 || !(c.is_ascii_alphanumeric() || c == b'_') {
+                    break;
+                }
+                k += 1;
+            }
+        }
+        return Some(f64::NAN);
+    }
+    if match_word(ctx, count, width, b"inf") {
+        // "infinity" extends "inf"; the longer match wins, and failing to
+        // match the rest simply leaves it in the input.
+        let _ = match_word(ctx, count, width, b"inity");
+        return Some(f64::INFINITY);
+    }
+    None
+}
+
+/// Match `digits[.digits][e[sign]digits]` and convert it exactly.
+#[allow(clippy::arithmetic_side_effects)]
+fn scan_float_digits(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize) -> Option<f64> {
+    let mut acc = crate::decfloat::DigitCollector::new();
+    let mut has_digits = false;
+
+    while *count < width && ctx.peek().is_ascii_digit() {
+        acc.push_integer(ctx.peek());
+        ctx.advance();
+        *count += 1;
+        has_digits = true;
+    }
+
+    if *count < width && ctx.peek() == b'.' {
+        ctx.advance();
+        *count += 1;
+        while *count < width && ctx.peek().is_ascii_digit() {
+            acc.push_fraction(ctx.peek());
+            ctx.advance();
+            *count += 1;
+            has_digits = true;
+        }
+    }
+
+    if !has_digits {
+        return None;
+    }
+
+    // Exponent.  Only consume the 'e'/sign prefix if actual exponent digits
+    // follow; otherwise leave them in the input (scanf consumes the longest
+    // *valid* prefix, and "1.5e" is not one — only "1.5" is).
+    if *count < width && (ctx.peek() == b'e' || ctx.peek() == b'E') {
+        let saved_si = ctx.si;
+        let saved_count = *count;
+        ctx.advance();
+        *count += 1;
+        let exp_neg = ctx.peek() == b'-';
+        if (exp_neg || ctx.peek() == b'+') && *count < width {
+            ctx.advance();
+            *count += 1;
+        }
+        if *count < width && ctx.peek().is_ascii_digit() {
+            let mut exp_val: i32 = 0;
+            while *count < width && ctx.peek().is_ascii_digit() {
+                exp_val = exp_val
+                    .saturating_mul(10)
+                    .saturating_add(i32::from(ctx.peek().wrapping_sub(b'0')));
+                ctx.advance();
+                *count += 1;
+            }
+            acc.apply_exponent(if exp_neg {
+                exp_val.saturating_neg()
+            } else {
+                exp_val
+            });
+        } else {
+            ctx.si = saved_si;
+            *count = saved_count;
+        }
+    }
+
+    let (val, out_of_range) = acc.to_f64();
+    if out_of_range {
+        crate::errno::set_errno(crate::errno::ERANGE);
+    }
+    Some(val)
+}
+
 /// Scan a floating-point number.
 ///
-/// Parses `[sign]digits[.digits][e[sign]digits]` and stores as f32
-/// or f64 (depending on length modifier).
+/// Accepts the same subject sequence as `strtod` — `[sign]digits[.digits]`
+/// with an optional `e[sign]digits` exponent, or `INF`/`INFINITY`/`NAN`
+/// (C99 7.21.6.2p12) — and stores an `f32`, `f64` or `long double` according
+/// to the length modifier.
+///
+/// Digits go straight into a [`crate::decfloat::DigitCollector`] rather than
+/// into a text buffer.  A fixed text buffer has to stop somewhere, and
+/// stopping in the middle of a number leaves the tail — including any
+/// exponent — in the input, which both changes the value silently and derails
+/// every conversion after it.  Feeding the collector instead means an
+/// arbitrarily long literal is consumed in full and converted exactly.
 #[allow(clippy::arithmetic_side_effects)]
 fn scan_float(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, long_mod: u8) -> bool {
     ctx.skip_ws();
@@ -850,86 +981,23 @@ fn scan_float(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, long_mod:
         return false;
     }
 
-    // Collect the float string into a small buffer, then parse.
-    let mut buf = [0u8; 64];
-    let mut bi: usize = 0;
     let mut count: usize = 0;
 
     // Sign.
-    if (ctx.peek() == b'-' || ctx.peek() == b'+') && count < width {
-        buf_put(&mut buf, &mut bi, ctx.peek());
+    let negative = ctx.peek() == b'-';
+    if (negative || ctx.peek() == b'+') && count < width {
         ctx.advance();
         count = count.wrapping_add(1);
     }
 
-    let mut has_digits = false;
-
-    // Integer digits.
-    while count < width && ctx.peek().is_ascii_digit() && bi < 62 {
-        buf_put(&mut buf, &mut bi, ctx.peek());
-        ctx.advance();
-        count = count.wrapping_add(1);
-        has_digits = true;
-    }
-
-    // Decimal point.
-    if count < width && ctx.peek() == b'.' && bi < 62 {
-        buf_put(&mut buf, &mut bi, ctx.peek());
-        ctx.advance();
-        count = count.wrapping_add(1);
-
-        while count < width && ctx.peek().is_ascii_digit() && bi < 62 {
-            buf_put(&mut buf, &mut bi, ctx.peek());
-            ctx.advance();
-            count = count.wrapping_add(1);
-            has_digits = true;
-        }
-    }
-
-    if !has_digits {
+    let Some(magnitude) = scan_float_named(ctx, &mut count, width)
+        .or_else(|| scan_float_digits(ctx, &mut count, width))
+    else {
         return false;
-    }
-
-    // Exponent.  Only consume the 'e'/sign prefix if actual exponent
-    // digits follow; otherwise leave them in the input (scanf must only
-    // consume the longest valid prefix, and "1.5e" is not valid — only
-    // "1.5" is).
-    if count < width && (ctx.peek() == b'e' || ctx.peek() == b'E') && bi < 62 {
-        let saved_si = ctx.si;
-        let saved_buf_idx = bi;
-        let save_count = count;
-
-        buf_put(&mut buf, &mut bi, ctx.peek());
-        ctx.advance();
-        count = count.wrapping_add(1);
-
-        if count < width && (ctx.peek() == b'-' || ctx.peek() == b'+') && bi < 62 {
-            buf_put(&mut buf, &mut bi, ctx.peek());
-            ctx.advance();
-            count = count.wrapping_add(1);
-        }
-
-        let exp_digit_start = count;
-        while count < width && ctx.peek().is_ascii_digit() && bi < 62 {
-            buf_put(&mut buf, &mut bi, ctx.peek());
-            ctx.advance();
-            count = count.wrapping_add(1);
-        }
-
-        if count == exp_digit_start {
-            // No exponent digits after 'e'[sign] — rollback.
-            ctx.si = saved_si;
-            bi = saved_buf_idx;
-            let _ = save_count; // count unused after this block.
-        }
-    }
-
-    // Null-terminate.
-    buf_put(&mut buf, &mut bi, 0);
+    };
+    let val = if negative { -magnitude } else { magnitude };
 
     if !suppress {
-        // Parse the collected string using strtod.
-        let val = unsafe { crate::stdlib::strtod(buf.as_ptr(), core::ptr::null_mut()) };
         let ptr = ctx.next_arg();
         if long_mod == LEN_LONG_DOUBLE {
             // %Lf → a 16-byte x87 `long double`.  Storing only the 8 bytes of
@@ -1618,6 +1686,117 @@ mod tests {
         let n = sscanf_va(b"42\0".as_ptr(), b"%f\0".as_ptr(), &args);
         assert_eq!(n, 1);
         assert!((val - 42.0).abs() < 0.001, "got {val}");
+    }
+
+    #[test]
+    fn scan_f_consumes_a_number_longer_than_any_buffer() {
+        // The old collector stopped at 62 characters and, crucially, stopped
+        // *consuming* there too — so the tail and the exponent stayed in the
+        // input.  "1" + 70 zeros + "e-70" came back as 1e61 with "e-70" left
+        // over to derail the next conversion.  It is exactly 1.0.
+        let mut text = String::from("1");
+        for _ in 0..70 {
+            text.push('0');
+        }
+        text.push_str("e-70 rest");
+        let mut input = text.into_bytes();
+        input.push(0);
+
+        let mut val: f64 = 0.0;
+        let mut word = [0u8; 16];
+        let args = [&raw mut val as u64, word.as_mut_ptr() as u64];
+        let n = sscanf_va(input.as_ptr(), b"%lf %s\0".as_ptr(), &args);
+        assert_eq!(n, 2);
+        assert_eq!(val, 1.0, "got {val}");
+        assert_eq!(&word[..4], b"rest");
+    }
+
+    #[test]
+    fn scan_f_is_correctly_rounded() {
+        // Delegating to the exact converter means %lf reaches the ends of the
+        // range that the old float-accumulating parser could not.
+        for (text, want) in [
+            ("1.7976931348623157e308\0", f64::MAX),
+            ("5e-324\0", f64::from_bits(1)),
+            ("0.1\0", 0.1_f64),
+            ("9007199254740993\0", 9_007_199_254_740_992.0_f64),
+        ] {
+            let mut val: f64 = 0.0;
+            let args = [&raw mut val as u64];
+            let n = sscanf_va(text.as_ptr(), b"%lf\0".as_ptr(), &args);
+            assert_eq!(n, 1, "{text}");
+            assert_eq!(val, want, "{text}");
+        }
+    }
+
+    #[test]
+    fn scan_f_accepts_inf_and_nan() {
+        // C99 7.21.6.2p12: the float conversions match strtod's subject
+        // sequence, which includes INF/INFINITY/NAN.
+        for (text, check) in [
+            ("inf\0", 0u8),
+            ("INFINITY\0", 0),
+            ("-Inf\0", 1),
+            ("nan\0", 2),
+            ("NaN(quiet_1)\0", 2),
+        ] {
+            let mut val: f64 = 0.0;
+            let args = [&raw mut val as u64];
+            let n = sscanf_va(text.as_ptr(), b"%lf\0".as_ptr(), &args);
+            assert_eq!(n, 1, "{text}");
+            match check {
+                0 => assert_eq!(val, f64::INFINITY, "{text}"),
+                1 => assert_eq!(val, f64::NEG_INFINITY, "{text}"),
+                _ => assert!(val.is_nan(), "{text}"),
+            }
+        }
+    }
+
+    #[test]
+    fn scan_f_only_consumes_a_complete_named_value() {
+        // "info" starts like "inf" but the trailing "o" must survive, and a
+        // bare "in" is not a match at all.
+        let mut val: f64 = 0.0;
+        let mut word = [0u8; 16];
+        let args = [&raw mut val as u64, word.as_mut_ptr() as u64];
+        let n = sscanf_va(b"info\0".as_ptr(), b"%lf%s\0".as_ptr(), &args);
+        assert_eq!(n, 2);
+        assert_eq!(val, f64::INFINITY);
+        assert_eq!(&word[..1], b"o");
+
+        let mut val2: f64 = -1.0;
+        let args = [&raw mut val2 as u64];
+        assert_eq!(sscanf_va(b"in\0".as_ptr(), b"%lf\0".as_ptr(), &args), 0);
+        assert_eq!(val2, -1.0, "a failed match must not assign");
+    }
+
+    #[test]
+    fn scan_f_respects_an_explicit_width() {
+        let mut a: f64 = 0.0;
+        let mut b: f64 = 0.0;
+        let args = [&raw mut a as u64, &raw mut b as u64];
+        let n = sscanf_va(b"1.2534\0".as_ptr(), b"%4lf%lf\0".as_ptr(), &args);
+        assert_eq!(n, 2);
+        assert_eq!(a, 1.25);
+        assert_eq!(b, 34.0);
+        // The width can cut an exponent short.  Six characters reach "1.25e3",
+        // which is a complete number.
+        let mut c: f64 = 0.0;
+        let args = [&raw mut c as u64];
+        assert_eq!(sscanf_va(b"1.25e34\0".as_ptr(), b"%6lf\0".as_ptr(), &args), 1);
+        assert_eq!(c, 1250.0);
+
+        // Five characters reach "1.25e", which is not: the 'e' must be rolled
+        // back rather than swallowed, leaving "e34" for the next conversion.
+        let mut d: f64 = 0.0;
+        let mut word = [0u8; 8];
+        let args = [&raw mut d as u64, word.as_mut_ptr() as u64];
+        assert_eq!(
+            sscanf_va(b"1.25e34\0".as_ptr(), b"%5lf%s\0".as_ptr(), &args),
+            2
+        );
+        assert_eq!(d, 1.25);
+        assert_eq!(&word[..3], b"e34");
     }
 
     // -- %[...] scanset tests --

@@ -494,6 +494,91 @@ impl Decimal {
     }
 }
 
+/// Accumulates the decimal digits of a floating-point literal exactly.
+///
+/// `strtod` and `scanf`'s `%f`/`%e`/`%g` read their input from different
+/// places — a C string and a scan context — but the digit bookkeeping is
+/// identical, and getting it subtly wrong is exactly how a parser loses
+/// precision.  Driving one collector from both keeps them in step.
+///
+/// The value accumulated is exactly `digits * 10^exp10`.  Digits past
+/// [`MAX_PARSE_DIGITS`] are not stored — they cannot change which `f64` the
+/// input rounds to, only whether it lands on a tie — but they are still
+/// accounted for, either in the exponent or in the sticky bit.
+pub(crate) struct DigitCollector {
+    digits: [u8; MAX_PARSE_DIGITS],
+    len: usize,
+    exp10: i32,
+    truncated: bool,
+}
+
+impl DigitCollector {
+    pub(crate) const fn new() -> Self {
+        Self {
+            digits: [b'0'; MAX_PARSE_DIGITS],
+            len: 0,
+            exp10: 0,
+            truncated: false,
+        }
+    }
+
+    /// Add a digit that appeared before the decimal point.
+    ///
+    /// One that does not fit still scales everything already stored, hence the
+    /// exponent bump; only its own contribution is lost, to the sticky bit.
+    pub(crate) fn push_integer(&mut self, ascii: u8) {
+        if self.len == 0 && ascii == b'0' {
+            // A leading zero contributes nothing at all.
+        } else if self.len < MAX_PARSE_DIGITS {
+            if let Some(slot) = self.digits.get_mut(self.len) {
+                *slot = ascii;
+            }
+            self.len = self.len.saturating_add(1);
+        } else {
+            self.exp10 = self.exp10.saturating_add(1);
+            if ascii != b'0' {
+                self.truncated = true;
+            }
+        }
+    }
+
+    /// Add a digit that appeared after the decimal point.
+    ///
+    /// Each stored digit moves the point one place right, and so does each
+    /// leading zero that precedes the first significant digit.  A digit that
+    /// does not fit sits entirely below the last stored one, so it is pure
+    /// sticky and does not touch the exponent.
+    pub(crate) fn push_fraction(&mut self, ascii: u8) {
+        if self.len == 0 && ascii == b'0' {
+            self.exp10 = self.exp10.saturating_sub(1);
+        } else if self.len < MAX_PARSE_DIGITS {
+            if let Some(slot) = self.digits.get_mut(self.len) {
+                *slot = ascii;
+            }
+            self.len = self.len.saturating_add(1);
+            self.exp10 = self.exp10.saturating_sub(1);
+        } else if ascii != b'0' {
+            self.truncated = true;
+        }
+    }
+
+    /// Apply an explicit `e[+-]NN` exponent.
+    pub(crate) fn apply_exponent(&mut self, exp: i32) {
+        self.exp10 = self.exp10.saturating_add(exp);
+    }
+
+    /// Round the accumulated value to the nearest `f64`, ties to even.
+    ///
+    /// Returns `(value, out_of_range)` as [`decimal_to_f64`] does.
+    pub(crate) fn to_f64(&self) -> (f64, bool) {
+        decimal_to_f64(
+            self.digits.get(..self.len).unwrap_or(&[]),
+            self.exp10,
+            self.truncated,
+        )
+    }
+}
+
 /// Convert `digits * 10^exp10` to the nearest `f64`, ties to even.
 ///
 /// `digits` holds the ASCII decimal digits of the significant part; `exp10` is

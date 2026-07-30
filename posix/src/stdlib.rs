@@ -477,59 +477,24 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
         }
     }
 
-    // Digits, collected exactly.  `digits` holds the significant decimal
-    // digits and `exp10` the power of ten they are scaled by, so the parsed
-    // value is exactly `digits * 10^exp10` — no floating-point arithmetic
-    // happens until the single correctly-rounded conversion at the end.
-    //
-    // Past `MAX_PARSE_DIGITS` significant digits no further digit can change
-    // which `f64` the input rounds to; it can only decide a tie.  So overflow
-    // digits are not stored, they just set `truncated`, the sticky bit.
-    let mut digits = [b'0'; crate::decfloat::MAX_PARSE_DIGITS];
-    let mut nd: usize = 0;
-    let mut exp10: i32 = 0;
-    let mut truncated = false;
+    // Digits, collected exactly: no floating-point arithmetic happens until
+    // the single correctly-rounded conversion at the end.
+    let mut acc = crate::decfloat::DigitCollector::new();
     let mut has_digits = false;
 
-    // Integer part.  A digit that fits is stored as-is; one that does not
-    // still scales everything already stored, hence the exponent bump.
+    // Integer part.
     while (unsafe { *nptr.add(i) }).is_ascii_digit() {
-        let d = unsafe { *nptr.add(i) };
+        acc.push_integer(unsafe { *nptr.add(i) });
         has_digits = true;
-        if nd == 0 && d == b'0' {
-            // Leading zero: contributes nothing at all.
-        } else if nd < digits.len() {
-            if let Some(slot) = digits.get_mut(nd) {
-                *slot = d;
-            }
-            nd = nd.wrapping_add(1);
-        } else {
-            exp10 = exp10.saturating_add(1);
-            if d != b'0' {
-                truncated = true;
-            }
-        }
         i = i.wrapping_add(1);
     }
 
-    // Fractional part.  Each stored digit moves the point one place right,
-    // and so does each leading zero that precedes the first significant digit.
+    // Fractional part.
     if unsafe { *nptr.add(i) } == b'.' {
         i = i.wrapping_add(1);
         while (unsafe { *nptr.add(i) }).is_ascii_digit() {
-            let d = unsafe { *nptr.add(i) };
+            acc.push_fraction(unsafe { *nptr.add(i) });
             has_digits = true;
-            if nd == 0 && d == b'0' {
-                exp10 = exp10.saturating_sub(1);
-            } else if nd < digits.len() {
-                if let Some(slot) = digits.get_mut(nd) {
-                    *slot = d;
-                }
-                nd = nd.wrapping_add(1);
-                exp10 = exp10.saturating_sub(1);
-            } else if d != b'0' {
-                truncated = true;
-            }
             i = i.wrapping_add(1);
         }
     }
@@ -568,15 +533,14 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
                 exp_val = exp_val.saturating_neg();
             }
 
-            exp10 = exp10.saturating_add(exp_val);
+            acc.apply_exponent(exp_val);
         } else {
             // No exponent digits — roll back.
             i = before_exp;
         }
     }
 
-    let (mut result, out_of_range) =
-        crate::decfloat::decimal_to_f64(digits.get(..nd).unwrap_or(&[]), exp10, truncated);
+    let (mut result, out_of_range) = acc.to_f64();
 
     if negative {
         result = -result;

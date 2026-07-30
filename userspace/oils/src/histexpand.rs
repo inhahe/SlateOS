@@ -95,37 +95,41 @@ fn words(s: &str) -> Vec<&str> {
 }
 
 /// Apply a `:h`/`:t`/`:r`/`:e` pathname modifier.
+///
+/// These are readline's, which are deliberately naive: each is one `strrchr`
+/// over the *whole* selected text, with no notion of a basename and no special
+/// case for a leading separator. Two consequences are worth spelling out, both
+/// measured against bash 5.2 rather than inferred:
+///
+/// * When the separator is absent the text comes back **unchanged**, not empty
+///   — `echo abc` is `echo abc` under both `:h` and `:e`.
+/// * A dot anywhere counts as the extension separator, even one inside a
+///   directory name or at the very start: `echo a.b/c` under `:e` is `.b/c`,
+///   and the word `.abc` under `:r` is empty.
 fn modify_path(text: &str, which: char) -> String {
     match which {
-        // head: everything before the last '/', or empty if there is none.
+        // head: everything before the last `/` — so a leading slash leaves
+        // nothing at all, and `/abc` is empty rather than `/`.
         'h' => match text.rfind('/') {
-            Some(0) => "/".to_string(),
             Some(i) => text.get(..i).unwrap_or("").to_string(),
-            None => String::new(),
+            None => text.to_string(),
         },
-        // tail: the basename.
-        't' => text.rsplit('/').next().unwrap_or(text).to_string(),
-        // root: strip a trailing extension, looking only within the basename so
-        // a dot in a parent directory name is not mistaken for one.
-        'r' => split_ext(text).0.to_string(),
-        // ext: the trailing extension, including its dot.
-        'e' => split_ext(text).1.to_string(),
+        // tail: everything after the last `/`.
+        't' => match text.rfind('/') {
+            Some(i) => text.get(i.saturating_add(1)..).unwrap_or("").to_string(),
+            None => text.to_string(),
+        },
+        // root: everything before the last `.`.
+        'r' => match text.rfind('.') {
+            Some(i) => text.get(..i).unwrap_or("").to_string(),
+            None => text.to_string(),
+        },
+        // ext: the last `.` and everything after it.
+        'e' => match text.rfind('.') {
+            Some(i) => text.get(i..).unwrap_or("").to_string(),
+            None => text.to_string(),
+        },
         _ => text.to_string(),
-    }
-}
-
-/// Split `text` into (root, extension) at the last dot of its basename. The
-/// extension includes the dot and is empty when there is none.
-fn split_ext(text: &str) -> (&str, &str) {
-    let base_at = text.rfind('/').map_or(0, |i| i.saturating_add(1));
-    let base = text.get(base_at..).unwrap_or("");
-    // A leading dot is part of the name, not an extension separator.
-    match base.rfind('.').filter(|&i| i > 0) {
-        Some(i) => {
-            let cut = base_at.saturating_add(i);
-            (text.get(..cut).unwrap_or(""), text.get(cut..).unwrap_or(""))
-        }
-        None => (text, ""),
     }
 }
 
@@ -276,7 +280,10 @@ fn apply_word_designator(event: &str, chars: &[char], start: usize) -> (String, 
                 _ => (pick(from, from), i),
             }
         }
-        None => (event.to_string(), i),
+        // Nothing after the `:` at all. Like the non-designator case above, hand
+        // the position back unconsumed so the modifier scan sees the `:` and
+        // rejects it (bash: `: unrecognized history modifier`).
+        None => (event.to_string(), start),
     }
 }
 
@@ -323,7 +330,10 @@ fn apply_modifiers(
                 i = j.saturating_add(1);
             }
             Some('s') => {
+                // No delimiter at all (`!!:s` at the end of the line) is not an
+                // error in bash: the `s` is consumed and the text is left alone.
                 let Some((old, new, end)) = parse_subst(chars, j.saturating_add(1)) else {
+                    i = j.saturating_add(1);
                     break;
                 };
                 // An empty pattern reuses the previous one, as in bash.
@@ -350,8 +360,19 @@ fn apply_modifiers(
                 text = substitute(&text, &last.old, &last.new, global);
                 i = end;
             }
-            // Not a modifier we recognise — stop, leaving the `:` in place.
-            _ => break,
+            // A `:` commits to a modifier, so anything else after it — an
+            // unknown letter, or the end of the line — aborts the whole
+            // expansion the way a missing event does. bash names the offending
+            // character, which is empty when the line simply ran out (`!!:` and
+            // `!!:g` both report `: unrecognized history modifier`).
+            //
+            // A character that is not a `:` is a different matter: it merely
+            // ends the modifier run and stays as literal text, which is why
+            // `!!:hz` is the `:h` of the event with a `z` stuck on the end.
+            other => {
+                let name: String = other.copied().map(String::from).unwrap_or_default();
+                return Err(format!("{name}: unrecognized history modifier"));
+            }
         }
     }
     Ok((text, i, print_only))
@@ -1024,6 +1045,68 @@ mod tests {
         assert_eq!(expanded("echo !!:$:t", &h), "echo file.tar.gz");
         assert_eq!(expanded("echo !!:$:r", &h), "echo /usr/local/lib/file.tar");
         assert_eq!(expanded("echo !!:$:e", &h), "echo .gz");
+    }
+
+    /// readline's pathname modifiers are one `strrchr` each over the whole
+    /// selected text: no basename, no leading-separator special case, and the
+    /// text unchanged when the separator is missing. Every expectation here was
+    /// measured against bash 5.2.
+    #[test]
+    fn pathname_modifiers_are_naive_strrchr() {
+        // No separator at all leaves the text alone rather than emptying it.
+        let h = ["echo abc"];
+        assert_eq!(expanded("echo !!:h", &h), "echo echo abc");
+        assert_eq!(expanded("echo !!:t", &h), "echo echo abc");
+        assert_eq!(expanded("echo !!:r", &h), "echo echo abc");
+        assert_eq!(expanded("echo !!:e", &h), "echo echo abc");
+        // A leading `/` is not preserved as a root: `:h` keeps only what is
+        // before it, which for the bare word is nothing.
+        let h = ["echo /abc"];
+        assert_eq!(expanded("echo !!:1:h", &h), "echo ");
+        assert_eq!(expanded("echo !!:1:t", &h), "echo abc");
+        // A dot in a directory name counts, and so does a leading one.
+        let h = ["echo a.b/c"];
+        assert_eq!(expanded("echo !!:1:r", &h), "echo a");
+        assert_eq!(expanded("echo !!:1:e", &h), "echo .b/c");
+        let h = ["echo .abc"];
+        assert_eq!(expanded("echo !!:1:r", &h), "echo ");
+        assert_eq!(expanded("echo !!:1:e", &h), "echo .abc");
+    }
+
+    /// A `:` commits to a modifier: an unknown letter or a line that ends right
+    /// after the `:` aborts the expansion. A character that is *not* preceded by
+    /// a `:` merely ends the modifier run and stays literal.
+    #[test]
+    fn unrecognized_modifier_aborts_the_expansion() {
+        let h = hist(&["echo abc"]);
+        for (line, name) in [
+            ("echo !!:z", "z"),
+            ("echo !!:1:z", "z"),
+            ("echo !!:s^abc^x^:z", "z"),
+            ("echo !!:Z", "Z"),
+            // The `g`/`a` prefix is consumed first, so the *following*
+            // character is the one bash names.
+            ("echo !!:gz", "z"),
+            // Nothing after the `:` at all: bash names an empty character.
+            ("echo !!:", ""),
+            ("echo !!:g", ""),
+            ("echo !!:h:", ""),
+        ] {
+            match expand1(line, &ctx(&h)) {
+                Expansion::NotFound(msg) => {
+                    assert_eq!(msg, format!("{name}: unrecognized history modifier"), "{line}");
+                }
+                other => panic!("expected {line} to fail, got {}", match other {
+                    Expansion::Changed(s) | Expansion::PrintOnly(s) => s,
+                    Expansion::Unchanged => "unchanged".to_string(),
+                    Expansion::NotFound(_) => unreachable!(),
+                }),
+            }
+        }
+        // Not a `:`, so it is literal text appended to the modified event.
+        assert_eq!(expanded("echo !!:hz", &["echo abc"]), "echo echo abcz");
+        // `:s` with no delimiter at all is consumed and changes nothing.
+        assert_eq!(expanded("echo !!:s", &["echo abc"]), "echo echo abc");
     }
 
     #[test]

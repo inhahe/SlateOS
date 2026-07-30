@@ -324,6 +324,231 @@ struct PendingHeredoc {
     tok_index: usize,
 }
 
+/// Where a `case` the substitution-extent scan has walked into currently sits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CasePhase {
+    /// After `case`, before its `in`. The subject word is being read.
+    AwaitIn,
+    /// In a pattern list: the next `)` at the `case`'s own depth terminates a
+    /// pattern rather than closing a group.
+    Pattern,
+    /// In a clause body, until `;;` / `;&` / `;;&` starts the next pattern list
+    /// or `esac` ends the `case`.
+    Body,
+}
+
+/// One `case` the scan is inside.
+#[derive(Clone, Copy, Debug)]
+struct CaseFrame {
+    /// The parenthesis depth the `case` was read at, which is the depth a
+    /// pattern's `)` sits at. Nested `case`s can share a depth, so this is not a
+    /// key — the frames form a stack.
+    depth: usize,
+    phase: CasePhase,
+    /// Whether nothing of the current pattern has been read yet, which is the
+    /// only place a `(` is the pattern's *optional open* — it has no mate of its
+    /// own, the pattern's terminating `)` stands in for one.
+    pat_start: bool,
+}
+
+/// The `case`-awareness of [`Lexer::read_subst_body`].
+///
+/// A `case` pattern's `)` has no opening mate, so a scan that finds the end of a
+/// substitution by counting parentheses reaches zero in the middle of the
+/// `case` — the single commonest way `$( … )` is written that a counting scan
+/// cannot read (`x=$(case $y in a) … esac)`). bash has no such trouble because
+/// its extent scan *is* the parser; ours has to know just enough grammar to tell
+/// a pattern's `)` from a group's.
+///
+/// "Just enough" is: which words are the reserved `case`, `in` and `esac`, and
+/// where a clause body ends. That in turn needs command position — `case`,
+/// `esac` and `do` are reserved words only there, and `$(printf %s case in f)`
+/// must keep its `)` — so this tracks the word being read and whether a word
+/// starting here would begin a command. Quoting is what makes `"esac"` a plain
+/// word, so a word with any quoted character in it is never reserved.
+struct CaseScan {
+    /// The `case`s the scan is inside, innermost last.
+    frames: Vec<CaseFrame>,
+    /// The unquoted characters of the word being read.
+    word: String,
+    /// Whether every character of that word so far was unquoted. A quoted span
+    /// contributes nothing to `word`, so this is also what says a word is being
+    /// read at all when `word` is empty (`""` is a word; nothing is not).
+    word_pure: bool,
+    /// Whether the word being read is the first of a pattern list, which is
+    /// where `esac` is reserved. Sampled when the word *begins*, because its own
+    /// first character is what ends [`CaseFrame::pat_start`].
+    word_pat_start: bool,
+    /// Whether a word starting here would be in command position.
+    cmd_pos: bool,
+}
+
+impl CaseScan {
+    fn new() -> Self {
+        Self {
+            frames: Vec::new(),
+            word: String::new(),
+            word_pure: true,
+            word_pat_start: false,
+            cmd_pos: true,
+        }
+    }
+
+    /// Whether no word is being read, so the next character starts one.
+    fn between_words(&self) -> bool {
+        self.word.is_empty() && self.word_pure
+    }
+
+    /// About to read the first character of a word.
+    fn begin_word(&mut self) {
+        if self.between_words() {
+            self.word_pat_start = self.frames.last().is_some_and(|f| f.pat_start);
+        }
+    }
+
+    /// A character of the word being read.
+    fn push(&mut self, c: char) {
+        self.begin_word();
+        self.word.push(c);
+        self.pattern_seen();
+    }
+
+    /// A quoted or substituted span, which is part of the word being read but
+    /// cannot be part of a reserved one.
+    fn push_quoted(&mut self) {
+        self.begin_word();
+        self.word_pure = false;
+        self.pattern_seen();
+    }
+
+    /// Note that the current pattern is no longer empty, so a `(` from here on
+    /// is a group and not the pattern's optional open.
+    fn pattern_seen(&mut self) {
+        if let Some(f) = self.frames.last_mut() {
+            f.pat_start = false;
+        }
+    }
+
+    /// The word being read has ended (a delimiter was reached). `depth` is the
+    /// scan's current parenthesis depth, which a `case` found here is recorded
+    /// at.
+    fn finish_word(&mut self, depth: usize) {
+        if self.between_words() {
+            return;
+        }
+        let word = if self.word_pure {
+            core::mem::take(&mut self.word)
+        } else {
+            String::new()
+        };
+        self.word.clear();
+        self.word_pure = true;
+        let cmd_pos = self.cmd_pos;
+        let pat_first = self.word_pat_start;
+        self.word_pat_start = false;
+        // A word ends a command position unless it is one of the reserved words
+        // a command follows.
+        self.cmd_pos = matches!(
+            word.as_str(),
+            "if" | "then"
+                | "elif"
+                | "else"
+                | "while"
+                | "until"
+                | "do"
+                | "{"
+                | "!"
+                | "time"
+                | "coproc"
+        );
+        if let Some(f) = self.frames.last_mut() {
+            match f.phase {
+                CasePhase::AwaitIn if word == "in" => {
+                    f.phase = CasePhase::Pattern;
+                    f.pat_start = true;
+                    return;
+                }
+                // `esac` is reserved wherever a pattern could start, which is why
+                // `case esac in …` is a syntax error in bash rather than a match
+                // against the word `esac`. An empty `case x in esac` ends here.
+                CasePhase::Pattern if pat_first && word == "esac" => {
+                    self.frames.pop();
+                    return;
+                }
+                CasePhase::Body if cmd_pos && word == "esac" => {
+                    self.frames.pop();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if word == "case" && cmd_pos {
+            self.frames.push(CaseFrame {
+                depth,
+                phase: CasePhase::AwaitIn,
+                pat_start: false,
+            });
+        }
+    }
+
+    /// A delimiter that ends a command, so the next word is in command position.
+    fn command_end(&mut self) {
+        self.cmd_pos = true;
+    }
+
+    /// A redirection operator: the word after it names a file, never a command.
+    fn redirect(&mut self) {
+        self.cmd_pos = false;
+    }
+
+    /// A `;` was reached, `next` being the character after it: `;;`, `;&` and
+    /// `;;&` all end a clause body and start the next pattern list.
+    fn semi(&mut self, next: Option<char>) {
+        self.cmd_pos = true;
+        if matches!(next, Some(';' | '&'))
+            && let Some(f) = self.frames.last_mut()
+            && f.phase == CasePhase::Body
+        {
+            f.phase = CasePhase::Pattern;
+            f.pat_start = true;
+        }
+    }
+
+    /// Whether an `(` at `depth` is a pattern's optional open, which takes no
+    /// depth of its own because the pattern's `)` is what closes it.
+    fn is_pattern_open(&mut self, depth: usize) -> bool {
+        let open = self.frames.last().is_some_and(|f| {
+            f.phase == CasePhase::Pattern && f.pat_start && f.depth == depth
+        });
+        if open {
+            self.pattern_seen();
+        }
+        open
+    }
+
+    /// Whether a `)` at `depth` terminates a pattern rather than closing a
+    /// group. Consumes the terminator when it does.
+    fn take_pattern_close(&mut self, depth: usize) -> bool {
+        let Some(f) = self.frames.last_mut() else {
+            return false;
+        };
+        if f.phase != CasePhase::Pattern || f.depth != depth {
+            return false;
+        }
+        f.phase = CasePhase::Body;
+        f.pat_start = false;
+        self.cmd_pos = true;
+        true
+    }
+
+    /// Whether a `case` is still open where the substitution closes. bash has no
+    /// separate diagnostic for this — its parser simply meets the `)` where it
+    /// wanted `;;` or `esac` and names it.
+    fn open_at_close(&self) -> bool {
+        !self.frames.is_empty()
+    }
+}
+
 impl Lexer {
     fn new(src: &str, opts: LexOpts) -> Self {
         Self {
@@ -1968,6 +2193,9 @@ impl Lexer {
     /// Read text until the matching `close`, honoring nested `open`/`close`
     /// and skipping quoted spans. `self.pos` is just past the initial `open`.
     ///
+    /// See [`Lexer::read_subst_body`] for the substitution form, which counts
+    /// parentheses only where the grammar says a `)` closes a group.
+    ///
     /// The unterminated-`close` error is left **unstamped** (no reporting line):
     /// which line bash blames depends on what opened the group — the opening
     /// line for `$[`/`<(`/`>(`, the end of input for `$(` — so the caller
@@ -2026,6 +2254,8 @@ impl Lexer {
         // `<<` in there is a left shift and a `#` a base marker (`16#ff`), so
         // neither introduces anything.
         let mut arith_from: Option<usize> = None;
+        // Which `)` closes a group and which terminates a `case` pattern.
+        let mut cases = CaseScan::new();
         loop {
             let Some(c) = self.bump() else {
                 return Err(eof_matching(close));
@@ -2045,6 +2275,7 @@ impl Lexer {
                     }
                 }
                 word_start = false;
+                cases.push_quoted();
                 continue;
             }
             if c == '"' {
@@ -2067,6 +2298,7 @@ impl Lexer {
                     }
                 }
                 word_start = false;
+                cases.push_quoted();
                 continue;
             }
             if heredocs {
@@ -2078,6 +2310,8 @@ impl Lexer {
                             self.consume_subst_heredoc_bodies(&mut pending, &mut raw)?;
                         }
                         word_start = true;
+                        cases.finish_word(depth);
+                        cases.command_end();
                         continue;
                     }
                     // Copied verbatim so the re-lex still sees the comment, but not
@@ -2098,6 +2332,7 @@ impl Lexer {
                             raw.push(n);
                         }
                         word_start = false;
+                        cases.push_quoted();
                         continue;
                     }
                     '`' => {
@@ -2106,6 +2341,7 @@ impl Lexer {
                         raw.push_str(&verbatim);
                         raw.push('`');
                         word_start = false;
+                        cases.push_quoted();
                         continue;
                     }
                     '$' if self.peek() == Some('{') => {
@@ -2115,6 +2351,7 @@ impl Lexer {
                         raw.push_str(&inner);
                         raw.push('}');
                         word_start = false;
+                        cases.push_quoted();
                         continue;
                     }
                     // `$((` / `((` open an arithmetic span. The parens are left to
@@ -2124,6 +2361,7 @@ impl Lexer {
                         arith_from = arith_from.or(Some(depth));
                         raw.push('$');
                         word_start = false;
+                        cases.push_quoted();
                         continue;
                     }
                     '(' if word_start && self.peek() == Some('(') => {
@@ -2135,6 +2373,7 @@ impl Lexer {
                         self.pos += 2;
                         raw.push_str("<<<");
                         word_start = false;
+                        cases.finish_word(depth);
                         continue;
                     }
                     // `<<`: a here-document, whose body the next newline brings from
@@ -2142,6 +2381,7 @@ impl Lexer {
                     '<' if !in_arith && self.peek() == Some('<') => {
                         self.pos += 1;
                         raw.push_str("<<");
+                        cases.finish_word(depth);
                         let strip = self.peek() == Some('-');
                         if strip {
                             self.pos += 1;
@@ -2165,15 +2405,58 @@ impl Lexer {
                     _ => {}
                 }
             }
-            if c == open {
-                depth += 1;
-            } else if c == close {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(raw);
+            if heredocs {
+                // Feed the `case` tracker. Every delimiter ends the word being
+                // read, and the reserved words are only recognised there.
+                match c {
+                    ' ' | '\t' => cases.finish_word(depth),
+                    ';' => {
+                        cases.finish_word(depth);
+                        cases.semi(self.peek());
+                    }
+                    '&' | '|' => {
+                        cases.finish_word(depth);
+                        cases.command_end();
+                    }
+                    // A redirection: the word after it names a file, not a
+                    // command, so `case` there is not the reserved word.
+                    '<' | '>' => {
+                        cases.finish_word(depth);
+                        cases.redirect();
+                    }
+                    '(' => {
+                        cases.finish_word(depth);
+                        cases.command_end();
+                    }
+                    ')' => cases.finish_word(depth),
+                    _ => cases.push(c),
                 }
-                if arith_from == Some(depth) {
-                    arith_from = None;
+            }
+            if c == open {
+                // A `case` pattern's optional `(` has no mate of its own.
+                if !(heredocs && cases.is_pattern_open(depth)) {
+                    depth += 1;
+                }
+            } else if c == close {
+                // A pattern's `)` closes the pattern, not a group — this is the
+                // whole reason the scan tracks `case` at all.
+                if !(heredocs && cases.take_pattern_close(depth)) {
+                    depth -= 1;
+                    if depth == 0 {
+                        // A `case` still open here is one bash's parser would have
+                        // met this `)` in the middle of, so hand the `)` to the
+                        // body parse and let it name the token — which also puts
+                        // the failure where bash puts it, in the substitution
+                        // rather than in the enclosing input (the two exit
+                        // differently: 1 for a substitution, 2 for the input).
+                        if heredocs && cases.open_at_close() {
+                            raw.push(close);
+                        }
+                        return Ok(raw);
+                    }
+                    if arith_from == Some(depth) {
+                        arith_from = None;
+                    }
                 }
             }
             raw.push(c);
@@ -3125,5 +3408,127 @@ mod tests {
                 .collect();
             assert_eq!(got, vec![("EOF", 1, 3)], "{src:?}");
         }
+    }
+
+    /// A `case` pattern's `)` has no opening mate, so the extent scan cannot end
+    /// a substitution on a bare count of parentheses — it has to know where the
+    /// reserved words `case`, `in` and `esac` are reserved, which is command
+    /// position and only there.
+    #[test]
+    fn substitution_body_ends_at_the_grammars_close_paren() {
+        // (source, the raw substitution body the scan must capture)
+        let bodies: &[(&str, &str)] = &[
+            // The shape that motivates all of this.
+            (
+                "x=$(case b in a) echo A;; b) echo B;; esac)",
+                "case b in a) echo A;; b) echo B;; esac",
+            ),
+            // A pattern's optional `(` takes no depth of its own: the pattern's
+            // `)` is what closes it.
+            (
+                "x=$(case b in (a) echo A;; (b) echo B;; esac)",
+                "case b in (a) echo A;; (b) echo B;; esac",
+            ),
+            // A bare `;` does not end a clause body, so `esac` after one is still
+            // the reserved word; `;&` and `;;&` do end one.
+            ("x=$(case b in b) echo B; esac)", "case b in b) echo B; esac"),
+            (
+                "x=$(case b in b) echo B;& c) echo C;; esac)",
+                "case b in b) echo B;& c) echo C;; esac",
+            ),
+            (
+                "x=$(case b in b) echo B;;& b*) echo B2;; esac)",
+                "case b in b) echo B;;& b*) echo B2;; esac",
+            ),
+            // `esac` is reserved wherever a pattern could start, so an empty
+            // `case` ends at once.
+            ("x=$(case b in esac)", "case b in esac"),
+            // Two `case`s can share a depth, so the frames are a stack and not
+            // keyed by it.
+            (
+                "x=$(case b in b) case c in c) echo d;; esac;; esac)",
+                "case b in b) case c in c) echo d;; esac;; esac",
+            ),
+            // A group inside a clause body is still a group.
+            ("x=$(case b in b) (echo s);; esac)", "case b in b) (echo s);; esac"),
+            // …and a `)` that is not the grammar's at all: quoted, or an extglob
+            // pattern's, which closes itself.
+            (
+                "x=$(case \")\" in \")\") echo p;; esac)",
+                "case \")\" in \")\") echo p;; esac",
+            ),
+            ("x=$(case b in @(a|b)) echo X;; esac)", "case b in @(a|b)) echo X;; esac"),
+            // Command position is what makes a word reserved: none of these three
+            // `case`s is one, so the first `)` still closes the substitution.
+            ("x=$(printf %s case in f); echo hi", "printf %s case in f"),
+            ("x=$(echo a case b in c); echo hi", "echo a case b in c"),
+            ("x=$(echo $((1 + 1)) case); echo hi", "echo $((1 + 1)) case"),
+            // Quoting is the other thing that unmakes a reserved word.
+            (
+                "x=$(case b in b) echo \"esac\";; esac)",
+                "case b in b) echo \"esac\";; esac",
+            ),
+            // Every place a command position arises has to be one.
+            ("x=$(true | case b in b) echo p;; esac)", "true | case b in b) echo p;; esac"),
+            (
+                "x=$(for i in 1 2; do case $i in 1) echo o;; esac; done)",
+                "for i in 1 2; do case $i in 1) echo o;; esac; done",
+            ),
+            (
+                "x=$(f() { case b in b) echo fn;; esac; }; f)",
+                "f() { case b in b) echo fn;; esac; }; f",
+            ),
+            // Layout: the `in` and the patterns can be on their own lines, and a
+            // comment can sit between them.
+            ("x=$(case b\nin\nb) echo B;;\nesac)", "case b\nin\nb) echo B;;\nesac"),
+            (
+                "x=$(case b in # c\nb) echo B;; esac)",
+                "case b in # c\nb) echo B;; esac",
+            ),
+            // A here-document in a clause body still takes its body from the
+            // enclosing input.
+            (
+                "x=$(case b in b) cat <<EOF\nhd\nEOF\n;; esac)",
+                "case b in b) cat <<EOF\nhd\nEOF\n;; esac",
+            ),
+            // Process substitution reads its body the same way.
+            ("cat <(case b in b) echo B;; esac)", "case b in b) echo B;; esac"),
+        ];
+        // `@(a|b)` is only a pattern with `extglob` on.
+        let opts = LexOpts { extglob: true };
+        for (src, want) in bodies {
+            let tk = tokenize_deferred(src, opts);
+            assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);
+            let raw = tk
+                .toks
+                .iter()
+                .find_map(|t| match t {
+                    Tok::Word(segs) => segs.iter().find_map(|s| match s {
+                        Seg::CmdSub(raw, _, None) | Seg::ProcSub(_, raw, _) => Some(raw.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no substitution segment in {src:?}: {:?}", tk.toks));
+            assert_eq!(raw, *want, "{src:?}");
+        }
+        // A `case` still open where the substitution closes: the `)` is where
+        // bash's parser wanted `;;` or `esac`, so it goes *into* the body for the
+        // body parse to name — which also makes the failure the substitution's
+        // (exit 1) rather than the enclosing input's (exit 2).
+        let tk = tokenize_deferred("x=$(case b in b) echo B); echo hi", LexOpts::default());
+        assert!(tk.err.is_none(), "{:?}", tk.err);
+        let raw = tk
+            .toks
+            .iter()
+            .find_map(|t| match t {
+                Tok::Word(segs) => segs.iter().find_map(|s| match s {
+                    Seg::CmdSub(raw, _, None) => Some(raw.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("a substitution segment");
+        assert_eq!(raw, "case b in b) echo B)");
     }
 }

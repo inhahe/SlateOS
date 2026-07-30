@@ -8363,8 +8363,8 @@ Two supporting changes:
 warning-then-syntax-error order and the earlier lines running first) and
 `lexer::tests::substitution_body_reaches_past_a_here_document`. Three divergences in
 the same scanner remain, each logged on its own below:
-TD-OILS-CMDSUB-HEREDOC-PAST-CLOSE, TD-OILS-CMDSUB-CASE-PATTERN-PAREN,
-TD-OILS-CMDSUB-ARITH-CMD-MESSAGE. Found while fixing BUG-OILS-HEREDOC-EOF-WARNING.
+TD-OILS-CMDSUB-HEREDOC-PAST-CLOSE, TD-OILS-CMDSUB-CASE-PATTERN-PAREN (since fixed),
+TD-OILS-CMDSUB-ARITH-VS-SUBSHELL. Found while fixing BUG-OILS-HEREDOC-EOF-WARNING.
 
 ### TD-OILS-CMDSUB-HEREDOC-PAST-CLOSE. a here-document whose `)` is on its own line is not fed from past that line — 2026-07-30 — OPEN
 
@@ -8404,7 +8404,7 @@ awkward part — the raw text is already inside a `Seg::CmdSub` nested in a
 **Impact.** Adversarial: it needs `<<` and the closing `)` on one line with the body
 after. Deliberately kept out of `tests/corpus/heredoc-in-cmdsub.sh`.
 
-### TD-OILS-CMDSUB-CASE-PATTERN-PAREN. a `case` pattern's `)` inside `$( … )` closes the substitution — 2026-07-30 — OPEN
+### TD-OILS-CMDSUB-CASE-PATTERN-PAREN. a `case` pattern's `)` inside `$( … )` closes the substitution — ✅ RESOLVED 2026-07-30
 
 **Where:** `userspace/oils/src/lexer.rs` — `read_balanced_inner`, which finds the
 end of a substitution by counting parentheses.
@@ -8438,7 +8438,77 @@ would mean the lexer asking the parser where the body ends, which the current la
 `case` inside a plain `( … )` subshell or a function body is fine — those are lexed
 inline, with the real token loop.
 
-### TD-OILS-CMDSUB-ARITH-CMD-MESSAGE. `$(((` reports a malformed arithmetic expansion where bash reports an unmatched `)` — 2026-07-30 — OPEN
+**Fixed** by the lexer-side state machine the plan called for: `CaseScan` in
+`lexer.rs`, consulted by `read_balanced_inner` in its substitution mode. It carries a
+stack of `CaseFrame { depth, phase, pat_start }` — nested `case`s can share a depth,
+so the frames are a stack and not keyed by it — and `read_subst_body` asks it two
+questions at every parenthesis: is this `(` a pattern's *optional open* (which takes
+no depth, because the pattern's `)` is what closes it), and does this `)` terminate a
+pattern rather than a group.
+
+Answering those needs the reserved words, and a word is reserved only in command
+position — `$(printf %s case in f)` is three arguments and its `)` still closes the
+substitution — so the scan also tracks the word being read and whether a word
+starting there would begin a command. Quoting unmakes a reserved word, so a word with
+any quoted character in it is never one (`echo "esac"` does not end a `case`). The
+body-terminating tokens are `;;`, `;&` and `;;&`; a bare `;` is not one, which is why
+`case b in b) echo B; esac` still ends at its `esac` — that one comes out of the
+command-position rule instead.
+
+Measured against bash across 32 shapes before any of it was written (all 32 now
+byte-for-byte identical), and the three that were *already* right stayed right. Two
+findings worth recording:
+
+- `esac` is reserved wherever a pattern could start, so `case esac in esac) …` is a
+  syntax error in bash rather than a match against the word `esac`. Treating it as
+  reserved there is what reproduces bash's error — and it also gives an empty
+  `case x in esac` for free.
+- A `case` still open where the substitution closes is not an error the *scan* should
+  raise. bash's parser meets that `)` where it wanted `;;` or `esac` and names it, and
+  the failure belongs to the substitution (exit 1) not to the enclosing input
+  (exit 2). So the scan appends the `)` to the raw body and lets the body parse name
+  it, which lands on both counts.
+
+**Verified:** `tests/corpus/case-in-cmdsub.sh` (39 assertions, byte-for-byte) and
+`lexer::tests::substitution_body_ends_at_the_grammars_close_paren` (21 extents plus
+the interrupted `case`). One shape is left diverging *on purpose*, logged below as
+TD-OILS-CMDSUB-ESAC-PATTERN-BASH-BUG.
+
+### TD-OILS-CMDSUB-ESAC-PATTERN-BASH-BUG. `(esac)` as a pattern inside `$( … )` — deliberate divergence — 2026-07-30 — WONTFIX
+
+**Where:** `userspace/oils/src/lexer.rs` — `CaseScan::finish_word`, whose
+`CasePhase::Pattern` arm treats `esac` as reserved only where a pattern could
+*start*, so the optional `(` makes it a pattern like any other word.
+
+**Symptom.** That is the grammar, and it is what bash itself does outside a
+substitution — but bash's own substitution scan gets it wrong, and returns text that
+looks like leaked `declare -f` output:
+
+```
+$ bash -c 'case esac in (esac) echo E;; esac'
+E
+$ bash -c 'x=$(case esac in (esac) echo E;; esac); declare -p x'
+declare -- x=$'\n        echo E\n    ;;\nesac)'
+$ osh -c 'x=$(case esac in (esac) echo E;; esac); declare -p x'
+declare -- x="E"
+```
+
+Note the control: `x=$(case b in (b) echo B;; esac)` gives `B` in both shells, so it
+is `esac`-as-a-pattern specifically, and only inside a substitution. bash's two
+answers for the same program contradict each other, so there is nothing coherent to
+match; osh gives the answer bash gives everywhere else.
+
+Without the optional `(` the two agree — `case esac in esac) …` is a syntax error in
+both, and `tests/corpus/case-in-cmdsub.sh` pins that. This shape is kept *out* of the
+corpus because the differ compares byte-for-byte.
+
+**Proper fix.** None wanted. Revisit only if a future bash fixes its scan, at which
+point this entry should turn into a corpus case.
+
+**Impact.** `esac` used as a `case` pattern, with the optional open parenthesis,
+inside a command or process substitution. Nothing else.
+
+### TD-OILS-CMDSUB-ARITH-VS-SUBSHELL. `$((` is committed to arithmetic with no backtrack, so `$(( cmd ) | cmd )` fails to parse — 2026-07-30 — OPEN
 
 **Where:** `userspace/oils/src/lexer.rs` — `read_arith`, reached because
 `read_dollar` commits to `$((` on sight.
@@ -8452,14 +8522,30 @@ $ osh -c '…'
 osh: line 1: syntax error: malformed arithmetic expansion
 ```
 
-Both reject it and both score 2; only the message differs.
+Both reject that one and both score 2, so it looked message-only at first. It is not.
+A second shape, found while measuring the `case` fix, is ordinary shell that bash
+**runs** — a subshell as the first element of a pipeline inside a substitution:
+
+```
+$ bash -c 'x=$(( echo a; echo b ) | tr a-z A-Z); echo "x=[$x]"'
+x=[A
+B]
+$ osh -c '…'
+osh: -c: line 1: syntax error: malformed arithmetic expansion
+```
+
+With a space (`$( (`) osh gets it right, so the whole divergence is the missing
+backtrack. (The first guess when logging this was that bash rejects the un-spaced
+form too — measuring it is what showed otherwise. The `$(((1 << 3))` case above
+*is* rejected by both, but only because the arithmetic reading also fails.)
 
 **Proper fix.** On a `read_arith` failure, rewind to just past the `$(` and re-scan
 as a command substitution, which is what bash's `parse_dollar_paren` does. The rewind
 is cheap (`self.pos` and `self.line` are the only state the scan advances), but it has
 to be careful not to re-report a *nested* error the first attempt already stamped.
 
-**Impact.** Message text only, on input every shell rejects.
+**Impact.** Any `$((` that is really a substitution containing a parenthesised group:
+`$(( cmd ) | cmd )`, `$(( cmd ) && cmd )`, `$(( cmd ); cmd )`. bash runs all of them.
 
 ### BUG-OILS-EMPTY-SUBSCRIPT. A lexically empty subscript `a[]` was read as index 0, and `${a[]}` was a fatal *parse* error that killed the script — ✅ RESOLVED 2026-07-30
 

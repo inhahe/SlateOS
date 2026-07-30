@@ -14,6 +14,54 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-POSIX-H-ERRNO-GLOBAL. `h_errno` is a process-global `static mut`, but POSIX/glibc make it per-thread — 2026-07-30 — OPEN
+
+**What.** `posix/src/socket.rs` exports `pub static mut h_errno: i32` — one
+variable for the whole process. glibc instead exposes `__h_errno_location()`
+and `#define h_errno (*__h_errno_location())`, giving each thread its own copy,
+exactly as it does for `errno`. Two threads doing concurrent `gethostbyname`
+lookups therefore clobber each other's error code: thread A can read
+`HOST_NOT_FOUND` that thread B stored, or read a stale success while its own
+lookup failed.
+
+**Where.** `posix/src/socket.rs` (search `h_errno`); writers are
+`gethostbyname`/`gethostbyaddr` and friends.
+
+**Why it's still open.** The per-thread storage this needs already exists as of
+2026-07-30 — `crate::perthread::PerThread` (see TD-POSIX-TEST-PARALLEL) — so
+the fix is mechanical: add an `h_errno: i32` field to `PerThread`, add
+`__h_errno_location() -> *mut i32` mirroring `__errno_location`, and replace
+every `h_errno = …` write with `(*perthread::current()).h_errno = …`. It was
+deliberately left out of that change to keep one logical change per commit; the
+netdb *result buffers* were migrated, the error variable was not.
+
+**Proper fix.** As above. Keep the `h_errno` symbol itself exported (some C
+code references it directly through the header's macro), but define it as the
+macro over `__h_errno_location()` in the header rather than as a data symbol.
+
+### TD-POSIX-NNP-TEST-ISOLATION. 29 `NO_NEW_PRIVS` tests shared genuinely-process-global state and raced under the parallel harness — 2026-07-30 — ✅ **RESOLVED 2026-07-30**
+
+**Symptom.** With the parallel test harness,
+`unistd::tests::test_phase160_repeated_get_no_set_returns_zero`
+(`posix/src/unistd.rs:4771`) intermittently failed: `PR_GET_NO_NEW_PRIVS`
+returned 1 where the test had never set it.
+
+**Root cause — deliberately *not* the same as TD-POSIX-TEST-PARALLEL.** This
+one is not a product thread-safety gap. `NO_NEW_PRIVS` is backed by a single
+process-wide `AtomicBool`, and that is *correct*: it mirrors Linux's
+`task->no_new_privs`, a per-process (not per-thread) security bit that is
+one-way latching. 29 tests in `unistd.rs` mutate and read that one bit, so the
+harness running them concurrently lets one test's `PR_SET_NO_NEW_PRIVS` land in
+the middle of another's `PR_GET_NO_NEW_PRIVS`. Making the bit per-thread would
+have "fixed" the suite by breaking the product.
+
+**✅ RESOLVED 2026-07-30.** Added a test-only `nnp_guard()` returning a
+`MutexGuard` over a private `static LOCK: Mutex<()>`, and took it as the first
+statement of all 29 affected tests. The guard's doc comment records explicitly
+why serialising is the right fix here and why per-thread storage would be
+wrong, so a future reader doesn't "improve" it into a bug. Verified by 10
+consecutive clean parallel runs of the full posix suite (20013 tests each).
+
 ### BUG-OILS-NAMEREF-CIRCULAR-CHAIN. A nameref cycle expands to the last name in the chain instead of to nothing, with no warning — 2026-07-28 — ✅ RESOLVED 2026-07-28
 
 **Symptom.** A nameref chain that closes on itself:
@@ -2750,7 +2798,7 @@ extent path). Verified: 55/55 fastpy ring-3 self-tests pass loading from disk, g
 boot. Follow-on secondary lever (shared-runtime `.so` to shrink each ELF) remains a
 possible future optimization but is no longer urgent.
 
-### TD-POSIX-TEST-PARALLEL. `cargo test -p posix` is flaky under parallel execution — non-thread-safe libc functions share `static mut` return buffers — 2026-07-22 — OPEN (test-infra; run with `--test-threads=1` meanwhile)
+### TD-POSIX-TEST-PARALLEL. `cargo test -p posix` is flaky under parallel execution — non-thread-safe libc functions share `static mut` return buffers — 2026-07-22 — ✅ **RESOLVED 2026-07-30**
 
 **What:** Running the posix host suite with the default parallel test runner
 (`cargo test -p posix --target x86_64-pc-windows-gnu`) intermittently fails a
@@ -2767,17 +2815,46 @@ tests on multiple threads concurrently, so two tests calling the same
 static-buffer function race: thread A reads `p_name` after thread B has
 overwritten the shared buffer. Nothing to do with any product bug.
 
-**Workaround (now):** run the suite single-threaded —
-`cargo test -p posix --target x86_64-pc-windows-gnu -- --test-threads=1`
-(all 19992 pass deterministically that way).
+**Fix (2026-07-30):** the recommended TLS-buffer fix, not the test-only Mutex.
+New module `posix/src/perthread.rs` defines a single `#[repr(C)] PerThread`
+block holding *every* piece of storage POSIX says is per-thread: `errno`, the
+`gmtime`/`localtime` `Tm`, the `asctime`/`ctime` buffer, `inet_ntoa`'s buffer,
+and the four netdb result buffers (`hostent`, `hostent_rev`, `servent`,
+`protoent`). 15 `static mut`s across `errno.rs`, `time.rs` and `socket.rs` were
+deleted in favour of it.
 
-**Proper fix (candidate task):** make the static return buffers **thread-local**
-(matches glibc, whose `gmtime`/`localtime`/`getproto*` results are effectively
-per-thread), so the functions become per-thread-safe on both the host build
-(`thread_local!`) and the no_std OS target (FS/GS TLS, already used for pthread
-TSD). That fixes the races *and* improves product fidelity. Lighter-weight
-alternative: guard the affected tests with a shared `Mutex` (test-only) — fixes
-the suite but not the product thread-safety gap. Prefer the TLS-buffer fix.
+Placement on the OS target: the block is parked at `TP + TCB_SIZE`, inside the
+mapping `TlsImage::reserve()` already covers (`reserve()` grew by
+`perthread::BLOCK_SIZE`). That means **no allocation** (so no failure path and
+no allocator re-entrancy inside e.g. `strerror`), **no teardown** (`pthread_join`
+/`pthread_detach` already unmap the whole thread block), and zero-initialisation
+for free — the mapping is fresh anonymous memory and every field's correct
+initial state is all-zero (guarded at compile time by a test that builds a
+`PerThread` via `core::mem::zeroed()`, so rustc's `invalid_value` lint fires if
+anyone ever adds a field whose zero bit pattern is invalid). Lookup is one
+`mov {}, fs:[0]` plus a constant offset. On the host build the same `current()`
+API is backed by a `thread_local!`. See design-decisions.md §92 for the
+alternatives considered (`#[thread_local]`, lazily-`malloc`'d block).
+
+Because reading `%fs:0` faults when `fs_base` is still 0, `tls.rs` gained a
+process-global `TP_INSTALLED: AtomicBool` (Release on successful
+`SYS_SET_FS_BASE`, Acquire in `thread_pointer()`); bare-metal `services/`
+binaries that skip the crt leave it clear forever and share a static `FALLBACK`.
+A single global flag is correct here because the ordering is fixed:
+`__libc_start_main` installs the main thread's TP before anything else, and
+`pthread_create` is unreachable before that, so no thread can observe the flag
+set without having installed its own TP.
+
+Verified: host clippy `--all-targets` clean and `x86_64-unknown-none` clippy
+clean; **10 consecutive parallel `cargo test -p posix` runs, all 20013 passed /
+0 failed** (previously flaky on nearly every run). On target, the ring-3 C
+fixture `services/ctest-tls-thread` was extended to assert per-thread `errno`
+(each pthread gets its own `__errno_location()`, distinct from the parent's, and
+starts at 0), and `scripts/boot-test.sh` passes.
+
+**Follow-on:** `h_errno` (`socket.rs`) is still a process-global `static mut`;
+glibc makes it per-thread via `__h_errno_location()`. Same class of bug, not yet
+migrated — see TD-POSIX-H-ERRNO-GLOBAL.
 
 **Note:** while investigating this I also found and fixed a *deterministic*
 stale test (`file::tests::translate_no_flags` asserted the pre-

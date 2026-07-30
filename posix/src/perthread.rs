@@ -65,7 +65,41 @@ use core::mem::{align_of, size_of};
 #[derive(Clone, Copy)]
 pub struct PerThread {
     /// The thread's `errno`.  `__errno_location()` returns `&mut` this.
+    ///
+    /// Kept first so that `current().cast::<i32>()` is the errno pointer —
+    /// `__errno_location` is on the hot path of every failing syscall.
     pub errno: i32,
+
+    /// Result buffer for `gmtime`/`localtime`.
+    ///
+    /// All-zero is not a *meaningful* `struct tm` (`tm_mday == 0` is out of
+    /// range), but it is the same thing the old process-wide static held
+    /// before the first call, and every path that returns a pointer to it
+    /// fully overwrites it first.
+    pub tm: crate::time::Tm,
+
+    /// Result buffer for `asctime`/`ctime`.
+    ///
+    /// 26 bytes is the maximum a conforming `asctime` can produce
+    /// (`"Www Mmm dd hh:mm:ss yyyy\n\0"`); 32 rounds it up and leaves room
+    /// for the out-of-range years `asctime` is allowed to refuse to format.
+    pub asctime: [u8; 32],
+
+    /// Result buffer for `inet_ntoa`.  Exactly fits `"255.255.255.255\0"`.
+    pub inet_ntoa: [u8; 16],
+
+    /// Result web for `gethostbyname`.
+    pub hostent: crate::socket::HostentBuf,
+
+    /// Result web for `gethostbyaddr`, kept separate so a reverse lookup
+    /// does not clobber a forward one.
+    pub hostent_rev: crate::socket::HostentBuf,
+
+    /// Result web for `getservbyname`/`getservbyport`.
+    pub servent: crate::socket::ServentBuf,
+
+    /// Result web for `getprotobyname`/`getprotobynumber`.
+    pub protoent: crate::socket::ProtoentBuf,
 }
 
 impl PerThread {
@@ -73,7 +107,26 @@ impl PerThread {
     ///
     /// Must be bit-identical to all-zero: a thread's block is carved out of
     /// fresh anonymous memory and is never explicitly initialised.
-    pub const ZERO: Self = Self { errno: 0 };
+    pub const ZERO: Self = Self {
+        errno: 0,
+        tm: crate::time::Tm {
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 0,
+            tm_mon: 0,
+            tm_year: 0,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: 0,
+        },
+        asctime: [0; 32],
+        inet_ntoa: [0; 16],
+        hostent: crate::socket::HostentBuf::ZERO,
+        hostent_rev: crate::socket::HostentBuf::ZERO,
+        servent: crate::socket::ServentBuf::ZERO,
+        protoent: crate::socket::ProtoentBuf::ZERO,
+    };
 }
 
 /// Bytes reserved for the per-thread block, rounded up so that placing it
@@ -152,6 +205,39 @@ mod tests {
         assert!(BLOCK_SIZE >= core::mem::size_of::<PerThread>() as u64);
     }
 
+    /// Every thread's stack+TLS mapping pays for this block, so it has to
+    /// stay small.  If a new buffer pushes past the budget, weigh it against
+    /// making that one buffer lazily allocated instead of raising this.
+    #[test]
+    fn the_block_stays_small_enough_to_ride_in_every_thread() {
+        assert!(
+            BLOCK_SIZE <= 2048,
+            "per-thread block grew to {BLOCK_SIZE} bytes"
+        );
+    }
+
+    /// The load-bearing invariant of this module: a thread's block is fresh
+    /// anonymous memory that is never explicitly initialised, so all-zero
+    /// must be a *valid* `PerThread` and must agree with [`PerThread::ZERO`].
+    ///
+    /// `mem::zeroed` also earns its keep at compile time — rustc's
+    /// `invalid_value` lint rejects it outright if anyone ever adds a field
+    /// whose zero bit pattern is invalid (a reference, a `NonNull`, an enum
+    /// with no zero discriminant), which is exactly the mistake that would
+    /// otherwise be silent UB on every newly-created thread.
+    #[test]
+    fn a_zero_filled_block_is_valid_and_matches_zero() {
+        // SAFETY: every field is an integer, a byte array, a raw pointer, or
+        // a `repr(C)` struct of those, so all-zero is a valid value.
+        let zeroed: PerThread = unsafe { core::mem::zeroed() };
+        assert_eq!(zeroed.errno, PerThread::ZERO.errno);
+        assert_eq!(zeroed.asctime, PerThread::ZERO.asctime);
+        assert_eq!(zeroed.inet_ntoa, PerThread::ZERO.inet_ntoa);
+        assert_eq!(zeroed.tm.tm_sec, PerThread::ZERO.tm.tm_sec);
+        assert_eq!(zeroed.tm.tm_year, PerThread::ZERO.tm.tm_year);
+        assert_eq!(zeroed.tm.tm_isdst, PerThread::ZERO.tm.tm_isdst);
+    }
+
     #[test]
     fn current_is_stable_within_a_thread() {
         assert_eq!(current(), current());
@@ -190,5 +276,37 @@ mod tests {
         unsafe {
             (*current()).errno = 0;
         }
+    }
+
+    /// End-to-end version of the above, through the actual libc entry points
+    /// rather than the raw block: this is the race that made
+    /// `cargo test -p posix` flaky under the parallel harness
+    /// (`known-issues.md` TD-POSIX-TEST-PARALLEL).  Two threads hammering
+    /// `getprotobynumber` with different arguments must each keep reading
+    /// their own answer.
+    #[test]
+    fn netdb_results_are_not_shared_between_threads() {
+        /// Look up `number` and read the name back, `rounds` times, failing
+        /// if the name ever belongs to a different protocol.
+        fn hammer(number: i32, expect: &[u8], rounds: usize) {
+            for _ in 0..rounds {
+                // Takes a plain integer; returns a pointer into this
+                // thread's own block.
+                let p = crate::socket::getprotobynumber(number);
+                assert!(!p.is_null(), "no entry for protocol {number}");
+                // SAFETY: non-null result, and `p_name` points at this
+                // thread's NUL-terminated name buffer.
+                let name = unsafe {
+                    let n = (*p).p_name;
+                    core::slice::from_raw_parts(n, crate::string::strlen(n))
+                };
+                assert_eq!(name, expect, "protocol {number} read another thread's name");
+            }
+        }
+
+        const ROUNDS: usize = 2000;
+        let other = std::thread::spawn(|| hammer(17, b"udp", ROUNDS));
+        hammer(6, b"tcp", ROUNDS);
+        other.join().expect("child thread panicked");
     }
 }

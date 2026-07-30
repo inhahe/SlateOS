@@ -766,32 +766,25 @@ pub struct Tm {
     pub tm_isdst: i32,
 }
 
-/// Static storage for gmtime/localtime (not thread-safe per POSIX).
-static mut TM_RESULT: Tm = Tm {
-    tm_sec: 0,
-    tm_min: 0,
-    tm_hour: 0,
-    tm_mday: 0,
-    tm_mon: 0,
-    tm_year: 0,
-    tm_wday: 0,
-    tm_yday: 0,
-    tm_isdst: 0,
-};
-
 /// Convert time_t to broken-down UTC time.
 ///
-/// Returns a pointer to a static Tm (not thread-safe).
+/// Returns a pointer to storage owned by the library, which the *calling
+/// thread's* next `gmtime`/`localtime`/`ctime` overwrites — the classic
+/// POSIX contract, and the reason `gmtime_r` exists.  The buffer lives in
+/// [`crate::perthread`], so another thread calling `gmtime` concurrently
+/// cannot clobber this result.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gmtime(timep: *const TimeT) -> *mut Tm {
     if timep.is_null() {
         return core::ptr::null_mut();
     }
     let secs = unsafe { *timep };
-    // SAFETY: Single-threaded access to static storage.
-    let tm = unsafe { &mut *core::ptr::addr_of_mut!(TM_RESULT) };
-    secs_to_tm(secs, tm);
-    core::ptr::addr_of_mut!(*tm)
+    // SAFETY: `perthread::current()` is non-null and valid for this thread,
+    // and no other thread holds a pointer into this block.
+    let tm = unsafe { &raw mut (*crate::perthread::current()).tm };
+    // SAFETY: as above — `tm` points at this thread's own `Tm`.
+    secs_to_tm(secs, unsafe { &mut *tm });
+    tm
 }
 
 /// Convert time_t to broken-down local time.
@@ -835,8 +828,10 @@ pub extern "C" fn timelocal(tm: *mut Tm) -> TimeT {
 
 /// Convert broken-down time to string.
 ///
-/// Returns a pointer to a static string in the format
-/// "Wed Jun 30 21:49:08 1993\n\0".
+/// Returns a pointer to a string in the format
+/// "Wed Jun 30 21:49:08 1993\n\0", in storage owned by the library and
+/// overwritten by the *calling thread's* next `asctime`/`ctime` (see
+/// [`crate::perthread`]; `asctime_r` is the reentrant form).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn asctime(tm: *const Tm) -> *const u8 {
     if tm.is_null() {
@@ -845,15 +840,16 @@ pub extern "C" fn asctime(tm: *const Tm) -> *const u8 {
 
     let t = unsafe { &*tm };
 
-    // SAFETY: Single-threaded access to static buffer.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(ASCTIME_BUF) };
+    // SAFETY: `perthread::current()` is non-null and valid for this thread,
+    // and no other thread holds a pointer into this block.  `t` may alias
+    // the same block (`ctime` passes `localtime`'s result straight in), but
+    // `format_asctime` reads `t` fully before writing the buffer, and the
+    // two fields do not overlap.
+    let buf = unsafe { &mut (*crate::perthread::current()).asctime };
     let len = format_asctime(t, buf);
     let _ = len; // We always null-terminate.
     buf.as_ptr()
 }
-
-/// Static buffer for asctime.
-static mut ASCTIME_BUF: [u8; 32] = [0u8; 32];
 
 /// Convert time_t to string.
 ///

@@ -582,31 +582,26 @@ pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
 
 /// Convert a network-order IPv4 address to a dotted-decimal string.
 ///
-/// Returns a pointer to a static buffer (not thread-safe, per POSIX).
-///
-/// # Safety
-///
-/// The returned pointer is valid until the next call to `inet_ntoa`.
+/// Returns a pointer to library-owned storage, overwritten by the *calling
+/// thread's* next `inet_ntoa` (see [`crate::perthread`]).  `inet_ntop` is
+/// the reentrant alternative.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inet_ntoa(addr: InAddr) -> *const u8 {
-    static mut NTOA_BUF: [u8; 16] = [0u8; 16];
-
     let octets = addr.s_addr.to_ne_bytes();
     let mut pos: usize = 0;
 
-    // SAFETY: Single-threaded access; buffer is 16 bytes, max output
-    // is "255.255.255.255\0" = 16 bytes.
-    unsafe {
-        let buf = core::ptr::addr_of_mut!(NTOA_BUF);
-        for (idx, &octet) in octets.iter().enumerate() {
-            if idx > 0 {
-                write_byte(&mut *buf, &mut pos, b'.');
-            }
-            write_u8_decimal(&mut *buf, &mut pos, octet);
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block.  The buffer is 16 bytes and
+    // the longest output is "255.255.255.255\0", exactly 16.
+    let buf = unsafe { &mut (*crate::perthread::current()).inet_ntoa };
+    for (idx, &octet) in octets.iter().enumerate() {
+        if idx > 0 {
+            write_byte(buf, &mut pos, b'.');
         }
-        write_byte(&mut *buf, &mut pos, 0); // null terminate
-        (*buf).as_ptr()
+        write_u8_decimal(buf, &mut pos, octet);
     }
+    write_byte(buf, &mut pos, 0); // null terminate
+    buf.as_ptr()
 }
 
 /// Write a single byte to a buffer.
@@ -3591,6 +3586,7 @@ pub unsafe extern "C" fn getsockname(fd: i32, addr: *mut Sockaddr, addrlen: *mut
 
 /// Host entry for DNS results.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Hostent {
     /// Official hostname.
     pub h_name: *const u8,
@@ -3604,23 +3600,101 @@ pub struct Hostent {
     pub h_addr_list: *const *const u8,
 }
 
-/// Static storage for gethostbyname result (not thread-safe, per POSIX).
-static mut HOSTENT_NAME: [u8; 256] = [0u8; 256];
-static mut HOSTENT_ADDR: [u8; 4] = [0u8; 4];
-static mut HOSTENT_ADDR_PTR: [*const u8; 2] = [core::ptr::null(); 2];
-static mut HOSTENT_ALIASES: [*const u8; 1] = [core::ptr::null()];
-static mut HOSTENT_RESULT: Hostent = Hostent {
-    h_name: core::ptr::null(),
-    h_aliases: core::ptr::null(),
-    h_addrtype: 0,
-    h_length: 0,
-    h_addr_list: core::ptr::null(),
-};
+/// Backing storage for one `hostent` result: the `struct hostent` itself
+/// plus everything its pointers point at.
+///
+/// A `hostent` is a web of pointers into library-owned memory, so the whole
+/// web has to be kept together and have the same lifetime.  One of these
+/// lives in each thread's [`crate::perthread`] block, which is what makes
+/// `gethostbyname` safe to call from two threads at once: each gets its own
+/// web.  Within a thread the next call still overwrites the previous result
+/// — that is the POSIX contract, and why `gethostbyname_r` exists.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct HostentBuf {
+    /// Null-terminated hostname; 256 is `NI_MAXHOST`, and a DNS name is at
+    /// most 253 characters, so this never truncates a legal name.
+    name: [u8; 256],
+    /// The single IPv4 address, in network byte order.
+    addr: [u8; 4],
+    /// `h_addr_list`: `[&addr, NULL]`.
+    addr_list: [*const u8; 2],
+    /// `h_aliases`: always empty — our resolver returns no CNAME chain.
+    aliases: [*const u8; 1],
+    /// The `struct hostent` handed back to the caller.
+    result: Hostent,
+}
+
+impl HostentBuf {
+    /// Initial state, which must be bit-identical to all-zero — see
+    /// [`crate::perthread::PerThread::ZERO`].  Null pointers are the correct
+    /// "no result yet" value for every pointer field.
+    pub const ZERO: Self = Self {
+        name: [0; 256],
+        addr: [0; 4],
+        addr_list: [core::ptr::null(); 2],
+        aliases: [core::ptr::null()],
+        result: Hostent {
+            h_name: core::ptr::null(),
+            h_aliases: core::ptr::null(),
+            h_addrtype: 0,
+            h_length: 0,
+            h_addr_list: core::ptr::null(),
+        },
+    };
+
+    /// Store `name` (truncated to fit, always null-terminated) and `addr`,
+    /// wire up the pointer web, and return the assembled `hostent`.
+    ///
+    /// Written against a raw pointer rather than `&mut self` because the
+    /// result it builds contains pointers *into* the same object; deriving
+    /// them all from one raw pointer keeps their provenance valid for as
+    /// long as the caller holds the returned `hostent`.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point at a `HostentBuf` the calling thread owns
+    /// exclusively — in practice the one inside its own `PerThread` block —
+    /// and `name` must be readable for `name_len` bytes.
+    unsafe fn fill(this: *mut Self, name: *const u8, name_len: usize, addr: [u8; 4]) -> *const Hostent {
+        // SAFETY: the caller guarantees `this` is a valid, exclusively-owned
+        // `HostentBuf` and that `name` is readable for `name_len` bytes.
+        // The two never overlap: `name` is caller memory or a stack buffer,
+        // `this` is in the thread's TLS block.
+        unsafe {
+            let name_buf = &raw mut (*this).name;
+            // Leave room for the terminator: `name` is 256 bytes, so at most
+            // 255 characters plus a NUL.
+            let copy_len = core::cmp::min(name_len, 255);
+            core::ptr::copy_nonoverlapping(name, name_buf.cast::<u8>(), copy_len);
+            name_buf.cast::<u8>().add(copy_len).write(0);
+
+            let addr_buf = &raw mut (*this).addr;
+            addr_buf.write(addr);
+
+            let addr_list = &raw mut (*this).addr_list;
+            addr_list.cast::<*const u8>().write(addr_buf.cast::<u8>());
+            addr_list.cast::<*const u8>().add(1).write(core::ptr::null());
+
+            let aliases = &raw mut (*this).aliases;
+            aliases.cast::<*const u8>().write(core::ptr::null());
+
+            let result = &raw mut (*this).result;
+            (*result).h_name = name_buf.cast::<u8>();
+            (*result).h_aliases = aliases.cast::<*const u8>();
+            (*result).h_addrtype = AF_INET;
+            (*result).h_length = 4;
+            (*result).h_addr_list = addr_list.cast::<*const u8>();
+            result
+        }
+    }
+}
 
 /// Resolve a hostname to an IPv4 address.
 ///
-/// Returns a pointer to a static `Hostent`, or NULL on failure.
-/// The returned pointer is valid until the next call.
+/// Returns a pointer to library-owned storage, or NULL on failure.  The
+/// result is valid until the *calling thread's* next `gethostbyname` (see
+/// [`HostentBuf`]).
 ///
 /// # Safety
 ///
@@ -3650,39 +3724,16 @@ pub unsafe extern "C" fn gethostbyname(name: *const u8) -> *const Hostent {
         return core::ptr::null();
     }
 
-    // SAFETY: Single-threaded access to static storage.
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block; `name` is readable for
+    // `name_len` bytes (that is where `strlen` found the terminator).
     unsafe {
-        // Copy the hostname into our static buffer.
-        let buf = core::ptr::addr_of_mut!(HOSTENT_NAME);
-        let copy_len = core::cmp::min(name_len, 255);
-        core::ptr::copy_nonoverlapping(name, (*buf).as_mut_ptr(), copy_len);
-        // Null-terminate the hostname copy.
-        if let Some(slot) = (*buf).get_mut(copy_len) {
-            *slot = 0;
-        }
-
-        // Store the resolved address.
-        let addr = core::ptr::addr_of_mut!(HOSTENT_ADDR);
-        (*addr) = resolved;
-
-        // Set up address list: [&addr, NULL].
-        let addr_ptr = core::ptr::addr_of_mut!(HOSTENT_ADDR_PTR);
-        (*addr_ptr)[0] = (*addr).as_ptr();
-        (*addr_ptr)[1] = core::ptr::null();
-
-        // Set up empty alias list.
-        let aliases = core::ptr::addr_of_mut!(HOSTENT_ALIASES);
-        (*aliases)[0] = core::ptr::null();
-
-        // Assemble the hostent.
-        let result = core::ptr::addr_of_mut!(HOSTENT_RESULT);
-        (*result).h_name = (*buf).as_ptr();
-        (*result).h_aliases = (*aliases).as_ptr();
-        (*result).h_addrtype = AF_INET;
-        (*result).h_length = 4;
-        (*result).h_addr_list = (*addr_ptr).as_ptr();
-
-        result
+        HostentBuf::fill(
+            &raw mut (*crate::perthread::current()).hostent,
+            name,
+            name_len,
+            resolved,
+        )
     }
 }
 
@@ -3718,26 +3769,15 @@ pub unsafe extern "C" fn gethostbyname2(name: *const u8, af: i32) -> *const Host
 // gethostbyaddr — reverse DNS lookup
 // ---------------------------------------------------------------------------
 
-/// Static storage for gethostbyaddr (separate from gethostbyname to allow
-/// interleaved usage, even though POSIX doesn't guarantee it).
-static mut HOSTENT_REV_NAME: [u8; 256] = [0u8; 256];
-static mut HOSTENT_REV_ADDR: [u8; 4] = [0u8; 4];
-static mut HOSTENT_REV_ADDR_PTR: [*const u8; 2] = [core::ptr::null(); 2];
-static mut HOSTENT_REV_ALIASES: [*const u8; 1] = [core::ptr::null()];
-static mut HOSTENT_REV_RESULT: Hostent = Hostent {
-    h_name: core::ptr::null(),
-    h_aliases: core::ptr::null(),
-    h_addrtype: 0,
-    h_length: 0,
-    h_addr_list: core::ptr::null(),
-};
-
 /// Reverse-resolve an IPv4 address to a hostname.
 ///
 /// Given a network-byte-order IPv4 address (4 bytes at `*addr`),
 /// performs a DNS PTR lookup via `SYS_DNS_REVERSE_RESOLVE`.
 ///
-/// Returns a pointer to a static `Hostent`, or NULL on failure.
+/// Returns a pointer to library-owned storage, or NULL on failure.  This
+/// uses a *different* [`HostentBuf`] from `gethostbyname`, so interleaving
+/// forward and reverse lookups doesn't clobber either result — POSIX makes
+/// no such promise, but callers rely on it and one extra buffer is cheap.
 ///
 /// # Safety
 ///
@@ -3779,40 +3819,20 @@ pub unsafe extern "C" fn gethostbyaddr(
         return core::ptr::null();
     }
 
-    let name_len = ret as usize;
-    let copy_len = if name_len < 255 { name_len } else { 255 };
+    // The kernel reports the name length; clamp it to what it could have
+    // written rather than trusting it.
+    let name_len = core::cmp::min(ret as usize, name_buf.len());
 
-    // SAFETY: Single-threaded access to static storage.
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block; `name_buf` is a local array
+    // readable for `name_len <= name_buf.len()` bytes.
     unsafe {
-        // Copy the resolved hostname into static storage.
-        let buf = core::ptr::addr_of_mut!(HOSTENT_REV_NAME);
-        core::ptr::copy_nonoverlapping(name_buf.as_ptr(), (*buf).as_mut_ptr(), copy_len);
-        if let Some(slot) = (*buf).get_mut(copy_len) {
-            *slot = 0;
-        }
-
-        // Store the address.
-        let stored_addr = core::ptr::addr_of_mut!(HOSTENT_REV_ADDR);
-        (*stored_addr) = ip_bytes;
-
-        // Set up address list: [&addr, NULL].
-        let addr_ptr = core::ptr::addr_of_mut!(HOSTENT_REV_ADDR_PTR);
-        (*addr_ptr)[0] = (*stored_addr).as_ptr();
-        (*addr_ptr)[1] = core::ptr::null();
-
-        // Empty alias list.
-        let aliases = core::ptr::addr_of_mut!(HOSTENT_REV_ALIASES);
-        (*aliases)[0] = core::ptr::null();
-
-        // Assemble the result.
-        let result = core::ptr::addr_of_mut!(HOSTENT_REV_RESULT);
-        (*result).h_name = (*buf).as_ptr();
-        (*result).h_aliases = (*aliases).as_ptr();
-        (*result).h_addrtype = AF_INET;
-        (*result).h_length = 4;
-        (*result).h_addr_list = (*addr_ptr).as_ptr();
-
-        result
+        HostentBuf::fill(
+            &raw mut (*crate::perthread::current()).hostent_rev,
+            name_buf.as_ptr(),
+            name_len,
+            ip_bytes,
+        )
     }
 }
 
@@ -5444,6 +5464,7 @@ pub extern "C" fn freeifaddrs(_ifa: *mut Ifaddrs) {
 
 /// Service database entry.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Servent {
     /// Official service name.
     pub s_name: *const u8,
@@ -5601,31 +5622,60 @@ static SERVICES: &[ServiceEntry] = &[
     },
 ];
 
-/// Static storage for getservbyname/getservbyport results.
-static mut SERVENT_NAME: [u8; 32] = [0u8; 32];
-static mut SERVENT_PROTO: [u8; 8] = [0u8; 8];
-static mut SERVENT_ALIASES: [*const u8; 1] = [core::ptr::null()];
-static mut SERVENT_RESULT: Servent = Servent {
-    s_name: core::ptr::null(),
-    s_aliases: core::ptr::null(),
-    s_port: 0,
-    s_proto: core::ptr::null(),
-};
+/// Backing storage for one `servent` result: the struct plus the strings
+/// its pointers point at.
+///
+/// One per thread (in [`crate::perthread`]), so two threads can call
+/// `getservbyname` at once without reading each other's answer.  Within a
+/// thread the next call still overwrites it, as POSIX specifies.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ServentBuf {
+    /// `s_name`; 32 bytes fits every entry in [`SERVICES`] with room to
+    /// spare (the longest is "postgresql").
+    name: [u8; 32],
+    /// `s_proto`; only "tcp" and "udp" ever appear.
+    proto: [u8; 8],
+    /// `s_aliases`: always empty — our table records no alternate names.
+    aliases: [*const u8; 1],
+    /// The `struct servent` handed back to the caller.
+    result: Servent,
+}
 
-/// Fill the static Servent from a ServiceEntry.
+impl ServentBuf {
+    /// Initial state; must be bit-identical to all-zero, see
+    /// [`crate::perthread::PerThread::ZERO`].
+    pub const ZERO: Self = Self {
+        name: [0; 32],
+        proto: [0; 8],
+        aliases: [core::ptr::null()],
+        result: Servent {
+            s_name: core::ptr::null(),
+            s_aliases: core::ptr::null(),
+            s_port: 0,
+            s_proto: core::ptr::null(),
+        },
+    };
+}
+
+/// Fill the calling thread's `Servent` from a `ServiceEntry`.
 ///
 /// # Safety
 ///
-/// Modifies static mutable storage.  Not thread-safe.
+/// Must be called on a thread whose `PerThread` block is not concurrently
+/// in use by anyone else — which is what `perthread::current()` guarantees.
 unsafe fn fill_servent(entry: &ServiceEntry) -> *const Servent {
-    let name_ptr = core::ptr::addr_of_mut!(SERVENT_NAME).cast::<u8>();
-    let proto_ptr = core::ptr::addr_of_mut!(SERVENT_PROTO).cast::<u8>();
-    let aliases_ptr = core::ptr::addr_of_mut!(SERVENT_ALIASES);
-    let result_ptr = core::ptr::addr_of_mut!(SERVENT_RESULT);
-
-    // SAFETY: All static buffers are valid for the lifetime of the program,
-    // and we only write within their bounds (name≤31, proto≤7).
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block.  Every write below is bounds-
+    // checked against the field it targets (name ≤ 31, proto ≤ 7, leaving
+    // room for the terminator that the preceding zero-fill provides).
     unsafe {
+        let this = &raw mut (*crate::perthread::current()).servent;
+        let name_ptr = (&raw mut (*this).name).cast::<u8>();
+        let proto_ptr = (&raw mut (*this).proto).cast::<u8>();
+        let aliases_ptr = (&raw mut (*this).aliases).cast::<*const u8>();
+        let result_ptr = &raw mut (*this).result;
+
         // Zero and copy name.
         let nlen = entry.name.len().min(31);
         core::ptr::write_bytes(name_ptr, 0, 32);
@@ -5637,21 +5687,22 @@ unsafe fn fill_servent(entry: &ServiceEntry) -> *const Servent {
         core::ptr::copy_nonoverlapping(entry.proto.as_ptr(), proto_ptr, plen);
 
         // Empty alias list.
-        (*aliases_ptr)[0] = core::ptr::null();
+        aliases_ptr.write(core::ptr::null());
 
         // Assemble result.
         (*result_ptr).s_name = name_ptr;
-        (*result_ptr).s_aliases = (*aliases_ptr).as_ptr();
+        (*result_ptr).s_aliases = aliases_ptr;
         (*result_ptr).s_port = i32::from(entry.port.to_be());
         (*result_ptr).s_proto = proto_ptr;
-    }
 
-    result_ptr
+        result_ptr
+    }
 }
 
 /// Look up a service by name and protocol.
 ///
-/// Returns a pointer to a static `Servent`, or NULL if not found.
+/// Returns a pointer to library-owned storage (valid until the calling
+/// thread's next `getservby*` call), or NULL if not found.
 ///
 /// # Safety
 ///
@@ -5713,6 +5764,7 @@ pub unsafe extern "C" fn getservbyport(port: i32, proto: *const u8) -> *const Se
 
 /// Protocol database entry.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Protoent {
     /// Official protocol name.
     pub p_name: *const u8,
@@ -5787,29 +5839,59 @@ static PROTOCOLS: &[ProtoEntry] = &[
     },
 ];
 
-static mut PROTOENT_NAME: [u8; 16] = [0u8; 16];
-static mut PROTOENT_ALIASES: [*const u8; 2] = [core::ptr::null(); 2];
-static mut PROTOENT_ALIAS_BUF: [u8; 16] = [0u8; 16];
-static mut PROTOENT_RESULT: Protoent = Protoent {
-    p_name: core::ptr::null(),
-    p_aliases: core::ptr::null(),
-    p_proto: 0,
-};
+/// Backing storage for one `protoent` result: the struct plus the strings
+/// its pointers point at.
+///
+/// One per thread (in [`crate::perthread`]).  This is the buffer whose
+/// process-wide predecessor made `cargo test -p posix` flaky under the
+/// parallel harness (`known-issues.md` TD-POSIX-TEST-PARALLEL): two tests
+/// calling `getprotoby*` at once each saw the other's protocol name.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProtoentBuf {
+    /// `p_name`; 16 bytes covers every entry in [`PROTOCOLS`].
+    name: [u8; 16],
+    /// `p_aliases`: at most one alias plus the NULL terminator.
+    aliases: [*const u8; 2],
+    /// Storage for that one alias.
+    alias: [u8; 16],
+    /// The `struct protoent` handed back to the caller.
+    result: Protoent,
+}
 
-/// Fill the static Protoent from a ProtoEntry.
+impl ProtoentBuf {
+    /// Initial state; must be bit-identical to all-zero, see
+    /// [`crate::perthread::PerThread::ZERO`].
+    pub const ZERO: Self = Self {
+        name: [0; 16],
+        aliases: [core::ptr::null(); 2],
+        alias: [0; 16],
+        result: Protoent {
+            p_name: core::ptr::null(),
+            p_aliases: core::ptr::null(),
+            p_proto: 0,
+        },
+    };
+}
+
+/// Fill the calling thread's `Protoent` from a `ProtoEntry`.
 ///
 /// # Safety
 ///
-/// Modifies static mutable storage.
+/// Must be called on a thread whose `PerThread` block is not concurrently
+/// in use by anyone else — which is what `perthread::current()` guarantees.
 unsafe fn fill_protoent(entry: &ProtoEntry) -> *const Protoent {
-    let name_raw = core::ptr::addr_of_mut!(PROTOENT_NAME).cast::<u8>();
-    let aliases_ptr = core::ptr::addr_of_mut!(PROTOENT_ALIASES);
-    let alias_buf_raw = core::ptr::addr_of_mut!(PROTOENT_ALIAS_BUF).cast::<u8>();
-    let result_ptr = core::ptr::addr_of_mut!(PROTOENT_RESULT);
-
-    // SAFETY: All static buffers are valid for the lifetime of the program,
-    // and we only write within their bounds (name≤15, alias≤15).
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block.  Both string copies are
+    // clamped to 15 bytes into 16-byte fields that were just zeroed, so the
+    // terminator is always present.
     unsafe {
+        let this = &raw mut (*crate::perthread::current()).protoent;
+        let name_raw = (&raw mut (*this).name).cast::<u8>();
+        let aliases_ptr = (&raw mut (*this).aliases).cast::<*const u8>();
+        let alias_buf_raw = (&raw mut (*this).alias).cast::<u8>();
+        let result_ptr = &raw mut (*this).result;
+
         // Zero and copy name.
         let nlen = entry.name.len().min(15);
         core::ptr::write_bytes(name_raw, 0, 16);
@@ -5820,23 +5902,26 @@ unsafe fn fill_protoent(entry: &ProtoEntry) -> *const Protoent {
             let alen = alias.len().min(15);
             core::ptr::write_bytes(alias_buf_raw, 0, 16);
             core::ptr::copy_nonoverlapping(alias.as_ptr(), alias_buf_raw, alen);
-            (*aliases_ptr)[0] = alias_buf_raw;
-            (*aliases_ptr)[1] = core::ptr::null();
+            aliases_ptr.write(alias_buf_raw);
         } else {
-            (*aliases_ptr)[0] = core::ptr::null();
+            aliases_ptr.write(core::ptr::null());
         }
+        // Terminate unconditionally: the one-alias case writes slot 0, so
+        // slot 1 must be NULL either way.
+        aliases_ptr.add(1).write(core::ptr::null());
 
         (*result_ptr).p_name = name_raw;
-        (*result_ptr).p_aliases = (*aliases_ptr).as_ptr();
+        (*result_ptr).p_aliases = aliases_ptr;
         (*result_ptr).p_proto = entry.number;
-    }
 
-    result_ptr
+        result_ptr
+    }
 }
 
 /// Look up a protocol by name.
 ///
-/// Returns a pointer to a static `Protoent`, or NULL if not found.
+/// Returns a pointer to library-owned storage (valid until the calling
+/// thread's next `getprotoby*` call), or NULL if not found.
 ///
 /// # Safety
 ///

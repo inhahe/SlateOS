@@ -6944,6 +6944,19 @@ impl Shell {
         }
     }
 
+    /// The value a subscript-less reference to `name` sees — the inverse of
+    /// [`Shell::set_scalar_store`], so it reads element/key `0` of an array
+    /// rather than the (unreachable) scalar slot of the same name.
+    fn scalar_store(&self, name: &str) -> Option<String> {
+        if self.arrays.contains_key(name) {
+            self.array_element(name, 0)
+        } else if self.assoc.contains_key(name) {
+            self.assoc_element(name, "0")
+        } else {
+            self.vars.get(name).cloned()
+        }
+    }
+
     /// Apply a variable assignment. `trace` is true only for a *bare* assignment
     /// command (`x=5`), which `set -x` echoes: an indexed-element or array
     /// assignment is traced here in source form (bash does not expand it for the
@@ -7431,6 +7444,13 @@ impl Shell {
                 // abandoned by a failed expansion leaves an unvalued array
                 // unvalued.
                 self.array_valued.insert(a.name.clone());
+                // A compound assignment onto a name that currently holds a
+                // *scalar* widens the type, carrying the old value in as element
+                // 0 — which an append then continues after, so `w=5; w+=(9)` is
+                // `([0]="5" [1]="9")` in bash. A non-append literal clears it
+                // again just below, but the migration still matters there: it is
+                // what empties the now-unreachable scalar slot of the same name.
+                self.array_kind_apply(&a.name, false);
                 // Phase 2 — clear, then bind.
                 if !a.append {
                     self.arrays.insert(a.name.clone(), BTreeMap::new());
@@ -19127,12 +19147,12 @@ impl Shell {
                 continue;
             }
             if assoc {
-                self.assoc.entry(base_name.to_string()).or_default();
+                self.array_kind_apply(base_name, true);
             } else if indexed || (subscript.is_some() && !self.assoc.contains_key(base_name)) {
                 // A subscripted name auto-creates an *indexed* array (bash) even
                 // with no explicit `-a` and no value — but never clobbers an
                 // existing associative array of the same name.
-                self.arrays.entry(base_name.to_string()).or_default();
+                self.array_kind_apply(base_name, false);
             }
             // Apply/remove the integer and case attributes before binding the
             // value, so a `declare -i x=5+3` initial value is evaluated
@@ -19336,11 +19356,6 @@ impl Shell {
         status
     }
 
-    /// Handle the combined `declare -A m=([k]=v)` / `declare -a a=(x y)` form,
-    /// where the array literal is an operand of a declaration builtin. Flags and
-    /// any scalar/plain operands in `argv` go through [`Shell::builtin_declare`];
-    /// each array literal is then marked with the declared kind (`-A` → assoc,
-    /// `-a`/default → indexed) and applied via [`Shell::apply_assignment`].
     /// Check whether `declare -A`/`declare -a` on `name` would reinterpret an
     /// array that already exists under the *other* kind.
     ///
@@ -19364,6 +19379,52 @@ impl Shell {
         }
     }
 
+    /// Give `name` an array kind, carrying any value it already holds as a
+    /// *scalar* in as element (or key) `0`.
+    ///
+    /// bash widens the type without discarding the value: `x=5; declare -a x`
+    /// yields `declare -a x=([0]="5")`, and `-A` the same with the numeric key
+    /// `0`. Even an empty scalar migrates (`n=; declare -a n` → `([0]="")`),
+    /// which is how the array ends up *valued* — `declare -p` prints `=(…)`
+    /// rather than the bare form. A name that holds nothing at all stays
+    /// unvalued (`declare -a fresh` → `declare -a fresh`).
+    ///
+    /// osh used to create an empty array and leave the scalar sitting in
+    /// `self.vars`, where nothing could reach it: `set_scalar_store` and every
+    /// read prefer the array once one exists, so `$x` and `${x[0]}` both came
+    /// back empty and `${#x[@]}` was 0. The value was not shadowed but lost, and
+    /// `declare -ai n` on a counter is a common enough idiom that it mattered.
+    /// It also fed the `+=` case: `w=5; declare -a w+=(9)` must yield
+    /// `([0]="5" [1]="9")`, which needs the `5` present before the literal binds.
+    fn array_kind_apply(&mut self, name: &str, assoc: bool) {
+        if assoc {
+            if self.assoc.contains_key(name) {
+                return;
+            }
+            let carried = self.vars.remove(name);
+            self.assoc.entry(name.to_string()).or_default();
+            if let Some(v) = carried {
+                self.assoc_set(name, "0".to_string(), v, false);
+                self.array_valued.insert(name.to_string());
+            }
+        } else {
+            if self.arrays.contains_key(name) {
+                return;
+            }
+            let carried = self.vars.remove(name);
+            let entry = self.arrays.entry(name.to_string()).or_default();
+            if let Some(v) = carried {
+                entry.insert(0, v);
+                self.array_valued.insert(name.to_string());
+            }
+        }
+    }
+
+    /// Handle the combined `declare -A m=([k]=v)` / `declare -a a=(x y)` form,
+    /// where the array literal is an operand of a declaration builtin. Flags and
+    /// any scalar/plain operands in `argv` go through [`Shell::builtin_declare`];
+    /// each array literal is marked with the declared kind (`-A` → assoc,
+    /// `-a`/default → indexed) and applied via [`Shell::apply_assignment`].
     fn exec_declare_with_arrays(
         &mut self,
         argv: &[String],
@@ -19484,9 +19545,9 @@ impl Shell {
                 return Flow::Discard;
             }
             if assoc {
-                self.assoc.entry(a.name.clone()).or_default();
+                self.array_kind_apply(&a.name, true);
             } else if indexed {
-                self.arrays.entry(a.name.clone()).or_default();
+                self.array_kind_apply(&a.name, false);
             }
             // Apply the value attributes to the array name (mirrors the scalar
             // path in `builtin_declare`).
@@ -19638,23 +19699,28 @@ impl Shell {
                 status = 1;
                 continue;
             }
-            if assoc {
-                self.assoc.entry(name.clone()).or_default();
-            } else if indexed {
-                self.arrays.entry(name.clone()).or_default();
+            // `-a`/`-A` here take effect only when the operand carries a value:
+            // the array is created by the *assignment*, so a bare `readonly -a
+            // name` leaves the name the plain scalar it was (`x=5; readonly -a x`
+            // still reports `declare -r x="5"`, and `readonly -a fresh` reports
+            // `declare -r fresh`), while `readonly -a x=5` reports
+            // `declare -ar x=([0]="5")`. An array literal operand
+            // (`readonly a=(1 2)`) never reaches here — it is a `decl_arrays`
+            // entry, handled by `exec_declare_with_arrays`.
+            if value.is_some() && (assoc || indexed) {
+                self.array_kind_apply(&name, assoc);
             }
-            if let Some(v) = value
-                && !assoc
-                && !indexed
-            {
+            if let Some(v) = value {
                 let stored = if append {
-                    let mut cur = self.vars.get(&name).cloned().unwrap_or_default();
+                    let mut cur = self.scalar_store(&name).unwrap_or_default();
                     cur.push_str(&v);
                     cur
                 } else {
                     v
                 };
-                self.vars.insert(name.clone(), stored);
+                // Routes to element/key 0 when the name is an array — the same
+                // rule a bare `name=value` follows.
+                self.set_scalar_store(&name, stored);
             } else if !self.vars.contains_key(&name)
                 && !self.arrays.contains_key(&name)
                 && !self.assoc.contains_key(&name)
@@ -37766,6 +37832,72 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "declare -a g=(x y); f() { local -A g=([k]=v); echo \"in=${g[k]} n=${#g[@]}\"; }; f; echo \"out=${g[0]} n=${#g[@]}\"",
         );
         assert_eq!(o4, "in=v n=1\nout=x n=2\n");
+    }
+
+    #[test]
+    fn giving_a_scalar_an_array_kind_keeps_its_value_as_element_zero() {
+        // Widening the type does not discard the value: bash reports
+        // `declare -a x=([0]="5")`, and a subscript-less read still finds it.
+        // osh used to create an *empty* array and leave the `5` in the scalar
+        // slot, where nothing could reach it — `$x`, `${x[0]}` and `${#x[@]}`
+        // all came back empty, so the value was lost rather than shadowed.
+        assert_eq!(
+            run("x=5; declare -a x; declare -p x; echo \"[$x] [${x[0]}] n=${#x[@]}\"").0,
+            "declare -a x=([0]=\"5\")\n[5] [5] n=1\n"
+        );
+        // `-A` the same, under the numeric key `0`.
+        assert_eq!(
+            run("y=5; declare -A y; echo \"[${y[0]}] n=${#y[@]}\"").0,
+            "[5] n=1\n"
+        );
+        // Even an empty scalar migrates, which is what leaves the array *valued*
+        // — `declare -p` prints `=(…)` rather than the bare form. A name holding
+        // nothing at all stays unvalued.
+        assert_eq!(
+            run("n=; declare -a n; declare -p n; declare -a fresh; declare -p fresh").0,
+            "declare -a n=([0]=\"\")\ndeclare -a fresh\n"
+        );
+        // The value carries across the other spellings, and is *not* re-read as
+        // an arithmetic expression by a simultaneous `-i`.
+        assert_eq!(
+            run("t=5; typeset -a t; declare -p t; i=1+1; declare -ai i; declare -p i").0,
+            "declare -a t=([0]=\"5\")\ndeclare -ai i=([0]=\"1+1\")\n"
+        );
+        // The migration is what makes an appending literal continue *after* the
+        // old value instead of overwriting it.
+        assert_eq!(
+            run("w=5; declare -a w+=(9); declare -p w; v=5; v+=(9); declare -p v").0,
+            "declare -a w=([0]=\"5\" [1]=\"9\")\ndeclare -a v=([0]=\"5\" [1]=\"9\")\n"
+        );
+        // A non-appending literal still replaces it.
+        assert_eq!(
+            run("a=5; declare -a a=(1); declare -p a").0,
+            "declare -a a=([0]=\"1\")\n"
+        );
+    }
+
+    #[test]
+    fn readonly_array_flags_need_a_value_to_take_effect() {
+        // bash's `readonly -a`/`-A` create the array through the *assignment*, so
+        // a bare name keeps whatever kind it had: `x=5; readonly -a x` still
+        // reports `declare -r x="5"`, and an unset name stays a plain scalar.
+        // osh applied the attribute regardless, turning the scalar into an
+        // unreachable one and reporting a `-a` bash does not.
+        assert_eq!(
+            run("x=5; readonly -a x; declare -p x; readonly -A fresh; declare -p fresh").0,
+            "declare -r x=\"5\"\ndeclare -r fresh\n"
+        );
+        // With a value the flag does apply, and the value lands in element 0.
+        assert_eq!(
+            run("readonly -a rx=7; declare -p rx; readonly -A ry=7; declare -p ry").0,
+            "declare -ar rx=([0]=\"7\")\ndeclare -Ar ry=([0]=\"7\" )\n"
+        );
+        // A subscript-less value onto an existing array targets element 0 rather
+        // than a scalar slot of the same name (the rule `name=value` follows).
+        assert_eq!(
+            run("z=(1 2); readonly z=5; declare -p z").0,
+            "declare -ar z=([0]=\"5\" [1]=\"2\")\n"
+        );
     }
 
     #[test]

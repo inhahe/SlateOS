@@ -52,6 +52,38 @@ echo "rc=$?"
 echo a[b!c]
 echo "rc=$?"
 
+# The bracket rule has one exception, and it is the expansion character itself:
+# bash compares the character *after* the `!` against `history_expansion_char`,
+# so a doubled `!` gets through where every other designator is turned away.
+# Each expanding line is preceded by a fixed line so that what `!!` names is
+# predictable — and bash echoes the line it expanded, so these print twice.
+echo one two
+echo [!!]
+echo one two
+echo [!!:1]
+echo one two
+echo x[!!]y
+echo one two
+echo [[!!]]
+# The `!` of a `[!]…]` bracket — where the `]` is a literal member rather than
+# the close — is inhibited like any other, and that does not carry over to a
+# later `!!` on the same line.
+echo one two
+echo [!]!!]
+# `[!!!]` is therefore the doubled `!` followed by a leftover `!]`, which is an
+# event reference like any other and fails.
+echo before-2b
+echo [!!!]
+echo "rc=$?"
+# Every other designator directly after the `[` stays inhibited.
+echo [!^]
+echo [!$]
+echo [!:0]
+echo [!-1]
+echo [!*]
+echo [!%]
+echo a[!$]b
+
 # --- `!(pat)`: extglob negation ------------------------------------------
 # With extglob OFF, `(` is *not* one of bash's history_no_expand_chars, so this
 # is an event reference and fails. This is the rule that looks most like a bash

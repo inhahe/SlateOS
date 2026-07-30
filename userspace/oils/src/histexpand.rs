@@ -796,8 +796,8 @@ fn quote_breaks(s: &str) -> String {
 /// `bash: …: event not found` — because the obvious guesses are wrong in both
 /// directions: `(` is *not* in bash's no-expand set (a bare `echo !(zzz)` with
 /// `extglob` off really does try to expand), while `$!` and `x[!a]` are
-/// inhibited even though nothing about the `!` itself says so, and double quotes
-/// inhibit nothing at all.
+/// inhibited even though nothing about the `!` itself says so, `[!!]` expands
+/// where `[!$]` does not, and double quotes inhibit nothing at all.
 fn inhibited(chars: &[char], i: usize, extglob: bool, dquote: bool) -> bool {
     let next = chars.get(i.saturating_add(1)).copied();
     // bash's `history_no_expand_chars`, " \t\n\r=", plus end of line. `\r` is in
@@ -851,7 +851,14 @@ fn inhibited(chars: &[char], i: usize, extglob: bool, dquote: bool) -> bool {
     {
         return true;
     }
-    if prev == Some('[') && rest.contains(&']') {
+    // The glob-bracket rule has one exception, and it is the `!` itself: `[!!]`
+    // expands, while `[!$]`, `[!^]`, `[!:0]`, `[!-1]`, `[!?x?]`, `[!abc]` and
+    // `[!*]` are all left alone. So it is not "a designator may not open a
+    // bracket expression" — only a second `!` overrides the negation reading,
+    // which is bash comparing the next character against its
+    // `history_expansion_char`. `[!!!]` therefore expands the `!!` and then
+    // *fails* on the `!]` that is left.
+    if prev == Some('[') && next != Some('!') && rest.contains(&']') {
         return true;
     }
     false
@@ -1488,6 +1495,21 @@ mod tests {
         }
         for line in ["echo [!q", "echo a[b!c]"] {
             assert!(!unchanged(line, false), "{line} should expand");
+        }
+        // The one character that overrides the negation reading is the history
+        // character itself, so `[!!…]` expands where every other designator in
+        // the same position does not.
+        for line in ["echo [!!]", "echo [!!:1]", "echo x[!!]y", "echo [[!!]]", "echo [!!$]"] {
+            assert!(!unchanged(line, false), "{line} should expand");
+        }
+        for line in ["echo [!^]", "echo [!$]", "echo [!:0]", "echo [!-1]", "echo [!*]"] {
+            assert!(unchanged(line, false), "{line} should not expand");
+        }
+        // …and only the first `!` of `[!!!]` is exempt: the `!!` expands, leaving
+        // a `!]` that is a search for `]` and fails.
+        match expand1("echo [!!!]", &ctx(&h)) {
+            Expansion::NotFound(e) => assert_eq!(e, "!]: event not found"),
+            other => panic!("expected [!!!] to fail, got {other:?}"),
         }
         // `!(pat)` is inhibited only once `extglob` is on: `(` is *not* one of
         // bash's `history_no_expand_chars`, so with extglob off even `[[ x ==

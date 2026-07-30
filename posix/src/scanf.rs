@@ -893,10 +893,18 @@ fn scan_float_named(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize) 
     None
 }
 
-/// Match `digits[.digits][e[sign]digits]` and convert it exactly.
+/// Match `digits[.digits][e[sign]digits]`, accumulating into `acc`.
+///
+/// The conversion is left to the caller so it can round in the destination's
+/// own precision: `%f` must round to `f32` straight from the digits, because
+/// rounding to `f64` and narrowing afterwards rounds twice.
 #[allow(clippy::arithmetic_side_effects)]
-fn scan_float_digits(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize) -> Option<f64> {
-    let mut acc = crate::decfloat::DigitCollector::new();
+fn scan_float_digits(
+    ctx: &mut ScanCtx<'_, '_>,
+    count: &mut usize,
+    width: usize,
+    acc: &mut crate::decfloat::DigitCollector,
+) -> bool {
     let mut has_digits = false;
 
     while *count < width && ctx.peek().is_ascii_digit() {
@@ -918,7 +926,7 @@ fn scan_float_digits(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize)
     }
 
     if !has_digits {
-        return None;
+        return false;
     }
 
     // Exponent.  Only consume the 'e'/sign prefix if actual exponent digits
@@ -954,11 +962,17 @@ fn scan_float_digits(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize)
         }
     }
 
-    let (val, out_of_range) = acc.to_f64();
+    true
+}
+
+/// Raise `ERANGE` if a conversion said it was out of range, and pass the
+/// value through.
+fn report_erange<T>(converted: (T, bool)) -> T {
+    let (value, out_of_range) = converted;
     if out_of_range {
         crate::errno::set_errno(crate::errno::ERANGE);
     }
-    Some(val)
+    value
 }
 
 /// Scan a floating-point number.
@@ -990,46 +1004,59 @@ fn scan_float(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, long_mod:
         count = count.wrapping_add(1);
     }
 
-    let Some(magnitude) = scan_float_named(ctx, &mut count, width)
-        .or_else(|| scan_float_digits(ctx, &mut count, width))
-    else {
+    let mut acc = crate::decfloat::DigitCollector::new();
+    let named = scan_float_named(ctx, &mut count, width);
+    if named.is_none() && !scan_float_digits(ctx, &mut count, width, &mut acc) {
         return false;
-    };
-    let val = if negative { -magnitude } else { magnitude };
+    }
 
     if !suppress {
         let ptr = ctx.next_arg();
-        if long_mod == LEN_LONG_DOUBLE {
-            // %Lf → a 16-byte x87 `long double`.  Storing only the 8 bytes of
-            // an f64 here would leave the destination's exponent/sign half
-            // holding whatever was there before, so the caller would read a
-            // value unrelated to the input — hence the explicit re-encode.
-            // The value itself still carries only f64 precision; see
-            // TD-POSIX-LONG-DOUBLE-PRECISION.
-            let p = ptr as *mut crate::x87::LongDouble;
-            if !p.is_null() {
-                // SAFETY: `%Lf` promises a writable `long double *`, which is
-                // exactly `LongDouble`'s 16 bytes.  Written unaligned because
-                // `LongDouble` declares `align(16)` and we would rather not
-                // make a UB claim about a pointer that came from C.
-                unsafe {
-                    p.write_unaligned(crate::x87::from_f64(val));
+        if long_mod >= LEN_LONG {
+            let magnitude = named.unwrap_or_else(|| report_erange(acc.to_f64()));
+            let val = if negative { -magnitude } else { magnitude };
+            if long_mod == LEN_LONG_DOUBLE {
+                // %Lf → a 16-byte x87 `long double`.  Storing only the 8 bytes
+                // of an f64 here would leave the destination's exponent/sign
+                // half holding whatever was there before, so the caller would
+                // read a value unrelated to the input — hence the explicit
+                // re-encode.  The value itself still carries only f64
+                // precision; see TD-POSIX-LONG-DOUBLE-PRECISION.
+                let p = ptr as *mut crate::x87::LongDouble;
+                if !p.is_null() {
+                    // SAFETY: `%Lf` promises a writable `long double *`, which
+                    // is exactly `LongDouble`'s 16 bytes.  Written unaligned
+                    // because `LongDouble` declares `align(16)` and we would
+                    // rather not make a UB claim about a pointer that came
+                    // from C.
+                    unsafe {
+                        p.write_unaligned(crate::x87::from_f64(val));
+                    }
                 }
-            }
-        } else if long_mod >= LEN_LONG {
-            // %lf → f64
-            let p = ptr as *mut f64;
-            if !p.is_null() {
-                unsafe {
-                    *p = val;
+            } else {
+                // %lf → f64
+                let p = ptr as *mut f64;
+                if !p.is_null() {
+                    // SAFETY: `%lf` promises a writable `double *`.
+                    unsafe {
+                        *p = val;
+                    }
                 }
             }
         } else {
-            // %f → f32
+            // %f → f32, rounded straight from the digits.  Converting an f64
+            // afterwards would round twice, and two roundings are not one.
+            // `inf`/`nan` narrow exactly, so they need no such care.
+            let magnitude = match named {
+                Some(v) => v as f32,
+                None => report_erange(acc.to_f32()),
+            };
+            let val = if negative { -magnitude } else { magnitude };
             let p = ptr as *mut f32;
             if !p.is_null() {
+                // SAFETY: `%f` promises a writable `float *`.
                 unsafe {
-                    *p = val as f32;
+                    *p = val;
                 }
             }
         }
@@ -1797,6 +1824,19 @@ mod tests {
         );
         assert_eq!(d, 1.25);
         assert_eq!(&word[..3], b"e34");
+    }
+
+    #[test]
+    fn scan_f_rounds_to_f32_without_going_through_f64() {
+        // %f stores a float, and it must be rounded straight from the digits.
+        // This input rounds to exactly the midpoint between 1.0f and its
+        // successor when taken through f64, where ties-to-even then picks the
+        // wrong side.
+        let text = b"1.000000059604644830901776231257827021181583404541015625\0";
+        let mut val: f32 = 0.0;
+        let args = [&raw mut val as u64];
+        assert_eq!(sscanf_va(text.as_ptr(), b"%f\0".as_ptr(), &args), 1);
+        assert_eq!(val.to_bits(), 1.0_f32.to_bits() + 1);
     }
 
     // -- %[...] scanset tests --

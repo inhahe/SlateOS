@@ -374,28 +374,61 @@ pub unsafe extern "C" fn strtoull(nptr: *const u8, endptr: *mut *const u8, base:
 // Floating-point conversion
 // ---------------------------------------------------------------------------
 
-/// Convert a C string to a double (`strtod`).
+/// What a floating-point subject sequence turned out to be.
 ///
-/// Parses decimal floating-point strings of the form:
-///   `[whitespace][sign]digits[.digits][e[sign]digits]`
+/// `strtod` and `strtof` differ only in the format they round to, so the scan
+/// is shared and each finishes it in its own precision.  Rounding to `f64` and
+/// narrowing afterwards would round twice, which is not the same as rounding
+/// once — see [`crate::decfloat::decimal_to_f32`].
+enum FloatToken {
+    /// No valid subject sequence.
+    None,
+    Nan,
+    Infinity,
+    /// Digits, accumulated into the caller's collector.
+    Number,
+}
+
+/// Scan a `strtod` subject sequence and report what it was.
 ///
-/// Also supports `INF`, `INFINITY`, and `NAN` (case-insensitive).
-/// Hex floats (`0x` prefix) are not currently supported.
+/// Accepts `[whitespace][sign]` followed by `digits[.digits][e[sign]digits]`,
+/// `inf`/`infinity`, or `nan[(n-char-sequence)]`, the last two
+/// case-insensitively.  Hex floats (`0x1p3`) are not supported; see the note
+/// on [`strtod`].
+///
+/// Sets `*endptr` past whatever was consumed (or to `nptr` when nothing was)
+/// and returns the sign separately, so the caller applies it in its own
+/// precision.  Digits go into `acc` and are not converted here.
 ///
 /// # Safety
 ///
-/// `nptr` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+/// `nptr` must be a valid null-terminated string, and `endptr` either null or
+/// writable.
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
-pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 {
+unsafe fn scan_float_token(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    acc: &mut crate::decfloat::DigitCollector,
+) -> (FloatToken, bool) {
     if nptr.is_null() {
         if !endptr.is_null() {
+            // SAFETY: the caller promises `endptr` is writable.
             unsafe {
                 *endptr = nptr;
             }
         }
-        return 0.0;
+        return (FloatToken::None, false);
     }
+
+    let set_end = |i: usize| {
+        if !endptr.is_null() {
+            // SAFETY: the caller promises `endptr` is writable, and `i` never
+            // passes the terminator because every loop below stops at it.
+            unsafe {
+                *endptr = nptr.add(i);
+            }
+        }
+    };
 
     let mut i: usize = 0;
 
@@ -410,20 +443,20 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
         i = i.wrapping_add(1);
     }
 
-    // Check for "inf", "infinity", "nan" (case-insensitive).
-    // Important: check bytes one at a time to avoid reading past null
-    // terminator (which could be at the end of a mapped page).
+    // "inf", "infinity", "nan" (case-insensitive).  Bytes are compared one at
+    // a time and never past a NUL, which could sit at the end of a mapped
+    // page.
     let c0 = unsafe { *nptr.add(i) };
     if c0 == 0 {
         // Empty subject string — fall through to digit parsing.
     } else if (c0 | 0x20) == b'i' {
-        // Possible "inf" or "infinity".
         let c1 = unsafe { *nptr.add(i.wrapping_add(1)) };
         if c1 != 0 {
             let c2 = unsafe { *nptr.add(i.wrapping_add(2)) };
             if c2 != 0 && (c1 | 0x20) == b'n' && (c2 | 0x20) == b'f' {
                 i = i.wrapping_add(3);
-                // Check for full "infinity" — one byte at a time.
+                // "infinity" extends "inf"; the longer match wins, but a
+                // partial one must leave its bytes in place.
                 let inity: [u8; 5] = *b"inity";
                 let mut j: usize = 0;
                 let mut all_match = true;
@@ -439,16 +472,8 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
                 if all_match {
                     i = i.wrapping_add(5);
                 }
-                if !endptr.is_null() {
-                    unsafe {
-                        *endptr = nptr.add(i);
-                    }
-                }
-                return if negative {
-                    f64::NEG_INFINITY
-                } else {
-                    f64::INFINITY
-                };
+                set_end(i);
+                return (FloatToken::Infinity, negative);
             }
         }
     } else if (c0 | 0x20) == b'n' {
@@ -457,7 +482,7 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
             let c2 = unsafe { *nptr.add(i.wrapping_add(2)) };
             if c2 != 0 && (c1 | 0x20) == b'a' && (c2 | 0x20) == b'n' {
                 i = i.wrapping_add(3);
-                // Skip optional (chars) payload per C99.
+                // Skip the optional (chars) payload per C99.
                 if unsafe { *nptr.add(i) } == b'(' {
                     let mut j = i.wrapping_add(1);
                     while unsafe { *nptr.add(j) } != 0 && unsafe { *nptr.add(j) } != b')' {
@@ -467,29 +492,22 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
                         i = j.wrapping_add(1);
                     }
                 }
-                if !endptr.is_null() {
-                    unsafe {
-                        *endptr = nptr.add(i);
-                    }
-                }
-                return f64::NAN;
+                set_end(i);
+                return (FloatToken::Nan, negative);
             }
         }
     }
 
     // Digits, collected exactly: no floating-point arithmetic happens until
-    // the single correctly-rounded conversion at the end.
-    let mut acc = crate::decfloat::DigitCollector::new();
+    // the caller's single correctly-rounded conversion.
     let mut has_digits = false;
 
-    // Integer part.
     while (unsafe { *nptr.add(i) }).is_ascii_digit() {
         acc.push_integer(unsafe { *nptr.add(i) });
         has_digits = true;
         i = i.wrapping_add(1);
     }
 
-    // Fractional part.
     if unsafe { *nptr.add(i) } == b'.' {
         i = i.wrapping_add(1);
         while (unsafe { *nptr.add(i) }).is_ascii_digit() {
@@ -499,17 +517,13 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
         }
     }
 
-    // If no digits were parsed, endptr points to nptr (no conversion).
     if !has_digits {
-        if !endptr.is_null() {
-            unsafe {
-                *endptr = nptr;
-            }
-        }
-        return 0.0;
+        // No conversion performed: endptr points at the original string.
+        set_end(0);
+        return (FloatToken::None, negative);
     }
 
-    // Exponent part.  Save position before 'e' so we can restore if no
+    // Exponent.  Save the position before 'e' so it can be restored if no
     // exponent digits follow (POSIX: 'e' without digits is not consumed).
     let c = unsafe { *nptr.add(i) };
     if c == b'e' || c == b'E' {
@@ -528,57 +542,85 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
                     .saturating_add(i32::from(unsafe { *nptr.add(i) }.wrapping_sub(b'0')));
                 i = i.wrapping_add(1);
             }
-
-            if exp_neg {
-                exp_val = exp_val.saturating_neg();
-            }
-
-            acc.apply_exponent(exp_val);
+            acc.apply_exponent(if exp_neg {
+                exp_val.saturating_neg()
+            } else {
+                exp_val
+            });
         } else {
-            // No exponent digits — roll back.
             i = before_exp;
         }
     }
 
-    let (mut result, out_of_range) = acc.to_f64();
+    set_end(i);
+    (FloatToken::Number, negative)
+}
 
-    if negative {
-        result = -result;
-    }
-
-    // POSIX: set ERANGE on overflow (the result is infinite) and on underflow.
-    // `decimal_to_f64` reports both, and also reports a subnormal result, which
-    // is gradual underflow — glibc sets ERANGE for that too.  An all-zero input
-    // is never out of range, so no guard against `strtod("0")` is needed.
-    if out_of_range {
-        crate::errno::set_errno(crate::errno::ERANGE);
-    }
-
-    if !endptr.is_null() {
-        unsafe {
-            *endptr = nptr.add(i);
+/// Convert a C string to a double (`strtod`).
+///
+/// Parses decimal floating-point strings of the form:
+///   `[whitespace][sign]digits[.digits][e[sign]digits]`
+///
+/// Also supports `INF`, `INFINITY`, and `NAN` (case-insensitive).
+/// Hex floats (`0x` prefix) are not currently supported.
+///
+/// The digits are collected exactly and rounded once, so the result is the
+/// nearest `double` to the input, ties to even.
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 {
+    let mut acc = crate::decfloat::DigitCollector::new();
+    // SAFETY: forwarding this function's own contract.
+    let (token, negative) = unsafe { scan_float_token(nptr, endptr, &mut acc) };
+    let value = match token {
+        FloatToken::None => return 0.0,
+        FloatToken::Nan => return f64::NAN,
+        FloatToken::Infinity => f64::INFINITY,
+        FloatToken::Number => {
+            let (v, out_of_range) = acc.to_f64();
+            // POSIX: ERANGE on overflow and on underflow.  `decimal_to_f64`
+            // also reports a subnormal result — gradual underflow — which is
+            // what glibc flags.
+            if out_of_range {
+                crate::errno::set_errno(crate::errno::ERANGE);
+            }
+            v
         }
-    }
-
-    result
+    };
+    if negative { -value } else { value }
 }
 
 /// Convert a C string to a float (`strtof`).
+///
+/// Rounds to `f32` directly from the decimal digits rather than by way of
+/// `strtod`: two roundings are not one, and a value a hair above an `f32`
+/// midpoint can land exactly on that midpoint in `f64` and then be sent the
+/// wrong way by ties-to-even.
 ///
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtof(nptr: *const u8, endptr: *mut *const u8) -> f32 {
-    let d = unsafe { strtod(nptr, endptr) };
-    let f = d as f32;
-    // POSIX: set ERANGE if the f32 result overflows or underflows.
-    // strtod already sets ERANGE for f64 overflow; we additionally check
-    // for values that fit in f64 but not f32.
-    if (f.is_infinite() && !d.is_infinite()) || (f == 0.0 && d != 0.0) {
-        crate::errno::set_errno(crate::errno::ERANGE);
-    }
-    f
+    let mut acc = crate::decfloat::DigitCollector::new();
+    // SAFETY: forwarding this function's own contract.
+    let (token, negative) = unsafe { scan_float_token(nptr, endptr, &mut acc) };
+    let value = match token {
+        FloatToken::None => return 0.0,
+        FloatToken::Nan => return f32::NAN,
+        FloatToken::Infinity => f32::INFINITY,
+        FloatToken::Number => {
+            let (v, out_of_range) = acc.to_f32();
+            if out_of_range {
+                crate::errno::set_errno(crate::errno::ERANGE);
+            }
+            v
+        }
+    };
+    if negative { -value } else { value }
 }
 
 /// Convert a C string to a long double — the `f64` core of `strtold`.
@@ -4759,6 +4801,65 @@ mod tests {
             for text in [format!("{v:e}"), format!("{v:.30e}"), format!("{v:?}")] {
                 let want = text.parse::<f64>().unwrap();
                 assert_eq!(parse(&text), want, "strtod({text})");
+            }
+        }
+    }
+
+    #[test]
+    fn strtof_rounds_once_not_twice() {
+        // strtof used to be strtod plus a cast, which rounds twice.  This
+        // input is a hair above the midpoint between 1.0f and its successor,
+        // but rounds to exactly that midpoint in f64, where ties-to-even then
+        // sends it back down.
+        let text = "1.000000059604644830901776231257827021181583404541015625";
+        assert_eq!(parse(text) as f32, 1.0_f32, "the trap this test guards against");
+        let mut z = text.as_bytes().to_vec();
+        z.push(0);
+        let got = unsafe { strtof(z.as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(got.to_bits(), 1.0_f32.to_bits() + 1);
+    }
+
+    #[test]
+    fn strtof_uses_the_f32_range_for_erange() {
+        fn parse32(text: &str) -> f32 {
+            let mut z = text.as_bytes().to_vec();
+            z.push(0);
+            unsafe { strtof(z.as_ptr(), core::ptr::null_mut()) }
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(parse32("3.4028235e38"), f32::MAX);
+        assert_eq!(crate::errno::get_errno(), 0);
+
+        crate::errno::set_errno(0);
+        assert!(parse32("1e39").is_infinite());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+
+        crate::errno::set_errno(0);
+        assert_eq!(parse32("1e-60"), 0.0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+
+        // Named values still work through the shared scanner.
+        assert!(parse32("-INFINITY").is_infinite() && parse32("-INFINITY") < 0.0);
+        assert!(parse32("nan(x)").is_nan());
+    }
+
+    #[test]
+    fn strtof_matches_rusts_parser_over_a_sweep() {
+        let mut st: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..4000 {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            let v = f32::from_bits((st >> 32) as u32);
+            if !v.is_finite() {
+                continue;
+            }
+            let v = v.abs();
+            for text in [format!("{v:e}"), format!("{v:.25e}"), format!("{v:?}")] {
+                let mut z = text.as_bytes().to_vec();
+                z.push(0);
+                let got = unsafe { strtof(z.as_ptr(), core::ptr::null_mut()) };
+                assert_eq!(got, text.parse::<f32>().unwrap(), "strtof({text})");
             }
         }
     }

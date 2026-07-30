@@ -577,9 +577,21 @@ impl DigitCollector {
             self.truncated,
         )
     }
+
+    /// Round the accumulated value to the nearest `f32`, ties to even.
+    ///
+    /// Rounds straight from the decimal rather than by way of `f64`; see
+    /// [`decimal_to_f32`] for why that distinction matters.
+    pub(crate) fn to_f32(&self) -> (f32, bool) {
+        decimal_to_f32(
+            self.digits.get(..self.len).unwrap_or(&[]),
+            self.exp10,
+            self.truncated,
+        )
+    }
 }
 
-/// Convert `digits * 10^exp10` to the nearest `f64`, ties to even.
+/// Convert `digits * 10^exp10` to the nearest value of `fmt`, ties to even.
 ///
 /// `digits` holds the ASCII decimal digits of the significant part; `exp10` is
 /// the power of ten it is scaled by.  `truncated` says the caller had more
@@ -603,11 +615,12 @@ impl DigitCollector {
 /// remainder feeds the sticky bit, so the final rounding step sees the true
 /// value and not an approximation of it.
 ///
-/// Returns `(value, out_of_range)`.  `out_of_range` is the C `ERANGE`
-/// condition: overflow to infinity, underflow to zero, or a subnormal result
-/// (gradual underflow).  glibc reports `ERANGE` for all three.
+/// Returns `(bits, out_of_range)` — the raw encoding of a *positive* value;
+/// the caller applies the sign.  `out_of_range` is the C `ERANGE` condition:
+/// overflow to infinity, underflow to zero, or a subnormal result (gradual
+/// underflow).  glibc reports `ERANGE` for all three.
 #[allow(clippy::arithmetic_side_effects)]
-pub(crate) fn decimal_to_f64(digits: &[u8], exp10: i32, truncated: bool) -> (f64, bool) {
+fn decimal_to_binary(digits: &[u8], exp10: i32, truncated: bool, fmt: &Format) -> (u64, bool) {
     let mut sticky = truncated;
     let mut exp10 = exp10;
 
@@ -624,7 +637,7 @@ pub(crate) fn decimal_to_f64(digits: &[u8], exp10: i32, truncated: bool) -> (f64
     }
     let digits = digits.get(start..end).unwrap_or(&[]);
     if digits.is_empty() {
-        return (0.0, false);
+        return (0, false);
     }
 
     // Position of the decimal point: the value lies in `[10^(mag-1), 10^mag)`.
@@ -632,11 +645,14 @@ pub(crate) fn decimal_to_f64(digits: &[u8], exp10: i32, truncated: bool) -> (f64
     // `10^-324`, so these cut-offs are decided by magnitude alone and keep the
     // big-integer work bounded.
     let mag = exp10.saturating_add(i32::try_from(digits.len()).unwrap_or(i32::MAX));
+    // The bounds are the `f64` ones even when rounding to `f32`; they exist
+    // only to keep the big-integer work finite, and the rounding step below
+    // handles anything inside them that still overflows the narrower format.
     if mag > 310 {
-        return (f64::INFINITY, true);
+        return (fmt.infinity(), true);
     }
     if mag < -330 {
-        return (0.0, true);
+        return (0, true);
     }
 
     // The exact integer formed by the digits, absorbed 19 at a time because
@@ -699,31 +715,93 @@ pub(crate) fn decimal_to_f64(digits: &[u8], exp10: i32, truncated: bool) -> (f64
         e = -i32::try_from(l).unwrap_or(i32::MAX) - i32::try_from(q).unwrap_or(i32::MAX);
     }
 
-    round_to_f64(&b, e, sticky)
+    round_to_binary(&b, e, sticky, fmt)
 }
 
-/// Round the exact value `b * 2^e` to the nearest `f64`, ties to even.
+/// Convert `digits * 10^exp10` to the nearest `f64`, ties to even.
+///
+/// See [`decimal_to_binary`]; `truncated` is the caller's sticky bit and the
+/// second result is the C `ERANGE` condition.
+pub(crate) fn decimal_to_f64(digits: &[u8], exp10: i32, truncated: bool) -> (f64, bool) {
+    let (bits, out_of_range) = decimal_to_binary(digits, exp10, truncated, &F64_FORMAT);
+    (f64::from_bits(bits), out_of_range)
+}
+
+/// Convert `digits * 10^exp10` to the nearest `f32`, ties to even.
+///
+/// Rounding to `f64` first and narrowing afterwards would round twice, and
+/// two roundings are not one: a value a hair above an `f32` midpoint can land
+/// exactly *on* that midpoint in `f64`, after which ties-to-even sends it the
+/// wrong way.  `strtof("1.000000059604644830901776231257827021181583404541015625")`
+/// is such a value — it must give `1.00000012`, but via `f64` it gives `1.0`.
+/// So `f32` is rounded straight from the exact decimal expansion.
+pub(crate) fn decimal_to_f32(digits: &[u8], exp10: i32, truncated: bool) -> (f32, bool) {
+    let (bits, out_of_range) = decimal_to_binary(digits, exp10, truncated, &F32_FORMAT);
+    (f32::from_bits(u32::try_from(bits).unwrap_or(0)), out_of_range)
+}
+
+/// The shape of a binary floating-point format, as much of it as rounding into
+/// the format needs to know.
+struct Format {
+    /// Bits in the significand, counting the implicit leading one.
+    mant_bits: u32,
+    /// Binary exponent of the smallest subnormal, the floor below which
+    /// results are gradually flushed towards zero.
+    min_exp: i32,
+    /// Added to the exponent of `m * 2^exp` (with `m` normalised to
+    /// `mant_bits` bits) to get the stored exponent field.
+    bias: i32,
+    /// The reserved all-ones exponent field, which encodes infinity.
+    inf_field: u64,
+}
+
+impl Format {
+    /// The bit pattern of positive infinity.
+    fn infinity(&self) -> u64 {
+        self.inf_field << self.mant_bits.saturating_sub(1)
+    }
+}
+
+/// IEEE-754 binary64: 53-bit significand, least subnormal `2^-1074`.
+const F64_FORMAT: Format = Format {
+    mant_bits: 53,
+    min_exp: -1074,
+    bias: 1075,
+    inf_field: 0x7ff,
+};
+
+/// IEEE-754 binary32: 24-bit significand, least subnormal `2^-149`.
+const F32_FORMAT: Format = Format {
+    mant_bits: 24,
+    min_exp: -149,
+    bias: 150,
+    inf_field: 0xff,
+};
+
+/// Round the exact value `b * 2^e` into `fmt`, ties to even.
 ///
 /// `sticky_in` says the true value is strictly greater than `b * 2^e`, by less
-/// than one unit in `b`'s last place.  Returns `(value, out_of_range)` with the
-/// same `ERANGE` meaning as [`decimal_to_f64`].
+/// than one unit in `b`'s last place.  Returns `(bits, out_of_range)` with the
+/// same `ERANGE` meaning as [`decimal_to_binary`].
 #[allow(clippy::arithmetic_side_effects)]
-fn round_to_f64<const N: usize>(b: &Big<N>, e: i32, sticky_in: bool) -> (f64, bool) {
+fn round_to_binary<const N: usize>(b: &Big<N>, e: i32, sticky_in: bool, fmt: &Format) -> (u64, bool) {
     let n = b.bits();
     if n == 0 {
-        return (0.0, false);
+        return (0, false);
     }
+    let prec = fmt.mant_bits as usize;
+    let implicit = 1u64 << (fmt.mant_bits - 1);
 
-    // Keep the top 53 bits, then, if that lands below the subnormal floor,
-    // drop further bits so the exponent is exactly `-1074`.  Everything below
-    // the cut is summarised by one guard bit and one sticky bit, which is all
-    // round-to-nearest-even needs.
-    let mut drop = n.saturating_sub(53);
+    // Keep the top `mant_bits` bits, then, if that lands below the subnormal
+    // floor, drop further bits so the exponent is exactly `min_exp`.
+    // Everything below the cut is summarised by one guard bit and one sticky
+    // bit, which is all round-to-nearest-even needs.
+    let mut drop = n.saturating_sub(prec);
     let mut exp = e.saturating_add(i32::try_from(drop).unwrap_or(i32::MAX));
-    if exp < -1074 {
-        let extra = i64::from(-1074i32).saturating_sub(i64::from(exp));
+    if exp < fmt.min_exp {
+        let extra = i64::from(fmt.min_exp).saturating_sub(i64::from(exp));
         drop = drop.saturating_add(usize::try_from(extra).unwrap_or(usize::MAX));
-        exp = -1074;
+        exp = fmt.min_exp;
     }
 
     let mut m = b.window(drop);
@@ -731,39 +809,39 @@ fn round_to_f64<const N: usize>(b: &Big<N>, e: i32, sticky_in: bool) -> (f64, bo
     let sticky = sticky_in || (drop > 1 && b.any_bits_below(drop.saturating_sub(1)));
     if guard && (sticky || m & 1 == 1) {
         m += 1;
-        if m == 1 << 53 {
+        if m == implicit << 1 {
             m >>= 1;
             exp = exp.saturating_add(1);
         }
     }
 
     if m == 0 {
-        return (0.0, true);
+        return (0, true);
     }
-    // A short significand (fewer than 53 bits, so nothing was dropped and
-    // nothing was rounded) is normalised by scaling up until it reaches the
-    // implicit-bit position or the subnormal floor stops us.
-    while m < 1 << 52 && exp > -1074 {
+    // A short significand (fewer bits than the format holds, so nothing was
+    // dropped and nothing was rounded) is normalised by scaling up until it
+    // reaches the implicit-bit position or the subnormal floor stops us.
+    while m < implicit && exp > fmt.min_exp {
         m <<= 1;
         exp -= 1;
     }
-    if m < 1 << 52 {
+    if m < implicit {
         // Subnormal: the exponent is pinned at the floor, so `m` *is* the
         // stored bit pattern.
-        return (f64::from_bits(m), true);
+        return (m, true);
     }
 
-    let biased = exp.saturating_add(1075);
-    if biased >= 0x7ff {
-        return (f64::INFINITY, true);
+    let biased = exp.saturating_add(fmt.bias);
+    if biased >= i32::try_from(fmt.inf_field).unwrap_or(i32::MAX) {
+        return (fmt.infinity(), true);
     }
     let biased = u64::try_from(biased).unwrap_or(0);
-    (f64::from_bits((biased << 52) | (m - (1 << 52))), false)
+    ((biased << (fmt.mant_bits - 1)) | (m - implicit), false)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Decimal, decimal_to_f64, decompose};
+    use super::{Decimal, decimal_to_f32, decimal_to_f64, decompose};
 
     /// Render the whole exact expansion the way `%f` would, for comparison
     /// against Rust's own (exact) formatter.
@@ -985,6 +1063,55 @@ mod tests {
             assert_eq!(
                 decimal_to_f64(digits.as_bytes(), exp10, false).0,
                 text.parse::<f64>().unwrap_or(f64::NAN),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn f32_conversion_rounds_once_not_twice() {
+        // A hair above the midpoint between 1.0f32 and its successor, but
+        // close enough to that midpoint that rounding to f64 first lands
+        // exactly on it — at which point ties-to-even wrongly picks 1.0.
+        let text = "1.000000059604644830901776231257827021181583404541015625";
+        let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+        let exp10 = -(text.len() as i32 - 2);
+        let (via_f64, _) = decimal_to_f64(digits.as_bytes(), exp10, false);
+        assert_eq!(via_f64 as f32, 1.0_f32, "the trap this test guards against");
+        let (direct, _) = decimal_to_f32(digits.as_bytes(), exp10, false);
+        assert_eq!(direct.to_bits(), 1.0_f32.to_bits() + 1);
+    }
+
+    #[test]
+    fn f32_conversion_spans_its_own_range() {
+        assert_eq!(decimal_to_f32(b"1", 0, false), (1.0_f32, false));
+        assert_eq!(decimal_to_f32(b"34028235", 31, false), (f32::MAX, false));
+        // The least f32 subnormal, and half of it (a tie that rounds to zero).
+        assert_eq!(decimal_to_f32(b"14", -46, false).0, f32::from_bits(1));
+        assert_eq!(decimal_to_f32(b"7", -46, false).0, 0.0_f32);
+        // In range for f64, out of range for f32.
+        assert_eq!(decimal_to_f32(b"1", 39, false), (f32::INFINITY, true));
+        assert_eq!(decimal_to_f32(b"1", -46, false), (0.0_f32, true));
+    }
+
+    #[test]
+    fn f32_conversion_matches_rusts_parser_over_a_sweep() {
+        let mut st: u64 = 0xDEAD_BEEF_1234_5678;
+        for _ in 0..4000 {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            let v = f32::from_bits((st >> 32) as u32);
+            if !v.is_finite() {
+                continue;
+            }
+            let text = format!("{:.20e}", v.abs());
+            let (mantissa, exponent) = text.split_once('e').unwrap_or((text.as_str(), "0"));
+            let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+            let exp10 = exponent.parse::<i32>().unwrap_or(0) - 20;
+            assert_eq!(
+                decimal_to_f32(digits.as_bytes(), exp10, false).0,
+                text.parse::<f32>().unwrap_or(f32::NAN),
                 "{text}"
             );
         }

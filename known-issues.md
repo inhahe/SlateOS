@@ -14,7 +14,135 @@ work that should be done now."
 
 ## Active Bugs
 
-### BUG-POSIX-LONG-DOUBLE-ABI. `long double` was treated as if it were `double` — `printf("%Lf")` desynchronised every later argument and `strtold` returned in the wrong register — 2026-07-30 — 🟡 **printf half fixed; `strtold` still broken**
+### BUG-POSIX-PRINTF-ARG-ARRAY-OOB. `printf` with more than 8 integer conversions reads past a fixed `[u64; 8]` array — 2026-07-30 — ✅ **RESOLVED 2026-07-30**
+
+**What.** `format_core` in `posix/src/printf.rs` pulls arguments with
+
+```rust
+fn consume_arg(args: *const u64, idx: &mut usize) -> u64 {
+    if args.is_null() { return 0; }
+    let val = unsafe { *args.add(*idx) };   // no bound on *idx
+    *idx = idx.wrapping_add(1);
+    val
+}
+```
+
+`args` points at a `[u64; 8]` produced by `va_collect`, which *caps* its
+stores at 8 (`if let Some(slot) = int_args.get_mut(iidx)`) but keeps
+incrementing `iidx`. The formatting pass has no such cap, so the ninth `%d`
+in a format string reads `int_args[8]` — one word past the end of a
+stack-allocated array in the `v*` caller's frame. Same for the ninth float
+conversion.
+
+This is a memory-safety bug, not just a correctness one: it is an
+out-of-bounds read of the caller's stack whose value is then formatted into
+attacker-visible output (`%s` on the ninth argument dereferences it as a
+pointer, which is a fault or an info leak). `printf("%d %d %d %d %d %d %d
+%d %d\n", …)` — nine integers, entirely ordinary — is enough to trigger it.
+
+**Why it exists.** The flat-array representation is a leftover from when the
+variadic entry points were assembly trampolines that flattened varargs into
+two `[u64; 8]`s. That design is already gone from the entry points (see
+BUG-POSIX-LONG-DOUBLE-ABI below — the same representation is what made
+`%Lf` unreachable), but the arrays survive as internal plumbing between
+`va_collect` and `format_core`, and with them the fixed 8-argument limit.
+
+**Proper fix.** Delete `va_collect` and the arrays: give `format_core` a
+`&mut VaList` and have it pull each argument with `va_arg_int` /
+`va_arg_double` / `va_arg_long_double` at the point of use. That is a single
+pass instead of two, removes the limit entirely rather than merely bounding
+it, and eliminates the "two parsers that must stay in lock-step" hazard that
+caused BUG-POSIX-LONG-DOUBLE-ABI in the first place. The same conversion is
+needed for the parallel flattening trampolines in `posix/src/err.rs`
+(`warn`/`warnx`/`err`/`errx`) and `posix/src/error.rs`
+(`error`/`error_at_line`), which have identical limits and the identical
+`%Lf` gap.
+
+Merely bounds-checking `consume_arg` would stop the OOB read but silently
+print zeros for the ninth argument onward, which is the band-aid, not the
+fix.
+
+**Fix (DONE).** `va_collect` and `consume_arg` are gone. `printf.rs` now has
+a single argument source,
+
+```rust
+pub(crate) struct Args<'a> { va: Option<&'a mut VaList> }
+```
+
+whose `int()` / `double()` / `long_double()` pull straight from the caller's
+`va_list` at the point of use, so there is no array to run off the end of and
+no second format-string walk to keep in lock-step. `format_core`,
+`parse_spec`, `dispatch_spec` and all six `_*_impl` entry points take
+`&mut Args`; `_asprintf_impl` takes the `va_list` **by value** instead,
+because it walks the format twice (measure, then write) and must start each
+pass from its own copy — a `va_list` cannot be rewound.
+
+The same conversion was applied to the three modules that shared the
+representation, each of whose hand-written flattening trampolines was
+replaced by the shared `va_trampoline!` macro (verified by disassembly:
+`warn`/`warnx` gp 8/`%rsi`, `err`/`errx` gp 16/`%rdx`, `error` gp 24/`%rcx`,
+`error_at_line` gp 40/`%r9`, `syslog` gp 16/`%rdx`, `__syslog_chk` gp
+24/`%rcx`):
+
+* `posix/src/err.rs` — `warn`/`warnx`/`err`/`errx`; `emit()` takes
+  `&mut Args`; the four `_*_impl` funnels are deleted.
+* `posix/src/error.rs` — `error`/`error_at_line`; `do_error()` takes
+  `&mut Args`; `_error_impl`/`_error_at_line_impl`/`split_args` are deleted.
+* `posix/src/syslog.rs` — `syslog`/`__syslog_chk`; `do_syslog()` takes
+  `&mut Args`; `_syslog_impl` is deleted.
+
+Those three also inherited the `%Lf` fix for free: a MEMORY-class `long
+double` is now reachable from `warn`, `error` and `syslog`, where no
+register-array representation could have carried it.
+
+Regression tests: `more_than_eight_integer_conversions` and
+`more_than_eight_float_conversions` in `printf.rs`, plus a ten-argument case
+in each of `err.rs`, `error.rs` and `syslog.rs`. The printf test module's
+`snprintf_str`/`fmt_str` helpers now build a synthetic register save area and
+hand the engine a real `va_list`, so ~20 000 existing assertions exercise the
+production argument path instead of a test-only one.
+
+**Not fixed here: the same bug in `scanf`.** See
+BUG-POSIX-SCANF-ARG-ARRAY-OOB below.
+
+### BUG-POSIX-SCANF-ARG-ARRAY-OOB. `sscanf` with more than 8 conversions reads a garbage pointer off the stack and writes through it — 2026-07-30 — 🔴 **open**
+
+**What.** `posix/src/scanf.rs` still uses the flat-array design that
+BUG-POSIX-PRINTF-ARG-ARRAY-OOB removed from `printf.rs`.
+`va_collect_scanf` flattens the destination pointers into a `[u64; 8]`,
+capping its *stores* at eight but not its index; the engine then reads them
+back with
+
+```rust
+fn next_arg(&mut self) -> u64 {
+    let v = unsafe { *self.args.add(self.ai) };   // no bound on self.ai
+    self.ai = self.ai.wrapping_add(1);
+    v
+}
+```
+
+so the ninth conversion reads one word past the end of a stack array.
+
+**Why this is worse than the printf case.** Every scanf argument is an
+*output pointer*. The printf bug leaked a stack word into formatted output;
+this one takes an arbitrary stack word as a destination pointer and **writes
+the scanned value through it**. `sscanf(s, "%d %d %d %d %d %d %d %d %d",
+&a, …)` — nine ordinary integers — is an arbitrary stack write.
+
+The three assembly trampolines (`sscanf`, `scanf`, `fscanf`) have the same
+eight-argument ceiling built into them: each spills only four to five
+argument registers plus three to four stack slots into a 64-byte scratch
+area, so a caller with more than eight conversions loses the extras before
+the engine is even entered.
+
+**Proper fix.** Exactly the printf conversion: replace the three trampolines
+with `va_trampoline!` (`sscanf` → `vsscanf` gp 16/`%rdx`, `scanf` →
+`vscanf` gp 8/`%rsi`, `fscanf` → `vfscanf` gp 16/`%rdx`), delete
+`va_collect_scanf` and the `_*_impl` funnels, and give `ScanCtx` a
+`&mut VaList` so `next_arg` calls `printf::va_arg_int` at the point of use.
+The `__isoc99_*` aliases are `jmp`s and need no change.
+
+### BUG-POSIX-LONG-DOUBLE-ABI. `long double` was treated as if it were `double` — `printf("%Lf")` desynchronised every later argument and `strtold` returned in the wrong register — 2026-07-30 — ✅ **RESOLVED 2026-07-30**
 
 **What.** The sysroot implements `long double` by pretending it is `double`.
 That is a defensible *precision* limitation (see
@@ -67,20 +195,38 @@ by 16. Six regression tests in `printf::tests` cover the value, all of
 stack-passed integer, re-alignment after an odd 8-byte word, and a
 wide-exponent value that proves the x87 decode is real.
 
-**Fix, part 2 — `strtold` (TODO).** The Rust function cannot express an
-`%st(0)` return, so it needs an assembly trampoline (target-only). Rename the
-Rust export via
-`#[cfg_attr(target_os = "none", unsafe(export_name = "__strtold_f64"))]`, then
-add a `global_asm!` thunk exporting `strtold` that calls it and pushes the
-result onto the x87 stack:
-`sub $8,%rsp; movabs $__strtold_f64,%rax; call *%rax; movsd %xmm0,(%rsp); fldl (%rsp); add $8,%rsp; ret`
-(AT&T syntax; `movabs` + indirect call because the sysroot is built with
-`code-model=large`).
+**Fix, part 2 — `strtold` (DONE).** A Rust function cannot express an `%st(0)`
+return, so the export was renamed via
+`#[cfg_attr(target_os = "none", unsafe(export_name = "__strtold_f64"))]` and a
+target-only `global_asm!` thunk now exports `strtold`: it calls the Rust
+function, spills `%xmm0` to the stack and `fld`s it, leaving the value in
+`%st(0)`. Verified by disassembling `libc.a` (`fldl (%rsp)` present, both
+symbols defined).
 
-**Also outstanding:** `scanf`'s `%Lf` must *store* 16 bytes via
-`crate::x87::from_f64`, not 8; and a ring-3 fixture should guard both halves
-end-to-end (argument ordering after `%Lf`, and `strtold`'s `%st(0)` return)
-since neither can be observed from host unit tests.
+**Fix, part 3 — `scanf` (DONE).** `scan_float` now stores 16 bytes through
+`crate::x87::from_f64` for `%Lf` (unaligned, since the pointer comes from C),
+and the modifier table gained `L`. Adding `L` to the prescan exposed that
+`z`, `j` and `t` were missing from the *main* parser too, so `%zu`/`%jd`/`%td`
+were silently broken in exactly the same way; fixed in the same change. Five
+regression tests.
+
+**Fix, part 4 — the entry points (DONE).** The `%L` fix in `va_collect` was
+initially unreachable from the *direct* printf family: its six assembly
+trampolines flattened the varargs into two `[u64; 8]` arrays, a
+representation that cannot express a MEMORY-class `long double` at all. Two
+argument-delivery paths into one engine is exactly what let a fix to one miss
+the other, so all twelve trampolines (six plain, six `__*_chk`) were rewritten
+around a shared `va_trampoline!` macro that performs a real `va_start` and
+delegates to the `v*`/`__v*_chk` function. (The flat arrays still exist one
+level down and carry their own bug — see BUG-POSIX-PRINTF-ARG-ARRAY-OOB.)
+
+**Fix, part 5 — ring-3 fixtures (DONE).** `services/ctest-longdouble` (plain
+C, `zig cc`, exit 42 = pass) guards the type's shape, `%Lf`/`%Le`/`%Lg`
+including the argument-desync case, `strtold` called 32× to catch an x87
+stack leak, `%Lf` in `scanf`, and a format/reparse round trip.
+`services/ctest-fortify` does the same through the `__*_chk` family, which
+has no host coverage at all because the trampolines exist only on the
+bare-metal target. Both run from `kernel/src/proc/spawn.rs` and pass in QEMU.
 
 ### BUG-SYSROOT-SOFT-FLOAT-ABI. The sysroot `libc.a` was compiled soft-float but linked into hard-float programs — `strtod`/`atof`/`difftime`/`printf("%f")` silently returned garbage — 2026-07-30 — ✅ **RESOLVED 2026-07-30**
 

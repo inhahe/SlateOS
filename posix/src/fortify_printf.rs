@@ -106,12 +106,10 @@ va_trampoline!("__snprintf_chk", "__vsnprintf_chk", "40", "r9");
 /// matching it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __vprintf_chk(_flag: i32, fmt: *const u8, ap: *mut VaList) -> i32 {
-    if ap.is_null() {
-        return printf::_printf_impl(fmt, core::ptr::null(), core::ptr::null());
-    }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
-    printf::_printf_impl(fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: the caller guarantees `ap` is a valid va_list matching `fmt`;
+    // a null one is rendered as zero arguments rather than a fault.
+    let mut args = unsafe { printf::Args::from_raw(ap) };
+    printf::_printf_impl(fmt, &mut args)
 }
 
 /// `__vfprintf_chk(fp, flag, fmt, ap)`.
@@ -125,12 +123,9 @@ pub unsafe extern "C" fn __vfprintf_chk(
     fmt: *const u8,
     ap: *mut VaList,
 ) -> i32 {
-    if ap.is_null() {
-        return printf::_fprintf_impl(stream, fmt, core::ptr::null(), core::ptr::null());
-    }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
-    printf::_fprintf_impl(stream, fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: as for `__vprintf_chk`.
+    let mut args = unsafe { printf::Args::from_raw(ap) };
+    printf::_fprintf_impl(stream, fmt, &mut args)
 }
 
 /// `__vdprintf_chk(fd, flag, fmt, ap)`.
@@ -144,12 +139,9 @@ pub unsafe extern "C" fn __vdprintf_chk(
     fmt: *const u8,
     ap: *mut VaList,
 ) -> i32 {
-    if ap.is_null() {
-        return printf::_dprintf_impl(fd, fmt, core::ptr::null(), core::ptr::null());
-    }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
-    printf::_dprintf_impl(fd, fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: as for `__vprintf_chk`.
+    let mut args = unsafe { printf::Args::from_raw(ap) };
+    printf::_dprintf_impl(fd, fmt, &mut args)
 }
 
 /// `__vasprintf_chk(&p, flag, fmt, ap)`.
@@ -163,12 +155,10 @@ pub unsafe extern "C" fn __vasprintf_chk(
     fmt: *const u8,
     ap: *mut VaList,
 ) -> i32 {
-    if ap.is_null() {
-        return printf::_asprintf_impl(strp, fmt, core::ptr::null(), core::ptr::null());
-    }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
-    printf::_asprintf_impl(strp, fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: as for `__vprintf_chk`; `asprintf` walks the format string
+    // twice, so it takes a snapshot by value and replays it (C's `va_copy`).
+    let snapshot = if ap.is_null() { None } else { Some(unsafe { *ap }) };
+    unsafe { printf::_asprintf_impl(strp, fmt, snapshot) }
 }
 
 /// `__vsprintf_chk(s, flag, slen, fmt, ap)`.
@@ -183,12 +173,9 @@ pub unsafe extern "C" fn __vsprintf_chk(
     fmt: *const u8,
     ap: *mut VaList,
 ) -> i32 {
-    if ap.is_null() {
-        return printf::_snprintf_impl(s, slen, fmt, core::ptr::null(), core::ptr::null());
-    }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
-    printf::_snprintf_impl(s, slen, fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: as for `__vprintf_chk`.
+    let mut args = unsafe { printf::Args::from_raw(ap) };
+    printf::_snprintf_impl(s, slen, fmt, &mut args)
 }
 
 /// `__vsnprintf_chk(s, maxlen, flag, slen, fmt, ap)`.
@@ -206,12 +193,9 @@ pub unsafe extern "C" fn __vsnprintf_chk(
     ap: *mut VaList,
 ) -> i32 {
     let bound = maxlen.min(slen);
-    if ap.is_null() {
-        return printf::_snprintf_impl(s, bound, fmt, core::ptr::null(), core::ptr::null());
-    }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
-    printf::_snprintf_impl(s, bound, fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: as for `__vprintf_chk`.
+    let mut args = unsafe { printf::Args::from_raw(ap) };
+    printf::_snprintf_impl(s, bound, fmt, &mut args)
 }
 
 // ---------------------------------------------------------------------------

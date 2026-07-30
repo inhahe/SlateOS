@@ -29,12 +29,17 @@
 //!
 //! The C prototypes are variadic.  Like [`crate::printf`] and [`crate::err`],
 //! the variadic entry points (`error`, `error_at_line`) are assembly
-//! trampolines that flatten register/stack varargs into a single 16-slot
-//! `u64` array (8 integer slots followed by 8 float slots) and call a Rust
-//! `_*_impl`.  The `v*` variants take a real `va_list` (a pointer on the
-//! x86_64 System V ABI) and are plain Rust, so they are host-testable.  Both
-//! paths funnel through [`do_error`], which expands the format with the tested
-//! `snprintf` engine.
+//! trampolines that perform a real `va_start` — spilling the argument
+//! registers into a System V register save area and building a `va_list` over
+//! it — and then call the matching `v*` variant.  Those are plain Rust and
+//! host-testable, and they funnel through [`do_error`], which expands the
+//! format with the tested `snprintf` engine.
+//!
+//! Streaming the arguments straight out of the `va_list` rather than
+//! flattening them into fixed arrays is what lifts the old eight-integer /
+//! eight-float ceiling and makes `%Lf` reachable here; see
+//! BUG-POSIX-PRINTF-ARG-ARRAY-OOB and BUG-POSIX-LONG-DOUBLE-ABI in
+//! `known-issues.md`.
 //!
 //! ## Limitation
 //!
@@ -45,6 +50,9 @@
 #![allow(clippy::used_underscore_items)]
 
 use crate::printf::{self, VaList};
+
+#[cfg(target_os = "none")]
+use crate::printf::va_trampoline;
 
 // ---------------------------------------------------------------------------
 // Global variables (exported C symbols).
@@ -72,92 +80,18 @@ static mut OLD_LINENUM: u32 = 0;
 const MSG_BUF_SIZE: usize = 1024;
 
 // ---------------------------------------------------------------------------
-// Assembly trampolines — flatten varargs into a 16-slot [u64] array.
+// Assembly trampolines — `va_start`, then call the matching `v*` variant.
 //
-//   error(status, errnum, fmt, ...)                  : 3 fixed args
-//   error_at_line(status, errnum, file, line, fmt, …): 5 fixed args
-//
-// The slot array is [int0..int7, float0..float7]; the Rust impl receives a
-// single pointer to it and splits the halves internally.
+// The named-argument counts decide the initial `gp_offset` and which register
+// carries the `va_list*`:
+//   error(status, errnum, fmt, ...)                  : 3 named args
+//   error_at_line(status, errnum, file, line, fmt, …): 5 named args
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "none")]
-core::arch::global_asm!(
-    // error(status, errnum, fmt, ...) → _error_impl(status, errnum, fmt, args)
-    // Fixed: rdi=status, rsi=errnum, rdx=fmt.  Varargs start at rcx,r8,r9,stack.
-    ".global error",
-    ".type error, @function",
-    "error:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rcx",    // int vararg 0
-    "mov [rsp+8], r8",   // int vararg 1
-    "mov [rsp+16], r9",  // int vararg 2
-    "mov rax, [rbp+16]", // int vararg 3 (stack)
-    "mov [rsp+24], rax",
-    "mov rax, [rbp+24]", // int vararg 4
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+32]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+40]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+48]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi=status, rsi=errnum, rdx=fmt already set.
-    "mov rcx, rsp", // args pointer (int0..int7, float0..float7)
-    "call _error_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // error_at_line(status, errnum, file, line, fmt, ...)
-    //   → _error_at_line_impl(status, errnum, file, line, fmt, args)
-    // Fixed: rdi=status, rsi=errnum, rdx=file, rcx=line, r8=fmt.
-    // Varargs start at r9, then stack.
-    ".global error_at_line",
-    ".type error_at_line, @function",
-    "error_at_line:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], r9",     // int vararg 0
-    "mov rax, [rbp+16]", // int vararg 1 (stack)
-    "mov [rsp+8], rax",
-    "mov rax, [rbp+24]", // int vararg 2
-    "mov [rsp+16], rax",
-    "mov rax, [rbp+32]", // int vararg 3
-    "mov [rsp+24], rax",
-    "mov rax, [rbp+40]", // int vararg 4
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+48]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+56]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+64]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi=status, rsi=errnum, rdx=file, rcx=line, r8=fmt already set.
-    "mov r9, rsp", // args pointer
-    "call _error_at_line_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-);
+va_trampoline!("error", "verror", "24", "rcx");
+#[cfg(target_os = "none")]
+va_trampoline!("error_at_line", "verror_at_line", "40", "r9");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -201,9 +135,8 @@ fn write_u32_dec(mut val: u32) {
 /// Shared body for the whole family.
 ///
 /// `with_line` selects the `error_at_line` framing (the `filename:linenum: `
-/// insert and the `error_one_per_line` dedup).  `iargs`/`fargs` are the flat
-/// integer/float argument arrays for the format engine; either may be null.
-#[allow(clippy::too_many_arguments)]
+/// insert and the `error_one_per_line` dedup).  `args` is the argument source
+/// the format engine pulls from; it is left untouched when `fmt` is null.
 fn do_error(
     status: i32,
     errnum: i32,
@@ -211,8 +144,7 @@ fn do_error(
     linenum: u32,
     with_line: bool,
     fmt: *const u8,
-    iargs: *const u64,
-    fargs: *const u64,
+    args: &mut printf::Args,
 ) {
     // error_one_per_line dedup (only meaningful for error_at_line).
     if with_line {
@@ -261,7 +193,7 @@ fn do_error(
     // Expanded format body.
     if !fmt.is_null() {
         let mut body = [0u8; MSG_BUF_SIZE];
-        let n = printf::_snprintf_impl(body.as_mut_ptr(), MSG_BUF_SIZE, fmt, iargs, fargs);
+        let n = printf::_snprintf_impl(body.as_mut_ptr(), MSG_BUF_SIZE, fmt, args);
         let len = if n >= 0 && (n as usize) < MSG_BUF_SIZE {
             n as usize
         } else if n >= 0 {
@@ -295,64 +227,8 @@ fn do_error(
 }
 
 // ---------------------------------------------------------------------------
-// Rust entry points (called by the assembly trampolines)
-// ---------------------------------------------------------------------------
-
-/// Backing implementation for `error`.
-///
-/// `args` points to a 16-slot `u64` array: 8 integer slots followed by 8
-/// float slots, as laid out by the assembly trampoline.
-///
-/// # Safety
-///
-/// `fmt` must be a valid NUL-terminated C string (or null); `args` must point
-/// to at least 16 valid `u64` slots (the trampoline always provides them).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn _error_impl(status: i32, errnum: i32, fmt: *const u8, args: *const u64) {
-    let (iargs, fargs) = split_args(args);
-    do_error(
-        status,
-        errnum,
-        core::ptr::null(),
-        0,
-        false,
-        fmt,
-        iargs,
-        fargs,
-    );
-}
-
-/// Backing implementation for `error_at_line`.
-///
-/// # Safety
-///
-/// As [`_error_impl`]; `filename` must be null or a valid C string.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn _error_at_line_impl(
-    status: i32,
-    errnum: i32,
-    filename: *const u8,
-    linenum: u32,
-    fmt: *const u8,
-    args: *const u64,
-) {
-    let (iargs, fargs) = split_args(args);
-    do_error(status, errnum, filename, linenum, true, fmt, iargs, fargs);
-}
-
-/// Split the trampoline's combined slot array into integer/float halves.
-fn split_args(args: *const u64) -> (*const u64, *const u64) {
-    if args.is_null() {
-        (core::ptr::null(), core::ptr::null())
-    } else {
-        // SAFETY: the trampoline always provides 16 contiguous slots, so
-        // `args + 8` is in-bounds.  Null is handled above.
-        (args, unsafe { args.add(8) })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// v* variants — take a `va_list` (pointer); pure Rust, host-testable.
+// v* variants — take a `va_list` (pointer); pure Rust, host-testable, and the
+// delegation target of the trampolines above.
 // ---------------------------------------------------------------------------
 
 /// `verror(status, errnum, format, ap)` — `error` with a `va_list`.
@@ -363,31 +239,10 @@ fn split_args(args: *const u64) -> (*const u64, *const u64) {
 /// valid `va_list` whose arguments match `fmt`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn verror(status: i32, errnum: i32, fmt: *const u8, ap: *mut VaList) {
-    if ap.is_null() {
-        do_error(
-            status,
-            errnum,
-            core::ptr::null(),
-            0,
-            false,
-            fmt,
-            core::ptr::null(),
-            core::ptr::null(),
-        );
-        return;
-    }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
-    do_error(
-        status,
-        errnum,
-        core::ptr::null(),
-        0,
-        false,
-        fmt,
-        iargs.as_ptr(),
-        fargs.as_ptr(),
-    );
+    // SAFETY: the caller guarantees `ap` is a valid va_list matching `fmt`;
+    // a null one is rendered as zero arguments rather than a fault.
+    let mut args = unsafe { printf::Args::from_raw(ap) };
+    do_error(status, errnum, core::ptr::null(), 0, false, fmt, &mut args);
 }
 
 /// `verror_at_line(status, errnum, filename, linenum, format, ap)`.
@@ -404,31 +259,9 @@ pub unsafe extern "C" fn verror_at_line(
     fmt: *const u8,
     ap: *mut VaList,
 ) {
-    if ap.is_null() {
-        do_error(
-            status,
-            errnum,
-            filename,
-            linenum,
-            true,
-            fmt,
-            core::ptr::null(),
-            core::ptr::null(),
-        );
-        return;
-    }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
-    do_error(
-        status,
-        errnum,
-        filename,
-        linenum,
-        true,
-        fmt,
-        iargs.as_ptr(),
-        fargs.as_ptr(),
-    );
+    // SAFETY: as `verror`.
+    let mut args = unsafe { printf::Args::from_raw(ap) };
+    do_error(status, errnum, filename, linenum, true, fmt, &mut args);
 }
 
 // ---------------------------------------------------------------------------
@@ -450,7 +283,7 @@ mod tests {
     // state (`error_message_count`, `error_one_per_line`, `OLD_FILENAME`,
     // `OLD_LINENUM`, `error_print_progname`).  Without serialization,
     // cargo's parallel runner can interleave a `read_count()` /
-    // `_error_impl()` / `read_count()` triple, producing flaky
+    // `verror()` / `read_count()` triple, producing flaky
     // "left: 1 / right: 2" failures when a sibling test slips an
     // increment in between.  TEST_LOCK serialises every test that
     // touches the bookkeeping so the assertions remain deterministic.
@@ -479,64 +312,79 @@ mod tests {
     }
 
     #[test]
-    fn error_impl_increments_count() {
+    fn verror_increments_count() {
         let _guard = TEST_LOCK.lock().unwrap();
         let before = read_count();
+        // SAFETY: the format string has no conversions, so no args are read.
         unsafe {
-            _error_impl(0, 0, b"plain message\0".as_ptr(), core::ptr::null());
+            verror(0, 0, b"plain message\0".as_ptr(), core::ptr::null_mut());
         }
         assert_eq!(read_count(), before.wrapping_add(1));
     }
 
     #[test]
-    fn error_impl_with_errnum_no_crash() {
+    fn verror_with_errnum_no_crash() {
         let _guard = TEST_LOCK.lock().unwrap();
         let before = read_count();
+        // SAFETY: no conversions in the format string.
         unsafe {
-            _error_impl(
+            verror(
                 0,
                 errno::ENOENT,
                 b"cannot stat\0".as_ptr(),
-                core::ptr::null(),
+                core::ptr::null_mut(),
             );
         }
         assert_eq!(read_count(), before.wrapping_add(1));
     }
 
     #[test]
-    fn error_impl_with_format_args_no_crash() {
+    fn verror_with_format_args_no_crash() {
         let _guard = TEST_LOCK.lock().unwrap();
-        // "%s" + a string arg, laid out as the trampoline would: int slot 0.
         let path = b"/tmp/x\0";
-        let mut slots = [0u64; 16];
-        slots[0] = path.as_ptr() as u64;
         let before = read_count();
-        unsafe {
-            _error_impl(0, 0, b"open %s failed\0".as_ptr(), slots.as_ptr());
-        }
+        with_valist(&[path.as_ptr() as u64], |va| {
+            // SAFETY: va is a valid synthetic va_list with one pointer arg.
+            unsafe { verror(0, 0, b"open %s failed\0".as_ptr(), va) };
+        });
+        assert_eq!(read_count(), before.wrapping_add(1));
+    }
+
+    /// More conversions than the retired flat `[u64; 8]` arrays could hold —
+    /// a regression guard for BUG-POSIX-PRINTF-ARG-ARRAY-OOB.
+    #[test]
+    fn verror_more_than_eight_int_args_no_crash() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let before = read_count();
+        with_valist(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], |va| {
+            // SAFETY: va is a valid synthetic va_list with ten int args.
+            unsafe { verror(0, 0, b"%d%d%d%d%d%d%d%d%d%d\0".as_ptr(), va) };
+        });
         assert_eq!(read_count(), before.wrapping_add(1));
     }
 
     #[test]
-    fn error_impl_null_fmt_no_crash() {
+    fn verror_null_fmt_no_crash() {
         let _guard = TEST_LOCK.lock().unwrap();
+        // SAFETY: a null format string is handled as "no body".
         unsafe {
-            _error_impl(0, errno::EIO, core::ptr::null(), core::ptr::null());
+            verror(0, errno::EIO, core::ptr::null(), core::ptr::null_mut());
         }
     }
 
     #[test]
-    fn error_at_line_impl_no_crash() {
+    fn verror_at_line_no_crash() {
         let _guard = TEST_LOCK.lock().unwrap();
         let before = read_count();
+        // SAFETY: no conversions in the format string.
         unsafe {
-            _error_at_line_impl(
+            verror_at_line(
                 0,
                 errno::EACCES,
                 b"main.c\0".as_ptr(),
                 42,
                 b"bad token\0".as_ptr(),
-                core::ptr::null(),
+                core::ptr::null_mut(),
             );
         }
         assert_eq!(read_count(), before.wrapping_add(1));
@@ -556,39 +404,42 @@ mod tests {
         }
         let before = read_count();
         let file = b"dup.c\0";
+        // SAFETY: none of these format strings have conversions.
         unsafe {
-            _error_at_line_impl(
+            verror_at_line(
                 0,
                 0,
                 file.as_ptr(),
                 7,
                 b"first\0".as_ptr(),
-                core::ptr::null(),
+                core::ptr::null_mut(),
             );
         }
         // First call prints and increments.
         assert_eq!(read_count(), before.wrapping_add(1));
+        // SAFETY: as above.
         unsafe {
-            _error_at_line_impl(
+            verror_at_line(
                 0,
                 0,
                 file.as_ptr(),
                 7,
                 b"second\0".as_ptr(),
-                core::ptr::null(),
+                core::ptr::null_mut(),
             );
         }
         // Second identical call is suppressed: count unchanged.
         assert_eq!(read_count(), before.wrapping_add(1));
         // A different line is not suppressed.
+        // SAFETY: as above.
         unsafe {
-            _error_at_line_impl(
+            verror_at_line(
                 0,
                 0,
                 file.as_ptr(),
                 8,
                 b"third\0".as_ptr(),
-                core::ptr::null(),
+                core::ptr::null_mut(),
             );
         }
         assert_eq!(read_count(), before.wrapping_add(2));
@@ -643,8 +494,9 @@ mod tests {
         unsafe {
             core::ptr::addr_of_mut!(error_print_progname).write(Some(cb));
         }
+        // SAFETY: no conversions in the format string.
         unsafe {
-            _error_impl(0, 0, b"msg\0".as_ptr(), core::ptr::null());
+            verror(0, 0, b"msg\0".as_ptr(), core::ptr::null_mut());
         }
         assert_eq!(CALLS.load(Ordering::SeqCst), 1);
         // Restore default behavior.

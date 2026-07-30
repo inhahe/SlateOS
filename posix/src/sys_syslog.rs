@@ -25,7 +25,7 @@ pub use crate::syslog::LOG_PID;
 
 pub use crate::syslog::openlog;
 // `syslog` itself is an assembly trampoline (variadic) defined only on the
-// bare-metal target; the Rust-callable forms are `_syslog_impl` and `vsyslog`.
+// bare-metal target; the Rust-callable form is `vsyslog`.
 pub use crate::syslog::closelog;
 pub use crate::syslog::setlogmask;
 pub use crate::syslog::vsyslog;

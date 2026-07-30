@@ -178,10 +178,9 @@ const PRINTF_BUF_SIZE: usize = 4096;
 ///
 /// Output goes through the stdio buffer (line-buffered on stdout) so
 /// printf output is properly coalesced with other stdout writes.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
+pub(crate) fn _printf_impl(fmt: *const u8, args: &mut Args) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args, fargs);
+    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
     if n <= 0 {
         return n;
     }
@@ -204,15 +203,9 @@ pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64, fargs: *const u
 ///
 /// Output goes through the stdio buffer so fprintf output is properly
 /// coalesced with other writes to the same stream.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn _fprintf_impl(
-    stream: *mut u8,
-    fmt: *const u8,
-    args: *const u64,
-    fargs: *const u64,
-) -> i32 {
+pub(crate) fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: &mut Args) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args, fargs);
+    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
     if n <= 0 {
         return n;
     }
@@ -229,15 +222,9 @@ pub extern "C" fn _fprintf_impl(
 ///
 /// Like `fprintf` but takes a raw fd (int) instead of a `FILE*`.
 /// Writes directly to the fd without stdio buffering.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn _dprintf_impl(
-    fd: i32,
-    fmt: *const u8,
-    args: *const u64,
-    fargs: *const u64,
-) -> i32 {
+pub(crate) fn _dprintf_impl(fd: i32, fmt: *const u8, args: &mut Args) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args, fargs);
+    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
     if n <= 0 {
         return n;
     }
@@ -251,19 +238,12 @@ pub extern "C" fn _dprintf_impl(
 }
 
 /// `snprintf(buf, size, fmt, ...)` — write formatted output to a buffer.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn _snprintf_impl(
-    buf: *mut u8,
-    size: usize,
-    fmt: *const u8,
-    args: *const u64,
-    fargs: *const u64,
-) -> i32 {
+pub(crate) fn _snprintf_impl(buf: *mut u8, size: usize, fmt: *const u8, args: &mut Args) -> i32 {
     if buf.is_null() || size == 0 {
         // Still count characters.
-        return format_core(core::ptr::null_mut(), 0, fmt, args, fargs);
+        return format_core(core::ptr::null_mut(), 0, fmt, args);
     }
-    let n = format_core(buf, size, fmt, args, fargs);
+    let n = format_core(buf, size, fmt, args);
     // Null-terminate (snprintf guarantees this if size > 0).
     let term_pos = if n >= 0 && (n as usize) < size {
         n as usize
@@ -278,15 +258,9 @@ pub extern "C" fn _snprintf_impl(
 }
 
 /// `sprintf(buf, fmt, ...)` — write formatted output to a buffer (no limit).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn _sprintf_impl(
-    buf: *mut u8,
-    fmt: *const u8,
-    args: *const u64,
-    fargs: *const u64,
-) -> i32 {
+pub(crate) fn _sprintf_impl(buf: *mut u8, fmt: *const u8, args: &mut Args) -> i32 {
     // No size limit — dangerous but matches C semantics.
-    let n = format_core(buf, usize::MAX, fmt, args, fargs);
+    let n = format_core(buf, usize::MAX, fmt, args);
     // C99: "A null character is written at the end of the characters written."
     if !buf.is_null() && n >= 0 {
         // SAFETY: format_core wrote n bytes starting at buf; caller must provide
@@ -304,19 +278,27 @@ pub extern "C" fn _sprintf_impl(
 /// (including null terminator) and stores a pointer to it in `*strp`.
 /// Returns the number of characters written (excluding null), or -1
 /// on allocation failure.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn _asprintf_impl(
+///
+/// # Safety
+/// `va`, when `Some`, must be a valid `va_list` snapshot matching `fmt` — see
+/// [`Args::new`].  It is taken **by value** because this is the one entry
+/// point that walks the format string twice (measure, then write) and a
+/// `va_list` cannot be rewound: each pass starts from its own copy, which is
+/// exactly what C's `va_copy` is for.
+pub(crate) unsafe fn _asprintf_impl(
     strp: *mut *mut u8,
     fmt: *const u8,
-    args: *const u64,
-    fargs: *const u64,
+    va: Option<VaList>,
 ) -> i32 {
     if strp.is_null() {
         return -1;
     }
 
     // First pass: count required bytes (format to null buffer).
-    let n = format_core(core::ptr::null_mut(), 0, fmt, args, fargs);
+    let mut measure = va;
+    // SAFETY: the caller's contract on `va` is passed straight through.
+    let mut margs = unsafe { Args::new(measure.as_mut()) };
+    let n = format_core(core::ptr::null_mut(), 0, fmt, &mut margs);
     if n < 0 {
         unsafe {
             *strp = core::ptr::null_mut();
@@ -333,8 +315,12 @@ pub extern "C" fn _asprintf_impl(
         return -1;
     }
 
-    // Second pass: format into the allocated buffer.
-    let written = format_core(buf, alloc_size, fmt, args, fargs);
+    // Second pass: format into the allocated buffer, from a fresh copy of the
+    // va_list so it replays the same arguments.
+    let mut write = va;
+    // SAFETY: as for the measuring pass.
+    let mut wargs = unsafe { Args::new(write.as_mut()) };
+    let written = format_core(buf, alloc_size, fmt, &mut wargs);
 
     // Null-terminate.
     let term_pos = if written >= 0 && (written as usize) < alloc_size {
@@ -380,6 +366,7 @@ pub extern "C" fn _asprintf_impl(
 /// pointers.  Exposed publicly only so it can appear in the `extern "C"`
 /// signatures of the v* functions; callers in C pass an ordinary `va_list`.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VaList {
     /// Byte offset into `reg_save_area` of the next general-purpose arg
     /// (0..48; once ≥48 the GP registers are exhausted).
@@ -519,119 +506,80 @@ unsafe fn skip_length_modifier(fmt: *const u8, fpos: &mut usize) -> bool {
     false
 }
 
-/// Flatten the arguments referenced by `fmt` out of `va` into the integer and
-/// float arrays expected by [`format_core`].
+/// The argument source for one formatting pass.
 ///
-/// This mirrors `parse_spec`/`dispatch_spec` exactly so that argument
-/// consumption stays in lock-step with the formatting engine: `*` width and
-/// precision consume an integer arg, the numeric/string/pointer conversions
-/// consume an integer arg, and the floating conversions consume a `double`.
-/// At most 8 of each kind are stored (the engine's fixed-array contract); any
-/// beyond that are still pulled from the `va_list` to preserve ordering but
-/// are discarded.
+/// The engine pulls each argument from the caller's `va_list` at the point of
+/// use, in document order.  There is deliberately no intermediate array: an
+/// earlier design flattened the arguments into two fixed `[u64; 8]`s, which
+/// capped every call at eight integer and eight floating conversions (reading
+/// out of bounds past that — BUG-POSIX-PRINTF-ARG-ARRAY-OOB), could not
+/// represent a MEMORY-class `long double` at all, and required a second
+/// format-string walk that had to stay in exact lock-step with this one.
 ///
-/// # Safety
-/// `va` must be a valid `va_list` with enough arguments to satisfy `fmt`.
-pub unsafe fn va_collect(fmt: *const u8, va: &mut VaList) -> ([u64; 8], [u64; 8]) {
-    let mut int_args = [0u64; 8];
-    let mut float_args = [0u64; 8];
-    let mut iidx: usize = 0;
-    let mut fidx: usize = 0;
+/// `None` means "no arguments available" — a null `va_list`, which the C
+/// standard leaves undefined but which we render as zeros rather than a fault.
+pub(crate) struct Args<'a> {
+    va: Option<&'a mut VaList>,
+}
 
-    if fmt.is_null() {
-        return (int_args, float_args);
+impl<'a> Args<'a> {
+    /// Wrap a `va_list` as an argument source.
+    ///
+    /// # Safety
+    /// If present, `va` must be a valid, ABI-conformant `va_list` with at
+    /// least as many arguments as `fmt`'s conversions will request, of
+    /// matching types.  This is the same contract C places on the caller of
+    /// any `v*printf`, and it is checked nowhere: the whole unsafety of the
+    /// printf family lives in this one constructor.
+    pub(crate) const unsafe fn new(va: Option<&'a mut VaList>) -> Self {
+        Self { va }
     }
 
-    let mut fpos: usize = 0;
-    loop {
-        // SAFETY: fmt is NUL-terminated; we stop at the NUL.
-        let ch = unsafe { *fmt.add(fpos) };
-        if ch == 0 {
-            break;
-        }
-        if ch != b'%' {
-            fpos = fpos.wrapping_add(1);
-            continue;
-        }
-        fpos = fpos.wrapping_add(1); // skip '%'
-        if unsafe { *fmt.add(fpos) } == 0 {
-            break;
-        }
-
-        // Flags.
-        while let b'-' | b'+' | b' ' | b'0' | b'#' = unsafe { *fmt.add(fpos) } {
-            fpos = fpos.wrapping_add(1);
-        }
-
-        // Width (a '*' consumes an integer arg).
-        if unsafe { *fmt.add(fpos) } == b'*' {
-            // SAFETY: va contract upheld by caller.
-            let v = unsafe { va_arg_int(va) };
-            if let Some(slot) = int_args.get_mut(iidx) {
-                *slot = v;
-            }
-            iidx = iidx.wrapping_add(1);
-            fpos = fpos.wrapping_add(1);
+    /// Wrap a possibly-null `va_list` pointer, as the C entry points receive
+    /// it.  A null pointer yields an empty source rather than a fault.
+    ///
+    /// # Safety
+    /// As [`Args::new`] when `va` is non-null.
+    pub(crate) unsafe fn from_raw(va: *mut VaList) -> Self {
+        if va.is_null() {
+            Self::empty()
         } else {
-            while unsafe { *fmt.add(fpos) }.is_ascii_digit() {
-                fpos = fpos.wrapping_add(1);
-            }
-        }
-
-        // Precision (a '.*' consumes an integer arg).
-        if unsafe { *fmt.add(fpos) } == b'.' {
-            fpos = fpos.wrapping_add(1);
-            if unsafe { *fmt.add(fpos) } == b'*' {
-                // SAFETY: va contract upheld by caller.
-                let v = unsafe { va_arg_int(va) };
-                if let Some(slot) = int_args.get_mut(iidx) {
-                    *slot = v;
-                }
-                iidx = iidx.wrapping_add(1);
-                fpos = fpos.wrapping_add(1);
-            } else {
-                while unsafe { *fmt.add(fpos) }.is_ascii_digit() {
-                    fpos = fpos.wrapping_add(1);
-                }
-            }
-        }
-
-        // Length modifiers. Only `L` changes an argument's size: every integer
-        // type occupies one 8-byte slot on LP64 however it is spelled, but a
-        // `long double` is 16 bytes on the stack.
-        // SAFETY: fmt is NUL-terminated and fpos is in range.
-        let long_double = unsafe { skip_length_modifier(fmt, &mut fpos) };
-
-        // Conversion specifier.
-        let conv = unsafe { *fmt.add(fpos) };
-        fpos = fpos.wrapping_add(1);
-        match conv {
-            b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b's' | b'c' | b'p' | b'n' => {
-                // SAFETY: va contract upheld by caller.
-                let v = unsafe { va_arg_int(va) };
-                if let Some(slot) = int_args.get_mut(iidx) {
-                    *slot = v;
-                }
-                iidx = iidx.wrapping_add(1);
-            }
-            b'f' | b'F' | b'e' | b'E' | b'g' | b'G' => {
-                // SAFETY: va contract upheld by caller.
-                let v = if long_double {
-                    unsafe { va_arg_long_double(va) }
-                } else {
-                    unsafe { va_arg_double(va) }
-                };
-                if let Some(slot) = float_args.get_mut(fidx) {
-                    *slot = v;
-                }
-                fidx = fidx.wrapping_add(1);
-            }
-            // '%' and unknown specifiers consume no argument.
-            _ => {}
+            // SAFETY: non-null, and the caller's va_list contract carries over.
+            Self { va: Some(unsafe { &mut *va }) }
         }
     }
 
-    (int_args, float_args)
+    /// An argument source with nothing in it; every request yields zero.
+    pub(crate) const fn empty() -> Self {
+        Self { va: None }
+    }
+
+    /// Next integer/pointer argument.
+    fn int(&mut self) -> u64 {
+        match self.va.as_deref_mut() {
+            // SAFETY: the va_list contract is upheld by `Args::new`.
+            Some(va) => unsafe { va_arg_int(va) },
+            None => 0,
+        }
+    }
+
+    /// Next `double` argument, as raw bits.
+    fn double(&mut self) -> u64 {
+        match self.va.as_deref_mut() {
+            // SAFETY: the va_list contract is upheld by `Args::new`.
+            Some(va) => unsafe { va_arg_double(va) },
+            None => 0,
+        }
+    }
+
+    /// Next `long double` argument, narrowed to `f64` bits.
+    fn long_double(&mut self) -> u64 {
+        match self.va.as_deref_mut() {
+            // SAFETY: the va_list contract is upheld by `Args::new`.
+            Some(va) => unsafe { va_arg_long_double(va) },
+            None => 0,
+        }
+    }
 }
 
 /// `vprintf(fmt, ap)` — `printf` with a `va_list`.
@@ -644,9 +592,10 @@ pub unsafe extern "C" fn vprintf(fmt: *const u8, ap: *mut VaList) -> i32 {
     if ap.is_null() {
         return -1;
     }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { va_collect(fmt, &mut *ap) };
-    _printf_impl(fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: ap is non-null and the caller guarantees it is a valid va_list
+    // matching `fmt`, which is exactly `Args::new`'s contract.
+    let mut args = unsafe { Args::new(Some(&mut *ap)) };
+    _printf_impl(fmt, &mut args)
 }
 
 /// `vfprintf(stream, fmt, ap)` — `fprintf` with a `va_list`.
@@ -658,9 +607,9 @@ pub unsafe extern "C" fn vfprintf(stream: *mut u8, fmt: *const u8, ap: *mut VaLi
     if ap.is_null() {
         return -1;
     }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { va_collect(fmt, &mut *ap) };
-    _fprintf_impl(stream, fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: as for `vprintf`.
+    let mut args = unsafe { Args::new(Some(&mut *ap)) };
+    _fprintf_impl(stream, fmt, &mut args)
 }
 
 /// `vdprintf(fd, fmt, ap)` — `dprintf` with a `va_list`.
@@ -672,9 +621,9 @@ pub unsafe extern "C" fn vdprintf(fd: i32, fmt: *const u8, ap: *mut VaList) -> i
     if ap.is_null() {
         return -1;
     }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { va_collect(fmt, &mut *ap) };
-    _dprintf_impl(fd, fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: as for `vprintf`.
+    let mut args = unsafe { Args::new(Some(&mut *ap)) };
+    _dprintf_impl(fd, fmt, &mut args)
 }
 
 /// `vsnprintf(buf, size, fmt, ap)` — `snprintf` with a `va_list`.
@@ -692,9 +641,9 @@ pub unsafe extern "C" fn vsnprintf(
     if ap.is_null() {
         return -1;
     }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { va_collect(fmt, &mut *ap) };
-    _snprintf_impl(buf, size, fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: as for `vprintf`.
+    let mut args = unsafe { Args::new(Some(&mut *ap)) };
+    _snprintf_impl(buf, size, fmt, &mut args)
 }
 
 /// `vsprintf(buf, fmt, ap)` — `sprintf` with a `va_list`.
@@ -707,9 +656,9 @@ pub unsafe extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, ap: *mut VaList)
     if ap.is_null() {
         return -1;
     }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { va_collect(fmt, &mut *ap) };
-    _sprintf_impl(buf, fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: as for `vprintf`.
+    let mut args = unsafe { Args::new(Some(&mut *ap)) };
+    _sprintf_impl(buf, fmt, &mut args)
 }
 
 /// `vasprintf(strp, fmt, ap)` — `asprintf` with a `va_list`.
@@ -722,9 +671,9 @@ pub unsafe extern "C" fn vasprintf(strp: *mut *mut u8, fmt: *const u8, ap: *mut 
     if ap.is_null() {
         return -1;
     }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let (iargs, fargs) = unsafe { va_collect(fmt, &mut *ap) };
-    _asprintf_impl(strp, fmt, iargs.as_ptr(), fargs.as_ptr())
+    // SAFETY: as for `vprintf`.  `asprintf` walks the format string twice, so
+    // it takes a snapshot by value and replays it (C's `va_copy`).
+    unsafe { _asprintf_impl(strp, fmt, Some(*ap)) }
 }
 
 // ---------------------------------------------------------------------------
@@ -755,6 +704,9 @@ struct FormatSpec {
     flags: FormatFlags,
     width: usize,
     precision: Option<usize>,
+    /// The `L` length modifier was present, so a floating conversion must
+    /// fetch a 16-byte `long double` rather than a `double`.
+    long_double: bool,
 }
 
 /// Parse flags, width, precision, and length modifier from a format string.
@@ -762,12 +714,7 @@ struct FormatSpec {
 /// `fpos` points past the initial '%'.  On return, `fpos` points to
 /// the conversion character (d, s, x, etc.).  Width/precision `*`
 /// arguments are consumed from `args`.
-fn parse_spec(
-    fmt: *const u8,
-    fpos: &mut usize,
-    args: *const u64,
-    arg_idx: &mut usize,
-) -> FormatSpec {
+fn parse_spec(fmt: *const u8, fpos: &mut usize, args: &mut Args) -> FormatSpec {
     let mut flags = FormatFlags::new();
 
     // Flags.
@@ -786,7 +733,7 @@ fn parse_spec(
     // Width.
     let mut width: usize = 0;
     if unsafe { *fmt.add(*fpos) } == b'*' {
-        let w = consume_arg(args, arg_idx) as i64;
+        let w = args.int() as i64;
         if w < 0 {
             flags.left_align = true;
             // Negate safely: wrapping_neg of i64::MIN is still negative,
@@ -811,7 +758,7 @@ fn parse_spec(
     if unsafe { *fmt.add(*fpos) } == b'.' {
         *fpos = fpos.wrapping_add(1);
         if unsafe { *fmt.add(*fpos) } == b'*' {
-            let p = consume_arg(args, arg_idx) as i32;
+            let p = args.int() as i32;
             if p >= 0 {
                 precision = Some(p as usize);
             }
@@ -828,34 +775,31 @@ fn parse_spec(
         }
     }
 
-    // Length modifier. Nothing here needs to know *which* one it was: every
-    // integer type occupies one 8-byte slot on LP64, and `va_collect` has
-    // already narrowed a `long double` argument to f64 bits, so the formatting
-    // pass only has to skip the modifier to land on the conversion character.
+    // Length modifier.  Only `L` matters: every integer type occupies one
+    // 8-byte slot on LP64 however it is spelled, but `L` on a floating
+    // conversion promotes the argument to a 16-byte, stack-passed
+    // `long double`, so the fetch below has to know.
     // SAFETY: fmt is NUL-terminated and fpos is in range.
-    let _ = unsafe { skip_length_modifier(fmt, fpos) };
+    let long_double = unsafe { skip_length_modifier(fmt, fpos) };
 
     FormatSpec {
         flags,
         width,
         precision,
+        long_double,
     }
 }
 
 /// Dispatch a single conversion specifier.
 ///
 /// Returns the updated `fpos` (past the specifier character).
-#[allow(clippy::too_many_arguments)]
 fn dispatch_spec(
     dst: &mut FmtOutput,
     fmt: *const u8,
     fpos: usize,
     spec_start: usize,
     spec: &FormatSpec,
-    args: *const u64,
-    arg_idx: &mut usize,
-    fargs: *const u64,
-    farg_idx: &mut usize,
+    args: &mut Args,
 ) -> usize {
     let ch = unsafe { *fmt.add(fpos) };
     let next = fpos.wrapping_add(1);
@@ -864,37 +808,37 @@ fn dispatch_spec(
         b'%' => emit_byte(dst, b'%'),
 
         b'd' | b'i' => {
-            let val = consume_arg(args, arg_idx) as i64;
+            let val = args.int() as i64;
             format_signed(dst, val, &spec.flags, spec.width, spec.precision);
         }
 
         b'u' => {
-            let val = consume_arg(args, arg_idx);
+            let val = args.int();
             format_unsigned(dst, val, 10, false, &spec.flags, spec.width, spec.precision);
         }
 
         b'x' => {
-            let val = consume_arg(args, arg_idx);
+            let val = args.int();
             format_unsigned(dst, val, 16, false, &spec.flags, spec.width, spec.precision);
         }
 
         b'X' => {
-            let val = consume_arg(args, arg_idx);
+            let val = args.int();
             format_unsigned(dst, val, 16, true, &spec.flags, spec.width, spec.precision);
         }
 
         b'o' => {
-            let val = consume_arg(args, arg_idx);
+            let val = args.int();
             format_unsigned(dst, val, 8, false, &spec.flags, spec.width, spec.precision);
         }
 
         b's' => {
-            let ptr = consume_arg(args, arg_idx) as *const u8;
+            let ptr = args.int() as *const u8;
             format_string(dst, ptr, &spec.flags, spec.width, spec.precision);
         }
 
         b'c' => {
-            let ch_val = consume_arg(args, arg_idx) as u8;
+            let ch_val = args.int() as u8;
             if spec.width > 1 && !spec.flags.left_align {
                 emit_padding(dst, b' ', spec.width.wrapping_sub(1));
             }
@@ -905,7 +849,7 @@ fn dispatch_spec(
         }
 
         b'p' => {
-            let val = consume_arg(args, arg_idx);
+            let val = args.int();
             // Count hex digits to determine total output width for padding.
             let hex_len = if val == 0 {
                 1usize
@@ -935,7 +879,7 @@ fn dispatch_spec(
         }
 
         b'n' => {
-            let ptr = consume_arg(args, arg_idx) as *mut i32;
+            let ptr = args.int() as *mut i32;
             if !ptr.is_null() {
                 // SAFETY: Caller guarantees ptr is valid.
                 unsafe {
@@ -944,23 +888,24 @@ fn dispatch_spec(
             }
         }
 
-        // Floating-point specifiers: consume from the float args array.
+        // Floating-point specifiers.  `%Lf` fetches 16 bytes from the overflow
+        // area (X87/X87UP is MEMORY-class), not a `double` from %xmm.
         b'f' | b'F' => {
-            let bits = consume_arg(fargs, farg_idx);
+            let bits = if spec.long_double { args.long_double() } else { args.double() };
             let val = f64::from_bits(bits);
             let prec = spec.precision.unwrap_or(6);
             format_float_fixed(dst, val, ch == b'F', &spec.flags, spec.width, prec);
         }
 
         b'e' | b'E' => {
-            let bits = consume_arg(fargs, farg_idx);
+            let bits = if spec.long_double { args.long_double() } else { args.double() };
             let val = f64::from_bits(bits);
             let prec = spec.precision.unwrap_or(6);
             format_float_sci(dst, val, ch == b'E', &spec.flags, spec.width, prec);
         }
 
         b'g' | b'G' => {
-            let bits = consume_arg(fargs, farg_idx);
+            let bits = if spec.long_double { args.long_double() } else { args.double() };
             let val = f64::from_bits(bits);
             let prec = if spec.precision == Some(0) {
                 1
@@ -989,20 +934,12 @@ fn dispatch_spec(
 /// Returns the number of characters that would have been written
 /// (not counting null), even if `out_size` was too small (snprintf
 /// semantics).
-fn format_core(
-    out: *mut u8,
-    out_size: usize,
-    fmt: *const u8,
-    args: *const u64,
-    fargs: *const u64,
-) -> i32 {
+fn format_core(out: *mut u8, out_size: usize, fmt: *const u8, args: &mut Args) -> i32 {
     if fmt.is_null() {
         return -1;
     }
 
     let mut dst = FmtOutput::new(out, out_size);
-    let mut arg_idx: usize = 0;
-    let mut farg_idx: usize = 0;
     let mut fpos: usize = 0;
 
     loop {
@@ -1025,18 +962,8 @@ fn format_core(
         }
 
         let spec_start = fpos;
-        let spec = parse_spec(fmt, &mut fpos, args, &mut arg_idx);
-        fpos = dispatch_spec(
-            &mut dst,
-            fmt,
-            fpos,
-            spec_start,
-            &spec,
-            args,
-            &mut arg_idx,
-            fargs,
-            &mut farg_idx,
-        );
+        let spec = parse_spec(fmt, &mut fpos, args);
+        fpos = dispatch_spec(&mut dst, fmt, fpos, spec_start, &spec, args);
     }
 
     dst.pos as i32
@@ -1067,16 +994,6 @@ impl FormatFlags {
             alt_form: false,
         }
     }
-}
-
-/// Consume the next argument from the args array.
-fn consume_arg(args: *const u64, idx: &mut usize) -> u64 {
-    if args.is_null() {
-        return 0;
-    }
-    let val = unsafe { *args.add(*idx) };
-    *idx = idx.wrapping_add(1);
-    val
 }
 
 /// Emit a single byte to the output buffer.
@@ -2025,21 +1942,76 @@ mod tests {
     // write to a caller-supplied buffer — no syscalls, no I/O — so they
     // work on the host test target.
     //
-    // Integer arguments are passed as a `&[u64]` array.  String pointer
-    // arguments are cast to `u64`.  Float arguments are passed as
-    // `f64::to_bits()` in a separate `&[u64]` array.
+    // Integer arguments are given as a `&[u64]` slice (string pointers cast
+    // to `u64`) and float arguments as a separate `&[u64]` of
+    // `f64::to_bits()`.  [`with_args`] lays those out into a synthetic System
+    // V register save area and hands the engine a real `va_list` over it —
+    // the same shape a compiler-generated `va_start` produces — so the tests
+    // exercise the production argument path rather than a test-only one.
     // -----------------------------------------------------------------------
+
+    /// Storage backing a synthetic `va_list`: the 176-byte register save area
+    /// (six 8-byte GP slots, then eight 16-byte XMM slots) plus a generous
+    /// overflow area for arguments past the register file.
+    struct ArgScratch {
+        reg: [u8; 176],
+        overflow: [u8; 512],
+    }
+
+    /// Build a synthetic `va_list` over `ints`/`floats` and run `f` on it.
+    ///
+    /// The first six integers land in the GP save slots and the first eight
+    /// floats in the XMM save slots; anything beyond that goes to the
+    /// overflow area, integers first.  That ordering is only faithful when at
+    /// most one of the two classes overflows — with both overflowing, the
+    /// real ABI interleaves them by document order, which this two-slice
+    /// interface cannot express.  The assertion below pins that limit rather
+    /// than letting such a test silently read the wrong slots.
+    fn with_args<R>(ints: &[u64], floats: &[u64], f: impl FnOnce(&mut Args) -> R) -> R {
+        assert!(
+            ints.len() <= 6 || floats.len() <= 8,
+            "with_args cannot lay out overflowing integers and floats together; \
+             build the va_list explicitly for this case"
+        );
+        let mut scratch = ArgScratch {
+            reg: [0u8; 176],
+            overflow: [0u8; 512],
+        };
+
+        for (i, &v) in ints.iter().take(6).enumerate() {
+            let off = i * 8;
+            scratch.reg[off..off + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        for (i, &v) in floats.iter().take(8).enumerate() {
+            let off = 48 + i * 16;
+            scratch.reg[off..off + 8].copy_from_slice(&v.to_le_bytes());
+        }
+
+        let mut spill = 0usize;
+        for &v in ints.iter().skip(6).chain(floats.iter().skip(8)) {
+            assert!(spill + 8 <= scratch.overflow.len(), "overflow area too small");
+            scratch.overflow[spill..spill + 8].copy_from_slice(&v.to_le_bytes());
+            spill += 8;
+        }
+
+        let mut va = VaList {
+            gp_offset: 0,
+            fp_offset: 48,
+            overflow_arg_area: scratch.overflow.as_mut_ptr(),
+            reg_save_area: scratch.reg.as_mut_ptr(),
+        };
+        // SAFETY: `va` describes the scratch buffers above, which outlive the
+        // call and are laid out exactly as the ABI specifies.
+        let mut args = unsafe { Args::new(Some(&mut va)) };
+        f(&mut args)
+    }
 
     /// Format via `_snprintf_impl` and return the output as a `String`.
     fn snprintf_str(fmt: &[u8], args: &[u64], fargs: &[u64]) -> (String, i32) {
         let mut buf = [0u8; 512];
-        let n = _snprintf_impl(
-            buf.as_mut_ptr(),
-            buf.len(),
-            fmt.as_ptr(),
-            args.as_ptr(),
-            fargs.as_ptr(),
-        );
+        let n = with_args(args, fargs, |a| {
+            _snprintf_impl(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), a)
+        });
         let len = if n >= 0 && (n as usize) < buf.len() {
             n as usize
         } else {
@@ -2055,13 +2027,9 @@ mod tests {
     #[allow(dead_code)]
     fn fmt_str(fmt: &[u8], args: &[u64], fargs: &[u64]) -> (String, i32) {
         let mut buf = [0u8; 512];
-        let n = format_core(
-            buf.as_mut_ptr(),
-            buf.len(),
-            fmt.as_ptr(),
-            args.as_ptr(),
-            fargs.as_ptr(),
-        );
+        let n = with_args(args, fargs, |a| {
+            format_core(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), a)
+        });
         let len = if n >= 0 && (n as usize) < buf.len() {
             n as usize
         } else if n >= 0 {
@@ -2334,13 +2302,9 @@ mod tests {
     #[test]
     fn snprintf_truncation() {
         let mut buf = [0xFFu8; 8];
-        let n = _snprintf_impl(
-            buf.as_mut_ptr(),
-            buf.len(),
-            b"hello world\0".as_ptr(),
-            [].as_ptr(),
-            [].as_ptr(),
-        );
+        let n = with_args(&[], &[], |a| {
+            _snprintf_impl(buf.as_mut_ptr(), buf.len(), b"hello world\0".as_ptr(), a)
+        });
         // n should be 11 (total chars that would be written).
         assert_eq!(n, 11);
         // buf should be "hello w\0" (7 chars + NUL).
@@ -2350,13 +2314,9 @@ mod tests {
     #[test]
     fn snprintf_exact_fit() {
         let mut buf = [0xFFu8; 6];
-        let n = _snprintf_impl(
-            buf.as_mut_ptr(),
-            buf.len(),
-            b"hello\0".as_ptr(),
-            [].as_ptr(),
-            [].as_ptr(),
-        );
+        let n = with_args(&[], &[], |a| {
+            _snprintf_impl(buf.as_mut_ptr(), buf.len(), b"hello\0".as_ptr(), a)
+        });
         assert_eq!(n, 5);
         assert_eq!(&buf, b"hello\0");
     }
@@ -2364,13 +2324,9 @@ mod tests {
     #[test]
     fn snprintf_size_one() {
         let mut buf = [0xFFu8; 1];
-        let n = _snprintf_impl(
-            buf.as_mut_ptr(),
-            buf.len(),
-            b"hello\0".as_ptr(),
-            [].as_ptr(),
-            [].as_ptr(),
-        );
+        let n = with_args(&[], &[], |a| {
+            _snprintf_impl(buf.as_mut_ptr(), buf.len(), b"hello\0".as_ptr(), a)
+        });
         assert_eq!(n, 5);
         // Only the NUL terminator should be written.
         assert_eq!(buf[0], 0);
@@ -2378,13 +2334,9 @@ mod tests {
 
     #[test]
     fn snprintf_null_buf_returns_count() {
-        let n = _snprintf_impl(
-            core::ptr::null_mut(),
-            0,
-            b"hello %d\0".as_ptr(),
-            [42u64].as_ptr(),
-            [].as_ptr(),
-        );
+        let n = with_args(&[42u64], &[], |a| {
+            _snprintf_impl(core::ptr::null_mut(), 0, b"hello %d\0".as_ptr(), a)
+        });
         // Should return the number of chars that would be written.
         assert_eq!(n, 8); // "hello 42"
     }
@@ -2552,13 +2504,9 @@ mod tests {
 
     #[test]
     fn format_core_null_fmt() {
-        let n = format_core(
-            core::ptr::null_mut(),
-            0,
-            core::ptr::null(),
-            [].as_ptr(),
-            [].as_ptr(),
-        );
+        let n = with_args(&[], &[], |a| {
+            format_core(core::ptr::null_mut(), 0, core::ptr::null(), a)
+        });
         assert_eq!(n, -1);
     }
 
@@ -3142,13 +3090,9 @@ mod tests {
     fn stress_snprintf_truncation() {
         // snprintf with small buffer should truncate but return full length.
         let mut buf = [0u8; 6]; // room for 5 chars + NUL
-        let n = _snprintf_impl(
-            buf.as_mut_ptr(),
-            buf.len(),
-            b"hello world\0".as_ptr(),
-            [].as_ptr(),
-            [].as_ptr(),
-        );
+        let n = with_args(&[], &[], |a| {
+            _snprintf_impl(buf.as_mut_ptr(), buf.len(), b"hello world\0".as_ptr(), a)
+        });
         // Should return 11 (length of "hello world") even though buffer is only 6.
         assert_eq!(n, 11);
         // Buffer should contain "hello\0".
@@ -3181,13 +3125,13 @@ mod tests {
     // v* printf family (va_list extraction)
     //
     // These build a synthetic SysV `va_list` by hand — a 176-byte register
-    // save area plus a stack overflow area — so they exercise `va_collect`
-    // and `va_arg_*` without relying on the host C `va_start` (whose ABI
-    // differs on Windows hosts).  `gp_offset`/`fp_offset` start at the
-    // values `va_start` would leave for a function whose only fixed arg is
-    // `fmt` (1 GP register consumed → 8) ... but since `va_collect` simply
-    // reads from the given offsets, we use 0/48 here and place the args at
-    // the start of each register bank for clarity.
+    // save area plus a stack overflow area — so they exercise the `va_arg_*`
+    // readers without relying on the host C `va_start` (whose ABI differs on
+    // Windows hosts).  `gp_offset`/`fp_offset` start at the values `va_start`
+    // would leave for a function whose only fixed arg is `fmt` (1 GP register
+    // consumed → 8) ... but since the readers simply consume from the given
+    // offsets, we use 0/48 here and place the args at the start of each
+    // register bank for clarity.
     // -----------------------------------------------------------------------
 
     /// Build a register save area populated with up to 6 integer args (GP
@@ -3259,7 +3203,8 @@ mod tests {
     #[test]
     fn vsnprintf_mixed_int_float() {
         // Document order: int, float, int — pulled from separate banks but
-        // interleaved correctly by va_collect.
+        // interleaved correctly, because each conversion takes its argument
+        // from the bank its own class dictates.
         let (s, _) = run_vsnprintf(b"%d=%.1f (%d)\0", &[7, 9], &[2.5]);
         assert_eq!(s, "7=2.5 (9)");
     }
@@ -3480,8 +3425,11 @@ mod tests {
 
     #[test]
     fn vsnprintf_advances_va_offsets() {
-        // After collecting two int args from registers, gp_offset should have
-        // advanced by 16 (two 8-byte slots).
+        // Formatting two `%d` must consume exactly two GP slots and no XMM
+        // slot: `gp_offset` advances by 16, `fp_offset` stays at 48.  The
+        // engine reads the va_list in place, so the caller's cursor is
+        // observable afterwards — that is what `va_end` exists for in C, and
+        // what makes a second pass over the same list illegal.
         let mut reg = [0u8; 176];
         reg[0..8].copy_from_slice(&1u64.to_le_bytes());
         reg[8..16].copy_from_slice(&2u64.to_le_bytes());
@@ -3492,11 +3440,45 @@ mod tests {
             overflow_arg_area: overflow.as_mut_ptr(),
             reg_save_area: reg.as_mut_ptr(),
         };
-        // SAFETY: valid synthetic va_list.
-        let (iargs, _) = unsafe { va_collect(b"%d %d\0".as_ptr(), &mut va) };
-        assert_eq!(iargs[0], 1);
-        assert_eq!(iargs[1], 2);
+        let mut buf = [0u8; 64];
+        // SAFETY: valid synthetic va_list with two integer arguments.
+        let n = unsafe {
+            vsnprintf(
+                buf.as_mut_ptr(),
+                buf.len(),
+                b"%d %d\0".as_ptr(),
+                &raw mut va,
+            )
+        };
+        assert_eq!(n, 3);
+        assert_eq!(&buf[..3], b"1 2");
         assert_eq!(va.gp_offset, 16);
         assert_eq!(va.fp_offset, 48);
+    }
+
+    /// Regression guard for BUG-POSIX-PRINTF-ARG-ARRAY-OOB: more conversions
+    /// than the retired flat `[u64; 8]` arrays could hold.  The ninth `%d`
+    /// used to index one past the end of an eight-element stack array.
+    #[test]
+    fn more_than_eight_integer_conversions() {
+        let (s, n) = snprintf_str(
+            b"%d %d %d %d %d %d %d %d %d %d %d %d\0",
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            &[],
+        );
+        assert_eq!(s, "1 2 3 4 5 6 7 8 9 10 11 12");
+        assert_eq!(n, 26);
+    }
+
+    /// The floating-point half of the same bug: nine `%f` conversions.
+    #[test]
+    fn more_than_eight_float_conversions() {
+        let bits: Vec<u64> = (1..=9).map(|i| f64::from(i).to_bits()).collect();
+        let (s, _) = snprintf_str(
+            b"%.0f%.0f%.0f%.0f%.0f%.0f%.0f%.0f%.0f\0",
+            &[],
+            &bits,
+        );
+        assert_eq!(s, "123456789");
     }
 }

@@ -9,10 +9,11 @@
 //!
 //! `syslog` is variadic in C (`void syslog(int, const char *fmt, ...)`), so —
 //! like [`crate::printf`] — its entry point is an assembly trampoline that
-//! captures register/stack varargs into flat arrays and calls `_syslog_impl`,
-//! which expands the printf-style format with the tested snprintf engine
-//! before adding the priority/ident/PID framing.  `vsyslog` takes a real
-//! `va_list` (a pointer on the x86_64 System V ABI) and is plain Rust.
+//! performs a real `va_start` and calls `vsyslog`, which expands the
+//! printf-style format with the tested snprintf engine before adding the
+//! priority/ident/PID framing.  `vsyslog` takes the `va_list` directly (a
+//! pointer on the x86_64 System V ABI) and is plain Rust, so the whole body
+//! is host-testable and there is exactly one argument-delivery path.
 //!
 //! Under `_FORTIFY_SOURCE` the libc headers redirect `syslog`/`vsyslog` to
 //! `__syslog_chk`/`__vsyslog_chk` (an extra leading `flag` argument); both
@@ -27,95 +28,29 @@
 //!   must be written `%%` (matching every real libc).
 
 // Calls `printf::_snprintf_impl`; underscore is the ABI convention for libc
-// impl trampoline targets, not a privacy marker.  Also defines a local
-// `_syslog_impl` trampoline target with the same convention.
+// impl trampoline targets, not a privacy marker.
 #![allow(clippy::used_underscore_items)]
 
 use crate::file;
 use crate::printf::{self, VaList};
 use crate::string;
 
+#[cfg(target_os = "none")]
+use crate::printf::va_trampoline;
+
 // ---------------------------------------------------------------------------
-// Assembly trampoline — capture varargs, then call `_syslog_impl`.
-// Layout matches `fprintf`: 2 fixed args (priority, fmt), rest varargs.
+// Assembly trampolines — `va_start`, then call the matching `v*` variant.
+//
+// The named-argument counts decide the initial `gp_offset` and which register
+// carries the `va_list*`:
+//   syslog(priority, fmt, ...)              : 2 named args (like `fprintf`)
+//   __syslog_chk(priority, flag, fmt, ...)  : 3 named args
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "none")]
-core::arch::global_asm!(
-    // syslog(priority, fmt, ...) → _syslog_impl(priority, fmt, int_args, float_args)
-    ".global syslog",
-    ".type syslog, @function",
-    "syslog:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rdx",    // int vararg 0
-    "mov [rsp+8], rcx",  // int vararg 1
-    "mov [rsp+16], r8",  // int vararg 2
-    "mov [rsp+24], r9",  // int vararg 3
-    "mov rax, [rbp+16]", // int vararg 4 (stack)
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+24]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+32]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+40]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi = priority, rsi = fmt (already set)
-    "mov rdx, rsp",      // int_args
-    "lea rcx, [rsp+64]", // float_args
-    "call _syslog_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-    // __syslog_chk(priority, flag, fmt, ...) → _syslog_impl(priority, fmt, int_args, float_args)
-    // The _FORTIFY_SOURCE redirect target for syslog().  Fixed args:
-    // rdi=priority, rsi=flag, rdx=fmt; varargs start at rcx (like fprintf).
-    // The fortify `flag` is discarded.
-    ".global __syslog_chk",
-    ".type __syslog_chk, @function",
-    "__syslog_chk:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 128",
-    "mov [rsp], rcx",    // int vararg 0
-    "mov [rsp+8], r8",   // int vararg 1
-    "mov [rsp+16], r9",  // int vararg 2
-    "mov rax, [rbp+16]", // int vararg 3 (stack)
-    "mov [rsp+24], rax",
-    "mov rax, [rbp+24]", // int vararg 4
-    "mov [rsp+32], rax",
-    "mov rax, [rbp+32]", // int vararg 5
-    "mov [rsp+40], rax",
-    "mov rax, [rbp+40]", // int vararg 6
-    "mov [rsp+48], rax",
-    "mov rax, [rbp+48]", // int vararg 7
-    "mov [rsp+56], rax",
-    "movsd [rsp+64], xmm0",
-    "movsd [rsp+72], xmm1",
-    "movsd [rsp+80], xmm2",
-    "movsd [rsp+88], xmm3",
-    "movsd [rsp+96], xmm4",
-    "movsd [rsp+104], xmm5",
-    "movsd [rsp+112], xmm6",
-    "movsd [rsp+120], xmm7",
-    // rdi=priority already set; move fmt into rsi.
-    "mov rsi, rdx",      // fmt
-    "mov rdx, rsp",      // int_args
-    "lea rcx, [rsp+64]", // float_args
-    "call _syslog_impl",
-    "add rsp, 128",
-    "pop rbp",
-    "ret",
-);
+va_trampoline!("syslog", "vsyslog", "16", "rdx");
+#[cfg(target_os = "none")]
+va_trampoline!("__syslog_chk", "__vsyslog_chk", "24", "rcx");
 
 /// Stack buffer for the expanded format-string body.
 const SYSLOG_MSG_BUF: usize = 1024;
@@ -238,29 +173,8 @@ pub extern "C" fn openlog(ident: *const u8, option: i32, _facility: i32) {
     }
 }
 
-/// Implementation behind the `syslog` assembly trampoline.
-///
-/// Expands the printf-style `fmt`/varargs into a stack buffer, then frames
-/// the result with the priority prefix, ident, and (optionally) PID before
-/// writing to stderr.  `iargs`/`fargs` are the captured integer/float
-/// vararg arrays (each up to 8 entries) produced by the trampoline.
-///
-/// # Safety
-///
-/// `fmt` must be a valid NUL-terminated C string (or null), and
-/// `iargs`/`fargs` must each point to at least 8 `u64` slots when `fmt`
-/// references that many conversions (the trampoline always provides 8).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn _syslog_impl(
-    priority: i32,
-    fmt: *const u8,
-    iargs: *const u64,
-    fargs: *const u64,
-) {
-    do_syslog(priority, fmt, iargs, fargs);
-}
-
-/// `vsyslog(int priority, const char *fmt, va_list ap)` — the va_list form.
+/// `vsyslog(int priority, const char *fmt, va_list ap)` — the va_list form,
+/// and the delegation target of the `syslog` trampoline.
 ///
 /// On the x86_64 System V ABI a `va_list` is `__va_list_tag[1]`, so the
 /// `va_list` parameter decays to a pointer and this function is plain Rust.
@@ -271,12 +185,10 @@ pub unsafe extern "C" fn _syslog_impl(
 /// point to a valid, initialised `va_list` matching `fmt`'s conversions.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn vsyslog(priority: i32, fmt: *const u8, ap: *mut VaList) {
-    if ap.is_null() {
-        return;
-    }
-    // SAFETY: caller guarantees `ap` is a valid va_list and `fmt` matches it.
-    let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
-    do_syslog(priority, fmt, iargs.as_ptr(), fargs.as_ptr());
+    // SAFETY: the caller guarantees `ap` is a valid va_list matching `fmt`;
+    // a null one is rendered as zero arguments rather than a fault.
+    let mut args = unsafe { printf::Args::from_raw(ap) };
+    do_syslog(priority, fmt, &mut args);
 }
 
 /// `__vsyslog_chk(priority, flag, fmt, ap)` — the `_FORTIFY_SOURCE` redirect
@@ -288,13 +200,13 @@ pub unsafe extern "C" fn vsyslog(priority: i32, fmt: *const u8, ap: *mut VaList)
 /// and `ap` a valid `va_list` matching `fmt`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __vsyslog_chk(priority: i32, _flag: i32, fmt: *const u8, ap: *mut VaList) {
-    // SAFETY: forwards to vsyslog, which validates `ap`.
+    // SAFETY: forwards to vsyslog, which carries the same contract.
     unsafe { vsyslog(priority, fmt, ap) };
 }
 
-/// Shared body for `_syslog_impl` and `vsyslog`: mask-filter, printf-expand
-/// the format into a stack buffer, then write the framed line to stderr.
-fn do_syslog(priority: i32, fmt: *const u8, iargs: *const u64, fargs: *const u64) {
+/// Shared body for the family: mask-filter, printf-expand the format into a
+/// stack buffer, then write the framed line to stderr.
+fn do_syslog(priority: i32, fmt: *const u8, args: &mut printf::Args) {
     let pri = log_pri(priority);
 
     // Check log mask before doing any work.
@@ -309,10 +221,9 @@ fn do_syslog(priority: i32, fmt: *const u8, iargs: *const u64, fargs: *const u64
 
     // Expand the printf-style format into a stack buffer.  `_snprintf_impl`
     // is a safe wrapper that bounds all writes to the buffer and always
-    // NUL-terminates; it tolerates null `iargs`/`fargs` when `fmt` has no
-    // matching conversions.
+    // NUL-terminates; an empty `args` renders every conversion as zero.
     let mut body = [0u8; SYSLOG_MSG_BUF];
-    let written = printf::_snprintf_impl(body.as_mut_ptr(), SYSLOG_MSG_BUF, fmt, iargs, fargs);
+    let written = printf::_snprintf_impl(body.as_mut_ptr(), SYSLOG_MSG_BUF, fmt, args);
     // Clamp to the buffer (snprintf returns the would-be length, which may
     // exceed the buffer when truncated).
     let body_len = if written < 0 {
@@ -694,12 +605,12 @@ mod tests {
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
         }
+        // SAFETY: the format string has no conversions, so no args are read.
         unsafe {
-            _syslog_impl(
+            vsyslog(
                 LOG_INFO,
                 b"test syslog message\0".as_ptr(),
-                core::ptr::null(),
-                core::ptr::null(),
+                core::ptr::null_mut(),
             );
         }
     }
@@ -710,20 +621,19 @@ mod tests {
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(log_upto(LOG_ERR) as i32);
         }
+        // SAFETY: neither format string has conversions.
         unsafe {
             // This should be filtered out (LOG_INFO > LOG_ERR).
-            _syslog_impl(
+            vsyslog(
                 LOG_INFO,
                 b"this should be filtered\0".as_ptr(),
-                core::ptr::null(),
-                core::ptr::null(),
+                core::ptr::null_mut(),
             );
             // This should get through.
-            _syslog_impl(
+            vsyslog(
                 LOG_ERR,
                 b"this should print\0".as_ptr(),
-                core::ptr::null(),
-                core::ptr::null(),
+                core::ptr::null_mut(),
             );
         }
         // Restore.
@@ -737,13 +647,35 @@ mod tests {
         unsafe {
             core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
         }
+        // SAFETY: a null format string is rejected before any arg is read.
         unsafe {
-            _syslog_impl(
-                LOG_ERR,
-                core::ptr::null(),
-                core::ptr::null(),
-                core::ptr::null(),
-            );
+            vsyslog(LOG_ERR, core::ptr::null(), core::ptr::null_mut());
+        }
+    }
+
+    /// More conversions than the retired flat `[u64; 8]` arrays could hold —
+    /// a regression guard for BUG-POSIX-PRINTF-ARG-ARRAY-OOB.
+    #[test]
+    fn test_syslog_more_than_eight_int_args_no_crash() {
+        unsafe {
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
+        }
+        let mut reg = [0u8; 176];
+        for i in 0..6 {
+            let v = (i as u64).wrapping_add(1);
+            reg[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        let mut overflow = [0u8; 128];
+        let mut va = VaList {
+            gp_offset: 0,
+            fp_offset: 48,
+            overflow_arg_area: overflow.as_mut_ptr(),
+            reg_save_area: reg.as_mut_ptr(),
+        };
+        // SAFETY: va supplies six register args plus in-bounds overflow slots
+        // for the remaining four conversions.
+        unsafe {
+            vsyslog(LOG_INFO, b"%d%d%d%d%d%d%d%d%d%d\0".as_ptr(), &mut va);
         }
     }
 

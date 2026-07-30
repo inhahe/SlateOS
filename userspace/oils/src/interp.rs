@@ -6918,7 +6918,7 @@ impl Shell {
                     let prefix = self.xtrace_prefix();
                     let op = if a.append { "+=" } else { "=" };
                     self.emit_stderr(
-                        format!("{prefix}{}{op}{}\n", a.name, xtrace_quote(&val)).as_bytes(),
+                        format!("{prefix}{}{op}{}\n", a.name, xtrace_quote_value(&val)).as_bytes(),
                     );
                 }
                 // `BASH_ARGV0=name` sets `$0` (the shell/script name used in
@@ -8860,7 +8860,7 @@ impl Shell {
         if self.xtrace {
             let prefix = self.xtrace_prefix();
             for (k, v) in &assigns {
-                self.emit_stderr(format!("{prefix}{k}={}\n", xtrace_quote(v)).as_bytes());
+                self.emit_stderr(format!("{prefix}{k}={}\n", xtrace_quote_value(v)).as_bytes());
             }
             let mut line = prefix;
             for (i, a) in argv.iter().enumerate() {
@@ -24995,24 +24995,113 @@ fn shell_quote(s: &str) -> String {
     out
 }
 
-/// Minimal shell-quoting as used by `set -x` traces: a value made only of
-/// "safe" characters (including the empty string) is emitted verbatim; anything
-/// else is wrapped in single quotes, with embedded single quotes rendered as
-/// `'\''`. This matches bash's xtrace output (`x=5`, `x='a b'`, `x=` for empty)
-/// — distinct from `@Q`/`shell_quote` (which always quotes) and `%q` (which
-/// backslash-escapes).
-fn xtrace_quote(s: &str) -> String {
-    let safe = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
-    if s.chars().all(safe) {
+/// `true` when a character forces `set -x` to single-quote the word it is in.
+///
+/// bash's `sh_contains_shell_metas`, measured character by character over the
+/// whole of ASCII (`echo $'a\xNNb'` under `set -x`, each byte also probed at the
+/// start and the end of the word). Two of them are position-sensitive, and only
+/// where the character actually means something there: `#` starts a comment, so
+/// it is a metacharacter only as the first character of a word; `~` is subject to
+/// tilde expansion at the start of a word and after a `=` or a `:`, and is
+/// ordinary text anywhere else. `\t` and `\n` count because they are IFS
+/// whitespace — which is why a word holding a tab is single-quoted rather than
+/// ANSI-C quoted, even though a tab is not printable.
+fn xtrace_meta(c: char, prev: Option<char>) -> bool {
+    match c {
+        ' ' | '\t' | '\n' => true,
+        '\'' | '"' | '\\' => true,
+        '|' | '&' | ';' | '(' | ')' | '<' | '>' => true,
+        '!' | '{' | '}' | '*' | '[' | ']' | '?' | '^' | '$' | '`' => true,
+        '#' => prev.is_none(),
+        '~' => matches!(prev, None | Some('=' | ':')),
+        _ => false,
+    }
+}
+
+/// Quote one string the way `set -x` does. bash tries three shapes in order and
+/// takes the first that applies (`xtrace_print_word_list` in `print_cmd.c`):
+///
+/// 1. the empty word is `''` — unless it is an assignment's *value*, which stays
+///    bare (`x=`), the one place the two paths differ, hence `empty_bare`;
+/// 2. a word holding a shell metacharacter is single-quoted, embedded quotes
+///    rendered `'\''`;
+/// 3. a word holding an unprintable character is ANSI-C quoted (`$'a\001b'`);
+/// 4. anything else is emitted verbatim.
+///
+/// The order matters and is observable: `$'a\001 b'` holds *both* a space and a
+/// control character, and bash prints `'a<0x01> b'` — the space wins and the
+/// control character goes out raw. This is distinct from `@Q`/`shell_quote`
+/// (which always quotes) and from `%q` (which backslash-escapes).
+fn xtrace_quote_with(s: &str, empty_bare: bool) -> String {
+    if s.is_empty() {
+        return if empty_bare { String::new() } else { "''".to_string() };
+    }
+    let mut prev = None;
+    if s.chars().any(|c| {
+        let meta = xtrace_meta(c, prev);
+        prev = Some(c);
+        meta
+    }) {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('\'');
+        for c in s.chars() {
+            if c == '\'' {
+                out.push_str("'\\''");
+            } else {
+                out.push(c);
+            }
+        }
+        out.push('\'');
+        return out;
+    }
+    if !s.chars().any(char::is_control) {
         return s.to_string();
     }
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
+    ansic_quote(s)
+}
+
+/// A word for a `set -x` trace: the empty word shows as `''`.
+fn xtrace_quote(s: &str) -> String {
+    xtrace_quote_with(s, false)
+}
+
+/// An assignment's value for a `set -x` trace: the empty value shows as nothing
+/// at all, so `x=` traces as `x=` and not as `x=''`.
+fn xtrace_quote_value(s: &str) -> String {
+    xtrace_quote_with(s, true)
+}
+
+/// `$'…'` ANSI-C quoting, bash's `ansic_quote`: the eight escapes it spells with
+/// a letter — `\a \b \E \f \n \r \t \v`, note `\E` and not `\033` for escape —
+/// then `\'` and `\\`, then three-digit **octal** for any other unprintable
+/// character, and the character itself for anything printable.
+fn ansic_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    out.push_str("$'");
     for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
+        match c {
+            '\u{7}' => out.push_str("\\a"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{1b}' => out.push_str("\\E"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{b}' => out.push_str("\\v"),
+            '\'' => out.push_str("\\'"),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => {
+                // Octal, three digits. Every character that reaches here is one
+                // of the C0/C1 controls (`char::is_control` is exactly the `Cc`
+                // category), so its value is at most 0o237 and three digits are
+                // always enough and never too few.
+                let v = c as u32;
+                out.push('\\');
+                out.push(char::from(b'0' + u8::try_from((v >> 6) & 7).unwrap_or(0)));
+                out.push(char::from(b'0' + u8::try_from((v >> 3) & 7).unwrap_or(0)));
+                out.push(char::from(b'0' + u8::try_from(v & 7).unwrap_or(0)));
+            }
+            c => out.push(c),
         }
     }
     out.push('\'');
@@ -40118,6 +40207,44 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("{ set -x; x=5 true; } 2>&1").0, "+ x=5\n+ true\n");
         // `PS4` overrides the trace prefix.
         assert_eq!(run("{ PS4='TRACE '; set -x; x=5; } 2>&1").0, "TRACE x=5\n");
+    }
+
+    /// `set -x` word quoting, measured against bash 5.2 byte by byte over the
+    /// whole of ASCII (see [`xtrace_quote_with`] for the rule it encodes).
+    #[test]
+    fn xtrace_quotes_words_like_bash() {
+        let trace = |src: &str| run(&format!("{{ set -x; {src}; }} 2>&1")).0;
+        // A word with no metacharacter and nothing unprintable goes out verbatim.
+        assert_eq!(trace("true a=b c/d 1+1"), "+ true a=b c/d 1+1\n");
+        // `#` is a metacharacter only as the *first* character of a word, and `~`
+        // only at the start or right after a `=` or a `:` — exactly the places
+        // they mean something.
+        assert_eq!(trace("true '#ab' 'a#b' 'a=#b'"), "+ true '#ab' a#b a=#b\n");
+        assert_eq!(
+            trace("true '~ab' 'a~b' 'ab~' 'a~b~c' 'a=~b' 'a:~b'"),
+            "+ true '~ab' a~b ab~ a~b~c 'a=~b' 'a:~b'\n"
+        );
+        // An embedded single quote closes, escapes, and reopens.
+        assert_eq!(trace(r#"true "a'b""#), "+ true 'a'\\''b'\n");
+        // An empty *word* is `''`; an empty assignment *value* is nothing at all.
+        assert_eq!(trace("true '' ''"), "+ true '' ''\n");
+        assert_eq!(trace("x="), "+ x=\n");
+        assert_eq!(trace("x= true"), "+ x=\n+ true\n");
+        // Unprintable with no metacharacter → ANSI-C quoting, with bash's `\E`
+        // for escape and three-digit octal for the rest.
+        assert_eq!(trace("true $'a\\033b'"), "+ true $'a\\Eb'\n");
+        assert_eq!(trace("true $'a\\001\\002b'"), "+ true $'a\\001\\002b'\n");
+        assert_eq!(trace("true $'a\\177b'"), "+ true $'a\\177b'\n");
+        assert_eq!(trace("true $'a\\ab\\bc\\fd\\re'"), "+ true $'a\\ab\\bc\\fd\\re'\n");
+        // The order of the two branches is observable: a word holding *both* a
+        // space and a control character takes the metacharacter branch, so the
+        // control character is emitted raw inside single quotes rather than
+        // escaped.
+        assert_eq!(trace("true $'a\\001 b'"), "+ true 'a\u{1} b'\n");
+        assert_eq!(trace("true $'a\\t\\001b'"), "+ true 'a\t\u{1}b'\n");
+        // A newline likewise keeps the word single-quoted (it is IFS whitespace),
+        // so the trace really does span two lines.
+        assert_eq!(trace("true $'a\\nb'"), "+ true 'a\nb'\n");
     }
 
     #[test]

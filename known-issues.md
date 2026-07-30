@@ -8642,6 +8642,95 @@ probing bash 5.2 while investigating `^old^new^` (below):
 differentially; unit tests `pathname_modifiers_are_naive_strrchr` and
 `unrecognized_modifier_aborts_the_expansion` cover the same ground in-process.
 
+### TD-OILS-HISTEXPAND-QUICKSUB. `^old^new^` was a path of its own, so everything after the closing delimiter was thrown away — ✅ RESOLVED 2026-07-29
+
+**Where:** `userspace/oils/src/histexpand.rs` — `expand()`, and the deleted
+`quick_substitution()`.
+
+**What.** osh treated `^old^new^` as a whole-line form with its own parser and
+its own diagnostics. readline does something much simpler: it *textually*
+prefixes `!!:s` to the line and runs the ordinary expander over the result. Four
+observable consequences, all measured against bash 5.2 and none of which the
+bespoke path reproduced:
+
+```
+$ echo one two
+$ ^one^X^ tail       bash → echo X two tail    osh → echo X two
+$ ^one^X^^           bash → echo X two^        osh → echo X two
+$ ^one^X^ !!         bash → echo X two echo one two   (the tail is expanded too)
+$ history -c ; ^a^b^ bash → !!: event not found  osh → :s^a^b^: event not found
+```
+
+**Fix.** `expand()` now builds `format!("!!:s{line}")` when the line starts with
+`^` and falls into the normal loop; `quick_substitution()` is gone. The `:s`
+error wording (`:s^zz^two^: substitution failed`, `:s^: no previous
+substitution`) comes out of `apply_modifiers` unchanged, because it already
+quoted the modifier back from the `:` — which is exactly the rewritten spec.
+
+One subtlety needed a new `Expansion` variant. bash adopts `history_expand`'s
+output string unconditionally but only *echoes* it when the expander proper
+changed something, so a `^old^new^` whose `!!` turns out to be quoted runs, and
+is recorded, as the literal `!!:s^old^new^` with nothing echoed to stderr:
+
+```
+$ echo 'x
+$ ^one^two^'         bash prints  x  then  !!:s^one^two^   with an empty stderr
+```
+
+`Expansion::ChangedQuietly` carries that case. It is only reachable once the
+reader's quote state is carried across physical lines
+(TD-OILS-HISTEXPAND-LINE-QUOTE-STATE), which is the change that produced the
+measurement above.
+
+**Tests.** `tests/corpus/histexpand-quicksub.sh` (new) plus unit tests
+`quick_substitution_keeps_what_follows_the_delimiter` and
+`quick_substitution_failures_name_the_rewritten_spec`.
+
+### TD-OILS-HISTEXPAND-LINE-QUOTE-STATE. history expansion resets the quote state at every physical line, so a `!` on a continuation line is judged out of context — OPEN 2026-07-29
+
+**Where:** `userspace/oils/src/histexpand.rs` — `expand()` starts every call with
+`in_single`/`in_double` false; `userspace/oils/src/interp.rs` —
+`expand_history_lines()` (the `crate::histexpand::expand(&raw.text, …)` call).
+
+**What.** bash hands readline the quote delimiter its *reader* is currently
+inside (readline's `history_quoting_state`, set from bash's delimiter stack) so a
+continuation line is expanded knowing it is inside `'…'` or `"…"`. osh expands
+each physical line from a clean slate, which gets the polarity exactly inverted:
+it expands what bash leaves alone and leaves alone what bash expands. Measured,
+with `set -o history; set -H` and `echo one` as the previous command:
+
+| lines | bash | osh |
+|---|---|---|
+| `echo 'x` / `!!'` | literal `!!` | expands |
+| `echo 'x` / `y' !!` | **expands** (the `'` closed first) | literal |
+| `echo 'x` / `!! z'` | literal | expands |
+| `echo 'x` / `!zz'` | literal | `!zz': event not found` |
+| `echo "x` / `!"` | literal (the `"` joins the no-expand set) | `!": event not found` |
+| `echo "x` / `!zz"` | `!zz: event not found` | `!zz": event not found` |
+| `echo "a` / `#!zz"` | `!zz: event not found` (no comment inside `"`) | literal |
+| `echo 'x` / `^one^two^'` | literal `!!:s^one^two^` | expands |
+| `echo $(echo 'x` / `!!')` | literal | expands |
+| `` echo `echo 'y `` / `` !!'` `` | **expands** | expands (agrees) |
+
+The last row is the interesting one: a quote opened inside a `` ` `` body does
+*not* become the reader's state, because bash scans a backquote body as a flat
+matched pair, while `$( … )` recurses into the parser and does push its inner
+quotes. Backslash continuations, `$( … )` and compound commands already agree.
+
+**Proper fix.** The delimiter is what the lexer was looking for when the input
+ran out, so `LexError` should carry it structurally (it is already in the message
+text that `eof_matching` builds) and `lexer.rs` should expose an
+`open_quote(src, opts) -> Option<char>` over `tokenize_deferred`. Innermost wins,
+which the existing never-overwrite discipline on `LexError::line` already gives.
+`expand_history_lines` then passes `open_quote(&accum, opts)` into a new
+`HistCtx` field, and `expand()` seeds `in_single`/`in_double` from it. The in-line
+rules stay as they are — readline toggles single quotes even inside double ones,
+which osh already does, and which is why `echo "a 'b` / `c' !!"` agrees today.
+
+Note the interaction with `Expansion::ChangedQuietly`
+(TD-OILS-HISTEXPAND-QUICKSUB above): the `^one^two^` row is the case that variant
+exists for, and is currently unreachable.
+
 ### TD-OILS-FD0-WRITE. fd 0 has no write side, so `>&0` silently writes to stdout instead of the descriptor — ✅ RESOLVED 2026-07-28
 
 **Fix (2026-07-28).** fd 0 now carries its write half, and its *access mode* is

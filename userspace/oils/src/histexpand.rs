@@ -67,11 +67,19 @@ impl HistCtx<'_> {
 }
 
 /// What [`expand`] made of a line.
+#[derive(Debug)]
 pub enum Expansion {
     /// The line contained nothing to expand and is to be used as-is.
     Unchanged,
     /// The line was rewritten. bash echoes the result before running it.
     Changed(String),
+    /// The line was rewritten but the rewrite is *not* reported. readline
+    /// implements `^old^new^` by textually prefixing `!!:s`, and it counts only
+    /// the expansion proper as a change — so a line whose `!!` turns out to be
+    /// quoted runs (and is recorded) as the literal `!!:s^old^new^` with nothing
+    /// echoed to stderr. bash adopts `history_expand`'s output string either way,
+    /// which is what this variant carries.
+    ChangedQuietly(String),
     /// The line carried a `:p` modifier: bash echoes the rewritten line and
     /// records it in the history exactly as for [`Expansion::Changed`], but does
     /// *not* run it — `:p` exists to preview what an event designator names.
@@ -471,12 +479,25 @@ fn inhibited(chars: &[char], i: usize, extglob: bool, dquote: bool) -> bool {
     false
 }
 
+/// Run history expansion over one physical input line.
+///
+/// `last` carries the most recent `:s` substitution across calls, so a later
+/// `:&` can repeat it.
 pub fn expand(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
-    // `^old^new^` is a whole-line form: it only applies when it is the first
-    // thing on the line.
-    if line.starts_with('^') {
-        return quick_substitution(line, ctx, last);
-    }
+    // `^old^new^` is not a form of its own: readline implements it by *textually*
+    // prefixing `!!:s` and running the ordinary expander over the result. Three
+    // observable consequences follow, all of which would need special-casing if
+    // it were implemented as its own path:
+    //
+    // * it only works when the `^` is the very first character of the line;
+    // * the diagnostics quote back the rewritten spec (`:s^nomatch^x^`,
+    //   delimiter and all) rather than the line as typed, and an empty history
+    //   fails as `!!: event not found` rather than naming the substitution;
+    // * everything after the closing delimiter survives *and is expanded* —
+    //   `^one^two^ !!` appends the previous command a second time, `^one^two^^`
+    //   leaves a trailing `^`, and `^one^two^:z` reaches the modifier scan.
+    let quick = line.starts_with('^').then(|| format!("!!:s{line}"));
+    let line = quick.as_deref().unwrap_or(line);
     if !line.contains('!') {
         return Expansion::Unchanged;
     }
@@ -569,19 +590,23 @@ pub fn expand(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
     match (changed, print_only) {
         (_, true) => Expansion::PrintOnly(out),
         (true, false) => Expansion::Changed(out),
+        // A `^old^new^` rewrite whose `!!` turned out to be quoted: nothing was
+        // expanded, so nothing is echoed, but the line bash runs is still the
+        // rewritten one. See [`Expansion::ChangedQuietly`].
+        (false, false) if quick.is_some() => Expansion::ChangedQuietly(out),
         (false, false) => Expansion::Unchanged,
     }
 }
 
-/// Expand the single designator starting at `chars[start]` (which is the `!`).
-/// On success returns the replacement text and the index just past it; on
-/// failure the whole message body bash would print (see [`Expansion::NotFound`]).
 /// readline's `history_word_delimiters`, `" \t\n;&()|<>"`. It ends an event
 /// search string and marks where a `#` may start a comment.
 fn is_word_delimiter(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | ';' | '&' | '(' | ')' | '|' | '<' | '>')
 }
 
+/// Expand the single designator starting at `chars[start]` (which is the `!`).
+/// On success returns the replacement text and the index just past it; on
+/// failure the whole message body bash would print (see [`Expansion::NotFound`]).
 fn expand_one(
     chars: &[char],
     start: usize,
@@ -695,37 +720,6 @@ fn spec_text(chars: &[char], start: usize, end: usize) -> String {
     chars.get(start..end).unwrap_or(&[]).iter().collect()
 }
 
-/// `^old^new^` — re-run the previous command with the first occurrence of `old`
-/// replaced by `new`.
-fn quick_substitution(line: &str, ctx: &HistCtx, last: &mut LastSubst) -> Expansion {
-    let chars: Vec<char> = line.chars().collect();
-    let Some((old, new, end)) = parse_subst(&chars, 0) else {
-        return Expansion::Unchanged;
-    };
-    // bash rewrites `^old^new^` into the equivalent `:s` modifier before running
-    // it, and its diagnostics quote back *that* form — `:s^nomatch^x^`, delimiter
-    // and all — rather than the line as typed.
-    let spec = format!(":s{}", spec_text(&chars, 0, end));
-    let Some(prev) = ctx.back(1) else {
-        return Expansion::NotFound(format!("{spec}: event not found"));
-    };
-    if old.is_empty() {
-        return Expansion::NotFound(format!("{spec}: no previous substitution"));
-    }
-    if !prev.contains(&old) {
-        return Expansion::NotFound(format!("{spec}: substitution failed"));
-    }
-    let text = substitute(prev, &old, &new, false);
-    // Anything after the closing delimiter is appended, so `^a^b^:p` still
-    // reaches the modifier logic.
-    *last = LastSubst { old, new };
-    match apply_modifiers(text, &chars, end, last) {
-        Ok((modified, _i, true)) => Expansion::PrintOnly(modified),
-        Ok((modified, _i, false)) => Expansion::Changed(modified),
-        Err(msg) => Expansion::NotFound(msg),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,7 +741,7 @@ mod tests {
     fn expanded(line: &str, items: &[&str]) -> String {
         let h = hist(items);
         match expand1(line, &ctx(&h)) {
-            Expansion::Changed(s) => s,
+            Expansion::Changed(s) | Expansion::ChangedQuietly(s) => s,
             Expansion::Unchanged => line.to_string(),
             Expansion::PrintOnly(s) => panic!("unexpected print-only: {s}"),
             Expansion::NotFound(e) => panic!("unexpected not-found: {e}"),
@@ -1096,11 +1090,7 @@ mod tests {
                 Expansion::NotFound(msg) => {
                     assert_eq!(msg, format!("{name}: unrecognized history modifier"), "{line}");
                 }
-                other => panic!("expected {line} to fail, got {}", match other {
-                    Expansion::Changed(s) | Expansion::PrintOnly(s) => s,
-                    Expansion::Unchanged => "unchanged".to_string(),
-                    Expansion::NotFound(_) => unreachable!(),
-                }),
+                other => panic!("expected {line} to fail, got {other:?}"),
             }
         }
         // Not a `:`, so it is literal text appended to the modified event.
@@ -1126,6 +1116,56 @@ mod tests {
         assert_eq!(expanded("^world^planet^", &["echo hello world"]), "echo hello planet");
         // The trailing delimiter may be omitted.
         assert_eq!(expanded("^world^planet", &["echo hello world"]), "echo hello planet");
+    }
+
+    /// `^old^new^` is `!!:s` prefixed to the line, so text after the closing
+    /// delimiter is part of the rewritten line and gets expanded with it.
+    #[test]
+    fn quick_substitution_keeps_what_follows_the_delimiter() {
+        let h = ["echo one two"];
+        assert_eq!(expanded("^one^X^ tail", &h), "echo X two tail");
+        assert_eq!(expanded("^one^X^^", &h), "echo X two^");
+        assert_eq!(expanded("^one^X^y", &h), "echo X twoy");
+        assert_eq!(expanded("^one^X^ | cat", &h), "echo X two | cat");
+        // A second event reference in the tail is expanded in its turn.
+        assert_eq!(expanded("^one^X^ !!", &h), "echo X two echo one two");
+        // The modifier scan is reached, and rejects what bash rejects.
+        match expand1("^one^X^:2", &ctx(&hist(&h))) {
+            Expansion::NotFound(msg) => assert_eq!(msg, "2: unrecognized history modifier"),
+            other => panic!("expected a rejected modifier, got {other:?}"),
+        }
+        match expand1("^one^X^:p", &ctx(&hist(&h))) {
+            Expansion::PrintOnly(s) => assert_eq!(s, "echo X two"),
+            other => panic!("expected a preview, got {other:?}"),
+        }
+    }
+
+    /// Because the rewrite is textual, the failure is the *rewritten* line's:
+    /// with no history at all it is the `!!` that cannot be resolved, and the
+    /// substitution is never reached.
+    #[test]
+    fn quick_substitution_failures_name_the_rewritten_spec() {
+        let empty = hist(&[]);
+        for line in ["^a^b^", "^a^b^ tail"] {
+            match expand1(line, &ctx(&empty)) {
+                Expansion::NotFound(msg) => assert_eq!(msg, "!!: event not found", "{line}"),
+                other => panic!("expected {line} to fail, got {other:?}"),
+            }
+        }
+        let h = hist(&["echo one"]);
+        match expand1("^zz^two^", &ctx(&h)) {
+            Expansion::NotFound(msg) => assert_eq!(msg, ":s^zz^two^: substitution failed"),
+            other => panic!("expected a failed substitution, got {other:?}"),
+        }
+        // An empty `old` reuses the previous substitution, of which there is none.
+        for line in ["^", "^^", "^^^"] {
+            match expand1(line, &ctx(&h)) {
+                Expansion::NotFound(msg) => {
+                    assert_eq!(msg, format!(":s{line}: no previous substitution"), "{line}");
+                }
+                other => panic!("expected {line} to fail, got {other:?}"),
+            }
+        }
     }
 
     #[test]

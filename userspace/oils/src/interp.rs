@@ -3615,6 +3615,13 @@ impl Shell {
                     accum.push_str(&text);
                     accum.push('\n');
                 }
+                Expansion::ChangedQuietly(text) => {
+                    // Same, minus the echo: bash reports only what the expander
+                    // proper changed, and a `^old^new^` rewrite is not that.
+                    ip.commit_raw_line(Some(&text), opts);
+                    accum.push_str(&text);
+                    accum.push('\n');
+                }
                 Expansion::PrintOnly(text) => {
                     // `:p` previews: the line is echoed and recorded just as a
                     // rewritten line would be, but never handed to the parser.
@@ -16694,7 +16701,11 @@ impl Shell {
                     Expansion::Unchanged => a.clone(),
                     // A `:p` argument prints like any other here; the modifier
                     // only means "do not run it", and `-p` never runs anything.
-                    Expansion::Changed(t) | Expansion::PrintOnly(t) => t,
+                    // The echo the reader would have done is likewise irrelevant,
+                    // so a quiet rewrite is just a rewrite.
+                    Expansion::Changed(t)
+                    | Expansion::ChangedQuietly(t)
+                    | Expansion::PrintOnly(t) => t,
                     Expansion::NotFound(_) => {
                         // The builtin reports the whole argument and its own
                         // wording, not the event spec and the reader's message.

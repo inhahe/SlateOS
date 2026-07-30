@@ -77,6 +77,19 @@ It checks both directions: returns through `strtod`/`strtof`/`atof`/`difftime`,
 and arguments through `snprintf("%f", …)` including a mixed integer/float
 vararg list, since the ABI counts the two argument classes separately.
 
+The guard was verified against a **negative control**, not just observed to
+pass: rebuilding `libc.a` with the old `-C code-model=large` alone, relinking
+the fixture and re-running the boot test produced
+
+```
+FAIL: ctest-libc-float (ring 3) — reached Zombie but exit code was Some(10),
+expected 42. Codes: 10/12/13 = strtod returned the wrong value (the signature
+of a soft-float sysroot: the callee wrote %rax, we read %xmm0) …
+```
+
+so the test genuinely catches the regression rather than passing for an
+unrelated reason. The sysroot and fixture were restored afterwards.
+
 **Related.** Anything else built against this sysroot before 2026-07-30 and
 still cached may hold the old soft-float `libc.a`; a full sysroot + fixture +
 rootfs rebuild is required to be sure.

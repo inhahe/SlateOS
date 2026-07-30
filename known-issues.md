@@ -259,6 +259,99 @@ reproducer — and the reproducer took one try once the question became "what
 state does the failing run have that the passing run does not?" rather than "how
 do I make the timing worse?".
 
+### TD-OILS-WAIT-N-REPORTED-JOB. `wait -n` re-reported a job whose status had already been announced — ✅ RESOLVED 2026-07-30
+
+**Where:** `userspace/oils/src/interp.rs` — `wait_next()`, the `candidates`
+collection.
+
+**Found by the same test flaking a second time.** A full `cargo test -p oils`
+failed `interp::tests::wait_without_operands_names_no_job` at
+`left: 3, right: 127` and passed in isolation — the identical signature to
+TD-OILS-WAIT-NO-OPERANDS-FLAKE above, whose lesson is "an intermittent failure
+is not evidence of a race; go find the deterministic reproducer". Applying that
+lesson worked a second time. The question "what state does the failing run have
+that the passing run does not?" pointed straight at *which branch* the
+operand-less `wait` had taken, and forcing the already-finished branch with a
+sleep plus an intervening `jobs` diverged every time:
+
+```
+( exit 3 ) & p=$!
+sleep 0.3
+wait          # rc 0 — spares the `$!` job from being marked reported
+jobs          # announces it; the row lingers unswept
+wait -n $p    # bash: `wait: <pid>: no such job`, rc 127.  osh: rc 3
+wait -n       # bash: rc 127.  osh: rc 3
+wait $p       # both: rc 5-style replay of the remembered status
+```
+
+**What.** `-n` answers with the *next* job to finish. A job whose death has
+already been announced (bash's `J_NOTIFIED`, osh's `Job::notified`) has already
+done that, so it is not a candidate — bash goes as far as denying it exists at
+all. osh's `wait_next` collected *every* row in the table, so an unswept
+notified row was re-reported: rc 3 where bash gives 127, and a status
+successfully returned for a pid bash calls `no such job`. A row surviving the
+announcement is there for a `jobs` or a `wait %1` to read once more, and for a
+*targeted* `wait PID` to replay — never for `-n`.
+
+**Why it looked like a race.** An operand-less `wait` marks every job it
+*actually waited for* as reported, but `drain_jobs` polls first, so a job that
+had already finished never enters `waited` and is spared. Whether a following
+`-n` therefore found a stale unswept row came down to how fast the job's thread
+ran — timing decided *visibility*, not correctness. The bug itself was fully
+deterministic. Second data point for the lesson: this failure shape (a `wait`
+returning a status where bash returns 127, intermittently) has now twice been a
+real deterministic divergence rather than a race.
+
+**Fix.** `wait_next` filters `notified` rows out of both candidate paths. The
+bare path skips them; the operand path turns a `JobLookup::Found` on a notified
+row into the same `wait: <spec>: no such job` diagnostic a `NotFound` gets, by
+merging the two match arms.
+
+**Tests.** `interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported`
+pins the spared-vs-announced split, the `no such job` wording, the surviving
+targeted replay, and that a reported row does not shadow a live job. The
+`spared-*` / `reported-*` / `shadow-*` block in `tests/corpus/jobs-wait.sh`
+pins the same shapes against bash with sleeps chosen so the branch is decided by
+the script, not the scheduler. `wait_without_operands_names_no_job` now sleeps
+inside its job body for the same reason, which removes its timing dependence.
+
+### TD-OILS-LOCAL-ARRAY-KIND-VALUED. `local -a` on an existing local scalar leaves the name unvalued where bash reports an empty array — 2026-07-30 — OPEN (very low priority)
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare`'s local path and
+`array_kind_apply`.
+
+**What.** Inside a function, `local x=5; local -a x; declare -p x` gives bash
+`declare -a x=()` — the widening discards the scalar *and* still marks the name
+valued. osh prints the bare `declare -a x`. At global scope the same pair is
+handled correctly (`x=5; declare -a x` → `declare -a x=([0]="5")`, pinned by
+`giving_a_scalar_an_array_kind_keeps_its_value_as_element_zero`); it is only the
+second `local` on a name already local in the *same* frame that differs, because
+that re-declaration resets the frame slot before `array_kind_apply` can carry
+the old value in. Note bash does not carry it either here — it produces `()`,
+not `([0]="5")` — so the fix is not to route the local path through
+`array_kind_apply` but to mark the name valued when a re-`local` widens it.
+
+**Proper fix.** In the local path, when `-a`/`-A` is applied to a name already
+present in the current frame as a scalar, insert it into `array_valued` after
+creating the (empty) array. Needs a probe first to confirm bash's behaviour when
+the earlier `local` had no value at all (`local x; local -a x`).
+
+### TD-OILS-EXPORT-ARRAY-FLAG. `export -a` is accepted by bash and rejected by osh — 2026-07-30 — OPEN (low priority, MSYS-only observation)
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_export`'s option parsing.
+
+**What.** MSYS bash 5.2 accepts `export -a name` (silently: an exported array is
+not actually placed in the environment, and `declare -p` shows
+`declare -ax name`), while osh reports an invalid-option usage error. `readonly
+-a` is accepted by both. The asymmetry is almost certainly an oversight in osh's
+`export` option table rather than a deliberate choice.
+
+**Proper fix.** Give `builtin_export` the same `-a`/`-A` handling
+`builtin_readonly` has (including the "the flag takes effect only when the
+operand carries a value" rule fixed in `readonly_array_flags_need_a_value_to_take_effect`).
+Measure against a non-MSYS bash first if one becomes available, since this was
+observed only on the MSYS build.
+
 ### TD-OILS-NO-HISTEXPAND. `!`-style history expansion — 2026-07-29 — RESOLVED 2026-07-29
 
 **Was.** osh listed `histexpand` in `set -o` but never acted on it: with both

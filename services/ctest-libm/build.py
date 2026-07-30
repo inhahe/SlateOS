@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Reproducible build recipe for the `ctest-libm` SlateOS fixture.
+
+Produces `ctest-libm.elf`, a native SlateOS (`x86_64-slateos`) binary compiled
+from `main.c` by `zig cc` (clang + musl headers) and linked against the posix
+`libc.a` sysroot with rust-lld.  `scripts/create-ext4-rootfs.sh` stages it at
+`/tests/ctest-libm.elf`, and the kernel runs it as a ring-3 self-test
+(`self_test_clibm`, `kernel/src/proc/spawn.rs`) that asserts the exit code
+(42 == all checks passed).
+
+It is the companion to `ctest-libc-float`: that fixture covers double
+*returns* and *varargs* double arguments, this one covers **named** floating
+point arguments (%xmm0-%xmm7 by SSE class, no %al, no register save area) —
+the direction libm uses and the one nothing else exercises — plus the numeric
+behaviour of `posix/src/math.rs` as actually compiled into the sysroot.
+
+Plain C, deliberately, for the same reason as the other fixture: the bug class
+is an inter-toolchain ABI disagreement, so the caller has to be built by a
+different toolchain than the callee.
+
+**`-fno-builtin` is load-bearing.** Without it clang recognises `sqrt`,
+`fabs`, `fmax`, `floor`, `round` and friends as builtins and emits `sqrtsd` /
+`andpd` / `maxsd` / `roundsd` inline, or constant-folds them outright.  The
+sysroot would then never be called and the fixture would pass even with a
+completely broken `libc.a`.  `main.c` additionally launders every input
+through a volatile global for the same reason.
+
+Otherwise the compile flags mirror `toolchain/x86_64-slateos.json` (static
+relocation, large code model).  No `-msse` flag is needed or wanted: SSE2 is
+baseline for x86-64, so `zig cc` already uses the hard-float SysV ABI.
+
+Run from the fastpy repo root so `compiler` is importable, e.g.:
+
+    PYTHONPATH="D:/visual studio projects/fastpy" \
+        python "D:/visual studio projects/os/services/ctest-libm/build.py"
+
+The posix sysroot (`libc.a`) must already be built and must be *current* with
+`posix/src/` and with `toolchain/build-sysroot.ps1`'s RUSTFLAGS.
+"""
+
+import subprocess
+import sys
+from pathlib import Path
+
+from compiler import toolchain
+
+HERE = Path(__file__).resolve().parent
+OS_ROOT = HERE.parent.parent
+SYSROOT_LIB = OS_ROOT / "toolchain" / "sysroot" / "lib"
+
+
+def main() -> None:
+    zig = toolchain._find_zig_cc()
+    if zig is None:
+        sys.exit(
+            "Cannot find `zig` for the SlateOS C cross-compile. Install zig "
+            "(it bundles clang + musl), put it on PATH, or set FASTPY_ZIG."
+        )
+    if not (SYSROOT_LIB / "libc.a").exists():
+        sys.exit(f"Missing sysroot libc.a in {SYSROOT_LIB}; run toolchain/build-sysroot.ps1")
+
+    obj = HERE / "main.o"
+    cmd = [
+        str(zig), "cc",
+        f"--target={toolchain._SLATEOS_ZIG_TARGET}",
+        "-c", "-O2",
+        "-fno-builtin",           # call the sysroot, don't inline/fold libm
+        "-mcmodel=large",         # match codegen code-model=large
+        "-fno-pic", "-fno-pie",   # match relocation-model=static
+        "-Wall", "-Wextra", "-Werror",
+        str(HERE / "main.c"),
+        "-o", str(obj),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0 or not obj.exists():
+        sys.exit(f"C cross-compile failed:\n{result.stdout}\n{result.stderr}")
+
+    exe = toolchain._link_slateos(
+        [obj],
+        HERE / "ctest-libm.elf",
+        entry="_start",
+        sysroot_lib_dir=SYSROOT_LIB,
+        libs=["c"],
+    )
+    print("OBJ:", obj, obj.stat().st_size)
+    print("EXE:", exe, exe.stat().st_size)
+
+
+if __name__ == "__main__":
+    main()

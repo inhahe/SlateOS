@@ -6698,6 +6698,135 @@ pub fn self_test_clibc_float() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the sysroot's **math library**: the named
+/// floating-point argument ABI, and the numeric behaviour of the shipped code.
+///
+/// This is the companion to [`self_test_clibc_float`], and it exists because
+/// that test has a blind spot.  Every double it moves is either a *return*
+/// value or a *varargs* argument — `strtod`/`strtof`/`atof` take pointers,
+/// `difftime` takes two `time_t`, and `snprintf`'s floats all travel the
+/// variadic path (caller fills `%xmm0`-`%xmm7` and sets `%al`, callee spills
+/// them to a register save area).  **Named** float arguments are a separate
+/// rule of the SysV x86-64 ABI: classified SSE and placed directly in
+/// `%xmm0`-`%xmm7`, with no `%al` and no save area.  That is the rule almost
+/// every real float call in a program uses, and libm is where it lives — so
+/// the most-used direction was the one nothing tested.
+///
+/// It doubles as the only check that `posix/src/math.rs` is numerically right
+/// *as built for the sysroot*.  Its 261 unit tests run on the host
+/// (`x86_64-pc-windows-gnu`); the shipped copy is a different compilation
+/// entirely — different target, different features, different optimisation
+/// decisions — so host-test success says nothing about the artifact in
+/// `libc.a`.  The tolerances are tight enough (1e-12 relative, ~4 ulp) to
+/// catch a broken series expansion or range reduction, not just an ABI break.
+///
+/// The fixture (`services/ctest-libm/ctest-libm.elf`) is plain C for the same
+/// reason as the other one: the bug class is a *cross-toolchain* disagreement,
+/// so the caller must be built by a different compiler than the callee.  Two
+/// things would silently defeat it, and both are guarded in
+/// `services/ctest-libm/build.py`: `-fno-builtin` (otherwise clang emits
+/// `sqrtsd`/`andpd`/`roundsd` inline and never calls the sysroot at all) and
+/// laundering every input through a `volatile` global (otherwise constant
+/// folding evaluates the call at compile time).
+///
+/// Exit code 42 means every check passed; any other code names the failing
+/// step (see the FAIL diagnostic below and `services/ctest-libm/main.c`).
+pub fn self_test_clibm() -> KernelResult<()> {
+    let ctest_elf = match load_test_elf("ctest-libm") {
+        Some(v) => v,
+        None => {
+            serial_println!("[spawn] SKIP ctest-libm: fixture absent on /mnt/tests (lean build)");
+            return Ok(());
+        }
+    };
+
+    serial_println!(
+        "[spawn] Running libm (ring 3, C) integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after all of its math checks pass.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-libm"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-libm",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-libm spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Pure arithmetic with no blocking calls, but keep the same bounded budget
+    // the other ring-3 fixtures use so a fault can't wedge boot.
+    let mut became_zombie = false;
+    for _ in 0..2000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-libm (ring 3) — expected Zombie, got {:?}. This fixture \
+             does nothing that can block, so a non-zombie state means it faulted: most \
+             likely an SSE instruction trapped because the sysroot and the program disagree \
+             about whether SSE is available at all",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-libm (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {}. Code bands: 10-27 = named double arguments / algebraic functions \
+             (a soft-float sysroot fails at 10, the very first sqrt; 13/15/16/17/23 need \
+             two or three %xmm argument registers, so a wrong-register bug that survives \
+             one argument dies here), 30-34 = f32 arguments in the low half of an %xmm, \
+             40-45 = mixed SSE/INTEGER classes and out-parameters (frexp/modf/ldexp: an \
+             int or a pointer must consume from %rdi-%r9, *not* from the %xmm sequence), \
+             50-68 = transcendental accuracy (63/64 specifically check that log1p/expm1 \
+             keep relative precision near zero instead of forwarding to log/exp; 68 checks \
+             sin/cos range reduction outside [-pi, pi]), 70-76 = integer returns and \
+             classification (72 = lrint must be ties-to-even where lround is \
+             ties-away-from-zero). See BUG-SYSROOT-SOFT-FLOAT-ABI in known-issues.md and \
+             services/ctest-libm/main.c",
+            exit_code, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   libm (ring 3: 48 math functions called from a zig-cc C caller agree with \
+         the sysroot on named %xmm arguments, mixed SSE/INTEGER classes and out-params, and \
+         return values accurate to ~4 ulp): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that fastpy **pure-mode file I/O** works on-target.
 ///
 /// This is the first proof that the whole pure-mode file path runs natively on

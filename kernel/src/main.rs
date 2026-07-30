@@ -1625,6 +1625,17 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: libc float ABI (ring 3) self-test failed: {:?}", e);
     }
 
+    // The float-ABI fixture above only moves doubles as return values or as
+    // *varargs*. Named float arguments are a different ABI rule (SSE class
+    // straight into %xmm0-7, no %al, no register save area) and libm is where
+    // essentially every one of them lives, so it gets its own fixture — which
+    // doubles as the only check that posix/src/math.rs is numerically correct
+    // as compiled for the sysroot rather than for the host test runner.
+    // Bounded yield loop; can never hang.
+    if let Err(e) = proc::spawn::self_test_clibm() {
+        serial_println!("WARNING: libm (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
     // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
     // memfs and exits with the byte count read back, proving the full path

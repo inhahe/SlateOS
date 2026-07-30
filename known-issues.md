@@ -90,6 +90,40 @@ of a soft-float sysroot: the callee wrote %rax, we read %xmm0) …
 so the test genuinely catches the regression rather than passing for an
 unrelated reason. The sysroot and fixture were restored afterwards.
 
+**Second guard — named float arguments.** `ctest-libc-float` has a blind spot:
+every double it moves is either a *return* value or a *varargs* argument.
+`strtod`/`strtof`/`atof` take pointers, `difftime` takes two `time_t`, and
+`snprintf`'s floats travel the variadic path (caller fills `%xmm0`-`%xmm7` and
+sets `%al`, callee spills them to a register save area). **Named** float
+arguments are a separate ABI rule — classified SSE, placed directly in
+`%xmm0`-`%xmm7`, no `%al`, no save area — and that is the rule nearly every
+real float call uses. `services/ctest-libm/` (plain C, `zig cc`) plus
+`self_test_clibm` in `kernel/src/proc/spawn.rs` covers it: 48 math functions
+including two- and three-`%xmm` calls (`pow`, `atan2`, `hypot`, `fma`), `f32`
+arguments in the low half of an `%xmm`, and mixed SSE/INTEGER classes with
+out-parameters (`frexp`, `modf`, `ldexp` — where an `int` or a pointer must
+consume from `%rdi`-`%r9` and *not* from the `%xmm` sequence).
+
+Two things would silently defeat that fixture, and both are guarded in its
+`build.py`: **`-fno-builtin`** (otherwise clang recognises `sqrt`/`fabs`/
+`fmax`/`floor` as builtins, emits `sqrtsd`/`andpd`/`maxsd`/`roundsd` inline,
+and the sysroot is never called — the test would pass with `libc.a` absent),
+and laundering every input through a `volatile` global (otherwise constant
+folding evaluates the call at compile time). Verified after building:
+`llvm-nm --undefined-only main.o` lists all 48 as real external references —
+and, as a negative control, recompiling the same source *without*
+`-fno-builtin` leaves only 38: `sqrt`, `sqrtf`, `fabs`, `fabsf`, `fmax`,
+`fmaxf`, `fmin`, `fminf`, `copysign` and `lrint` disappear into inline SSE.
+The flag is load-bearing, not decorative.
+
+It doubles as the only check that `posix/src/math.rs` is numerically correct
+*as compiled for the sysroot* — its 261 unit tests run on the host, which is a
+different target, feature set and optimisation pipeline, so host-test success
+is not evidence about the artifact in `libc.a`. Tolerances are 1e-12 relative
+(~4 ulp), tight enough to also catch a broken series expansion or range
+reduction; the expectations were calibrated against the host build first so a
+tolerance that `math.rs` cannot meet can't masquerade as an ABI break.
+
 **Related.** Anything else built against this sysroot before 2026-07-30 and
 still cached may hold the old soft-float `libc.a`; a full sysroot + fixture +
 rootfs rebuild is required to be sure.

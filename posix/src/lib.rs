@@ -2621,4 +2621,5 @@ pub mod values;
 pub mod wait;
 pub mod wchar;
 pub mod wordexp;
+pub mod x87;
 pub mod xattr;

@@ -315,6 +315,37 @@ pins the same shapes against bash with sleeps chosen so the branch is decided by
 the script, not the scheduler. `wait_without_operands_names_no_job` now sleeps
 inside its job body for the same reason, which removes its timing dependence.
 
+### TD-OILS-DECL-FLAG-PRESCAN. bash decides which attributes are in force while a compound operand binds from a *pre-expansion* scan of the flag words — 2026-07-30 — OPEN (very low priority, deliberate)
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_declare_with_arrays`'s flag loop,
+which reads the already-expanded `argv`.
+
+**What.** A compound operand of a declaration builtin binds during the command's
+word-expansion pass (see the phase comment in `exec_declare_with_arrays`), so the
+attributes that transform its values have to be known *before* the words are
+expanded. bash therefore reads them off the flag words **as written**, and a flag
+letter that only appears after expansion is missed at bind time even though the
+builtin still records the attribute afterwards:
+
+```
+f=l
+declare -a$f v=(Ab); declare -p v   # bash: declare -al v=([0]="Ab")   -- not folded
+declare -al  v=(Ab); declare -p v   # bash: declare -al v=([0]="ab")
+```
+
+osh folds in both spellings, because its flag loop runs over post-expansion
+`argv`. Only the `a`/`A` kind and the `i`/`l`/`u`/`c` value transforms are
+affected; `x`/`r`/`n`/`g` are applied by the builtin in both shells and so are
+immune.
+
+**Why it is not fixed.** Matching it means scanning the *unexpanded* words for
+flag letters, which would mean threading the pre-expansion word list of a simple
+command into `exec_declare_with_arrays` purely to reproduce a quirk that only
+shows up when a declaration builtin's flags are themselves computed. Worth doing
+only if the same pre-expansion word list is needed for another reason — the
+`decl_arrays` positional info wanted by `TD-OILS-XTRACE-ARRAY-DECL` is the likely
+trigger.
+
 ### TD-OILS-LOCAL-ARRAY-KIND-VALUED. `local -a` on an existing local scalar leaves the name unvalued where bash reports an empty array — 2026-07-30 — OPEN (very low priority)
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_declare`'s local path and

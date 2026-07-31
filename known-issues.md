@@ -5997,7 +5997,7 @@ Same root cause and disposition as `TD-OILS-PRINTF-QUOTE-CHAR` and
 for SlateOS, which has no C/POSIX byte locale), so the MSYS byte-wise result is
 a host-locale artifact, not an osh divergence. No action needed.
 
-### TD-OILS-BYTE-STRINGS. A byte that is not valid UTF-8 cannot survive osh: a script holding one is refused outright, and data holding one is replaced or dropped — OPEN 2026-07-30 (steps 1–8 of 10 done; no path can still *alter data*, only *display* it)
+### TD-OILS-BYTE-STRINGS. A byte that is not valid UTF-8 cannot survive osh: a script holding one is refused outright, and data holding one is replaced or dropped — OPEN 2026-07-30 (steps 1–8 of 10 done, step 9 part-done; no path can still *alter data*, only *display* it)
 
 **Where:** the representation itself — osh stored a shell word, a variable value
 and a captured stream as a Rust `String`, which cannot hold invalid UTF-8. The
@@ -6186,11 +6186,45 @@ would have needed a scaffold at every site the other now satisfies for free.
 Step 8 was the last one that could still *alter data*; everything left is the
 layer that only ever *displays* it. What remains can land one layer per commit:
 
-9. `arith.rs`, `histexpand.rs`, `ere.rs`. Closes the `VarLookup` seams
-   (`interp.rs:24931`/`:24940`/`:24967`), the `HistCtx` text accessors and the
-   `expand_history_lines` pass-through (two interim seams authored at step 8),
-   the `history -p` seam, and `TD-OILS-ERE-TEXT-ONLY`. `main.rs` was pulled
-   forward and is already done (see `TD-OILS-ARGV-PANICS-ON-NON-UTF8`).
+9. `arith.rs`, `histexpand.rs`, `ere.rs`. `main.rs` was pulled forward and is
+   already done (see `TD-OILS-ARGV-PANICS-ON-NON-UTF8`).
+
+   * **`arith.rs` — done 2026-07-30.** The evaluator took a `&str`, so
+     `eval_bytes` gated the whole expression on the source decoding as UTF-8.
+     Arithmetic syntax is entirely ASCII, so that gate almost never mattered —
+     except for the one thing in an arithmetic expression that is *not* syntax:
+     an **associative subscript**, which is a literal key. `declare -A m;
+     k=$(printf '\xa9'); m[$k]=7` then `(( m[$k] ))` failed with `syntax
+     error: invalid arithmetic operator` where bash answers `7`, and
+     `(( m[$k] = 9 ))` failed the same way *while silently dropping the store*
+     — the worse half, since the shell reported a syntax problem rather than
+     the write it had not done. Both now match bash, with the regression test
+     `an_associative_subscript_may_hold_any_byte`.
+
+     The lexer reads **bytes** rather than `char`s, which is not merely
+     equivalent but strictly closer to bash: bash's `isspace`/`isdigit` are
+     byte-wise in the C locale, whereas the `char` lexer skipped a Unicode NBSP
+     as whitespace where bash rejects it. `read_op` returns a `&'static str`
+     from a longest-match-first table, so the operator tables (`binop_bp`,
+     `is_assign_op`, `assign_base`) keep matching on text without ever
+     converting a byte of input. Variable *names* stay `&str` — identifier
+     syntax is ASCII — while values, subscripts and error tokens are bytes.
+     `ArithError`'s `Display` is gone, replaced by `body() -> Str`, because the
+     error token is a slice of the source; the shell now prints an offending
+     byte as itself rather than as U+FFFD. `eval_bytes` was deleted, not
+     rewired: there is one entry point again. This closed the three `VarLookup`
+     seams in `interp.rs` (formerly `:24931`/`:24940`/`:24967`).
+
+     A latent bug was fixed *before* the conversion, in its own commit:
+     `bytes::trim_start`/`trim_end` used `u8::is_ascii_whitespace`, which omits
+     the **vertical tab**, while documenting C's `isspace`, which includes it.
+     `str_to_val`'s Unicode `str::trim` masked the difference; converting it to
+     `bytes::trim` would have silently broken `v=$'\v5'; echo $((v))` (bash: 5).
+     New `bytes::is_space` with a pinning test.
+
+   * **Left in step 9:** `histexpand.rs` (the `HistCtx` text accessors and the
+     `expand_history_lines` pass-through — two interim seams authored at step 8
+     — plus the `history -p` seam) and `ere.rs` (`TD-OILS-ERE-TEXT-ONLY`).
 10. The diagnostic layer (`errln`, `err_prefix`, `write_line`) — ~378 sites,
     almost all `format!` with static text, so it wants a `berrln!` macro rather
     than 378 hand edits. Closes what is left: `SourceFrame.path`, `BASH_SOURCE`
@@ -6212,9 +6246,13 @@ one, `builtin_source`'s `SourceFrame.path`, which is the same step-10 seam
 step 8: **10** — 8 in `interp.rs` (`:3005` `set_name`, `:3280` and `:22883`
 `SourceFrame.path`, `:7300` `BASH_ARGV0`, `:24931`/`:24940`/`:24967` the
 arithmetic `VarLookup`, `:26541` the `shown` helper), 1 in `parser.rs` (its own
-`shown`) and 1 in `lexer.rs:111` (the unterminated-heredoc delimiter). Every
-one is now either a step-9 arithmetic seam or a step-10 diagnostic seam; none
-of them can alter what a command *does*.
+`shown`) and 1 in `lexer.rs:111` (the unterminated-heredoc delimiter). After
+`arith.rs` (step 9, first of three files): **7** — the three arithmetic
+`VarLookup` seams are gone, and **every seam that remains is a step-10
+diagnostic seam**: `interp.rs:3005` `set_name`, `:3280` and `:22883`
+`SourceFrame.path`, `:7300` `BASH_ARGV0`, `:26528` `shown`, `parser.rs:63`
+`shown`, `lexer.rs:111` the unterminated-heredoc delimiter. None of them can
+alter what a command *does*.
 
 **Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
 `TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts

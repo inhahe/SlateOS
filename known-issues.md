@@ -6222,6 +6222,108 @@ that). For a subscripted operand that does carry a value, emit
 `nameref_attr`, and declare `NAME` itself. Low priority: a subscripted
 operand on a nameref is a shape almost no script writes.
 
+**✅ RESOLVED 2026-07-31.** Implemented, with the rule stated the way the
+measurements (probes `nr30`–`nr35`) actually support: what a subscripted
+operand declares is decided by **which name can hold the array it needs
+to store into**.
+
+* **Valueless** — nothing is stored, so it resolves like any other
+  operand, and the operand's own subscript rides along on the resolved
+  base (`declare -i r[1]` → `declare -ai w=([0]="5")`, the reference
+  intact).
+* **Valued, writing the reference's own binding** (global scope, or
+  `-g`) — the array can only be the operand's, so the reference is
+  dropped with `warning: NAME: removing nameref attribute` and the
+  operand declares itself. The reference's stored value is the target's
+  *name*, which would otherwise survive as element 0, so the new
+  `Shell::unreference_for_declare` takes it away with the attribute.
+* **Valued, binding a local array** — bash builds that from the resolved
+  name, so there it follows: `f() { local -n r=w; local r[1]=9; }` gives
+  the frame a `w=([1]="9")` and leaves `r` the reference. (A reference
+  the frame is only *shadowing* is not followed at all — see
+  BUG-OILS-DECL-NAMEREF-LOCAL-SCOPE — so no reference is dropped there
+  either, and nothing is warned about.)
+* **No target to resolve to** — a circular chain — takes the same answer
+  as the valued form: the array it makes is the operand's own.
+* **Two subscripts** — a reference that already designates an element,
+  subscripted again — are refused with
+  `` declare: `arr[1][0]': not a valid identifier ``, status 1.
+
+A `-n` operand may not carry a subscript at all, which was refused
+nowhere before and left osh able to build a variable that was both an
+array and a reference (`declare -n r[1]=w` → `declare -an r=([0]="w"
+[1]="w")`). It now reports `declare: r[1]: reference variable cannot be
+an array` with status 1, as bash does, for `declare`, `typeset` and
+`local` alike.
+
+Covered by a new section in `tests/corpus/nameref-declare.sh` and the
+unit test
+`a_subscripted_declaration_makes_an_array_of_whichever_name_can_hold_one`.
+Full corpus 178 matched / 0 failed; 1041 unit tests; clippy clean on both
+targets.
+
+Two corners bash answers inconsistently are left alone and not asserted
+in the corpus. `f() { local -n r=w; declare -g r[1]=9; }` makes bash both
+store into `w` *and* leave an empty global `r=()`; and a circular chain
+subscripted inside a function warns twice and leaves bash's `a` marked
+both `-a` and `-n` at once — a state bash refuses to create by any other
+route. osh gives the single-warning, single-effect answer in both.
+
+### TD-OILS-DECL-UNSET-NAMEREF-DOES-NOT-FOLLOW. `declare +n` applies its *other* flags to the reference instead of the target — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped`,
+where `unset_nameref` is one of the conditions that suppress the `follow`
+step, so the whole operand stops being resolved.
+
+bash is narrower than that: `+n` takes the attribute off the **name**,
+and everything *else* in the operand still goes to the target.
+
+```sh
+w=5; declare -n r=w
+declare -x +n r    # bash declare -x w="5" / declare -- r="w"
+                   # osh  declare -- w="5" / declare -x r="w"
+declare +n r=9     # bash declare -- w="9" / declare -- r="w"
+                   # osh  declare -- w="5" / declare -- r="9"
+declare -x +n r[1] # bash declare -ax w=([0]="5") / declare -- r="w"
+                   # osh  declare -- w="5"        / declare -ax r=([0]="w")
+```
+
+The bare `declare +n r` is right by luck — it carries nothing else, so
+there is nothing to misdirect.
+
+**Proper fix.** Resolve the operand as usual (the follow must use the
+pre-removal state, since bash reaches the target through the reference it
+is about to drop), then take `nameref_attr` off the *original* name
+rather than suppressing the follow. One wrinkle to keep: an operand whose
+only content is `+n` stops there — bash leaves the target completely
+untouched, where a subscripted operand with any other flag array-ifies it
+(`declare +n r[1]` leaves `declare -- w="5"`, `declare -x +n r[1]` makes
+`declare -ax w`). Low priority: `+n` combined with other flags is a shape
+almost no script writes.
+
+### TD-OILS-DECL-PLUS-X-R-SETS-INSTEAD-OF-CLEARING. `declare +x` / `declare +r` set the attribute they should remove — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped`'s
+flag loop, whose `b'x' => export = true` and `b'r' => readonly = true`
+arms ignore the `enable` flag that every other letter consults.
+
+```sh
+x=5; declare -x x; declare +x x; declare -p x  # bash declare -- x="5"   osh declare -x x="5"
+x=5; declare +r x; declare -p x                # bash declare -- x="5"   osh declare -r x="5"
+x=5; readonly x; declare +r x; echo "rc=$?"    # bash declare: x: readonly variable, rc=1
+                                               # osh  (silent), rc=0
+```
+
+The `+r` half is destructive: asking to *remove* a readonly attribute
+instead applies one, and nothing can take it off again. Found while
+measuring TD-OILS-DECL-UNSET-NAMEREF-DOES-NOT-FOLLOW (`declare +n +x r`
+left `r` exported).
+
+**Proper fix.** Give both letters the `enable` test every other letter
+already has: `+x` clears the export attribute, and `+r` is a no-op on a
+name that is not readonly and reports `{tag}: {name}: readonly variable`
+with status 1 on one that is (bash cannot remove the attribute at all).
+
 ### TD-OILS-ATTR-ASSIGN-BYPASSES-DYNVAR. `export NAME=v` / `readonly NAME=v` store straight into the variable table, so a dynamic special loses its value function — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the `export` and `readonly`

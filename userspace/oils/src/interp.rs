@@ -14930,6 +14930,20 @@ impl Shell {
         target
     }
 
+    /// Take the nameref attribute off `name` — and with it the target name it
+    /// was holding — so a declaration can bind `name` itself.
+    ///
+    /// bash does this for a *subscripted* `declare` operand that cannot be
+    /// resolved into one: the element assignment needs an array to store into,
+    /// and the array it makes is the operand's own. The stored value is the
+    /// target's *name*, which would otherwise survive as element 0 of that new
+    /// array, so it goes with the attribute. See
+    /// [`Shell::builtin_declare_scoped`].
+    fn unreference_for_declare(&mut self, name: &str) {
+        self.nameref_attr.remove(name);
+        self.vars.remove(name);
+    }
+
     /// If `name` is a nameref whose target is an array element (`arr[0]` /
     /// `m[key]`), return the referenced element's value. `None` when there is no
     /// value to read — because `name` is not such a nameref, because the element
@@ -22189,6 +22203,21 @@ impl Shell {
                 status = 1;
                 continue;
             };
+            // A reference is a name, and an element of an array is not one, so
+            // a `-n` operand may not carry a subscript. The refusal names the
+            // operand as written and binds nothing, whatever the name held
+            // before (`declare -n r[1]=w` and `local -n zz[1]=w` alike).
+            if nameref && subscript.is_some() {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    tag,
+                    b": ",
+                    name,
+                    b": reference variable cannot be an array"
+                ]);
+                status = 1;
+                continue;
+            }
             // bash resolves a nameref *operand* before it applies anything, so
             // a declaration naming the reference declares the target and leaves
             // the reference the reference it was:
@@ -22207,10 +22236,7 @@ impl Shell {
             //
             // A declaration that is *about* the reference is exempt: `-n`
             // (declaring or retargeting it) and `+n` (taking the attribute
-            // away). So is a subscripted operand, which bash answers with a
-            // rule of its own — it resolves one that carries no value and
-            // *un-references* one that does — see known-issues
-            // TD-OILS-DECL-NAMEREF-SUBSCRIPT.
+            // away).
             //
             // And so is a declaration that is about to *make* the binding
             // rather than add to one: what decides is whether the binding this
@@ -22233,17 +22259,74 @@ impl Shell {
             // global into the live tables for the whole builtin.
             let binding_is_nameref = self.nameref_attr.contains(base_name)
                 && (!make_local || self.local_binds_here(base_name));
-            let follow =
-                !nameref && !unset_nameref && subscript.is_none() && binding_is_nameref;
+            // A *subscripted* operand naming a reference has an answer of its
+            // own, because an element assignment needs an array to store into.
+            // Where the declaration writes the reference's own binding — global
+            // scope, or `-g` — that array can only be the operand's, so the
+            // reference is dropped, with a warning, and the operand declares
+            // itself. A valueless operand stores nothing and resolves as ever:
+            //
+            // ```sh
+            // w=5; declare -n r=w
+            // declare -i r[1]   # declare -ai w=([0]="5"), declare -n r="w"
+            // declare r[1]=9    # warning: r: removing nameref attribute
+            //                   # declare -a r=([1]="9"), w untouched
+            // ```
+            //
+            // A declaration that binds a *local* array builds it from the
+            // resolved name instead, so there both forms follow:
+            // `f() { local -n r=w; local r[1]=9; }` gives the frame a
+            // `w=([1]="9")` and leaves `r` the reference.
+            let unreference = binding_is_nameref
+                && !nameref
+                && !unset_nameref
+                && subscript.is_some()
+                && value.is_some()
+                && !make_local;
+            if unreference {
+                self.perrln(&format!("warning: {base_name}: removing nameref attribute"));
+                self.unreference_for_declare(base_name);
+            }
+            let follow = !nameref && !unset_nameref && binding_is_nameref && !unreference;
             let target = if follow { self.resolve_ref_use(base_name) } else { None };
             if follow && target.is_none() {
                 // A circular chain names nothing to declare. The warning is
-                // out; the operand is dropped and the status left alone
-                // (`declare -n a=b; declare -n b=a; declare -i a; echo $?` → 0).
+                // out; an unsubscripted operand is then dropped with the status
+                // left alone (`declare -n a=b; declare -n b=a; declare -i a;
+                // echo $?` → 0). A subscripted one still needs its array, and
+                // makes the operand's own exactly as the valued form above did.
+                if subscript.is_none() {
+                    continue;
+                }
+                self.unreference_for_declare(base_name);
+            }
+            // The target's own subscript and the operand's cannot both stand:
+            // nothing is *named* `arr[1]`, so `arr[1][0]` is no identifier
+            // either. bash reports the name it built and declares nothing —
+            // except where the declaration binds a local, which drops the
+            // operand without a word.
+            if let Some(t) = &target
+                && let Some(tsub) = &t.sub
+                && let Some(osub) = subscript
+            {
+                if !make_local {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        tag,
+                        b": `",
+                        t.base.as_bytes(),
+                        b"[",
+                        tsub.as_slice(),
+                        b"][",
+                        osub,
+                        b"]': not a valid identifier"
+                    ]);
+                    status = 1;
+                }
                 continue;
             }
             let (base_name, subscript) = match &target {
-                Some(t) => (t.base.as_str(), t.sub.as_deref()),
+                Some(t) => (t.base.as_str(), t.sub.as_deref().or(subscript)),
                 None => (base_name, subscript),
             };
             // A `-n` declaration's value is the *name* it refers to, so bash
@@ -43222,6 +43305,55 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("w=5; declare -n r=w; f() { export r=9; }; f; declare -p w").0,
             "declare -x w=\"9\"\n"
+        );
+    }
+
+    /// A subscripted operand needs an array to store into, and where that array
+    /// can only be the reference's own binding the reference is dropped rather
+    /// than followed.
+    #[test]
+    fn a_subscripted_declaration_makes_an_array_of_whichever_name_can_hold_one() {
+        let r = "w=5; declare -n r=w";
+        // Valueless: nothing is stored, so it resolves like any other operand.
+        assert_eq!(
+            run(&format!("{r}; declare -i r[1]; declare -p w r")).0,
+            "declare -ai w=([0]=\"5\")\ndeclare -n r=\"w\"\n"
+        );
+        // Valued: the reference goes, with a warning, and the operand declares
+        // itself — the target's *name*, which the reference held, going with it
+        // rather than surviving as element 0.
+        assert_eq!(
+            run(&format!("{r}; declare r[1]=9; echo \"rc=$?\"; declare -p w r")).0,
+            "rc=0\ndeclare -- w=\"5\"\ndeclare -a r=([1]=\"9\")\n"
+        );
+        assert_eq!(
+            run(&format!("{r}; declare -A r[k]=9; declare -p w r")).0,
+            "declare -- w=\"5\"\ndeclare -A r=([k]=\"9\" )\n"
+        );
+        // A circular chain has no target either, so its array is its own too.
+        assert_eq!(
+            run("declare -n a=b; declare -n b=a; declare -i a[1]; echo \"rc=$?\"; declare -p a").0,
+            "rc=0\ndeclare -ai a\n"
+        );
+        // Two subscripts cannot stand: nothing is *named* `arr[1]`.
+        let (out, _) = run("declare -a arr=(1 2); declare -n r=arr[1]; declare -i r[0]; echo \"rc=$?\"; declare -p arr");
+        assert_eq!(out, "rc=1\ndeclare -a arr=([0]=\"1\" [1]=\"2\")\n");
+        // A declaration binding a *local* array builds it from the resolved
+        // name, so there a valued operand follows like any other.
+        assert_eq!(
+            run("w=5; f() { local -n r=w; local r[1]=9; declare -p r w; }; f; declare -p w").0,
+            "declare -n r=\"w\"\ndeclare -a w=([1]=\"9\")\ndeclare -- w=\"5\"\n"
+        );
+        // A reference the frame is only shadowing is not followed at all, so
+        // nothing is dropped and the local is an ordinary array.
+        assert_eq!(
+            run(&format!("{r}; f() {{ declare r[1]=9; declare -p r; }}; f; declare -p w r")).0,
+            "declare -a r=([1]=\"9\")\ndeclare -- w=\"5\"\ndeclare -n r=\"w\"\n"
+        );
+        // And a `-n` operand may not carry a subscript at all.
+        assert_eq!(
+            run(&format!("{r}; declare -n r[1]=w; echo \"rc=$?\"; declare -p r")).0,
+            "rc=1\ndeclare -n r=\"w\"\n"
         );
     }
 

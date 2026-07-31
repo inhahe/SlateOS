@@ -12,6 +12,13 @@
 # (which reports the reference itself) and `unset -n`. A bare `unset r` is not
 # among them — it unsets the target.
 #
+# Two more things decide it. Which *binding* the declaration writes: a
+# local-binding `declare`/`local` writes the current frame's, so a reference
+# further out is merely what it shadows. And whether the operand carries a
+# subscript: an element assignment needs an array to store into, and where that
+# array can only be the reference's own binding the reference is dropped
+# instead of followed.
+#
 # `export` and `readonly` follow too, and have no exemption at all: neither has
 # a `-n` operand of its own, and `export -n` (which removes the export
 # attribute) removes it from the target.
@@ -100,7 +107,47 @@ echo "=== a self reference never becomes one, so nothing is followed"
 ( declare -n r=r; declare -i r; declare -p r ) 2>&1
 ( declare -n r=r; export r;     declare -p r ) 2>&1
 
-echo "=== a subscripted operand is not resolved at all"
+echo "=== a subscripted operand needs an array, and that decides what it declares"
+# An element assignment has to have an array to store into. Where the
+# declaration writes the reference's own binding, that array can only be the
+# operand's, so the reference is dropped — with a warning — and the operand
+# declares itself. A valueless operand stores nothing and resolves as ever.
+( w=5; declare -n r=w; declare -i r[1];    echo "rc=$?"; declare -p w r ) 2>&1
+( w=5; declare -n r=w; declare -A r[k];    echo "rc=$?"; declare -p w r ) 2>&1
+( declare -a arr=(1 2); declare -n r=arr; declare -i r[1]; declare -p arr r ) 2>&1
+( w=5; declare -n r=w; declare r[1]=9;     echo "rc=$?"; declare -p w r ) 2>&1
+( w=5; declare -n r=w; declare -i r[1]=3+4; echo "rc=$?"; declare -p w r ) 2>&1
+( w=5; declare -n r=w; declare -A r[k]=9;  echo "rc=$?"; declare -p w r ) 2>&1
+( w=5; declare -n r=w; declare r[1]+=9;    echo "rc=$?"; declare -p w r ) 2>&1
+( declare -a arr=(1 2); declare -n r=arr;    declare r[1]=9; declare -p arr r ) 2>&1
+( declare -a arr=(1 2); declare -n r=arr[1]; declare r[0]=9; declare -p arr r ) 2>&1
+( declare -A m=([k]=1); declare -n r=m[k];   declare r[0]=9; declare -p m r ) 2>&1
+# A target that does not exist yet is still where a valueless one lands.
+( declare -n r=nope; declare -i r[1]; echo "rc=$?"; declare -p nope r ) 2>&1
+# Two subscripts cannot stand: nothing is *named* `arr[1]`, so `arr[1][0]` is
+# no identifier either, and the operand declares nothing.
+( declare -a arr=(1 2); declare -n r=arr[1]; declare -i r[0]; echo "rc=$?"; declare -p arr r ) 2>&1
+( declare -A m=([k]=1); declare -n r=m[k];   declare -i r[0]; echo "rc=$?"; declare -p m r ) 2>&1
+# A circular chain has no target to resolve to, so the array it makes is the
+# operand's own — as the valued form's is.
+( declare -n a=b; declare -n b=a; declare a[1]=9;  echo "rc=$?"; declare -p a b ) 2>&1 | d
+( declare -n a=b; declare -n b=a; declare -i a[1]; echo "rc=$?"; declare -p a b ) 2>&1 | d
+# A declaration that binds a *local* array builds it from the resolved name
+# instead, so both forms follow there.
+( w=5; f() { local -n r=w; local r[1]=9;   declare -p r w; }; f; declare -p w ) 2>&1
+( w=5; f() { local -n r=w; local -i r[1];  declare -p r w; }; f; declare -p w ) 2>&1
+# …while a global reference the frame is only shadowing is not followed at all,
+# so no reference is dropped and nothing is warned about.
+( w=5; declare -n r=w; f() { declare r[1]=9;  declare -p r; }; f; declare -p w r ) 2>&1
+( w=5; declare -n r=w; f() { declare -i r[1]; declare -p r; }; f; declare -p w r ) 2>&1
+
+echo "=== a reference is a name, so a -n operand may not carry a subscript"
+( w=5; declare -n r=w; declare -n r[1]=w; echo "rc=$?"; declare -p w r ) 2>&1
+( w=5; declare -n r=w; declare -n r[1];   echo "rc=$?"; declare -p w r ) 2>&1
+( declare -n zz[1]=w;  echo "rc=$?" ) 2>&1
+( f() { local -n zz[1]=w; echo "rc=$?"; }; f ) 2>&1
+
+echo "=== export and readonly do not resolve a subscripted operand at all"
 ( w=5; declare -n r=w; export 'r[1]=9';   declare -p w r ) 2>&1
 ( w=5; declare -n r=w; readonly 'r[1]=9'; declare -p w r ) 2>&1
 

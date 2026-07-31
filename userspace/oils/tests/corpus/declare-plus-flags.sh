@@ -269,3 +269,18 @@ declare -a +i d20=2+3; declare -p d20
 declare +i -i d21=2+3; declare -p d21
 declare -a +i d22[0]=2+3; declare -p d22
 declare -a +l d23[0]=AB; declare -p d23
+
+echo "=== a refused +a/+A abandons the operand, so the removals never run"
+# `+a` cannot un-make the array the literal just bound, and that refusal lands
+# exactly where the builtin would have taken the fold or the integer attribute
+# back off again — so the name keeps whatever the literal bound *under*.
+e() { sed 's/^.*: line [0-9]*: //'; }
+{ declare -a d24=(1); declare +a -l +l d24=(AB); echo "rc=$?"; declare -p d24; } 2>&1 | e
+{ declare -a d25=(1); declare +a -i +i d25=(2+3); echo "rc=$?"; declare -p d25; } 2>&1 | e
+# The array this very command makes counts as one it cannot un-make.
+{ declare +a -l +l d26=(AB); echo "rc=$?"; declare -p d26; } 2>&1 | e
+{ declare +a -i +i d27=(2+3); echo "rc=$?"; declare -p d27; } 2>&1 | e
+{ declare -A d28=([k]=v); declare +A -l +l d28=([k]=AB); echo "rc=$?"; declare -p d28; } 2>&1 | e
+# …but `+a` against an *associative* name refuses nothing, so they do run.
+{ declare -A d29=([k]=v); declare +a -l +l d29=([k]=AB); echo "rc=$?"; declare -p d29; } 2>&1 | e
+{ declare +A -l +l d30=([k]=AB); echo "rc=$?"; declare -p d30; } 2>&1 | e

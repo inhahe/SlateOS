@@ -6633,7 +6633,7 @@ TD-OILS-DECL-ERROR-SKIPS-FLAG-APPLY — is bash's habit of abandoning a
 name's flag application after an error that is raised once the literal
 has already bound.
 
-### TD-OILS-DECL-ERROR-SKIPS-FLAG-APPLY. A per-name `declare` error abandons that name's flag application, but only *after* the compound literal has bound — 2026-07-31 — OPEN (2 of 3 done)
+### TD-OILS-DECL-ERROR-SKIPS-FLAG-APPLY. A per-name `declare` error abandons that name's flag application, but only *after* the compound literal has bound — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` —
 `exec_declare_with_arrays_scoped`. bash's `declare_internal` performs a
@@ -6649,7 +6649,7 @@ when this entry was written: for two of the three osh emitted **no error
 at all**, so the status was wrong too, not just the attribute letters.
 
 ```sh
-declare +a  -l +l k8=(AB)  # bash declare -al k8=([0]="ab")  osh declare -a k8=([0]="ab")   OPEN
+declare +a  -l +l k8=(AB)  # bash declare -al k8=([0]="ab")  osh ditto                     ✅ DONE
 declare -aA +l    v9=(AB)  # bash declare -Al v9=([AB]="")   osh ditto                     ✅ DONE
 declare -n  +i    t1=(2+3) # bash declare -a  t1=([0]="2+3") osh ditto                     ✅ DONE
 ```
@@ -6685,12 +6685,19 @@ came out of it:
 Covered by `naming_both_array_kinds_binds_as_associative_and_then_refuses`
 and `userspace/oils/tests/corpus/declare-array-kind-conflict.sh`.
 
-**Still open — `+a`/`+A` on the array the same command makes.** Only the
-fold differs: `declare +a -l +l k8=(AB)` leaves `declare -al` in bash and
-`declare -a` in osh. The destroy refusal in phase 3 abandons the operand
-the same way, so `post_fold` in phase 1 has to be skipped for it too —
-the same treatment `self_kind_conflict` now gets, except that whether it
-fires is only known after the literal has bound.
+**✅ `+a`/`+A` on the array the same command makes — done 2026-07-31.**
+Only the removals differed: `declare +a -l +l k8=(AB)` leaves `declare -al`
+in bash and left `declare -a` in osh, and `declare +a -i +i k=(2+3)` the
+same for the integer attribute. The destroy refusal in phase 3 abandons the
+operand exactly as the two above do, so it now feeds the same
+`operand_refused` flag — computed *after* `apply_assignment`, since whether
+it fires is only knowable once the literal has bound and made the name an
+array of that kind. `+a` against an associative name (or `+A` against an
+indexed one) refuses nothing, so there the removals still run.
+
+Measured with `target/dvscratch/px56.sh`; covered by the new section of
+`userspace/oils/tests/corpus/declare-plus-flags.sh` and by
+`the_off_direction_of_the_array_kinds_refuses_rather_than_converting`.
 
 **✅ `-n` with a compound literal — done 2026-07-31.** bash refuses with
 `{tag}: NAME: reference variable cannot be an array`, rc 1; the literal

@@ -23720,14 +23720,23 @@ impl Shell {
             // from, which decides whether the name is rolled back below.
             let saved_expanded = std::mem::replace(&mut self.compound_expanded, false);
             let bound = self.apply_assignment(a, false);
+            // `+a`/`+A` cannot un-make the array the literal just bound, so phase
+            // 3 refuses this operand as well — and abandons it in exactly the
+            // same place, before the removals below. Whether that refusal fires
+            // is only knowable once the literal *has* bound, which is why this
+            // half is folded in here rather than with the others above.
+            let operand_refused = operand_refused
+                || (unset_indexed && self.arrays.contains_key(&a.name))
+                || (unset_assoc && self.assoc.contains_key(&a.name));
             // A claimed fold was really set on the variable, so the removals run
             // against it rather than against the fold the name arrived with.
             //
             // Unless the operand is about to be refused — for naming both array
-            // kinds (`self_kind_conflict`) or for asking a reference to be an
-            // array (`nameref_array_refusal`): either refusal abandons the
-            // operand where bash's builtin would have run these removals, so
-            // whatever the literal bound under is simply what the name keeps.
+            // kinds (`self_kind_conflict`), for asking a reference to be an
+            // array (`nameref_array_refusal`), or for the destroy refusal just
+            // above: each abandons the operand where bash's builtin would have
+            // run these removals, so whatever the literal bound under is simply
+            // what the name keeps.
             let post_fold = if operand_refused {
                 bind_fold
             } else if claimed && single_case.is_some() {
@@ -44660,6 +44669,31 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare +A q=(1 2); echo \"rc=$?\"; declare -p q").0,
             "rc=0\ndeclare -a q=([0]=\"1\" [1]=\"2\")\n"
+        );
+        // Abandoning the operand means abandoning it *before* the removals that
+        // normally run once the literal has bound, so the name keeps the fold or
+        // the integer attribute the literal bound under.
+        for (src, want) in [
+            ("declare -a q=(1); declare +a -l +l q=(AB)", "declare -al q=([0]=\"ab\")\n"),
+            ("declare -a q=(1); declare +a -i +i q=(2+3)", "declare -ai q=([0]=\"5\")\n"),
+            // The array this very command makes is one it cannot un-make.
+            ("declare +a -l +l q=(AB)", "declare -al q=([0]=\"ab\")\n"),
+            ("declare +a -i +i q=(2+3)", "declare -ai q=([0]=\"5\")\n"),
+            (
+                "declare -A q=([k]=v); declare +A -l +l q=([k]=AB)",
+                "declare -Al q=([k]=\"ab\" )\n",
+            ),
+        ] {
+            assert_eq!(
+                run(&format!("{{ {src}; }} 2>/dev/null; echo rc=$?; declare -p q")).0,
+                format!("rc=1\n{want}"),
+                "{src}"
+            );
+        }
+        // …but `+a` against an *associative* name refuses nothing, so they run.
+        assert_eq!(
+            run("declare -A q=([k]=v); declare +a -l +l q=([k]=AB); echo rc=$?; declare -p q").0,
+            "rc=0\ndeclare -A q=([k]=\"ab\" )\n"
         );
         // It outranks the kind-conflict complaint, and is outranked in turn by
         // the readonly refusal.

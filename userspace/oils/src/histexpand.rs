@@ -13,6 +13,17 @@
 //! and returns the rewritten line. Deciding *when* to call it (per physical
 //! line, before lexing) is the caller's job, because expansion has to interleave
 //! with reading — see the design notes in `known-issues.md`.
+//!
+//! Everything here is byte-typed. A recorded command is not text — it may name
+//! a file whose bytes do not decode — and history expansion is a *textual*
+//! rewrite over that recorded command, so decoding it anywhere would mean
+//! recalling something other than what was run. Every character the grammar
+//! tests for (`!`, `:`, `^`, `$`, `*`, `%`, the digits) is ASCII, and no byte of
+//! a multi-byte UTF-8 sequence is ever ASCII, so a byte scan can neither match
+//! inside a character nor split one.
+
+use crate::bfmt;
+use crate::bytes::{self, BStr, Str};
 
 /// The history a line is expanded against.
 ///
@@ -21,7 +32,7 @@
 /// absolute `!n` means `entries[n - base]`.
 #[derive(Clone, Copy)]
 pub struct HistCtx<'a> {
-    pub entries: &'a [crate::bytes::Str],
+    pub entries: &'a [Str],
     pub base: usize,
     /// Whether `shopt -s extglob` is in effect, which makes `!(` the opening of
     /// a negated extended-glob pattern rather than an event designator. See
@@ -42,46 +53,29 @@ pub struct HistCtx<'a> {
     pub open_quote: Option<char>,
 }
 
-/// Seam: this module rewrites a line of shell *source* as text
-/// (TD-OILS-BYTE-STRINGS step 9), while the history list it reads is bytes. An
-/// entry that is not text therefore resolves to nothing here — no event
-/// designator names it and no prefix or substring search looks inside it. That
-/// is the honest answer rather than an approximation: recalling an *altered*
-/// command is the one outcome worse than recalling none.
 impl HistCtx<'_> {
     /// The entry numbered `n`, or `None` if `n` is outside the retained range.
-    fn by_number(&self, n: usize) -> Option<&str> {
-        n.checked_sub(self.base)
-            .and_then(|i| self.entries.get(i))
-            .and_then(|e| crate::bytes::as_str(e))
+    fn by_number(&self, n: usize) -> Option<BStr<'_>> {
+        n.checked_sub(self.base).and_then(|i| self.entries.get(i)).map(Vec::as_slice)
     }
 
     /// The `n`th entry counting back from the most recent, where 1 is the most
     /// recent (`!-1`, equivalently `!!`).
-    fn back(&self, n: usize) -> Option<&str> {
-        self.entries
-            .len()
-            .checked_sub(n)
-            .and_then(|i| self.entries.get(i))
-            .and_then(|e| crate::bytes::as_str(e))
+    fn back(&self, n: usize) -> Option<BStr<'_>> {
+        self.entries.len().checked_sub(n).and_then(|i| self.entries.get(i)).map(Vec::as_slice)
     }
 
     /// The most recent entry starting with `prefix`.
-    fn by_prefix(&self, prefix: &str) -> Option<&str> {
-        self.entries
-            .iter()
-            .rev()
-            .filter_map(|e| crate::bytes::as_str(e))
-            .find(|e| e.starts_with(prefix))
+    ///
+    /// Byte-wise, as bash's `strncmp` is: a prefix search finds the entry whose
+    /// leading bytes are the ones written, whatever they encode.
+    fn by_prefix(&self, prefix: BStr<'_>) -> Option<BStr<'_>> {
+        self.entries.iter().rev().map(Vec::as_slice).find(|e| e.starts_with(prefix))
     }
 
     /// The most recent entry containing `needle`.
-    fn by_substring(&self, needle: &str) -> Option<&str> {
-        self.entries
-            .iter()
-            .rev()
-            .filter_map(|e| crate::bytes::as_str(e))
-            .find(|e| e.contains(needle))
+    fn by_substring(&self, needle: BStr<'_>) -> Option<BStr<'_>> {
+        self.entries.iter().rev().map(Vec::as_slice).find(|e| bytes::contains(e, needle))
     }
 }
 
@@ -91,25 +85,25 @@ pub enum Expansion {
     /// The line contained nothing to expand and is to be used as-is.
     Unchanged,
     /// The line was rewritten. bash echoes the result before running it.
-    Changed(String),
+    Changed(Str),
     /// The line was rewritten but the rewrite is *not* reported. readline
     /// implements `^old^new^` by textually prefixing `!!:s`, and it counts only
     /// the expansion proper as a change — so a line whose `!!` turns out to be
     /// quoted runs (and is recorded) as the literal `!!:s^old^new^` with nothing
     /// echoed to stderr. bash adopts `history_expand`'s output string either way,
     /// which is what this variant carries.
-    ChangedQuietly(String),
+    ChangedQuietly(Str),
     /// The line carried a `:p` modifier: bash echoes the rewritten line and
     /// records it in the history exactly as for [`Expansion::Changed`], but does
     /// *not* run it — `:p` exists to preview what an event designator names.
-    PrintOnly(String),
+    PrintOnly(Str),
     /// The line could not be expanded — an event designator named something not
     /// in the history, or a `:s` modifier whose pattern did not match. bash
     /// reports this on stderr and discards the line without running it. The
     /// payload is the whole message body, since bash words the three cases
     /// differently: `!999: event not found`, `:s/a/b/: substitution failed`,
     /// `:&: no previous substitution`.
-    NotFound(String),
+    NotFound(Str),
 }
 
 /// readline's `history_word_delimiters` — what ends a word when nothing is
@@ -157,7 +151,7 @@ fn byte_at(s: &[u8], i: usize) -> Option<u8> {
 ///   and keep their quotes; an unterminated one swallows the rest of the line.
 ///   `${ … }` does *not* protect, so `${a;b}` is `${a`, `;`, `b}`.
 /// * A `#` that starts a word ends the line: `echo a # b c` has two words.
-fn words(s: &str) -> Vec<&str> {
+fn words(s: BStr<'_>) -> Vec<BStr<'_>> {
     word_spans(s).into_iter().filter_map(|(a, b)| s.get(a..b)).collect()
 }
 
@@ -165,8 +159,8 @@ fn words(s: &str) -> Vec<&str> {
 ///
 /// Kept separate because a `%` word designator has to answer "which word is byte
 /// *n* in?", and the whitespace between two words is in neither.
-fn word_spans(s: &str) -> Vec<(usize, usize)> {
-    let bytes = s.as_bytes();
+fn word_spans(s: BStr<'_>) -> Vec<(usize, usize)> {
+    let bytes = s;
     let mut out = Vec::new();
     let mut i = 0usize;
     loop {
@@ -202,16 +196,16 @@ fn word_spans(s: &str) -> Vec<(usize, usize)> {
 /// their own (`!?; b?` against `a; b` remembers `;`), and which is nothing at
 /// all when the match starts on the whitespace between two words (`!? b?`).
 /// Measured against bash 5.2.
-fn search_match(line: &str, needle: &str) -> String {
-    let Some(at) = line.rfind(needle) else {
-        return String::new();
+fn search_match(line: BStr<'_>, needle: BStr<'_>) -> Str {
+    let Some(at) = bytes::rfind(line, needle) else {
+        return Str::new();
     };
     word_spans(line)
         .into_iter()
         .find(|&(a, b)| at >= a && at < b)
         .and_then(|(a, b)| line.get(a..b))
         .unwrap_or_default()
-        .to_string()
+        .to_vec()
 }
 
 /// Scan the one word starting at `start`, returning the index just past it.
@@ -372,44 +366,40 @@ fn scan_word(s: &[u8], mut i: usize) -> usize {
 /// * A dot anywhere counts as the extension separator, even one inside a
 ///   directory name or at the very start: `echo a.b/c` under `:e` is `.b/c`,
 ///   and the word `.abc` under `:r` is empty.
-fn modify_path(text: &str, which: char) -> String {
+fn modify_path(text: BStr<'_>, which: u8) -> Str {
+    // `rposition` rather than `bytes::rfind`: the separator is one ASCII byte,
+    // and no byte of a multi-byte character can be mistaken for it.
+    let last = |sep: u8| text.iter().rposition(|&b| b == sep);
     match which {
         // head: everything before the last `/` — so a leading slash leaves
         // nothing at all, and `/abc` is empty rather than `/`.
-        'h' => match text.rfind('/') {
-            Some(i) => text.get(..i).unwrap_or("").to_string(),
-            None => text.to_string(),
+        b'h' => match last(b'/') {
+            Some(i) => text.get(..i).unwrap_or_default().to_vec(),
+            None => text.to_vec(),
         },
         // tail: everything after the last `/`.
-        't' => match text.rfind('/') {
-            Some(i) => text.get(i.saturating_add(1)..).unwrap_or("").to_string(),
-            None => text.to_string(),
+        b't' => match last(b'/') {
+            Some(i) => text.get(i.saturating_add(1)..).unwrap_or_default().to_vec(),
+            None => text.to_vec(),
         },
         // root: everything before the last `.`.
-        'r' => match text.rfind('.') {
-            Some(i) => text.get(..i).unwrap_or("").to_string(),
-            None => text.to_string(),
+        b'r' => match last(b'.') {
+            Some(i) => text.get(..i).unwrap_or_default().to_vec(),
+            None => text.to_vec(),
         },
         // ext: the last `.` and everything after it.
-        'e' => match text.rfind('.') {
-            Some(i) => text.get(i..).unwrap_or("").to_string(),
-            None => text.to_string(),
+        b'e' => match last(b'.') {
+            Some(i) => text.get(i..).unwrap_or_default().to_vec(),
+            None => text.to_vec(),
         },
-        _ => text.to_string(),
+        _ => text.to_vec(),
     }
 }
 
 /// Apply an `s/old/new/` substitution to `text`, replacing the first occurrence
 /// (or every occurrence when `global`).
-fn substitute(text: &str, old: &str, new: &str, global: bool) -> String {
-    if old.is_empty() {
-        return text.to_string();
-    }
-    if global {
-        text.replace(old, new)
-    } else {
-        text.replacen(old, new, 1)
-    }
+fn substitute(text: BStr<'_>, old: BStr<'_>, new: BStr<'_>, global: bool) -> Str {
+    bytes::replacen(text, old, new, if global { usize::MAX } else { 1 })
 }
 
 /// What one history expansion leaves behind for the next one.
@@ -432,45 +422,45 @@ fn substitute(text: &str, old: &str, new: &str, global: bool) -> String {
 #[derive(Default, Clone)]
 pub struct HistState {
     /// The `old` of the most recent `s/old/new/`.
-    subst_old: String,
+    subst_old: Str,
     /// Its `new`.
-    subst_new: String,
+    subst_new: Str,
     /// The string of the most recent successful `?string?` search.
-    search_string: String,
+    search_string: Str,
     /// The word that search matched — bash's `search_match`. Empty when there
     /// has been no search, and also when the match began on whitespace, which
     /// belongs to no word.
-    search_match: String,
+    search_match: Str,
 }
 
 /// Read a delimited `s`/`&` modifier body starting just past the `s`, e.g.
 /// `/old/new/`. The trailing delimiter may be omitted at end of input. Returns
 /// the parsed pair and the index just past what was consumed.
-fn parse_subst(chars: &[char], mut i: usize) -> Option<(String, String, usize)> {
-    let delim = *chars.get(i)?;
+fn parse_subst(src: BStr<'_>, mut i: usize) -> Option<(Str, Str, usize)> {
+    let delim = *src.get(i)?;
     i = i.saturating_add(1);
-    let mut old = String::new();
-    while let Some(&c) = chars.get(i) {
+    let mut old = Str::new();
+    while let Some(&c) = src.get(i) {
         i = i.saturating_add(1);
         if c == delim {
             break;
         }
         // A backslash escapes the delimiter inside the pattern.
-        if c == '\\' && chars.get(i) == Some(&delim) {
+        if c == b'\\' && src.get(i) == Some(&delim) {
             old.push(delim);
             i = i.saturating_add(1);
         } else {
             old.push(c);
         }
     }
-    let mut new = String::new();
-    while let Some(&c) = chars.get(i) {
+    let mut new = Str::new();
+    while let Some(&c) = src.get(i) {
         if c == delim {
             i = i.saturating_add(1);
             break;
         }
         i = i.saturating_add(1);
-        if c == '\\' && chars.get(i) == Some(&delim) {
+        if c == b'\\' && src.get(i) == Some(&delim) {
             new.push(delim);
             i = i.saturating_add(1);
         } else {
@@ -520,15 +510,15 @@ enum RangeEnd {
 /// word a previous `?string?` search matched, which is what `search_match`
 /// carries. Like `*` it never fails, and like `$` it ends the designator.
 fn apply_word_designator(
-    event: &str,
-    chars: &[char],
+    event: BStr<'_>,
+    src: BStr<'_>,
     start: usize,
-    search_match: &str,
-) -> Result<(String, usize), String> {
+    search_match: BStr<'_>,
+) -> Result<(Str, usize), Str> {
     let ws = words(event);
     let last = ws.len().saturating_sub(1);
     let mut i = start;
-    let had_colon = chars.get(i) == Some(&':');
+    let had_colon = src.get(i) == Some(&b':');
     if had_colon {
         i = i.saturating_add(1);
     }
@@ -536,20 +526,20 @@ fn apply_word_designator(
     // Parse the *end* of a range: a number, `^` (the first argument) or `$`
     // (the last word). Unlike the start of a range, a number here needs no
     // preceding colon — `!!-2` is words 0 through 2.
-    let read_end = |chars: &[char], i: &mut usize| -> Option<usize> {
-        match chars.get(*i) {
-            Some('^') => {
+    let read_end = |src: BStr<'_>, i: &mut usize| -> Option<usize> {
+        match src.get(*i) {
+            Some(b'^') => {
                 *i = i.saturating_add(1);
                 Some(1)
             }
-            Some('$') => {
+            Some(b'$') => {
                 *i = i.saturating_add(1);
                 Some(last)
             }
             Some(c) if c.is_ascii_digit() => {
                 let mut n = 0usize;
-                while let Some(d) = chars.get(*i).and_then(|c| c.to_digit(10)) {
-                    n = n.saturating_mul(10).saturating_add(d as usize);
+                while let Some(d) = src.get(*i).copied().and_then(digit) {
+                    n = n.saturating_mul(10).saturating_add(d);
                     *i = i.saturating_add(1);
                 }
                 Some(n)
@@ -559,24 +549,24 @@ fn apply_word_designator(
     };
 
     // Join words `from..=to` — an empty range is an empty string, not an error.
-    let join = |from: usize, to: Option<usize>| -> String {
+    let join = |from: usize, to: Option<usize>| -> Str {
         match to {
-            Some(to) if from <= to => ws.get(from..=to).unwrap_or(&[]).join(" "),
-            _ => String::new(),
+            Some(to) if from <= to => ws.get(from..=to).unwrap_or_default().join(&b' '),
+            _ => Str::new(),
         }
     };
 
     // Range-check and join. A start past the last word is always an error; a
     // written-out end must also be no later than the last word and no earlier
     // than the start.
-    let take = |from: usize, to: &RangeEnd, end: usize| -> Result<(String, usize), String> {
+    let take = |from: usize, to: &RangeEnd, end: usize| -> Result<(Str, usize), Str> {
         let bad = from > last
             || match *to {
                 RangeEnd::Given(to) => to > last || to < from,
                 RangeEnd::SecondToLast => false,
             };
         if bad {
-            return Err(format!("{}: bad word specifier", spec_text(chars, start, end)));
+            return Err(bfmt![spec_text(src, start, end), b": bad word specifier"]);
         }
         let to = match *to {
             RangeEnd::Given(to) => Some(to),
@@ -587,27 +577,27 @@ fn apply_word_designator(
 
     // A range start, once one of the leading special forms has been ruled out.
     // `$` is not here because it terminates the designator on its own.
-    let read_start = |chars: &[char], i: &mut usize| -> Option<usize> {
-        match chars.get(*i) {
-            Some('^') => {
+    let read_start = |src: BStr<'_>, i: &mut usize| -> Option<usize> {
+        match src.get(*i) {
+            Some(b'^') => {
                 *i = i.saturating_add(1);
                 Some(1)
             }
             // A bare number is a word number only after a `:`.
-            Some(c) if had_colon && c.is_ascii_digit() => read_end(chars, i),
+            Some(c) if had_colon && c.is_ascii_digit() => read_end(src, i),
             _ => None,
         }
     };
 
-    match chars.get(i) {
+    match src.get(i) {
         // `*` — all arguments, i.e. words 1 through the last. Alone among the
         // designators it never fails: on a one-word event it is simply empty.
-        Some('*') => {
+        Some(b'*') => {
             i = i.saturating_add(1);
             Ok((join(1, Some(last)), i))
         }
         // `$` — the last word, and the end of the designator.
-        Some('$') => {
+        Some(b'$') => {
             i = i.saturating_add(1);
             take(last, &RangeEnd::Given(last), i)
         }
@@ -615,40 +605,39 @@ fn apply_word_designator(
         // event that was. Nothing about the event in hand is consulted, so no
         // range check applies and there is nothing to fail: with no prior
         // search this is simply empty.
-        Some('%') => {
+        Some(b'%') => {
             i = i.saturating_add(1);
-            Ok((search_match.to_string(), i))
+            Ok((search_match.to_vec(), i))
         }
         // `-m` — words 0 through m.
-        Some('-') => {
+        Some(b'-') => {
             i = i.saturating_add(1);
-            let end = read_end(chars, &mut i).map_or(RangeEnd::SecondToLast, RangeEnd::Given);
+            let end = read_end(src, &mut i).map_or(RangeEnd::SecondToLast, RangeEnd::Given);
             take(0, &end, i)
         }
         Some(_) => {
-            let Some(from) = read_start(chars, &mut i) else {
+            let Some(from) = read_start(src, &mut i) else {
                 // Not a word designator after all; leave the whole event and let
                 // the caller reconsider this position as a modifier.
                 if had_colon {
                     i = start;
                 }
-                return Ok((event.to_string(), i));
+                return Ok((event.to_vec(), i));
             };
-            match chars.get(i) {
+            match src.get(i) {
                 // `n*` — from n to the last word.
-                Some('*') => {
+                Some(b'*') => {
                     i = i.saturating_add(1);
                     take(from, &RangeEnd::Given(last), i)
                 }
                 // `n^` — from n to the first argument; see the note above.
-                Some('^') => {
+                Some(b'^') => {
                     i = i.saturating_add(1);
                     take(from, &RangeEnd::Given(1), i)
                 }
-                Some('-') => {
+                Some(b'-') => {
                     i = i.saturating_add(1);
-                    let end =
-                        read_end(chars, &mut i).map_or(RangeEnd::SecondToLast, RangeEnd::Given);
+                    let end = read_end(src, &mut i).map_or(RangeEnd::SecondToLast, RangeEnd::Given);
                     take(from, &end, i)
                 }
                 // A single word.
@@ -658,8 +647,17 @@ fn apply_word_designator(
         // Nothing after the `:` at all. Like the non-designator case above, hand
         // the position back unconsumed so the modifier scan sees the `:` and
         // rejects it (bash: `: unrecognized history modifier`).
-        None => Ok((event.to_string(), start)),
+        None => Ok((event.to_vec(), start)),
     }
+}
+
+/// The value of an ASCII decimal digit byte.
+///
+/// Not `char::to_digit`: the input is a byte, and only the ten ASCII digits are
+/// digits to readline's scanner — a decimal digit of some other script is text
+/// that happens to look numeric, and bash counts none of it.
+fn digit(c: u8) -> Option<usize> {
+    c.is_ascii_digit().then(|| usize::from(c.wrapping_sub(b'0')))
 }
 
 /// Apply any trailing `:h`/`:t`/`:r`/`:e`/`:s`/`:&`/`:p`/`:q`/`:x` modifiers,
@@ -670,40 +668,40 @@ fn apply_word_designator(
 /// missing event does: the `Err` carries the message body bash would print,
 /// which quotes the modifier back verbatim (`:gs/nope/x/: substitution failed`).
 fn apply_modifiers(
-    mut text: String,
-    chars: &[char],
+    mut text: Str,
+    src: BStr<'_>,
     mut i: usize,
     state: &mut HistState,
-) -> Result<(String, usize, bool), String> {
+) -> Result<(Str, usize, bool), Str> {
     let mut print_only = false;
-    while chars.get(i) == Some(&':') {
+    while src.get(i) == Some(&b':') {
         let mut j = i.saturating_add(1);
         // `g`/`a` prefix makes the following substitution global.
         let mut global = false;
-        while matches!(chars.get(j), Some('g' | 'a')) {
+        while matches!(src.get(j), Some(b'g' | b'a')) {
             global = true;
             j = j.saturating_add(1);
         }
-        match chars.get(j) {
-            Some(&c @ ('h' | 't' | 'r' | 'e')) => {
+        match src.get(j) {
+            Some(&c @ (b'h' | b't' | b'r' | b'e')) => {
                 text = modify_path(&text, c);
                 i = j.saturating_add(1);
             }
-            Some('p') => {
+            Some(b'p') => {
                 print_only = true;
                 i = j.saturating_add(1);
             }
             // `:q` quotes the result as one word; `:x` quotes it so that its
             // whitespace still separates words. Either way a later expansion
             // pass leaves the text alone. bash uses single quotes for both.
-            Some(&c @ ('q' | 'x')) => {
-                text = if c == 'q' { single_quote(&text) } else { quote_breaks(&text) };
+            Some(&c @ (b'q' | b'x')) => {
+                text = if c == b'q' { single_quote(&text) } else { quote_breaks(&text) };
                 i = j.saturating_add(1);
             }
-            Some('s') => {
+            Some(b's') => {
                 // No delimiter at all (`!!:s` at the end of the line) is not an
                 // error in bash: the `s` is consumed and the text is left alone.
-                let Some((old, new, end)) = parse_subst(chars, j.saturating_add(1)) else {
+                let Some((old, new, end)) = parse_subst(src, j.saturating_add(1)) else {
                     i = j.saturating_add(1);
                     break;
                 };
@@ -711,23 +709,23 @@ fn apply_modifiers(
                 let reused = old.is_empty();
                 let old = if reused { state.subst_old.clone() } else { old };
                 if old.is_empty() {
-                    return Err(format!("{}: no previous substitution", spec_text(chars, i, end)));
+                    return Err(bfmt![spec_text(src, i, end), b": no previous substitution"]);
                 }
-                if !text.contains(&old) {
-                    return Err(format!("{}: substitution failed", spec_text(chars, i, end)));
+                if !bytes::contains(&text, &old) {
+                    return Err(bfmt![spec_text(src, i, end), b": substitution failed"]);
                 }
                 text = substitute(&text, &old, &new, global);
                 state.subst_old = old;
                 state.subst_new = new;
                 i = end;
             }
-            Some('&') => {
+            Some(b'&') => {
                 let end = j.saturating_add(1);
                 if state.subst_old.is_empty() {
-                    return Err(format!("{}: no previous substitution", spec_text(chars, i, end)));
+                    return Err(bfmt![spec_text(src, i, end), b": no previous substitution"]);
                 }
-                if !text.contains(&state.subst_old) {
-                    return Err(format!("{}: substitution failed", spec_text(chars, i, end)));
+                if !bytes::contains(&text, &state.subst_old) {
+                    return Err(bfmt![spec_text(src, i, end), b": substitution failed"]);
                 }
                 text = substitute(&text, &state.subst_old, &state.subst_new, global);
                 i = end;
@@ -742,8 +740,8 @@ fn apply_modifiers(
             // ends the modifier run and stays as literal text, which is why
             // `!!:hz` is the `:h` of the event with a `z` stuck on the end.
             other => {
-                let name: String = other.copied().map(String::from).unwrap_or_default();
-                return Err(format!("{name}: unrecognized history modifier"));
+                let name = other.copied().map(|c| vec![c]).unwrap_or_default();
+                return Err(bfmt![name, b": unrecognized history modifier"]);
             }
         }
     }
@@ -751,17 +749,17 @@ fn apply_modifiers(
 }
 
 /// Wrap `s` in single quotes, escaping any it contains the way bash's `:q` does.
-fn single_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len().saturating_add(2));
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
+fn single_quote(s: BStr<'_>) -> Str {
+    let mut out = Str::with_capacity(s.len().saturating_add(2));
+    out.push(b'\'');
+    for &c in s {
+        if c == b'\'' {
+            out.extend_from_slice(b"'\\''");
         } else {
             out.push(c);
         }
     }
-    out.push('\'');
+    out.push(b'\'');
     out
 }
 
@@ -773,21 +771,21 @@ fn single_quote(s: &str) -> String {
 /// company as soon as the text is less tidy — `a  b` becomes `'a' '' 'b'`, a
 /// tab stays a tab, and `a;b` stays the single item `'a;b'` even though
 /// [`words`] would split it in three. Measured against bash 5.2.
-fn quote_breaks(s: &str) -> String {
-    let mut out = String::with_capacity(s.len().saturating_add(2));
-    out.push('\'');
-    for c in s.chars() {
+fn quote_breaks(s: BStr<'_>) -> Str {
+    let mut out = Str::with_capacity(s.len().saturating_add(2));
+    out.push(b'\'');
+    for &c in s {
         match c {
-            '\'' => out.push_str("'\\''"),
-            ' ' | '\t' | '\n' => {
-                out.push('\'');
+            b'\'' => out.extend_from_slice(b"'\\''"),
+            b' ' | b'\t' | b'\n' => {
+                out.push(b'\'');
                 out.push(c);
-                out.push('\'');
+                out.push(b'\'');
             }
             _ => out.push(c),
         }
     }
-    out.push('\'');
+    out.push(b'\'');
     out
 }
 
@@ -804,18 +802,18 @@ fn quote_breaks(s: &str) -> String {
 /// `extglob` off really does try to expand), while `$!` and `x[!a]` are
 /// inhibited even though nothing about the `!` itself says so, `[!!]` expands
 /// where `[!$]` does not, and double quotes inhibit nothing at all.
-fn inhibited(chars: &[char], i: usize, extglob: bool, dquote: bool) -> bool {
-    let next = chars.get(i.saturating_add(1)).copied();
+fn inhibited(src: BStr<'_>, i: usize, extglob: bool, dquote: bool) -> bool {
+    let next = src.get(i.saturating_add(1)).copied();
     // bash's `history_no_expand_chars`, " \t\n\r=", plus end of line. `\r` is in
     // the set even though a line read by the shell never contains one.
-    if matches!(next, None | Some(' ' | '\t' | '\n' | '\r' | '=')) {
+    if matches!(next, None | Some(b' ' | b'\t' | b'\n' | b'\r' | b'=')) {
         return true;
     }
     // Inside a double-quoted string the closing quote joins that set, so
     // `echo "x !"` is left alone — but only when it comes *immediately* after the
     // `!`. In `echo "x !a"b` the quote merely ends the search string, and `!a` is
     // a real (failing) event reference.
-    if dquote && next == Some('"') {
+    if dquote && next == Some(b'"') {
         return true;
     }
     // `!(pat)` is an extended-glob negation — but only once `extglob` is on, only
@@ -826,18 +824,15 @@ fn inhibited(chars: &[char], i: usize, extglob: bool, dquote: bool) -> bool {
     // pattern" exception.
     if extglob
         && i >= 2
-        && next == Some('(')
-        && chars
-            .get(i.saturating_add(2)..)
-            .unwrap_or_default()
-            .contains(&')')
+        && next == Some(b'(')
+        && src.get(i.saturating_add(2)..).unwrap_or_default().contains(&b')')
     {
         return true;
     }
-    let prev = i.checked_sub(1).and_then(|p| chars.get(p)).copied();
+    let prev = i.checked_sub(1).and_then(|p| src.get(p)).copied();
     // `$!` is the last background pid, so a `!` directly after a `$` is never an
     // event — including in `$$!q`, where the `!` follows the second `$`.
-    if prev == Some('$') {
+    if prev == Some(b'$') {
         return true;
     }
     // `${!name}` / `${!name[@]}` / `${!pre*}` is indirect expansion, and `[!…]`
@@ -850,10 +845,10 @@ fn inhibited(chars: &[char], i: usize, extglob: bool, dquote: bool) -> bool {
     // quoting; a plain forward scan differs only for a `}` that appears solely
     // inside quotes or a nested expansion within the same word, which no real
     // input hits.
-    let rest = chars.get(i.saturating_add(1)..).unwrap_or_default();
-    if prev == Some('{')
-        && i.checked_sub(2).and_then(|p| chars.get(p)).copied() == Some('$')
-        && rest.contains(&'}')
+    let rest = src.get(i.saturating_add(1)..).unwrap_or_default();
+    if prev == Some(b'{')
+        && i.checked_sub(2).and_then(|p| src.get(p)).copied() == Some(b'$')
+        && rest.contains(&b'}')
     {
         return true;
     }
@@ -864,7 +859,7 @@ fn inhibited(chars: &[char], i: usize, extglob: bool, dquote: bool) -> bool {
     // which is bash comparing the next character against its
     // `history_expansion_char`. `[!!!]` therefore expands the `!!` and then
     // *fails* on the `!]` that is left.
-    if prev == Some('[') && next != Some('!') && rest.contains(&']') {
+    if prev == Some(b'[') && next != Some(b'!') && rest.contains(&b']') {
         return true;
     }
     false
@@ -877,7 +872,7 @@ fn inhibited(chars: &[char], i: usize, extglob: bool, dquote: bool) -> bool {
 ///
 /// `state` carries what one expansion leaves for the next — the most recent
 /// `:s` and the most recent `?string?` search. See [`HistState`].
-pub fn expand(line: &str, ctx: &HistCtx, state: &mut HistState) -> Expansion {
+pub fn expand(line: BStr<'_>, ctx: &HistCtx, state: &mut HistState) -> Expansion {
     // `^old^new^` is not a form of its own: readline implements it by *textually*
     // prefixing `!!:s` and running the ordinary expander over the result. Three
     // observable consequences follow, all of which would need special-casing if
@@ -890,14 +885,13 @@ pub fn expand(line: &str, ctx: &HistCtx, state: &mut HistState) -> Expansion {
     // * everything after the closing delimiter survives *and is expanded* —
     //   `^one^two^ !!` appends the previous command a second time, `^one^two^^`
     //   leaves a trailing `^`, and `^one^two^:z` reaches the modifier scan.
-    let quick = line.starts_with('^').then(|| format!("!!:s{line}"));
-    let line = quick.as_deref().unwrap_or(line);
-    if !line.contains('!') {
+    let quick = line.starts_with(b"^").then(|| bfmt![b"!!:s", line]);
+    let src: BStr<'_> = quick.as_deref().unwrap_or(line);
+    if !src.contains(&b'!') {
         return Expansion::Unchanged;
     }
 
-    let chars: Vec<char> = line.chars().collect();
-    let mut out = String::new();
+    let mut out = Str::new();
     let mut i = 0usize;
     let mut changed = false;
     let mut print_only = false;
@@ -909,16 +903,16 @@ pub fn expand(line: &str, ctx: &HistCtx, state: &mut HistState) -> Expansion {
     // is still expanded, because the rewrite happens before quote removal.
     let mut in_double = ctx.open_quote == Some('"');
 
-    while let Some(&c) = chars.get(i) {
+    while let Some(&c) = src.get(i) {
         // A backslash suppresses the history character — and is left in place,
         // because removing it is the *parser's* job, not history expansion's.
         // `echo \!!` is therefore reported unchanged (no echo of a rewritten
         // line) even though the command finally run prints `!!`; and inside
         // double quotes, where `\!` is not a quoting pair, the backslash
         // survives all the way to the output, as it does in bash.
-        if c == '\\' && !in_single {
+        if c == b'\\' && !in_single {
             out.push(c);
-            if let Some(&n) = chars.get(i.saturating_add(1)) {
+            if let Some(&n) = src.get(i.saturating_add(1)) {
                 out.push(n);
                 i = i.saturating_add(2);
             } else {
@@ -926,13 +920,13 @@ pub fn expand(line: &str, ctx: &HistCtx, state: &mut HistState) -> Expansion {
             }
             continue;
         }
-        if c == '\'' {
+        if c == b'\'' {
             in_single = !in_single;
             out.push(c);
             i = i.saturating_add(1);
             continue;
         }
-        if c == '"' && !in_single {
+        if c == b'"' && !in_single {
             in_double = !in_double;
             out.push(c);
             i = i.saturating_add(1);
@@ -949,32 +943,30 @@ pub fn expand(line: &str, ctx: &HistCtx, state: &mut HistState) -> Expansion {
         // Unlike the `!` rules above, this one *does* respect double quotes,
         // which is why they are tracked at all. `expand` is handed one raw input
         // line at a time, so "the rest of the line" is the rest of the string.
-        if c == '#'
+        if c == b'#'
             && !in_single
             && !in_double
-            && i.checked_sub(1)
-                .and_then(|p| chars.get(p))
-                .is_none_or(|&p| is_word_delimiter(p))
+            && i.checked_sub(1).and_then(|p| src.get(p)).is_none_or(|&p| is_word_delimiter(p))
         {
-            out.extend(chars.get(i..).unwrap_or_default());
+            out.extend_from_slice(src.get(i..).unwrap_or_default());
             break;
         }
         // Single quotes suppress expansion; double quotes deliberately do not.
-        if c != '!' || in_single {
+        if c != b'!' || in_single {
             out.push(c);
             i = i.saturating_add(1);
             continue;
         }
 
-        if inhibited(&chars, i, ctx.extglob, in_double) {
+        if inhibited(src, i, ctx.extglob, in_double) {
             out.push(c);
             i = i.saturating_add(1);
             continue;
         }
 
-        match expand_one(&chars, i, ctx, state, in_double) {
+        match expand_one(src, i, ctx, state, in_double) {
             Ok((text, end, p)) => {
-                out.push_str(&text);
+                out.extend_from_slice(&text);
                 i = end;
                 changed = true;
                 print_only |= p;
@@ -996,70 +988,70 @@ pub fn expand(line: &str, ctx: &HistCtx, state: &mut HistState) -> Expansion {
 
 /// readline's `history_word_delimiters`, `" \t\n;&()|<>"`. It ends an event
 /// search string and marks where a `#` may start a comment.
-fn is_word_delimiter(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | ';' | '&' | '(' | ')' | '|' | '<' | '>')
+fn is_word_delimiter(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | b';' | b'&' | b'(' | b')' | b'|' | b'<' | b'>')
 }
 
-/// Expand the single designator starting at `chars[start]` (which is the `!`).
+/// Expand the single designator starting at `src[start]` (which is the `!`).
 /// On success returns the replacement text and the index just past it; on
 /// failure the whole message body bash would print (see [`Expansion::NotFound`]).
 fn expand_one(
-    chars: &[char],
+    src: BStr<'_>,
     start: usize,
     ctx: &HistCtx,
     state: &mut HistState,
     dquote: bool,
-) -> Result<(String, usize, bool), String> {
+) -> Result<(Str, usize, bool), Str> {
     let mut i = start.saturating_add(1);
     // Remember where the spec began so a failure can quote it back.
     let spec_start = start;
-    let missing = |spec: &str| format!("{spec}: event not found");
+    let missing = |spec: BStr<'_>| bfmt![spec, b": event not found"];
 
-    let event: String = match chars.get(i) {
+    let event: Str = match src.get(i) {
         // `!!` — the previous command.
-        Some('!') => {
+        Some(b'!') => {
             i = i.saturating_add(1);
-            ctx.back(1).map(str::to_string).ok_or_else(|| missing("!!"))?
+            ctx.back(1).map(<[u8]>::to_vec).ok_or_else(|| missing(b"!!"))?
         }
         // `!#` — the current line so far. Handled by the caller having already
         // accumulated it; we approximate with the text before this designator.
-        Some('#') => {
+        Some(b'#') => {
             i = i.saturating_add(1);
-            chars.get(..start).unwrap_or(&[]).iter().collect()
+            src.get(..start).unwrap_or_default().to_vec()
         }
         // `!-n` — n events back.
-        Some('-') => {
+        Some(b'-') => {
             i = i.saturating_add(1);
             let mut n = 0usize;
             let digits_at = i;
-            while let Some(d) = chars.get(i).and_then(|c| c.to_digit(10)) {
-                n = n.saturating_mul(10).saturating_add(d as usize);
+            while let Some(d) = src.get(i).copied().and_then(digit) {
+                n = n.saturating_mul(10).saturating_add(d);
                 i = i.saturating_add(1);
             }
             if i == digits_at {
-                return Err(missing(&spec_text(chars, spec_start, i)));
+                return Err(missing(&spec_text(src, spec_start, i)));
             }
             ctx.back(n)
-                .map(str::to_string)
-                .ok_or_else(|| missing(&spec_text(chars, spec_start, i)))?
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| missing(&spec_text(src, spec_start, i)))?
         }
         // `!n` — an absolute event number.
         Some(c) if c.is_ascii_digit() => {
             let mut n = 0usize;
-            while let Some(d) = chars.get(i).and_then(|c| c.to_digit(10)) {
-                n = n.saturating_mul(10).saturating_add(d as usize);
+            while let Some(d) = src.get(i).copied().and_then(digit) {
+                n = n.saturating_mul(10).saturating_add(d);
                 i = i.saturating_add(1);
             }
             ctx.by_number(n)
-                .map(str::to_string)
-                .ok_or_else(|| missing(&spec_text(chars, spec_start, i)))?
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| missing(&spec_text(src, spec_start, i)))?
         }
         // `!?string?` — the most recent event containing string.
-        Some('?') => {
+        Some(b'?') => {
             i = i.saturating_add(1);
-            let mut written = String::new();
-            while let Some(&c) = chars.get(i) {
-                if c == '?' {
+            let mut written = Str::new();
+            while let Some(&c) = src.get(i) {
+                if c == b'?' {
                     i = i.saturating_add(1);
                     break;
                 }
@@ -1075,12 +1067,12 @@ fn expand_one(
             // The diagnostic quotes back exactly what was written: `!??` rather
             // than the string it stood for, and `!?zzz` without a `?` that the
             // designator never had.
-            let spec = spec_text(chars, spec_start, i);
+            let spec = spec_text(src, spec_start, i);
             if needle.is_empty() {
                 return Err(missing(&spec));
             }
             let found =
-                ctx.by_substring(&needle).map(str::to_string).ok_or_else(|| missing(&spec))?;
+                ctx.by_substring(&needle).map(<[u8]>::to_vec).ok_or_else(|| missing(&spec))?;
             // bash records the match here, at search time, and a `%` later in
             // *this* line already sees it (`!?gam?:%`). Note that it is a plain
             // string: it survives into lines whose own event has no such word.
@@ -1089,16 +1081,15 @@ fn expand_one(
             found
         }
         // `!$`, `!^`, `!*` — word designators against the previous command.
-        Some('$' | '^' | '*') => ctx
-            .back(1)
-            .map(str::to_string)
-            .ok_or_else(|| missing("!!"))?,
+        Some(b'$' | b'^' | b'*') => {
+            ctx.back(1).map(<[u8]>::to_vec).ok_or_else(|| missing(b"!!"))?
+        }
         // `!string` — the most recent event starting with string.
         Some(_) => {
-            let mut prefix = String::new();
+            let mut prefix = Str::new();
             let mut hit_delimiter = false;
-            while let Some(&c) = chars.get(i) {
-                if is_word_delimiter(c) || (dquote && c == '"') {
+            while let Some(&c) = src.get(i) {
+                if is_word_delimiter(c) || (dquote && c == b'"') {
                     hit_delimiter = true;
                     break;
                 }
@@ -1106,7 +1097,7 @@ fn expand_one(
                 // the search string without being a hard delimiter: an empty
                 // search string before one of them still means "the previous
                 // event", which is what makes `!:0` and `!$` work.
-                if matches!(c, ':' | '^' | '$' | '*' | '%' | '-') {
+                if matches!(c, b':' | b'^' | b'$' | b'*' | b'%' | b'-') {
                     break;
                 }
                 prefix.push(c);
@@ -1116,27 +1107,27 @@ fn expand_one(
             // (`!(zzz)` with `extglob` off, `!;x`, `!|x`) matches nothing at all,
             // and bash quotes back just the `!`.
             if prefix.is_empty() && hit_delimiter {
-                return Err(missing("!"));
+                return Err(missing(b"!"));
             }
             ctx.by_prefix(&prefix)
-                .map(str::to_string)
-                .ok_or_else(|| missing(&format!("!{prefix}")))?
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| missing(&bfmt![b"!", &prefix]))?
         }
-        None => return Err(missing("!")),
+        None => return Err(missing(b"!")),
     };
 
     // The `%` arm needs the search match, so this cannot be borrowed for the
     // whole call: clone the one string out first.
     let matched = state.search_match.clone();
-    let (selected, after_words) = apply_word_designator(&event, chars, i, &matched)?;
-    apply_modifiers(selected, chars, after_words, state)
+    let (selected, after_words) = apply_word_designator(&event, src, i, &matched)?;
+    apply_modifiers(selected, src, after_words, state)
 }
 
 /// The raw text of a designator, for the message of a failed expansion — bash
 /// quotes back exactly the part it could not use (`!999: event not found`,
 /// `:4: bad word specifier`, `:gs/nope/x/: substitution failed`).
-fn spec_text(chars: &[char], start: usize, end: usize) -> String {
-    chars.get(start..end).unwrap_or(&[]).iter().collect()
+fn spec_text(src: BStr<'_>, start: usize, end: usize) -> Str {
+    src.get(start..end).unwrap_or_default().to_vec()
 }
 
 #[cfg(test)]
@@ -1151,6 +1142,63 @@ mod tests {
     /// construction, so they build the byte-typed list through this helper.
     fn hist(items: &[&str]) -> Vec<crate::bytes::Str> {
         items.iter().map(|s| s.as_bytes().to_vec()).collect()
+    }
+
+    /// A borrowed result, as text.
+    ///
+    /// Panicking here is the point: a case that reaches this helper wrote its
+    /// expectation as a Rust string literal, so bytes that are not text are a
+    /// bug in the case, not something to paper over. The cases that *are* about
+    /// non-text bytes call `super::…` directly and compare bytes.
+    fn text(b: BStr<'_>) -> &str {
+        core::str::from_utf8(b).expect("this case's expectation is text")
+    }
+
+    /// An owned result, as text — see [`text`].
+    fn owned(b: Str) -> String {
+        String::from_utf8(b).expect("this case's expectation is text")
+    }
+
+    /// [`super::Expansion`] with text payloads.
+    ///
+    /// The ~900 lines of bash-measured expectations below spell shell source as
+    /// Rust string literals, while the module under test is byte-typed. This
+    /// mirror — and the `words`/`search_match`/`quote_breaks`/`expand` adapters
+    /// beside it — keep those cases readable by shadowing the glob import; a
+    /// locally-defined item wins over one brought in by `use super::*`.
+    #[derive(Debug)]
+    enum Expansion {
+        Unchanged,
+        Changed(String),
+        ChangedQuietly(String),
+        PrintOnly(String),
+        NotFound(String),
+    }
+
+    /// [`super::expand`] over text.
+    fn expand(line: &str, ctx: &HistCtx, state: &mut HistState) -> Expansion {
+        match super::expand(line.as_bytes(), ctx, state) {
+            super::Expansion::Unchanged => Expansion::Unchanged,
+            super::Expansion::Changed(s) => Expansion::Changed(owned(s)),
+            super::Expansion::ChangedQuietly(s) => Expansion::ChangedQuietly(owned(s)),
+            super::Expansion::PrintOnly(s) => Expansion::PrintOnly(owned(s)),
+            super::Expansion::NotFound(e) => Expansion::NotFound(owned(e)),
+        }
+    }
+
+    /// [`super::words`] over text.
+    fn words(s: &str) -> Vec<&str> {
+        super::words(s.as_bytes()).into_iter().map(text).collect()
+    }
+
+    /// [`super::search_match`] over text.
+    fn search_match(line: &str, needle: &str) -> String {
+        owned(super::search_match(line.as_bytes(), needle.as_bytes()))
+    }
+
+    /// [`super::quote_breaks`] over text.
+    fn quote_breaks(s: &str) -> String {
+        owned(super::quote_breaks(s.as_bytes()))
     }
 
     /// Every expectation here was measured against bash 5.2 by recording the
@@ -2058,5 +2106,63 @@ mod tests {
         }
         // Number 4 has been dropped off the front.
         assert!(matches!(expand1("!4", &c), Expansion::NotFound(_)));
+    }
+
+    /// A recorded line is whatever bytes were typed, and SlateOS paths admit
+    /// every byte but `/` and NUL — so `cat a\xffb` is an ordinary command.
+    ///
+    /// The expander used to require the whole line, and every entry it reached,
+    /// to decode as UTF-8: a line holding such a byte was passed through
+    /// unexpanded, and an entry holding one was invisible to `!!`, `!string`
+    /// and `!?string?`. Recalling an *altered* command would be worse than
+    /// recalling none, so every case here compares bytes.
+    #[test]
+    fn history_holds_bytes_that_are_not_text() {
+        let entries =
+            vec![b"cat a\xffb".to_vec(), b"\xe9cho hi".to_vec(), b"grep \xa9 log".to_vec()];
+        let c = HistCtx { entries: &entries, base: 1, extglob: false, open_quote: None };
+        let got = |line: &[u8]| -> Str {
+            match super::expand(line, &c, &mut HistState::default()) {
+                super::Expansion::Changed(s) | super::Expansion::ChangedQuietly(s) => s,
+                other => panic!("expected a rewrite, got {other:?}"),
+            }
+        };
+        let failed = |line: &[u8]| -> Str {
+            match super::expand(line, &c, &mut HistState::default()) {
+                super::Expansion::NotFound(e) => e,
+                other => panic!("expected a failure, got {other:?}"),
+            }
+        };
+
+        // Every kind of event reference reaches an entry that is not text and
+        // hands it back byte for byte.
+        assert_eq!(got(b"!!"), b"grep \xa9 log");
+        assert_eq!(got(b"!1"), b"cat a\xffb");
+        assert_eq!(got(b"!-3"), b"cat a\xffb");
+        // …including the two searches, whose search string is bytes too.
+        assert_eq!(got(b"!\xe9ch"), b"\xe9cho hi");
+        assert_eq!(got(b"!?\xa9?"), b"grep \xa9 log");
+
+        // Word designators cut an entry into words, not characters: `a\xffb` is
+        // one word, because no byte of it is one of readline's delimiters.
+        assert_eq!(got(b"echo !1:1"), b"echo a\xffb");
+        assert_eq!(got(b"echo !1:*"), b"echo a\xffb");
+        // `%` names the word the search matched, byte for byte.
+        assert_eq!(got(b"echo !?\xff?:%"), b"echo a\xffb");
+
+        // The modifiers keep the bytes too: quoting, substitution, `strrchr`.
+        assert_eq!(got(b"echo !1:1:q"), b"echo 'a\xffb'");
+        assert_eq!(got(b"echo !1:x"), b"echo 'cat' 'a\xffb'");
+        assert_eq!(got(b"!!:s/\xa9/(c)/"), b"grep (c) log");
+        assert_eq!(got(b"echo !1:1:e"), b"echo a\xffb");
+
+        // A failure quotes the reference back as written rather than mangling
+        // the byte it could not decode.
+        assert_eq!(failed(b"!?\xfe?"), b"!?\xfe?: event not found");
+        assert_eq!(failed(b"!\xfe"), b"!\xfe: event not found");
+
+        // And a line that merely *contains* such a byte still expands, where it
+        // used to be handed back untouched because the line did not decode.
+        assert_eq!(got(b"echo \xff !!:0"), b"echo \xff grep");
     }
 }

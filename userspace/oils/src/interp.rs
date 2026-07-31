@@ -3785,20 +3785,6 @@ impl Shell {
         let mut accum = Str::new();
         loop {
             let Some(raw) = ip.peek_raw_line() else { return };
-            // Seam: the history expander is still text-typed
-            // (TD-OILS-BYTE-STRINGS step 9). A line that is not text holds no
-            // history event we could recognise, so it is passed through
-            // unexpanded rather than approximated — an *altered* command line is
-            // the one outcome worse than an unexpanded one.
-            let Some(raw_text) = bytes::as_str(&raw.text).map(str::to_owned) else {
-                ip.commit_raw_line(None, opts);
-                accum.extend_from_slice(&raw.text);
-                accum.push(b'\n');
-                if !self.needs_more_lines(&accum) {
-                    return;
-                }
-                continue;
-            };
             // Lifted out and put back so the expander can hold `&mut` on the
             // cross-line expansion state while `HistCtx` borrows the history list.
             let mut state = std::mem::take(&mut self.hist_state);
@@ -3814,7 +3800,7 @@ impl Shell {
                     // line of `echo 'a` / `!!'` would expand.
                     open_quote: crate::lexer::open_quote(&accum, opts),
                 };
-                crate::histexpand::expand(&raw_text, &ctx, &mut state)
+                crate::histexpand::expand(&raw.text, &ctx, &mut state)
             };
             self.hist_state = state;
             match expanded {
@@ -3826,16 +3812,16 @@ impl Shell {
                 Expansion::Changed(text) => {
                     // bash echoes the rewritten line to stderr before running it,
                     // so what `!!` turned into is visible.
-                    self.errln(&text);
-                    ip.commit_raw_line(Some(text.as_bytes()), opts);
-                    accum.extend_from_slice(text.as_bytes());
+                    self.berrln(&text);
+                    ip.commit_raw_line(Some(&text), opts);
+                    accum.extend_from_slice(&text);
                     accum.push(b'\n');
                 }
                 Expansion::ChangedQuietly(text) => {
                     // Same, minus the echo: bash reports only what the expander
                     // proper changed, and a `^old^new^` rewrite is not that.
-                    ip.commit_raw_line(Some(text.as_bytes()), opts);
-                    accum.extend_from_slice(text.as_bytes());
+                    ip.commit_raw_line(Some(&text), opts);
+                    accum.extend_from_slice(&text);
                     accum.push(b'\n');
                 }
                 Expansion::PrintOnly(text) => {
@@ -3845,13 +3831,13 @@ impl Shell {
                     // what keeps it an entry of its own. Like a failed
                     // expansion the line never reaches the parser, so it does
                     // not count towards the source line numbering either.
-                    self.errln(&text);
-                    self.hist_record(text.into_bytes());
+                    self.berrln(&text);
+                    self.hist_record(text);
                     ip.drop_raw_line(opts);
                 }
                 Expansion::NotFound(msg) => {
                     let prefix = self.read_error_prefix(raw.line);
-                    self.errln(&format!("{prefix}{msg}"));
+                    self.berrln(&bfmt![prefix, msg]);
                     // The line is dropped whole — not run, not recorded, `$?`
                     // untouched — and never reaches the parser, so it does not
                     // count towards the source line numbering either.
@@ -18049,19 +18035,6 @@ impl Shell {
             }
             let mut status = 0;
             for a in rest {
-                // Seam: the history expander reads source text (step 9), so an
-                // operand that is not text cannot be expanded. Refused, not
-                // approximated — see `-s` above.
-                let Some(a) = bytes::as_str(a) else {
-                    self.berrln(&bfmt![
-                        self.err_prefix(),
-                        b"history: ",
-                        a,
-                        b": argument is not valid text"
-                    ]);
-                    status = 1;
-                    continue;
-                };
                 let mut state = std::mem::take(&mut self.hist_state);
                 let expanded = {
                     let ctx = HistCtx {
@@ -18077,7 +18050,7 @@ impl Shell {
                 };
                 self.hist_state = state;
                 let text = match expanded {
-                    Expansion::Unchanged => a.to_string(),
+                    Expansion::Unchanged => a.clone(),
                     // A `:p` argument prints like any other here; the modifier
                     // only means "do not run it", and `-p` never runs anything.
                     // The echo the reader would have done is likewise irrelevant,
@@ -18088,18 +18061,19 @@ impl Shell {
                     Expansion::NotFound(_) => {
                         // The builtin reports the whole argument and its own
                         // wording, not the event spec and the reader's message.
-                        self.errln(&format!(
-                            "{}history: {a}: history expansion failed",
-                            self.err_prefix()
-                        ));
-                        // (`a` is text here by construction — see the seam above.)
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"history: ",
+                            a,
+                            b": history expansion failed"
+                        ]);
                         status = 1;
                         continue;
                     }
                 };
                 // Written per argument so a failure lands between the lines it
                 // actually falls between, as in bash.
-                let rc = self.write_bytes(out, redir, format!("{text}\n").as_bytes());
+                let rc = self.write_bytes(out, redir, &bfmt![text, b'\n']);
                 if rc != 0 {
                     status = rc;
                 }

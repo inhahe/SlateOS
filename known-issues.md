@@ -6222,9 +6222,47 @@ layer that only ever *displays* it. What remains can land one layer per commit:
      `bytes::trim` would have silently broken `v=$'\v5'; echo $((v))` (bash: 5).
      New `bytes::is_space` with a pinning test.
 
-   * **Left in step 9:** `histexpand.rs` (the `HistCtx` text accessors and the
-     `expand_history_lines` pass-through — two interim seams authored at step 8
-     — plus the `history -p` seam) and `ere.rs` (`TD-OILS-ERE-TEXT-ONLY`).
+   * **`histexpand.rs` — done 2026-07-30.** History expansion is now byte-native
+     end to end, which closed all three of its seams *by deletion* rather than by
+     moving them: the `HistCtx` text accessors and the `expand_history_lines`
+     pass-through (both interim seams authored at step 8) and the `history -p`
+     "argument is not valid text" refusal. None of them was a
+     `scaffold_lossy_string` call, so the gate count below is unchanged at 7 —
+     but each was a real loss of function, not merely of display:
+
+     A recorded line is whatever bytes were typed, and a SlateOS path admits
+     every byte but `/` and NUL, so `cat a\xffb` is an ordinary command. Before
+     this, `expand_history_lines` refused any *line* that did not decode and
+     committed it unexpanded — so typing `!!` after that `cat` ran the literal
+     two characters `!!` instead of the command. Worse, the *entry* was equally
+     unreachable: `!c`, `!?\xff?` and `!-1` could not name it, and `history -p`
+     answered `argument is not valid text`. The regression test
+     `history_holds_bytes_that_are_not_text` pins all of it — the three event
+     forms, both searches, word designators (`a\xffb` is one word, since no byte
+     of it is a readline delimiter), `%`, and the `:q`/`:x`/`:s`/`:e` modifiers
+     — comparing bytes throughout.
+
+     Like `arith.rs`, the scanner reads **bytes**, and history-expansion syntax
+     is entirely ASCII, so a byte scan can neither match inside a multi-byte
+     character nor split one. `words`/`word_spans`/`search_match`/`modify_path`
+     return borrowed or owned bytes; `Expansion`'s four payloads are `Str`; the
+     unknown-modifier and bad-word-specifier messages quote the offending byte
+     back as itself. Three general helpers were added to `bytes.rs` for it —
+     `rfind`, `contains` and `replacen` — the last deliberately diverging from
+     `str::replacen` on an empty pattern (it replaces nothing, because every
+     caller reaches it through a shell construct where an empty pattern means
+     "match nothing", and splicing at every boundary would insert text the user
+     never asked for).
+
+     The ~900 lines of bash-measured expectations in the test module stayed
+     readable rather than being rewritten as byte literals: a text-typed mirror
+     of `Expansion` plus `words`/`search_match`/`quote_breaks`/`expand` adapters
+     are *defined inside* `mod tests`, where a local item shadows the `use
+     super::*` glob. They `expect` on a decode failure — a case that wrote its
+     expectation as a Rust string literal has a bug if it sees a non-text byte —
+     while the non-text cases call `super::…` directly.
+
+   * **Left in step 9:** `ere.rs` (`TD-OILS-ERE-TEXT-ONLY`).
 10. The diagnostic layer (`errln`, `err_prefix`, `write_line`) — ~378 sites,
     almost all `format!` with static text, so it wants a `berrln!` macro rather
     than 378 hand edits. Closes what is left: `SourceFrame.path`, `BASH_SOURCE`
@@ -6252,7 +6290,9 @@ arithmetic `VarLookup`, `:26541` the `shown` helper), 1 in `parser.rs` (its own
 diagnostic seam**: `interp.rs:3005` `set_name`, `:3280` and `:22883`
 `SourceFrame.path`, `:7300` `BASH_ARGV0`, `:26528` `shown`, `parser.rs:63`
 `shown`, `lexer.rs:111` the unterminated-heredoc delimiter. None of them can
-alter what a command *does*.
+alter what a command *does*. After `histexpand.rs` (step 9, second of three
+files): still **7** — its three seams were removed by deletion, not converted
+into scaffolded ones, so the count is flat while the loss of function is gone.
 
 **Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
 `TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts

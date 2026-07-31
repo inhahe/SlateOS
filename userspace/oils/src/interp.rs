@@ -23548,12 +23548,14 @@ impl Shell {
     /// shortcuts: alias, builtin, command, directory, export, file, keyword,
     /// variable — and `-A function`), `-P prefix` / `-S suffix` (added to each
     /// match after filtering), `-X filterpat` (glob-remove matches; a leading
-    /// `!` inverts to keep-only), and `-F function` — see
-    /// [`Shell::compgen_function_matches`], which also warns the way bash does
-    /// about running a completion function outside a completion. The remaining
-    /// selectors that require a live completion context (`-C` and the
-    /// user/group/job/service actions) are parsed-and-ignored so scripts that
-    /// pass them still run without error.
+    /// `!` inverts to keep-only), and the two sources meant for a live
+    /// completion, `-F function` and `-C command` (see
+    /// [`Shell::compgen_function_matches`] and
+    /// [`Shell::compgen_command_matches`]) — which, as in bash, are run but
+    /// warned about, since outside a completion they see an empty command line.
+    /// The actions that need a host database or a live line editor
+    /// (user/group/job/service) are parsed-and-ignored so scripts that pass them
+    /// still run without error.
     ///
     /// Options are read the way bash reads them: clustered, with an
     /// argument-taking letter swallowing the rest of its cluster (`-Wab`,
@@ -23585,6 +23587,7 @@ impl Shell {
         let mut filter: Option<Str> = None;
         let mut o_opts: Vec<Str> = Vec::new();
         let mut func: Option<Str> = None;
+        let mut cmd: Option<Str> = None;
         // Whether any option that asks for candidates was given. bash builds a
         // compspec only if there is something to put in it, and a `compgen` with
         // nothing to build succeeds silently rather than reporting "no matches".
@@ -23659,8 +23662,8 @@ impl Shell {
                         // one adds to the first.
                         'o' => o_opts.push(val),
                         'F' => func = Some(val),
-                        // -C needs a live completion context; kept only as
-                        // "something was asked for".
+                        'C' => cmd = Some(val),
+                        // Unreachable: every letter in ARG_LETTERS is above.
                         _ => {}
                     }
                     ci = cluster.len(); // the cluster's remainder was the value
@@ -23690,6 +23693,12 @@ impl Shell {
             self.berrln(&bfmt![
                 self.err_prefix(),
                 b"compgen: warning: -F option may not work as you expect"
+            ]);
+        }
+        if cmd.is_some() {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"compgen: warning: -C option may not work as you expect"
             ]);
         }
 
@@ -23822,6 +23831,11 @@ impl Shell {
         // what fits the word is the function's own job.
         if let Some(f) = func {
             list.extend(self.compgen_function_matches(&f, &word, out, redir));
+        }
+
+        // ---- -C command: the lines it writes, likewise unnarrowed ----
+        if let Some(c) = cmd {
+            list.extend(self.compgen_command_matches(&c, &word));
         }
 
         // ---- -X filterpat: glob-remove (leading '!' keeps only matches) ----
@@ -23961,6 +23975,40 @@ impl Shell {
         self.unbind_var("COMP_WORDS");
         self.unbind_var("COMPREPLY");
         matches
+    }
+
+    /// The matches a completion *command* offers — `compgen -C 'cmd' word`.
+    ///
+    /// bash does not run `cmd` as a command with arguments: it appends the same
+    /// three words a completion function is called with (`compgen`, the word,
+    /// and the empty preceding word), each single-quoted, to the command
+    /// **text**, and substitutes the result. So the words land on whatever the
+    /// text ends with — `compgen -C 'echo hi' x` prints `hi compgen x` — and a
+    /// word holding a space or a quote survives as one argument.
+    ///
+    /// Being a command substitution, it runs in a subshell (nothing it assigns
+    /// is visible afterwards) on the line the `compgen` itself is on, and its
+    /// exit status is ignored: only what it wrote to stdout counts. That output
+    /// is split into lines — blank ones dropped, everything else kept verbatim,
+    /// spaces and all — and, like `-F`, not narrowed to the word.
+    fn compgen_command_matches(&mut self, cmd: BStr<'_>, word: BStr<'_>) -> Vec<Str> {
+        let src = bfmt![
+            cmd,
+            b" ",
+            single_quote_bytes(b"compgen"),
+            b" ",
+            single_quote_bytes(word),
+            b" ",
+            single_quote_bytes(b"")
+        ];
+        // Body line 1 is the line `compgen` was reached on, so `$LINENO` inside
+        // the command reads as it would in a `$( … )` written there.
+        let map = LineMap::Offset(self.current_line.saturating_sub(1));
+        self.command_sub(&src, &map, None)
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect()
     }
 
     /// Filesystem completion for `compgen -f`/`-d`: treat `word` as a partial
@@ -37569,6 +37617,45 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("f() { COMPREPLY=(iq ix); }; compgen -k -W 'iw' -F f -X 'ix' -P '<' i 2>/dev/null").0,
             "<if\n<in\n<iw\n<iq\n"
+        );
+    }
+
+    #[test]
+    fn compgen_c_substitutes_the_completion_command() {
+        // The three completion words are appended to the command *text*, so
+        // they land on whatever it ends with — and each is quoted, so a word
+        // with a space stays one argument.
+        let warn = "osh: compgen: warning: -C option may not work as you expect\n";
+        assert_eq!(
+            run("compgen -C 'printf \"[%s]\\n\"' 'a b' 2>&1").0,
+            format!("{warn}[compgen]\n[a b]\n[]\n")
+        );
+        assert_eq!(run("compgen -C 'echo hi' x 2>/dev/null").0, "hi compgen x \n");
+        // Output is split into lines with the blank ones dropped; the rest are
+        // kept verbatim, and none of them is narrowed to the word.
+        assert_eq!(
+            run("compgen -C 'printf \"zz\\n\\n  sp  \\nqq\"' a 2>/dev/null").0,
+            "zz\n  sp  \nqq\n"
+        );
+        // It is a subshell, so nothing it assigns survives; and its status is
+        // ignored — an empty answer is what makes the status 1.
+        assert_eq!(run("y=out; compgen -C 'y=in; echo z' q 2>/dev/null; echo \"<$y>\"").0, "z compgen q \n<out>\n");
+        assert_eq!(run("compgen -C 'exit 3' q 2>/dev/null"), (String::new(), 1));
+        // Both warnings are printed when both sources are asked for, always in
+        // this order rather than the order they were written.
+        assert_eq!(
+            run("f() { COMPREPLY=(ff); }; compgen -C 'echo cc' -F f q 2>&1").0,
+            format!(
+                "osh: compgen: warning: -F option may not work as you expect\n\
+                 {warn}ff\ncc compgen q \n"
+            )
+        );
+        // A second -C overwrites the first — one compspec slot — and -X/-P
+        // still apply to what the command answered.
+        assert_eq!(run("compgen -C 'echo aa' -C 'echo bb' q 2>/dev/null").0, "bb compgen q \n");
+        assert_eq!(
+            run("compgen -C 'printf \"keep\\ndrop\\n\"' -X 'drop' -P '<' q 2>/dev/null").0,
+            "<keep\n"
         );
     }
 

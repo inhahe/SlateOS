@@ -13,12 +13,17 @@
 //! (a single unchanged word when there is no valid brace pattern).
 
 use crate::ast::{Word, WordPart};
+use crate::bytes::{self, Ch, Str};
 
 /// One flattened element of a word for brace scanning.
 #[derive(Clone)]
 enum Atom {
     /// A brace-significant literal character from an unquoted `Literal` part.
-    Ch(char),
+    ///
+    /// A [`Ch`], not a `char`: a literal word is bytes, and a byte that is not
+    /// part of a valid UTF-8 sequence still has to survive brace expansion
+    /// unchanged — it may be part of a filename.
+    Ch(Ch),
     /// An opaque, non-literal part (quotes/params/subs); never brace syntax.
     Opaque(WordPart),
 }
@@ -46,7 +51,7 @@ fn flatten(word: &Word) -> Vec<Atom> {
     let mut out = Vec::new();
     for part in &word.parts {
         match part {
-            WordPart::Literal(s) => out.extend(s.chars().map(Atom::Ch)),
+            WordPart::Literal(s) => out.extend(bytes::chars(s).map(Atom::Ch)),
             other => out.push(Atom::Opaque(other.clone())),
         }
     }
@@ -55,10 +60,10 @@ fn flatten(word: &Word) -> Vec<Atom> {
 
 fn unflatten(atoms: &[Atom]) -> Word {
     let mut parts = Vec::new();
-    let mut lit = String::new();
+    let mut lit = Str::new();
     for a in atoms {
         match a {
-            Atom::Ch(c) => lit.push(*c),
+            Atom::Ch(c) => c.push_to(&mut lit),
             Atom::Opaque(p) => {
                 if !lit.is_empty() {
                     parts.push(WordPart::Literal(std::mem::take(&mut lit)));
@@ -108,7 +113,8 @@ fn expand_atoms(atoms: &[Atom]) -> Vec<Vec<Atom>> {
 /// skipped so a later valid brace in the same word is still found.
 fn find_brace(atoms: &[Atom]) -> Option<BraceMatch> {
     for (i, a) in atoms.iter().enumerate() {
-        if let Atom::Ch('{') = a
+        if let Atom::Ch(c) = a
+            && *c == '{'
             && let Some(m) = match_brace(atoms, i)
         {
             return Some(m);
@@ -124,9 +130,9 @@ fn match_brace(atoms: &[Atom], open: usize) -> Option<BraceMatch> {
     let mut commas = Vec::new();
     for (j, a) in atoms.iter().enumerate().skip(open) {
         let Atom::Ch(c) = a else { continue };
-        match c {
-            '{' => depth += 1,
-            '}' => {
+        match c.as_ascii() {
+            Some('{') => depth += 1,
+            Some('}') => {
                 depth -= 1;
                 if depth == 0 {
                     if !commas.is_empty() {
@@ -138,7 +144,7 @@ fn match_brace(atoms: &[Atom], open: usize) -> Option<BraceMatch> {
                     return None;
                 }
             }
-            ',' if depth == 1 => commas.push(j),
+            Some(',') if depth == 1 => commas.push(j),
             _ => {}
         }
     }
@@ -161,11 +167,15 @@ fn split_commas(atoms: &[Atom], open: usize, close: usize, commas: &[usize]) -> 
 /// its ordered elements. Supports signed integers (with optional zero-padding)
 /// and single-character ranges.
 fn sequence_of(body: &[Atom]) -> Option<Vec<Vec<Atom>>> {
-    // The body of a sequence must be entirely literal characters.
+    // The body of a sequence must be entirely literal characters — and
+    // *characters*, not raw bytes: an endpoint has to be a number or a single
+    // character to mean anything, so a byte that is not valid UTF-8 makes the
+    // body a plain literal rather than a sequence, which is what bash does too
+    // (it fails the same `{a..b}` shape check and leaves the braces alone).
     let s: String = body
         .iter()
         .map(|a| match a {
-            Atom::Ch(c) => Some(*c),
+            Atom::Ch(c) => c.as_char(),
             Atom::Opaque(_) => None,
         })
         .collect::<Option<String>>()?;
@@ -214,7 +224,7 @@ fn sequence_of(body: &[Atom]) -> Option<Vec<Vec<Atom>>> {
             range
                 .into_iter()
                 .filter_map(char::from_u32)
-                .map(|c| vec![Atom::Ch(c)])
+                .map(|c| vec![Atom::Ch(Ch::U(c))])
                 .collect(),
         );
     }
@@ -308,7 +318,7 @@ fn format_int(n: i64, width: usize) -> String {
 }
 
 fn str_to_atoms(s: &str) -> Vec<Atom> {
-    s.chars().map(Atom::Ch).collect()
+    s.chars().map(|c| Atom::Ch(Ch::U(c))).collect()
 }
 
 #[cfg(test)]
@@ -320,7 +330,9 @@ mod tests {
         expand_braces(&word)
             .iter()
             .map(|w| match w.parts.first() {
-                Some(WordPart::Literal(s)) if w.parts.len() == 1 => s.clone(),
+                Some(WordPart::Literal(s)) if w.parts.len() == 1 => {
+                    String::from_utf8(s.clone()).expect("test inputs are ASCII")
+                }
                 None => String::new(),
                 _ => String::from("<parts>"),
             })

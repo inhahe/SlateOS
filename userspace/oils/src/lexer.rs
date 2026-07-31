@@ -5,6 +5,45 @@
 //! arithmetic substitutions keep their *raw inner source* so the parser can
 //! recursively parse them (this keeps the lexer free of a dependency on the
 //! parser).
+//!
+//! Source is **bytes**: a shell word may hold any byte, so the scan runs over
+//! [`Ch`] — a decoded scalar or one undecodable byte — rather than `char`. The
+//! syntax it recognises is entirely ASCII, so [`syn`] gives every scanning site
+//! an ASCII view without any of them having to case-split on decodability.
+
+use crate::bytes::{self, BStr, Ch, Str};
+
+/// A character as shell *syntax*: ASCII as itself, anything else as NUL.
+///
+/// Every metacharacter, quote, operator and reserved word in the grammar is
+/// ASCII, so a character that is not ASCII can never *be* one — and NUL is the
+/// one ASCII spelling the grammar assigns no meaning to. Folding the rest onto
+/// it means a scan can compare against the character it cares about without
+/// first asking whether the input decoded, while the character's own bytes stay
+/// available through [`Lexer::bump_ch`] for the literal runs that must keep
+/// them.
+fn syn(c: Ch) -> char {
+    match c {
+        Ch::U(c) if c.is_ascii() => c,
+        _ => '\0',
+    }
+}
+
+/// One ASCII syntax character as a byte string.
+fn one(c: char) -> Str {
+    Ch::U(c).to_str()
+}
+
+/// Append one ASCII syntax character.
+fn push1(out: &mut Str, c: char) {
+    Ch::U(c).push_to(out);
+}
+
+/// A here-document body line with its leading tabs removed, for `<<-`.
+fn strip_tabs(line: BStr<'_>) -> BStr<'_> {
+    let n = line.iter().take_while(|&&b| b == b'\t').count();
+    line.get(n..).unwrap_or_default()
+}
 
 /// A lexer error with a human-readable message (unbalanced quote, etc.).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +98,20 @@ impl core::fmt::Display for LexError {
 /// bash names the delimiter it was scanning for, e.g. `unexpected EOF while
 /// looking for matching `)'` — a single backtick, the closing char, then a
 /// single quote — so a `$(`/`(` reports `)`, `${` reports `}`, `"` reports `"`.
+/// bash's end-of-input diagnostic for a here-document whose delimiter never
+/// arrived.
+///
+/// The delimiter is a word, so it may hold bytes that are not text; the message
+/// is still a `String` because the whole diagnostic layer is (TD-OILS-BYTE-STRINGS
+/// step 10). Only the spelling in the message is affected — the delimiter itself
+/// is compared byte-wise against the body lines, so which line ends the body is
+/// unaffected by this.
+fn unterminated_heredoc(delim: BStr<'_>) -> LexError {
+    #[allow(deprecated)]
+    let shown = bytes::scaffold_lossy_string(delim);
+    LexError::new(format!("unexpected EOF while looking for `{shown}'"))
+}
+
 fn eof_matching(close: char) -> LexError {
     LexError {
         msg: format!("unexpected EOF while looking for matching `{close}'"),
@@ -111,7 +164,7 @@ pub enum Op {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seg {
     /// Unquoted literal run.
-    Lit(String),
+    Lit(Str),
     /// A quoted-literal run: the contents of `'…'`/`$'…'`, or a single
     /// backslash-escaped character, which means exactly the same thing
     /// (`a\*b` ≡ `a'*'b`).
@@ -120,13 +173,13 @@ pub enum Seg {
     /// interchangeable during expansion, but bash prints a stored function
     /// body back in whichever form the source wrote (`declare -f`), so the
     /// distinction has to survive lexing.
-    Sq(String, bool),
+    Sq(Str, bool),
     /// Double-quoted run of fragments.
     Dq(Vec<Seg>),
     /// `$name` / `$1` / `$?` … a bare parameter reference.
     Param(String),
     /// `${ … }` — raw inner text, parsed later.
-    ParamBraced(String),
+    ParamBraced(Str),
     /// `$( … )` / `` ` … ` `` — raw inner source, parsed later, plus the 1-based
     /// source line of the substitution's *closing* delimiter.
     ///
@@ -143,12 +196,12 @@ pub enum Seg {
     /// text (see [`Lexer::read_backtick`]), and it parses a `$( … )` body in
     /// the enclosing token stream, which changes how an error in it is
     /// reported.
-    CmdSub(String, u32, Option<String>),
+    CmdSub(Str, u32, Option<Str>),
     /// `$(( … ))` — raw arithmetic expression text.
     /// The `bool` is `true` when the deprecated `$[ … ]` spelling was used. The
     /// two evaluate identically, but bash prints a stored function body back in
     /// whichever form the source wrote, so the distinction must survive here.
-    Arith(String, bool),
+    Arith(Str, bool),
     /// `<( … )` / `>( … )` process substitution — the `bool` is `true` for the
     /// input form `<(…)`, the `String` is the raw inner command source, and the
     /// `u32` is the 1-based source line the `<(`/`>(` opens on.
@@ -158,7 +211,7 @@ pub enum Seg {
     /// the opening line to shift it back (`parser::parse_procsub_body`). Unlike
     /// a `$( … )` body there is no rank-based renumbering — this really is a
     /// plain offset.
-    ProcSub(bool, String, u32),
+    ProcSub(bool, Str, u32),
 }
 
 /// One token.
@@ -183,9 +236,9 @@ pub enum Tok {
     /// with the body: the parser cannot recover them — the operator token only
     /// records `<<` vs `<<-` — and printing a stored function back out needs a
     /// delimiter to name.
-    HereDoc(Vec<Seg>, String, bool),
+    HereDoc(Vec<Seg>, Str, bool),
     /// `(( … ))` — an arithmetic command, holding the raw expression text.
-    ArithCmd(String),
+    ArithCmd(Str),
     /// `name=( … )` / `name+=( … )` — an array assignment. Each element is a
     /// word captured as its own [`Seg`] list.
     ArrayAssign {
@@ -213,7 +266,7 @@ pub struct LexOpts {
 }
 
 struct Lexer {
-    chars: Vec<char>,
+    chars: Vec<Ch>,
     pos: usize,
     /// 1-based source line the cursor currently sits on. Advanced by counting
     /// the newlines each token consumes (including those swallowed *inside* a
@@ -329,7 +382,7 @@ impl ReaderWarning {
 pub struct HeredocEof {
     /// The delimiter that was wanted, in its unquoted form (`<<"EOF"` wants
     /// `EOF`).
-    pub delim: String,
+    pub delim: Str,
     /// The line named *inside* the message (`here-document at line N`): the last
     /// line fetched when body collection **began**. For a lone here-document that
     /// is the operator's own line, but for the second of two it is the line the
@@ -384,7 +437,7 @@ pub struct SubstHeredoc {
 /// A here-document awaiting its body (collected when the introducing line ends).
 struct PendingHeredoc {
     /// The end delimiter (unquoted form).
-    delim: String,
+    delim: Str,
     /// `<<-`: strip leading tabs from body lines and the closing delimiter.
     strip: bool,
     /// Whether the body undergoes parameter/command/arith expansion (false when
@@ -440,7 +493,7 @@ struct CaseScan {
     /// The `case`s the scan is inside, innermost last.
     frames: Vec<CaseFrame>,
     /// The unquoted characters of the word being read.
-    word: String,
+    word: Str,
     /// Whether every character of that word so far was unquoted. A quoted span
     /// contributes nothing to `word`, so this is also what says a word is being
     /// read at all when `word` is empty (`""` is a word; nothing is not).
@@ -457,7 +510,7 @@ impl CaseScan {
     fn new() -> Self {
         Self {
             frames: Vec::new(),
-            word: String::new(),
+            word: Str::new(),
             word_pure: true,
             word_pat_start: false,
             cmd_pos: true,
@@ -479,7 +532,7 @@ impl CaseScan {
     /// A character of the word being read.
     fn push(&mut self, c: char) {
         self.begin_word();
-        self.word.push(c);
+        push1(&mut self.word, c);
         self.pattern_seen();
     }
 
@@ -509,7 +562,7 @@ impl CaseScan {
         let word = if self.word_pure {
             core::mem::take(&mut self.word)
         } else {
-            String::new()
+            Str::new()
         };
         self.word.clear();
         self.word_pure = true;
@@ -519,21 +572,21 @@ impl CaseScan {
         // A word ends a command position unless it is one of the reserved words
         // a command follows.
         self.cmd_pos = matches!(
-            word.as_str(),
-            "if" | "then"
-                | "elif"
-                | "else"
-                | "while"
-                | "until"
-                | "do"
-                | "{"
-                | "!"
-                | "time"
-                | "coproc"
+            word.as_slice(),
+            b"if" | b"then"
+                | b"elif"
+                | b"else"
+                | b"while"
+                | b"until"
+                | b"do"
+                | b"{"
+                | b"!"
+                | b"time"
+                | b"coproc"
         );
         if let Some(f) = self.frames.last_mut() {
             match f.phase {
-                CasePhase::AwaitIn if word == "in" => {
+                CasePhase::AwaitIn if word.as_slice() == b"in" => {
                     f.phase = CasePhase::Pattern;
                     f.pat_start = true;
                     return;
@@ -541,18 +594,18 @@ impl CaseScan {
                 // `esac` is reserved wherever a pattern could start, which is why
                 // `case esac in …` is a syntax error in bash rather than a match
                 // against the word `esac`. An empty `case x in esac` ends here.
-                CasePhase::Pattern if pat_first && word == "esac" => {
+                CasePhase::Pattern if pat_first && word.as_slice() == b"esac" => {
                     self.frames.pop();
                     return;
                 }
-                CasePhase::Body if cmd_pos && word == "esac" => {
+                CasePhase::Body if cmd_pos && word.as_slice() == b"esac" => {
                     self.frames.pop();
                     return;
                 }
                 _ => {}
             }
         }
-        if word == "case" && cmd_pos {
+        if word.as_slice() == b"case" && cmd_pos {
             self.frames.push(CaseFrame {
                 depth,
                 phase: CasePhase::AwaitIn,
@@ -620,9 +673,9 @@ impl CaseScan {
 }
 
 impl Lexer {
-    fn new(src: &str, opts: LexOpts) -> Self {
+    fn new(src: BStr<'_>, opts: LexOpts) -> Self {
         Self {
-            chars: src.chars().collect(),
+            chars: bytes::chars(src).collect(),
             pos: 0,
             line: 1,
             iter_start: 0,
@@ -642,14 +695,14 @@ impl Lexer {
 
     /// As [`Lexer::new`], but an unterminated here-document is an error rather
     /// than leniently accepted. See [`tokenize_spanned_strict`].
-    fn strict_heredoc(src: &str, opts: LexOpts) -> Self {
+    fn strict_heredoc(src: BStr<'_>, opts: LexOpts) -> Self {
         Self { strict_heredoc_eof: true, ..Self::new(src, opts) }
     }
 
     /// As [`Lexer::new`], but the stream is closed with the `)` that ends the
     /// enclosing substitution rather than with an implicit newline. See
     /// [`tokenize_paren_body`].
-    fn paren_body(src: &str, opts: LexOpts) -> Self {
+    fn paren_body(src: BStr<'_>, opts: LexOpts) -> Self {
         Self { paren_body: true, ..Self::new(src, opts) }
     }
 }
@@ -658,7 +711,7 @@ impl Lexer {
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize(src: &str, opts: LexOpts) -> Result<Vec<Tok>, LexError> {
+pub fn tokenize(src: BStr<'_>, opts: LexOpts) -> Result<Vec<Tok>, LexError> {
     tokenize_spanned(src, opts).map(|(toks, _lines)| toks)
 }
 
@@ -670,7 +723,7 @@ pub fn tokenize(src: &str, opts: LexOpts) -> Result<Vec<Tok>, LexError> {
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize_spanned(src: &str, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+pub fn tokenize_spanned(src: BStr<'_>, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
     let mut lx = Lexer::new(src, opts);
     lx.run()
 }
@@ -694,7 +747,7 @@ pub fn tokenize_spanned(src: &str, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>)
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize_paren_body(src: &str, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+pub fn tokenize_paren_body(src: BStr<'_>, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
     let mut lx = Lexer::paren_body(src, opts);
     lx.run()
 }
@@ -747,7 +800,7 @@ pub struct Tokenized {
 /// them. [`crate::parser::IncrementalParser`] uses this and surfaces the error
 /// once the good prefix is exhausted.
 #[must_use]
-pub fn tokenize_deferred(src: &str, opts: LexOpts) -> Tokenized {
+pub fn tokenize_deferred(src: BStr<'_>, opts: LexOpts) -> Tokenized {
     let mut lx = Lexer::new(src, opts);
     let mut toks = Vec::new();
     let mut lines = Vec::new();
@@ -820,7 +873,7 @@ pub fn tokenize_deferred(src: &str, opts: LexOpts) -> Tokenized {
 /// reporting only the innermost unclosed delimiter reproduces both, since the
 /// backtick scan never descends into the quote to begin with.
 #[must_use]
-pub fn open_quote(src: &str, opts: LexOpts) -> Option<char> {
+pub fn open_quote(src: BStr<'_>, opts: LexOpts) -> Option<char> {
     let (err, _line) = tokenize_deferred(src, opts).err?;
     match err.looking_for {
         Some(q @ ('\'' | '"')) => Some(q),
@@ -846,13 +899,13 @@ pub fn open_quote(src: &str, opts: LexOpts) -> Option<char> {
 /// `conts` records the offset of every such backslash — rather than
 /// re-deriving the rule and risking the two drifting apart.
 #[must_use]
-pub fn ends_in_continuation(src: &str, opts: LexOpts) -> bool {
-    let chars: Vec<char> = src.chars().collect();
+pub fn ends_in_continuation(src: BStr<'_>, opts: LexOpts) -> bool {
+    let chars: Vec<Ch> = bytes::chars(src).collect();
     // The `\` must be the last character before the final newline.
     let Some(nl) = chars.len().checked_sub(1) else {
         return false;
     };
-    if chars.get(nl) != Some(&'\n') {
+    if chars.get(nl).copied() != Some(Ch::U('\n')) {
         return false;
     }
     // Immediately before it — a `\<CR><LF>` is *not* a continuation, because the
@@ -861,7 +914,7 @@ pub fn ends_in_continuation(src: &str, opts: LexOpts) -> bool {
     let Some(bs) = nl.checked_sub(1) else {
         return false;
     };
-    if chars.get(bs) != Some(&'\\') {
+    if chars.get(bs).copied() != Some(Ch::U('\\')) {
         return false;
     }
     let Ok(bs) = u32::try_from(bs) else {
@@ -878,7 +931,7 @@ pub fn ends_in_continuation(src: &str, opts: LexOpts) -> bool {
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote, substitution, or here-document.
-pub fn tokenize_spanned_strict(src: &str, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+pub fn tokenize_spanned_strict(src: BStr<'_>, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
     let mut lx = Lexer::strict_heredoc(src, opts);
     lx.run()
 }
@@ -892,7 +945,7 @@ pub fn tokenize_spanned_strict(src: &str, opts: LexOpts) -> Result<(Vec<Tok>, Ve
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn lex_word_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
+pub fn lex_word_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, LexOpts::default());
     lx.read_word_verbatim(false)
 }
@@ -905,7 +958,7 @@ pub fn lex_word_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated substitution.
-pub fn lex_dquote_body(src: &str) -> Result<Vec<Seg>, LexError> {
+pub fn lex_dquote_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, LexOpts::default());
     lx.read_double_quote_until(false)
 }
@@ -919,15 +972,15 @@ pub fn lex_dquote_body(src: &str) -> Result<Vec<Seg>, LexError> {
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn lex_replacement_verbatim(src: &str) -> Result<Vec<Seg>, LexError> {
+pub fn lex_replacement_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, LexOpts::default());
     lx.read_word_verbatim(true)
 }
 
 /// Reserved words after which a new simple command begins — so a following
 /// word is in "command position" and eligible for alias expansion.
-const CMD_INTRODUCERS: &[&str] = &[
-    "if", "then", "elif", "else", "while", "until", "do", "{", "!",
+const CMD_INTRODUCERS: &[&[u8]] = &[
+    b"if", b"then", b"elif", b"else", b"while", b"until", b"do", b"{", b"!",
 ];
 
 /// True when a word following `prev` (the previous kept token) starts a simple
@@ -949,7 +1002,7 @@ fn starts_command(prev: Option<&Tok>) -> bool {
                 | Op::LParen
         ),
         Some(Tok::Word(segs)) => {
-            matches!(segs.as_slice(), [Seg::Lit(w)] if CMD_INTRODUCERS.contains(&w.as_str()))
+            matches!(segs.as_slice(), [Seg::Lit(w)] if CMD_INTRODUCERS.contains(&w.as_slice()))
         }
         _ => false,
     }
@@ -966,7 +1019,7 @@ fn starts_command(prev: Option<&Tok>) -> bool {
 pub fn expand_aliases(
     toks: &[Tok],
     lines: &[u32],
-    aliases: &std::collections::BTreeMap<String, String>,
+    aliases: &std::collections::BTreeMap<Str, Str>,
     opts: LexOpts,
 ) -> (Vec<Tok>, Vec<u32>) {
     let (out, out_lines, _) = expand_aliases_tracked(toks, lines, aliases, opts);
@@ -984,7 +1037,7 @@ pub fn expand_aliases(
 pub fn expand_aliases_tracked(
     toks: &[Tok],
     lines: &[u32],
-    aliases: &std::collections::BTreeMap<String, String>,
+    aliases: &std::collections::BTreeMap<Str, Str>,
     opts: LexOpts,
 ) -> (Vec<Tok>, Vec<u32>, Vec<Option<usize>>) {
     let mut active = std::collections::BTreeSet::new();
@@ -1012,9 +1065,9 @@ pub fn expand_aliases_tracked(
 fn expand_aliases_inner(
     toks: &[Tok],
     lines: &[u32],
-    aliases: &std::collections::BTreeMap<String, String>,
+    aliases: &std::collections::BTreeMap<Str, Str>,
     opts: LexOpts,
-    active: &mut std::collections::BTreeSet<String>,
+    active: &mut std::collections::BTreeSet<Str>,
     out: &mut Vec<Tok>,
     out_lines: &mut Vec<u32>,
     out_origin: &mut Vec<Option<usize>>,
@@ -1071,7 +1124,7 @@ fn expand_aliases_inner(
             {
                 *slot = Some(i);
             }
-            force = val.ends_with(' ') || val.ends_with('\t');
+            force = val.ends_with(b" ") || val.ends_with(b"\t");
             continue;
         }
         out.push(tok.clone());
@@ -1089,8 +1142,12 @@ fn is_name_char(c: char) -> bool {
 }
 
 /// True when `s` is a syntactically valid shell variable name (an identifier).
-fn is_valid_name(s: &str) -> bool {
-    let mut chars = s.chars();
+///
+/// Defined here, next to the scanner that decides what an identifier looks
+/// like, and re-exported from `parser` for the rest of the crate so there is
+/// exactly one answer to the question.
+pub(crate) fn is_valid_name(s: BStr<'_>) -> bool {
+    let mut chars = bytes::chars(s).map(syn);
     match chars.next() {
         Some(c) if is_name_start(c) => chars.all(is_name_char),
         _ => false,
@@ -1118,7 +1175,7 @@ pub(crate) fn word_is_assignment(segs: &[Seg]) -> bool {
     let Some(Seg::Lit(s)) = segs.first() else {
         return false;
     };
-    let b: Vec<char> = s.chars().collect();
+    let b: Vec<char> = bytes::chars(s).map(syn).collect();
     let mut i = 0;
     if b.first().is_none_or(|&c| !is_name_start(c)) {
         return false;
@@ -1152,15 +1209,21 @@ pub(crate) fn word_is_assignment(segs: &[Seg]) -> bool {
 }
 
 impl Lexer {
+    /// The character at `i` as shell syntax. See [`syn`].
+    fn at(&self, i: usize) -> Option<char> {
+        self.chars.get(i).copied().map(syn)
+    }
+
     fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
+        self.at(self.pos)
     }
 
     fn peek_at(&self, off: usize) -> Option<char> {
-        self.chars.get(self.pos + off).copied()
+        self.at(self.pos + off)
     }
 
-    fn bump(&mut self) -> Option<char> {
+    /// Consume the character at the cursor, keeping its own bytes.
+    fn bump_ch(&mut self) -> Option<Ch> {
         let c = self.chars.get(self.pos).copied();
         if c.is_some() {
             self.pos += 1;
@@ -1168,10 +1231,26 @@ impl Lexer {
         // Reaching the end of a line is where a read-ahead is redeemed: the lines
         // the here-document reader already took lie behind the cursor now, and it
         // must not read them a second time as input. See [`Lexer::sync_ahead`].
-        if c == Some('\n') {
+        if c == Some(Ch::U('\n')) {
             self.sync_ahead();
         }
         c
+    }
+
+    fn bump(&mut self) -> Option<char> {
+        self.bump_ch().map(syn)
+    }
+
+    /// Consume the character at the cursor and append its bytes to `out`.
+    fn take_into(&mut self, out: &mut Str) {
+        if let Some(c) = self.bump_ch() {
+            c.push_to(out);
+        }
+    }
+
+    /// The source spanning `[from, to)` as bytes.
+    fn slice(&self, from: usize, to: usize) -> Str {
+        bytes::from_chars(self.chars.get(from..to).unwrap_or(&[]).iter().copied())
     }
 
     /// Move the token cursor to wherever the here-document reader has already
@@ -1190,7 +1269,7 @@ impl Lexer {
     /// The cursor sits one past the newline, so the backslash is two back. A
     /// backslash at end of input is not a continuation and is not recorded.
     fn note_continuation(&mut self) {
-        if self.chars.get(self.pos.wrapping_sub(1)) != Some(&'\n') {
+        if self.at(self.pos.wrapping_sub(1)) != Some('\n') {
             return;
         }
         let Some(at) = self.pos.checked_sub(2) else {
@@ -1205,27 +1284,29 @@ impl Lexer {
     /// brace group (`{ …; }`) or brace expansion (`{a,b}`) falls through to the
     /// normal word/reserved-word path. The `{` at `self.pos` is assumed.
     fn varfd_prefix(&self) -> Option<(String, usize)> {
-        debug_assert_eq!(self.chars.get(self.pos), Some(&'{'));
+        debug_assert_eq!(self.at(self.pos), Some('{'));
         let mut i = self.pos + 1;
         // First name char must be a name-start (letter or `_`).
-        match self.chars.get(i) {
-            Some(&c) if is_name_start(c) => i += 1,
+        match self.at(i) {
+            Some(c) if is_name_start(c) => i += 1,
             _ => return None,
         }
-        while matches!(self.chars.get(i), Some(&c) if is_name_char(c)) {
+        while matches!(self.at(i), Some(c) if is_name_char(c)) {
             i += 1;
         }
-        if self.chars.get(i) != Some(&'}') {
+        if self.at(i) != Some('}') {
             return None;
         }
         let close = i;
         i += 1;
         // The `}` must be immediately followed by a redirection operator for
         // this to be a varfd prefix rather than an ordinary `{word}` token.
-        if !matches!(self.chars.get(i), Some('<' | '>')) {
+        if !matches!(self.at(i), Some('<' | '>')) {
             return None;
         }
-        let name: String = self.chars[self.pos + 1..close].iter().collect();
+        // Name characters only, so the name is text by construction — which is
+        // what makes it a shell variable the redirect can assign the fd to.
+        let name: String = (self.pos + 1..close).filter_map(|i| self.at(i)).collect();
         Some((name, close + 1))
     }
 
@@ -1433,15 +1514,17 @@ impl Lexer {
                     // Possibly an IO number (digits directly before < or >).
                     let start = self.pos;
                     let mut i = self.pos;
-                    while matches!(self.chars.get(i), Some('0'..='9')) {
+                    while matches!(self.at(i), Some('0'..='9')) {
                         i += 1;
                     }
-                    if matches!(self.chars.get(i), Some('<' | '>')) {
-                        let digits: String = self.chars[start..i].iter().collect();
+                    if matches!(self.at(i), Some('<' | '>')) {
+                        let digits = self.slice(start, i);
                         self.pos = i;
-                        // A numeric fd always fits in i32 for realistic input;
-                        // fall back to a word if it somehow doesn't parse.
-                        if let Ok(n) = digits.parse::<i32>() {
+                        // Decimal digits only, so this is text by construction. A
+                        // numeric fd always fits in i32 for realistic input; fall
+                        // back to a word if it somehow doesn't parse.
+                        if let Some(n) = bytes::as_str(&digits).and_then(|s| s.parse::<i32>().ok())
+                        {
                             out.push(Tok::Io(n));
                         } else {
                             out.push(Tok::Word(vec![Seg::Lit(digits)]));
@@ -1535,7 +1618,7 @@ impl Lexer {
     /// script whose line 2 opens `cat <(echo a` reports line 4, while
     /// `eval 'v=$(echo a'` on line 2 of a script reports line 3.)
     fn eof_line(&self) -> u32 {
-        let ends_with_newline = self.chars.last() == Some(&'\n');
+        let ends_with_newline = self.chars.last().copied() == Some(Ch::U('\n'));
         self.cur_line()
             .saturating_add(u32::from(!ends_with_newline))
     }
@@ -1567,7 +1650,7 @@ impl Lexer {
         if let Some(a) = &self.hd_ahead {
             return a.line;
         }
-        let at_line_start = self.pos == 0 || self.chars.get(self.pos.wrapping_sub(1)) == Some(&'\n');
+        let at_line_start = self.pos == 0 || self.at(self.pos.wrapping_sub(1)) == Some('\n');
         self.cur_line()
             .saturating_sub(u32::from(at_line_start))
             .max(1)
@@ -1657,8 +1740,8 @@ impl Lexer {
         let append = self.peek() == Some('+');
         let eq_at = self.pos + usize::from(append);
         if name.is_empty()
-            || self.chars.get(eq_at) != Some(&'=')
-            || self.chars.get(eq_at + 1) != Some(&'(')
+            || self.at(eq_at) != Some('=')
+            || self.at(eq_at + 1) != Some('(')
         {
             self.pos = start;
             return Ok(None);
@@ -1708,16 +1791,16 @@ impl Lexer {
         // regex-RHS lexing mode. A word is "bare" when it is a single unquoted
         // literal segment.
         if let [Seg::Lit(s)] = segs.as_slice() {
-            match s.as_str() {
-                "[[" => self.cond_depth = self.cond_depth.saturating_add(1),
-                "]]" => self.cond_depth = self.cond_depth.saturating_sub(1),
-                "=~" if self.cond_depth > 0 => self.regex_next = true,
+            match s.as_slice() {
+                b"[[" => self.cond_depth = self.cond_depth.saturating_add(1),
+                b"]]" => self.cond_depth = self.cond_depth.saturating_sub(1),
+                b"=~" if self.cond_depth > 0 => self.regex_next = true,
                 // The right-hand side of a `[[ … ]]` match is a *pattern*, and
                 // bash lexes extended patterns there whether or not `extglob` is
                 // set — so `[[ abc == @(abc|x) ]]` works in a default shell.
                 // Only in this position: `[[ @(a) == b ]]` and `[[ -n @(a) ]]`
                 // are both syntax errors near `(`.
-                "==" | "!=" | "=" if self.cond_depth > 0 => self.extpat_next = true,
+                b"==" | b"!=" | b"=" if self.cond_depth > 0 => self.extpat_next = true,
                 _ => {}
             }
         }
@@ -1741,7 +1824,7 @@ impl Lexer {
     /// "unexpected EOF while looking for matching `)'" when the input runs out.
     fn read_word_regex(&mut self) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
-        let mut lit = String::new();
+        let mut lit = Str::new();
         // Nesting depth of unquoted `(` … `)` groups. While it is non-zero the
         // word swallows everything, which is the whole point of the construct.
         let mut depth: u32 = 0;
@@ -1751,12 +1834,12 @@ impl Lexer {
                 ')' if depth == 0 => break,
                 '(' => {
                     depth = depth.saturating_add(1);
-                    lit.push('(');
+                    lit.push(b'(');
                     self.pos += 1;
                 }
                 ')' => {
                     depth = depth.saturating_sub(1);
-                    lit.push(')');
+                    lit.push(b')');
                     self.pos += 1;
                 }
                 '\'' => {
@@ -1788,11 +1871,11 @@ impl Lexer {
                     // whose backslashes already survive to the ERE. A trailing
                     // `\<newline>` is still a line continuation and is dropped.
                     self.pos += 1;
-                    if let Some(next) = self.bump()
+                    if let Some(next) = self.bump_ch()
                         && next != '\n'
                     {
-                        lit.push('\\');
-                        lit.push(next);
+                        lit.push(b'\\');
+                        next.push_to(&mut lit);
                     } else {
                         self.note_continuation();
                     }
@@ -1802,13 +1885,10 @@ impl Lexer {
                         flush_lit(&mut segs, &mut lit);
                         segs.push(seg);
                     } else {
-                        lit.push('$');
+                        lit.push(b'$');
                     }
                 }
-                other => {
-                    lit.push(other);
-                    self.pos += 1;
-                }
+                _ => self.take_into(&mut lit),
             }
         }
         if depth > 0 {
@@ -1826,7 +1906,7 @@ impl Lexer {
     /// operator tokenization, so embedded/leading/trailing spaces are literal.
     fn read_word_verbatim(&mut self, repl_escapes: bool) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
-        let mut lit = String::new();
+        let mut lit = Str::new();
         while let Some(c) = self.peek() {
             match c {
                 '\'' => {
@@ -1850,15 +1930,15 @@ impl Lexer {
                 }
                 '\\' => {
                     self.pos += 1;
-                    if let Some(next) = self.bump()
+                    if let Some(next) = self.bump_ch()
                         && next != '\n'
                     {
                         if repl_escapes && (next == '&' || next == '\\') {
                             // Replacement context: keep `\&`/`\\` intact so the
                             // later `&`-scan can tell an escaped ampersand (a
                             // literal `&`) from an active one.
-                            lit.push('\\');
-                            lit.push(next);
+                            lit.push(b'\\');
+                            next.push_to(&mut lit);
                         } else {
                             // An escaped character in a `${…#pat}` /
                             // `${…/pat/…}` / `${…^pat}` pattern (or
@@ -1872,7 +1952,7 @@ impl Lexer {
                             // pattern back as written. Same rationale and
                             // representation as in `read_word_inner`.
                             flush_lit(&mut segs, &mut lit);
-                            segs.push(Seg::Sq(next.to_string(), true));
+                            segs.push(Seg::Sq(next.to_str(), true));
                         }
                     }
                 }
@@ -1881,13 +1961,10 @@ impl Lexer {
                         flush_lit(&mut segs, &mut lit);
                         segs.push(seg);
                     } else {
-                        lit.push('$');
+                        lit.push(b'$');
                     }
                 }
-                other => {
-                    lit.push(other);
-                    self.pos += 1;
-                }
+                _ => self.take_into(&mut lit),
             }
         }
         flush_lit(&mut segs, &mut lit);
@@ -1921,7 +1998,7 @@ impl Lexer {
         extpat: bool,
     ) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
-        let mut lit = String::new();
+        let mut lit = Str::new();
         // Bracket-nesting depth while consuming a leading `name[subscript]`
         // subscript. While > 0, unquoted whitespace and operator characters are
         // literal content; only balanced `]` closes it. Quotes/expansions inside
@@ -1953,7 +2030,7 @@ impl Lexer {
                 && segs.is_empty()
                 && ((assign_ok && is_valid_name(&lit)) || (array_elem && lit.is_empty()))
             {
-                lit.push('[');
+                lit.push(b'[');
                 self.pos += 1;
                 sub_depth += 1;
                 continue;
@@ -1961,13 +2038,13 @@ impl Lexer {
             if sub_depth > 0 {
                 match c {
                     '[' => {
-                        lit.push('[');
+                        lit.push(b'[');
                         sub_depth += 1;
                         self.pos += 1;
                         continue;
                     }
                     ']' => {
-                        lit.push(']');
+                        lit.push(b']');
                         sub_depth -= 1;
                         self.pos += 1;
                         continue;
@@ -1976,17 +2053,16 @@ impl Lexer {
                     // (fall through to the outer match); everything else — spaces,
                     // operators — is literal subscript content.
                     '\'' | '"' | '`' | '\\' | '$' => {}
-                    other => {
-                        lit.push(other);
-                        self.pos += 1;
+                    _ => {
+                        self.take_into(&mut lit);
                         continue;
                     }
                 }
             }
             // Opener: `X(` where X ∈ ?*+@! (unquoted). Begins/nests a group.
             if extglob && matches!(c, '?' | '*' | '+' | '@' | '!') && self.peek_at(1) == Some('(') {
-                lit.push(c);
-                lit.push('(');
+                push1(&mut lit, c);
+                lit.push(b'(');
                 self.pos += 2;
                 ext_depth += 1;
                 continue;
@@ -1994,13 +2070,13 @@ impl Lexer {
             if ext_depth > 0 {
                 match c {
                     '(' => {
-                        lit.push('(');
+                        lit.push(b'(');
                         ext_depth += 1;
                         self.pos += 1;
                         continue;
                     }
                     ')' => {
-                        lit.push(')');
+                        lit.push(b')');
                         ext_depth -= 1;
                         self.pos += 1;
                         continue;
@@ -2010,9 +2086,8 @@ impl Lexer {
                     '\'' | '"' | '`' | '\\' | '$' => {}
                     // Everything else — including `|`, whitespace, `<`, `>`, `&`,
                     // `;`, `#` — is literal pattern content inside the group.
-                    other => {
-                        lit.push(other);
-                        self.pos += 1;
+                    _ => {
+                        self.take_into(&mut lit);
                         continue;
                     }
                 }
@@ -2062,7 +2137,7 @@ impl Lexer {
                 }
                 '\\' => {
                     self.pos += 1;
-                    if let Some(next) = self.bump()
+                    if let Some(next) = self.bump_ch()
                         && next != '\n'
                     {
                         // A backslash-escaped character is semantically
@@ -2094,10 +2169,10 @@ impl Lexer {
                         // contiguous literal, so keep the fold there rather than
                         // split the group across segments.
                         if ext_depth > 0 {
-                            lit.push(next);
+                            next.push_to(&mut lit);
                         } else {
                             flush_lit(&mut segs, &mut lit);
-                            segs.push(Seg::Sq(next.to_string(), true));
+                            segs.push(Seg::Sq(next.to_str(), true));
                         }
                     } else {
                         self.note_continuation();
@@ -2108,26 +2183,26 @@ impl Lexer {
                         flush_lit(&mut segs, &mut lit);
                         segs.push(seg);
                     } else {
-                        lit.push('$');
+                        lit.push(b'$');
                     }
                 }
-                other => {
-                    lit.push(other);
-                    self.pos += 1;
-                }
+                _ => self.take_into(&mut lit),
             }
         }
         flush_lit(&mut segs, &mut lit);
         Ok(segs)
     }
 
-    fn read_single_quote(&mut self) -> Result<String, LexError> {
+    fn read_single_quote(&mut self) -> Result<Str, LexError> {
         let open = self.cur_line();
-        let mut s = String::new();
+        let mut s = Str::new();
         loop {
-            match self.bump() {
-                Some('\'') => return Ok(s),
-                Some(c) => s.push(c),
+            match self.peek() {
+                Some('\'') => {
+                    self.pos += 1;
+                    return Ok(s);
+                }
+                Some(_) => self.take_into(&mut s),
                 None => return Err(eof_matching('\'').at(open)),
             }
         }
@@ -2147,29 +2222,24 @@ impl Lexer {
     /// `$'\c\'` really does run to end-of-input.
     ///
     /// Note: byte escapes (`\xHH`, `\nnn`) naming a value above 0x7F decode to
-    /// that single byte, as bash does — but the lexer still stores words as a
-    /// UTF-8 `String`, so the byte is re-encoded here (TD-OILS-BYTE-STRINGS
-    /// scaffold: this seam disappears when `WordPart::Literal` becomes bytes).
-    fn read_ansi_c_quote(&mut self) -> Result<String, LexError> {
+    /// that single byte, as bash does, and the word keeps it — `$'\xa9'` is one
+    /// byte `a9`, not the two of U+00A9 and not the three of U+FFFD.
+    fn read_ansi_c_quote(&mut self) -> Result<Str, LexError> {
         let open = self.cur_line();
-        let mut raw = String::new();
+        let mut raw = Str::new();
         loop {
-            let Some(c) = self.bump() else {
+            let Some(c) = self.bump_ch() else {
                 return Err(eof_matching('\'').at(open));
             };
             if c == '\'' {
-                // TD-OILS-BYTE-STRINGS scaffold: `raw` is still a `String`.
-                #[allow(deprecated)]
-                return Ok(crate::bytes::scaffold_lossy_string(
-                    &crate::escape::ansi_c_unescape(raw.as_bytes()),
-                ));
+                return Ok(crate::escape::ansi_c_unescape(&raw));
             }
-            raw.push(c);
+            c.push_to(&mut raw);
             if c == '\\' {
-                let Some(e) = self.bump() else {
+                let Some(e) = self.bump_ch() else {
                     return Err(eof_matching('\'').at(open));
                 };
-                raw.push(e);
+                e.push_to(&mut raw);
             }
         }
     }
@@ -2187,7 +2257,7 @@ impl Lexer {
     fn read_double_quote_until(&mut self, closed: bool) -> Result<Vec<Seg>, LexError> {
         let open = self.cur_line();
         let mut segs: Vec<Seg> = Vec::new();
-        let mut lit = String::new();
+        let mut lit = Str::new();
         loop {
             let Some(c) = self.peek() else {
                 if closed {
@@ -2218,12 +2288,12 @@ impl Lexer {
                         Some(n @ ('"' | '\\' | '$' | '`')) => {
                             self.pos += 1;
                             flush_lit(&mut segs, &mut lit);
-                            segs.push(Seg::Sq(n.to_string(), true));
+                            segs.push(Seg::Sq(one(n), true));
                         }
                         Some('\n') => {
                             self.pos += 1;
                         }
-                        _ => lit.push('\\'),
+                        _ => lit.push(b'\\'),
                     }
                 }
                 '`' => {
@@ -2238,13 +2308,10 @@ impl Lexer {
                         flush_lit(&mut segs, &mut lit);
                         segs.push(seg);
                     } else {
-                        lit.push('$');
+                        lit.push(b'$');
                     }
                 }
-                other => {
-                    lit.push(other);
-                    self.pos += 1;
-                }
+                _ => self.take_into(&mut lit),
             }
         }
     }
@@ -2359,7 +2426,7 @@ impl Lexer {
     /// stamps it. Errors from the nested quote scans below *are* stamped here,
     /// at the quote's own opening line, and `LexError::at` never overwrites, so
     /// the caller's stamp cannot displace them.
-    fn read_balanced(&mut self, open: char, close: char) -> Result<String, LexError> {
+    fn read_balanced(&mut self, open: char, close: char) -> Result<Str, LexError> {
         self.read_balanced_inner(open, close, false)
     }
 
@@ -2387,7 +2454,7 @@ impl Lexer {
     /// business, and its closing backtick is found lexically), and a backslash
     /// escape. Those are copied whole rather than character by character, which
     /// incidentally makes `$(echo \))` and `` $(echo `echo )`) `` scan correctly.
-    fn read_subst_body(&mut self) -> Result<String, LexError> {
+    fn read_subst_body(&mut self) -> Result<Str, LexError> {
         self.read_balanced_inner('(', ')', true)
     }
 
@@ -2396,15 +2463,15 @@ impl Lexer {
         open: char,
         close: char,
         heredocs: bool,
-    ) -> Result<String, LexError> {
+    ) -> Result<Str, LexError> {
         let mut depth = 1usize;
-        let mut raw = String::new();
+        let mut raw = Str::new();
         // Here-documents declared in this body whose bodies the next newline will
         // bring. Deliberately *not* `self.pending_heredocs`: the enclosing lexer's
         // own pending here-documents belong to the line the substitution sits on
         // and must still be collected after it, in that order (`cat <<A $(cat <<B`
         // collects B first, then A).
-        let mut pending: Vec<(String, bool)> = Vec::new();
+        let mut pending: Vec<(Str, bool)> = Vec::new();
         // `#` starts a comment, and `<<` a here-document, only at a word's start.
         let mut word_start = true;
         // The paren depth the innermost `$(( … ))` / `(( … ))` began at, if any. A
@@ -2424,20 +2491,22 @@ impl Lexer {
         // Which `)` closes a group and which terminates a `case` pattern.
         let mut cases = CaseScan::new();
         loop {
-            let Some(c) = self.bump() else {
+            let Some(cx) = self.bump_ch() else {
                 return Err(eof_matching(close));
             };
+            let c = syn(cx);
             if c == '\'' {
                 let q_open = self.cur_line();
-                raw.push(c);
+                cx.push_to(&mut raw);
                 // Copy verbatim to the closing single quote.
                 loop {
-                    match self.bump() {
+                    match self.peek() {
                         Some('\'') => {
-                            raw.push('\'');
+                            self.pos += 1;
+                            raw.push(b'\'');
                             break;
                         }
-                        Some(q) => raw.push(q),
+                        Some(_) => self.take_into(&mut raw),
                         None => return Err(eof_matching('\'').at(q_open)),
                     }
                 }
@@ -2447,20 +2516,20 @@ impl Lexer {
             }
             if c == '"' {
                 let q_open = self.cur_line();
-                raw.push(c);
+                cx.push_to(&mut raw);
                 loop {
-                    match self.bump() {
+                    match self.peek() {
                         Some('\\') => {
-                            raw.push('\\');
-                            if let Some(n) = self.bump() {
-                                raw.push(n);
-                            }
+                            self.pos += 1;
+                            raw.push(b'\\');
+                            self.take_into(&mut raw);
                         }
                         Some('"') => {
-                            raw.push('"');
+                            self.pos += 1;
+                            raw.push(b'"');
                             break;
                         }
-                        Some(q) => raw.push(q),
+                        Some(_) => self.take_into(&mut raw),
                         None => return Err(eof_matching('"').at(q_open)),
                     }
                 }
@@ -2472,7 +2541,7 @@ impl Lexer {
                 let in_arith = arith_from.is_some();
                 match c {
                     '\n' => {
-                        raw.push('\n');
+                        raw.push(b'\n');
                         if !pending.is_empty() {
                             self.consume_subst_heredoc_bodies(&mut pending, &mut raw)?;
                             own = 0;
@@ -2485,29 +2554,25 @@ impl Lexer {
                     // Copied verbatim so the re-lex still sees the comment, but not
                     // scanned: a `<<` inside one introduces nothing.
                     '#' if word_start && !in_arith => {
-                        raw.push('#');
+                        raw.push(b'#');
                         while !matches!(self.peek(), None | Some('\n')) {
-                            if let Some(n) = self.bump() {
-                                raw.push(n);
-                            }
+                            self.take_into(&mut raw);
                         }
                         continue;
                     }
                     // A backslash escapes the next character, `)` included.
                     '\\' => {
-                        raw.push('\\');
-                        if let Some(n) = self.bump() {
-                            raw.push(n);
-                        }
+                        raw.push(b'\\');
+                        self.take_into(&mut raw);
                         word_start = false;
                         cases.push_quoted();
                         continue;
                     }
                     '`' => {
                         let (_, verbatim) = self.read_backtick()?;
-                        raw.push('`');
-                        raw.push_str(&verbatim);
-                        raw.push('`');
+                        raw.push(b'`');
+                        raw.extend_from_slice(&verbatim);
+                        raw.push(b'`');
                         word_start = false;
                         cases.push_quoted();
                         continue;
@@ -2515,9 +2580,9 @@ impl Lexer {
                     '$' if self.peek() == Some('{') => {
                         self.pos += 1;
                         let inner = self.read_dollar_brace()?;
-                        raw.push_str("${");
-                        raw.push_str(&inner);
-                        raw.push('}');
+                        raw.extend_from_slice(b"${");
+                        raw.extend_from_slice(&inner);
+                        raw.push(b'}');
                         word_start = false;
                         cases.push_quoted();
                         continue;
@@ -2527,7 +2592,7 @@ impl Lexer {
                     // span ends; only the suppression is recorded here.
                     '$' if self.peek() == Some('(') && self.peek_at(1) == Some('(') => {
                         arith_from = arith_from.or(Some(depth));
-                        raw.push('$');
+                        raw.push(b'$');
                         word_start = false;
                         cases.push_quoted();
                         continue;
@@ -2539,7 +2604,7 @@ impl Lexer {
                     // is never mistaken for the first of a `<<`.
                     '<' if self.peek() == Some('<') && self.peek_at(1) == Some('<') => {
                         self.pos += 2;
-                        raw.push_str("<<<");
+                        raw.extend_from_slice(b"<<<");
                         word_start = false;
                         cases.finish_word(depth);
                         continue;
@@ -2548,24 +2613,23 @@ impl Lexer {
                     // the enclosing input.
                     '<' if !in_arith && self.peek() == Some('<') => {
                         self.pos += 1;
-                        raw.push_str("<<");
+                        raw.extend_from_slice(b"<<");
                         cases.finish_word(depth);
                         let strip = self.peek() == Some('-');
                         if strip {
                             self.pos += 1;
-                            raw.push('-');
+                            raw.push(b'-');
                         }
                         while matches!(self.peek(), Some(' ' | '\t')) {
-                            if let Some(n) = self.bump() {
-                                raw.push(n);
-                            }
+                            self.take_into(&mut raw);
                         }
                         // Copy the delimiter word as written — quotes and all, since
                         // the re-lex has to draw the same expand/no-expand
                         // conclusion from it that `read_heredoc_delim` just did.
                         let word = self.pos;
                         let (delim, _) = self.read_heredoc_delim();
-                        raw.extend(self.chars.get(word..self.pos).unwrap_or(&[]).iter());
+                        let written = self.slice(word, self.pos);
+                        raw.extend_from_slice(&written);
                         pending.push((delim, strip));
                         if nested.is_empty() {
                             own += 1;
@@ -2613,10 +2677,7 @@ impl Lexer {
                     // is a left shift anyway.
                     if heredocs
                         && arith_from.is_none()
-                        && matches!(
-                            self.chars.get(self.pos.wrapping_sub(2)),
-                            Some('$' | '<' | '>')
-                        )
+                        && matches!(self.at(self.pos.wrapping_sub(2)), Some('$' | '<' | '>'))
                     {
                         nested.push(depth);
                     }
@@ -2634,7 +2695,7 @@ impl Lexer {
                         // rather than in the enclosing input (the two exit
                         // differently: 1 for a substitution, 2 for the input).
                         if heredocs && cases.open_at_close() {
-                            raw.push(close);
+                            push1(&mut raw, close);
                         }
                         // A here-document declared in this body but never
                         // delimited inside it: its `<<` and this `)` are on one
@@ -2654,7 +2715,7 @@ impl Lexer {
                     }
                 }
             }
-            raw.push(c);
+            cx.push_to(&mut raw);
             if heredocs {
                 word_start = matches!(c, ' ' | '\t' | ';' | '&' | '|' | '(' | ')');
             }
@@ -2683,9 +2744,9 @@ impl Lexer {
     /// and it is issued when that body is lexed as an input of its own.
     fn gather_ahead(
         &mut self,
-        pending: &mut Vec<(String, bool)>,
+        pending: &mut Vec<(Str, bool)>,
         own: usize,
-        raw: &mut String,
+        raw: &mut Str,
     ) -> Result<(), LexError> {
         if own > 0 {
             self.warnings.push(ReaderWarning::SubstHeredoc(SubstHeredoc {
@@ -2701,7 +2762,7 @@ impl Lexer {
             Some(a) => a.pos,
             None => {
                 let mut p = self.pos;
-                while !matches!(self.chars.get(p), None | Some('\n')) {
+                while !matches!(self.at(p), None | Some('\n')) {
                     p += 1;
                 }
                 p.saturating_add(usize::from(p < self.chars.len()))
@@ -2711,7 +2772,7 @@ impl Lexer {
         // lines after the command, which the re-lex of this text finds only if the
         // command is terminated first. The scan stopped at `)`, so it never
         // reached a newline of its own to supply that.
-        raw.push('\n');
+        raw.push(b'\n');
         let gathered = self.consume_subst_heredoc_bodies(pending, raw);
         self.hd_ahead = Some(HdAhead { pos: self.pos, line: self.fetched_line() });
         self.pos = resume;
@@ -2723,8 +2784,8 @@ impl Lexer {
     /// the substitution's raw text. See [`Lexer::read_subst_body`].
     fn consume_subst_heredoc_bodies(
         &mut self,
-        pending: &mut Vec<(String, bool)>,
-        raw: &mut String,
+        pending: &mut Vec<(Str, bool)>,
+        raw: &mut Str,
     ) -> Result<(), LexError> {
         for (delim, strip) in core::mem::take(pending) {
             // The moment bash's warning names; see [`Lexer::collect_heredocs`],
@@ -2733,9 +2794,7 @@ impl Lexer {
             loop {
                 if self.pos >= self.chars.len() {
                     if self.strict_heredoc_eof {
-                        return Err(LexError::new(format!(
-                            "unexpected EOF while looking for `{delim}'"
-                        )));
+                        return Err(unterminated_heredoc(&delim));
                     }
                     self.warnings.push(ReaderWarning::HeredocEof(HeredocEof {
                         delim: delim.clone(),
@@ -2749,8 +2808,8 @@ impl Lexer {
                     // place and warn a second time about the one here-document —
                     // whereas the warning already recorded here is the reader's,
                     // raised once, which is what bash prints.
-                    raw.push_str(&delim);
-                    raw.push('\n');
+                    raw.extend_from_slice(&delim);
+                    raw.push(b'\n');
                     break;
                 }
                 let start = self.pos;
@@ -2761,13 +2820,14 @@ impl Lexer {
                 if self.peek() == Some('\n') {
                     self.pos += 1;
                 }
-                raw.extend(self.chars.get(start..self.pos).unwrap_or(&[]).iter());
-                let mut line: String = self.chars.get(start..eol).unwrap_or(&[]).iter().collect();
-                if line.ends_with('\r') {
+                let taken = self.slice(start, self.pos);
+                raw.extend_from_slice(&taken);
+                let mut line = self.slice(start, eol);
+                if line.ends_with(b"\r") {
                     line.pop();
                 }
-                let content = if strip { line.trim_start_matches('\t') } else { line.as_str() };
-                if content == delim {
+                let content = if strip { strip_tabs(&line) } else { line.as_slice() };
+                if content == delim.as_slice() {
                     break;
                 }
             }
@@ -2789,35 +2849,34 @@ impl Lexer {
     /// `${`, `$(`, `$((`, and backtick command substitutions start nested
     /// spans that must balance with their own terminators; single/double
     /// quotes protect their contents; a backslash escapes the next character.
-    fn read_dollar_brace(&mut self) -> Result<String, LexError> {
+    fn read_dollar_brace(&mut self) -> Result<Str, LexError> {
         let open = self.cur_line();
-        let mut raw = String::new();
+        let mut raw = Str::new();
         loop {
-            let Some(c) = self.bump() else {
+            let Some(cx) = self.bump_ch() else {
                 return Err(eof_matching('}').at(open));
             };
-            match c {
+            match syn(cx) {
                 // First unescaped, unquoted, non-nested `}` closes the span.
                 '}' => return Ok(raw),
                 // Backslash escapes the next character (both are preserved
                 // verbatim so later re-parsing sees the escape).
                 '\\' => {
-                    raw.push('\\');
-                    if let Some(n) = self.bump() {
-                        raw.push(n);
-                    }
+                    raw.push(b'\\');
+                    self.take_into(&mut raw);
                 }
                 // Single quotes: copy verbatim to the closing quote.
                 '\'' => {
                     let q_open = self.cur_line();
-                    raw.push('\'');
+                    raw.push(b'\'');
                     loop {
-                        match self.bump() {
+                        match self.peek() {
                             Some('\'') => {
-                                raw.push('\'');
+                                self.pos += 1;
+                                raw.push(b'\'');
                                 break;
                             }
-                            Some(q) => raw.push(q),
+                            Some(_) => self.take_into(&mut raw),
                             None => return Err(eof_matching('\'').at(q_open)),
                         }
                     }
@@ -2825,20 +2884,20 @@ impl Lexer {
                 // Double quotes: copy to the closing quote, honoring `\`.
                 '"' => {
                     let q_open = self.cur_line();
-                    raw.push('"');
+                    raw.push(b'"');
                     loop {
-                        match self.bump() {
+                        match self.peek() {
                             Some('\\') => {
-                                raw.push('\\');
-                                if let Some(n) = self.bump() {
-                                    raw.push(n);
-                                }
+                                self.pos += 1;
+                                raw.push(b'\\');
+                                self.take_into(&mut raw);
                             }
                             Some('"') => {
-                                raw.push('"');
+                                self.pos += 1;
+                                raw.push(b'"');
                                 break;
                             }
-                            Some(q) => raw.push(q),
+                            Some(_) => self.take_into(&mut raw),
                             None => return Err(eof_matching('"').at(q_open)),
                         }
                     }
@@ -2847,20 +2906,20 @@ impl Lexer {
                 // backtick (honoring `\``).
                 '`' => {
                     let q_open = self.cur_line();
-                    raw.push('`');
+                    raw.push(b'`');
                     loop {
-                        match self.bump() {
+                        match self.peek() {
                             Some('\\') => {
-                                raw.push('\\');
-                                if let Some(n) = self.bump() {
-                                    raw.push(n);
-                                }
+                                self.pos += 1;
+                                raw.push(b'\\');
+                                self.take_into(&mut raw);
                             }
                             Some('`') => {
-                                raw.push('`');
+                                self.pos += 1;
+                                raw.push(b'`');
                                 break;
                             }
-                            Some(q) => raw.push(q),
+                            Some(_) => self.take_into(&mut raw),
                             None => return Err(eof_matching('`').at(q_open)),
                         }
                     }
@@ -2869,24 +2928,24 @@ impl Lexer {
                 // own terminator; consume it whole so a `}` or `)` inside it is
                 // not mistaken for our terminator.
                 '$' => {
-                    raw.push('$');
+                    raw.push(b'$');
                     match self.peek() {
                         Some('{') => {
-                            raw.push('{');
+                            raw.push(b'{');
                             self.pos += 1;
                             let inner = self.read_dollar_brace()?;
-                            raw.push_str(&inner);
-                            raw.push('}');
+                            raw.extend_from_slice(&inner);
+                            raw.push(b'}');
                         }
                         Some('(') => {
-                            raw.push('(');
+                            raw.push(b'(');
                             self.pos += 1;
                             if self.peek() == Some('(') {
-                                raw.push('(');
+                                raw.push(b'(');
                                 self.pos += 1;
                                 let inner = self.read_arith()?;
-                                raw.push_str(&inner);
-                                raw.push_str("))");
+                                raw.extend_from_slice(&inner);
+                                raw.extend_from_slice(b"))");
                             } else {
                                 // The same substitution as anywhere else, so it
                                 // reads a here-document declared inside it the same
@@ -2894,39 +2953,39 @@ impl Lexer {
                                 // text, right where the nested re-lex expects them.
                                 let inner =
                                     self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
-                                raw.push_str(&inner);
-                                raw.push(')');
+                                raw.extend_from_slice(&inner);
+                                raw.push(b')');
                             }
                         }
                         Some('[') => {
-                            raw.push('[');
+                            raw.push(b'[');
                             self.pos += 1;
                             let sub_open = self.cur_line();
                             let inner = self.read_balanced('[', ']').map_err(|e| e.at(sub_open))?;
-                            raw.push_str(&inner);
-                            raw.push(']');
+                            raw.extend_from_slice(&inner);
+                            raw.push(b']');
                         }
                         _ => {}
                     }
                 }
-                _ => raw.push(c),
+                _ => cx.push_to(&mut raw),
             }
         }
     }
 
     /// Read a `$(( … ))` body (up to the closing `))`).
-    fn read_arith(&mut self) -> Result<String, LexError> {
+    fn read_arith(&mut self) -> Result<Str, LexError> {
         let open = self.cur_line();
         let mut depth = 0usize;
-        let mut raw = String::new();
+        let mut raw = Str::new();
         loop {
-            let Some(c) = self.bump() else {
+            let Some(cx) = self.bump_ch() else {
                 return Err(eof_matching(')').at(open));
             };
-            match c {
+            match syn(cx) {
                 '(' => {
                     depth += 1;
-                    raw.push(c);
+                    raw.push(b'(');
                 }
                 ')' => {
                     if depth == 0 {
@@ -2938,9 +2997,9 @@ impl Lexer {
                         return Err(LexError::new("malformed arithmetic expansion"));
                     }
                     depth -= 1;
-                    raw.push(c);
+                    raw.push(b')');
                 }
-                _ => raw.push(c),
+                _ => cx.push_to(&mut raw),
             }
         }
     }
@@ -2970,8 +3029,8 @@ impl Lexer {
 
     /// Read a here-document delimiter word. Any quoting (`'EOF'`, `"EOF"`,
     /// `\EOF`) disables expansion of the body and is stripped from the delimiter.
-    fn read_heredoc_delim(&mut self) -> (String, bool) {
-        let mut delim = String::new();
+    fn read_heredoc_delim(&mut self) -> (Str, bool) {
+        let mut delim = Str::new();
         let mut expand = true;
         while let Some(c) = self.peek() {
             match c {
@@ -2979,34 +3038,29 @@ impl Lexer {
                 '\'' => {
                     expand = false;
                     self.pos += 1;
-                    while let Some(q) = self.bump() {
+                    while let Some(q) = self.bump_ch() {
                         if q == '\'' {
                             break;
                         }
-                        delim.push(q);
+                        q.push_to(&mut delim);
                     }
                 }
                 '"' => {
                     expand = false;
                     self.pos += 1;
-                    while let Some(q) = self.bump() {
+                    while let Some(q) = self.bump_ch() {
                         if q == '"' {
                             break;
                         }
-                        delim.push(q);
+                        q.push_to(&mut delim);
                     }
                 }
                 '\\' => {
                     expand = false;
                     self.pos += 1;
-                    if let Some(n) = self.bump() {
-                        delim.push(n);
-                    }
+                    self.take_into(&mut delim);
                 }
-                other => {
-                    delim.push(other);
-                    self.pos += 1;
-                }
+                _ => self.take_into(&mut delim),
             }
         }
         (delim, expand)
@@ -3017,7 +3071,7 @@ impl Lexer {
     fn collect_heredocs(&mut self, out: &mut [Tok]) -> Result<(), LexError> {
         let pending = core::mem::take(&mut self.pending_heredocs);
         for ph in pending {
-            let mut body = String::new();
+            let mut body = Str::new();
             // Captured before the first body line is read, because that is the
             // moment bash's message names — and it cannot be recovered afterwards.
             // For the *second* of two here-documents it is not the operator's line
@@ -3034,10 +3088,7 @@ impl Lexer {
                     // body, so we do too — but it also warns, so record what the
                     // warning needs. See [`HeredocEof`].
                     if self.strict_heredoc_eof {
-                        return Err(LexError::new(format!(
-                            "unexpected EOF while looking for `{}'",
-                            ph.delim
-                        )));
+                        return Err(unterminated_heredoc(&ph.delim));
                     }
                     self.warnings.push(ReaderWarning::HeredocEof(HeredocEof {
                         delim: ph.delim.clone(),
@@ -3052,19 +3103,15 @@ impl Lexer {
                     self.pos += 1;
                 }
                 let eol = self.pos;
-                let mut line: String = self.chars[start..self.pos].iter().collect();
+                let mut line = self.slice(start, self.pos);
                 if self.peek() == Some('\n') {
                     self.pos += 1;
                 }
-                if line.ends_with('\r') {
+                if line.ends_with(b"\r") {
                     line.pop();
                 }
-                let content = if ph.strip {
-                    line.trim_start_matches('\t')
-                } else {
-                    line.as_str()
-                };
-                if content == ph.delim {
+                let content = if ph.strip { strip_tabs(&line) } else { line.as_slice() };
+                if content == ph.delim.as_slice() {
                     break;
                 }
                 // An expanding here-doc (unquoted delimiter) joins a line ending
@@ -3074,13 +3121,13 @@ impl Lexer {
                 if ph.expand && ends_with_continuation(content) {
                     // The backslash is the last character before the newline.
                     let mut at = eol.saturating_sub(1);
-                    if self.chars.get(at) == Some(&'\r') {
+                    if self.at(at) == Some('\r') {
                         at = at.saturating_sub(1);
                     }
                     self.conts.push(u32::try_from(at).unwrap_or(u32::MAX));
                 }
-                body.push_str(content);
-                body.push('\n');
+                body.extend_from_slice(content);
+                body.push(b'\n');
             }
             let segs = scan_heredoc_segs(&body, ph.expand)?;
             if let Some(slot) = out.get_mut(ph.tok_index) {
@@ -3097,27 +3144,29 @@ impl Lexer {
     /// They differ exactly where an escape appeared, and printing the parsed
     /// text instead would not merely lose the spelling — a nested backtick
     /// would come out unescaped, and the result would no longer parse.
-    fn read_backtick(&mut self) -> Result<(String, String), LexError> {
+    fn read_backtick(&mut self) -> Result<(Str, Str), LexError> {
         let open = self.cur_line();
         let start = self.pos;
-        let mut raw = String::new();
+        let mut raw = Str::new();
         loop {
-            match self.bump() {
+            match self.peek() {
                 Some('`') => {
-                    let src = self.chars.get(start..self.pos.saturating_sub(1));
-                    return Ok((raw, src.unwrap_or_default().iter().collect()));
+                    self.pos += 1;
+                    let src = self.slice(start, self.pos.saturating_sub(1));
+                    return Ok((raw, src));
                 }
                 Some('\\') => {
+                    self.pos += 1;
                     // Inside backticks, `\`` and `\\` and `\$` are unescaped.
                     match self.peek() {
                         Some(n @ ('`' | '\\' | '$')) => {
                             self.pos += 1;
-                            raw.push(n);
+                            push1(&mut raw, n);
                         }
-                        _ => raw.push('\\'),
+                        _ => raw.push(b'\\'),
                     }
                 }
-                Some(c) => raw.push(c),
+                Some(_) => self.take_into(&mut raw),
                 None => return Err(eof_matching('`').at(open)),
             }
         }
@@ -3126,11 +3175,11 @@ impl Lexer {
 
 /// Whether `line` ends in a `\` that is not itself escaped — a line
 /// continuation, which the reader joins to the following line.
-fn ends_with_continuation(line: &str) -> bool {
-    line.chars().rev().take_while(|&c| c == '\\').count() % 2 == 1
+fn ends_with_continuation(line: BStr<'_>) -> bool {
+    line.iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 1
 }
 
-fn flush_lit(segs: &mut Vec<Seg>, lit: &mut String) {
+fn flush_lit(segs: &mut Vec<Seg>, lit: &mut Str) {
     if !lit.is_empty() {
         segs.push(Seg::Lit(core::mem::take(lit)));
     }
@@ -3139,13 +3188,13 @@ fn flush_lit(segs: &mut Vec<Seg>, lit: &mut String) {
 /// Lower a here-document body into segments. When `expand` is false (quoted
 /// delimiter) the whole body is a single literal; otherwise it is scanned like a
 /// double-quoted context (parameter/command/arith expansion, `"` literal).
-fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
+fn scan_heredoc_segs(body: BStr<'_>, expand: bool) -> Result<Vec<Seg>, LexError> {
     if !expand {
-        return Ok(vec![Seg::Lit(body.to_string())]);
+        return Ok(vec![Seg::Lit(body.to_vec())]);
     }
     let mut lx = Lexer::new(body, LexOpts::default());
     let mut segs: Vec<Seg> = Vec::new();
-    let mut lit = String::new();
+    let mut lit = Str::new();
     while let Some(c) = lx.peek() {
         match c {
             '\\' => {
@@ -3159,12 +3208,12 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
                         // literal run — but it also records the backslash, so
                         // `declare -f` can print the body back as written.
                         flush_lit(&mut segs, &mut lit);
-                        segs.push(Seg::Sq(n.to_string(), true));
+                        segs.push(Seg::Sq(one(n), true));
                     }
                     Some('\n') => {
                         lx.pos += 1;
                     }
-                    _ => lit.push('\\'),
+                    _ => lit.push(b'\\'),
                 }
             }
             '`' => {
@@ -3178,13 +3227,10 @@ fn scan_heredoc_segs(body: &str, expand: bool) -> Result<Vec<Seg>, LexError> {
                     flush_lit(&mut segs, &mut lit);
                     segs.push(seg);
                 } else {
-                    lit.push('$');
+                    lit.push(b'$');
                 }
             }
-            other => {
-                lit.push(other);
-                lx.pos += 1;
-            }
+            _ => lx.take_into(&mut lit),
         }
     }
     flush_lit(&mut segs, &mut lit);

@@ -4,6 +4,18 @@
 //! parser currently accepts. It intentionally starts small and grows toward
 //! the full bash-superset (arrays, `[[ ]]`, `(( ))`, here-docs) — see the
 //! crate-level docs and `design-decisions.md §72`.
+//!
+//! # Text vs. bytes
+//!
+//! Source text that the shell reproduces or re-parses verbatim — literals,
+//! quoted runs, here-doc delimiters, arithmetic and command-substitution
+//! bodies — is [`Str`] (a byte string), because a shell word can name a file
+//! and a SlateOS filename is an arbitrary byte sequence bar `/` and NUL.
+//! *Names* stay `String`: variable, function-parameter, `{fd}` and label
+//! namespaces are `[A-Za-z_][A-Za-z0-9_]*` by grammar, so text is not an
+//! approximation there — it is the truth.
+
+use crate::bytes::Str;
 
 /// A whole program: a list of and-or lists separated by `;`, `&`, or newlines.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -86,8 +98,8 @@ pub enum Command {
     /// `[[ expr ]]` — bash conditional expression (exit 0 if true, 1 if false).
     Cond(CondExpr),
     /// `(( expr ))` — bash arithmetic command (exit 0 if the result is
-    /// non-zero, 1 if zero). The `String` holds the raw arithmetic text.
-    Arith(String),
+    /// non-zero, 1 if zero). The payload is the raw arithmetic text.
+    Arith(Str),
     /// `coproc [NAME] command` — run `command` asynchronously with its
     /// stdin/stdout wired to two pipes. Exposes an array `NAME` (default
     /// `COPROC`) where `NAME[0]` reads the coproc's stdout and `NAME[1]`
@@ -346,9 +358,9 @@ pub struct SelectClause {
 /// section was omitted (an omitted condition is treated as always-true).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForArithClause {
-    pub init: String,
-    pub cond: String,
-    pub update: String,
+    pub init: Str,
+    pub cond: Str,
+    pub update: Str,
     pub body: Program,
 }
 
@@ -360,7 +372,10 @@ pub struct FunctionDef {
     /// false this is instead the source spelling of a word bash refuses at run
     /// time (`\f`, `"f"`, `$x`), kept verbatim so the error can quote it back
     /// exactly as typed.
-    pub name: String,
+    ///
+    /// Bytes, not text: bash accepts *any* word here, so a function may be
+    /// named after a file, and a SlateOS filename need not be UTF-8.
+    pub name: Str,
     /// Whether the name may actually become a function. bash defers this check
     /// to execution: a quoted or expanded name parses fine and then fails with
     /// ``line N: `NAME': not a valid identifier`` — status 1, and the script
@@ -412,7 +427,7 @@ pub struct Word {
 impl Word {
     /// Construct a word from a single literal string (used by tests/helpers).
     #[must_use]
-    pub fn literal(s: impl Into<String>) -> Self {
+    pub fn literal(s: impl Into<Str>) -> Self {
         Word {
             parts: vec![WordPart::Literal(s.into())],
         }
@@ -448,7 +463,7 @@ impl Word {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WordPart {
     /// Unquoted literal text (subject to later splitting/globbing).
-    Literal(String),
+    Literal(Str),
     /// Quoted literal text (no expansion, no splitting): the contents of
     /// `'…'`/`$'…'`, or a single backslash-escaped character, which means the
     /// same thing (`a\*b` ≡ `a'*'b`).
@@ -456,7 +471,7 @@ pub enum WordPart {
     /// `escaped` is `true` for the backslash spelling. Expansion treats both
     /// identically; only [`crate::unparse`] cares, because bash prints a
     /// stored function body back in whichever form the source wrote.
-    SingleQuoted { text: String, escaped: bool },
+    SingleQuoted { text: Str, escaped: bool },
     /// Double-quoted run of parts (expansion, but no splitting/globbing).
     DoubleQuoted(Vec<WordPart>),
     /// `$name` / `${name}` parameter reference.
@@ -568,7 +583,7 @@ pub enum WordPart {
     /// `$(( expr ))` arithmetic substitution (raw expression text for now).
     /// `bracket` records the deprecated `$[ expr ]` spelling, which evaluates
     /// identically but is printed back as written (bash `declare -f`).
-    ArithSub { expr: String, bracket: bool },
+    ArithSub { expr: Str, bracket: bool },
     /// `${#name}` — the length of the parameter's value.
     Length(String),
     /// `${name[index]}`, `${name[@]}`, `${name[*]}`, and their `${#…}` length
@@ -606,7 +621,7 @@ pub enum WordPart {
     BadTransform {
         name: String,
         index: Option<Box<Word>>,
-        raw: String,
+        raw: Str,
     },
     /// `${name[@]:off:len}` / `${name[*]:off:len}` — array slice, and the
     /// positional-parameter forms `${@:off:len}` / `${*:off:len}`. Selects a
@@ -657,7 +672,7 @@ pub enum WordPart {
     /// error: it prints `${raw}: bad substitution`, sets `$?`=1, and aborts the
     /// current parse unit without exiting the shell). The stored string is the
     /// text *between* the braces, so the diagnostic reproduces `${raw}`.
-    BadSubst(String),
+    BadSubst(Str),
     /// Process substitution `<(cmd)` (input) / `>(cmd)` (output). Expands to the
     /// pathname of a file the shell connects to `cmd`: for `<(cmd)` the file holds
     /// `cmd`'s output (read by the enclosing command); for `>(cmd)` the file's
@@ -822,7 +837,7 @@ pub enum CmdSubBody {
         prog: Program,
         /// The body text, re-read one logical line at a time when the
         /// substitution is expanded.
-        src: String,
+        src: Str,
         /// How that re-read's own line numbers become the numbers the shell
         /// reports — the rank-based `$( … )` rule, already applied to `prog`.
         map: LineMap,
@@ -830,12 +845,12 @@ pub enum CmdSubBody {
     /// `` ` … ` `` — parsed at expansion time, by `Shell::command_sub`.
     Backtick {
         /// The body with `` \` ``/`\\`/`\$` unescaped: what actually gets parsed.
-        src: String,
+        src: Str,
         /// The body exactly as written, for `declare -f`. bash echoes a backtick
         /// body verbatim rather than re-printing it, and re-printing is not
         /// merely untidy — a nested `` \` `` would lose its backslash and the
         /// result would no longer parse.
-        verbatim: String,
+        verbatim: Str,
         /// The line the closing backtick sits on, in the enclosing source.
         ///
         /// The body's own lines are numbered from `close_line - 1` — a plain
@@ -889,7 +904,7 @@ pub enum BulkOp {
     /// reference with **no elements** expands empty, but with one or more
     /// elements it is a runtime "bad substitution". `raw` is the source text
     /// between `${` and `}` for the diagnostic.
-    BadTransform { raw: String },
+    BadTransform { raw: Str },
 }
 
 /// An array subscript inside `${name[…]}`.
@@ -965,7 +980,7 @@ pub struct Redirect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HereDoc {
     /// The delimiter word with its quoting removed (`<<'EOF'` → `EOF`).
-    pub delim: String,
+    pub delim: Str,
     /// The delimiter was quoted in any form (`'EOF'`, `"EOF"`, `\EOF`), which
     /// suppressed expansion of the body. bash prints every spelling back as
     /// `'EOF'`.

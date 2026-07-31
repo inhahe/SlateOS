@@ -121,6 +121,41 @@ impl<T: PushBytes + ?Sized> PushBytes for &T {
     }
 }
 
+/// `String`-shaped appending for a byte buffer.
+///
+/// Lets code that builds shell source keep reading the way it did when the
+/// buffer was a `String` — `s.push_str("if ")` for ASCII syntax,
+/// `s.push_str(&word)` for data — while the buffer underneath is bytes. The
+/// argument is anything [`PushBytes`] accepts, so a `&str` literal and a `Str`
+/// value append through the same call.
+///
+/// Deliberately no `push`: `Vec<u8>`'s own `push` takes a byte and would shadow
+/// any `push(char)` here, so a `s.push('x')` left behind by a conversion fails
+/// to compile rather than silently meaning something else. Write `s.push(b'x')`.
+pub trait StrBuf {
+    /// Append `s`'s byte spelling to this buffer.
+    fn push_str(&mut self, s: &(impl PushBytes + ?Sized));
+}
+
+impl StrBuf for Str {
+    fn push_str(&mut self, s: &(impl PushBytes + ?Sized)) {
+        s.push_bytes(self);
+    }
+}
+
+/// Concatenate `parts` with `sep` between them — `[T]::join` for byte strings.
+#[must_use]
+pub fn join(parts: &[Str], sep: BStr<'_>) -> Str {
+    let mut out = Str::new();
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            out.extend_from_slice(sep);
+        }
+        out.extend_from_slice(p);
+    }
+    out
+}
+
 /// Integers spell themselves in decimal. `format!` is lossless here because the
 /// output is pure ASCII by construction.
 macro_rules! push_bytes_via_display {
@@ -179,6 +214,22 @@ pub fn push_char(out: &mut Str, c: char) {
 #[must_use]
 pub fn as_str(s: BStr<'_>) -> Option<&str> {
     std::str::from_utf8(s).ok()
+}
+
+/// Byte-offset of the first occurrence of `needle` in `haystack`.
+///
+/// `str::find` for byte strings. An empty needle matches at 0, matching
+/// `str::find`'s convention so that callers translated from `&str` keep their
+/// behaviour.
+#[must_use]
+pub fn find(haystack: BStr<'_>, needle: BStr<'_>) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Parse a shell value as a decimal integer the way the shell's numeric
@@ -511,7 +562,9 @@ pub fn path_to_bytes(p: &std::path::Path) -> Str {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use super::{BStr, Str, char_at, char_count, char_offset, char_slice, to_lowercase, to_uppercase};
+    use super::{
+        BStr, Str, char_at, char_count, char_offset, char_slice, find, to_lowercase, to_uppercase,
+    };
 
     /// `a\xffb` — the value that motivates this whole module: three characters
     /// under bash's counting rule, and not valid UTF-8.
@@ -530,6 +583,19 @@ mod tests {
         // through `Display` and become U+FFFD.
         let got = bfmt![b"[", LONE, b"]"];
         assert_eq!(got, b"[a\xffb]".to_vec());
+    }
+
+    #[test]
+    fn find_matches_str_find_semantics() {
+        assert_eq!(find(LONE, b"\xffb"), Some(1));
+        assert_eq!(find(LONE, b"b\xff"), None);
+        // An empty needle matches at the front, as `str::find` does.
+        assert_eq!(find(LONE, b""), Some(0));
+        assert_eq!(find(b"", b""), Some(0));
+        // A needle longer than the haystack must not panic in `windows`.
+        assert_eq!(find(b"a", b"ab"), None);
+        assert_eq!(find(b"", b"a"), None);
+        assert_eq!(find(b"abcabc", b"ca"), Some(2));
     }
 
     #[test]

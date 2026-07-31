@@ -3,6 +3,28 @@
 //! The parser also lowers lexer [`Seg`]s into [`ast::WordPart`]s, recursively
 //! parsing command/parameter substitutions (their raw inner source is captured
 //! by the lexer).
+//!
+//! # Text vs. bytes
+//!
+//! Shell *source* is bytes: a script may contain any byte, and a word in it may
+//! name a file whose name is not UTF-8. So everything that flows from the source
+//! into the AST — literals, here-doc delimiters, substitution bodies, function
+//! names — is [`Str`], and the source itself arrives as [`BStr`].
+//!
+//! Two things stay `String`, deliberately:
+//!
+//! * **Names.** Variable, alias and reserved-word namespaces are text by
+//!   construction (`[A-Za-z_][A-Za-z0-9_]*`), so a name that is not UTF-8 is not
+//!   a name at all. Those sites go through [`bytes::as_str`] and reject — or
+//!   defer to a run-time "bad substitution" — when it returns `None`, which is
+//!   the honest answer rather than a mangled approximation.
+//! * **Diagnostics.** [`ParseError::msg`] is still `String`; the word being
+//!   complained about is rendered by [`shown`]. Step 10 of TD-OILS-BYTE-STRINGS
+//!   converts the diagnostic layer and deletes that helper.
+//!
+//! Syntax comparisons scan [`Ch`] but are written against an ASCII `char` view
+//! ([`syn`]/[`syn_at`], mirroring the lexer's), so a non-ASCII character or a
+//! stray byte reads as `'\0'` and matches no operator.
 
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseItem,
@@ -15,12 +37,61 @@ use crate::ast::{
     Pipeline, Program,
     Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
+use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
     LexOpts, Op, ReaderWarning, Seg, Tok, Tokenized, expand_aliases, expand_aliases_tracked,
     tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
 use std::collections::BTreeMap;
+
+/// Whether `s` is a syntactically valid shell identifier.
+///
+/// Re-exported from the lexer, which owns the definition, so the rest of the
+/// crate can keep asking the parser (its historical home) and get one answer.
+pub(crate) use crate::lexer::is_valid_name;
+
+/// Render a byte string for a diagnostic message.
+///
+/// [`ParseError::msg`] is `String`, so a word that reaches a diagnostic has to
+/// be spelled as text *somewhere*; concentrating that in one function keeps the
+/// lossy conversion visible and reviewable. Step 10 of TD-OILS-BYTE-STRINGS
+/// converts the diagnostic layer to bytes and deletes this along with the
+/// scaffold it wraps.
+fn shown(s: BStr<'_>) -> String {
+    #[allow(deprecated)]
+    bytes::scaffold_lossy_string(s)
+}
+
+/// A shell identifier as text, or `None` when the bytes are not one.
+///
+/// The variable namespace is ASCII by construction, so a word that is not valid
+/// UTF-8 cannot name a variable. Callers reach this having already checked the
+/// identifier rule, so `None` is unreachable in practice — but it is the honest
+/// return for bytes that are not text, and every caller has a sensible
+/// not-an-assignment / not-an-identifier answer for it.
+fn name_text(name: BStr<'_>) -> Option<String> {
+    bytes::as_str(name).map(str::to_owned)
+}
+
+/// The ASCII syntax view of a scanned character, mirroring `lexer::syn`.
+///
+/// Shell syntax is entirely ASCII, so a non-ASCII character — or a byte that is
+/// not part of any character — cannot *be* an operator. Reading it as `'\0'`
+/// lets the syntax tests stay written as ordinary `char` comparisons while
+/// guaranteeing that no such byte is ever mistaken for punctuation.
+fn syn(c: Ch) -> char {
+    match c {
+        Ch::U(c) if c.is_ascii() => c,
+        _ => '\0',
+    }
+}
+
+/// [`syn`] of the character at `i`, or `'\0'` past the end — so a lookahead
+/// never needs a length check of its own.
+fn syn_at(chs: &[Ch], i: usize) -> char {
+    chs.get(i).copied().map_or('\0', syn)
+}
 
 /// A parse error with a human-readable message and, when known, the 1-based
 /// source line the error occurred on.
@@ -128,7 +199,7 @@ impl From<crate::lexer::LexError> for ParseError {
 ///
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error.
-pub fn parse(src: &str) -> Result<Program, ParseError> {
+pub fn parse(src: BStr<'_>) -> Result<Program, ParseError> {
     parse_opts(src, LexOpts::default())
 }
 
@@ -143,7 +214,7 @@ pub fn parse(src: &str) -> Result<Program, ParseError> {
 ///
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error.
-pub fn parse_opts(src: &str, opts: LexOpts) -> Result<Program, ParseError> {
+pub fn parse_opts(src: BStr<'_>, opts: LexOpts) -> Result<Program, ParseError> {
     let (toks, lines) = tokenize_spanned(src, opts).map_err(ParseError::from)?;
     parse_tokens(toks, lines, opts)
 }
@@ -164,7 +235,11 @@ pub fn parse_opts(src: &str, opts: LexOpts) -> Result<Program, ParseError> {
 ///
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error in the body.
-pub fn parse_procsub_body(src: &str, open_line: u32, opts: LexOpts) -> Result<Program, ParseError> {
+pub fn parse_procsub_body(
+    src: BStr<'_>,
+    open_line: u32,
+    opts: LexOpts,
+) -> Result<Program, ParseError> {
     let (mut toks, mut lines) = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
     map_lines(&mut toks, &mut lines, &LineMap::Offset(open_line.saturating_sub(1)));
@@ -180,7 +255,7 @@ pub fn parse_procsub_body(src: &str, open_line: u32, opts: LexOpts) -> Result<Pr
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error (including an
 /// unterminated here-document).
-pub fn parse_strict_heredoc(src: &str, opts: LexOpts) -> Result<Program, ParseError> {
+pub fn parse_strict_heredoc(src: BStr<'_>, opts: LexOpts) -> Result<Program, ParseError> {
     let (toks, lines) =
         crate::lexer::tokenize_spanned_strict(src, opts).map_err(ParseError::from)?;
     parse_tokens(toks, lines, opts)
@@ -191,8 +266,8 @@ pub fn parse_strict_heredoc(src: &str, opts: LexOpts) -> Result<Program, ParseEr
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error.
 pub fn parse_with_aliases(
-    src: &str,
-    aliases: &BTreeMap<String, String>,
+    src: BStr<'_>,
+    aliases: &BTreeMap<Str, Str>,
     opts: LexOpts,
 ) -> Result<Program, ParseError> {
     let (toks, lines) = tokenize_spanned(src, opts).map_err(ParseError::from)?;
@@ -270,7 +345,7 @@ pub enum UnitLineKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitLine {
     /// The line's source text, without its terminating newline.
-    pub text: String,
+    pub text: Str,
     pub kind: UnitLineKind,
     /// The line ends in an unquoted `#` comment. bash cannot append `"; "` to
     /// such a line — the next command would be swallowed by the comment — so it
@@ -294,15 +369,17 @@ pub struct UnitLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawLine {
     /// The line's source text, without its terminating newline.
-    pub text: String,
+    pub text: Str,
     /// The line's number after the parser's line map, for a diagnostic.
     pub line: u32,
 }
 
 pub struct IncrementalParser {
     /// The source, kept for re-lexing the tail when [`LexOpts`] change. Held as
-    /// chars because the offsets recorded by the lexer are char indices.
-    src: Vec<char>,
+    /// characters because the offsets recorded by the lexer are char indices —
+    /// [`Ch`], so a byte that is not part of any character still counts as one
+    /// position and survives a round trip.
+    src: Vec<Ch>,
     /// Applied to every line the lexer reports, so a fragment lexed on its own
     /// still names the lines of the input it came from.
     line_map: LineMap,
@@ -341,7 +418,7 @@ pub struct IncrementalParser {
     /// — every physical line of it, including the comment and blank lines before
     /// it, any here-document body it swallowed, and the `\<newline>` joins
     /// [`Self::unit_lines`] cuts out. `set -v` echoes exactly this.
-    unit_raw: String,
+    unit_raw: Str,
     /// `orig[pos..]` alias-expanded under `last_aliases`, prefixed by any
     /// alias-spliced tokens carried across the last rebuild.
     work: Vec<Tok>,
@@ -357,7 +434,7 @@ pub struct IncrementalParser {
     /// The alias state `work` was built under, or `None` if never built. The
     /// inner `Option` is the caller's argument (`None` = expansion disabled), so
     /// a `shopt -u expand_aliases` also invalidates.
-    last_aliases: Option<Option<BTreeMap<String, String>>>,
+    last_aliases: Option<Option<BTreeMap<Str, Str>>>,
     /// An unterminated quote/substitution that ended the input. Held back until
     /// the complete lines before it have been handed out and executed, because
     /// bash reports it only after running them.
@@ -393,7 +470,7 @@ impl IncrementalParser {
     /// lines already consumed for a REPL reading stdin one command at a time,
     /// and [`LineMap::CmdSub`] for a `$( … )` body re-read at expansion time.
     #[must_use]
-    pub fn new(src: &str, line_map: impl Into<LineMap>, opts: LexOpts) -> Self {
+    pub fn new(src: BStr<'_>, line_map: impl Into<LineMap>, opts: LexOpts) -> Self {
         let line_map = line_map.into();
         let Tokenized {
             toks: mut orig,
@@ -407,7 +484,7 @@ impl IncrementalParser {
         map_lines(&mut orig, &mut orig_lines, &line_map);
         let pending_warnings = map_reader_warnings(warnings, &line_map);
         Self {
-            src: src.chars().collect(),
+            src: bytes::chars(src).collect(),
             opts,
             orig,
             orig_lines,
@@ -417,7 +494,7 @@ impl IncrementalParser {
             hist_cursor: 0,
             expand_cursor: 0,
             unit_lines: Vec::new(),
-            unit_raw: String::new(),
+            unit_raw: Str::new(),
             work: Vec::new(),
             work_lines: Vec::new(),
             work_origin: Vec::new(),
@@ -466,7 +543,7 @@ impl IncrementalParser {
         let newlines =
             u32::try_from(head.iter().filter(|&&c| c == '\n').count()).unwrap_or(u32::MAX);
         let map = self.line_map.shifted(newlines);
-        let tail: String = self.src.get(off..).unwrap_or(&[]).iter().collect();
+        let tail: Str = bytes::from_chars(self.src.get(off..).unwrap_or(&[]).iter().copied());
         let Tokenized {
             toks: mut orig,
             lines: mut orig_lines,
@@ -510,7 +587,7 @@ impl IncrementalParser {
 
     /// Re-expand the unconsumed remainder of the original token stream under
     /// `aliases`.
-    fn rebuild(&mut self, aliases: Option<&BTreeMap<String, String>>) {
+    fn rebuild(&mut self, aliases: Option<&BTreeMap<Str, Str>>) {
         // Alias-spliced tokens we are standing in the middle of have no
         // counterpart in `orig`, so carry them over verbatim: re-expanding from
         // `pos` would replay the part of the splice already executed. (Reachable
@@ -604,7 +681,7 @@ impl IncrementalParser {
             .count();
         let line = u32::try_from(newlines).unwrap_or(u32::MAX).saturating_add(1);
         Some(RawLine {
-            text: self.src.get(start..end).unwrap_or(&[]).iter().collect(),
+            text: bytes::from_chars(self.src.get(start..end).unwrap_or(&[]).iter().copied()),
             line: self.line_map.map(line),
         })
     }
@@ -616,7 +693,7 @@ impl IncrementalParser {
     /// `Some(text)` splices `text` in and re-lexes the unparsed remainder, so the
     /// parser goes on to see the expanded line and nothing else — which is also
     /// what puts the *expanded* form into the command history, as bash does.
-    pub fn commit_raw_line(&mut self, expanded: Option<&str>, opts: LexOpts) {
+    pub fn commit_raw_line(&mut self, expanded: Option<BStr<'_>>, opts: LexOpts) {
         let start = self.expand_frontier();
         if start >= self.src.len() {
             return;
@@ -624,7 +701,7 @@ impl IncrementalParser {
         let end = self.line_end(start);
         let mut new_end = end;
         if let Some(text) = expanded {
-            let repl: Vec<char> = text.chars().collect();
+            let repl: Vec<Ch> = bytes::chars(text).collect();
             new_end = start.saturating_add(repl.len());
             self.src.splice(start..end, repl);
             // From `hist_cursor`, not from the next token: the rewritten text can
@@ -634,7 +711,7 @@ impl IncrementalParser {
         // Step past the newline ending the line, so the next peek starts on the
         // following one. A replacement containing newlines counts as expanded in
         // full — bash expands a line once, never its own output.
-        self.expand_cursor = if self.src.get(new_end) == Some(&'\n') {
+        self.expand_cursor = if self.src.get(new_end).is_some_and(|&c| c == '\n') {
             new_end.saturating_add(1)
         } else {
             self.src.len()
@@ -656,7 +733,8 @@ impl IncrementalParser {
             return;
         }
         let end = self.line_end(start);
-        let cut = if self.src.get(end) == Some(&'\n') { end.saturating_add(1) } else { end };
+        let cut =
+            if self.src.get(end).is_some_and(|&c| c == '\n') { end.saturating_add(1) } else { end };
         self.src.drain(start..cut);
         self.relex_from(self.hist_cursor, opts);
         self.expand_cursor = start;
@@ -673,7 +751,7 @@ impl IncrementalParser {
     /// one level down: a change re-*lexes* the remaining input.
     pub fn next_unit(
         &mut self,
-        aliases: Option<&BTreeMap<String, String>>,
+        aliases: Option<&BTreeMap<Str, Str>>,
         opts: LexOpts,
     ) -> Option<Result<Program, ParseError>> {
         // A lexing option must be applied before aliases, since re-lexing
@@ -855,7 +933,7 @@ impl IncrementalParser {
     /// and `\<newline>` joins are all still in it, unlike
     /// [`Self::last_unit_lines`], which cooks them for the history.
     #[must_use]
-    pub fn last_unit_raw(&self) -> &str {
+    pub fn last_unit_raw(&self) -> BStr<'_> {
         &self.unit_raw
     }
 
@@ -879,7 +957,7 @@ impl IncrementalParser {
             return;
         }
         self.hist_cursor = end;
-        self.unit_raw = self.src.get(start..end).unwrap_or(&[]).iter().collect();
+        self.unit_raw = bytes::from_chars(self.src.get(start..end).unwrap_or(&[]).iter().copied());
         // Tokens are emitted in source order, so walking the span's tokens once
         // groups them by the newlines between them.
         let mut toks: Vec<usize> = Vec::new();
@@ -926,7 +1004,7 @@ impl IncrementalParser {
             // line opened, a comment, or a blank line.
             let kind = if prev_heredoc {
                 UnitLineKind::HereDocBody
-            } else if text.trim().is_empty() {
+            } else if bytes::trim(&text).is_empty() {
                 UnitLineKind::Blank
             } else {
                 UnitLineKind::Comment
@@ -945,7 +1023,7 @@ impl IncrementalParser {
         // Joined-away continuations do not count as leftover text: `echo a \`
         // followed by an empty line leaves a `\` after the last token that the
         // history never sees.
-        let comment = self.line_text(code_end, to).contains(|c: char| !c.is_whitespace());
+        let comment = !bytes::trim(&self.line_text(code_end, to)).is_empty();
         let heredoc = toks
             .iter()
             .any(|&i| matches!(self.orig.get(i), Some(Tok::Op(Op::DLess | Op::DLessDash))));
@@ -957,24 +1035,24 @@ impl IncrementalParser {
     /// joined line rather than the two physical ones. A continuation the lexer
     /// *kept* — inside `'…'`, `"…"`, `$( … )`, or a quoted-delimiter
     /// here-document — was never recorded and so survives here too.
-    fn line_text(&self, from: usize, to: usize) -> String {
-        let mut text = String::new();
+    fn line_text(&self, from: usize, to: usize) -> Str {
+        let mut text = Str::new();
         let mut i = from;
         while i < to {
             let at = u32::try_from(i).unwrap_or(u32::MAX);
             if self.orig_conts.binary_search(&at).is_ok() {
                 // Skip the backslash and the newline it hid, CR included.
                 i = i.saturating_add(1);
-                if self.src.get(i) == Some(&'\r') {
+                if self.src.get(i).is_some_and(|&c| c == '\r') {
                     i = i.saturating_add(1);
                 }
-                if self.src.get(i) == Some(&'\n') {
+                if self.src.get(i).is_some_and(|&c| c == '\n') {
                     i = i.saturating_add(1);
                 }
                 continue;
             }
             if let Some(&c) = self.src.get(i) {
-                text.push(c);
+                c.push_to(&mut text);
             }
             i = i.saturating_add(1);
         }
@@ -999,7 +1077,7 @@ impl IncrementalParser {
             )) => true,
             Some(Tok::Word(segs)) => matches!(
                 segs.as_slice(),
-                [Seg::Lit(s)] if matches!(s.as_str(), "{" | "do" | "then" | "else" | "elif" | "in")
+                [Seg::Lit(s)] if matches!(s.as_slice(), b"{" | b"do" | b"then" | b"else" | b"elif" | b"in")
             ),
             _ => false,
         }
@@ -1050,7 +1128,7 @@ impl IncrementalParser {
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error in the body.
 pub fn parse_cmdsub_body(
-    src: &str,
+    src: BStr<'_>,
     close_line: u32,
     opts: LexOpts,
 ) -> Result<(Program, LineMap), ParseError> {
@@ -1064,7 +1142,7 @@ pub fn parse_cmdsub_body(
     // The body's line 1 is the line `$(` sits on: the closing `)` is on the
     // body's last line, so stepping back over the body's newlines lands there.
     let newlines =
-        u32::try_from(src.bytes().filter(|&b| b == b'\n').count()).unwrap_or(u32::MAX);
+        u32::try_from(src.iter().filter(|&&b| b == b'\n').count()).unwrap_or(u32::MAX);
     let phys = LineMap::Offset(close_line.saturating_sub(newlines).saturating_sub(1));
     map_lines(&mut toks, &mut lines, &phys);
     let prog = parse_tokens_ending(toks, lines, opts, true)
@@ -1263,25 +1341,40 @@ impl Parser {
         matches!(self.peek(), Some(Tok::Op(o)) if *o == op)
     }
 
-    /// If the current token is an unquoted single-literal word, return it.
-    fn reserved_here(&self) -> Option<String> {
+    /// If the current token is an unquoted single-literal word naming a
+    /// reserved word, return that word.
+    ///
+    /// The *matched entry of [`RESERVED`]* rather than the token's own bytes, so
+    /// the answer is `&'static str` and every caller can go on comparing against
+    /// string literals. The two are equal by construction — a reserved word is
+    /// ASCII — and the source spelling is never needed here.
+    fn reserved_here(&self) -> Option<&'static str> {
         if let Some(Tok::Word(segs)) = self.peek()
             && let [Seg::Lit(s)] = segs.as_slice()
-            && RESERVED.contains(&s.as_str())
+        {
+            return RESERVED.iter().find(|r| r.as_bytes() == s.as_slice()).copied();
+        }
+        None
+    }
+
+    /// The literal text of a bare word token (single unquoted literal), if any.
+    fn bare_word_here(&self) -> Option<Str> {
+        if let Some(Tok::Word(segs)) = self.peek()
+            && let [Seg::Lit(s)] = segs.as_slice()
         {
             return Some(s.clone());
         }
         None
     }
 
-    /// The literal text of a bare word token (single unquoted literal), if any.
-    fn bare_word_here(&self) -> Option<String> {
-        if let Some(Tok::Word(segs)) = self.peek()
-            && let [Seg::Lit(s)] = segs.as_slice()
-        {
-            return Some(s.clone());
-        }
-        None
+    /// Whether the current token is exactly the bare word `w`.
+    ///
+    /// The common shape by far: the grammar asks about a fixed ASCII spelling
+    /// (`[[`, `time`, `function`, `]]`), so nothing is gained by copying the
+    /// token out first.
+    fn at_bare_word(&self, w: BStr<'_>) -> bool {
+        matches!(self.peek(), Some(Tok::Word(segs))
+            if matches!(segs.as_slice(), [Seg::Lit(s)] if s.as_slice() == w))
     }
 
     /// A short human-readable name for the current token, for syntax-error
@@ -1330,7 +1423,7 @@ impl Parser {
             // which the lexer has already decoded — see
             // TD-OILS-ANSIC-ERROR-SPELLING in known-issues.md.)
             Some(Tok::Word(segs)) => word_from_segs(segs, self.opts)
-                .map_or_else(|_| "word".to_string(), |w| crate::unparse::word_src(&w)),
+                .map_or_else(|_| "word".to_string(), |w| shown(&crate::unparse::word_src(&w))),
             // Anything else (a newline, a here-doc body) has no word spelling.
             _ => "word".to_string(),
         }
@@ -1402,7 +1495,7 @@ impl Parser {
             return Ok(None);
         }
         if let Some(w) = self.reserved_here()
-            && stops.contains(&w.as_str())
+            && stops.contains(&w)
         {
             return Ok(None);
         }
@@ -1442,7 +1535,7 @@ impl Parser {
                 || self.at_op(Op::RParen)
                 || self
                     .reserved_here()
-                    .is_some_and(|w| stops.contains(&w.as_str()));
+                    .is_some_and(|w| stops.contains(&w));
             if !at_terminator {
                 return Err(self.unexpected_here());
             }
@@ -1492,13 +1585,13 @@ impl Parser {
         // as a whole command.
         let mut prefixed = false;
         loop {
-            if self.reserved_here().as_deref() == Some("!") {
+            if self.reserved_here() == Some("!") {
                 negated = !negated;
                 prefixed = true;
                 self.pos += 1;
                 continue;
             }
-            if self.bare_word_here().as_deref() == Some("time") {
+            if self.at_bare_word(b"time") {
                 timed = true;
                 prefixed = true;
                 self.pos += 1;
@@ -1509,11 +1602,11 @@ impl Parser {
                 // `-p`. `--` selects the POSIX format as well, so `time -- x`
                 // and `time -p x` report identically — and `declare -f` prints
                 // both back as `time -p`.
-                if self.bare_word_here().as_deref() == Some("-p") {
+                if self.at_bare_word(b"-p") {
                     time_posix = true;
                     self.pos += 1;
                 }
-                if self.bare_word_here().as_deref() == Some("--") {
+                if self.at_bare_word(b"--") {
                     time_posix = true;
                     self.pos += 1;
                 }
@@ -1565,7 +1658,7 @@ impl Parser {
 
     fn parse_command(&mut self) -> Result<Command, ParseError> {
         if let Some(w) = self.reserved_here() {
-            let cmd = match w.as_str() {
+            let cmd = match w {
                 "if" => self.parse_if()?,
                 "while" => self.parse_loop(false)?,
                 "until" => self.parse_loop(true)?,
@@ -1593,7 +1686,7 @@ impl Parser {
             return self.with_redirects(Command::Arith(raw));
         }
         // `[[ expr ]]` conditional expression.
-        if self.bare_word_here().as_deref() == Some("[[") {
+        if self.at_bare_word(b"[[") {
             let cmd = self.parse_cond()?;
             return self.with_redirects(cmd);
         }
@@ -1618,7 +1711,10 @@ impl Parser {
             // error can quote it back exactly as typed.
             let bare = self.bare_word_here();
             let definable = bare.is_some();
-            let name = bare.unwrap_or_else(|| self.token_display());
+            // Not definable: the name is only ever quoted back in a run-time
+            // error, so its source spelling (a `String` until step 10 of
+            // TD-OILS-BYTE-STRINGS) is what there is to store.
+            let name = bare.unwrap_or_else(|| self.token_display().into_bytes());
             self.pos += 3;
             self.skip_newlines();
             let body = self.parse_compound_body()?;
@@ -1632,12 +1728,12 @@ impl Parser {
         }
         // `function NAME [()] body` — bash keyword form of a function
         // definition (recognised only at command start).
-        if self.bare_word_here().as_deref() == Some("function") {
+        if self.at_bare_word(b"function") {
             return self.parse_function_keyword();
         }
         // `coproc [NAME] command` — bash reserved word, recognised only at
         // command start.
-        if self.bare_word_here().as_deref() == Some("coproc") {
+        if self.at_bare_word(b"coproc") {
             return self.parse_coproc();
         }
         self.parse_simple()
@@ -1657,7 +1753,7 @@ impl Parser {
         }
         let bare = self.bare_word_here();
         let definable = bare.is_some();
-        let name = bare.unwrap_or_else(|| self.token_display());
+        let name = bare.unwrap_or_else(|| self.token_display().into_bytes());
         self.pos += 1; // consume the name word
         // Optional `()` after the name.
         if self.at_op(Op::LParen) {
@@ -1690,7 +1786,10 @@ impl Parser {
             && is_valid_name(&w)
             && self.compound_starts_at(self.pos + 1)
         {
-            name = Some(w);
+            // `is_valid_name` has already established that the word is an ASCII
+            // identifier, so the conversion cannot fail; a `None` here would
+            // simply leave the coproc unnamed, as if no name had been written.
+            name = bytes::as_str(&w).map(str::to_owned);
             self.pos += 1;
         }
         let body = self.parse_command()?;
@@ -1706,8 +1805,8 @@ impl Parser {
             Some(Tok::Word(segs)) => {
                 if let [Seg::Lit(s)] = segs.as_slice() {
                     matches!(
-                        s.as_str(),
-                        "{" | "[[" | "if" | "while" | "until" | "for" | "select" | "case"
+                        s.as_slice(),
+                        b"{" | b"[[" | b"if" | b"while" | b"until" | b"for" | b"select" | b"case"
                     )
                 } else {
                     false
@@ -1826,14 +1925,14 @@ impl Parser {
         self.expect_reserved("then")?;
         let body = self.parse_program(&["elif", "else", "fi"], false)?;
         let mut elifs = Vec::new();
-        while self.reserved_here().as_deref() == Some("elif") {
+        while self.reserved_here() == Some("elif") {
             self.pos += 1;
             let c = self.parse_program(&["then"], false)?;
             self.expect_reserved("then")?;
             let b = self.parse_program(&["elif", "else", "fi"], false)?;
             elifs.push((c, b));
         }
-        let else_body = if self.reserved_here().as_deref() == Some("else") {
+        let else_body = if self.reserved_here() == Some("else") {
             self.pos += 1;
             Some(self.parse_program(&["fi"], false)?)
         } else {
@@ -1866,14 +1965,22 @@ impl Parser {
             self.pos += 1;
             return self.parse_for_arith(&raw);
         }
-        let Some(var) = self.bare_word_here() else {
+        let Some(name) = self.bare_word_here() else {
             // `for` with no loop variable (`for; do …`, `for` at EOF, `for |`):
             // bash names the unexpected token / reports end of input.
             return Err(self.unexpected_here());
         };
-        if !is_valid_name(&var) {
-            return Err(ParseError::new(format!("`{var}': not a valid identifier")));
-        }
+        // A loop variable is a *name*, and names are ASCII identifiers, so a
+        // word that is not one — including a word that is not text at all —
+        // gets the same error bash gives for `for 1x`. `is_valid_name`
+        // accepting the bytes also guarantees they are ASCII, so the two
+        // checks together reject exactly what bash rejects.
+        let Some(var) = name_text(&name).filter(|v| is_valid_name(v.as_bytes())) else {
+            return Err(ParseError::new(format!(
+                "`{}': not a valid identifier",
+                shown(&name)
+            )));
+        };
         self.pos += 1;
         self.skip_newlines();
         let words = self.parse_in_list()?;
@@ -1900,7 +2007,7 @@ impl Parser {
     /// which is distinct from `Some(vec![])` for an empty list (`for x in; do …`
     /// iterates nothing).
     fn parse_in_list(&mut self) -> Result<Option<Vec<Word>>, ParseError> {
-        if self.reserved_here().as_deref() != Some("in") {
+        if self.reserved_here() != Some("in") {
             self.skip_separators();
             return Ok(None);
         }
@@ -1919,12 +2026,16 @@ impl Parser {
     /// the word-list `for` loop; the runtime difference is the interactive menu.
     fn parse_select(&mut self) -> Result<Command, ParseError> {
         self.expect_reserved("select")?;
-        let Some(var) = self.bare_word_here() else {
+        let Some(name) = self.bare_word_here() else {
             return Err(self.unexpected_here());
         };
-        if !is_valid_name(&var) {
-            return Err(ParseError::new(format!("`{var}': not a valid identifier")));
-        }
+        // Same name rule as the word-list `for` loop; see `parse_for`.
+        let Some(var) = name_text(&name).filter(|v| is_valid_name(v.as_bytes())) else {
+            return Err(ParseError::new(format!(
+                "`{}': not a valid identifier",
+                shown(&name)
+            )));
+        };
         self.pos += 1;
         self.skip_newlines();
         let words = self.parse_in_list()?;
@@ -1938,8 +2049,8 @@ impl Parser {
     /// the raw `init; cond; update` text captured from the arithmetic token.
     /// The three sections are split on `;`; an omitted section is empty (an
     /// empty condition is treated as always-true at run time).
-    fn parse_for_arith(&mut self, raw: &str) -> Result<Command, ParseError> {
-        let parts: Vec<&str> = raw.split(';').collect();
+    fn parse_for_arith(&mut self, raw: BStr<'_>) -> Result<Command, ParseError> {
+        let parts: Vec<BStr<'_>> = raw.split(|&b| b == b';').collect();
         if parts.len() != 3 {
             return Err(ParseError::new(
                 "C-style for loop requires 'for (( init; cond; update ))'".into(),
@@ -1950,9 +2061,9 @@ impl Parser {
         // when a function is printed back by `declare -f`: `for (( i=0; i<2;
         // i++ ))` comes back as `for ((i=0; i<2; i++ ))`, trailing space and
         // all. The arithmetic evaluator ignores the whitespace either way.
-        let init = parts[0].trim_start().to_string();
-        let cond = parts[1].trim_start().to_string();
-        let update = parts[2].trim_start().to_string();
+        let init = bytes::trim_start(parts.first().copied().unwrap_or_default()).to_vec();
+        let cond = bytes::trim_start(parts.get(1).copied().unwrap_or_default()).to_vec();
+        let update = bytes::trim_start(parts.get(2).copied().unwrap_or_default()).to_vec();
         // An optional separator (`;`/newline) may precede `do`.
         self.skip_separators();
         self.expect_reserved("do")?;
@@ -1979,7 +2090,7 @@ impl Parser {
         self.expect_reserved("in")?;
         self.skip_newlines();
         let mut items = Vec::new();
-        while self.reserved_here().as_deref() != Some("esac") {
+        while self.reserved_here() != Some("esac") {
             if self.peek().is_none() {
                 // Unterminated `case` at end of input: bash reports
                 // `syntax error: unexpected end of file`.
@@ -2046,7 +2157,7 @@ impl Parser {
                 || self.at_op(Op::DSemi)
                 || self.at_op(Op::SemiAmp)
                 || self.at_op(Op::DSemiAmp)
-                || self.reserved_here().as_deref() == Some("esac")
+                || self.reserved_here() == Some("esac")
             {
                 break;
             }
@@ -2077,7 +2188,7 @@ impl Parser {
         // Consume `[[`.
         self.pos += 1;
         let expr = self.parse_cond_or()?;
-        if self.bare_word_here().as_deref() != Some("]]") {
+        if !self.at_bare_word(b"]]") {
             // A complete expression but no closer: bash emits
             // `unexpected EOF while looking for \`]]'` then `syntax error:
             // unexpected end of file` (no source echo). If a stray token sits
@@ -2144,7 +2255,7 @@ impl Parser {
                     .to_string(),
             ));
         }
-        if self.bare_word_here().as_deref() == Some("!") {
+        if self.at_bare_word(b"!") {
             self.pos += 1;
             let inner = self.parse_cond_not()?;
             return Ok(CondExpr::Not(Box::new(inner)));
@@ -2215,7 +2326,7 @@ impl Parser {
         // stray `)` is *not* caught here: it is a structural token that
         // `parse_cond` reports with its own "unexpected token" form.
         if let Some(Tok::Word(segs)) = self.peek()
-            && !matches!(segs.as_slice(), [Seg::Lit(s)] if s == "]]")
+            && !matches!(segs.as_slice(), [Seg::Lit(s)] if s.as_slice() == b"]]")
         {
             let tok = self.token_display();
             return Err(ParseError::new(format!(
@@ -2296,7 +2407,7 @@ impl Parser {
     fn expect_cond_word(&mut self, pos: CondPos) -> Result<Word, ParseError> {
         if let Some(Tok::Word(segs)) = self.peek() {
             // `]]` is the closer, never an operand.
-            if !matches!(segs.as_slice(), [Seg::Lit(s)] if s == "]]") {
+            if !matches!(segs.as_slice(), [Seg::Lit(s)] if s.as_slice() == b"]]") {
                 let segs = segs.clone();
                 self.pos += 1;
                 return self.word_from_segs(&segs);
@@ -2402,7 +2513,7 @@ impl Parser {
                     // dispatched, so here we only stop for list terminators).
                     if !seen_word
                         && let [Seg::Lit(s)] = segs.as_slice()
-                        && RESERVED.contains(&s.as_str())
+                        && RESERVED.iter().any(|r| r.as_bytes() == s.as_slice())
                     {
                         break;
                     }
@@ -2604,7 +2715,7 @@ impl Parser {
     }
 
     fn expect_reserved(&mut self, w: &str) -> Result<(), ParseError> {
-        if self.reserved_here().as_deref() == Some(w) {
+        if self.reserved_here() == Some(w) {
             self.pos += 1;
             Ok(())
         } else {
@@ -2632,9 +2743,10 @@ impl Parser {
         if name_len == 0 {
             return Ok(None);
         }
-        let name = &first[..name_len];
-        let (index, after_lhs) = if first[name_len..].starts_with('[') {
-            match balanced_subscript_end(&first[name_len..]) {
+        let name = first.get(..name_len).unwrap_or_default();
+        let lhs_tail = first.get(name_len..).unwrap_or_default();
+        let (index, after_lhs) = if lhs_tail.first() == Some(&b'[') {
+            match balanced_subscript_end(lhs_tail) {
                 // A subscript containing expansions spans multiple segments,
                 // e.g. `m[$k]=v` → [Lit("m["), Param("k"), Lit("]=v")]; the
                 // first segment then has no closing `]` at all.
@@ -2645,7 +2757,7 @@ impl Parser {
                     // ("a[]: bad array subscript"); refusing it here instead
                     // would demote the word to a command name and report
                     // "command not found".
-                    let idx_src = &first[name_len + 1..name_len + close];
+                    let idx_src = lhs_tail.get(1..close).unwrap_or_default();
                     // A subscript is parsed verbatim (no word-splitting or
                     // trimming): for an associative array the expanded text —
                     // leading/trailing whitespace included — is the literal key
@@ -2653,17 +2765,17 @@ impl Parser {
                     // arithmetic evaluator ignores the whitespace, so preserving
                     // it is harmless.
                     let idx = word_verbatim_from_source(idx_src, self.opts)?;
-                    (Some(idx), &first[name_len + close + 1..])
+                    (Some(idx), lhs_tail.get(close + 1..).unwrap_or_default())
                 }
             }
         } else {
-            (None, &first[name_len..])
+            (None, lhs_tail)
         };
         // `+=` append. Only these two spellings follow the left-hand side; a
         // word that runs on into anything else is not an assignment.
-        let (append, after) = if let Some(rest) = after_lhs.strip_prefix("+=") {
+        let (append, after) = if let Some(rest) = after_lhs.strip_prefix(b"+=") {
             (true, rest)
-        } else if let Some(rest) = after_lhs.strip_prefix('=') {
+        } else if let Some(rest) = after_lhs.strip_prefix(b"=") {
             (false, rest)
         } else {
             return Ok(None);
@@ -2672,11 +2784,14 @@ impl Parser {
         // rest of the segments.
         let mut value_segs: Vec<Seg> = Vec::new();
         if !after.is_empty() {
-            value_segs.push(Seg::Lit(after.to_string()));
+            value_segs.push(Seg::Lit(after.to_vec()));
         }
-        value_segs.extend_from_slice(&segs[1..]);
+        value_segs.extend_from_slice(segs.get(1..).unwrap_or_default());
+        let Some(name) = name_text(name) else {
+            return Ok(None);
+        };
         Ok(Some(Assignment {
-            name: name.to_string(),
+            name,
             index,
             append,
             value: AssignRhs::Scalar(self.word_from_segs(&value_segs)?),
@@ -2694,47 +2809,47 @@ impl Parser {
     fn spanning_subscript_assignment(
         &self,
         segs: &[Seg],
-        first: &str,
+        first: BStr<'_>,
         open: usize,
     ) -> Result<Option<Assignment>, ParseError> {
-        let name = &first[..open];
+        let name = first.get(..open).unwrap_or_default();
         if name.is_empty() || !is_valid_name(name) {
             return Ok(None);
         }
         // Subscript segments: the first seg's text after `[`, then whole
         // segments, up to the segment that carries the closing `]`.
         let mut sub_segs: Vec<Seg> = Vec::new();
-        let after_open = &first[open + 1..];
+        let after_open = first.get(open + 1..).unwrap_or_default();
         if !after_open.is_empty() {
-            sub_segs.push(Seg::Lit(after_open.to_string()));
+            sub_segs.push(Seg::Lit(after_open.to_vec()));
         }
         let mut value_segs: Vec<Seg> = Vec::new();
         let mut append = false;
         let mut found = false;
-        for seg in &segs[1..] {
+        for seg in segs.get(1..).unwrap_or_default() {
             if found {
                 value_segs.push(seg.clone());
                 continue;
             }
             if let Seg::Lit(s) = seg
-                && let Some(close) = s.find(']')
+                && let Some(close) = s.iter().position(|&b| b == b']')
             {
-                let before = &s[..close];
+                let before = s.get(..close).unwrap_or_default();
                 if !before.is_empty() {
-                    sub_segs.push(Seg::Lit(before.to_string()));
+                    sub_segs.push(Seg::Lit(before.to_vec()));
                 }
-                let rest = &s[close + 1..];
-                let val_lit = if let Some(v) = rest.strip_prefix("+=") {
+                let rest = s.get(close + 1..).unwrap_or_default();
+                let val_lit = if let Some(v) = rest.strip_prefix(b"+=") {
                     append = true;
                     v
-                } else if let Some(v) = rest.strip_prefix('=') {
+                } else if let Some(v) = rest.strip_prefix(b"=") {
                     v
                 } else {
                     // `]` not immediately followed by `=` — not an assignment.
                     return Ok(None);
                 };
                 if !val_lit.is_empty() {
-                    value_segs.push(Seg::Lit(val_lit.to_string()));
+                    value_segs.push(Seg::Lit(val_lit.to_vec()));
                 }
                 found = true;
                 continue;
@@ -2744,8 +2859,11 @@ impl Parser {
         if !found || sub_segs.is_empty() {
             return Ok(None);
         }
+        let Some(name) = name_text(name) else {
+            return Ok(None);
+        };
         Ok(Some(Assignment {
-            name: name.to_string(),
+            name,
             index: Some(self.word_from_segs(&sub_segs)?),
             append,
             value: AssignRhs::Scalar(self.word_from_segs(&value_segs)?),
@@ -2760,19 +2878,20 @@ impl Parser {
 /// positional; use element assignment `m[$k]=v` for that).
 fn parse_array_elem(segs: &[Seg], opts: LexOpts) -> Result<ArrayElem, ParseError> {
     if let Some(Seg::Lit(first)) = segs.first()
-        && first.starts_with('[')
-        && let Some(close_eq) = first.find("]=")
+        && first.first() == Some(&b'[')
+        && let Some(close_eq) = bytes::find(first, b"]=")
     {
         // Verbatim: an associative keyed element `[ x ]=v` keys on the literal
         // ` x ` (bash preserves subscript whitespace); indexed elements
         // arithmetic-evaluate, which ignores it.
-        let index = word_verbatim_from_source(&first[1..close_eq], opts)?;
+        let index =
+            word_verbatim_from_source(first.get(1..close_eq).unwrap_or_default(), opts)?;
         let mut value_segs: Vec<Seg> = Vec::new();
-        let after = &first[close_eq + 2..];
+        let after = first.get(close_eq + 2..).unwrap_or_default();
         if !after.is_empty() {
-            value_segs.push(Seg::Lit(after.to_string()));
+            value_segs.push(Seg::Lit(after.to_vec()));
         }
-        value_segs.extend_from_slice(&segs[1..]);
+        value_segs.extend_from_slice(segs.get(1..).unwrap_or_default());
         return Ok(ArrayElem::Keyed {
             index,
             value: word_from_segs(&value_segs, opts)?,
@@ -2785,28 +2904,29 @@ fn parse_array_elem(segs: &[Seg], opts: LexOpts) -> Result<ArrayElem, ParseError
     // later literal segment) is the key — intervening quoted/expansion segments
     // belong to it and are copied verbatim.
     if let Some(Seg::Lit(first)) = segs.first()
-        && first.starts_with('[')
-        && !first.contains("]=")
+        && first.first() == Some(&b'[')
+        && bytes::find(first, b"]=").is_none()
     {
         let mut key_segs: Vec<Seg> = Vec::new();
-        let head = &first[1..];
+        let head = first.get(1..).unwrap_or_default();
         if !head.is_empty() {
-            key_segs.push(Seg::Lit(head.to_string()));
+            key_segs.push(Seg::Lit(head.to_vec()));
         }
         for (i, seg) in segs.iter().enumerate().skip(1) {
             if let Seg::Lit(s) = seg
-                && let Some(pos) = s.find("]=")
+                && let Some(pos) = bytes::find(s, b"]=")
             {
-                if !s[..pos].is_empty() {
-                    key_segs.push(Seg::Lit(s[..pos].to_string()));
+                let before = s.get(..pos).unwrap_or_default();
+                if !before.is_empty() {
+                    key_segs.push(Seg::Lit(before.to_vec()));
                 }
                 let index = word_from_segs(&key_segs, opts)?;
                 let mut value_segs: Vec<Seg> = Vec::new();
-                let after = &s[pos + 2..];
+                let after = s.get(pos + 2..).unwrap_or_default();
                 if !after.is_empty() {
-                    value_segs.push(Seg::Lit(after.to_string()));
+                    value_segs.push(Seg::Lit(after.to_vec()));
                 }
-                value_segs.extend_from_slice(&segs[i + 1..]);
+                value_segs.extend_from_slice(segs.get(i + 1..).unwrap_or_default());
                 return Ok(ArrayElem::Keyed {
                     index,
                     value: word_from_segs(&value_segs, opts)?,
@@ -2831,8 +2951,8 @@ fn is_declaration_command(words: &[Word]) -> bool {
         return false;
     };
     matches!(
-        name.as_str(),
-        "declare" | "typeset" | "local" | "export" | "readonly"
+        name.as_slice(),
+        b"declare" | b"typeset" | b"local" | b"export" | b"readonly"
     )
 }
 
@@ -2952,7 +3072,7 @@ fn seg_to_part(seg: &Seg, opts: LexOpts) -> Result<WordPart, ParseError> {
 /// must not be mistaken for the subscript's close. Brackets inside any valid
 /// nested `${…}`/`$(…)` are themselves balanced, so plain depth counting over
 /// `[`/`]` handles those correctly too.
-fn matching_subscript_close(bytes: &[char], open: usize) -> Option<usize> {
+fn matching_subscript_close(chs: &[Ch], open: usize) -> Option<usize> {
     // Scan for the `]` that closes the subscript opened at `open`, tracking
     // `[`/`]` nesting and *skipping quoted spans* so a quoted `]` inside an
     // associative key (`${h["a]b"]}`, `${h['a]b']}`) is not mistaken for the
@@ -2963,22 +3083,22 @@ fn matching_subscript_close(bytes: &[char], open: usize) -> Option<usize> {
     // TD-OILS-SUBSCRIPT-QUOTED-BRACKET.
     let mut depth = 0usize;
     let mut i = open;
-    while i < bytes.len() {
-        match bytes[i] {
+    while i < chs.len() {
+        match syn_at(chs, i) {
             // A backslash escapes the next character (skip both).
             '\\' => i += 1,
             // Single-quoted run: verbatim to the closing quote (no escapes).
             '\'' => {
                 i += 1;
-                while i < bytes.len() && bytes[i] != '\'' {
+                while i < chs.len() && syn_at(chs, i) != '\'' {
                     i += 1;
                 }
             }
             // Double-quoted run: to the closing quote, honoring `\`.
             '"' => {
                 i += 1;
-                while i < bytes.len() && bytes[i] != '"' {
-                    if bytes[i] == '\\' {
+                while i < chs.len() && syn_at(chs, i) != '"' {
+                    if syn_at(chs, i) == '\\' {
                         i += 1;
                     }
                     i += 1;
@@ -3002,7 +3122,7 @@ fn matching_subscript_close(bytes: &[char], open: usize) -> Option<usize> {
 enum NameSubscript {
     /// The body split cleanly into a name, an optional `[subscript]`, and
     /// whatever text followed the subscript.
-    Split(String, Option<ArrayIndex>, Vec<char>),
+    Split(String, Option<ArrayIndex>, Vec<Ch>),
     /// The body is well-formed enough to *parse* but cannot be interpreted, so
     /// bash defers the complaint to expansion time. The only such case here is
     /// an empty subscript (`${a[]}`), which bash parses happily — a guarded
@@ -3010,38 +3130,46 @@ enum NameSubscript {
     /// word is expanded, as a runtime "bad substitution". Every caller turns
     /// this into [`WordPart::BadSubst`]. Note the check is purely lexical:
     /// `${a[  ]}` is *not* empty, and arithmetic-evaluates its blanks to index 0.
+    ///
+    /// A parameter *name* that is not text takes the same route: the variable
+    /// namespace is ASCII, so `${\xff}` names nothing and bash's answer is the
+    /// same run-time "bad substitution".
     Deferred,
 }
 
-fn split_name_subscript(
-    bytes: &[char],
-    opts: LexOpts,
-) -> Result<NameSubscript, ParseError> {
-    if bytes.is_empty() {
+fn split_name_subscript(chs: &[Ch], opts: LexOpts) -> Result<NameSubscript, ParseError> {
+    if chs.is_empty() {
         return Err(ParseError::new("empty '${}' expansion".into()));
     }
     let mut i = 0;
-    if bytes[0].is_ascii_digit() {
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
+    if syn_at(chs, 0).is_ascii_digit() {
+        while i < chs.len() && syn_at(chs, i).is_ascii_digit() {
             i += 1;
         }
-    } else if is_name_start(bytes[0]) {
-        while i < bytes.len() && is_name_char(bytes[i]) {
+    } else if is_name_start(syn_at(chs, 0)) {
+        while i < chs.len() && is_name_char(syn_at(chs, i)) {
             i += 1;
         }
     } else {
         // A special single-char parameter (`@`, `*`, `?`, `#`, `!`, `$`, …).
         i = 1;
     }
-    let name: String = bytes[..i].iter().collect();
-    if bytes.get(i) == Some(&'[')
-        && let Some(close) = matching_subscript_close(bytes, i)
+    let raw_name = bytes::from_chars(chs.get(..i).unwrap_or_default().iter().copied());
+    // Only the special-parameter branch above can pick up a non-ASCII character,
+    // and no such parameter exists — `${\xff}` names nothing, which bash reports
+    // when the word is expanded.
+    let Some(name) = name_text(&raw_name) else {
+        return Ok(NameSubscript::Deferred);
+    };
+    if syn_at(chs, i) == '['
+        && let Some(close) = matching_subscript_close(chs, i)
     {
-        let inner: String = bytes[i + 1..close].iter().collect();
-        let index = match inner.as_str() {
-            "@" => ArrayIndex::All,
-            "*" => ArrayIndex::Star,
-            "" => return Ok(NameSubscript::Deferred),
+        let inner =
+            bytes::from_chars(chs.get(i + 1..close).unwrap_or_default().iter().copied());
+        let index = match inner.as_slice() {
+            b"@" => ArrayIndex::All,
+            b"*" => ArrayIndex::Star,
+            b"" => return Ok(NameSubscript::Deferred),
             // Verbatim so an associative read `${h[ x ]}` keys on the literal
             // ` x ` (bash preserves subscript whitespace); indexed reads
             // arithmetic-evaluate, which ignores the whitespace.
@@ -3050,48 +3178,54 @@ fn split_name_subscript(
         return Ok(NameSubscript::Split(
             name,
             Some(index),
-            bytes[close + 1..].to_vec(),
+            chs.get(close + 1..).unwrap_or_default().to_vec(),
         ));
     }
-    Ok(NameSubscript::Split(name, None, bytes[i..].to_vec()))
+    Ok(NameSubscript::Split(name, None, chs.get(i..).unwrap_or_default().to_vec()))
 }
 
 /// Parse the `offset[:length]` portion of a substring/slice expansion (the
 /// text after the leading `:`). The offset and each length are parsed as
 /// arithmetic words. Splits on the *first* unescaped `:` only.
 fn parse_slice_bounds(
-    rest: &[char],
+    rest: &[Ch],
     opts: LexOpts,
 ) -> Result<(Box<Word>, Option<Box<Word>>), ParseError> {
-    let body: String = rest.iter().collect();
-    let (off_str, len_str) = match body.find(':') {
-        Some(idx) => (body[..idx].to_string(), Some(body[idx + 1..].to_string())),
-        None => (body, None),
+    let (off, len) = match rest.iter().position(|&c| syn(c) == ':') {
+        Some(idx) => (
+            rest.get(..idx).unwrap_or_default(),
+            Some(rest.get(idx + 1..).unwrap_or_default()),
+        ),
+        None => (rest, None),
     };
-    let length = match len_str {
-        Some(s) => Some(Box::new(word_from_source(&s, opts)?)),
+    let length = match len {
+        Some(s) => {
+            let text = bytes::from_chars(s.iter().copied());
+            Some(Box::new(word_from_source(&text, opts)?))
+        }
         None => None,
     };
-    Ok((Box::new(word_from_source(&off_str, opts)?), length))
+    let off_text = bytes::from_chars(off.iter().copied());
+    Ok((Box::new(word_from_source(&off_text, opts)?), length))
 }
 
-pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, ParseError> {
-    if let Some(after_hash) = raw.strip_prefix('#') {
+pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: LexOpts) -> Result<WordPart, ParseError> {
+    if let Some(after_hash) = raw.strip_prefix(b"#") {
         if after_hash.is_empty() {
             // `${#}` is the positional-parameter count — treat as `$#`.
             return Ok(WordPart::Param("#".into()));
         }
-        let bytes: Vec<char> = after_hash.chars().collect();
+        let chs: Vec<Ch> = bytes::chars(after_hash).collect();
         let NameSubscript::Split(name, subscript, remaining) =
-            split_name_subscript(&bytes, opts)?
+            split_name_subscript(&chs, opts)?
         else {
-            return Ok(WordPart::BadSubst(raw.to_string()));
+            return Ok(WordPart::BadSubst(raw.to_vec()));
         };
         if let Some(index) = subscript {
             if !remaining.is_empty() {
                 // bash accepts this at parse time and rejects it only during
                 // expansion as a runtime "bad substitution" (DISCARD-class).
-                return Ok(WordPart::BadSubst(raw.to_string()));
+                return Ok(WordPart::BadSubst(raw.to_vec()));
             }
             // `${#name[@]}` / `${#name[i]}` — array element count / element length.
             return Ok(WordPart::ArrayRef {
@@ -3100,9 +3234,13 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
                 length: true,
             });
         }
-        return Ok(WordPart::Length(after_hash.to_string()));
+        // `${#name}` names a parameter, so bytes that are not text are not one.
+        let Some(text) = name_text(after_hash) else {
+            return Ok(WordPart::BadSubst(raw.to_vec()));
+        };
+        return Ok(WordPart::Length(text));
     }
-    if let Some(after_bang) = raw.strip_prefix('!') {
+    if let Some(after_bang) = raw.strip_prefix(b"!") {
         // `${!prefix*}` / `${!prefix@}` — names of set variables beginning with
         // `prefix`. Distinguished from the array-keys form (`${!a[@]}`) by
         // ending in a bare `*`/`@` (no closing `]`). A valid name prefix is
@@ -3110,32 +3248,28 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
         // A *non-empty* prefix is required for the name-listing form: a bare
         // `${!*}`/`${!@}` is instead indirect expansion through the positional
         // list (`$*`/`$@`), handled below, not a listing of every variable.
-        if let Some(prefix) = after_bang.strip_suffix('*')
+        if let Some(prefix) = after_bang.strip_suffix(b"*")
             && !prefix.is_empty()
-            && !prefix.contains('[')
+            && !prefix.contains(&b'[')
             && is_valid_name(prefix)
+            && let Some(prefix) = name_text(prefix)
         {
-            return Ok(WordPart::VarNames {
-                prefix: prefix.to_string(),
-                star: true,
-            });
+            return Ok(WordPart::VarNames { prefix, star: true });
         }
-        if let Some(prefix) = after_bang.strip_suffix('@')
+        if let Some(prefix) = after_bang.strip_suffix(b"@")
             && !prefix.is_empty()
-            && !prefix.contains('[')
+            && !prefix.contains(&b'[')
             && is_valid_name(prefix)
+            && let Some(prefix) = name_text(prefix)
         {
-            return Ok(WordPart::VarNames {
-                prefix: prefix.to_string(),
-                star: false,
-            });
+            return Ok(WordPart::VarNames { prefix, star: false });
         }
         // `${!name[@]}` / `${!name[*]}` — the keys/indices of an array.
-        let bytes: Vec<char> = after_bang.chars().collect();
+        let chs: Vec<Ch> = bytes::chars(after_bang).collect();
         let NameSubscript::Split(name, subscript, remaining) =
-            split_name_subscript(&bytes, opts)?
+            split_name_subscript(&chs, opts)?
         else {
-            return Ok(WordPart::BadSubst(raw.to_string()));
+            return Ok(WordPart::BadSubst(raw.to_vec()));
         };
         if let Some(index) = &subscript
             && remaining.is_empty()
@@ -3158,8 +3292,8 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
         // parameter being an array.
         let index: Option<Box<Word>> = match subscript {
             None => None,
-            Some(ArrayIndex::Index(w)) if is_valid_name(&name) => Some(w),
-            Some(_) => return Ok(WordPart::BadSubst(raw.to_string())),
+            Some(ArrayIndex::Index(w)) if is_valid_name(name.as_bytes()) => Some(w),
+            Some(_) => return Ok(WordPart::BadSubst(raw.to_vec())),
         };
         if is_indirect_referent(&name) {
             if remaining.is_empty() {
@@ -3174,9 +3308,9 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
             // the placeholder name is rewritten to the resolved target at
             // expansion time. Only scalar modifiers combine with indirection,
             // and only a plain-name referent may carry a trailing modifier.
-            if is_valid_name(&name) {
-                let modifier_src: String =
-                    name.chars().chain(remaining.iter().copied()).collect();
+            if is_valid_name(name.as_bytes()) {
+                let mut modifier_src = name.clone().into_bytes();
+                modifier_src.extend(bytes::from_chars(remaining.iter().copied()));
                 let target = parse_braced_param(&modifier_src, opts)?;
                 if matches!(
                     target,
@@ -3197,11 +3331,11 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
         }
         // bash accepts this at parse time and rejects it only during expansion
         // as a runtime "bad substitution" (DISCARD-class).
-        return Ok(WordPart::BadSubst(raw.to_string()));
+        return Ok(WordPart::BadSubst(raw.to_vec()));
     }
-    let bytes: Vec<char> = raw.chars().collect();
-    let NameSubscript::Split(name, subscript, rest) = split_name_subscript(&bytes, opts)? else {
-        return Ok(WordPart::BadSubst(raw.to_string()));
+    let chs: Vec<Ch> = bytes::chars(raw).collect();
+    let NameSubscript::Split(name, subscript, rest) = split_name_subscript(&chs, opts)? else {
+        return Ok(WordPart::BadSubst(raw.to_vec()));
     };
     // A subscript may be combined with an operator: `${a[i]:-def}`, `${a[i]#pat}`,
     // etc. Only a specific `[expr]` index is allowed with an operator — `[@]`/`[*]`
@@ -3228,8 +3362,9 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
             }
             // `${a[@]:off:len}` / `${a[*]:off:len}` — array slice (a `:` not
             // followed by a `-=+?` operator char).
-            if rest[0] == ':' && !matches!(rest.get(1), Some('-' | '=' | '+' | '?')) {
-                let (offset, length) = parse_slice_bounds(&rest[1..], opts)?;
+            if syn_at(&rest, 0) == ':' && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') {
+                let (offset, length) =
+                    parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts)?;
                 return Ok(WordPart::ArraySlice {
                     name,
                     star: matches!(index, ArrayIndex::Star),
@@ -3249,26 +3384,24 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
             // `${a[@]@Z}` / `${a[@]@}` — an empty/unknown/multi-char `@`
             // transform operator: empty for an empty array (or unset), but a
             // "bad substitution" when the array has ≥1 element.
-            if rest.first() == Some(&'@') {
+            if syn_at(&rest, 0) == '@' {
                 return Ok(WordPart::ArrayBulk {
                     name,
                     star: matches!(index, ArrayIndex::Star),
-                    op: BulkOp::BadTransform {
-                        raw: raw.to_string(),
-                    },
+                    op: BulkOp::BadTransform { raw: raw.to_vec() },
                 });
             }
             // `${a[@]:-x}` / `${a[*]:+x}` / `${a[@]:?msg}` — use/alternate/error
             // operators on a whole-array reference. Bash treats `[@]`/`[*]` like
             // `$@`: substitute the elements when active, else the operand word.
             let star = matches!(index, ArrayIndex::Star);
-            let mut chs = rest.iter();
-            let mut c = *chs.next().unwrap_or(&'\0');
+            let mut it = rest.iter().copied();
+            let mut c = it.next().map_or('\0', syn);
             let colon = c == ':';
             if colon {
-                c = *chs.next().unwrap_or(&'\0');
+                c = it.next().map_or('\0', syn);
             }
-            let arg_str: String = chs.collect();
+            let arg_str = bytes::from_chars(it);
             let op = match c {
                 '-' => ParamOp::UseDefault,
                 '=' => ParamOp::AssignDefault,
@@ -3277,7 +3410,7 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
                 _ => {
                     // bash accepts this at parse time and rejects it only during
                     // expansion as a runtime "bad substitution" (DISCARD-class).
-                    return Ok(WordPart::BadSubst(raw.to_string()));
+                    return Ok(WordPart::BadSubst(raw.to_vec()));
                 }
             };
             return Ok(WordPart::ArrayOp {
@@ -3293,11 +3426,10 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
     // rule as the array form; distinguished from string substring because the
     // parameter names the whole positional list).
     if (name == "@" || name == "*")
-        && !rest.is_empty()
-        && rest[0] == ':'
-        && !matches!(rest.get(1), Some('-' | '=' | '+' | '?'))
+        && syn_at(&rest, 0) == ':'
+        && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?')
     {
-        let (offset, length) = parse_slice_bounds(&rest[1..], opts)?;
+        let (offset, length) = parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts)?;
         return Ok(WordPart::ArraySlice {
             name: name.clone(),
             star: name == "*",
@@ -3319,25 +3451,23 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
     }
     // `${@@Z}` / `${@@}` — invalid `@` transform over the positionals: empty
     // when there are no positional parameters, "bad substitution" otherwise.
-    if (name == "@" || name == "*") && rest.first() == Some(&'@') {
+    if (name == "@" || name == "*") && syn_at(&rest, 0) == '@' {
         return Ok(WordPart::ArrayBulk {
             name: name.clone(),
             star: name == "*",
-            op: BulkOp::BadTransform {
-                raw: raw.to_string(),
-            },
+            op: BulkOp::BadTransform { raw: raw.to_vec() },
         });
     }
     if rest.is_empty() {
         return Ok(WordPart::Param(name));
     }
-    match rest[0] {
+    match syn_at(&rest, 0) {
         // Prefix / suffix trimming: `#`, `##`, `%`, `%%`.
         '#' | '%' => {
-            let suffix = rest[0] == '%';
-            let longest = rest.get(1) == Some(&rest[0]);
+            let suffix = syn_at(&rest, 0) == '%';
+            let longest = syn_at(&rest, 1) == syn_at(&rest, 0);
             let pat_start = if longest { 2 } else { 1 };
-            let pat: String = rest[pat_start..].iter().collect();
+            let pat = bytes::from_chars(rest.get(pat_start..).unwrap_or_default().iter().copied());
             Ok(WordPart::ParamTrim {
                 name,
                 index: elem_index,
@@ -3348,14 +3478,14 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
         }
         // Case modification: `^`/`^^` (upper), `,`/`,,` (lower), `~`/`~~` (toggle).
         '^' | ',' | '~' => {
-            let mode = match rest[0] {
+            let mode = match syn_at(&rest, 0) {
                 '^' => crate::ast::CaseMode::Upper,
                 ',' => crate::ast::CaseMode::Lower,
                 _ => crate::ast::CaseMode::Toggle,
             };
-            let all = rest.get(1) == Some(&rest[0]);
+            let all = syn_at(&rest, 1) == syn_at(&rest, 0);
             let pat_start = if all { 2 } else { 1 };
-            let pat: String = rest[pat_start..].iter().collect();
+            let pat = bytes::from_chars(rest.get(pat_start..).unwrap_or_default().iter().copied());
             Ok(WordPart::ParamCase {
                 name,
                 index: elem_index,
@@ -3371,25 +3501,25 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
             // deferred to expansion, where it yields empty for an unset
             // parameter but a "bad substitution" for a set one. `BadTransform`
             // carries the raw source so the runtime can reproduce that split.
-            if rest.len() == 2 && is_valid_transform_op(rest[1]) {
+            if rest.len() == 2 && is_valid_transform_op(syn_at(&rest, 1)) {
                 return Ok(WordPart::ParamTransform {
                     name,
                     index: elem_index,
-                    op: rest[1],
+                    op: syn_at(&rest, 1),
                 });
             }
             Ok(WordPart::BadTransform {
                 name,
                 index: elem_index,
-                raw: raw.to_string(),
+                raw: raw.to_vec(),
             })
         }
         // Pattern substitution: `/pat/repl`, `//pat/repl`, `/#…`, `/%…`.
-        '/' => parse_param_replace(name, elem_index, &rest[1..], opts),
+        '/' => parse_param_replace(name, elem_index, rest.get(1..).unwrap_or_default(), opts),
         // Substring `:offset[:length]` — but `:` followed by one of -=+? is the
         // use/assign/alt/error operator, handled below.
-        ':' if !matches!(rest.get(1), Some('-' | '=' | '+' | '?')) => {
-            let (offset, length) = parse_slice_bounds(&rest[1..], opts)?;
+        ':' if !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') => {
+            let (offset, length) = parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts)?;
             Ok(WordPart::ParamSubstr {
                 name,
                 index: elem_index,
@@ -3399,15 +3529,15 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
         }
         // `:-`, `:=`, `:+`, `:?` and the colon-less `-=+?` forms.
         _ => {
-            let mut chs = rest.iter();
-            let mut c = *chs.next().unwrap_or(&'\0');
+            let mut it = rest.iter().copied();
+            let mut c = it.next().map_or('\0', syn);
             // A leading `:` selects the null-or-unset (colon) form; without it the
             // operator acts only when the parameter is genuinely unset.
             let colon = c == ':';
             if colon {
-                c = *chs.next().unwrap_or(&'\0');
+                c = it.next().map_or('\0', syn);
             }
-            let arg_str: String = chs.collect();
+            let arg_str = bytes::from_chars(it);
             let op = match c {
                 '-' => ParamOp::UseDefault,
                 '=' => ParamOp::AssignDefault,
@@ -3416,7 +3546,7 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
                 _ => {
                     // bash accepts this at parse time and rejects it only during
                     // expansion as a runtime "bad substitution" (DISCARD-class).
-                    return Ok(WordPart::BadSubst(raw.to_string()));
+                    return Ok(WordPart::BadSubst(raw.to_vec()));
                 }
             };
             Ok(WordPart::ParamOp {
@@ -3439,47 +3569,46 @@ pub(crate) fn parse_braced_param(raw: &str, opts: LexOpts) -> Result<WordPart, P
 /// substitution parsers.
 #[allow(clippy::type_complexity)]
 fn parse_replace_pieces(
-    body: &[char],
+    body: &[Ch],
     opts: LexOpts,
 ) -> Result<(bool, ReplaceAnchor, Box<Word>, Box<Word>), ParseError> {
     let mut i = 0;
     let mut all = false;
     let mut anchor = ReplaceAnchor::None;
-    match body.first() {
-        Some('/') => {
+    match syn_at(body, 0) {
+        '/' => {
             all = true;
             i = 1;
         }
-        Some('#') => {
+        '#' => {
             anchor = ReplaceAnchor::Start;
             i = 1;
         }
-        Some('%') => {
+        '%' => {
             anchor = ReplaceAnchor::End;
             i = 1;
         }
         _ => {}
     }
     // Pattern runs to the next unescaped '/'; the remainder is the replacement.
-    let mut pattern = String::new();
-    let mut replacement = String::new();
+    let mut pattern = Str::new();
+    let mut replacement = Str::new();
     let mut in_repl = false;
-    while i < body.len() {
-        let c = body[i];
-        if !in_repl && c == '\\' && body.get(i + 1) == Some(&'/') {
-            pattern.push('/');
+    while let Some(&c) = body.get(i) {
+        if !in_repl && syn(c) == '\\' && syn_at(body, i + 1) == '/' {
+            pattern.push(b'/');
             i += 2;
             continue;
         }
-        if !in_repl && c == '/' {
+        if !in_repl && syn(c) == '/' {
             in_repl = true;
             i += 1;
             continue;
         }
         if in_repl {
-            replacement.push(c);
+            c.push_to(&mut replacement);
         } else {
-            pattern.push(c);
+            c.push_to(&mut pattern);
         }
         i += 1;
     }
@@ -3494,7 +3623,7 @@ fn parse_replace_pieces(
 fn parse_param_replace(
     name: String,
     index: Option<Box<Word>>,
-    body: &[char],
+    body: &[Ch],
     opts: LexOpts,
 ) -> Result<WordPart, ParseError> {
     let (all, anchor, pattern, replacement) = parse_replace_pieces(body, opts)?;
@@ -3511,16 +3640,16 @@ fn parse_param_replace(
 /// Parse the operator portion of a bulk array expansion (`${a[@]OP}`) into a
 /// [`BulkOp`], or `None` when `rest` is not a recognized element-wise operator
 /// (e.g. the `:-`/`:=` default operators, which do not apply to `[@]`).
-fn parse_bulk_op(rest: &[char], opts: LexOpts) -> Result<Option<BulkOp>, ParseError> {
+fn parse_bulk_op(rest: &[Ch], opts: LexOpts) -> Result<Option<BulkOp>, ParseError> {
     if rest.is_empty() {
         return Ok(None);
     }
-    match rest[0] {
+    match syn_at(rest, 0) {
         '#' | '%' => {
-            let suffix = rest[0] == '%';
-            let longest = rest.get(1) == Some(&rest[0]);
+            let suffix = syn_at(rest, 0) == '%';
+            let longest = syn_at(rest, 1) == syn_at(rest, 0);
             let pat_start = if longest { 2 } else { 1 };
-            let pat: String = rest[pat_start..].iter().collect();
+            let pat = bytes::from_chars(rest.get(pat_start..).unwrap_or_default().iter().copied());
             Ok(Some(BulkOp::Trim {
                 suffix,
                 longest,
@@ -3528,14 +3657,14 @@ fn parse_bulk_op(rest: &[char], opts: LexOpts) -> Result<Option<BulkOp>, ParseEr
             }))
         }
         '^' | ',' | '~' => {
-            let mode = match rest[0] {
+            let mode = match syn_at(rest, 0) {
                 '^' => crate::ast::CaseMode::Upper,
                 ',' => crate::ast::CaseMode::Lower,
                 _ => crate::ast::CaseMode::Toggle,
             };
-            let all = rest.get(1) == Some(&rest[0]);
+            let all = syn_at(rest, 1) == syn_at(rest, 0);
             let pat_start = if all { 2 } else { 1 };
-            let pat: String = rest[pat_start..].iter().collect();
+            let pat = bytes::from_chars(rest.get(pat_start..).unwrap_or_default().iter().copied());
             Ok(Some(BulkOp::Case {
                 mode,
                 all,
@@ -3543,7 +3672,8 @@ fn parse_bulk_op(rest: &[char], opts: LexOpts) -> Result<Option<BulkOp>, ParseEr
             }))
         }
         '/' => {
-            let (all, anchor, pattern, replacement) = parse_replace_pieces(&rest[1..], opts)?;
+            let (all, anchor, pattern, replacement) =
+                parse_replace_pieces(rest.get(1..).unwrap_or_default(), opts)?;
             Ok(Some(BulkOp::Replace {
                 all,
                 anchor,
@@ -3555,8 +3685,8 @@ fn parse_bulk_op(rest: &[char], opts: LexOpts) -> Result<Option<BulkOp>, ParseEr
         // An empty (`@`), unknown (`@Z`), or multi-char (`@QU`) operator is
         // left to the caller, which builds a `BulkOp::BadTransform` (bash
         // defers the empty/invalid case to expansion time — see below).
-        '@' if rest.len() == 2 && is_valid_transform_op(rest[1]) => {
-            Ok(Some(BulkOp::Transform { op: rest[1] }))
+        '@' if rest.len() == 2 && is_valid_transform_op(syn_at(rest, 1)) => {
+            Ok(Some(BulkOp::Transform { op: syn_at(rest, 1) }))
         }
         _ => Ok(None),
     }
@@ -3578,7 +3708,7 @@ fn is_valid_transform_op(op: char) -> bool {
 /// Parse `s` as a single word preserving literal whitespace (no word-splitting
 /// or operator tokenization) — for the pattern and replacement of
 /// `${var/pat/repl}`, where bash applies only expansion and quote removal.
-pub(crate) fn word_verbatim_from_source(s: &str, opts: LexOpts) -> Result<Word, ParseError> {
+pub(crate) fn word_verbatim_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
@@ -3597,7 +3727,7 @@ pub(crate) fn word_verbatim_from_source(s: &str, opts: LexOpts) -> Result<Word, 
 ///
 /// # Errors
 /// Returns [`ParseError`] on an unterminated substitution inside `s`.
-pub(crate) fn dquote_word_from_source(s: &str, opts: LexOpts) -> Result<Word, ParseError> {
+pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
@@ -3613,7 +3743,7 @@ pub(crate) fn dquote_word_from_source(s: &str, opts: LexOpts) -> Result<Word, Pa
 /// `${var/pat/repl}`: a literal `\&`/`\\` is preserved (not consumed at lex
 /// time) so the runtime `&`-substitution can distinguish an escaped ampersand
 /// from an active one. See [`crate::lexer::lex_replacement_verbatim`].
-fn word_replacement_from_source(s: &str, opts: LexOpts) -> Result<Word, ParseError> {
+fn word_replacement_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
@@ -3625,7 +3755,7 @@ fn word_replacement_from_source(s: &str, opts: LexOpts) -> Result<Word, ParseErr
     Ok(Word { parts })
 }
 
-fn word_from_source(s: &str, opts: LexOpts) -> Result<Word, ParseError> {
+fn word_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
@@ -3654,22 +3784,17 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-pub(crate) fn is_valid_name(s: &str) -> bool {
-    let mut it = s.chars();
-    match it.next() {
-        Some(c) if is_name_start(c) => {}
-        _ => return false,
-    }
-    it.all(is_name_char)
-}
-
 /// Byte length of the identifier `s` begins with, or `0` if it does not begin
 /// with one. Used to anchor assignment-word recognition to the name, so that a
 /// `[` or `=` further right — in the *value* — cannot be mistaken for the start
 /// of a subscript or for the assignment operator.
-fn name_prefix_len(s: &str) -> usize {
+fn name_prefix_len(s: BStr<'_>) -> usize {
     let mut len = 0;
-    for (i, c) in s.char_indices() {
+    // Byte-wise: every identifier character is ASCII, so a byte that is part of
+    // a multi-byte character (or is not text at all) fails the test and ends the
+    // name — it can never be mistaken for one.
+    for (i, &b) in s.iter().enumerate() {
+        let c = char::from(b);
         if i == 0 {
             if !is_name_start(c) {
                 return 0;
@@ -3677,7 +3802,7 @@ fn name_prefix_len(s: &str) -> usize {
         } else if !is_name_char(c) {
             break;
         }
-        len = i + c.len_utf8();
+        len = i + 1;
     }
     len
 }
@@ -3690,13 +3815,13 @@ fn name_prefix_len(s: &str) -> usize {
 /// The subscript body is *not* scanned for quoting: bash reads it as arithmetic
 /// (or, for an associative array, as a literal key) after the brackets have
 /// already been matched, so a `]` inside it is a `]` here too.
-fn balanced_subscript_end(s: &str) -> Option<usize> {
-    debug_assert!(s.starts_with('['));
+fn balanced_subscript_end(s: BStr<'_>) -> Option<usize> {
+    debug_assert!(s.first() == Some(&b'['));
     let mut depth = 0usize;
-    for (i, c) in s.char_indices() {
-        match c {
-            '[' => depth += 1,
-            ']' => {
+    for (i, &b) in s.iter().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(i);
@@ -3717,7 +3842,7 @@ fn balanced_subscript_end(s: &str) -> Option<usize> {
 /// (bash then rejects them as "invalid variable name" unless empty). Only a
 /// *prefixed* `@`/`*` (`${!prefix@}`) is the variable-name listing form.
 fn is_indirect_referent(name: &str) -> bool {
-    is_valid_name(name)
+    is_valid_name(name.as_bytes())
         || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
         || matches!(name, "#" | "?" | "-" | "@" | "*")
 }
@@ -3727,7 +3852,7 @@ fn is_indirect_referent(name: &str) -> bool {
 /// `>&$var` or `>&"file"` are treated as filenames (redirect both).
 fn dup_target_is_fd(target: &Word) -> bool {
     if let [WordPart::Literal(s)] = target.parts.as_slice() {
-        s == "-" || (!s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+        s.as_slice() == b"-" || (!s.is_empty() && s.iter().all(u8::is_ascii_digit))
     } else {
         false
     }
@@ -3736,7 +3861,7 @@ fn dup_target_is_fd(target: &Word) -> bool {
 /// Map a `[[ … ]]` unary operator string to its [`CondUnary`], keeping the
 /// spelling it was written with (`-h` and `-L` are the same test but must print
 /// back differently).
-fn unary_op_from(s: &str) -> Option<CondUnary> {
+fn unary_op_from(s: BStr<'_>) -> Option<CondUnary> {
     // A table rather than a `match`, because the spelling has to come back out
     // as a `&'static str`: `-L` and `-h` select the same test but are distinct
     // entries so that each keeps its own name.
@@ -3757,7 +3882,7 @@ fn unary_op_from(s: &str) -> Option<CondUnary> {
         ("-t", UnaryOp::Terminal),
     ];
     OPS.iter()
-        .find(|(text, _)| *text == s)
+        .find(|(text, _)| text.as_bytes() == s)
         .map(|&(text, op)| CondUnary { op, text })
 }
 
@@ -3821,7 +3946,7 @@ impl RawBinOp {
 /// Map a `[[ … ]]` binary operator word to its [`RawBinOp`] and the spelling it
 /// was written with — `==` and `=` are the same comparison under two names, and
 /// bash prints back whichever one the source used.
-fn raw_binop_from(s: &str) -> Option<(RawBinOp, &'static str)> {
+fn raw_binop_from(s: BStr<'_>) -> Option<(RawBinOp, &'static str)> {
     const OPS: &[(&str, RawBinOp)] = &[
         ("==", RawBinOp::StrEq),
         ("=", RawBinOp::StrEq),
@@ -3837,12 +3962,29 @@ fn raw_binop_from(s: &str) -> Option<(RawBinOp, &'static str)> {
         ("-ot", RawBinOp::FileOlder),
         ("-ef", RawBinOp::SameFile),
     ];
-    OPS.iter().find(|(text, _)| *text == s).map(|&(text, op)| (op, text))
+    OPS.iter().find(|(text, _)| text.as_bytes() == s).map(|&(text, op)| (op, text))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tests spell their input as Rust source, which is UTF-8 by
+    /// construction, so they call the byte-string parser through this shadow
+    /// rather than writing `b"..."` at every site. A local item shadows the
+    /// glob import above, so `parse` inside this module means this function.
+    fn parse(src: &str) -> Result<Program, ParseError> {
+        super::parse(src.as_bytes())
+    }
+
+    /// The text of a byte string an assertion wants to compare against a
+    /// literal. Every such value in these tests is ASCII by construction, so a
+    /// non-UTF-8 one is a test bug and should fail loudly.
+    fn text(s: BStr<'_>) -> String {
+        bytes::as_str(s)
+            .unwrap_or_else(|| panic!("expected UTF-8, got {s:?}"))
+            .to_owned()
+    }
 
     #[test]
     fn simple_command() {
@@ -4062,7 +4204,7 @@ mod tests {
         let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
             panic!("expected function");
         };
-        assert_eq!(f.name, "greet");
+        assert_eq!(text(&f.name), "greet");
     }
 
     /// bash's `WORD ( )` production accepts any word, and defers the name check
@@ -4075,7 +4217,7 @@ mod tests {
             let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
                 panic!("expected function: {src}");
             };
-            (f.name.clone(), f.definable)
+            (text(&f.name), f.definable)
         };
         // Not an identifier, but a perfectly good function name.
         for name in ["my-func", "a.b", "1f", "a/b", "a,b", ".f", "f%", "[b]", "a[b]"] {
@@ -4106,21 +4248,21 @@ mod tests {
         let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
             panic!("expected function");
         };
-        assert_eq!(f.name, "greet");
+        assert_eq!(text(&f.name), "greet");
 
         // bash keyword form WITH parentheses.
         let prog = parse("function greet() { echo hi; }").unwrap();
         let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
             panic!("expected function");
         };
-        assert_eq!(f.name, "greet");
+        assert_eq!(text(&f.name), "greet");
 
         // A non-identifier name is permitted in the keyword form.
         let prog = parse("function foo-bar { echo hi; }").unwrap();
         let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
             panic!("expected function");
         };
-        assert_eq!(f.name, "foo-bar");
+        assert_eq!(text(&f.name), "foo-bar");
 
         // Multi-line body and a subshell body.
         assert!(parse("function f {\necho a\necho b\n}").is_ok());
@@ -4128,7 +4270,7 @@ mod tests {
         let Command::Function(f) = &prog.items[0].list.first.commands[0] else {
             panic!("expected function");
         };
-        assert_eq!(f.name, "f");
+        assert_eq!(text(&f.name), "f");
 
         // Trailing redirection is attached to the definition.
         let prog = parse("function f { echo a; } >/dev/null").unwrap();
@@ -4460,7 +4602,7 @@ mod tests {
     /// at a time.
     fn backtick_unit(src: &str, close_line: u32) -> Result<Program, ParseError> {
         let opts = LexOpts::default();
-        IncrementalParser::new(src, LineMap::Offset(close_line.saturating_sub(1)), opts)
+        IncrementalParser::new(src.as_bytes(), LineMap::Offset(close_line.saturating_sub(1)), opts)
             .next_unit(None, opts)
             .unwrap_or_else(|| Ok(Program { items: Vec::new() }))
     }
@@ -4682,7 +4824,7 @@ mod tests {
                 panic!("{src}: expected a regex conditional");
             };
             match rhs.parts.as_slice() {
-                [WordPart::Literal(s)] => s.clone(),
+                [WordPart::Literal(s)] => text(s),
                 other => panic!("{src}: expected one literal part, got {other:?}"),
             }
         };
@@ -4713,7 +4855,7 @@ mod tests {
         let Command::Arith(raw) = &prog.items[0].list.first.commands[0] else {
             panic!("expected arith command");
         };
-        assert_eq!(raw.trim(), "x + 1");
+        assert_eq!(text(bytes::trim(raw)), "x + 1");
     }
 
     #[test]

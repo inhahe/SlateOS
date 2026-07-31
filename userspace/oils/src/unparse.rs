@@ -25,6 +25,8 @@ use crate::ast::{
     CondExpr, Item, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor,
     SimpleCommand, Word, WordPart,
 };
+use crate::bfmt;
+use crate::bytes::{self, BStr, Str, StrBuf as _};
 
 /// Deparse a `${…}` case-modification operator: `^`/`^^` (upper), `,`/`,,`
 /// (lower), `~`/`~~` (toggle); doubled when `all`.
@@ -40,8 +42,8 @@ fn case_op_src(mode: CaseMode, all: bool) -> &'static str {
 }
 
 /// One indentation level (bash uses 4 spaces in `declare -f` output).
-fn ind(level: usize) -> String {
-    "    ".repeat(level)
+fn ind(level: usize) -> Str {
+    b"    ".repeat(level)
 }
 
 /// Render a function definition in bash's `declare -f` form:
@@ -53,8 +55,8 @@ fn ind(level: usize) -> String {
 /// }
 /// ```
 #[must_use]
-pub fn unparse_function(name: &str, body: &Program, redirects: &[Redirect]) -> String {
-    let mut s = String::new();
+pub fn unparse_function(name: BStr<'_>, body: &Program, redirects: &[Redirect]) -> Str {
+    let mut s = Str::new();
     s.push_str(name);
     // bash prints the opening brace on its own line with a trailing space
     // (`{ \n`), matching `declare -f` / `type` output byte-for-byte.
@@ -63,22 +65,22 @@ pub fn unparse_function(name: &str, body: &Program, redirects: &[Redirect]) -> S
     if inner.is_empty() {
         // An empty body still needs a no-op so it re-parses.
         s.push_str(&ind(1));
-        s.push(':');
-        s.push('\n');
+        s.push(b':');
+        s.push(b'\n');
     } else {
         s.push_str(&inner);
-        if !inner.ends_with('\n') {
-            s.push('\n');
+        if !inner.ends_with(b"\n") {
+            s.push(b'\n');
         }
     }
     // Redirections attached to the definition (`f() { …; } >log`) render on
     // the closing-brace line: `} > log`, matching bash's `declare -f`.
-    s.push('}');
+    s.push(b'}');
     for r in redirects {
-        s.push(' ');
+        s.push(b' ');
         s.push_str(&redirect_src(r));
     }
-    s.push('\n');
+    s.push(b'\n');
     // A here-doc attached to the *definition* (`f() { …; } <<EOF`) is still
     // parked on the closing-brace line; nothing inside has markers left.
     flush_here_docs(&s)
@@ -93,15 +95,15 @@ pub fn unparse_function(name: &str, body: &Program, redirects: &[Redirect]) -> S
 /// clauses) leaves the last statement unterminated. Non-final statements always
 /// take a `;` separator (a backgrounded statement's ` &` is its own separator).
 #[must_use]
-pub fn program_block(prog: &Program, level: usize, terminate_last: bool) -> String {
-    let mut out = String::new();
+pub fn program_block(prog: &Program, level: usize, terminate_last: bool) -> Str {
+    let mut out = Str::new();
     let n = prog.items.len();
     for (i, item) in prog.items.iter().enumerate() {
         // bash keeps a backgrounded statement and the one that follows it on the
         // same line (`a & b & c`), using ` & ` as an inline connector. So only
         // indent an item that begins a fresh line: the first, or one whose
         // predecessor was not backgrounded. (TD-OILS-DECLAREF-QUIRKS item 3.)
-        let mut stmt = String::new();
+        let mut stmt = Str::new();
         if i == 0 || !prog.items[i - 1].background {
             stmt.push_str(&ind(level));
         }
@@ -115,18 +117,18 @@ pub fn program_block(prog: &Program, level: usize, terminate_last: bool) -> Stri
             // `item_stmt` already emitted the trailing ` &`; connect the next
             // statement inline with a space, and only break the line when this
             // backgrounded item is the last in the block.
-            stmt.push(if is_last { '\n' } else { ' ' });
+            stmt.push(if is_last { b'\n' } else { b' ' });
         } else {
             // Separate with `;`, terminating the last one only in clause-body
             // context (`then`/`else`/`do`); group bodies leave it unterminated.
             if (!is_last || terminate_last) && !trailing_here {
-                stmt.push(';');
+                stmt.push(b';');
             }
-            stmt.push('\n');
+            stmt.push(b'\n');
         }
         out.push_str(&flush_here_docs(&stmt));
         if trailing_here {
-            out.push('\n');
+            out.push(b'\n');
         }
     }
     out
@@ -135,8 +137,8 @@ pub fn program_block(prog: &Program, level: usize, terminate_last: bool) -> Stri
 /// Render a program inline (single logical line), items joined by `; `. Used for
 /// conditions (`if <here>; then …`) and command substitutions.
 #[must_use]
-pub fn program_inline(prog: &Program) -> String {
-    let mut parts: Vec<String> = Vec::new();
+pub fn program_inline(prog: &Program) -> Str {
+    let mut parts: Vec<Str> = Vec::new();
     for item in &prog.items {
         let mut s = and_or_inline(&item.list);
         if item.background {
@@ -144,13 +146,13 @@ pub fn program_inline(prog: &Program) -> String {
         }
         parts.push(s);
     }
-    parts.join("; ")
+    bytes::join(&parts, b"; ")
 }
 
 /// One statement (and-or list, plus a trailing ` &` when backgrounded). The
 /// first line carries no leading indent (the caller supplies it); nested lines
 /// are indented to `level`.
-fn item_stmt(item: &Item, level: usize) -> String {
+fn item_stmt(item: &Item, level: usize) -> Str {
     let mut s = and_or_block(&item.list, level);
     if item.background {
         s.push_str(" &");
@@ -159,7 +161,7 @@ fn item_stmt(item: &Item, level: usize) -> String {
 }
 
 /// And-or list where the first pipeline may be a multi-line compound command.
-fn and_or_block(ao: &AndOr, level: usize) -> String {
+fn and_or_block(ao: &AndOr, level: usize) -> Str {
     let mut s = pipeline_block(&ao.first, level);
     for (op, pl) in &ao.rest {
         s.push_str(match op {
@@ -174,13 +176,13 @@ fn and_or_block(ao: &AndOr, level: usize) -> String {
 /// And-or list as bash exposes it in a trap's stored command text: rendered
 /// inline, with any here-document body flushed onto its own lines.
 #[must_use]
-pub fn and_or_src(ao: &AndOr) -> String {
+pub fn and_or_src(ao: &AndOr) -> Str {
     flush_here_docs(&and_or_inline(ao))
 }
 
 /// And-or list rendered strictly inline (for conditions / command subs). Any
 /// here-document body stays parked for the caller to flush.
-fn and_or_inline(ao: &AndOr) -> String {
+fn and_or_inline(ao: &AndOr) -> Str {
     let mut s = pipeline_src(&ao.first);
     for (op, pl) in &ao.rest {
         s.push_str(match op {
@@ -192,8 +194,8 @@ fn and_or_inline(ao: &AndOr) -> String {
     s
 }
 
-fn pipeline_prefix(pl: &Pipeline) -> String {
-    let mut s = String::new();
+fn pipeline_prefix(pl: &Pipeline) -> Str {
+    let mut s = Str::new();
     if pl.timed {
         s.push_str(if pl.time_posix { "time -p " } else { "time " });
     }
@@ -204,18 +206,18 @@ fn pipeline_prefix(pl: &Pipeline) -> String {
 }
 
 /// Pipeline where each command may be a multi-line compound command.
-fn pipeline_block(pl: &Pipeline, level: usize) -> String {
+fn pipeline_block(pl: &Pipeline, level: usize) -> Str {
     let mut s = pipeline_prefix(pl);
-    let cmds: Vec<String> = pl.commands.iter().map(|c| command_block(c, level)).collect();
-    s.push_str(&cmds.join(" | "));
+    let cmds: Vec<Str> = pl.commands.iter().map(|c| command_block(c, level)).collect();
+    s.push_str(&bytes::join(&cmds, b" | "));
     s
 }
 
 /// Pipeline rendered strictly inline.
-fn pipeline_src(pl: &Pipeline) -> String {
+fn pipeline_src(pl: &Pipeline) -> Str {
     let mut s = pipeline_prefix(pl);
-    let cmds: Vec<String> = pl.commands.iter().map(command_inline).collect();
-    s.push_str(&cmds.join(" | "));
+    let cmds: Vec<Str> = pl.commands.iter().map(command_inline).collect();
+    s.push_str(&bytes::join(&cmds, b" | "));
     s
 }
 
@@ -232,8 +234,8 @@ fn render_if(
     elifs: &[(Program, Program)],
     else_body: Option<&Program>,
     level: usize,
-) -> String {
-    let mut s = String::from("if ");
+) -> Str {
+    let mut s = b"if ".to_vec();
     s.push_str(&program_inline(cond));
     s.push_str("; then\n");
     s.push_str(&program_block(body, level + 1, true));
@@ -262,14 +264,14 @@ fn render_if(
 /// Render a command as a (possibly multi-line) block. The first line has no
 /// leading indent; continuation lines are indented at `level`, bodies at
 /// `level + 1`.
-fn command_block(cmd: &Command, level: usize) -> String {
+fn command_block(cmd: &Command, level: usize) -> Str {
     match cmd {
         Command::Simple(sc) => simple_inline(sc),
         Command::If(c) => render_if(&c.cond, &c.body, &c.elifs, c.else_body.as_ref(), level),
         Command::Loop(c) => {
             // `while`/`until` keep `do` on the same line as the condition
             // (`while COND; do`), unlike `for`/`select` (see below).
-            let mut s = String::from(if c.until { "until " } else { "while " });
+            let mut s = if c.until { b"until ".to_vec() } else { b"while ".to_vec() };
             s.push_str(&program_inline(&c.cond));
             s.push_str("; do\n");
             s.push_str(&program_block(&c.body, level + 1, true));
@@ -280,11 +282,11 @@ fn command_block(cmd: &Command, level: usize) -> String {
         Command::For(c) => {
             // bash's deparser puts `do` on its own line for `for` (the word list
             // is terminated with `;`, then `do` at the loop's indent level).
-            let mut s = format!("for {}", c.var);
+            let mut s = bfmt![b"for ", &c.var];
             if let Some(words) = &c.words {
                 s.push_str(" in");
                 for w in words {
-                    s.push(' ');
+                    s.push(b' ');
                     s.push_str(&word_src(w));
                 }
             }
@@ -299,7 +301,7 @@ fn command_block(cmd: &Command, level: usize) -> String {
         Command::ForArith(c) => {
             // `for ((init; cond; upd))` with no inner-paren padding and `do` on
             // its own line, matching bash.
-            let mut s = format!("for (({}; {}; {}))\n", c.init, c.cond, c.update);
+            let mut s = bfmt![b"for ((", &c.init, b"; ", &c.cond, b"; ", &c.update, b"))\n"];
             s.push_str(&ind(level));
             s.push_str("do\n");
             s.push_str(&program_block(&c.body, level + 1, true));
@@ -308,11 +310,11 @@ fn command_block(cmd: &Command, level: usize) -> String {
             s
         }
         Command::Select(c) => {
-            let mut s = format!("select {}", c.var);
+            let mut s = bfmt![b"select ", &c.var];
             if let Some(words) = &c.words {
                 s.push_str(" in");
                 for w in words {
-                    s.push(' ');
+                    s.push(b' ');
                     s.push_str(&word_src(w));
                 }
             }
@@ -331,14 +333,14 @@ fn command_block(cmd: &Command, level: usize) -> String {
             // definition with the `function` keyword — regardless of the source
             // syntax — while top-level defs omit it. See known-issues.md
             // TD-OILS-DECLAREF-QUIRKS item 4.
-            let mut s = format!("function {} () \n", f.name);
+            let mut s = bfmt![b"function ", &f.name, b" () \n"];
             s.push_str(&ind(level));
             s.push_str("{ \n");
             s.push_str(&program_block(&f.body, level + 1, false));
             s.push_str(&ind(level));
-            s.push('}');
+            s.push(b'}');
             for r in &f.redirects {
-                s.push(' ');
+                s.push(b' ');
                 s.push_str(&redirect_src(r));
             }
             s
@@ -346,11 +348,11 @@ fn command_block(cmd: &Command, level: usize) -> String {
         Command::Case(c) => {
             // bash prints `case WORD in ` with a trailing space before the
             // newline.
-            let mut s = format!("case {} in \n", word_src(&c.word));
+            let mut s = bfmt![b"case ", &word_src(&c.word), b" in \n"];
             for item in &c.items {
-                let pats: Vec<String> = item.patterns.iter().map(word_src).collect();
+                let pats: Vec<Str> = item.patterns.iter().map(word_src).collect();
                 s.push_str(&ind(level + 1));
-                s.push_str(&pats.join("|"));
+                s.push_str(&bytes::join(&pats, b"|"));
                 s.push_str(")\n");
                 s.push_str(&program_block(&item.body, level + 2, false));
                 s.push_str(&ind(level + 1));
@@ -359,7 +361,7 @@ fn command_block(cmd: &Command, level: usize) -> String {
                     crate::ast::CaseTerm::FallThrough => ";&",
                     crate::ast::CaseTerm::ContinueMatch => ";;&",
                 });
-                s.push('\n');
+                s.push(b'\n');
             }
             s.push_str(&ind(level));
             s.push_str("esac");
@@ -367,10 +369,10 @@ fn command_block(cmd: &Command, level: usize) -> String {
         }
         Command::BraceGroup(prog) => {
             // bash prints the opening brace with a trailing space (`{ `).
-            let mut s = String::from("{ \n");
+            let mut s = b"{ \n".to_vec();
             s.push_str(&program_block(prog, level + 1, false));
             s.push_str(&ind(level));
-            s.push('}');
+            s.push(b'}');
             s
         }
         Command::Subshell(prog) => {
@@ -382,20 +384,20 @@ fn command_block(cmd: &Command, level: usize) -> String {
             // wrap in `( … )`. (TD-OILS-DECLAREF-QUIRKS item 2.)
             let body = program_block(prog, level, false);
             if body.is_empty() {
-                return String::from("( )");
+                return b"( )".to_vec();
             }
             let indent = ind(level);
-            let trimmed = body.strip_prefix(indent.as_str()).unwrap_or(body.as_str());
-            let trimmed = trimmed.strip_suffix('\n').unwrap_or(trimmed);
-            format!("( {trimmed} )")
+            let trimmed = body.strip_prefix(indent.as_slice()).unwrap_or(body.as_slice());
+            let trimmed = trimmed.strip_suffix(b"\n").unwrap_or(trimmed);
+            bfmt![b"( ", trimmed, b" )"]
         }
-        Command::Cond(expr) => format!("[[ {} ]]", cond_src(expr)),
-        Command::Arith(text) => format!("(({text}))"),
+        Command::Cond(expr) => bfmt![b"[[ ", &cond_src(expr), b" ]]"],
+        Command::Arith(text) => bfmt![b"((", text, b"))"],
         Command::Coproc { name, body } => {
-            let mut s = String::from("coproc ");
+            let mut s = b"coproc ".to_vec();
             if let Some(n) = name {
                 s.push_str(n);
-                s.push(' ');
+                s.push(b' ');
             }
             s.push_str(&command_block(body, level));
             s
@@ -403,7 +405,7 @@ fn command_block(cmd: &Command, level: usize) -> String {
         Command::Redirected { inner, redirects } => {
             let mut s = command_block(inner, level);
             for r in redirects {
-                s.push(' ');
+                s.push(b' ');
                 s.push_str(&redirect_src(r));
             }
             s
@@ -413,32 +415,32 @@ fn command_block(cmd: &Command, level: usize) -> String {
 
 /// Render a command strictly inline (compound commands still use `;` separators,
 /// which is valid bash — just not multi-line).
-fn command_inline(cmd: &Command) -> String {
+fn command_inline(cmd: &Command) -> Str {
     match cmd {
         Command::Simple(sc) => simple_inline(sc),
         Command::If(c) => {
-            let mut s = String::from("if ");
+            let mut s = b"if ".to_vec();
             s.push_str(&program_inline(&c.cond));
             s.push_str("; then ");
             s.push_str(&program_inline(&c.body));
-            s.push(';');
+            s.push(b';');
             for (econd, ebody) in &c.elifs {
                 s.push_str(" elif ");
                 s.push_str(&program_inline(econd));
                 s.push_str("; then ");
                 s.push_str(&program_inline(ebody));
-                s.push(';');
+                s.push(b';');
             }
             if let Some(eb) = &c.else_body {
                 s.push_str(" else ");
                 s.push_str(&program_inline(eb));
-                s.push(';');
+                s.push(b';');
             }
             s.push_str(" fi");
             s
         }
         Command::Loop(c) => {
-            let mut s = String::from(if c.until { "until " } else { "while " });
+            let mut s = if c.until { b"until ".to_vec() } else { b"while ".to_vec() };
             s.push_str(&program_inline(&c.cond));
             s.push_str("; do ");
             s.push_str(&program_inline(&c.body));
@@ -446,11 +448,11 @@ fn command_inline(cmd: &Command) -> String {
             s
         }
         Command::For(c) => {
-            let mut s = format!("for {}", c.var);
+            let mut s = bfmt![b"for ", &c.var];
             if let Some(words) = &c.words {
                 s.push_str(" in");
                 for w in words {
-                    s.push(' ');
+                    s.push(b' ');
                     s.push_str(&word_src(w));
                 }
             }
@@ -460,17 +462,17 @@ fn command_inline(cmd: &Command) -> String {
             s
         }
         Command::ForArith(c) => {
-            let mut s = format!("for (( {}; {}; {} )); do ", c.init, c.cond, c.update);
+            let mut s = bfmt![b"for (( ", &c.init, b"; ", &c.cond, b"; ", &c.update, b" )); do "];
             s.push_str(&program_inline(&c.body));
             s.push_str("; done");
             s
         }
         Command::Select(c) => {
-            let mut s = format!("select {}", c.var);
+            let mut s = bfmt![b"select ", &c.var];
             if let Some(words) = &c.words {
                 s.push_str(" in");
                 for w in words {
-                    s.push(' ');
+                    s.push(b' ');
                     s.push_str(&word_src(w));
                 }
             }
@@ -480,42 +482,42 @@ fn command_inline(cmd: &Command) -> String {
             s
         }
         Command::Function(f) => {
-            let mut s = format!("{} () {{ ", f.name);
+            let mut s = bfmt![&f.name, b" () { "];
             s.push_str(&program_inline(&f.body));
             s.push_str("; }");
             for r in &f.redirects {
-                s.push(' ');
+                s.push(b' ');
                 s.push_str(&redirect_src(r));
             }
             s
         }
         Command::Case(c) => {
-            let mut s = format!("case {} in ", word_src(&c.word));
+            let mut s = bfmt![b"case ", &word_src(&c.word), b" in "];
             for item in &c.items {
-                let pats: Vec<String> = item.patterns.iter().map(word_src).collect();
-                s.push_str(&pats.join("|"));
+                let pats: Vec<Str> = item.patterns.iter().map(word_src).collect();
+                s.push_str(&bytes::join(&pats, b"|"));
                 s.push_str(") ");
                 s.push_str(&program_inline(&item.body));
-                s.push(' ');
+                s.push(b' ');
                 s.push_str(match item.term {
                     crate::ast::CaseTerm::Break => ";;",
                     crate::ast::CaseTerm::FallThrough => ";&",
                     crate::ast::CaseTerm::ContinueMatch => ";;&",
                 });
-                s.push(' ');
+                s.push(b' ');
             }
             s.push_str("esac");
             s
         }
-        Command::BraceGroup(prog) => format!("{{ {}; }}", program_inline(prog)),
-        Command::Subshell(prog) => format!("( {} )", program_inline(prog)),
-        Command::Cond(expr) => format!("[[ {} ]]", cond_src(expr)),
-        Command::Arith(text) => format!("(({text}))"),
+        Command::BraceGroup(prog) => bfmt![b"{ ", &program_inline(prog), b"; }"],
+        Command::Subshell(prog) => bfmt![b"( ", &program_inline(prog), b" )"],
+        Command::Cond(expr) => bfmt![b"[[ ", &cond_src(expr), b" ]]"],
+        Command::Arith(text) => bfmt![b"((", text, b"))"],
         Command::Coproc { name, body } => {
-            let mut s = String::from("coproc ");
+            let mut s = b"coproc ".to_vec();
             if let Some(n) = name {
                 s.push_str(n);
-                s.push(' ');
+                s.push(b' ');
             }
             s.push_str(&command_inline(body));
             s
@@ -523,7 +525,7 @@ fn command_inline(cmd: &Command) -> String {
         Command::Redirected { inner, redirects } => {
             let mut s = command_inline(inner);
             for r in redirects {
-                s.push(' ');
+                s.push(b' ');
                 s.push_str(&redirect_src(r));
             }
             s
@@ -536,14 +538,14 @@ fn command_inline(cmd: &Command) -> String {
 /// except that a here-document body is flushed onto its own lines after it,
 /// which is what bash stores there too.
 #[must_use]
-pub fn simple_src(sc: &SimpleCommand) -> String {
+pub fn simple_src(sc: &SimpleCommand) -> Str {
     flush_here_docs(&simple_inline(sc))
 }
 
 /// A simple command rendered on one line, with any here-document body left
 /// parked for the caller to flush.
-fn simple_inline(sc: &SimpleCommand) -> String {
-    let mut parts: Vec<String> = Vec::new();
+fn simple_inline(sc: &SimpleCommand) -> Str {
+    let mut parts: Vec<Str> = Vec::new();
     for a in &sc.assignments {
         parts.push(assignment_src(a));
     }
@@ -561,45 +563,45 @@ fn simple_inline(sc: &SimpleCommand) -> String {
     for d in decl {
         parts.push(assignment_src(&d.assign));
     }
-    let mut s = parts.join(" ");
+    let mut s = bytes::join(&parts, b" ");
     for r in &sc.redirects {
         if !s.is_empty() {
-            s.push(' ');
+            s.push(b' ');
         }
         s.push_str(&redirect_src(r));
     }
     s
 }
 
-pub(crate) fn assignment_src(a: &Assignment) -> String {
-    let mut s = a.name.clone();
+pub(crate) fn assignment_src(a: &Assignment) -> Str {
+    let mut s = a.name.as_bytes().to_vec();
     if let Some(idx) = &a.index {
-        s.push('[');
+        s.push(b'[');
         s.push_str(&word_src(idx));
-        s.push(']');
+        s.push(b']');
     }
     s.push_str(if a.append { "+=" } else { "=" });
     match &a.value {
         AssignRhs::Scalar(w) => s.push_str(&word_src(w)),
         AssignRhs::Array(elems) => {
-            s.push('(');
-            let items: Vec<String> = elems
+            s.push(b'(');
+            let items: Vec<Str> = elems
                 .iter()
                 .map(|e| match e {
                     ArrayElem::Positional(w) => word_src(w),
                     ArrayElem::Keyed { index, value } => {
-                        format!("[{}]={}", word_src(index), word_src(value))
+                        bfmt![b"[", &word_src(index), b"]=", &word_src(value)]
                     }
                 })
                 .collect();
-            s.push_str(&items.join(" "));
-            s.push(')');
+            s.push_str(&bytes::join(&items, b" "));
+            s.push(b')');
         }
     }
     s
 }
 
-fn redirect_src(r: &Redirect) -> String {
+fn redirect_src(r: &Redirect) -> Str {
     // A varfd prefix `{name}` replaces the numeric fd on the operators that
     // accept one (`{fd}>`, `{fd}>>`, `{fd}<`, `{fd}>&…`).
     if let Some(name) = &r.varfd {
@@ -617,12 +619,12 @@ fn redirect_src(r: &Redirect) -> String {
             // form for those (unreachable in practice).
             _ => return redirect_src_plain(r),
         };
-        return format!("{{{name}}}{op}{sep}{}", word_src(&r.target));
+        return bfmt![b"{", name, b"}", op, sep, &word_src(&r.target)];
     }
     redirect_src_plain(r)
 }
 
-fn redirect_src_plain(r: &Redirect) -> String {
+fn redirect_src_plain(r: &Redirect) -> Str {
     // bash's `declare -f` deparser separates a redirection operator from a
     // *file/word* target with a single space (`> log`, `2>> err`, `&> both`,
     // `< in`), but writes fd-*duplication* operators tight against their fd
@@ -631,8 +633,8 @@ fn redirect_src_plain(r: &Redirect) -> String {
         RedirectOp::Write => fd_prefixed(r.fd, 1, ">", " ", &word_src(&r.target)),
         RedirectOp::Clobber => fd_prefixed(r.fd, 1, ">|", " ", &word_src(&r.target)),
         RedirectOp::Append => fd_prefixed(r.fd, 1, ">>", " ", &word_src(&r.target)),
-        RedirectOp::WriteBoth => format!("&> {}", word_src(&r.target)),
-        RedirectOp::AppendBoth => format!("&>> {}", word_src(&r.target)),
+        RedirectOp::WriteBoth => bfmt![b"&> ", &word_src(&r.target)],
+        RedirectOp::AppendBoth => bfmt![b"&>> ", &word_src(&r.target)],
         RedirectOp::Read => fd_prefixed(r.fd, 0, "<", " ", &word_src(&r.target)),
         // `<>` opens fd 0 by default, but bash's `declare -f` deparser elides the
         // source fd only for fd 1 (`1<> f` → `<> f`), showing it otherwise
@@ -644,7 +646,7 @@ fn redirect_src_plain(r: &Redirect) -> String {
         // Likewise an input dup renders with its explicit source fd
         // (`0<&3`, never `<&3`).
         RedirectOp::DupIn => fd_prefixed(r.fd, -1, "<&", "", &word_src(&r.target)),
-        RedirectOp::HereStr => format!("<<< {}", word_src(&r.target)),
+        RedirectOp::HereStr => bfmt![b"<<< ", &word_src(&r.target)],
         RedirectOp::HereDoc => here_doc_src(r),
     }
 }
@@ -659,8 +661,8 @@ fn redirect_src_plain(r: &Redirect) -> String {
 /// lifted out to the end of the line once the line is complete. Control
 /// characters are used because shell source has no use for them, so a body can
 /// never contain one that would be mistaken for a marker.
-const HD_OPEN: char = '\u{1}';
-const HD_CLOSE: char = '\u{2}';
+const HD_OPEN: u8 = 0x01;
+const HD_CLOSE: u8 = 0x02;
 
 /// `<<DELIM` / `<<-'DELIM'` plus the body, parked for [`flush_here_docs`].
 ///
@@ -668,32 +670,30 @@ const HD_CLOSE: char = '\u{2}';
 /// to the single-quoted form, and prints a `<<-` body already stripped of its
 /// leading tabs — which is exactly what the lexer stored — so the reprinted
 /// `<<-` still re-reads as the same bytes.
-fn here_doc_src(r: &Redirect) -> String {
+fn here_doc_src(r: &Redirect) -> Str {
     let Some(hd) = &r.here else {
         // A here-doc redirect always carries its delimiter from the parser.
         // Nothing else can deliver the body, so fall back to the here-string
         // form, which at least feeds stdin the same bytes.
-        return format!("<<< {}", word_src(&r.target));
+        return bfmt![b"<<< ", &word_src(&r.target)];
     };
     let delim = if hd.quoted {
-        format!("'{}'", hd.delim)
+        bfmt![b"'", &hd.delim, b"'"]
     } else {
         hd.delim.clone()
     };
-    let dash = if hd.strip { "-" } else { "" };
+    let dash: BStr<'static> = if hd.strip { b"-" } else { b"" };
     let mut body = word_src(&r.target);
     // Every body line the lexer captured ended in a newline; an empty body
     // needs none, and a body whose final line somehow lost its newline still
     // must not run into the delimiter.
-    if !body.is_empty() && !body.ends_with('\n') {
-        body.push('\n');
+    if !body.is_empty() && !body.ends_with(b"\n") {
+        body.push(b'\n');
     }
-    let fd = if r.fd == 0 {
-        String::new()
-    } else {
-        r.fd.to_string()
-    };
-    format!("{fd}<<{dash}{delim}{HD_OPEN}{body}{}\n{HD_CLOSE}", hd.delim)
+    let fd = if r.fd == 0 { Str::new() } else { bfmt![r.fd] };
+    bfmt![
+        &fd, b"<<", dash, &delim, HD_OPEN, &body, &hd.delim, b"\n", HD_CLOSE
+    ]
 }
 
 /// Move every parked here-document body ([`HD_OPEN`]…[`HD_CLOSE`]) out of the
@@ -703,40 +703,47 @@ fn here_doc_src(r: &Redirect) -> String {
 /// for a here-doc inside an `if` condition emits a function body that no longer
 /// re-parses (the body swallows the `then` clause). Flushing per line keeps the
 /// output readable and correct; the divergence is recorded in known-issues.md.
-fn flush_here_docs(text: &str) -> String {
-    if !text.contains(HD_OPEN) {
-        return text.to_string();
+fn flush_here_docs(text: BStr<'_>) -> Str {
+    if !text.contains(&HD_OPEN) {
+        return text.to_vec();
     }
-    let mut out = String::with_capacity(text.len());
+    let mut out = Str::with_capacity(text.len());
     // Bodies parked on the line being copied out, waiting for its newline. A
     // body spans lines of its own, so the scan cannot work line by line: it
     // walks the text looking for whichever comes first, a marker or a newline.
-    let mut parked = String::new();
+    let mut parked = Str::new();
     let mut rest = text;
-    while let Some(i) = rest.find([HD_OPEN, '\n']) {
-        out.push_str(&rest[..i]);
-        if rest[i..].starts_with('\n') {
-            out.push('\n');
-            out.push_str(&parked);
-            parked.clear();
-            rest = &rest[i + 1..];
-        } else if let Some(end) = rest[i..].find(HD_CLOSE).map(|e| i + e) {
-            parked.push_str(&rest[i + HD_OPEN.len_utf8()..end]);
-            rest = &rest[end + HD_CLOSE.len_utf8()..];
+    while let Some(i) = rest.iter().position(|&b| b == HD_OPEN || b == b'\n') {
+        out.extend_from_slice(rest.get(..i).unwrap_or_default());
+        if rest.get(i) == Some(&b'\n') {
+            out.push(b'\n');
+            out.append(&mut parked);
+            rest = rest.get(i + 1..).unwrap_or_default();
+        } else if let Some(end) = marker_end(rest, i) {
+            parked.extend_from_slice(rest.get(i + 1..end).unwrap_or_default());
+            rest = rest.get(end + 1..).unwrap_or_default();
         } else {
             // Unterminated marker: nothing sane to do but keep the text as-is.
-            out.push_str(&rest[i..]);
+            out.extend_from_slice(rest.get(i..).unwrap_or_default());
             return out;
         }
     }
-    out.push_str(rest);
+    out.extend_from_slice(rest);
     if !parked.is_empty() {
-        if !out.ends_with('\n') {
-            out.push('\n');
+        if !out.ends_with(b"\n") {
+            out.push(b'\n');
         }
-        out.push_str(&parked);
+        out.append(&mut parked);
     }
     out
+}
+
+/// Index of the [`HD_CLOSE`] that ends the parked body opened at `open`.
+fn marker_end(text: BStr<'_>, open: usize) -> Option<usize> {
+    text.get(open..)?
+        .iter()
+        .position(|&b| b == HD_CLOSE)
+        .map(|e| open + e)
 }
 
 /// Whether the *last* line of a rendered statement carries a here-document,
@@ -744,16 +751,16 @@ fn flush_here_docs(text: &str) -> String {
 ///
 /// That is the case where the statement's `;` separator has to give way: the
 /// body must start on the very next line, so there is nowhere to put one.
-fn last_line_has_here_doc(text: &str) -> bool {
+fn last_line_has_here_doc(text: BStr<'_>) -> bool {
     let mut found = false;
     let mut rest = text;
-    while let Some(i) = rest.find([HD_OPEN, '\n']) {
-        if rest[i..].starts_with('\n') {
+    while let Some(i) = rest.iter().position(|&b| b == HD_OPEN || b == b'\n') {
+        if rest.get(i) == Some(&b'\n') {
             found = false;
-            rest = &rest[i + 1..];
-        } else if let Some(end) = rest[i..].find(HD_CLOSE).map(|e| i + e) {
+            rest = rest.get(i + 1..).unwrap_or_default();
+        } else if let Some(end) = marker_end(rest, i) {
             found = true;
-            rest = &rest[end + HD_CLOSE.len_utf8()..];
+            rest = rest.get(end + 1..).unwrap_or_default();
         } else {
             return true;
         }
@@ -764,38 +771,38 @@ fn last_line_has_here_doc(text: &str) -> bool {
 /// `fd` prefix only when it differs from the operator's default (`>`→1, `<`→0);
 /// `sep` is inserted between the operator and target (a space for file targets,
 /// empty for fd-duplication operators).
-fn fd_prefixed(fd: i32, default: i32, op: &str, sep: &str, target: &str) -> String {
+fn fd_prefixed(fd: i32, default: i32, op: &str, sep: &str, target: BStr<'_>) -> Str {
     if fd == default {
-        format!("{op}{sep}{target}")
+        bfmt![op, sep, target]
     } else {
-        format!("{fd}{op}{sep}{target}")
+        bfmt![fd, op, sep, target]
     }
 }
 
-fn cond_src(expr: &CondExpr) -> String {
+fn cond_src(expr: &CondExpr) -> Str {
     match expr {
         // A bare word is a non-empty test, and bash prints it as the `-n` it
         // means rather than as written — one of the few places its printer
         // normalises instead of echoing the source.
-        CondExpr::Word(w) => format!("-n {}", word_src(w)),
+        CondExpr::Word(w) => bfmt![b"-n ", &word_src(w)],
         // Operators print with the spelling they were written with, which the
         // AST kept for exactly this reason: `[[ -h f ]]` and `[[ a = b ]]` must
         // not come back out as `-L` and `==`.
-        CondExpr::Unary(op, w) => format!("{} {}", op.text, word_src(w)),
+        CondExpr::Unary(op, w) => bfmt![&op.text, b" ", &word_src(w)],
         CondExpr::Binary(l, op, r) => {
-            format!("{} {} {}", word_src(l), op.text, word_src(r))
+            bfmt![&word_src(l), b" ", &op.text, b" ", &word_src(r)]
         }
-        CondExpr::Regex(l, r) => format!("{} =~ {}", word_src(l), word_src(r)),
-        CondExpr::Not(e) => format!("! {}", cond_src(e)),
-        CondExpr::And(a, b) => format!("{} && {}", cond_src(a), cond_src(b)),
-        CondExpr::Or(a, b) => format!("{} || {}", cond_src(a), cond_src(b)),
-        CondExpr::Group(e) => format!("( {} )", cond_src(e)),
+        CondExpr::Regex(l, r) => bfmt![&word_src(l), b" =~ ", &word_src(r)],
+        CondExpr::Not(e) => bfmt![b"! ", &cond_src(e)],
+        CondExpr::And(a, b) => bfmt![&cond_src(a), b" && ", &cond_src(b)],
+        CondExpr::Or(a, b) => bfmt![&cond_src(a), b" || ", &cond_src(b)],
+        CondExpr::Group(e) => bfmt![b"( ", &cond_src(e), b" )"],
     }
 }
 
 /// Reconstruct source text for a whole word (all parts concatenated).
 #[must_use]
-pub fn word_src(w: &Word) -> String {
+pub fn word_src(w: &Word) -> Str {
     parts_src(&w.parts)
 }
 
@@ -805,8 +812,8 @@ pub fn word_src(w: &Word) -> String {
 /// `expand_word_internal` was handed, which for a double-quoted section is the
 /// section's contents with the quote characters already stripped.
 #[must_use]
-pub fn parts_src(parts: &[WordPart]) -> String {
-    let mut s = String::new();
+pub fn parts_src(parts: &[WordPart]) -> Str {
+    let mut s = Str::new();
     for p in parts {
         s.push_str(&part_src(p));
     }
@@ -815,7 +822,7 @@ pub fn parts_src(parts: &[WordPart]) -> String {
 
 /// `$name` when `name` is a plain identifier or a single special parameter,
 /// otherwise the braced `${name}` form (always valid).
-fn dollar_name(name: &str) -> String {
+fn dollar_name(name: &str) -> Str {
     let simple = !name.is_empty()
         && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
@@ -825,18 +832,18 @@ fn dollar_name(name: &str) -> String {
             Some('?' | '@' | '*' | '#' | '$' | '!' | '-' | '0'..='9')
         );
     if simple || special {
-        format!("${name}")
+        bfmt![b"$", name]
     } else {
-        format!("${{{name}}}")
+        bfmt![b"${", name, b"}"]
     }
 }
 
 /// `name` optionally followed by `[index]`.
 #[must_use]
-pub fn name_sub(name: &str, index: &Option<Box<Word>>) -> String {
+pub fn name_sub(name: &str, index: &Option<Box<Word>>) -> Str {
     match index {
-        Some(i) => format!("{name}[{}]", word_src(i)),
-        None => name.to_string(),
+        Some(i) => bfmt![name, b"[", &word_src(i), b"]"],
+        None => name.as_bytes().to_vec(),
     }
 }
 
@@ -850,28 +857,38 @@ pub fn name_sub(name: &str, index: &Option<Box<Word>>) -> String {
 /// A single-quoted run cannot contain a single quote, so an embedded one — only
 /// reachable via `$'a\'b'` — is spliced out and re-added as `'\''`, exactly as
 /// bash does.
-fn quoted_lit_src(text: &str, escaped: bool) -> String {
+fn quoted_lit_src(text: BStr<'_>, escaped: bool) -> Str {
     if escaped {
-        let mut s = String::with_capacity(text.len() * 2);
-        for c in text.chars() {
-            s.push('\\');
-            s.push(c);
+        let mut s = Str::with_capacity(text.len() * 2);
+        for c in bytes::chars(text) {
+            s.push(b'\\');
+            c.push_to(&mut s);
         }
         return s;
     }
-    format!("'{}'", text.replace('\'', "'\\''"))
+    let mut s = Str::with_capacity(text.len() + 2);
+    s.push(b'\'');
+    for &b in text {
+        if b == b'\'' {
+            s.extend_from_slice(b"'\\''");
+        } else {
+            s.push(b);
+        }
+    }
+    s.push(b'\'');
+    s
 }
 
-fn part_src(p: &WordPart) -> String {
+fn part_src(p: &WordPart) -> Str {
     match p {
         WordPart::Literal(s) => s.clone(),
         WordPart::SingleQuoted { text, escaped } => quoted_lit_src(text, *escaped),
         WordPart::DoubleQuoted(parts) => {
-            let mut s = String::from("\"");
+            let mut s = b"\"".to_vec();
             for p in parts {
                 s.push_str(&part_src(p));
             }
-            s.push('"');
+            s.push(b'"');
             s
         }
         WordPart::Param(name) => dollar_name(name),
@@ -886,7 +903,7 @@ fn part_src(p: &WordPart) -> String {
                 ParamOp::ErrorIfUnset => "?",
             };
             let colon = if *colon { ":" } else { "" };
-            format!("${{{}{}{}{}}}", name_sub(name, index), colon, sym, word_src(arg))
+            bfmt![b"${", &name_sub(name, index), colon, sym, &word_src(arg), b"}"]
         }
         WordPart::ParamTrim { name, index, suffix, longest, pattern } => {
             let op = match (suffix, longest) {
@@ -895,15 +912,15 @@ fn part_src(p: &WordPart) -> String {
                 (false, true) => "##",
                 (false, false) => "#",
             };
-            format!("${{{}{}{}}}", name_sub(name, index), op, word_src(pattern))
+            bfmt![b"${", &name_sub(name, index), op, &word_src(pattern), b"}"]
         }
         WordPart::ParamSubstr { name, index, offset, length } => {
-            let mut s = format!("${{{}:{}", name_sub(name, index), word_src(offset));
+            let mut s = bfmt![b"${", &name_sub(name, index), b":", &word_src(offset)];
             if let Some(len) = length {
-                s.push(':');
+                s.push(b':');
                 s.push_str(&word_src(len));
             }
-            s.push('}');
+            s.push(b'}');
             s
         }
         WordPart::ParamReplace { name, index, all, anchor, pattern, replacement } => {
@@ -918,20 +935,22 @@ fn part_src(p: &WordPart) -> String {
                     }
                 }
             };
-            format!(
-                "${{{}{}{}/{}}}",
-                name_sub(name, index),
+            bfmt![
+                b"${",
+                &name_sub(name, index),
                 op,
-                word_src(pattern),
-                word_src(replacement)
-            )
+                &word_src(pattern),
+                b"/",
+                &word_src(replacement),
+                b"}"
+            ]
         }
         WordPart::ParamCase { name, index, mode, all, pattern } => {
             let op = case_op_src(*mode, *all);
-            format!("${{{}{}{}}}", name_sub(name, index), op, word_src(pattern))
+            bfmt![b"${", &name_sub(name, index), op, &word_src(pattern), b"}"]
         }
         WordPart::Indirect { refname, index } => {
-            format!("${{!{}}}", name_sub(refname, index))
+            bfmt![b"${!", &name_sub(refname, index), b"}"]
         }
         WordPart::IndirectOp { refname, index, target } => {
             // The `target` carries the referent name as a bare placeholder, so
@@ -940,15 +959,15 @@ fn part_src(p: &WordPart) -> String {
             // subscript, which the placeholder never held.
             let inner = part_src(target);
             match inner
-                .strip_prefix("${")
-                .and_then(|rest| rest.strip_prefix(refname.as_str()))
+                .strip_prefix(b"${")
+                .and_then(|rest| rest.strip_prefix(refname.as_bytes()))
             {
-                Some(op) => format!("${{!{}{op}", name_sub(refname, index)),
-                None => inner,
+                Some(op) => bfmt![b"${!", &name_sub(refname, index), op],
+                None => inner.clone(),
             }
         }
         WordPart::VarNames { prefix, star } => {
-            format!("${{!{prefix}{}}}", if *star { "*" } else { "@" })
+            bfmt![b"${!", prefix, if *star { "*" } else { "@" }, b"}"]
         }
         // A substitution is its own source context, so a here-document inside
         // one has to be flushed *within* the parentheses — carrying it out to
@@ -958,72 +977,73 @@ fn part_src(p: &WordPart) -> String {
             // time), and even if it had been, re-printing it would drop the
             // backslash from a nested `` \` `` and stop it parsing. Echo it as
             // written, which is what bash does.
-            CmdSubBody::Backtick { verbatim, .. } => format!("`{verbatim}`"),
+            CmdSubBody::Backtick { verbatim, .. } => bfmt![b"`", verbatim, b"`"],
             CmdSubBody::Parsed { prog, .. } => {
-                format!("$({})", flush_here_docs(&program_inline(prog)))
+                bfmt![b"$(", &flush_here_docs(&program_inline(prog)), b")"]
             }
         },
-        WordPart::ProcSub { input, body } => format!(
-            "{}({})",
-            if *input { '<' } else { '>' },
-            flush_here_docs(&program_inline(body))
-        ),
+        WordPart::ProcSub { input, body } => bfmt![
+            if *input { b"<" } else { b">" },
+            b"(",
+            &flush_here_docs(&program_inline(body)),
+            b")"
+        ],
         WordPart::ArithSub { expr, bracket } => {
             if *bracket {
-                format!("$[{expr}]")
+                bfmt![b"$[", expr, b"]"]
             } else {
-                format!("$(({expr}))")
+                bfmt![b"$((", expr, b"))"]
             }
         }
-        WordPart::BadSubst(raw) => format!("${{{raw}}}"),
-        WordPart::Length(name) => format!("${{#{name}}}"),
+        WordPart::BadSubst(raw) => bfmt![b"${", raw, b"}"],
+        WordPart::Length(name) => bfmt![b"${#", name, b"}"],
         WordPart::ArrayRef { name, index, length } => {
             let idx = match index {
                 ArrayIndex::Index(w) => word_src(w),
-                ArrayIndex::All => "@".to_string(),
-                ArrayIndex::Star => "*".to_string(),
+                ArrayIndex::All => b"@".to_vec(),
+                ArrayIndex::Star => b"*".to_vec(),
             };
             if *length {
-                format!("${{#{name}[{idx}]}}")
+                bfmt![b"${#", name, b"[", &idx, b"]}"]
             } else {
-                format!("${{{name}[{idx}]}}")
+                bfmt![b"${", name, b"[", &idx, b"]}"]
             }
         }
         WordPart::ArrayKeys { name, star } => {
-            format!("${{!{name}[{}]}}", if *star { "*" } else { "@" })
+            bfmt![b"${!", name, b"[", if *star { "*" } else { "@" }, b"]}"]
         }
         WordPart::ParamTransform { name, index, op } => {
-            format!("${{{}@{op}}}", name_sub(name, index))
+            bfmt![b"${", &name_sub(name, index), b"@", *op, b"}"]
         }
         WordPart::BadTransform { raw, .. } => {
             // The raw source already includes the name, any subscript, and the
             // (empty/unknown/multi-char) operator, e.g. `x@`, `a[0]@Z`.
-            format!("${{{raw}}}")
+            bfmt![b"${", raw, b"}"]
         }
         WordPart::ArraySlice { name, star, offset, length } => {
             let sub = if name == "@" || name == "*" {
-                name.clone()
+                name.as_bytes().to_vec()
             } else {
-                format!("{name}[{}]", if *star { "*" } else { "@" })
+                bfmt![name, b"[", if *star { "*" } else { "@" }, b"]"]
             };
-            let mut s = format!("${{{sub}:{}", word_src(offset));
+            let mut s = bfmt![b"${", &sub, b":", &word_src(offset)];
             if let Some(len) = length {
-                s.push(':');
+                s.push(b':');
                 s.push_str(&word_src(len));
             }
-            s.push('}');
+            s.push(b'}');
             s
         }
         WordPart::ArrayBulk { name, star, op } => {
             // `BadTransform` carries the full raw inner source, so reproduce it
             // verbatim rather than re-synthesising a subscript + operator.
             if let BulkOp::BadTransform { raw } = op {
-                return format!("${{{raw}}}");
+                return bfmt![b"${", raw, b"}"];
             }
             let sub = if name == "@" || name == "*" {
-                name.clone()
+                name.as_bytes().to_vec()
             } else {
-                format!("{name}[{}]", if *star { "*" } else { "@" })
+                bfmt![name, b"[", if *star { "*" } else { "@" }, b"]"]
             };
             let opstr = match op {
                 BulkOp::Trim { suffix, longest, pattern } => {
@@ -1033,7 +1053,7 @@ fn part_src(p: &WordPart) -> String {
                         (false, true) => "##",
                         (false, false) => "#",
                     };
-                    format!("{o}{}", word_src(pattern))
+                    bfmt![o, &word_src(pattern)]
                 }
                 BulkOp::Replace { all, anchor, pattern, replacement } => {
                     let o = match anchor {
@@ -1047,19 +1067,19 @@ fn part_src(p: &WordPart) -> String {
                             }
                         }
                     };
-                    format!("{o}{}/{}", word_src(pattern), word_src(replacement))
+                    bfmt![o, &word_src(pattern), b"/", &word_src(replacement)]
                 }
                 BulkOp::Case { mode, all, pattern } => {
-                    format!("{}{}", case_op_src(*mode, *all), word_src(pattern))
+                    bfmt![case_op_src(*mode, *all), &word_src(pattern)]
                 }
-                BulkOp::Transform { op } => format!("@{op}"),
+                BulkOp::Transform { op } => bfmt![b"@", *op],
                 // Short-circuited via the early return above.
-                BulkOp::BadTransform { .. } => String::new(),
+                BulkOp::BadTransform { .. } => Str::new(),
             };
-            format!("${{{sub}{opstr}}}")
+            bfmt![b"${", &sub, &opstr, b"}"]
         }
         WordPart::ArrayOp { name, star, op, colon, arg } => {
-            let sub = format!("{name}[{}]", if *star { "*" } else { "@" });
+            let sub = bfmt![name, b"[", if *star { "*" } else { "@" }, b"]"];
             let o = match op {
                 ParamOp::UseDefault => "-",
                 ParamOp::AssignDefault => "=",
@@ -1067,7 +1087,7 @@ fn part_src(p: &WordPart) -> String {
                 ParamOp::ErrorIfUnset => "?",
             };
             let colon = if *colon { ":" } else { "" };
-            format!("${{{sub}{colon}{o}{}}}", word_src(arg))
+            bfmt![b"${", &sub, colon, o, &word_src(arg), b"}"]
         }
     }
 }
@@ -1079,17 +1099,23 @@ mod tests {
 
     /// Parse `src`, expect exactly one function definition, and unparse it.
     fn dump_fn(src: &str, name: &str) -> String {
-        let prog = parse(src).expect("parse");
+        let prog = parse(src.as_bytes()).expect("parse");
         for item in &prog.items {
             for cmd in &item.list.first.commands {
                 if let Command::Function(f) = cmd
-                    && f.name == name
+                    && f.name == name.as_bytes()
                 {
-                    return unparse_function(&f.name, &f.body, &f.redirects);
+                    return text(unparse_function(&f.name, &f.body, &f.redirects));
                 }
             }
         }
         panic!("function {name} not found");
+    }
+
+    /// The dumps these tests build are ASCII by construction; render one as
+    /// text so the assertions can stay written as string literals.
+    fn text(s: Str) -> String {
+        String::from_utf8(s).expect("test dumps are ASCII")
     }
 
     /// Unparse a function, re-parse the dump, and unparse again — the two dumps
@@ -1097,17 +1123,17 @@ mod tests {
     fn assert_roundtrip(src: &str, name: &str) {
         let first = dump_fn(src, name);
         // The dump is `name () \n{ … }`; re-parse it as a program.
-        let reprog = parse(&first).expect("re-parse dump");
+        let reprog = parse(first.as_bytes()).expect("re-parse dump");
         let f = reprog
             .items
             .iter()
             .flat_map(|i| &i.list.first.commands)
             .find_map(|c| match c {
-                Command::Function(f) if f.name == name => Some(f),
+                Command::Function(f) if f.name == name.as_bytes() => Some(f),
                 _ => None,
             })
             .expect("function in dump");
-        let second = unparse_function(&f.name, &f.body, &f.redirects);
+        let second = text(unparse_function(&f.name, &f.body, &f.redirects));
         assert_eq!(first, second, "round-trip differs for {name}");
     }
 

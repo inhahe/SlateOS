@@ -37,6 +37,7 @@ use crate::ast::{
     Pipeline, Program,
     Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
+use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
     LexOpts, Op, ReaderWarning, Seg, Tok, Tokenized, expand_aliases, expand_aliases_tracked,
@@ -50,18 +51,6 @@ use std::collections::BTreeMap;
 /// Re-exported from the lexer, which owns the definition, so the rest of the
 /// crate can keep asking the parser (its historical home) and get one answer.
 pub(crate) use crate::lexer::is_valid_name;
-
-/// Render a byte string for a diagnostic message.
-///
-/// [`ParseError::msg`] is `String`, so a word that reaches a diagnostic has to
-/// be spelled as text *somewhere*; concentrating that in one function keeps the
-/// lossy conversion visible and reviewable. Step 10 of TD-OILS-BYTE-STRINGS
-/// converts the diagnostic layer to bytes and deletes this along with the
-/// scaffold it wraps.
-fn shown(s: BStr<'_>) -> String {
-    #[allow(deprecated)]
-    bytes::scaffold_lossy_string(s)
-}
 
 /// A shell identifier as text, or `None` when the bytes are not one.
 ///
@@ -104,7 +93,13 @@ fn syn_at(chs: &[Ch], i: usize) -> char {
 /// falls back to the current execution line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
-    pub msg: String,
+    /// The message, as bytes. Most are fixed text, but the ones that name the
+    /// offending construct quote a *shell word* back — the token in `syntax
+    /// error near unexpected token \`…'`, or the name in `\`…': not a valid
+    /// identifier` — and a shell word may hold any byte. The word therefore
+    /// goes back out as the bytes the user wrote rather than through a decode
+    /// that would rewrite the very text being blamed.
+    pub msg: Str,
     pub line: Option<u32>,
     /// True when the error was found inside a `$( … )` or `<( … )` body, which
     /// bash treats as fatal to whatever was reading that body.
@@ -130,8 +125,8 @@ pub struct ParseError {
 impl ParseError {
     /// A parse error with no known line (the common construction site inside
     /// the grammar; [`parse_tokens`] stamps the line afterwards).
-    pub fn new(msg: String) -> Self {
-        Self { msg, line: None, fatal: false }
+    pub fn new(msg: &(impl bytes::PushBytes + ?Sized)) -> Self {
+        Self { msg: bfmt![msg], line: None, fatal: false }
     }
 
     /// Mark this error as raised from inside a `$( … )`/`<( … )` body, so the
@@ -167,14 +162,8 @@ impl ParseError {
     /// token and is not continuable.
     #[must_use]
     pub fn is_incomplete(&self) -> bool {
-        self.msg.contains("unexpected end of file")
-            || self.msg.contains("unexpected EOF while looking for")
-    }
-}
-
-impl core::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.msg)
+        bytes::contains(&self.msg, b"unexpected end of file")
+            || bytes::contains(&self.msg, b"unexpected EOF while looking for")
     }
 }
 
@@ -1158,8 +1147,8 @@ pub fn parse_cmdsub_body(
             // is not continuable, so the REPL must not offer a PS2 prompt for
             // one. Neither form can be completed by more input anyway — the
             // lexer already found the closing delimiter.
-            if e.msg == "syntax error: unexpected end of file" {
-                ParseError::new("syntax error near unexpected token `)'".to_string())
+            if e.msg == b"syntax error: unexpected end of file" {
+                ParseError::new("syntax error near unexpected token `)'")
             } else {
                 e
             }
@@ -1379,17 +1368,17 @@ impl Parser {
 
     /// A short human-readable name for the current token, for syntax-error
     /// messages (mirrors bash's `near unexpected token '…'`).
-    fn token_display(&self) -> String {
+    fn token_display(&self) -> Str {
         self.token_display_at(self.pos)
     }
 
     /// [`Parser::token_display`] for an arbitrary position, so a diagnostic can
     /// name a token the parser has already moved past (see
     /// [`Parser::cond_near`]).
-    fn token_display_at(&self, pos: usize) -> String {
+    fn token_display_at(&self, pos: usize) -> Str {
         match self.toks.get(pos) {
-            None => "end of input".to_string(),
-            Some(Tok::Newline) => "newline".to_string(),
+            None => b"end of input".to_vec(),
+            Some(Tok::Newline) => b"newline".to_vec(),
             Some(Tok::Op(op)) => match op {
                 Op::DSemi => ";;",
                 Op::SemiAmp => ";&",
@@ -1415,7 +1404,8 @@ impl Parser {
                 Op::DLessDash => "<<-",
                 Op::TLess => "<<<",
             }
-            .to_string(),
+            .as_bytes()
+            .to_vec(),
             // bash names the offending word by its *source* spelling, quotes and
             // all: `[[ a '<' b ]]` is reported near `'<'`, not near a bare `<` or
             // a placeholder. Rebuild the word from its segments and print it the
@@ -1423,9 +1413,9 @@ impl Parser {
             // which the lexer has already decoded — see
             // TD-OILS-ANSIC-ERROR-SPELLING in known-issues.md.)
             Some(Tok::Word(segs)) => word_from_segs(segs, self.opts)
-                .map_or_else(|_| "word".to_string(), |w| shown(&crate::unparse::word_src(&w))),
+                .map_or_else(|_| b"word".to_vec(), |w| crate::unparse::word_src(&w)),
             // Anything else (a newline, a here-doc body) has no word spelling.
-            _ => "word".to_string(),
+            _ => b"word".to_vec(),
         }
     }
 
@@ -1435,12 +1425,13 @@ impl Parser {
     /// offending token with a leading backtick and a trailing single quote.
     fn unexpected_here(&self) -> ParseError {
         if self.peek().is_none() {
-            ParseError::new("syntax error: unexpected end of file".to_string())
+            ParseError::new("syntax error: unexpected end of file")
         } else {
-            ParseError::new(format!(
-                "syntax error near unexpected token `{}'",
-                self.token_display()
-            ))
+            ParseError::new(&bfmt![
+                b"syntax error near unexpected token `",
+                self.token_display(),
+                b"'"
+            ])
         }
     }
 
@@ -1714,7 +1705,7 @@ impl Parser {
             // Not definable: the name is only ever quoted back in a run-time
             // error, so its source spelling (a `String` until step 10 of
             // TD-OILS-BYTE-STRINGS) is what there is to store.
-            let name = bare.unwrap_or_else(|| self.token_display().into_bytes());
+            let name = bare.unwrap_or_else(|| self.token_display());
             self.pos += 3;
             self.skip_newlines();
             let body = self.parse_compound_body()?;
@@ -1753,7 +1744,7 @@ impl Parser {
         }
         let bare = self.bare_word_here();
         let definable = bare.is_some();
-        let name = bare.unwrap_or_else(|| self.token_display().into_bytes());
+        let name = bare.unwrap_or_else(|| self.token_display());
         self.pos += 1; // consume the name word
         // Optional `()` after the name.
         if self.at_op(Op::LParen) {
@@ -1976,10 +1967,11 @@ impl Parser {
         // accepting the bytes also guarantees they are ASCII, so the two
         // checks together reject exactly what bash rejects.
         let Some(var) = name_text(&name).filter(|v| is_valid_name(v.as_bytes())) else {
-            return Err(ParseError::new(format!(
-                "`{}': not a valid identifier",
-                shown(&name)
-            )));
+            return Err(ParseError::new(&bfmt![
+                b"`",
+                &name,
+                b"': not a valid identifier"
+            ]));
         };
         self.pos += 1;
         self.skip_newlines();
@@ -2031,10 +2023,11 @@ impl Parser {
         };
         // Same name rule as the word-list `for` loop; see `parse_for`.
         let Some(var) = name_text(&name).filter(|v| is_valid_name(v.as_bytes())) else {
-            return Err(ParseError::new(format!(
-                "`{}': not a valid identifier",
-                shown(&name)
-            )));
+            return Err(ParseError::new(&bfmt![
+                b"`",
+                &name,
+                b"': not a valid identifier"
+            ]));
         };
         self.pos += 1;
         self.skip_newlines();
@@ -2052,9 +2045,7 @@ impl Parser {
     fn parse_for_arith(&mut self, raw: BStr<'_>) -> Result<Command, ParseError> {
         let parts: Vec<BStr<'_>> = raw.split(|&b| b == b';').collect();
         if parts.len() != 3 {
-            return Err(ParseError::new(
-                "C-style for loop requires 'for (( init; cond; update ))'".into(),
-            ));
+            return Err(ParseError::new("C-style for loop requires 'for (( init; cond; update ))'"));
         }
         // Only the *leading* whitespace is dropped. bash keeps each section's
         // source text from its first non-blank character onwards, which shows up
@@ -2195,8 +2186,7 @@ impl Parser {
             // where `]]` should be, name it the ordinary way.
             if self.peek().is_none() {
                 return Err(ParseError::new(
-                    "unexpected EOF while looking for `]]'\nsyntax error: unexpected end of file"
-                        .to_string(),
+                    "unexpected EOF while looking for `]]'\nsyntax error: unexpected end of file",
                 ));
             }
             // A complete sub-expression followed by a stray token where `]]` was
@@ -2211,13 +2201,19 @@ impl Parser {
             let tok = self.token_display();
             if matches!(self.peek(), Some(Tok::Op(_))) {
                 let near = cond_error_near(&tok);
-                return Err(ParseError::new(format!(
-                    "syntax error in conditional expression: unexpected token `{tok}'\nsyntax error near `{near}'"
-                )));
+                return Err(ParseError::new(&bfmt![
+                    b"syntax error in conditional expression: unexpected token `",
+                    &tok,
+                    b"'\nsyntax error near `",
+                    near,
+                    b"'"
+                ]));
             }
-            return Err(ParseError::new(format!(
-                "syntax error in conditional expression\nsyntax error near `{tok}'"
-            )));
+            return Err(ParseError::new(&bfmt![
+                b"syntax error in conditional expression\nsyntax error near `",
+                tok,
+                b"'"
+            ]));
         }
         self.pos += 1;
         Ok(Command::Cond(expr))
@@ -2251,8 +2247,7 @@ impl Parser {
             // did not get, rather than reporting a missing `]]` — that message
             // is reserved for an expression that *was* complete.
             return Err(ParseError::new(
-                "unexpected token `EOF' in conditional command\nsyntax error: unexpected end of file"
-                    .to_string(),
+                "unexpected token `EOF' in conditional command\nsyntax error: unexpected end of file",
             ));
         }
         if self.at_bare_word(b"!") {
@@ -2274,12 +2269,16 @@ impl Parser {
                 // input it falls back to its implicit-newline model, which we
                 // don't reproduce.
                 if self.peek().is_none() {
-                    return Err(ParseError::new("syntax error: unexpected end of file".to_string()));
+                    return Err(ParseError::new("syntax error: unexpected end of file"));
                 }
                 let tok = self.token_display();
-                return Err(ParseError::new(format!(
-                    "unexpected token `{tok}', expected `)'\nsyntax error near `{tok}'"
-                )));
+                return Err(ParseError::new(&bfmt![
+                    b"unexpected token `",
+                    &tok,
+                    b"', expected `)'\nsyntax error near `",
+                    &tok,
+                    b"'"
+                ]));
             }
             self.pos += 1;
             // A finished term may be followed by a newline before whatever comes
@@ -2329,9 +2328,11 @@ impl Parser {
             && !matches!(segs.as_slice(), [Seg::Lit(s)] if s.as_slice() == b"]]")
         {
             let tok = self.token_display();
-            return Err(ParseError::new(format!(
-                "conditional binary operator expected\nsyntax error near `{tok}'"
-            )));
+            return Err(ParseError::new(&bfmt![
+                b"conditional binary operator expected\nsyntax error near `",
+                tok,
+                b"'"
+            ]));
         }
         // A newline here is *not* skipped — this is the one position where the
         // binary operator would go, and bash reads it without skipping so that
@@ -2342,9 +2343,13 @@ impl Parser {
         if matches!(self.peek(), Some(Tok::Newline)) {
             let tok = self.token_display();
             let near = self.cond_near();
-            return Err(ParseError::new(format!(
-                "unexpected token `{tok}', conditional binary operator expected\nsyntax error near `{near}'"
-            )));
+            return Err(ParseError::new(&bfmt![
+                b"unexpected token `",
+                tok,
+                b"', conditional binary operator expected\nsyntax error near `",
+                near,
+                b"'"
+            ]));
         }
         // Any other *operator* here is in the same position and is named the
         // same way — the "unexpected token" clause is what distinguishes an
@@ -2359,9 +2364,13 @@ impl Parser {
         {
             let tok = self.token_display();
             let near = cond_error_near(&tok);
-            return Err(ParseError::new(format!(
-                "unexpected token `{tok}', conditional binary operator expected\nsyntax error near `{near}'"
-            )));
+            return Err(ParseError::new(&bfmt![
+                b"unexpected token `",
+                tok,
+                b"', conditional binary operator expected\nsyntax error near `",
+                near,
+                b"'"
+            ]));
         }
         Ok(CondExpr::Word(left))
     }
@@ -2387,7 +2396,7 @@ impl Parser {
     /// whenever that is a real word (`[[ -n ]]` reports near `]]`). A newline
     /// never becomes that token, so an error on one is reported near whatever
     /// came before it: `[[ a` reports near `a`, and `[[ a -eq` near `-eq`.
-    fn cond_near(&self) -> String {
+    fn cond_near(&self) -> Str {
         if !matches!(self.peek(), Some(Tok::Newline)) {
             return self.token_display();
         }
@@ -2423,22 +2432,28 @@ impl Parser {
     /// end-of-file diagnostic there.
     fn cond_operand_error(&self, pos: CondPos) -> ParseError {
         if self.peek().is_none() {
-            return ParseError::new("syntax error: unexpected end of file".to_string());
+            return ParseError::new("syntax error: unexpected end of file");
         }
         let tok = self.token_display();
         // A newline never becomes the token bash reports "near", so an operand
         // slot that a line end walked into names the operator instead.
-        let near = format!("syntax error near `{}'", self.cond_near());
+        let near = bfmt![b"syntax error near `", self.cond_near(), b"'"];
         let msg = match pos {
             CondPos::Primary => near,
-            CondPos::Unary => {
-                format!("unexpected argument `{tok}' to conditional unary operator\n{near}")
-            }
-            CondPos::Binary => {
-                format!("unexpected argument `{tok}' to conditional binary operator\n{near}")
-            }
+            CondPos::Unary => bfmt![
+                b"unexpected argument `",
+                tok,
+                b"' to conditional unary operator\n",
+                near
+            ],
+            CondPos::Binary => bfmt![
+                b"unexpected argument `",
+                tok,
+                b"' to conditional binary operator\n",
+                near
+            ],
         };
-        ParseError::new(msg)
+        ParseError::new(&msg)
     }
 
     /// Peek at a binary operator following an operand, without consuming.
@@ -2536,9 +2551,7 @@ impl Parser {
                     // anywhere else it's a syntax error.
                     let is_decl_operand = seen_word && is_declaration_command(&cmd.words);
                     if seen_word && !is_decl_operand {
-                        return Err(ParseError::new(
-                            "array assignment is only valid before the command word".into(),
-                        ));
+                        return Err(ParseError::new("array assignment is only valid before the command word"));
                     }
                     let Some(Tok::ArrayAssign {
                         name,
@@ -2645,7 +2658,7 @@ impl Parser {
                 RedirectOp::HereDoc
             }
             Some(Tok::Op(Op::TLess)) => RedirectOp::HereStr,
-            _ => return Err(ParseError::new("expected redirection operator".into())),
+            _ => return Err(ParseError::new("expected redirection operator")),
         };
         let fd = explicit_fd.unwrap_or(match op {
             RedirectOp::Read
@@ -2995,10 +3008,10 @@ fn attach_redirect(cmd: Command, redir: Redirect) -> Command {
 /// The scan is textual, so an operator written flush against the word before it
 /// picks that word up too: `[[ a>>b ]]` is reported near `a>>b`. Reproducing
 /// that needs the source text, not the token — see TD-OILS-COND-TOKEN-SPELLING.
-fn cond_error_near(tok: &str) -> String {
-    match tok.chars().next_back() {
-        Some(c @ (';' | '|' | '&')) => c.to_string(),
-        _ => tok.to_string(),
+fn cond_error_near(tok: BStr<'_>) -> Str {
+    match tok.last() {
+        Some(&c @ (b';' | b'|' | b'&')) => vec![c],
+        _ => tok.to_vec(),
     }
 }
 
@@ -3139,7 +3152,7 @@ enum NameSubscript {
 
 fn split_name_subscript(chs: &[Ch], opts: LexOpts) -> Result<NameSubscript, ParseError> {
     if chs.is_empty() {
-        return Err(ParseError::new("empty '${}' expansion".into()));
+        return Err(ParseError::new("empty '${}' expansion"));
     }
     let mut i = 0;
     if syn_at(chs, 0).is_ascii_digit() {
@@ -3712,7 +3725,7 @@ pub(crate) fn word_verbatim_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Wo
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError::new(e.msg))?;
+    let segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError::new(&e.msg))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg, opts)?);
@@ -3731,7 +3744,7 @@ pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let segs = crate::lexer::lex_dquote_body(s).map_err(|e| ParseError::new(e.msg))?;
+    let segs = crate::lexer::lex_dquote_body(s).map_err(|e| ParseError::new(&e.msg))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg, opts)?);
@@ -3747,7 +3760,7 @@ fn word_replacement_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word, Pars
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let segs = crate::lexer::lex_replacement_verbatim(s).map_err(|e| ParseError::new(e.msg))?;
+    let segs = crate::lexer::lex_replacement_verbatim(s).map_err(|e| ParseError::new(&e.msg))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg, opts)?);
@@ -3759,7 +3772,7 @@ fn word_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let toks = tokenize(s, opts).map_err(|e| ParseError::new(e.msg))?;
+    let toks = tokenize(s, opts).map_err(|e| ParseError::new(&e.msg))?;
     let mut parts: Vec<WordPart> = Vec::new();
     let mut first = true;
     for t in &toks {
@@ -3977,6 +3990,18 @@ mod tests {
         super::parse(src.as_bytes())
     }
 
+    /// A [`ParseError`]'s message as text, for assertions.
+    ///
+    /// The cases below spell bash's exact diagnostics as Rust string literals
+    /// while the parser speaks bytes, so this panics rather than approximating:
+    /// a diagnostic that stopped being text is a failure of the case, not
+    /// something to paper over. The one case that *is* about a non-text
+    /// diagnostic compares bytes directly.
+    #[track_caller]
+    fn emsg(e: &ParseError) -> String {
+        String::from_utf8(e.msg.clone()).expect("diagnostic is text")
+    }
+
     /// The text of a byte string an assertion wants to compare against a
     /// literal. Every such value in these tests is ASCII by construction, so a
     /// non-UTF-8 one is a test bug and should fail loudly.
@@ -4030,13 +4055,50 @@ mod tests {
         assert_eq!(line_of("echo \"a\nb\"\ncmd\n"), 2);
     }
 
+    /// Every parser diagnostic that quotes a shell construct back quotes the
+    /// *bytes* the user wrote. A word may hold any byte but NUL, so a message
+    /// that decoded one would blame something other than what was typed — and
+    /// for the here-document case it would name a delimiter that is not the one
+    /// the reader was actually comparing body lines against.
+    ///
+    /// These go through `super::parse` on a byte literal, not the text-shadowing
+    /// `parse`/[`emsg`] pair the cases above use, since decoding is the thing
+    /// under test.
+    #[test]
+    fn diagnostics_quote_the_source_bytes_back() {
+        // The offending token, named by its source spelling.
+        let e = super::parse(b"f() a\xffb").unwrap_err();
+        assert_eq!(e.msg, b"syntax error near unexpected token `a\xffb'");
+
+        // A loop variable that is not an identifier — and cannot be one, since
+        // a name is ASCII by construction.
+        let e = super::parse(b"for a\xffb in x; do :; done").unwrap_err();
+        assert_eq!(e.msg, b"`a\xffb': not a valid identifier");
+        let e = super::parse(b"select a\xffb in x; do :; done").unwrap_err();
+        assert_eq!(e.msg, b"`a\xffb': not a valid identifier");
+
+        // The `[[ … ]]` family names its token the same way, on the second line.
+        let e = super::parse(b"[[ -z x a\xffb ]]").unwrap_err();
+        assert_eq!(
+            e.msg,
+            b"syntax error in conditional expression\nsyntax error near `a\xffb'"
+        );
+
+        // A construct left open is reported by the lexer, whose message carries
+        // the same bytes and still classifies as *incomplete* — so a REPL line
+        // holding one keeps reading rather than erroring out.
+        let e = super::parse(b"echo \"a\xffb").unwrap_err();
+        assert_eq!(e.msg, b"unexpected EOF while looking for matching `\"'");
+        assert!(e.is_incomplete());
+    }
+
     /// bash names the offending word in a syntax error by its *source* spelling,
     /// so the message shows the quotes the user typed rather than the string
     /// they stand for. Every expectation here is bash 5.2.37's own wording.
     #[test]
     fn syntax_error_names_the_token_as_written() {
         fn err(src: &str) -> String {
-            parse(src).expect_err("expected a parse error").msg
+            emsg(&parse(src).expect_err("expected a parse error"))
         }
         // Inside `[[ ]]` bash prefixes the complaint with what it wanted, then
         // names the word it found. Each quoting keeps its own spelling: it is
@@ -4063,7 +4125,7 @@ mod tests {
     #[test]
     fn conditional_error_names_operators_but_not_words() {
         fn err(src: &str) -> String {
-            parse(src).expect_err("expected a parse error").msg
+            emsg(&parse(src).expect_err("expected a parse error"))
         }
         // Where a binary operator was expected, an operator is named …
         let want = "conditional binary operator expected\nsyntax error near ";
@@ -4107,7 +4169,7 @@ mod tests {
         // The tokens that may legitimately follow a finished operand are still
         // accepted rather than swept up by the operator rule.
         for src in ["[[ a && b ]]", "[[ a || b ]]", "[[ ( a ) ]]", "[[ ( a || b ) ]]"] {
-            parse(src).unwrap_or_else(|e| panic!("{src}: {}", e.msg));
+            parse(src).unwrap_or_else(|e| panic!("{src}: {}", emsg(&e)));
         }
     }
 
@@ -4285,16 +4347,16 @@ mod tests {
         // At EOF, both the keyword form and the POSIX form report bash's
         // canonical "unexpected end of file" (not a bespoke message).
         assert_eq!(
-            parse("function f").unwrap_err().msg,
+            emsg(&parse("function f").unwrap_err()),
             "syntax error: unexpected end of file"
         );
         assert_eq!(
-            parse("f()").unwrap_err().msg,
+            emsg(&parse("f()").unwrap_err()),
             "syntax error: unexpected end of file"
         );
         // A non-body token after the header names the offending token.
         assert_eq!(
-            parse("f() echo hi").unwrap_err().msg,
+            emsg(&parse("f() echo hi").unwrap_err()),
             "syntax error near unexpected token `echo'"
         );
     }
@@ -4314,7 +4376,7 @@ mod tests {
             ("( )", "syntax error near unexpected token `)'"),
             ("( echo hi", "syntax error: unexpected end of file"),
         ] {
-            assert_eq!(parse(src).unwrap_err().msg, want, "src {src:?}");
+            assert_eq!(emsg(&parse(src).unwrap_err()), want, "src {src:?}");
         }
         // A well-formed `case` still parses (guard against over-eager erroring).
         assert!(parse("case x in a) echo 1;; b) echo 2;; esac").is_ok());
@@ -4343,7 +4405,7 @@ mod tests {
             ("echo > ;", "syntax error near unexpected token `;'"),
             ("echo > )", "syntax error near unexpected token `)'"),
         ] {
-            assert_eq!(parse(src).unwrap_err().msg, want, "src {src:?}");
+            assert_eq!(emsg(&parse(src).unwrap_err()), want, "src {src:?}");
         }
         // A well-formed redirection still parses.
         assert!(parse("echo hi > out.txt").is_ok());
@@ -4382,7 +4444,7 @@ mod tests {
                 "unexpected EOF while looking for `]]'\nsyntax error: unexpected end of file",
             ),
         ] {
-            assert_eq!(parse(src).unwrap_err().msg, want, "src {src:?}");
+            assert_eq!(emsg(&parse(src).unwrap_err()), want, "src {src:?}");
         }
         // Well-formed conditionals still parse.
         assert!(parse("[[ -f /etc ]]").is_ok());
@@ -4640,7 +4702,7 @@ mod tests {
             "cat >( ! )",
         ] {
             let e = parse(src).unwrap_err();
-            assert_eq!(e.msg, "syntax error near unexpected token `)'", "{src}");
+            assert_eq!(emsg(&e), "syntax error near unexpected token `)'", "{src}");
             // Found inside the body, so it is fatal to whoever was reading it.
             assert!(e.fatal, "{src} should be a fatal substitution error");
         }
@@ -4652,7 +4714,7 @@ mod tests {
             assert!(parse(src).is_ok(), "{src} should parse (body deferred)");
         }
         assert_eq!(
-            backtick_unit("for", 1).unwrap_err().msg,
+            emsg(&backtick_unit("for", 1).unwrap_err()),
             "syntax error near unexpected token `newline'"
         );
         assert!(backtick_unit("!", 1).is_ok());
@@ -4818,7 +4880,7 @@ mod tests {
     #[test]
     fn cond_regex_group_spans_blanks_and_operators() {
         let regex_of = |src: &str| -> String {
-            let prog = parse(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+            let prog = parse(src).unwrap_or_else(|e| panic!("{src}: {}", emsg(&e)));
             let Command::Cond(CondExpr::Regex(_, rhs)) = &prog.items[0].list.first.commands[0]
             else {
                 panic!("{src}: expected a regex conditional");
@@ -4842,7 +4904,7 @@ mod tests {
         assert!(parse("[[ $x =~ a;b ]]").is_err());
         assert!(parse("[[ $x =~ a) ]]").is_err());
         // A group left open is the word reader's error, named as bash names it.
-        let e = parse("[[ $x =~ (a(b) ]]").unwrap_err().to_string();
+        let e = emsg(&parse("[[ $x =~ (a(b) ]]").unwrap_err());
         assert!(
             e.contains("unexpected EOF while looking for matching `)'"),
             "got {e}"

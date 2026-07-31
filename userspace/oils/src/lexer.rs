@@ -11,6 +11,7 @@
 //! syntax it recognises is entirely ASCII, so [`syn`] gives every scanning site
 //! an ASCII view without any of them having to case-split on decodability.
 
+use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 
 /// A character as shell *syntax*: ASCII as itself, anything else as NUL.
@@ -48,7 +49,10 @@ fn strip_tabs(line: BStr<'_>) -> BStr<'_> {
 /// A lexer error with a human-readable message (unbalanced quote, etc.).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LexError {
-    pub msg: String,
+    /// The message, as bytes: most are fixed text, but the here-document one
+    /// quotes back the delimiter the reader was looking for, and a delimiter is
+    /// a shell word — `<<a\xffb` must name the delimiter it actually wanted.
+    pub msg: Str,
     /// 1-based source line to report the error on, when the raise site knows a
     /// better one than the line the enclosing token started on.
     ///
@@ -76,8 +80,8 @@ pub struct LexError {
 
 impl LexError {
     /// A lexer error with no line preference; the caller's fallback applies.
-    pub(crate) fn new(msg: impl Into<String>) -> Self {
-        Self { msg: msg.into(), line: None, looking_for: None }
+    pub(crate) fn new(msg: &(impl bytes::PushBytes + ?Sized)) -> Self {
+        Self { msg: bfmt![msg], line: None, looking_for: None }
     }
 
     /// Fill in the reporting line if the raise site did not already choose one.
@@ -88,12 +92,6 @@ impl LexError {
     }
 }
 
-impl core::fmt::Display for LexError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.msg)
-    }
-}
-
 /// bash's end-of-input diagnostic for an unclosed quote, substitution, or group.
 /// bash names the delimiter it was scanning for, e.g. `unexpected EOF while
 /// looking for matching `)'` — a single backtick, the closing char, then a
@@ -101,20 +99,16 @@ impl core::fmt::Display for LexError {
 /// bash's end-of-input diagnostic for a here-document whose delimiter never
 /// arrived.
 ///
-/// The delimiter is a word, so it may hold bytes that are not text; the message
-/// is still a `String` because the whole diagnostic layer is (TD-OILS-BYTE-STRINGS
-/// step 10). Only the spelling in the message is affected — the delimiter itself
-/// is compared byte-wise against the body lines, so which line ends the body is
-/// unaffected by this.
+/// The delimiter is a shell word, so it goes back into the message as the bytes
+/// the user wrote: `<<a\xffb` names the delimiter it was actually looking for,
+/// which is the same byte string it compares the body lines against.
 fn unterminated_heredoc(delim: BStr<'_>) -> LexError {
-    #[allow(deprecated)]
-    let shown = bytes::scaffold_lossy_string(delim);
-    LexError::new(format!("unexpected EOF while looking for `{shown}'"))
+    LexError::new(&bfmt![b"unexpected EOF while looking for `", delim, b"'"])
 }
 
 fn eof_matching(close: char) -> LexError {
     LexError {
-        msg: format!("unexpected EOF while looking for matching `{close}'"),
+        msg: bfmt![b"unexpected EOF while looking for matching `", close, b"'"],
         line: None,
         looking_for: Some(close),
     }
@@ -3773,7 +3767,7 @@ mod tests {
         for src in ["x=$(cat <<EOF\nbody\n); echo hi", "cat <(cat <<EOF\nbody\n); echo hi"] {
             let tk = tokenize_deferred(src.as_bytes(), LexOpts::default());
             let (e, line) = tk.err.as_ref().unwrap_or_else(|| panic!("{src:?} must fail"));
-            assert_eq!(e.to_string(), "unexpected EOF while looking for matching `)'");
+            assert_eq!(e.msg, b"unexpected EOF while looking for matching `)'");
             assert_eq!(*line, 4, "{src:?}");
             assert_eq!(heredoc_eofs(&tk), vec![("EOF", 1, 3)], "{src:?}");
         }

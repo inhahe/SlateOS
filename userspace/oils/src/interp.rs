@@ -24339,7 +24339,7 @@ impl Shell {
         // binary operator` followed by `syntax error near \`]]'`). Prefix each
         // line the way bash tags every line with `<$0>: <src>: line N:`.
         let mut out = Str::new();
-        for (i, msg_line) in e.msg.split('\n').enumerate() {
+        for (i, msg_line) in e.msg.split(|&b| b == b'\n').enumerate() {
             if i > 0 {
                 out.push(b'\n');
             }
@@ -24353,7 +24353,7 @@ impl Shell {
         // The echo is the source line *verbatim*: it is what the user typed, and
         // a shell word may hold any byte, so it goes back out unchanged rather
         // than through a decode that would rewrite the very text being blamed.
-        if e.msg.contains("syntax error near ")
+        if bytes::contains(&e.msg, b"syntax error near ")
             && let Some(text) = map.unmap(line).and_then(|n| nth_source_line(src, n))
         {
             out.push_str(&bfmt![b"\n", &prefix, b"`", text, b"'"]);
@@ -27330,18 +27330,22 @@ fn special_redirect_fd(path: BStr<'_>) -> Option<i32> {
 /// `\`NAME': not a valid identifier` message, and the `unexpected EOF while
 /// looking for matching \`C'` unclosed-quote/substitution diagnostic (bash
 /// emits these last two with no `syntax error:` tag).
-fn wrap_parse_message(msg: &str, prefix: BStr<'_>) -> Str {
+///
+/// The message is bytes: the ones that name the offending construct quote a
+/// shell word back, so the classification below is a byte-wise prefix test on
+/// the fixed *English* part, which is unaffected by what the quoted word holds.
+fn wrap_parse_message(msg: BStr<'_>, prefix: BStr<'_>) -> Str {
     // Messages that are already in one of bash's canonical parser forms pass
     // through verbatim: `syntax error…`, any `unexpected …` diagnostic
     // (`unexpected EOF…`, `unexpected argument…`, `unexpected token…`), and the
     // `… not a valid identifier` form. Everything else is a bare osh fragment
     // that bash would prefix with `syntax error: `.
-    if msg.starts_with("syntax error")
-        || msg.starts_with("unexpected ")
+    if msg.starts_with(b"syntax error")
+        || msg.starts_with(b"unexpected ")
         // bash's `[[ … ]]` "conditional binary operator expected" diagnostic is a
         // complete message with no `syntax error:` tag (TD-OILS-COND-ERRTEXT).
-        || msg.starts_with("conditional ")
-        || msg.ends_with("not a valid identifier")
+        || msg.starts_with(b"conditional ")
+        || msg.ends_with(b"not a valid identifier")
     {
         bfmt![prefix, msg]
     } else {
@@ -29749,7 +29753,7 @@ mod tests {
 
     /// [`super::wrap_parse_message`] over text — see [`parse_error`].
     #[track_caller]
-    fn wrap_parse_message(msg: &str, prefix: &str) -> String {
+    fn wrap_parse_message(msg: BStr<'_>, prefix: &str) -> String {
         String::from_utf8(super::wrap_parse_message(msg, prefix.as_bytes()))
             .expect("diagnostic is text")
     }
@@ -30013,13 +30017,13 @@ mod tests {
         // A parser message that already opens with "syntax error" (bash's
         // canonical unexpected-token phrasing) must NOT get a second
         // "syntax error: " prefix.
-        let e = ParseError::new("syntax error near unexpected token '--'".into());
+        let e = ParseError::new("syntax error near unexpected token '--'");
         assert_eq!(
             wrap_parse_message(&e.msg, "osh: "),
             "osh: syntax error near unexpected token '--'"
         );
         // A fragment-style message still gets the prefix.
-        let e2 = ParseError::new("expected ')'".into());
+        let e2 = ParseError::new("expected ')'");
         assert_eq!(
             wrap_parse_message(&e2.msg, "osh: "),
             "osh: syntax error: expected ')'"
@@ -30133,6 +30137,22 @@ mod tests {
         assert_ne!(status, 0);
         let err = take_capture(&buf);
         assert!(err.starts_with(b"/tmp/a\xffb.sh: line 1: cd: "), "{err:?}");
+
+        // The here-document reader's warning quotes the delimiter it was
+        // looking for — a shell word, so it goes back out as written. That is
+        // the same byte string the reader compares each body line against, so a
+        // decoded spelling would name a delimiter that never ends the body.
+        let buf = capture_sink();
+        let status = {
+            let mut out = Out::Capture(buf.clone());
+            sh.run_source_out(b"exec 2>&1\ncat <<a\xffb\nbody\n", &mut out, 0)
+        };
+        assert_eq!(status, 0);
+        let err = take_capture(&buf);
+        assert!(
+            bytes::contains(&err, b"delimited by end-of-file (wanted `a\xffb')"),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -30308,7 +30328,7 @@ mod tests {
                 Some(Err(e)) => {
                     assert_eq!(units, 2, "both complete lines are handed out first");
                     assert_eq!(e.line, Some(3));
-                    assert!(e.msg.contains("unexpected EOF while looking for"));
+                    assert!(bytes::contains(&e.msg, b"unexpected EOF while looking for"));
                     break;
                 }
                 None => panic!("the lexer error must surface"),
@@ -30414,7 +30434,7 @@ mod tests {
             let err = parse(src.as_bytes()).expect_err("should fail to parse");
             assert_eq!(
                 err.msg,
-                format!("unexpected EOF while looking for matching `{close}'"),
+                bfmt![b"unexpected EOF while looking for matching `", close, b"'"],
                 "src {src:?}"
             );
         }
@@ -30425,14 +30445,14 @@ mod tests {
         // A stray extra pipe: bash prints `syntax error near unexpected token `|'`.
         let err = parse("echo a | | echo b".as_bytes()).expect_err("should fail");
         assert!(
-            err.msg.starts_with("syntax error near unexpected token"),
+            err.msg.starts_with(b"syntax error near unexpected token"),
             "got {:?}",
             err.msg
         );
         // An invalid `for` loop variable: bash prints `\`1abc': not a valid
         // identifier` with no `syntax error:` tag.
         let err = parse("for 1abc in x; do :; done".as_bytes()).expect_err("should fail");
-        assert_eq!(err.msg, "`1abc': not a valid identifier");
+        assert_eq!(err.msg, b"`1abc': not a valid identifier");
         // The interp-level message wrapper must pass both through without wrapping.
         assert_eq!(
             wrap_parse_message(&err.msg, "osh: "),

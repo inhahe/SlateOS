@@ -171,26 +171,6 @@ macro_rules! push_bytes_via_display {
 }
 push_bytes_via_display!(i8, i16, i32, i64, i128, isize, u16, u32, u64, u128, usize);
 
-/// **Refactor scaffolding — every call site is a bug until it is gone.**
-///
-/// Reinterpret a shell string as a Rust `String`, replacing anything that is
-/// not valid UTF-8. That is exactly the silent corruption TD-OILS-BYTE-STRINGS
-/// exists to remove, so this function must not survive the conversion: it is
-/// here only to keep the tree compiling while osh is converted module by
-/// module, at the seams where a byte-native producer still feeds a
-/// `String`-typed consumer.
-///
-/// It is `#[deprecated]` on purpose — the resulting warnings *are* the list of
-/// seams that remain, and the conversion is finished when the compiler stops
-/// printing them and this function is deleted.
-#[deprecated(
-    note = "byte-string refactor scaffolding: this call site must become byte-native \
-            before TD-OILS-BYTE-STRINGS can land"
-)]
-pub fn scaffold_lossy_string(v: BStr<'_>) -> String {
-    String::from_utf8_lossy(v).into_owned()
-}
-
 /// Append a `char`'s UTF-8 spelling to a byte string.
 ///
 /// The counterpart of `String::push` for the many loops that walk *source* text
@@ -204,8 +184,8 @@ pub fn push_char(out: &mut Str, c: char) {
 
 /// Borrow `s` as `&str` when — and only when — it is valid UTF-8.
 ///
-/// This is the *honest* counterpart to [`scaffold_lossy_string`]: it never
-/// invents a replacement character, it reports that the bytes are not text.
+/// This is the *only* way this crate turns bytes into text: it never invents a
+/// replacement character, it reports that the bytes are not text.
 /// Use it where a value has to be interpreted as text to mean anything at all
 /// — a numeric parse, a `strftime` format, a lookup in a `HashMap<String, _>`
 /// keyed by a portable identifier — because for those the correct answer for

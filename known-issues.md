@@ -5997,7 +5997,7 @@ Same root cause and disposition as `TD-OILS-PRINTF-QUOTE-CHAR` and
 for SlateOS, which has no C/POSIX byte locale), so the MSYS byte-wise result is
 a host-locale artifact, not an osh divergence. No action needed.
 
-### TD-OILS-BYTE-STRINGS. A byte that is not valid UTF-8 cannot survive osh: a script holding one is refused outright, and data holding one is replaced or dropped — OPEN 2026-07-30 (steps 1–8 of 10 done, step 9 part-done; no path can still *alter data*, only *display* it)
+### TD-OILS-BYTE-STRINGS. A byte that is not valid UTF-8 cannot survive osh: a script holding one is refused outright, and data holding one is replaced or dropped — ✅ RESOLVED 2026-07-30 (all 10 steps done; `scaffold_lossy_string` deleted)
 
 **Where:** the representation itself — osh stored a shell word, a variable value
 and a captured stream as a Rust `String`, which cannot hold invalid UTF-8. The
@@ -6340,9 +6340,47 @@ layer that only ever *displays* it. What remains can land one layer per commit:
      `interp.rs`'s `shown()` is deleted. Pinned by
      `interp::tests::diagnostics_carry_bytes_that_are_not_text`.
 
-   * **10c — the parser's own text.** `LexError.msg`, `ParseError.msg`,
-     `token_display` and `unterminated_heredoc` (`lexer.rs:111`) — the last two
-     seams, and all that is left of this task.
+   * **10c — the parser's own text. Done 2026-07-30.** `LexError::msg`,
+     `ParseError::msg`, `token_display`/`token_display_at`, `cond_near`,
+     `cond_error_near` and `unterminated_heredoc` are all `Str`; `wrap_parse_message`
+     takes bytes. Both `Display` impls were **deleted** rather than made lossy —
+     the shell formats these itself through `format_parse_error`, and the only
+     other readers were three tests. That removes `parser.rs`'s `shown()`, the
+     last seam.
+
+     The visible effect is that every diagnostic which quotes a shell construct
+     back now quotes the *bytes the user wrote*: `f() a\xffb` reports `syntax
+     error near unexpected token \`a\xffb'`, `for a\xffb in x` reports
+     `` `a\xffb': not a valid identifier ``, `[[ -z x a\xffb ]]` names `a\xffb`
+     on its second line, and a here-document delimiter is quoted as the same
+     byte string the reader compares each body line against. Before this a
+     `\xff` became U+FFFD, so the message named something the user had not
+     typed — and, for the here-document case, a delimiter that could never have
+     ended the body.
+
+     Classification stayed correct because every test in it is over the fixed
+     *English* part of a message, which no quoted word can perturb:
+     `ParseError::is_incomplete` and `wrap_parse_message` became byte-wise
+     prefix/suffix tests, and `format_parse_error` splits on `b'\n'`.
+     `cond_error_near`, which scans back for a trailing `;`/`|`/`&`, reads the
+     last *byte* — all three delimiters are ASCII, so a byte scan can neither
+     match inside a multi-byte character nor split one.
+
+     The ~40 parse-error cases in `parser.rs`'s test module kept their Rust
+     string literals through an `emsg(&ParseError) -> String` adapter that
+     `expect`s on a decode failure (the same shape as `interp.rs`'s
+     `parse_error`); the byte cases call `super::parse` on a byte literal
+     directly. Pinned by `parser::tests::diagnostics_quote_the_source_bytes_back`,
+     with the here-document warning added to
+     `interp::tests::diagnostics_carry_bytes_that_are_not_text`.
+
+11. **`scaffold_lossy_string` deleted — 2026-07-30.** The gate below is met: the
+    function is gone from `bytes.rs` and no lossy decode survives anywhere in
+    osh's production code. The one remaining `from_utf8_lossy` in the crate is
+    `bytes::bytes_to_os`'s `#[cfg(not(unix))]` arm — the Windows *development*
+    host, whose filesystem names are UTF-16 rather than bytes, so there is no
+    byte sequence to recover. SlateOS itself takes the `#[cfg(unix)]` arm, which
+    is exact. Everything else is `#[cfg(test)]` harness code.
 
 **Gate.** The branch does not merge until `scaffold_lossy_string` is deleted and
 a grep for it outside `bytes.rs` returns nothing. That grep count *is* the
@@ -6374,12 +6412,34 @@ Everything that reaches step 10 is now purely diagnostic. After step 10a:
 unterminated-here-document delimiter. After step 10b: **2** — `parser.rs:63`
 `shown` and `lexer.rs:111` the unterminated-here-document delimiter, both of
 which are step 10c and both of which live in the parser rather than the
-interpreter. `interp.rs` is now seam-free.
+interpreter. `interp.rs` is now seam-free. After step 10c: **0**, and
+`scaffold_lossy_string` itself is deleted. **The gate is met.**
 
 **Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
 `TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts
 where osh already matches UTF-8-locale bash, and the byte-string move must
 preserve their current character-wise answers.
+
+**Resolved 2026-07-30.** All ten steps are done and the gate is met: osh's
+representation is `Str = Vec<u8>` end to end, from the script reader through the
+lexer, parser, expander, arithmetic, history expansion, ERE engine and every
+builtin, out to the diagnostics. A SlateOS path admits every byte but `/` and
+NUL, so a file named `a\xffb` is now one osh can name, glob, open, stat, delete
+and *report errors about* — where before the shell would variously refuse the
+script, replace the byte with U+FFFD (and so act on a **different file**), or
+fake an EOF. `bytes.rs` carries the vocabulary the conversion needed: the `Str`
+/ `BStr` aliases, the `bfmt!` concatenating macro and its `PushBytes` trait, the
+`StrBuf` extension (deliberately without a `push`, so a leftover `s.push('x')`
+fails to compile), the `Ch` scanned-character type whose derived `Ord` puts
+every decoded scalar below every undecodable byte, and `as_str` — the one
+honest, *fallible* bytes-to-text conversion, now the only one in the crate.
+
+What remains genuinely text is text *by construction* and is documented as such
+at each site: variable/alias/reserved-word names and `HashMap<String, _>` keys
+are `[A-Za-z_][A-Za-z0-9_]*`, so bytes that are not text are not names and the
+honest answer is a rejection rather than an approximation. The residual
+narrowings are tracked separately and are all of that shape —
+`TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT` and `TD-OILS-NONUTF8-ENV-NAME`.
 
 ### TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT. An array *element* named by a subscript that is not text cannot be assigned to by `printf -v`, `read` or `declare -n` — OPEN 2026-07-30
 

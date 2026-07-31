@@ -337,8 +337,8 @@ fn shopt_line(name: &str, on: bool, reinput: bool) -> String {
 ///
 /// `Err` signals a non-numeric argument, which the caller reports as
 /// "numeric argument required" and turns into status 2.
-fn parse_exit_status(arg: &str) -> Result<i32, ()> {
-    arg.trim().parse::<i64>().map(|n| (n & 0xFF) as i32).map_err(|_| ())
+fn parse_exit_status(arg: BStr<'_>) -> Result<i32, ()> {
+    bytes::parse_i64(arg).map(|n| (n & 0xFF) as i32).ok_or(())
 }
 
 /// The outcome of reading the status operand `exit`, `logout` and `return`
@@ -397,9 +397,9 @@ pub struct StartupFiles<'a> {
 /// `eval -- -- cmd` runs `-- cmd`. Builtins that take no options at all still
 /// honour the marker (`eval`, `let`), because bash's `builtin_usage` shim
 /// strips it before the builtin ever sees the words.
-fn strip_end_of_options(args: &[String]) -> &[String] {
+fn strip_end_of_options(args: &[Str]) -> &[Str] {
     match args.split_first() {
-        Some((first, rest)) if first == "--" => rest,
+        Some((first, rest)) if first.as_slice() == b"--" => rest,
         _ => args,
     }
 }
@@ -1666,7 +1666,7 @@ enum JobLookup {
     /// A `%name`/`%?string` spec matched more than one job. The payload is the
     /// text that was matched against, which is what bash names — the spec with
     /// its leading `%` (and `?`) stripped off.
-    Ambiguous(String),
+    Ambiguous(Str),
 }
 
 /// One function frame's trap-inheritance mask (see [`Shell::trap_suppress`]).
@@ -1697,17 +1697,19 @@ impl DirStackSpec {
     /// Parse `+N`/`-N`. Returns `None` when the sign is not followed by a plain
     /// non-negative decimal number, which the caller turns into bash's
     /// "invalid number" usage error.
-    fn parse(arg: &str) -> Option<Self> {
-        let plus = match arg.as_bytes().first()? {
+    fn parse(arg: BStr<'_>) -> Option<Self> {
+        let plus = match arg.first()? {
             b'+' => true,
             b'-' => false,
             _ => return None,
         };
+        // An index is ASCII digits, so a tail that is not text is simply not a
+        // number — the same answer `+x` gets, and the same message.
         let digits = arg.get(1..)?;
-        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
             return None;
         }
-        digits.parse().ok().map(|n| Self { plus, n })
+        bytes::as_str(digits)?.parse().ok().map(|n| Self { plus, n })
     }
 }
 
@@ -1800,7 +1802,7 @@ struct SetOpts {
 /// matches), `-E` (empty command line) and `-I` (initial non-assignment word).
 #[derive(Clone, PartialEq, Eq)]
 enum CompKey {
-    Name(String),
+    Name(Str),
     Default,
     Empty,
     Initial,
@@ -1815,16 +1817,16 @@ enum CompKey {
 #[derive(Clone, Default)]
 struct CompSpec {
     /// `-o` option names present, e.g. `nospace`, `dirnames` (see `COMP_O_ORDER`).
-    o_opts: Vec<String>,
+    o_opts: Vec<Str>,
     /// `-A`/shortcut action names present, e.g. `function`, `alias` (see `COMP_ACTIONS`).
-    actions: Vec<String>,
-    globpat: Option<String>,   // -G
-    wordlist: Option<String>,  // -W
-    prefix: Option<String>,    // -P
-    suffix: Option<String>,    // -S
-    filterpat: Option<String>, // -X
-    command: Option<String>,   // -C
-    function: Option<String>,  // -F
+    actions: Vec<Str>,
+    globpat: Option<Str>,   // -G
+    wordlist: Option<Str>,  // -W
+    prefix: Option<Str>,    // -P
+    suffix: Option<Str>,    // -S
+    filterpat: Option<Str>, // -X
+    command: Option<Str>,   // -C
+    function: Option<Str>,  // -F
 }
 
 /// Canonical print order of `complete -o` option names (bash `pcomplete.c`).
@@ -2592,7 +2594,7 @@ pub struct Shell {
     /// stored/printed faithfully but async delivery awaits kernel signal
     /// support (see known-issues TD-OILS11). NOT cloned into subshells (bash
     /// resets non-ignored traps to their default in a subshell).
-    traps: HashMap<String, String>,
+    traps: HashMap<String, Str>,
     /// Inherited-but-reset trap strings that are shown by `trap`/`trap -p` but
     /// never fired. bash resets a subshell's non-ignored traps to their default
     /// *disposition* (so they do not fire), yet `trap -p` inside the subshell
@@ -2601,7 +2603,7 @@ pub struct Shell {
     /// empty at top level and populated only when forking a subshell. Setting or
     /// resetting a trap via the builtin removes the key here (it is no longer a
     /// mere inherited entry).
-    trap_shadow: HashMap<String, String>,
+    trap_shadow: HashMap<String, Str>,
     /// Guards the `EXIT` trap so it fires at most once when the shell exits.
     exit_trap_done: bool,
     /// True while a trap handler (`ERR`/`DEBUG`/`RETURN`) is running, to prevent
@@ -2667,10 +2669,12 @@ pub struct Shell {
     /// Inherited by subshell clones and children (the process umask).
     umask_val: u32,
     /// Remembered full pathnames for commands looked up via `$PATH`, keyed by the
-    /// command name (`hash` builtin). Value is `(resolved path, hit count)`. bash
+    /// command name (`hash` builtin). Both halves are bytes: a command name is a
+    /// path component and the value is an OS path, and a path may hold any byte
+    /// but `/` and NUL. Value is `(resolved path, hit count)`. bash
     /// caches every PATH search here and consults it before re-searching; the
     /// table is inherited by subshell clones. See `resolve_external`.
-    cmd_hash: std::collections::HashMap<String, (std::path::PathBuf, u64)>,
+    cmd_hash: std::collections::HashMap<Str, (std::path::PathBuf, u64)>,
     /// Per-shell resource limits for the `ulimit` builtin, keyed by the bash
     /// option letter (`'n'`, `'s'`, …). The value is a `(soft, hard)` pair in
     /// the *display units* bash uses for that resource (`None` == unlimited).
@@ -2974,7 +2978,7 @@ impl Shell {
         let mut v: Vec<(Str, Str)> = self
             .cmd_hash
             .iter()
-            .map(|(k, (p, _))| (k.clone().into_bytes(), bytes::path_to_bytes(p)))
+            .map(|(k, (p, _))| (k.clone(), bytes::path_to_bytes(p)))
             .collect();
         v.sort_by(|a, b| a.0.cmp(&b.0));
         self.assoc.insert("BASH_CMDS".to_string(), v);
@@ -4040,9 +4044,9 @@ impl Shell {
     /// The file `history -a/-n/-r/-w` acts on: the operand, else `$HISTFILE`,
     /// else `$HOME/.history` — readline's fallback, and the one a
     /// non-interactive shell always lands on, since it never sets `HISTFILE`.
-    fn hist_file(&self, arg: Option<&String>) -> Option<Str> {
+    fn hist_file(&self, arg: Option<&Str>) -> Option<Str> {
         if let Some(a) = arg {
-            return Some(a.clone().into_bytes());
+            return Some(a.clone());
         }
         if let Some(f) = self.param_value("HISTFILE").filter(|f| !f.is_empty()) {
             return Some(f);
@@ -4056,19 +4060,19 @@ impl Shell {
     /// Only `-a` reports why it failed (`cannot create`, when the file is not
     /// there and cannot be made); `-n`, `-r` and `-w` fail silently with status
     /// 1, which is bash's behaviour and not an oversight here.
-    fn hist_file_op(&mut self, op: char, arg: Option<&String>) -> i32 {
+    fn hist_file_op(&mut self, op: u8, arg: Option<&Str>) -> i32 {
         let Some(path) = self.hist_file(arg) else {
             return 1;
         };
         let host = bytes::bytes_to_path(&self.host_path(&path));
         match op {
-            'r' | 'n' => {
+            b'r' | b'n' => {
                 let Ok(text) = std::fs::read_to_string(&host) else {
                     return 1;
                 };
                 // `-r` takes the whole file; `-n` only what a previous read or
                 // write has not already accounted for.
-                let skip = if op == 'n' { self.hist_saved } else { 0 };
+                let skip = if op == b'n' { self.hist_saved } else { 0 };
                 let mut lines = 0usize;
                 for line in text.lines() {
                     lines = lines.saturating_add(1);
@@ -4085,7 +4089,7 @@ impl Shell {
                 self.hist_saved = lines;
                 0
             }
-            'w' => {
+            b'w' => {
                 let mut s = String::new();
                 for e in &self.history {
                     s.push_str(e);
@@ -5121,16 +5125,19 @@ impl Shell {
     /// A leading `--` ends option parsing (`break -- 2` breaks two levels, and a
     /// lone `break --` defaults to one). The number itself may carry a sign and
     /// surrounding whitespace, because bash's `legal_number` skips both.
-    fn loop_count_arg(&mut self, name: &str, args: &[String]) -> Result<u32, (Flow, i32)> {
+    fn loop_count_arg(&mut self, name: &str, args: &[Str]) -> Result<u32, (Flow, i32)> {
         let rest = strip_end_of_options(args);
         let Some(s) = rest.first() else {
             return Ok(1);
         };
-        let Ok(n) = s.trim_matches(|c: char| c.is_ascii_whitespace()).parse::<i64>() else {
-            self.errln(&format!(
-                "{}{name}: {s}: numeric argument required",
-                self.err_prefix()
-            ));
+        let Some(n) = bytes::parse_i64(s) else {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                name,
+                b": ",
+                s,
+                b": numeric argument required"
+            ]);
             let code = self.last_status | 128;
             return Err((Flow::Exit(code), code));
         };
@@ -5142,10 +5149,13 @@ impl Shell {
             return Err((Flow::Abort, 1));
         }
         if n <= 0 {
-            self.errln(&format!(
-                "{}{name}: {s}: loop count out of range",
-                self.err_prefix()
-            ));
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                name,
+                b": ",
+                s,
+                b": loop count out of range"
+            ]);
             return Err((Flow::Break(self.loop_depth.max(1)), 1));
         }
         let n = u32::try_from(n).unwrap_or(u32::MAX);
@@ -5171,16 +5181,19 @@ impl Shell {
     ///   because of the cleanup the unwind escapes an enclosing `eval`/`source`
     ///   — exactly [`Flow::Abort`]. So `exit 3 4; echo x` on one line prints
     ///   neither, and a following line still runs, with status 1.
-    fn exit_status_arg(&mut self, name: &str, args: &[String]) -> ExitArg {
+    fn exit_status_arg(&mut self, name: &str, args: &[Str]) -> ExitArg {
         let rest = strip_end_of_options(args);
         let Some(s) = rest.first() else {
             return ExitArg::Status(self.last_status);
         };
         let Ok(n) = parse_exit_status(s) else {
-            self.errln(&format!(
-                "{}{name}: {s}: numeric argument required",
-                self.err_prefix()
-            ));
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                name,
+                b": ",
+                s,
+                b": numeric argument required"
+            ]);
             return ExitArg::BadNumber;
         };
         if rest.len() > 1 {
@@ -5471,7 +5484,7 @@ impl Shell {
     /// status is 0 when the *last* expression evaluates non-zero, 1 when it is
     /// zero; an arithmetic error or no arguments yields status 1 (bash: 2 for
     /// "expression expected", but 1 for a zero result — we report 1 for both).
-    fn builtin_let(&mut self, args: &[String]) -> i32 {
+    fn builtin_let(&mut self, args: &[Str]) -> i32 {
         // `let --` is `let` with no expression, not arithmetic on `--`.
         let args = strip_end_of_options(args);
         if args.is_empty() {
@@ -6544,10 +6557,10 @@ impl Shell {
             CondBinOp::FileNewer | CondBinOp::FileOlder | CondBinOp::SameFile => {
                 let (a, b) = (self.expand_to_string(l), self.expand_to_string(r));
                 self.cond_trace_binary(invert, &a, op.text, &b);
-                let which = match op.op {
-                    CondBinOp::FileNewer => "-nt",
-                    CondBinOp::FileOlder => "-ot",
-                    _ => "-ef",
+                let which: BStr<'_> = match op.op {
+                    CondBinOp::FileNewer => b"-nt",
+                    CondBinOp::FileOlder => b"-ot",
+                    _ => b"-ef",
                 };
                 file_cmp(&self.cwd, which, &a, &b)
             }
@@ -7818,11 +7831,9 @@ impl Shell {
             return;
         }
         if name == "BASH_CMDS" {
-            // The hashed *path* is an OS path, so it is carried as bytes the
-            // whole way: a hash entry has to name the file it was resolved to.
-            // TD-OILS-BYTE-STRINGS step 7 converts the command *name* alongside
-            // the rest of the argv surface.
-            let key = bytes::scaffold_lossy_string(&key);
+            // Both halves of an entry are bytes the whole way: the key is a
+            // command name and the value the OS path it resolved to, and a hash
+            // entry has to name the file it was actually resolved to.
             let final_val: Str = if append {
                 let mut cur = self
                     .cmd_hash
@@ -10311,19 +10322,19 @@ impl Shell {
     ) -> Flow {
         // A command *name* that is not text can only be a `$PATH` file: no
         // alias, keyword, function or builtin can be spelled with it.
-        let Some(target) = bytes::as_str(target).map(str::to_owned) else {
-            return self.command_describe_file(&[], verbose, out, redir);
+        let Some(text) = bytes::as_str(target).map(str::to_owned) else {
+            return self.command_describe_file(target, verbose, out, redir);
         };
-        let target = target.as_str();
+        let target = text.as_str();
         if let Some(val) = self.describe_alias(target) {
             let line = if verbose {
-                alias_description(target, val)
+                alias_description(target.as_bytes(), val.as_bytes())
             } else {
                 // bash's terse form for an alias is a command that would
                 // recreate it, not the bare name.
-                format!("alias {target}={}", single_quote(val))
+                bfmt![b"alias ", target, b"=", single_quote_bytes(val.as_bytes())]
             };
-            let _ = self.write_line(out, redir, &line);
+            let _ = self.bwrite_line(out, redir, &line);
             self.last_status = 0;
         } else if SHELL_KEYWORDS.contains(&target) {
             // A reserved word is never on `$PATH`, but it *is* what the name
@@ -10440,18 +10451,12 @@ impl Shell {
         if name.contains(&b'/') || name.contains(&b'\\') {
             return self.find_in_path(name);
         }
-        // The hash table is keyed by name, and `hash`/`hash -p` reach it through
-        // the builtin argv surface, which is text. A non-text name therefore
-        // cannot have (or gain) an entry — it still resolves, just uncached.
-        let Some(key) = bytes::as_str(name).map(str::to_owned) else {
-            return self.find_in_path(name);
-        };
-        if let Some((path, hits)) = self.cmd_hash.get_mut(&key) {
+        if let Some((path, hits)) = self.cmd_hash.get_mut(name) {
             *hits += 1;
             return Some(path.clone());
         }
         let path = self.find_in_path(name)?;
-        self.cmd_hash.insert(key, (path.clone(), 1));
+        self.cmd_hash.insert(name.to_vec(), (path.clone(), 1));
         // Refresh the BASH_CMDS mirror only when a *new* command is hashed (rare,
         // once per distinct command). The cache-hit branch above mutates only the
         // hit count, which the mirror doesn't expose, so it stays sync-free.
@@ -14489,19 +14494,6 @@ impl Shell {
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) -> Flow {
-        // Seam: the builtins themselves are still `String`-typed
-        // (TD-OILS-BYTE-STRINGS step 7 converts them). Until they are, a
-        // builtin cannot be handed an argument that is not text, so `echo`
-        // and friends still mangle one — the conversion is confined to this
-        // one place precisely so that fixing it is a single edit.
-        #[allow(deprecated)]
-        let argv: Vec<String> = argv.iter().map(|a| bytes::scaffold_lossy_string(a)).collect();
-        #[allow(deprecated)]
-        let assigns: Vec<(String, String)> = assigns
-            .iter()
-            .map(|(k, v)| (k.clone(), bytes::scaffold_lossy_string(v)))
-            .collect();
-        let (argv, assigns) = (argv.as_slice(), assigns.as_slice());
         // A write failure inside the builtin is reported as `{name}: write
         // error: …` (see [`Shell::finish_write`]), and the builtin that runs
         // commands of its own must not lend its name to *their* failures — so
@@ -14523,12 +14515,56 @@ impl Shell {
         flow
     }
 
+    /// Run `eval`'s joined operand as shell source, and report the status the
+    /// builtin should yield.
+    ///
+    /// Split out of the `eval` arm of [`Shell::run_builtin_body`] so that arm
+    /// stays a single expression: the builtin teardown that follows the arm
+    /// (temporary assignments, scoped fds, the stderr stack) must run on every
+    /// path, so nothing in there may return early.
+    fn eval_string(&mut self, src: &str, out: &mut Out, stdin: &StdinSrc) -> i32 {
+        // bash tags a syntax error inside `eval` with the `eval:` input-source
+        // token; `eval_depth` drives that in the parse-error prefix. Restore on
+        // every exit path (the borrow of `self` ends before this returns, so a
+        // plain inc/dec is sufficient).
+        self.eval_depth = self.eval_depth.saturating_add(1);
+        // Route the evaluated commands' stdout to *this* command's sink so
+        // `x=$(eval echo hi)` captures it, matching bash, and let an `exit`
+        // inside the string unwind the shell via the side channel (a builtin
+        // can only return an `i32`).
+        //
+        // Line numbers inside the string continue the enclosing script's count:
+        // bash reports `LINENO(eval) - 1 + line_within_string`, because the
+        // string's first line *is* the line the `eval` command ended on.
+        // (`eval` on line 3 running a one-line string reports 3; running a
+        // three-line string reports 3, 4, 5.) `current_line` is already
+        // absolute, so nested evals compose.
+        let eval_base = self.current_line.saturating_sub(1);
+        let eval_flow =
+            self.run_source_flow_out(src, out, stdin, &LineMap::Offset(eval_base), HistRead::Off);
+        self.eval_depth = self.eval_depth.saturating_sub(1);
+        match eval_flow {
+            Flow::Exit(code) => {
+                self.pending_builtin_exit = Some(code);
+                code
+            }
+            // An abort that reached here was raised past this `eval`'s handler
+            // on purpose; re-raise it so the caller's parse unit is discarded
+            // too (see [`Flow::Abort`]).
+            Flow::Abort => {
+                self.pending_abort = true;
+                self.last_status
+            }
+            _ => self.last_status,
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn run_builtin_body(
         &mut self,
         name: &str,
-        argv: &[String],
-        assigns: &[(String, String)],
+        argv: &[Str],
+        assigns: &[(String, Str)],
         out: &mut Out,
         stdin: &StdinSrc,
         redir: &RedirPlan,
@@ -14651,17 +14687,20 @@ impl Shell {
             "printf" => self.builtin_printf(args, out, redir),
             "export" => self.builtin_export(args, out, redir),
             "declare" | "typeset" => {
-                let lead: String =
-                    args.iter().take_while(|a| a.starts_with('-')).flat_map(|a| a.chars()).collect();
+                // The leading flag cluster, as its raw bytes: every flag
+                // letter is ASCII, so a byte that is not one is simply not a
+                // flag and the `contains` tests below reject it.
+                let lead: Str =
+                    args.iter().take_while(|a| a.starts_with(b"-")).flatten().copied().collect();
                 // `declare -ft name` / `+ft name` toggles a function's trace
                 // attribute (so it inherits DEBUG/RETURN traps); it is a
                 // mutation, not a listing, and accepts a `+` sign.
                 if let Some((enable, start)) = Self::func_trace_op(args) {
                     self.set_func_trace(enable, &args[start..])
-                } else if lead.contains('F') || lead.contains('f') {
+                } else if lead.contains(&b'F') || lead.contains(&b'f') {
                     // `declare -F`/`-f` operate on functions (name listing).
-                    self.declare_functions(args, lead.contains('F'), out, redir)
-                } else if lead.contains('p') {
+                    self.declare_functions(args, lead.contains(&b'F'), out, redir)
+                } else if lead.contains(&b'p') {
                     self.declare_print(args, out, redir)
                 } else {
                     // `declare -A` / `-a` / `-i` / `-x` / `-r` / `-n` / `-l` /
@@ -14671,7 +14710,9 @@ impl Shell {
                     let start = Self::declare_flag_end(args);
                     let has_names = args.get(start).is_some();
                     let has_attr = args[..start].iter().any(|a| {
-                        a.chars().any(|c| matches!(c, 'A' | 'a' | 'i' | 'x' | 'r' | 'n' | 'l' | 'u'))
+                        a.iter().any(|c| {
+                            matches!(c, b'A' | b'a' | b'i' | b'x' | b'r' | b'n' | b'l' | b'u')
+                        })
                     });
                     if !has_names && has_attr {
                         self.declare_list_filtered(args, out, redir)
@@ -14695,39 +14736,21 @@ impl Shell {
                 // `eval` takes no options, but still honours the end-of-options
                 // marker: `eval -- 'echo hi'` prints `hi` rather than looking
                 // for a command named `--`.
-                let joined = strip_end_of_options(args).join(" ");
-                // bash tags a syntax error inside `eval` with the `eval:`
-                // input-source token; `eval_depth` drives that in the parse-error
-                // prefix. Restore on every exit path (the borrow of `self` ends
-                // before this returns, so a plain inc/dec is sufficient).
-                self.eval_depth = self.eval_depth.saturating_add(1);
-                // Route the evaluated commands' stdout to *this* command's sink
-                // so `x=$(eval echo hi)` captures it, matching bash, and let an
-                // `exit` inside the string unwind the shell via the side channel
-                // (a builtin can only return an `i32`).
-                //
-                // Line numbers inside the string continue the enclosing script's
-                // count: bash reports `LINENO(eval) - 1 + line_within_string`,
-                // because the string's first line *is* the line the `eval`
-                // command ended on. (`eval` on line 3 running a one-line string
-                // reports 3; running a three-line string reports 3, 4, 5.)
-                // `current_line` is already absolute, so nested evals compose.
-                let eval_base = self.current_line.saturating_sub(1);
-                let eval_flow = self.run_source_flow_out(&joined, out, stdin, &LineMap::Offset(eval_base), HistRead::Off);
-                self.eval_depth = self.eval_depth.saturating_sub(1);
-                match eval_flow {
-                    Flow::Exit(code) => {
-                        self.pending_builtin_exit = Some(code);
-                        code
+                let joined = strip_end_of_options(args).join(b" ".as_slice());
+                // Seam: the parser is still `str`-typed (TD-OILS-BYTE-STRINGS
+                // step 8), so an operand that is not text cannot be parsed. It
+                // is rejected rather than approximated — evaluating an
+                // *altered* command is worse than evaluating none.
+                match bytes::as_str(&joined) {
+                    Some(src) => self.eval_string(src, out, stdin),
+                    None => {
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"eval: argument is not valid text: ",
+                            &joined
+                        ]);
+                        2
                     }
-                    // An abort that reached here was raised past this `eval`'s
-                    // handler on purpose; re-raise it so the caller's parse unit
-                    // is discarded too (see [`Flow::Abort`]).
-                    Flow::Abort => {
-                        self.pending_abort = true;
-                        self.last_status
-                    }
-                    _ => self.last_status,
                 }
             }
             "source" | "." => self.builtin_source(args, name, out, stdin),
@@ -14902,16 +14925,7 @@ impl Shell {
                     // in-place `execve` that preserves the pid awaits kernel
                     // support; observationally the shell does not continue past
                     // `exec` (a following command never runs).
-                    // Seam: the builtin argv surface is still `String`-typed
-                    // (TD-OILS-BYTE-STRINGS step 7), so it is widened back to
-                    // bytes here for the runner, which names the file to spawn.
-                    let argv: Vec<Str> =
-                        args.iter().map(|a| a.clone().into_bytes()).collect();
-                    let assigns: Vec<(String, Str)> = assigns
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone().into_bytes()))
-                        .collect();
-                    self.run_external(&argv, &assigns, out, stdin, redir);
+                    self.run_external(args, assigns, out, stdin, redir);
                     let code = self.last_status;
                     flow = Flow::Exit(code);
                     code
@@ -15192,36 +15206,38 @@ impl Shell {
         Ok(target)
     }
 
-    fn builtin_cd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_cd(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Leading `-L`/`-P` select logical (default) vs physical (symlink-
         // resolved) handling. `-` is a target (`$OLDPWD`), not a flag.
         let mut physical = false;
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i += 1;
                 break;
             }
             // A bare `-` is the `$OLDPWD` target, not an option.
-            if a == "-" {
+            if a.as_slice() == b"-" {
                 break;
             }
-            if let Some(flags) = a.strip_prefix('-')
+            if let Some(flags) = a.strip_prefix(b"-")
                 && !flags.is_empty()
             {
                 // bash's cd accepts only -L/-P/-e/-@; any other letter is a
-                // usage error (reported on the first offending flag).
-                if let Some(c) = flags.chars().find(|c| !matches!(c, 'L' | 'P' | 'e' | '@')) {
+                // usage error (reported on the first offending flag). A flag
+                // letter is ASCII, so the scan is byte-wise: a byte that is not
+                // one of the four is reported as the invalid option it is.
+                if let Some(c) = flags.iter().find(|c| !matches!(c, b'L' | b'P' | b'e' | b'@')) {
                     return self.builtin_invalid_option(
                         "cd",
-                        &format!("-{c}"),
+                        &[b'-', *c],
                         "cd [-L|[-P [-e]] [-@]] [dir]",
                     );
                 }
-                for c in flags.chars() {
+                for c in flags {
                     match c {
-                        'L' => physical = false,
-                        'P' => physical = true,
+                        b'L' => physical = false,
+                        b'P' => physical = true,
                         _ => {} // -e/-@: accepted, no effect here.
                     }
                 }
@@ -15255,20 +15271,20 @@ impl Shell {
         }
 
         // `cd -` returns to `$OLDPWD` and echoes the new directory (bash).
-        let is_dash = rest.first().map(String::as_str) == Some("-");
-        let (mut target, mut echo) = match rest.first().map(String::as_str) {
+        let is_dash = rest.first().map(Vec::as_slice) == Some(b"-".as_slice());
+        let (mut target, mut echo) = match rest.first().map(Vec::as_slice) {
             None => (
                 self.param_value("HOME").unwrap_or_else(|| b"/".to_vec()),
                 false,
             ),
-            Some("-") => match self.param_value("OLDPWD") {
+            Some(b"-") => match self.param_value("OLDPWD") {
                 Some(p) => (p, true),
                 None => {
                     self.emit_stderr(format!("{}cd: OLDPWD not set\n", self.err_prefix()).as_bytes());
                     return 1;
                 }
             },
-            Some(p) => (p.as_bytes().to_vec(), false),
+            Some(p) => (p.to_vec(), false),
         };
 
         // `CDPATH` search: a non-explicit relative target is looked up under
@@ -15397,7 +15413,7 @@ impl Shell {
     /// the new top. With no argument, swap the top two entries. `+N`/`-N` rotate
     /// the stack so the N-th entry (from the left / right) becomes current. `-n`
     /// performs the stack manipulation *without* changing directory.
-    fn builtin_pushd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_pushd(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         const USAGE: &str = "pushd [-n] [+N | -N | dir]";
         let mut no_cd = false;
         let mut spec: Option<DirStackSpec> = None;
@@ -15405,18 +15421,18 @@ impl Shell {
         let mut end_opts = false;
         for a in args {
             if !end_opts {
-                if a == "--" {
+                if a.as_slice() == b"--" {
                     end_opts = true;
                     continue;
                 }
-                if a == "-n" {
+                if a.as_slice() == b"-n" {
                     no_cd = true;
                     continue;
                 }
                 // Anything else that leads with a sign must be an index: bash
                 // does not cluster `-n` with other letters, so `-nz` is an
                 // "invalid number", not an unknown option.
-                if a.starts_with('+') || a.starts_with('-') {
+                if a.starts_with(b"+") || a.starts_with(b"-") {
                     match DirStackSpec::parse(a) {
                         // A recognised index ends the scan outright — bash
                         // silently ignores everything after it (`pushd +1 foo`
@@ -15429,7 +15445,7 @@ impl Shell {
                     }
                 }
             }
-            if dir.replace(a.clone().into_bytes()).is_some() {
+            if dir.replace(a.clone()).is_some() {
                 self.errln(&format!("{}pushd: too many arguments", self.err_prefix()));
                 return 1;
             }
@@ -15507,21 +15523,21 @@ impl Shell {
     /// it. `+N`/`-N` remove the N-th entry (from the left / right) instead;
     /// removing the current entry (index 0) behaves like a plain `popd`. `-n`
     /// drops the saved top without changing directory.
-    fn builtin_popd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_popd(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         const USAGE: &str = "popd [-n] [+N | -N]";
         let mut no_cd = false;
         let mut spec: Option<DirStackSpec> = None;
         for a in args {
             // `popd` has no operands, so `--` simply ends the scan; bash
             // discards whatever follows it rather than complaining.
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 break;
             }
-            if a == "-n" {
+            if a.as_slice() == b"-n" {
                 no_cd = true;
                 continue;
             }
-            if a.starts_with('+') || a.starts_with('-') {
+            if a.starts_with(b"+") || a.starts_with(b"-") {
                 match DirStackSpec::parse(a) {
                     Some(s) => {
                         spec = Some(s);
@@ -15531,7 +15547,7 @@ impl Shell {
                 }
             }
             // `popd` takes no directory operand at all.
-            self.errln(&format!("{}popd: {a}: invalid argument", self.err_prefix()));
+            self.berrln(&bfmt![self.err_prefix(), b"popd: ", a, b": invalid argument"]);
             self.errln(&format!("popd: usage: {USAGE}"));
             return 2;
         }
@@ -15558,8 +15574,9 @@ impl Shell {
 
     /// Report bash's `NAME: ARG: invalid number` plus the builtin's usage line,
     /// the shape every `pushd`/`popd`/`dirs` index-parse failure takes (status 2).
-    fn dirstack_invalid_number(&mut self, tag: &str, arg: &str, usage: &str) -> i32 {
-        self.errln(&format!("{}{tag}: {arg}: invalid number", self.err_prefix()));
+    fn dirstack_invalid_number(&mut self, tag: &str, arg: BStr<'_>, usage: &str) -> i32 {
+        // `arg` is the word the user typed, so it is quoted back as its bytes.
+        self.berrln(&bfmt![self.err_prefix(), tag, b": ", arg, b": invalid number"]);
         self.errln(&format!("{tag}: usage: {usage}"));
         2
     }
@@ -15587,7 +15604,7 @@ impl Shell {
     /// `-c` clears it, `-l` uses long (un-contracted) paths, `-p` prints one per
     /// line, `-v` prints one per line with an index; `+N`/`-N` print a single
     /// entry (from the left / right).
-    fn builtin_dirs(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_dirs(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         const USAGE: &str = "dirs [-clpv] [+N] [-N]";
         let mut clear = false;
         let mut long = false;
@@ -15597,32 +15614,32 @@ impl Shell {
         for a in args {
             // Like `popd`, `dirs` has no operands: `--` ends the scan and bash
             // ignores every word after it (`dirs -- foo` prints the stack).
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 break;
             }
             // bash's `dirs` does *not* cluster its flags: each option word
             // is a single letter, and `-cp` is read as an index (hence
             // "invalid number", not "invalid option").
-            match a.as_str() {
-                "-c" => {
+            match a.as_slice() {
+                b"-c" => {
                     clear = true;
                     continue;
                 }
-                "-l" => {
+                b"-l" => {
                     long = true;
                     continue;
                 }
-                "-p" => {
+                b"-p" => {
                     per_line = true;
                     continue;
                 }
-                "-v" => {
+                b"-v" => {
                     verbose = true;
                     continue;
                 }
                 _ => {}
             }
-            if a.starts_with('+') || a.starts_with('-') {
+            if a.starts_with(b"+") || a.starts_with(b"-") {
                 match DirStackSpec::parse(a) {
                     Some(s) => {
                         single = Some(s);
@@ -15633,7 +15650,7 @@ impl Shell {
             }
             // `dirs` accepts no operands; bash reports a bare word as an
             // invalid *option* even though it does not start with a dash.
-            self.errln(&format!("{}dirs: {a}: invalid option", self.err_prefix()));
+            self.berrln(&bfmt![self.err_prefix(), b"dirs: ", a, b": invalid option"]);
             self.errln(&format!("dirs: usage: {USAGE}"));
             return 2;
         }
@@ -15680,26 +15697,28 @@ impl Shell {
     /// (on top-level shell exit); other specs are recorded and printed
     /// faithfully but not yet delivered — async signal delivery needs kernel
     /// support (see known-issues TD-OILS11).
-    fn builtin_trap(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_trap(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let mut print = false;
         let mut list = false;
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            match a.as_str() {
-                "--" => {
+            match a.as_slice() {
+                b"--" => {
                     i += 1;
                     break;
                 }
-                "-p" => print = true,
-                "-l" => list = true,
-                "-lp" | "-pl" => {
+                b"-p" => print = true,
+                b"-l" => list = true,
+                b"-lp" | b"-pl" => {
                     print = true;
                     list = true;
                 }
                 // A bare `-` is the reset *action*, not an option.
-                "-" => break,
-                other if other.starts_with('-') => {
-                    let opt: String = other.chars().take(2).collect();
+                b"-" => break,
+                other if other.starts_with(b"-") => {
+                    // The dash and the letter after it — a *character*, so a
+                    // multi-byte one is quoted back whole rather than cut.
+                    let opt = bytes::char_slice(other, 0, 2);
                     return self.builtin_invalid_option(
                         "trap",
                         &opt,
@@ -15730,7 +15749,7 @@ impl Shell {
             self.emit_stderr(b"trap: usage: trap [-lp] [[arg] signal_spec ...]\n");
             return 2;
         }
-        let reset = action == "-";
+        let reset = action.as_slice() == b"-";
         let mut status = 0;
         for spec in specs {
             match normalize_sigspec(spec) {
@@ -15751,9 +15770,12 @@ impl Shell {
                     }
                 }
                 None => {
-                    self.emit_stderr(
-                        format!("{}trap: {spec}: invalid signal specification\n", self.err_prefix()).as_bytes(),
-                    );
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"trap: ",
+                        spec,
+                        b": invalid signal specification"
+                    ]);
                     status = 1;
                 }
             }
@@ -15763,13 +15785,13 @@ impl Shell {
 
     /// Print the currently-set traps in re-inputtable form (`trap -- 'act' SIG`),
     /// sorted by signal number. When `specs` is non-empty, only those are shown.
-    fn trap_print(&mut self, specs: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn trap_print(&mut self, specs: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let filter: Option<Vec<String>> = if specs.is_empty() {
             None
         } else {
             Some(specs.iter().filter_map(|s| normalize_sigspec(s)).collect())
         };
-        let mut entries: Vec<(&String, &String)> = self
+        let mut entries: Vec<(&String, &Str)> = self
             .traps
             .iter()
             .filter(|(k, _)| filter.as_ref().is_none_or(|f| f.contains(k)))
@@ -15782,13 +15804,20 @@ impl Shell {
             }
         }
         entries.sort_by_key(|(k, _)| sigspec_order(k));
-        let mut buf = String::new();
+        let mut buf = Str::new();
         for (sig, action) in entries {
-            let quoted = single_quote(action);
-            let name = sigspec_display(sig);
-            buf.push_str(&format!("trap -- {quoted} {name}\n"));
+            // A handler is the user's own source text, so the line is assembled
+            // as bytes: a handler holding a byte that is not text is printed
+            // back exactly as it was given, and stays re-inputtable.
+            buf.extend_from_slice(&bfmt![
+                b"trap -- ",
+                &single_quote_bytes(action),
+                b" ",
+                sigspec_display(sig),
+                b"\n"
+            ]);
         }
-        self.write_bytes(out, redir, buf.as_bytes())
+        self.write_bytes(out, redir, &buf)
     }
 
     /// `trap -l` — list the known signal names, five per line, numbered.
@@ -15813,7 +15842,7 @@ impl Shell {
     /// "No such process", matching a nonexistent pid.
     fn builtin_kill(
         &mut self,
-        args: &[String],
+        args: &[Str],
         out: &mut Out,
         stdin: &StdinSrc,
         redir: &RedirPlan,
@@ -15826,35 +15855,37 @@ impl Shell {
         // here: a spec's validity only matters once there is a signal to
         // deliver, which is why `kill -l -x 15` still answers `TERM`.
         let mut signum: Option<u16> = Some(15);
-        let mut sigspec: Option<&str> = None;
+        let mut sigspec: Option<BStr<'_>> = None;
         let mut list_names = false;
         let mut i = 0;
         while let Some(word) = args.get(i) {
             // How many words this option occupies, and the spec it supplies.
-            let (spec, width) = match word.as_str() {
-                "-l" | "-L" => {
+            // Every option spelling is ASCII, so the run is read byte-wise and
+            // a word that is not text falls to the final arm — an operand,
+            // which is what it is.
+            let (spec, width) = match word.as_slice() {
+                b"-l" | b"-L" => {
                     list_names = true;
                     i += 1;
                     continue;
                 }
-                "--" => {
+                b"--" => {
                     i += 1;
                     break;
                 }
-                "-?" => {
+                b"-?" => {
                     self.emit_stderr(KILL_USAGE);
                     return 2;
                 }
-                "-s" | "-n" => match args.get(i + 1) {
-                    Some(a) => (a.as_str(), 2),
+                b"-s" | b"-n" => match args.get(i + 1) {
+                    Some(a) => (a.as_slice(), 2),
                     None => {
-                        self.emit_stderr(
-                            format!(
-                                "{}kill: {word}: option requires an argument\n",
-                                self.err_prefix()
-                            )
-                            .as_bytes(),
-                        );
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"kill: ",
+                            word,
+                            b": option requires an argument"
+                        ]);
                         return 1;
                     }
                 },
@@ -15863,25 +15894,25 @@ impl Shell {
                 // the letter — a name for `-s`, a number for `-n` — so `-sn9`
                 // is the spec `n9` while `-s9x` is the spec `s9x`.
                 w if w.len() > 2
-                    && w.starts_with("-s")
-                    && w.as_bytes().get(2).is_some_and(u8::is_ascii_alphabetic) =>
+                    && w.starts_with(b"-s")
+                    && w.get(2).is_some_and(u8::is_ascii_alphabetic) =>
                 {
                     (&w[2..], 1)
                 }
                 w if w.len() > 2
-                    && w.starts_with("-n")
-                    && w.as_bytes().get(2).is_some_and(u8::is_ascii_digit) =>
+                    && w.starts_with(b"-n")
+                    && w.get(2).is_some_and(u8::is_ascii_digit) =>
                 {
                     (&w[2..], 1)
                 }
                 // A plain `-SPEC`, but only while no signal has been named yet.
-                w if w.starts_with('-') && sigspec.is_none() => (&w[1..], 1),
+                w if w.starts_with(b"-") && sigspec.is_none() => (&w[1..], 1),
                 _ => break,
             };
             sigspec = Some(spec);
             // bash reads a lone `0` as the existence check without consulting
             // the table at all.
-            signum = if spec == "0" { Some(0) } else { decode_signal(spec) };
+            signum = if spec == b"0" { Some(0) } else { decode_signal(spec) };
             i += width;
         }
 
@@ -15893,10 +15924,12 @@ impl Shell {
         // reported once rather than once per target.
         let Some(signum) = signum else {
             let spec = sigspec.unwrap_or_default();
-            self.emit_stderr(
-                format!("{}kill: {spec}: invalid signal specification\n", self.err_prefix())
-                    .as_bytes(),
-            );
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"kill: ",
+                spec,
+                b": invalid signal specification"
+            ]);
             return 1;
         };
 
@@ -15913,9 +15946,15 @@ impl Shell {
         // so it reports the same spec once per target.
         let Some(signum) = u8::try_from(signum).ok().filter(|n| u16::from(*n) < NSIG) else {
             let spec = sigspec.unwrap_or_default();
-            let msg = format!("{}kill: {spec}: invalid signal specification\n", self.err_prefix());
+            let mut msg = bfmt![
+                self.err_prefix(),
+                b"kill: ",
+                spec,
+                b": invalid signal specification\n"
+            ];
+            msg.shrink_to_fit();
             for _ in targets {
-                self.emit_stderr(msg.as_bytes());
+                self.emit_stderr(&msg);
             }
             return 1;
         };
@@ -15931,7 +15970,7 @@ impl Shell {
 
     /// Deliver `signum` to a single `kill` target (job spec `%n` or a pid).
     /// Returns `true` on success. Signal 0 is an existence check (no delivery).
-    fn kill_one(&mut self, target: &str, signum: u8, out: &mut Out, stdin: &StdinSrc) -> bool {
+    fn kill_one(&mut self, target: BStr<'_>, signum: u8, out: &mut Out, stdin: &StdinSrc) -> bool {
         // Reap first: a job that had already exited is not one this `kill`
         // terminated, so it keeps the `Done` it earned rather than being
         // rewritten as `Terminated`. bash, which reaps asynchronously, already
@@ -15942,7 +15981,7 @@ impl Shell {
         // read the way bash reads any number, so ` 9` and `+9` both name process
         // nine — and the messages below quote the number read rather than the
         // word it came from.
-        let pid = if target.starts_with('%') {
+        let pid = if target.starts_with(b"%") {
             None
         } else {
             match legal_number(target) {
@@ -15950,25 +15989,23 @@ impl Shell {
                 // The empty word is the one non-number bash does not put down to
                 // spelling; it has no spelling to fault.
                 None if target.is_empty() => {
-                    self.emit_stderr(
-                        format!("{}kill: `': not a pid or valid job spec\n", self.err_prefix())
-                            .as_bytes(),
-                    );
+                    self.errln(&format!("{}kill: `': not a pid or valid job spec", self.err_prefix()));
                     return false;
                 }
                 None => {
-                    self.emit_stderr(
-                        format!(
-                            "{}kill: {target}: arguments must be process or job IDs\n",
-                            self.err_prefix()
-                        )
-                        .as_bytes(),
-                    );
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"kill: ",
+                        target,
+                        b": arguments must be process or job IDs"
+                    ]);
                     return false;
                 }
             }
         };
-        let shown = pid.map_or_else(|| target.to_string(), |n| n.to_string());
+        // What the messages below quote: the number read out of the word when
+        // there was one, otherwise the word itself — which is bytes.
+        let shown: Str = pid.map_or_else(|| target.to_vec(), |n| n.to_string().into_bytes());
         let is_self = pid == Some(i64::from(std::process::id()));
         // Resolve to one of our tracked jobs, if possible. An ambiguous `%name`
         // stops here: bash names the ambiguity and does not go on to claim
@@ -15983,10 +16020,8 @@ impl Shell {
         };
         // A `%…` operand is a job spec and nothing else, so failing to resolve it
         // is "no such job" — never the "No such process" a stale *pid* gets.
-        if job_idx.is_none() && target.starts_with('%') {
-            self.emit_stderr(
-                format!("{}kill: {target}: no such job\n", self.err_prefix()).as_bytes(),
-            );
+        if job_idx.is_none() && target.starts_with(b"%") {
+            self.berrln(&bfmt![self.err_prefix(), b"kill: ", target, b": no such job"]);
             return false;
         }
         // Naming a job in `kill` puts it back on the list of jobs whose fate is
@@ -16001,10 +16036,12 @@ impl Shell {
         if signum == 0 {
             let exists = job_idx.is_some() || is_self;
             if !exists {
-                self.emit_stderr(
-                    format!("{}kill: ({shown}) - No such process\n", self.err_prefix())
-                        .as_bytes(),
-                );
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"kill: (",
+                    &shown,
+                    b") - No such process"
+                ]);
             }
             return exists;
         }
@@ -16028,10 +16065,12 @@ impl Shell {
                         return true;
                     }
                     Err(_) => {
-                        self.emit_stderr(
-                            format!("{}kill: ({shown}) - No such process\n", self.err_prefix())
-                                .as_bytes(),
-                        );
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"kill: (",
+                            &shown,
+                            b") - No such process"
+                        ]);
                         return false;
                     }
                 },
@@ -16058,9 +16097,7 @@ impl Shell {
         }
         // A pid osh did not spawn cannot be signalled without the target's
         // process-control layer; report it like bash does for a stale pid.
-        self.emit_stderr(
-            format!("{}kill: ({shown}) - No such process\n", self.err_prefix()).as_bytes(),
-        );
+        self.berrln(&bfmt![self.err_prefix(), b"kill: (", &shown, b") - No such process"]);
         false
     }
 
@@ -16106,7 +16143,7 @@ impl Shell {
     /// `kill -l $?` names what killed the last command. A name, on the other
     /// hand, is looked up in the whole table, pseudo signals included — which
     /// is the one place their numbers can be seen.
-    fn kill_list(&mut self, specs: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn kill_list(&mut self, specs: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         if specs.is_empty() {
             let buf = signal_list_columns();
             return self.write_bytes(out, redir, buf.as_bytes());
@@ -16132,13 +16169,12 @@ impl Shell {
                 None => {
                     // bash quotes the word it was given, not the number it read
                     // out of it, so surrounding blanks survive into the message.
-                    self.emit_stderr(
-                        format!(
-                            "{}kill: {spec}: invalid signal specification\n",
-                            self.err_prefix()
-                        )
-                        .as_bytes(),
-                    );
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"kill: ",
+                        spec,
+                        b": invalid signal specification"
+                    ]);
                     status = 1;
                 }
             }
@@ -16367,7 +16403,7 @@ impl Shell {
     /// for a following `kill %1` to find.
     fn builtin_jobs(
         &mut self,
-        args: &[String],
+        args: &[Str],
         out: &mut Out,
         stdin: &StdinSrc,
         redir: &RedirPlan,
@@ -16384,35 +16420,35 @@ impl Shell {
         // that is the point at which it looks.
         let mut execute = false;
         let mut listing_option = false;
-        let mut specs: Vec<String> = Vec::new();
+        let mut specs: Vec<Str> = Vec::new();
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 specs.extend_from_slice(&args[i + 1..]);
                 break;
             }
-            let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
                 // First non-option word: the rest are jobspecs.
                 specs.extend_from_slice(&args[i..]);
                 break;
             };
             i += 1;
             // Valid jobs options are -lnprsx.
-            if let Some(c) = flags.chars().find(|c| !matches!(c, 'l' | 'n' | 'p' | 'r' | 's' | 'x')) {
+            if let Some(c) = flags.iter().find(|c| !matches!(c, b'l' | b'n' | b'p' | b'r' | b's' | b'x')) {
                 return self.builtin_invalid_option(
                     "jobs",
-                    &format!("-{c}"),
+                    &[b'-', *c],
                     "jobs [-lnprs] [jobspec ...] or jobs -x command [args]",
                 );
             }
-            for c in flags.chars() {
+            for c in flags {
                 match c {
-                    'l' => form = JobsForm::Long,
-                    'p' => form = JobsForm::PidOnly,
-                    'n' => form = JobsForm::Changed,
-                    'r' => state = Some(JobState::Running),
-                    's' => state = Some(JobState::Stopped),
-                    'x' => {
+                    b'l' => form = JobsForm::Long,
+                    b'p' => form = JobsForm::PidOnly,
+                    b'n' => form = JobsForm::Changed,
+                    b'r' => state = Some(JobState::Running),
+                    b's' => state = Some(JobState::Stopped),
+                    b'x' => {
                         if listing_option {
                             self.emit_stderr(
                                 format!(
@@ -16454,9 +16490,7 @@ impl Shell {
                         if let JobLookup::Ambiguous(text) = outcome {
                             self.ambiguous_job_spec("jobs", &text);
                         }
-                        self.emit_stderr(
-                            format!("{}jobs: {spec}: no such job\n", self.err_prefix()).as_bytes(),
-                        );
+                        self.berrln(&bfmt![self.err_prefix(), b"jobs: ", spec, b": no such job"]);
                         status = 1;
                     }
                 }
@@ -16558,38 +16592,53 @@ impl Shell {
     /// the pid is what stands in. Under a bash that is not doing job control
     /// the two differ: every child shares the shell's group, so bash answers
     /// with a pgid that names no job in particular.
-    fn jobs_execute(&mut self, words: &[String], out: &mut Out, stdin: &StdinSrc) -> i32 {
+    fn jobs_execute(&mut self, words: &[Str], out: &mut Out, stdin: &StdinSrc) -> i32 {
         if words.is_empty() {
             return 0;
         }
-        let argv: Vec<String> = words
-            .iter()
-            .map(|w| {
-                if !w.starts_with('%') {
-                    return w.clone();
+        let mut argv: Vec<Str> = Vec::with_capacity(words.len());
+        for w in words {
+            if !w.starts_with(b"%") {
+                argv.push(w.clone());
+                continue;
+            }
+            match self.lookup_job(w, BareNumber::JobId) {
+                JobLookup::Found(idx) => argv.push(self.jobs[idx].pid.to_string().into_bytes()),
+                JobLookup::Ambiguous(text) => {
+                    self.ambiguous_job_spec("jobs", &text);
+                    argv.push(w.clone());
                 }
-                match self.lookup_job(w, BareNumber::JobId) {
-                    JobLookup::Found(idx) => self.jobs[idx].pid.to_string(),
-                    JobLookup::Ambiguous(text) => {
-                        self.ambiguous_job_spec("jobs", &text);
-                        w.clone()
-                    }
-                    _ => w.clone(),
-                }
-            })
-            .collect();
+                JobLookup::NotFound => argv.push(w.clone()),
+            }
+        }
         // Quoted parts, so the words survive as they are: a substituted pid is
         // not a pattern to match, and a spec left alone is not one either.
+        //
+        // Seam: the command is handed to the executor as an AST, whose word
+        // text is still `String`-typed (TD-OILS-BYTE-STRINGS step 8), so a word
+        // that is not text cannot be carried through it. It is refused rather
+        // than approximated — running an *altered* command is the one outcome
+        // worse than running none.
+        let mut cmd_words = Vec::with_capacity(argv.len());
+        for a in &argv {
+            let Some(text) = bytes::as_str(a) else {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"jobs: ",
+                    a,
+                    b": argument is not valid text"
+                ]);
+                return 1;
+            };
+            cmd_words.push(Word {
+                parts: vec![WordPart::SingleQuoted {
+                    text: text.to_string(),
+                    escaped: false,
+                }],
+            });
+        }
         let sc = SimpleCommand {
-            words: argv
-                .into_iter()
-                .map(|a| Word {
-                    parts: vec![WordPart::SingleQuoted {
-                        text: a,
-                        escaped: false,
-                    }],
-                })
-                .collect(),
+            words: cmd_words,
             ..SimpleCommand::default()
         };
         match self.exec_simple(&sc, out, stdin) {
@@ -16611,9 +16660,12 @@ impl Shell {
     /// job number or one of the `+`/`-`/`%` shorthands is matched against the
     /// job's command text, and a spec that matches more than one job is an
     /// error rather than a pick.
-    fn lookup_job(&self, spec: &str, bare: BareNumber) -> JobLookup {
-        let Some(rest) = spec.strip_prefix('%') else {
-            let Ok(n) = spec.parse::<u32>() else {
+    fn lookup_job(&self, spec: BStr<'_>, bare: BareNumber) -> JobLookup {
+        let Some(rest) = spec.strip_prefix(b"%") else {
+            // A bare number, and nothing but: a spec that is not text is not a
+            // number either, so it matches no job — which is the answer any
+            // unparseable spec gets.
+            let Some(Ok(n)) = bytes::as_str(spec).map(str::parse::<u32>) else {
                 return JobLookup::NotFound;
             };
             return match bare {
@@ -16624,9 +16676,8 @@ impl Shell {
         };
         // `%N` is a job number, but only when the whole of it is digits: `%1x`
         // falls through to a name match rather than being read as job 1.
-        if rest.starts_with(|c: char| c.is_ascii_digit()) && rest.bytes().all(|b| b.is_ascii_digit())
-        {
-            let Ok(id) = rest.parse::<usize>() else {
+        if rest.first().is_some_and(u8::is_ascii_digit) && rest.iter().all(u8::is_ascii_digit) {
+            let Some(Ok(id)) = bytes::as_str(rest).map(str::parse::<usize>) else {
                 return JobLookup::NotFound;
             };
             return self
@@ -16637,21 +16688,23 @@ impl Shell {
         }
         // `%`, `%%` and `%+` name the current job, `%-` the previous one — the
         // same two jobs `jobs` marks `+` and `-`.
-        let (name, substring) = match rest.chars().next() {
-            None | Some('%' | '+') => {
+        // The four leading sigils are ASCII, so the first *byte* decides; a
+        // spec beginning with any other byte is a name to match against.
+        let (name, substring) = match rest.first() {
+            None | Some(b'%' | b'+') => {
                 return self
                     .current_job
                     .and_then(|id| self.jobs.iter().position(|j| j.id == id))
                     .map_or(JobLookup::NotFound, JobLookup::Found);
             }
-            Some('-') => {
+            Some(b'-') => {
                 return self
                     .previous_job
                     .and_then(|id| self.jobs.iter().position(|j| j.id == id))
                     .map_or(JobLookup::NotFound, JobLookup::Found);
             }
             // `%?str` searches anywhere in the command, `%str` only its start.
-            Some('?') => (&rest[1..], true),
+            Some(b'?') => (&rest[1..], true),
             Some(_) => (rest, false),
         };
         // bash matches against each *process* of a pipeline job; osh tracks the
@@ -16659,13 +16712,17 @@ impl Shell {
         // its whole-command spelling. Logged as part of TD-OILS13.
         let mut found = None;
         for (idx, job) in self.jobs.iter().enumerate() {
-            let hit =
-                if substring { job.cmd.contains(name) } else { job.cmd.starts_with(name) };
+            // Seam: a job's recorded command text is still `String`-typed
+            // (TD-OILS-BYTE-STRINGS step 8, the parser layer), so the match is
+            // made against its bytes rather than the other way round. That is
+            // exact either way — a byte string never matches text it is not.
+            let hay = job.cmd.as_bytes();
+            let hit = if substring { hay.contains_str(name) } else { hay.starts_with(name) };
             if !hit {
                 continue;
             }
             if found.is_some() {
-                return JobLookup::Ambiguous(name.to_string());
+                return JobLookup::Ambiguous(name.to_vec());
             }
             found = Some(idx);
         }
@@ -16674,10 +16731,10 @@ impl Shell {
 
     /// `BUILTIN: TEXT: ambiguous job spec` — the diagnostic for a `%name` spec
     /// that named more than one job.
-    fn ambiguous_job_spec(&mut self, builtin: &str, text: &str) {
-        self.emit_stderr(
-            format!("{}{builtin}: {text}: ambiguous job spec\n", self.err_prefix()).as_bytes(),
-        );
+    fn ambiguous_job_spec(&mut self, builtin: &str, text: BStr<'_>) {
+        // `text` is the part of the spec the user typed that matched, so it is
+        // reported as its bytes.
+        self.berrln(&bfmt![self.err_prefix(), builtin, b": ", text, b": ambiguous job spec"]);
     }
 
     /// Block on every job that still has a live body, and count each one as
@@ -16729,12 +16786,12 @@ impl Shell {
     /// operands, wait for all jobs. Returns the exit status of the last waited
     /// job (0 when there are no jobs to wait for). Each waited job is removed
     /// from the table.
-    fn builtin_wait(&mut self, args: &[String]) -> i32 {
+    fn builtin_wait(&mut self, args: &[Str]) -> i32 {
         // Parse flags: `-n` (return as soon as the next job completes) and
         // `-p VAR` (store the pid of the job whose status is returned in VAR).
         let mut wait_any = false;
-        let mut pid_var: Option<String> = None;
-        let mut operands: Vec<String> = Vec::new();
+        let mut pid_var: Option<Str> = None;
+        let mut operands: Vec<Str> = Vec::new();
         // bash reads these with `getopt`, so the letters cluster (`wait -fn`,
         // `wait -np VAR`) and `-p`'s argument is either the rest of its own
         // cluster (`-pVAR`) or the next word. A lone `-` is not an option — it is
@@ -16742,36 +16799,36 @@ impl Shell {
         const USAGE: &[u8] = b"wait: usage: wait [-fn] [-p var] [id ...]\n";
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 operands.extend_from_slice(&args[i + 1..]);
                 break;
             }
-            let Some(cluster) = a.strip_prefix('-').filter(|c| !c.is_empty()) else {
+            let Some(cluster) = a.strip_prefix(b"-").filter(|c| !c.is_empty()) else {
                 // First non-flag token: the rest are operands.
                 operands.extend_from_slice(&args[i..]);
                 break;
             };
             i += 1;
-            for (at, c) in cluster.char_indices() {
+            for (at, c) in cluster.iter().enumerate() {
                 match c {
-                    'n' => wait_any = true,
+                    b'n' => wait_any = true,
                     // `-f`: wait for the job to *terminate* rather than merely
                     // change state. osh's `wait` already blocks until
                     // termination, so this is a no-op; accept it so scripts
                     // using `wait -f` don't error.
-                    'f' => {}
-                    'p' => {
-                        let rest = &cluster[at + c.len_utf8()..];
+                    b'f' => {}
+                    b'p' => {
+                        let rest = &cluster[at + 1..];
                         if rest.is_empty() {
                             let Some(v) = args.get(i) else {
-                                self.emit_stderr(format!("{}wait: -p: option requires an argument\n", self.err_prefix()).as_bytes());
+                                self.errln(&format!("{}wait: -p: option requires an argument", self.err_prefix()));
                                 self.emit_stderr(USAGE);
                                 return 2;
                             };
                             pid_var = Some(v.clone());
                             i += 1;
                         } else {
-                            pid_var = Some(rest.to_string());
+                            pid_var = Some(rest.to_vec());
                         }
                         break;
                     }
@@ -16780,9 +16837,7 @@ impl Shell {
                     // an invalid option — not a negative pid — and aborts with
                     // status 2 plus the usage line.
                     _ => {
-                        self.emit_stderr(
-                            format!("{}wait: -{c}: invalid option\n", self.err_prefix()).as_bytes(),
-                        );
+                        self.berrln(&bfmt![self.err_prefix(), b"wait: -", *c, b": invalid option"]);
                         self.emit_stderr(USAGE);
                         return 2;
                     }
@@ -16791,15 +16846,24 @@ impl Shell {
         }
 
         // `-p` names a variable to assign, so the name has to be one: bash
-        // rejects anything else outright, before waiting for anything.
-        if let Some(var) = &pid_var
-            && !crate::parser::is_valid_name(var)
-        {
-            self.emit_stderr(
-                format!("{}wait: `{var}': not a valid identifier\n", self.err_prefix()).as_bytes(),
-            );
-            return 1;
-        }
+        // rejects anything else outright, before waiting for anything. An
+        // identifier is ASCII, so a word that is not text is not one either —
+        // it takes the same message, quoting the bytes the user gave.
+        let pid_var: Option<String> = match &pid_var {
+            Some(var) => match bytes::as_str(var).filter(|n| crate::parser::is_valid_name(n)) {
+                Some(name) => Some(name.to_string()),
+                None => {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"wait: `",
+                        var,
+                        b"': not a valid identifier"
+                    ]);
+                    return 1;
+                }
+            },
+            None => None,
+        };
 
         // `-p VAR` names where the pid of the job whose status is being reported
         // goes. bash clears it up front, so a `wait` that reports no particular
@@ -16852,7 +16916,10 @@ impl Shell {
                 JobLookup::NotFound => {
                     // Not a live job — but it may be one we already reaped, whose
                     // status bash keeps answering with (silently, no diagnostic).
-                    match spec.parse::<u32>().ok().and_then(|p| self.reaped_status.get(&p)) {
+                    match bytes::as_str(spec)
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .and_then(|p| self.reaped_status.get(&p))
+                    {
                         Some(&status) => {
                             last = status;
                             if let Some(var) = &pid_var {
@@ -16900,29 +16967,25 @@ impl Shell {
     /// neither a PID nor a valid job spec → `` `X': not a pid or valid job spec ``
     /// with status 1. (bash's `wait -n` path uses the simpler "no such job" text
     /// for every bad id, so it does not go through here.)
-    fn wait_bad_operand(&mut self, spec: &str) -> i32 {
-        if spec.starts_with('%') {
-            self.emit_stderr(
-                format!("{}wait: {spec}: no such job\n", self.err_prefix()).as_bytes(),
-            );
+    fn wait_bad_operand(&mut self, spec: BStr<'_>) -> i32 {
+        if spec.starts_with(b"%") {
+            self.berrln(&bfmt![self.err_prefix(), b"wait: ", spec, b": no such job"]);
             127
-        } else if !spec.is_empty() && spec.bytes().all(|b| b.is_ascii_digit()) {
-            self.emit_stderr(
-                format!(
-                    "{}wait: pid {spec} is not a child of this shell\n",
-                    self.err_prefix()
-                )
-                .as_bytes(),
-            );
+        } else if !spec.is_empty() && spec.iter().all(u8::is_ascii_digit) {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"wait: pid ",
+                spec,
+                b" is not a child of this shell"
+            ]);
             127
         } else {
-            self.emit_stderr(
-                format!(
-                    "{}wait: `{spec}': not a pid or valid job spec\n",
-                    self.err_prefix()
-                )
-                .as_bytes(),
-            );
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"wait: `",
+                spec,
+                b"': not a pid or valid job spec"
+            ]);
             1
         }
     }
@@ -16930,7 +16993,7 @@ impl Shell {
     /// `wait -n [ids…]` — block until the *next* job in the candidate set (the
     /// named ids, or all jobs when none are named) terminates, then return its
     /// status and forget it. Returns 127 when there are no candidate jobs.
-    fn wait_next(&mut self, operands: &[String], pid_var: Option<&str>) -> i32 {
+    fn wait_next(&mut self, operands: &[Str], pid_var: Option<&str>) -> i32 {
         // Build the candidate set. Jobs are named by *id*, not by position: the
         // wait polls, and a job announced meanwhile (see
         // `notify_signalled_jobs`) leaves the table, which would shift every
@@ -16961,7 +17024,7 @@ impl Shell {
                     JobLookup::Found(idx) if !self.jobs[idx].notified => v.push(self.jobs[idx].id),
                     JobLookup::Ambiguous(text) => self.ambiguous_job_spec("wait", &text),
                     JobLookup::Found(_) | JobLookup::NotFound => {
-                        self.emit_stderr(format!("{}wait: {spec}: no such job\n", self.err_prefix()).as_bytes());
+                        self.berrln(&bfmt![self.err_prefix(), b"wait: ", spec, b": no such job"]);
                     }
                 }
             }
@@ -17030,33 +17093,33 @@ impl Shell {
     /// `-a` selects all jobs, `-r` only running (not-yet-finished) jobs. With no
     /// jobspec and neither `-a` nor `-r`, the current (most recently backgrounded)
     /// job is used.
-    fn builtin_disown(&mut self, args: &[String]) -> i32 {
+    fn builtin_disown(&mut self, args: &[Str]) -> i32 {
         self.poll_jobs();
         let mut mark_hup = false;
         let mut all = false;
         let mut running_only = false;
-        let mut specs: Vec<String> = Vec::new();
+        let mut specs: Vec<Str> = Vec::new();
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 specs.extend_from_slice(&args[i + 1..]);
                 break;
             }
-            if let Some(flags) = a.strip_prefix('-')
+            if let Some(flags) = a.strip_prefix(b"-")
                 && !flags.is_empty()
             {
-                if let Some(c) = flags.chars().find(|c| !matches!(c, 'h' | 'a' | 'r')) {
+                if let Some(c) = flags.iter().find(|c| !matches!(c, b'h' | b'a' | b'r')) {
                     return self.builtin_invalid_option(
                         "disown",
-                        &format!("-{c}"),
+                        &[b'-', *c],
                         "disown [-h] [-ar] [jobspec ... | pid ...]",
                     );
                 }
-                for c in flags.chars() {
+                for c in flags {
                     match c {
-                        'h' => mark_hup = true,
-                        'a' => all = true,
-                        'r' => running_only = true,
+                        b'h' => mark_hup = true,
+                        b'a' => all = true,
+                        b'r' => running_only = true,
                         _ => {}
                     }
                 }
@@ -17086,7 +17149,7 @@ impl Shell {
                         if let JobLookup::Ambiguous(text) = outcome {
                             self.ambiguous_job_spec("disown", &text);
                         }
-                        self.emit_stderr(format!("{}disown: {spec}: no such job\n", self.err_prefix()).as_bytes());
+                        self.berrln(&bfmt![self.err_prefix(), b"disown: ", spec, b": no such job"]);
                         status = 1;
                     }
                 }
@@ -17158,7 +17221,7 @@ impl Shell {
     /// tty transfer — see known-issues TD-OILS13), so `fg` cannot resume a
     /// *stopped* job; it simply waits for a still-running background job. This is
     /// the meaningful subset of `fg` for a shell without terminal job control.
-    fn builtin_fg(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_fg(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Without job control (a non-interactive shell that has not enabled
         // `set -m`), bash refuses `fg` outright with `fg: no job control`,
         // regardless of any running background job. Match that.
@@ -17168,7 +17231,7 @@ impl Shell {
         }
         self.poll_jobs();
         // Skip a leading `--` separator; the first remaining operand is the spec.
-        let spec = args.iter().find(|a| a.as_str() != "--");
+        let spec = args.iter().find(|a| a.as_slice() != b"--");
         let idx = match spec {
             Some(s) => {
                 let s = s.clone();
@@ -17181,7 +17244,7 @@ impl Shell {
                         return 1;
                     }
                     JobLookup::NotFound => {
-                        self.emit_stderr(format!("{}fg: {s}: no such job\n", self.err_prefix()).as_bytes());
+                        self.berrln(&bfmt![self.err_prefix(), b"fg: ", &s, b": no such job"]);
                         return 1;
                     }
                 }
@@ -17216,14 +17279,14 @@ impl Shell {
     /// already in background` on stderr, exit 0. With no jobspec the current
     /// (most recently backgrounded) job is used. Returns 1 when job control is
     /// disabled (`bg: no job control`) or a named/current job does not exist.
-    fn builtin_bg(&mut self, args: &[String], _out: &mut Out, _redir: &RedirPlan) -> i32 {
+    fn builtin_bg(&mut self, args: &[Str], _out: &mut Out, _redir: &RedirPlan) -> i32 {
         // As with `fg`, no job control ⇒ bash prints `bg: no job control`.
         if !self.job_control_enabled() {
             self.emit_stderr(format!("{}bg: no job control\n", self.err_prefix()).as_bytes());
             return 1;
         }
         self.poll_jobs();
-        let specs: Vec<String> = args.iter().filter(|a| a.as_str() != "--").cloned().collect();
+        let specs: Vec<Str> = args.iter().filter(|a| a.as_slice() != b"--").cloned().collect();
         let idxs: Vec<usize> = if specs.is_empty() {
             match self.current_job_idx() {
                 Some(idx) => vec![idx],
@@ -17243,7 +17306,7 @@ impl Shell {
                         return 1;
                     }
                     JobLookup::NotFound => {
-                        self.emit_stderr(format!("{}bg: {s}: no such job\n", self.err_prefix()).as_bytes());
+                        self.berrln(&bfmt![self.err_prefix(), b"bg: ", &s, b": no such job"]);
                         return 1;
                     }
                 }
@@ -17271,7 +17334,7 @@ impl Shell {
     /// bash. The stack mirrors the `FUNCNAME`/`BASH_LINENO`/`BASH_SOURCE`
     /// arrays: frame `i` names `fn_stack[len-1-i]`, called at
     /// `call_line_stack[len-1-i]`, in source `$0`.
-    fn builtin_caller(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_caller(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let depth = self.fn_stack.len();
         // Not inside any function → no call context. bash returns 1 *silently*
         // here (the empty-stack check runs before any argument validation, so
@@ -17283,7 +17346,7 @@ impl Shell {
         // for `caller n`, BASH_SOURCE[1] for bare `caller` — with the literal
         // `NULL` when that frame does not exist (e.g. the caller is the
         // top-level of a `-c`/interactive shell, which has no bottom frame).
-        let spec = args.iter().find(|a| a.as_str() != "--");
+        let spec = args.iter().find(|a| a.as_slice() != b"--");
         match spec {
             None => {
                 // Bare `caller`: line of the current call site (BASH_LINENO[0])
@@ -17296,13 +17359,13 @@ impl Shell {
                 self.write_bytes(out, redir, format!("{line} {src}\n").as_bytes())
             }
             Some(expr) => {
-                let Ok(n) = expr.parse::<usize>() else {
+                // A frame number is ASCII digits, so a word that is not text is
+                // not a number either — it takes the same message.
+                let Some(Ok(n)) = bytes::as_str(expr).map(str::parse::<usize>) else {
                     // bash: a non-numeric expr prints the invalid-number error
                     // (with the shell location prefix) followed by the
                     // unprefixed usage line, and returns 2.
-                    self.emit_stderr(
-                        format!("{}caller: {expr}: invalid number\n", self.err_prefix()).as_bytes(),
-                    );
+                    self.berrln(&bfmt![self.err_prefix(), b"caller: ", expr, b": invalid number"]);
                     self.emit_stderr(b"caller: usage: caller [expr]\n");
                     return 2;
                 };
@@ -17338,27 +17401,27 @@ impl Shell {
     /// topic); `-s` prints only the usage synopsis, `-d` prints only the short
     /// description, and the default prints both. A pattern matching nothing is a
     /// status-1 error (`no help topics match`).
-    fn builtin_help(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_help(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let mut short = false; // -s: synopsis only
         let mut desc_only = false; // -d: description only
-        let mut patterns: Vec<String> = Vec::new();
+        let mut patterns: Vec<Str> = Vec::new();
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 patterns.extend_from_slice(&args[i + 1..]);
                 break;
             }
-            if let Some(flags) = a.strip_prefix('-')
+            if let Some(flags) = a.strip_prefix(b"-")
                 && !flags.is_empty()
-                && flags.chars().all(|c| matches!(c, 's' | 'd' | 'm'))
+                && flags.iter().all(|c| matches!(c, b's' | b'd' | b'm'))
             {
-                for c in flags.chars() {
+                for c in flags {
                     match c {
-                        's' => short = true,
-                        'd' => desc_only = true,
+                        b's' => short = true,
+                        b'd' => desc_only = true,
                         // -m (man-page-like format) is accepted; we render the
                         // same content as the default long form.
-                        'm' => {}
+                        b'm' => {}
                         _ => {}
                     }
                 }
@@ -17404,15 +17467,17 @@ impl Shell {
         // `help ech` → echo, `help c` → every topic starting with `c`). Matches
         // are listed alphabetically by topic name, as bash does.
         let mut status = 0;
-        let mut text = String::new();
+        let mut text = Str::new();
         for pat in &patterns {
-            let is_glob = pat.contains(['*', '?']);
-            let pat_chars: Vec<Ch> = bytes::chars(pat.as_bytes()).collect();
+            let is_glob = pat.contains(&b'*') || pat.contains(&b'?');
+            let pat_chars: Vec<Ch> = bytes::chars(pat).collect();
             // bash prefers an exact topic-name match: `help for` resolves to the
             // `for` topic alone, never the longer `for ((` (and `help time` not
             // `times`). Only when no topic name equals the pattern does it fall
-            // back to glob (`*`/`?`) or case-sensitive prefix matching.
-            let exact = HELP_TABLE.iter().find(|(name, _, _)| *name == pat.as_str());
+            // back to glob (`*`/`?`) or case-sensitive prefix matching. Every
+            // topic name is text, so a pattern that is not text matches none of
+            // them — which is the "no help topics match" it deserves.
+            let exact = HELP_TABLE.iter().find(|(name, _, _)| name.as_bytes() == pat.as_slice());
             let mut matches: Vec<&(&str, &str, &str)> = if let Some(e) = exact {
                 vec![e]
             } else {
@@ -17422,19 +17487,22 @@ impl Shell {
                         if is_glob {
                             glob_match(&pat_chars, &bytes::chars(name.as_bytes()).collect::<Vec<_>>(), false)
                         } else {
-                            name.starts_with(pat.as_str())
+                            name.as_bytes().starts_with(pat.as_slice())
                         }
                     })
                     .collect()
             };
             if matches.is_empty() {
-                self.emit_stderr(
-                    format!(
-                        "{}help: no help topics match `{pat}'.  Try `help help' or `man -k {pat}' or `info {pat}'.\n",
-                        self.err_prefix()
-                    )
-                    .as_bytes(),
-                );
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"help: no help topics match `",
+                    pat,
+                    b"'.  Try `help help' or `man -k ",
+                    pat,
+                    b"' or `info ",
+                    pat,
+                    b"'."
+                ]);
                 status = 1;
                 continue;
             }
@@ -17442,35 +17510,25 @@ impl Shell {
             // bash heads a glob match with a keyword banner (a blank line
             // follows); a prefix match lists entries directly.
             if is_glob {
-                text.push_str(&format!("Shell commands matching keyword `{pat}'\n\n"));
+                // The banner quotes the pattern the user typed, so the output
+                // is assembled as bytes.
+                text.extend_from_slice(&bfmt![b"Shell commands matching keyword `", pat, b"'\n\n"]);
             }
             for (name, usage, description) in matches {
                 if desc_only {
-                    text.push_str(name);
-                    text.push_str(" - ");
-                    text.push_str(description);
-                    text.push('\n');
+                    text.extend_from_slice(&bfmt![name, b" - ", description, b"\n"]);
                 } else if short {
                     // bash short form: "NAME: usage".
-                    text.push_str(name);
-                    text.push_str(": ");
-                    text.push_str(usage);
-                    text.push('\n');
+                    text.extend_from_slice(&bfmt![name, b": ", usage, b"\n"]);
                 } else {
                     // bash long form: "NAME: usage" line, then indented
                     // description.
-                    text.push_str(name);
-                    text.push_str(": ");
-                    text.push_str(usage);
-                    text.push('\n');
-                    text.push_str("    ");
-                    text.push_str(description);
-                    text.push('\n');
+                    text.extend_from_slice(&bfmt![name, b": ", usage, b"\n    ", description, b"\n"]);
                 }
             }
         }
         if !text.is_empty() {
-            self.write_bytes(out, redir, text.as_bytes());
+            self.write_bytes(out, redir, &text);
         }
         status
     }
@@ -17488,29 +17546,29 @@ impl Shell {
     /// builtin with its state, `-n` lists only the disabled ones, and bare
     /// `enable` lists the enabled ones — all in re-inputtable `enable NAME` /
     /// `enable -n NAME` form. An unknown name is a status-1 error.
-    fn builtin_enable(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_enable(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let mut disable = false;
         let mut list_all = false;
-        let mut names: Vec<String> = Vec::new();
+        let mut names: Vec<Str> = Vec::new();
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 names.extend_from_slice(&args[i + 1..]);
                 break;
             }
-            if let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) {
-                if let Some(c) = flags.chars().find(|c| !matches!(c, 'a' | 'd' | 'n' | 'p' | 's' | 'f'))
+            if let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) {
+                if let Some(c) = flags.iter().find(|c| !matches!(c, b'a' | b'd' | b'n' | b'p' | b's' | b'f'))
                 {
                     return self.builtin_invalid_option(
                         "enable",
-                        &format!("-{c}"),
+                        &[b'-', *c],
                         "enable [-a] [-dnps] [-f filename] [name ...]",
                     );
                 }
-                for c in flags.chars() {
+                for c in flags {
                     match c {
-                        'n' => disable = true,
-                        'a' => list_all = true,
+                        b'n' => disable = true,
+                        b'a' => list_all = true,
                         // d/p/s/f: accepted; osh does not distinguish special vs
                         // regular vs dynamically-loaded builtin classes.
                         _ => {}
@@ -17547,15 +17605,23 @@ impl Shell {
 
         let mut status = 0;
         for name in &names {
-            if !is_builtin(name) {
-                self.emit_stderr(format!("{}enable: {name}: not a shell builtin\n", self.err_prefix()).as_bytes());
+            // A builtin's name is text by construction, so a word that is not
+            // text names no builtin — the same answer any other unknown word
+            // gets, quoting the bytes the user typed.
+            let Some(text) = bytes::as_str(name).filter(|n| is_builtin(n)) else {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"enable: ",
+                    name,
+                    b": not a shell builtin"
+                ]);
                 status = 1;
                 continue;
-            }
+            };
             if disable {
-                self.disabled_builtins.insert(name.clone());
+                self.disabled_builtins.insert(text.to_string());
             } else {
-                self.disabled_builtins.remove(name);
+                self.disabled_builtins.remove(text);
             }
         }
         status
@@ -17566,19 +17632,19 @@ impl Shell {
     /// form. `name=value` defines an alias; a bare `name` prints that one alias
     /// (status 1 if undefined). Aliases are expanded over the token stream before
     /// parsing (see `parse_with_aliases`).
-    fn builtin_alias(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_alias(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Consume leading `-p` / `--`; other operands begin the name list.
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i += 1;
                 break;
             }
-            if let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) {
-                if let Some(c) = flags.chars().find(|c| *c != 'p') {
+            if let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) {
+                if let Some(c) = flags.iter().find(|c| **c != b'p') {
                     return self.builtin_invalid_option(
                         "alias",
-                        &format!("-{c}"),
+                        &[b'-', *c],
                         "alias [-p] [name[=value] ... ]",
                     );
                 }
@@ -17597,21 +17663,33 @@ impl Shell {
         }
         let mut status = 0;
         for op in operands {
-            if let Some(eq) = op.find('=') {
+            if let Some(eq) = op.iter().position(|b| *b == b'=') {
                 let name = &op[..eq];
+                // Seam: the alias table is still `String`-typed
+                // (TD-OILS-BYTE-STRINGS step 8 — aliases are expanded by the
+                // lexer, over text), so a definition that is not text cannot be
+                // stored. It is refused with bash's invalid-name message rather
+                // than approximated: an alias whose name or body was altered
+                // would run a command the user never wrote.
+                let (Some(name), Some(val)) = (bytes::as_str(name), bytes::as_str(&op[eq + 1..]))
+                else {
+                    self.berrln(&bfmt![self.err_prefix(), b"alias: `", op, b"': invalid alias name"]);
+                    status = 1;
+                    continue;
+                };
                 if name.is_empty() {
-                    self.emit_stderr(
-                        format!("{}alias: `{op}': invalid alias name\n", self.err_prefix()).as_bytes(),
-                    );
+                    self.berrln(&bfmt![self.err_prefix(), b"alias: `", op, b"': invalid alias name"]);
                     status = 1;
                     continue;
                 }
-                self.aliases.insert(name.to_string(), op[eq + 1..].to_string());
-            } else if let Some(val) = self.aliases.get(op).cloned() {
-                let line = format!("alias {op}={}\n", single_quote(&val));
-                self.write_bytes(out, redir, line.as_bytes());
+                self.aliases.insert(name.to_string(), val.to_string());
+            } else if let Some(val) =
+                bytes::as_str(op).and_then(|n| self.aliases.get(n)).cloned()
+            {
+                let line = bfmt![b"alias ", op, b"=", single_quote_bytes(val.as_bytes()), b"\n"];
+                self.write_bytes(out, redir, &line);
             } else {
-                self.emit_stderr(format!("{}alias: {op}: not found\n", self.err_prefix()).as_bytes());
+                self.berrln(&bfmt![self.err_prefix(), b"alias: ", op, b": not found"]);
                 status = 1;
             }
         }
@@ -17622,21 +17700,21 @@ impl Shell {
 
     /// `unalias [-a] name ...` — remove aliases. `-a` removes every alias; an
     /// unknown name is a status-1 error.
-    fn builtin_unalias(&mut self, args: &[String]) -> i32 {
+    fn builtin_unalias(&mut self, args: &[Str]) -> i32 {
         // Parse leading options: only `-a` (remove all) is valid; any other
         // `-`-flag is a usage error (bash reports the first offending letter).
         let mut all = false;
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i += 1;
                 break;
             }
-            if let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) {
-                if let Some(c) = flags.chars().find(|c| *c != 'a') {
+            if let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) {
+                if let Some(c) = flags.iter().find(|c| **c != b'a') {
                     return self.builtin_invalid_option(
                         "unalias",
-                        &format!("-{c}"),
+                        &[b'-', *c],
                         "unalias [-a] name [name ...]",
                     );
                 }
@@ -17659,8 +17737,16 @@ impl Shell {
         }
         let mut status = 0;
         for name in names {
-            if self.aliases.remove(name).is_none() {
-                self.emit_stderr(format!("{}unalias: {name}: not found\n", self.err_prefix()).as_bytes());
+            // The alias table is keyed by `String` — an alias can only be named
+            // by the parser, which is still text-typed (TD-OILS-BYTE-STRINGS
+            // step 8) — so a name that is not text names no alias at all. "not
+            // found" is then the honest answer, and the name is quoted back as
+            // the bytes the user typed.
+            if bytes::as_str(name)
+                .and_then(|n| self.aliases.remove(n))
+                .is_none()
+            {
+                self.berrln(&bfmt![self.err_prefix(), b"unalias: ", name, b": not found"]);
                 status = 1;
             }
         }
@@ -17675,19 +17761,19 @@ impl Shell {
     /// `-p pathname name` remembers `name` at `pathname` without a search; `-l`
     /// lists entries in re-inputtable form. Bare `name`s force a fresh `$PATH`
     /// search and remember the result. Unknown/unfound names are a status-1 error.
-    fn builtin_hash(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_hash(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let mut clear = false;
         let mut delete = false;
         let mut print_path = false;
         let mut list = false;
-        let mut pathname: Option<String> = None;
+        let mut pathname: Option<Str> = None;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
-            if arg == "--" {
+            if arg.as_slice() == b"--" {
                 i += 1;
                 break;
             }
-            if arg == "-p" {
+            if arg.as_slice() == b"-p" {
                 pathname = args.get(i + 1).cloned();
                 if pathname.is_none() {
                     self.emit_stderr(format!("{}hash: -p: option requires an argument\n", self.err_prefix()).as_bytes());
@@ -17696,22 +17782,22 @@ impl Shell {
                 i += 2;
                 continue;
             }
-            if let Some(flags) = arg.strip_prefix('-')
+            if let Some(flags) = arg.strip_prefix(b"-")
                 && !flags.is_empty()
             {
-                if let Some(c) = flags.chars().find(|c| !matches!(c, 'r' | 'd' | 't' | 'l')) {
+                if let Some(c) = flags.iter().find(|c| !matches!(c, b'r' | b'd' | b't' | b'l')) {
                     return self.builtin_invalid_option(
                         "hash",
-                        &format!("-{c}"),
+                        &[b'-', *c],
                         "hash [-lr] [-p pathname] [-dt] [name ...]",
                     );
                 }
-                for c in flags.chars() {
+                for c in flags {
                     match c {
-                        'r' => clear = true,
-                        'd' => delete = true,
-                        't' => print_path = true,
-                        'l' => list = true,
+                        b'r' => clear = true,
+                        b'd' => delete = true,
+                        b't' => print_path = true,
+                        b'l' => list = true,
                         _ => {}
                     }
                 }
@@ -17733,25 +17819,33 @@ impl Shell {
                 return 0;
             };
             self.cmd_hash
-                .insert(name.clone(), (std::path::PathBuf::from(p), 0));
+                .insert(name.clone(), (bytes::bytes_to_path(&p), 0));
             self.sync_bash_cmds();
             return 0;
         }
         if list {
-            let mut entries: Vec<(&String, &(std::path::PathBuf, u64))> =
+            let mut entries: Vec<(&Str, &(std::path::PathBuf, u64))> =
                 self.cmd_hash.iter().collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
-            let mut s = String::new();
+            let mut s = Str::new();
             for (name, (path, _)) in entries {
-                s.push_str(&format!("builtin hash -p {} {name}\n", path.to_string_lossy()));
+                // Re-inputtable output: the path is emitted as its own bytes, so
+                // feeding the line back reproduces the same entry.
+                s.extend_from_slice(&bfmt![
+                    b"builtin hash -p ",
+                    bytes::path_to_bytes(path),
+                    b" ",
+                    name,
+                    b"\n"
+                ]);
             }
-            return self.write_bytes(out, redir, s.as_bytes());
+            return self.write_bytes(out, redir, &s);
         }
         if delete {
             let mut status = 0;
             for name in names {
-                if self.cmd_hash.remove(name).is_none() {
-                    self.emit_stderr(format!("{}hash: {name}: not found\n", self.err_prefix()).as_bytes());
+                if self.cmd_hash.remove(name.as_slice()).is_none() {
+                    self.berrln(&bfmt![self.err_prefix(), b"hash: ", name, b": not found"]);
                     status = 1;
                 }
             }
@@ -17759,22 +17853,26 @@ impl Shell {
             return status;
         }
         if print_path {
-            let mut s = String::new();
+            let mut s = Str::new();
             let mut status = 0;
             let multiple = names.len() > 1;
             for name in names {
-                if let Some((path, _)) = self.cmd_hash.get(name) {
+                let hit = self
+                    .cmd_hash
+                    .get(name.as_slice())
+                    .map(|(path, _)| bytes::path_to_bytes(path));
+                if let Some(path) = hit {
                     if multiple {
-                        s.push_str(&format!("{name}\t{}\n", path.to_string_lossy()));
+                        s.extend_from_slice(&bfmt![name, b"\t", path, b"\n"]);
                     } else {
-                        s.push_str(&format!("{}\n", path.to_string_lossy()));
+                        s.extend_from_slice(&bfmt![path, b"\n"]);
                     }
                 } else {
-                    self.emit_stderr(format!("{}hash: {name}: not found\n", self.err_prefix()).as_bytes());
+                    self.berrln(&bfmt![self.err_prefix(), b"hash: ", name, b": not found"]);
                     status = 1;
                 }
             }
-            let w = self.write_bytes(out, redir, s.as_bytes());
+            let w = self.write_bytes(out, redir, &s);
             return if w != 0 { w } else { status };
         }
         if names.is_empty() {
@@ -17783,25 +17881,30 @@ impl Shell {
             if self.cmd_hash.is_empty() {
                 return self.write_bytes(out, redir, b"hash: hash table empty\n");
             }
-            let mut entries: Vec<(&String, &(std::path::PathBuf, u64))> =
+            let mut entries: Vec<(&Str, &(std::path::PathBuf, u64))> =
                 self.cmd_hash.iter().collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
-            let mut s = String::from("hits\tcommand\n");
+            let mut s = Str::from(&b"hits\tcommand\n"[..]);
             for (_, (path, hits)) in entries {
-                s.push_str(&format!("{hits:>4}\t{}\n", path.to_string_lossy()));
+                s.extend_from_slice(&bfmt![
+                    format!("{hits:>4}"),
+                    b"\t",
+                    bytes::path_to_bytes(path),
+                    b"\n"
+                ]);
             }
-            return self.write_bytes(out, redir, s.as_bytes());
+            return self.write_bytes(out, redir, &s);
         }
         // Bare names: forget any old entry and force a fresh `$PATH` search.
         let mut status = 0;
         for name in names {
-            self.cmd_hash.remove(name);
-            match self.find_in_path(name.as_bytes()) {
+            self.cmd_hash.remove(name.as_slice());
+            match self.find_in_path(name) {
                 Some(path) => {
                     self.cmd_hash.insert(name.clone(), (path, 0));
                 }
                 None => {
-                    self.emit_stderr(format!("{}hash: {name}: not found\n", self.err_prefix()).as_bytes());
+                    self.berrln(&bfmt![self.err_prefix(), b"hash: ", name, b": not found"]);
                     status = 1;
                 }
             }
@@ -17825,44 +17928,47 @@ impl Shell {
     /// The branches run in bash's order: `-c` (which returns immediately unless
     /// one of `-anrw` also has work to do), then `-s`, `-p`, `-d`, the file
     /// options, and finally the listing.
-    fn builtin_history(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_history(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         const USAGE: &str = "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]";
         // A `HISTSIZE` assigned since the last line was recorded has already
         // stifled the list by the time bash's builtin looks at it.
         self.hist_sync();
         let mut clear = false;
-        let mut delete: Option<String> = None;
+        let mut delete: Option<Str> = None;
         let mut store = false;
         let mut print = false;
         // The one of `-anrw` in force, plus the distinct set seen: bash rejects
         // two *different* file options but accepts the same one twice.
-        let mut file_op: Option<char> = None;
-        let mut file_ops: Vec<char> = Vec::new();
+        let mut file_op: Option<u8> = None;
+        let mut file_ops: Vec<u8> = Vec::new();
         let mut i = 0;
         'args: while let Some(a) = args.get(i) {
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i = i.saturating_add(1);
                 break;
             }
-            let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
                 break;
             };
             i = i.saturating_add(1);
-            for (at, c) in flags.char_indices() {
+            // bash reads an option cluster a byte at a time, so a cluster
+            // that is not text still yields the option letters it does contain
+            // and reports the offending byte as itself.
+            for (at, c) in flags.iter().enumerate() {
                 match c {
-                    'c' => clear = true,
-                    's' => store = true,
-                    'p' => print = true,
-                    'a' | 'n' | 'r' | 'w' => {
-                        file_op = Some(c);
-                        if !file_ops.contains(&c) {
-                            file_ops.push(c);
+                    b'c' => clear = true,
+                    b's' => store = true,
+                    b'p' => print = true,
+                    b'a' | b'n' | b'r' | b'w' => {
+                        file_op = Some(*c);
+                        if !file_ops.contains(c) {
+                            file_ops.push(*c);
                         }
                     }
-                    'd' => {
+                    b'd' => {
                         // getopt style: the offset is the rest of this word, or
                         // the next word when nothing follows the `d`.
-                        let tail = flags.get(at.saturating_add(1)..).unwrap_or("");
+                        let tail = flags.get(at.saturating_add(1)..).unwrap_or_default();
                         if tail.is_empty() {
                             let Some(off) = args.get(i) else {
                                 self.errln(&format!(
@@ -17875,15 +17981,17 @@ impl Shell {
                             i = i.saturating_add(1);
                             delete = Some(off.clone());
                         } else {
-                            delete = Some(tail.to_string());
+                            delete = Some(tail.to_vec());
                         }
                         continue 'args;
                     }
                     _ => {
-                        self.errln(&format!(
-                            "{}history: -{c}: invalid option",
-                            self.err_prefix()
-                        ));
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"history: -",
+                            *c,
+                            b": invalid option"
+                        ]);
                         self.errln(&format!("history: usage: {USAGE}"));
                         return 2;
                     }
@@ -17915,8 +18023,23 @@ impl Shell {
             // The `history -s …` line was recorded when it was read, so bash
             // drops it again before appending — the replacement keeps the same
             // number. With the option off there is no such entry to drop.
+            // Seam: a history entry is *source text* the reader re-lexes on
+            // recall, and the list is typed to match the lexer
+            // (TD-OILS-BYTE-STRINGS step 8). An operand that is not text is
+            // refused rather than approximated — recalling an *altered* command
+            // is the one outcome worse than recalling none.
+            let joined = rest.join(b" ".as_slice());
+            let Some(entry) = bytes::as_str(&joined).map(str::to_owned) else {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"history: ",
+                    &joined,
+                    b": entry is not valid text"
+                ]);
+                return 1;
+            };
             self.hist_drop_own_entry();
-            self.hist_record(rest.join(" "));
+            self.hist_record(entry);
             return 0;
         }
         if store || print {
@@ -17930,6 +18053,19 @@ impl Shell {
             }
             let mut status = 0;
             for a in rest {
+                // Seam: the history expander reads source text (step 9), so an
+                // operand that is not text cannot be expanded. Refused, not
+                // approximated — see `-s` above.
+                let Some(a) = bytes::as_str(a) else {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"history: ",
+                        a,
+                        b": argument is not valid text"
+                    ]);
+                    status = 1;
+                    continue;
+                };
                 let mut state = std::mem::take(&mut self.hist_state);
                 let expanded = {
                     let ctx = HistCtx {
@@ -17945,7 +18081,7 @@ impl Shell {
                 };
                 self.hist_state = state;
                 let text = match expanded {
-                    Expansion::Unchanged => a.clone(),
+                    Expansion::Unchanged => a.to_string(),
                     // A `:p` argument prints like any other here; the modifier
                     // only means "do not run it", and `-p` never runs anything.
                     // The echo the reader would have done is likewise irrelevant,
@@ -17960,6 +18096,7 @@ impl Shell {
                             "{}history: {a}: history expansion failed",
                             self.err_prefix()
                         ));
+                        // (`a` is text here by construction — see the seam above.)
                         status = 1;
                         continue;
                     }
@@ -17983,21 +18120,25 @@ impl Shell {
         // that is not a number, and `history 0` lists nothing.
         let mut from = 0;
         if let Some(a) = rest.first() {
-            let Ok(n) = a.parse::<usize>() else {
-                self.errln(&format!(
-                    "{}history: {a}: numeric argument required",
-                    self.err_prefix()
-                ));
+            // A count is ASCII digits, so a word that is not text is simply not
+            // a number — the same answer `history x` gets, and the same message.
+            let Some(Ok(n)) = bytes::as_str(a).map(str::parse::<usize>) else {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"history: ",
+                    a,
+                    b": numeric argument required"
+                ]);
                 return 1;
             };
             from = self.history.len().saturating_sub(n);
         }
-        let mut s = String::new();
+        let mut s = Str::new();
         for (idx, entry) in self.history.iter().enumerate().skip(from) {
             let n = self.hist_base.saturating_add(idx);
-            s.push_str(&format!("{n:>5}  {entry}\n"));
+            s.extend_from_slice(&bfmt![format!("{n:>5}  "), entry, b"\n"]);
         }
-        self.write_bytes(out, redir, s.as_bytes())
+        self.write_bytes(out, redir, &s)
     }
 
     /// `history -d OFFSET` — delete one entry, or the `START-END` range.
@@ -18012,29 +18153,35 @@ impl Shell {
     /// failure is a reversed range, which just returns 1. A range's *start* is
     /// clamped to the oldest entry rather than rejected, which is why
     /// `history -d 0-2` deletes the first two entries instead of failing.
-    fn history_delete(&mut self, arg: &str) -> i32 {
+    fn history_delete(&mut self, arg: BStr<'_>) -> i32 {
         let len = i64::try_from(self.history.len()).unwrap_or(i64::MAX);
         let base = i64::try_from(self.hist_base).unwrap_or(1);
         let last = base.saturating_add(len).saturating_sub(1);
         // A negative offset is relative to the newest entry's number.
-        let resolve = |s: &str| -> Option<i64> {
-            let n: i64 = s.parse().ok()?;
+        // An offset is ASCII digits with an optional sign, so a spec that is
+        // not text is simply not a position — the same answer `history -d x`
+        // gets, and the same message.
+        let resolve = |s: BStr<'_>| -> Option<i64> {
+            let n: i64 = bytes::as_str(s)?.parse().ok()?;
             Some(if n < 0 {
                 base.saturating_add(len).saturating_add(n)
             } else {
                 n
             })
         };
-        let fail = |shell: &mut Self, what: &str| -> i32 {
-            shell.errln(&format!(
-                "{}history: {what}: history position out of range",
-                shell.err_prefix()
-            ));
+        let fail = |shell: &mut Self, what: BStr<'_>| -> i32 {
+            shell.berrln(&bfmt![
+                shell.err_prefix(),
+                b"history: ",
+                what,
+                b": history position out of range"
+            ]);
             1
         };
         let sep = arg
-            .char_indices()
-            .find(|&(i, c)| c == '-' && i > 0)
+            .iter()
+            .enumerate()
+            .find(|&(i, &b)| b == b'-' && i > 0)
             .map(|(i, _)| i);
         let (lo, hi) = match sep {
             None => match resolve(arg) {
@@ -18094,7 +18241,7 @@ impl Shell {
     /// The number is read like `atoi`, so trailing junk is ignored; only the
     /// first character after an optional `-` has to be a digit for the word to
     /// count as a number at all.
-    fn fc_gethnum(&self, spec: Option<&str>, listing: bool, first: bool) -> FcSpec {
+    fn fc_gethnum(&self, spec: Option<BStr<'_>>, listing: bool, first: bool) -> FcSpec {
         let len = isize::try_from(self.history.len()).unwrap_or(isize::MAX);
         // bash: `last_hist = i - rh - hist_last_line_added`. Both terms are 1
         // exactly when the shell is recording, in which case `fc`'s own line is
@@ -18110,11 +18257,11 @@ impl Shell {
         }
         let real_last = len - 1;
         let Some(s) = spec else { return FcSpec::Idx(last_hist) };
-        let (sign, digits) = match s.strip_prefix('-') {
+        let (sign, digits) = match s.strip_prefix(b"-") {
             Some(rest) => (-1_isize, rest),
             None => (1, s),
         };
-        if digits.starts_with(|c: char| c.is_ascii_digit()) {
+        if digits.first().is_some_and(u8::is_ascii_digit) {
             let n = sign.saturating_mul(atoi(digits));
             if n < 0 {
                 return FcSpec::Idx((n.saturating_add(last_hist).saturating_add(1)).max(0));
@@ -18134,7 +18281,10 @@ impl Shell {
         }
         let upto = usize::try_from(last_hist).unwrap_or(0);
         for (j, entry) in self.history.iter().enumerate().take(upto.saturating_add(1)).rev() {
-            if entry.starts_with(s) {
+            // A history entry is text (the list is typed to match the lexer
+            // until TD-OILS-BYTE-STRINGS step 8), so a spec that is not text
+            // matches no entry — that is the answer, not an approximation.
+            if entry.as_bytes().starts_with(s) {
                 return FcSpec::Idx(isize::try_from(j).unwrap_or(0));
             }
         }
@@ -18183,7 +18333,7 @@ impl Shell {
     #[allow(clippy::too_many_lines)]
     fn builtin_fc(
         &mut self,
-        args: &[String],
+        args: &[Str],
         out: &mut Out,
         stdin: &StdinSrc,
         redir: &RedirPlan,
@@ -18197,7 +18347,7 @@ impl Shell {
         let mut reverse = false;
         let mut listing = false;
         let mut execute = false;
-        let mut ename: Option<String> = None;
+        let mut ename: Option<Str> = None;
         let mut i = 0;
         'args: while let Some(a) = args.get(i) {
             // bash stops option parsing at the first word that looks like a
@@ -18206,24 +18356,27 @@ impl Shell {
             if fc_is_number(a) {
                 break;
             }
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i = i.saturating_add(1);
                 break;
             }
-            let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
                 break;
             };
             i = i.saturating_add(1);
-            for (at, c) in flags.char_indices() {
+            // bash reads an option cluster a byte at a time, so a cluster
+            // that is not text still yields the option letters it does contain
+            // and reports the offending byte as itself.
+            for (at, c) in flags.iter().enumerate() {
                 match c {
-                    'n' => numbering = false,
-                    'l' => listing = true,
-                    'r' => reverse = true,
-                    's' => execute = true,
-                    'e' => {
+                    b'n' => numbering = false,
+                    b'l' => listing = true,
+                    b'r' => reverse = true,
+                    b's' => execute = true,
+                    b'e' => {
                         // getopt style: the name is the rest of this word, or
                         // the next word when nothing follows the `e`.
-                        let tail = flags.get(at.saturating_add(1)..).unwrap_or("");
+                        let tail = flags.get(at.saturating_add(1)..).unwrap_or_default();
                         if tail.is_empty() {
                             let Some(name) = args.get(i) else {
                                 self.errln(&format!(
@@ -18236,12 +18389,17 @@ impl Shell {
                             i = i.saturating_add(1);
                             ename = Some(name.clone());
                         } else {
-                            ename = Some(tail.to_string());
+                            ename = Some(tail.to_vec());
                         }
                         continue 'args;
                     }
                     _ => {
-                        self.errln(&format!("{}fc: -{c}: invalid option", self.err_prefix()));
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"fc: -",
+                            *c,
+                            b": invalid option"
+                        ]);
                         self.errln(&format!("fc: usage: {USAGE}"));
                         return 2;
                     }
@@ -18249,11 +18407,11 @@ impl Shell {
             }
         }
         // `fc -e -` is the historical spelling of `fc -s`.
-        if ename.as_deref() == Some("-") {
+        if ename.as_deref() == Some(b"-".as_slice()) {
             execute = true;
             ename = None;
         }
-        let rest: Vec<String> = args.get(i..).unwrap_or(&[]).to_vec();
+        let rest: Vec<Str> = args.get(i..).unwrap_or(&[]).to_vec();
 
         if execute {
             return self.fc_execute(&rest, out, stdin);
@@ -18273,7 +18431,7 @@ impl Shell {
             Some(s) => {
                 let beg = self.fc_gethnum(Some(s), listing, true);
                 let end = match rest.get(1) {
-                    Some(s2) => self.fc_gethnum(Some(s2), listing, false),
+                    Some(s2) => self.fc_gethnum(Some(s2.as_slice()), listing, false),
                     // One endpoint only. Listing runs from it to the newest
                     // entry; editing takes just that one command. `-0` is the
                     // exception: it already named the newest line there is, so
@@ -18370,19 +18528,24 @@ impl Shell {
 
     /// `fc -s` / `fc -e -`: re-run a command with optional global substitutions,
     /// without an editor.
-    fn fc_execute(&mut self, rest: &[String], out: &mut Out, stdin: &StdinSrc) -> i32 {
+    fn fc_execute(&mut self, rest: &[Str], out: &mut Out, stdin: &StdinSrc) -> i32 {
         // Every leading operand containing `=` is a `pat=rep` pair, split at its
         // *first* `=` so a replacement may itself contain one. They apply in the
         // order written, and each replaces **every** occurrence.
-        let mut subs: Vec<(String, String)> = Vec::new();
+        let mut subs: Vec<(Str, Str)> = Vec::new();
         let mut k = 0;
         while let Some(w) = rest.get(k) {
-            let Some(eq) = w.find('=') else { break };
-            let (pat, rep) = (w.get(..eq).unwrap_or(""), w.get(eq.saturating_add(1)..).unwrap_or(""));
-            subs.push((pat.to_string(), rep.to_string()));
+            let Some(eq) = w.iter().position(|b| *b == b'=') else {
+                break;
+            };
+            let (pat, rep) = (
+                w.get(..eq).unwrap_or_default(),
+                w.get(eq.saturating_add(1)..).unwrap_or_default(),
+            );
+            subs.push((pat.to_vec(), rep.to_vec()));
             k = k.saturating_add(1);
         }
-        let spec = rest.get(k).map(String::as_str);
+        let spec = rest.get(k).map(Vec::as_slice);
         let idx = match self.fc_gethnum(spec, false, false) {
             FcSpec::Idx(n) if n >= 0 => usize::try_from(n).unwrap_or(0),
             _ => {
@@ -18390,13 +18553,28 @@ impl Shell {
                 return 1;
             }
         };
-        let Some(mut command) = self.history.get(idx).cloned() else {
+        let Some(command) = self.history.get(idx).cloned() else {
             self.errln(&format!("{}fc: no command found", self.err_prefix()));
             return 1;
         };
+        let mut command = command.into_bytes();
         for (pat, rep) in &subs {
-            command = str_replace_all(&command, pat, rep);
+            command = bytes_replace_all(&command, pat, rep);
         }
+        // Seam: the rewritten command is shell *source* — it is echoed, recorded
+        // in the history and parsed, all of which are text-typed until
+        // TD-OILS-BYTE-STRINGS step 8. A substitution that introduces bytes that
+        // are not text is refused rather than approximated: running an *altered*
+        // command is the one outcome worse than running none.
+        let Some(command) = bytes::as_str(&command).map(str::to_owned) else {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"fc: ",
+                &command,
+                b": command is not valid text"
+            ]);
+            return 1;
+        };
         // The command about to run is echoed on stderr — so `fc -s … 2>/dev/null`
         // hides the echo while `> /dev/null` does not.
         self.errln(&command);
@@ -18409,10 +18587,31 @@ impl Shell {
     fn fc_edit_and_run(
         &mut self,
         text: &str,
-        ename: Option<&str>,
+        ename: Option<BStr<'_>>,
         out: &mut Out,
         stdin: &StdinSrc,
     ) -> i32 {
+        // Seam: the editor invocation is built as a *shell command line* and
+        // parsed (which is why `FCEDIT='sed -i s/a/b/'` works), and the parser is
+        // text-typed until TD-OILS-BYTE-STRINGS step 8. An editor name that is
+        // not text is refused before the temp file is written, so nothing is
+        // left behind — and never approximated, since the approximation would
+        // run a *different* editor.
+        let ename = match ename {
+            Some(e) => match bytes::as_str(e) {
+                Some(name) => Some(name),
+                None => {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"fc: ",
+                        e,
+                        b": editor name is not valid text"
+                    ]);
+                    return 1;
+                }
+            },
+            None => None,
+        };
         let path = unique_temp_path("osh_fc");
         if std::fs::write(&path, text.as_bytes()).is_err() {
             self.errln(&format!(
@@ -18472,14 +18671,14 @@ impl Shell {
     /// `-S`); `-p` prefixes the output with a re-inputtable `umask ` command.
     /// A mode operand sets the mask from an octal number or a symbolic
     /// permission list (`u=rwx,g=rx,o=`).
-    fn builtin_umask(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_umask(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let mut symbolic = false;
         let mut reusable = false;
-        let mut mode: Option<&str> = None;
+        let mut mode: Option<BStr<'_>> = None;
         for a in args {
-            match a.as_str() {
-                "-S" => symbolic = true,
-                "-p" => reusable = true,
+            match a.as_slice() {
+                b"-S" => symbolic = true,
+                b"-p" => reusable = true,
                 s => mode = Some(s),
             }
         }
@@ -18490,11 +18689,18 @@ impl Shell {
             // octal, not a symbolic clause), and masks a valid value to the low
             // 9 bits. Any malformed octal (non-octal digit, letter, or overflow)
             // is reported as "octal number out of range".
-            let new = if m.starts_with(|c: char| c.is_ascii_digit()) {
-                match u32::from_str_radix(m, 8) {
-                    Ok(v) => v & 0o777,
-                    Err(_) => {
-                        self.emit_stderr(format!("{}umask: {m}: octal number out of range\n", self.err_prefix()).as_bytes());
+            let new = if m.first().is_some_and(u8::is_ascii_digit) {
+                // An octal number is ASCII digits, so a mode that is not text is
+                // not a number either — the same answer `umask 8` gets.
+                match bytes::as_str(m).and_then(|s| u32::from_str_radix(s, 8).ok()) {
+                    Some(v) => v & 0o777,
+                    None => {
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"umask: ",
+                            m,
+                            b": octal number out of range"
+                        ]);
                         return 1;
                     }
                 }
@@ -18505,15 +18711,16 @@ impl Shell {
                         // bash quotes the offending character and distinguishes a
                         // missing/invalid operator from a bad permission letter.
                         let msg = match e {
-                            SymUmaskErr::Operator(c) => {
-                                let ch: String = c.map(|c| c.to_string()).unwrap_or_default();
-                                format!("`{ch}': invalid symbolic mode operator")
-                            }
+                            SymUmaskErr::Operator(c) => bfmt![
+                                b"`",
+                                c.map(bytes::Ch::to_str).unwrap_or_default(),
+                                b"': invalid symbolic mode operator"
+                            ],
                             SymUmaskErr::Character(c) => {
-                                format!("`{c}': invalid symbolic mode character")
+                                bfmt![b"`", c.to_str(), b"': invalid symbolic mode character"]
                             }
                         };
-                        self.emit_stderr(format!("{}umask: {msg}\n", self.err_prefix()).as_bytes());
+                        self.berrln(&bfmt![self.err_prefix(), b"umask: ", msg]);
                         return 1;
                     }
                 }
@@ -18548,31 +18755,37 @@ impl Shell {
     /// operands — but does not query or enforce the real kernel limits yet (see
     /// known-issues `TD-OILS-ULIMIT`). Modelled on Linux bash's option set,
     /// which is what slateos (a unix/linux-family target) mirrors.
-    fn builtin_ulimit(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_ulimit(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let mut resources: Vec<char> = Vec::new();
         let mut want_hard = false;
         let mut want_soft = false;
         let mut show_all = false;
-        let mut value: Option<&str> = None;
+        let mut value: Option<BStr<'_>> = None;
 
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i += 1;
                 break;
             }
-            if let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) {
-                for ch in flags.chars() {
-                    match ch {
+            if let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) {
+                // Read a byte at a time, as bash does. Every option letter is
+                // ASCII, so a byte that is not one matches no resource spec and
+                // is reported as the byte it is.
+                for ch in flags {
+                    match char::from(*ch) {
                         'H' => want_hard = true,
                         'S' => want_soft = true,
                         'a' => show_all = true,
                         c if RLIMIT_SPECS.iter().any(|s| s.opt == c) => resources.push(c),
-                        other => {
-                            self.emit_stderr(
-                                format!("{}ulimit: -{other}: invalid option\n", self.err_prefix()).as_bytes(),
-                            );
+                        _ => {
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                b"ulimit: -",
+                                *ch,
+                                b": invalid option"
+                            ]);
                             self.emit_stderr(ULIMIT_USAGE.as_bytes());
                             return 2;
                         }
@@ -18580,7 +18793,7 @@ impl Shell {
                 }
                 i += 1;
             } else {
-                value = Some(a.as_str());
+                value = Some(a.as_slice());
                 i += 1;
                 break;
             }
@@ -18609,15 +18822,20 @@ impl Shell {
             for &opt in &resources {
                 let entry = self.rlimits.entry(opt).or_insert((None, None));
                 let new = match v {
-                    "unlimited" => None,
-                    "hard" => entry.1,
-                    "soft" => entry.0,
-                    n => match n.parse::<u64>() {
-                        Ok(parsed) => Some(parsed),
-                        Err(_) => {
-                            self.emit_stderr(
-                                format!("{}ulimit: {n}: invalid limit argument\n", self.err_prefix()).as_bytes(),
-                            );
+                    b"unlimited" => None,
+                    b"hard" => entry.1,
+                    b"soft" => entry.0,
+                    // A limit is ASCII digits, so an operand that is not text is
+                    // not a number — the same answer `ulimit -f x` gets.
+                    n => match bytes::as_str(n).map(str::parse::<u64>) {
+                        Some(Ok(parsed)) => Some(parsed),
+                        _ => {
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                b"ulimit: ",
+                                n,
+                                b": invalid limit argument"
+                            ]);
                             return 1;
                         }
                     },
@@ -18721,9 +18939,12 @@ impl Shell {
         if action.is_empty() {
             return Flow::Next;
         }
+        let Some(src) = self.trap_source(name, &action) else {
+            return Flow::Next;
+        };
         self.in_trap = true;
         let saved = self.last_status;
-        let flow = self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), HistRead::Off);
+        let flow = self.run_source_flow_out(src, out, stdin, &LineMap::Offset(0), HistRead::Off);
         // Preserve the pre-trap status unless the handler asked to exit, in
         // which case its code is the shell's exit status.
         if !matches!(flow, Flow::Exit(_)) {
@@ -18731,6 +18952,26 @@ impl Shell {
         }
         self.in_trap = false;
         flow
+    }
+
+    /// The source text of a trap handler, or `None` after reporting that the
+    /// handler cannot be run.
+    ///
+    /// Seam: the parser is still `str`-typed (TD-OILS-BYTE-STRINGS step 8), so
+    /// a handler holding bytes that are not text cannot be parsed. It is
+    /// refused rather than approximated — running an *altered* handler is the
+    /// one outcome worse than running none.
+    fn trap_source<'a>(&self, name: &str, action: &'a Str) -> Option<&'a str> {
+        let src = bytes::as_str(action);
+        if src.is_none() {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"trap: ",
+                name,
+                b": handler is not valid text"
+            ]);
+        }
+        src
     }
 
     /// Run the `EXIT` trap, if set, exactly once when the top-level shell exits.
@@ -18766,6 +19007,7 @@ impl Shell {
         self.exit_trap_done = true;
         if let Some(action) = self.traps.get("EXIT").cloned()
             && !action.is_empty()
+            && let Some(src) = self.trap_source("EXIT", &action)
         {
             // bash: the shell's exit status is the one in effect when the trap
             // fires, so it is preserved across the handler — *unless* the
@@ -18777,7 +19019,7 @@ impl Shell {
             // `fire_trap_flow`), which is what bash's `parse_and_execute` does:
             // the commands before a syntax error in the action still run, and
             // `set -v` echoes each unit as it is read.
-            let flow = self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), HistRead::Off);
+            let flow = self.run_source_flow_out(src, out, stdin, &LineMap::Offset(0), HistRead::Off);
             let exited = match flow {
                 Flow::Exit(code) => Some(code),
                 _ => None,
@@ -18788,25 +19030,25 @@ impl Shell {
         None
     }
 
-    fn builtin_pwd(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_pwd(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // bash's pwd accepts -L (logical, default), -P (physical: resolve
         // symlinks), and -W (Cygwin/Windows path); any other letter is a usage
         // error. Flags may be clustered; the last of -L/-P wins.
         let mut physical = false;
         for a in args {
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 break;
             }
-            let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
                 break;
             };
-            if let Some(c) = flags.chars().find(|c| !matches!(c, 'L' | 'P' | 'W')) {
-                return self.builtin_invalid_option("pwd", &format!("-{c}"), "pwd [-LPW]");
+            if let Some(c) = flags.iter().find(|c| !matches!(c, b'L' | b'P' | b'W')) {
+                return self.builtin_invalid_option("pwd", &[b'-', *c], "pwd [-LPW]");
             }
-            for c in flags.chars() {
+            for c in flags {
                 match c {
-                    'L' => physical = false,
-                    'P' => physical = true,
+                    b'L' => physical = false,
+                    b'P' => physical = true,
                     _ => {} // -W: accepted, no effect here.
                 }
             }
@@ -18823,7 +19065,7 @@ impl Shell {
         self.bwrite_line(out, redir, &cwd)
     }
 
-    fn builtin_echo(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_echo(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Leading option words made up solely of the letters `neE` are flags
         // (bash: `-n` no newline, `-e` interpret backslash escapes, `-E` disable
         // that; they may be clustered, e.g. `-ne`). Parsing stops at the first
@@ -18833,14 +19075,14 @@ impl Shell {
         let mut start = 0;
         while let Some(a) = args.get(start) {
             if a.len() >= 2
-                && a.starts_with('-')
-                && a[1..].chars().all(|c| matches!(c, 'n' | 'e' | 'E'))
+                && a.starts_with(b"-")
+                && a[1..].iter().all(|c| matches!(c, b'n' | b'e' | b'E'))
             {
-                for c in a[1..].chars() {
+                for c in &a[1..] {
                     match c {
-                        'n' => newline = false,
-                        'e' => interpret = true,
-                        'E' => interpret = false,
+                        b'n' => newline = false,
+                        b'e' => interpret = true,
+                        b'E' => interpret = false,
                         _ => {}
                     }
                 }
@@ -18849,16 +19091,15 @@ impl Shell {
                 break;
             }
         }
-        let joined = args[start..].join(" ");
+        let joined = args[start..].join(b" ".as_slice());
         let mut line: Str = if interpret {
-            let r =
-                crate::escape::unescape_echo(joined.as_bytes(), crate::escape::EscapeMode::EchoE);
+            let r = crate::escape::unescape_echo(&joined, crate::escape::EscapeMode::EchoE);
             if r.stopped {
                 newline = false;
             }
             r.text
         } else {
-            joined.into_bytes()
+            joined
         };
         if newline {
             line.push(b'\n');
@@ -18866,17 +19107,17 @@ impl Shell {
         self.write_bytes(out, redir, &line)
     }
 
-    fn builtin_printf(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_printf(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // `-v var`: store the result in the shell variable `var` instead of
         // writing it to stdout. The name may be a separate token (`-v x`) or
         // glued (`-vx`). `--` ends option processing; any other `-X` is a usage
         // error (bash's getopt behavior).
         let mut i = 0;
-        let mut assign_var: Option<String> = None;
+        let mut assign_var: Option<Str> = None;
         if let Some(first) = args.first() {
-            if first == "--" {
+            if first.as_slice() == b"--" {
                 i = 1;
-            } else if let Some(glued) = first.strip_prefix("-v") {
+            } else if let Some(glued) = first.strip_prefix(b"-v".as_slice()) {
                 if glued.is_empty() {
                     // `-v NAME` — the name is the next token.
                     let Some(name) = args.get(1) else {
@@ -18892,12 +19133,14 @@ impl Shell {
                     i = 2;
                 } else {
                     // `-vNAME` — the name is glued to the flag.
-                    assign_var = Some(glued.to_string());
+                    assign_var = Some(glued.to_vec());
                     i = 1;
                 }
-            } else if let Some(flags) = first.strip_prefix('-').filter(|f| !f.is_empty()) {
-                // A leading option that is not `-v`/`--` is invalid.
-                let opt: String = std::iter::once('-').chain(flags.chars().take(1)).collect();
+            } else if let Some(flags) = first.strip_prefix(b"-").filter(|f| !f.is_empty()) {
+                // A leading option that is not `-v`/`--` is invalid. The dash and
+                // the letter after it — a *character*, so a multi-byte one is
+                // quoted back whole rather than cut.
+                let opt = bfmt![b"-", bytes::char_at(flags, 0)];
                 return self.builtin_invalid_option(
                     "printf",
                     &opt,
@@ -18911,15 +19154,26 @@ impl Shell {
         // never gets far enough to complain about the number. Nothing is
         // formatted, nothing is written, and the status is the usage error's 2
         // rather than the 1 a refused *store* would leave.
-        if let Some(name) = &assign_var
-            && !is_valid_assignment_target(name)
-        {
-            self.errln(&format!(
-                "{}printf: `{name}': not a valid identifier",
-                self.err_prefix()
-            ));
-            return 2;
-        }
+        // A variable name is text by definition — the name tables are keyed by
+        // `String` and a name is spelled in the shell's own identifier syntax — so
+        // a `-v` word that is not text is not a valid identifier, which is the
+        // complaint it already gets.
+        let assign_var: Option<String> = match &assign_var {
+            Some(name) => {
+                let Some(valid) = bytes::as_str(name).filter(|n| is_valid_assignment_target(n))
+                else {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"printf: `",
+                        name,
+                        b"': not a valid identifier"
+                    ]);
+                    return 2;
+                };
+                Some(valid.to_string())
+            }
+            None => None,
+        };
         let Some(fmt) = args.get(i) else {
             // No format operand (`printf`, or `printf -v var` with nothing
             // after): bash prints the usage synopsis (unprefixed, like the other
@@ -18933,16 +19187,8 @@ impl Shell {
         // status at 0), and at most one fatal malformed-conversion error (which
         // aborts printf). Each carries the byte offset at which it arose.
         let mut diags = PrintfDiags::default();
-        // The operands arrive as `String` (the word expander is not byte-native
-        // yet) but printf is: `String → bytes` is lossless, so this widening
-        // costs nothing and disappears when `Word` expansion returns `Str`.
-        let fargs: Vec<Str> = args
-            .get(i + 1..)
-            .unwrap_or_default()
-            .iter()
-            .map(|a| a.clone().into_bytes())
-            .collect();
-        let text = format_printf(fmt.as_bytes(), &fargs, &mut diags);
+        let fargs = args.get(i + 1..).unwrap_or_default();
+        let text = format_printf(fmt, fargs, &mut diags);
         let PrintfDiags { errors, warnings, notes, fatal, .. } = diags;
         let num_status = i32::from(!errors.is_empty() || fatal.is_some());
         // Merge errors and warnings into one offset-ordered message stream so
@@ -19035,30 +19281,40 @@ impl Shell {
     fn attr_operand(
         &mut self,
         tag: &str,
-        word: &str,
-    ) -> Option<(String, bool, Option<String>)> {
+        word: BStr<'_>,
+    ) -> Option<(String, bool, Option<Str>)> {
         let (name, append, value) = match attr_assignment_split(word) {
             Some(eq) => {
-                let append = eq > 0 && word.as_bytes()[eq - 1] == b'+';
+                let append = eq > 0 && word.get(eq - 1) == Some(&b'+');
                 let end = if append { eq - 1 } else { eq };
                 (
-                    &word[..end],
+                    word.get(..end).unwrap_or_default(),
                     append,
-                    Some(word[eq + 1..].to_string()),
+                    // The *value* is bytes and stays bytes: `export x=$'\xff'`
+                    // has to keep the byte it was given.
+                    Some(word.get(eq + 1..).unwrap_or_default().to_vec()),
                 )
             }
             None => (word, false, None),
         };
-        if !crate::parser::is_valid_name(name) {
-            self.emit_stderr(
-                format!("{}{tag}: `{name}': not a valid identifier\n", self.err_prefix()).as_bytes(),
-            );
+        // The *name* is text by definition — the variable tables are keyed by
+        // `String` and a name is spelled in the shell's identifier syntax — so a
+        // name that is not text is not a valid identifier, which is the
+        // complaint it already gets. The word is quoted back as its own bytes.
+        let Some(text) = bytes::as_str(name).filter(|n| crate::parser::is_valid_name(n)) else {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                tag,
+                b": `",
+                name,
+                b"': not a valid identifier"
+            ]);
             return None;
-        }
-        Some((name.to_string(), append, value))
+        };
+        Some((text.to_string(), append, value))
     }
 
-    fn builtin_export(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_export(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Parse leading flags: `-p` (list exported vars), `-n` (remove the export
         // attribute), `--` ends option processing. (`-f`, exporting functions,
         // is not modelled.)
@@ -19067,19 +19323,22 @@ impl Shell {
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i += 1;
                 break;
             }
-            if a.starts_with('-') && a.len() > 1 && !a.contains('=') {
-                for c in a[1..].chars() {
+            if a.starts_with(b"-") && a.len() > 1 && !a.contains(&b'=') {
+                for c in &a[1..] {
                     match c {
-                        'p' => print = true,
-                        'n' => unexport = true,
+                        b'p' => print = true,
+                        b'n' => unexport = true,
                         _ => {
-                            self.emit_stderr(
-                                format!("{}export: -{c}: invalid option\n", self.err_prefix()).as_bytes(),
-                            );
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                b"export: -",
+                                *c,
+                                b": invalid option"
+                            ]);
                             self.emit_stderr(
                                 b"export: usage: export [-fn] [name[=value] ...] or export -p\n",
                             );
@@ -19120,10 +19379,10 @@ impl Shell {
                 }
                 let stored = if append {
                     let mut cur = self.vars.get(&k).cloned().unwrap_or_default();
-                    cur.extend_from_slice(v.as_bytes());
+                    cur.extend_from_slice(&v);
                     cur
                 } else {
-                    v.into_bytes()
+                    v
                 };
                 self.put_var(k.clone(), stored);
                 if unexport {
@@ -19199,24 +19458,28 @@ impl Shell {
     /// selects functions from a plus-signed `+f`, so e.g. `declare +ft name`
     /// does NOT touch the function's trace attribute (it falls through to the
     /// variable path). Returns `None` for any non-trace invocation.
-    fn func_trace_op(args: &[String]) -> Option<(bool, usize)> {
+    fn func_trace_op(args: &[Str]) -> Option<(bool, usize)> {
         let mut func = false;
         let mut trace: Option<bool> = None;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
-            if arg == "--" {
+            if arg.as_slice() == b"--" {
                 i += 1;
                 break;
             }
-            let enable = arg.starts_with('-');
-            let Some(flags) = arg.strip_prefix(['-', '+']).filter(|f| !f.is_empty()) else {
+            let enable = arg.starts_with(b"-");
+            let Some(flags) = arg
+                .strip_prefix(b"-")
+                .or_else(|| arg.strip_prefix(b"+"))
+                .filter(|f| !f.is_empty())
+            else {
                 break;
             };
-            for c in flags.chars() {
+            for c in flags {
                 match c {
                     // Only a `-f`/`-F` (minus) enters function mode.
-                    'f' | 'F' if enable => func = true,
-                    't' => trace = Some(enable),
+                    b'f' | b'F' if enable => func = true,
+                    b't' => trace = Some(enable),
                     _ => {}
                 }
             }
@@ -19232,18 +19495,25 @@ impl Shell {
     /// function, so it inherits the caller's `DEBUG`/`RETURN` traps even when
     /// `functrace` is off. A name that is not a defined function is an error
     /// (bash: `not found`, exit 1), matching `declare -f` on an unknown name.
-    fn set_func_trace(&mut self, enable: bool, names: &[String]) -> i32 {
+    fn set_func_trace(&mut self, enable: bool, names: &[Str]) -> i32 {
         let mut status = 0;
         for name in names {
-            if self.funcs.contains_key(name) {
-                if enable {
-                    self.fn_trace_attr.insert(name.clone());
-                } else {
-                    self.fn_trace_attr.remove(name);
+            // The function table is keyed by `String` — a function can only be
+            // named by the parser, which is text-typed until TD-OILS-BYTE-STRINGS
+            // step 8 — so a name that is not text names no function and gets the
+            // same "not found", quoted back as the bytes the user typed.
+            match bytes::as_str(name).filter(|n| self.funcs.contains_key(*n)) {
+                Some(n) => {
+                    if enable {
+                        self.fn_trace_attr.insert(n.to_string());
+                    } else {
+                        self.fn_trace_attr.remove(n);
+                    }
                 }
-            } else {
-                self.errln(&format!("{}{name}: not found", self.err_prefix()));
-                status = 1;
+                None => {
+                    self.berrln(&bfmt![self.err_prefix(), name, b": not found"]);
+                    status = 1;
+                }
             }
         }
         status
@@ -19251,7 +19521,7 @@ impl Shell {
 
     fn declare_functions(
         &mut self,
-        args: &[String],
+        args: &[Str],
         name_only: bool,
         out: &mut Out,
         redir: &RedirPlan,
@@ -19261,17 +19531,20 @@ impl Shell {
         // (status 1, no diagnostic) — matching bash's `declare` semantics.
         let readonly = args
             .iter()
-            .take_while(|a| a.starts_with('-'))
-            .flat_map(|a| a.chars())
-            .any(|c| c == 'r');
-        let names: Vec<&String> = args.iter().skip_while(|a| a.starts_with('-')).collect();
+            .take_while(|a| a.starts_with(b"-"))
+            .flat_map(|a| a.iter())
+            .any(|c| *c == b'r');
+        let names: Vec<&Str> = args.iter().skip_while(|a| a.starts_with(b"-")).collect();
         if readonly && !names.is_empty() {
             let mut status = 0;
             for name in &names {
-                if self.funcs.contains_key(name.as_str()) {
-                    self.readonly_funcs.insert((*name).clone());
-                } else {
-                    status = 1;
+                // A name that is not text is not a function (see
+                // `set_func_trace`); this path fails silently either way.
+                match bytes::as_str(name.as_slice()).filter(|n| self.funcs.contains_key(*n)) {
+                    Some(n) => {
+                        self.readonly_funcs.insert(n.to_string());
+                    }
+                    None => status = 1,
                 }
             }
             return status;
@@ -19296,6 +19569,11 @@ impl Shell {
         let mut listing = String::new();
         let mut status = 0;
         for name in names {
+            let Some(name) = bytes::as_str(name) else {
+                // Not text ⇒ not a function; status 1, no diagnostic (bash).
+                status = 1;
+                continue;
+            };
             if let Some(body) = self.funcs.get(name) {
                 if name_only {
                     listing.push_str(name);
@@ -19315,13 +19593,13 @@ impl Shell {
     /// Index of the first non-flag operand in a `declare`/`typeset` argument
     /// list — i.e. one past the leading `-x`/`+x` flag words (and a terminating
     /// `--`). Mirrors the flag loop in [`Shell::builtin_declare`].
-    fn declare_flag_end(args: &[String]) -> usize {
+    fn declare_flag_end(args: &[Str]) -> usize {
         let mut i = 0;
         while let Some(arg) = args.get(i) {
-            if arg == "--" {
+            if arg.as_slice() == b"--" {
                 return i + 1;
             }
-            match arg.strip_prefix(['-', '+']) {
+            match arg.strip_prefix(b"-").or_else(|| arg.strip_prefix(b"+")) {
                 Some(f) if !f.is_empty() => i += 1,
                 _ => return i,
             }
@@ -19335,11 +19613,14 @@ impl Shell {
     /// readonly variables), sorted by name, in re-inputtable `declare -FLAGS
     /// name="value"` form. Internal bash-only arrays (`BASH_ALIASES`, etc.) are
     /// not modelled, so they simply don't appear.
-    fn declare_list_filtered(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn declare_list_filtered(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let start = Self::declare_flag_end(args);
         let mut want: Vec<char> = Vec::new();
         for a in &args[..start] {
-            for c in a.chars() {
+            // Read a byte at a time; every attribute letter is ASCII, so a byte
+            // that is not one selects no attribute.
+            for &b in a.iter() {
+                let c = char::from(b);
                 if matches!(c, 'A' | 'a' | 'i' | 'x' | 'r' | 'n' | 'l' | 'u') && !want.contains(&c) {
                     want.push(c);
                 }
@@ -19392,9 +19673,9 @@ impl Shell {
         all
     }
 
-    fn declare_print(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn declare_print(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Names are the non-flag operands after the leading dashed flags.
-        let names: Vec<&String> = args.iter().skip_while(|a| a.starts_with('-')).collect();
+        let names: Vec<&Str> = args.iter().skip_while(|a| a.starts_with(b"-")).collect();
         let mut status = 0;
         let mut write_status = 0;
         if names.is_empty() {
@@ -19413,14 +19694,20 @@ impl Shell {
             // the two streams merged, `declare -p a nope` reads `a`'s
             // definition first and the complaint after it, as bash does.
             for name in names {
-                if let Some(def) = self.format_declare_def(name) {
-                    let w = self.write_bytes(out, redir, &bfmt![&def, b"\n"]);
-                    if w != 0 {
-                        write_status = w;
+                // The variable tables are `String`-keyed, so a name that is not
+                // text names nothing declared — the same "not found" it would
+                // get for any unset name, quoted back as its own bytes.
+                match bytes::as_str(name).and_then(|n| self.format_declare_def(n)) {
+                    Some(def) => {
+                        let w = self.write_bytes(out, redir, &bfmt![&def, b"\n"]);
+                        if w != 0 {
+                            write_status = w;
+                        }
                     }
-                } else {
-                    self.emit_stderr(format!("{}declare: {name}: not found\n", self.err_prefix()).as_bytes());
-                    status = 1;
+                    None => {
+                        self.berrln(&bfmt![self.err_prefix(), b"declare: ", name, b": not found"]);
+                        status = 1;
+                    }
                 }
             }
         }
@@ -19546,10 +19833,10 @@ impl Shell {
     /// exactly bash's `builtin_usage`/`sh_invalidopt` pair. `opt` is the offending
     /// flag as bash reports it (e.g. `-Z` or `+Z`); `usage` is the synopsis body
     /// after `usage:`.
-    fn builtin_invalid_option(&self, builtin: &str, opt: &str, usage: &str) -> i32 {
-        self.emit_stderr(
-            format!("{}{builtin}: {opt}: invalid option\n", self.err_prefix()).as_bytes(),
-        );
+    fn builtin_invalid_option(&self, builtin: &str, opt: BStr<'_>, usage: &str) -> i32 {
+        // `opt` is echoed from the command line, so it is bytes: an invalid
+        // option is reported as the bytes the user actually typed.
+        self.berrln(&bfmt![self.err_prefix(), builtin, b": ", opt, b": invalid option"]);
         self.emit_stderr(format!("{builtin}: usage: {usage}\n").as_bytes());
         2
     }
@@ -19588,42 +19875,36 @@ impl Shell {
         &mut self,
         tag: &str,
         name: &str,
-        value: &str,
+        value: BStr<'_>,
         append: bool,
-    ) -> Option<String> {
-        let result: Cow<'_, str> = if append {
-            match self.vars.get(name) {
-                // A nameref holds the *name* it points to, and a name is text,
-                // so an existing value that is not text can only append to an
-                // unnameable target — reported as the empty result is, with the
-                // generic "not a valid identifier" wording the append form uses.
-                Some(old) => match bytes::as_str(old) {
-                    Some(old) => Cow::Owned(format!("{old}{value}")),
-                    None => Cow::Borrowed(""),
-                },
-                None => Cow::Borrowed(value),
-            }
-        } else {
-            Cow::Borrowed(value)
+    ) -> Option<Str> {
+        let joined: Str = match self.vars.get(name) {
+            Some(old) if append => bfmt![old, value],
+            _ => value.to_vec(),
         };
-        if !is_valid_assignment_target(&result) {
-            // The quoted text is what this command supplied, not the result.
-            let shown = value;
-            let what = if append || result.is_empty() {
-                "not a valid identifier"
+        // A nameref holds the *name* it points to, and a name is text — the
+        // variable tables are `String`-keyed — so a result that is not text
+        // names nothing and is rejected exactly as any other invalid target is.
+        let Some(result) = bytes::as_str(&joined).filter(|r| is_valid_assignment_target(r)) else {
+            let what = if append || joined.is_empty() {
+                b": not a valid identifier\n".as_slice()
             } else {
-                "invalid variable name for name reference"
+                b": invalid variable name for name reference\n".as_slice()
             };
-            return Some(format!("{}{tag}: `{shown}': {what}\n", self.err_prefix()));
-        }
-        if nameref_target_base(&result) != name {
+            // The quoted text is what this command supplied, not the result.
+            return Some(bfmt![self.err_prefix(), tag, b": `", value, b"'", what]);
+        };
+        if nameref_target_base(result) != name {
             return None;
         }
         if self.local_frames.is_empty() {
-            Some(format!(
-                "{}{tag}: {name}: nameref variable self references not allowed\n",
-                self.err_prefix()
-            ))
+            Some(
+                format!(
+                    "{}{tag}: {name}: nameref variable self references not allowed\n",
+                    self.err_prefix()
+                )
+                .into_bytes(),
+            )
         } else {
             // A warning, not an error: emit it here and let the caller proceed.
             let prefix = self.err_prefix();
@@ -19634,7 +19915,7 @@ impl Shell {
         }
     }
 
-    fn builtin_declare(&mut self, args: &[String], is_local: bool, tag: &str) -> i32 {
+    fn builtin_declare(&mut self, args: &[Str], is_local: bool, tag: &str) -> i32 {
         if is_local && self.local_frames.is_empty() {
             self.emit_stderr(format!("{}local: can only be used in a function\n", self.err_prefix()).as_bytes());
             return 1;
@@ -19662,32 +19943,32 @@ impl Shell {
         let mut global = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
-            if arg == "--" {
+            if arg.as_slice() == b"--" {
                 i += 1;
                 break;
             }
             // Flags may be introduced with `-` (enable) or `+` (disable).
-            let enable = arg.starts_with('-');
-            if let Some(flags) = arg.strip_prefix(['-', '+'])
+            let enable = arg.starts_with(b"-");
+            if let Some(flags) = arg.strip_prefix(b"-").or_else(|| arg.strip_prefix(b"+"))
                 && !flags.is_empty()
             {
-                for c in flags.chars() {
+                for c in flags {
                     match c {
-                        'A' => assoc = true,
-                        'a' => indexed = true,
-                        'x' => export = true,
-                        'r' => readonly = true,
-                        'i' => {
+                        b'A' => assoc = true,
+                        b'a' => indexed = true,
+                        b'x' => export = true,
+                        b'r' => readonly = true,
+                        b'i' => {
                             if enable {
                                 integer = true;
                             } else {
                                 unset_integer = true;
                             }
                         }
-                        'l' | 'u' | 'c' => {
+                        b'l' | b'u' | b'c' => {
                             let dir = match c {
-                                'l' => 1,
-                                'u' => 2,
+                                b'l' => 1,
+                                b'u' => 2,
                                 _ => 3,
                             };
                             if enable {
@@ -19699,27 +19980,31 @@ impl Shell {
                                 case_dir = Some(0);
                             }
                         }
-                        'n' => {
+                        b'n' => {
                             if enable {
                                 nameref = true;
                             } else {
                                 unset_nameref = true;
                             }
                         }
-                        'g' => global = enable,
+                        b'g' => global = enable,
                         // Accepted but with no attribute effect in this
                         // reimplementation: -p (print, handled elsewhere), -f/-F
                         // (function restriction), -I (inherit), -t (trace).
-                        'p' | 'f' | 'F' | 'I' | 't' => {}
+                        b'p' | b'f' | b'F' | b'I' | b't' => {}
                         _ => {
                             // Genuinely unknown option letter: bash prints an
                             // "invalid option" diagnostic plus the usage synopsis
                             // and fails with status 2.
-                            let sign = if enable { '-' } else { '+' };
-                            self.emit_stderr(
-                                format!("{}{tag}: {sign}{c}: invalid option\n", self.err_prefix())
-                                    .as_bytes(),
-                            );
+                            let sign = if enable { b'-' } else { b'+' };
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                tag,
+                                b": ",
+                                sign,
+                                *c,
+                                b": invalid option"
+                            ]);
                             self.emit_stderr(Self::declare_usage(tag).as_bytes());
                             return 2;
                         }
@@ -19742,7 +20027,7 @@ impl Shell {
             // it is restored on return (`call_function`), so any `set` changes
             // made afterwards are undone. Handled as a special "name", not a
             // variable, so it neither shadows nor creates a var called `-`.
-            if is_local && name_val == "-" {
+            if is_local && name_val.as_slice() == b"-" {
                 // Only the first `local -` in the frame captures; a later one
                 // must not overwrite the earlier baseline (bash restores to the
                 // state at the first `local -`).
@@ -19756,20 +20041,21 @@ impl Shell {
             }
             // Split `NAME=value` / `NAME+=value`; the `+=` form appends to (or
             // numerically adds, under `-i`) the variable's current value.
-            let (name, append, value) = match name_val.find('=') {
-                Some(eq) => {
-                    if eq > 0 && name_val.as_bytes()[eq - 1] == b'+' {
+            // The *name* is text by definition, but the *value* is bytes and
+            // stays bytes: `declare x=$'\xff'` has to keep the byte it was given.
+            let (name, append, value): (BStr<'_>, bool, Option<Str>) =
+                match name_val.iter().position(|b| *b == b'=') {
+                    Some(eq) => {
+                        let plus = eq > 0 && name_val.get(eq - 1) == Some(&b'+');
+                        let end = if plus { eq - 1 } else { eq };
                         (
-                            &name_val[..eq - 1],
-                            true,
-                            Some(name_val[eq + 1..].to_string()),
+                            name_val.get(..end).unwrap_or_default(),
+                            plus,
+                            Some(name_val.get(eq + 1..).unwrap_or_default().to_vec()),
                         )
-                    } else {
-                        (&name_val[..eq], false, Some(name_val[eq + 1..].to_string()))
                     }
-                }
-                None => (name_val.as_str(), false, None),
-            };
+                    None => (name_val.as_slice(), false, None),
+                };
             if name.is_empty() {
                 continue;
             }
@@ -19778,23 +20064,34 @@ impl Shell {
             // name. A well-formed subscript is `BASE[...]` with a closing `]` at
             // the very end and a valid identifier `BASE`. Anything else (an
             // unbalanced `h[a`, or a bad base) fails identifier validation below.
-            let (base_name, subscript): (&str, Option<&str>) = match name.find('[') {
-                Some(p) if p > 0 && name.ends_with(']') => {
-                    (&name[..p], Some(&name[p + 1..name.len() - 1]))
-                }
-                _ => (name, None),
-            };
+            let (base_name, subscript): (BStr<'_>, Option<BStr<'_>>) =
+                match name.iter().position(|b| *b == b'[') {
+                    Some(p) if p > 0 && name.ends_with(b"]") => (
+                        name.get(..p).unwrap_or_default(),
+                        name.get(p + 1..name.len().saturating_sub(1)),
+                    ),
+                    _ => (name, None),
+                };
             // Every declare target must be a valid identifier (bash rejects
             // `bad@name=v`, `1x=v`, `h[a` with `\`ARG': not a valid identifier`
             // and status 1, quoting the *original* argument).
-            if !crate::parser::is_valid_name(base_name) {
-                self.emit_stderr(
-                    format!("{}{tag}: `{name_val}': not a valid identifier\n", self.err_prefix())
-                        .as_bytes(),
-                );
+            // The variable tables are keyed by `String` and an identifier is
+            // spelled in the shell's identifier syntax, so a base name that is
+            // not text is not a valid identifier — which is the complaint it
+            // already gets, quoting the original argument's own bytes.
+            let Some(base_name) =
+                bytes::as_str(base_name).filter(|n| crate::parser::is_valid_name(n))
+            else {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    tag,
+                    b": `",
+                    name_val.as_slice(),
+                    b"': not a valid identifier"
+                ]);
                 status = 1;
                 continue;
-            }
+            };
             // A `-n` declaration's value is the *name* it refers to, so bash
             // validates it here — before the readonly check below, which it
             // therefore pre-empts (`readonly r; declare -n r='a b'` reports the
@@ -19803,7 +20100,7 @@ impl Shell {
                 && let Some(v) = &value
                 && let Some(msg) = self.nameref_value_error(tag, base_name, v, append)
             {
-                self.emit_stderr(msg.as_bytes());
+                self.emit_stderr(&msg);
                 status = 1;
                 continue;
             }
@@ -19911,6 +20208,22 @@ impl Shell {
                     // `-i`; only a bad `-i` *value* is tagged `declare:`) and its
                     // "bad array subscript" diagnostic names the raw source
                     // (`a[1+2-20]`), matching bash.
+                    // Seam: `Assignment`/`Word` are `String`-typed until
+                    // TD-OILS-BYTE-STRINGS step 8, so a subscripted target's
+                    // subscript source and its value both have to be text here.
+                    // Refusing is the honest answer — storing an *altered* value
+                    // is the one outcome worse than storing none.
+                    let (Some(sub), Some(v)) = (bytes::as_str(sub), bytes::as_str(&v)) else {
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            tag,
+                            b": `",
+                            name_val.as_slice(),
+                            b"': operand is not valid text"
+                        ]);
+                        status = 1;
+                        continue;
+                    };
                     let assignment = Assignment {
                         name: base_name.to_string(),
                         index: Some(Word::literal(sub)),
@@ -19951,6 +20264,9 @@ impl Shell {
                 }
                 continue;
             }
+            // Past the subscripted branch, `name` and `base_name` are the same
+            // operand — and it has already been checked to be text.
+            let name = base_name;
             if let Some(v) = value {
                 if self.nameref_attr.contains(name) {
                     // `declare -n ref=target` — store the target *name* literally
@@ -19959,8 +20275,8 @@ impl Shell {
                     // extends the *name*, which is how `declare -n r=a; declare
                     // -n r+='[1]'` builds the element reference `a[1]` (bash).
                     let v = match self.vars.get(name) {
-                        Some(old) if append => bfmt![old, v.as_str()],
-                        _ => v.into_bytes(),
+                        Some(old) if append => bfmt![old, &v],
+                        _ => v,
                     };
                     self.put_var(name.to_string(), v);
                 } else if assoc || indexed {
@@ -19970,14 +20286,29 @@ impl Shell {
                     // word-splitting, quoting and `$var` all apply a second
                     // time — while any other string becomes a single element at
                     // index/key 0 (`declare -a a=x` → `([0]="x")`).
-                    let trimmed = v.trim();
-                    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+                    let trimmed = bytes::trim(&v);
+                    if trimmed.starts_with(b"(") && trimmed.ends_with(b")") {
                         // Re-parse `name=(...)` and drive it through the normal
                         // array-assignment path. `name` is already registered
                         // as assoc/indexed above, so `apply_assignment` selects
                         // the correct array kind.
                         let op = if append { "+=" } else { "=" };
-                        let src = format!("{name}{op}{v}");
+                        // Seam: a parenthesised value is a compound array
+                        // *literal* — shell source that is re-parsed and
+                        // re-expanded — so it has to be text until the parser
+                        // becomes byte-typed (step 8).
+                        let Some(vtext) = bytes::as_str(&v) else {
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                tag,
+                                b": `",
+                                &v,
+                                b"': array literal is not valid text"
+                            ]);
+                            status = 1;
+                            continue;
+                        };
+                        let src = format!("{name}{op}{vtext}");
                         if let Ok(prog) = crate::parser::parse(&src)
                             && let Some(assignment) = prog
                                 .items
@@ -19998,7 +20329,7 @@ impl Shell {
                         // rather than `53`.
                         let cur = if append { self.scalar_store(name) } else { None };
                         let Some(stored) =
-                            self.appended_attributed_value(name, cur, v.into_bytes(), append)
+                            self.appended_attributed_value(name, cur, v, append)
                         else {
                             // A bad `-i` value leaves the array *valued but empty*
                             // (`declare -ai a=2+` reports `declare -ai a=()`) and
@@ -20028,7 +20359,7 @@ impl Shell {
                     // afterwards: `declare -i n=2+` then `declare -p n` gives
                     // `declare -i n`.
                     let cur = if append { self.vars.get(name).cloned() } else { None };
-                    match self.appended_attributed_value(name, cur, v.into_bytes(), append) {
+                    match self.appended_attributed_value(name, cur, v, append) {
                         Some(stored) => {
                             self.put_var(name.to_string(), stored);
                         }
@@ -20042,9 +20373,7 @@ impl Shell {
                     // `+=` the folded value is appended to the current string. No
                     // `-i`, so the arithmetic arm of the helper cannot fail here.
                     let cur = if append { self.vars.get(name).cloned() } else { None };
-                    if let Some(stored) =
-                        self.appended_attributed_value(name, cur, v.into_bytes(), append)
-                    {
+                    if let Some(stored) = self.appended_attributed_value(name, cur, v, append) {
                         self.put_var(name.to_string(), stored);
                     }
                 }
@@ -20154,15 +20483,14 @@ impl Shell {
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
-        // Seam: the declaration builtins this dispatches to (`declare`,
-        // `readonly`, `export`) are still `String`-typed
-        // (TD-OILS-BYTE-STRINGS step 7 converts them), as is this function's
-        // own flag parsing. The `set -x` line below is rendered from the
-        // *byte* words instead, so a non-text operand still traces verbatim.
-        #[allow(deprecated)]
-        let argv_text: Vec<String> = argv.iter().map(|a| bytes::scaffold_lossy_string(a)).collect();
-        let argv = argv_text.as_slice();
-        let cmd = argv.first().map(String::as_str).unwrap_or("");
+        // The command word named a declaration builtin, so it is text by
+        // construction — the builtin table is keyed by `String`, and this
+        // function is only reached through it.
+        let cmd = argv
+            .first()
+            .map(Vec::as_slice)
+            .and_then(bytes::as_str)
+            .unwrap_or_default();
         let is_local = cmd == "local";
         if is_local && self.local_frames.is_empty() {
             self.emit_stderr(format!("{}local: can only be used in a function\n", self.err_prefix()).as_bytes());
@@ -20187,24 +20515,24 @@ impl Shell {
         let mut nameref = false;
         let mut unset_nameref = false;
         for arg in &argv[1..] {
-            let enable = arg.starts_with('-');
-            let Some(flags) = arg.strip_prefix(['-', '+']) else {
+            let enable = arg.starts_with(b"-");
+            let Some(flags) = arg.strip_prefix(b"-").or_else(|| arg.strip_prefix(b"+")) else {
                 break; // first non-flag operand — flags are done
             };
-            if arg == "--" {
+            if arg.as_slice() == b"--" {
                 break; // `--` ends option parsing
             }
-            for c in flags.chars() {
+            for c in flags {
                 match c {
-                    'A' => assoc = true,
-                    'a' => indexed = true,
-                    'g' => global = enable,
-                    'i' if enable => integer = true,
-                    'i' => unset_integer = true,
-                    'l' | 'u' | 'c' => {
+                    b'A' => assoc = true,
+                    b'a' => indexed = true,
+                    b'g' => global = enable,
+                    b'i' if enable => integer = true,
+                    b'i' => unset_integer = true,
+                    b'l' | b'u' | b'c' => {
                         let dir = match c {
-                            'l' => 1,
-                            'u' => 2,
+                            b'l' => 1,
+                            b'u' => 2,
                             _ => 3,
                         };
                         if enable {
@@ -20216,10 +20544,10 @@ impl Shell {
                             case_dir = Some(0);
                         }
                     }
-                    'r' if enable => readonly = true,
-                    'x' if enable => export = true,
-                    'n' if enable => nameref = true,
-                    'n' => unset_nameref = true,
+                    b'r' if enable => readonly = true,
+                    b'x' if enable => export = true,
+                    b'n' if enable => nameref = true,
+                    b'n' => unset_nameref = true,
                     _ => {}
                 }
             }
@@ -20439,7 +20767,7 @@ impl Shell {
         // slips into listing mode.
         let has_scalar_operand = argv[1..]
             .iter()
-            .any(|a| a != "--" && !a.starts_with(['-', '+']));
+            .any(|a| a.as_slice() != b"--" && !a.starts_with(b"-") && !a.starts_with(b"+"));
         let status = match cmd {
             "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir),
             "export" if has_scalar_operand => self.builtin_export(&argv[1..], out, redir),
@@ -20475,36 +20803,38 @@ impl Shell {
     /// variable read-only (assigning an initial value first), so later
     /// assignments and `unset` are rejected. With no name operands (or `-p`),
     /// prints the current readonly variables in a re-inputtable form.
-    fn builtin_readonly(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_readonly(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Strip leading flags; only `-a`/`-A` (array kinds) affect storage.
-        let mut names: Vec<&String> = Vec::new();
+        let mut names: Vec<&Str> = Vec::new();
         let mut assoc = false;
         let mut indexed = false;
         let mut print_only = false;
         let mut func_mode = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
-            if arg == "--" {
+            if arg.as_slice() == b"--" {
                 i += 1;
                 break;
             }
-            if let Some(flags) = arg.strip_prefix('-')
+            if let Some(flags) = arg.strip_prefix(b"-")
                 && !flags.is_empty()
             {
-                for c in flags.chars() {
+                for c in flags {
                     match c {
-                        'A' => assoc = true,
-                        'a' => indexed = true,
-                        'p' => print_only = true,
-                        'f' => func_mode = true, // operate on the function namespace
-                        'n' => {} // accepted (disable-readonly hint); no effect here.
+                        b'A' => assoc = true,
+                        b'a' => indexed = true,
+                        b'p' => print_only = true,
+                        b'f' => func_mode = true, // operate on the function namespace
+                        b'n' => {} // accepted (disable-readonly hint); no effect here.
                         _ => {
                             // Unknown option: bash prints "invalid option" plus the
                             // usage synopsis and fails with status 2.
-                            self.emit_stderr(
-                                format!("{}readonly: -{c}: invalid option\n", self.err_prefix())
-                                    .as_bytes(),
-                            );
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                b"readonly: -",
+                                *c,
+                                b": invalid option"
+                            ]);
                             self.emit_stderr(
                                 b"readonly: usage: readonly [-aAf] [name[=value] ...] or readonly -p\n",
                             );
@@ -20581,10 +20911,10 @@ impl Shell {
             if let Some(v) = value {
                 let stored = if append {
                     let mut cur = self.scalar_store(&name).unwrap_or_default();
-                    cur.extend_from_slice(v.as_bytes());
+                    cur.extend_from_slice(&v);
                     cur
                 } else {
-                    v.into_bytes()
+                    v
                 };
                 // Routes to element/key 0 when the name is an array — the same
                 // rule a bare `name=value` follows.
@@ -20607,7 +20937,7 @@ impl Shell {
     /// function). With no names, list every readonly function as its
     /// reconstructed definition followed by a `declare -fr NAME` line, matching
     /// bash. A readonly function cannot later be redefined or `unset -f`.
-    fn readonly_functions(&mut self, names: &[&String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn readonly_functions(&mut self, names: &[&Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         if names.is_empty() {
             let mut ro: Vec<&String> = self.readonly_funcs.iter().collect();
             ro.sort();
@@ -20622,13 +20952,22 @@ impl Shell {
         }
         let mut status = 0;
         for name in names {
-            if self.funcs.contains_key(name.as_str()) {
-                self.readonly_funcs.insert((*name).clone());
-            } else {
-                self.emit_stderr(
-                    format!("{}readonly: {name}: not a function\n", self.err_prefix()).as_bytes(),
-                );
-                status = 1;
+            // The function table is keyed by `String` — a function can only be
+            // named by the parser — so a name that is not text names no
+            // function and gets the same complaint, quoted back as its bytes.
+            match bytes::as_str(name.as_slice()).filter(|n| self.funcs.contains_key(*n)) {
+                Some(n) => {
+                    self.readonly_funcs.insert(n.to_string());
+                }
+                None => {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"readonly: ",
+                        name.as_slice(),
+                        b": not a function"
+                    ]);
+                    status = 1;
+                }
             }
         }
         status
@@ -20647,30 +20986,30 @@ impl Shell {
     /// toggles one does not fail, but only the options osh actually models
     /// change any behaviour; [`shopt_is_read_only`] covers the two that describe
     /// how the shell was started rather than direct it, and cannot be changed.
-    fn builtin_shopt(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_shopt(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let mut flags = ShoptFlags::default();
         // `-o`: operate on `set -o` options (noclobber, errexit, …) rather than
         // shopt options. Flags may be clustered (`shopt -qo NAME`, `-so NAME`).
         let mut opt_o = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
-            match arg.as_str() {
-                "--" => {
+            match arg.as_slice() {
+                b"--" => {
                     i += 1;
                     break;
                 }
-                s if s.starts_with('-') && s.len() > 1 => {
-                    for c in s.chars().skip(1) {
+                s if s.starts_with(b"-") && s.len() > 1 => {
+                    for c in s.iter().skip(1) {
                         match c {
-                            's' => flags.set = true,
-                            'u' => flags.unset = true,
-                            'q' => flags.quiet = true,
-                            'o' => opt_o = true,
-                            'p' => flags.reinput = true,
+                            b's' => flags.set = true,
+                            b'u' => flags.unset = true,
+                            b'q' => flags.quiet = true,
+                            b'o' => opt_o = true,
+                            b'p' => flags.reinput = true,
                             _ => {
                                 return self.builtin_invalid_option(
                                     "shopt",
-                                    &format!("-{c}"),
+                                    &[b'-', *c],
                                     "shopt [-pqsu] [-o] [optname ...]",
                                 );
                             }
@@ -20695,7 +21034,7 @@ impl Shell {
             );
             return 1;
         }
-        let names: Vec<&String> = args[i..].iter().collect();
+        let names: Vec<&Str> = args[i..].iter().collect();
 
         // `-o` mode: query/toggle `set -o` shell options, reusing the same
         // machinery (and `%-15s\t%s` listing format) as the `set` builtin.
@@ -20727,16 +21066,22 @@ impl Shell {
             // so `shopt bogus nocaseglob` still says where `nocaseglob` stands.
             let mut all_on = true;
             for name in &names {
-                if !shopt_is_known(name) {
-                    self.emit_stderr(
-                        format!("{}shopt: {name}: invalid shell option name\n", self.err_prefix()).as_bytes(),
-                    );
+                // Option names come from a fixed table, so a name that is not
+                // text names no option — the same complaint any other unknown
+                // name gets, quoting the bytes it was given.
+                let Some(name) = bytes::as_str(name.as_slice()).filter(|n| shopt_is_known(n)) else {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"shopt: ",
+                        name.as_slice(),
+                        b": invalid shell option name"
+                    ]);
                     all_on = false;
                     continue;
-                }
+                };
                 let on = self
                     .shopt
-                    .get(name.as_str())
+                    .get(name)
                     .copied()
                     .unwrap_or_else(|| self.shopt_default(name));
                 if !on {
@@ -20762,19 +21107,22 @@ impl Shell {
         // parameters (see the extdebug base-frame handling below).
         let extdebug_before = self.extdebug_on();
         for name in names {
-            if !shopt_is_known(name) {
-                self.emit_stderr(
-                    format!("{}shopt: {name}: invalid shell option name\n", self.err_prefix()).as_bytes(),
-                );
+            let Some(name) = bytes::as_str(name.as_slice()).filter(|n| shopt_is_known(n)) else {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"shopt: ",
+                    name.as_slice(),
+                    b": invalid shell option name"
+                ]);
                 status = 1;
                 continue;
-            }
+            };
             if shopt_is_read_only(name) {
                 // Accepted and then ignored, as bash does — the name is real, so
                 // this is not the error an unknown name gets.
                 continue;
             }
-            self.shopt.insert(name.clone(), flags.set);
+            self.shopt.insert(name.to_string(), flags.set);
             changed = true;
         }
         // On an extdebug OFF→ON transition, seed the BASH_ARGC/BASH_ARGV stack
@@ -20816,7 +21164,7 @@ impl Shell {
     /// state (others are accepted but inert, as with `set -o`).
     fn shopt_o_mode(
         &mut self,
-        names: &[&String],
+        names: &[&Str],
         flags: ShoptFlags,
         out: &mut Out,
         redir: &RedirPlan,
@@ -20833,12 +21181,18 @@ impl Shell {
         // odd one out.)
         if flags.set || flags.unset {
             for name in names {
-                if !SETO_NAMES.contains(&name.as_str()) {
-                    self.emit_stderr(
-                        format!("{}shopt: {name}: invalid option name\n", self.err_prefix()).as_bytes(),
-                    );
+                // As above: `set -o` option names come from a fixed table, so a
+                // name that is not text is not one of them.
+                let Some(name) = bytes::as_str(name.as_slice()).filter(|n| SETO_NAMES.contains(n))
+                else {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"shopt: ",
+                        name.as_slice(),
+                        b": invalid option name"
+                    ]);
                     continue;
-                }
+                };
                 self.set_named_option(name, flags.set);
             }
             return 0;
@@ -20859,11 +21213,16 @@ impl Shell {
         // remaining names still get their answer.
         let mut all_on = true;
         for name in names {
-            if !SETO_NAMES.contains(&name.as_str()) {
-                self.emit_stderr(format!("{}shopt: {name}: invalid option name\n", self.err_prefix()).as_bytes());
+            let Some(name) = bytes::as_str(name.as_slice()).filter(|n| SETO_NAMES.contains(n)) else {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"shopt: ",
+                    name.as_slice(),
+                    b": invalid option name"
+                ]);
                 all_on = false;
                 continue;
-            }
+            };
             let on = self.shell_option_enabled(name);
             if !on {
                 all_on = false;
@@ -20883,7 +21242,7 @@ impl Shell {
         i32::from(!all_on)
     }
 
-    fn builtin_unset(&mut self, args: &[String]) -> i32 {
+    fn builtin_unset(&mut self, args: &[Str]) -> i32 {
         // Parse leading `-v` (variables only) / `-f` (functions only) flags.
         // Without a flag, a name that is a set variable is unset as a variable,
         // otherwise it is unset as a function (bash: variables take precedence).
@@ -20893,27 +21252,27 @@ impl Shell {
         let mut nameref_only = false;
         let mut i = 0;
         while let Some(a) = args.get(i) {
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i += 1;
                 break;
             }
-            if let Some(flags) = a.strip_prefix('-')
+            if let Some(flags) = a.strip_prefix(b"-")
                 && !flags.is_empty()
             {
                 // An option-looking token with an unknown letter is a usage
                 // error (bash reports the first offending flag), not a name.
-                if let Some(c) = flags.chars().find(|c| !matches!(c, 'v' | 'f' | 'n')) {
+                if let Some(c) = flags.iter().find(|c| !matches!(c, b'v' | b'f' | b'n')) {
                     return self.builtin_invalid_option(
                         "unset",
-                        &format!("-{c}"),
+                        &[b'-', *c],
                         "unset [-f] [-v] [-n] [name ...]",
                     );
                 }
-                for c in flags.chars() {
+                for c in flags {
                     match c {
-                        'f' => funcs_only = true,
-                        'v' => vars_only = true,
-                        'n' => nameref_only = true,
+                        b'f' => funcs_only = true,
+                        b'v' => vars_only = true,
+                        b'n' => nameref_only = true,
                         _ => {}
                     }
                 }
@@ -20927,6 +21286,14 @@ impl Shell {
         // b c` still unsets `b` and `c`.
         let mut status = 0;
         for a in &args[i..] {
+            // Every table `unset` reaches — variables, arrays, functions, the
+            // attribute sets — is keyed by `String`, and a name is spelled in
+            // the shell's identifier syntax, so a name that is not text is
+            // bound to nothing at all. Unsetting an unbound name is silently
+            // fine in bash, so this is the same quiet no-op.
+            let Some(a) = bytes::as_str(a) else {
+                continue;
+            };
             if funcs_only {
                 if self.readonly_funcs.contains(a) {
                     self.emit_stderr(
@@ -20980,7 +21347,7 @@ impl Shell {
             // (bash semantics); resolve the target name first. A circular chain
             // points nowhere, so bash reports it and unsets the *reference*,
             // leaving the rest of the cycle in place.
-            let a = &self.resolve_ref_use(a).unwrap_or_else(|| a.clone());
+            let a = &self.resolve_ref_use(a).unwrap_or_else(|| a.to_string());
             // A readonly variable cannot be unset.
             if self.readonly.contains(a) {
                 self.emit_stderr(
@@ -21153,7 +21520,7 @@ impl Shell {
         true
     }
 
-    fn builtin_set(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_set(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Bare `set` (no operands) lists every shell variable in sorted,
         // re-inputtable `name=value` form, followed by every function definition
         // (matching bash, which prints functions after the variables).
@@ -21188,24 +21555,29 @@ impl Shell {
         let mut i = 0;
         while i < args.len() {
             let arg = &args[i];
-            match arg.as_str() {
-                "--" => {
-                    self.positional = args[i + 1..].iter().map(|a| a.clone().into_bytes()).collect();
+            match arg.as_slice() {
+                b"--" => {
+                    self.positional = args[i + 1..].to_vec();
                     return 0;
                 }
-                "-" | "+" => {
+                b"-" | b"+" => {
                     i += 1;
                 }
-                "-o" | "+o" => {
-                    let enable = arg.starts_with('-');
+                b"-o" | b"+o" => {
+                    let enable = arg.starts_with(b"-");
                     if let Some(opt) = args.get(i + 1) {
-                        if !self.set_named_option(opt, enable) {
+                        // Option names come from a fixed table, so a name that
+                        // is not text is not one of them — the same complaint
+                        // any other unknown name gets.
+                        if !bytes::as_str(opt).is_some_and(|o| self.set_named_option(o, enable)) {
                             // bash: `set: NAME: invalid option name`, status 2,
                             // stopping before any later options are applied.
-                            self.emit_stderr(
-                                format!("{}set: {opt}: invalid option name\n", self.err_prefix())
-                                    .as_bytes(),
-                            );
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                b"set: ",
+                                opt,
+                                b": invalid option name"
+                            ]);
                             return 2;
                         }
                         i += 2;
@@ -21216,8 +21588,8 @@ impl Shell {
                         return self.write_bytes(out, redir, text.as_bytes());
                     }
                 }
-                s if s.starts_with('-') || s.starts_with('+') => {
-                    let enable = s.starts_with('-');
+                s if s.starts_with(b"-") || s.starts_with(b"+") => {
+                    let enable = s.starts_with(b"-");
                     // A short-option cluster may embed `o` (long-option
                     // selector), e.g. `set -eo pipefail`. Each `o` consumes the
                     // next *word* as its option name (bash reads successive words
@@ -21225,18 +21597,23 @@ impl Shell {
                     // while the remaining cluster letters stay ordinary flags. An
                     // `o` with no following word lists the options like `set -o`.
                     let mut extra_words = 0usize;
-                    for c in s[1..].chars() {
+                    // Read the cluster a byte at a time: every option letter is
+                    // ASCII, so a byte that is not one is not a letter bash
+                    // accepts and takes the "invalid option" path below.
+                    for &b in s.get(1..).unwrap_or_default() {
+                        let c = char::from(b);
                         if c == 'o' {
                             match args.get(i + 1 + extra_words) {
                                 Some(opt) => {
-                                    if !self.set_named_option(opt, enable) {
-                                        self.emit_stderr(
-                                            format!(
-                                                "{}set: {opt}: invalid option name\n",
-                                                self.err_prefix()
-                                            )
-                                            .as_bytes(),
-                                        );
+                                    if !bytes::as_str(opt)
+                                        .is_some_and(|o| self.set_named_option(o, enable))
+                                    {
+                                        self.berrln(&bfmt![
+                                            self.err_prefix(),
+                                            b"set: ",
+                                            opt,
+                                            b": invalid option name"
+                                        ]);
                                         return 2;
                                     }
                                     extra_words += 1;
@@ -21249,11 +21626,14 @@ impl Shell {
                         } else if !self.set_short_option(c, enable) {
                             // bash: `set: -X: invalid option` + usage, status 2,
                             // stopping before later cluster letters are applied.
-                            let sign = if enable { '-' } else { '+' };
-                            self.emit_stderr(
-                                format!("{}set: {sign}{c}: invalid option\n", self.err_prefix())
-                                    .as_bytes(),
-                            );
+                            let sign = if enable { b'-' } else { b'+' };
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                b"set: ",
+                                sign,
+                                b,
+                                b": invalid option"
+                            ]);
                             self.emit_stderr(
                                 b"set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]\n",
                             );
@@ -21263,7 +21643,7 @@ impl Shell {
                     i += 1 + extra_words;
                 }
                 _ => {
-                    self.positional = args[i..].iter().map(|a| a.clone().into_bytes()).collect();
+                    self.positional = args[i..].to_vec();
                     return 0;
                 }
             }
@@ -21492,7 +21872,7 @@ impl Shell {
         }
     }
 
-    fn builtin_shift(&mut self, args: &[String]) -> i32 {
+    fn builtin_shift(&mut self, args: &[Str]) -> i32 {
         // `shift [n]`: default 1. A non-numeric count is a hard error, as is a
         // negative count ("out of range"); a count larger than `$#` silently
         // returns 1 (bash). More than one operand is "too many arguments".
@@ -21502,11 +21882,15 @@ impl Shell {
             Some(s) => {
                 // bash parses the count as a signed integer, accepting a leading
                 // `+`/`-`; anything else is "numeric argument required".
-                let Ok(v) = s.parse::<i64>() else {
-                    self.emit_stderr(
-                        format!("{}shift: {s}: numeric argument required\n", self.err_prefix())
-                            .as_bytes(),
-                    );
+                // A count is a number, so a count that is not text is not
+                // one — the same complaint `shift x` gets.
+                let Some(v) = bytes::as_str(s).and_then(|t| t.parse::<i64>().ok()) else {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"shift: ",
+                        s.as_slice(),
+                        b": numeric argument required"
+                    ]);
                     return 1;
                 };
                 if args.len() > 1 {
@@ -21516,10 +21900,12 @@ impl Shell {
                     return 1;
                 }
                 if v < 0 {
-                    self.emit_stderr(
-                        format!("{}shift: {s}: shift count out of range\n", self.err_prefix())
-                            .as_bytes(),
-                    );
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"shift: ",
+                        s.as_slice(),
+                        b": shift count out of range"
+                    ]);
                     return 1;
                 }
                 v
@@ -21556,20 +21942,20 @@ impl Shell {
         self.set_scalar_checked(name, value.to_vec())
     }
 
-    fn builtin_getopts(&mut self, args: &[String]) -> i32 {
+    fn builtin_getopts(&mut self, args: &[Str]) -> i32 {
         // getopts has no options of its own, so bash's internal_getopt rejects
         // any leading `-X` (letter) as an invalid option; `--` ends option
         // parsing, and a bare `-` is treated as the optstring operand.
         let mut base = 0;
         if let Some(first) = args.first() {
-            if first == "--" {
+            if first.as_slice() == b"--" {
                 base = 1;
             } else if first.len() > 1
-                && let Some(c) = first.strip_prefix('-').and_then(|r| r.chars().next())
+                && let Some(c) = first.strip_prefix(b"-").and_then(<[u8]>::first)
             {
                 return self.builtin_invalid_option(
                     "getopts",
-                    &format!("-{c}"),
+                    &[b'-', *c],
                     "getopts optstring name [arg ...]",
                 );
             }
@@ -21581,14 +21967,28 @@ impl Shell {
                 return 2;
             }
         };
-        let name = match args.get(base + 1) {
-            Some(s) => s.clone(),
+        // The `name` operand names a variable, and the variable tables are
+        // keyed by `String`, so a name that is not text is not a valid
+        // identifier — which is what bash calls it.
+        let name = match args.get(base + 1).map(Vec::as_slice) {
+            Some(s) => match bytes::as_str(s) {
+                Some(n) => n.to_string(),
+                None => {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"getopts: `",
+                        s,
+                        b"': not a valid identifier"
+                    ]);
+                    return 2;
+                }
+            },
             None => {
                 self.errln("getopts: usage: getopts optstring name [arg ...]");
                 return 2;
             }
         };
-        let silent = optstring.starts_with(':');
+        let silent = optstring.starts_with(b":");
         // bash suppresses getopts' own diagnostics when `OPTERR` is exactly
         // "0" (default 1), independently of the leading-colon "silent" mode —
         // silent mode also changes the *reported* value (`?`→`:`, sets OPTARG),
@@ -21598,7 +21998,7 @@ impl Shell {
         // They are *values* — an option-argument is routinely a path — so the
         // scan is over bytes and `OPTARG` is bound to the bytes it found.
         let pos: Vec<Str> = if args.len() > base + 2 {
-            args[base + 2..].iter().map(|a| a.clone().into_bytes()).collect()
+            args[base + 2..].to_vec()
         } else {
             self.positional.clone()
         };
@@ -21658,16 +22058,20 @@ impl Shell {
             self.getopts_col += 1;
 
             // Look the option up in the optstring (skipping ':' modifiers).
-            let ospec: Vec<char> = optstring.chars().collect();
+            // The optstring names option *characters* too, so it is walked
+            // the same way the argument is — which lets a byte that decodes to
+            // no character still be named there and matched exactly.
+            let ospec: Vec<bytes::Ch> = bytes::chars(&optstring).collect();
+            const COLON: bytes::Ch = bytes::Ch::U(':');
             let mut found = false;
             let mut takes_arg = false;
             for (i, &c) in ospec.iter().enumerate() {
-                if c == ':' {
+                if c == COLON {
                     continue;
                 }
-                if opt.as_char() == Some(c) {
+                if opt == c {
                     found = true;
-                    takes_arg = ospec.get(i + 1) == Some(&':');
+                    takes_arg = ospec.get(i + 1) == Some(&COLON);
                     break;
                 }
             }
@@ -21756,10 +22160,11 @@ impl Shell {
     /// `-u N` reads from a descriptor opened by `exec N< file` (see
     /// [`Shell::open_fds`]); `N` = 0 falls back to normal stdin. `-t` is accepted
     /// (its argument consumed) but not yet honored — see known-issues.
-    fn builtin_read(&mut self, args: &[String], stdin: &StdinSrc, redir: &RedirPlan) -> i32 {
+    fn builtin_read(&mut self, args: &[Str], stdin: &StdinSrc, redir: &RedirPlan) -> i32 {
+        const USAGE_READ: &[u8] = b"read: usage: read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]\n";
         let mut raw = false;
-        let mut array: Option<String> = None;
-        let mut names: Vec<String> = Vec::new();
+        let mut array: Option<Str> = None;
+        let mut names: Vec<Str> = Vec::new();
         // `-d delim` (record delimiter; empty ⇒ NUL), `-n N` (stop after N
         // characters or the delimiter), `-N N` (read exactly N characters,
         // ignoring the delimiter). None ⇒ default line-oriented read.
@@ -21776,63 +22181,70 @@ impl Shell {
         // `-p PROMPT`: displayed on stderr before reading, but *only* when the
         // input is a terminal (bash). Captured here and emitted after the input
         // source is resolved, so a piped/redirected/here-string read stays quiet.
-        let mut prompt: Option<String> = None;
+        let mut prompt: Option<Str> = None;
         // Parse short options, honoring bash's cluster/attached-argument forms:
         // flags may be bundled (`-rs`) and an option-argument may be glued to its
         // letter (`-d:`, `-n5`, `-u3`) or supplied as the next token (`-d :`).
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i += 1;
                 names.extend(args[i..].iter().cloned());
                 break;
             }
-            if a.len() > 1 && a.starts_with('-') {
-                let chars: Vec<char> = a.chars().skip(1).collect();
+            if a.len() > 1 && a.starts_with(b"-") {
+                // The cluster is read a byte at a time: every option letter is
+                // ASCII, so a byte that is not one is not a letter `read`
+                // accepts and takes the "invalid option" path below.
+                let cluster = a.get(1..).unwrap_or_default();
                 let mut j = 0;
-                while j < chars.len() {
-                    let c = chars[j];
+                while j < cluster.len() {
+                    let b = cluster[j];
+                    let c = char::from(b);
                     // Options that take an argument: the argument is the rest of
                     // this token after the letter, or (if none) the next token.
                     if matches!(c, 'a' | 'p' | 'd' | 'n' | 'N' | 'u' | 't' | 'i') {
-                        let rest: String = chars[j + 1..].iter().collect();
-                        let val = if rest.is_empty() {
+                        let rest = cluster.get(j + 1..).unwrap_or_default();
+                        let val: Option<Str> = if rest.is_empty() {
                             i += 1;
                             args.get(i).cloned()
                         } else {
-                            Some(rest)
+                            Some(rest.to_vec())
                         };
                         // Every argument-taking option requires an argument;
                         // bash prints `option requires an argument` + the usage
                         // synopsis and exits 2 when it is missing.
                         let Some(val) = val else {
-                            self.emit_stderr(
-                                format!(
-                                    "{}read: -{c}: option requires an argument\n",
-                                    self.err_prefix()
-                                )
-                                .as_bytes(),
-                            );
-                            self.emit_stderr(b"read: usage: read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]\n");
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                b"read: -",
+                                b,
+                                b": option requires an argument"
+                            ]);
+                            self.emit_stderr(USAGE_READ);
                             return 2;
                         };
                         match c {
+                            // A `-a`/`-p` argument is kept as the bytes it came
+                            // as: the prompt is written straight to stderr, and
+                            // the array name is narrowed where it is used.
                             'a' => array = Some(val),
                             'p' => prompt = Some(val),
                             // `-d ''` ⇒ NUL delimiter; otherwise the first byte.
-                            'd' => delim = Some(val.bytes().next().unwrap_or(0)),
+                            'd' => delim = Some(val.first().copied().unwrap_or(0)),
                             // `-n`/`-N` require a non-negative integer; bash
                             // rejects anything else with `invalid number` (exit 1).
                             'n' | 'N' => {
-                                let Ok(n) = val.parse::<usize>() else {
-                                    self.emit_stderr(
-                                        format!(
-                                            "{}read: {val}: invalid number\n",
-                                            self.err_prefix()
-                                        )
-                                        .as_bytes(),
-                                    );
+                                let Some(n) =
+                                    bytes::as_str(&val).and_then(|v| v.parse::<usize>().ok())
+                                else {
+                                    self.berrln(&bfmt![
+                                        self.err_prefix(),
+                                        b"read: ",
+                                        &val,
+                                        b": invalid number"
+                                    ]);
                                     return 1;
                                 };
                                 nchars = Some(n);
@@ -21842,42 +22254,34 @@ impl Shell {
                             // rejects anything else with `invalid file descriptor
                             // specification` (exit 1).
                             'u' => {
-                                let Ok(fd) = val.parse::<i32>() else {
-                                    self.emit_stderr(
-                                        format!(
-                                            "{}read: {val}: invalid file descriptor specification\n",
-                                            self.err_prefix()
-                                        )
-                                        .as_bytes(),
-                                    );
+                                let Some(fd) = bytes::as_str(&val)
+                                    .and_then(|v| v.parse::<i32>().ok())
+                                    .filter(|fd| *fd >= 0)
+                                else {
+                                    self.berrln(&bfmt![
+                                        self.err_prefix(),
+                                        b"read: ",
+                                        &val,
+                                        b": invalid file descriptor specification"
+                                    ]);
                                     return 1;
                                 };
-                                if fd < 0 {
-                                    self.emit_stderr(
-                                        format!(
-                                            "{}read: {val}: invalid file descriptor specification\n",
-                                            self.err_prefix()
-                                        )
-                                        .as_bytes(),
-                                    );
-                                    return 1;
-                                }
                                 ufd = Some(fd);
                             }
                             // `-t` requires a non-negative decimal timeout; bash
                             // rejects anything else with `invalid timeout
                             // specification` (exit 1).
                             't' => {
-                                let ok =
-                                    val.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0);
+                                let ok = bytes::as_str(&val)
+                                    .and_then(|v| v.parse::<f64>().ok())
+                                    .filter(|v| v.is_finite() && *v >= 0.0);
                                 let Some(v) = ok else {
-                                    self.emit_stderr(
-                                        format!(
-                                            "{}read: {val}: invalid timeout specification\n",
-                                            self.err_prefix()
-                                        )
-                                        .as_bytes(),
-                                    );
+                                    self.berrln(&bfmt![
+                                        self.err_prefix(),
+                                        b"read: ",
+                                        &val,
+                                        b": invalid timeout specification"
+                                    ]);
                                     return 1;
                                 };
                                 timeout = Some(v);
@@ -21894,11 +22298,13 @@ impl Shell {
                         _ => {
                             // Genuinely unknown option: bash prints the "invalid
                             // option" diagnostic plus the usage synopsis, exit 2.
-                            self.emit_stderr(
-                                format!("{}read: -{c}: invalid option\n", self.err_prefix())
-                                    .as_bytes(),
-                            );
-                            self.emit_stderr(b"read: usage: read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]\n");
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                b"read: -",
+                                b,
+                                b": invalid option"
+                            ]);
+                            self.emit_stderr(USAGE_READ);
                             return 2;
                         }
                     }
@@ -21956,7 +22362,7 @@ impl Shell {
                 && rd_redir.stdin_from_fd.is_none()
                 && io::stdin().is_terminal();
             if input_is_tty {
-                self.emit_stderr(p.as_bytes());
+                self.emit_stderr(p);
             }
         }
 
@@ -21975,12 +22381,18 @@ impl Shell {
         // point the input is already gone. The `-a` array is an option argument
         // rather than an operand, so it is not part of this early check either
         // and is validated down with the assignment.
+        // The variable tables are keyed by `String` and an identifier is
+        // spelled in the shell's identifier syntax, so a name that is not text
+        // is not a valid assignment target either.
         if let Some(first) = names.first()
-            && !is_valid_assignment_target(first)
+            && !bytes::as_str(first).is_some_and(is_valid_assignment_target)
         {
-            self.emit_stderr(
-                format!("{}read: `{first}': not a valid identifier\n", self.err_prefix()).as_bytes(),
-            );
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"read: `",
+                first.as_slice(),
+                b"': not a valid identifier"
+            ]);
             return 1;
         }
 
@@ -22025,14 +22437,18 @@ impl Shell {
             // not an array to put a record in. Both this and the readonly guard
             // happen here rather than up front, because the input has already
             // been consumed by the time bash looks at where to put it.
-            if !crate::parser::is_valid_name(&arr) {
-                self.emit_stderr(
-                    format!("{}read: `{arr}': not a valid identifier\n", self.err_prefix()).as_bytes(),
-                );
+            let Some(name) = bytes::as_str(&arr).filter(|a| crate::parser::is_valid_name(a))
+            else {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"read: `",
+                    &arr,
+                    b"': not a valid identifier"
+                ]);
                 return 1;
-            }
-            if self.readonly.contains(&arr) {
-                self.emit_stderr(format!("{}{arr}: readonly variable\n", self.err_prefix()).as_bytes());
+            };
+            if self.readonly.contains(name) {
+                self.berrln(&bfmt![self.err_prefix(), name, b": readonly variable"]);
                 return 1;
             }
             // The record replaces whatever the array held rather than merging
@@ -22045,10 +22461,11 @@ impl Shell {
             } else {
                 read_split(&line, &ifs, raw, None).into_iter().enumerate().collect()
             };
-            self.vars.remove(&arr);
-            self.assoc.remove(&arr);
-            self.array_valued.insert(arr.clone());
-            self.arrays.insert(arr, map);
+            let name = name.to_string();
+            self.vars.remove(&name);
+            self.assoc.remove(&name);
+            self.array_valued.insert(name.clone());
+            self.arrays.insert(name, map);
             return eof_status;
         }
 
@@ -22078,13 +22495,16 @@ impl Shell {
             // exactly as a readonly one does: the fields before it are already
             // stored and the ones after it never are. (The first name was
             // checked before the read, so only the later ones can fail here.)
-            if !is_valid_assignment_target(name) {
-                self.emit_stderr(
-                    format!("{}read: `{name}': not a valid identifier\n", self.err_prefix())
-                        .as_bytes(),
-                );
+            let Some(name) = bytes::as_str(name).filter(|n| is_valid_assignment_target(n))
+            else {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"read: `",
+                    name.as_slice(),
+                    b"': not a valid identifier"
+                ]);
                 return 1;
-            }
+            };
             // A readonly target aborts the read at that field (bash: earlier
             // fields are already assigned, the read fails with status 1).
             if !self.set_scalar_checked(name, val) {
@@ -22173,7 +22593,7 @@ impl Shell {
     /// complaint arrives before a byte of input has been touched.
     fn builtin_mapfile(
         &mut self,
-        args: &[String],
+        args: &[Str],
         stdin: &StdinSrc,
         redir: &RedirPlan,
         out: &mut Out,
@@ -22185,16 +22605,16 @@ impl Shell {
         let mut skip: usize = 0;
         let mut origin: usize = 0;
         let mut origin_given = false;
-        let mut callback: Option<String> = None;
+        let mut callback: Option<Str> = None;
         let mut quantum: usize = 5000;
         // The array to fill. bash takes the *first* operand and simply ignores
         // any after it — it never looks past `list->word`, so `mapfile a b`
         // fills `a` and leaves `b` alone without a word of complaint.
-        let mut array = String::from("MAPFILE");
+        let mut array: Str = b"MAPFILE".to_vec();
         // `-u N`: read the array from user-space fd N (opened by `exec N< file`
         // or a coproc read end) instead of the ambient stdin. The raw spec is
         // kept so a non-numeric `-u abc` reproduces bash's exact diagnostic.
-        let mut ufd_spec: Option<String> = None;
+        let mut ufd_spec: Option<Str> = None;
 
         const ARG_LETTERS: &str = "dnOusCc";
         let usage = format!(
@@ -22203,29 +22623,35 @@ impl Shell {
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i += 1;
                 break;
             }
-            if !(a.len() > 1 && a.starts_with('-')) {
+            if !(a.len() > 1 && a.starts_with(b"-")) {
                 break;
             }
-            let chars: Vec<char> = a[1..].chars().collect();
+            // The cluster is read a byte at a time: every option letter is
+            // ASCII, so a byte that is not one is not an option `mapfile` takes.
+            let cluster = a.get(1..).unwrap_or_default();
             let mut ci = 0;
-            while ci < chars.len() {
-                let c = chars[ci];
+            while ci < cluster.len() {
+                let b = cluster[ci];
+                let c = char::from(b);
                 if ARG_LETTERS.contains(c) {
-                    let val = if ci + 1 < chars.len() {
-                        chars[ci + 1..].iter().collect::<String>()
+                    let val: Str = if ci + 1 < cluster.len() {
+                        cluster.get(ci + 1..).unwrap_or_default().to_vec()
                     } else {
                         i += 1;
                         match args.get(i) {
                             Some(v) => v.clone(),
                             None => {
-                                self.errln(&format!(
-                                    "{}{tag}: -{c}: option requires an argument",
-                                    self.err_prefix()
-                                ));
+                                self.berrln(&bfmt![
+                                    self.err_prefix(),
+                                    tag,
+                                    b": -",
+                                    b,
+                                    b": option requires an argument"
+                                ]);
                                 self.emit_stderr(format!("{tag}: usage: {usage}\n").as_bytes());
                                 return 2;
                             }
@@ -22234,33 +22660,37 @@ impl Shell {
                     // The three counts are read with bash's `legal_number`, so
                     // ` 3 ` is three and `0x2` is not a number at all, and each
                     // is rejected the moment it is read.
-                    let count_arg = |what: &str, least: i64| -> Result<usize, i32> {
+                    let count_arg = |what: BStr<'_>, least: i64| -> Result<usize, i32> {
                         match legal_number(&val) {
                             Some(n) if n >= least => {
                                 Ok(usize::try_from(n).unwrap_or(usize::MAX))
                             }
                             _ => {
-                                self.errln(&format!(
-                                    "{}{tag}: {val}: invalid {what}",
-                                    self.err_prefix()
-                                ));
+                                self.berrln(&bfmt![
+                                    self.err_prefix(),
+                                    tag,
+                                    b": ",
+                                    &val,
+                                    b": invalid ",
+                                    what
+                                ]);
                                 Err(1)
                             }
                         }
                     };
                     match c {
-                        'd' => delim = val.bytes().next().unwrap_or(0),
+                        'd' => delim = val.first().copied().unwrap_or(0),
                         'u' => ufd_spec = Some(val.clone()),
                         'C' => callback = Some(val.clone()),
-                        'n' => match count_arg("line count", 0) {
+                        'n' => match count_arg(b"line count", 0) {
                             Ok(n) => count = n,
                             Err(s) => return s,
                         },
-                        's' => match count_arg("line count", 0) {
+                        's' => match count_arg(b"line count", 0) {
                             Ok(n) => skip = n,
                             Err(s) => return s,
                         },
-                        'O' => match count_arg("array origin", 0) {
+                        'O' => match count_arg(b"array origin", 0) {
                             Ok(n) => {
                                 origin = n;
                                 // `-O` also suppresses the array-clearing below
@@ -22273,17 +22703,17 @@ impl Shell {
                         // A quantum of zero would call the callback endlessly
                         // often, so bash refuses it rather than taking it as
                         // "never".
-                        _ => match count_arg("callback quantum", 1) {
+                        _ => match count_arg(b"callback quantum", 1) {
                             Ok(n) => quantum = n,
                             Err(s) => return s,
                         },
                     }
-                    ci = chars.len(); // the cluster's remainder was the value
+                    ci = cluster.len(); // the cluster's remainder was the value
                 } else if c == 't' {
                     strip = true;
                     ci += 1;
                 } else {
-                    return self.builtin_invalid_option(tag, &format!("-{c}"), &usage);
+                    return self.builtin_invalid_option(tag, &[b'-', b], &usage);
                 }
             }
             i += 1;
@@ -22302,10 +22732,13 @@ impl Shell {
             Some(spec) => match legal_number(spec).and_then(|n| i32::try_from(n).ok()) {
                 Some(n) if n >= 0 => Some(n),
                 _ => {
-                    self.errln(&format!(
-                        "{}{tag}: {spec}: invalid file descriptor specification",
-                        self.err_prefix()
-                    ));
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        tag,
+                        b": ",
+                        spec,
+                        b": invalid file descriptor specification"
+                    ]);
                     return 1;
                 }
             },
@@ -22329,7 +22762,21 @@ impl Shell {
         // readonly complaint names the variable alone (the attribute is the
         // variable's, not the builtin's doing), while the other two are the
         // builtin's own objections and carry its name.
-        let array = match self.resolve_ref_use(&array) {
+        // The variable tables are keyed by `String` and an identifier is
+        // spelled in the shell's identifier syntax, so a name that is not text
+        // is not a valid identifier — the complaint it already gets, quoting
+        // the bytes it was given.
+        let Some(text) = bytes::as_str(&array) else {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                tag,
+                b": `",
+                &array,
+                b"': not a valid identifier"
+            ]);
+            return 1;
+        };
+        let array = match self.resolve_ref_use(text) {
             Some(t) => t,
             None => return 1,
         };
@@ -22422,13 +22869,14 @@ impl Shell {
                 && assigned.is_multiple_of(quantum)
                 && let Some(cb) = &callback
             {
-                // Seam: the callback is *shell source*, and the parser is
-                // still `str`-typed (TD-OILS-BYTE-STRINGS step 8), so a record
-                // that is not text reaches the callback approximated. What is
-                // *stored* below is the record's own bytes either way.
+                // Seam: the callback line is *shell source*, and the parser
+                // is still `str`-typed (TD-OILS-BYTE-STRINGS step 8), so a
+                // callback — or a record — that is not text reaches it
+                // approximated. What is *stored* below is the record's own
+                // bytes either way.
+                let line = bfmt![cb, b" ", idx.to_string(), b" ", single_quote_bytes(&s)];
                 #[allow(deprecated)]
-                let quoted = single_quote(&bytes::scaffold_lossy_string(&s));
-                let cmd = format!("{cb} {idx} {quoted}");
+                let cmd = bytes::scaffold_lossy_string(&line);
                 // An `exit N` in the callback terminates the *shell* (bash), so
                 // the read loop stops and the array is never assigned at all.
                 // A builtin can only hand back an `i32`, hence the side channel.
@@ -22451,7 +22899,7 @@ impl Shell {
 
     fn builtin_source(
         &mut self,
-        args: &[String],
+        args: &[Str],
         tag: &str,
         out: &mut Out,
         stdin: &StdinSrc,
@@ -22460,13 +22908,13 @@ impl Shell {
         // error (bash reports it with the invoking name — `.` or `source`).
         // `--` ends option processing and is skipped.
         if let Some(first) = args.first()
-            && first != "--"
-            && let Some(flags) = first.strip_prefix('-').filter(|f| !f.is_empty())
+            && first.as_slice() != b"--"
+            && let Some(flags) = first.strip_prefix(b"-").filter(|f| !f.is_empty())
         {
-            let opt: String = std::iter::once('-').chain(flags.chars().take(1)).collect();
+            let opt = [b'-', flags.first().copied().unwrap_or(b'-')];
             return self.builtin_invalid_option(tag, &opt, &format!("{tag} filename [arguments]"));
         }
-        let args = if args.first().map(String::as_str) == Some("--") {
+        let args = if args.first().map(Vec::as_slice) == Some(b"--".as_slice()) {
             &args[1..]
         } else {
             args
@@ -22478,11 +22926,15 @@ impl Shell {
             self.emit_stderr(format!("{tag}: usage: {tag} filename [arguments]\n").as_bytes());
             return 2;
         };
-        match std::fs::read_to_string(bytes::bytes_to_path(&self.host_path(path.as_bytes()))) {
+        // The path is opened from its own bytes, so a script whose *name* is
+        // not text still opens. Its *contents* must be text, because the parser
+        // is (TD-OILS-BYTE-STRINGS step 8); until then a script carrying a
+        // non-UTF-8 byte is reported as the read failure it is, rather than
+        // being silently re-spelled.
+        match std::fs::read_to_string(bytes::bytes_to_path(&self.host_path(path))) {
             Ok(src) => {
                 let saved = if args.len() > 1 {
-                    let rest: Vec<Str> =
-                        args[1..].iter().map(|a| a.clone().into_bytes()).collect();
+                    let rest: Vec<Str> = args[1..].to_vec();
                     Some(std::mem::replace(&mut self.positional, rest))
                 } else {
                     None
@@ -22494,7 +22946,13 @@ impl Shell {
                 // it. The path goes in as written on the command line, which is
                 // what bash reports.
                 self.source_stack.push(SourceFrame {
-                    path: path.clone(),
+                    // Seam: the source-name / diagnostic layer is still
+                    // `String` (TD-OILS-BYTE-STRINGS step 10). This is only the
+                    // *label* the frame carries — the file was opened from its
+                    // own bytes above — so an approximation here cannot reach
+                    // the wrong file.
+                    #[allow(deprecated)]
+                    path: bytes::scaffold_lossy_string(path),
                     call_line: self.current_line,
                     fn_depth: self.fn_stack.len(),
                     startup: false,
@@ -22570,9 +23028,21 @@ impl Shell {
                 // label — "bash: line N: FILE: No such file or directory" — but
                 // keeps the "source:" label for other open failures.
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    self.errln(&format!("{}{path}: {}", self.err_prefix(), io_error_message(&e)));
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        path.as_slice(),
+                        b": ",
+                        io_error_message(&e)
+                    ]);
                 } else {
-                    self.errln(&format!("{}{tag}: {path}: {}", self.err_prefix(), io_error_message(&e)));
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        tag,
+                        b": ",
+                        path.as_slice(),
+                        b": ",
+                        io_error_message(&e)
+                    ]);
                 }
                 1
             }
@@ -22604,7 +23074,7 @@ impl Shell {
     /// was asked for, since bash builds no compspec at all in that case and so
     /// has nothing to report as missing (`compgen` and `compgen zzz` both
     /// succeed silently).
-    fn builtin_compgen(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_compgen(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         const KEYWORDS: &[&str] = SHELL_KEYWORDS;
         // Option letters that take an argument: the rest of the cluster if there
         // is any (`-Wab`, `-Afunction`), else the next word.
@@ -22614,13 +23084,13 @@ impl Shell {
         // Each of these is a single slot in bash's compspec, so a repeated
         // option overwrites rather than adds: `-W 'x y' -W 'p q'` offers only
         // `p q`. The actions are the exception — they are a set.
-        let mut wordlist: Option<String> = None;
-        let mut globpat: Option<String> = None;
-        let mut actions: Vec<String> = Vec::new();
-        let mut prefix = String::new();
-        let mut suffix = String::new();
-        let mut filter: Option<String> = None;
-        let mut o_opts: Vec<String> = Vec::new();
+        let mut wordlist: Option<Str> = None;
+        let mut globpat: Option<Str> = None;
+        let mut actions: Vec<Str> = Vec::new();
+        let mut prefix = Str::new();
+        let mut suffix = Str::new();
+        let mut filter: Option<Str> = None;
+        let mut o_opts: Vec<Str> = Vec::new();
         // Whether any option that asks for candidates was given. bash builds a
         // compspec only if there is something to put in it, and a `compgen` with
         // nothing to build succeeds silently rather than reporting "no matches".
@@ -22629,22 +23099,28 @@ impl Shell {
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i += 1;
                 break;
             }
             // Option scanning stops at the first operand, so a word before an
             // option hides it: `compgen zzz -W 'a b'` asks for nothing at all.
-            if !(a.len() > 1 && a.starts_with('-')) {
+            if !(a.len() > 1 && a.starts_with(b"-")) {
                 break;
             }
-            let chars: Vec<char> = a[1..].chars().collect();
+            // bash reads an option cluster a byte at a time, so a non-ASCII
+            // byte in one simply matches no option letter and is reported as
+            // itself.
+            let cluster = a.get(1..).unwrap_or_default();
             let mut ci = 0;
-            while ci < chars.len() {
-                let c = chars[ci];
+            while ci < cluster.len() {
+                let b = cluster[ci];
+                let c = char::from(b);
                 if ARG_LETTERS.contains(c) {
-                    let val = if ci + 1 < chars.len() {
-                        chars[ci + 1..].iter().collect::<String>()
+                    // The option's *value* is arbitrary bytes and stays bytes:
+                    // a `-W` wordlist or a `-P` prefix may name a file.
+                    let val: Str = if ci + 1 < cluster.len() {
+                        cluster.get(ci + 1..).unwrap_or_default().to_vec()
                     } else {
                         i += 1;
                         match args.get(i) {
@@ -22664,18 +23140,22 @@ impl Shell {
                         // The two names checked against a table are rejected
                         // here, as the option is read, so the complaint comes
                         // before anything a valid option would have generated.
-                        'A' if !COMP_ACTIONS.iter().any(|(n, _)| *n == val) => {
-                            self.errln(&format!(
-                                "{}compgen: {val}: invalid action name",
-                                self.err_prefix()
-                            ));
+                        'A' if !COMP_ACTIONS.iter().any(|(n, _)| n.as_bytes() == val) => {
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                b"compgen: ",
+                                &val,
+                                b": invalid action name"
+                            ]);
                             return 2;
                         }
-                        'o' if !COMP_O_ORDER.contains(&val.as_str()) => {
-                            self.errln(&format!(
-                                "{}compgen: {val}: invalid option name",
-                                self.err_prefix()
-                            ));
+                        'o' if !COMP_O_ORDER.iter().any(|n| n.as_bytes() == val) => {
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                b"compgen: ",
+                                &val,
+                                b": invalid option name"
+                            ]);
                             return 2;
                         }
                         'W' => wordlist = Some(val),
@@ -22691,13 +23171,13 @@ impl Shell {
                         // "something was asked for".
                         _ => {}
                     }
-                    ci = chars.len(); // the cluster's remainder was the value
+                    ci = cluster.len(); // the cluster's remainder was the value
                 } else if let Some(act) = comp_short_action(c) {
                     has_spec = true;
-                    actions.push(act.to_string());
+                    actions.push(act.as_bytes().to_vec());
                     ci += 1;
                 } else {
-                    return self.builtin_invalid_option("compgen", &format!("-{c}"), USAGE);
+                    return self.builtin_invalid_option("compgen", &[b'-', b], USAGE);
                 }
             }
             i += 1;
@@ -22714,8 +23194,8 @@ impl Shell {
         // and they run in the alphabetical order of the action table, with the
         // `-W` wordlist appended after all of them. `compgen -v -b tr` and
         // `compgen -b -v tr` therefore give the same answer, builtins first.
-        let mut cands: Vec<String> = Vec::new();
-        fn sorted(mut names: Vec<String>) -> Vec<String> {
+        let mut cands: Vec<Str> = Vec::new();
+        fn sorted(mut names: Vec<Str>) -> Vec<Str> {
             names.sort_unstable();
             names
         }
@@ -22727,74 +23207,66 @@ impl Shell {
             .filter(|n| *n != "file" && *n != "directory")
             .chain(["file", "directory"]);
         for action in gen_order {
-            if !actions.iter().any(|a| a == action) {
+            if !actions.iter().any(|a| a.as_slice() == action.as_bytes()) {
                 continue;
             }
             match action {
                 // bash reads these out of arrays it keeps sorted, so the
                 // answer is sorted however the names went in.
-                "function" => cands.extend(sorted(self.funcs.keys().cloned().collect())),
-                "alias" => cands.extend(self.aliases.keys().cloned()),
+                "function" => cands.extend(sorted(name_bytes(self.funcs.keys()))),
+                "alias" => cands.extend(name_bytes(self.aliases.keys())),
                 "builtin" => {
-                    cands.extend(sorted(BUILTIN_NAMES.iter().map(|s| (*s).to_string()).collect()));
+                    cands.extend(sorted(str_bytes(BUILTIN_NAMES.iter().copied())));
                 }
                 // Reserved words come out in the grammar's own table order,
                 // which is neither alphabetical nor the order they are listed
                 // anywhere else.
-                "keyword" => cands.extend(KEYWORDS.iter().map(|s| (*s).to_string())),
+                "keyword" => cands.extend(str_bytes(KEYWORDS.iter().copied())),
                 "variable" => {
-                    let mut v: Vec<String> = self.vars.keys().cloned().collect();
-                    v.extend(self.arrays.keys().cloned());
-                    v.extend(self.assoc.keys().cloned());
+                    let mut v: Vec<Str> = name_bytes(self.vars.keys());
+                    v.extend(name_bytes(self.arrays.keys()));
+                    v.extend(name_bytes(self.assoc.keys()));
                     cands.extend(sorted(v));
                 }
                 // `arrayvar` is the array-valued subset, not every variable.
                 "arrayvar" => {
-                    let mut v: Vec<String> = self.arrays.keys().cloned().collect();
-                    v.extend(self.assoc.keys().cloned());
+                    let mut v: Vec<Str> = name_bytes(self.arrays.keys());
+                    v.extend(name_bytes(self.assoc.keys()));
                     cands.extend(sorted(v));
                 }
-                "export" => cands.extend(sorted(self.exported.iter().cloned().collect())),
+                "export" => cands.extend(sorted(name_bytes(self.exported.iter()))),
                 // A command name is looked for in the order the shell itself
                 // would look: alias, reserved word, function, builtin, $PATH.
                 "command" => {
-                    cands.extend(self.aliases.keys().cloned());
-                    cands.extend(KEYWORDS.iter().map(|s| (*s).to_string()));
-                    cands.extend(sorted(self.funcs.keys().cloned().collect()));
-                    cands.extend(sorted(BUILTIN_NAMES.iter().map(|s| (*s).to_string()).collect()));
+                    cands.extend(name_bytes(self.aliases.keys()));
+                    cands.extend(str_bytes(KEYWORDS.iter().copied()));
+                    cands.extend(sorted(name_bytes(self.funcs.keys())));
+                    cands.extend(sorted(str_bytes(BUILTIN_NAMES.iter().copied())));
                     cands.extend(self.compgen_path_commands(&word));
                 }
                 // `enable`'s two halves. Both are sorted, being slices of the
                 // same sorted builtin table.
-                "enabled" => cands.extend(sorted(
-                    BUILTIN_NAMES
-                        .iter()
-                        .filter(|n| !self.disabled_builtins.contains(**n))
-                        .map(|s| (*s).to_string())
-                        .collect(),
-                )),
-                "disabled" => cands.extend(sorted(
-                    BUILTIN_NAMES
-                        .iter()
-                        .filter(|n| self.disabled_builtins.contains(**n))
-                        .map(|s| (*s).to_string())
-                        .collect(),
-                )),
+                "enabled" => cands.extend(sorted(str_bytes(
+                    BUILTIN_NAMES.iter().copied().filter(|n| !self.disabled_builtins.contains(*n)),
+                ))),
+                "disabled" => cands.extend(sorted(str_bytes(
+                    BUILTIN_NAMES.iter().copied().filter(|n| self.disabled_builtins.contains(*n)),
+                ))),
                 // The two option namespaces, each in the order its own builtin
                 // lists them: `shopt`'s table order, `set -o`'s alphabetical.
-                "shopt" => cands.extend(SHOPT_TABLE.iter().map(|(n, _)| (*n).to_string())),
-                "setopt" => cands.extend(STANDARD_SET_O_OPTIONS.iter().map(|s| (*s).to_string())),
+                "shopt" => cands.extend(str_bytes(SHOPT_TABLE.iter().map(|(n, _)| *n))),
+                "setopt" => cands.extend(str_bytes(STANDARD_SET_O_OPTIONS.iter().copied())),
                 // Everything `trap` accepts as a spec: `EXIT`, the signals in
                 // number order with their `SIG` prefix, then the pseudo-signals.
                 "signal" => {
-                    cands.push("EXIT".to_string());
-                    cands.extend(SIGNALS.iter().map(|(_, n)| format!("SIG{n}")));
-                    cands.extend(["DEBUG", "ERR", "RETURN"].map(String::from));
+                    cands.push(b"EXIT".to_vec());
+                    cands.extend(SIGNALS.iter().map(|(_, n)| bfmt![b"SIG", *n]));
+                    cands.extend(str_bytes(["DEBUG", "ERR", "RETURN"]));
                 }
                 // What `help` will answer to — builtins and the compound-command
                 // constructs alike, sorted together.
                 "helptopic" => {
-                    cands.extend(sorted(HELP_TABLE.iter().map(|(n, _, _)| (*n).to_string()).collect()));
+                    cands.extend(sorted(str_bytes(HELP_TABLE.iter().map(|(n, _, _)| *n))));
                 }
                 "file" => cands.extend(self.compgen_paths(&word, false)),
                 "directory" => cands.extend(self.compgen_paths(&word, true)),
@@ -22807,14 +23279,14 @@ impl Shell {
         // ---- keep the candidates that start with the word prefix ----
         // Narrowing to the word belongs to the source, not to the finished
         // answer, because one source does not do it (see `-G` below).
-        let mut list: Vec<String> = cands.into_iter().filter(|c| c.starts_with(&word)).collect();
+        let mut list: Vec<Str> = cands.into_iter().filter(|c| c.starts_with(&word)).collect();
 
         // ---- -G globpat: pathname expansion, offered whole ----
         // The word never narrows this one: bash hands back everything the
         // pattern expanded to, and hands it back in reverse.
         if let Some(pat) = &globpat {
             let field: Vec<EChar> =
-                bytes::chars(pat.as_bytes()).map(|c| EChar { c, quoted: false }).collect();
+                bytes::chars(pat).map(|c| EChar { c, quoted: false }).collect();
             let mut m = glob_expand_field(
                 self.cwd.as_bytes(),
                 &field,
@@ -22825,24 +23297,18 @@ impl Shell {
             );
             m.sort();
             m.reverse();
-            // TD-OILS-BYTE-STRINGS scaffold: the completion list is still
-            // `Vec<String>`.
-            #[allow(deprecated)]
-            list.extend(m.iter().map(|s| crate::bytes::scaffold_lossy_string(s)));
+            list.extend(m);
         }
 
         // ---- -W wordlist, split on IFS ----
         if let Some(wl) = &wordlist {
             let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| b" \t\n".to_vec());
-            // The completion surface is still `String`-typed
-            // (TD-OILS-BYTE-STRINGS), so only IFS's *characters* can delimit a
-            // wordlist here — a byte that is part of none could not appear in
-            // it to be split on anyway.
-            let ifs_chars: Vec<char> = bytes::chars(&ifs).filter_map(Ch::as_char).collect();
+            // Splitting is per *byte*, as it is everywhere else IFS is used:
+            // IFS names delimiter bytes, not characters.
             list.extend(
-                wl.split(|c| ifs_chars.contains(&c))
-                    .filter(|s| !s.is_empty() && s.starts_with(&word))
-                    .map(str::to_string),
+                wl.split(|b| ifs.contains(b))
+                    .filter(|s| !s.is_empty() && s.starts_with(word.as_slice()))
+                    .map(<[u8]>::to_vec),
             );
         }
 
@@ -22851,13 +23317,13 @@ impl Shell {
             && !pat.is_empty()
         {
             let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
-            let (invert, p) = match pat.strip_prefix('!') {
+            let (invert, p) = match pat.strip_prefix(b"!") {
                 Some(rest) => (true, rest),
-                None => (false, pat.as_str()),
+                None => (false, pat.as_slice()),
             };
-            let pchars: Vec<Ch> = bytes::chars(p.as_bytes()).collect();
+            let pchars: Vec<Ch> = bytes::chars(p).collect();
             list.retain(|c| {
-                let tchars: Vec<Ch> = bytes::chars(c.as_bytes()).collect();
+                let tchars: Vec<Ch> = bytes::chars(c).collect();
                 let m = glob_match(&pchars, &tchars, extglob);
                 // Default: drop matches. `!pat`: keep only matches.
                 if invert { m } else { !m }
@@ -22865,8 +23331,7 @@ impl Shell {
         }
 
         // ---- decorate with -P/-S ----
-        let mut answer: Vec<String> =
-            list.iter().map(|c| format!("{prefix}{c}{suffix}")).collect();
+        let mut answer: Vec<Str> = list.iter().map(|c| bfmt![&prefix, c, &suffix]).collect();
 
         // ---- the -o fallbacks, which stand outside the compspec ----
         // These are readline's own completions rather than compspec sources, so
@@ -22874,27 +23339,27 @@ impl Shell {
         // filtered by neither -X nor decorated by -P/-S, and they are appended
         // to the finished answer. `plusdirs` adds directories to whatever was
         // found, however much that was…
-        if o_opts.iter().any(|o| o == "plusdirs") {
+        if o_opts.iter().any(|o| o.as_slice() == b"plusdirs") {
             answer.extend(self.compgen_paths(&word, true));
         }
         // …while the other two only step in when nothing at all was found —
         // and when both are asked for, directories win over filenames.
         if answer.is_empty() {
-            if o_opts.iter().any(|o| o == "dirnames") {
+            if o_opts.iter().any(|o| o.as_slice() == b"dirnames") {
                 answer.extend(self.compgen_paths(&word, true));
-            } else if o_opts.iter().any(|o| o == "default") {
+            } else if o_opts.iter().any(|o| o.as_slice() == b"default") {
                 answer.extend(self.compgen_paths(&word, false));
             }
         }
 
         // ---- emit one per line ----
         let empty = answer.is_empty();
-        let mut result = String::new();
+        let mut result = Str::new();
         for c in &answer {
-            result.push_str(c);
-            result.push('\n');
+            result.extend_from_slice(c);
+            result.push(b'\n');
         }
-        let write_status = self.write_bytes(out, redir, result.as_bytes());
+        let write_status = self.write_bytes(out, redir, &result);
         // bash: status 1 when no candidates were produced, else the write status.
         if empty { 1 } else { write_status }
     }
@@ -22909,43 +23374,51 @@ impl Shell {
     /// entries `.` and `..` are held back from an empty basename. This is
     /// readline's own filename generator with `match-hidden-files` on, which is
     /// its default and therefore what `compgen` is expected to hand back.
-    fn compgen_paths(&self, word: &str, dirs_only: bool) -> Vec<String> {
+    fn compgen_paths(&self, word: BStr<'_>, dirs_only: bool) -> Vec<Str> {
         // Split into the directory prefix (kept verbatim on each result) and the
         // basename to prefix-match. `foo/ba` -> dir "foo/", base "ba"; "ba" ->
         // dir "" (cwd), base "ba".
-        let (dir_prefix, dir_path, base) = match word.rfind('/') {
-            Some(idx) => {
-                let dp = &word[..=idx];
-                let path = if idx == 0 { "/".to_string() } else { word[..idx].to_string() };
-                (dp.to_string(), path, word[idx + 1..].to_string())
-            }
-            None => (String::new(), ".".to_string(), word.to_string()),
-        };
-        let Ok(rd) = std::fs::read_dir(self.resolve(dir_path.as_bytes())) else {
+        let (dir_prefix, dir_path, base): (BStr<'_>, Str, BStr<'_>) =
+            match word.iter().rposition(|b| *b == b'/') {
+                Some(idx) => {
+                    let dp = word.get(..=idx).unwrap_or_default();
+                    let path = if idx == 0 {
+                        b"/".to_vec()
+                    } else {
+                        word.get(..idx).unwrap_or_default().to_vec()
+                    };
+                    (dp, path, word.get(idx + 1..).unwrap_or_default())
+                }
+                None => (b"".as_slice(), b".".to_vec(), word),
+            };
+        let Ok(rd) = std::fs::read_dir(self.resolve(&dir_path)) else {
             return Vec::new();
         };
-        let mut out: Vec<String> = Vec::new();
+        let mut out: Vec<Str> = Vec::new();
         // A directory yields `.` and `..` before anything else — but only to a
         // non-empty basename, since completing a whole directory listing with
         // the two entries that name the directory itself would be no help.
         // Nothing else is hidden: a leading dot is just a character here.
         if !base.is_empty() {
             out.extend(
-                [".", ".."]
-                    .iter()
-                    .filter(|n| n.starts_with(&base))
-                    .map(|n| format!("{dir_prefix}{n}")),
+                [b".".as_slice(), b".."]
+                    .into_iter()
+                    .filter(|n| n.starts_with(base))
+                    .map(|n| bfmt![dir_prefix, n]),
             );
         }
         for ent in rd.flatten() {
-            let name = ent.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(&base) {
+            // A directory entry is bytes on this OS — a name that is not text
+            // is still a name that can be completed to, so it is offered as
+            // the bytes it is rather than approximated.
+            let name = bytes::os_to_bytes(&ent.file_name());
+            if !name.starts_with(base) {
                 continue;
             }
             if dirs_only && !ent.path().is_dir() {
                 continue;
             }
-            out.push(format!("{dir_prefix}{name}"));
+            out.push(bfmt![dir_prefix, &name]);
         }
         out
     }
@@ -22958,7 +23431,7 @@ impl Shell {
     /// which has no execute bit, only files with a known executable extension
     /// (`.exe`/`.cmd`/`.bat`/`.com`) qualify, and that extension is stripped so
     /// the bare command name is offered.
-    fn compgen_path_commands(&self, _word: &str) -> Vec<String> {
+    fn compgen_path_commands(&self, _word: BStr<'_>) -> Vec<Str> {
         let path: Str = match self.param_value("PATH") {
             Some(p) => p,
             None if !self.env_imported => {
@@ -22966,7 +23439,7 @@ impl Shell {
             }
             None => return Vec::new(),
         };
-        let mut out: Vec<String> = Vec::new();
+        let mut out: Vec<Str> = Vec::new();
         for dir in std::env::split_paths(&bytes::bytes_to_os(&path)) {
             // A relative `$PATH` entry is relative to *this shell's* cwd.
             let Ok(rd) = std::fs::read_dir(self.resolve(&bytes::path_to_bytes(&dir))) else {
@@ -22976,18 +23449,20 @@ impl Shell {
                 if ent.path().is_dir() {
                     continue;
                 }
-                let raw = ent.file_name().to_string_lossy().into_owned();
+                // A command name is a filename, and a filename is bytes.
+                let raw = bytes::os_to_bytes(&ent.file_name());
                 #[cfg(windows)]
                 let name = {
                     // No execute bit on Windows: gate on the extension so
                     // non-executable files (e.g. `*.json`) are not offered.
                     let lower = raw.to_ascii_lowercase();
                     let mut base = None;
-                    for ext in [".exe", ".cmd", ".bat", ".com"] {
+                    for ext in [b".exe".as_slice(), b".cmd", b".bat", b".com"] {
                         if lower.ends_with(ext) {
-                            // `ext` is ASCII, so this byte slice is on a char
-                            // boundary and preserves the base name's case.
-                            base = Some(raw[..raw.len() - ext.len()].to_string());
+                            // The extension is stripped so the bare command
+                            // name is offered, with the base name's own case.
+                            base =
+                                Some(raw.get(..raw.len().saturating_sub(ext.len())).unwrap_or_default().to_vec());
                             break;
                         }
                     }
@@ -23054,14 +23529,14 @@ impl Shell {
     /// Note: with multiple specs, `complete -p` (list all) emits them in
     /// insertion order; bash uses its internal hash-table order, which is not
     /// reproducible. Each individual definition still matches bash exactly.
-    fn builtin_complete(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_complete(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Option letters that take an argument (the rest of the cluster, or the
         // next word). Everything else is a no-argument flag.
         const ARG_LETTERS: &str = "oAGWFCXPS";
         const USAGE: &[u8] = b"complete: usage: complete [-abcdefgjksuv] [-pr] [-DEI] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [name ...]\n";
 
         let mut spec = CompSpec::default();
-        let mut names: Vec<String> = Vec::new();
+        let mut names: Vec<Str> = Vec::new();
         let mut targets: Vec<CompKey> = Vec::new();
         let mut do_print = false;
         let mut do_remove = false;
@@ -23070,7 +23545,7 @@ impl Shell {
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i += 1;
                 while i < args.len() {
                     names.push(args[i].clone());
@@ -23078,15 +23553,18 @@ impl Shell {
                 }
                 break;
             }
-            if a.len() > 1 && a.starts_with('-') {
-                let chars: Vec<char> = a[1..].chars().collect();
+            if a.len() > 1 && a.starts_with(b"-") {
+                let cluster = a.get(1..).unwrap_or_default();
                 let mut ci = 0;
-                while ci < chars.len() {
-                    let c = chars[ci];
+                while ci < cluster.len() {
+                    let b = cluster[ci];
+                    let c = char::from(b);
                     if ARG_LETTERS.contains(c) {
-                        // Value: remainder of the cluster if any, else next word.
-                        let val = if ci + 1 < chars.len() {
-                            chars[ci + 1..].iter().collect::<String>()
+                        // Value: remainder of the cluster if any, else next
+                        // word. It is arbitrary bytes and is stored as such —
+                        // `complete -p` has to round-trip it byte for byte.
+                        let val: Str = if ci + 1 < cluster.len() {
+                            cluster.get(ci + 1..).unwrap_or_default().to_vec()
                         } else {
                             i += 1;
                             match args.get(i) {
@@ -23104,11 +23582,13 @@ impl Shell {
                         has_def = true;
                         match c {
                             'o' => {
-                                if !COMP_O_ORDER.contains(&val.as_str()) {
-                                    self.errln(&format!(
-                                        "{}complete: {val}: invalid option name",
-                                        self.err_prefix()
-                                    ));
+                                if !COMP_O_ORDER.iter().any(|n| n.as_bytes() == val) {
+                                    self.berrln(&bfmt![
+                                        self.err_prefix(),
+                                        b"complete: ",
+                                        &val,
+                                        b": invalid option name"
+                                    ]);
                                     return 2;
                                 }
                                 if !spec.o_opts.contains(&val) {
@@ -23116,11 +23596,13 @@ impl Shell {
                                 }
                             }
                             'A' => {
-                                if !COMP_ACTIONS.iter().any(|(n, _)| *n == val) {
-                                    self.errln(&format!(
-                                        "{}complete: {val}: invalid action name",
-                                        self.err_prefix()
-                                    ));
+                                if !COMP_ACTIONS.iter().any(|(n, _)| n.as_bytes() == val) {
+                                    self.berrln(&bfmt![
+                                        self.err_prefix(),
+                                        b"complete: ",
+                                        &val,
+                                        b": invalid action name"
+                                    ]);
                                     return 2;
                                 }
                                 if !spec.actions.contains(&val) {
@@ -23136,13 +23618,13 @@ impl Shell {
                             'S' => spec.suffix = Some(val),
                             _ => {}
                         }
-                        ci = chars.len(); // consumed the remainder of the cluster
+                        ci = cluster.len(); // consumed the remainder of the cluster
                     } else {
                         let action = comp_short_action(c);
                         if let Some(act) = action {
                             has_def = true;
-                            if !spec.actions.iter().any(|x| x == act) {
-                                spec.actions.push(act.to_string());
+                            if !spec.actions.iter().any(|x| x.as_slice() == act.as_bytes()) {
+                                spec.actions.push(act.as_bytes().to_vec());
                             }
                         } else {
                             match c {
@@ -23189,11 +23671,11 @@ impl Shell {
         // ---- print mode (`-p`, and bare `complete`) ----
         if do_print || (!has_def && names.is_empty() && targets.is_empty()) {
             if names.is_empty() && targets.is_empty() {
-                let mut s = String::new();
+                let mut s = Str::new();
                 for (k, sp) in &self.comp_specs {
-                    s.push_str(&format_compspec(k, sp));
+                    s.extend_from_slice(&format_compspec(k, sp));
                 }
-                return self.write_bytes(out, redir, s.as_bytes());
+                return self.write_bytes(out, redir, &s);
             }
             let mut keys: Vec<CompKey> = Vec::new();
             keys.extend(targets.iter().cloned());
@@ -23202,14 +23684,15 @@ impl Shell {
             for k in keys {
                 match self.comp_get(&k).map(|sp| format_compspec(&k, sp)) {
                     Some(line) => {
-                        self.write_bytes(out, redir, line.as_bytes());
+                        self.write_bytes(out, redir, &line);
                     }
                     None => {
-                        self.errln(&format!(
-                            "{}complete: {}: no completion specification",
+                        self.berrln(&bfmt![
                             self.err_prefix(),
-                            comp_key_label(&k)
-                        ));
+                            b"complete: ",
+                            comp_key_label(&k),
+                            b": no completion specification"
+                        ]);
                         status = 1;
                     }
                 }
@@ -23241,18 +23724,18 @@ impl Shell {
     /// errors unless invoked from within a running completion function; osh has
     /// no such context, so a nameless `compopt` always reports that error.
     /// Returns 2 on a usage error, 1 when a named spec does not exist, else 0.
-    fn builtin_compopt(&mut self, args: &[String]) -> i32 {
+    fn builtin_compopt(&mut self, args: &[Str]) -> i32 {
         const USAGE: &[u8] = b"compopt: usage: compopt [-o|+o option] [-DEI] [name ...]\n";
-        let mut add: Vec<String> = Vec::new();
-        let mut del: Vec<String> = Vec::new();
+        let mut add: Vec<Str> = Vec::new();
+        let mut del: Vec<Str> = Vec::new();
         let mut targets: Vec<CompKey> = Vec::new();
-        let mut names: Vec<String> = Vec::new();
+        let mut names: Vec<Str> = Vec::new();
 
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            match a.as_str() {
-                "--" => {
+            match a.as_slice() {
+                b"--" => {
                     i += 1;
                     while i < args.len() {
                         names.push(args[i].clone());
@@ -23260,34 +23743,38 @@ impl Shell {
                     }
                     break;
                 }
-                "-o" | "+o" => {
+                b"-o" | b"+o" => {
                     i += 1;
                     let Some(v) = args.get(i) else {
-                        self.errln(&format!(
-                            "{}compopt: {a}: option requires an argument",
-                            self.err_prefix()
-                        ));
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"compopt: ",
+                            a.as_slice(),
+                            b": option requires an argument"
+                        ]);
                         self.emit_stderr(USAGE);
                         return 2;
                     };
-                    if !COMP_O_ORDER.contains(&v.as_str()) {
-                        self.errln(&format!(
-                            "{}compopt: {v}: invalid option name",
-                            self.err_prefix()
-                        ));
+                    if !COMP_O_ORDER.iter().any(|n| n.as_bytes() == v.as_slice()) {
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"compopt: ",
+                            v.as_slice(),
+                            b": invalid option name"
+                        ]);
                         return 2;
                     }
-                    if a == "-o" {
+                    if a.as_slice() == b"-o" {
                         add.push(v.clone());
                     } else {
                         del.push(v.clone());
                     }
                 }
-                "-D" => targets.push(CompKey::Default),
-                "-E" => targets.push(CompKey::Empty),
-                "-I" => targets.push(CompKey::Initial),
-                other if other.len() > 1 && other.starts_with('-') => {
-                    let c = other.chars().nth(1).unwrap_or('?');
+                b"-D" => targets.push(CompKey::Default),
+                b"-E" => targets.push(CompKey::Empty),
+                b"-I" => targets.push(CompKey::Initial),
+                other if other.len() > 1 && other.starts_with(b"-") => {
+                    let c = char::from(other.get(1).copied().unwrap_or(b'?'));
                     self.errln(&format!("{}compopt: -{c}: invalid option", self.err_prefix()));
                     self.emit_stderr(USAGE);
                     return 2;
@@ -23313,11 +23800,12 @@ impl Shell {
         let mut status = 0;
         for k in keys {
             if self.comp_get(&k).is_none() {
-                self.errln(&format!(
-                    "{}compopt: {}: no completion specification",
+                self.berrln(&bfmt![
                     self.err_prefix(),
-                    comp_key_label(&k)
-                ));
+                    b"compopt: ",
+                    comp_key_label(&k),
+                    b": no completion specification"
+                ]);
                 status = 1;
                 continue;
             }
@@ -23333,7 +23821,7 @@ impl Shell {
         status
     }
 
-    fn builtin_type(&mut self, args: &[String], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_type(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Parse flags: -t (type word), -p (path if file), -P (force PATH search),
         // -a (all locations), -f (skip function lookup). Flags may be clustered.
         let mut mode_t = false;
@@ -23344,27 +23832,27 @@ impl Shell {
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            if a == "--" {
+            if a.as_slice() == b"--" {
                 i += 1;
                 break;
             }
-            if let Some(flags) = a.strip_prefix('-')
+            if let Some(flags) = a.strip_prefix(b"-")
                 && !flags.is_empty()
             {
-                if let Some(c) = flags.chars().find(|c| !"tpPaf".contains(*c)) {
+                if let Some(c) = flags.iter().find(|c| !b"tpPaf".contains(*c)) {
                     return self.builtin_invalid_option(
                         "type",
-                        &format!("-{c}"),
+                        &[b'-', *c],
                         "type [-afptP] name [name ...]",
                     );
                 }
-                for c in flags.chars() {
+                for c in flags {
                     match c {
-                        't' => mode_t = true,
-                        'p' => mode_p = true,
-                        'P' => mode_pp = true,
-                        'a' => mode_a = true,
-                        'f' => skip_func = true,
+                        b't' => mode_t = true,
+                        b'p' => mode_p = true,
+                        b'P' => mode_pp = true,
+                        b'a' => mode_a = true,
+                        b'f' => skip_func = true,
                         _ => {}
                     }
                 }
@@ -23373,14 +23861,23 @@ impl Shell {
                 break;
             }
         }
-        let names: Vec<&String> = args[i..].iter().collect();
+        let names = &args[i..];
 
         let mut status = 0;
         for name in names {
-            let alias = self.describe_alias(name).cloned();
-            let is_kw = SHELL_KEYWORDS.contains(&name.as_str());
-            let is_fn = !skip_func && self.funcs.contains_key(name);
-            let is_bi = self.builtin_enabled(name);
+            // Aliases, keywords, functions and builtins are all named by *text*:
+            // those tables are `String`-keyed and can only hold names the parser
+            // produced. A name that is not text therefore matches none of them —
+            // that is the answer, not an approximation. It can still name a
+            // *file*, so the `$PATH` search below runs on its bytes.
+            let text = bytes::as_str(name);
+            let alias = match text {
+                Some(n) => self.describe_alias(n).cloned(),
+                None => None,
+            };
+            let is_kw = text.is_some_and(|n| SHELL_KEYWORDS.contains(&n));
+            let is_fn = !skip_func && text.is_some_and(|n| self.funcs.contains_key(n));
+            let is_bi = text.is_some_and(|n| self.builtin_enabled(n));
             // `-P` forces a filesystem search even when the name is a builtin,
             // function, or keyword.
             // Search the filesystem when any flag needs paths, or (for default
@@ -23392,17 +23889,17 @@ impl Shell {
                 || mode_t
                 || (alias.is_none() && !is_kw && !is_fn && !is_bi);
             let files = if need_files {
-                self.find_all_in_path(name.as_bytes())
+                self.find_all_in_path(name)
             } else {
                 Vec::new()
             };
             // A command remembered in the hash table counts as found even when a
             // fresh PATH search comes up empty (bash reports it as hashed).
-            let is_hashed = self.cmd_hash.contains_key(name.as_str());
+            let is_hashed = self.cmd_hash.contains_key(name.as_slice());
             let found = alias.is_some() || is_kw || is_fn || is_bi || !files.is_empty() || is_hashed;
             if !found {
                 if !mode_t && !mode_p && !mode_pp {
-                    self.errln(&format!("{}type: {name}: not found", self.err_prefix()));
+                    self.berrln(&bfmt![self.err_prefix(), b"type: ", name, b": not found"]);
                 }
                 status = 1;
                 continue;
@@ -23414,10 +23911,10 @@ impl Shell {
                     status = 1;
                 } else if mode_a {
                     for f in &files {
-                        let _ = self.write_line(out, redir, &f.to_string_lossy());
+                        let _ = self.bwrite_line(out, redir, &bytes::path_to_bytes(f));
                     }
                 } else {
-                    let _ = self.write_line(out, redir, &files[0].to_string_lossy());
+                    let _ = self.bwrite_line(out, redir, &bytes::path_to_bytes(&files[0]));
                 }
                 continue;
             }
@@ -23448,15 +23945,18 @@ impl Shell {
                     // Nothing to print, but the name is found ⇒ status stays 0.
                 } else if mode_a {
                     for f in &files {
-                        let _ = self.write_line(out, redir, &f.to_string_lossy());
+                        let _ = self.bwrite_line(out, redir, &bytes::path_to_bytes(f));
                     }
                 } else if let Some(f) = files.first() {
-                    let _ = self.write_line(out, redir, &f.to_string_lossy());
-                } else if let Some((p, _)) = self.cmd_hash.get(name.as_str()) {
+                    let _ = self.bwrite_line(out, redir, &bytes::path_to_bytes(f));
+                } else if let Some(p) = self
+                    .cmd_hash
+                    .get(name.as_slice())
+                    .map(|(p, _)| bytes::path_to_bytes(p))
+                {
                     // A hashed command with no live PATH match still prints its
                     // remembered path.
-                    let p = p.to_string_lossy().into_owned();
-                    let _ = self.write_line(out, redir, &p);
+                    let _ = self.bwrite_line(out, redir, &p);
                 }
                 continue;
             }
@@ -23465,58 +23965,66 @@ impl Shell {
             // location only; with -a, print every location in precedence order.
             if mode_a {
                 if let Some(val) = &alias {
-                    let _ = self.write_line(out, redir, &alias_description(name, val));
+                    let _ = self.bwrite_line(out, redir, &alias_description(name, val.as_bytes()));
                 }
                 if is_kw {
-                    let _ = self.write_line(out, redir, &format!("{name} is a shell keyword"));
+                    let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell keyword"]);
                 }
-                if is_fn {
-                    let _ = self.write_line(out, redir, &format!("{name} is a function"));
-                    if let Some(body) = self.funcs.get(name) {
-                        let src = crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice));
+                // A function is by construction text-named (`is_fn` implies it),
+                // so the unparser — still `str`-typed — can be handed the name.
+                if is_fn && let Some(n) = text {
+                    let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a function"]);
+                    if let Some(body) = self.funcs.get(n) {
+                        let src = crate::unparse::unparse_function(n, body, self.func_redirects.get(n).map_or(&[][..], Vec::as_slice));
                         let _ = self.write_bytes(out, redir, src.as_bytes());
                     }
                 }
                 if is_bi {
-                    let _ = self.write_line(out, redir, &format!("{name} is a shell builtin"));
+                    let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell builtin"]);
                 }
                 for f in &files {
                     let _ =
-                        self.write_line(out, redir, &format!("{name} is {}", f.to_string_lossy()));
+                        self.bwrite_line(out, redir, &bfmt![name, b" is ", bytes::path_to_bytes(f)]);
                 }
             } else {
                 if let Some(val) = &alias {
-                    let _ = self.write_line(out, redir, &alias_description(name, val));
+                    let _ = self.bwrite_line(out, redir, &alias_description(name, val.as_bytes()));
                 } else if is_kw {
-                    let _ = self.write_line(out, redir, &format!("{name} is a shell keyword"));
-                } else if is_fn {
+                    let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell keyword"]);
+                } else if is_fn && let Some(n) = text {
                     // bash prints the "is a function" line followed by the
                     // reconstructed function source.
-                    let _ = self.write_line(out, redir, &format!("{name} is a function"));
-                    if let Some(body) = self.funcs.get(name) {
-                        let src = crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice));
+                    let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a function"]);
+                    if let Some(body) = self.funcs.get(n) {
+                        let src = crate::unparse::unparse_function(n, body, self.func_redirects.get(n).map_or(&[][..], Vec::as_slice));
                         let _ = self.write_bytes(out, redir, src.as_bytes());
                     }
                 } else if is_bi {
-                    let _ = self.write_line(out, redir, &format!("{name} is a shell builtin"));
-                } else if let Some((p, _)) = self.cmd_hash.get(name.as_str()) {
+                    let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell builtin"]);
+                } else if let Some(p) = self
+                    .cmd_hash
+                    .get(name.as_slice())
+                    .map(|(p, _)| bytes::path_to_bytes(p))
+                {
                     // A previously-run command is remembered in the hash table.
-                    let _ = self
-                        .write_line(out, redir, &format!("{name} is hashed ({})", p.to_string_lossy()));
+                    let _ = self.bwrite_line(out, redir, &bfmt![name, b" is hashed (", p, b")"]);
                 } else {
-                    let _ =
-                        self.write_line(out, redir, &format!("{name} is {}", files[0].to_string_lossy()));
+                    let _ = self.bwrite_line(
+                        out,
+                        redir,
+                        &bfmt![name, b" is ", bytes::path_to_bytes(&files[0])],
+                    );
                 }
             }
         }
         status
     }
 
-    fn builtin_test(&mut self, name: &str, args: &[String]) -> i32 {
+    fn builtin_test(&mut self, name: &str, args: &[Str]) -> i32 {
         // For `[`, the last argument must be `]`.
-        let mut a: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut a: Vec<BStr<'_>> = args.iter().map(Vec::as_slice).collect();
         if name == "[" {
-            if a.last() == Some(&"]") {
+            if a.last() == Some(&b"]".as_slice()) {
                 a.pop();
             } else {
                 self.errln(&format!("{}[: missing ']'", self.err_prefix()));
@@ -23526,7 +24034,7 @@ impl Shell {
         match self.eval_test_expr(&a) {
             Ok(b) => i32::from(!b),
             Err(body) => {
-                self.errln(&format!("{}{name}: {body}", self.err_prefix()));
+                self.berrln(&bfmt![self.err_prefix(), name, b": ", &body]);
                 2
             }
         }
@@ -23540,7 +24048,7 @@ impl Shell {
     /// precedence), `-a` (AND), `!` (NOT) and `( … )` grouping. Being a method,
     /// it resolves the state-dependent unary primaries `-v`/`-o`/`-R` against the
     /// live shell in *every* position, not just the bare two-argument form.
-    fn eval_test_expr(&self, a: &[&str]) -> Result<bool, String> {
+    fn eval_test_expr(&self, a: &[BStr<'_>]) -> Result<bool, Str> {
         match a.len() {
             0 => Ok(false),
             1 => Ok(!a[0].is_empty()),
@@ -23550,13 +24058,13 @@ impl Shell {
                 // anything else (e.g. `[ 1 -eq ]`, where `-eq` lands here) is a
                 // "unary operator expected" error, not a silent success.
                 let (op, x) = (a[0], a[1]);
-                if op == "!" {
+                if op == b"!" {
                     return Ok(x.is_empty());
                 }
                 if is_test_unary_op(op) {
                     return Ok(self.eval_test_unary(op, x));
                 }
-                Err(format!("{op}: unary operator expected"))
+                Err(bfmt![op, b": unary operator expected"])
             }
             3 => {
                 let (l, op, r) = (a[0], a[1], a[2]);
@@ -23572,21 +24080,21 @@ impl Shell {
                 if is_test_binary_op(op) {
                     return eval_binary(&self.cwd, l, op, r);
                 }
-                if op == "-a" {
+                if op == b"-a" {
                     return Ok(!l.is_empty() && !r.is_empty());
                 }
-                if op == "-o" {
+                if op == b"-o" {
                     return Ok(!l.is_empty() || !r.is_empty());
                 }
-                if l == "!" {
+                if l == b"!" {
                     return Ok(!self.eval_test_expr(&a[1..])?);
                 }
-                if l == "(" && r == ")" {
+                if l == b"(" && r == b")" {
                     return Ok(!op.is_empty());
                 }
                 eval_binary(&self.cwd, l, op, r)
             }
-            4 if a[0] == "!" => {
+            4 if a[0] == b"!" => {
                 // bash's `posixtest` special-cases a four-argument leading `!`:
                 // it negates the *three-argument* test of the rest, so `!` binds
                 // looser here than the general expression parser's `!term` (e.g.
@@ -23603,11 +24111,11 @@ impl Shell {
     /// Run bash's full recursive `test` expression parser over `a`, erroring on
     /// any operands left unconsumed after a complete expression (bash's
     /// "syntax error: `X' unexpected").
-    fn eval_test_parser(&self, a: &[&str]) -> Result<bool, String> {
+    fn eval_test_parser(&self, a: &[BStr<'_>]) -> Result<bool, Str> {
         let mut p = TestExpr { toks: a, pos: 0 };
         let v = p.or_expr(self)?;
         if p.pos != a.len() {
-            return Err(format!("syntax error: `{}' unexpected", a[p.pos]));
+            return Err(bfmt![b"syntax error: `", a[p.pos], b"' unexpected"]);
         }
         Ok(v)
     }
@@ -23615,11 +24123,15 @@ impl Shell {
     /// Evaluate a `test`/`[` *unary* primary, resolving the three primaries that
     /// need live shell state (`-v NAME` set?, `-o OPT` enabled?, `-R NAME`
     /// nameref?) and delegating the filesystem/string ones to [`eval_unary`].
-    fn eval_test_unary(&self, op: &str, x: &str) -> bool {
+    fn eval_test_unary(&self, op: BStr<'_>, x: BStr<'_>) -> bool {
         match op {
-            "-v" => self.var_is_set(x),
-            "-o" => self.shell_option_enabled(x),
-            "-R" => self.nameref_attr.contains(x),
+            // These three name a variable or a shell option, and both
+            // namespaces are text — so an operand that is not text names
+            // nothing that is set, nothing that is enabled and nothing that is
+            // a nameref. False is the answer, not an approximation of one.
+            b"-v" => bytes::as_str(x).is_some_and(|n| self.var_is_set(n)),
+            b"-o" => bytes::as_str(x).is_some_and(|n| self.shell_option_enabled(n)),
+            b"-R" => bytes::as_str(x).is_some_and(|n| self.nameref_attr.contains(n)),
             _ => eval_unary(&self.cwd, op, x),
         }
     }
@@ -24785,7 +25297,7 @@ impl RedirPlan {
 /// Such a builtin's output is not written by it — it is written by whatever it
 /// runs — so its redirections have to be installed around the body the way a
 /// compound command's are. See [`Shell::run_builtin`].
-fn builtin_runs_commands(name: &str, args: &[String]) -> bool {
+fn builtin_runs_commands(name: &str, args: &[Str]) -> bool {
     match name {
         "eval" | "source" | "." => true,
         // `fc` runs the editor and then the commands it left behind, so they
@@ -24794,14 +25306,14 @@ fn builtin_runs_commands(name: &str, args: &[String]) -> bool {
         // `-s` re-runs a command whatever else was given, so it always counts.
         "fc" => {
             let (listing, execute, ename) = fc_scan_opts(args);
-            execute || ename.as_deref() == Some("-") || !listing
+            execute || ename.as_deref() == Some(b"-".as_slice()) || !listing
         }
         // `jobs -x cmd …` runs `cmd`; every other spelling of `jobs` only
         // prints, and so applies its own redirections at write time.
         "jobs" => args
             .iter()
-            .take_while(|a| a.as_str() != "--" && a.starts_with('-') && a.len() > 1)
-            .any(|a| a.contains('x')),
+            .take_while(|a| a.as_slice() != b"--" && a.starts_with(b"-") && a.len() > 1)
+            .any(|a| a.contains(&b'x')),
         _ => false,
     }
 }
@@ -25973,8 +26485,8 @@ const PSEUDO_SIGNALS: &[(u16, &str)] =
 /// the word is used up, so ` 15 ` is the number fifteen — which is why
 /// `kill -l " 15"` answers `TERM` where `kill -l " TERM"`, having no number to
 /// read, does not answer at all.
-fn legal_number(word: &str) -> Option<i64> {
-    word.trim_matches(|c: char| c.is_ascii_whitespace()).parse::<i64>().ok()
+fn legal_number(word: BStr<'_>) -> Option<i64> {
+    bytes::parse_i64(word)
 }
 
 /// bash's `decode_signal`: the number a signal spec names, or `None`.
@@ -25986,21 +26498,23 @@ fn legal_number(word: &str) -> Option<i64> {
 /// signal, so `kill -l DEBUG` answers with one. And only a real signal's entry
 /// is spelled with the prefix, so `SIG` may be dropped from `SIGTERM` but never
 /// added to `EXIT`. Case is not significant either way.
-fn decode_signal(spec: &str) -> Option<u16> {
+fn decode_signal(spec: BStr<'_>) -> Option<u16> {
     if let Some(n) = legal_number(spec) {
         // A number names a slot in the table directly, and the table's real
         // entries stop at NSIG — so no number reaches the pseudo signals.
         return u16::try_from(n).ok().filter(|n| *n < NSIG);
     }
+    // Every name in the table is ASCII, so the comparison is byte-wise and a
+    // spec that is not text simply matches nothing — which is what it is.
     let upper = spec.to_ascii_uppercase();
-    if upper == "EXIT" {
+    if upper == b"EXIT" {
         return Some(0);
     }
-    if let Some((num, _)) = PSEUDO_SIGNALS.iter().find(|(_, name)| *name == upper) {
+    if let Some((num, _)) = PSEUDO_SIGNALS.iter().find(|(_, name)| name.as_bytes() == upper) {
         return Some(*num);
     }
-    let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
-    SIGNALS.iter().find(|(_, name)| *name == bare).map(|(num, _)| u16::from(*num))
+    let bare = upper.strip_prefix(b"SIG".as_slice()).unwrap_or(&upper);
+    SIGNALS.iter().find(|(_, name)| name.as_bytes() == bare).map(|(num, _)| u16::from(*num))
 }
 
 /// The canonical spec name for a number [`decode_signal`] returned: `EXIT` for
@@ -26018,7 +26532,7 @@ fn signal_spec_name(num: u16) -> Option<String> {
 
 /// Normalize a `trap` signal spec to a canonical name (`EXIT`, `ERR`, `INT`, …),
 /// or `None` for an unrecognized spec.
-fn normalize_sigspec(spec: &str) -> Option<String> {
+fn normalize_sigspec(spec: BStr<'_>) -> Option<String> {
     signal_spec_name(decode_signal(spec)?)
 }
 
@@ -26027,7 +26541,9 @@ fn normalize_sigspec(spec: &str) -> Option<String> {
 /// `trap -p` output deterministically. That is simply the order of bash's own
 /// table, so the spec's number is the key.
 fn sigspec_order(spec: &str) -> u16 {
-    decode_signal(spec).unwrap_or(255)
+    // The keys of the trap table are normalized names this module produced, so
+    // they are text; the lookup itself works on their bytes.
+    decode_signal(spec.as_bytes()).unwrap_or(255)
 }
 
 /// Render a normalized trap spec as bash's `trap -p` display name: real signals
@@ -26044,22 +26560,35 @@ fn sigspec_display(spec: &str) -> String {
 /// `type NAME` and `command -V NAME`: ``name is aliased to `value'``. Note the
 /// asymmetric backtick/apostrophe quoting — that is bash's own style, and the
 /// value is *not* escaped inside it.
-fn alias_description(name: &str, value: &str) -> String {
-    format!("{name} is aliased to `{value}'")
+fn alias_description(name: BStr<'_>, value: BStr<'_>) -> Str {
+    bfmt![name, b" is aliased to `", value, b"'"]
 }
 
 /// Wrap `s` in single quotes for `trap -p` output, escaping embedded quotes the
 /// POSIX way (`'\''`). Always quotes (even simple words), matching bash.
 fn single_quote(s: &str) -> String {
-    let mut out = String::from("'");
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
+    // Quoting only ever inserts ASCII, so quoting text yields text: the round
+    // trip below cannot fail, and the default is unreachable. (The two
+    // functions merge into one once the remaining `String`-typed layers —
+    // aliases and completion specs — become bytes; see TD-OILS-BYTE-STRINGS.)
+    String::from_utf8(single_quote_bytes(s.as_bytes())).unwrap_or_default()
+}
+
+/// [`single_quote`] for a value that is bytes.
+///
+/// Quoting is a byte-wise operation — the only byte that needs care is the
+/// quote itself — so a value holding bytes that are not text survives it
+/// unchanged, and the quoted form still reproduces the original exactly.
+fn single_quote_bytes(s: BStr<'_>) -> Str {
+    let mut out = Str::from(&b"'"[..]);
+    for &b in s {
+        if b == b'\'' {
+            out.extend_from_slice(b"'\\''");
         } else {
-            out.push(c);
+            out.push(b);
         }
     }
-    out.push('\'');
+    out.push(b'\'');
     out
 }
 
@@ -26070,14 +26599,27 @@ fn comp_short_action(c: char) -> Option<&'static str> {
     COMP_ACTIONS.iter().find(|(_, flag)| *flag == c).map(|(name, _)| *name)
 }
 
+/// Collect a shell name table's `String` keys as byte strings. The tables are
+/// `String`-keyed (TD-OILS-BYTE-STRINGS steps 8-10), but the completion list
+/// they feed is byte-typed, so this is the one-way widening between them.
+fn name_bytes<'a, I: IntoIterator<Item = &'a String>>(names: I) -> Vec<Str> {
+    names.into_iter().map(|n| n.as_bytes().to_vec()).collect()
+}
+
+/// Same, for the compiled-in `&'static str` tables (builtin names, keywords,
+/// shopt/set -o option names, signal and help topics).
+fn str_bytes<I: IntoIterator<Item = &'static str>>(names: I) -> Vec<Str> {
+    names.into_iter().map(|n| n.as_bytes().to_vec()).collect()
+}
+
 /// The label used for a completion target in diagnostics (`complete -p foo`
 /// error → `foo`; the specials print as their flag).
-fn comp_key_label(k: &CompKey) -> String {
+fn comp_key_label(k: &CompKey) -> Str {
     match k {
         CompKey::Name(n) => n.clone(),
-        CompKey::Default => "-D".to_string(),
-        CompKey::Empty => "-E".to_string(),
-        CompKey::Initial => "-I".to_string(),
+        CompKey::Default => b"-D".to_vec(),
+        CompKey::Empty => b"-E".to_vec(),
+        CompKey::Initial => b"-I".to_vec(),
     }
 }
 
@@ -26085,67 +26627,66 @@ fn comp_key_label(k: &CompKey) -> String {
 /// bash's `complete -p` output), terminated by a newline. Option groups are
 /// emitted in bash's fixed print order: `-o` options, shortcut actions, `-A`
 /// actions, then `-G -W -P -S -X -C -F`, then the target (`name` or `-D/-E/-I`).
-fn format_compspec(key: &CompKey, sp: &CompSpec) -> String {
-    let mut s = String::from("complete");
+fn format_compspec(key: &CompKey, sp: &CompSpec) -> Str {
+    let mut s: Str = b"complete".to_vec();
     // -o options, in canonical order.
     for o in COMP_O_ORDER {
-        if sp.o_opts.iter().any(|x| x == o) {
-            s.push_str(" -o ");
-            s.push_str(o);
+        if sp.o_opts.iter().any(|x| x.as_slice() == o.as_bytes()) {
+            s.extend_from_slice(b" -o ");
+            s.extend_from_slice(o.as_bytes());
         }
     }
     // Actions: shortcut-flag actions first (in table order), then -A-only ones.
     for &(name, flag) in COMP_ACTIONS {
-        if flag != '\0' && sp.actions.iter().any(|x| x == name) {
-            s.push_str(" -");
-            s.push(flag);
+        if flag != '\0' && sp.actions.iter().any(|x| x.as_slice() == name.as_bytes()) {
+            s.extend_from_slice(&bfmt![b" -", flag]);
         }
     }
     for &(name, flag) in COMP_ACTIONS {
-        if flag == '\0' && sp.actions.iter().any(|x| x == name) {
-            s.push_str(" -A ");
-            s.push_str(name);
+        if flag == '\0' && sp.actions.iter().any(|x| x.as_slice() == name.as_bytes()) {
+            s.extend_from_slice(b" -A ");
+            s.extend_from_slice(name.as_bytes());
         }
     }
     if let Some(v) = &sp.globpat {
-        s.push_str(" -G ");
-        s.push_str(&single_quote(v));
+        s.extend_from_slice(b" -G ");
+        s.extend_from_slice(&single_quote_bytes(v));
     }
     if let Some(v) = &sp.wordlist {
-        s.push_str(" -W ");
-        s.push_str(&single_quote(v));
+        s.extend_from_slice(b" -W ");
+        s.extend_from_slice(&single_quote_bytes(v));
     }
     if let Some(v) = &sp.prefix {
-        s.push_str(" -P ");
-        s.push_str(&single_quote(v));
+        s.extend_from_slice(b" -P ");
+        s.extend_from_slice(&single_quote_bytes(v));
     }
     if let Some(v) = &sp.suffix {
-        s.push_str(" -S ");
-        s.push_str(&single_quote(v));
+        s.extend_from_slice(b" -S ");
+        s.extend_from_slice(&single_quote_bytes(v));
     }
     if let Some(v) = &sp.filterpat {
-        s.push_str(" -X ");
-        s.push_str(&single_quote(v));
+        s.extend_from_slice(b" -X ");
+        s.extend_from_slice(&single_quote_bytes(v));
     }
     if let Some(v) = &sp.command {
-        s.push_str(" -C ");
-        s.push_str(&single_quote(v));
+        s.extend_from_slice(b" -C ");
+        s.extend_from_slice(&single_quote_bytes(v));
     }
     // bash prints the -F function name unquoted.
     if let Some(v) = &sp.function {
-        s.push_str(" -F ");
-        s.push_str(v);
+        s.extend_from_slice(b" -F ");
+        s.extend_from_slice(v);
     }
     match key {
         CompKey::Name(n) => {
-            s.push(' ');
-            s.push_str(n);
+            s.push(b' ');
+            s.extend_from_slice(n);
         }
-        CompKey::Default => s.push_str(" -D"),
-        CompKey::Empty => s.push_str(" -E"),
-        CompKey::Initial => s.push_str(" -I"),
+        CompKey::Default => s.extend_from_slice(b" -D"),
+        CompKey::Empty => s.extend_from_slice(b" -E"),
+        CompKey::Initial => s.extend_from_slice(b" -I"),
     }
-    s.push('\n');
+    s.push(b'\n');
     s
 }
 
@@ -26785,8 +27326,8 @@ fn parse_dirstack_index(prefix: &str) -> Option<DirStackRef> {
 /// refuse), while `h[a=1` — where the subscript never closes — yields nothing
 /// at all and is refused whole. For a `NAME+=value` the index returned is still
 /// the `=`; the caller drops the `+`.
-fn attr_assignment_split(word: &str) -> Option<usize> {
-    let b = word.as_bytes();
+fn attr_assignment_split(word: BStr<'_>) -> Option<usize> {
+    let b = word;
     if !matches!(b.first(), Some(c) if c.is_ascii_alphabetic() || *c == b'_') {
         return None;
     }
@@ -26911,13 +27452,15 @@ enum FcSpec {
 /// C's `atoi` on a leading run of ASCII digits: stops at the first non-digit and
 /// saturates instead of overflowing. `fc` reads its numeric endpoints this way,
 /// so `fc -l 2x` means `fc -l 2`.
-fn atoi(s: &str) -> isize {
+fn atoi(s: BStr<'_>) -> isize {
     let mut n: isize = 0;
-    for c in s.chars() {
-        let Some(d) = c.to_digit(10) else { break };
+    for c in s {
+        if !c.is_ascii_digit() {
+            break;
+        }
         n = n
             .saturating_mul(10)
-            .saturating_add(isize::try_from(d).unwrap_or(0));
+            .saturating_add(isize::from(c.saturating_sub(b'0')));
     }
     n
 }
@@ -26928,28 +27471,28 @@ fn atoi(s: &str) -> isize {
 /// diagnosed by [`Shell::builtin_fc`], not here.
 ///
 /// Returns `(listing, execute, ename)`.
-fn fc_scan_opts(args: &[String]) -> (bool, bool, Option<String>) {
+fn fc_scan_opts(args: &[Str]) -> (bool, bool, Option<Str>) {
     let (mut listing, mut execute, mut ename) = (false, false, None);
     let mut i = 0;
     while let Some(a) = args.get(i) {
-        if a == "--" || fc_is_number(a) {
+        if a.as_slice() == b"--" || fc_is_number(a) {
             break;
         }
-        let Some(flags) = a.strip_prefix('-').filter(|f| !f.is_empty()) else {
+        let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
             break;
         };
         i = i.saturating_add(1);
-        for (at, c) in flags.char_indices() {
+        for (at, c) in flags.iter().enumerate() {
             match c {
-                'l' => listing = true,
-                's' => execute = true,
-                'e' => {
-                    let tail = flags.get(at.saturating_add(1)..).unwrap_or("");
+                b'l' => listing = true,
+                b's' => execute = true,
+                b'e' => {
+                    let tail = flags.get(at.saturating_add(1)..).unwrap_or_default();
                     if tail.is_empty() {
                         ename = args.get(i).cloned();
                         i = i.saturating_add(1);
                     } else {
-                        ename = Some(tail.to_string());
+                        ename = Some(tail.to_vec());
                     }
                     break;
                 }
@@ -26963,17 +27506,17 @@ fn fc_scan_opts(args: &[String]) -> (bool, bool, Option<String>) {
 /// bash's `fc_number`: whether a `fc` operand is a history number, which is what
 /// stops option parsing so `fc -l -2` reads `-2` as an endpoint. One leading `-`
 /// is allowed; the rest must be a valid number on its own.
-fn fc_is_number(s: &str) -> bool {
-    let body = s.strip_prefix('-').unwrap_or(s);
-    !body.is_empty() && body.chars().all(|c| c.is_ascii_digit())
+fn fc_is_number(s: BStr<'_>) -> bool {
+    let body = s.strip_prefix(b"-").unwrap_or(s);
+    !body.is_empty() && body.iter().all(u8::is_ascii_digit)
 }
 
 /// Replace **every** occurrence of `pat` in `s` with `rep` — bash's
 /// `strsub(…, global)`, which is what `fc -s pat=rep` performs. An empty pattern
 /// matches nothing (bash's loop cannot advance on one either).
-fn str_replace_all(s: &str, pat: &str, rep: &str) -> String {
+fn bytes_replace_all(s: BStr<'_>, pat: BStr<'_>, rep: BStr<'_>) -> Str {
     if pat.is_empty() {
-        return s.to_string();
+        return s.to_vec();
     }
     s.replace(pat, rep)
 }
@@ -29100,18 +29643,18 @@ fn format_a(f: f64, prec: Option<usize>, upper: bool) -> String {
 /// the start of a `term` (reached via `primary`'s unary branch) is the operator.
 /// Unary primaries are evaluated shell-aware via [`Shell::eval_test_unary`].
 struct TestExpr<'a> {
-    toks: &'a [&'a str],
+    toks: &'a [BStr<'a>],
     pos: usize,
 }
 
 impl<'a> TestExpr<'a> {
-    fn peek(&self) -> Option<&'a str> {
+    fn peek(&self) -> Option<BStr<'a>> {
         self.toks.get(self.pos).copied()
     }
 
-    fn or_expr(&mut self, sh: &Shell) -> Result<bool, String> {
+    fn or_expr(&mut self, sh: &Shell) -> Result<bool, Str> {
         let mut v = self.and_expr(sh)?;
-        while self.peek() == Some("-o") {
+        while self.peek() == Some(b"-o".as_slice()) {
             self.pos += 1;
             // Evaluate both sides (test primaries are side-effect free); OR them.
             let rhs = self.and_expr(sh)?;
@@ -29120,9 +29663,9 @@ impl<'a> TestExpr<'a> {
         Ok(v)
     }
 
-    fn and_expr(&mut self, sh: &Shell) -> Result<bool, String> {
+    fn and_expr(&mut self, sh: &Shell) -> Result<bool, Str> {
         let mut v = self.term(sh)?;
-        while self.peek() == Some("-a") {
+        while self.peek() == Some(b"-a".as_slice()) {
             self.pos += 1;
             let rhs = self.term(sh)?;
             v = v && rhs;
@@ -29130,28 +29673,28 @@ impl<'a> TestExpr<'a> {
         Ok(v)
     }
 
-    fn term(&mut self, sh: &Shell) -> Result<bool, String> {
+    fn term(&mut self, sh: &Shell) -> Result<bool, Str> {
         match self.peek() {
-            None => Err("argument expected".to_string()),
-            Some("!") => {
+            None => Err(b"argument expected".to_vec()),
+            Some(b"!") => {
                 self.pos += 1;
                 Ok(!self.term(sh)?)
             }
-            Some("(") => {
+            Some(b"(") => {
                 self.pos += 1;
                 let v = self.or_expr(sh)?;
-                if self.peek() == Some(")") {
+                if self.peek() == Some(b")".as_slice()) {
                     self.pos += 1;
                     Ok(v)
                 } else {
-                    Err("`)' expected".to_string())
+                    Err(b"`)' expected".to_vec())
                 }
             }
             Some(_) => self.primary(sh),
         }
     }
 
-    fn primary(&mut self, sh: &Shell) -> Result<bool, String> {
+    fn primary(&mut self, sh: &Shell) -> Result<bool, Str> {
         let rem = self.toks.len() - self.pos;
         // Dyadic primary first (bash checks a binary operator in the second
         // position before treating the first token as a unary op), so e.g.
@@ -29213,27 +29756,29 @@ fn symbolic_umask_string(mask: u32) -> String {
 enum SymUmaskErr {
     /// Expected a `+`/`-`/`=` operator; got this character (`None` = end of the
     /// clause, which bash quotes as an empty `` `' ``).
-    Operator(Option<char>),
+    Operator(Option<bytes::Ch>),
     /// A permission letter that is not `r`/`w`/`x`.
-    Character(char),
+    Character(bytes::Ch),
 }
 
-fn parse_symbolic_umask(current: u32, spec: &str) -> Result<u32, SymUmaskErr> {
+fn parse_symbolic_umask(current: u32, spec: BStr<'_>) -> Result<u32, SymUmaskErr> {
     // Work in "allowed permission" space, then invert back to a mask at the end.
     let mut allowed = !current & 0o777;
-    for clause in spec.split(',') {
+    for clause in spec.split(|b| *b == b',') {
         if clause.is_empty() {
             continue;
         }
-        let mut chars = clause.chars().peekable();
+        // Walked as *characters*, not bytes: the diagnostics quote back the
+        // offending character, and a multi-byte one has to be quoted whole.
+        let mut chars = bytes::chars(clause).peekable();
         // `who` set: any of u/g/o/a; empty defaults to `a` (all).
         let mut who_mask = 0u32; // bit per who: u=0o700, g=0o070, o=0o007
         while let Some(&c) = chars.peek() {
             match c {
-                'u' => who_mask |= 0o700,
-                'g' => who_mask |= 0o070,
-                'o' => who_mask |= 0o007,
-                'a' => who_mask |= 0o777,
+                bytes::Ch::U('u') => who_mask |= 0o700,
+                bytes::Ch::U('g') => who_mask |= 0o070,
+                bytes::Ch::U('o') => who_mask |= 0o007,
+                bytes::Ch::U('a') => who_mask |= 0o777,
                 _ => break,
             }
             chars.next();
@@ -29242,16 +29787,16 @@ fn parse_symbolic_umask(current: u32, spec: &str) -> Result<u32, SymUmaskErr> {
             who_mask = 0o777;
         }
         let op = match chars.next() {
-            Some(c) if matches!(c, '+' | '-' | '=') => c,
+            Some(bytes::Ch::U(c)) if matches!(c, '+' | '-' | '=') => c,
             other => return Err(SymUmaskErr::Operator(other)),
         };
         // Permission letters → a 3-bit value replicated into every selected who.
         let mut pbits = 0u32;
         for c in chars {
             match c {
-                'r' => pbits |= 0o4,
-                'w' => pbits |= 0o2,
-                'x' => pbits |= 0o1,
+                bytes::Ch::U('r') => pbits |= 0o4,
+                bytes::Ch::U('w') => pbits |= 0o2,
+                bytes::Ch::U('x') => pbits |= 0o1,
                 _ => return Err(SymUmaskErr::Character(c)),
             }
         }
@@ -29282,28 +29827,29 @@ fn cd_is_explicit(t: BStr<'_>) -> bool {
         || bytes::bytes_to_path(t).is_absolute()
 }
 
-fn eval_unary(cwd: BStr<'_>, op: &str, x: &str) -> bool {
+fn eval_unary(cwd: BStr<'_>, op: BStr<'_>, x: BStr<'_>) -> bool {
     // The filesystem primaries name a path relative to *this shell's* directory.
-    let p = || bytes::bytes_to_path(&resolve_against(cwd, x.as_bytes()));
+    let p = || bytes::bytes_to_path(&resolve_against(cwd, x));
     match op {
-        "-z" => x.is_empty(),
-        "-n" => !x.is_empty(),
-        "-e" => p().exists(),
-        "-f" => p().is_file(),
-        "-d" => p().is_dir(),
-        "-s" => std::fs::metadata(p()).map(|m| m.len() > 0).unwrap_or(false),
-        "-r" | "-w" | "-x" => p().exists(),
+        b"-z" => x.is_empty(),
+        b"-n" => !x.is_empty(),
+        b"-e" => p().exists(),
+        b"-f" => p().is_file(),
+        b"-d" => p().is_dir(),
+        b"-s" => std::fs::metadata(p()).map(|m| m.len() > 0).unwrap_or(false),
+        b"-r" | b"-w" | b"-x" => p().exists(),
         // `-L`/`-h` — the path is a symbolic link. `symlink_metadata` does not
         // follow the final component, so a broken symlink still tests true.
-        "-L" | "-h" => std::fs::symlink_metadata(p())
+        b"-L" | b"-h" => std::fs::symlink_metadata(p())
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false),
         // `-t FD` — file descriptor `FD` is open and refers to a terminal.
         // Only the standard streams (0/1/2) are addressable from a shell.
-        "-t" => match x.parse::<i32>() {
-            Ok(0) => io::stdin().is_terminal(),
-            Ok(1) => io::stdout().is_terminal(),
-            Ok(2) => io::stderr().is_terminal(),
+        // An operand that is not text is not a descriptor number either.
+        b"-t" => match bytes::as_str(x).and_then(|s| s.parse::<i32>().ok()) {
+            Some(0) => io::stdin().is_terminal(),
+            Some(1) => io::stdout().is_terminal(),
+            Some(2) => io::stderr().is_terminal(),
             _ => false,
         },
         _ => !x.is_empty(),
@@ -29312,11 +29858,11 @@ fn eval_unary(cwd: BStr<'_>, op: &str, x: &str) -> bool {
 
 /// Whether `op` is a `test`/`[` binary primary. Used to disambiguate the
 /// 3-argument case (a binary operator in the middle beats a leading `!`).
-fn is_test_binary_op(op: &str) -> bool {
+fn is_test_binary_op(op: BStr<'_>) -> bool {
     matches!(
         op,
-        "=" | "==" | "!=" | "<" | ">" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt"
-            | "-ot" | "-ef"
+        b"=" | b"==" | b"!=" | b"<" | b">" | b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge"
+            | b"-nt" | b"-ot" | b"-ef"
     )
 }
 
@@ -29327,44 +29873,42 @@ fn is_test_binary_op(op: &str) -> bool {
 /// full `OPERAND: integer expression expected` diagnostic body is returned so
 /// the caller can print `NAME: OPERAND: integer expression expected`, matching
 /// bash's diagnostic (and exit status 2).
-fn test_parse_int(s: &str) -> Result<i64, String> {
-    s.trim()
-        .parse::<i64>()
-        .map_err(|_| format!("{s}: integer expression expected"))
+fn test_parse_int(s: BStr<'_>) -> Result<i64, Str> {
+    bytes::parse_i64(s).ok_or_else(|| bfmt![s, b": integer expression expected"])
 }
 
 /// Whether `op` is a recognised `test`/`[` *unary* primary. bash's unary
 /// operators are all a single letter after `-`; an unrecognised two-argument
 /// operator (e.g. a binary op like `-eq` used with a missing operand) is an
 /// error, not a silent success. Kept in sync with `eval_unary`.
-fn is_test_unary_op(op: &str) -> bool {
+fn is_test_unary_op(op: BStr<'_>) -> bool {
     matches!(
         op,
-        "-a" | "-b"
-            | "-c"
-            | "-d"
-            | "-e"
-            | "-f"
-            | "-g"
-            | "-h"
-            | "-k"
-            | "-n"
-            | "-o"
-            | "-p"
-            | "-r"
-            | "-s"
-            | "-t"
-            | "-u"
-            | "-v"
-            | "-w"
-            | "-x"
-            | "-z"
-            | "-G"
-            | "-L"
-            | "-N"
-            | "-O"
-            | "-R"
-            | "-S"
+        b"-a" | b"-b"
+            | b"-c"
+            | b"-d"
+            | b"-e"
+            | b"-f"
+            | b"-g"
+            | b"-h"
+            | b"-k"
+            | b"-n"
+            | b"-o"
+            | b"-p"
+            | b"-r"
+            | b"-s"
+            | b"-t"
+            | b"-u"
+            | b"-v"
+            | b"-w"
+            | b"-x"
+            | b"-z"
+            | b"-G"
+            | b"-L"
+            | b"-N"
+            | b"-O"
+            | b"-R"
+            | b"-S"
     )
 }
 
@@ -29372,32 +29916,35 @@ fn is_test_unary_op(op: &str) -> bool {
 /// diagnostic body) when an arithmetic comparison is given a non-integer
 /// operand (bash prints `integer expression expected` and exits 2 in that
 /// case).
-fn eval_binary(cwd: BStr<'_>, l: &str, op: &str, r: &str) -> Result<bool, String> {
+fn eval_binary(cwd: BStr<'_>, l: BStr<'_>, op: BStr<'_>, r: BStr<'_>) -> Result<bool, Str> {
     match op {
-        "=" | "==" => Ok(l == r),
-        "!=" => Ok(l != r),
-        "<" => Ok(l < r),
-        ">" => Ok(l > r),
-        "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
+        // Byte-wise, which is what bash's `strcmp`/`strcoll` does in the C
+        // locale — and the only comparison that can answer for operands that
+        // are not text at all.
+        b"=" | b"==" => Ok(l == r),
+        b"!=" => Ok(l != r),
+        b"<" => Ok(l < r),
+        b">" => Ok(l > r),
+        b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge" => {
             // bash checks the left operand first, then the right.
             let a = test_parse_int(l)?;
             let b = test_parse_int(r)?;
             Ok(match op {
-                "-eq" => a == b,
-                "-ne" => a != b,
-                "-lt" => a < b,
-                "-le" => a <= b,
-                "-gt" => a > b,
-                "-ge" => a >= b,
+                b"-eq" => a == b,
+                b"-ne" => a != b,
+                b"-lt" => a < b,
+                b"-le" => a <= b,
+                b"-gt" => a > b,
+                b"-ge" => a >= b,
                 _ => false,
             })
         }
-        "-nt" | "-ot" | "-ef" => Ok(file_cmp(cwd, op, l.as_bytes(), r.as_bytes())),
+        b"-nt" | b"-ot" | b"-ef" => Ok(file_cmp(cwd, op, l, r)),
         // Reached only from the three-argument fallback `[ a b c ]` where the
         // middle token is not a binary operator; bash reports it as such rather
         // than silently succeeding. (The parser paths guard with
         // `is_test_binary_op` before calling here.)
-        _ => Err(format!("{op}: binary operator expected")),
+        _ => Err(bfmt![op, b": binary operator expected"]),
     }
 }
 
@@ -29410,23 +29957,23 @@ fn eval_binary(cwd: BStr<'_>, l: &str, op: &str, r: &str) -> Result<bool, String
 /// device+inode match, which the standard library does not expose across our
 /// host and target (true hard links to *different* names are not detected; see
 /// known-issues TD-OILS12).
-fn file_cmp(cwd: BStr<'_>, op: &str, l: BStr<'_>, r: BStr<'_>) -> bool {
+fn file_cmp(cwd: BStr<'_>, op: BStr<'_>, l: BStr<'_>, r: BStr<'_>) -> bool {
     let (l, r) = (resolve_against(cwd, l), resolve_against(cwd, r));
     let (l, r) = (bytes::bytes_to_path(&l), bytes::bytes_to_path(&r));
     let lmtime = std::fs::metadata(&l).and_then(|m| m.modified()).ok();
     let rmtime = std::fs::metadata(&r).and_then(|m| m.modified()).ok();
     match op {
-        "-nt" => match (lmtime, rmtime) {
+        b"-nt" => match (lmtime, rmtime) {
             (Some(a), Some(b)) => a > b,
             (Some(_), None) => true,
             _ => false,
         },
-        "-ot" => match (lmtime, rmtime) {
+        b"-ot" => match (lmtime, rmtime) {
             (Some(a), Some(b)) => a < b,
             (None, Some(_)) => true,
             _ => false,
         },
-        "-ef" => match (std::fs::canonicalize(l), std::fs::canonicalize(r)) {
+        b"-ef" => match (std::fs::canonicalize(l), std::fs::canonicalize(r)) {
             (Ok(a), Ok(b)) => a == b,
             _ => false,
         },
@@ -35624,11 +36171,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         let mut sh = Shell::new();
         sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(&dir));
-        let cmds = sh.compgen_path_commands("");
+        let cmds = sh.compgen_path_commands(b"");
         // The executable is offered by its bare name; the `.json` is not (in
         // either its raw or extension-stripped form).
-        assert!(cmds.iter().any(|c| c == "mycmd"), "expected mycmd in {cmds:?}");
-        assert!(!cmds.iter().any(|c| c == "mycfg" || c == "mycfg.json"), "config file leaked into {cmds:?}");
+        assert!(cmds.iter().any(|c| c.as_slice() == b"mycmd"), "expected mycmd in {cmds:?}");
+        assert!(
+            !cmds.iter().any(|c| c.as_slice() == b"mycfg" || c.as_slice() == b"mycfg.json"),
+            "config file leaked into {cmds:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -38430,7 +38980,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         for (i, (num, _)) in PSEUDO_SIGNALS.iter().enumerate() {
             assert_eq!(*num, NSIG + u16::try_from(i).expect("three entries fit"));
             // A number can never name one of them, however it is spelled.
-            assert_eq!(decode_signal(&num.to_string()), None);
+            assert_eq!(decode_signal(num.to_string().as_bytes()), None);
         }
     }
 
@@ -41536,39 +42086,41 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.run_source("sleep 5 &");
         sh.run_source("( sleep 6 ) &");
         for (spec, want) in [
-            ("%1", 0),
-            ("%2", 1),
+            (b"%1".as_slice(), 0),
+            (b"%2", 1),
             // `%`, `%%` and `%+` are the current job; `%-` the previous one.
-            ("%", 1),
-            ("%%", 1),
-            ("%+", 1),
-            ("%+x", 1),
-            ("%-", 0),
-            ("%-x", 0),
+            (b"%", 1),
+            (b"%%", 1),
+            (b"%+", 1),
+            (b"%+x", 1),
+            (b"%-", 0),
+            (b"%-x", 0),
             // A name matches the start of the command, `%?str` anywhere in it.
-            ("%sleep", 0),
-            ("%(", 1),
-            ("%?6", 1),
+            (b"%sleep", 0),
+            (b"%(", 1),
+            (b"%?6", 1),
         ] {
             // A `%` spec means the same thing to every builtin, so the
             // bare-number rule cannot change any of these.
             for bare in [BareNumber::Pid, BareNumber::JobId] {
                 assert!(
                     matches!(sh.lookup_job(spec, bare), JobLookup::Found(i) if i == want),
-                    "{spec}"
+                    "{}",
+                    spec.as_bstr()
                 );
             }
         }
-        for spec in ["%0", "%1x", "%nosuch", "%?nosuch"] {
+        for spec in [b"%0".as_slice(), b"%1x", b"%nosuch", b"%?nosuch"] {
             assert!(
                 matches!(sh.lookup_job(spec, BareNumber::JobId), JobLookup::NotFound),
-                "{spec}"
+                "{}",
+                spec.as_bstr()
             );
         }
         // Matching two jobs is an error rather than a pick, and the error names
         // the text that was matched against — the spec minus its `%` and `?`.
-        match sh.lookup_job("%?sleep", BareNumber::JobId) {
-            JobLookup::Ambiguous(text) => assert_eq!(text, "sleep"),
+        match sh.lookup_job(b"%?sleep", BareNumber::JobId) {
+            JobLookup::Ambiguous(text) => assert_eq!(text, b"sleep"),
             _ => panic!("%?sleep should have matched both jobs"),
         }
         // A bare number is a pid or a job number according to which builtin is
@@ -41576,10 +42128,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `jobs`/`fg`/`bg` the other. So job 2's pid resolves only as a pid, and
         // the number 2 only as a job.
         let pid = sh.jobs[1].pid.to_string();
-        assert!(matches!(sh.lookup_job(&pid, BareNumber::Pid), JobLookup::Found(1)));
-        assert!(matches!(sh.lookup_job(&pid, BareNumber::JobId), JobLookup::NotFound));
-        assert!(matches!(sh.lookup_job("2", BareNumber::JobId), JobLookup::Found(1)));
-        assert!(matches!(sh.lookup_job("2", BareNumber::Pid), JobLookup::NotFound));
+        assert!(matches!(sh.lookup_job(pid.as_bytes(), BareNumber::Pid), JobLookup::Found(1)));
+        assert!(matches!(sh.lookup_job(pid.as_bytes(), BareNumber::JobId), JobLookup::NotFound));
+        assert!(matches!(sh.lookup_job(b"2", BareNumber::JobId), JobLookup::Found(1)));
+        assert!(matches!(sh.lookup_job(b"2", BareNumber::Pid), JobLookup::NotFound));
         sh.run_source("kill %1; kill %2");
     }
 

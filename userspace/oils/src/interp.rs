@@ -7404,15 +7404,23 @@ impl Shell {
             xtrace_compound: None,
             compound_expanded: false,
             glob_error: None,
-            // A subshell body is not itself a function frame; a `local` there is
-            // an error until it enters one of its own function calls.
-            local_frames: Vec::new(),
+            // A subshell is a *fork*, so it inherits the whole call-frame stack:
+            // `f() { ( local q=1; echo "$q" ); }` really does declare a local of
+            // `f`'s frame, and the binding disappears with the subshell rather
+            // than with a return. Copying the frames is what makes that work —
+            // and what keeps `temp_shadow`'s `local_depth` below meaning the
+            // same thing on both sides. Nothing here ever pops one of the
+            // inherited frames: `call_function` pops only what it pushed, and
+            // the subshell's whole state is dropped at the end.
+            local_frames: self.local_frames.clone(),
             // …but the assignment prefix that is in force *is* inherited: the
             // binding it made is in `vars`, which the subshell copies, so the
             // shadow that makes a computed name read it has to come along or
             // `SECONDS=100 eval '( echo $SECONDS )'` would go back to counting.
             temp_shadow: self.temp_shadow.clone(),
-            local_opt_saves: Vec::new(),
+            // Kept in lockstep with `local_frames` above, so a `local -` inside
+            // the subshell finds its own frame's slot rather than none at all.
+            local_opt_saves: self.local_opt_saves.clone(),
             // A subshell inherits the enclosing function context, so `FUNCNAME`
             // (and further nested calls) stay consistent.
             fn_stack: self.fn_stack.clone(),

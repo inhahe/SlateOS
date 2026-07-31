@@ -13130,6 +13130,82 @@ impl Shell {
         1
     }
 
+    /// Install a simple command's own `2> file` / `2>> file` / `2>&1` / `2>&N`
+    /// for the duration of a builtin, returning whether anything was pushed (and
+    /// so must be popped with `self.stderr_stack.pop()`).
+    ///
+    /// A builtin's diagnostics go through [`Shell::berrln`], which follows the
+    /// `stderr_stack`, so this is what makes `declare -Z 2>/dev/null` silent.
+    /// Two callers install it: [`Shell::run_builtin_body`] for the ordinary
+    /// path, and [`Shell::exec_declare_with_arrays_scoped`], which is dispatched
+    /// to directly for a `declare` carrying a compound operand and so never
+    /// reaches the builtin runner. That second caller pushes only around the
+    /// *builtin's* phases — the compound literals bind before it, during word
+    /// expansion, where bash has no redirect in place yet.
+    ///
+    /// `exec` is exempt and must not call this — it applies its redirects to the
+    /// *persistent* fd table itself.
+    ///
+    /// NOTE: our `RedirPlan` is order-free, so the rare `>&2 2>file` combination
+    /// routes `>&2` to the file (the `2>file >&2` ordering) rather than the
+    /// pre-redirect stderr — see known-issues TD-OILS14.
+    fn push_builtin_stderr(&mut self, redir: &RedirPlan, out: &mut Out) -> bool {
+        if let Some((path, append)) = &redir.stderr {
+            if let Ok(f) = open_out(&self.cwd, path, *append) {
+                self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
+                return true;
+            }
+            return false;
+        }
+        if let Some(n) = redir.stderr_to_fd {
+            match self.write_fd_for(n, redir) {
+                Some(w) => {
+                    self.stderr_stack.push(w.as_stderr_target());
+                    return true;
+                }
+                None => {
+                    self.perrln(&format!("{n}: Bad file descriptor"));
+                    return false;
+                }
+            }
+        }
+        if !redir.stderr_to_stdout {
+            return false;
+        }
+        // `2>&1` with fd 1 not a file: fd 2 mirrors fd 1's live sink.
+        match out {
+            // fd 1 is a capture: fd 2 joins it as a second writer on the *same*
+            // buffer, so the two interleave in write order.
+            Out::Capture(buf) => {
+                self.stderr_stack.push(StderrTarget::Buffer(buf.clone()));
+                true
+            }
+            Out::Pipe(w) => match w.try_clone() {
+                Ok(wp) => {
+                    self.stderr_stack.push(StderrTarget::Pipe(Arc::new(wp)));
+                    true
+                }
+                Err(_) => false,
+            },
+            Out::Inherit => {
+                // Dup fd 1's current sink now. A builtin cannot move fd 1 under
+                // its own redirect (`exec` is exempt from this block), but one it
+                // *runs* can: `eval 'exec >f; echo X >&2' 2>&1` must still send
+                // `X` to the original stdout.
+                match self.snapshot_std_fd(1) {
+                    Ok(w) => {
+                        self.stderr_stack.push(w.as_stderr_target());
+                        true
+                    }
+                    Err(e) => {
+                        self.perrln(&format!("stdout: {e}"));
+                        false
+                    }
+                }
+            }
+        }
+    }
+
     /// Push the `StderrTarget` implied by a *partially applied* redirect plan,
     /// returning whether anything was pushed (and so must be popped).
     ///
@@ -16241,62 +16317,12 @@ impl Shell {
         };
 
         // Scoped stderr redirect: a simple-command builtin honors its own
-        // `2> file`/`2>> file`/`2>&1`/`2>&N` by pushing a StderrTarget for the
-        // builtin's duration, so diagnostics and `>&2` output land in the right
-        // sink (bash). Compound commands install their group-level stderr
-        // separately (`exec_redirected`); `exec` manages redirects itself (it
-        // sets the *persistent* `exec_stderr`), so it is exempt.
-        //
-        // NOTE: our `RedirPlan` is order-free, so the rare `>&2 2>file`
-        // combination routes `>&2` to the file (the `2>file >&2` ordering)
-        // rather than the pre-redirect stderr — see known-issues TD-OILS14.
-        let mut pushed_stderr = false;
-        if name != "exec" {
-            if let Some((path, append)) = &redir.stderr {
-                if let Ok(f) = open_out(&self.cwd, path, *append) {
-                    self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
-                    pushed_stderr = true;
-                }
-            } else if let Some(n) = redir.stderr_to_fd {
-                if let Some(w) = self.write_fd_for(n, redir) {
-                    self.stderr_stack.push(w.as_stderr_target());
-                    pushed_stderr = true;
-                } else {
-                    self.perrln(&format!("{n}: Bad file descriptor"));
-                }
-            } else if redir.stderr_to_stdout {
-                // `2>&1` with fd 1 not a file: fd 2 mirrors fd 1's live sink.
-                match out {
-                    // fd 1 is a capture: fd 2 joins it as a second writer on the
-                    // *same* buffer, so the two interleave in write order.
-                    Out::Capture(buf) => {
-                        self.stderr_stack.push(StderrTarget::Buffer(buf.clone()));
-                        pushed_stderr = true;
-                    }
-                    Out::Pipe(w) => {
-                        if let Ok(wp) = w.try_clone() {
-                            self.stderr_stack.push(StderrTarget::Pipe(Arc::new(wp)));
-                            pushed_stderr = true;
-                        }
-                    }
-                    Out::Inherit => {
-                        // Dup fd 1's current sink now. A builtin cannot move fd 1
-                        // under its own redirect (`exec` is exempt from this
-                        // block), but one it *runs* can: `eval 'exec >f; echo X
-                        // >&2' 2>&1` must still send `X` to the original stdout.
-                        match self.snapshot_std_fd(1) {
-                            Ok(w) => {
-                                self.stderr_stack.push(w.as_stderr_target());
-                                pushed_stderr = true;
-                            }
-                            Err(e) => {
-                                self.perrln(&format!("stdout: {e}"));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // `2> file`/`2>> file`/`2>&1`/`2>&N` for its duration, so diagnostics
+        // and `>&2` output land in the right sink (bash). Compound commands
+        // install their group-level stderr separately (`exec_redirected`);
+        // `exec` manages redirects itself (it sets the *persistent*
+        // `exec_stderr`), so it is exempt.
+        let pushed_stderr = name != "exec" && self.push_builtin_stderr(redir, out);
 
         // No output-file materialisation here: `resolve_redirects` already
         // created/truncated every `>`/`>>` target when it built the plan (in
@@ -23624,6 +23650,13 @@ impl Shell {
         // the loop below.
         let mut refused_local: HashSet<String> = HashSet::new();
         let mut refused_status = 0;
+        // The *builtin's* half of the two refusals that are reported twice over
+        // (see `func_tag` in the loop below). bash raises these from the builtin,
+        // which runs only once the whole word list has expanded, so they come
+        // after every machinery half rather than interleaved with them — and
+        // they speak through the command's own `2>`, which the machinery halves
+        // do not. Both follow from holding them until phase 2.
+        let mut builtin_refusals: Vec<Str> = Vec::new();
         // Where each operand's binding actually lands, in operand order, so that
         // phase 3 can apply the builtin's attributes to the same name phase 1
         // bound. See the resolution at the head of the loop.
@@ -23700,6 +23733,11 @@ impl Shell {
             // handed the same operand. An operand reached *through a reference*
             // loses the first tag: the refusal is raised from the resolution,
             // which has no source word to name the function from.
+            //
+            // Only the machinery's half is spoken here. The builtin's waits for
+            // phase 2 — see `builtin_refusals` — because that is when bash's
+            // runs: `local ra=(1) rb=(2)` with both readonly reports both
+            // machinery halves and only then both builtin ones.
             let func_tag: Str = if follow {
                 Vec::new()
             } else {
@@ -23708,7 +23746,7 @@ impl Shell {
             if make_local && self.noassign.contains(&target) {
                 let msg: Str = bfmt![&target, b": variable may not be assigned value"];
                 self.berrln(&bfmt![self.err_prefix(), &func_tag, &msg]);
-                self.berrln(&bfmt![self.err_prefix(), cmd, b": ", &msg]);
+                builtin_refusals.push(bfmt![self.err_prefix(), cmd, b": ", &msg]);
                 refused_local.insert(target);
                 refused_status = 1;
                 continue;
@@ -23735,7 +23773,7 @@ impl Shell {
             if make_local && !held_here && !held_outer && self.readonly.contains(&target) {
                 let msg: Str = bfmt![&target, b": readonly variable"];
                 self.berrln(&bfmt![self.err_prefix(), &func_tag, &msg]);
-                self.berrln(&bfmt![self.err_prefix(), cmd, b": ", &msg]);
+                builtin_refusals.push(bfmt![self.err_prefix(), cmd, b": ", &msg]);
                 refused_local.insert(target);
                 refused_status = 1;
                 continue;
@@ -24029,6 +24067,25 @@ impl Shell {
             line.push(b'\n');
             self.emit_stderr(&line);
         }
+        // Everything below this line is the *builtin*, so it speaks through the
+        // command's own `2>`: bash applies a simple command's redirections after
+        // word expansion, and only then runs the builtin. That split is exactly
+        // why phase 1's diagnostics escape `2>/dev/null` — the compound literals
+        // bind during the expansion, before there is any redirect to speak
+        // through — while `declare -Z 2>/dev/null` and `declare +a q 2>/dev/null`
+        // are silent. The trace line above is outside for the same reason: bash
+        // writes it before the redirect is in place.
+        //
+        // This path never reaches [`Shell::run_builtin_body`], which is where an
+        // ordinary builtin's push lives, so it installs its own. Every exit
+        // below has to pop it: there are two, the `-p` return and the end of the
+        // function.
+        let pushed_stderr = self.push_builtin_stderr(redir, out);
+        // The refusals phase 1 raised on the builtin's behalf, now that it is
+        // the builtin speaking. See `builtin_refusals`.
+        for msg in &builtin_refusals {
+            self.berrln(msg);
+        }
         // `-p` asks the builtin about its operands rather than telling it about
         // them, so the compound ones — which phase 2 never sees, since they live
         // in `decl_arrays` rather than `argv` — have to be asked about here, from
@@ -24045,6 +24102,9 @@ impl Shell {
             } else {
                 self.declare_print(asked, cmd, out, redir)
             };
+            if pushed_stderr {
+                self.stderr_stack.pop();
+            }
             return Flow::Next;
         }
         // Phase 2 — the builtin: the flags, and any *scalar* operands
@@ -24146,6 +24206,9 @@ impl Shell {
             if readonly && !unset_readonly {
                 self.readonly.insert(target.clone());
             }
+        }
+        if pushed_stderr {
+            self.stderr_stack.pop();
         }
         self.last_status = status;
         Flow::Next

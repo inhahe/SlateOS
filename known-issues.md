@@ -7005,29 +7005,124 @@ One wart remains, and it is TD-OILS-DECL-REFUSAL-ORDER's rather than this
 entry's: a forced-operand word is diagnosed by phase 2, so it still
 precedes any phase-3 refusal of a compound operand written *before* it.
 
-### TD-OILS-DECL-DIAGNOSTIC-ESCAPES-REDIRECTION. `declare`'s invalid-option and refusal messages ignore the command's own redirections — 2026-07-31 — OPEN
+### TD-OILS-DECL-DIAGNOSTIC-ESCAPES-REDIRECTION. `declare`'s invalid-option and refusal messages ignore the command's own redirections — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
-**Where:** `userspace/oils/src/interp.rs` — the declaration-builtin flag
-prescan, which runs while the command word list is being classified,
-before the redirections for that command are installed. bash emits the
-same diagnostics from inside the builtin, so `2>/dev/null` on the
-`declare` itself silences them.
+**Where:** `userspace/oils/src/interp.rs` — `exec_declare_with_arrays_scoped`.
+A `declare` carrying a compound `name=(…)` operand is dispatched straight
+to that function from `exec_simple`, so it never reached
+`run_builtin_body`, which is where a builtin's scoped stderr push lives.
+Every diagnostic the command raised therefore went to the *enclosing*
+stderr.
 
 ```sh
-declare -i+i n=(2+3) 2>/dev/null    # bash: silent.  osh: prints the
+declare -i+i n=(2+3) 2>/dev/null    # bash: silent.  osh: printed the
                                    # "-+: invalid option" + usage pair
-declare +a -l +l k=(AB) 2>/dev/null # bash: silent.  osh: prints
+declare +a -l +l k=(AB) 2>/dev/null # bash: silent.  osh: printed
                                    # "cannot destroy array variables in this way"
 ```
 
-Reproduce with `target/dvscratch/px21.sh` / `px22.sh` (both are otherwise
-matching; these two lines are the whole diff).
+**Measured rule (bash 5.2.37, `target/dvscratch/px78.sh`–`px82.sh`).**
+A `declare` with a compound operand speaks with two voices, and only one
+of them is redirectable — because bash binds `name=(…)` while it is still
+*expanding the words*, and installs the command's redirections only
+afterwards, just before running the builtin:
 
-**Proper fix.** Emit the prescan's diagnostics through the same
-redirection-aware path the builtin body uses — i.e. defer them until the
-command's redirections are in place, or hand them to the builtin to
-report. Related to TD-OILS-DECL-FLAG-PRESCAN, which is about *where* the
-prescan happens at all.
+* **The compound-assignment machinery's diagnostics escape** `2>/dev/null`.
+  Confirmed: the untagged conversion refusal (`ci: cannot convert indexed
+  to associative array`), the function-tagged `noassign` and
+  readonly-shadow lines, the circular-nameref warning, the
+  element-reference refusal (`` `ng[1]': not a valid identifier ``), the
+  arithmetic error from an `-i` literal, and the readonly-target refusal.
+* **The builtin's own diagnostics are redirected**: invalid options, the
+  `+a`/`+A` destroy refusal, the `-a`/`-A` self-conflict, the phase-3
+  refusals, and `declare -p`'s "not found".
+* **The two refusals bash reports *twice*** (`noassign` and the
+  readonly-shadow one) are silenced by halves: the machinery's tagged line
+  survives `2>/dev/null`, the builtin's `local: …` line does not.
+* Those builtin halves also come **after every machinery half**, not
+  interleaved operand by operand, because bash's builtin runs only once
+  the whole word list has expanded: `local ra=(1) rb=(2)` with both
+  readonly prints both `f: …` lines and only then both `local: …` lines.
+* The trace line of `set -x` is written **before** the redirect is in
+  place, so it is not redirected either.
+
+**Fix.** `run_builtin_body`'s inline stderr push was extracted into
+`Shell::push_builtin_stderr`, and `exec_declare_with_arrays_scoped` now
+installs it around phases 2 and 3 only — after the compound literals have
+bound and after the xtrace line, popping at both exits. The builtin's half
+of the two double-reported phase-1 refusals is collected into
+`builtin_refusals` during phase 1 and emitted under that push, which fixes
+the ordering at the same time. Pinned by
+`userspace/oils/tests/corpus/declare-redirected-diagnostics.sh`.
+
+Note this means the corpus's "group the diagnostics through `e()` rather
+than redirecting per command" idiom is still needed — but only for the
+*phase 1* shapes, which genuinely escape a per-command redirect in bash
+too.
+
+**Still open, separately:** `local` used outside a function *with* a
+compound operand — see TD-OILS-DECL-LOCAL-OUTSIDE-FUNCTION-SKIPS-BINDING.
+
+### TD-OILS-DECL-LOCAL-OUTSIDE-FUNCTION-SKIPS-BINDING. `local q=(1)` outside a function refuses before binding, and the refusal escapes the redirection — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` —
+`exec_declare_with_arrays_scoped`, the `is_local && self.local_frames
+.is_empty()` guard at the head of the function. It returns before phase 1
+has bound the compound literals, and before the stderr push installed for
+phases 2 and 3 (see TD-OILS-DECL-DIAGNOSTIC-ESCAPES-REDIRECTION).
+
+bash raises "can only be used in a function" from the *builtin*, which
+runs after the words have expanded — so the compound operand binds first,
+and the message is redirectable:
+
+```sh
+( local q=(1); echo "rc=$?"; declare -p q )
+# bash: "local: can only be used in a function" / rc=1 / declare -a q=([0]="1")
+# osh:  the same message and rc, but "declare: q: not found"
+
+( local q=(1) 2>/dev/null; echo "rc=$?" )
+# bash: rc=1, silent.  osh: prints the message.
+```
+
+Reproduce with `target/dvscratch/px82.sh` (the `local at top level`
+sections are the whole diff).
+
+**Proper fix.** Move the guard down to phase 2, next to the builtin call,
+so phase 1 runs and the message is emitted under the push. `make_local`
+has to stop being unconditionally true for `local` at the same time —
+`make_local = !self.local_frames.is_empty() && (is_local || !global &&
+!global_builtin)` — because at top level bash takes the plain
+`apply_assignment` readonly path (one untagged message, then the parse
+unit is discarded) rather than the doubly-reported local-shadow one.
+
+### TD-OILS-DECL-COMPOUND-REFUSAL-TAG-IS-THE-FIRST-COMMAND-ONLY. the function name on a compound-assignment refusal appears only when the declaration is the function's first command — 2026-07-31 — OPEN (WONTFIX candidate)
+
+**Where:** `userspace/oils/src/interp.rs` — `func_tag` in
+`exec_declare_with_arrays_scoped`'s phase-1 loop, which uses
+`self.fn_stack.last()` unconditionally.
+
+The two refusals bash reports twice (`noassign` and the readonly-shadow
+one) carry a `<function>: ` tag on the *machinery's* half — but only when
+the failing declaration is the first command executed in the function
+body. Anything at all in front of it, including the condition of an `if`
+or the word list of a `for` that encloses it, drops the tag:
+
+```sh
+readonly ra=1
+b1() { local ra=(1); }              # bash: "b1: ra: readonly variable"
+b2() { true; local ra=(1); }        # bash: "ra: readonly variable"
+b6() { if :; then local ra=(1); fi; }   # bash: "ra: readonly variable"
+o2() { :; i1; }; i1() { local ra=(1); } # bash: "i1: …" — i1's own first command
+```
+
+osh always tags. Measured with `target/dvscratch/px83.sh`.
+
+This is bash leaking `this_command_name`, which still holds the function's
+name at the moment the *first* body command's words are expanded and is
+cleared afterwards. Matching it would mean tracking a "nothing has run in
+this frame yet" bit per `fn_stack` entry purely to reproduce an artefact,
+so it is deliberately not matched; the corpus cases that exercise these
+refusals all put the declaration first, where the two agree.
 
 ### TD-OILS-DECL-VALUELESS-IGNORES-READONLY. `declare x` / `local x` inside a function shadows a readonly global instead of refusing — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

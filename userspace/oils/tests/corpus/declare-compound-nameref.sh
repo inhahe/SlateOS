@@ -77,6 +77,28 @@ echo "=== a reference that resolves to nothing falls back to its own name"
 { declare -n r10=; declare -a r10=(z); echo "rc=$?"; p 'r10' r10; } 2>&1 | e
 { declare -n r11='1x'; declare -a r11=(z); echo "rc=$?"; p 'r11' r11; } 2>&1 | e
 
+echo "=== a scalar operand's refusals split the same way, name for name"
+# Raised against the word: the assignment's readonly refusal and the kind
+# conversion.
+{ readonly s1=1; declare -n q1=s1; declare q1=9; echo "rc=$?"; } 2>&1 | e
+{ declare -A s2=([k]=v); declare -n q2=s2; declare -a q2=z; echo "rc=$?"; } 2>&1 | e
+{ declare -a s3=(1); declare -n q3=s3; declare -A q3; echo "rc=$?"; } 2>&1 | e
+{ declare -a s4=(1); declare -n q4=s4; declare +a q4; echo "rc=$?"; } 2>&1 | e
+# Raised against the resolved name: the shadow refusals and `+r`.
+{ declare -n q5=s1; declare +r q5; echo "rc=$?"; } 2>&1 | e
+fq1() { local -n q=s1; local q; echo "rc=$?"; }
+fq1 2>&1 | e
+fq2() { local -n q=GROUPS; local q; echo "rc=$?"; }
+fq2 2>&1 | e
+# …and the `-aA` self-conflict is raised against whichever of the two the
+# array it refuses belongs to: one the command *found* is the operand's, one
+# the command just *made* is the target's.
+{ declare -A s6; declare -n q6=s6; declare -aA q6; echo "rc=$?"; } 2>&1 | e
+{ declare -n q7=s7; declare -aA q7; echo "rc=$?"; } 2>&1 | e
+# A compound literal binds during word expansion, so its array is always one
+# the builtin found — even when the target did not exist before the command.
+{ declare -n q8=s8; declare -aA q8=(z); echo "rc=$?"; p 's8' s8; } 2>&1 | e
+
 echo "=== an element reference is not a name a literal can bind to"
 { declare -a ng=(1 2); declare -n rg='ng[1]'; declare -a rg=(z); echo "unreached"; } 2>&1 | e
 

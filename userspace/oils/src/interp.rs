@@ -22588,9 +22588,14 @@ impl Shell {
                 self.readonly.contains(base_name) && !(shadow_new && held_outer);
             // Reassigning a value to an existing readonly variable is an error.
             // bash tags the diagnostic with the invoking builtin's name
-            // (`declare: y: readonly variable`, `local: …`, `typeset: …`).
+            // (`declare: y: readonly variable`, `local: …`, `typeset: …`) and
+            // quotes the operand as *written* — the refusal comes from the
+            // binding, which is handed the word. The other two readonly refusals
+            // below come from lookups on the resolved name and quote that
+            // instead, so `readonly t; declare -n r=t` gives `declare r=9` →
+            // `r: readonly variable` but `declare +r r` → `t: readonly variable`.
             if value.is_some() && readonly_blocks {
-                self.perrln(&format!("{tag}: {base_name}: readonly variable"));
+                self.perrln(&format!("{tag}: {operand_name}: readonly variable"));
                 status = 1;
                 continue;
             }
@@ -22687,6 +22692,14 @@ impl Shell {
             // not a conversion), while a same-scope `declare -A` on an existing
             // indexed array is still rejected.
             let kind_conflict = self.array_kind_conflict(base_name, assoc, indexed);
+            // Whether the name was *already* an associative array when the
+            // command arrived, which is what decides the name the `-aA`
+            // self-conflict below quotes. bash refuses in two places: against a
+            // variable it found (quoting the operand as written) and against one
+            // it has just created (quoting the variable, i.e. the target a
+            // reference led to). They spell the refusal identically, so only the
+            // name tells them apart. See the refusal for the measurements.
+            let was_assoc = self.assoc.contains_key(base_name);
             // The kind this command asks for goes on before the `+a`/`+A`
             // refusal below, because bash's own refusal comes from the variable
             // it has already created: `declare -a +a fresh` really does leave
@@ -22733,8 +22746,15 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // The conversion refusal quotes the operand as *written* too, like
+            // the destroy one above — but the self-conflict just below does not,
+            // even though it is spelled the same way: that one is raised against
+            // the array the command has by then already made, which is the
+            // target's (`declare -n r=t; declare -aA r` reports `t`).
             if let Some((from_kind, to_kind)) = kind_conflict {
-                self.perrln(&format!("{tag}: {base_name}: cannot convert {from_kind} to {to_kind} array"));
+                self.perrln(&format!(
+                    "{tag}: {operand_name}: cannot convert {from_kind} to {to_kind} array"
+                ));
                 status = 1;
                 continue;
             }
@@ -22745,9 +22765,18 @@ impl Shell {
             // the array just made. The operand is abandoned there, so neither
             // its value nor any of its attributes land: `declare -aA -l s=AB`
             // gives an unfolded, empty `declare -A s=()`.
+            //
+            // Which name it quotes depends on whether the array was already
+            // there: with `declare -n r=t`, `declare -A t; declare -aA r`
+            // reports `r` while `declare -aA r` on an unset `t` reports `t`,
+            // because the second refusal is raised against the array this very
+            // command made. (The compound path always reports the operand as
+            // written — its literal binds during word expansion, so the array is
+            // always one the builtin *found*.)
             if assoc && indexed && !print_mode {
+                let named = if was_assoc { operand_name } else { base_name };
                 self.perrln(&format!(
-                    "{tag}: {base_name}: cannot convert associative to indexed array"
+                    "{tag}: {named}: cannot convert associative to indexed array"
                 ));
                 // As in the `cannot destroy` refusal above, an operand that
                 // carried a value still leaves the array *valued*, so
@@ -44884,6 +44913,41 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "osh: declare: r: cannot destroy array variables in this way\n\
              declare -a t=([0]=\"z\")\ndeclare -n r=\"t\"\n"
         );
+        // A *scalar* operand's refusals split the same way. Raised against the
+        // word the command was handed:
+        for (src, want) in [
+            ("readonly t=1; declare -n r=t; declare r=9", "declare: r: readonly variable\n"),
+            (
+                "declare -A t=([k]=v); declare -n r=t; declare -a r=z",
+                "declare: r: cannot convert associative to indexed array\n",
+            ),
+            (
+                "declare -a t=(1); declare -n r=t; declare +a r",
+                "declare: r: cannot destroy array variables in this way\n",
+            ),
+            // Raised against the resolved name instead:
+            (
+                "readonly t=1; declare -n r=t; declare +r r",
+                "declare: t: readonly variable\n",
+            ),
+            // The `-aA` self-conflict names whichever of the two the array it
+            // refuses belongs to: one the command *found* is the operand's…
+            (
+                "declare -A t; declare -n r=t; declare -aA r",
+                "declare: r: cannot convert associative to indexed array\n",
+            ),
+            // …and one this very command made is the target's.
+            (
+                "declare -n r=t; declare -aA r",
+                "declare: t: cannot convert associative to indexed array\n",
+            ),
+        ] {
+            assert_eq!(
+                run(&format!("{{ {src}; }} 2>&1")).0,
+                format!("osh: {want}"),
+                "{src}"
+            );
+        }
         // A local binding does not follow a *global* reference: the frame is
         // about to make its own array of that name, so it merely shadows it.
         assert_eq!(

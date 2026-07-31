@@ -9829,6 +9829,53 @@ not a set of processes.
 already reports the last stage's status. Kept out of
 `tests/corpus/kill-dispositions.sh`, which signals only single-process jobs.
 
+### TD-OILS-JOB-SWEEP-LINE. A dead job that has been reported leaves osh's job table one operation later than bash's — OPEN 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::cleanup_dead_jobs` and its
+call sites (`Shell::builtin_jobs`, `Shell::notify_signalled_jobs`), against the
+read-eval loop in `Shell::run_source_flow_out`.
+
+**What.** bash sweeps jobs that are both finished and already reported at the
+boundary between **top-level commands read from the script**, not between the
+commands of one list. osh sweeps only when `jobs` or a signal announcement next
+looks at the table. So a reported dead job outlives its bash counterpart by one
+line:
+
+```sh
+true & sleep 0.3
+jobs                    # both: [1]+  Done   true
+jobs %1; echo "rc=$?"   # bash: jobs: %1: no such job / rc=1
+                        # osh : [1]+  Done   true          / rc=0
+```
+
+On one line (`true & sleep 0.3; jobs; jobs %1`) the two agree — bash does not
+sweep between `;`-separated commands either. A dead job that was never
+*reported* survives the line boundary in both.
+
+Newly visible through `compgen -A job`, which since 2026-07-31 reads the same
+table (`Shell::compgen_job_names`); before that only `jobs`/`wait` could see the
+extra row, and both sweep on entry, which hid it.
+
+**Proper fix.** Sweep reported dead jobs at the top-level command boundary, the
+way bash does — one `cleanup_dead_jobs()` per iteration of
+`run_source_flow_out`'s loop, whose unit *is* one logical line, replacing the
+on-demand sweeps. Needs care: `jobs-lifetime.sh`,
+`jobs-spec.sh` and `jobs-wait.sh` all pin the current timing, and bash's own
+behaviour past the sweep is not self-consistent (see below), so each corpus
+expectation has to be re-measured rather than assumed.
+
+**Also measured, and deliberately *not* to be copied.** bash's table is left
+inconsistent by a bare `wait`: after `sleep & cat /dev/null & wait`, a following
+`compgen -A job` still answers `cat` but not `sleep` — the older slot was
+cleared and the newer one was not. That is a bash artefact of `js.j_lastj` not
+tracking the deletions, not a rule; osh answers nothing, which is what the table
+actually holds. The fix above should not chase it.
+
+**Impact.** Narrow, and only across a line boundary: a script that lists a
+finished job and then names it again on the next line gets an answer from osh
+where bash reports `no such job`. `compgen-job.sh` steers clear of the region on
+purpose.
+
 ### TD-OILS-KILL-PGRP. osh has no notion of a process group, so `kill 0` and a negative pid do not reach one — OPEN 2026-07-27
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::kill_one`.

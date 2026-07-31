@@ -23563,9 +23563,11 @@ impl Shell {
     /// [`Shell::compgen_function_matches`] and
     /// [`Shell::compgen_command_matches`]) — which, as in bash, are run but
     /// warned about, since outside a completion they see an empty command line.
-    /// The actions that need a host database or a live line editor
-    /// (user/group/job/service) are parsed-and-ignored so scripts that pass them
-    /// still run without error.
+    /// The job actions (`-j`/`-A job`, `-A running`, `-A stopped`) read the
+    /// shell's own job table — see [`Shell::compgen_job_names`]. The actions
+    /// that need a host database or a live line editor
+    /// (user/group/hostname/service/binding) are parsed-and-ignored so scripts
+    /// that pass them still run without error.
     ///
     /// Options are read the way bash reads them: clustered, with an
     /// argument-taking letter swallowing the rest of its cluster (`-Wab`,
@@ -23794,8 +23796,13 @@ impl Shell {
                 }
                 "file" => cands.extend(self.compgen_paths(&word, false)),
                 "directory" => cands.extend(self.compgen_paths(&word, true)),
-                // binding/group/hostname/job/running/service/stopped/user need
-                // either a live readline or a host database osh has neither of.
+                // The three job actions, newest job first (see
+                // [`Shell::compgen_job_names`]).
+                "job" => cands.extend(self.compgen_job_names(None)),
+                "running" => cands.extend(self.compgen_job_names(Some(JobState::Running))),
+                "stopped" => cands.extend(self.compgen_job_names(Some(JobState::Stopped))),
+                // binding/group/hostname/service/user need either a live
+                // readline or a host database osh has neither of.
                 _ => {}
             }
         }
@@ -23898,6 +23905,37 @@ impl Shell {
         let write_status = self.write_bytes(out, redir, &result);
         // bash: status 1 when no candidates were produced, else the write status.
         if empty { 1 } else { write_status }
+    }
+
+    /// The job names the `job`, `running` and `stopped` actions offer.
+    ///
+    /// bash walks the job table **backwards**, so the newest job is offered
+    /// first, and keeps only the first space-delimited word of each job's
+    /// command text: `cat /dev/null | sleep 7 &` offers `cat`, `{ sleep 6; } &`
+    /// offers `{`, and an `if …` job offers `if`. Nothing is deduplicated —
+    /// two `sleep` jobs are two `sleep` candidates.
+    ///
+    /// `job` offers every job the table still holds, finished ones included: a
+    /// job that has exited but not yet been swept is still a completion, so
+    /// what is on offer follows the table's own lifetime rules — where osh and
+    /// bash part company by one command boundary, which is
+    /// TD-OILS-JOB-SWEEP-LINE rather than anything this generator decides.
+    /// `running` and `stopped` narrow by state; osh has no stopped jobs (no
+    /// terminal job control — TD-OILS13), so `stopped` never offers anything.
+    fn compgen_job_names(&mut self, state: Option<JobState>) -> Vec<Str> {
+        // The state has to be current for `running` to be right, and reaping is
+        // the only way osh learns one — the same reason `jobs` polls first.
+        self.poll_jobs();
+        self.jobs
+            .iter()
+            .rev()
+            .filter(|j| match state {
+                None => true,
+                Some(JobState::Running) => j.status.is_none(),
+                Some(JobState::Stopped) => false,
+            })
+            .map(|j| j.cmd.split(|b| *b == b' ').next().map_or_else(Vec::new, <[u8]>::to_vec))
+            .collect()
     }
 
     /// The matches a completion *function* offers — `compgen -F NAME word`.
@@ -37685,6 +37723,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("compgen -C 'printf \"keep\\ndrop\\n\"' -X 'drop' -P '<' q 2>/dev/null").0,
             "<keep\n"
         );
+    }
+
+    #[test]
+    fn compgen_job_actions_read_the_job_table() {
+        // Newest job first, and only the first space-delimited word of each
+        // job's command line — so a pipeline offers its first command and a
+        // group its brace. Nothing is deduplicated.
+        assert_eq!(
+            run("sleep 0.4 & { sleep 0.4; } & true | sleep 0.4 & compgen -A job").0,
+            "true\n{\nsleep\n"
+        );
+        // `-j` is the same action by its shortcut letter, and the word narrows
+        // the answer as it does for every other action.
+        assert_eq!(run("sleep 0.4 & true & compgen -j s").0, "sleep\n");
+        assert_eq!(run("sleep 0.4 & compgen -j x"), (String::new(), 1));
+        // `running` drops a job that has already finished; `job` keeps it,
+        // because a job stays in the table until something sweeps it.
+        assert_eq!(run("true & sleep 0.3; compgen -A job").0, "true\n");
+        assert_eq!(run("true & sleep 0.3; compgen -A running"), (String::new(), 1));
+        // osh has no stopped jobs, so that action never answers anything.
+        assert_eq!(run("sleep 0.4 & compgen -A stopped"), (String::new(), 1));
+        // With no jobs at all there is nothing to offer.
+        assert_eq!(run("compgen -A job"), (String::new(), 1));
     }
 
     #[test]

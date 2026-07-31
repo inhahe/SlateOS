@@ -14744,17 +14744,17 @@ impl Shell {
                 } else if lead.contains(&b'p') {
                     self.declare_print(args, out, redir)
                 } else {
-                    // `declare -A` / `-a` / `-i` / `-x` / `-r` / `-n` / `-l` /
-                    // `-u` with NO name operands is a *listing* filtered by those
-                    // attributes (bash), not a declaration. With names, or with no
-                    // attribute flags at all, fall through to declare/assign.
+                    // An attribute flag with NO name operands is a *listing*
+                    // filtered by those attributes (bash), not a declaration.
+                    // With names, or with no attribute flag at all, fall through
+                    // to declare/assign. The same parse decides which flags a
+                    // listing then filters *by*, so both use `listing_flags` —
+                    // a second copy of the letter list here is how `-c` came to
+                    // route to a declaration that declared nothing.
                     let start = Self::declare_flag_end(args);
                     let has_names = args.get(start).is_some();
-                    let has_attr = args[..start].iter().any(|a| {
-                        a.iter().any(|c| {
-                            matches!(c, b'A' | b'a' | b'i' | b'x' | b'r' | b'n' | b'l' | b'u')
-                        })
-                    });
+                    let has_attr =
+                        !Self::listing_flags(args.get(..start).unwrap_or_default()).is_empty();
                     if !has_names && has_attr {
                         self.declare_list_filtered(args, out, redir)
                     } else {
@@ -19248,7 +19248,14 @@ impl Shell {
             if unexport {
                 return 0;
             }
-            return self.export_list(out, redir);
+            let mut want: Vec<char> = Vec::new();
+            if indexed {
+                want.push('a');
+            }
+            if assoc {
+                want.push('A');
+            }
+            return self.export_list(&want, out, redir);
         }
         let _ = print; // `-p` with operands behaves like plain `export`.
         let mut status = 0;
@@ -19313,8 +19320,18 @@ impl Shell {
     /// a set variable prints as `declare -x NAME="value"` (with any other
     /// attributes, e.g. `-rx` for readonly), and an exported-but-unset name
     /// prints as the bare `declare -x NAME`.
-    fn export_list(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
-        let mut names: Vec<String> = self.exported.iter().cloned().collect();
+    ///
+    /// `want` carries the call's `a`/`A` flags, which restrict the listing to
+    /// arrays of that kind — bash reaches `declare`'s listing here, so
+    /// `export -a` means "the exported indexed arrays", not "everything
+    /// exported". See [`Shell::listing_kind_admits`].
+    fn export_list(&mut self, want: &[char], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut names: Vec<String> = self
+            .exported
+            .iter()
+            .filter(|n| self.listing_kind_admits(n, want))
+            .cloned()
+            .collect();
         names.sort();
         names.dedup();
         let mut listing = Str::new();
@@ -19499,29 +19516,28 @@ impl Shell {
         i
     }
 
-    /// `declare -A`/`-a`/`-i`/`-x`/`-r`/`-n`/`-l`/`-u` with no name operands:
-    /// list every variable that carries **at least one** of the requested
-    /// attributes (bash's union semantics — `declare -ir` lists integer *or*
-    /// readonly variables), sorted by name, in re-inputtable `declare -FLAGS
-    /// name="value"` form. Internal bash-only arrays (`BASH_ALIASES`, etc.) are
-    /// not modelled, so they simply don't appear.
-    fn declare_list_filtered(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
-        let start = Self::declare_flag_end(args);
-        let mut want: Vec<char> = Vec::new();
-        for a in &args[..start] {
-            // Read a byte at a time; every attribute letter is ASCII, so a byte
-            // that is not one selects no attribute.
-            for &b in a.iter() {
-                let c = char::from(b);
-                if matches!(c, 'A' | 'a' | 'i' | 'x' | 'r' | 'n' | 'l' | 'u') && !want.contains(&c) {
-                    want.push(c);
-                }
-            }
-        }
+    /// The names a flag-filtered listing covers, sorted, given the attribute
+    /// letters the caller parsed.
+    ///
+    /// bash treats the two groups of letters differently, and the difference is
+    /// observable:
+    ///
+    /// * `a`/`A` are **type restrictions**, applied conjunctively. `declare -a`
+    ///   lists the indexed arrays; `declare -aA` lists nothing at all, since no
+    ///   name is both kinds at once.
+    /// * every other letter is an **attribute**, and those union among
+    ///   themselves — `declare -ir` lists the integer variables *or* the
+    ///   readonly ones.
+    ///
+    /// The two combine as restriction-then-union, so `declare -ax` is "the
+    /// indexed arrays that are exported" (not "everything indexed or exported"):
+    /// with `plain=(1)`, `earr` exported-and-array, and `foo` an exported
+    /// scalar, bash lists only `earr`. A listing with a restriction but no
+    /// attribute letter keeps everything the restriction admits.
+    fn listing_names(&self, want: &[char]) -> Vec<String> {
+        let attrs: Vec<char> = want.iter().copied().filter(|c| !matches!(c, 'a' | 'A')).collect();
         let has_attr = |sh: &Shell, name: &str| {
-            want.iter().any(|&c| match c {
-                'A' => sh.assoc.contains_key(name),
-                'a' => sh.arrays.contains_key(name),
+            attrs.iter().any(|&c| match c {
                 'i' => sh.integer_attr.contains(name),
                 'x' => sh.exported.contains(name),
                 'r' => sh.readonly.contains(name),
@@ -19532,11 +19548,53 @@ impl Shell {
                 _ => false,
             })
         };
-        let names: Vec<String> = self
-            .declare_p_names()
+        self.declare_p_names()
             .into_iter()
-            .filter(|n| has_attr(self, n))
-            .collect();
+            .filter(|n| self.listing_kind_admits(n, want))
+            .filter(|n| attrs.is_empty() || has_attr(self, n))
+            .collect()
+    }
+
+    /// Whether the `a`/`A` **type restrictions** among `want` admit `name`.
+    ///
+    /// Conjunctive, and vacuously true when neither letter is present: `-a`
+    /// keeps only indexed arrays, `-A` only associative ones, and `-aA` keeps
+    /// nothing, since no name is both kinds at once. Shared by every listing
+    /// that takes these flags — `declare`, `export` and `readonly` — because in
+    /// bash they are one code path and must not drift apart.
+    fn listing_kind_admits(&self, name: &str, want: &[char]) -> bool {
+        (!want.contains(&'a') || self.arrays.contains_key(name))
+            && (!want.contains(&'A') || self.assoc.contains_key(name))
+    }
+
+    /// The attribute letters a listing call's leading flag words select, in
+    /// first-seen order and without duplicates.
+    fn listing_flags(args: &[Str]) -> Vec<char> {
+        let mut want: Vec<char> = Vec::new();
+        for a in args {
+            // Read a byte at a time; every attribute letter is ASCII, so a byte
+            // that is not one selects no attribute.
+            for &b in a.iter() {
+                let c = char::from(b);
+                if matches!(c, 'A' | 'a' | 'i' | 'x' | 'r' | 'n' | 'l' | 'u' | 'c')
+                    && !want.contains(&c)
+                {
+                    want.push(c);
+                }
+            }
+        }
+        want
+    }
+
+    /// `declare -A`/`-a`/`-i`/`-x`/`-r`/`-n`/`-l`/`-u` with no name operands:
+    /// list the variables the flags select (see [`Shell::listing_names`] for how
+    /// the letters combine), sorted by name, in re-inputtable `declare -FLAGS
+    /// name="value"` form. Internal bash-only arrays (`BASH_ALIASES`, etc.) are
+    /// not modelled, so they simply don't appear.
+    fn declare_list_filtered(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let start = Self::declare_flag_end(args);
+        let want = Self::listing_flags(args.get(..start).unwrap_or_default());
+        let names = self.listing_names(&want);
         let mut listing = Str::new();
         for name in &names {
             if let Some(def) = self.format_declare_def(name) {
@@ -20718,7 +20776,21 @@ impl Shell {
         // the one that answers about the names it is given.)
         let _ = print_only;
         if names.is_empty() {
-            let mut ro: Vec<String> = self.readonly.iter().cloned().collect();
+            // `-a`/`-A` restrict the listing to arrays of that kind, exactly as
+            // in `declare` and `export` — see `Shell::listing_kind_admits`.
+            let mut want: Vec<char> = Vec::new();
+            if indexed {
+                want.push('a');
+            }
+            if assoc {
+                want.push('A');
+            }
+            let mut ro: Vec<String> = self
+                .readonly
+                .iter()
+                .filter(|n| self.listing_kind_admits(n, &want))
+                .cloned()
+                .collect();
             ro.sort();
             let mut listing = Str::new();
             for name in &ro {
@@ -39963,6 +40035,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (out, st) = run("export -Z x 2>&1");
         assert_eq!(st, 2);
         assert!(out.contains("export: -Z: invalid option"), "{out:?}");
+    }
+
+    #[test]
+    fn a_kind_flag_restricts_a_listing_rather_than_widening_it() {
+        // `a`/`A` are type *restrictions*, applied conjunctively, while the
+        // other attribute letters union among themselves. So `declare -ax` is
+        // "the indexed arrays that are exported" — osh unioned all the letters
+        // together and listed every array *or* exported name instead.
+        let setup = "declare -a plain=(1); declare -ax earr=(2); foo=1; export foo;\
+                     declare -ai iarr=(9); declare -i n=3; declare -A aa=([k]=v);";
+        assert_eq!(
+            run(&format!("{setup} declare -ax")).0,
+            "declare -ax earr=([0]=\"2\")\n"
+        );
+        assert_eq!(
+            run(&format!("{setup} declare -ai")).0,
+            "declare -ai iarr=([0]=\"9\")\n"
+        );
+        // No name is both kinds at once, so the two restrictions together admit
+        // nothing — where a union would have listed every array of either kind.
+        assert_eq!(run(&format!("{setup} declare -aA")).0, "");
+        // Attribute letters with no restriction still union: an integer-only
+        // and a readonly-only name both appear. (Asserted by containment, not
+        // equality — the shell's own readonly/integer variables such as
+        // `SHELLOPTS` and `UID` are in this listing too, as they are in bash's.)
+        let ir = run("declare -i n=1; declare -r r=2; declare -ir").0;
+        assert!(ir.contains("declare -i n=\"1\"\n"), "{ir:?}");
+        assert!(ir.contains("declare -r r=\"2\"\n"), "{ir:?}");
+        // `export`/`readonly` reach the same listing in bash, so they restrict
+        // the same way rather than ignoring the flag.
+        assert_eq!(
+            run("declare -ax e=(2); foo=1; export foo; export -a").0,
+            "declare -ax e=([0]=\"2\")\n"
+        );
+        // Containment again: `BASH_VERSINFO` is a readonly indexed array, so it
+        // belongs in this listing — bash lists it here too. What matters is
+        // that the readonly *scalar* `rs` does not appear.
+        let ro = run("declare -ar ra=(3); readonly rs=4; readonly -a").0;
+        assert!(ro.contains("declare -ar ra=([0]=\"3\")\n"), "{ro:?}");
+        assert!(!ro.contains("rs"), "{ro:?}");
+        assert_eq!(
+            run("declare -Ax m=([k]=v); foo=1; export foo; export -A").0,
+            "declare -Ax m=([k]=\"v\" )\n"
+        );
+    }
+
+    #[test]
+    fn declare_c_lists_the_capcase_variables() {
+        // `-c` was missing from both copies of the listing letter set, so it
+        // routed to a declaration that declared nothing and printed nothing.
+        // The two copies are now one helper, which is what kept them in sync.
+        assert_eq!(
+            run("declare -c cv=abc; declare -l lv=ABC; declare -c").0,
+            "declare -c cv=\"Abc\"\n"
+        );
+        assert_eq!(
+            run("declare -c cv=abc; declare -l lv=ABC; declare -l").0,
+            "declare -l lv=\"abc\"\n"
+        );
     }
 
     #[test]

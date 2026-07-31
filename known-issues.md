@@ -777,7 +777,7 @@ present in the current frame as a scalar, insert it into `array_valued` after
 creating the (empty) array. Needs a probe first to confirm bash's behaviour when
 the earlier `local` had no value at all (`local x; local -a x`).
 
-### TD-OILS-EXPORT-ARRAY-FLAG. `export -a` is accepted by bash and rejected by osh — 2026-07-30 — ✅ RESOLVED 2026-07-30 (see TD-OILS-DECL-LIST-KIND-FILTER for the listing half, split out)
+### TD-OILS-EXPORT-ARRAY-FLAG. `export -a` is accepted by bash and rejected by osh — 2026-07-30 — ✅ RESOLVED 2026-07-30 (listing half split out as TD-OILS-DECL-LIST-KIND-FILTER, also resolved)
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_export`'s option parsing.
 
@@ -820,35 +820,55 @@ name=value` already used, which is also what makes `-a` implementable
 (`array_kind_apply` would otherwise leave an empty array beside a live scalar).
 Covered by `export_assigns_through_the_array_aware_store`.
 
-### TD-OILS-DECL-LIST-KIND-FILTER. `export -a` / `readonly -a` with no operands should list only arrays; osh lists everything — 2026-07-30 — OPEN (low priority)
+### TD-OILS-DECL-LIST-KIND-FILTER. A listing's `-a`/`-A` is a type *restriction*, not another term in the attribute union — 2026-07-30 — ✅ RESOLVED 2026-07-30
 
-**Where:** `userspace/oils/src/interp.rs` — `Shell::export_list`, and
-`builtin_readonly`'s nameless path (the `if names.is_empty()` branch), neither of
-which is told which flags were parsed.
+**Where:** `userspace/oils/src/interp.rs` — `declare_list_filtered`, the routing
+gate above it in the `declare` arm, `Shell::export_list`, and
+`builtin_readonly`'s nameless path.
 
-**What.** With no operands, bash's `-a`/`-A` *filter the listing* rather than
-being ignored — the `declare -a` rule, which these builtins share a code path
-with in bash. Measured on 5.2.37:
+**What.** Split out of TD-OILS-EXPORT-ARRAY-FLAG, which noticed only that
+`export -a` with no operands ignored the flag. Investigating it turned up the
+real, larger rule — and a worse instance of it in `declare`.
 
-```
-$ declare -ax arr=(1 2); foo=1; export foo
-$ export -a          # only the exported indexed arrays
-declare -ax arr=([0]="1" [1]="2")
-$ export             # everything exported
-declare -ax arr=([0]="1" [1]="2")
-declare -x foo="1"
-```
+bash sorts the listing letters into two groups that combine differently:
 
-`export -A` likewise lists only exported associative arrays, and `readonly -a` /
-`readonly -A` filter the readonly listing the same way. osh prints the full
-listing in every case, so the flag is silently a no-op there.
+* `a`/`A` are **type restrictions**, applied conjunctively;
+* every other letter is an **attribute**, and those union among themselves.
 
-**Proper fix.** Give both listing paths the parsed `assoc`/`indexed` pair and
-skip a name whose kind does not match (`self.arrays` / `self.assoc` membership).
-Worth doing together with the same filter for `declare -a` with no names if that
-one is also unfiltered — check before starting, since a shared helper is the
-right shape if all four sites need it. Split out of TD-OILS-EXPORT-ARRAY-FLAG,
-whose operand half is resolved.
+`declare_list_filtered` unioned all of them together, so a restriction *widened*
+the listing instead of narrowing it. Measured against 5.2.37 with
+`plain=(1)`, `earr` exported-and-array, `foo` an exported scalar:
+
+| call | bash | osh (before) |
+|---|---|---|
+| `declare -ax` | `earr` only | `earr`, `plain`, `foo`, *and the whole environment* |
+| `declare -ai` | the arrays that are integer | every array **or** integer name |
+| `declare -aA` | nothing — no name is both kinds | every array of either kind |
+| `declare -ir` | union: integer **or** readonly | same (this half was right) |
+
+`export -a` / `export -A` / `readonly -a` / `readonly -A` are the same rule seen
+through builtins that pin one attribute letter: `export -a` is "the indexed
+arrays that are exported". Those three listing paths ignored the flag entirely.
+
+**Fixed 2026-07-30.** The rule is now one helper, `Shell::listing_kind_admits`,
+used by all four listing paths — `declare_list_filtered` applies it before the
+attribute union, and `export_list` and `readonly`'s nameless path apply it to
+their own name sets. `listing_names` carries the restriction-then-union model
+and `listing_flags` parses the letters once.
+
+**A third bug fell out of the same de-duplication.** The listing letter set was
+written out twice — once in the `declare` arm's routing gate, once in
+`declare_list_filtered` — and *both* copies omitted `c`. So `declare -c` with no
+names routed to a declaration that declared nothing and printed nothing, where
+bash lists the capcase variables (`declare -c cv="Abc"`). The dead `'c'` arm
+already sitting in the attribute match was the giveaway. Both copies are now
+`listing_flags`, so they cannot drift again.
+
+Covered by `a_kind_flag_restricts_a_listing_rather_than_widening_it` (all four
+paths, plus the union case and the empty `-aA`) and
+`declare_c_lists_the_capcase_variables`. Note the two containment-rather-than-
+equality assertions: the shell's own `SHELLOPTS`/`UID`/`BASH_VERSINFO` belong in
+an unrestricted union listing and in `readonly -a`, exactly as they do in bash's.
 
 ### TD-OILS-DECL-COMPOUND-DISCARD-LEAK. A failed expansion in a declaration builtin's array operand discards the *next* command too — 2026-07-30 — ✅ RESOLVED 2026-07-30
 

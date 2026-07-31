@@ -5509,37 +5509,63 @@ arguably more useful and is self-consistent.
 port bash's `hash.c` hash function and bucket iteration for `self.assoc`.
 Not worth it absent a concrete need.
 
-### TD-OILS-NOASSIGN-VARS. bash's six unassignable variables can be clobbered in `osh` — 2026-07-31
+### TD-OILS-NOASSIGN-VARS. bash's six unassignable variables can be clobbered in `osh` — 2026-07-31 — mostly fixed 2026-07-31, the builtin write paths remain
 
-**Where:** `userspace/oils/src/interp.rs` — the assignment paths
-(`scalar_write_checked`, the compound-assignment/`declare` paths), which
-today know only about `self.readonly`.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::noassign` (seeded from
+`NOASSIGN_VARS`), checked in `apply_assignment`, `scalar_write_checked`
+and `exec_for`; `NOUNSET_VARS` in `builtin_unset`.
 
 **What:** bash gives `FUNCNAME`, `GROUPS`, `BASH_SOURCE`, `BASH_LINENO`,
-`BASH_ARGC` and `BASH_ARGV` the `att_noassign` attribute. Measured
+`BASH_ARGC` and `BASH_ARGV` the `att_noassign` attribute, and the last
+four `att_nounset` besides. `DIRSTACK` and `COMP_WORDBREAKS` look like
+they belong and do not — both are freely assignable in bash. Measured
 against bash 5.2.37 (MSYS):
 
-| form | bash | osh |
-|---|---|---|
-| `GROUPS=5`, `GROUPS[0]=5`, `read GROUPS`, `for GROUPS in …` | silently ignored, status 0, value unchanged | assigns |
-| `GROUPS=(1 2)`, `GROUPS+=(1)` | silently fails, status 1, **aborts the rest of the parsed command list** (`GROUPS=(1); echo after` prints nothing; `GROUPS=(1)⏎echo after` prints `after=1` — the same abort osh already reproduces for `readonly x=1; x=2`) | assigns |
-| `declare GROUPS=…` at top level | status 1, silent, value unchanged | assigns |
-| `declare`/`local GROUPS=…` inside a function | `<tag>: GROUPS: variable may not be assigned value` on stderr, non-fatal; the compound form emits it twice, once tagged with the enclosing function name and once with the builtin | assigns |
-| `unset GROUPS` | succeeds and the name loses the attribute permanently — a later `GROUPS=(1 2)` makes an ordinary array | already matches (nothing to lose) |
+| form | bash | osh before | osh now |
+|---|---|---|---|
+| `GROUPS=5`, `GROUPS[0]=5`, `GROUPS+=x` | silently ignored, status 0 | assigns | ✅ |
+| `GROUPS=(1 2)`, `GROUPS+=(1)` | silently fails, status 1, **abandons the rest of the parse unit** (`GROUPS=(1); echo after` prints nothing; the same two on separate lines print `after=1` — the abort osh already had for `readonly x=1; x=2`) | assigns | ✅ |
+| `read GROUPS`, `for GROUPS in a b` | silently fails, status 1; the loop body never runs, but an *empty* list is still success | assigns | ✅ |
+| `set -x; GROUPS=5` | traces `+ GROUPS=5` and then ignores it | — | ✅ |
+| `unset FUNCNAME` / `unset GROUPS` | succeeds; the name sheds the attribute and a later `FUNCNAME=(1 2)` makes an ordinary array | unset a *function* by that name (the variable holds no value outside a call, so it never looked like one) | ✅ |
+| `unset BASH_SOURCE`/`BASH_LINENO`/`BASH_ARGC`/`BASH_ARGV` | `unset: NAME: cannot unset`, status 1, no abort | unsets | ✅ |
+| `printf -v GROUPS x`, `mapfile GROUPS`, `read -a GROUPS` | status 1, value unchanged | assigns | ❌ still assigns |
+| `(( GROUPS = 5 ))`, `let GROUPS=7` | status 1, value unchanged, silent; in a *word* (`echo $(( GROUPS = 5 ))`) it abandons the parse unit like any fatal arithmetic error | assigns | ❌ still assigns |
+| `declare GROUPS=…` at top level | status 1, silent, unchanged | assigns | ❌ still assigns |
+| `declare GROUPS=(…)` at top level, `export GROUPS=(…)` | abandons the parse unit, silent | assigns | ❌ still assigns |
+| `declare`/`local GROUPS=…` **creating a local** | `<tag>: GROUPS: variable may not be assigned value`, status 1, no abort; the compound form emits it *twice*, once tagged with the enclosing function name and once with the builtin | assigns | ❌ still assigns |
+| `declare -g GROUPS=(…)` / `export GROUPS=(…)` inside a function | silently succeeds, status 0, unchanged | assigns | ❌ still assigns |
 
-`DIRSTACK` and `COMP_WORDBREAKS` are *not* in the family: both are
-freely assignable in bash.
+**Why it matters:** five of the six are osh's own materialised state (the
+call-stack views and the extended-debugging argument stack), so a script
+that assigns to one corrupts the shell's bookkeeping rather than merely
+disagreeing with bash.
 
-**Why it matters:** the four `BASH_*` names and `FUNCNAME` are osh's own
-materialised call-stack state, so a script that assigns to one corrupts
-the shell's bookkeeping rather than merely disagreeing with bash.
+**Fixed 2026-07-31:** `noassign: HashSet<String>` on `Shell`, seeded from
+`NOASSIGN_VARS`, cloned into subshells and dropped per-name by
+`unbind_var`. `apply_assignment` refuses after the `set -x` trace —
+returning success for a scalar and failure for an array literal, which
+routes the latter into the existing readonly-abort path with no
+diagnostic; `scalar_write_checked` refuses silently, which is where
+`read` gets its status 1; `exec_for` mirrors its own readonly guard.
+`builtin_unset` gained the `cannot unset` refusal and now recognises a
+`noassign` name as a *variable* even when it holds no value. Corpus case
+`noassign-vars.sh`; unit test
+`the_variables_the_shell_maintains_refuse_assignment`.
 
-**Proper fix:** a `noassign: HashSet<String>` on `Shell`, seeded with the
-six names and cleared per-name by `unset`, checked in the same places
-`readonly` is: scalar writes become silent no-ops, compound writes take
-the existing readonly-abort path with the message suppressed. The
-function-only `declare`/`local` diagnostics are the fiddliest part and
-can be a second step.
+**Still open (the ❌ rows):** the builtin write paths — `printf -v`,
+`mapfile`, `read -a`, arithmetic assignment, and the `declare`/`local`/
+`export` family. The first four want the same silent refusal pushed into
+the array-store and arithmetic-write choke points (arithmetic needs a
+*silent* `ArithError` variant, since `(( GROUPS=5 ))` prints nothing but
+still fails the expression). The `declare` family is the fiddly part and
+is worth weighing before copying: bash's own behaviour there is
+self-inconsistent — the same `declare NAME=(…)` abandons the parse unit
+at top level, prints two diagnostics when it would create a local, and
+silently succeeds under `-g` — because each case reaches a different
+internal path. Reproducing that accident faithfully may not be worth the
+bug risk; a coherent rule (refuse, status 1, diagnostic when a local
+would be created) plus a documented divergence is the likely answer.
 
 ### TD-OILS-MISSING-SPECIAL-ARRAYS. `osh` does not define some bash special array variables (`GROUPS`) — 2026-07-19 — ✅ RESOLVED 2026-07-31
 

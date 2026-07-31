@@ -192,6 +192,39 @@ fn reported_identity() -> (u32, u32) {
     (uid, euid)
 }
 
+/// The variables bash marks `att_noassign`: the shell maintains them, so a
+/// script's attempt to assign to one is not obeyed. Seeded into
+/// [`Shell::noassign`], where the exact (silent) refusal is described.
+///
+/// All six are shell bookkeeping rather than settings — the call-stack views
+/// (`FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO`) and the extended-debugging
+/// argument stack (`BASH_ARGC`, `BASH_ARGV`) are osh's own state, so a script
+/// that overwrote one would corrupt the shell rather than merely disagree with
+/// it, and `GROUPS` is the process's credential.
+///
+/// `DIRSTACK` and `COMP_WORDBREAKS` look like they belong here and do not:
+/// bash lets both be assigned (and acts on the result), which is measured, not
+/// assumed.
+const NOASSIGN_VARS: &[&str] = &[
+    "FUNCNAME",
+    "GROUPS",
+    "BASH_SOURCE",
+    "BASH_LINENO",
+    "BASH_ARGC",
+    "BASH_ARGV",
+];
+
+/// The variables bash additionally marks `att_nounset`: `unset` refuses them
+/// with `unset: NAME: cannot unset` and status 1 (and, unlike a failed
+/// assignment, does not abandon the rest of the parse unit).
+///
+/// A subset of [`NOASSIGN_VARS`], and the reason that list is not simply
+/// "things `unset` clears the attribute of": `unset FUNCNAME` and
+/// `unset GROUPS` succeed and leave ordinary names behind, while these four
+/// cannot be shed at all. No state is kept for it because none can change —
+/// the attribute is unreachable by any means the shell offers.
+const NOUNSET_VARS: &[&str] = &["BASH_SOURCE", "BASH_LINENO", "BASH_ARGC", "BASH_ARGV"];
+
 /// One numeric ID field — a `/etc/passwd` GID, an `OSH_GROUPS` entry — or
 /// `None` when it is not a plain non-negative decimal number.
 ///
@@ -2589,6 +2622,19 @@ pub struct Shell {
     /// readonly variable is an error; the shell reports it and leaves the value
     /// unchanged. Copied into subshell clones so the attribute is inherited.
     readonly: HashSet<String>,
+    /// Names that may not be assigned to — bash's `att_noassign`, carried by the
+    /// six variables the shell itself maintains ([`NOASSIGN_VARS`]).
+    ///
+    /// Unlike `readonly` this is *silent*: a scalar assignment (`GROUPS=5`,
+    /// `FUNCNAME[0]=x`) is simply not performed and succeeds anyway, and a
+    /// compound one (`GROUPS=(1 2)`) is not performed and fails, discarding the
+    /// rest of the parse unit exactly as a readonly rejection does but without a
+    /// diagnostic. Both are bash's, measured.
+    ///
+    /// Not a permanent property of the name: `unset GROUPS` drops the attribute
+    /// with every other one ([`Shell::unbind_var`]), after which the name is
+    /// ordinary and assignable. Copied into subshell clones, like the rest.
+    noassign: HashSet<String>,
     /// Function names marked `readonly -f` (`declare -fr`). A readonly function
     /// cannot be redefined or `unset -f`. Distinct from `readonly` (which tracks
     /// variables); copied into subshell clones so the attribute is inherited.
@@ -2988,6 +3034,7 @@ impl Shell {
             loop_depth: 0,
             declared: HashSet::new(),
             readonly: HashSet::new(),
+            noassign: NOASSIGN_VARS.iter().map(|n| (*n).to_string()).collect(),
             readonly_funcs: HashSet::new(),
             shopt: HashMap::new(),
             comp_specs: Vec::new(),
@@ -3118,6 +3165,9 @@ impl Shell {
                 .map(|(i, g)| (i, g.to_string().into_bytes()))
                 .collect();
             self.arrays.insert("GROUPS".to_string(), groups);
+            // Has-a-value, so `declare -p` renders `=()` rather than a bare
+            // `declare -a GROUPS` once `unset GROUPS[0]` has emptied it.
+            self.array_valued.insert("GROUPS".to_string());
         }
         // BASH_VERSINFO: (major, minor, patch, build, status, machtype). bash
         // marks it readonly; matching that guards scripts that probe the level.
@@ -5662,6 +5712,14 @@ impl Shell {
                 self.last_status = 1;
                 return Flow::Next;
             }
+            // A variable the shell maintains (`for GROUPS in a b`) is abandoned
+            // the same way, minus the diagnostic — see [`Shell::noassign`]. Like
+            // the readonly case this is discovered on the first *iteration*, so
+            // a loop over an empty list still succeeds.
+            if self.noassign.contains(&c.var) {
+                self.last_status = 1;
+                return Flow::Next;
+            }
             // Binding the loop variable is an assignment, so the name's
             // attributes apply (`declare -i n` evaluates each word, `declare -u`
             // folds its case), an existing array is written at element 0, and
@@ -7102,6 +7160,7 @@ impl Shell {
             loop_depth: 0,
             declared: self.declared.clone(),
             readonly: self.readonly.clone(),
+            noassign: self.noassign.clone(),
             readonly_funcs: self.readonly_funcs.clone(),
             shopt: self.shopt.clone(),
             // Completion specs are not propagated to subshells (bash parity).
@@ -7410,6 +7469,15 @@ impl Shell {
             self.perrln(&format!("{base}: readonly variable"));
             return false;
         }
+        // A variable the shell maintains refuses the write *silently* (see
+        // [`Shell::noassign`]) and the refusal is a failure, which is how every
+        // caller that writes through a variable name — `read`, a `for` loop's
+        // control variable, `printf -v`, `mapfile` — comes to report status 1
+        // for it, as bash does. The one write that reports *success* is the bare
+        // `NAME=value` command, which does not come through here.
+        if self.noassign.contains(dest.base()) {
+            return false;
+        }
         self.scalar_write_store(dest, val)
     }
 
@@ -7612,6 +7680,25 @@ impl Shell {
             self.perrln(&format!("{}: readonly variable", a.name));
             return false;
         }
+        // A variable the shell maintains (`GROUPS`, `FUNCNAME`, …) refuses the
+        // value *silently* — bash's `att_noassign`, see [`Shell::noassign`]. The
+        // two shapes part company on status alone: a scalar write is a no-op
+        // that succeeded (`GROUPS=5; echo $?` is 0), an array literal a no-op
+        // that failed, and failing here discards the rest of the parse unit
+        // exactly as a readonly rejection does — `GROUPS=(1); echo hi` prints
+        // nothing, while the same two on separate lines print `hi`.
+        //
+        // Checked after the `set -x` trace above, because bash traces the
+        // assignment it is about to ignore (`set -x; GROUPS=5` emits
+        // `+ GROUPS=5`), and after the readonly check, so a name that is
+        // somehow both still gets the louder diagnostic.
+        // …the array-literal half of it, anyway. The scalar half waits until
+        // after the value has been expanded and traced, below, because bash
+        // traces the assignment it is about to ignore (`set -x; GROUPS=5` emits
+        // `+ GROUPS=5`) and a scalar's trace carries its *expanded* value.
+        if self.noassign.contains(&a.name) && matches!(a.value, AssignRhs::Array(_)) {
+            return false;
+        }
         // `set -a` (allexport): any assigned variable is given the export
         // attribute automatically.
         if self.allexport {
@@ -7645,6 +7732,11 @@ impl Shell {
                     let op: &[u8] = if a.append { b"+=" } else { b"=" };
                     let line = bfmt![prefix, &a.name, op, xtrace_quote_value(&val), b"\n"];
                     self.emit_stderr(&line);
+                }
+                // The scalar half of the `noassign` refusal (see above): traced,
+                // then dropped on the floor, and the command succeeds anyway.
+                if self.noassign.contains(&a.name) {
+                    return true;
                 }
                 // `BASH_ARGV0=name` sets `$0` (the shell/script name used in
                 // diagnostics and `$0` expansion). It is dynamic — not stored in
@@ -22175,13 +22267,27 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // Nor can one of the four the shell can never do without
+            // ([`NOUNSET_VARS`]). This is a plain failure, not the parse-unit
+            // abort a *failed assignment* to the same name would be.
+            if NOUNSET_VARS.contains(&a.as_str()) {
+                self.perrln(&format!("unset: {a}: cannot unset"));
+                status = 1;
+                continue;
+            }
             // A name declared without a value is still a variable, and so still
             // takes precedence over a function of the same name: `declare f;
             // unset f` removes the (unset) variable and leaves `f()` callable.
+            //
+            // So is one the shell maintains: `FUNCNAME` holds no value outside a
+            // function, but `unset FUNCNAME` still means the *variable* — it
+            // sheds the attribute (see [`Shell::unbind_var`]) rather than
+            // looking for a function by that name.
             let is_var = self.vars.contains_key(a)
                 || self.arrays.contains_key(a)
                 || self.assoc.contains_key(a)
-                || self.declared.contains(a);
+                || self.declared.contains(a)
+                || self.noassign.contains(a);
             if !vars_only && !is_var {
                 // Not a set variable: fall back to unsetting a function.
                 if self.readonly_funcs.contains(a.as_bytes()) {
@@ -22220,6 +22326,10 @@ impl Shell {
         self.trace_attr.remove(name);
         self.array_valued.remove(name);
         self.declared.remove(name);
+        // Including the "shell maintains this" attribute: bash's `unset GROUPS`
+        // leaves an ordinary, assignable name behind, and a later `GROUPS=(1 2)`
+        // makes a plain array of it.
+        self.noassign.remove(name);
         // Unsetting `HOSTFILE` throws the hostname list away, rather than
         // leaving it to be added to — the one asymmetry in
         // [`Shell::compgen_hostnames`], and the reason it needs a hook here:
@@ -38635,6 +38745,48 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // An empty member field matches nobody, and neither does an empty name.
         assert_eq!(member(""), [] as [u32; 0]);
         assert!(group_ids_for_member(b"no/such/file/at/all", b"amy").is_empty());
+    }
+
+    /// The six variables the shell maintains refuse assignment *silently*, in
+    /// two shapes that differ only in status — and a failed one abandons the
+    /// rest of the parse unit, exactly as a readonly rejection does. See
+    /// [`Shell::noassign`]; the whole family is exercised against bash by the
+    /// `noassign-vars` corpus case.
+    #[test]
+    fn the_variables_the_shell_maintains_refuse_assignment() {
+        // Scalar: not performed, no diagnostic, and the command succeeds.
+        assert_eq!(run("GROUPS=5; echo $?").0, "0\n");
+        assert_eq!(run("GROUPS[0]=5; echo $?").0, "0\n");
+        assert_eq!(run("GROUPS+=x; echo $?").0, "0\n");
+        assert_eq!(run("f() { echo ${FUNCNAME[0]}; }; FUNCNAME=z; f").0, "f\n");
+        // Array literal: not performed either, but it fails — and the failure
+        // discards the rest of the parse unit, so the `echo` never runs.
+        for name in NOASSIGN_VARS {
+            let (out, st) = run(&format!("{name}=(1 2); echo reached"));
+            assert_eq!((out.as_str(), st), ("", 1), "{name}=(1 2)");
+            assert_eq!(run(&format!("{name}+=(1); echo reached")).0, "", "{name}+=(1)");
+        }
+        // A *following line* is a separate parse unit and still runs, which is
+        // what makes this a discard rather than an exit.
+        assert_eq!(run("GROUPS=(1)\necho after=$?").0, "after=1\n");
+        // Writing through the name from elsewhere fails, silently, with the
+        // status as the only sign: `read`, and a `for` loop's control variable
+        // (which gives up the loop on its first iteration, so an empty list is
+        // still a success).
+        assert_eq!(run("read FUNCNAME <<<hi; echo $?").0, "1\n");
+        assert_eq!(run("for FUNCNAME in a b; do echo body; done; echo $?").0, "1\n");
+        assert_eq!(run("for FUNCNAME in; do echo body; done; echo $?").0, "0\n");
+        // `unset` sheds the attribute along with the rest, leaving an ordinary
+        // name — for the two of the six that can be unset at all.
+        assert_eq!(run("unset FUNCNAME; FUNCNAME=(1 2); echo \"${FUNCNAME[*]}\"").0, "1 2\n");
+        assert_eq!(run("unset GROUPS; GROUPS=9; echo $GROUPS").0, "9\n");
+        for name in NOUNSET_VARS {
+            let (out, _) = run(&format!("unset {name} 2>&1; echo $?"));
+            assert!(
+                out.contains(&format!("unset: {name}: cannot unset\n")) && out.ends_with("1\n"),
+                "unset {name}: {out:?}"
+            );
+        }
     }
 
     /// The `OSH_GROUPS` override, the counterpart of `OSH_UID`/`OSH_EUID`.

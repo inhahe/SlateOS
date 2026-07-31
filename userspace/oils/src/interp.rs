@@ -19259,14 +19259,19 @@ impl Shell {
                     status = 1;
                     continue;
                 }
+                // Both halves go through the array-aware store, so an operand
+                // naming an existing array reaches element/key 0 — the same
+                // routing a bare `name=value` and `readonly name=value` follow.
+                // Writing `vars` directly instead would park the value in a slot
+                // no expansion of an array name ever reads, silently losing it.
                 let stored = if append {
-                    let mut cur = self.vars.get(&k).cloned().unwrap_or_default();
+                    let mut cur = self.scalar_store(&k).unwrap_or_default();
                     cur.extend_from_slice(&v);
                     cur
                 } else {
                     v
                 };
-                self.put_var(k.clone(), stored);
+                self.set_scalar_store(&k, stored);
                 if unexport {
                     self.exported.remove(&k);
                 } else {
@@ -39882,6 +39887,38 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("z=(1 2); readonly z=5; declare -p z").0,
             "declare -ar z=([0]=\"5\" [1]=\"2\")\n"
+        );
+    }
+
+    #[test]
+    fn export_assigns_through_the_array_aware_store() {
+        // `export name=value` is an assignment, so a name that is already an
+        // array takes the value at element/key 0 — exactly where a bare
+        // `name=value` and `readonly name=value` put it. osh wrote the scalar
+        // slot directly, which no expansion of an array name ever reads, so the
+        // value was silently lost.
+        assert_eq!(
+            run("declare -a arr=(1 2); export arr=9; declare -p arr").0,
+            "declare -ax arr=([0]=\"9\" [1]=\"2\")\n"
+        );
+        // Same for an associative array, where the subscript-less value takes
+        // key "0". (bash lists `[0]` first here; the key *order* of an assoc
+        // listing is TD-OILS-ASSOC-ORDER, not this fix — what matters is that
+        // the key exists and holds the value.)
+        assert_eq!(
+            run("declare -A m=([k]=v); export m=9; declare -p m").0,
+            "declare -Ax m=([k]=\"v\" [0]=\"9\" )\n"
+        );
+        // The append form reads back through the same routing, so it extends
+        // element 0's value rather than an empty scalar slot.
+        assert_eq!(
+            run("declare -a arr=(1 2); export arr+=9; declare -p arr").0,
+            "declare -ax arr=([0]=\"19\" [1]=\"2\")\n"
+        );
+        // A plain name is unaffected: it still lands in the scalar slot.
+        assert_eq!(
+            run("export s=1; export s+=2; declare -p s").0,
+            "declare -x s=\"12\"\n"
         );
     }
 

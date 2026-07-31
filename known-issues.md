@@ -793,6 +793,30 @@ operand carries a value" rule fixed in `readonly_array_flags_need_a_value_to_tak
 Measure against a non-MSYS bash first if one becomes available, since this was
 observed only on the MSYS build.
 
+**Prerequisite done 2026-07-30 — and it uncovered a worse bug.** Before `-a`
+can apply an array kind, `export`'s assignment has to *use* one:
+`builtin_export` wrote `self.put_var(k, stored)`, i.e. the scalar slot, so
+`declare -a arr=(1 2); export arr=9` parked the 9 in a slot no expansion of an
+array name ever reads — `declare -p arr` still showed `([0]="1" [1]="2")` and
+the assignment was **silently lost**. bash gives `([0]="9" [1]="2")`. The append
+form read the same dead slot, so `export arr+=9` appended to `""` instead of to
+element 0.
+
+Both halves now go through the array-aware pair `scalar_store` /
+`set_scalar_store`, the same routing a bare `name=value` and `readonly
+name=value` already used, which also makes `-a` implementable (`array_kind_apply`
+would otherwise leave an empty array beside a live scalar). Covered by
+`export_assigns_through_the_array_aware_store`. The remaining work is the flag
+acceptance itself, plus the listing filter below.
+
+**Also measured on the way (still open).** With no operands, bash's `-a`/`-A`
+*filter the listing* rather than being ignored: `export -a` lists only exported
+indexed arrays, `export -A` only exported associative ones (`declare`-style).
+`readonly -a` filters the same way. osh's `export_list` and `readonly`'s
+nameless path both list everything regardless of the flag. bash's usage synopsis
+still reads `[-fn]`, with no mention of `-a`, so osh's matching usage line needs
+no change.
+
 ### TD-OILS-DECL-COMPOUND-DISCARD-LEAK. A failed expansion in a declaration builtin's array operand discards the *next* command too — 2026-07-30 — ✅ RESOLVED 2026-07-30
 
 **Where:** `userspace/oils/src/interp.rs` — `exec_declare_with_arrays`, which never

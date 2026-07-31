@@ -232,6 +232,26 @@ pub fn find(haystack: BStr<'_>, needle: BStr<'_>) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// The lines of `s`, exactly as [`str::lines`] splits text.
+///
+/// A line ends at a `\n`, which takes a `\r` immediately before it with it;
+/// the last line need not be terminated; a trailing newline does *not* yield a
+/// final empty line; and an empty input has no lines at all. Splitting a
+/// history file or a `mapfile` source this way keeps every byte of every line,
+/// which `str::lines` on a lossily-decoded string would not.
+pub fn lines(s: BStr<'_>) -> impl Iterator<Item = BStr<'_>> {
+    // `split` on an empty slice still yields one (empty) piece, which is the
+    // single case where it disagrees with `str::lines`; `None` drops it.
+    let body = if s.is_empty() {
+        None
+    } else {
+        Some(s.strip_suffix(b"\n").unwrap_or(s))
+    };
+    body.into_iter()
+        .flat_map(|b| b.split(|&c| c == b'\n'))
+        .map(|l| l.strip_suffix(b"\r").unwrap_or(l))
+}
+
 /// Parse a shell value as a decimal integer the way the shell's numeric
 /// contexts do: surrounding ASCII whitespace is ignored, and anything that is
 /// not a well-formed number — including bytes that are not text at all —

@@ -21,7 +21,7 @@
 /// absolute `!n` means `entries[n - base]`.
 #[derive(Clone, Copy)]
 pub struct HistCtx<'a> {
-    pub entries: &'a [String],
+    pub entries: &'a [crate::bytes::Str],
     pub base: usize,
     /// Whether `shopt -s extglob` is in effect, which makes `!(` the opening of
     /// a negated extended-glob pattern rather than an event designator. See
@@ -42,12 +42,18 @@ pub struct HistCtx<'a> {
     pub open_quote: Option<char>,
 }
 
+/// Seam: this module rewrites a line of shell *source* as text
+/// (TD-OILS-BYTE-STRINGS step 9), while the history list it reads is bytes. An
+/// entry that is not text therefore resolves to nothing here — no event
+/// designator names it and no prefix or substring search looks inside it. That
+/// is the honest answer rather than an approximation: recalling an *altered*
+/// command is the one outcome worse than recalling none.
 impl HistCtx<'_> {
     /// The entry numbered `n`, or `None` if `n` is outside the retained range.
     fn by_number(&self, n: usize) -> Option<&str> {
         n.checked_sub(self.base)
             .and_then(|i| self.entries.get(i))
-            .map(String::as_str)
+            .and_then(|e| crate::bytes::as_str(e))
     }
 
     /// The `n`th entry counting back from the most recent, where 1 is the most
@@ -57,7 +63,7 @@ impl HistCtx<'_> {
             .len()
             .checked_sub(n)
             .and_then(|i| self.entries.get(i))
-            .map(String::as_str)
+            .and_then(|e| crate::bytes::as_str(e))
     }
 
     /// The most recent entry starting with `prefix`.
@@ -65,8 +71,8 @@ impl HistCtx<'_> {
         self.entries
             .iter()
             .rev()
+            .filter_map(|e| crate::bytes::as_str(e))
             .find(|e| e.starts_with(prefix))
-            .map(String::as_str)
     }
 
     /// The most recent entry containing `needle`.
@@ -74,8 +80,8 @@ impl HistCtx<'_> {
         self.entries
             .iter()
             .rev()
+            .filter_map(|e| crate::bytes::as_str(e))
             .find(|e| e.contains(needle))
-            .map(String::as_str)
     }
 }
 
@@ -1137,12 +1143,14 @@ fn spec_text(chars: &[char], start: usize, end: usize) -> String {
 mod tests {
     use super::*;
 
-    fn ctx(entries: &[String]) -> HistCtx<'_> {
+    fn ctx(entries: &[crate::bytes::Str]) -> HistCtx<'_> {
         HistCtx { entries, base: 1, extglob: false, open_quote: None }
     }
 
-    fn hist(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| (*s).to_string()).collect()
+    /// The tests spell their history as Rust source, which is UTF-8 by
+    /// construction, so they build the byte-typed list through this helper.
+    fn hist(items: &[&str]) -> Vec<crate::bytes::Str> {
+        items.iter().map(|s| s.as_bytes().to_vec()).collect()
     }
 
     /// Every expectation here was measured against bash 5.2 by recording the
@@ -1593,7 +1601,7 @@ mod tests {
     fn word_designators_name_a_range_and_reject_one_that_is_out_of_range() {
         let four = hist(&["a b c d"]);
         let one = hist(&["onlyone"]);
-        let sel = |items: &[String], spec: &str| -> Result<String, String> {
+        let sel = |items: &[crate::bytes::Str], spec: &str| -> Result<String, String> {
             let line = format!("echo X{spec}X");
             match expand1(&line, &ctx(items)) {
                 Expansion::Changed(s) | Expansion::ChangedQuietly(s) => Ok(s

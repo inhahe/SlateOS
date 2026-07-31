@@ -554,22 +554,12 @@ fn run(args: &[Str]) -> i32 {
         status
     } else {
         match plan {
-            // Seam: the parser is still `str`-typed (TD-OILS-BYTE-STRINGS
-            // step 8), so a `-c` string that is not text cannot be parsed. It
-            // is rejected rather than approximated — running an *altered*
-            // command is the one outcome worse than running none.
-            Plan::Command(command) => match bytes::as_str(command) {
-                Some(src) => sh.run_source(src),
-                None => {
-                    ediag(&[b"osh: -c: command string is not valid text: ", command]);
-                    2
-                }
-            },
+            Plan::Command(command) => sh.run_source(command),
             // The script is opened only now: bash reads the startup files first,
             // so `osh -l nosuchfile` runs `~/.bash_profile` before reporting 127.
             // The path is opened as *bytes*, so a script whose name is not text
             // is still found (the diagnostic below quotes it verbatim too).
-            Plan::Script(path) => match std::fs::read_to_string(bytes::bytes_to_path(path)) {
+            Plan::Script(path) => match std::fs::read(bytes::bytes_to_path(path)) {
                 Ok(src) => sh.run_source(&src),
                 Err(e) => {
                     ediag(&[b"osh: ", path, b": ", e.to_string().as_bytes()]);
@@ -617,11 +607,15 @@ fn repl(sh: &mut Shell) -> i32 {
         if interactive {
             print_prompt(sh);
         }
-        let mut buffer = String::new();
+        let mut buffer = Str::new();
         let mut read_lines: u32 = 0;
         let done = loop {
-            let mut line = String::new();
-            match lock.read_line(&mut line) {
+            // Shell input is *bytes*: a script (or a here-doc body typed at the
+            // prompt) may legitimately carry a byte that is not text, and a
+            // UTF-8-validating read would fail the whole line rather than run
+            // it. See TD-OILS-BYTE-STRINGS.
+            let mut line = Str::new();
+            match lock.read_until(b'\n', &mut line) {
                 Ok(0) => break true, // EOF
                 Ok(_) => {}
                 Err(e) => {
@@ -630,8 +624,11 @@ fn repl(sh: &mut Shell) -> i32 {
                 }
             }
             read_lines = read_lines.saturating_add(1);
-            let trimmed = line.trim_end_matches(['\n', '\r']);
-            buffer.push_str(trimmed);
+            let mut trimmed = line.as_slice();
+            while let Some(rest) = trimmed.strip_suffix(b"\n").or_else(|| trimmed.strip_suffix(b"\r")) {
+                trimmed = rest;
+            }
+            buffer.extend_from_slice(trimmed);
             // A line ending in an *odd* number of backslashes leaves a live
             // `\<newline>` pair, so more input is coming. Both characters stay
             // in the buffer: splicing them out here is wrong in every case
@@ -640,9 +637,8 @@ fn repl(sh: &mut Shell) -> i32 {
             // unquoted here-doc body, the rules differ) — and dropping the
             // backslash also merged the two physical lines into two separate
             // *commands*, since a bare newline was pushed in its place.
-            let trailing_backslashes = trimmed
-                .len()
-                .saturating_sub(trimmed.trim_end_matches('\\').len());
+            let trailing_backslashes =
+                trimmed.iter().rev().take_while(|&&b| b == b'\\').count();
             // If the command so far is only *incomplete* — an unterminated quote
             // or substitution, an unfinished `if`/`while`/`for`/`case`/`{`/`(`
             // compound command, or a line ending on `&&`/`||`/`|` — keep reading
@@ -651,9 +647,9 @@ fn repl(sh: &mut Shell) -> i32 {
             // complete command, or a genuine (non-continuable) syntax error, both
             // fall through to execution below.
             if trailing_backslashes % 2 == 1
-                || (!buffer.trim().is_empty() && sh.parse_incomplete(&buffer))
+                || (!bytes::trim(&buffer).is_empty() && sh.parse_incomplete(&buffer))
             {
-                buffer.push('\n');
+                buffer.push(b'\n');
                 if interactive {
                     print_continuation();
                 }
@@ -662,7 +658,7 @@ fn repl(sh: &mut Shell) -> i32 {
             break false;
         };
 
-        if !buffer.trim().is_empty() {
+        if !bytes::trim(&buffer).is_empty() {
             sh.run_source_at(&buffer, consumed);
             // `exit` (or any unwind reaching the top level) ends the shell: stop
             // reading, exactly as bash does. Without this the loop would treat

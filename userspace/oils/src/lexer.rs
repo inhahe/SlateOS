@@ -1237,10 +1237,6 @@ impl Lexer {
         c
     }
 
-    fn bump(&mut self) -> Option<char> {
-        self.bump_ch().map(syn)
-    }
-
     /// Consume the character at the cursor and append its bytes to `out`.
     fn take_into(&mut self, out: &mut Str) {
         if let Some(c) = self.bump_ch() {
@@ -3245,12 +3241,12 @@ mod tests {
     /// option-specific tests want. Shadows [`super::tokenize`] so the option
     /// argument does not have to be spelled out 30 times.
     fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
-        super::tokenize(src, LexOpts::default())
+        super::tokenize(src.as_bytes(), LexOpts::default())
     }
 
     /// As [`tokenize`], with per-token line numbers.
     fn tokenize_spanned(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
-        super::tokenize_spanned(src, LexOpts::default())
+        super::tokenize_spanned(src.as_bytes(), LexOpts::default())
     }
 
     /// Tokenize and drop the terminating `Newline`, so a test that counts words
@@ -3270,7 +3266,7 @@ mod tests {
     /// *innermost* unclosed delimiter (see the function's docs).
     #[test]
     fn open_quote_reports_the_innermost_unclosed_quote() {
-        let q = |src: &str| super::open_quote(src, LexOpts::default());
+        let q = |src: &str| super::open_quote(src.as_bytes(), LexOpts::default());
         assert_eq!(q("echo 'x\n"), Some('\''));
         assert_eq!(q("echo \"x\n"), Some('"'));
         // A quote inside `$( … )` is the reader's state; one inside a backquote
@@ -3298,7 +3294,7 @@ mod tests {
     /// the lexer *keeps* is not a continuation, so the reader must not wait.
     #[test]
     fn ends_in_continuation_asks_which_backslashes_were_deleted() {
-        let c = |src: &str| super::ends_in_continuation(src, LexOpts::default());
+        let c = |src: &str| super::ends_in_continuation(src.as_bytes(), LexOpts::default());
         assert!(c("echo x \\\n"));
         // `\<CR><LF>` is not one: the `\` escapes the CR. Measured — a CRLF
         // script's `echo x \` prints `x \r` in bash too, joined to nothing.
@@ -3333,7 +3329,7 @@ mod tests {
                 toks_of(&src),
                 vec![
                     Tok::Word(vec![Seg::Lit("echo".into())]),
-                    Tok::Word(vec![Seg::Lit(open.to_string())]),
+                    Tok::Word(vec![Seg::Lit(open.to_string().into_bytes())]),
                     Tok::Op(Op::LParen),
                     Tok::Word(vec![Seg::Lit("a".into())]),
                     Tok::Op(Op::Pipe),
@@ -3342,13 +3338,13 @@ mod tests {
                 ],
                 "extglob off: {src}"
             );
-            let mut with = super::tokenize(&src, LexOpts { extglob: true }).unwrap();
+            let mut with = super::tokenize(src.as_bytes(), LexOpts { extglob: true }).unwrap();
             with.pop();
             assert_eq!(
                 with,
                 vec![
                     Tok::Word(vec![Seg::Lit("echo".into())]),
-                    Tok::Word(vec![Seg::Lit(format!("{open}(a|b)"))]),
+                    Tok::Word(vec![Seg::Lit(format!("{open}(a|b)").into_bytes())]),
                 ],
                 "extglob on: {src}"
             );
@@ -3498,7 +3494,7 @@ mod tests {
             ("echo $(( echo a ); ( echo b ))", "( echo a ); ( echo b )"),
         ] {
             match seg(src) {
-                Seg::CmdSub(raw, ..) => assert_eq!(raw, body, "body of {src}"),
+                Seg::CmdSub(raw, ..) => assert_eq!(raw, body.as_bytes(), "body of {src}"),
                 other => panic!("{src} should read as a substitution, got {other:?}"),
             }
         }
@@ -3566,7 +3562,7 @@ mod tests {
         if let Tok::Word(segs) = &toks[1] {
             match &segs[0] {
                 Seg::CmdSub(raw, close, _) => {
-                    assert_eq!(raw, "echo $(echo x)");
+                    assert_eq!(raw, b"echo $(echo x)");
                     // Single-line input: the closing paren is on line 1.
                     assert_eq!(*close, 1);
                 }
@@ -3598,7 +3594,7 @@ mod tests {
             _ => None,
         });
         let segs = hd.expect("here-doc token");
-        assert_eq!(segs, vec![Seg::Lit("line one\nline two\n".to_string())]);
+        assert_eq!(segs, vec![Seg::Lit(b"line one\nline two\n".to_vec())]);
     }
 
     #[test]
@@ -3632,7 +3628,7 @@ mod tests {
                 _ => None,
             })
             .expect("here-doc token");
-        assert_eq!(segs, vec![Seg::Lit("indented\n".to_string())]);
+        assert_eq!(segs, vec![Seg::Lit(b"indented\n".to_vec())]);
     }
 
     #[test]
@@ -3649,9 +3645,14 @@ mod tests {
         tk.warnings
             .iter()
             .filter_map(|w| match w {
-                ReaderWarning::HeredocEof(h) => {
-                    Some((h.delim.as_str(), h.body_line, h.eof_line))
-                }
+                // Every delimiter these tests use is ASCII, so reading it
+                // back as text is exact; a non-text one would compare unequal
+                // to any expectation here rather than being approximated.
+                ReaderWarning::HeredocEof(h) => Some((
+                    crate::bytes::as_str(&h.delim).unwrap_or_default(),
+                    h.body_line,
+                    h.eof_line,
+                )),
                 ReaderWarning::SubstHeredoc(_) => None,
             })
             .collect()
@@ -3708,7 +3709,7 @@ mod tests {
             ("cat <<EOF\nbody\nEOF\n", &[]),
         ];
         for (src, want) in cases {
-            let tk = tokenize_deferred(src, LexOpts::default());
+            let tk = tokenize_deferred(src.as_bytes(), LexOpts::default());
             let got: Vec<Want<'_>> = heredoc_eofs(&tk);
             assert_eq!(got, *want, "{src:?}");
         }
@@ -3750,7 +3751,7 @@ mod tests {
             ("cat <(cat <<EOF\n)\nEOF\n)", "cat <<EOF\n)\nEOF\n"),
         ];
         for (src, want) in bodies {
-            let tk = tokenize_deferred(src, LexOpts::default());
+            let tk = tokenize_deferred(src.as_bytes(), LexOpts::default());
             assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);
             let raw = tk
                 .toks
@@ -3763,14 +3764,14 @@ mod tests {
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("no substitution segment in {src:?}: {:?}", tk.toks));
-            assert_eq!(raw, *want, "{src:?}");
+            assert_eq!(raw, want.as_bytes(), "{src:?}");
         }
         // When the body runs to end of input the substitution never closes, and
         // bash reports the unmatched `)` — one line past the last, as it does for
         // every unterminated `$( … )`. The here-document warning is recorded too,
         // in the *enclosing* line numbers, and comes out first.
         for src in ["x=$(cat <<EOF\nbody\n); echo hi", "cat <(cat <<EOF\nbody\n); echo hi"] {
-            let tk = tokenize_deferred(src, LexOpts::default());
+            let tk = tokenize_deferred(src.as_bytes(), LexOpts::default());
             let (e, line) = tk.err.as_ref().unwrap_or_else(|| panic!("{src:?} must fail"));
             assert_eq!(e.to_string(), "unexpected EOF while looking for matching `)'");
             assert_eq!(*line, 4, "{src:?}");
@@ -3821,9 +3822,9 @@ mod tests {
             ),
         ];
         for (src, (raws, warned)) in cases {
-            let tk = tokenize_deferred(src, LexOpts::default());
+            let tk = tokenize_deferred(src.as_bytes(), LexOpts::default());
             assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);
-            let got: Vec<String> = tk
+            let got: Vec<crate::bytes::Str> = tk
                 .toks
                 .iter()
                 .filter_map(|t| match t {
@@ -3836,7 +3837,9 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(got, *raws, "{src:?}");
+            let want: Vec<crate::bytes::Str> =
+                raws.iter().map(|r| r.as_bytes().to_vec()).collect();
+            assert_eq!(got, want, "{src:?}");
             let got: Vec<(usize, u32)> = tk
                 .warnings
                 .iter()
@@ -3861,14 +3864,14 @@ mod tests {
         // is stamped with the body's last line, and the next line follows from
         // there. (`$LINENO` reports 3 and 4 for this input, measured.)
         let src = "x=$(cat <<EOF); echo hi\nbody\nEOF\necho ho\n";
-        let tk = tokenize_deferred(src, LexOpts::default());
+        let tk = tokenize_deferred(src.as_bytes(), LexOpts::default());
         let after: Vec<u32> = tk
             .toks
             .iter()
             .zip(&tk.lines)
             .filter(|(t, _)| {
                 matches!(t, Tok::Word(w)
-                    if matches!(w.first(), Some(Seg::Lit(l)) if l == "hi" || l == "ho"))
+                    if matches!(w.first(), Some(Seg::Lit(l)) if l == b"hi" || l == b"ho"))
             })
             .map(|(_, &l)| l)
             .collect();
@@ -3962,7 +3965,7 @@ mod tests {
         // `@(a|b)` is only a pattern with `extglob` on.
         let opts = LexOpts { extglob: true };
         for (src, want) in bodies {
-            let tk = tokenize_deferred(src, opts);
+            let tk = tokenize_deferred(src.as_bytes(), opts);
             assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);
             let raw = tk
                 .toks
@@ -3975,13 +3978,13 @@ mod tests {
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("no substitution segment in {src:?}: {:?}", tk.toks));
-            assert_eq!(raw, *want, "{src:?}");
+            assert_eq!(raw, want.as_bytes(), "{src:?}");
         }
         // A `case` still open where the substitution closes: the `)` is where
         // bash's parser wanted `;;` or `esac`, so it goes *into* the body for the
         // body parse to name — which also makes the failure the substitution's
         // (exit 1) rather than the enclosing input's (exit 2).
-        let tk = tokenize_deferred("x=$(case b in b) echo B); echo hi", LexOpts::default());
+        let tk = tokenize_deferred("x=$(case b in b) echo B); echo hi".as_bytes(), LexOpts::default());
         assert!(tk.err.is_none(), "{:?}", tk.err);
         let raw = tk
             .toks
@@ -3994,6 +3997,6 @@ mod tests {
                 _ => None,
             })
             .expect("a substitution segment");
-        assert_eq!(raw, "case b in b) echo B)");
+        assert_eq!(raw, b"case b in b) echo B)");
     }
 }

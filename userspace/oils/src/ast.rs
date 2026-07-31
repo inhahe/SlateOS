@@ -492,7 +492,7 @@ pub enum WordPart {
         /// read. Only indirection sets it: `${!ref:?msg}` reads whatever `ref`
         /// points at but names `!ref`, because the target's name is an answer
         /// the writer never gave and so is not theirs to be told about.
-        label: Option<String>,
+        label: Option<Str>,
     },
     /// `${name#pat}` / `${name##pat}` / `${name%pat}` / `${name%%pat}` — remove
     /// a matching prefix (`#`) or suffix (`%`); doubled operator = longest match.
@@ -1030,7 +1030,7 @@ mod tests {
 
     /// The command word of the first simple command in `src`.
     fn first_word(src: &str) -> Word {
-        let prog = crate::parser::parse(src).expect("parse");
+        let prog = crate::parser::parse(src.as_bytes()).expect("parse");
         let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
             panic!("not a simple command: {src}");
         };

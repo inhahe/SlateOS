@@ -1275,7 +1275,10 @@ fn job_holds_sink(ao: &AndOr, stderr_is_sink: bool) -> bool {
             // `n>&m` / `n<&m`: fd n becomes whatever fd m is — the sink if m is
             // one of its descriptors, something else otherwise (`n>&-` closes).
             RedirectOp::DupOut | RedirectOp::DupIn => {
-                let Some(src) = literal_word(&r.target).and_then(|t| t.parse::<i32>().ok()) else {
+                let Some(src) = literal_word(&r.target)
+                    .and_then(bytes::as_str)
+                    .and_then(|t| t.parse::<i32>().ok())
+                else {
                     // An expanded or non-numeric target: assume it leaves the
                     // sink held, which is the answer for an unredirected job.
                     continue;
@@ -1294,7 +1297,7 @@ fn job_holds_sink(ao: &AndOr, stderr_is_sink: bool) -> bool {
 }
 
 /// The text of a word that is a single unexpanded literal, if it is one.
-fn literal_word(w: &Word) -> Option<&str> {
+fn literal_word(w: &Word) -> Option<BStr<'_>> {
     match w.parts.as_slice() {
         [WordPart::Literal(s)] => Some(s),
         _ => None,
@@ -1582,7 +1585,7 @@ struct Job {
     /// The live job body, or `None` after it has been reaped.
     child: Option<JobBody>,
     /// The command line, for `jobs` display.
-    cmd: String,
+    cmd: Str,
     /// Final exit status once the body has finished and been reaped.
     status: Option<i32>,
     /// The signal that terminated the job, if one did. `status` alone cannot
@@ -1887,17 +1890,17 @@ pub struct Shell {
     /// importing, so they keep the on-demand `std::env` fallback and inherited
     /// child environment — staying deterministic and host-independent.
     env_imported: bool,
-    funcs: HashMap<String, Program>,
+    funcs: HashMap<Str, Program>,
     /// The source label each function was *defined* in — bash's `BASH_SOURCE`
     /// entry for that function's frames. Kept as a parallel map for the same
     /// reason as `func_redirects`: the many `self.funcs.get()` sites stay
     /// unchanged.
-    func_sources: HashMap<String, String>,
+    func_sources: HashMap<Str, String>,
     /// Redirections attached to a function *definition* (`f() { …; } >log`).
     /// bash applies these on every invocation of the function, wrapping the
     /// body execution. Kept as a parallel map (rather than folding into
     /// `funcs`) so the many `self.funcs.get()` sites stay unchanged.
-    func_redirects: HashMap<String, Vec<Redirect>>,
+    func_redirects: HashMap<Str, Vec<Redirect>>,
     positional: Vec<Str>,
     name: String,
     /// The shell's working directory — absolute, `/`-separated, no trailing
@@ -2271,7 +2274,7 @@ pub struct Shell {
     /// re-entered with its contents (quotes already stripped), so
     /// `a"b${x@Z}"c` reports `b${x@Z}`. Saved/restored around every entry so
     /// nesting (command substitution, `${y:-${x@Z}}`) resolves innermost-first.
-    bad_sub_word: Option<String>,
+    bad_sub_word: Option<Str>,
     /// Set when a `[[ … =~ RHS ]]` match fails because the RHS could not be
     /// compiled as a regex. bash reports such a `[[` command as status 2 (not 1
     /// "no match") and prints nothing to stderr. `exec_cond` checks this flag
@@ -2354,7 +2357,7 @@ pub struct Shell {
     /// `FUNCNAME` array (bash: `FUNCNAME[0]` is the current function, then its
     /// callers, then `main`). Non-empty exactly while inside a function body;
     /// materialised into `arrays["FUNCNAME"]` by `refresh_funcname`.
-    fn_stack: Vec<String>,
+    fn_stack: Vec<Str>,
     /// The source line of each call site in `fn_stack`, innermost last:
     /// `call_line_stack[k]` is the line where `fn_stack[k]` was invoked. Drives
     /// `BASH_LINENO` and the `caller` builtin. Kept in lockstep with `fn_stack`.
@@ -2419,7 +2422,7 @@ pub struct Shell {
     /// Function names marked `readonly -f` (`declare -fr`). A readonly function
     /// cannot be redefined or `unset -f`. Distinct from `readonly` (which tracks
     /// variables); copied into subshell clones so the attribute is inherited.
-    readonly_funcs: HashSet<String>,
+    readonly_funcs: HashSet<Str>,
     /// `shopt` option toggles (e.g. `nullglob`, `dotglob`, `nocaseglob`). Only
     /// options present with `true` are enabled; absent/`false` = default off.
     /// Inherited by subshell clones.
@@ -2454,7 +2457,7 @@ pub struct Shell {
     /// Function names carrying the trace attribute (`declare -ft name`). Such a
     /// function inherits the caller's `DEBUG` and `RETURN` traps even when
     /// `functrace` (`set -T`) is off. Inherited by subshell clones.
-    fn_trace_attr: HashSet<String>,
+    fn_trace_attr: HashSet<Str>,
     /// Per-function-frame trap-inheritance suppression, pushed on every function
     /// entry and popped on return (kept in lockstep with `fn_stack`). Each frame
     /// names the traps that the caller installed but that this frame does NOT
@@ -2489,7 +2492,7 @@ pub struct Shell {
     /// deleting one renumbers every entry after it — which is what bash does,
     /// and why the numbers are never stored. Cloned into subshells, since
     /// bash's `( history )` and `$(history)` both list the parent's entries.
-    history: Vec<String>,
+    history: Vec<Str>,
     /// The number readline would give [`Shell::history`]'s *first* entry. It is
     /// 1 until `HISTSIZE` first forces an entry off the front, and rises by one
     /// per evicted entry thereafter, so numbers keep climbing even though the
@@ -2586,7 +2589,7 @@ pub struct Shell {
     /// text). Expanded over the token stream before parsing (see
     /// `parse_with_aliases`). `BTreeMap` keeps `alias` listings sorted. Cloned
     /// into subshells (bash inherits aliases).
-    aliases: BTreeMap<String, String>,
+    aliases: BTreeMap<Str, Str>,
     /// Signal/pseudo-signal traps set by the `trap` builtin, keyed by the
     /// normalized spec (`EXIT`, `ERR`, `INT`, …). The value is the action
     /// command string; an empty string means "ignore". Currently only the
@@ -2961,7 +2964,7 @@ impl Shell {
         let v: Vec<(Str, Str)> = self
             .aliases
             .iter()
-            .map(|(k, val)| (k.clone().into_bytes(), val.clone().into_bytes()))
+            .map(|(k, val)| (k.clone(), val.clone()))
             .collect();
         self.assoc.insert("BASH_ALIASES".to_string(), v);
         // Mark has-a-value so `declare -p` renders `=()` even when empty.
@@ -3267,7 +3270,7 @@ impl Shell {
         }
         // Absent or unreadable is silent, by design: every shell has startup
         // files it does not have.
-        let Ok(src) = std::fs::read_to_string(&host) else {
+        let Ok(src) = std::fs::read(&host) else {
             return Ok(false);
         };
         self.source_stack.push(SourceFrame {
@@ -3316,12 +3319,20 @@ impl Shell {
         if spec.is_empty() {
             return Ok(false);
         }
-        // `$BASH_ENV` is re-parsed as shell source, so it has to be text to
-        // mean anything; bytes that are not are not a path we could have run.
-        let Some(spec) = bytes::as_str(spec) else {
-            return Ok(false);
-        };
-        let quoted = format!("\"{}\"", spec.replace('"', "\\\""));
+        // Only two bytes need escaping to make the value survive the wrapping
+        // quotes unchanged: a `"` of its own, and a `\` at the very end (which
+        // would otherwise escape the closing quote and leave the word
+        // unterminated). A `\` anywhere else already means inside real double
+        // quotes exactly what it means in bash's `Q_DOUBLE_QUOTES` mode, so
+        // escaping it there would corrupt `BASH_ENV='\$x'`.
+        let mut quoted = Str::from(b"\"".as_slice());
+        for (i, &b) in spec.iter().enumerate() {
+            if b == b'"' || (b == b'\\' && i + 1 == spec.len()) {
+                quoted.push(b'\\');
+            }
+            quoted.push(b);
+        }
+        quoted.push(b'"');
         let Ok(word) = crate::parser::word_verbatim_from_source(&quoted, self.lex_opts()) else {
             return Ok(false);
         };
@@ -3530,7 +3541,7 @@ impl Shell {
 
     /// Parse and execute `src` as *top-level* shell input (the `-c` string, a
     /// script file, or one logical REPL command), returning its exit status.
-    pub fn run_source(&mut self, src: &str) -> i32 {
+    pub fn run_source(&mut self, src: BStr<'_>) -> i32 {
         self.run_source_at(src, 0)
     }
 
@@ -3541,7 +3552,7 @@ impl Shell {
     /// A REPL reads stdin one logical command at a time, so without this every
     /// command would restart at line 1 — bash keeps counting across the whole
     /// stream (`printf 'echo one\nnosuchcmd\n' | bash` says `line 2:`).
-    pub fn run_source_at(&mut self, src: &str, line_base: u32) -> i32 {
+    pub fn run_source_at(&mut self, src: BStr<'_>, line_base: u32) -> i32 {
         let mut out = Out::Inherit;
         self.run_source_out(src, &mut out, line_base)
     }
@@ -3572,7 +3583,7 @@ impl Shell {
     /// are treated as complete-with-empty-body by the lexer, so `<<EOF` with no
     /// body does not trigger continuation — a documented limitation.)
     #[must_use]
-    pub fn parse_incomplete(&self, src: &str) -> bool {
+    pub fn parse_incomplete(&self, src: BStr<'_>) -> bool {
         // Alias-aware grammar/quote check, mirroring `run_source`: catches open
         // quotes/substitutions and unfinished compound commands / trailing
         // operators (all surfaced as bash's "unexpected end of file" / "unexpected
@@ -3595,10 +3606,10 @@ impl Shell {
         // line, so terminate the buffer with a newline first (each REPL line is
         // Enter-terminated) — otherwise a just-typed `… <<EOF` never triggers the
         // body scan and would be misjudged complete.
-        let mut strict_src = String::with_capacity(src.len().saturating_add(1));
-        strict_src.push_str(src);
-        if !src.ends_with('\n') {
-            strict_src.push('\n');
+        let mut strict_src = Str::with_capacity(src.len().saturating_add(1));
+        strict_src.extend_from_slice(src);
+        if src.last() != Some(&b'\n') {
+            strict_src.push(b'\n');
         }
         matches!(crate::parser::parse_strict_heredoc(&strict_src, self.lex_opts()), Err(e) if e.is_incomplete())
     }
@@ -3610,7 +3621,7 @@ impl Shell {
     /// unwound everything there is to unwind: it collapses to the returned
     /// status *and* latches [`Shell::exit_requested`] so the read-eval loop
     /// stops reading further input.
-    fn run_source_out(&mut self, src: &str, out: &mut Out, line_base: u32) -> i32 {
+    fn run_source_out(&mut self, src: BStr<'_>, out: &mut Out, line_base: u32) -> i32 {
         match self.run_source_flow_out(
             src,
             out,
@@ -3656,7 +3667,7 @@ impl Shell {
     /// two exceptions.
     fn run_source_flow_out(
         &mut self,
-        src: &str,
+        src: BStr<'_>,
         out: &mut Out,
         stdin: &StdinSrc,
         map: &LineMap,
@@ -3696,11 +3707,11 @@ impl Shell {
             if self.verbose {
                 let raw = ip.last_unit_raw();
                 if !raw.is_empty() {
-                    let mut bytes = raw.as_bytes().to_vec();
-                    if !raw.ends_with('\n') {
-                        bytes.push(b'\n');
+                    let mut echo = raw.to_vec();
+                    if raw.last() != Some(&b'\n') {
+                        echo.push(b'\n');
                     }
-                    self.emit_stderr(&bytes);
+                    self.emit_stderr(&echo);
                 }
             }
             // A here-document body that did not turn out as declared is a warning
@@ -3717,7 +3728,7 @@ impl Shell {
                         "{}warning: here-document at line {} delimited by end-of-file (wanted `{}')",
                         self.err_prefix_at(hd.eof_line),
                         hd.body_line,
-                        hd.delim
+                        shown(&hd.delim)
                     ),
                     crate::lexer::ReaderWarning::SubstHeredoc(s) => format!(
                         "{}warning: command substitution: {} unterminated here-document{}",
@@ -3771,9 +3782,23 @@ impl Shell {
     /// line introducing it, which is already a complete command: the parser then
     /// swallows the body whole and the frontier resumes past it.
     fn expand_history_lines(&mut self, ip: &mut IncrementalParser, opts: crate::lexer::LexOpts) {
-        let mut accum = String::new();
+        let mut accum = Str::new();
         loop {
             let Some(raw) = ip.peek_raw_line() else { return };
+            // Seam: the history expander is still text-typed
+            // (TD-OILS-BYTE-STRINGS step 9). A line that is not text holds no
+            // history event we could recognise, so it is passed through
+            // unexpanded rather than approximated — an *altered* command line is
+            // the one outcome worse than an unexpanded one.
+            let Some(raw_text) = bytes::as_str(&raw.text).map(str::to_owned) else {
+                ip.commit_raw_line(None, opts);
+                accum.extend_from_slice(&raw.text);
+                accum.push(b'\n');
+                if !self.needs_more_lines(&accum) {
+                    return;
+                }
+                continue;
+            };
             // Lifted out and put back so the expander can hold `&mut` on the
             // cross-line expansion state while `HistCtx` borrows the history list.
             let mut state = std::mem::take(&mut self.hist_state);
@@ -3789,29 +3814,29 @@ impl Shell {
                     // line of `echo 'a` / `!!'` would expand.
                     open_quote: crate::lexer::open_quote(&accum, opts),
                 };
-                crate::histexpand::expand(&raw.text, &ctx, &mut state)
+                crate::histexpand::expand(&raw_text, &ctx, &mut state)
             };
             self.hist_state = state;
             match expanded {
                 Expansion::Unchanged => {
                     ip.commit_raw_line(None, opts);
-                    accum.push_str(&raw.text);
-                    accum.push('\n');
+                    accum.extend_from_slice(&raw.text);
+                    accum.push(b'\n');
                 }
                 Expansion::Changed(text) => {
                     // bash echoes the rewritten line to stderr before running it,
                     // so what `!!` turned into is visible.
                     self.errln(&text);
-                    ip.commit_raw_line(Some(&text), opts);
-                    accum.push_str(&text);
-                    accum.push('\n');
+                    ip.commit_raw_line(Some(text.as_bytes()), opts);
+                    accum.extend_from_slice(text.as_bytes());
+                    accum.push(b'\n');
                 }
                 Expansion::ChangedQuietly(text) => {
                     // Same, minus the echo: bash reports only what the expander
                     // proper changed, and a `^old^new^` rewrite is not that.
-                    ip.commit_raw_line(Some(&text), opts);
-                    accum.push_str(&text);
-                    accum.push('\n');
+                    ip.commit_raw_line(Some(text.as_bytes()), opts);
+                    accum.extend_from_slice(text.as_bytes());
+                    accum.push(b'\n');
                 }
                 Expansion::PrintOnly(text) => {
                     // `:p` previews: the line is echoed and recorded just as a
@@ -3821,7 +3846,7 @@ impl Shell {
                     // expansion the line never reaches the parser, so it does
                     // not count towards the source line numbering either.
                     self.errln(&text);
-                    self.hist_record(text);
+                    self.hist_record(text.into_bytes());
                     ip.drop_raw_line(opts);
                 }
                 Expansion::NotFound(msg) => {
@@ -3868,7 +3893,7 @@ impl Shell {
     /// reader is plainly still waiting for the joined line. That is asked
     /// separately, of the lexer rather than of the text, so the two agree on
     /// which backslashes are continuations at all.
-    fn needs_more_lines(&self, src: &str) -> bool {
+    fn needs_more_lines(&self, src: BStr<'_>) -> bool {
         let opts = self.lex_opts();
         if crate::lexer::ends_in_continuation(src, opts) {
             return true;
@@ -3900,8 +3925,8 @@ impl Shell {
     /// bash's reader commits it as a (empty) command before the next line is
     /// read.
     fn record_history(&mut self, lines: &[UnitLine]) {
-        let mut entry = String::new();
-        let mut sep = "";
+        let mut entry = Str::new();
+        let mut sep: BStr<'static> = b"";
         for (i, line) in lines.iter().enumerate() {
             match line.kind {
                 UnitLineKind::Blank => continue,
@@ -3909,14 +3934,14 @@ impl Shell {
                     if entry.is_empty() {
                         self.hist_record(line.text.clone());
                     } else {
-                        sep = "\n";
+                        sep = b"\n";
                     }
                     continue;
                 }
                 UnitLineKind::Code | UnitLineKind::HereDocBody => {}
             }
-            entry.push_str(sep);
-            entry.push_str(&line.text);
+            entry.extend_from_slice(sep);
+            entry.extend_from_slice(&line.text);
             // A here-document body already ends in the newline that closed it,
             // so what follows it just needs separating from the delimiter line.
             let opens_next = lines
@@ -3926,11 +3951,11 @@ impl Shell {
                 .find(|l| !matches!(l.kind, UnitLineKind::Blank | UnitLineKind::Comment))
                 .is_some_and(|l| l.heredoc);
             sep = if line.comment || line.heredoc || opens_next {
-                "\n"
+                b"\n"
             } else if line.open || line.kind == UnitLineKind::HereDocBody {
-                " "
+                b" "
             } else {
-                "; "
+                b"; "
             };
         }
         if !entry.is_empty() {
@@ -4005,7 +4030,7 @@ impl Shell {
     /// [`Shell::hist_base`], so the numbers keep climbing while the list stays
     /// capped. `HISTSIZE=0` is the case readline spells out separately — the
     /// entry is dropped outright and the base does *not* move.
-    fn hist_push(&mut self, entry: String) {
+    fn hist_push(&mut self, entry: Str) {
         self.hist_sync();
         if self.hist_max == Some(0) {
             return;
@@ -4023,7 +4048,7 @@ impl Shell {
     /// `history -a` writes out. Entries pulled in from a history file by `-r` or
     /// `-n` deliberately do not come through here: they are already in a file,
     /// and appending them again would duplicate them.
-    fn hist_record(&mut self, entry: String) {
+    fn hist_record(&mut self, entry: Str) {
         self.hist_session = self.hist_session.saturating_add(1);
         self.hist_push(entry);
     }
@@ -4067,21 +4092,23 @@ impl Shell {
         let host = bytes::bytes_to_path(&self.host_path(&path));
         match op {
             b'r' | b'n' => {
-                let Ok(text) = std::fs::read_to_string(&host) else {
+                // Read as bytes: a history file records shell source, and a
+                // command may legitimately carry a byte that is not text.
+                let Ok(text) = std::fs::read(&host) else {
                     return 1;
                 };
                 // `-r` takes the whole file; `-n` only what a previous read or
                 // write has not already accounted for.
                 let skip = if op == b'n' { self.hist_saved } else { 0 };
                 let mut lines = 0usize;
-                for line in text.lines() {
+                for line in bytes::lines(&text) {
                     lines = lines.saturating_add(1);
                     if lines <= skip {
                         continue;
                     }
                     // A wholly empty line is not an entry; a blank one is.
                     if !line.is_empty() {
-                        self.hist_push(line.to_string());
+                        self.hist_push(line.to_vec());
                     }
                 }
                 // The file's line count, not where the list now ends: a later
@@ -4090,12 +4117,12 @@ impl Shell {
                 0
             }
             b'w' => {
-                let mut s = String::new();
+                let mut s = Str::new();
                 for e in &self.history {
-                    s.push_str(e);
-                    s.push('\n');
+                    s.extend_from_slice(e);
+                    s.push(b'\n');
                 }
-                if std::fs::write(&host, s.as_bytes()).is_err() {
+                if std::fs::write(&host, &s).is_err() {
                     return 1;
                 }
                 // `-w` does not move the read cursor, however much it wrote.
@@ -4122,15 +4149,15 @@ impl Shell {
                     return 1;
                 }
                 let from = self.history.len().saturating_sub(self.hist_session);
-                let mut s = String::new();
+                let mut s = Str::new();
                 for e in self.history.get(from..).unwrap_or(&[]) {
-                    s.push_str(e);
-                    s.push('\n');
+                    s.extend_from_slice(e);
+                    s.push(b'\n');
                 }
                 let appended = std::fs::OpenOptions::new()
                     .append(true)
                     .open(&host)
-                    .and_then(|mut f| std::io::Write::write_all(&mut f, s.as_bytes()));
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, &s));
                 if appended.is_err() {
                     return 1;
                 }
@@ -4166,21 +4193,21 @@ impl Shell {
             return;
         };
         let host = bytes::bytes_to_path(&self.host_path(&path));
-        let Ok(text) = std::fs::read_to_string(&host) else {
+        let Ok(text) = std::fs::read(&host) else {
             return;
         };
-        let lines: Vec<&str> = text.lines().collect();
+        let lines: Vec<BStr<'_>> = bytes::lines(&text).collect();
         if lines.len() <= keep {
             return;
         }
-        let mut s = String::new();
+        let mut s = Str::new();
         for line in lines.get(lines.len().saturating_sub(keep)..).unwrap_or(&[]) {
-            s.push_str(line);
-            s.push('\n');
+            s.extend_from_slice(line);
+            s.push(b'\n');
         }
         // A write that fails leaves the file as it was, which is also what bash
         // does — `history_truncate_file` reports nothing either way.
-        let _ = std::fs::write(&host, s.as_bytes());
+        let _ = std::fs::write(&host, &s);
     }
 
     /// The number `$HISTCMD` reports: the number the *newest* entry carries, or
@@ -4845,7 +4872,7 @@ impl Shell {
         let [WordPart::Literal(name)] = first.parts.as_slice() else {
             return false; // command word uses expansion — resolve via buffered path
         };
-        !is_builtin(name) && !self.funcs.contains_key(name)
+        !bytes::as_str(name).is_some_and(is_builtin) && !self.funcs.contains_key(name)
     }
 
     /// Run an all-external pipeline with real OS pipes so the stages execute
@@ -4996,8 +5023,12 @@ impl Shell {
                 // `"f"()` fails even though `f` would be a fine name.
                 if !f.definable {
                     self.emit_stderr(
-                        format!("{}`{}': not a valid identifier\n", self.err_prefix(), f.name)
-                            .as_bytes(),
+                        format!(
+                            "{}`{}': not a valid identifier\n",
+                            self.err_prefix(),
+                            shown(&f.name)
+                        )
+                        .as_bytes(),
                     );
                     self.last_status = 1;
                 }
@@ -5005,7 +5036,8 @@ impl Shell {
                 // attempt and fails the command, leaving the definition intact).
                 else if self.readonly_funcs.contains(&f.name) {
                     self.emit_stderr(
-                        format!("{}{}: readonly function\n", self.err_prefix(), f.name).as_bytes(),
+                        format!("{}{}: readonly function\n", self.err_prefix(), shown(&f.name))
+                            .as_bytes(),
                     );
                     self.last_status = 1;
                 } else {
@@ -5281,12 +5313,15 @@ impl Shell {
         // `set -x` prints the (source-form) loop header before *each* iteration,
         // matching bash. A `for name; do` with no explicit list traces as
         // `for name in "$@"`.
-        let header = if self.xtrace {
+        let header: Option<Str> = if self.xtrace {
             let words = match &c.words {
-                Some(words) => words.iter().map(crate::unparse::word_src).collect::<Vec<_>>().join(" "),
-                None => "\"$@\"".to_string(),
+                Some(words) => bytes::join(
+                    &words.iter().map(crate::unparse::word_src).collect::<Vec<_>>(),
+                    b" ",
+                ),
+                None => b"\"$@\"".to_vec(),
             };
-            Some(format!("for {} in {words}", c.var))
+            Some(bfmt![b"for ", c.var.as_str(), b" in ", &words])
         } else {
             None
         };
@@ -5294,7 +5329,7 @@ impl Shell {
         for item in items {
             if let Some(h) = &header {
                 let prefix = self.xtrace_prefix();
-                let line = bfmt![prefix, h.as_str(), b"\n"];
+                let line = bfmt![prefix, h, b"\n"];
                 self.emit_stderr(&line);
             }
             // A readonly loop variable cannot be bound. bash finds this out at
@@ -5397,10 +5432,13 @@ impl Shell {
         // menu — bash does not re-emit it per iteration.
         if self.xtrace {
             let words = match &c.words {
-                Some(words) => words.iter().map(crate::unparse::word_src).collect::<Vec<_>>().join(" "),
-                None => "\"$@\"".to_string(),
+                Some(words) => bytes::join(
+                    &words.iter().map(crate::unparse::word_src).collect::<Vec<_>>(),
+                    b" ",
+                ),
+                None => b"\"$@\"".to_vec(),
             };
-            self.xtrace_emit(&format!("select {} in {words}", c.var));
+            self.bxtrace_emit(&bfmt![b"select ", c.var.as_str(), b" in ", &words]);
         }
         let ps3 = self.vars.get("PS3").cloned().unwrap_or_else(|| b"#? ".to_vec());
         let redir = RedirPlan::default();
@@ -5504,7 +5542,7 @@ impl Shell {
     /// Evaluate an arithmetic string with a builtin/context tag set for the
     /// duration (bash's `this_command_name`) — used by the `(( … ))` command and
     /// the C-style `for (( … ))` sections, whose errors bash tags with `((`.
-    fn eval_arith_cmd(&mut self, raw: &str, tag: &'static str) -> Option<i64> {
+    fn eval_arith_cmd(&mut self, raw: BStr<'_>, tag: &'static str) -> Option<i64> {
         let saved = self.arith_cmd.take();
         self.arith_cmd = Some(Cow::Borrowed(tag));
         let r = self.eval_arith_raw(raw);
@@ -5526,7 +5564,7 @@ impl Shell {
     /// assignment the section would have made takes effect (`x=keep;
     /// (( x=$((1/0)) ))` leaves `x` as `keep`). The abort the expansion armed is
     /// left armed for [`Self::arith_discard_flow`] to turn into a `Flow`.
-    fn eval_arith_raw(&mut self, raw: &str) -> Option<i64> {
+    fn eval_arith_raw(&mut self, raw: BStr<'_>) -> Option<i64> {
         let saved_tag = self.arith_cmd.take();
         let saved_abort = self.discard_error.take();
         let expanded = self.expand_arith_params(raw);
@@ -5613,7 +5651,7 @@ impl Shell {
     /// A bad subscript is fatal and untagged, like any other subscript failure —
     /// `ref='a[1/0]'; echo "${!ref}"; echo same-line` prints
     /// `1/0: division by 0` and abandons the rest of the line.
-    fn eval_referent_subscript(&mut self, raw: &str) -> i64 {
+    fn eval_referent_subscript(&mut self, raw: BStr<'_>) -> i64 {
         match self.eval_arith_raw(raw) {
             Some(n) => n,
             None => {
@@ -5631,10 +5669,10 @@ impl Shell {
         // `set -x` traces each section as `(( expr ))`; bash substitutes an
         // always-true `1` for an *empty* section (init/cond/update) and still
         // prints it, so `for ((;;))` traces `(( 1 ))` for init and cond.
-        let trace_section = |s: &mut Self, raw: &str| {
+        let trace_section = |s: &mut Self, raw: BStr<'_>| {
             if s.xtrace {
-                let expr = if raw.is_empty() { "1" } else { raw };
-                s.xtrace_emit(&format!("(( {expr} ))"));
+                let expr: BStr<'_> = if raw.is_empty() { b"1" } else { raw };
+                s.bxtrace_emit(&bfmt![b"(( ", expr, b" ))"]);
             }
         };
         self.last_status = 0;
@@ -5684,7 +5722,7 @@ impl Shell {
         // `set -x` prints `case WORD in` (WORD in source form, unexpanded) once
         // before pattern matching, matching bash.
         if self.xtrace {
-            self.xtrace_emit(&format!("case {} in", crate::unparse::word_src(&c.word)));
+            self.bxtrace_emit(&bfmt![b"case ", crate::unparse::word_src(&c.word), b" in"]);
         }
         let subject: Vec<Ch> = bytes::chars(self.expand_to_string(&c.word).as_bytes()).collect();
         // `shopt -s nocasematch` makes `case` (and `[[ == ]]`) matching
@@ -6223,9 +6261,9 @@ impl Shell {
     /// abandon the rest of the parse unit instead — a failure inside an array
     /// *subscript* and a failed nested expansion; `arith_discard_flow` turns
     /// either into a `Flow::Discard`.
-    fn exec_arith(&mut self, raw: &str) -> Flow {
+    fn exec_arith(&mut self, raw: BStr<'_>) -> Flow {
         if self.xtrace {
-            self.xtrace_emit(&format!("(( {raw} ))"));
+            self.bxtrace_emit(&bfmt![b"(( ", raw, b" ))"]);
         }
         // bash tags `(( … ))`-command arithmetic errors with `((`.
         self.last_status = match self.eval_arith_cmd(raw, "((") {
@@ -6988,7 +7026,7 @@ impl Shell {
             }
             ScalarDest::Elem(n, sub) => {
                 let n = n.clone();
-                self.assign_elem(&n, &Some(Box::new(Word::literal(sub))), val)
+                self.assign_elem(&n, &Some(Box::new(Word::literal(sub.as_bytes()))), val)
             }
         }
     }
@@ -7258,6 +7296,7 @@ impl Shell {
                     // TD-OILS-BYTE-STRINGS step 10: `$0` doubles as the label
                     // the diagnostic layer prints (`osh: line 3: …`), which is
                     // still `String`; the seam closes when that layer converts.
+                    #[allow(deprecated)]
                     let val = bytes::scaffold_lossy_string(&val);
                     self.name = if a.append {
                         format!("{}{val}", self.name)
@@ -7327,12 +7366,13 @@ impl Shell {
                         // subscript's *source* (`m['']`, `m[""]`, `m[$blank]`),
                         // so reconstruct it rather than printing the expansion.
                         if key.is_empty() {
-                            self.errln(&format!(
-                                "{}{}[{}]: bad array subscript",
+                            self.berrln(&bfmt![
                                 self.err_prefix(),
-                                a.name,
-                                crate::unparse::word_src(idx_word)
-                            ));
+                                &a.name,
+                                b"[",
+                                crate::unparse::word_src(idx_word),
+                                b"]: bad array subscript"
+                            ]);
                             return false;
                         }
                         let stored = if is_int {
@@ -7816,13 +7856,10 @@ impl Shell {
         // sync would overwrite it. Route the write to the source, then rebuild
         // the mirror so the change is immediately visible on read.
         if name == "BASH_ALIASES" {
-            // TD-OILS-BYTE-STRINGS step 8: an alias body is *source text* the
-            // lexer re-reads, and the alias table is typed to match the lexer.
-            let key = bytes::scaffold_lossy_string(&key);
-            let val = bytes::scaffold_lossy_string(&val);
             let final_val = if append {
-                let cur = self.aliases.get(&key).cloned().unwrap_or_default();
-                format!("{cur}{val}")
+                let mut cur = self.aliases.get(&key).cloned().unwrap_or_default();
+                cur.extend_from_slice(&val);
+                cur
             } else {
                 val
             };
@@ -7920,11 +7957,11 @@ impl Shell {
         };
         // The reference bash tags an offset/length arithmetic error with:
         // `@`/`*` for the positionals, `a[@]`/`a[*]` for an array.
-        let all = if star { '*' } else { '@' };
-        let param_ref = if name == "@" || name == "*" {
-            all.to_string()
+        let all = if star { b'*' } else { b'@' };
+        let param_ref: Str = if name == "@" || name == "*" {
+            vec![all]
         } else {
-            format!("{name}[{all}]")
+            bfmt![name, b"[", all, b"]"]
         };
         let n = elems.len() as i64;
         let off = self.eval_arith_substr_bound(offset, &param_ref);
@@ -8303,11 +8340,13 @@ impl Shell {
                     // expanded to.
                     let key = self.expand_to_string(w);
                     if key.is_empty() {
-                        self.errln(&format!(
-                            "{}{name}[{}]: bad array subscript",
+                        self.berrln(&bfmt![
                             self.err_prefix(),
-                            crate::unparse::word_src(w)
-                        ));
+                            name,
+                            b"[",
+                            crate::unparse::word_src(w),
+                            b"]: bad array subscript"
+                        ]);
                         return false;
                     }
                     self.assoc_set(name, key, value, false);
@@ -8335,7 +8374,7 @@ impl Shell {
     /// the pointer is an array element. The subscript is rendered from its
     /// *source*, not its value, because that is what bash's complaints about
     /// such a reference quote: `${!a[$n]}` names `a[$n]`.
-    fn indirect_ref_src(refname: &str, index: &Option<Box<Word>>) -> String {
+    fn indirect_ref_src(refname: &str, index: &Option<Box<Word>>) -> Str {
         crate::unparse::name_sub(refname, index)
     }
 
@@ -8356,10 +8395,11 @@ impl Shell {
     ) -> Result<Option<Str>, ()> {
         if index.is_some() && !self.var_is_set(refname) {
             let src = Self::indirect_ref_src(refname, index);
-            self.errln(&format!(
-                "{}{src}: invalid indirect expansion",
-                self.err_prefix()
-            ));
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                &src,
+                b": invalid indirect expansion"
+            ]);
             self.discard_error = Some(1);
             return Err(());
         }
@@ -8475,7 +8515,7 @@ impl Shell {
             if self.assoc.contains_key(name) {
                 return self.assoc_element(name, sub.as_bytes());
             }
-            let idx = self.eval_referent_subscript(sub);
+            let idx = self.eval_referent_subscript(sub.as_bytes());
             return self.array_element(name, idx);
         }
         self.param_value(target)
@@ -8671,18 +8711,14 @@ impl Shell {
         out
     }
 
-    /// Emit a single `set -x` trace line (prefix + `text` + newline) to stderr.
+    /// Emit a single `set -x` trace line (prefix + `text` + newline) to stderr,
+    /// where `text` may hold any byte — a `[[ … ]]` operand, an expanded word.
+    /// The trace shows the bytes the shell actually has, since a mangled trace
+    /// of a byte-string value is worse than none: it would name a file that is
+    /// not the one the command is about to touch.
+    ///
     /// Callers gate on `self.xtrace` themselves so `text` need not be built when
     /// tracing is off.
-    fn xtrace_emit(&mut self, text: &str) {
-        self.bxtrace_emit(text.as_bytes());
-    }
-
-    /// [`Self::xtrace_emit`] for a trace line built from *values* — a `[[ … ]]`
-    /// operand, an expanded word — which may hold any byte. The trace shows the
-    /// bytes the shell actually has, since a mangled trace of a byte-string
-    /// value is worse than none: it would name a file that is not the one the
-    /// command is about to touch.
     fn bxtrace_emit(&mut self, text: BStr<'_>) {
         let prefix = self.xtrace_prefix();
         let line = bfmt![prefix, text, b"\n"];
@@ -8701,18 +8737,10 @@ impl Shell {
     /// `PS4` containing a command substitution cannot trace itself.
     fn prompt_expand(&mut self, s: &str) -> Str {
         let decoded = self.prompt_decode(s);
-        // TD-OILS-BYTE-STRINGS step 8: the decode itself is byte-faithful (a
-        // `\w` inserts the working directory's real bytes), but re-lexing the
-        // result as double-quoted *source* still needs text. A decoded prompt
-        // that is not text is used literally — which is also what an unlexable
-        // one does, just below.
-        let Some(src) = bytes::as_str(&decoded) else {
-            return decoded;
-        };
         // A substitution that cannot even be lexed expands to nothing in bash
         // (it reports a syntax error to stderr; we take the empty string, which
         // is what the failed expansion contributes to the prompt either way).
-        let Ok(word) = crate::parser::dquote_word_from_source(src, self.lex_opts()) else {
+        let Ok(word) = crate::parser::dquote_word_from_source(&decoded, self.lex_opts()) else {
             return decoded;
         };
         let saved = std::mem::replace(&mut self.xtrace, false);
@@ -9108,11 +9136,11 @@ impl Shell {
                     // (`m['']` reports `''`, which expands to nothing).
                     if key.is_empty() {
                         if length {
-                            self.errln(&format!(
-                                "{}{}]: bad array subscript",
+                            self.berrln(&bfmt![
                                 self.err_prefix(),
-                                crate::unparse::word_src(w)
-                            ));
+                                crate::unparse::word_src(w),
+                                b"]: bad array subscript"
+                            ]);
                             self.discard_error = Some(1);
                             return b"0".to_vec();
                         }
@@ -9555,7 +9583,8 @@ impl Shell {
         // `myfunc 2> err`, `myfunc < in`) apply to the whole function body, so
         // run it inside a redirect scope when any are present. Without redirects,
         // dispatch directly to avoid the scope-setup overhead.
-        if let Some(name) = name_str.clone().filter(|n| self.funcs.contains_key(n)) {
+        if self.funcs.contains_key(name.as_slice()) {
+            let name = name.clone();
             let args: Vec<Str> = argv[1..].to_vec();
             if redir.needs_scope() {
                 return self.exec_with_redirects(redir, out, stdin, move |sh, o, s| {
@@ -9579,11 +9608,11 @@ impl Shell {
         // twice.
         if !name.contains(&b'/')
             && !name.contains(&b'\\')
-            && self.funcs.contains_key("command_not_found_handle")
+            && self.funcs.contains_key(b"command_not_found_handle".as_slice())
             && self.find_in_path(&name).is_none()
         {
             return self.call_function(
-                "command_not_found_handle",
+                b"command_not_found_handle",
                 &argv,
                 &assigns,
                 out,
@@ -9620,7 +9649,7 @@ impl Shell {
 
     fn call_function(
         &mut self,
-        name: &str,
+        name: BStr<'_>,
         args: &[Str],
         assigns: &[(String, Str)],
         out: &mut Out,
@@ -9640,10 +9669,11 @@ impl Shell {
         if let Some(limit) = self.funcnest_limit()
             && self.fn_stack.len() >= limit
         {
-            self.errln(&format!(
-                "{}{name}: maximum function nesting level exceeded ({limit})",
-                self.err_prefix()
-            ));
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                name,
+                format!(": maximum function nesting level exceeded ({limit})")
+            ]);
             self.last_status = 1;
             // bash treats this as a fatal `jump_to_top_level(DISCARD)`: it aborts
             // the rest of the current top-level command (bypassing `&&`/`||`/`;`)
@@ -9670,7 +9700,7 @@ impl Shell {
         self.local_opt_saves.push(None);
         // Track the function name for `FUNCNAME` while the body runs, plus the
         // line at the call site (the item currently executing) for `BASH_LINENO`.
-        self.fn_stack.push(name.to_string());
+        self.fn_stack.push(name.to_vec());
         self.call_line_stack.push(self.current_line);
         // `BASH_SOURCE` for this frame is where the function was *defined*, not
         // where it is being called from; a function defined in a sourced script
@@ -9876,13 +9906,15 @@ impl Shell {
     /// so each source frame's recorded `fn_depth` is enough to place it: it
     /// sits directly above function frame `fn_depth - 1`.
     ///
-    /// Each entry is `(FUNCNAME, BASH_SOURCE, BASH_LINENO)`.
-    fn merged_frames(&self) -> Vec<(String, String, u32)> {
+    /// Each entry is `(FUNCNAME, BASH_SOURCE, BASH_LINENO)`. The name is bytes
+    /// (a function may be defined under any word); the source label is still
+    /// text (TD-OILS-BYTE-STRINGS step 10).
+    fn merged_frames(&self) -> Vec<(Str, String, u32)> {
         let mut out = Vec::with_capacity(self.fn_stack.len() + self.source_stack.len());
         let mut si = 0usize;
         for k in 0..=self.fn_stack.len() {
             while let Some(f) = self.source_stack.get(si).filter(|f| f.fn_depth == k) {
-                out.push(("source".to_string(), f.path.clone(), f.call_line));
+                out.push((b"source".to_vec(), f.path.clone(), f.call_line));
                 si = si.saturating_add(1);
             }
             if let Some(name) = self.fn_stack.get(k) {
@@ -9905,7 +9937,7 @@ impl Shell {
     /// bash leaves `FUNCNAME` unset entirely otherwise (verified: at the top
     /// level of a sourced script `${FUNCNAME+set}` is empty even though
     /// `BASH_SOURCE` has two entries).
-    fn funcname_at(&self, i: usize) -> Option<String> {
+    fn funcname_at(&self, i: usize) -> Option<Str> {
         if self.fn_stack.is_empty() {
             return None;
         }
@@ -9914,7 +9946,7 @@ impl Shell {
         if i < depth {
             frames.get(depth.saturating_sub(1).saturating_sub(i)).map(|f| f.0.clone())
         } else if self.script_mode && i == depth {
-            Some("main".to_string())
+            Some(b"main".to_vec())
         } else {
             None
         }
@@ -9974,7 +10006,7 @@ impl Shell {
         // Walk the merged stack from innermost (last) to outermost (first).
         for (name, src, line) in self.merged_frames().into_iter().rev() {
             if in_function {
-                names.insert(idx, name.into_bytes());
+                names.insert(idx, name);
             }
             linenos.insert(idx, line.to_string().into_bytes());
             sources.insert(idx, src.into_bytes());
@@ -10301,7 +10333,7 @@ impl Shell {
     /// bash only reports aliases when `expand_aliases` is in effect: with the
     /// option off, `alias al=…; type al` says "not found" — because running the
     /// name would *not* reach the alias. Verified against bash 5.2.
-    fn describe_alias(&self, name: &str) -> Option<&String> {
+    fn describe_alias(&self, name: BStr<'_>) -> Option<&Str> {
         if self.aliases_enabled() { self.aliases.get(name) } else { None }
     }
 
@@ -10326,13 +10358,13 @@ impl Shell {
             return self.command_describe_file(target, verbose, out, redir);
         };
         let target = text.as_str();
-        if let Some(val) = self.describe_alias(target) {
+        if let Some(val) = self.describe_alias(target.as_bytes()) {
             let line = if verbose {
-                alias_description(target.as_bytes(), val.as_bytes())
+                alias_description(target.as_bytes(), val)
             } else {
                 // bash's terse form for an alias is a command that would
                 // recreate it, not the bare name.
-                bfmt![b"alias ", target, b"=", single_quote_bytes(val.as_bytes())]
+                bfmt![b"alias ", target, b"=", single_quote_bytes(val)]
             };
             let _ = self.bwrite_line(out, redir, &line);
             self.last_status = 0;
@@ -10346,7 +10378,7 @@ impl Shell {
             };
             let _ = self.write_line(out, redir, &line);
             self.last_status = 0;
-        } else if self.funcs.contains_key(target) {
+        } else if self.funcs.contains_key(target.as_bytes()) {
             let line = if verbose {
                 format!("{target} is a function")
             } else {
@@ -11114,7 +11146,7 @@ impl Shell {
             // (both are declared from source text), so it is only the *lookups*
             // that need text — the spawn below uses the bytes as written.
             && bytes::as_str(name).is_none_or(|n| {
-                !self.funcs.contains_key(n) && !self.builtin_enabled(n)
+                !self.funcs.contains_key(n.as_bytes()) && !self.builtin_enabled(n)
             })
             // A name that resolves nowhere is *not* handled here: bash reports
             // `command not found` from the forked child, so the status belongs to
@@ -11168,8 +11200,7 @@ impl Shell {
                 child,
                 // `jobs` shows the command as *written*, not as expanded — which
                 // is what bash does, and what the general path below already
-                // records. (It also keeps the label out of the byte-string
-                // world: source text is text.)
+                // records.
                 cmd: crate::unparse::and_or_src(ao),
                 // A job that never got off the ground is one the shell knows
                 // the fate of the moment it exists.
@@ -12599,19 +12630,19 @@ impl Shell {
         for part in &word.parts {
             match part {
                 WordPart::Literal(s) => {
-                    for (i, seg) in s.split(':').enumerate() {
+                    for (i, seg) in s.split(|&b| b == b':').enumerate() {
                         if i > 0 {
                             cur.push(b':');
                         }
                         // The first segment inherits the running tilde position;
                         // every later segment follows a literal `:`, so it is one.
                         if i > 0 || at_tilde_pos {
-                            cur.extend_from_slice(&self.tilde_expand(seg.as_bytes()));
+                            cur.extend_from_slice(&self.tilde_expand(seg));
                         } else {
-                            cur.extend_from_slice(seg.as_bytes());
+                            cur.extend_from_slice(seg);
                         }
                     }
-                    at_tilde_pos = s.ends_with(':');
+                    at_tilde_pos = s.ends_with(b":");
                 }
                 WordPart::SingleQuoted { text: t, .. } => {
                     cur.extend_from_slice(t.as_bytes());
@@ -12647,30 +12678,30 @@ impl Shell {
                     // On the first part, split off the `NAME=`/`NAME+=` prefix
                     // (including any `[subscript]`) and emit it verbatim; the
                     // value begins right after the `=`.
-                    let value_str: &str = if idx == 0 {
-                        match s.find('=') {
+                    let value_str: BStr<'_> = if idx == 0 {
+                        match bytes::find(s, b"=") {
                             Some(eq) => {
-                                out.extend_from_slice(&s.as_bytes()[..=eq]);
-                                &s[eq + 1..]
+                                out.extend_from_slice(s.get(..=eq).unwrap_or_default());
+                                s.get(eq.saturating_add(1)..).unwrap_or_default()
                             }
                             // No `=` in the first literal (value came from a later
                             // part, e.g. `X=$y`): treat the whole literal as value.
-                            None => s.as_str(),
+                            None => s,
                         }
                     } else {
-                        s.as_str()
+                        s
                     };
-                    for (i, seg) in value_str.split(':').enumerate() {
+                    for (i, seg) in value_str.split(|&b| b == b':').enumerate() {
                         if i > 0 {
                             out.push(b':');
                         }
                         if i > 0 || at_tilde_pos {
-                            out.extend_from_slice(&self.tilde_expand(seg.as_bytes()));
+                            out.extend_from_slice(&self.tilde_expand(seg));
                         } else {
-                            out.extend_from_slice(seg.as_bytes());
+                            out.extend_from_slice(seg);
                         }
                     }
-                    at_tilde_pos = value_str.ends_with(':');
+                    at_tilde_pos = value_str.ends_with(b":");
                 }
                 WordPart::SingleQuoted { text: t, .. } => {
                     out.extend_from_slice(t.as_bytes());
@@ -12715,17 +12746,13 @@ impl Shell {
     /// A tilde expansion's result is pushed **quoted** and the remainder
     /// unquoted, which is bash's own split — see [`Shell::tilde_split`] for why
     /// the two halves must not be conflated.
-    fn push_literal_annotated(&self, buf: &mut Vec<EChar>, s: &str, leading: bool) {
-        match if leading {
-            self.tilde_split(s.as_bytes())
-        } else {
-            None
-        } {
+    fn push_literal_annotated(&self, buf: &mut Vec<EChar>, s: BStr<'_>, leading: bool) {
+        match if leading { self.tilde_split(s) } else { None } {
             Some((dir, rest)) => {
                 push_chars(buf, &dir, true);
                 push_chars(buf, rest, false);
             }
-            None => push_chars(buf, s.as_bytes(), false),
+            None => push_chars(buf, s, false),
         }
     }
 
@@ -13028,7 +13055,7 @@ impl Shell {
                 // Whatever the modifier ends up reading, a complaint it makes is
                 // about the reference as written — the writer named `!ref`, and
                 // the variable it resolved to is not theirs to be told about.
-                let label = format!("!{}", Self::indirect_ref_src(refname, index));
+                let label = bfmt![b"!", Self::indirect_ref_src(refname, index)];
                 let nameref = index.is_none() && self.nameref_attr.contains(refname);
                 let pointed_at: Option<Str> = if nameref {
                     match self.resolve_ref_name(refname) {
@@ -13080,7 +13107,14 @@ impl Shell {
                     // variable can be called `!a[9]`, so it is unset by
                     // construction. There is nothing to validate about it, so it
                     // skips the check above.
-                    None => label.clone(),
+                    //
+                    // A reference whose source is not text cannot be spelled as
+                    // a name at all, so `!` alone stands in for it — unset by
+                    // the same construction. The stand-in is never read (the
+                    // operand below is `None` whenever it is used) and never
+                    // printed (a diagnostic quotes `label`, not this), so the
+                    // two cases behave alike.
+                    None => bytes::as_str(&label).unwrap_or("!").to_owned(),
                 };
                 let renamed = rename_param_target(target, &tname, &label);
                 // What the modifier reads. An ordinary pointer expands to the
@@ -13110,7 +13144,7 @@ impl Shell {
             }
             WordPart::BadSubst(raw) => self.bad_substitution(raw),
             // Literal/quoted handled by callers.
-            WordPart::Literal(s) | WordPart::SingleQuoted { text: s, .. } => s.clone().into_bytes(),
+            WordPart::Literal(s) | WordPart::SingleQuoted { text: s, .. } => s.clone(),
             WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
         }
     }
@@ -13132,15 +13166,15 @@ impl Shell {
     ///
     /// bash aborts the whole expansion at the first such error, so a word with
     /// two of them reports only once; the early return here matches that.
-    fn bad_substitution_with(&mut self, raw: &str, fatal: bool) -> Str {
+    fn bad_substitution_with(&mut self, raw: BStr<'_>, fatal: bool) -> Str {
         if self.unbound_error.is_some() || self.discard_error.is_some() {
             return Str::new();
         }
-        let shown = self
+        let named = self
             .bad_sub_word
             .clone()
-            .unwrap_or_else(|| format!("${{{raw}}}"));
-        self.emit_stderr(format!("{}{shown}: bad substitution\n", self.err_prefix()).as_bytes());
+            .unwrap_or_else(|| bfmt![b"${", raw, b"}"]);
+        self.emit_stderr(&bfmt![self.err_prefix(), &named, b": bad substitution\n"]);
         if fatal {
             self.unbound_error = Some(1);
         } else {
@@ -13151,13 +13185,13 @@ impl Shell {
 
     /// The non-fatal (DISCARD-class) "bad substitution" — see
     /// [`Shell::bad_substitution_with`].
-    fn bad_substitution(&mut self, raw: &str) -> Str {
+    fn bad_substitution(&mut self, raw: BStr<'_>) -> Str {
         self.bad_substitution_with(raw, false)
     }
 
     /// The fatal "bad substitution" raised by an unrecognised `@` transform
     /// operator — see [`Shell::bad_substitution_with`].
-    fn bad_transform_substitution(&mut self, raw: &str) -> Str {
+    fn bad_transform_substitution(&mut self, raw: BStr<'_>) -> Str {
         self.bad_substitution_with(raw, true)
     }
 
@@ -13202,7 +13236,9 @@ impl Shell {
                     // indirection it is rather than as a bad name. Either way
                     // the default word is expanded first — bash lets its side
                     // effects happen before it complains.
-                    if matches!(operand, Operand::Value(_)) && !crate::parser::is_valid_name(name) {
+                    if matches!(operand, Operand::Value(_))
+                        && !crate::parser::is_valid_name(name.as_bytes())
+                    {
                         let complaint = if name.starts_with('!') {
                             "invalid indirect expansion"
                         } else {
@@ -13253,7 +13289,7 @@ impl Shell {
                     // or, through an indirection, the reference the writer
                     // actually wrote rather than the name it resolved to.
                     let disp = label
-                        .map_or_else(|| crate::unparse::name_sub(name, index), ToString::to_string);
+                        .map_or_else(|| crate::unparse::name_sub(name, index), <[u8]>::to_vec);
                     let line = bfmt![self.err_prefix(), disp, b": ", text, b"\n"];
                     self.emit_stderr(&line);
                     // bash: `${var:?word}` on an unset/null parameter writes the
@@ -13763,7 +13799,7 @@ impl Shell {
     /// `read_file` is the already-taken `$(< file)` fast path: a body that is
     /// solely an input redirection reads and substitutes the file's contents
     /// directly, which is what bash does instead of running the null command.
-    fn command_sub(&mut self, src: &str, map: &LineMap, read_file: Option<Str>) -> Str {
+    fn command_sub(&mut self, src: BStr<'_>, map: &LineMap, read_file: Option<Str>) -> Str {
         if let Some(path) = read_file {
             return self.substitute_file(&path);
         }
@@ -13801,7 +13837,7 @@ impl Shell {
     /// Aliases are deliberately not expanded for the peek: the shape
     /// [`Shell::comsub_read_file`] accepts has no command word for an alias to
     /// replace, so expansion cannot change the answer.
-    fn comsub_text_read_file(&mut self, src: &str, map: &LineMap) -> Option<Str> {
+    fn comsub_text_read_file(&mut self, src: BStr<'_>, map: &LineMap) -> Option<Str> {
         let opts = self.lex_opts();
         let mut ip = IncrementalParser::new(src, map.clone(), opts);
         let prog = ip.next_unit(None, opts)?.ok()?;
@@ -14114,7 +14150,7 @@ impl Shell {
                     text: s,
                     escaped: true,
                 } => {
-                    if !matches!(s.as_str(), "$" | "`" | "\"" | "\\") {
+                    if !matches!(s.as_slice(), b"$" | b"`" | b"\"" | b"\\") {
                         out.push(b'\\');
                     }
                     out.extend_from_slice(s.as_bytes());
@@ -14169,14 +14205,14 @@ impl Shell {
     /// bound. bash's `parameter_brace_substring` swaps `this_command_name` for
     /// the parameter reference while evaluating those two expressions, so the
     /// diagnostic reads `a[0]: 1 z: syntax error in expression`.
-    fn eval_arith_substr_bound(&mut self, w: &Word, param_ref: &str) -> i64 {
-        let saved = self.arith_cmd.replace(Cow::Owned(param_ref.to_string()));
+    fn eval_arith_substr_bound(&mut self, w: &Word, param_ref: BStr<'_>) -> i64 {
+        let saved = self.arith_cmd.replace(Cow::Owned(shown(param_ref)));
         let v = self.eval_arith_index(w);
         self.arith_cmd = saved;
         v
     }
 
-    fn arith_sub(&mut self, expr: &str) -> Str {
+    fn arith_sub(&mut self, expr: BStr<'_>) -> Str {
         // Expand `$name` / `${name}` parameters inside the expression first;
         // bare identifiers are resolved by the evaluator via `VarLookup`.
         let expanded = self.expand_arith_params(expr);
@@ -14211,31 +14247,34 @@ impl Shell {
     /// that to the evaluator would be wrong twice over: the quote would show up in
     /// the diagnostic, and `\$n` would expand instead of reaching the evaluator as
     /// a literal `$n` for it to complain about.
-    fn expand_arith_params(&mut self, expr: &str) -> Str {
-        let chars: Vec<char> = expr.chars().collect();
-        // The *source* is text (it came from the parser), but what this pass
-        // substitutes into it — variable values, command-substitution output —
-        // is not, so the result is bytes.
+    fn expand_arith_params(&mut self, expr: BStr<'_>) -> Str {
+        // The source is scanned as characters — an arithmetic expression may
+        // hold a non-ASCII variable *value* spliced in by an earlier pass — but
+        // every character the scanner acts on is ASCII, so `syn` decides what is
+        // an operator and anything else copies through untouched.
+        let chars: Vec<Ch> = bytes::chars(expr).collect();
+        // The source is bytes, and so is what this pass substitutes into it —
+        // variable values, command-substitution output — so the result is bytes.
         let mut out = Str::new();
         let mut i = 0;
         while i < chars.len() {
-            if chars[i] == '\\' {
-                match chars.get(i + 1) {
+            if syn_at(&chars, i) == '\\' {
+                match chars.get(i + 1).copied() {
                     // Line continuation — both characters disappear, so
                     // `(( 1 + \<newline>2 ))` is 3.
-                    Some('\n') => i += 2,
+                    Some(c) if syn(c) == '\n' => i += 2,
                     // The escape bites only before the characters double quoting
                     // makes special. The backslash goes and what follows stays
                     // *literal*, which is what stops `\$n` from expanding.
-                    Some(c @ ('$' | '`' | '"' | '\\')) => {
-                        bytes::push_char(&mut out, *c);
+                    Some(c) if matches!(syn(c), '$' | '`' | '"' | '\\') => {
+                        c.push_to(&mut out);
                         i += 2;
                     }
                     // Anywhere else the backslash is just a character, and
                     // survives together with the one after it: `\q` stays `\q`.
                     Some(c) => {
                         out.push(b'\\');
-                        bytes::push_char(&mut out, *c);
+                        c.push_to(&mut out);
                         i += 2;
                     }
                     None => {
@@ -14245,7 +14284,7 @@ impl Shell {
                 }
                 continue;
             }
-            if chars[i] == '"' {
+            if syn_at(&chars, i) == '"' {
                 // Removed here rather than by the evaluator, so the text a
                 // diagnostic blames has no quotes in it. No open/closed state is
                 // needed: the rules inside and outside double quotes are the same
@@ -14254,27 +14293,31 @@ impl Shell {
                 i += 1;
                 continue;
             }
-            if chars[i] == '`' {
+            if syn_at(&chars, i) == '`' {
                 // Backtick command substitution: consume up to the next backtick.
                 let start = i + 1;
                 let mut j = start;
-                while j < chars.len() && chars[j] != '`' {
+                while j < chars.len() && syn_at(&chars, j) != '`' {
                     j += 1;
                 }
-                let inner: String = chars[start..j].iter().collect();
+                let inner = bytes::from_chars(
+                    chars.get(start..j).unwrap_or_default().iter().copied(),
+                );
                 i = if j < chars.len() { j + 1 } else { j };
                 let sub = self.run_command_sub_text(&inner);
                 out.extend_from_slice(bytes::trim(&sub));
                 continue;
             }
-            if chars[i] != '$' {
-                bytes::push_char(&mut out, chars[i]);
+            if syn_at(&chars, i) != '$' {
+                if let Some(c) = chars.get(i) {
+                    c.push_to(&mut out);
+                }
                 i += 1;
                 continue;
             }
-            // `chars[i] == '$'`
-            match chars.get(i + 1) {
-                Some('(') if chars.get(i + 2) == Some(&'(') => {
+            // The character at `i` is `$`.
+            match syn_at(&chars, i + 1) {
+                '(' if syn_at(&chars, i + 2) == '(' => {
                     // `$((expr))` — nested arithmetic. Find the matching `))`.
                     if let Some((inner, next)) = Self::scan_arith_sub(&chars, i + 3) {
                         let val = self.arith_sub(&inner);
@@ -14287,7 +14330,7 @@ impl Shell {
                     out.push(b'$');
                     i += 1;
                 }
-                Some('(') => {
+                '(' => {
                     // `$(cmd)` — command substitution. Find the matching `)`.
                     if let Some((inner, next)) = Self::scan_paren_group(&chars, i + 2) {
                         let sub = self.run_command_sub_text(&inner);
@@ -14298,7 +14341,7 @@ impl Shell {
                     out.push(b'$');
                     i += 1;
                 }
-                Some('{') => {
+                '{' => {
                     // `${…}` — a full parameter expansion (length `${#x}`, array
                     // subscript `${a[i]}`, operators `${x:-y}`, indirection
                     // `${!x}`, transforms `${x@Q}`, …). Scan the balanced brace
@@ -14311,7 +14354,7 @@ impl Shell {
                     let start = i;
                     let mut depth = 0usize;
                     while i < chars.len() {
-                        match chars[i] {
+                        match syn_at(&chars, i) {
                             '{' => depth += 1,
                             '}' if depth == 0 => break,
                             '}' => depth -= 1,
@@ -14319,7 +14362,9 @@ impl Shell {
                         }
                         i += 1;
                     }
-                    let inner: String = chars[start..i].iter().collect();
+                    let inner = bytes::from_chars(
+                        chars.get(start..i).unwrap_or_default().iter().copied(),
+                    );
                     if i < chars.len() {
                         i += 1; // consume the closing '}'
                     }
@@ -14331,7 +14376,11 @@ impl Shell {
                         // Fall back to the bare-name lookup for anything the
                         // param parser rejects (keeps prior behaviour for the
                         // simple cases it can't reach).
-                        Err(_) => self.param_value(&inner).unwrap_or_default(),
+                        // A name that is not text names no variable at all,
+                        // which is the same empty answer.
+                        Err(_) => bytes::as_str(&inner)
+                            .and_then(|n| self.param_value(n))
+                            .unwrap_or_default(),
                     };
                     let val = bytes::trim(&val);
                     out.extend_from_slice(if val.is_empty() { b"0" } else { val });
@@ -14339,8 +14388,10 @@ impl Shell {
                 _ => {
                     i += 1;
                     let mut n = String::new();
-                    while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                        n.push(chars[i]);
+                    while let Some(c) = chars.get(i).copied().map(syn).filter(|c| {
+                        c.is_ascii_alphanumeric() || *c == '_'
+                    }) {
+                        n.push(c);
                         i += 1;
                     }
                     let val = self.param_value(&n).unwrap_or_default();
@@ -14363,7 +14414,7 @@ impl Shell {
     /// so a diagnostic here would be attributed to the wrong place. The eager
     /// parse is only that validity check; the run is incremental, so a `shopt`
     /// or `alias` in the body still affects the rest of it.
-    fn run_command_sub_text(&mut self, text: &str) -> Str {
+    fn run_command_sub_text(&mut self, text: BStr<'_>) -> Str {
         if crate::parser::parse(text).is_err() {
             return Str::new();
         }
@@ -14375,14 +14426,15 @@ impl Shell {
 
     /// From `chars[start..]` (just past an opening `(`), return the balanced
     /// group's inner text and the index just past its matching `)`.
-    fn scan_paren_group(chars: &[char], start: usize) -> Option<(String, usize)> {
+    fn scan_paren_group(chars: &[Ch], start: usize) -> Option<(Str, usize)> {
         let mut depth = 0usize;
         let mut i = start;
         while i < chars.len() {
-            match chars[i] {
+            match syn_at(chars, i) {
                 '(' => depth += 1,
                 ')' if depth == 0 => {
-                    return Some((chars[start..i].iter().collect(), i + 1));
+                    let inner = chars.get(start..i)?;
+                    return Some((bytes::from_chars(inner.iter().copied()), i + 1));
                 }
                 ')' => depth -= 1,
                 _ => {}
@@ -14394,15 +14446,16 @@ impl Shell {
 
     /// From `chars[start..]` (just past the `$((`), return the arithmetic
     /// expression text and the index just past its matching `))`.
-    fn scan_arith_sub(chars: &[char], start: usize) -> Option<(String, usize)> {
+    fn scan_arith_sub(chars: &[Ch], start: usize) -> Option<(Str, usize)> {
         let mut depth = 0usize;
         let mut i = start;
         while i < chars.len() {
-            match chars[i] {
+            match syn_at(chars, i) {
                 '(' => depth += 1,
                 ')' if depth == 0 => {
-                    if chars.get(i + 1) == Some(&')') {
-                        return Some((chars[start..i].iter().collect(), i + 2));
+                    if syn_at(chars, i + 1) == ')' {
+                        let inner = chars.get(start..i)?;
+                        return Some((bytes::from_chars(inner.iter().copied()), i + 2));
                     }
                     return None;
                 }
@@ -14522,7 +14575,7 @@ impl Shell {
     /// stays a single expression: the builtin teardown that follows the arm
     /// (temporary assignments, scoped fds, the stderr stack) must run on every
     /// path, so nothing in there may return early.
-    fn eval_string(&mut self, src: &str, out: &mut Out, stdin: &StdinSrc) -> i32 {
+    fn eval_string(&mut self, src: BStr<'_>, out: &mut Out, stdin: &StdinSrc) -> i32 {
         // bash tags a syntax error inside `eval` with the `eval:` input-source
         // token; `eval_depth` drives that in the parse-error prefix. Restore on
         // every exit path (the borrow of `self` ends before this returns, so a
@@ -14737,21 +14790,7 @@ impl Shell {
                 // marker: `eval -- 'echo hi'` prints `hi` rather than looking
                 // for a command named `--`.
                 let joined = strip_end_of_options(args).join(b" ".as_slice());
-                // Seam: the parser is still `str`-typed (TD-OILS-BYTE-STRINGS
-                // step 8), so an operand that is not text cannot be parsed. It
-                // is rejected rather than approximated — evaluating an
-                // *altered* command is worse than evaluating none.
-                match bytes::as_str(&joined) {
-                    Some(src) => self.eval_string(src, out, stdin),
-                    None => {
-                        self.berrln(&bfmt![
-                            self.err_prefix(),
-                            b"eval: argument is not valid text: ",
-                            &joined
-                        ]);
-                        2
-                    }
-                }
+                self.eval_string(&joined, out, stdin)
             }
             "source" | "." => self.builtin_source(args, name, out, stdin),
             "type" => self.builtin_type(args, out, redir),
@@ -16259,14 +16298,13 @@ impl Shell {
         {
             return false;
         }
-        let msg = format!(
-            "{}{} {:<24}{}\n",
+        let msg = bfmt![
             self.err_prefix(),
-            job.pid,
-            signal_description(sig),
-            job.cmd
-        );
-        self.emit_stderr(msg.as_bytes());
+            format!("{} {:<24}", job.pid, signal_description(sig)),
+            &job.cmd,
+            b"\n"
+        ];
+        self.emit_stderr(&msg);
         true
     }
 
@@ -16497,7 +16535,7 @@ impl Shell {
             }
             ids
         };
-        let mut buf = String::new();
+        let mut buf = Str::new();
         let mut reported: Vec<usize> = Vec::new();
         for job in &self.jobs {
             if !ids.contains(&job.id) {
@@ -16523,8 +16561,8 @@ impl Shell {
             }
             reported.push(job.id);
             if form == JobsForm::PidOnly {
-                buf.push_str(&job.pid.to_string());
-                buf.push('\n');
+                buf.extend_from_slice(job.pid.to_string().as_bytes());
+                buf.push(b'\n');
                 continue;
             }
             // bash words the state three ways: `Running`, the description of
@@ -16542,18 +16580,22 @@ impl Shell {
             // longer anything running in the background to denote.
             let amp = if running { " &" } else { "" };
             if form == JobsForm::Long {
-                buf.push_str(&format!(
-                    "[{}]{} {} {:<24}{}{}\n",
-                    job.id, marker, job.pid, state_text, job.cmd, amp
-                ));
+                buf.extend_from_slice(&bfmt![
+                    format!("[{}]{} {} {state_text:<24}", job.id, marker, job.pid),
+                    &job.cmd,
+                    amp,
+                    b"\n"
+                ]);
             } else {
-                buf.push_str(&format!(
-                    "[{}]{}  {:<24}{}{}\n",
-                    job.id, marker, state_text, job.cmd, amp
-                ));
+                buf.extend_from_slice(&bfmt![
+                    format!("[{}]{}  {state_text:<24}", job.id, marker),
+                    &job.cmd,
+                    amp,
+                    b"\n"
+                ]);
             }
         }
-        let wstatus = self.write_bytes(out, redir, buf.as_bytes());
+        let wstatus = self.write_bytes(out, redir, &buf);
         // Listing a job counts as reporting it. Only the jobs actually printed
         // are marked, so a `-r` that filtered a finished one out leaves it for
         // the next `jobs` to report — and `-p`, which says nothing about a job
@@ -16614,25 +16656,11 @@ impl Shell {
         // Quoted parts, so the words survive as they are: a substituted pid is
         // not a pattern to match, and a spec left alone is not one either.
         //
-        // Seam: the command is handed to the executor as an AST, whose word
-        // text is still `String`-typed (TD-OILS-BYTE-STRINGS step 8), so a word
-        // that is not text cannot be carried through it. It is refused rather
-        // than approximated — running an *altered* command is the one outcome
-        // worse than running none.
         let mut cmd_words = Vec::with_capacity(argv.len());
         for a in &argv {
-            let Some(text) = bytes::as_str(a) else {
-                self.berrln(&bfmt![
-                    self.err_prefix(),
-                    b"jobs: ",
-                    a,
-                    b": argument is not valid text"
-                ]);
-                return 1;
-            };
             cmd_words.push(Word {
                 parts: vec![WordPart::SingleQuoted {
-                    text: text.to_string(),
+                    text: a.clone(),
                     escaped: false,
                 }],
             });
@@ -16712,11 +16740,7 @@ impl Shell {
         // its whole-command spelling. Logged as part of TD-OILS13.
         let mut found = None;
         for (idx, job) in self.jobs.iter().enumerate() {
-            // Seam: a job's recorded command text is still `String`-typed
-            // (TD-OILS-BYTE-STRINGS step 8, the parser layer), so the match is
-            // made against its bytes rather than the other way round. That is
-            // exact either way — a byte string never matches text it is not.
-            let hay = job.cmd.as_bytes();
+            let hay = job.cmd.as_slice();
             let hit = if substring { hay.contains_str(name) } else { hay.starts_with(name) };
             if !hit {
                 continue;
@@ -16850,7 +16874,7 @@ impl Shell {
         // identifier is ASCII, so a word that is not text is not one either —
         // it takes the same message, quoting the bytes the user gave.
         let pid_var: Option<String> = match &pid_var {
-            Some(var) => match bytes::as_str(var).filter(|n| crate::parser::is_valid_name(n)) {
+            Some(var) => match bytes::as_str(var).filter(|n| crate::parser::is_valid_name(n.as_bytes())) {
                 Some(name) => Some(name.to_string()),
                 None => {
                     self.berrln(&bfmt![
@@ -17259,7 +17283,7 @@ impl Shell {
         };
         // Echo the command line to stdout, matching bash's `fg` behavior.
         let cmd = self.jobs[idx].cmd.clone();
-        let _ = self.write_bytes(out, redir, format!("{cmd}\n").as_bytes());
+        let _ = self.write_bytes(out, redir, &bfmt![&cmd, b"\n"]);
         // Wait for the job to finish, then remove it from the table.
         let job = &mut self.jobs[idx];
         let status = if let Some(body) = job.child.take() {
@@ -17378,7 +17402,8 @@ impl Shell {
                     return 1;
                 };
                 let src = self.bash_source_at(n + 1).unwrap_or_else(|| "NULL".to_string());
-                self.write_bytes(out, redir, format!("{line} {func} {src}\n").as_bytes())
+                let text = bfmt![line.to_string(), b" ", &func, b" ", src, b"\n"];
+                self.write_bytes(out, redir, &text)
             }
         }
     }
@@ -17655,38 +17680,31 @@ impl Shell {
         }
         let operands = &args[i..];
         if operands.is_empty() {
-            let mut buf = String::new();
+            let mut buf = Str::new();
             for (name, val) in &self.aliases {
-                buf.push_str(&format!("alias {name}={}\n", single_quote(val)));
+                buf.extend_from_slice(&bfmt![
+                    b"alias ",
+                    name,
+                    b"=",
+                    single_quote_bytes(val),
+                    b"\n"
+                ]);
             }
-            return self.write_bytes(out, redir, buf.as_bytes());
+            return self.write_bytes(out, redir, &buf);
         }
         let mut status = 0;
         for op in operands {
             if let Some(eq) = op.iter().position(|b| *b == b'=') {
-                let name = &op[..eq];
-                // Seam: the alias table is still `String`-typed
-                // (TD-OILS-BYTE-STRINGS step 8 — aliases are expanded by the
-                // lexer, over text), so a definition that is not text cannot be
-                // stored. It is refused with bash's invalid-name message rather
-                // than approximated: an alias whose name or body was altered
-                // would run a command the user never wrote.
-                let (Some(name), Some(val)) = (bytes::as_str(name), bytes::as_str(&op[eq + 1..]))
-                else {
-                    self.berrln(&bfmt![self.err_prefix(), b"alias: `", op, b"': invalid alias name"]);
-                    status = 1;
-                    continue;
-                };
+                let (name, val) = op.split_at(eq);
                 if name.is_empty() {
                     self.berrln(&bfmt![self.err_prefix(), b"alias: `", op, b"': invalid alias name"]);
                     status = 1;
                     continue;
                 }
-                self.aliases.insert(name.to_string(), val.to_string());
-            } else if let Some(val) =
-                bytes::as_str(op).and_then(|n| self.aliases.get(n)).cloned()
-            {
-                let line = bfmt![b"alias ", op, b"=", single_quote_bytes(val.as_bytes()), b"\n"];
+                // `split_at` leaves the `=` on the front of the value.
+                self.aliases.insert(name.to_vec(), val.get(1..).unwrap_or_default().to_vec());
+            } else if let Some(val) = self.aliases.get(op.as_slice()).cloned() {
+                let line = bfmt![b"alias ", op, b"=", single_quote_bytes(&val), b"\n"];
                 self.write_bytes(out, redir, &line);
             } else {
                 self.berrln(&bfmt![self.err_prefix(), b"alias: ", op, b": not found"]);
@@ -17737,15 +17755,7 @@ impl Shell {
         }
         let mut status = 0;
         for name in names {
-            // The alias table is keyed by `String` — an alias can only be named
-            // by the parser, which is still text-typed (TD-OILS-BYTE-STRINGS
-            // step 8) — so a name that is not text names no alias at all. "not
-            // found" is then the honest answer, and the name is quoted back as
-            // the bytes the user typed.
-            if bytes::as_str(name)
-                .and_then(|n| self.aliases.remove(n))
-                .is_none()
-            {
+            if self.aliases.remove(name.as_slice()).is_none() {
                 self.berrln(&bfmt![self.err_prefix(), b"unalias: ", name, b": not found"]);
                 status = 1;
             }
@@ -18023,21 +18033,7 @@ impl Shell {
             // The `history -s …` line was recorded when it was read, so bash
             // drops it again before appending — the replacement keeps the same
             // number. With the option off there is no such entry to drop.
-            // Seam: a history entry is *source text* the reader re-lexes on
-            // recall, and the list is typed to match the lexer
-            // (TD-OILS-BYTE-STRINGS step 8). An operand that is not text is
-            // refused rather than approximated — recalling an *altered* command
-            // is the one outcome worse than recalling none.
-            let joined = rest.join(b" ".as_slice());
-            let Some(entry) = bytes::as_str(&joined).map(str::to_owned) else {
-                self.berrln(&bfmt![
-                    self.err_prefix(),
-                    b"history: ",
-                    &joined,
-                    b": entry is not valid text"
-                ]);
-                return 1;
-            };
+            let entry = rest.join(b" ".as_slice());
             self.hist_drop_own_entry();
             self.hist_record(entry);
             return 0;
@@ -18281,10 +18277,7 @@ impl Shell {
         }
         let upto = usize::try_from(last_hist).unwrap_or(0);
         for (j, entry) in self.history.iter().enumerate().take(upto.saturating_add(1)).rev() {
-            // A history entry is text (the list is typed to match the lexer
-            // until TD-OILS-BYTE-STRINGS step 8), so a spec that is not text
-            // matches no entry — that is the answer, not an approximation.
-            if entry.as_bytes().starts_with(s) {
+            if entry.starts_with(s) {
                 return FcSpec::Idx(isize::try_from(j).unwrap_or(0));
             }
         }
@@ -18298,14 +18291,14 @@ impl Shell {
     /// entry", not "drop my own entry" — so with `set +o history` in force (and
     /// therefore no entry of its own to drop) `fc -s` eats the last *real* entry
     /// and puts the re-run command in its place. Reproduced deliberately.
-    fn fc_replhist(&mut self, command: &str) {
+    fn fc_replhist(&mut self, command: BStr<'_>) {
         if command.is_empty() {
             return;
         }
         if self.history.pop().is_some() {
             self.hist_session = self.hist_session.saturating_sub(1);
         }
-        self.hist_record(command.to_string());
+        self.hist_record(command.to_vec());
     }
 
     /// `fc [-e ename] [-lnr] [first] [last]` / `fc -s [pat=rep …] [command]` —
@@ -18492,7 +18485,7 @@ impl Shell {
         if !listing {
             numbering = false;
         }
-        let mut text = String::new();
+        let mut text = Str::new();
         let mut idx = if reverse { end } else { beg };
         while if reverse { idx >= beg } else { idx <= end } {
             if let Ok(u) = usize::try_from(idx)
@@ -18500,16 +18493,16 @@ impl Shell {
             {
                 if numbering {
                     let n = self.hist_base.saturating_add(u);
-                    text.push_str(&format!("{n}"));
+                    text.extend_from_slice(format!("{n}").as_bytes());
                 }
                 if listing {
                     // bash writes a tab then a `*` for an entry carrying
                     // timestamp data and a space otherwise; osh never attaches
                     // data, so it is always the space.
-                    text.push_str("\t ");
+                    text.extend_from_slice(b"\t ");
                 }
-                text.push_str(entry);
-                text.push('\n');
+                text.extend_from_slice(entry);
+                text.push(b'\n');
             }
             if reverse {
                 idx = idx.saturating_sub(1);
@@ -18521,7 +18514,7 @@ impl Shell {
             }
         }
         if listing {
-            return self.write_bytes(out, redir, text.as_bytes());
+            return self.write_bytes(out, redir, &text);
         }
         self.fc_edit_and_run(&text, ename.as_deref(), out, stdin)
     }
@@ -18553,31 +18546,16 @@ impl Shell {
                 return 1;
             }
         };
-        let Some(command) = self.history.get(idx).cloned() else {
+        let Some(mut command) = self.history.get(idx).cloned() else {
             self.errln(&format!("{}fc: no command found", self.err_prefix()));
             return 1;
         };
-        let mut command = command.into_bytes();
         for (pat, rep) in &subs {
             command = bytes_replace_all(&command, pat, rep);
         }
-        // Seam: the rewritten command is shell *source* — it is echoed, recorded
-        // in the history and parsed, all of which are text-typed until
-        // TD-OILS-BYTE-STRINGS step 8. A substitution that introduces bytes that
-        // are not text is refused rather than approximated: running an *altered*
-        // command is the one outcome worse than running none.
-        let Some(command) = bytes::as_str(&command).map(str::to_owned) else {
-            self.berrln(&bfmt![
-                self.err_prefix(),
-                b"fc: ",
-                &command,
-                b": command is not valid text"
-            ]);
-            return 1;
-        };
         // The command about to run is echoed on stderr — so `fc -s … 2>/dev/null`
         // hides the echo while `> /dev/null` does not.
-        self.errln(&command);
+        self.berrln(&command);
         self.fc_replhist(&command);
         self.fc_run(&command, out, stdin, HistRead::Off)
     }
@@ -18586,34 +18564,13 @@ impl Shell {
     /// whatever it left and run that.
     fn fc_edit_and_run(
         &mut self,
-        text: &str,
+        text: BStr<'_>,
         ename: Option<BStr<'_>>,
         out: &mut Out,
         stdin: &StdinSrc,
     ) -> i32 {
-        // Seam: the editor invocation is built as a *shell command line* and
-        // parsed (which is why `FCEDIT='sed -i s/a/b/'` works), and the parser is
-        // text-typed until TD-OILS-BYTE-STRINGS step 8. An editor name that is
-        // not text is refused before the temp file is written, so nothing is
-        // left behind — and never approximated, since the approximation would
-        // run a *different* editor.
-        let ename = match ename {
-            Some(e) => match bytes::as_str(e) {
-                Some(name) => Some(name),
-                None => {
-                    self.berrln(&bfmt![
-                        self.err_prefix(),
-                        b"fc: ",
-                        e,
-                        b": editor name is not valid text"
-                    ]);
-                    return 1;
-                }
-            },
-            None => None,
-        };
         let path = unique_temp_path("osh_fc");
-        if std::fs::write(&path, text.as_bytes()).is_err() {
+        if std::fs::write(&path, text).is_err() {
             self.errln(&format!(
                 "{}fc: {path}: cannot open temp file",
                 self.err_prefix()
@@ -18627,8 +18584,8 @@ impl Shell {
         // free and strictly safer).
         let quoted = format!("'{}'", path.replace('\'', r"'\''"));
         let cmd = match ename {
-            Some(e) => format!("{e} {quoted}"),
-            None => format!("${{FCEDIT:-${{EDITOR:-vi}}}} {quoted}"),
+            Some(e) => bfmt![e, b" ", &quoted],
+            None => bfmt![b"${FCEDIT:-${EDITOR:-vi}} ", &quoted],
         };
         let rc = self.fc_run(&cmd, out, stdin, HistRead::Off);
         if rc != 0 || self.pending_builtin_exit.is_some() || self.pending_abort {
@@ -18638,7 +18595,9 @@ impl Shell {
             let _ = std::fs::remove_file(&path); // best effort; the file is ours
             return if rc == 0 { rc } else { 1 };
         }
-        let edited = std::fs::read_to_string(&path).unwrap_or_default();
+        // Read as bytes: the editor may have left a command carrying a byte
+        // that is not text, and the replay has to run what it actually wrote.
+        let edited = std::fs::read(&path).unwrap_or_default();
         let _ = std::fs::remove_file(&path); // best effort; the file is ours
         // bash raises `echo_input_at_read` (i.e. `set -v`) for the replay, so
         // each unit is echoed to stderr as it is read, and forces history
@@ -18652,7 +18611,7 @@ impl Shell {
 
     /// Run internally-generated shell source on `fc`'s behalf, routing an `exit`
     /// or an abort out through the side channels a builtin has to use.
-    fn fc_run(&mut self, src: &str, out: &mut Out, stdin: &StdinSrc, hist: HistRead) -> i32 {
+    fn fc_run(&mut self, src: BStr<'_>, out: &mut Out, stdin: &StdinSrc, hist: HistRead) -> i32 {
         match self.run_source_flow_out(src, out, stdin, &LineMap::Offset(0), hist) {
             Flow::Exit(code) => {
                 self.pending_builtin_exit = Some(code);
@@ -18939,12 +18898,10 @@ impl Shell {
         if action.is_empty() {
             return Flow::Next;
         }
-        let Some(src) = self.trap_source(name, &action) else {
-            return Flow::Next;
-        };
         self.in_trap = true;
         let saved = self.last_status;
-        let flow = self.run_source_flow_out(src, out, stdin, &LineMap::Offset(0), HistRead::Off);
+        let flow =
+            self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), HistRead::Off);
         // Preserve the pre-trap status unless the handler asked to exit, in
         // which case its code is the shell's exit status.
         if !matches!(flow, Flow::Exit(_)) {
@@ -18955,25 +18912,6 @@ impl Shell {
     }
 
     /// The source text of a trap handler, or `None` after reporting that the
-    /// handler cannot be run.
-    ///
-    /// Seam: the parser is still `str`-typed (TD-OILS-BYTE-STRINGS step 8), so
-    /// a handler holding bytes that are not text cannot be parsed. It is
-    /// refused rather than approximated — running an *altered* handler is the
-    /// one outcome worse than running none.
-    fn trap_source<'a>(&self, name: &str, action: &'a Str) -> Option<&'a str> {
-        let src = bytes::as_str(action);
-        if src.is_none() {
-            self.berrln(&bfmt![
-                self.err_prefix(),
-                b"trap: ",
-                name,
-                b": handler is not valid text"
-            ]);
-        }
-        src
-    }
-
     /// Run the `EXIT` trap, if set, exactly once when the top-level shell exits.
     /// Called by the binary driver at each true-exit point.
     ///
@@ -19007,7 +18945,6 @@ impl Shell {
         self.exit_trap_done = true;
         if let Some(action) = self.traps.get("EXIT").cloned()
             && !action.is_empty()
-            && let Some(src) = self.trap_source("EXIT", &action)
         {
             // bash: the shell's exit status is the one in effect when the trap
             // fires, so it is preserved across the handler — *unless* the
@@ -19019,7 +18956,8 @@ impl Shell {
             // `fire_trap_flow`), which is what bash's `parse_and_execute` does:
             // the commands before a syntax error in the action still run, and
             // `set -v` echoes each unit as it is read.
-            let flow = self.run_source_flow_out(src, out, stdin, &LineMap::Offset(0), HistRead::Off);
+            let flow =
+                self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), HistRead::Off);
             let exited = match flow {
                 Flow::Exit(code) => Some(code),
                 _ => None,
@@ -19301,7 +19239,7 @@ impl Shell {
         // `String` and a name is spelled in the shell's identifier syntax — so a
         // name that is not text is not a valid identifier, which is the
         // complaint it already gets. The word is quoted back as its own bytes.
-        let Some(text) = bytes::as_str(name).filter(|n| crate::parser::is_valid_name(n)) else {
+        let Some(text) = bytes::as_str(name).filter(|n| crate::parser::is_valid_name(n.as_bytes())) else {
             self.berrln(&bfmt![
                 self.err_prefix(),
                 tag,
@@ -19498,14 +19436,10 @@ impl Shell {
     fn set_func_trace(&mut self, enable: bool, names: &[Str]) -> i32 {
         let mut status = 0;
         for name in names {
-            // The function table is keyed by `String` — a function can only be
-            // named by the parser, which is text-typed until TD-OILS-BYTE-STRINGS
-            // step 8 — so a name that is not text names no function and gets the
-            // same "not found", quoted back as the bytes the user typed.
-            match bytes::as_str(name).filter(|n| self.funcs.contains_key(*n)) {
+            match Some(name.as_slice()).filter(|n| self.funcs.contains_key(*n)) {
                 Some(n) => {
                     if enable {
-                        self.fn_trace_attr.insert(n.to_string());
+                        self.fn_trace_attr.insert(n.to_vec());
                     } else {
                         self.fn_trace_attr.remove(n);
                     }
@@ -19538,55 +19472,49 @@ impl Shell {
         if readonly && !names.is_empty() {
             let mut status = 0;
             for name in &names {
-                // A name that is not text is not a function (see
-                // `set_func_trace`); this path fails silently either way.
-                match bytes::as_str(name.as_slice()).filter(|n| self.funcs.contains_key(*n)) {
-                    Some(n) => {
-                        self.readonly_funcs.insert(n.to_string());
-                    }
-                    None => status = 1,
+                if self.funcs.contains_key(name.as_slice()) {
+                    self.readonly_funcs.insert((*name).clone());
+                } else {
+                    status = 1;
                 }
             }
             return status;
         }
         if names.is_empty() {
-            let mut all: Vec<&String> = self.funcs.keys().collect();
+            let mut all: Vec<&Str> = self.funcs.keys().collect();
             all.sort();
-            let mut listing = String::new();
+            let mut listing = Str::new();
             for name in all {
                 if name_only {
                     // `declare -F` — list each function as a `declare -f NAME`
                     // line (`-fr` when the function is readonly).
-                    let flags = if self.readonly_funcs.contains(name) { "-fr" } else { "-f" };
-                    listing.push_str(&format!("declare {flags} {name}\n"));
+                    let flags: BStr<'_> =
+                        if self.readonly_funcs.contains(name) { b"-fr" } else { b"-f" };
+                    listing.extend_from_slice(&bfmt![b"declare ", flags, b" ", name, b"\n"]);
                 } else if let Some(body) = self.funcs.get(name) {
                     // `declare -f` — print every function's reconstructed source.
-                    listing.push_str(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+                    listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
                 }
             }
-            return self.write_bytes(out, redir, listing.as_bytes());
+            return self.write_bytes(out, redir, &listing);
         }
-        let mut listing = String::new();
+        let mut listing = Str::new();
         let mut status = 0;
         for name in names {
-            let Some(name) = bytes::as_str(name) else {
-                // Not text ⇒ not a function; status 1, no diagnostic (bash).
-                status = 1;
-                continue;
-            };
+            let name = name.as_slice();
             if let Some(body) = self.funcs.get(name) {
                 if name_only {
-                    listing.push_str(name);
-                    listing.push('\n');
+                    listing.extend_from_slice(name);
+                    listing.push(b'\n');
                 } else {
                     // `declare -f NAME` prints the function's reconstructed source.
-                    listing.push_str(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+                    listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
                 }
             } else {
                 status = 1;
             }
         }
-        let write_status = self.write_bytes(out, redir, listing.as_bytes());
+        let write_status = self.write_bytes(out, redir, &listing);
         if status != 0 { status } else { write_status }
     }
 
@@ -20080,7 +20008,7 @@ impl Shell {
             // not text is not a valid identifier — which is the complaint it
             // already gets, quoting the original argument's own bytes.
             let Some(base_name) =
-                bytes::as_str(base_name).filter(|n| crate::parser::is_valid_name(n))
+                bytes::as_str(base_name).filter(|n| crate::parser::is_valid_name(n.as_bytes()))
             else {
                 self.berrln(&bfmt![
                     self.err_prefix(),
@@ -20293,22 +20221,10 @@ impl Shell {
                         // as assoc/indexed above, so `apply_assignment` selects
                         // the correct array kind.
                         let op = if append { "+=" } else { "=" };
-                        // Seam: a parenthesised value is a compound array
+                        // A parenthesised value is a compound array
                         // *literal* — shell source that is re-parsed and
-                        // re-expanded — so it has to be text until the parser
-                        // becomes byte-typed (step 8).
-                        let Some(vtext) = bytes::as_str(&v) else {
-                            self.berrln(&bfmt![
-                                self.err_prefix(),
-                                tag,
-                                b": `",
-                                &v,
-                                b"': array literal is not valid text"
-                            ]);
-                            status = 1;
-                            continue;
-                        };
-                        let src = format!("{name}{op}{vtext}");
+                        // re-expanded, from its own bytes.
+                        let src = bfmt![name, op, &v];
                         if let Ok(prog) = crate::parser::parse(&src)
                             && let Some(assignment) = prog
                                 .items
@@ -20939,25 +20855,22 @@ impl Shell {
     /// bash. A readonly function cannot later be redefined or `unset -f`.
     fn readonly_functions(&mut self, names: &[&Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         if names.is_empty() {
-            let mut ro: Vec<&String> = self.readonly_funcs.iter().collect();
+            let mut ro: Vec<&Str> = self.readonly_funcs.iter().collect();
             ro.sort();
-            let mut listing = String::new();
+            let mut listing = Str::new();
             for name in ro {
                 if let Some(body) = self.funcs.get(name) {
-                    listing.push_str(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
-                    listing.push_str(&format!("declare -fr {name}\n"));
+                    listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+                    listing.extend_from_slice(&bfmt![b"declare -fr ", name, b"\n"]);
                 }
             }
-            return self.write_bytes(out, redir, listing.as_bytes());
+            return self.write_bytes(out, redir, &listing);
         }
         let mut status = 0;
         for name in names {
-            // The function table is keyed by `String` — a function can only be
-            // named by the parser — so a name that is not text names no
-            // function and gets the same complaint, quoted back as its bytes.
-            match bytes::as_str(name.as_slice()).filter(|n| self.funcs.contains_key(*n)) {
+            match Some(name.as_slice()).filter(|n| self.funcs.contains_key(*n)) {
                 Some(n) => {
-                    self.readonly_funcs.insert(n.to_string());
+                    self.readonly_funcs.insert(n.to_vec());
                 }
                 None => {
                     self.berrln(&bfmt![
@@ -21286,46 +21199,56 @@ impl Shell {
         // b c` still unsets `b` and `c`.
         let mut status = 0;
         for a in &args[i..] {
-            // Every table `unset` reaches — variables, arrays, functions, the
-            // attribute sets — is keyed by `String`, and a name is spelled in
-            // the shell's identifier syntax, so a name that is not text is
-            // bound to nothing at all. Unsetting an unbound name is silently
-            // fine in bash, so this is the same quiet no-op.
-            let Some(a) = bytes::as_str(a) else {
-                continue;
-            };
+            // `unset -f` names a *function*, and bash lets a function be
+            // defined with any word, so this branch runs on the raw operand —
+            // ahead of the identifier gate the variable namespace needs.
             if funcs_only {
-                if self.readonly_funcs.contains(a) {
-                    self.emit_stderr(
-                        format!("{}unset: {a}: cannot unset: readonly function\n", self.err_prefix()).as_bytes(),
-                    );
+                if self.readonly_funcs.contains(a.as_slice()) {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"unset: ",
+                        a.as_slice(),
+                        b": cannot unset: readonly function"
+                    ]);
                     status = 1;
                     continue;
                 }
-                self.funcs.remove(a);
-                self.func_sources.remove(a);
-                self.fn_trace_attr.remove(a);
+                self.funcs.remove(a.as_slice());
+                self.func_sources.remove(a.as_slice());
+                self.fn_trace_attr.remove(a.as_slice());
                 continue;
             }
-            // `unset -n ref` removes the nameref binding itself.
+            // `unset -n ref` removes the nameref binding itself. Those tables
+            // are keyed by `String` and a variable name is spelled in the
+            // shell's identifier syntax, so a name that is not text is bound to
+            // nothing at all — and unsetting an unbound name is silently fine
+            // in bash, which is the same quiet no-op.
             if nameref_only {
-                self.nameref_attr.remove(a);
-                self.vars.remove(a);
+                if let Some(a) = bytes::as_str(a) {
+                    self.nameref_attr.remove(a);
+                    self.vars.remove(a);
+                }
                 continue;
             }
             // `unset name[sub]` removes a single element. The subscript is split
             // off *before* nameref resolution so `unset ref[1]` follows `ref` to
-            // its target array, as bash does.
+            // its target array, as bash does — and before the identifier gate
+            // below, because the subscript is an ordinary word that may hold any
+            // byte even when the base name it indexes is a plain identifier
+            // (`unset 'm[\xff]'` addresses a real element of `m`).
             //
             // A token only counts as an array reference when the base is a valid
             // identifier, the bracket is not the first character, and the
             // subscript is non-empty and closes the token. Anything else
             // (`e[]`, `q[0]junk`, `1abc[0]`) is an ordinary — and necessarily
             // unset — variable name, which bash quietly accepts.
-            let subscript = a.find('[').filter(|&open| open > 0).and_then(|open| {
-                a.strip_suffix(']')
-                    .filter(|_| open + 1 < a.len() - 1 && crate::parser::is_valid_name(&a[..open]))
-                    .map(|body| (&a[..open], &body[open + 1..]))
+            let subscript = bytes::find(a, b"[").filter(|&open| open > 0).and_then(|open| {
+                // A valid identifier is ASCII, so the base is text whenever the
+                // token is an array reference at all.
+                let base = bytes::as_str(a.get(..open)?)
+                    .filter(|b| crate::parser::is_valid_name(b.as_bytes()))?;
+                let sub = a.strip_suffix(b"]")?.get(open.saturating_add(1)..)?;
+                (!sub.is_empty()).then_some((base, sub))
             });
             if let Some((base, sub_src)) = subscript {
                 let name = self
@@ -21343,6 +21266,14 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // Every remaining *variable* table `unset` reaches — scalars,
+            // arrays, the attribute sets — is keyed by `String`, and a variable
+            // name is spelled in the shell's identifier syntax, so a name that
+            // is not text is bound to nothing at all. Unsetting an unbound name
+            // is silently fine in bash, so this is the same quiet no-op.
+            let Some(a) = bytes::as_str(a) else {
+                continue;
+            };
             // Without `-n`, unsetting a nameref unsets the variable it points to
             // (bash semantics); resolve the target name first. A circular chain
             // points nowhere, so bash reports it and unsets the *reference*,
@@ -21365,16 +21296,16 @@ impl Shell {
                 || self.declared.contains(a);
             if !vars_only && !is_var {
                 // Not a set variable: fall back to unsetting a function.
-                if self.readonly_funcs.contains(a) {
+                if self.readonly_funcs.contains(a.as_bytes()) {
                     self.emit_stderr(
                         format!("{}unset: {a}: cannot unset: readonly function\n", self.err_prefix()).as_bytes(),
                     );
                     status = 1;
                     continue;
                 }
-                self.funcs.remove(a);
-                self.func_sources.remove(a);
-                self.fn_trace_attr.remove(a);
+                self.funcs.remove(a.as_bytes());
+                self.func_sources.remove(a.as_bytes());
+                self.fn_trace_attr.remove(a.as_bytes());
                 continue;
             }
             self.unbind_var(a);
@@ -21412,7 +21343,7 @@ impl Shell {
     /// status 1. The diagnostics deliberately name the subscript's **source**
     /// text rather than its expansion, as bash does (`unset: [$k]: bad array
     /// subscript`), because the expansion is by definition unusable.
-    fn unset_element(&mut self, name: &str, sub_src: &str) -> bool {
+    fn unset_element(&mut self, name: &str, sub_src: BStr<'_>) -> bool {
         // An element of a readonly array cannot be unset either — bash reports
         // the base name as the readonly variable.
         if self.readonly.contains(name) {
@@ -21441,9 +21372,12 @@ impl Shell {
             // keys — unlike the indexed case below, they do not clear the map.
             let key = self.expand_to_string(&word);
             if key.is_empty() {
-                self.emit_stderr(
-                    format!("{}unset: [{sub_src}]: bad array subscript\n", self.err_prefix()).as_bytes(),
-                );
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"unset: [",
+                    sub_src,
+                    b"]: bad array subscript"
+                ]);
                 return false;
             }
             if let Some(map) = self.assoc.get_mut(name) {
@@ -21451,7 +21385,7 @@ impl Shell {
             }
             return true;
         }
-        if sub_src == "@" || sub_src == "*" {
+        if sub_src == b"@" || sub_src == b"*" {
             if !is_indexed {
                 // A scalar has no all-elements subscript, and `@` is not an
                 // arithmetic expression, so this is reported before any
@@ -21507,9 +21441,12 @@ impl Shell {
             .and_then(|arr| arr.keys().next_back().copied())
             .map_or(0, |k| k.saturating_add(1));
         let Some(idx) = Self::resolve_index(raw, bound) else {
-            self.emit_stderr(
-                format!("{}unset: [{sub_src}]: bad array subscript\n", self.err_prefix()).as_bytes(),
-            );
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"unset: [",
+                sub_src,
+                b"]: bad array subscript"
+            ]);
             return false;
         };
         if let Some(arr) = self.arrays.get_mut(name) {
@@ -21540,11 +21477,11 @@ impl Shell {
                     listing.push(b'\n');
                 }
             }
-            let mut fns: Vec<&String> = self.funcs.keys().collect();
+            let mut fns: Vec<&Str> = self.funcs.keys().collect();
             fns.sort();
             for name in fns {
                 if let Some(body) = self.funcs.get(name) {
-                    listing.extend_from_slice(crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)).as_bytes());
+                    listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
                 }
             }
             return self.write_bytes(out, redir, &listing);
@@ -22437,7 +22374,7 @@ impl Shell {
             // not an array to put a record in. Both this and the readonly guard
             // happen here rather than up front, because the input has already
             // been consumed by the time bash looks at where to put it.
-            let Some(name) = bytes::as_str(&arr).filter(|a| crate::parser::is_valid_name(a))
+            let Some(name) = bytes::as_str(&arr).filter(|a| crate::parser::is_valid_name(a.as_bytes()))
             else {
                 self.berrln(&bfmt![
                     self.err_prefix(),
@@ -22780,7 +22717,7 @@ impl Shell {
             Some(t) => t,
             None => return 1,
         };
-        if !crate::parser::is_valid_name(&array) {
+        if !crate::parser::is_valid_name(array.as_bytes()) {
             self.errln(&format!(
                 "{}{tag}: `{array}': not a valid identifier",
                 self.err_prefix()
@@ -22869,14 +22806,7 @@ impl Shell {
                 && assigned.is_multiple_of(quantum)
                 && let Some(cb) = &callback
             {
-                // Seam: the callback line is *shell source*, and the parser
-                // is still `str`-typed (TD-OILS-BYTE-STRINGS step 8), so a
-                // callback — or a record — that is not text reaches it
-                // approximated. What is *stored* below is the record's own
-                // bytes either way.
-                let line = bfmt![cb, b" ", idx.to_string(), b" ", single_quote_bytes(&s)];
-                #[allow(deprecated)]
-                let cmd = bytes::scaffold_lossy_string(&line);
+                let cmd = bfmt![cb, b" ", idx.to_string(), b" ", single_quote_bytes(&s)];
                 // An `exit N` in the callback terminates the *shell* (bash), so
                 // the read loop stops and the array is never assigned at all.
                 // A builtin can only hand back an `i32`, hence the side channel.
@@ -22927,11 +22857,9 @@ impl Shell {
             return 2;
         };
         // The path is opened from its own bytes, so a script whose *name* is
-        // not text still opens. Its *contents* must be text, because the parser
-        // is (TD-OILS-BYTE-STRINGS step 8); until then a script carrying a
-        // non-UTF-8 byte is reported as the read failure it is, rather than
-        // being silently re-spelled.
-        match std::fs::read_to_string(bytes::bytes_to_path(&self.host_path(path))) {
+        // not text still opens — and its contents are parsed as the bytes they
+        // are, so a script may carry any byte a shell word may.
+        match std::fs::read(bytes::bytes_to_path(&self.host_path(path))) {
             Ok(src) => {
                 let saved = if args.len() > 1 {
                     let rest: Vec<Str> = args[1..].to_vec();
@@ -23213,8 +23141,8 @@ impl Shell {
             match action {
                 // bash reads these out of arrays it keeps sorted, so the
                 // answer is sorted however the names went in.
-                "function" => cands.extend(sorted(name_bytes(self.funcs.keys()))),
-                "alias" => cands.extend(name_bytes(self.aliases.keys())),
+                "function" => cands.extend(sorted(self.funcs.keys().cloned().collect())),
+                "alias" => cands.extend(self.aliases.keys().cloned()),
                 "builtin" => {
                     cands.extend(sorted(str_bytes(BUILTIN_NAMES.iter().copied())));
                 }
@@ -23238,9 +23166,9 @@ impl Shell {
                 // A command name is looked for in the order the shell itself
                 // would look: alias, reserved word, function, builtin, $PATH.
                 "command" => {
-                    cands.extend(name_bytes(self.aliases.keys()));
+                    cands.extend(self.aliases.keys().cloned());
                     cands.extend(str_bytes(KEYWORDS.iter().copied()));
-                    cands.extend(sorted(name_bytes(self.funcs.keys())));
+                    cands.extend(sorted(self.funcs.keys().cloned().collect()));
                     cands.extend(sorted(str_bytes(BUILTIN_NAMES.iter().copied())));
                     cands.extend(self.compgen_path_commands(&word));
                 }
@@ -23871,12 +23799,9 @@ impl Shell {
             // that is the answer, not an approximation. It can still name a
             // *file*, so the `$PATH` search below runs on its bytes.
             let text = bytes::as_str(name);
-            let alias = match text {
-                Some(n) => self.describe_alias(n).cloned(),
-                None => None,
-            };
+            let alias = self.describe_alias(name).cloned();
             let is_kw = text.is_some_and(|n| SHELL_KEYWORDS.contains(&n));
-            let is_fn = !skip_func && text.is_some_and(|n| self.funcs.contains_key(n));
+            let is_fn = !skip_func && self.funcs.contains_key(name);
             let is_bi = text.is_some_and(|n| self.builtin_enabled(n));
             // `-P` forces a filesystem search even when the name is a builtin,
             // function, or keyword.
@@ -23970,13 +23895,11 @@ impl Shell {
                 if is_kw {
                     let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell keyword"]);
                 }
-                // A function is by construction text-named (`is_fn` implies it),
-                // so the unparser — still `str`-typed — can be handed the name.
-                if is_fn && let Some(n) = text {
+                if is_fn {
                     let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a function"]);
-                    if let Some(body) = self.funcs.get(n) {
-                        let src = crate::unparse::unparse_function(n, body, self.func_redirects.get(n).map_or(&[][..], Vec::as_slice));
-                        let _ = self.write_bytes(out, redir, src.as_bytes());
+                    if let Some(body) = self.funcs.get(name.as_slice()) {
+                        let src = crate::unparse::unparse_function(name, body, self.func_redirects.get(name.as_slice()).map_or(&[][..], Vec::as_slice));
+                        let _ = self.write_bytes(out, redir, &src);
                     }
                 }
                 if is_bi {
@@ -23991,13 +23914,13 @@ impl Shell {
                     let _ = self.bwrite_line(out, redir, &alias_description(name, val.as_bytes()));
                 } else if is_kw {
                     let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell keyword"]);
-                } else if is_fn && let Some(n) = text {
+                } else if is_fn {
                     // bash prints the "is a function" line followed by the
                     // reconstructed function source.
                     let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a function"]);
-                    if let Some(body) = self.funcs.get(n) {
-                        let src = crate::unparse::unparse_function(n, body, self.func_redirects.get(n).map_or(&[][..], Vec::as_slice));
-                        let _ = self.write_bytes(out, redir, src.as_bytes());
+                    if let Some(body) = self.funcs.get(name.as_slice()) {
+                        let src = crate::unparse::unparse_function(name, body, self.func_redirects.get(name.as_slice()).map_or(&[][..], Vec::as_slice));
+                        let _ = self.write_bytes(out, redir, &src);
                     }
                 } else if is_bi {
                     let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell builtin"]);
@@ -24598,7 +24521,7 @@ impl Shell {
     fn format_parse_error(
         &self,
         e: &crate::parser::ParseError,
-        src: &str,
+        src: BStr<'_>,
         map: &LineMap,
     ) -> String {
         let line = e.line.unwrap_or_else(|| self.current_line.max(1));
@@ -24621,7 +24544,7 @@ impl Shell {
         if e.msg.contains("syntax error near ")
             && let Some(text) = map.unmap(line).and_then(|n| nth_source_line(src, n))
         {
-            out.push_str(&format!("\n{prefix}`{text}'"));
+            out.push_str(&format!("\n{prefix}`{}'", shown(text)));
         }
         // Under **errexit** only the *first* line of the whole diagnostic
         // survives, whatever its shape — the echoed source line, a follow-on
@@ -25183,7 +25106,7 @@ struct ParamOpNode<'a> {
     /// How to *name* the parameter in a diagnostic, when that differs from
     /// `name`: through an indirection bash blames the reference the writer
     /// wrote (`ptr=b[1]; ${!ptr:?}` says `ptr`), not the name it resolved to.
-    label: Option<&'a str>,
+    label: Option<BStr<'a>>,
 }
 
 /// The place a plain scalar assignment ends up, after namerefs are followed.
@@ -26566,15 +26489,6 @@ fn alias_description(name: BStr<'_>, value: BStr<'_>) -> Str {
 
 /// Wrap `s` in single quotes for `trap -p` output, escaping embedded quotes the
 /// POSIX way (`'\''`). Always quotes (even simple words), matching bash.
-fn single_quote(s: &str) -> String {
-    // Quoting only ever inserts ASCII, so quoting text yields text: the round
-    // trip below cannot fail, and the default is unreachable. (The two
-    // functions merge into one once the remaining `String`-typed layers —
-    // aliases and completion specs — become bytes; see TD-OILS-BYTE-STRINGS.)
-    String::from_utf8(single_quote_bytes(s.as_bytes())).unwrap_or_default()
-}
-
-/// [`single_quote`] for a value that is bytes.
 ///
 /// Quoting is a byte-wise operation — the only byte that needs care is the
 /// quote itself — so a value holding bytes that are not text survives it
@@ -26597,6 +26511,34 @@ fn single_quote_bytes(s: BStr<'_>) -> Str {
 /// action shortcut.
 fn comp_short_action(c: char) -> Option<&'static str> {
     COMP_ACTIONS.iter().find(|(_, flag)| *flag == c).map(|(name, _)| *name)
+}
+
+/// The ASCII syntax view of a scanned character, mirroring `lexer::syn`.
+///
+/// Arithmetic and parameter-expansion syntax is entirely ASCII, so a non-ASCII
+/// character — or a byte that is not a character at all — reads as `'\0'` and
+/// so matches no operator, instead of being mistaken for one.
+fn syn(c: Ch) -> char {
+    match c {
+        Ch::U(c) if c.is_ascii() => c,
+        _ => '\0',
+    }
+}
+
+/// [`syn`] of the character at `i`, or `'\0'` past the end — so a lookahead
+/// never needs a length check of its own.
+fn syn_at(chs: &[Ch], i: usize) -> char {
+    chs.get(i).copied().map_or('\0', syn)
+}
+
+/// Render a byte string for a diagnostic that is still `String`-typed.
+///
+/// The diagnostic layer is step 10 of TD-OILS-BYTE-STRINGS; until it lands,
+/// text that reaches a `format!`-built message goes through here, so every
+/// remaining lossy conversion is one call site and disappears with the scaffold.
+fn shown(s: BStr<'_>) -> String {
+    #[allow(deprecated)]
+    bytes::scaffold_lossy_string(s)
 }
 
 /// Collect a shell name table's `String` keys as byte strings. The tables are
@@ -27249,15 +27191,18 @@ fn ulimit_line(spec: &RlimitSpec, v: Option<u64>) -> String {
 
 /// The declaration builtins whose `name=value` operands bash treats as
 /// assignments (assignment-context expansion: tilde-expanded, no splitting/glob).
-fn is_declaration_builtin(name: &str) -> bool {
-    matches!(name, "export" | "declare" | "typeset" | "local" | "readonly")
+fn is_declaration_builtin(name: BStr<'_>) -> bool {
+    matches!(
+        name,
+        b"export" | b"declare" | b"typeset" | b"local" | b"readonly"
+    )
 }
 
 /// If a word is a single unquoted literal, return it (used to recognise a
 /// declaration-builtin command word syntactically, as bash does).
-fn word_as_plain_literal(word: &Word) -> Option<&str> {
+fn word_as_plain_literal(word: &Word) -> Option<BStr<'_>> {
     match word.parts.as_slice() {
-        [WordPart::Literal(s)] => Some(s.as_str()),
+        [WordPart::Literal(s)] => Some(s),
         _ => None,
     }
 }
@@ -27282,7 +27227,8 @@ fn is_assignment_word(word: &Word) -> bool {
     }
     // Optional array subscript `[...]`.
     if i < bytes.len() && bytes[i] == b'[' {
-        match s[i..].find(']') {
+        // `bytes` shadows the module, hence the fully-qualified `find`.
+        match bytes.get(i..).and_then(|rest| crate::bytes::find(rest, b"]")) {
             Some(close) => i += close + 1,
             None => return false,
         }
@@ -27378,15 +27324,16 @@ fn attr_assignment_split(word: BStr<'_>) -> Option<usize> {
 /// rejected is anything that could never name a variable at all — an empty
 /// string, `1x`, `a-b`, an unbalanced `a[`, an empty `a[]`.
 fn is_valid_assignment_target(s: &str) -> bool {
-    match s.find('[') {
+    let b = s.as_bytes();
+    match bytes::find(b, b"[") {
         // `BASE[SUB]`: the subscript must close at the very end and be
         // non-empty, and the base must still be an identifier.
         Some(p) => {
-            s.ends_with(']')
-                && s.len() > p.saturating_add(2)
-                && crate::parser::is_valid_name(&s[..p])
+            b.ends_with(b"]")
+                && b.len() > p.saturating_add(2)
+                && b.get(..p).is_some_and(crate::parser::is_valid_name)
         }
-        None => crate::parser::is_valid_name(s),
+        None => crate::parser::is_valid_name(b),
     }
 }
 
@@ -27616,9 +27563,9 @@ fn wrap_parse_message(msg: &str, prefix: &str) -> String {
 /// The 1-based `line`th physical line of `src` (verbatim, minus a trailing
 /// `\r`), or `None` if out of range. Used to echo the offending source line the
 /// way bash does on its second diagnostic line.
-fn nth_source_line(src: &str, line: u32) -> Option<&str> {
+fn nth_source_line(src: BStr<'_>, line: u32) -> Option<BStr<'_>> {
     let idx = usize::try_from(line).ok()?.checked_sub(1)?;
-    src.split('\n').nth(idx).map(|l| l.strip_suffix('\r').unwrap_or(l))
+    src.split(|&b| b == b'\n').nth(idx).map(|l| l.strip_suffix(b"\r").unwrap_or(l))
 }
 
 /// Create/truncate (or open for append) an output redirect's target *now*,
@@ -27694,7 +27641,7 @@ fn open_rw_pair(cwd: BStr<'_>, path: BStr<'_>) -> io::Result<(InputFd, Arc<File>
 /// the open forms (`{v}>file`, `{v}>&N`, …) which bind a fresh persistent fd.
 fn redir_is_close(r: &Redirect) -> bool {
     matches!(r.op, RedirectOp::DupOut | RedirectOp::DupIn)
-        && matches!(r.target.parts.as_slice(), [WordPart::Literal(s)] if s == "-")
+        && matches!(r.target.parts.as_slice(), [WordPart::Literal(s)] if s.as_slice() == b"-")
 }
 
 /// Duplicate the process's real standard stdout (`is_stdout`) or stderr into an
@@ -28219,7 +28166,7 @@ fn is_valid_indirect_target(s: &str) -> bool {
 /// as written, `!ref`. The two part ways here and nowhere else: the reader was
 /// asking about a name they never wrote down, so being told the resolved one
 /// would name a variable they never mentioned.
-fn rename_param_target(part: &WordPart, new_name: &str, label: &str) -> WordPart {
+fn rename_param_target(part: &WordPart, new_name: &str, label: BStr<'_>) -> WordPart {
     let name = new_name.to_string();
     match part.clone() {
         WordPart::ParamOp {
@@ -28234,7 +28181,7 @@ fn rename_param_target(part: &WordPart, new_name: &str, label: &str) -> WordPart
             op,
             colon,
             arg,
-            label: Some(label.to_string()),
+            label: Some(label.to_vec()),
         },
         WordPart::ParamTrim {
             index,
@@ -30029,7 +29976,7 @@ mod tests {
         let buf = capture_sink();
         let status = {
             let mut out = Out::Capture(buf.clone());
-            sh.run_source_out(src, &mut out, 0)
+            sh.run_source_out(src.as_bytes(), &mut out, 0)
         };
         let buf = take_capture(&buf);
         (String::from_utf8_lossy(&buf).into_owned(), status)
@@ -30046,7 +29993,7 @@ mod tests {
         let buf = capture_sink();
         let status = {
             let mut out = Out::Capture(buf.clone());
-            sh.run_source_out(src, &mut out, 0)
+            sh.run_source_out(src.as_bytes(), &mut out, 0)
         };
         (take_capture(&buf), status)
     }
@@ -30071,7 +30018,7 @@ mod tests {
         let buf = capture_sink();
         let status = {
             let mut out = Out::Capture(buf.clone());
-            sh.run_source_out(src, &mut out, 0)
+            sh.run_source_out(src.as_bytes(), &mut out, 0)
         };
         let buf = take_capture(&buf);
         (String::from_utf8_lossy(&buf).into_owned(), status)
@@ -30101,7 +30048,7 @@ mod tests {
             "( echo a",
             "select x in a b; do",
         ] {
-            assert!(sh.parse_incomplete(src), "should be incomplete: {src:?}");
+            assert!(sh.parse_incomplete(src.as_bytes()), "should be incomplete: {src:?}");
         }
         // --- incomplete: open quotes / substitutions ---
         for src in [
@@ -30111,11 +30058,11 @@ mod tests {
             "echo `date",
             "echo $((1 +",
         ] {
-            assert!(sh.parse_incomplete(src), "should be incomplete: {src:?}");
+            assert!(sh.parse_incomplete(src.as_bytes()), "should be incomplete: {src:?}");
         }
         // --- incomplete: line ends on a binary/pipe operator ---
         for src in ["echo a &&", "echo a ||", "echo a |", "echo a |&"] {
-            assert!(sh.parse_incomplete(src), "should be incomplete: {src:?}");
+            assert!(sh.parse_incomplete(src.as_bytes()), "should be incomplete: {src:?}");
         }
         // --- incomplete: dangling here-document (body not yet typed) ---
         for src in [
@@ -30125,7 +30072,7 @@ mod tests {
             "cat <<'Q'",
             "while read x; do echo $x; done <<IN",
         ] {
-            assert!(sh.parse_incomplete(src), "should be incomplete (heredoc): {src:?}");
+            assert!(sh.parse_incomplete(src.as_bytes()), "should be incomplete (heredoc): {src:?}");
         }
         // --- complete: a full command must NOT be flagged incomplete ---
         for src in [
@@ -30142,12 +30089,12 @@ mod tests {
             "",
             "   ",
         ] {
-            assert!(!sh.parse_incomplete(src), "should be complete: {src:?}");
+            assert!(!sh.parse_incomplete(src.as_bytes()), "should be complete: {src:?}");
         }
         // --- genuine syntax errors: NOT incomplete (more input can't fix) ---
         for src in ["echo )", "echo a; ; echo b", "done", "fi", "esac"] {
             assert!(
-                !sh.parse_incomplete(src),
+                !sh.parse_incomplete(src.as_bytes()),
                 "genuine error must not be treated as incomplete: {src:?}"
             );
         }
@@ -30164,7 +30111,7 @@ mod tests {
         {
             let mut out = Out::Capture(buf.clone());
             // No terminating `EOF` line: bash runs `cat` with the partial body.
-            let status = sh.run_source_out("cat <<EOF\npartial\n", &mut out, 0);
+            let status = sh.run_source_out("cat <<EOF\npartial\n".as_bytes(), &mut out, 0);
             assert_eq!(status, 0, "unterminated heredoc should still execute");
         }
         let buf = take_capture(&buf);
@@ -30238,7 +30185,7 @@ mod tests {
         sh.set_command_mode();
         sh.set_interactive_shell(false);
         let buf = capture_sink();
-        let prog = parse(src).expect("parse");
+        let prog = parse(src.as_bytes()).expect("parse");
         {
             let mut out = Out::Capture(buf.clone());
             sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit);
@@ -30278,44 +30225,44 @@ mod tests {
 
         // near-token, single line: `-c` token, line 1, second-line echo.
         let src = "echo hello world (";
-        let e = parse(src).unwrap_err();
+        let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 1: syntax error near unexpected token `('\n\
              osh: -c: line 1: `echo hello world ('"
         );
 
         // near-token, line 3: the reported line and echoed text follow the token.
         let src = ":\n:\necho a | | b";
-        let e = parse(src).unwrap_err();
+        let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 3: syntax error near unexpected token `|'\n\
              osh: -c: line 3: `echo a | | b'"
         );
 
         // end-of-file error: one line past the last token, and NO second line.
         let src = "if true";
-        let e = parse(src).unwrap_err();
+        let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 2: syntax error: unexpected end of file"
         );
 
         // EOF quirk with trailing blank lines: bash reports the EOF position line.
         let src = "if true\n\n\n";
-        let e = parse(src).unwrap_err();
+        let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 4: syntax error: unexpected end of file"
         );
 
         // Inside `eval`, the input-source token is `eval`, not `-c`.
         sh.eval_depth = 1;
         let src = "echo (";
-        let e = parse(src).unwrap_err();
+        let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: eval: line 1: syntax error near unexpected token `('\n\
              osh: eval: line 1: `echo ('"
         );
@@ -30339,11 +30286,11 @@ mod tests {
         // Each case: the source, then its full diagnostic, then the one line that
         // survives errexit — which is always the full form's first line.
         for src in ["echo hello world (", ":\n:\necho a | | b", "if true", "[[ a b ]]"] {
-            let e = parse(src).unwrap_err();
+            let e = parse(src.as_bytes()).unwrap_err();
             sh.errexit = false;
-            let full = sh.format_parse_error(&e, src, &LineMap::Offset(0));
+            let full = sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0));
             sh.errexit = true;
-            let terse = sh.format_parse_error(&e, src, &LineMap::Offset(0));
+            let terse = sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0));
             assert_eq!(terse, full.split('\n').next().unwrap(), "{src:?}");
             assert!(!terse.contains('\n'), "{src:?} -> {terse:?}");
         }
@@ -30352,17 +30299,17 @@ mod tests {
         // Spot-check one multi-line shape concretely, so a change in the *first*
         // line cannot pass by agreeing with itself.
         let src = "echo hello world (";
-        let e = parse(src).unwrap_err();
+        let e = parse(src.as_bytes()).unwrap_err();
         sh.errexit = true;
         assert_eq!(
-            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 1: syntax error near unexpected token `('"
         );
         // A diagnostic that is one line already is untouched.
         let src = "if true";
-        let e = parse(src).unwrap_err();
+        let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 2: syntax error: unexpected end of file"
         );
     }
@@ -30376,8 +30323,8 @@ mod tests {
         sh.set_command_mode();
         sh.set_interactive_shell(false);
         let check = |sh: &Shell, src: &str, want: &str| {
-            let e = parse(src).unwrap_err();
-            assert_eq!(sh.format_parse_error(&e, src, &LineMap::Offset(0)), want, "src: {src}");
+            let e = parse(src.as_bytes()).unwrap_err();
+            assert_eq!(sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)), want, "src: {src}");
         };
         // A bare word primary followed by another word: bash wanted a binary
         // operator. Covers a plain operand, a non-`[[` operator, and a unary
@@ -30454,34 +30401,34 @@ mod tests {
         sh.set_command_mode();
         sh.set_interactive_shell(false);
         let src = "a=(1 2";
-        let e = parse(src).unwrap_err();
+        let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(e.line, Some(1));
         assert_eq!(
-            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 1: unexpected EOF while looking for matching `)'"
         );
 
         // The array opens on line 3 and runs to EOF on line 5; bash names line 3.
         let src = "echo one\necho two\na=(1 2\n3\n4\n";
-        let e = parse(src).unwrap_err();
+        let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(e.line, Some(3));
         assert_eq!(
-            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 3: unexpected EOF while looking for matching `)'"
         );
 
         // `$( … )` is the exception: its body is re-parsed after the outer scan,
         // so the failure surfaces at end of input (one past the last line).
         let src = "echo one\nv=$(echo a\necho b\n";
-        let e = parse(src).unwrap_err();
+        let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(e.line, Some(4));
 
         // "One past the last line" counts a final line with no newline of its
         // own — the case an `eval` string always hits, since `eval 'v=$(echo a'`
         // is one unterminated line and bash reports the line after it.
-        let e = parse("v=$(echo a").unwrap_err();
+        let e = parse("v=$(echo a".as_bytes()).unwrap_err();
         assert_eq!(e.line, Some(2));
-        let e = parse("echo one\nv=$(echo a").unwrap_err();
+        let e = parse("echo one\nv=$(echo a".as_bytes()).unwrap_err();
         assert_eq!(e.line, Some(3));
     }
 
@@ -30491,7 +30438,7 @@ mod tests {
         // quote on a later line does not suppress the lines before it. The
         // incremental parser must therefore hand back every complete unit first
         // and only then report the lexer error.
-        let mut ip = crate::parser::IncrementalParser::new("echo one\necho two\nv='abc\n", 0, crate::lexer::LexOpts::default());
+        let mut ip = crate::parser::IncrementalParser::new("echo one\necho two\nv='abc\n".as_bytes(), 0, crate::lexer::LexOpts::default());
         let mut units = 0;
         loop {
             match ip.next_unit(None, crate::lexer::LexOpts::default()) {
@@ -30524,7 +30471,12 @@ mod tests {
                 .iter()
                 .map(|w| match w {
                     crate::lexer::ReaderWarning::HeredocEof(h) => {
-                        format!("{}/{}/{}", h.delim, h.body_line, h.eof_line)
+                        format!(
+                            "{}/{}/{}",
+                            String::from_utf8_lossy(&h.delim),
+                            h.body_line,
+                            h.eof_line
+                        )
                     }
                     crate::lexer::ReaderWarning::SubstHeredoc(s) => {
                         format!("subst/{}/{}", s.count, s.line)
@@ -30537,7 +30489,7 @@ mod tests {
         // Two units: `echo hi` must be handed out (and so run) with nothing said,
         // and the warning released only with the unit that owns the `<<`.
         let mut ip =
-            crate::parser::IncrementalParser::new("echo hi\ncat <<EOF\nbody", 0, opts);
+            crate::parser::IncrementalParser::new("echo hi\ncat <<EOF\nbody".as_bytes(), 0, opts);
         assert_eq!(unit(&mut ip), (true, false, vec![]));
         assert_eq!(unit(&mut ip), (true, false, vec!["EOF/2/3".to_string()]));
         assert_eq!(unit(&mut ip), (false, false, vec![]));
@@ -30545,19 +30497,19 @@ mod tests {
         // A unit that both warns and fails to parse releases the warning anyway:
         // bash prints it *before* the `unexpected end of file`.
         let mut ip =
-            crate::parser::IncrementalParser::new("if true; then\ncat <<EOF\nbody", 0, opts);
+            crate::parser::IncrementalParser::new("if true; then\ncat <<EOF\nbody".as_bytes(), 0, opts);
         assert_eq!(unit(&mut ip), (true, true, vec!["EOF/2/3".to_string()]));
 
         // …but a syntax error on an *earlier* line suppresses it entirely, because
         // bash abandons the input without ever reading the here-document's line.
         // (Measured: `echo one )` + an unterminated here-doc warns not at all.)
         let mut ip =
-            crate::parser::IncrementalParser::new("echo one )\ncat <<EOF\nbody", 0, opts);
+            crate::parser::IncrementalParser::new("echo one )\ncat <<EOF\nbody".as_bytes(), 0, opts);
         assert_eq!(unit(&mut ip), (true, true, vec![]));
         assert_eq!(unit(&mut ip), (false, false, vec![]));
 
         // Both here-documents of one command are released together, in body order.
-        let mut ip = crate::parser::IncrementalParser::new("cat <<A <<B\none", 0, opts);
+        let mut ip = crate::parser::IncrementalParser::new("cat <<A <<B\none".as_bytes(), 0, opts);
         assert_eq!(
             unit(&mut ip),
             (true, false, vec!["A/1/2".to_string(), "B/2/2".to_string()])
@@ -30565,7 +30517,7 @@ mod tests {
 
         // The line numbers pass through the `LineMap`, so an `eval` body reports
         // the lines of the input it was written on rather than its own.
-        let mut ip = crate::parser::IncrementalParser::new("cat <<EOF\nbody", 1, opts);
+        let mut ip = crate::parser::IncrementalParser::new("cat <<EOF\nbody".as_bytes(), 1, opts);
         assert_eq!(unit(&mut ip), (true, false, vec!["EOF/2/3".to_string()]));
 
         // A here-document declared inside a `$( … )` is read by the *enclosing*
@@ -30576,7 +30528,7 @@ mod tests {
         // runs first, silently — measured against bash, which prints `one`, then
         // the warning, then the syntax error.
         let mut ip =
-            crate::parser::IncrementalParser::new("echo hi\nx=$(cat <<EOF\nbody", 0, opts);
+            crate::parser::IncrementalParser::new("echo hi\nx=$(cat <<EOF\nbody".as_bytes(), 0, opts);
         assert_eq!(unit(&mut ip), (true, false, vec![]));
         assert_eq!(unit(&mut ip), (true, true, vec!["EOF/2/3".to_string()]));
         assert_eq!(unit(&mut ip), (false, false, vec![]));
@@ -30597,7 +30549,7 @@ mod tests {
             ("x=$((1 + 2", ')'),
             ("a=(1 2 3", ')'),
         ] {
-            let err = parse(src).expect_err("should fail to parse");
+            let err = parse(src.as_bytes()).expect_err("should fail to parse");
             assert_eq!(
                 err.msg,
                 format!("unexpected EOF while looking for matching `{close}'"),
@@ -30609,7 +30561,7 @@ mod tests {
     #[test]
     fn unexpected_token_and_identifier_errors_match_bash() {
         // A stray extra pipe: bash prints `syntax error near unexpected token `|'`.
-        let err = parse("echo a | | echo b").expect_err("should fail");
+        let err = parse("echo a | | echo b".as_bytes()).expect_err("should fail");
         assert!(
             err.msg.starts_with("syntax error near unexpected token"),
             "got {:?}",
@@ -30617,7 +30569,7 @@ mod tests {
         );
         // An invalid `for` loop variable: bash prints `\`1abc': not a valid
         // identifier` with no `syntax error:` tag.
-        let err = parse("for 1abc in x; do :; done").expect_err("should fail");
+        let err = parse("for 1abc in x; do :; done".as_bytes()).expect_err("should fail");
         assert_eq!(err.msg, "`1abc': not a valid identifier");
         // The interp-level message wrapper must pass both through without wrapping.
         assert_eq!(
@@ -30638,7 +30590,7 @@ mod tests {
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
-            let prog = parse(src).expect("parse");
+            let prog = parse(src.as_bytes()).expect("parse");
             {
                 let mut out = Out::Capture(buf.clone());
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -30691,7 +30643,7 @@ mod tests {
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
-            let prog = parse(src).expect("parse");
+            let prog = parse(src.as_bytes()).expect("parse");
             {
                 let mut out = Out::Capture(buf.clone());
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -30735,7 +30687,7 @@ mod tests {
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
-            let prog = parse(src).expect("parse");
+            let prog = parse(src.as_bytes()).expect("parse");
             {
                 let mut out = Out::Capture(buf.clone());
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -30820,7 +30772,7 @@ mod tests {
             let buf = capture_sink();
             let status = {
                 let mut out = Out::Capture(buf.clone());
-                sh.run_source_out(src, &mut out, 0)
+                sh.run_source_out(src.as_bytes(), &mut out, 0)
             };
             let buf = take_capture(&buf);
             (String::from_utf8_lossy(&buf).into_owned(), status)
@@ -30923,7 +30875,7 @@ mod tests {
             let buf = capture_sink();
             let status = {
                 let mut out = Out::Capture(buf.clone());
-                sh.run_source_out(src, &mut out, 0)
+                sh.run_source_out(src.as_bytes(), &mut out, 0)
             };
             let buf = take_capture(&buf);
             (String::from_utf8_lossy(&buf).into_owned(), status)
@@ -30991,7 +30943,7 @@ mod tests {
             let buf = capture_sink();
             let status = {
                 let mut out = Out::Capture(buf.clone());
-                sh.run_source_out(src, &mut out, 0)
+                sh.run_source_out(src.as_bytes(), &mut out, 0)
             };
             let buf = take_capture(&buf);
             (String::from_utf8_lossy(&buf).into_owned(), status)
@@ -31045,7 +30997,7 @@ mod tests {
             let buf = capture_sink();
             {
                 let mut out = Out::Capture(buf.clone());
-                sh.run_source_out(src, &mut out, 0);
+                sh.run_source_out(src.as_bytes(), &mut out, 0);
             }
             let buf = take_capture(&buf);
             String::from_utf8_lossy(&buf).into_owned()
@@ -31097,7 +31049,7 @@ mod tests {
             let buf = capture_sink();
             {
                 let mut out = Out::Capture(buf.clone());
-                sh.run_source_out(src, &mut out, 0);
+                sh.run_source_out(src.as_bytes(), &mut out, 0);
             }
             let buf = take_capture(&buf);
             String::from_utf8_lossy(&buf).into_owned()
@@ -31170,7 +31122,7 @@ echo \"[${i[a]}] [${i[x]-absent}]\""
             let buf = capture_sink();
             let status = {
                 let mut out = Out::Capture(buf.clone());
-                sh.run_source_out(src, &mut out, 0)
+                sh.run_source_out(src.as_bytes(), &mut out, 0)
             };
             let buf = take_capture(&buf);
             (String::from_utf8_lossy(&buf).into_owned(), status)
@@ -31291,14 +31243,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn coproc_parses_named_only_before_compound() {
         // `coproc NAME { … }` is a named coproc; the AST records the name.
-        let prog = parse("coproc c1 { echo hi; }").expect("parse");
+        let prog = parse("coproc c1 { echo hi; }".as_bytes()).expect("parse");
         match &prog.items[0].list.first.commands[0] {
             Command::Coproc { name, .. } => assert_eq!(name.as_deref(), Some("c1")),
             other => panic!("expected coproc, got {other:?}"),
         }
         // `coproc echo hi` is an *unnamed* coproc over a simple command (no name
         // is consumed before a simple command).
-        let prog = parse("coproc echo hi").expect("parse");
+        let prog = parse("coproc echo hi".as_bytes()).expect("parse");
         match &prog.items[0].list.first.commands[0] {
             Command::Coproc { name, .. } => assert_eq!(*name, None),
             other => panic!("expected coproc, got {other:?}"),
@@ -31310,9 +31262,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// to input read *after* the alias definition, not within the same parse.
     fn run_with_aliases(setup: &str, src: &str) -> (String, i32) {
         let mut sh = Shell::new();
-        sh.run_source(setup);
+        sh.run_source(setup.as_bytes());
         let buf = capture_sink();
-        let prog = parse_with_aliases(src, &sh.aliases, sh.lex_opts()).expect("parse");
+        let prog = parse_with_aliases(src.as_bytes(), &sh.aliases, sh.lex_opts()).expect("parse");
         {
             let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -31363,11 +31315,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         sh.set_command_mode();
         sh.set_interactive_shell(false);
-        sh.run_source("alias g='echo hi'");
+        sh.run_source("alias g='echo hi'".as_bytes());
         let buf = capture_sink();
         {
             let mut out = Out::Capture(buf.clone());
-            sh.exec_program(&parse_with_aliases("g", &sh.aliases, sh.lex_opts()).expect("parse"), &mut out, &StdinSrc::Inherit);
+            sh.exec_program(&parse_with_aliases("g".as_bytes(), &sh.aliases, sh.lex_opts()).expect("parse"), &mut out, &StdinSrc::Inherit);
         }
         // `parse_with_aliases` applies the table unconditionally — it is the
         // *caller* (`run_source`) that consults the gate — so the body did run.
@@ -31377,7 +31329,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // not expand it; here we prove the gate itself is off by default.
         assert!(!sh.aliases_enabled(), "expand_aliases should default off in command mode");
         // Opting in flips the gate on.
-        sh.run_source("shopt -s expand_aliases");
+        sh.run_source("shopt -s expand_aliases".as_bytes());
         assert!(sh.aliases_enabled(), "shopt -s expand_aliases should enable expansion");
     }
 
@@ -31399,7 +31351,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "non-interactive REPL should not expand aliases by default"
         );
         // Opting in still flips the gate on, matching bash.
-        sh.run_source("shopt -s expand_aliases");
+        sh.run_source("shopt -s expand_aliases".as_bytes());
         assert!(sh.aliases_enabled(), "shopt -s expand_aliases enables expansion");
     }
 
@@ -31439,7 +31391,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let mut sh = Shell::new();
             sh.set_interactive_shell(interactive);
             let buf = capture_sink();
-            let prog = parse(src).expect("parse");
+            let prog = parse(src.as_bytes()).expect("parse");
             {
                 let mut out = Out::Capture(buf.clone());
                 sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -32357,6 +32309,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // bash prints a bare newline for an empty list (unreachable from
         // `select`, which returns before printing, but part of the function).
         assert_eq!(select_menu(&[], 80), "\n");
+    }
+
+    /// [`single_quote_bytes`] for a text value, so a test can build shell
+    /// source with `format!`. Quoting only ever inserts ASCII, so quoting text
+    /// yields text and the round trip cannot fail.
+    fn single_quote(s: &str) -> String {
+        String::from_utf8(single_quote_bytes(s.as_bytes())).unwrap_or_default()
     }
 
     #[test]
@@ -33363,8 +33322,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // directly follows the `${`, so in `${!!}` the *second* `!` is still an
         // event designator and an interactive bash rewrites the line before
         // parsing it (measured: it substitutes the previous history entry).
-        assert!(parse("echo ${!$}").is_ok());
-        assert!(parse("echo ${!!}").is_ok());
+        assert!(parse("echo ${!$}".as_bytes()).is_ok());
+        assert!(parse("echo ${!!}".as_bytes()).is_ok());
         let (o1, s1) = run_script("echo ${!$} 2>/dev/null; echo after");
         assert_eq!((o1.as_str(), s1), ("", 1));
         assert_eq!(
@@ -33421,8 +33380,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!((o.as_str(), s), ("", 1));
         // Round-trips through the unparser (`${!ref<op>}`).
         assert_eq!(
-            crate::unparse::program_inline(&parse("echo ${!x:-def}").unwrap()).trim(),
-            "echo ${!x:-def}"
+            crate::bytes::trim(&crate::unparse::program_inline(
+                &parse("echo ${!x:-def}".as_bytes()).unwrap()
+            )),
+            b"echo ${!x:-def}".as_slice()
         );
     }
 
@@ -34428,7 +34389,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         setup(&mut sh);
         let buf = capture_sink();
-        let prog = parse(src).expect("parse");
+        let prog = parse(src.as_bytes()).expect("parse");
         {
             let mut out = Out::Capture(buf.clone());
             if let Flow::Exit(code) = sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit) {
@@ -34480,7 +34441,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     // substitution is a separate, subtler behaviour — see known-issues.)
     fn trap_var(src: &str, var: &str) -> Option<String> {
         let mut sh = Shell::new();
-        sh.run_source(src);
+        sh.run_source(src.as_bytes());
         sh.vars.get(var).map(|v| as_text(v).to_string())
     }
 
@@ -34528,7 +34489,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // commands. `f` installs DEBUG; after `f` returns the two top-level
         // `:`/`echo` commands each fire it. `trap -p` output confirms persistence.
         let mut sh = Shell::new();
-        sh.run_source("f(){ trap 'D=$((D+1))' DEBUG; }\nf\n:\n:");
+        sh.run_source("f(){ trap 'D=$((D+1))' DEBUG; }\nf\n:\n:".as_bytes());
         // Two top-level simple commands after the definition fire the persisted
         // DEBUG trap. (The `f` call itself fired it once before the body ran, but
         // the trap was not yet installed at that point, so it starts counting at
@@ -34960,7 +34921,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             sh.set_interactive_shell(false);
             let buf = capture_sink();
             let mut out = Out::Capture(buf.clone());
-            let prog = parse(src).expect("parse");
+            let prog = parse(src.as_bytes()).expect("parse");
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             String::from_utf8(take_capture(&buf)).unwrap()
         };
@@ -35098,7 +35059,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.set_interactive_shell(false);
         sh.set_execution_string(b"echo hi");
         let buf = capture_sink();
-        let prog = parse("echo \"[$BASH_EXECUTION_STRING]\"; echo ${!BASH*}").expect("parse");
+        let prog = parse("echo \"[$BASH_EXECUTION_STRING]\"; echo ${!BASH*}".as_bytes()).expect("parse");
         {
             let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -36157,7 +36118,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             sh.set_interactive_shell(false);
             let buf = capture_sink();
             let mut out = Out::Capture(buf.clone());
-            let prog = parse(src).expect("parse");
+            let prog = parse(src.as_bytes()).expect("parse");
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             String::from_utf8(take_capture(&buf)).unwrap()
         };
@@ -36758,7 +36719,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let buf = capture_sink();
             let status = {
                 let mut o = Out::Capture(buf.clone());
-                sh.run_source_out(src, &mut o, 0)
+                sh.run_source_out(src.as_bytes(), &mut o, 0)
             };
             (String::from_utf8_lossy(&take_capture(&buf)).into_owned(), status)
         };
@@ -37285,7 +37246,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // directly after a `${`, so the `!` in `${x!}` is an event designator that
         // an interactive shell rewrites (or rejects) before the parser ever sees
         // the word — measured in bash, which answers `!}: event not found`.
-        assert!(parse("echo ${x!}").is_ok());
+        assert!(parse("echo ${x!}".as_bytes()).is_ok());
         let (o, s) = run_script("echo ${x!} 2>/dev/null; echo after");
         assert_eq!(o, "");
         assert_eq!(s, 1);
@@ -38022,7 +37983,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         sh.import_environment();
         let buf = capture_sink();
-        let prog = parse(src).expect("parse");
+        let prog = parse(src.as_bytes()).expect("parse");
         {
             let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -39146,7 +39107,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn trap_exit_fires_once() {
         let mut sh = Shell::new();
-        sh.run_source("trap 'TRAP_MARK=1' EXIT");
+        sh.run_source("trap 'TRAP_MARK=1' EXIT".as_bytes());
         // The handler has not run yet — only stored.
         assert!(!sh.vars.contains_key("TRAP_MARK"));
         sh.run_exit_trap();
@@ -39207,7 +39168,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let buf = capture_sink();
         {
             let mut out = Out::Capture(buf.clone());
-            let prog = parse("trap 'echo P' EXIT; ( echo in ); echo out").expect("parse");
+            let prog = parse("trap 'echo P' EXIT; ( echo in ); echo out".as_bytes()).expect("parse");
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         let buf = take_capture(&buf);
@@ -39233,24 +39194,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn trap_err_fires_on_failure() {
         let mut sh = Shell::new();
-        sh.run_source("trap 'ERR_HIT=1' ERR\nfalse");
+        sh.run_source("trap 'ERR_HIT=1' ERR\nfalse".as_bytes());
         assert_eq!(sh.vars.get("ERR_HIT").map(as_text), Some("1"));
 
         // ERR does not fire for a successful command...
         let mut sh = Shell::new();
-        sh.run_source("trap 'ERR_HIT=1' ERR\ntrue");
+        sh.run_source("trap 'ERR_HIT=1' ERR\ntrue".as_bytes());
         assert!(!sh.vars.contains_key("ERR_HIT"));
 
         // ...nor for a failure inside an `if` condition (exempt context).
         let mut sh = Shell::new();
-        sh.run_source("trap 'ERR_HIT=1' ERR\nif false; then :; fi");
+        sh.run_source("trap 'ERR_HIT=1' ERR\nif false; then :; fi".as_bytes());
         assert!(!sh.vars.contains_key("ERR_HIT"));
     }
 
     #[test]
     fn trap_debug_fires_before_each_command() {
         let mut sh = Shell::new();
-        sh.run_source("trap 'DBG=$((DBG+1))' DEBUG\n:\n:\n:");
+        sh.run_source("trap 'DBG=$((DBG+1))' DEBUG\n:\n:\n:".as_bytes());
         assert_eq!(sh.vars.get("DBG").map(as_text), Some("3"));
     }
 
@@ -39262,7 +39223,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Without any of those it does NOT fire (bash's default); see the
         // `return_trap_*` tests for the full matrix.
         let mut sh = Shell::new();
-        sh.run_source("set -T\ntrap 'RET=1' RETURN\nf() { :; }\nf");
+        sh.run_source("set -T\ntrap 'RET=1' RETURN\nf() { :; }\nf".as_bytes());
         assert_eq!(sh.vars.get("RET").map(as_text), Some("1"));
     }
 
@@ -39308,7 +39269,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// (see `trap_output_goes_to_the_callers_sink` for that half).
     fn run_marker(src: &str, var: &str) -> String {
         let mut sh = Shell::new();
-        sh.run_source(src);
+        sh.run_source(src.as_bytes());
         sh.vars.get(var).map(|v| as_text(v).to_string()).unwrap_or_default()
     }
 
@@ -39448,13 +39409,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // bash: an `exit N` inside the EXIT trap replaces the shell's exit
         // status with N. Without one, the pre-trap status is preserved.
         let mut sh = Shell::new();
-        sh.run_source("trap 'exit 9' EXIT");
+        sh.run_source("trap 'exit 9' EXIT".as_bytes());
         sh.last_status = 2;
         sh.run_exit_trap();
         assert_eq!(sh.last_status, 9);
 
         let mut sh = Shell::new();
-        sh.run_source("trap 'MARK=1' EXIT");
+        sh.run_source("trap 'MARK=1' EXIT".as_bytes());
         sh.last_status = 3;
         sh.run_exit_trap();
         assert_eq!(sh.last_status, 3);
@@ -39515,12 +39476,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn exit_trap_reports_its_own_exit_to_the_driver() {
         let mut sh = Shell::new();
-        sh.run_source("trap 'exit 9' EXIT");
+        sh.run_source("trap 'exit 9' EXIT".as_bytes());
         sh.last_status = 2;
         assert_eq!(sh.run_exit_trap(), Some(9));
 
         let mut sh = Shell::new();
-        sh.run_source("trap 'echo bye > /dev/null' EXIT");
+        sh.run_source("trap 'echo bye > /dev/null' EXIT".as_bytes());
         sh.last_status = 2;
         assert_eq!(sh.run_exit_trap(), None, "a normal handler leaves the status alone");
 
@@ -39548,14 +39509,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn top_level_exit_latches_exit_requested() {
         let mut sh = Shell::new();
-        sh.run_source("echo hi > /dev/null");
+        sh.run_source("echo hi > /dev/null".as_bytes());
         assert!(!sh.exit_requested(), "an ordinary command does not request exit");
 
-        assert_eq!(sh.run_source("exit 3"), 3);
+        assert_eq!(sh.run_source("exit 3".as_bytes()), 3);
         assert!(sh.exit_requested());
 
         let mut sh = Shell::new();
-        sh.run_source("( exit 4 )");
+        sh.run_source("( exit 4 )".as_bytes());
         assert!(!sh.exit_requested(), "a subshell exit stays inside the subshell");
         assert_eq!(sh.last_status, 4);
     }
@@ -39567,9 +39528,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn mapfile_callback_exit_unwinds_shell() {
         let path = scratch_script("mapfile_cb_exit", "a\nb\nc\n");
         let mut sh = Shell::new();
-        let code = sh.run_source(&format!(
+        let code = sh.run_source(format!(
             "cb() {{ CB=\"$CB $1\"; exit 5; }}\nmapfile -C cb -c 1 arr < {path}\nAFTER=1"
-        ));
+        ).as_bytes());
         assert_eq!(code, 5);
         assert!(sh.exit_requested());
         assert_eq!(sh.vars.get("CB").map(as_text), Some(" 0"), "one callback, then unwind");
@@ -41412,9 +41373,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn pipeline_classifier_routes_external_vs_builtin() {
         let mut sh = Shell::new();
-        sh.funcs.insert("myfn".to_string(), parse("echo hi").unwrap());
+        sh.funcs.insert(b"myfn".to_vec(), parse("echo hi".as_bytes()).unwrap());
         let classify = |sh: &Shell, src: &str| -> bool {
-            let prog = parse(src).unwrap();
+            let prog = parse(src.as_bytes()).unwrap();
             let cmds = &prog.items[0].list.first.commands;
             cmds.iter().all(|c| sh.stage_is_plain_external(c))
         };
@@ -41559,7 +41520,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The buffered path (builtin stages) also honours pipefail + PIPESTATUS.
         // `false | true` — last stage true, but pipefail surfaces the failure.
         let mut sh = Shell::new();
-        assert_eq!(sh.run_source("set -o pipefail; false | true"), 1);
+        assert_eq!(sh.run_source("set -o pipefail; false | true".as_bytes()), 1);
         let (o, _) = run(r#"false | true; echo "${PIPESTATUS[@]}""#);
         assert_eq!(o, "1 0\n");
     }
@@ -41571,23 +41532,23 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // osh previously treated the clustered `o` as an ignored flag and left
         // `pipefail` to become a positional, so pipefail stayed off.
         let mut sh = Shell::new();
-        assert_eq!(sh.run_source("set -eo pipefail; shopt -oq pipefail && shopt -oq errexit"), 0);
+        assert_eq!(sh.run_source("set -eo pipefail; shopt -oq pipefail && shopt -oq errexit".as_bytes()), 0);
         // The `o` may appear anywhere in the cluster; remaining letters stay
         // flags, and successive `o`s consume successive following words.
         let mut sh = Shell::new();
-        assert_eq!(sh.run_source("set -oe pipefail; shopt -oq pipefail && shopt -oq errexit"), 0);
+        assert_eq!(sh.run_source("set -oe pipefail; shopt -oq pipefail && shopt -oq errexit".as_bytes()), 0);
         let mut sh = Shell::new();
         assert_eq!(
-            sh.run_source("set -oo pipefail xtrace; shopt -oq pipefail && shopt -oq xtrace"),
+            sh.run_source("set -oo pipefail xtrace; shopt -oq pipefail && shopt -oq xtrace".as_bytes()),
             0
         );
         // Words left after the consumed option name become positionals.
         assert_eq!(run(r#"set -eo pipefail extra; echo "$1""#).0, "extra\n");
         // `+eo` disables both.
         let mut sh = Shell::new();
-        sh.run_source("set -e -o pipefail");
-        sh.run_source("set +eo pipefail");
-        assert_eq!(sh.run_source("shopt -oq pipefail || shopt -oq errexit"), 1);
+        sh.run_source("set -e -o pipefail".as_bytes());
+        sh.run_source("set +eo pipefail".as_bytes());
+        assert_eq!(sh.run_source("shopt -oq pipefail || shopt -oq errexit".as_bytes()), 1);
         // The end-to-end effect: errexit fires on a pipefail-surfaced failure.
         assert_eq!(run("set -eo pipefail; false | true; echo reached"), (String::new(), 1));
     }
@@ -41598,17 +41559,17 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A `&` command is tracked as a job and sets `$!`; `wait $!` blocks
         // until it finishes and yields its exit status.
         let mut sh = Shell::new();
-        assert_eq!(sh.run_source("cmd /c exit 7 &"), 0);
+        assert_eq!(sh.run_source("cmd /c exit 7 &".as_bytes()), 0);
         assert!(sh.last_bg_pid.is_some());
         assert_eq!(sh.jobs.len(), 1);
-        assert_eq!(sh.run_source("wait $!"), 7);
+        assert_eq!(sh.run_source("wait $!".as_bytes()), 7);
         // The row outlives the `wait` that read it; the next sweep drops it.
         assert_eq!(sh.jobs.len(), 1);
         // An operand-less `wait` also blocks until the job is done, but names no
         // job and so reports 0 rather than its status (bash). It discards the
         // jobs it waited for outright.
-        assert_eq!(sh.run_source("cmd /c exit 7 &"), 0);
-        assert_eq!(sh.run_source("wait"), 0);
+        assert_eq!(sh.run_source("cmd /c exit 7 &".as_bytes()), 0);
+        assert_eq!(sh.run_source("wait".as_bytes()), 0);
         assert!(sh.jobs.is_empty());
     }
 
@@ -41626,20 +41587,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("( exit 9 ) &", 9),    // subshell
         ] {
             let mut sh = Shell::new();
-            assert_eq!(sh.run_source(src), 0, "backgrounding {src:?} succeeds");
+            assert_eq!(sh.run_source(src.as_bytes()), 0, "backgrounding {src:?} succeeds");
             assert!(sh.last_bg_pid.is_some(), "$! set for {src:?}");
             assert_eq!(sh.jobs.len(), 1, "one job registered for {src:?}");
             // `wait $!` returns the job's exit status. Its row survives that
             // one `wait` and is dropped by the next sweep of the table.
-            assert_eq!(sh.run_source("wait $!"), want, "wait status for {src:?}");
+            assert_eq!(sh.run_source("wait $!".as_bytes()), want, "wait status for {src:?}");
             assert_eq!(sh.jobs.len(), 1, "job reported but not yet swept for {src:?}");
-            assert_eq!(sh.run_source("wait $!"), want, "status answered again for {src:?}");
+            assert_eq!(sh.run_source("wait $!".as_bytes()), want, "status answered again for {src:?}");
             assert!(sh.jobs.is_empty(), "job swept for {src:?}");
         }
 
         // `$!` survives after a fast job finishes (bash keeps the last bg pid).
         let mut sh = Shell::new();
-        assert_eq!(sh.run_source("true &\np=$!\nwait\n[ -n \"$p\" ] && echo saved"), 0);
+        assert_eq!(sh.run_source("true &\np=$!\nwait\n[ -n \"$p\" ] && echo saved".as_bytes()), 0);
     }
 
     #[test]
@@ -41657,33 +41618,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let cd = dir.to_string_lossy().replace('\\', "/");
 
         let mut sh = Shell::new();
-        assert_eq!(sh.run_source(&format!("cd '{cd}'")), 0);
+        assert_eq!(sh.run_source(format!("cd '{cd}'").as_bytes()), 0);
 
         // A redirection applies to the job, rather than being dropped.
-        assert_eq!(sh.run_source("printf 'redirected\\n' > bg.out & wait"), 0);
+        assert_eq!(sh.run_source("printf 'redirected\\n' > bg.out & wait".as_bytes()), 0);
         assert_eq!(std::fs::read_to_string(dir.join("bg.out")).expect("bg.out"), "redirected\n");
 
         // An assignment prefix reaches the job's environment.
-        assert_eq!(sh.run_source("V=zz sh -c 'printf v=$V' > bg.env & wait"), 0);
+        assert_eq!(sh.run_source("V=zz sh -c 'printf v=$V' > bg.env & wait".as_bytes()), 0);
         assert_eq!(std::fs::read_to_string(dir.join("bg.env")).expect("bg.env"), "v=zz");
 
         // The words are expanded once. `true` is a builtin, so a shortcut that
         // expanded them to discover that and then let the general path expand
         // them again would run the substitution twice.
-        assert_eq!(sh.run_source(": > bg.cnt\ntrue $(printf x >> bg.cnt; echo y) &\nwait"), 0);
+        assert_eq!(sh.run_source(": > bg.cnt\ntrue $(printf x >> bg.cnt; echo y) &\nwait".as_bytes()), 0);
         assert_eq!(std::fs::read_to_string(dir.join("bg.cnt")).expect("bg.cnt"), "x");
 
         // A name that resolves nowhere is reported by the job, not by the shell:
         // the shell's own status is 0 and the 127 belongs to the job.
-        assert_eq!(sh.run_source("nosuch_cmd_bg_xyz &"), 0);
-        assert_eq!(sh.run_source("wait $!"), 127);
+        assert_eq!(sh.run_source("nosuch_cmd_bg_xyz &".as_bytes()), 0);
+        assert_eq!(sh.run_source("wait $!".as_bytes()), 127);
         // …which is also why `command_not_found_handle` gets a chance to run and
         // to supply the job's status.
         assert_eq!(
-            sh.run_source("command_not_found_handle() { return 9; }\nnosuch_cmd_bg_xyz &"),
+            sh.run_source("command_not_found_handle() { return 9; }\nnosuch_cmd_bg_xyz &".as_bytes()),
             0
         );
-        assert_eq!(sh.run_source("wait $!"), 9);
+        assert_eq!(sh.run_source("wait $!".as_bytes()), 9);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -41695,7 +41656,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // on the backgrounded pipeline itself is simply not applied, and `! X &`
         // comes out the opposite way round from a foreground `! X`.
         let mut sh = Shell::new();
-        assert_eq!(sh.run_source("! true"), 1, "foreground negation still applies");
+        assert_eq!(sh.run_source("! true".as_bytes()), 1, "foreground negation still applies");
         for (src, want) in [
             ("! true &", 0),
             ("! false &", 1),
@@ -41709,8 +41670,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("( ! true ) &", 1),
             ("{ ! true; } &", 1),
         ] {
-            assert_eq!(sh.run_source(src), 0, "backgrounding {src:?} succeeds");
-            assert_eq!(sh.run_source("wait $!"), want, "job status for {src:?}");
+            assert_eq!(sh.run_source(src.as_bytes()), 0, "backgrounding {src:?} succeeds");
+            assert_eq!(sh.run_source("wait $!".as_bytes()), want, "job status for {src:?}");
         }
     }
 
@@ -41767,7 +41728,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                  cat < two.txt & wait\n",
                 dir.display().to_string().replace('\\', "/")
             );
-            sh.run_source_out(&src, &mut out, 0);
+            sh.run_source_out(src.as_bytes(), &mut out, 0);
         }
         let got = String::from_utf8_lossy(&take_capture(&cap)).into_owned();
         assert_eq!(got, "read=[unset]\nparent=[l1]\nl1\nl2\n");
@@ -41782,14 +41743,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // the `wait` that read it (it is the *next* sweep that drops it), and
         // creating the next job is one such sweep — so numbering restarts.
         let mut sh = Shell::new();
-        sh.run_source("cmd /c exit 3 &");
+        sh.run_source("cmd /c exit 3 &".as_bytes());
         let pid = sh.last_bg_pid.expect("bg pid");
-        assert_eq!(sh.run_source(&format!("wait {pid}")), 3);
+        assert_eq!(sh.run_source(format!("wait {pid}").as_bytes()), 3);
         assert_eq!(sh.jobs.len(), 1);
 
-        sh.run_source("cmd /c exit 4 &");
+        sh.run_source("cmd /c exit 4 &".as_bytes());
         assert_eq!(sh.jobs.len(), 1, "the reported job was swept first");
-        assert_eq!(sh.run_source("wait %1"), 4);
+        assert_eq!(sh.run_source("wait %1".as_bytes()), 4);
         assert_eq!(sh.jobs.len(), 1);
     }
 
@@ -41868,12 +41829,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // leaving it holding a pid it is not reporting on.
         let mut sh = Shell::new();
         for src in ["( exit 3 ) &", "( exit 3 ) & ( exit 0 ) &", "false &"] {
-            assert_eq!(sh.run_source(src), 0);
-            assert_eq!(sh.run_source("wait"), 0, "operand-less wait after {src:?}");
+            assert_eq!(sh.run_source(src.as_bytes()), 0);
+            assert_eq!(sh.run_source("wait".as_bytes()), 0, "operand-less wait after {src:?}");
         }
         // Only a named job answers with its own status.
-        sh.run_source("( exit 3 ) &");
-        assert_eq!(sh.run_source("wait $!"), 3);
+        sh.run_source("( exit 3 ) &".as_bytes());
+        assert_eq!(sh.run_source("wait $!".as_bytes()), 3);
         // `-p VAR` is cleared up front, so a `wait` that names no job unsets it…
         // The job body sleeps so that it is *certainly* still running when the
         // `wait` arrives: an operand-less `wait` marks every job it actually
@@ -41881,12 +41842,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // (see below). Without the sleep, which branch this took depended on how
         // fast the job's thread ran, and the `-n` assertion below flaked under
         // parallel test load.
-        sh.run_source("VAR=stale; ( sleep 0.1; exit 3 ) &");
-        assert_eq!(sh.run_source("wait -p VAR"), 0);
+        sh.run_source("VAR=stale; ( sleep 0.1; exit 3 ) &".as_bytes());
+        assert_eq!(sh.run_source("wait -p VAR".as_bytes()), 0);
         assert!(!sh.vars.contains_key("VAR"), "operand-less wait leaves -p VAR unset");
         // …and so does a `-n` with nothing left to wait for.
-        sh.run_source("VAR=stale");
-        assert_eq!(sh.run_source("wait -n -p VAR 2>/dev/null"), 127);
+        sh.run_source("VAR=stale".as_bytes());
+        assert_eq!(sh.run_source("wait -n -p VAR 2>/dev/null".as_bytes()), 127);
         assert!(!sh.vars.contains_key("VAR"), "`wait -n` with no jobs leaves -p VAR unset");
     }
 
@@ -41899,27 +41860,27 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         // An operand-less `wait` spares the `$!` job from being marked reported
         // when it had already finished, so the status is still `-n`-answerable…
-        sh.run_source("( exit 3 ) & sleep 0.2");
-        assert_eq!(sh.run_source("wait"), 0);
-        assert_eq!(sh.run_source("wait -n"), 3, "spared job is still answerable");
+        sh.run_source("( exit 3 ) & sleep 0.2".as_bytes());
+        assert_eq!(sh.run_source("wait".as_bytes()), 0);
+        assert_eq!(sh.run_source("wait -n".as_bytes()), 3, "spared job is still answerable");
         // …until a `jobs` listing announces it, after which bash denies the job
         // exists at all: 127 from a bare `-n`, and `no such job` for one named by
         // pid — while a *targeted* `wait PID` still replays the status.
-        sh.run_source("( exit 5 ) & p=$!; sleep 0.2");
-        assert_eq!(sh.run_source("wait"), 0);
+        sh.run_source("( exit 5 ) & p=$!; sleep 0.2".as_bytes());
+        assert_eq!(sh.run_source("wait".as_bytes()), 0);
         assert_eq!(listing(&mut sh, "jobs").lines().count(), 1);
         assert!(
             listing(&mut sh, "wait -n $p 2>&1").ends_with(": no such job\n"),
             "a pid naming a reported job is unknown to `wait -n`"
         );
-        assert_eq!(sh.run_source("wait -n"), 127);
-        assert_eq!(sh.run_source("wait $p"), 5, "a targeted wait still answers");
+        assert_eq!(sh.run_source("wait -n".as_bytes()), 127);
+        assert_eq!(sh.run_source("wait $p".as_bytes()), 5, "a targeted wait still answers");
         // A reported job does not shadow a live one: `-n` waits for the live one.
-        sh.run_source("( exit 7 ) & sleep 0.2");
-        assert_eq!(sh.run_source("wait"), 0);
+        sh.run_source("( exit 7 ) & sleep 0.2".as_bytes());
+        assert_eq!(sh.run_source("wait".as_bytes()), 0);
         assert_eq!(listing(&mut sh, "jobs").lines().count(), 1);
-        sh.run_source("( sleep 0.1; exit 9 ) &");
-        assert_eq!(sh.run_source("wait -n"), 9);
+        sh.run_source("( sleep 0.1; exit 9 ) &".as_bytes());
+        assert_eq!(sh.run_source("wait -n".as_bytes()), 9);
     }
 
     /// Run `src` and return what it wrote to stdout — for the `jobs` tests,
@@ -41928,7 +41889,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn listing(sh: &mut Shell, src: &str) -> String {
         let buf = capture_sink();
         let mut out = Out::Capture(buf.clone());
-        sh.run_source_out(src, &mut out, 0);
+        sh.run_source_out(src.as_bytes(), &mut out, 0);
         String::from_utf8_lossy(&take_capture(&buf)).into_owned()
     }
 
@@ -41942,47 +41903,47 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let settle = || std::thread::sleep(std::time::Duration::from_millis(700));
 
         // Two jobs alive at once: the newer is `+`, the older `-`.
-        sh.run_source("sleep 0.4 & sleep 1 &");
+        sh.run_source("sleep 0.4 & sleep 1 &".as_bytes());
         assert_eq!(
             listing(&mut sh, "jobs"),
             "[1]-  Running                 sleep 0.4 &\n\
              [2]+  Running                 sleep 1 &\n"
         );
-        sh.run_source("wait");
+        sh.run_source("wait".as_bytes());
 
         // The older one keeps its `-` after finishing — and loses its `&`,
         // because there is no longer anything running in the background.
-        sh.run_source("sleep 0.2 & sleep 1 &");
+        sh.run_source("sleep 0.2 & sleep 1 &".as_bytes());
         settle();
         assert_eq!(
             listing(&mut sh, "jobs"),
             "[1]-  Done                    sleep 0.2\n\
              [2]+  Running                 sleep 1 &\n"
         );
-        sh.run_source("wait");
+        sh.run_source("wait".as_bytes());
 
         // A job that had *already* finished when the next one started never
         // gets the `-` at all: with no older job running, previous falls back
         // to current, and only one marker shows.
-        sh.run_source("sleep 0.2 &");
+        sh.run_source("sleep 0.2 &".as_bytes());
         settle();
-        sh.run_source("sleep 1 &");
+        sh.run_source("sleep 1 &".as_bytes());
         assert_eq!(
             listing(&mut sh, "jobs"),
             "[1]   Done                    sleep 0.2\n\
              [2]+  Running                 sleep 1 &\n"
         );
-        sh.run_source("wait");
+        sh.run_source("wait".as_bytes());
 
         // Only ever two markers, however many jobs there are.
-        sh.run_source("sleep 0.4 & sleep 1 & sleep 1 &");
+        sh.run_source("sleep 0.4 & sleep 1 & sleep 1 &".as_bytes());
         assert_eq!(
             listing(&mut sh, "jobs"),
             "[1]   Running                 sleep 0.4 &\n\
              [2]-  Running                 sleep 1 &\n\
              [3]+  Running                 sleep 1 &\n"
         );
-        sh.run_source("wait");
+        sh.run_source("wait".as_bytes());
     }
 
     #[test]
@@ -41991,7 +41952,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // listing actually reported, so a `-r` that filtered it out leaves it
         // for the next `jobs`, as does a jobspec that named someone else.
         let mut sh = Shell::new();
-        sh.run_source("sleep 0.2 &");
+        sh.run_source("sleep 0.2 &".as_bytes());
         std::thread::sleep(std::time::Duration::from_millis(700));
         assert_eq!(listing(&mut sh, "jobs -r"), "", "-r filters the finished job out");
         assert_eq!(listing(&mut sh, "jobs -s"), "", "no stopped jobs in a script shell");
@@ -41999,7 +41960,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(listing(&mut sh, "jobs"), "", "reported once, then forgotten");
         // Numbering restarts at 1 once the table has drained, and `-l` inserts
         // the pid between the marker and the state column.
-        sh.run_source("sleep 0.2 &");
+        sh.run_source("sleep 0.2 &".as_bytes());
         std::thread::sleep(std::time::Duration::from_millis(700));
         let l = listing(&mut sh, "jobs -l");
         let pid = sh.last_bg_pid.expect("bg pid");
@@ -42022,13 +41983,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("( exit 255 ) &", "Exit 255                ( exit 255 )"),
             ("( exit 143 ) &", "Exit 143                ( exit 143 )"),
         ] {
-            sh.run_source(src);
+            sh.run_source(src.as_bytes());
             std::thread::sleep(std::time::Duration::from_millis(100));
             assert_eq!(listing(&mut sh, "jobs"), format!("[1]+  {want}\n"), "{src}");
         }
         for (sig, want) in [("TERM", "Terminated"), ("PIPE", "Broken pipe")] {
-            sh.run_source("sleep 5 &");
-            sh.run_source(&format!("kill -{sig} %1"));
+            sh.run_source("sleep 5 &".as_bytes());
+            sh.run_source(format!("kill -{sig} %1").as_bytes());
             assert_eq!(
                 listing(&mut sh, "jobs"),
                 format!("[1]+  {want:<24}sleep 5\n"),
@@ -42041,15 +42002,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // keeps running. `CHLD` stands for the signals whose *default* is to be
         // ignored, which the job is left to keep.
         for sig in ["INT", "QUIT", "CHLD"] {
-            sh.run_source("sleep 5 &");
-            sh.run_source(&format!("kill -{sig} %1"));
+            sh.run_source("sleep 5 &".as_bytes());
+            sh.run_source(format!("kill -{sig} %1").as_bytes());
             assert_eq!(sh.last_status, 0, "kill -{sig}");
             assert_eq!(
                 listing(&mut sh, "jobs"),
                 "[1]+  Running                 sleep 5 &\n",
                 "kill -{sig}"
             );
-            sh.run_source("kill -TERM %1; disown -a");
+            sh.run_source("kill -TERM %1; disown -a".as_bytes());
         }
     }
 
@@ -42059,7 +42020,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // carries a pid the two shells cannot agree on — so its text is checked
         // here, where the pid is knowable.
         let mut sh = Shell::new();
-        sh.run_source("sleep 5 &");
+        sh.run_source("sleep 5 &".as_bytes());
         let pid = sh.jobs[0].pid;
         // The news arrives *between* commands, so the group's `2>&1` has to
         // enclose one: `kill` writes the death down, and the `:` after it is the
@@ -42076,11 +42037,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The three signals a listing can word are the three that are never
         // announced: the job is left in the table, still owed.
         for (sig, want) in [("TERM", "Terminated"), ("PIPE", "Broken pipe")] {
-            sh.run_source("sleep 5 &");
+            sh.run_source("sleep 5 &".as_bytes());
             let (o, _) = run_in(&mut sh, &format!("{{ kill -{sig} %1; :; }} 2>&1"));
             assert_eq!(o, "", "kill -{sig} says nothing");
             assert_eq!(listing(&mut sh, "jobs"), format!("[1]+  {want:<24}sleep 5\n"));
-            sh.run_source("disown -a");
+            sh.run_source("disown -a".as_bytes());
         }
     }
 
@@ -42107,14 +42068,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // previous one was acted on, so `%2 %+` disowns two jobs (dropping job 2
         // hands the `+` to job 1) and `%2 %2` fails the second time.
         let mut sh = Shell::new();
-        sh.run_source("sleep 5 &");
-        sh.run_source("sleep 6 &");
-        assert_eq!(sh.run_source("disown %2 %+"), 0);
+        sh.run_source("sleep 5 &".as_bytes());
+        sh.run_source("sleep 6 &".as_bytes());
+        assert_eq!(sh.run_source("disown %2 %+".as_bytes()), 0);
         assert!(sh.jobs.is_empty(), "both jobs should be gone");
 
         let mut sh = Shell::new();
-        sh.run_source("sleep 5 &");
-        sh.run_source("sleep 6 &");
+        sh.run_source("sleep 5 &".as_bytes());
+        sh.run_source("sleep 6 &".as_bytes());
         let (o, s) = run_in(&mut sh, "disown %2 %2 2>&1");
         assert_eq!(o, "osh: disown: %2: no such job\n");
         assert_eq!(s, 1);
@@ -42132,7 +42093,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn run_in(sh: &mut Shell, src: &str) -> (String, i32) {
         let buf = capture_sink();
         let mut out = Out::Capture(buf.clone());
-        let status = sh.run_source_out(src, &mut out, 0);
+        let status = sh.run_source_out(src.as_bytes(), &mut out, 0);
         (String::from_utf8_lossy(&take_capture(&buf)).into_owned(), status)
     }
 
@@ -42143,8 +42104,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // answers with a process group, which osh has no notion of — so it is
         // checked here instead.
         let mut sh = Shell::new();
-        sh.run_source("sleep 5 &");
-        sh.run_source("sleep 6 &");
+        sh.run_source("sleep 5 &".as_bytes());
+        sh.run_source("sleep 6 &".as_bytes());
         let pid1 = sh.jobs[0].pid.to_string();
         let pid2 = sh.jobs[1].pid.to_string();
         // Every spelling of a spec resolves; a repeat resolves again.
@@ -42158,7 +42119,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // value is never split or matched against the filesystem.
         let (o, _) = run_in(&mut sh, "jobs -x echo '*' 'a b'");
         assert_eq!(o, "* a b\n");
-        sh.run_source("kill %1; kill %2");
+        sh.run_source("kill %1; kill %2".as_bytes());
     }
 
     #[test]
@@ -42166,8 +42127,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Only the first character after the `%` decides what kind of spec it
         // is, so a suffix on `%+`/`%-` is ignored while `%1x` is a *name*.
         let mut sh = Shell::new();
-        sh.run_source("sleep 5 &");
-        sh.run_source("( sleep 6 ) &");
+        sh.run_source("sleep 5 &".as_bytes());
+        sh.run_source("( sleep 6 ) &".as_bytes());
         for (spec, want) in [
             (b"%1".as_slice(), 0),
             (b"%2", 1),
@@ -42215,7 +42176,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(matches!(sh.lookup_job(pid.as_bytes(), BareNumber::JobId), JobLookup::NotFound));
         assert!(matches!(sh.lookup_job(b"2", BareNumber::JobId), JobLookup::Found(1)));
         assert!(matches!(sh.lookup_job(b"2", BareNumber::Pid), JobLookup::NotFound));
-        sh.run_source("kill %1; kill %2");
+        sh.run_source("kill %1; kill %2".as_bytes());
     }
 
     /// Block until job `id` has ended *and the shell has noticed*.
@@ -42244,7 +42205,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // leaves the job nameable for one more command while a jobspec listing
         // does not.
         let mut sh = Shell::new();
-        sh.run_source("true &");
+        sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         let (o, _) = run_in(&mut sh, "jobs");
         assert!(o.starts_with("[1]+  Done"), "{o}");
@@ -42254,7 +42215,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(sh.jobs.is_empty());
 
         let mut sh = Shell::new();
-        sh.run_source("true &");
+        sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         let (o, s) = run_in(&mut sh, "jobs %1");
         assert!(o.starts_with("[1]+  Done"), "{o}");
@@ -42264,7 +42225,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Naming a job in `kill` puts its fate back on the books, so a listing
         // that already announced it announces it again.
         let mut sh = Shell::new();
-        sh.run_source("true &");
+        sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         run_in(&mut sh, "jobs");
         assert_eq!(run_in(&mut sh, "kill -0 %1").1, 0);
@@ -42277,7 +42238,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // outlives the `wait` that read it: the second `wait` answers with the
         // status again and is the one that drops the row.
         let mut sh = Shell::new();
-        sh.run_source("( exit 7 ) &");
+        sh.run_source("( exit 7 ) &".as_bytes());
         assert_eq!(run_in(&mut sh, "wait %1").1, 7);
         assert_eq!(sh.jobs.len(), 1);
         assert_eq!(run_in(&mut sh, "wait %1").1, 7);
@@ -42287,9 +42248,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(s, 127);
 
         // Numbering restarts once the row is gone, and not before.
-        sh.run_source("sleep 5 &");
+        sh.run_source("sleep 5 &".as_bytes());
         assert_eq!(sh.jobs[0].id, 1);
-        sh.run_source("kill %1");
+        sh.run_source("kill %1".as_bytes());
     }
 
     #[test]
@@ -42297,7 +42258,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A job that had already finished is not one the `wait` waited for, so
         // it is discarded only if some later job took `$!` away from it.
         let mut sh = Shell::new();
-        sh.run_source("true &");
+        sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         assert_eq!(run_in(&mut sh, "wait").1, 0);
         assert_eq!(sh.jobs.len(), 1, "the last job backgrounded is spared");
@@ -42306,9 +42267,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Job 2 is still running, so the `wait` really waits for it and it is
         // discarded despite holding `$!`; job 1, no longer holding it, goes too.
         let mut sh = Shell::new();
-        sh.run_source("true &");
+        sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
-        sh.run_source("sleep 0.3 &");
+        sh.run_source("sleep 0.3 &".as_bytes());
         assert_eq!(run_in(&mut sh, "wait").1, 0);
         assert!(sh.jobs.is_empty(), "job 1 lost `$!` to job 2, so both went");
     }
@@ -42323,8 +42284,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // have been the `-` job in the first place: a new job takes both
         // markers when there is nothing running to hand the `-` to.
         let mut sh = Shell::new();
-        sh.run_source("sleep 0.2 &");
-        sh.run_source("true &");
+        sh.run_source("sleep 0.2 &".as_bytes());
+        sh.run_source("true &".as_bytes());
         assert_eq!((sh.current_job, sh.previous_job), (Some(2), Some(1)));
         settle_job(&mut sh, 1);
         settle_job(&mut sh, 2);
@@ -42334,12 +42295,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // With something still running, that running job takes both markers.
         let mut sh = Shell::new();
-        sh.run_source("sleep 5 &");
-        sh.run_source("true &");
+        sh.run_source("sleep 5 &".as_bytes());
+        sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 2);
         run_in(&mut sh, "jobs %2");
         assert_eq!((sh.current_job, sh.previous_job), (Some(1), Some(1)));
-        sh.run_source("kill %1");
+        sh.run_source("kill %1".as_bytes());
     }
 
     #[cfg(windows)]
@@ -42348,10 +42309,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `wait -n` returns as soon as one job finishes; a second `wait -n`
         // reaps the other. `-p VAR` records the returned job's pid.
         let mut sh = Shell::new();
-        sh.run_source("cmd /c exit 5 &");
-        sh.run_source("cmd /c exit 6 &");
+        sh.run_source("cmd /c exit 5 &".as_bytes());
+        sh.run_source("cmd /c exit 6 &".as_bytes());
         assert_eq!(sh.jobs.len(), 2);
-        let first = sh.run_source("wait -n -p done_pid");
+        let first = sh.run_source("wait -n -p done_pid".as_bytes());
         assert!(first == 5 || first == 6, "unexpected status {first}");
         assert_eq!(sh.jobs.len(), 1);
         // The pid variable was set to a plausible pid.
@@ -42360,12 +42321,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 .get("done_pid")
                 .is_some_and(|p| as_text(p).parse::<u32>().is_ok())
         );
-        let second = sh.run_source("wait -n");
+        let second = sh.run_source("wait -n".as_bytes());
         assert!(second == 5 || second == 6);
         assert_ne!(first, second);
         assert!(sh.jobs.is_empty());
         // `wait -n` with no jobs left returns 127.
-        assert_eq!(sh.run_source("wait -n"), 127);
+        assert_eq!(sh.run_source("wait -n".as_bytes()), 127);
     }
 
     #[cfg(windows)]
@@ -42373,10 +42334,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn jobs_lists_background_job() {
         // `jobs` reports the tracked job with its job number and command line.
         let mut sh = Shell::new();
-        sh.run_source("cmd /c exit 0 &");
+        sh.run_source("cmd /c exit 0 &".as_bytes());
         let buf = capture_sink();
         {
-            let prog = parse("jobs").expect("parse");
+            let prog = parse("jobs".as_bytes()).expect("parse");
             let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
@@ -42385,7 +42346,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(s.contains("[1]"), "jobs output: {s:?}");
         assert!(s.contains("cmd /c exit 0"), "jobs output: {s:?}");
         // `wait` cleans up any still-tracked job for a tidy teardown.
-        sh.run_source("wait");
+        sh.run_source("wait".as_bytes());
     }
 
     #[cfg(windows)]
@@ -42394,11 +42355,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `fg` (no spec) foregrounds the current job: it prints the command line
         // and blocks until the job finishes, returning its exit status.
         let mut sh = Shell::new();
-        sh.run_source("cmd /c exit 7 &");
+        sh.run_source("cmd /c exit 7 &".as_bytes());
         assert_eq!(sh.jobs.len(), 1);
         let buf = capture_sink();
         let status = {
-            let prog = parse("fg").expect("parse");
+            let prog = parse("fg".as_bytes()).expect("parse");
             let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
             sh.last_status
@@ -42415,8 +42376,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn fg_by_job_spec_targets_named_job() {
         // `fg %n` targets a specific job by its job number.
         let mut sh = Shell::new();
-        sh.run_source("cmd /c exit 3 &");
-        assert_eq!(sh.run_source("fg %1"), 3);
+        sh.run_source("cmd /c exit 3 &".as_bytes());
+        assert_eq!(sh.run_source("fg %1".as_bytes()), 3);
         assert!(sh.jobs.is_empty());
     }
 
@@ -42424,9 +42385,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn fg_no_jobs_errors() {
         // With no jobs, `fg` reports an error and returns 1.
         let mut sh = Shell::new();
-        assert_eq!(sh.run_source("fg"), 1);
+        assert_eq!(sh.run_source("fg".as_bytes()), 1);
         // A non-existent job spec is also an error.
-        assert_eq!(sh.run_source("fg %9"), 1);
+        assert_eq!(sh.run_source("fg %9".as_bytes()), 1);
     }
 
     #[cfg(windows)]
@@ -42437,17 +42398,17 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // running" case: `bg: job N already in background` on stderr, exit 0.
         // (The stdout capture stays empty; the message goes to real stderr.)
         let mut sh = Shell::new();
-        sh.run_source("cmd /c exit 0 &");
+        sh.run_source("cmd /c exit 0 &".as_bytes());
         let buf = capture_sink();
         {
-            let prog = parse("bg").expect("parse");
+            let prog = parse("bg".as_bytes()).expect("parse");
             let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         let buf = take_capture(&buf);
         assert!(buf.is_empty(), "bg writes to stderr, not stdout: {buf:?}");
         assert_eq!(sh.last_status, 0);
-        sh.run_source("wait");
+        sh.run_source("wait".as_bytes());
     }
 
     #[test]
@@ -42471,8 +42432,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn bg_no_jobs_errors() {
         // With no jobs, `bg` reports an error and returns 1.
         let mut sh = Shell::new();
-        assert_eq!(sh.run_source("bg"), 1);
-        assert_eq!(sh.run_source("bg %5"), 1);
+        assert_eq!(sh.run_source("bg".as_bytes()), 1);
+        assert_eq!(sh.run_source("bg %5".as_bytes()), 1);
     }
 
     #[cfg(windows)]
@@ -42480,9 +42441,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn disown_removes_job_from_table() {
         // `disown %1` drops the job so `jobs` no longer reports it.
         let mut sh = Shell::new();
-        sh.run_source("cmd /c exit 0 &");
+        sh.run_source("cmd /c exit 0 &".as_bytes());
         assert_eq!(sh.jobs.len(), 1);
-        assert_eq!(sh.run_source("disown %1"), 0);
+        assert_eq!(sh.run_source("disown %1".as_bytes()), 0);
         assert!(sh.jobs.is_empty(), "job should be removed after disown");
     }
 
@@ -42490,11 +42451,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn disown_all_and_running_flags() {
         let mut sh = Shell::new();
-        sh.run_source("cmd /c exit 0 &");
-        sh.run_source("cmd /c exit 0 &");
+        sh.run_source("cmd /c exit 0 &".as_bytes());
+        sh.run_source("cmd /c exit 0 &".as_bytes());
         assert_eq!(sh.jobs.len(), 2);
         // `disown -a` clears every tracked job.
-        assert_eq!(sh.run_source("disown -a"), 0);
+        assert_eq!(sh.run_source("disown -a".as_bytes()), 0);
         assert!(sh.jobs.is_empty(), "disown -a should clear all jobs");
     }
 
@@ -42503,18 +42464,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn disown_h_marks_without_removing() {
         // `disown -h` keeps the job but flags it no-SIGHUP.
         let mut sh = Shell::new();
-        sh.run_source("cmd /c exit 0 &");
-        assert_eq!(sh.run_source("disown -h %1"), 0);
+        sh.run_source("cmd /c exit 0 &".as_bytes());
+        assert_eq!(sh.run_source("disown -h %1".as_bytes()), 0);
         assert_eq!(sh.jobs.len(), 1, "disown -h keeps the job in the table");
         assert!(sh.jobs[0].no_hup, "disown -h sets no_hup");
-        sh.run_source("wait");
+        sh.run_source("wait".as_bytes());
     }
 
     #[cfg(windows)]
     #[test]
     fn disown_bad_spec_errors() {
         let mut sh = Shell::new();
-        assert_eq!(sh.run_source("disown %9"), 1);
+        assert_eq!(sh.run_source("disown %9".as_bytes()), 1);
     }
 
     #[test]
@@ -44401,7 +44362,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let p = path.to_string_lossy().replace('\\', "/");
         let src = src_tmpl.replace("{FILE}", &p);
         let mut sh = Shell::new();
-        let prog = parse(&src).expect("parse");
+        let prog = parse(src.as_bytes()).expect("parse");
         {
             let mut out = Out::Inherit;
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -44682,7 +44643,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let src = src_tmpl.replace("{FILE}", &p);
         let mut sh = Shell::new();
         let buf = capture_sink();
-        let prog = parse(&src).expect("parse");
+        let prog = parse(src.as_bytes()).expect("parse");
         {
             let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -45684,7 +45645,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn exec_replaces_shell_and_stops() {
         // `exec cmd` runs the command and the shell does not continue past it.
         let mut sh = Shell::new();
-        let st = sh.run_source("exec cmd /c exit 5\nAFTER=1");
+        let st = sh.run_source("exec cmd /c exit 5\nAFTER=1".as_bytes());
         assert_eq!(st, 5);
         assert!(!sh.vars.contains_key("AFTER"));
     }
@@ -45694,7 +45655,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn exec_missing_command_exits_127() {
         // A failed `exec` of a missing command exits the shell with 127.
         let mut sh = Shell::new();
-        let st = sh.run_source("exec no_such_command_xyz_123\nAFTER=1");
+        let st = sh.run_source("exec no_such_command_xyz_123\nAFTER=1".as_bytes());
         assert_eq!(st, 127);
         assert!(!sh.vars.contains_key("AFTER"));
     }
@@ -45722,7 +45683,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         // Assigning through the shell keeps `HOME` an ordinary shell variable,
         // which is all `tilde_expand` looks at.
-        sh.run_source(&format!("HOME='{home}'"));
+        sh.run_source(format!("HOME='{home}'").as_bytes());
         (sh, home)
     }
 
@@ -45748,14 +45709,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A login shell never reads the rc file, and takes the *first* profile
         // that exists — `.bash_profile` is absent, so `.bash_login` wins over
         // `.profile`.
-        sh.run_source("unset SAW");
+        sh.run_source("unset SAW".as_bytes());
         sh.set_login_shell();
         assert_eq!(sh.run_startup_files(&files), None);
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("bash_login"));
 
         // Adding the earlier name pre-empts it.
         write_startup(&home, ".bash_profile", "SAW=bash_profile");
-        sh.run_source("unset SAW");
+        sh.run_source("unset SAW".as_bytes());
         assert_eq!(sh.run_startup_files(&files), None);
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("bash_profile"));
     }
@@ -45786,7 +45747,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("my_rc"));
 
         // Login + `--noprofile`: nothing at all, the rc file included.
-        sh.run_source("unset SAW");
+        sh.run_source("unset SAW".as_bytes());
         sh.set_login_shell();
         let noprofile =
             StartupFiles { interactive: true, no_profile: true, ..StartupFiles::default() };
@@ -45804,18 +45765,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         write_startup(&home, ".bash_profile", "SAW=prof");
 
         let plain = StartupFiles::default();
-        sh.run_source(&format!("BASH_ENV='{home}/env.sh'"));
+        sh.run_source(format!("BASH_ENV='{home}/env.sh'").as_bytes());
         assert_eq!(sh.run_startup_files(&plain), None);
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("env"));
 
         // After the profile, so the profile's assignment is the one it appends to.
-        sh.run_source("unset SAW");
+        sh.run_source("unset SAW".as_bytes());
         sh.set_login_shell();
         assert_eq!(sh.run_startup_files(&plain), None);
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("profenv"));
 
         // Never for an interactive shell.
-        sh.run_source("unset SAW");
+        sh.run_source("unset SAW".as_bytes());
         let inter =
             StartupFiles { interactive: true, no_profile: true, no_rc: true, rc_file: None };
         assert_eq!(sh.run_startup_files(&inter), None);
@@ -45825,24 +45786,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // *shell running the test* does not expand it first — the point is that
         // `run_env_file` does).
         write_startup(&home, "e nv.sh", "SAW=${SAW:-}spaced");
-        sh.run_source(&format!("V=nv\nBASH_ENV='{home}/e${{V}}.sh'\nunset SAW"));
+        sh.run_source(format!("V=nv\nBASH_ENV='{home}/e${{V}}.sh'\nunset SAW").as_bytes());
         assert_eq!(sh.run_startup_files(&plain), None);
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("profenv"));
 
         // …and the result is *not* split on the space in the name, so a path
         // with a space in it is found.
-        sh.run_source(&format!("unset SAW\nBASH_ENV='{home}/e nv.sh'"));
+        sh.run_source(format!("unset SAW\nBASH_ENV='{home}/e nv.sh'").as_bytes());
         assert_eq!(sh.run_startup_files(&plain), None);
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("profspaced"));
 
         // A leading `~` expands even though it would not inside real double
         // quotes: bash tilde-expands the *result* of the expansion.
-        sh.run_source("unset SAW\nBASH_ENV='~/env.sh'");
+        sh.run_source("unset SAW\nBASH_ENV='~/env.sh'".as_bytes());
         assert_eq!(sh.run_startup_files(&plain), None);
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("profenv"));
 
         // An empty value, and a name that does not exist, are both silent.
-        sh.run_source("unset SAW\nBASH_ENV=");
+        sh.run_source("unset SAW\nBASH_ENV=".as_bytes());
         assert_eq!(sh.run_startup_files(&plain), None);
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("prof"));
     }
@@ -45881,24 +45842,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // A login shell's `exit` arms it, and the file sees the pre-`exit` status.
         sh.set_login_shell();
-        assert_eq!(sh.run_source("false; exit 5"), 5);
+        assert_eq!(sh.run_source("false; exit 5".as_bytes()), 5);
         assert_eq!(sh.run_logout_file(), None);
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("logout1"));
 
         // Reading it disarms it, so a second call does nothing.
-        sh.run_source("unset SAW");
+        sh.run_source("unset SAW".as_bytes());
         assert_eq!(sh.run_logout_file(), None);
         assert_eq!(pval(&sh, "SAW"), None);
 
         // An `exit` *in* the logout file replaces the shell's status.
         write_startup(&home, ".bash_logout", "SAW=lo\nexit 9");
-        assert_eq!(sh.run_source("exit 4"), 4);
+        assert_eq!(sh.run_source("exit 4".as_bytes()), 4);
         assert_eq!(sh.run_logout_file(), Some(9));
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("lo"));
 
         // A merely *failing* command in it does not.
         write_startup(&home, ".bash_logout", "SAW=lo2\nfalse");
-        assert_eq!(sh.run_source("exit 4"), 4);
+        assert_eq!(sh.run_source("exit 4".as_bytes()), 4);
         assert_eq!(sh.run_logout_file(), None);
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("lo2"));
     }

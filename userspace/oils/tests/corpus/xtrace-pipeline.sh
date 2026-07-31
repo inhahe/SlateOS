@@ -14,7 +14,15 @@
 #
 # Every stage is arranged to write nothing to stdout (input is /dev/null, and no
 # stage can fail and complain), so the only bytes on the merged stream are the
-# trace lines and their order is not a race.
+# trace lines.
+#
+# What is ordered is each stage's *start* — its first trace line. A stage that
+# traces more than once (a function body, a loop) races with the stages
+# downstream of it for everything after that, in bash as much as here: a stage
+# cannot be made to finish before the next one begins without deadlocking on a
+# full pipe. So the pipelines below that trace more than one line in a stage are
+# arranged so that no interleaving is observable — either the extra lines are
+# identical to the next stage's, or the multi-line stage is the last one.
 
 echo "=== stages trace in pipeline order"
 ( set -x; cat /dev/null | cat ) 2>&1
@@ -41,7 +49,9 @@ echo "=== a builtin stage puts the pipeline on the threaded executor"
 ( set -x; A=1 true | B=2 true ) 2>&1
 
 echo "=== function and compound stages trace their bodies, still in order"
-( set -x; f() { true; }; f | cat ) 2>&1
+# `f | true`, not `f | cat`: the body's `+ true` and the next stage's trace are
+# concurrent, so they are spelled the same to keep the bytes deterministic.
+( set -x; f() { true; }; f | true ) 2>&1
 ( set -x; f() { true; }; cat /dev/null | f ) 2>&1
 ( set -x; { true; } | { true; } ) 2>&1
 ( set -x; ( true ) | ( true ) ) 2>&1

@@ -48172,6 +48172,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// OS may schedule in any order, so the order comes from the start handshake
     /// in [`Shell::exec_threaded_pipeline`] (see [`Shell::stage_started`]) —
     /// without it this was reversed for two stages and luck for three or more.
+    ///
+    /// The handshake covers the *start* and nothing more: a stage signals when
+    /// its first command has been traced, and what it writes after that races
+    /// with the stages downstream. It has to — a stage that had to finish before
+    /// the next one began would deadlock the moment it filled its pipe — and
+    /// bash promises no more, its stages being concurrent processes.
     #[test]
     fn a_pipelines_stages_begin_in_pipeline_order() {
         // Every stage here is a builtin, so the whole pipeline runs in-process
@@ -48190,14 +48196,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A stage that runs no command at all signals when it *finishes*, so it
         // holds nothing up and the surviving trace is still in order.
         assert_eq!(run("{ set -x; x=1 | :; } 2>&1").0, "+ x=1\n+ :\n");
-        // The trace is only the easiest case to see: what is ordered is the
-        // stage start, so ordinary stderr output follows it too.
-        let out = run("{ { echo A >&2; } | { echo B >&2; }; } 2>&1").0;
-        let (a, b) = (out.find('A'), out.find('B'));
+        // What is ordered is each stage's *start*, and only that: the signal is
+        // sent once, when the stage's first command has been traced and is about
+        // to run. Everything a stage writes afterwards races with the stages
+        // downstream of it — as it does in bash, whose stages are concurrent
+        // processes. So `f` below is guaranteed to trace before `:`, and the
+        // `true` inside its body is not.
+        let out = run("{ set -x; f() { true; }; f | :; } 2>&1").0;
         assert!(
-            a.is_some() && a < b,
-            "stages wrote out of pipeline order: {out:?}"
+            out.starts_with("+ f\n"),
+            "stage started out of pipeline order: {out:?}"
         );
+        assert_eq!(out.matches("+ true\n").count(), 1, "{out:?}");
+        assert_eq!(out.matches("+ :\n").count(), 1, "{out:?}");
     }
 
     /// `set -x` word quoting, measured against bash 5.2 byte by byte over the

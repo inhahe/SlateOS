@@ -54,6 +54,17 @@ echo "=== and the string is taken as written"
 ( SECONDS=3+4 eval 'echo "[$SECONDS]"' ) 2>&1
 ( declare -i SECONDS; SECONDS=3+4 eval 'echo "[$SECONDS]"' ) 2>&1
 
+echo "=== because the binding is a fresh, exported variable of its own"
+# `-x` always — it *is* the command's environment — and none of the global's
+# attributes come with it, which is the same fact as the string above being
+# taken as written: the `-i` never reached the value.
+( q=2 eval 'declare -p q' ) 2>&1
+( q=1; q=2 eval 'declare -p q'; declare -p q ) 2>&1
+( declare -i q; q=3+4 eval 'declare -p q'; declare -p q ) 2>&1
+( declare -u q=ab; q=cd eval 'declare -p q'; declare -p q ) 2>&1
+( declare -a q=(1 2); q=zz eval 'declare -p q'; declare -p q ) 2>&1
+( SECONDS=100 eval 'declare -p SECONDS' ) 2>&1
+
 echo "=== a prefix on a special builtin does not persist either"
 ( SECONDS=100 :; back ) 2>&1
 ( SECONDS=100 eval :; back ) 2>&1

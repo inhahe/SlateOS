@@ -6283,10 +6283,11 @@ itself is in `vars`, which a subshell copies.
 Covered by the unit test `an_assignment_prefix_shadows_a_computed_name`
 and by `tests/corpus/bash-assign-prefix-dynvar.sh`.
 
-**Still divergent, in follow-ups:** what `declare -p` reports for a prefix
-binding (TD-OILS-TEMP-BINDING-ATTRIBUTES). (The two `unset` follow-ups,
-TD-OILS-UNSET-THROUGH-TEMP-SHADOW and TD-OILS-UNSET-LOCAL-KILLS-DYNVAR,
-are since fixed.)
+**Still divergent, in a follow-up:** a valueless `local` of a
+prefix-bound name (TD-OILS-LOCAL-INHERITS-TEMP-BINDING). The other three
+follow-ups — TD-OILS-UNSET-THROUGH-TEMP-SHADOW,
+TD-OILS-UNSET-LOCAL-KILLS-DYNVAR and TD-OILS-TEMP-BINDING-ATTRIBUTES —
+are since fixed.
 
 ### TD-OILS-UNSET-THROUGH-TEMP-SHADOW. `unset` inside an assignment prefix's scope kills the name instead of revealing what it shadows — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
@@ -6366,7 +6367,7 @@ Both fixes are covered by the "unset empties the scope" section of
 `tests/corpus/bash-assign-prefix-dynvar.sh` and by five assertions at the
 end of the unit test `an_assignment_prefix_shadows_a_computed_name`.
 
-### TD-OILS-TEMP-BINDING-ATTRIBUTES. A prefix binding is reported with the global's attributes, and never as exported — 2026-07-31 — OPEN
+### TD-OILS-TEMP-BINDING-ATTRIBUTES. A prefix binding is reported with the global's attributes, and never as exported — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the temporary-environment
 path again. The binding is an entry in `vars` and nothing else, so a
@@ -6392,6 +6393,21 @@ attribute sets for the name and adding `exported` — with the scope's
 saved entry putting the global's attributes back on teardown. That saved
 entry is currently only the *value* (`Option<Str>`); it has to grow to
 carry the attribute sets too.
+
+**Fixed.** `Shell::temp_shadow` is now
+`Vec<Vec<(String, VarSnapshot)>>` — the same shape `local_frames` uses,
+because it is the same kind of scope — so `push_temp_shadow` captures a
+full `snapshot_var`, clears the name's array/assoc bindings and every
+attribute set (`-i`/`-l`/`-u`/`-c`/`-n`/`-t`/array-valued/`declared`),
+writes the value and adds `exported`; `pop_temp_shadow` and
+`reveal_temp_shadow` both hand the snapshot to `restore_var`. `readonly`
+is deliberately left intact, as in `declare_local`, so a readonly global
+is not silently shadowed. `Shell::replace_var` had no callers left and
+was removed.
+
+Covered by the "because the binding is a fresh, exported variable of its
+own" section of `tests/corpus/bash-assign-prefix-dynvar.sh` and by five
+assertions in `an_assignment_prefix_shadows_a_computed_name`.
 
 ### TD-OILS-LOCAL-INHERITS-TEMP-BINDING. A valueless `local` of a name the caller bound with an assignment prefix starts out unset instead of taking the prefix's value — 2026-07-31 — OPEN
 

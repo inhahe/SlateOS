@@ -2599,8 +2599,9 @@ pub struct Shell {
     local_frames: Vec<Vec<(String, VarSnapshot)>>,
     /// Stack of assignment-prefix scopes — what `SECONDS=100 cmd` binds for the
     /// command's duration — innermost last, one frame per builtin or function
-    /// the prefix runs. Each entry is a name and the value it displaced, which
-    /// the scope puts back when it closes.
+    /// the prefix runs. Each entry is a name and the [`VarSnapshot`] it
+    /// displaced, which the scope puts back when it closes — the same shape
+    /// `local_frames` uses, because it is the same kind of scope.
     ///
     /// bash puts a prefix's assignments in a variable scope of their own, and
     /// having it be a scope rather than a write-and-restore is observable three
@@ -2612,10 +2613,9 @@ pub struct Shell {
     /// (`q=1; q=2 eval 'unset q; echo $q'` prints 1). And the binding is a
     /// fresh, exported variable that inherits none of the global's attributes.
     ///
-    /// See [`Shell::is_ordinary_shadowed`] and
-    /// [`Shell::reveal_temp_shadow`]. (The third — attributes — is not
-    /// modelled yet; see known-issues TD-OILS-TEMP-BINDING-ATTRIBUTES.)
-    temp_shadow: Vec<Vec<(String, Option<Str>)>>,
+    /// See [`Shell::is_ordinary_shadowed`], [`Shell::reveal_temp_shadow`] and
+    /// [`Shell::push_temp_shadow`] for the three in turn.
+    temp_shadow: Vec<Vec<(String, VarSnapshot)>>,
     /// Per-function-call save slot for `local -`. Pushed (as `None`) in lockstep
     /// with `local_frames` on function entry and popped on return. The first
     /// `local -` executed in a given call captures the current `set`-option state
@@ -3838,13 +3838,6 @@ impl Shell {
     /// Set a shell variable.
     pub fn set_var(&mut self, name: impl Into<String>, value: impl Into<Str>) {
         self.put_var(name, value);
-    }
-
-    /// Store a variable value and return the previous one (`HashMap::insert`'s
-    /// contract), for the callers that have to restore it afterwards — a
-    /// builtin's temporary assignment prefix, most of all.
-    fn replace_var(&mut self, name: impl Into<String>, value: impl Into<Str>) -> Option<Str> {
-        self.vars.insert(name.into(), value.into())
     }
 
     /// Store a variable value. A *name* is restricted to the portable
@@ -16839,14 +16832,35 @@ impl Shell {
     /// Pair every `true` with [`Shell::pop_temp_shadow`]; see
     /// [`Shell::temp_shadow`]. The common case is no prefix at all, which
     /// pushes nothing.
+    ///
+    /// The binding is a **fresh, exported** variable, not a write to the one
+    /// already there: it is the command's environment, so `-x` always, and it
+    /// inherits none of the global's attributes. `declare -i q; q=3+4 cmd`
+    /// leaves the string as written and reports `declare -x q="3+4"` — a `-i`
+    /// on the global does not reach the prefix's value, which is the same fact
+    /// as the value function not reaching it (see
+    /// [`Shell::is_ordinary_shadowed`]). `readonly` is the exception, left
+    /// intact so a readonly global is not silently shadowed.
     fn push_temp_shadow(&mut self, assigns: &[(String, Str)]) -> bool {
         if assigns.is_empty() {
             return false;
         }
-        let frame: Vec<(String, Option<Str>)> = assigns
-            .iter()
-            .map(|(k, v)| (k.clone(), self.replace_var(k.clone(), v.clone())))
-            .collect();
+        let mut frame: Vec<(String, VarSnapshot)> = Vec::with_capacity(assigns.len());
+        for (k, v) in assigns {
+            frame.push((k.clone(), self.snapshot_var(k)));
+            self.arrays.remove(k);
+            self.assoc.remove(k);
+            self.integer_attr.remove(k);
+            self.lower_attr.remove(k);
+            self.upper_attr.remove(k);
+            self.capcase_attr.remove(k);
+            self.nameref_attr.remove(k);
+            self.trace_attr.remove(k);
+            self.array_valued.remove(k);
+            self.declared.remove(k);
+            self.put_var(k.clone(), v.clone());
+            self.exported.insert(k.clone());
+        }
         self.temp_shadow.push(frame);
         true
     }
@@ -16863,13 +16877,8 @@ impl Shell {
         let Some(frame) = self.temp_shadow.pop() else {
             return;
         };
-        for (name, old) in frame {
-            match old {
-                Some(v) => self.put_var(name, v),
-                None => {
-                    self.vars.remove(&name);
-                }
-            }
+        for (name, snap) in frame {
+            self.restore_var(&name, snap);
         }
     }
 
@@ -16900,8 +16909,8 @@ impl Shell {
                 .position(|(n, _)| n == name)
                 .map(|at| f.remove(at).1)
         });
-        if let Some(Some(v)) = old {
-            self.put_var(name.to_string(), v);
+        if let Some(snap) = old {
+            self.restore_var(name, snap);
         }
     }
 
@@ -42087,6 +42096,27 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("f() { local BASH_SUBSHELL=9; unset BASH_SUBSHELL; }; f; echo $BASH_SUBSHELL").0,
             "0\n"
+        );
+        // The binding is a fresh, *exported* variable — it is the command's
+        // environment, so `-x` always — that inherits none of the global's
+        // attributes, which is the same fact as the string above being taken as
+        // written. The global's are back when the scope closes.
+        assert_eq!(run("q=2 eval 'declare -p q'").0, "declare -x q=\"2\"\n");
+        assert_eq!(
+            run("q=1; q=2 eval 'declare -p q'; declare -p q").0,
+            "declare -x q=\"2\"\ndeclare -- q=\"1\"\n"
+        );
+        assert_eq!(
+            run("declare -i q; q=3+4 eval 'declare -p q'; declare -p q").0,
+            "declare -x q=\"3+4\"\ndeclare -i q\n"
+        );
+        assert_eq!(
+            run("declare -a q=(1 2); q=zz eval 'declare -p q'; declare -p q").0,
+            "declare -x q=\"zz\"\ndeclare -a q=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(
+            run("SECONDS=100 eval 'declare -p SECONDS'").0,
+            "declare -x SECONDS=\"100\"\n"
         );
     }
 

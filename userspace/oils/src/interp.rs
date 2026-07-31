@@ -44209,6 +44209,27 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
     }
 
+    /// A subscript is an ordinary word, so it may hold any byte even when the
+    /// array it indexes is a plain identifier. `unset` used to apply its
+    /// *identifier* gate to the whole operand before splitting the subscript
+    /// off, which silently dropped the request: the element stayed.
+    #[test]
+    fn unset_element_addresses_a_subscript_that_is_not_text() {
+        let mut sh = Shell::new();
+        let mut src: Str = b"declare -A m\nm[".to_vec();
+        src.push(0xff);
+        src.extend_from_slice(b"]=gone\nm[keep]=kept\n");
+        assert_eq!(sh.run_source(&src), 0);
+        assert_eq!(sh.assoc.get("m").map(Vec::len), Some(2), "both keys stored");
+        let mut unset: Str = b"unset 'm[".to_vec();
+        unset.push(0xff);
+        unset.extend_from_slice(b"]'\n");
+        assert_eq!(sh.run_source(&unset), 0);
+        let m = sh.assoc.get("m").expect("m is still declared");
+        assert_eq!(m.len(), 1, "the non-text key was removed");
+        assert_eq!(m[0].0, b"keep");
+    }
+
     #[test]
     fn unset_all_elements_subscript_differs_by_array_kind() {
         // Indexed: `[@]` empties the array but leaves it declared, attributes

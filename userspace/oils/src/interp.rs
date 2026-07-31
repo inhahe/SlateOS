@@ -2020,6 +2020,29 @@ enum CompKey {
     Initial,
 }
 
+/// The word-level facts about a declaration-builtin call that its expanded
+/// `argv` cannot answer, because the compound `name=(…)` operands were lifted
+/// out of `argv` into `decl_arrays` before it was built.
+///
+/// Both fields are derived from the same source positions
+/// (`ast::DeclArray::word_index`), and both exist because a compound operand is
+/// a *word* like any other to bash even though osh handles it out of band.
+struct DeclWords<'a> {
+    /// `argv` with each compound operand's bare name put back where it was
+    /// written. Under `set -x` this is the builtin's own trace line
+    /// (`+ declare -x SC=1 arr SD=2`); under `-p` it is the operand list the
+    /// builtin is *asked about*, so that `declare -p q r=(1)` reports both.
+    spliced: &'a [Str],
+    /// How many leading entries of `argv` may still be read as flag words.
+    /// bash parses flags with getopt, which stops at the first non-option word;
+    /// a compound operand is one, so everything behind the earliest of them is
+    /// an operand however it is spelled. `argv.len()` when nothing forces an
+    /// early stop.
+    flag_limit: usize,
+    /// Whether `set -x` is on, so the builtin's own trace line is wanted.
+    xtrace: bool,
+}
+
 /// One `complete`/`compopt` completion specification. osh's line-oriented REPL
 /// has no interactive tab-completion, so these specs are stored, printed
 /// (`complete -p`) and mutated (`compopt`) purely for script compatibility —
@@ -10781,15 +10804,25 @@ impl Shell {
                 }
                 w
             };
-            let trace = self.xtrace;
-            return self.exec_declare_with_arrays(
-                &argv,
-                &sc.decl_arrays,
-                &spliced,
-                trace,
-                out,
-                &redir,
-            );
+            // …and the same positions answer a third: where flag parsing has to
+            // stop. bash reads a declaration builtin's flags with getopt, which
+            // stops at the first non-option word — and a compound operand is one,
+            // so every word behind the earliest of them is an operand however it
+            // is spelled (`declare q=(1) -x` refuses `-x` as a name). The words
+            // that would say so were lifted out of `argv`, so the boundary has to
+            // be carried separately.
+            let flag_limit = sc
+                .decl_arrays
+                .iter()
+                .map(|d| word_starts.get(d.word_index).copied().unwrap_or(argv.len()))
+                .min()
+                .unwrap_or(argv.len());
+            let words = DeclWords {
+                spliced: &spliced,
+                flag_limit,
+                xtrace: self.xtrace,
+            };
+            return self.exec_declare_with_arrays(&argv, &sc.decl_arrays, &words, out, &redir);
         }
 
         // `command …` (bypass shell functions) and `builtin …` (force builtin
@@ -16266,7 +16299,7 @@ impl Shell {
             "dirs" => self.builtin_dirs(args, out, redir),
             "echo" => self.builtin_echo(args, out, redir),
             "printf" => self.builtin_printf(args, out, redir),
-            "export" => self.builtin_export(args, out, redir),
+            "export" => self.builtin_export(args, out, redir, args.len()),
             "declare" | "typeset" => {
                 // The leading flag cluster, as its raw bytes: every flag
                 // letter is ASCII, so a byte that is not one is simply not a
@@ -16303,7 +16336,7 @@ impl Shell {
                     if !has_names && has_attr {
                         self.declare_list_filtered(args, out, redir)
                     } else {
-                        self.builtin_declare(args, false, name)
+                        self.builtin_declare(args, false, name, args.len())
                     }
                 }
             }
@@ -16315,7 +16348,7 @@ impl Shell {
                 let lead: Str =
                     args.iter().take_while(|a| a.starts_with(b"-")).flatten().copied().collect();
                 if !lead.contains(&b'p') {
-                    self.builtin_declare(args, true, "local")
+                    self.builtin_declare(args, true, "local", args.len())
                 } else if self.local_frames.is_empty() {
                     self.perrln("local: can only be used in a function");
                     1
@@ -16323,7 +16356,7 @@ impl Shell {
                     self.local_print(args, out, redir)
                 }
             }
-            "readonly" => self.builtin_readonly(args, out, redir),
+            "readonly" => self.builtin_readonly(args, out, redir, args.len()),
             "shopt" => self.builtin_shopt(args, out, redir),
             "unset" => self.builtin_unset(args),
             "set" => self.builtin_set(args, out, redir),
@@ -21173,7 +21206,13 @@ impl Shell {
         }
     }
 
-    fn builtin_export(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_export(
+        &mut self,
+        args: &[Str],
+        out: &mut Out,
+        redir: &RedirPlan,
+        flag_limit: usize,
+    ) -> i32 {
         // Parse leading flags: `-p` (list exported vars), `-n` (remove the export
         // attribute), `-a`/`-A` (declare the operand an array, as `readonly`
         // does), `--` ends option processing. (`-f`, exporting functions, is not
@@ -21185,7 +21224,9 @@ impl Shell {
         let mut assoc = false;
         let mut indexed = false;
         let mut i = 0;
-        while i < args.len() {
+        // See [`DeclWords::flag_limit`]: a compound operand can have ended option
+        // parsing at a word that is not in `args` at all.
+        while i < args.len().min(flag_limit) {
             let a = &args[i];
             if a.as_slice() == b"--" {
                 i += 1;
@@ -22099,13 +22140,13 @@ impl Shell {
     /// `declare`/`typeset`/`local` — the entry point, which handles `-g` by
     /// swapping each operand's global binding into place around the declaration
     /// proper (see [`Shell::enter_global_scope`]).
-    fn builtin_declare(&mut self, args: &[Str], is_local: bool, tag: &str) -> i32 {
+    fn builtin_declare(&mut self, args: &[Str], is_local: bool, tag: &str, flag_limit: usize) -> i32 {
         // `local` is never global, whatever flags it is given.
         if is_local || !Self::declare_global_flag(args) {
-            return self.builtin_declare_scoped(args, is_local, tag);
+            return self.builtin_declare_scoped(args, is_local, tag, flag_limit);
         }
         let saved = self.enter_global_scope(&Self::declare_operand_names(args));
-        let status = self.builtin_declare_scoped(args, is_local, tag);
+        let status = self.builtin_declare_scoped(args, is_local, tag, flag_limit);
         self.leave_global_scope(saved);
         status
     }
@@ -22113,7 +22154,18 @@ impl Shell {
     /// The declaration proper, run with the bindings it is to act on already
     /// live — so it never has to care whether `-g` was given beyond skipping the
     /// local-shadowing step.
-    fn builtin_declare_scoped(&mut self, args: &[Str], is_local: bool, tag: &str) -> i32 {
+    ///
+    /// `flag_limit` is how many leading `args` entries may still be read as flag
+    /// words — `args.len()` for an ordinary call. It is smaller only when a
+    /// compound `name=(…)` operand ended option parsing at a word that is not in
+    /// `args` at all; see [`DeclWords::flag_limit`].
+    fn builtin_declare_scoped(
+        &mut self,
+        args: &[Str],
+        is_local: bool,
+        tag: &str,
+        flag_limit: usize,
+    ) -> i32 {
         if is_local && self.local_frames.is_empty() {
             self.perrln("local: can only be used in a function");
             return 1;
@@ -22176,6 +22228,9 @@ impl Shell {
         let mut unset_trace = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
+            if i >= flag_limit {
+                break; // an earlier compound operand ended option parsing
+            }
             if arg.as_slice() == b"--" {
                 i += 1;
                 break;
@@ -23083,18 +23138,15 @@ impl Shell {
     /// each array literal is marked with the declared kind (`-A` → assoc,
     /// `-a`/default → indexed) and applied via [`Shell::apply_assignment`].
     ///
-    /// `spliced` is `argv` with each compound operand's bare name put back at its
-    /// source position. It answers two questions. Under `set -x` (`xtrace_on`) it is
-    /// the builtin's own trace line, emitted here after the per-operand `name=(…)`
-    /// lines that phase 1 produces, so the caller must not trace this command itself.
-    /// And under `-p` it is the operand list the builtin is *asked about*: the
-    /// compound names have to be in it or `declare -p q r=(1)` would report only `q`.
+    /// `words` carries what the expanded `argv` cannot say about the *source*
+    /// words — see [`DeclWords`]. Its trace line is emitted here, after the
+    /// per-operand `name=(…)` lines that phase 1 produces, so the caller must not
+    /// trace this command itself.
     fn exec_declare_with_arrays(
         &mut self,
         argv: &[Str],
         decl_arrays: &[DeclArray],
-        spliced: &[Str],
-        xtrace_on: bool,
+        words: &DeclWords,
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
@@ -23106,14 +23158,7 @@ impl Shell {
         if argv.first().map(Vec::as_slice) == Some(b"local".as_slice())
             || !Self::declare_global_flag(argv.get(1..).unwrap_or_default())
         {
-            return self.exec_declare_with_arrays_scoped(
-                argv,
-                decl_arrays,
-                spliced,
-                xtrace_on,
-                out,
-                redir,
-            );
+            return self.exec_declare_with_arrays_scoped(argv, decl_arrays, words, out, redir);
         }
         let mut names = Self::declare_operand_names(argv.get(1..).unwrap_or_default());
         // Compound operands were lifted out of `argv` into `decl_arrays`, so
@@ -23124,8 +23169,7 @@ impl Shell {
             }
         }
         let saved = self.enter_global_scope(&names);
-        let flow = self
-            .exec_declare_with_arrays_scoped(argv, decl_arrays, spliced, xtrace_on, out, redir);
+        let flow = self.exec_declare_with_arrays_scoped(argv, decl_arrays, words, out, redir);
         self.leave_global_scope(saved);
         flow
     }
@@ -23169,8 +23213,7 @@ impl Shell {
         &mut self,
         argv: &[Str],
         decl_arrays: &[DeclArray],
-        spliced: &[Str],
-        xtrace_on: bool,
+        words: &DeclWords,
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
@@ -23256,7 +23299,10 @@ impl Shell {
         let mut seen_lower = false;
         let mut seen_upper = false;
         let mut seen_capcase = false;
-        for arg in &argv[1..] {
+        // `flag_limit` is where the *source* words stopped offering flags, which
+        // `argv` cannot show: a compound operand written before a flag-shaped
+        // word ended option parsing there. See [`DeclWords::flag_limit`].
+        for arg in argv.get(1..words.flag_limit.max(1)).unwrap_or_default() {
             let enable = arg.starts_with(b"-");
             let Some(flags) = arg.strip_prefix(b"-").or_else(|| arg.strip_prefix(b"+")) else {
                 break; // first non-flag operand — flags are done
@@ -23766,9 +23812,9 @@ impl Shell {
         // line comes now — after them, and only if the command got this far: bash
         // does not trace the builtin at all when an operand's binding aborted the
         // command above.
-        if xtrace_on {
+        if words.xtrace {
             let mut line = self.xtrace_prefix();
-            for (i, w) in spliced.iter().enumerate() {
+            for (i, w) in words.spliced.iter().enumerate() {
                 if i > 0 {
                     line.push(b' ');
                 }
@@ -23787,7 +23833,7 @@ impl Shell {
         // `readonly -p`/`export -p` are not this: they take `-p` as "print in a
         // form that can be re-read", still mark, and print nothing extra here.
         if print_mode && !matches!(cmd, "readonly" | "export") {
-            let asked = spliced.get(1..).unwrap_or_default();
+            let asked = words.spliced.get(1..).unwrap_or_default();
             self.last_status = if is_local {
                 self.local_print(asked, out, redir)
             } else {
@@ -23800,17 +23846,21 @@ impl Shell {
         // operands through their own builtin — but only when a non-flag operand is
         // present, so an array-literal-only invocation (`readonly arr=(1 2)`) never
         // slips into listing mode.
-        let has_scalar_operand = argv[1..]
-            .iter()
-            .any(|a| a.as_slice() != b"--" && !a.starts_with(b"-") && !a.starts_with(b"+"));
+        // A word past `flag_limit` is an operand however it is spelled, so it
+        // counts here too — `readonly q=(1) -x` really does reach the operand
+        // loop, which is what refuses `-x` as a name.
+        let limit = words.flag_limit.max(1).saturating_sub(1);
+        let has_scalar_operand = argv[1..].iter().enumerate().any(|(i, a)| {
+            i >= limit || (a.as_slice() != b"--" && !a.starts_with(b"-") && !a.starts_with(b"+"))
+        });
         let status = match cmd {
-            "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir),
-            "export" if has_scalar_operand => self.builtin_export(&argv[1..], out, redir),
+            "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir, limit),
+            "export" if has_scalar_operand => self.builtin_export(&argv[1..], out, redir, limit),
             "readonly" | "export" => 0,
             // `_scoped`: any `-g` swap is already in force for the whole
             // command (see the wrapper below), and re-entering it here would
             // pair the inner restore with the outer's saved binding.
-            _ => self.builtin_declare_scoped(&argv[1..], is_local, cmd),
+            _ => self.builtin_declare_scoped(&argv[1..], is_local, cmd, limit),
         };
         // A compound operand the builtin never saw (it lives in `decl_arrays`, not
         // `argv`) still failed the command when it was refused as a local above.
@@ -23893,7 +23943,13 @@ impl Shell {
     /// variable read-only (assigning an initial value first), so later
     /// assignments and `unset` are rejected. With no name operands (or `-p`),
     /// prints the current readonly variables in a re-inputtable form.
-    fn builtin_readonly(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
+    fn builtin_readonly(
+        &mut self,
+        args: &[Str],
+        out: &mut Out,
+        redir: &RedirPlan,
+        flag_limit: usize,
+    ) -> i32 {
         // Strip leading flags; only `-a`/`-A` (array kinds) affect storage.
         let mut names: Vec<&Str> = Vec::new();
         let mut assoc = false;
@@ -23903,6 +23959,11 @@ impl Shell {
         let mut no_mark = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
+            // See [`DeclWords::flag_limit`]: a compound operand can have ended
+            // option parsing at a word that is not in `args` at all.
+            if i >= flag_limit {
+                break;
+            }
             if arg.as_slice() == b"--" {
                 i += 1;
                 break;
@@ -44451,6 +44512,58 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("readonly -p q=(1) >/dev/null; declare -p q").0,
             "declare -ar q=([0]=\"1\")\n"
+        );
+    }
+
+    /// A declaration builtin's flags are read with getopt, which stops at the
+    /// first non-option word — and a compound `name=(…)` operand is one, even
+    /// though osh lifts it out of `argv` before the flag scan ever sees it.
+    #[test]
+    fn a_flag_written_behind_a_compound_operand_is_an_operand() {
+        // Not a flag: a name, and one no identifier could spell.
+        assert_eq!(
+            run("{ declare q=(1) -x; } 2>&1; echo rc=$?; declare -p q").0,
+            "osh: declare: `-x': not a valid identifier\nrc=1\ndeclare -a q=([0]=\"1\")\n"
+        );
+        // The operand loop continues, so every bad word is named…
+        assert_eq!(
+            run("{ declare q=(1) -x -y; } 2>&1").0,
+            "osh: declare: `-x': not a valid identifier\n\
+             osh: declare: `-y': not a valid identifier\n"
+        );
+        // …and a good operand behind a bad one still binds, without the letters
+        // of the word that was refused.
+        assert_eq!(
+            run("{ declare q=(1) -x r=2; } 2>/dev/null; declare -p r").0,
+            "declare -- r=\"2\"\n"
+        );
+        // A real *leading* flag still reaches every operand.
+        assert_eq!(
+            run("{ declare -i q=(2+3) -x r=4+5; } 2>/dev/null; declare -p q r").0,
+            "declare -ai q=([0]=\"5\")\ndeclare -i r=\"9\"\n"
+        );
+        // `--`, a lone `-` and `-p` are all just operands there.
+        for word in ["--", "-", "-p"] {
+            assert_eq!(
+                run(&format!("{{ declare q=(1) {word}; }} 2>&1; echo rc=$?")).0,
+                format!("osh: declare: `{word}': not a valid identifier\nrc=1\n"),
+                "{word}"
+            );
+        }
+        // Each builtin names itself, and `readonly`/`export` still mark the
+        // operand that did bind.
+        assert_eq!(
+            run("{ readonly q=(1) -x; } 2>/dev/null; declare -p q").0,
+            "declare -ar q=([0]=\"1\")\n"
+        );
+        let (o, _) = run("{ typeset q=(1) -x; } 2>&1");
+        assert_eq!(o, "osh: typeset: `-x': not a valid identifier\n");
+        let (o, _) = run("f(){ local q=(1) -x; }; { f; } 2>&1");
+        assert_eq!(o, "main: local: `-x': not a valid identifier\n");
+        // A flag ahead of every operand is still a flag.
+        assert_eq!(
+            run("declare -x q=(1) r=2; echo rc=$?; declare -p q r").0,
+            "rc=0\ndeclare -ax q=([0]=\"1\")\ndeclare -x r=\"2\"\n"
         );
     }
 

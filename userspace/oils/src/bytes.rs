@@ -232,6 +232,56 @@ pub fn find(haystack: BStr<'_>, needle: BStr<'_>) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Byte-offset of the **last** occurrence of `needle` in `haystack`.
+///
+/// `str::rfind` for byte strings, and empty-needle-compatible with it: an empty
+/// needle matches at the end, not at 0.
+#[must_use]
+pub fn rfind(haystack: BStr<'_>, needle: BStr<'_>) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(haystack.len());
+    }
+    if needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).rposition(|w| w == needle)
+}
+
+/// Whether `needle` occurs anywhere in `haystack` — `str::contains` for byte
+/// strings.
+#[must_use]
+pub fn contains(haystack: BStr<'_>, needle: BStr<'_>) -> bool {
+    find(haystack, needle).is_some()
+}
+
+/// Replace at most `n` non-overlapping occurrences of `from` with `to`, left to
+/// right — [`str::replacen`], and [`str::replace`] when `n` is [`usize::MAX`].
+///
+/// An empty `from` replaces nothing. That is *not* what `str::replacen` does
+/// (it splices `to` in at every character boundary), but every caller here
+/// reached this function through a shell construct where an empty pattern means
+/// "match nothing", and the `str` behaviour would insert text the user never
+/// asked for.
+#[must_use]
+pub fn replacen(s: BStr<'_>, from: BStr<'_>, to: BStr<'_>, n: usize) -> Str {
+    if from.is_empty() || n == 0 {
+        return s.to_vec();
+    }
+    let mut out = Str::with_capacity(s.len());
+    let mut rest = s;
+    let mut done = 0usize;
+    while done < n
+        && let Some(at) = find(rest, from)
+    {
+        out.extend_from_slice(rest.get(..at).unwrap_or_default());
+        out.extend_from_slice(to);
+        rest = rest.get(at.saturating_add(from.len())..).unwrap_or_default();
+        done = done.saturating_add(1);
+    }
+    out.extend_from_slice(rest);
+    out
+}
+
 /// The lines of `s`, exactly as [`str::lines`] splits text.
 ///
 /// A line ends at a `\n`, which takes a `\r` immediately before it with it;
@@ -596,8 +646,8 @@ pub fn path_to_bytes(p: &std::path::Path) -> Str {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::{
-        BStr, Str, char_at, char_count, char_offset, char_slice, find, to_lowercase, to_uppercase,
-        trim,
+        BStr, Str, char_at, char_count, char_offset, char_slice, find, replacen, rfind,
+        to_lowercase, to_uppercase, trim,
     };
 
     /// `a\xffb` — the value that motivates this whole module: three characters
@@ -614,6 +664,26 @@ mod tests {
         assert_eq!(trim(b" \t\n\x0b\x0c\r"), b"");
         // Every other byte stays, including ones that are not text at all.
         assert_eq!(trim(b"\xa0x\xa0"), b"\xa0x\xa0");
+    }
+
+    #[test]
+    fn rfind_and_replacen_are_str_semantics_over_bytes() {
+        // The last occurrence, and one that a UTF-8 decode could not have found
+        // at all because neither the needle nor its surroundings are text.
+        assert_eq!(rfind(b"xa ya za", b"a"), Some(7));
+        assert_eq!(rfind(b"\xffq\xffq", b"\xffq"), Some(2));
+        assert_eq!(rfind(b"abc", b"z"), None);
+        // Empty-needle conventions match `str`: `find` at 0, `rfind` at the end.
+        assert_eq!(find(b"abc", b""), Some(0));
+        assert_eq!(rfind(b"abc", b""), Some(3));
+        // Replacement is left-to-right and non-overlapping.
+        assert_eq!(replacen(b"aaa", b"a", b"b", 1), b"baa".to_vec());
+        assert_eq!(replacen(b"aaa", b"a", b"b", usize::MAX), b"bbb".to_vec());
+        assert_eq!(replacen(b"aaaa", b"aa", b"x", usize::MAX), b"xx".to_vec());
+        // An empty pattern replaces nothing, unlike `str::replacen`.
+        assert_eq!(replacen(b"abc", b"", b"-", usize::MAX), b"abc".to_vec());
+        // Bytes that are not text pass through and can be replaced.
+        assert_eq!(replacen(LONE, b"\xff", b"!", usize::MAX), b"a!b".to_vec());
     }
 
     #[test]

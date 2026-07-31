@@ -3029,6 +3029,22 @@ impl Shell {
         // are toggled.
         self.refresh_bashopts();
         self.readonly.insert("BASHOPTS".to_string());
+        // OPTIND / OPTERR: the `getopts` state, which bash has bound from
+        // startup even though nothing has parsed an option yet. This is not just
+        // cosmetic for `declare -p`: the standard option-parsing preamble ends
+        // `shift $((OPTIND - 1))`, and a script that reaches that line without
+        // having called `getopts` (no options passed) needs `$OPTIND` to be `1`
+        // — unset, the arithmetic is `-1` and the shift is an error.
+        //
+        // `OPTIND` carries the integer attribute (`declare -i OPTIND="1"`, so
+        // `OPTIND=3+4` stores `7`) and `OPTERR` does not (`declare -- OPTERR="1"`);
+        // that asymmetry is bash's, and is measured, not an oversight here.
+        // Seeded before `import_environment`, which matches bash on both halves
+        // of the inherited case: an environment `OPTIND=5` does not win (bash
+        // still reports `1`) but does mark the name exported (`declare -ix`).
+        self.put_var("OPTIND".to_string(), "1".to_string());
+        self.integer_attr.insert("OPTIND".to_string());
+        self.put_var("OPTERR".to_string(), "1".to_string());
         // BASH_ALIASES / BASH_CMDS: bash exposes the alias table and the
         // command-hash table as *live* associative arrays that are present even
         // when empty (`declare -A BASH_ALIASES=()`), reflect the current tables
@@ -33224,6 +33240,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("declare -p NoSuchVar_xyz").1, 1);
     }
 
+    /// bash binds `OPTIND` and `OPTERR` from startup, before anything has
+    /// parsed an option, and the value matters beyond the listing: the standard
+    /// option-parsing preamble ends `shift $((OPTIND - 1))`, so a script that
+    /// gets there without calling `getopts` (no options passed) must shift 0 —
+    /// with `OPTIND` unset the arithmetic is `-1` and the shift fails.
+    #[test]
+    fn optind_and_opterr_are_bound_from_startup() {
+        assert_eq!(run(r#"echo "[$OPTIND][$OPTERR]""#).0, "[1][1]\n");
+        assert_eq!(
+            run("declare -p OPTIND OPTERR").0,
+            "declare -i OPTIND=\"1\"\ndeclare -- OPTERR=\"1\"\n"
+        );
+        // The preamble shape that needs the seed.
+        assert_eq!(run(r#"set -- a b; shift $((OPTIND - 1)); echo "$*""#).0, "a b\n");
+        // `OPTIND` carries the integer attribute, so an assignment to it is
+        // evaluated as arithmetic; `OPTERR` does not. That asymmetry is bash's.
+        assert_eq!(run("OPTIND=3+4; declare -p OPTIND").0, "declare -i OPTIND=\"7\"\n");
+        assert_eq!(run("OPTERR=3+4; declare -p OPTERR").0, "declare -- OPTERR=\"3+4\"\n");
+        // A scan still starts at 1 and leaves the index past the last option.
+        assert_eq!(run("set -- -a -b x; while getopts ab o; do :; done; echo $OPTIND").0, "3\n");
+    }
+
     /// The *listing* forms — bare `declare -p`, the flag-filtered `declare -i`
     /// and `declare -a`, and `readonly -p` — report the dynamic special
     /// variables too. Their listing shape is not the named one: bash's listing
@@ -43577,7 +43615,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             hide_ppid(o2),
             "declare -i BASHPID\ndeclare -ir EUID=\"0\"\ndeclare -i HISTCMD\n\
-             declare -ir PPID\ndeclare -i RANDOM\ndeclare -ir UID=\"0\"\n\
+             declare -i OPTIND=\"1\"\ndeclare -ir PPID\ndeclare -i RANDOM\n\
+             declare -ir UID=\"0\"\n\
              declare -i k=\"5\"\ndeclare -i k2=\"9\""
         );
 
@@ -43590,7 +43629,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             hide_ppid(o3),
             "declare -i BASHPID\ndeclare -ir EUID=\"0\"\ndeclare -i HISTCMD\n\
-             declare -ir PPID\ndeclare -i RANDOM\ndeclare -ir UID=\"0\"\n\
+             declare -i OPTIND=\"1\"\ndeclare -ir PPID\ndeclare -i RANDOM\n\
+             declare -ir UID=\"0\"\n\
              declare -i ii=\"1\"\ndeclare -l low=\"hello\""
         );
 

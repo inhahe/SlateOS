@@ -142,4 +142,7 @@ echo "=== set -x traces the assignment it is about to ignore"
 ( set -x; FUNCNAME=(1 2) ) 2>&1
 
 echo "=== DIRSTACK and COMP_WORDBREAKS are not in the family"
+# `COMP_WORDBREAKS` is an ordinary variable. `DIRSTACK` is dynamic in the
+# *other* direction — the write is pushed back into the directory stack rather
+# than refused — which dirstack-var.sh covers on its own.
 ( COMP_WORDBREAKS=xy; echo "[$COMP_WORDBREAKS] rc=$?" )

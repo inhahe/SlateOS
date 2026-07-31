@@ -204,7 +204,9 @@ fn reported_identity() -> (u32, u32) {
 ///
 /// `DIRSTACK` and `COMP_WORDBREAKS` look like they belong here and do not:
 /// bash lets both be assigned (and acts on the result), which is measured, not
-/// assumed.
+/// assumed. `DIRSTACK` is dynamic in the other direction — the write is pushed
+/// back into the directory stack, see [`Shell::sync_dirstack_writeback`] — and
+/// `COMP_WORDBREAKS` is an ordinary variable.
 const NOASSIGN_VARS: &[&str] = &[
     "FUNCNAME",
     "GROUPS",
@@ -2710,6 +2712,18 @@ pub struct Shell {
     /// The saved directory stack (`pushd`/`popd`), as bytes: every entry is a
     /// path.
     dir_stack: Vec<Str>,
+    /// Whether `DIRSTACK` is still the shell's *dynamic* view of
+    /// [`Shell::dir_stack`] rather than an ordinary array.
+    ///
+    /// bash gives `DIRSTACK` both a value function and an assign function, so it
+    /// is re-materialised on every read and an assignment to it is pushed back
+    /// into the live stack (see [`Shell::sync_dirstack_writeback`]). `unset
+    /// DIRSTACK` drops the whole binding, dynamic hooks included, and bash never
+    /// recreates it: the name is ordinary from then on, `pushd` no longer touches
+    /// it, and a later `DIRSTACK=(a b c)` makes a plain three-element array.
+    /// Cloned into subshells, so a subshell that unsets it does not affect the
+    /// parent.
+    dirstack_dynamic: bool,
     /// The command history, oldest first, as recorded while `set -o history` is
     /// in effect. An entry's *number* is [`Shell::hist_base`] plus its index, so
     /// deleting one renumbers every entry after it — which is what bash does,
@@ -3048,6 +3062,7 @@ impl Shell {
             fn_trace_attr: HashSet::new(),
             trap_suppress: Vec::new(),
             dir_stack: Vec::new(),
+            dirstack_dynamic: true,
             history: Vec::new(),
             hist_base: 1,
             hist_max: None,
@@ -7179,6 +7194,7 @@ impl Shell {
             // inside the subshell correctly aligned.
             trap_suppress: self.trap_suppress.clone(),
             dir_stack: self.dir_stack.clone(),
+            dirstack_dynamic: self.dirstack_dynamic,
             history: self.history.clone(),
             hist_base: self.hist_base,
             hist_max: self.hist_max,
@@ -7642,6 +7658,18 @@ impl Shell {
     /// trace), while a plain scalar's trace is emitted at the store site below so
     /// the RHS is expanded exactly once.
     fn apply_assignment(&mut self, a: &Assignment, trace: bool) -> bool {
+        let ok = self.apply_assignment_inner(a, trace);
+        // A name the shell also keeps somewhere else takes the write back out of
+        // the variable table again — see [`Shell::after_var_write`]. Run whether
+        // or not the assignment succeeded, since a literal that failed part-way
+        // still stored what it got through.
+        self.after_var_write(&a.name);
+        ok
+    }
+
+    /// The body of [`Shell::apply_assignment`], which wraps it only to run the
+    /// dynamic-variable write-back hook on every exit.
+    fn apply_assignment_inner(&mut self, a: &Assignment, trace: bool) -> bool {
         // A nameref (`declare -n ref=target`) redirects the assignment to its
         // target: rewrite the name and re-run. `resolve_ref_name` follows the
         // whole chain, so the rewritten name is not itself a nameref (no loop).
@@ -10374,6 +10402,12 @@ impl Shell {
                 self.restore_var(&name, snap);
             }
         }
+        // A `local DIRSTACK` suspended the dynamic view for the duration of the
+        // call (see [`Shell::is_locally_shadowed`]), so the global that comes
+        // back may predate a `cd` the body did. bash's value function makes the
+        // staleness unobservable by regenerating on every read; osh materialises
+        // instead, so it has to catch up here.
+        self.refresh_dirstack();
         // If a `local -` ran in this frame, restore the `set`-option state it
         // captured, undoing any `set` changes made after the `local -` call.
         if let Some(Some(saved)) = self.local_opt_saves.pop() {
@@ -16113,10 +16147,80 @@ impl Shell {
     /// `${DIRSTACK[0]}` / `${DIRSTACK[@]}` read the same values bash exposes:
     /// the current directory first, then the saved stack. Called whenever the
     /// cwd or the saved stack changes (`cd`, `pushd`, `popd`, `dirs -c`).
+    ///
+    /// Does nothing once the name has been unset — see
+    /// [`Shell::dirstack_dynamic`].
     fn refresh_dirstack(&mut self) {
+        if !self.dirstack_dynamic || self.is_locally_shadowed("DIRSTACK") {
+            return;
+        }
         let full: std::collections::BTreeMap<usize, Str> =
             self.dir_stack_full().into_iter().enumerate().collect();
         self.arrays.insert("DIRSTACK".to_string(), full);
+    }
+
+    /// Push a write to `DIRSTACK` back into the live directory stack, then
+    /// re-materialise the array from it.
+    ///
+    /// bash's `DIRSTACK` is not a copy of the stack that happens to be refreshed:
+    /// it has an *assign* function too, called once per element written, which
+    /// forwards to `set_dirstack_element`. Three rules come out of that, and all
+    /// three are observable:
+    ///
+    ///   * Element 0 is the current directory, which the stack does not own —
+    ///     writing it is silently ignored and never moves the shell.
+    ///   * An element within the saved stack is written through, so `dirs +1`
+    ///     and a later `popd` see the new value.
+    ///   * An element past the end has nowhere to go and is dropped.
+    ///
+    /// Because it is elementwise, a *whole-array* assignment does not replace the
+    /// array either: `DIRSTACK=(a b c)` against a two-deep stack ignores `a`,
+    /// writes `b` into the one saved entry and throws `c` away, leaving the array
+    /// two long. Likewise `DIRSTACK+=(zz)` appends past the end and is dropped,
+    /// and `unset 'DIRSTACK[1]'` leaves the entry alone — the value function puts
+    /// it straight back. Every one of these succeeds; the refusal is silent.
+    ///
+    /// Missing indices are therefore taken as "unchanged" rather than as empty.
+    fn sync_dirstack_writeback(&mut self) {
+        if !self.dirstack_dynamic || self.is_locally_shadowed("DIRSTACK") {
+            return;
+        }
+        if let Some(arr) = self.arrays.get("DIRSTACK") {
+            for (i, saved) in self.dir_stack.iter_mut().enumerate() {
+                // The saved stack is offset by one from the array: array index 0
+                // is the cwd, which `dir_stack` does not hold.
+                if let Some(v) = arr.get(&i.saturating_add(1)) {
+                    saved.clone_from(v);
+                }
+            }
+        }
+        self.refresh_dirstack();
+    }
+
+    /// Whether a `local` of this name in some enclosing function call is
+    /// standing in front of the global binding.
+    ///
+    /// Only the dynamic names need to ask. bash's value and assign functions
+    /// belong to the *global* variable, and `local DIRSTACK` makes a new,
+    /// ordinary one in the function's scope — so inside the function a `cd` no
+    /// longer rewrites it and an assignment to it no longer reaches the
+    /// directory stack. It goes back to being dynamic when the frame pops.
+    fn is_locally_shadowed(&self, name: &str) -> bool {
+        self.local_frames
+            .iter()
+            .any(|f| f.iter().any(|(n, _)| n == name))
+    }
+
+    /// The hook every user-facing write to a variable runs afterwards, for the
+    /// names whose value the shell keeps somewhere else as well.
+    ///
+    /// Only `DIRSTACK` needs it: the other dynamic names bash exposes
+    /// (`FUNCNAME`, `BASH_SOURCE`, `GROUPS`, …) carry `att_noassign`, so a write
+    /// to one is turned away before it can land — see [`Shell::noassign`].
+    fn after_var_write(&mut self, name: &str) {
+        if name == "DIRSTACK" {
+            self.sync_dirstack_writeback();
+        }
     }
 
     /// Print the directory stack in the default single-line form (used after a
@@ -19892,6 +19996,9 @@ impl Shell {
             if !self.assign_elem(&base, &index, text) {
                 return 1;
             }
+            // `printf -v DIRSTACK …` writes through the dynamic hook like any
+            // other assignment — see [`Shell::after_var_write`].
+            self.after_var_write(&resolved.base);
             num_status
         } else {
             // Interleave stdout and stderr the way bash does (see
@@ -22452,6 +22559,14 @@ impl Shell {
         // leaves an ordinary, assignable name behind, and a later `GROUPS=(1 2)`
         // makes a plain array of it.
         self.noassign.remove(name);
+        // …and the "the shell keeps this elsewhere" one: `unset DIRSTACK` drops
+        // bash's dynamic value/assign hooks along with the variable and nothing
+        // ever puts them back, so `pushd` stops materialising the name and a
+        // later `DIRSTACK=(a b c)` makes an ordinary three-element array. See
+        // [`Shell::dirstack_dynamic`].
+        if name == "DIRSTACK" {
+            self.dirstack_dynamic = false;
+        }
         // Unsetting `HOSTFILE` throws the hostname list away, rather than
         // leaving it to be added to — the one asymmetry in
         // [`Shell::compgen_hostnames`], and the reason it needs a hook here:
@@ -22579,6 +22694,10 @@ impl Shell {
             // shifting of higher elements down).
             arr.remove(&idx);
         }
+        // …unless the shell keeps the value elsewhere, in which case the gap is
+        // filled straight back in: `unset 'DIRSTACK[1]'` succeeds and changes
+        // nothing. See [`Shell::after_var_write`].
+        self.after_var_write(name);
         true
     }
 
@@ -23531,7 +23650,10 @@ impl Shell {
             self.vars.remove(&name);
             self.assoc.remove(&name);
             self.array_valued.insert(name.clone());
-            self.arrays.insert(name, map);
+            self.arrays.insert(name.clone(), map);
+            // `read -a DIRSTACK` writes through the dynamic hook like any other
+            // assignment — see [`Shell::after_var_write`].
+            self.after_var_write(&name);
             return eof_status;
         }
 
@@ -23959,6 +24081,9 @@ impl Shell {
             self.arrays.entry(array.clone()).or_default().insert(idx, s);
             idx = idx.saturating_add(1);
         }
+        // `mapfile DIRSTACK` writes through the dynamic hook like any other
+        // assignment — see [`Shell::after_var_write`].
+        self.after_var_write(&array);
         0
     }
 
@@ -26377,7 +26502,9 @@ impl VarLookup for Shell {
         // left of an `=` would: through namerefs, on element 0 of an existing
         // array, and exported under `set -a`.
         if let Some(dest) = self.arith_write_dest(name)? {
+            let base = dest.base().to_string();
             self.scalar_write_store(&dest, value.to_string().into_bytes());
+            self.after_var_write(&base);
         }
         Ok(())
     }
@@ -26396,11 +26523,12 @@ impl VarLookup for Shell {
         self.arith_elem_writable(&base)?;
         // Mirror the indexed branch of `assign_elem`: negative indices count
         // back from `highest_index + 1` (bash sparse semantics).
-        let arr = self.arrays.entry(base).or_default();
+        let arr = self.arrays.entry(base.clone()).or_default();
         let bound = arr.keys().next_back().map_or(0, |k| k.saturating_add(1));
         if let Some(real) = Self::resolve_index(index, bound) {
             arr.insert(real, value.to_string().into_bytes());
         }
+        self.after_var_write(&base);
         Ok(())
     }
 
@@ -40983,6 +41111,68 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         let (out2, _) = run(&src);
         assert_eq!(out2, "n=2\ntop\nsaved\nn2=1\n");
+    }
+
+    #[test]
+    fn dirstack_writes_back_into_the_directory_stack() {
+        let _cwd = cwd_guard();
+        let t = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+        // A write to a saved entry reaches the stack itself, so `dirs +1` and a
+        // later `popd` both see it — the assign function bash gives the name.
+        let (out, _) = run(&format!(
+            "pushd \"{t}\" >/dev/null; DIRSTACK[1]=/; echo \"rc=$? [${{DIRSTACK[1]}}]\"; \
+             dirs +1; popd >/dev/null; echo \"pwd=$(pwd)\""
+        ));
+        assert_eq!(out, "rc=0 [/]\n/\npwd=/\n");
+        // Element 0 is the current directory, which the stack does not own:
+        // writing it is ignored and never moves the shell.
+        let (out, _) = run(
+            "DIRSTACK[0]=/nowhere; \
+             test \"${DIRSTACK[0]}\" = \"$(pwd)\" && echo unchanged; echo \"rc=$?\"",
+        );
+        assert_eq!(out, "unchanged\nrc=0\n");
+        // An element past the end has nowhere to go and is dropped, so neither
+        // an explicit index nor an append can grow the array.
+        assert_eq!(run("DIRSTACK[5]=q; echo \"$? ${#DIRSTACK[@]}\"").0, "0 1\n");
+        assert_eq!(run("DIRSTACK+=(zz); echo \"$? ${#DIRSTACK[@]}\"").0, "0 1\n");
+        // Being elementwise, a whole-array assignment does not replace the
+        // array: with two entries, `a` is ignored, `b` written and `c` dropped.
+        let (out, _) = run(&format!(
+            "pushd \"{t}\" >/dev/null; DIRSTACK=(a b c); \
+             echo \"$? ${{#DIRSTACK[@]}} ${{DIRSTACK[1]}}\""
+        ));
+        assert_eq!(out, "0 2 b\n");
+        // Unsetting an element changes nothing — the value function refills it.
+        let (out, _) = run(&format!(
+            "pushd \"{t}\" >/dev/null; unset 'DIRSTACK[1]'; echo \"$? ${{#DIRSTACK[@]}}\""
+        ));
+        assert_eq!(out, "0 2\n");
+        // Every other write path goes through the same hook.
+        for w in [
+            "printf -v 'DIRSTACK[1]' /etc",
+            "(( DIRSTACK[1] = 5 ))",
+            "declare 'DIRSTACK[1]'=/etc",
+        ] {
+            let (out, _) = run(&format!(
+                "pushd \"{t}\" >/dev/null; {w}; echo \"$? ${{#DIRSTACK[@]}}\""
+            ));
+            assert_eq!(out, "0 2\n", "{w}");
+        }
+        // `unset DIRSTACK` drops the dynamic hooks with the variable and nothing
+        // puts them back: the name is ordinary, and `pushd` stops touching it.
+        let (out, _) = run(&format!(
+            "unset DIRSTACK; DIRSTACK=(a b c); echo \"${{#DIRSTACK[@]}} ${{DIRSTACK[*]}}\"; \
+             pushd \"{t}\" >/dev/null; echo \"${{DIRSTACK[*]}}\""
+        ));
+        assert_eq!(out, "3 a b c\na b c\n");
+        // A `local` of the name is ordinary too, for the length of the call —
+        // the hooks belong to the global, which catches up when the frame pops.
+        let (out, _) = run(&format!(
+            "f() {{ local DIRSTACK=(a b); cd \"{t}\"; echo \"${{#DIRSTACK[@]}} ${{DIRSTACK[*]}}\"; }}; \
+             f; echo \"${{#DIRSTACK[@]}}\"; \
+             test \"${{DIRSTACK[0]}}\" = \"$(pwd)\" && echo caught-up"
+        ));
+        assert_eq!(out, "2 a b\n1\ncaught-up\n");
     }
 
     #[test]

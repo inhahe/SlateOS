@@ -23241,6 +23241,22 @@ impl Shell {
         // never make locals at all; this loop binds the literal itself, so it has
         // to know.
         let global_builtin = cmd == "export" || cmd == "readonly";
+        // `-n` is not the nameref letter for `readonly`/`export`: each reads it
+        // as "do not apply my own attribute", so `readonly -n q=(1)` binds a
+        // writable array and `export -n q=(1)` an unexported one, and neither
+        // name becomes a reference. `export -n` on a name that already carries
+        // the attribute really does take it off; `readonly -n` cannot, since
+        // nothing un-makes a readonly — which is exactly the asymmetry
+        // `unset_export`/`unset_readonly` already carry below.
+        if global_builtin && nameref {
+            nameref = false;
+            if cmd == "readonly" {
+                readonly = false;
+            } else {
+                export = false;
+                unset_export = true;
+            }
+        }
         let make_local =
             is_local || (!global && !global_builtin && !self.local_frames.is_empty());
         // Naming both `-a` and `-A` in the `-` direction is a conflict with the
@@ -23731,6 +23747,7 @@ impl Shell {
         let mut indexed = false;
         let mut print_only = false;
         let mut func_mode = false;
+        let mut no_mark = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
             if arg.as_slice() == b"--" {
@@ -23746,7 +23763,12 @@ impl Shell {
                         b'a' => indexed = true,
                         b'p' => print_only = true,
                         b'f' => func_mode = true, // operate on the function namespace
-                        b'n' => {} // accepted (disable-readonly hint); no effect here.
+                        // `-n` is not the nameref letter here: `readonly` reads it
+                        // as "do not apply my own attribute", so the operands are
+                        // still assigned (and still take `-a`/`-A`) but nothing is
+                        // marked readonly. A bare `readonly -n fresh` is therefore a
+                        // complete no-op — bash leaves the name not even declared.
+                        b'n' => no_mark = true,
                         _ => {
                             // Unknown option: bash prints "invalid option" plus the
                             // usage synopsis and fails with status 2.
@@ -23865,7 +23887,8 @@ impl Shell {
                 if !self.attr_store(&name, append, v, true) {
                     break;
                 }
-            } else if !self.vars.contains_key(&name)
+            } else if !no_mark
+                && !self.vars.contains_key(&name)
                 && !self.arrays.contains_key(&name)
                 && !self.assoc.contains_key(&name)
                 // …unless it is a dynamic special variable, which already
@@ -23876,7 +23899,9 @@ impl Shell {
                 // still unset, but reportable. See [`Shell::declared`].
                 self.declared.insert(name.clone());
             }
-            self.readonly.insert(name);
+            if !no_mark {
+                self.readonly.insert(name);
+            }
         }
         status
     }
@@ -45793,6 +45818,62 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("z=(1 2); readonly z=5; declare -p z").0,
             "declare -ar z=([0]=\"5\" [1]=\"2\")\n"
+        );
+    }
+
+    #[test]
+    fn readonly_and_export_read_n_as_do_not_apply_my_attribute() {
+        // `-n` is the nameref letter only for `declare`/`typeset`/`local`. For
+        // `readonly` and `export` it means "assign, but do not apply my own
+        // attribute", so the operand lands as an ordinary writable/unexported
+        // variable and never becomes a reference. osh applied both `n` and the
+        // builtin's attribute, producing a readonly nameref out of what bash
+        // makes a plain variable.
+        assert_eq!(
+            run("readonly -n b=1; declare -p b; b=2; echo rc=$? $b").0,
+            "declare -- b=\"1\"\nrc=0 2\n"
+        );
+        // With nothing to assign there is nothing left to do: bash does not even
+        // declare the name, so `declare -p` cannot find it.
+        assert_eq!(
+            run("readonly -n fresh; echo rc=$?; declare -p fresh").0,
+            "rc=0\n"
+        );
+        // It cannot take the attribute back off, either — nothing un-makes a
+        // readonly — and a valued operand over one is still refused.
+        assert_eq!(
+            run("readonly r=1; readonly -n r; echo rc=$?; declare -p r").0,
+            "rc=0\ndeclare -r r=\"1\"\n"
+        );
+        assert_eq!(
+            run("readonly r=1; readonly -n r=2; echo rc=$?").0,
+            "rc=1\n"
+        );
+        // The array letters still apply: only the builtin's own attribute is
+        // withheld.
+        assert_eq!(
+            run("readonly -na q=1; declare -p q").0,
+            "declare -a q=([0]=\"1\")\n"
+        );
+        // A compound literal takes the same route through the array path.
+        assert_eq!(
+            run("readonly -n c=(1 2); declare -p c; c[0]=9; declare -p c").0,
+            "declare -a c=([0]=\"1\" [1]=\"2\")\ndeclare -a c=([0]=\"9\" [1]=\"2\")\n"
+        );
+        // `export -n` differs in one way only: the export attribute *can* be
+        // taken back off, and bash does take it off.
+        assert_eq!(
+            run("export e=1; export -n e; declare -p e").0,
+            "declare -- e=\"1\"\n"
+        );
+        assert_eq!(
+            run("export -n x=1; declare -p x; export -n y=(1); declare -p y").0,
+            "declare -- x=\"1\"\ndeclare -a y=([0]=\"1\")\n"
+        );
+        // Meanwhile `declare -n` still means nameref.
+        assert_eq!(
+            run("w=hi; declare -n n=w; declare -p n").0,
+            "declare -n n=\"w\"\n"
         );
     }
 

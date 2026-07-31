@@ -7087,7 +7087,7 @@ capture that reaches `BASH_REMATCH` is the byte itself. Pinned by
 `interp::tests::cond_regex_matches_a_value_that_is_not_text`. See
 TD-OILS-BYTE-STRINGS step 9 for the full write-up.
 
-### TD-OILS-XTRACE-PIPE-ORDER. `set -x` traces multi-stage pipeline commands in reverse (last-stage-first) order rather than bash's left-to-right — cosmetic / documented tradeoff — 2026-07-20
+### TD-OILS-XTRACE-PIPE-ORDER. `set -x` traces multi-stage pipeline commands in reverse (last-stage-first) order rather than bash's left-to-right — 2026-07-20 — ✅ **RESOLVED 2026-07-31**
 
 **Where:** `userspace/oils/src/interp.rs` — `exec_threaded_pipeline`. Each
 pipeline stage emits its own xtrace line from inside `exec_simple_inner` when it
@@ -7151,11 +7151,40 @@ trap loop does, leaves a compound stage (`{ …; …; } | cat`) with no first co
 for the parent to print — the bug would survive for exactly the stages where it
 is hardest to see.
 
-**Blast radius while open.** `tests/corpus/xtrace-ps4.sh` deliberately contains
-no pipeline for this reason; the note there points back here.
-`tests/corpus/xtrace-pipeline.sh` covers the all-external path only, for the
-same reason, and says so at the top — extend it with builtin/function stages
-once this is fixed.
+**Resolved 2026-07-31**, as the refined sketch above. `Shell::stage_started` is
+an `Option<mpsc::Sender<()>>`; `exec_threaded_pipeline` builds n−1 channels, hands
+stage *i* the sender of channel *i* and makes it await channel *i−1* before it
+begins, and the current thread awaits channel *n−2* before running the last
+stage. `Shell::signal_stage_started` fires the sender (taking it, so it is
+one-shot per shell) from `exec_simple_inner` **immediately after** the trace is
+emitted — which is what makes the trace order guaranteed rather than likely —
+and again unconditionally when a worker's stage finishes, so `x=1 | true`, an
+empty group, or a stage that dies cannot stall the chain.
+
+Two properties worth keeping in mind if this is ever touched again:
+
+- **The sender is *cloned* into subshells** (`clone_for_subshell`), not reset.
+  A stage whose body is a subshell or a command substitution — `(yes) | head` —
+  would otherwise never signal until it ended, which for an unbounded producer
+  means never.
+- **The wait is bounded** (100 ms, `start_wait`) and a lapsed wait simply runs
+  the stage. The ordering is a strong preference, not a lock, so no arrangement
+  of stages can deadlock on it — bash's own order is a race in principle too.
+
+Measured after the fix: `set -x; echo A | cat` and the three-stage version give
+bash's order in 5/5 runs each, and `{ echo A >&2; } | { echo B >&2; }` prints
+`A` then `B` (the non-xtrace half of the bug). No pipeline shape tried took the
+100 ms path: `(yes) | head -2`, `x=1 | cat`, `seq 1 5 | while read …`, and the
+`lastpipe` variant all complete in <90 ms wall clock.
+
+**Pinned by** `interp::tests::a_pipelines_stages_begin_in_pipeline_order` (which
+also asserts the non-xtrace half — that a stage's ordinary stderr output follows
+the same order) and by `tests/corpus/xtrace-pipeline.sh`, which now covers both
+executors: external stages, builtin stages, function and compound (`{ … }`,
+`( … )`, `for`) stages, assignment-only stages, `PS4` across stages, and a
+pipeline inside a command substitution. Every stage in it writes nothing to
+stdout, so the merged stream holds only trace lines and the case cannot be flaky
+for a reason unrelated to the ordering (verified: 6/6 clean runs).
 
 ### TD-OILS-HELP-LAYOUT. Bare `help` uses an osh-identity header + single-column listing, not bash's "GNU bash" banner + COLUMNS-wide 2-column truncated layout — INTENTIONAL / documented — 2026-07-20
 
@@ -8779,9 +8808,9 @@ unit tests. What each turned out to be:
 - **`if` header.** bash (like `osh`) emits no `if`/`then`/`else` header — the
   guard and body commands self-trace. Always was correct; noted for completeness.
 
-One `set -x` divergence remains, tracked separately because its cause is the
+One `set -x` divergence remained, tracked separately because its cause was the
 pipeline executor rather than the tracer: TD-OILS-XTRACE-PIPE-ORDER (stage start
-order).
+order), resolved 2026-07-31.
 
 ### TD-OILS-XTRACE-ARRAY-DECL. `declare -a b=(x "")` traces the `declare` without its arguments, and does not trace the compound value — ✅ RESOLVED 2026-07-30
 

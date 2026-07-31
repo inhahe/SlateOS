@@ -57,9 +57,8 @@ echo "=== the first character repeats once per level of expansion"
 ( PS4='XY '; set -x; v=$(echo a) ) 2>&1
 ( PS4=; set -x; v=$(echo a) ) 2>&1
 
-# A pipeline is not an expansion either, but its stages' trace lines are not
-# ordered by osh the way bash orders them — see known-issues.md
-# TD-OILS-XTRACE-PIPE-ORDER — so there is no pipeline here.
+# A pipeline is not an expansion either; see xtrace-pipeline.sh, which covers
+# pipelines (including `PS4` across their stages) on their own.
 echo "=== a subshell and a function are not expansions"
 ( set -x; ( echo s ) ) 2>&1
 ( set -x; g() { echo G; }; g ) 2>&1

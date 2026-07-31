@@ -6,12 +6,13 @@
 # way. Each stage traces exactly as a lone simple command would: one line per
 # temporary assignment, then the command word and its arguments.
 #
-# Only all-external pipelines are exercised here. A stage that is a builtin or a
-# function is traced from a different execution path in osh, and that path does
-# not yet order its stages the way bash does — see known-issues.md
-# TD-OILS-XTRACE-PIPE-ORDER.
+# Both of osh's pipeline executors are exercised: the all-external one (real OS
+# pipes and child processes) and the threaded one (any stage that is a builtin, a
+# function or a compound command). The two arrive at the order differently — the
+# first expands its stages in order before spawning any, the second hands each
+# stage a "you may begin" signal from its predecessor.
 #
-# Every stage is arranged to write nothing at all (input is /dev/null, and no
+# Every stage is arranged to write nothing to stdout (input is /dev/null, and no
 # stage can fail and complain), so the only bytes on the merged stream are the
 # trace lines and their order is not a race.
 
@@ -31,3 +32,21 @@ echo "=== PS4 applies to every stage, and a pipeline is not an expansion"
 ( PS4='T '; set -x; cat /dev/null | cat ) 2>&1
 ( PS4=; set -x; cat /dev/null | cat ) 2>&1
 ( set -x; v=$(cat /dev/null | cat) ) 2>&1
+
+echo "=== a builtin stage puts the pipeline on the threaded executor"
+( set -x; true | cat ) 2>&1
+( set -x; cat /dev/null | true ) 2>&1
+( set -x; true | true ) 2>&1
+( set -x; true | cat | true ) 2>&1
+( set -x; A=1 true | B=2 true ) 2>&1
+
+echo "=== function and compound stages trace their bodies, still in order"
+( set -x; f() { true; }; f | cat ) 2>&1
+( set -x; f() { true; }; cat /dev/null | f ) 2>&1
+( set -x; { true; } | { true; } ) 2>&1
+( set -x; ( true ) | ( true ) ) 2>&1
+( set -x; for i in 1 2; do true; done | true ) 2>&1
+
+echo "=== a stage that runs no command at all does not hold up the next"
+( set -x; x=1 | true ) 2>&1
+( set -x; true | x=1 ) 2>&1

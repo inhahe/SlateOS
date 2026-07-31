@@ -105,7 +105,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, IsTerminal, Read, Seek, Write};
 use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use crate::arith::{self, VarLookup};
 use crate::bfmt;
@@ -2044,6 +2044,19 @@ pub struct Shell {
     /// unwind the stage — the in-process analogue of a producer taking `SIGPIPE`.
     /// Only ever set on a per-stage subshell clone, never the top-level shell.
     pipe_broken: bool,
+    /// "This pipeline stage has begun." Set on a stage's subshell clone by
+    /// [`Shell::exec_threaded_pipeline`], which chains the stages so that stage
+    /// *i+1* does not begin until stage *i* has signalled here — bash forks its
+    /// stages left to right, so their `set -x` traces (and anything else they
+    /// write early) come out in pipeline order.
+    ///
+    /// Fired from [`Shell::exec_simple_inner`] immediately after the stage's
+    /// first command is traced, so the ordering covers the trace itself rather
+    /// than merely the thread's entry, and again unconditionally when the stage
+    /// finishes, so a stage that runs no simple command cannot stall the chain.
+    /// Cloned into subshells (not moved) because a stage whose body is itself a
+    /// subshell — `(yes) | head` — would otherwise never signal until it ended.
+    stage_started: Option<mpsc::Sender<()>>,
     /// The builtins currently running, innermost last — the name a write-failure
     /// diagnostic uses (`echo: write error: …`, see [`Shell::finish_write`]).
     /// A stack because a builtin can run commands of its own (`eval`, `command`,
@@ -2837,6 +2850,7 @@ impl Shell {
             last_bg_pid: None,
             pipefail: false,
             pipe_broken: false,
+            stage_started: None,
             builtin_names: Vec::new(),
             pid: std::process::id(),
             ppid: parent_pid(),
@@ -4913,6 +4927,27 @@ impl Shell {
         let lastpipe = self.shopt.get("lastpipe").copied().unwrap_or(false);
         let mut last_flow = Flow::Next;
 
+        // Stage-start chain: channel `i` is signalled by stage i once it has
+        // begun, and awaited by stage i+1 before it begins. bash forks its
+        // stages left to right, so their early output — `set -x` traces above
+        // all — comes out in pipeline order even though the stages then run
+        // concurrently; osh runs the last stage on *this* thread and the rest on
+        // workers the OS may schedule in any order, so without this the order
+        // was reversed for two stages and pure luck for three or more
+        // (TD-OILS-XTRACE-PIPE-ORDER).
+        let (mut start_tx, mut start_rx): (Vec<_>, Vec<_>) = (0..n - 1)
+            .map(|_| {
+                let (tx, rx) = mpsc::channel();
+                (Some(tx), Some(rx))
+            })
+            .unzip();
+        // Waiting is bounded, and a lapsed wait just runs the stage anyway: a
+        // stage that blocks before its first command (`{ read x; } | cat` with
+        // no input yet) must not be able to hold the whole pipeline up, and no
+        // arrangement of stages may deadlock. The ordering is thus a strong
+        // preference, not a lock — which is also what bash offers.
+        let start_wait = std::time::Duration::from_millis(100);
+
         // Scoped threads let each stage borrow the shared AST (`cmds`) while
         // owning its subshell clone and pipe endpoints (all `Send`). `out` is
         // used only on this thread by the last stage.
@@ -4936,7 +4971,22 @@ impl Shell {
                 // Only stage 0 has no upstream pipe, so only it needs the
                 // pipeline's own input.
                 let head = if i == 0 { head_stdin.take() } else { None };
+                // Stage 0 begins at once; every later stage waits for its
+                // predecessor. `take` leaves `None` behind, so no endpoint is
+                // ever handed to two stages.
+                let wait = i
+                    .checked_sub(1)
+                    .and_then(|k| start_rx.get_mut(k))
+                    .and_then(Option::take);
+                sub.stage_started = start_tx.get_mut(i).and_then(Option::take);
                 let handle = scope.spawn(move || {
+                    if let Some(rx) = wait {
+                        // `Err` is fine and expected, hence discarded:
+                        // `Disconnected` means the predecessor finished (or
+                        // died) without ever reaching a command, `Timeout` that
+                        // it is stuck before one. Either way, go.
+                        let _ = rx.recv_timeout(start_wait);
+                    }
                     let stdin = match reader.map(HeadIn::Pipe).or(head) {
                         Some(h) => h.into_src(),
                         None => StdinSrc::Inherit,
@@ -4950,13 +5000,27 @@ impl Shell {
                     // A pipeline stage runs in its own subshell: fire its EXIT
                     // trap (if it set one) before the stage's state is dropped.
                     sub.run_exit_trap_out(&mut o, &stdin);
+                    // Unconditional backstop: a stage that ran no simple command
+                    // at all (`x=1 | cat`, an empty group) has signalled nothing
+                    // yet, and the next stage must not wait out its timeout for
+                    // a stage that is already over.
+                    sub.signal_stage_started();
                     // `o` drops here, closing the write end → EOF downstream.
                     sub.last_status
                 });
                 handles.push((i, handle));
             }
 
-            // Last stage: run on this thread (writing to `out`).
+            // Last stage: run on this thread (writing to `out`). It is the tail
+            // of the start chain, so it waits for stage n-2 and signals nobody.
+            if let Some(rx) = n
+                .checked_sub(2)
+                .and_then(|k| start_rx.get_mut(k))
+                .and_then(Option::take)
+            {
+                // Discarded for the same reason as in the workers above.
+                let _ = rx.recv_timeout(start_wait);
+            }
             let last = n - 1;
             // `.or` is a no-op for n >= 2 (stage `last` always has an upstream
             // pipe); it keeps the head's input from being dropped if a future
@@ -6791,6 +6855,12 @@ impl Shell {
             last_bg_pid: self.last_bg_pid,
             pipefail: self.pipefail,
             pipe_broken: false,
+            // Cloned rather than reset: a stage whose body is a subshell
+            // (`(yes) | head`) or a command substitution has to be able to
+            // report that it started from inside that nested shell, or the next
+            // stage waits for it in vain. Extra sends are harmless — the waiter
+            // receives once.
+            stage_started: self.stage_started.clone(),
             // A subshell is a fresh execution context: whatever builtin forked
             // it is not the one whose writes the clone will report.
             builtin_names: Vec::new(),
@@ -8916,6 +8986,21 @@ impl Shell {
         out
     }
 
+    /// Announce that this pipeline stage has begun, releasing the next stage
+    /// (see [`Shell::stage_started`]). A no-op outside a threaded pipeline, and
+    /// after the first call in a given shell — the sender is taken, so the
+    /// per-command call on the hot path costs one `Option` test.
+    ///
+    /// A send that fails means the waiter has already given up (its timeout) or
+    /// gone away; either way there is nothing left to release, so the error is
+    /// dropped deliberately.
+    fn signal_stage_started(&mut self) {
+        if let Some(tx) = self.stage_started.take() {
+            // Discarded deliberately: the only error is `Disconnected`.
+            let _ = tx.send(());
+        }
+    }
+
     /// Emit the `set -x` trace for one simple command. bash prints each
     /// temporary assignment (`FOO=bar cmd`) on its own line first, then the
     /// command with every argument minimally quoted, each line behind the
@@ -9770,6 +9855,10 @@ impl Shell {
 
         // `set -x`: trace the command before running it.
         self.xtrace_simple(&assigns, &argv, !decl_with_arrays);
+        // …and only now is this pipeline stage "started", so the next stage may
+        // begin: the point of the handshake is that the *trace* comes out in
+        // pipeline order, which a signal at thread entry would not guarantee.
+        self.signal_stage_started();
 
         // A redirection-only `exec` (`exec > file`, `exec 3>&1 1>&2 2>&3`,
         // `exec 1>&3`) mutates the shell's persistent fd table and must apply
@@ -45149,6 +45238,40 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("{ set -x; x=5 true; } 2>&1").0, "+ x=5\n+ true\n");
         // `PS4` overrides the trace prefix.
         assert_eq!(run("{ PS4='TRACE '; set -x; x=5; } 2>&1").0, "TRACE x=5\n");
+    }
+
+    /// A pipeline's stages must *begin* in pipeline order, because bash forks
+    /// them left to right and everything they write early inherits that order.
+    /// osh runs the last stage on the current thread and the rest on workers the
+    /// OS may schedule in any order, so the order comes from the start handshake
+    /// in [`Shell::exec_threaded_pipeline`] (see [`Shell::stage_started`]) —
+    /// without it this was reversed for two stages and luck for three or more.
+    #[test]
+    fn a_pipelines_stages_begin_in_pipeline_order() {
+        // Every stage here is a builtin, so the whole pipeline runs in-process
+        // on the threaded executor, and none of them writes to stdout — the
+        // trace is the only output, so nothing else can perturb the order.
+        assert_eq!(run("{ set -x; true | :; } 2>&1").0, "+ true\n+ :\n");
+        assert_eq!(
+            run("{ set -x; true | true | :; } 2>&1").0,
+            "+ true\n+ true\n+ :\n"
+        );
+        // A compound stage traces the commands inside it, in the same order.
+        assert_eq!(
+            run("{ set -x; { true; } | { :; }; } 2>&1").0,
+            "+ true\n+ :\n"
+        );
+        // A stage that runs no command at all signals when it *finishes*, so it
+        // holds nothing up and the surviving trace is still in order.
+        assert_eq!(run("{ set -x; x=1 | :; } 2>&1").0, "+ x=1\n+ :\n");
+        // The trace is only the easiest case to see: what is ordered is the
+        // stage start, so ordinary stderr output follows it too.
+        let out = run("{ { echo A >&2; } | { echo B >&2; }; } 2>&1").0;
+        let (a, b) = (out.find('A'), out.find('B'));
+        assert!(
+            a.is_some() && a < b,
+            "stages wrote out of pipeline order: {out:?}"
+        );
     }
 
     /// `set -x` word quoting, measured against bash 5.2 byte by byte over the

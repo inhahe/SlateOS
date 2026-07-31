@@ -269,15 +269,28 @@ pub fn parse_i64(s: BStr<'_>) -> Option<i64> {
 /// `unicode` feature, and would also trim characters bash keeps.)
 #[must_use]
 pub fn trim_start(s: BStr<'_>) -> BStr<'_> {
-    let i = s.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(s.len());
+    let i = s.iter().position(|b| !is_space(*b)).unwrap_or(s.len());
     s.get(i..).unwrap_or_default()
 }
 
 /// Drop trailing ASCII whitespace. See [`trim_start`].
 #[must_use]
 pub fn trim_end(s: BStr<'_>) -> BStr<'_> {
-    let i = s.iter().rposition(|b| !b.is_ascii_whitespace()).map_or(0, |i| i + 1);
+    let i = s.iter().rposition(|b| !is_space(*b)).map_or(0, |i| i + 1);
     s.get(..i).unwrap_or_default()
+}
+
+/// Is `b` whitespace to C's `isspace` in the C locale — space, `\t`, `\n`,
+/// `\v`, `\f`, `\r`?
+///
+/// Not `u8::is_ascii_whitespace`, which omits the **vertical tab**: Rust
+/// deliberately follows the WhatWG definition there, while every byte-wise
+/// space test bash makes goes through `isspace`. The difference is observable —
+/// `v=$'\v5'; echo $((v))` is `5` in bash, because the arithmetic evaluator
+/// trims the value before reading a number from it.
+#[must_use]
+pub const fn is_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
 /// Drop ASCII whitespace from both ends. See [`trim_start`].
@@ -584,11 +597,24 @@ pub fn path_to_bytes(p: &std::path::Path) -> Str {
 mod tests {
     use super::{
         BStr, Str, char_at, char_count, char_offset, char_slice, find, to_lowercase, to_uppercase,
+        trim,
     };
 
     /// `a\xffb` — the value that motivates this whole module: three characters
     /// under bash's counting rule, and not valid UTF-8.
     const LONE: BStr<'static> = b"a\xffb";
+
+    /// The vertical tab is whitespace to C's `isspace` — and so to every space
+    /// test bash makes — but *not* to Rust's `u8::is_ascii_whitespace`, which
+    /// follows the WhatWG definition instead. Trimming has to use C's rule, or
+    /// `v=$'\v5'; echo $((v))` stops being `5`.
+    #[test]
+    fn trim_takes_the_vertical_tab_that_rust_leaves() {
+        assert_eq!(trim(b"\x0b5\x0b"), b"5");
+        assert_eq!(trim(b" \t\n\x0b\x0c\r"), b"");
+        // Every other byte stays, including ones that are not text at all.
+        assert_eq!(trim(b"\xa0x\xa0"), b"\xa0x\xa0");
+    }
 
     #[test]
     fn bfmt_concatenates_every_argument_kind() {

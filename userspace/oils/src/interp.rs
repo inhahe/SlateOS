@@ -2190,11 +2190,36 @@ pub struct Shell {
     /// [`Shell::run_builtin_body`]; `None` whenever no builtin is running or the
     /// running one redirects nothing. See [`BuiltinStdout`].
     builtin_stdout: Option<BuiltinStdout>,
-    /// `$BASH_SUBSHELL` — the subshell nesting depth. 0 at the top level; each
-    /// `( … )` group, command substitution, pipeline stage, or other subshell
-    /// increments it for its clone (bash).
+    /// The true subshell nesting depth: 0 in the main shell environment, and
+    /// one more for every `( … )` group, command substitution, pipeline stage,
+    /// process substitution, `&` job or other clone.
+    ///
+    /// This is **not** `$BASH_SUBSHELL`, which counts fewer of them — see
+    /// [`Shell::subshell_level`]. It is the answer to "is this the main shell
+    /// environment", which is what decides whether a fatal expansion abort
+    /// takes the whole `-c` shell down ([`Shell::fatal_abort_status`]).
     subshell_depth: u32,
-    /// Base added to [`Shell::subshell_depth`] to give `$BASH_SUBSHELL`, set by
+    /// `$BASH_SUBSHELL` — the subshell level *bash reports*, which is not the
+    /// same as the nesting depth above.
+    ///
+    /// bash increments this in `execute_in_subshell`, the path taken by a compound
+    /// command that has to run in a child — so a `( … )`, a command
+    /// substitution, a process substitution, an `&` job, and a pipeline stage
+    /// that is a compound command, a function call or one of `eval`/`.`/`source`
+    /// all count, while a pipeline stage that is a plain simple command does
+    /// not: it is forked and then executed directly.
+    ///
+    /// ```sh
+    /// echo "[$BASH_SUBSHELL]" | cat        # [0] — forked, but not a subshell
+    /// { echo "[$BASH_SUBSHELL]"; } | cat   # [1]
+    /// ( echo "[$BASH_SUBSHELL]" ) | cat    # [1] — one fork, counted once
+    /// f() { echo "[$BASH_SUBSHELL]"; }; f | cat   # [1]
+    /// ```
+    ///
+    /// See [`Shell::clone_for_pipeline_stage`] and
+    /// [`Shell::stage_pending_level`].
+    subshell_level: u32,
+    /// Base added to [`Shell::subshell_level`] to give `$BASH_SUBSHELL`, set by
     /// assigning to the name. bash's `BASH_SUBSHELL` is not a read-only mirror
     /// of the depth: its assign function writes the very counter the shell
     /// increments on the way into a subshell, so `BASH_SUBSHELL=9` reads back 9
@@ -2202,6 +2227,17 @@ pub struct Shell {
     /// itself, because the number assigned may be negative and because nothing
     /// but the reported value may move — a subshell is still a subshell.
     subshell_base: i64,
+    /// Set on a pipeline stage's clone: the fork has happened, but whether it
+    /// counts towards `$BASH_SUBSHELL` is not known until the stage's own
+    /// top-level command is dispatched. Taken by [`Shell::exec_command`] (for a
+    /// compound stage) or by [`Shell::exec_simple`] (for a function call or an
+    /// `eval`/`.`/`source`), which then raise [`Shell::subshell_level`]; taken
+    /// and dropped by any other command, which does not count.
+    ///
+    /// Only the stage's *outermost* command may claim it, which is why it is
+    /// taken rather than tested: `eval 'eval "echo \$BASH_SUBSHELL"' | cat`
+    /// reports 1, not 2.
+    stage_pending_level: bool,
     last_bg_pid: Option<u32>,
     /// `set -o pipefail`: a pipeline's status is the rightmost non-zero stage.
     pipefail: bool,
@@ -3139,7 +3175,9 @@ impl Shell {
             comsub_read_eval: false,
             builtin_stdout: None,
             subshell_depth: 0,
+            subshell_level: 0,
             subshell_base: 0,
+            stage_pending_level: false,
             last_bg_pid: None,
             pipefail: false,
             pipe_broken: false,
@@ -5277,7 +5315,7 @@ impl Shell {
         std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(n.saturating_sub(1));
             for i in 0..n - 1 {
-                let mut sub = self.clone_for_subshell();
+                let mut sub = self.clone_for_pipeline_stage();
                 let cmd = &cmds[i];
                 // bash's `do_piping` sets `stdin_redir` for a stage that reads
                 // an upstream pipe, so a `&` job inside it inherits that pipe
@@ -5371,7 +5409,7 @@ impl Shell {
                 self.pipe_stage_redirect_root = false;
                 statuses[last] = self.last_status;
             } else {
-                let mut sub = self.clone_for_subshell();
+                let mut sub = self.clone_for_pipeline_stage();
                 sub.stdin_redirected = true;
                 sub.pipe_stage_redirect_root = stage_root_redirected;
                 sub.exec_command(&cmds[last], out, &stdin);
@@ -5566,6 +5604,27 @@ impl Shell {
     }
 
     fn exec_command(&mut self, cmd: &Command, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // A pipeline stage was forked before anything was known about it; this
+        // is where it becomes clear whether bash would have called that fork a
+        // subshell. See [`Shell::clone_for_pipeline_stage`].
+        if self.stage_pending_level {
+            match cmd {
+                // A redirect belongs to the command inside it, which decides.
+                Command::Redirected { .. } => {}
+                // Decided once the command name is resolved � a function or an
+                // `eval`/`.`/`source` re-enters the shell, anything else does
+                // not. See [`Shell::exec_simple`].
+                Command::Simple(_) => {}
+                // Already a subshell in its own right: its clone raises the
+                // level, and bash forks once for the two together.
+                Command::Subshell(_) => {
+                    self.take_stage_level();
+                }
+                // Every other shell control structure is one bash enters a
+                // subshell for when it is piped.
+                _ => self.enter_stage_subshell(),
+            }
+        }
         match cmd {
             Command::Simple(sc) => self.exec_simple(sc, out, stdin),
             Command::If(c) => self.exec_if(c, out, stdin),
@@ -7181,9 +7240,15 @@ impl Shell {
             // Belongs to a builtin that is running *now*, in this shell; a
             // subshell starts outside any builtin of its own.
             builtin_stdout: None,
-            // Entering a subshell increments the nesting depth (`$BASH_SUBSHELL`).
+            // Entering a subshell increments the true nesting depth, and with
+            // it the level bash reports � every caller of this constructor is
+            // one bash counts. The one that is not, a pipeline stage, takes the
+            // level back off; see [`Shell::clone_for_pipeline_stage`].
             subshell_depth: self.subshell_depth.saturating_add(1),
+            subshell_level: self.subshell_level.saturating_add(1),
             subshell_base: self.subshell_base,
+            // A fresh subshell is not a pipeline stage until said otherwise.
+            stage_pending_level: false,
             last_bg_pid: self.last_bg_pid,
             pipefail: self.pipefail,
             pipe_broken: false,
@@ -7452,6 +7517,39 @@ impl Shell {
             cmd_hash: self.cmd_hash.clone(),
             // Resource limits are a process attribute inherited by subshells.
             rlimits: self.rlimits.clone(),
+        }
+    }
+
+    /// The subshell a pipeline stage runs in — a [`clone_for_subshell`] that has
+    /// not yet decided whether it counts towards `$BASH_SUBSHELL`.
+    ///
+    /// bash forks every stage but only *enters a subshell* for one that is a
+    /// compound command, a function call, or an `eval`/`.`/`source`; a plain
+    /// simple command is forked and then executed directly, so the counter does
+    /// not move for it (`echo "[$BASH_SUBSHELL]" | cat` prints 0). The stage's
+    /// own dispatch settles it, so the level comes back off here and
+    /// [`Shell::stage_pending_level`] is left for whoever claims it.
+    ///
+    /// [`clone_for_subshell`]: Shell::clone_for_subshell
+    fn clone_for_pipeline_stage(&self) -> Shell {
+        let mut sub = self.clone_for_subshell();
+        sub.subshell_level = self.subshell_level;
+        sub.stage_pending_level = true;
+        sub
+    }
+
+    /// Claim [`Shell::stage_pending_level`] for a stage's outermost command:
+    /// answer whether it was pending, and take it either way so nothing nested
+    /// inside can claim it a second time.
+    fn take_stage_level(&mut self) -> bool {
+        std::mem::take(&mut self.stage_pending_level)
+    }
+
+    /// Enter the subshell a pipeline stage was forked for, if this is the
+    /// command that makes it one. See [`Shell::clone_for_pipeline_stage`].
+    fn enter_stage_subshell(&mut self) {
+        if self.take_stage_level() {
+            self.subshell_level = self.subshell_level.saturating_add(1);
         }
     }
 
@@ -8091,7 +8189,7 @@ impl Shell {
                             // very one a subshell increments, so the number
                             // given is what this level reads and each level
                             // further in reads one more.
-                            self.subshell_base = n.saturating_sub(i64::from(self.subshell_depth));
+                            self.subshell_base = n.saturating_sub(i64::from(self.subshell_level));
                         }
                         // The rest have no counter to move: `SRANDOM` draws
                         // from the system entropy source, so there is no seed
@@ -10702,6 +10800,9 @@ impl Shell {
         // run it inside a redirect scope when any are present. Without redirects,
         // dispatch directly to avoid the scope-setup overhead.
         if self.funcs.contains_key(name.as_slice()) {
+            // A function body re-enters the evaluator, so a pipeline stage that
+            // is a function call is one bash counts. See [`Shell::stage_pending_level`].
+            self.enter_stage_subshell();
             let name = name.clone();
             let args: Vec<Str> = argv[1..].to_vec();
             if redir.needs_scope() {
@@ -14966,7 +15067,7 @@ impl Shell {
             "PPID" => Some(self.ppid.to_string().into_bytes()),
             "BASH_SUBSHELL" => Some(
                 self.subshell_base
-                    .saturating_add(i64::from(self.subshell_depth))
+                    .saturating_add(i64::from(self.subshell_level))
                     .to_string()
                     .into_bytes(),
             ),
@@ -15379,8 +15480,14 @@ impl Shell {
                 let saved_verbose = self.verbose;
                 self.set_verbose(false);
                 self.xtrace_level = self.xtrace_level.saturating_add(1);
+                // …and one subshell level deeper, for the same reason: bash's
+                // fork is a subshell it counts, and they nest
+                // (`cat < <(cat < <(echo $BASH_SUBSHELL))` reports 2 above the
+                // enclosing level). See [`Shell::subshell_level`].
+                self.subshell_level = self.subshell_level.saturating_add(1);
                 let mut out = Out::Capture(cap.clone());
                 let _ = self.exec_program(body, &mut out, &StdinSrc::Inherit);
+                self.subshell_level = self.subshell_level.saturating_sub(1);
                 self.xtrace_level = self.xtrace_level.saturating_sub(1);
                 self.set_verbose(saved_verbose);
                 self.exec_stdout = saved_exec_stdout;
@@ -15417,6 +15524,8 @@ impl Shell {
             let saved_verbose = self.verbose;
             self.set_verbose(false);
             self.xtrace_level = self.xtrace_level.saturating_add(1);
+            // …and one subshell level deeper, as for the input form above.
+            self.subshell_level = self.subshell_level.saturating_add(1);
             for (path, body, forked_status) in jobs {
                 if let Ok(bytes) = std::fs::read(&path) {
                     let cursor = bytes_input(bytes);
@@ -15428,6 +15537,7 @@ impl Shell {
                 let _ = std::fs::remove_file(&path);
             }
             self.last_status = enclosing_status;
+            self.subshell_level = self.subshell_level.saturating_sub(1);
             self.xtrace_level = self.xtrace_level.saturating_sub(1);
             self.set_verbose(saved_verbose);
         }
@@ -15928,6 +16038,15 @@ impl Shell {
         // commands of its own must not lend its name to *their* failures — so
         // this is a stack, popped on every exit path.
         self.builtin_names.push(name.to_string());
+        // A pipeline stage whose command re-enters the shell's evaluator is one
+        // bash reports as a subshell; one that merely expands its words and
+        // prints is not, because the expansion already happened. `eval`, `.` and
+        // `source` are the builtins that re-enter, and they claim the stage's
+        // pending level here — which is also how `command eval …` and
+        // `builtin eval …` claim it, since both re-dispatch through this.
+        if matches!(name, "eval" | "." | "source") {
+            self.enter_stage_subshell();
+        }
         let flow = if builtin_runs_commands(name, argv.get(1..).unwrap_or(&[])) && !redir.is_empty()
         {
             let plan = redir.clone();
@@ -42019,6 +42138,58 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("( ( echo $BASH_SUBSHELL ) )").0, "2\n");
         // A command substitution is also a subshell.
         assert_eq!(run("echo $(echo $BASH_SUBSHELL)").0, "1\n");
+    }
+
+    #[test]
+    fn bash_subshell_counts_fewer_forks_than_a_pipeline_makes() {
+        // Every stage of a pipeline is forked, but bash only calls the fork a
+        // subshell when the stage re-enters the evaluator. A simple command
+        // does not: its words were expanded before the decision was made.
+        assert_eq!(run("echo $BASH_SUBSHELL | cat").0, "0\n");
+        assert_eq!(run("printf '%s\\n' $BASH_SUBSHELL | cat").0, "0\n");
+        assert_eq!(run("q=1 echo $BASH_SUBSHELL 2>/dev/null | cat").0, "0\n");
+        assert_eq!(run("! echo $BASH_SUBSHELL | cat").0, "0\n");
+        assert_eq!(run(": | echo $BASH_SUBSHELL | cat").0, "0\n");
+        // A compound stage does.
+        assert_eq!(run("{ echo $BASH_SUBSHELL; } | cat").0, "1\n");
+        assert_eq!(run("if :; then echo $BASH_SUBSHELL; fi | cat").0, "1\n");
+        assert_eq!(run("for i in 1; do echo $BASH_SUBSHELL; done | cat").0, "1\n");
+        assert_eq!(run("while :; do echo $BASH_SUBSHELL; break; done | cat").0, "1\n");
+        assert_eq!(run("case x in x) echo $BASH_SUBSHELL;; esac | cat").0, "1\n");
+        // `( … ) | cat` is one fork, counted once — not two.
+        assert_eq!(run("( echo $BASH_SUBSHELL ) | cat").0, "1\n");
+        assert_eq!(run("( ( echo $BASH_SUBSHELL ) ) | cat").0, "2\n");
+        // A function call and the builtins that run code re-enter the evaluator.
+        assert_eq!(run("f() { echo $BASH_SUBSHELL; }; f | cat").0, "1\n");
+        assert_eq!(run("f() { echo $BASH_SUBSHELL; }; f").0, "0\n");
+        assert_eq!(run("eval 'echo $BASH_SUBSHELL' | cat").0, "1\n");
+        assert_eq!(run("command eval 'echo $BASH_SUBSHELL' | cat").0, "1\n");
+        assert_eq!(run("builtin eval 'echo $BASH_SUBSHELL' | cat").0, "1\n");
+        assert_eq!(run("eval 'echo $BASH_SUBSHELL'").0, "0\n");
+        // Only the stage's outermost command may claim the fork.
+        assert_eq!(run("eval 'eval \"echo \\$BASH_SUBSHELL\"' | cat").0, "1\n");
+        assert_eq!(run("f() { echo $BASH_SUBSHELL; }; eval 'f' | cat").0, "1\n");
+        assert_eq!(run("{ eval 'echo $BASH_SUBSHELL'; } | cat").0, "1\n");
+        assert_eq!(run("( eval 'echo $BASH_SUBSHELL' ) | cat").0, "1\n");
+        // The words of an `eval` are expanded before the fork is claimed.
+        assert_eq!(run("eval \"echo $BASH_SUBSHELL\" | cat").0, "0\n");
+        // A pipeline inside a subshell counts from that subshell's level.
+        assert_eq!(run("( echo $BASH_SUBSHELL | cat )").0, "1\n");
+        assert_eq!(run("f() { echo $BASH_SUBSHELL; }; ( f | cat )").0, "2\n");
+    }
+
+    #[test]
+    fn a_process_substitution_is_a_subshell() {
+        // bash forks for `<( … )` and `>( … )`, and counts the fork.
+        assert_eq!(run("cat < <(echo $BASH_SUBSHELL)").0, "1\n");
+        assert_eq!(run("cat < <(cat < <(echo $BASH_SUBSHELL))").0, "2\n");
+        // The body is already forked, so its own top-level command adds nothing.
+        assert_eq!(run("f() { echo $BASH_SUBSHELL; }; cat < <(f)").0, "1\n");
+        // The level is restored afterwards.
+        assert_eq!(
+            run("cat < <(echo $BASH_SUBSHELL); echo $BASH_SUBSHELL").0,
+            "1\n0\n"
+        );
     }
 
     #[test]

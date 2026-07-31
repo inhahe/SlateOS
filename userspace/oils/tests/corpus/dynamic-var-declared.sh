@@ -14,14 +14,14 @@
 # climbing. An `export`ed one really does reach a child's environment, with the
 # value its function computes at the moment the child is started.
 #
-# What the declaration *does* cost the name is its invisibility. bash keeps
-# these out of the listings that walk the variable table — bare `declare -p`,
-# the flag-filtered `declare -i`, a bare `set` — while `declare -p NAME` reports
-# them all along. A declaration clears that, and from then on the listings carry
-# the name too, in the same full form the named lookup gives. (Merely *reading*
-# one clears it too, which osh does not model yet — see known-issues
-# TD-OILS-DYNVAR-INVISIBLE — so nothing below expands one before it looks at a
-# listing.)
+# What the declaration *does* change is that the name's slot is now filled in.
+# These slots start out empty — no value, and for `SECONDS` not even the `-i` —
+# so the listings that walk the variable table pass over them, while
+# `declare -p NAME` reports the full form all along. Naming one in a declaration
+# is a lookup like any other, and a lookup runs the value function, so from then
+# on the listings carry the name too, in the same full form. (A plain read does
+# it as well — see dynamic-var-visible.sh, which is about nothing else; so
+# nothing below expands one before it looks at a listing.)
 #
 # A `local` of the name is a different thing entirely: it shadows the dynamic
 # binding with an ordinary, unset variable, and the shell's own comes back when
@@ -63,7 +63,7 @@ echo "=== so an exported one really does reach a child"
 ( export SECONDS; sleep 1; env | grep '^SECONDS=' ) | m
 ( export SECONDS; unset SECONDS; env | grep -c '^SECONDS=' )
 
-echo "=== the name stops being invisible to the listings"
+echo "=== the name starts appearing in the listings"
 # Untouched, `SECONDS` is missing from all three; `RANDOM` is in `declare -i`
 # already, but without its value.
 ( declare -i | grep ' SECONDS' ; echo "rc=$?" ) | m

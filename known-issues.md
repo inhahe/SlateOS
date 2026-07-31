@@ -5653,7 +5653,7 @@ clears the promotion with the rest of the binding. Corpus case
 `dynamic-var-declared.sh`; unit test
 `declaring_a_dynamic_variable_keeps_its_value_function`.
 
-### TD-OILS-DYNVAR-INVISIBLE. Reading a dynamic special variable does not make it visible to the listings — 2026-07-31
+### TD-OILS-DYNVAR-INVISIBLE. Reading a dynamic special variable does not make it visible to the listings — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::dyn_declared` and
 `dynamic_special_value` / `param_value`.
@@ -5689,6 +5689,84 @@ on read needs interior mutability — a `Cell<u16>` bitmask over the
 `Shell::rng` already establishes the pattern (`Cell` on the `&self` read
 path). Do that rather than making `param_value` take `&mut self`: it is
 called from expansion paths that hold other borrows.
+
+**Fixed 2026-07-31**, by the `Cell` route above, and with the *concept*
+corrected along the way. Measuring the pristine state of all thirteen
+names showed there is no invisibility to model at all: a bare
+`declare -p` lists an untouched `SECONDS` all along, as
+`declare -- SECONDS` — no value, and not even the `-i`. What bash has is
+a slot whose **value cell and attributes the value function fills in**,
+on every *lookup*. So `declare -i` passes over a pristine `SECONDS`
+because it is not an integer yet, and a bare `set` passes over it because
+it has no value yet, and one read fixes both at once:
+
+```
+                declare -p             declare -i             set
+pristine        declare -- SECONDS     —                      —
+after a read    declare -i SECONDS=N   declare -i SECONDS=N   SECONDS=N
+```
+
+`dyn_declared: HashSet<String>` became `dyn_touched: Cell<u32>`, a
+bitmask set by `dynamic_special_value` — so an expansion, a `${x-y}`
+default, `(( x ))`, `[ -v x ]`, `declare -p NAME` and the declaration
+builtins all fill the slot in, while `${!prefix@}`, which asks for names
+rather than values, does not. `unset` clears the bit with the rest of the
+binding. A bare `set` now also lists the names that were valued from the
+start (`PPID`), which osh was omitting. Corpus case
+`dynamic-var-visible.sh`; unit test
+`looking_a_dynamic_variable_up_fills_its_slot_in`.
+
+**Still open, split out as TD-OILS-DYNVAR-ASSIGN-CELL:** the *assignment*
+half of the same value cell. `SECONDS=7` stores `7` in the cell without
+touching the attributes, so bash then lists `declare -- SECONDS="7"` and
+`SECONDS=7` in a bare `set` while still omitting it from `declare -i`;
+osh stores nothing. And the names with no assignment hook
+(`BASH_SUBSHELL`, `EPOCHSECONDS`, `EPOCHREALTIME`) discard the assignment
+entirely in bash, where osh keeps it.
+
+### TD-OILS-DYNVAR-ASSIGN-CELL. Assigning to a dynamic special variable does not fill its value cell — 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::dyn_touched` covers
+the lookup half of bash's value cell; the assignment half is missing.
+Split out of TD-OILS-DYNVAR-INVISIBLE.
+
+Each of these names has a slot whose value cell is filled in by a
+lookup — that is TD-OILS-DYNVAR-INVISIBLE, now fixed. An **assignment**
+fills it in too, but differently: it stores the string it was given and
+leaves the attributes alone. So `SECONDS=7` makes the name valued
+without making it an integer, which is exactly the shape bash reports:
+
+```
+                declare -p             declare -i             set
+SECONDS=7       declare -- SECONDS=7   —                      SECONDS=7
+RANDOM=7        declare -i RANDOM=7    declare -i RANDOM=7    RANDOM=7
+HISTCMD=7       declare -i HISTCMD=7   declare -i HISTCMD=7   HISTCMD=7
+SRANDOM=7       declare -i SRANDOM=7   declare -i SRANDOM=7   SRANDOM=7
+```
+
+osh reports the pristine, unvalued form for all four. (`RANDOM` and the
+rest already carry `-i` in their slot, so only the value is missing
+there; `SECONDS` needs the value *without* the `-i`, which is the case
+`dyn_touched` alone cannot express — a second bit, or a real
+`Option<Str>` cell per row.)
+
+The mirror image is the three names bash gives **no assignment hook** —
+`BASH_SUBSHELL`, `EPOCHSECONDS`, `EPOCHREALTIME`. bash discards the
+assignment outright: after `EPOCHSECONDS=7` the slot is still empty
+(`declare -- EPOCHSECONDS`, absent from `set`) and `$EPOCHSECONDS` still
+computes. osh stores the 7 and shadows the value function with it. That
+half needs a `stores` column in `DYNAMIC_SPECIALS` and a check in the
+assignment path.
+
+The same cell explains `+=` on these names, which is why that is filed
+here rather than on its own: bash appends to *the cell*, not to the
+computed value, and the concatenation is what the assignment hook then
+receives. `SECONDS=100; SECONDS+=5` gives **1005** (string append to the
+`"100"` the assignment stored, with no `-i` in the way), while
+`SECONDS=100; : $SECONDS; SECONDS+=5` gives **105** — the read refilled
+the cell *and* set `-i`, so the append became arithmetic. osh gives 100
+for both. `SECONDS=7; SECONDS+=abc` gives 0 in bash (the hook cannot
+parse `7abc`) against `abc` in osh.
 
 ### TD-OILS-DYNVAR-ARRAY-CONVERT. `declare -a SECONDS` makes an empty array instead of converting the live value — 2026-07-31
 

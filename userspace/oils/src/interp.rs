@@ -2740,26 +2740,41 @@ pub struct Shell {
     /// Cloned into subshells, so a subshell that unsets one does not affect the
     /// parent. `PPID` never lands here: it is readonly, so `unset PPID` fails.
     dyn_unset: std::collections::HashSet<String>,
-    /// The dynamic special variables a declaration builtin has *named* at global
-    /// scope — `export SECONDS`, `readonly SECONDS`, `declare -u RANDOM`, even a
-    /// bare `declare SECONDS`.
+    /// The dynamic special variables the shell has *looked up* — a bitmask over
+    /// the [`Shell::DYNAMIC_SPECIALS`] rows.
     ///
-    /// Naming one does not cost it its value function: bash applies the
-    /// attribute to the binding that is already there, so the name keeps
-    /// computing its value and keeps the attributes the table gives it. What
-    /// changes is that the name stops being *invisible*. bash marks these
-    /// `att_invisible`, which keeps them out of the listings (`declare -p` with
-    /// no operands, `declare -i`, a bare `set`) while `declare -p NAME` reports
-    /// them all along; a declaration clears the mark, after which the listings
-    /// carry the name too — and in the same full form the named lookup gives,
-    /// live value and all (`export SECONDS` → `declare -ix SECONDS="42"`, in
-    /// every listing that admits it).
+    /// bash gives each of these names a real slot in the variable table whose
+    /// value cell starts empty and whose attributes start incomplete; the value
+    /// function fills both in whenever the name is looked up. So a *pristine*
+    /// `SECONDS` lists as a bare, unvalued `declare -- SECONDS`, absent from
+    /// `declare -i` (it is not an integer yet) and from a bare `set` (it has no
+    /// value yet) — and one plain read is enough to turn it into the
+    /// `declare -i SECONDS="42"` that `declare -p SECONDS` reported all along,
+    /// in every listing:
     ///
-    /// Cloned into subshells. `unset` empties the entry along with the rest of
-    /// the binding (see [`Shell::dyn_unset`]); a `local` of the name shadows it
-    /// with an ordinary variable instead, and is recorded in
-    /// [`Shell::declared`] as any other local is.
-    dyn_declared: std::collections::HashSet<String>,
+    /// ```text
+    ///                 declare -p            declare -i               set
+    /// pristine        declare -- SECONDS    —                        —
+    /// after a read    declare -i SECONDS=N  declare -i SECONDS=N     SECONDS=N
+    /// ```
+    ///
+    /// Every lookup does it, whatever asked for it: `$SECONDS`, `${SECONDS-x}`,
+    /// `(( SECONDS ))`, `[ -v SECONDS ]`, `declare -p SECONDS`, and the
+    /// declaration builtins, which find the variable before applying their
+    /// attribute (`export SECONDS` → `declare -ix SECONDS="42"`, in every
+    /// listing that admits it). Enumerating *names* — `${!SEC@}` — does not,
+    /// since it never asks for a value.
+    ///
+    /// A [`std::cell::Cell`] because the read path ([`Shell::param_value`]) is
+    /// `&self`, and it is called from expansion paths that hold other borrows;
+    /// a bitmask because the table is fixed and small, so no allocation is
+    /// needed on what is a very hot path.
+    ///
+    /// Cloned into subshells. `unset` clears the bit along with the rest of the
+    /// binding (see [`Shell::dyn_unset`]); a `local` of the name shadows it with
+    /// an ordinary variable instead, and is recorded in [`Shell::declared`] as
+    /// any other local is.
+    dyn_touched: std::cell::Cell<u32>,
     /// The command history, oldest first, as recorded while `set -o history` is
     /// in effect. An entry's *number* is [`Shell::hist_base`] plus its index, so
     /// deleting one renumbers every entry after it — which is what bash does,
@@ -3100,7 +3115,7 @@ impl Shell {
             dir_stack: Vec::new(),
             dirstack_dynamic: true,
             dyn_unset: HashSet::new(),
-            dyn_declared: HashSet::new(),
+            dyn_touched: std::cell::Cell::new(0),
             history: Vec::new(),
             hist_base: 1,
             hist_max: None,
@@ -7242,7 +7257,7 @@ impl Shell {
             dir_stack: self.dir_stack.clone(),
             dirstack_dynamic: self.dirstack_dynamic,
             dyn_unset: self.dyn_unset.clone(),
-            dyn_declared: self.dyn_declared.clone(),
+            dyn_touched: self.dyn_touched.clone(),
             history: self.history.clone(),
             hist_base: self.hist_base,
             hist_max: self.hist_max,
@@ -9735,14 +9750,43 @@ impl Shell {
         self.dynamic_special(name)
     }
 
+    /// The [`Shell::dyn_touched`] bit for `name`, or `None` if it is not in the
+    /// table at all.
+    fn dyn_touch_bit(name: &str) -> Option<u32> {
+        const {
+            assert!(
+                Shell::DYNAMIC_SPECIALS.len() <= u32::BITS as usize,
+                "dyn_touched is a u32 bitmask over DYNAMIC_SPECIALS"
+            );
+        }
+        let i = Self::DYNAMIC_SPECIALS.iter().position(|d| d.name == name)?;
+        u32::try_from(i).ok().and_then(|i| 1u32.checked_shl(i))
+    }
+
+    /// Record that the shell has looked `name` up, so its value cell and its
+    /// attributes are filled in from here on. See [`Shell::dyn_touched`].
+    ///
+    /// Takes `&self`: the read path is `&self`, and a lookup is a lookup
+    /// whoever made it.
+    fn touch_dynamic_special(&self, name: &str) {
+        if let Some(bit) = Self::dyn_touch_bit(name) {
+            self.dyn_touched.set(self.dyn_touched.get() | bit);
+        }
+    }
+
+    /// Whether `name`'s value cell has been filled in by a lookup.
+    fn dyn_touched(&self, name: &str) -> bool {
+        Self::dyn_touch_bit(name).is_some_and(|bit| self.dyn_touched.get() & bit != 0)
+    }
+
     /// Record a declaration builtin naming `name`, and answer whether it is a
     /// dynamic special variable — in which case the caller must leave
     /// [`Shell::declared`] alone: the binding is already there, and a
     /// `declared` entry would shadow its value function with an empty one.
     ///
     /// bash's `export SECONDS` finds the variable, applies the attribute and
-    /// stops; there is nothing to create. All it costs the name is its
-    /// invisibility (see [`Shell::dyn_declared`]).
+    /// stops; there is nothing to create. Finding it is a lookup like any
+    /// other, so it fills the value cell in (see [`Shell::dyn_touched`]).
     fn declare_dynamic_special(&mut self, name: &str) -> bool {
         // A `local` of the name got there first — `declared` is where a local
         // with no value lives — so the declaration is about that ordinary
@@ -9750,20 +9794,20 @@ impl Shell {
         if self.declared.contains(name) || self.dynamic_special(name).is_none() {
             return false;
         }
-        self.dyn_declared.insert(name.to_string());
+        self.touch_dynamic_special(name);
         true
     }
 
     /// The table's own attribute letters for `name` as a *listing* sees them.
     ///
-    /// Normally [`DynamicSpecial::listed_flags`], which is what an untouched
-    /// name lists with — bash hides part of the truth there, most visibly on
-    /// `SECONDS`, whose `-i` shows up under `declare -p SECONDS` but not in a
-    /// listing. A declaration builtin clears the name's invisibility (see
-    /// [`Shell::dyn_declared`]), and from then on the listing tells the whole
+    /// Normally [`DynamicSpecial::listed_flags`], the attributes the name's
+    /// slot carries before anything has looked it up — bash leaves part of the
+    /// set unfilled there, most visibly on `SECONDS`, whose `-i` shows up under
+    /// `declare -p SECONDS` but not in a listing. A lookup fills them in (see
+    /// [`Shell::dyn_touched`]), and from then on the listing tells the whole
     /// truth: the named form's letters.
     fn dynamic_special_listed_flags(&self, d: &DynamicSpecial) -> &'static str {
-        if self.dyn_declared.contains(d.name) { d.named_flags } else { d.listed_flags }
+        if self.dyn_touched(d.name) { d.named_flags } else { d.listed_flags }
     }
 
     /// The attribute letters a dynamic special variable is reported with: the
@@ -14532,6 +14576,11 @@ impl Shell {
         if self.declared.contains(name) {
             return None;
         }
+        // bash's value function fills the name's value cell (and the rest of
+        // its attributes) in as a side effect, so a plain read is what makes an
+        // untouched `SECONDS` start listing as `declare -i SECONDS="42"`. See
+        // [`Shell::dyn_touched`].
+        self.touch_dynamic_special(name);
         match name {
             // `$BASH_ARGV0` mirrors `$0`; assigning it sets `$0` (see the
             // assignment hook in `apply_assignment`).
@@ -20901,10 +20950,10 @@ impl Shell {
     /// [`DynListing`] for why most of them list without a value.
     fn format_dynamic_special_listing(&self, name: &str) -> Option<Str> {
         let d = self.dynamic_special_listed(name)?;
-        // A declaration builtin has named it, so it is no longer invisible and
-        // the listing says everything the named form says — the live value
-        // included. See [`Shell::dyn_declared`].
-        if self.dyn_declared.contains(name) {
+        // A lookup has filled the value cell in, so the listing says everything
+        // the named form says — the live value included. See
+        // [`Shell::dyn_touched`].
+        if self.dyn_touched(name) {
             return self.format_dynamic_special_declare(name);
         }
         let letters = self.dynamic_special_letters(name, d.listed_flags);
@@ -22898,9 +22947,11 @@ impl Shell {
         // [`Shell::dyn_unset`].
         if Self::dynamic_special_entry(name).is_some() {
             self.dyn_unset.insert(name.to_string());
-            // Its invisibility is part of the binding too, so a name declared
-            // before the unset does not come back promoted.
-            self.dyn_declared.remove(name);
+            // The value cell went with the binding too, so a name looked up
+            // before the unset does not come back filled in.
+            if let Some(bit) = Self::dyn_touch_bit(name) {
+                self.dyn_touched.set(self.dyn_touched.get() & !bit);
+            }
         }
         // Unsetting `HOSTFILE` throws the hostname list away, rather than
         // leaving it to be added to — the one asymmetry in
@@ -23047,11 +23098,20 @@ impl Shell {
                 .chain(self.arrays.keys())
                 .chain(self.assoc.keys())
                 .cloned()
-                // …plus any dynamic special variable a declaration builtin has
-                // made visible. A bare `set` is about *values*, so it passes
-                // over the ones still invisible, and over the merely
-                // `declared`. See [`Shell::dyn_declared`].
-                .chain(self.dyn_declared.iter().cloned())
+                // …plus any dynamic special variable whose value cell is filled
+                // in. A bare `set` is about *values*, so it lists the ones a
+                // lookup has reached and the ones that were valued from the
+                // start (`PPID`), and passes over the rest — and over the merely
+                // `declared`. See [`Shell::dyn_touched`].
+                .chain(
+                    Self::DYNAMIC_SPECIALS
+                        .iter()
+                        .filter(|d| {
+                            !self.dyn_unset.contains(d.name)
+                                && (self.dyn_touched(d.name) || d.listed == DynListing::Live)
+                        })
+                        .map(|d| d.name.to_string()),
+                )
                 .collect();
             all.sort();
             all.dedup();
@@ -41662,6 +41722,52 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn looking_a_dynamic_variable_up_fills_its_slot_in() {
+        // A pristine `SECONDS` has an empty slot: no value, and not even the
+        // `-i` its named form reports. One read fills both in, for every
+        // listing at once.
+        let i = "case \"$(declare -i)\" in *'declare -i SECONDS='*) echo valued;; \
+                 *'declare -i SECONDS'*) echo bare;; *) echo gone;; esac";
+        let p = "case \"$(declare -p)\" in *'declare -i SECONDS='*) echo valued;; \
+                 *'declare -- SECONDS'*) echo bare;; *) echo gone;; esac";
+        let s = "case \"$(set)\" in *'SECONDS='*) echo listed;; *) echo absent;; esac";
+        assert_eq!(run(i).0, "gone\n");
+        assert_eq!(run(p).0, "bare\n");
+        assert_eq!(run(s).0, "absent\n");
+        // Every way of *looking it up* counts — an expansion, a default, an
+        // arithmetic mention, a set-test, and the named `declare -p`.
+        for touch in [
+            ": $SECONDS",
+            ": ${SECONDS-x}",
+            ": ${#SECONDS}",
+            "(( SECONDS ))",
+            "[ -v SECONDS ]",
+            "declare -p SECONDS >/dev/null",
+        ] {
+            assert_eq!(run(&format!("{touch}; {i}")).0, "valued\n", "{touch}");
+            assert_eq!(run(&format!("{touch}; {p}")).0, "valued\n", "{touch}");
+            assert_eq!(run(&format!("{touch}; {s}")).0, "listed\n", "{touch}");
+        }
+        // Naming one without asking for a value does not: `${!prefix@}` walks
+        // the table but never calls the value function.
+        assert_eq!(run(&format!(": ${{!SEC@}}; {i}")).0, "gone\n");
+        // A subshell's lookup does not reach the parent…
+        assert_eq!(run(&format!("( : $SECONDS ); {i}")).0, "gone\n");
+        assert_eq!(run(&format!("x=$( : $SECONDS ); {i}")).0, "gone\n");
+        // …while a function's does, there being only the one binding.
+        assert_eq!(run(&format!("f() {{ : $SECONDS; }}; f; {i}")).0, "valued\n");
+        // `unset` empties the slot again, along with the rest of the binding.
+        assert_eq!(run(&format!(": $SECONDS; unset SECONDS; {i}")).0, "gone\n");
+        assert_eq!(run(&format!(": $SECONDS; unset SECONDS; {s}")).0, "absent\n");
+        // `PPID` starts out valued, so it is in every listing from the first
+        // line — including a bare `set`.
+        assert_eq!(
+            run("case \"$(set)\" in *'PPID='*) echo listed;; *) echo absent;; esac").0,
+            "listed\n"
+        );
+    }
+
+    #[test]
     fn declaring_a_dynamic_variable_keeps_its_value_function() {
         // The attribute lands on the binding that is already there, so the
         // table's own letters stay and the value is still computed.
@@ -41686,9 +41792,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The value function is still doing the computing.
         let (out, _) = run("declare RANDOM; a=$RANDOM; b=$RANDOM; [ \"$a\" != \"$b\" ] && echo varying");
         assert_eq!(out, "varying\n");
-        // What the declaration costs the name is its invisibility: bash keeps
-        // these out of the listings that walk the variable table until
-        // something names them.
+        // What the declaration changes is that the name's slot is filled in:
+        // bash's listings walk the variable table and pass over the ones that
+        // are still empty, until something looks them up.
         let listed = "case \"$(declare -i)\" in *'declare -i SECONDS='*) echo valued;; \
                       *'declare -i SECONDS'*) echo bare;; *) echo gone;; esac";
         assert_eq!(run(listed).0, "gone\n");

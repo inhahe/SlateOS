@@ -6437,11 +6437,12 @@ honest, *fallible* bytes-to-text conversion, now the only one in the crate.
 What remains genuinely text is text *by construction* and is documented as such
 at each site: variable/alias/reserved-word names and `HashMap<String, _>` keys
 are `[A-Za-z_][A-Za-z0-9_]*`, so bytes that are not text are not names and the
-honest answer is a rejection rather than an approximation. The residual
-narrowings are tracked separately and are all of that shape —
-`TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT` and `TD-OILS-NONUTF8-ENV-NAME`.
+honest answer is a rejection rather than an approximation. The one residual
+narrowing is tracked separately and is of that shape — `TD-OILS-NONUTF8-ENV-NAME`.
+(`TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT` was the other, and is now resolved: it
+was not a *name* narrowing at all but a subscript wrongly caught up in one.)
 
-### TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT. An array *element* named by a subscript that is not text cannot be assigned to by `printf -v`, `read` or `declare -n` — STEP 1 DONE 2026-07-30 (`declare -n` still open, needs step 2)
+### TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT. An array *element* named by a subscript that is not text cannot be assigned to by `printf -v`, `read` or `declare -n` — ✅ RESOLVED 2026-07-30 (both steps)
 
 **Where:** `userspace/oils/src/interp.rs` — the three surviving callers of
 `is_valid_assignment_target` (`:27326`), each of which gates on
@@ -6523,12 +6524,37 @@ the write-side counterpart of step 8's `unset` test.
   split before judging, and the later-name store goes through
   `set_scalar_target_checked`.
 
-**Still open: `declare -n`.** `nameref_value_error` deliberately keeps its
-whole-operand text check — its comment now says why. A nameref's *stored value*
-is still a `String` walked by `resolve_ref_name`, so accepting
-`declare -n r='m[<non-text>]'` would bind a reference the resolver could not
-carry the subscript back out of. Refusing at the declaration is the loud
-failure; step 2 byte-types the value and lifts it.
+**Step 2 done 2026-07-30.** `declare -n r="m[$k]"` now binds the element it
+names, and reads and writes through the reference carry the subscript's bytes
+both ways. Regression test:
+`a_nameref_may_designate_an_element_whose_subscript_is_not_text`.
+
+- `resolve_ref_name`/`resolve_ref_use` return
+  `Option<RefTarget { base: String, sub: Option<Str> }>` instead of a single
+  pasted `String`. Every caller that cared about an element reference used to
+  take the spelling back apart with `find('[')`/`strip_suffix(']')`, which a
+  subscript cannot survive as text. The walk itself is unchanged for plain
+  names; an element value simply ends it, since no variable can be *named*
+  `arr[0]` and so it can carry no nameref attribute of its own.
+- Callers now ask for what they mean: `into_name()` (`None` for an element —
+  which names no variable, exactly reproducing the lookup misses the pasted
+  spelling used to produce), `.base` (the readonly attribute lives on the
+  variable), or `spelling()` (`${!ref}`, diagnostics).
+- `nameref_value_error` splits before judging, and the self-reference rule is
+  measured against the base alone — which is what bash does, so
+  `declare -n r=r[0]` is still a self-reference. `nameref_target_base` is gone.
+- `ArithElem::Element(String)` → `Element(Str)`;
+  `warn_elem_not_identifier(&str)` → `(BStr)`.
+
+**Behaviour fixed on the way past**, because there is no longer a `String` in
+which to smuggle a non-name:
+
+- `declare -n r=arr[0]; r[1]=v` and `assign_elem` through such a reference give
+  bash's ``  `arr[0]': not a valid identifier `` refusal instead of inventing a
+  variable literally named `arr[0]`.
+- `declare -n r=arr[0]; unset r` removes `arr[0]`. It used to look up a variable
+  named `arr[0]`, find nothing, and quietly do nothing.
+- `readarray r` through such a reference quotes the target as spelled.
 
 ### TD-OILS-ARGV-PANICS-ON-NON-UTF8. `osh` aborts at startup if any of its own arguments is not UTF-8 — FIXED 2026-07-30
 

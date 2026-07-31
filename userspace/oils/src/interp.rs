@@ -19744,16 +19744,12 @@ impl Shell {
             Some(old) if append => bfmt![old, value],
             _ => value.to_vec(),
         };
-        // A nameref's *stored value* is still text-only, so a result that is not
-        // text is rejected here even when its shape is fine: `declare -n
-        // r='m[<non-text>]'` names an element an associative array would store
-        // happily, but the resolver that walks the chain could not carry the
-        // subscript back out again. Refusing at the declaration is the loud
-        // failure; see TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT step 2, which
-        // byte-types the nameref value and lifts this.
-        let Some(result) =
-            bytes::as_str(&joined).filter(|r| split_assignment_target(r.as_bytes()).is_some())
-        else {
+        // Only the *base* has to be an identifier. A subscript is an ordinary
+        // shell word — `declare -n r="m[$k]"` designates an associative key that
+        // may hold any byte, and the map stores such a key happily — so the two
+        // halves are separated before either is judged, and the base alone is
+        // measured against the self-reference rule below.
+        let Some((base, _)) = split_assignment_target(&joined) else {
             let what = if append || joined.is_empty() {
                 b": not a valid identifier\n".as_slice()
             } else {
@@ -19762,7 +19758,7 @@ impl Shell {
             // The quoted text is what this command supplied, not the result.
             return Some(bfmt![self.err_prefix(), tag, b": `", value, b"'", what]);
         };
-        if nameref_target_base(result) != name {
+        if base != name {
             return None;
         }
         if self.local_frames.is_empty() {
@@ -27307,16 +27303,6 @@ fn split_assignment_target(s: BStr<'_>) -> Option<(&str, Option<BStr<'_>>)> {
             Some((name(s.get(..p)?)?, Some(sub)))
         }
         None => Some((name(s)?, None)),
-    }
-}
-
-/// The bare-name part of a nameref value: `arr[0]` refers to `arr`. Used for the
-/// self-reference check, which bash makes against the base name (so
-/// `declare -n r=r[0]` is a self-reference just as `declare -n r=r` is).
-fn nameref_target_base(s: &str) -> &str {
-    match s.find('[') {
-        Some(p) => &s[..p],
-        None => s,
     }
 }
 
@@ -44382,6 +44368,34 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let at = |k: BStr<'_>| m.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_slice());
         assert_eq!(at(b"p\xff"), Some(b"pr.intf".as_slice()));
         assert_eq!(at(b"r\xff"), Some(b"rd".as_slice()));
+    }
+
+    #[test]
+    fn a_nameref_may_designate_an_element_whose_subscript_is_not_text() {
+        // A nameref's value is a word naming *somewhere*: a base name plus an
+        // optional subscript. Only the base has to be an identifier, so the
+        // subscript may hold any byte — and the reference then has to carry
+        // those bytes back out on every read and write through it. The value
+        // used to be judged as text in one piece, which refused the declaration
+        // outright.
+        let mut sh = Shell::new();
+        let mut src: Str = b"declare -A m\nk='".to_vec();
+        src.push(0xff);
+        src.extend_from_slice(
+            b"'\ndeclare -n r=\"m[$k]\"\n\
+              r=through_ref\n\
+              printf '%s|%s|%s\\n' \"${m[$k]}\" \"$r\" \"${!r}\"\n",
+        );
+        let buf = capture_sink();
+        let status = {
+            let mut out = Out::Capture(buf.clone());
+            sh.run_source_out(&src, &mut out, 0)
+        };
+        assert_eq!(status, 0);
+        // In order: the element read directly, the same element read *through*
+        // the reference, and the target `${!r}` reports — spelled with the byte
+        // the subscript actually holds, since that is the key it names.
+        assert_eq!(take_capture(&buf), b"through_ref|through_ref|m[\xff]\n");
     }
 
     #[test]

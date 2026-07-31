@@ -22534,20 +22534,33 @@ impl Shell {
             // arithmetically and `declare -u x=abc` is folded to uppercase.
             // Attributes attach to the *base* name (so `declare -i x[0]=2+3`
             // makes `x` an integer array).
-            if integer {
-                self.integer_attr.insert(base_name.to_string());
-            } else if unset_integer {
+            //
+            // Where a letter is given in both directions the removal wins,
+            // whichever order the two came in — bash collects them into separate
+            // `flags_on`/`flags_off` sets and applies "off" last. That is
+            // visible in the value, not just the attribute: `declare -i +i x=3+4`
+            // stores the string `3+4`, because by the time the value binds the
+            // integer attribute is already gone.
+            if unset_integer {
                 self.integer_attr.remove(base_name);
+            } else if integer {
+                self.integer_attr.insert(base_name.to_string());
             }
-            if nameref {
-                self.nameref_attr.insert(base_name.to_string());
-            } else if unset_nameref {
+            // `-n +n` likewise leaves an ordinary variable holding the target's
+            // *name* as a plain string. The `-n` half is still what decides how
+            // the operand is read, though — its value is validated as a
+            // reference name and a subscript on it is still refused — because
+            // that judgement happens while the flag is being parsed, not when
+            // the attribute lands.
+            if unset_nameref {
                 self.nameref_attr.remove(base_name);
+            } else if nameref {
+                self.nameref_attr.insert(base_name.to_string());
             }
-            if trace {
-                self.trace_attr.insert(base_name.to_string());
-            } else if unset_trace {
+            if unset_trace {
                 self.trace_attr.remove(base_name);
+            } else if trace {
+                self.trace_attr.insert(base_name.to_string());
             }
             // Conflicting enable directions (e.g. `-lc`, `-lu`) cancel to none.
             let case_dir = if case_conflict { Some(0) } else { case_dir };
@@ -23133,11 +23146,11 @@ impl Shell {
                 self.array_kind_apply(&a.name, false);
             }
             // Apply the value attributes to the array name (mirrors the scalar
-            // path in `builtin_declare`).
-            if integer {
-                self.integer_attr.insert(a.name.clone());
-            } else if unset_integer {
+            // path in `builtin_declare`, removals last and all).
+            if unset_integer {
                 self.integer_attr.remove(&a.name);
+            } else if integer {
+                self.integer_attr.insert(a.name.clone());
             }
             let case_dir = if case_conflict { Some(0) } else { case_dir };
             match case_dir {
@@ -23311,15 +23324,15 @@ impl Shell {
                 status = 1;
                 continue;
             }
-            if nameref {
-                self.nameref_attr.insert(a.name.clone());
-            } else if unset_nameref {
+            if unset_nameref {
                 self.nameref_attr.remove(&a.name);
+            } else if nameref {
+                self.nameref_attr.insert(a.name.clone());
             }
-            if trace {
-                self.trace_attr.insert(a.name.clone());
-            } else if unset_trace {
+            if unset_trace {
                 self.trace_attr.remove(&a.name);
+            } else if trace {
+                self.trace_attr.insert(a.name.clone());
             }
             if unset_export {
                 self.exported.remove(&a.name);
@@ -43471,6 +43484,41 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("x=5; export x; readonly x; declare +x x; echo \"rc=$?\"; declare -p x").0,
             "rc=0\ndeclare -r x=\"5\"\n"
+        );
+    }
+
+    /// The "off" direction of a letter is applied after the "on" one, so a
+    /// letter written both ways in one command ends up off.
+    #[test]
+    fn a_flag_given_in_both_directions_ends_up_off() {
+        // Order does not matter, and the removal is early enough to change what
+        // the value *is*: with the integer attribute already gone by the time
+        // the value binds, `3+4` is stored as text.
+        for src in [
+            "declare -i +i x=3+4; declare -p x",
+            "declare +i -i x=3+4; declare -p x",
+        ] {
+            assert_eq!(run(src).0, "declare -- x=\"3+4\"\n");
+        }
+        // `+i` on a name that already had the attribute takes it off for good.
+        assert_eq!(
+            run("declare -i x=1; declare +i x; x=5+5; declare -p x").0,
+            "declare -- x=\"5+5\"\n"
+        );
+        // `-n +n` leaves an ordinary variable holding the target's name…
+        assert_eq!(
+            run("w=9; declare -n +n r=w; declare -p r w").0,
+            "declare -- r=\"w\"\ndeclare -- w=\"9\"\n"
+        );
+        // …but the `-n` half still decides how the operand is *read*: the value
+        // is validated as a reference name, and a subscript on it is refused.
+        assert_eq!(run("declare -n +n r='a b'; echo \"rc=$?\"").0, "rc=1\n");
+        assert_eq!(run("declare -n +n r[1]=w; echo \"rc=$?\"").0, "rc=1\n");
+        assert_eq!(run("declare -t +t x=5; declare -p x").0, "declare -- x=\"5\"\n");
+        // The same letter twice in one direction is not a conflict.
+        assert_eq!(
+            run("declare -i -i x=3+4; declare -p x").0,
+            "declare -i x=\"7\"\n"
         );
     }
 

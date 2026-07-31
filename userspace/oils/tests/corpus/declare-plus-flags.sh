@@ -153,3 +153,28 @@ f45
 declare -a q46=(1 2)
 f46() { declare -g +a q46; echo "rc=$?"; }
 f46; declare -p q46
+
+# The same "off is applied last" rule governs every letter that really can be
+# removed, not just `-x`.
+
+echo "=== -i +i in one command leaves no integer attribute, and no arithmetic"
+declare -i +i x47=3+4; declare -p x47
+declare +i -i x48=3+4; declare -p x48
+declare -i x49=1; declare +i x49; declare -p x49; x49=5+5; declare -p x49
+
+echo "=== -n +n leaves an ordinary variable holding the target's name"
+w50=9
+declare -n +n r50=w50; echo "rc=$?"; declare -p r50 w50
+declare +n -n r51=w50; echo "rc=$?"; declare -p r51
+
+echo "=== but the -n half still judges the operand"
+declare -n +n r52='a b'; echo "rc=$?"
+declare -n +n r53[1]=w50; echo "rc=$?"
+
+echo "=== -t +t"
+declare -t +t x54=5; declare -p x54
+declare -t x55=5; declare +t x55; declare -p x55
+
+echo "=== the same letter twice in one direction is not a conflict"
+declare -i -i x56=3+4; declare -p x56
+declare +i +i x57=3+4; declare -p x57

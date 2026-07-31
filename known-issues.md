@@ -6467,6 +6467,43 @@ insert }`, and measure the case-letter matrix before touching
 `case_dir`. Low priority: writing both directions of the same letter in
 one command is a shape almost no script uses.
 
+**Partly resolved 2026-07-31: `-i`, `-n` and `-t` are done; the case
+letters remain OPEN.** The three now read `if unset_X { remove } else if
+X { insert }` in both functions. The removal is early enough to change
+what the value *is*, not just which letter `declare -p` prints:
+`declare -i +i x=3+4` stores the string `3+4`, and `declare -n +n r=w`
+leaves an ordinary variable holding the target's name. The `-n` half
+still governs how the operand is *read* — its value is validated as a
+reference name and a subscript on it is still refused — because that
+judgement happens while the flags are parsed, not when the attribute
+lands. Covered by `a_flag_given_in_both_directions_ends_up_off` and four
+sections of `userspace/oils/tests/corpus/declare-plus-flags.sh`.
+
+**The case matrix has now been measured** (`target/dvscratch/px13.sh`,
+`px14.sh`) and is a per-letter on/off model, not the single `case_dir`
+slot osh keeps:
+
+* Each of `l`/`u`/`c` has its own on-bit and off-bit. A single enable
+  sets its own fold and clears the other two; a `+` removes **only its
+  own** letter. So `declare -l x=AB; declare +u x` leaves `declare -l
+  x="ab"` — osh clears all three.
+* Off beats on per letter, in either order: `-l +l` and `+l -l` both
+  leave nothing.
+* Two *different* enables in one command still cancel to none, and the
+  cancellation also drops a fold the name already carried:
+  `declare -c y=ab; declare -l -u y` leaves `declare -- y="Ab"`. The same
+  letter twice (`-l -l`, `-lu` vs `-ll`) is not a conflict.
+* `-l +l -u` cancels as a two-enable conflict and then clears lower —
+  net nothing, value unfolded.
+* All of this lands before the value binds, which is why `declare -l +l
+  b=AB` stores `AB` unfolded.
+
+**Proper fix for the case half.** Replace `case_dir: Option<u8>` with an
+enable slot plus three independent `off_lower`/`off_upper`/`off_cap`
+booleans, in both `builtin_declare_scoped` and
+`exec_declare_with_arrays_scoped`: apply the enable (or the conflict
+clear) first, then the three removals.
+
 ### TD-OILS-ATTR-ASSIGN-BYPASSES-DYNVAR. `export NAME=v` / `readonly NAME=v` store straight into the variable table, so a dynamic special loses its value function — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the `export` and `readonly`

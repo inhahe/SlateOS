@@ -136,6 +136,13 @@ false; bgnoise=$?
 true &
 echo "prev-status=$bgnoise"
 wait
+# An operand-less `wait` spares the job holding `$!` when the shell already knew
+# that job was dead, and whether it knew depends on whether it had reason to
+# reap — which the `echo` above gives it only sometimes. Either way the row is
+# finished, so reporting it once frees job number 1 for the block below, whose
+# whole point is that the next job really is `%1`. (The underlying divergence is
+# TD-OILS-JOB-DEATH-LEARNED-EAGERLY.)
+jobs >/dev/null 2>&1
 
 # `wait` on a pid that was never a child of this shell: status 127 plus a
 # message. Pid 1 exists but is not ours.

@@ -850,6 +850,52 @@ the assignment, no boundary to cross) as it is.
 **Fixed** exactly that way: the second reading is now compared with
 `[ "$b" -gt "$a" ] && echo climbing || echo "stuck [$b]"`.
 
+### TD-OILS-JOB-DEATH-LEARNED-EAGERLY. osh notices a background job's death at points bash has no way to, which makes the `$!`-sparing rule of an operand-less `wait` nondeterministic — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::poll_jobs` and its
+callers, chiefly `notify_signalled_jobs` (run between every top-level
+command, `exec_items`) and `drain_jobs` (the operand-less `wait`).
+
+**Symptom.** A full `scripts/osh-bash-diff.py` run failed `jobs-wait`
+about one time in three with `wait-spec=127` against bash's `0`. The job
+the block probes had been given number **2**, because a finished-but-
+unreported job was still holding number 1, so the closing `wait %1` found
+nothing.
+
+**Why.** An operand-less `wait` "spares" the job holding `$!` — it stays
+in the table to be announced by a later `jobs` — but only if the shell
+*already knew* that job was dead when the `wait` was reached; a job the
+`wait` itself had to block on counts as waited-for and is swept. Both
+shells implement that rule. They disagree about when the shell knows:
+
+```sh
+true & echo mid  ; wait; jobs   # both: empty      — nothing reaped it yet
+true & sleep 0   ; wait; jobs   # both: [1]+ Done  — the fork/wait reaped it
+```
+
+bash (non-interactive, no job control) reaps a background child only when
+it waits for a *foreground* child, so a builtin in between leaves the job
+`JRUNNING` and the `wait` sweeps it. osh's `poll_jobs` checks
+`JobBody::is_finished()` and is called from `notify_signalled_jobs`
+between every command, so osh learns of the death whatever ran in
+between — and, worse, *whether* the background thread had finished by
+then is a race, so the same script spares on some runs and sweeps on
+others. Twelve job/mid-command shapes were measured
+(`target/dvscratch/jw/`) and bash is deterministic in all of them; osh
+matches all twelve in isolation and diverges only under load.
+
+**Proper fix.** Give osh the same knowledge points bash has: stop
+polling from `notify_signalled_jobs` and from the head of `drain_jobs`,
+and poll only where bash calls `waitchld` — after waiting for a
+foreground external child, and inside the `jobs`/`wait`/`kill` builtins
+that explicitly reap. `notify_signalled_jobs` should announce from what
+is already known rather than going looking. This touches every job test,
+so it wants its own pass rather than being folded into another change.
+
+**Worked around** in `tests/corpus/jobs-wait.sh` by reporting the table
+once (`jobs >/dev/null 2>&1`) after the operand-less `wait`, which frees
+job number 1 on both branches; the underlying divergence is still here.
+
 ### TD-OILS-CORPUS-JOBS-WAIT-SLEEP-RACE. `tests/corpus/jobs-wait.sh` probed a "still running" job that a loaded machine had time to finish — ✅ RESOLVED 2026-07-31 (test bug, not a shell bug)
 
 **Where:** `userspace/oils/tests/corpus/jobs-wait.sh`, the block under

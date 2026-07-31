@@ -148,12 +148,19 @@ wait 1 2>/dev/null; echo "wait-stranger=$?"
 # the job from either side. (This split is what made `wait-stranger` above look
 # intermittent rather than plainly wrong: it only diverged on the runs where a
 # job 1 happened to still be in the table.)
-sleep 2 &
+#
+# The job has to still be *running* for any of that to mean anything, and a
+# timed one is not good enough: on a loaded machine the five probes below can
+# take longer than the sleep, and then `jobs` reports the finished job, both
+# shells purge it, and `wait %1` says "no such job" instead. So the job blocks
+# on a file we create when we are done with it rather than on a clock.
+( while [ ! -e release-job1 ]; do sleep 0.05; done ) &
 wait 1 2>/dev/null; echo "live-job-not-a-pid=$?"
 kill -0 1 2>/dev/null; echo "kill-bare=$?"
 kill -0 %1 2>/dev/null; echo "kill-spec=$?"
 disown 1 2>/dev/null; echo "disown-bare=$?"
 jobs 1 >/dev/null 2>&1; echo "jobs-bare=$?"
+: > release-job1
 wait %1; echo "wait-spec=$?"
 
 # Command substitution waits for its own subshell, so a `&` inside one still

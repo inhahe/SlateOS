@@ -14882,21 +14882,23 @@ impl Shell {
             Some(i) => (&after[..i], &after[i..]),
             None => (after, b"".as_slice()),
         };
-        // A tilde-prefix names a user, a directory-stack slot or one of `+`/`-`,
-        // all of which are text — so a prefix that is not text resolves to
-        // nothing, which is exactly the "no expansion if lookup fails" answer.
-        let prefix = bytes::as_str(prefix)?;
-        // Resolve the prefix to a directory. An unrecognised prefix (e.g. a
-        // `~user` we cannot resolve — no user database on this target) leaves the
+        // The *syntactic* tilde-prefixes — `~`, `~+`, `~-` and the directory-stack
+        // indices — are all ASCII, so they are recognised through a text view of
+        // the prefix. A prefix that is not text cannot be one of them, and falls
+        // through to the user-name lookup, which works on the raw bytes: a user
+        // name is OS-boundary data and need not be UTF-8.
+        let syntactic = bytes::as_str(prefix);
+        // Resolve the prefix to a directory. A prefix that resolves to nothing
+        // (a `~user` with no such user, or no user database at all) leaves the
         // word untouched, matching bash's "no expansion if lookup fails" rule.
-        let dir: Option<Str> = if prefix.is_empty() {
+        let dir: Option<Str> = if syntactic == Some("") {
             self.param_value("HOME")
-        } else if prefix == "+" {
+        } else if syntactic == Some("+") {
             self.param_value("PWD")
                 .or_else(|| std::env::current_dir().ok().map(|p| shell_path(&p)))
-        } else if prefix == "-" {
+        } else if syntactic == Some("-") {
             self.param_value("OLDPWD")
-        } else if let Some(n) = parse_dirstack_index(prefix) {
+        } else if let Some(n) = syntactic.and_then(parse_dirstack_index) {
             // `~N` / `~+N` count from the left (0 = current dir); `~-N` from the
             // right of the directory stack.
             let full = self.dir_stack_full();
@@ -14909,9 +14911,22 @@ impl Shell {
                     .and_then(|i| full.get(i).cloned()),
             }
         } else {
-            None
+            // `~name`: that user's home directory from the user database. Never
+            // `$HOME` — bash asks `getpwnam` even when the name happens to be
+            // the current user, so a `HOME` that has been reassigned does not
+            // change what `~$USER` expands to.
+            self.user_home(prefix)
         };
         Some((dir?, rest))
+    }
+
+    /// The home directory recorded for `user` in the user database, or `None`
+    /// when there is no such user — or no database at all, which is the case on
+    /// the Windows host the differential test corpus runs on, and is why `~name`
+    /// is left untouched there.
+    #[allow(clippy::unused_self, reason = "a shell-level lookup; the database may later be per-shell")]
+    fn user_home(&self, user: BStr<'_>) -> Option<Str> {
+        read_passwd_home(PASSWD_FILE, user)
     }
 
     // ---- builtins -----------------------------------------------------------
@@ -23905,8 +23920,11 @@ impl Shell {
                 // The first field of each `/etc/services` entry (see
                 // [`Shell::compgen_service_names`]).
                 "service" => cands.extend(self.compgen_service_names()),
-                // binding/group/user need either a live readline or a user
-                // database osh has neither of.
+                // The first field of each `/etc/passwd` / `/etc/group` record
+                // (see [`Shell::compgen_user_names`]).
+                "user" => cands.extend(self.compgen_user_names()),
+                "group" => cands.extend(self.compgen_group_names()),
+                // `binding` needs a live line editor, which osh has not got.
                 _ => {}
             }
         }
@@ -24093,6 +24111,25 @@ impl Shell {
     #[allow(clippy::unused_self, reason = "sits with the other compgen_* action helpers")]
     fn compgen_service_names(&self) -> Vec<Str> {
         read_service_names(SERVICES_FILE)
+    }
+
+    /// The user names the `user` (`-u`) action offers — the first field of each
+    /// `/etc/passwd` record.
+    ///
+    /// Read fresh every time, for the same reason as
+    /// [`Shell::compgen_service_names`]: bash walks `getpwent` from the top on
+    /// each completion.
+    #[allow(clippy::unused_self, reason = "sits with the other compgen_* action helpers")]
+    fn compgen_user_names(&self) -> Vec<Str> {
+        read_colon_table_names(PASSWD_FILE)
+    }
+
+    /// The group names the `group` (`-g`) action offers — the first field of
+    /// each `/etc/group` record. bash's `getgrent`; see
+    /// [`Shell::compgen_user_names`].
+    #[allow(clippy::unused_self, reason = "sits with the other compgen_* action helpers")]
+    fn compgen_group_names(&self) -> Vec<Str> {
+        read_colon_table_names(GROUP_FILE)
     }
 
     /// The matches a completion *function* offers — `compgen -F NAME word`.
@@ -27610,6 +27647,97 @@ fn read_service_names(path: BStr<'_>) -> Vec<Str> {
         names.extend(fields.next().map(<[u8]>::to_vec));
     }
     names
+}
+
+/// Where [`Shell::compgen_user_names`] looks — the user database, as bash's
+/// `getpwent` reaches it. A path, so bytes.
+const PASSWD_FILE: &[u8] = b"/etc/passwd";
+
+/// Where [`Shell::compgen_group_names`] looks — the group database, as bash's
+/// `getgrent` reaches it. A path, so bytes.
+const GROUP_FILE: &[u8] = b"/etc/group";
+
+/// The names in one `/etc/passwd`- or `/etc/group`-format file, in file order.
+///
+/// Both files put the name first in a colon-separated record
+/// (`name:passwd:uid:gid:gecos:home:shell` and `name:passwd:gid:members`), so
+/// one reader serves both — which is also why `compgen -u` and `compgen -g`
+/// differ only in the file they name.
+///
+/// A line is skipped when, after leading blanks, it is empty or starts with
+/// `#`; that is exactly the test glibc's `nss_files` applies before handing a
+/// line to its parser, and it is the *only* comment rule here. A `#` further
+/// along the line is ordinary data — a `#` in a GECOS field is part of the
+/// user's full name, not the start of a comment — which is the one place this
+/// parts company with [`read_hostnames`] and [`read_service_names`].
+///
+/// Nothing is deduplicated, and a file that cannot be read yields nothing: on
+/// the Windows host the differential corpus runs on there is no user database
+/// at all, so both actions correctly offer nothing there.
+fn read_colon_table_names(path: BStr<'_>) -> Vec<Str> {
+    let Ok(data) = std::fs::read(bytes::bytes_to_path(path)) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for line in data.split(|b| *b == b'\n') {
+        // `\r` is a blank, so a CRLF file's lines are not left with one glued to
+        // the end — it lands in the shell field, past the name, either way, but
+        // the leading-blank skip should treat it as bash's `isspace` does.
+        let line = match line.iter().position(|b| !b.is_ascii_whitespace()) {
+            Some(i) => line.get(i..).unwrap_or_default(),
+            // Blank or empty: nothing to parse.
+            None => continue,
+        };
+        if line.first() == Some(&b'#') {
+            continue;
+        }
+        let name = match line.iter().position(|b| *b == b':') {
+            Some(i) => line.get(..i).unwrap_or_default(),
+            // A record with no colon at all is still a name to bash's parser
+            // only if it parses; it does not, so it contributes nothing.
+            None => continue,
+        };
+        if !name.is_empty() {
+            names.push(name.to_vec());
+        }
+    }
+    names
+}
+
+/// The home directory `user` is given in one `/etc/passwd`-format file — field
+/// 5 of `name:passwd:uid:gid:gecos:home:shell` — or `None` if the file has no
+/// such user.
+///
+/// This is bash's `getpwnam`, which is what a `~user` tilde-prefix resolves
+/// through. The first matching record wins, as it does for `getpwnam`; a
+/// duplicated user name is a broken database either way.
+///
+/// Comment and blank lines are skipped on the same rule as
+/// [`read_colon_table_names`]. A record with fewer than six fields has no home
+/// directory to give and so does not match, which keeps a truncated line from
+/// expanding a tilde to the empty string.
+fn read_passwd_home(path: BStr<'_>, user: BStr<'_>) -> Option<Str> {
+    let data = std::fs::read(bytes::bytes_to_path(path)).ok()?;
+    for line in data.split(|b| *b == b'\n') {
+        let line = match line.iter().position(|b| !b.is_ascii_whitespace()) {
+            Some(i) => line.get(i..).unwrap_or_default(),
+            None => continue,
+        };
+        if line.first() == Some(&b'#') {
+            continue;
+        }
+        let mut fields = line.split(|b| *b == b':');
+        if fields.next() != Some(user) {
+            continue;
+        }
+        // The name is already consumed, so the iterator sits at the password
+        // field; password, uid, gid and gecos are the four before the home
+        // directory, which is therefore `nth(4)`.
+        if let Some(home) = fields.nth(4) {
+            return Some(home.to_vec());
+        }
+    }
+    None
 }
 
 /// The ASCII syntax view of a scanned character, mirroring `lexer::syn`.
@@ -38093,6 +38221,88 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(read_service_names(b"no/such/file/at/all").is_empty());
     }
 
+    /// Write `src` to a fresh temp file, hand its path to `f`, then remove it.
+    fn with_temp_file<T>(tag: &str, src: &str, f: impl FnOnce(&[u8]) -> T) -> T {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let p =
+            std::env::temp_dir().join(format!("osh_{tag}_{}_{nanos}.txt", std::process::id()));
+        std::fs::write(&p, src).expect("write");
+        let got = f(p.to_string_lossy().replace('\\', "/").as_bytes());
+        std::fs::remove_file(&p).ok();
+        got
+    }
+
+    #[test]
+    fn passwd_and_group_names_are_the_first_colon_field() {
+        let names = |src: &str| {
+            with_temp_file("pw", src, |p| {
+                read_colon_table_names(p)
+                    .iter()
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .collect::<Vec<_>>()
+            })
+        };
+        // A passwd record's name is everything before the first colon.
+        assert_eq!(names("root:x:0:0:root:/root:/bin/sh\namy:x:1000:1000::/home/amy:/bin/sh\n"), [
+            "root", "amy"
+        ]);
+        // A group record has fewer fields but the same first one.
+        assert_eq!(names("wheel:x:10:amy,bo\nusers:x:100:\n"), ["wheel", "users"]);
+        // Blank lines, and lines whose first non-blank byte is `#`, are skipped
+        // — that is glibc's whole comment rule for these files.
+        assert_eq!(names("\n   \n# a comment\n\t# an indented one\nroot:x:0:0::/:/sh\n"), ["root"]);
+        // A `#` anywhere else is data: it is part of a GECOS field, not the
+        // start of a comment, so the record still counts.
+        assert_eq!(names("bo:x:1:1:B #1:/home/bo:/bin/sh\n"), ["bo"]);
+        // Leading blanks are skipped rather than made part of the name.
+        assert_eq!(names("  amy:x:1:1::/home/amy:/bin/sh\n"), ["amy"]);
+        // A record with no colon does not parse, and an empty name is no name.
+        assert_eq!(names("nonsense\n:x:0:0::/:/sh\namy:x:1:1::/:/sh\n"), ["amy"]);
+        // Nothing is deduplicated, and a file with no final newline still
+        // yields its last record.
+        assert_eq!(names("a:x:1:1::/:/sh\na:x:2:2::/:/sh"), ["a", "a"]);
+        // A file that cannot be read is simply no names.
+        assert!(read_colon_table_names(b"no/such/file/at/all").is_empty());
+    }
+
+    #[test]
+    fn a_tilde_prefix_names_a_user_whose_home_comes_from_the_passwd_file() {
+        let home = |user: &str| {
+            with_temp_file(
+                "pwhome",
+                "# a comment\nroot:x:0:0:root:/root:/bin/sh\n\
+                 amy:x:1000:1000:Amy #1:/home/amy:/bin/sh\n\
+                 amy:x:1001:1001::/home/other:/bin/sh\n\
+                 nohome:x:1:1:::/bin/sh\n\
+                 short:x:1:1\n",
+                |p| {
+                    read_passwd_home(p, user.as_bytes())
+                        .map(|h| String::from_utf8_lossy(&h).into_owned())
+                },
+            )
+        };
+        // Field 5 is the home directory — past the password, uid, gid and a
+        // GECOS field that may itself contain a `#`.
+        assert_eq!(home("root").as_deref(), Some("/root"));
+        // The first matching record wins, as it does for `getpwnam`, so the
+        // second `amy` never answers.
+        assert_eq!(home("amy").as_deref(), Some("/home/amy"));
+        assert_eq!(home("nosuch"), None);
+        // An *empty* home field is still an answer — `getpwnam` succeeds and
+        // hands back an empty `pw_dir`, so `~nohome/x` expands to `/x`.
+        assert_eq!(home("nohome").as_deref(), Some(""));
+        // A record with too few fields does not parse at all, so it does not
+        // match and the tilde is left alone.
+        assert_eq!(home("short"), None);
+        // A comment line is not a user, even one whose text looks like a name.
+        assert_eq!(home("# a comment"), None);
+        // No database at all is simply no answer.
+        assert_eq!(read_passwd_home(b"no/such/file/at/all", b"root"), None);
+    }
+
     #[test]
     fn complete_register_and_print() {
         // A registered spec round-trips through `complete -p NAME` verbatim.
@@ -38632,8 +38842,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // ~+0 is the current directory-stack top (a real path, not literal).
         let out = run("echo ~+0").0;
         assert!(!out.starts_with('~'), "got: {out:?}");
-        // An unresolvable ~user prefix is left untouched.
+        // A `~user` prefix is looked up in the user database (see
+        // `read_passwd_home`); one that does not resolve is left untouched,
+        // rather than falling back on `$HOME`.
         assert_eq!(run("echo ~nosuchuser42/bin").0, "~nosuchuser42/bin\n");
+        assert_eq!(run("HOME=/home/me; echo ~nosuchuser42").0, "~nosuchuser42\n");
     }
 
     #[test]

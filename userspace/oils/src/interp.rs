@@ -22021,8 +22021,18 @@ impl Shell {
         }
         let mut assoc = false;
         let mut indexed = false;
+        // Export attribute: `-x` sets it, `+x` removes it. When both directions
+        // are given the removal wins, whichever order they came in — bash
+        // collects the two into separate `flags_on`/`flags_off` sets and applies
+        // "off" last, so `declare -x +x v=hi` leaves `v` unexported and a child
+        // never sees it.
         let mut export = false;
+        let mut unset_export = false;
+        // Readonly attribute: `-r` sets it. `+r` cannot take it off again —
+        // bash has no way to un-make a readonly variable — so it is a no-op on
+        // a name that is not readonly and a refusal on one that is.
         let mut readonly = false;
+        let mut unset_readonly = false;
         // Integer attribute: `-i` sets it, `+i` removes it.
         let mut integer = false;
         let mut unset_integer = false;
@@ -22060,8 +22070,20 @@ impl Shell {
                     match c {
                         b'A' => assoc = true,
                         b'a' => indexed = true,
-                        b'x' => export = true,
-                        b'r' => readonly = true,
+                        b'x' => {
+                            if enable {
+                                export = true;
+                            } else {
+                                unset_export = true;
+                            }
+                        }
+                        b'r' => {
+                            if enable {
+                                readonly = true;
+                            } else {
+                                unset_readonly = true;
+                            }
+                        }
                         b'i' => {
                             if enable {
                                 integer = true;
@@ -22349,6 +22371,21 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // `+r` asks for the one attribute bash cannot take off, so on a name
+            // that already has it the answer is the same refusal an assignment
+            // gets, and the operand is abandoned before any *other* flag is
+            // applied: `readonly x; declare -i +r x` leaves `x` un-integer. On a
+            // name that is not readonly it is a plain no-op, and the declaration
+            // proceeds as if the flag were absent — `declare +r fresh` still
+            // brings `fresh` into being. Checked before the local shadow below
+            // because that is where bash's own refusal lives: `local` will not
+            // shadow a readonly name either, so a `declare +r ro` inside a
+            // function reports it whichever of the two objects.
+            if unset_readonly && self.readonly.contains(base_name) {
+                self.perrln(&format!("{tag}: {base_name}: readonly variable"));
+                status = 1;
+                continue;
+            }
             // A variable the shell maintains refuses the value too — and, unlike
             // the readonly case, refuses the *attributes* along with it: the
             // operand is abandoned before any of them is applied, so
@@ -22546,11 +22583,14 @@ impl Shell {
                         status = 1;
                     }
                 }
-                // `-x`/`-r` on a subscripted target attach to the base array.
-                if export {
+                // `-x`/`-r` on a subscripted target attach to the base array,
+                // and `+x` clears the base array's export the same way.
+                if unset_export {
+                    self.exported.remove(base_name);
+                } else if export {
                     self.exported.insert(base_name.to_string());
                 }
-                if readonly {
+                if readonly && !unset_readonly {
                     self.readonly.insert(base_name.to_string());
                 }
                 continue;
@@ -22662,12 +22702,22 @@ impl Shell {
                 // [`Shell::declared`].
                 self.declared.insert(name.to_string());
             }
-            if export {
+            // See `unset_export` above: the removal wins over `-x` in the same
+            // command, in either order.
+            if unset_export {
+                self.exported.remove(name);
+            } else if export {
                 self.exported.insert(name.to_string());
             }
             // Mark readonly *after* the (initial) value is bound so the value is
             // accepted; subsequent assignments then hit the guard above.
-            if readonly {
+            //
+            // `+r` in the same command cancels it. That is not a contradiction
+            // of the refusal above: bash judges `+r` against the attribute the
+            // name *arrived* with and then clears whatever the flags set, so
+            // `declare -r +r fresh=5` leaves an ordinary variable while
+            // `readonly ro; declare -r +r ro` is refused.
+            if readonly && !unset_readonly {
                 self.readonly.insert(name.to_string());
             }
         }
@@ -22836,6 +22886,14 @@ impl Shell {
         // `readonly`/`export` imply the corresponding attribute on every name.
         let mut readonly = cmd == "readonly";
         let mut export = cmd == "export";
+        // `+x`/`+r` cancel the attribute the same command's `-x`/`-r` set — see
+        // `unset_export`/`unset_readonly` in
+        // [`Shell::builtin_declare_scoped`]. `+r` needs no *refusal* here: a
+        // compound operand naming an already-readonly variable is turned away
+        // by the readonly guard in `apply_assignment` during phase 1, before
+        // these attributes are reached.
+        let mut unset_export = false;
+        let mut unset_readonly = false;
         let mut nameref = false;
         let mut unset_nameref = false;
         let mut trace = false;
@@ -22871,7 +22929,9 @@ impl Shell {
                         }
                     }
                     b'r' if enable => readonly = true,
+                    b'r' => unset_readonly = true,
                     b'x' if enable => export = true,
+                    b'x' => unset_export = true,
                     b'n' if enable => nameref = true,
                     b'n' => unset_nameref = true,
                     b't' if enable => trace = true,
@@ -23179,10 +23239,12 @@ impl Shell {
             } else if unset_trace {
                 self.trace_attr.remove(&a.name);
             }
-            if export {
+            if unset_export {
+                self.exported.remove(&a.name);
+            } else if export {
                 self.exported.insert(a.name.clone());
             }
-            if readonly {
+            if readonly && !unset_readonly {
                 self.readonly.insert(a.name.clone());
             }
         }
@@ -43245,6 +43307,88 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -n r=nope; export r=5; declare -p nope").0,
             "declare -x nope=\"5\"\n"
+        );
+    }
+
+    /// `+x` takes the export attribute off; `+r` can take nothing off, so it
+    /// either does nothing or refuses.
+    #[test]
+    fn the_off_direction_of_export_removes_and_of_readonly_refuses() {
+        // `+x` removes what `-x`/`export` put on, and leaves the rest of the
+        // operand — assignment included — to run normally.
+        assert_eq!(
+            run("x=5; export x; declare +x x; echo \"rc=$?\"; declare -p x").0,
+            "rc=0\ndeclare -- x=\"5\"\n"
+        );
+        assert_eq!(
+            run("x=5; export x; declare -i +x x=7; declare -p x").0,
+            "declare -i x=\"7\"\n"
+        );
+        // On a name that was never exported it is simply absent.
+        assert_eq!(
+            run("x=5; declare +x x; echo \"rc=$?\"; declare -p x").0,
+            "rc=0\ndeclare -- x=\"5\"\n"
+        );
+        // The base array of a subscripted operand, and a compound operand's
+        // array, are reached the same way.
+        assert_eq!(
+            run("declare -a a=(1 2); export a; declare +x a[0]=9; declare -p a").0,
+            "declare -a a=([0]=\"9\" [1]=\"2\")\n"
+        );
+        assert_eq!(
+            run("declare -a a=(1 2); export a; declare +x a=(3); declare -p a").0,
+            "declare -a a=([0]=\"3\")\n"
+        );
+        // And a reference is followed to its target, as every other flag is.
+        assert_eq!(
+            run("y=5; export y; declare -n r=y; declare +x r; declare -p y r").0,
+            "declare -- y=\"5\"\ndeclare -n r=\"y\"\n"
+        );
+        // The removal is applied after the additions, so it wins over an `-x`
+        // in the same command whichever order the two came in.
+        for src in [
+            "declare -x +x v=hi; declare -p v",
+            "declare +x -x v=hi; declare -p v",
+        ] {
+            assert_eq!(run(src).0, "declare -- v=\"hi\"\n");
+        }
+        // `+r` on a name that is not readonly does nothing at all — the
+        // declaration is otherwise ordinary, and still brings a bare name into
+        // being.
+        assert_eq!(
+            run("declare -i +r x=3+4; echo \"rc=$?\"; declare -p x").0,
+            "rc=0\ndeclare -i x=\"7\"\n"
+        );
+        assert_eq!(
+            run("declare +r nope; echo \"rc=$?\"; declare -p nope").0,
+            "rc=0\ndeclare -- nope\n"
+        );
+        // On a readonly name it is refused, and the operand is abandoned before
+        // any other flag lands (`x` does not become an integer).
+        let (out, _) = run("x=5; readonly x; declare -i +r x; echo \"rc=$?\"; declare -p x");
+        assert_eq!(out, "rc=1\ndeclare -r x=\"5\"\n");
+        // The refusal is judged against the attribute the name arrived with, so
+        // the command's own `-r` neither triggers it nor escapes it: a name that
+        // arrived plain ends up plain, in either order.
+        for src in [
+            "declare -r +r x=5; echo \"rc=$?\"; declare -p x",
+            "declare +r -r x=5; echo \"rc=$?\"; declare -p x",
+        ] {
+            assert_eq!(run(src).0, "rc=0\ndeclare -- x=\"5\"\n");
+        }
+        assert_eq!(
+            run("x=5; readonly x; declare -r +r x; echo \"rc=$?\"; declare -p x").0,
+            "rc=1\ndeclare -r x=\"5\"\n"
+        );
+        // A reference is followed here too, and an exported readonly still
+        // loses its export to a `+x` — it is only the `+r` that cannot land.
+        assert_eq!(
+            run("y=5; readonly y; declare -n r=y; declare +r r; echo \"rc=$?\"").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("x=5; export x; readonly x; declare +x x; echo \"rc=$?\"; declare -p x").0,
+            "rc=0\ndeclare -r x=\"5\"\n"
         );
     }
 

@@ -6301,7 +6301,7 @@ untouched, where a subscripted operand with any other flag array-ifies it
 `declare -ax w`). Low priority: `+n` combined with other flags is a shape
 almost no script writes.
 
-### TD-OILS-DECL-PLUS-X-R-SETS-INSTEAD-OF-CLEARING. `declare +x` / `declare +r` set the attribute they should remove — 2026-07-31 — OPEN
+### TD-OILS-DECL-PLUS-X-R-SETS-INSTEAD-OF-CLEARING. `declare +x` / `declare +r` set the attribute they should remove — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped`'s
 flag loop, whose `b'x' => export = true` and `b'r' => readonly = true`
@@ -6323,6 +6323,129 @@ left `r` exported).
 already has: `+x` clears the export attribute, and `+r` is a no-op on a
 name that is not readonly and reports `{tag}: {name}: readonly variable`
 with status 1 on one that is (bash cannot remove the attribute at all).
+
+**✅ RESOLVED 2026-07-31.** Both letters now carry an `unset_export` /
+`unset_readonly` companion, and the rule measured against bash 5.2.37 is:
+
+* **The two directions are separate sets, and "off" is applied last.**
+  `declare -x +x v=hi` and `declare +x -x v=hi` both leave `v`
+  unexported — a child never sees it — and `declare -r +r x=5` leaves an
+  ordinary variable. So the applications are gated `if unset_export {
+  remove } else if export { insert }` and `if readonly && !unset_readonly
+  { insert }` rather than by flag order.
+* **`+x` really removes.** It reaches the base array of a subscripted
+  operand (`declare +x a[0]=9`), a compound operand's array (phase 3 of
+  `exec_declare_with_arrays_scoped`), and a nameref's target, exactly as
+  `-x` does — and it strips the export off a *readonly* name too, since
+  only the `+r` half is refused.
+* **`+r` never removes anything.** On a name that is not readonly it is a
+  plain no-op and the declaration proceeds as if absent (`declare +r
+  nope` still brings `nope` into being). On one that is, it reports
+  `{tag}: {name}: readonly variable` with status 1 and abandons the
+  operand *before* any other flag lands, so `readonly x; declare -i +r x`
+  leaves `x` un-integer.
+* **The refusal is judged against the attribute the name arrived with**,
+  which is why `-r +r` on a fresh name cancels out silently while
+  `readonly ro; declare -r +r ro` is refused. Placing the check just
+  after the existing readonly-assignment guard (and so before the local
+  shadow) also gets the in-function cases right for free: bash will not
+  shadow a readonly name with a `local` either, and the diagnostic it
+  emits there has the same `{tag}: {name}: readonly variable` shape.
+
+Coverage: `userspace/oils/tests/corpus/declare-plus-flags.sh` (25
+sections, matching bash) and the unit test
+`the_off_direction_of_export_removes_and_of_readonly_refuses`.
+
+Two neighbouring divergences found while measuring this are **not** part
+of the fix and are tracked separately below:
+TD-OILS-DECL-PLUS-A-DESTROYS-ARRAYS (`+a`/`+A`) and
+TD-OILS-DECL-FLAG-OFF-LOSES-TO-ON (`-i +i`, `-n +n`, `-t +t`).
+
+### TD-OILS-DECL-PLUS-A-DESTROYS-ARRAYS. `declare +a` / `declare +A` make an array instead of refusing to unmake one — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped`'s
+flag loop, whose `b'A' => assoc = true` and `b'a' => indexed = true` arms
+still ignore the `enable` flag (the sibling `b'x'`/`b'r'` arms were fixed
+under TD-OILS-DECL-PLUS-X-R-SETS-INSTEAD-OF-CLEARING); and the same two
+arms in `exec_declare_with_arrays_scoped`'s flag loop.
+
+bash cannot un-make an array either, so `+a`/`+A` is a refusal, not a
+removal — but only when the letter matches the variable's *actual* kind.
+osh instead reads the letter as its `-` form, which converts the variable
+and can silently drop data:
+
+```sh
+declare +a q; declare -p q                       # bash declare -- q      osh declare -a q
+declare -a q=(1 2); declare +a q; echo "rc=$?"   # bash declare: q: cannot destroy array
+                                                 #      variables in this way, rc=1
+                                                 # osh  (silent), rc=0
+declare +A q5=(1 2); declare -p q5               # bash declare -a q5=([0]="1" [1]="2")
+                                                 # osh  declare -A q5=([1]="2" )   <-- lost [0]
+declare -A m=([k]=1); declare +a m; echo "rc=$?" # bash rc=0 (no-op: m is not indexed)
+```
+
+**Measured rule (bash 5.2.37).**
+
+* `+a` refuses only when the name really is an *indexed* array, `+A` only
+  when it is *associative*; on anything else (scalar, unset, the other
+  kind) it is a no-op that leaves the declaration otherwise ordinary.
+* The message is `{tag}: {name}: cannot destroy array variables in this
+  way`, status 1, operand abandoned before any other flag lands
+  (`declare -a q=(1 2); declare -i +a q` leaves `q` un-integer).
+* The name it quotes is the **operand as written**, even when it was
+  resolved through a nameref: `declare -a arr=(1 2); declare -n r=arr;
+  declare +a r` says `r`, not `arr`. (The `+r` refusal quotes the
+  resolved target instead — see TD-OILS-READONLY-REFUSAL-NAMES-TARGET.)
+* It fires *after* the kind the same command establishes, so `declare -a
+  +a fresh` is refused and leaves `declare -a fresh` behind, and after a
+  *compound* literal has bound (`declare +a q=(1 2)` leaves the full
+  array and then refuses) but *before* a scalar value is stored
+  (`declare -a +a q=5` leaves `declare -a q=()`).
+* It fires *before* the array-kind conflict check: `declare -a q=(1 2);
+  declare -A +a q` says "cannot destroy", not "cannot convert".
+* A readonly refusal outranks it: `declare -a q=(1 2); readonly q;
+  declare +ar q` says `q: readonly variable`.
+* Inside a function the local shadow comes first, so `declare -a q=(1 2);
+  f() { declare +a q; }` is a no-op leaving a fresh `declare -- q`, while
+  `f() { local -a q=(1 2); declare +a q; }` (same frame, already bound)
+  and `f() { declare -g +a q; }` both refuse.
+
+**Proper fix.** Add `unset_indexed`/`unset_assoc` beside the existing
+`unset_export`/`unset_readonly`, give `b'a'`/`b'A'` the `enable` test in
+both flag loops, and put the refusal in `builtin_declare_scoped` just
+after `array_kind_apply` (which is after the local shadow and before the
+kind-conflict check and the value store), quoting the pre-resolution
+operand name. Mirror it in `exec_declare_with_arrays_scoped`'s phase 3
+for compound operands. Probes: `target/dvscratch/px4.sh`,
+`px5.sh`, `px8.sh`.
+
+### TD-OILS-DECL-FLAG-OFF-LOSES-TO-ON. `-i +i` in one command sets the attribute where bash clears it — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the attribute-application
+sites in `builtin_declare_scoped` and `exec_declare_with_arrays_scoped`,
+written `if integer { insert } else if unset_integer { remove }` (and the
+same shape for `nameref` and `trace`). The "on" direction wins where bash
+applies its `flags_on` set first and its `flags_off` set last, so the
+removal should win — as it now does for `-x +x` and `-r +r`.
+
+```sh
+x=5; declare -i +i x; declare -p x            # bash declare -- x="5"   osh declare -i x="5"
+x=5; declare +i -i x; declare -p x            # bash declare -- x="5"   osh declare -i x="5"
+x=5; declare -t +t x; declare -p x            # bash declare -- x="5"   osh declare -t x="5"
+w=1; declare -n +n r=w; declare -p r          # bash declare -- r="w"   osh declare -n r="w"
+x=AB; declare -l +l x; declare -p x           # bash declare -- x="AB"  osh declare -l x="AB"
+```
+
+The case letters need their own measurement: `case_dir` is currently
+*last-wins* rather than off-wins, and the three-way exclusivity of
+`-l`/`-u`/`-c` plus the existing `case_conflict` cancellation rule
+interact with it. Only `-l +l` has been measured (bash clears); `+l -l`,
+`-l +u` and friends have not.
+
+**Proper fix.** Flip each pair to `if unset_X { remove } else if X {
+insert }`, and measure the case-letter matrix before touching
+`case_dir`. Low priority: writing both directions of the same letter in
+one command is a shape almost no script uses.
 
 ### TD-OILS-ATTR-ASSIGN-BYPASSES-DYNVAR. `export NAME=v` / `readonly NAME=v` store straight into the variable table, so a dynamic special loses its value function — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

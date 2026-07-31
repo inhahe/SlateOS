@@ -64,7 +64,12 @@ done
 
 echo "=== += appends to the cell, or adds to it under the -i"
 ( SECONDS=100; SECONDS+=5; declare -p | g SECONDS; echo "read=$SECONDS" )
-( : $SECONDS; SECONDS=100; SECONDS+=5; declare -p | g SECONDS; echo "read=$SECONDS" )
+# Once `SECONDS` has been read it is a live counter again, so this one reads
+# back a *number* counting up from 105 rather than the stored text. Exactly
+# which number depends on how long the `declare -p` pipeline took — printing it
+# made this case fail whenever a second happened to tick — so answer with a
+# window instead. The un-looked-up form above reads 1005 and would print 0.
+( : $SECONDS; SECONDS=100; SECONDS+=5; declare -p | g SECONDS; echo "live=$(( SECONDS >= 105 && SECONDS < 115 ))" )
 ( RANDOM=100;  RANDOM+=5;  declare -p | g RANDOM )
 ( LINENO=100;  LINENO+=5;  declare -p | g LINENO )
 ( HISTCMD=100; HISTCMD+=5; declare -p | g HISTCMD )

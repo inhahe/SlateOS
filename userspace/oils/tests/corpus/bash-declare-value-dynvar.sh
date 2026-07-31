@@ -33,8 +33,12 @@ echo "=== so a computed name keeps computing"
 
 echo "=== but a local of one is an ordinary variable"
 ( f() { local BASH_SUBSHELL=9; echo "[$BASH_SUBSHELL]"; }; f; echo "[$BASH_SUBSHELL]" ) 2>&1
-( f() { local SECONDS=9; echo "[$SECONDS]"; }; f; echo "[$SECONDS]" ) 2>&1
-( f() { local SECONDS; SECONDS=7; echo "[$SECONDS]"; }; f; echo "[$SECONDS]" ) 2>&1
+# What the *outer* read has to show is that the shell's own live counter is back
+# rather than the 9 the frame held. Its actual value is however long this script
+# has been running — 0 or 1 depending on the machine, which made this case flake
+# — so ask whether it is a small elapsed count instead of printing it.
+( f() { local SECONDS=9; echo "[$SECONDS]"; }; f; echo "[$(( SECONDS < 5 ))]" ) 2>&1
+( f() { local SECONDS; SECONDS=7; echo "[$SECONDS]"; }; f; echo "[$(( SECONDS < 5 ))]" ) 2>&1
 ( f() { local SECONDS; echo "[${SECONDS-UNSET}]"; }; f ) 2>&1
 ( f() { local LINENO=7; echo "[$LINENO]"; }; f ) 2>&1
 # Only `-g` names the global, which is the computed one; a bare `declare` in a

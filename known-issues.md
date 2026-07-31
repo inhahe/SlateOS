@@ -659,6 +659,28 @@ job cases:
   durations have to *order* the jobs reliably, and squeezing them would trade a
   load flake for a timing flake.
 
+### TD-OILS-CORPUS-XTRACE-PIPELINE-FLAKE. `tests/corpus/xtrace-pipeline.sh` failed once in a full run and has not reproduced — 2026-07-31 — OPEN (unreproduced)
+
+**Symptom.** One full `scripts/osh-bash-diff.py` run reported
+`172 matched, 0 waived, 1 failed` with `X xtrace-pipeline`. Re-running that
+case alone gave `1 matched, 0 failed`, and the very next full run gave
+`173 matched, 0 failed`. Not a timeout — both shells produced complete
+output.
+
+**Why it is plausible.** osh runs a pipeline whose stages include a
+builtin on a *threaded* executor rather than by forking, so two stages'
+`set -x` lines are written by two threads to one stderr. bash forks, so
+its ordering is fixed by process. If the interleaving is what differed,
+it is a real (if benign) nondeterminism in osh and not just a flaky test.
+
+**What was ruled out.** The section's five pipelines
+(`true | cat`, `cat /dev/null | true`, `true | true`, `true | cat | true`,
+`A=1 true | B=2 true`) were run 40× serially and 150× across six
+concurrent processes: byte-identical every time. So either the flake is
+elsewhere in the case, or it needs load the harness produces and this did
+not. The failing run's diff was not captured — the next occurrence should
+be, with both shells' output side by side, before any fix is attempted.
+
 ### TD-OILS-CORPUS-JOBS-LIFETIME-RACE. `tests/corpus/jobs-lifetime.sh` raced on a 0.2 s margin — ✅ RESOLVED 2026-07-30 (flaky test, not a shell bug)
 
 **Where:** `userspace/oils/tests/corpus/jobs-lifetime.sh`, the two lines under
@@ -5999,7 +6021,7 @@ that). For a subscripted operand that does carry a value, emit
 `nameref_attr`, and declare `NAME` itself. Low priority: a subscripted
 operand on a nameref is a shape almost no script writes.
 
-### TD-OILS-ATTR-ASSIGN-BYPASSES-DYNVAR. `export NAME=v` / `readonly NAME=v` store straight into the variable table, so a dynamic special loses its value function — 2026-07-31 — OPEN
+### TD-OILS-ATTR-ASSIGN-BYPASSES-DYNVAR. `export NAME=v` / `readonly NAME=v` store straight into the variable table, so a dynamic special loses its value function — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the `export` and `readonly`
 operand loops, which perform their store with `set_scalar_store`
@@ -6036,6 +6058,68 @@ of `scalar_store`. The care needed is that `export`/`readonly` have their
 own refusal shapes for a readonly target and for `noassign` names, which
 must keep reporting what they report today (see `Shell::noassign`) rather
 than inheriting `apply_assignment`'s.
+
+**✅ RESOLVED 2026-07-31.** Both loops now store through the new
+`Shell::attr_store`, which builds the `Assignment` and calls
+`apply_assignment` traced. The two refusals still come first and still
+`continue` past the store, so nothing reaches `apply_assignment` that it
+would have to refuse a second time.
+
+The dynamic-variable gap was only the most visible symptom. Writing the
+table directly was skipping the whole assignment path, so the fix also
+picked up four things the entry did not name:
+
+* the **integer attribute** now evaluates the value — `declare -i q;
+  export q=3+4` stores 7 rather than the literal `3+4`, and `export
+  q+=3+4` on `q=1` *adds* to 8 rather than concatenating to `13+4`;
+* the **case attributes** fold it (`declare -u q; export q=ab` → `AB`);
+* a malformed `-i` value is an arithmetic **syntax error** that discards
+  the command, so `export q=3+ ok=1` leaves `ok` unset and the script
+  unrun. `export`/`readonly` were added to the `arith_cmd` tag table so
+  the complaint names them (`export: 3+: syntax error: operand
+  expected`), as it already named `declare`;
+* **`set -x`** emits the inner assignment's own trace line under the
+  builtin's, which bash does and osh did not.
+
+One subtlety the fix has to carry: the operand's value arrived *already
+expanded*, so it travels into the `Assignment` as a `SingleQuoted` part
+rather than a `Literal` one. An unquoted literal would be tilde-expanded a
+second time and `export Q=~/a:'~/b'` — whose second tilde the quotes made
+literal — would come back `/h/a:/h/b`. Quoting does not shield it from the
+attributes, which apply to the stored value.
+
+**Coverage.** New corpus case `tests/corpus/export-readonly-store.sh` and
+one unit test. Full differential corpus: 173 matched, 0 failed.
+
+### TD-OILS-BASH-SUBSHELL-ASSIGNABLE. `BASH_SUBSHELL` discards an assignment; bash lets it move the counter — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the dynamic-special table row
+for `BASH_SUBSHELL`, whose `DynAssign` is `Discard`, and whose value
+function returns the current subshell depth outright.
+
+bash's `BASH_SUBSHELL` is not a read-only reporter: it is the counter
+itself, so an assignment moves it and every subshell entered afterwards
+counts up from the new value. A non-numeric value reads as 0, the way
+`atoi` does.
+
+```sh
+echo "[$BASH_SUBSHELL]"                        # both [0]
+BASH_SUBSHELL=9
+echo "[$BASH_SUBSHELL]"                        # bash [9]   osh [0]
+( echo "[$BASH_SUBSHELL]"; ( echo "[$BASH_SUBSHELL]" ) )   # bash [10] [11]   osh [1] [2]
+( BASH_SUBSHELL=zz; echo "[$BASH_SUBSHELL]" )  # bash [0]   osh [1]
+declare -p BASH_SUBSHELL                       # bash declare -- BASH_SUBSHELL="9"   osh "0"
+```
+
+`unset BASH_SUBSHELL` already agrees (both leave the name empty), and the
+unassigned readings agree, so this is exactly the assignment.
+
+**Proper fix.** Give the row `DynAssign::Cell` and make the value function
+`cell + depth`, storing the cell as the assigned number *minus the depth
+the assignment happened at* — which is what "the assignment sets the
+counter" means. Check: assigning 9 at depth 1 stores 8, reads 9 there, 10
+one level in, 11 two; assigning `zz` at depth 1 stores −1 and reads 0.
+Low priority: scripts read `BASH_SUBSHELL`, they do not write it.
 
 ### TD-OILS-NAMEREF-VALUELESS-VALIDATION. `declare -n NAME` on an already-set variable does not validate its value — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

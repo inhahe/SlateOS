@@ -15976,6 +15976,12 @@ impl Shell {
             "declare" => Some(Cow::Borrowed(b"declare")),
             "typeset" => Some(Cow::Borrowed(b"typeset")),
             "local" => Some(Cow::Borrowed(b"local")),
+            // `export`/`readonly` store through the same assignment machinery
+            // (see [`Shell::attr_store`]), so a malformed `-i` value is blamed
+            // on them by name: `declare -i q; export q=3+` reports
+            // `export: 3+: syntax error: operand expected`.
+            "export" => Some(Cow::Borrowed(b"export")),
+            "readonly" => Some(Cow::Borrowed(b"readonly")),
             _ => None,
         };
         let status = match name {
@@ -20669,6 +20675,48 @@ impl Shell {
         AttrOperand::Done { status: 0 }
     }
 
+    /// Perform the store an `export`/`readonly` operand carries.
+    ///
+    /// bash reaches the same code a plain `name=value` does, so everything that
+    /// path does happens here too, and none of it can be had by writing the
+    /// table directly: the integer attribute evaluates the value
+    /// (`declare -i q; export q=3+4` stores 7, and `export q+=3+4` *adds* rather
+    /// than concatenating), the case attributes fold it (`declare -u q;
+    /// export q=ab` stores `AB`), a dynamic special keeps its value function
+    /// (`export SECONDS=100` really does set the clock), an existing array is
+    /// reached at element/key 0, and `set -x` traces the inner assignment on a
+    /// line of its own below the builtin's.
+    ///
+    /// Returns `false` when the value's arithmetic was malformed, which discards
+    /// the whole command: `export q=3+ ok=1` leaves `ok` unset and the rest of
+    /// the script unrun, exactly as the same operand does under `declare`.
+    ///
+    /// The refusals these two builtins have of their own — a readonly target, a
+    /// name the shell maintains — are checked by the callers *before* this, and
+    /// report their own way (see [`Shell::noassign`]), so nothing gets here that
+    /// `apply_assignment` would have to refuse a second time.
+    fn attr_store(&mut self, name: &str, append: bool, value: Str) -> bool {
+        let assignment = Assignment {
+            name: name.to_string(),
+            index: None,
+            append,
+            // The operand's value arrived already expanded, so it travels as a
+            // *quoted* literal: an unquoted one would be tilde-expanded a
+            // second time, and `export Q=~/a:'~/b'` — whose second tilde the
+            // quotes made literal — would come back `/h/a:/h/b`. Quoting does
+            // not shield it from the attributes; those apply to the stored
+            // value, so `declare -i q; export q='3+4'` still stores 7.
+            value: AssignRhs::Scalar(Word {
+                parts: vec![WordPart::SingleQuoted {
+                    text: value,
+                    escaped: false,
+                }],
+            }),
+        };
+        self.apply_assignment(&assignment, true);
+        self.discard_error.is_none()
+    }
+
     /// The `builtin: ` the readonly-assignment diagnostic of `export` and
     /// `readonly` carries when `-a`/`-A` is in play, and the empty string
     /// otherwise.
@@ -20798,19 +20846,9 @@ impl Shell {
                 if assoc || indexed {
                     self.array_kind_apply(&k, assoc);
                 }
-                // Both halves go through the array-aware store, so an operand
-                // naming an existing array reaches element/key 0 — the same
-                // routing a bare `name=value` and `readonly name=value` follow.
-                // Writing `vars` directly instead would park the value in a slot
-                // no expansion of an array name ever reads, silently losing it.
-                let stored = if append {
-                    let mut cur = self.scalar_store(&k).unwrap_or_default();
-                    cur.extend_from_slice(&v);
-                    cur
-                } else {
-                    v
-                };
-                self.set_scalar_store(&k, stored);
+                if !self.attr_store(&k, append, v) {
+                    break;
+                }
                 if unexport {
                     self.exported.remove(&k);
                 } else {
@@ -22803,16 +22841,9 @@ impl Shell {
                 self.array_kind_apply(&name, assoc);
             }
             if let Some(v) = value {
-                let stored = if append {
-                    let mut cur = self.scalar_store(&name).unwrap_or_default();
-                    cur.extend_from_slice(&v);
-                    cur
-                } else {
-                    v
-                };
-                // Routes to element/key 0 when the name is an array — the same
-                // rule a bare `name=value` follows.
-                self.set_scalar_store(&name, stored);
+                if !self.attr_store(&name, append, v) {
+                    break;
+                }
             } else if !self.vars.contains_key(&name)
                 && !self.arrays.contains_key(&name)
                 && !self.assoc.contains_key(&name)
@@ -42343,6 +42374,54 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // element 0 a negative subscript counts back from comes from.
         assert_eq!(run("w=5; w[1]=9; declare -p w").0, "declare -a w=([0]=\"5\" [1]=\"9\")\n");
         assert_eq!(run("w=5; w[-1]=9; declare -p w").0, "declare -a w=([0]=\"9\")\n");
+    }
+
+    #[test]
+    fn an_export_or_readonly_value_goes_through_the_assignment() {
+        for tag in ["export", "readonly"] {
+            let x = if tag == "export" { 'x' } else { 'r' };
+            // The integer attribute evaluates the value, and `+=` *adds*.
+            assert_eq!(
+                run(&format!("declare -i q; {tag} q=3+4; declare -p q")).0,
+                format!("declare -i{x} q=\"7\"\n"),
+                "{tag}"
+            );
+            assert_eq!(
+                run(&format!("declare -i q=1; {tag} q+=3+4; declare -p q")).0,
+                format!("declare -i{x} q=\"8\"\n"),
+                "{tag}"
+            );
+            // The case attributes fold it.
+            assert_eq!(
+                run(&format!("declare -u q; {tag} q=ab; declare -p q")).0,
+                format!("declare -{x}u q=\"AB\"\n"),
+                "{tag}"
+            );
+            // An existing array is reached at element 0, not beside it.
+            assert_eq!(
+                run(&format!("declare -a a=(1 2); {tag} a=zz; declare -p a")).0,
+                format!("declare -a{x} a=([0]=\"zz\" [1]=\"2\")\n"),
+                "{tag}"
+            );
+            // A malformed `-i` value is an arithmetic syntax error, which
+            // discards the whole command — later operands included.
+            assert_eq!(run(&format!("declare -i q; {tag} q=3+ ok=1; echo un")).0, "", "{tag}");
+        }
+        // A dynamic special keeps its value function.
+        assert_eq!(run("export SECONDS=100; echo \"[$SECONDS]\"").0, "[100]\n");
+        assert!(run("export HISTCMD=9; declare -p HISTCMD").0.starts_with("declare -ix HISTCMD="));
+        // (`set -x` traces the assignment as well as the builtin, which the
+        // harness cannot see — stderr goes to the terminal. Covered by
+        // tests/corpus/export-readonly-store.sh.)
+        // A value that arrived expanded is not expanded again.
+        assert_eq!(run("HOME=/h; export Q=~/a:'~/b'; echo \"$Q\"").0, "/h/a:~/b\n");
+        assert_eq!(run("export S='$notavar'; echo \"$S\"").0, "$notavar\n");
+        // The refusals these two have of their own still come first: the value
+        // is refused, the attribute is applied anyway.
+        assert_eq!(
+            run("readonly q=1; export q=2; echo \"rc=$?\"; declare -p q").0,
+            "rc=1\ndeclare -rx q=\"1\"\n"
+        );
     }
 
     #[test]

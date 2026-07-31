@@ -23902,8 +23902,11 @@ impl Shell {
                 // `$HOSTFILE`, or `/etc/hosts` (see
                 // [`Shell::compgen_hostnames`]).
                 "hostname" => cands.extend(self.compgen_hostnames()),
-                // binding/group/service/user need either a live readline or a
-                // host database osh has neither of.
+                // The first field of each `/etc/services` entry (see
+                // [`Shell::compgen_service_names`]).
+                "service" => cands.extend(self.compgen_service_names()),
+                // binding/group/user need either a live readline or a user
+                // database osh has neither of.
                 _ => {}
             }
         }
@@ -24074,6 +24077,22 @@ impl Shell {
             self.hostname_source = Some(cur);
         }
         self.hostname_list.clone()
+    }
+
+    /// The service names the `service` (`-s`) action offers — the first field of
+    /// each entry in `/etc/services`.
+    ///
+    /// Read fresh every time, unlike [`Shell::compgen_hostnames`]: bash walks
+    /// `getservent` from the top on each completion rather than keeping a list,
+    /// so an `/etc/services` edited mid-session is visible to the very next
+    /// `compgen -s`. There is also no `HOSTFILE`-style variable pointing the
+    /// action elsewhere, so there is nothing to invalidate against.
+    ///
+    /// Not a method that needs `&mut self`, but kept alongside the other action
+    /// helpers as one — the whole generation loop reads as `self.compgen_*`.
+    #[allow(clippy::unused_self, reason = "sits with the other compgen_* action helpers")]
+    fn compgen_service_names(&self) -> Vec<Str> {
+        read_service_names(SERVICES_FILE)
     }
 
     /// The matches a completion *function* offers — `compgen -F NAME word`.
@@ -27547,6 +27566,48 @@ fn read_hostnames(path: BStr<'_>) -> Vec<Str> {
             continue;
         }
         names.extend(fields.map(<[u8]>::to_vec));
+    }
+    names
+}
+
+/// Where [`Shell::compgen_service_names`] looks: the IANA port/protocol table.
+/// A path, so bytes.
+///
+/// bash reaches it through `getservent`, which has no equivalent of `HOSTFILE`
+/// — there is no way to point the action at another file, so unlike
+/// [`DEFAULT_HOSTS_FILE`] this really is the only place it looks.
+const SERVICES_FILE: &[u8] = b"/etc/services";
+
+/// The service names in one `/etc/services`-format file, in file order.
+///
+/// A line is `name port/protocol [aliases…]`, so this is the mirror image of
+/// [`read_hostnames`]: the **first** field is the name and everything after it
+/// is skipped. The aliases are deliberately not offered — measured against bash
+/// 5.2, whose `compgen -s` on a stock `/etc/services` offers `discard` but not
+/// its aliases `sink` and `null`, because it takes only `s_name` from each
+/// `getservent`.
+///
+/// Nothing is deduplicated, for the same reason: a service with both a `tcp`
+/// and a `udp` line is two `getservent` records and so is offered twice, which
+/// is why bash's `compgen -s | wc -l` (277 on the file measured) is much larger
+/// than its `sort -u` (180).
+///
+/// `#` starts a comment wherever it appears, and a file that cannot be read
+/// yields nothing — as for hostnames.
+fn read_service_names(path: BStr<'_>) -> Vec<Str> {
+    let Ok(data) = std::fs::read(bytes::bytes_to_path(path)) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for line in data.split(|b| *b == b'\n') {
+        let line = match line.iter().position(|b| *b == b'#') {
+            Some(i) => line.get(..i).unwrap_or_default(),
+            None => line,
+        };
+        // `\r` counts as whitespace, so a CRLF file does not leave a carriage
+        // return glued to a name that is alone on its line.
+        let mut fields = line.split(|b: &u8| b.is_ascii_whitespace()).filter(|f| !f.is_empty());
+        names.extend(fields.next().map(<[u8]>::to_vec));
     }
     names
 }
@@ -37999,6 +38060,37 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run_in(&mut sh, "compgen -A hostname 2>&1"), (String::new(), 1));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn service_file_names_are_the_first_field_only() {
+        let names = |src: &str| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let p =
+                std::env::temp_dir().join(format!("osh_svcs_{}_{nanos}.txt", std::process::id()));
+            std::fs::write(&p, src).expect("write");
+            let got = read_service_names(p.to_string_lossy().replace('\\', "/").as_bytes());
+            std::fs::remove_file(&p).ok();
+            got.iter().map(|n| String::from_utf8_lossy(n).into_owned()).collect::<Vec<_>>()
+        };
+        // The name is the first field; the port/protocol and every alias after
+        // it are skipped, and tabs separate as well as spaces.
+        assert_eq!(names("echo\t7/tcp\ndiscard 9/tcp sink null\n"), ["echo", "discard"]);
+        // A `#` starts a comment wherever it is: a trailing one leaves the name
+        // alone, and a line that begins with one contributes nothing.
+        assert_eq!(names("# a header\nsystat 11/tcp users  #Active users\n"), ["systat"]);
+        // Blank and whitespace-only lines contribute nothing.
+        assert_eq!(names("\n   \nftp 21/tcp\n"), ["ftp"]);
+        // Nothing is deduplicated — a service with a tcp and a udp line is two
+        // entries, so it is offered twice (bash's `compgen -s` does the same).
+        assert_eq!(names("echo 7/tcp\necho 7/udp\n"), ["echo", "echo"]);
+        // A file with no final newline still yields its last line's name.
+        assert_eq!(names("tail 99/tcp"), ["tail"]);
+        // A file that cannot be read is simply no names.
+        assert!(read_service_names(b"no/such/file/at/all").is_empty());
     }
 
     #[test]

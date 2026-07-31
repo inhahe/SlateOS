@@ -9499,10 +9499,13 @@ limitations remain:
    `COMP_CWORD`/`COMP_WORDS` and reading `COMPREPLY`) and `compgen -C cmd`
    substitutes the command, both with bash's "may not work as you expect"
    warning; the same day the `job`/`running`/`stopped` actions grew to read the
-   job table and `hostname` to read `$HOSTFILE`. What is missing is only the
-   *engine* that would consult a stored spec at a prompt — and the four actions
-   that need a host database or a live line editor
-   (`user`/`group`/`service`/`binding`), which are parsed and ignored.
+   job table and `hostname` to read `$HOSTFILE`, and `service` to read
+   `/etc/services`. What is missing is only the *engine* that would consult a
+   stored spec at a prompt — and the three actions that need a user database or
+   a live line editor (`user`/`group`/`binding`), which are parsed and ignored.
+   (`service` reads a real file on SlateOS but finds nothing on the Windows host
+   the differential corpus runs on, so it has unit tests rather than a corpus
+   case.)
 2. **`complete -p` (list all) uses insertion order**, whereas bash iterates its
    internal hash table (an order that depends on bash's string-hash + bucket
    layout and is not reproducible without replicating those internals). Each

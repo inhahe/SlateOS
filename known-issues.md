@@ -5509,13 +5509,15 @@ arguably more useful and is self-consistent.
 port bash's `hash.c` hash function and bucket iteration for `self.assoc`.
 Not worth it absent a concrete need.
 
-### TD-OILS-NOASSIGN-VARS. bash's six unassignable variables can be clobbered in `osh` — 2026-07-31 — fixed 2026-07-31 except the `declare`/`local`/`export` family
+### TD-OILS-NOASSIGN-VARS. bash's six unassignable variables can be clobbered in `osh` — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::noassign` (seeded from
 `NOASSIGN_VARS`), checked in `apply_assignment`, `scalar_write_checked`,
 `exec_for`, `arith_write_dest`, `arith_elem_writable`, `builtin_printf`,
-`builtin_read` and `builtin_mapfile`; `NOUNSET_VARS` in `builtin_unset`;
-`ArithError::silent` in `userspace/oils/src/arith.rs`.
+`builtin_read`, `builtin_mapfile`, `builtin_declare_scoped`,
+`builtin_export`, `builtin_readonly` and `exec_declare_with_arrays_scoped`;
+`NOUNSET_VARS` in `builtin_unset`; `ArithError::silent` in
+`userspace/oils/src/arith.rs`.
 
 **What:** bash gives `FUNCNAME`, `GROUPS`, `BASH_SOURCE`, `BASH_LINENO`,
 `BASH_ARGC` and `BASH_ARGV` the `att_noassign` attribute, and the last
@@ -5533,10 +5535,12 @@ against bash 5.2.37 (MSYS):
 | `unset BASH_SOURCE`/`BASH_LINENO`/`BASH_ARGC`/`BASH_ARGV` | `unset: NAME: cannot unset`, status 1, no abort | unsets | ✅ |
 | `printf -v GROUPS x`, `printf -v 'GROUPS[0]' x`, `mapfile GROUPS`, `read -a GROUPS` | silently fails, status 1, value unchanged; the rest of the parse unit still runs | assigns | ✅ |
 | `(( GROUPS = 5 ))`, `(( GROUPS[0]=5 ))`, `(( GROUPS++ ))`, `let GROUPS=7` | status 1, value unchanged, silent; the expression is abandoned where it stands, so `(( x=3, GROUPS=5 ))` leaves `x` as 3 and `(( GROUPS=5, x=3 ))` leaves it as 9; in a *word* (`echo $(( GROUPS = 5 ))`) it abandons the parse unit like any fatal arithmetic error | assigns | ✅ |
-| `declare GROUPS=…` at top level | status 1, silent, unchanged | assigns | ❌ still assigns |
-| `declare GROUPS=(…)` at top level, `export GROUPS=(…)` | abandons the parse unit, silent | assigns | ❌ still assigns |
-| `declare`/`local GROUPS=…` **creating a local** | `<tag>: GROUPS: variable may not be assigned value`, status 1, no abort; the compound form emits it *twice*, once tagged with the enclosing function name and once with the builtin | assigns | ❌ still assigns |
-| `declare -g GROUPS=(…)` / `export GROUPS=(…)` inside a function | silently succeeds, status 0, unchanged | assigns | ❌ still assigns |
+| `declare`/`typeset GROUPS=…` naming the **global** | status 1, silent, value unchanged — and *no attribute applied either*, the operand being abandoned whole (`declare -x GROUPS=5` leaves a plain `declare -a GROUPS`), while the valueless `declare -u GROUPS` applies `-u` normally | assigns | ✅ |
+| `export GROUPS=…`, `readonly GROUPS=…` | status **0**, silent, value unchanged, and the attribute *is* applied (`declare -ax GROUPS=(…)`) | assigns | ✅ |
+| `declare`/`local`/`typeset GROUPS` **creating a local** | `<tag>: GROUPS: variable may not be assigned value`, status 1, no abort, no attribute, no local made — even with *no value*, since binding a local of the name is itself the refused assignment | assigns | ✅ |
+| `declare GROUPS=(…)` **creating a local** | the same, reported *twice*: once by the compound-assignment machinery (which inside a function tags its diagnostics with the function's name) and once by the builtin | assigns | ✅ |
+| `declare -g GROUPS=(…)` / `export GROUPS=(…)` inside a function | silently succeeds, status 0, value unchanged, attributes applied | assigns | ✅ |
+| `declare GROUPS=(…)` at top level | not special-cased at all: the same silent parse-unit discard a bare `GROUPS=(1 2)` takes, so a later operand of the same command never binds either | assigns | ✅ |
 
 **Why it matters:** five of the six are osh's own materialised state (the
 call-stack views and the extended-debugging argument stack), so a script
@@ -5567,15 +5571,58 @@ their readonly checks. `builtin_printf`'s `-v` branch, `builtin_read`'s
 readonly guard. Corpus case extended; unit test
 `the_builtin_write_paths_refuse_the_variables_the_shell_maintains`.
 
-**Still open (the ❌ rows):** only the `declare`/`local`/`export` family,
-which is the fiddly part and is worth weighing before copying: bash's own
-behaviour there is
-self-inconsistent — the same `declare NAME=(…)` abandons the parse unit
-at top level, prints two diagnostics when it would create a local, and
-silently succeeds under `-g` — because each case reaches a different
-internal path. Reproducing that accident faithfully may not be worth the
-bug risk; a coherent rule (refuse, status 1, diagnostic when a local
-would be created) plus a documented divergence is the likely answer.
+**The declaration builtins — fixed 2026-07-31 (third pass).** This looked
+self-inconsistent from a distance (the same `declare NAME=(…)` discards
+the parse unit at top level, prints two diagnostics when it would create a
+local, and silently succeeds under `-g`) and the entry above proposed
+diverging from it deliberately. Measuring the whole matrix instead showed
+one coherent rule, which is what was implemented: **the refusal is by
+where the binding would land, not by which builtin asked.** A *local*
+target is refused loudly and abandoned whole — no local, no attribute, no
+value, status 1 — and the compound form is reported by both the
+compound-assignment machinery and the builtin, which is where the doubled
+diagnostic comes from. A *global* target is refused silently, with the
+builtin deciding only what survives: `declare` applies nothing and reports
+1, `export`/`readonly` apply their attribute and report 0. A *global
+compound at top level* is not special-cased at all — it is the plain
+assignment path, and takes that path's discard. `builtin_declare_scoped`
+gates on `value.is_some() || make_local` (which is why the valueless
+`declare -u GROUPS` still applies `-u`); `builtin_export` and
+`builtin_readonly` drop only the store; `exec_declare_with_arrays_scoped`
+carries the compound half. Corpus case extended; unit test
+`a_declaration_builtin_refuses_the_variables_the_shell_maintains`.
+
+### TD-OILS-EXPORT-COMPOUND-SCOPE. `export`/`readonly` of an array literal inside a function made a local — 2026-07-31 — ✅ RESOLVED 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` —
+`exec_declare_with_arrays_scoped`, the `make_local` computation.
+
+**What:** found while measuring the declaration builtins for
+TD-OILS-NOASSIGN-VARS. `export` and `readonly` always bind at the
+*global* scope, whichever scope they are invoked from; `declare`/`local`
+bind locally inside a function unless `-g` is given. The scalar path got
+this right by routing through `builtin_export`/`builtin_readonly`, which
+never make locals at all, but the compound-literal path bound the array
+itself and decided `make_local` from `!self.local_frames.is_empty()`
+alone — so an array literal exported from a function vanished with the
+frame:
+
+```sh
+f() { export q=(1 2); }; f; declare -p q
+# bash: declare -ax q=([0]="1" [1]="2")
+# osh (before): osh: line 1: declare: q: not found
+```
+
+Same for `readonly q=(1 2)`.
+
+**Fixed 2026-07-31:** `make_local` now excludes the two globally-scoped
+builtins by *name* (`let global_builtin = cmd == "export" || cmd ==
+"readonly"`). It has to be the name and not the attribute, which was
+measured too: `declare -x q=(1 2)`, `declare -r q=(1 2)` and `local -x
+q=(1 2)` all still make locals in bash, because `export`/`readonly` are
+separate entry points there rather than `declare` under a flag. Corpus
+case `noassign-vars.sh` extended; unit test
+`an_exported_array_literal_declared_in_a_function_is_global`.
 
 ### TD-OILS-MISSING-SPECIAL-ARRAYS. `osh` does not define some bash special array variables (`GROUPS`) — 2026-07-19 — ✅ RESOLVED 2026-07-31
 

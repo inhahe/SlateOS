@@ -20042,6 +20042,21 @@ impl Shell {
                     status = 1;
                     continue;
                 }
+                // A variable the shell maintains keeps its value — but, unlike
+                // the readonly case above, still takes the export attribute and
+                // still reports success: `export GROUPS=5` leaves
+                // `declare -ax GROUPS=(…)` and status 0. Only the *store* is
+                // refused, and silently. See [`Shell::noassign`]; the shape
+                // differs from `declare`'s (which reports 1 and applies nothing)
+                // because bash reaches the refusal from a different place in each.
+                if self.noassign.contains(&k) {
+                    if unexport {
+                        self.exported.remove(&k);
+                    } else {
+                        self.exported.insert(k);
+                    }
+                    continue;
+                }
                 // `-a`/`-A` take effect only on an operand that carries a
                 // value, the same rule `readonly` follows: the array is created
                 // by the *assignment*, so `export -a fresh` leaves the name the
@@ -20940,6 +20955,28 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // A variable the shell maintains refuses the value too — and, unlike
+            // the readonly case, refuses the *attributes* along with it: the
+            // operand is abandoned before any of them is applied, so
+            // `declare -u GROUPS=5` leaves a plain `declare -a GROUPS`, while the
+            // valueless `declare -u GROUPS` — which asks for no assignment at all
+            // — applies `-u` normally. See [`Shell::noassign`].
+            //
+            // The refusal is silent here as everywhere else, *except* when the
+            // declaration would create a local: binding a local of one of these
+            // names is itself the refused assignment, so even the valueless
+            // `local GROUPS` reports it, tagged with the builtin's name. Either
+            // way only this operand is skipped — the ones after it still bind,
+            // and the rest of the parse unit still runs.
+            if self.noassign.contains(base_name) && (value.is_some() || make_local) {
+                if make_local {
+                    self.perrln(&format!(
+                        "{tag}: {base_name}: variable may not be assigned value"
+                    ));
+                }
+                status = 1;
+                continue;
+            }
             // Shadow the name (snapshot + clear) before (re)binding it when this
             // declaration is function-local.
             if make_local {
@@ -21432,7 +21469,20 @@ impl Shell {
         }
         // As with scalar `declare`, an array declaration inside a function is
         // local by default unless `-g` was given.
-        let make_local = is_local || (!global && !self.local_frames.is_empty());
+        //
+        // `export` and `readonly` are the exception: they always bind at the
+        // global scope, whichever scope they were invoked from, so
+        // `f() { export q=(1 2); }; f` leaves a *global* `q` behind where
+        // `declare q=(1 2)` would leave nothing. It is the builtin's *name* that
+        // decides and not the attribute — `declare -x q=(1 2)` and `local -x`
+        // still make locals — because the two builtins are separate entry points
+        // in bash rather than `declare` under a flag. The scalar path gets this
+        // right by routing through `builtin_export`/`builtin_readonly`, which
+        // never make locals at all; this loop binds the literal itself, so it has
+        // to know.
+        let global_builtin = cmd == "export" || cmd == "readonly";
+        let make_local =
+            is_local || (!global && !global_builtin && !self.local_frames.is_empty());
         // Phase 1 — the *compound* operands, in operand order, before the builtin
         // runs at all.
         //
@@ -21464,8 +21514,41 @@ impl Shell {
         // those have to be in force before the literal binds, and bash likewise
         // shows them on a survivor of a failed later operand
         // (`declare -ail g=(2+3) r=(1)` → `declare -ail g=([0]="5")`, no `x`).
+        // The compound operands a variable the shell maintains refused *as a
+        // local*; phase 3 skips them, since bash applies none of the builtin's
+        // attributes to an operand it turned away that way. See the refusal in
+        // the loop below.
+        let mut refused_local: HashSet<&str> = HashSet::new();
+        let mut refused_status = 0;
         for d in decl_arrays {
             let a = &d.assign;
+            // A variable the shell maintains refuses a compound literal with the
+            // same split the scalar path has (see [`Shell::noassign`] and the
+            // refusal in `builtin_declare_scoped`), and the split is by *where the
+            // binding would land* rather than by which builtin asked:
+            //
+            //   * A **local** one is refused loudly, the operand abandoned before
+            //     even the shadow is made, and no attribute applied. bash reports
+            //     it twice over — once from the compound-assignment machinery,
+            //     which inside a function tags its diagnostics with the function's
+            //     name, and once from the builtin, which is handed the same operand
+            //     and turns it away again.
+            //   * A **global** one reached from inside a function (`declare -g`,
+            //     `export`) is refused silently and succeeds: only the store is
+            //     skipped, so the attributes still land. That refusal is below,
+            //     just before the binding, so that everything preceding it runs.
+            //   * A **global** one at top level is not special-cased at all: it
+            //     goes through `apply_assignment` like a bare `GROUPS=(1 2)` and
+            //     gets that path's silent parse-unit discard.
+            if make_local && self.noassign.contains(&a.name) {
+                let func = self.fn_stack.last().cloned().unwrap_or_default();
+                let msg: Str = bfmt![&a.name, b": variable may not be assigned value"];
+                self.berrln(&bfmt![self.err_prefix(), &func, b": ", &msg]);
+                self.berrln(&bfmt![self.err_prefix(), cmd, b": ", &msg]);
+                refused_local.insert(a.name.as_str());
+                refused_status = 1;
+                continue;
+            }
             // A function-local array declaration shadows the name in the current
             // frame first.
             if make_local {
@@ -21537,6 +21620,14 @@ impl Shell {
                     self.capcase_attr.remove(&a.name);
                 }
                 None => {}
+            }
+            // The silent half of the refusal above: a *global* target reached from
+            // inside a function keeps its value and its status, having taken every
+            // attribute on the way here. At top level there is no case to make —
+            // the binding below is the same one a bare `GROUPS=(1 2)` performs, and
+            // refuses itself.
+            if !self.local_frames.is_empty() && self.noassign.contains(&a.name) {
+                continue;
             }
             // Default (no flag): an array literal makes an indexed array — which
             // `apply_assignment` already does for a name absent from `assoc`.
@@ -21648,6 +21739,9 @@ impl Shell {
             // pair the inner restore with the outer's saved binding.
             _ => self.builtin_declare_scoped(&argv[1..], is_local, cmd),
         };
+        // A compound operand the builtin never saw (it lives in `decl_arrays`, not
+        // `argv`) still failed the command when it was refused as a local above.
+        let status = if refused_status == 0 { status } else { refused_status };
         // Phase 3 — the attributes the *builtin* applies, which it can only apply
         // to the scalar operands it was given: the array names live in
         // `decl_arrays`, so they are marked here instead. `readonly` in particular
@@ -21657,6 +21751,11 @@ impl Shell {
         // rely on.
         for d in decl_arrays {
             let a = &d.assign;
+            // An operand refused as a local above took none of the attributes in
+            // phase 1 and takes none of these either — bash abandons it whole.
+            if refused_local.contains(a.name.as_str()) {
+                continue;
+            }
             if nameref {
                 self.nameref_attr.insert(a.name.clone());
             } else if unset_nameref {
@@ -21795,6 +21894,13 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // A variable the shell maintains keeps its value, silently — but
+            // still takes the readonly attribute and still reports success,
+            // exactly as `export` does and unlike `declare`. Dropping the value
+            // here rather than skipping the operand is what leaves the rest of
+            // this iteration (the `readonly` insert) to run. See
+            // [`Shell::noassign`].
+            let value = value.filter(|_| !self.noassign.contains(&name));
             // `-a`/`-A` here take effect only when the operand carries a value:
             // the array is created by the *assignment*, so a bare `readonly -a
             // name` leaves the name the plain scalar it was (`x=5; readonly -a x`
@@ -38851,6 +38957,80 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Shedding the attribute makes every one of them ordinary again.
         assert_eq!(run("unset GROUPS; printf -v GROUPS x; echo \"$? $GROUPS\"").0, "0 x\n");
         assert_eq!(run("unset GROUPS; (( GROUPS = 5 )); echo \"$? $GROUPS\"").0, "0 5\n");
+    }
+
+    /// A declaration builtin refuses them by *where the binding would land*: a
+    /// global one silently, a local one with a diagnostic tagged by the builtin.
+    #[test]
+    fn a_declaration_builtin_refuses_the_variables_the_shell_maintains() {
+        // Global scope: the value is dropped, and `declare` applies none of its
+        // attributes either — the operand is abandoned whole — while `export` and
+        // `readonly` apply theirs and report success.
+        assert_eq!(run("declare GROUPS=5; echo $?").0, "1\n");
+        // The value is not printed anywhere: it is the host's, so only the
+        // rendered *attributes* are host-independent enough to assert on.
+        let attrs = |script: &str| {
+            let (out, _) = run(script);
+            out.split_once("GROUPS").map(|(a, _)| a.to_string()).unwrap_or(out)
+        };
+        assert_eq!(attrs("declare -x GROUPS=5; declare -p GROUPS"), "declare -a ");
+        assert_eq!(attrs("export GROUPS=5; echo $?; declare -p GROUPS"), "0\ndeclare -ax ");
+        assert_eq!(attrs("readonly GROUPS=5; echo $?; declare -p GROUPS"), "0\ndeclare -ar ");
+        // A valueless declaration asks for no assignment, so nothing is refused.
+        assert_eq!(run("declare GROUPS; echo $?").0, "0\n");
+        assert_eq!(attrs("declare -u GROUPS; declare -p GROUPS"), "declare -au ");
+        // Only this operand is skipped; the ones after it still bind.
+        assert_eq!(run("declare GROUPS=5 z=9; declare -p z").0, "declare -- z=\"9\"\n");
+        // A *local* one says so, tagged with the builtin — even with no value,
+        // because binding a local of the name is itself the refused assignment.
+        for (script, tag) in [
+            ("f() { local GROUPS=5; echo $?; }; f", "local"),
+            ("f() { local GROUPS; echo $?; }; f", "local"),
+            ("f() { local GROUPS[0]=5; echo $?; }; f", "local"),
+            ("f() { declare GROUPS; echo $?; }; f", "declare"),
+            ("f() { typeset GROUPS=5; echo $?; }; f", "typeset"),
+        ] {
+            let (out, _) = run(&format!("{{ {script} ; }} 2>&1"));
+            let want = format!("{tag}: GROUPS: variable may not be assigned value\n1\n");
+            assert!(out.ends_with(&want), "{script}: {out:?}");
+        }
+        // `-g` and `export` name the global, so they take the global refusal.
+        assert_eq!(run("f() { declare -g GROUPS=5; echo $?; }; f 2>&1").0, "1\n");
+        assert_eq!(run("f() { export GROUPS=5; echo $?; }; f 2>&1").0, "0\n");
+        // A compound literal splits the same way — and the local half is reported
+        // *twice*: by the compound-assignment machinery, which inside a function
+        // tags its diagnostics with the function's name, and by the builtin.
+        let (out, _) = run("zebra() { declare GROUPS=(1 2) after=(9); declare -p after; }; zebra 2>&1");
+        assert!(
+            out.contains("zebra: GROUPS: variable may not be assigned value\n")
+                && out.contains("declare: GROUPS: variable may not be assigned value\n")
+                && out.ends_with("declare -a after=([0]=\"9\")\n"),
+            "{out:?}"
+        );
+        assert_eq!(run("f() { declare -g GROUPS=(1 2); echo $?; }; f 2>&1").0, "0\n");
+        // At top level a compound is not special-cased: it takes the same silent
+        // parse-unit discard a bare `GROUPS=(1 2)` does, so `after` never binds.
+        assert_eq!(run("declare GROUPS=(1 2) after=(9); declare -p after").0, "");
+    }
+
+    /// `export`/`readonly` bind at the global scope wherever they are invoked —
+    /// for an array literal as much as for a scalar. It is the builtin's *name*
+    /// that decides and not the attribute, so `declare -x`/`local -x` still make
+    /// locals.
+    #[test]
+    fn an_exported_array_literal_declared_in_a_function_is_global() {
+        assert_eq!(
+            run("f() { export q=(1 2); }; f; declare -p q").0,
+            "declare -ax q=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(
+            run("f() { readonly q=(1 2); }; f; declare -p q").0,
+            "declare -ar q=([0]=\"1\" [1]=\"2\")\n"
+        );
+        for script in ["declare -x", "declare -r", "local -x"] {
+            let (out, _) = run(&format!("f() {{ {script} q=(1 2); }}; f; declare -p q 2>/dev/null"));
+            assert_eq!(out, "", "{script}");
+        }
     }
 
     /// The `OSH_GROUPS` override, the counterpart of `OSH_UID`/`OSH_EUID`.

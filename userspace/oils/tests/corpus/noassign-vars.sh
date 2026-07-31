@@ -73,6 +73,51 @@ x=9; (( GROUPS = 5, x = 3 )); echo "rc=$? x=$x"
 # other arithmetic error.
 ( echo "[$(( GROUPS = 5 ))]"; echo unreachable ); echo "rc=$?"
 
+echo "=== a declaration builtin refuses it by where the binding would land"
+# At global scope the value is dropped and the attributes are the only question:
+# `declare` applies none of them and reports 1, while `export` and `readonly`
+# apply theirs and report 0. A valueless `declare` asks for no assignment, so
+# nothing is refused and `-u` goes on as usual.
+( declare -u GROUPS=5; echo "rc=$?"; declare -p GROUPS ) | sed 's/=(.*)/=(...)/'
+( declare -x GROUPS=5; echo "rc=$?"; declare -p GROUPS ) | sed 's/=(.*)/=(...)/'
+( declare -u GROUPS; echo "rc=$?"; declare -p GROUPS ) | sed 's/=(.*)/=(...)/'
+( declare GROUPS[0]=5; echo "rc=$?" )
+( export GROUPS=5; echo "rc=$?"; declare -p GROUPS ) | sed 's/=(.*)/=(...)/'
+( readonly GROUPS=5; echo "rc=$?"; declare -p GROUPS ) | sed 's/=(.*)/=(...)/'
+# A later operand of the same command still binds.
+( declare GROUPS=5 z=9; echo "rc=$?"; declare -p z )
+# A *local* one is the one shape that says anything. Even the valueless form,
+# because making a local of the name is itself the refused assignment.
+( f() { local GROUPS=5; echo "rc=$?"; }; f ) 2>&1
+( f() { local GROUPS; echo "rc=$?"; }; f ) 2>&1
+( f() { declare GROUPS; echo "rc=$?"; }; f ) 2>&1
+( f() { local GROUPS[0]=5; echo "rc=$?"; }; f ) 2>&1
+( f() { local GROUPS x=1; echo "rc=$?"; declare -p x; }; f ) 2>&1
+# `-g` and `export` name the global, so they are refused the global way.
+( f() { declare -g GROUPS; echo "rc=$?"; }; f ) 2>&1
+( f() { declare -g GROUPS=5; echo "rc=$?"; }; f ) 2>&1
+( f() { export GROUPS=5; echo "rc=$?"; }; f ) 2>&1
+
+echo "=== and a compound literal splits the same way, twice over"
+# The local refusal is reported by the compound-assignment machinery — which
+# inside a function tags its diagnostics with the function's name — and then
+# again by the builtin it is handed to.
+( zebra() { declare GROUPS=(1 2); echo "rc=$?"; }; zebra ) 2>&1
+( zebra() { local -a GROUPS=(1 2) ok=(3); echo "rc=$?"; declare -p ok; }; zebra ) 2>&1
+( zebra() { declare GROUPS=(1 2) after=(9); declare -p after; }; zebra ) 2>&1
+( zebra() { declare -g GROUPS=(1 2); echo "rc=$?"; }; zebra ) 2>&1
+( zebra() { export GROUPS=(1 2); echo "rc=$?"; }; zebra ) 2>&1
+( f() { declare -gux GROUPS=(1 2); }; f; declare -p GROUPS ) 2>&1 | sed 's/=(.*)/=(...)/'
+( f() { declare -ux GROUPS=(1 2); }; f; declare -p GROUPS ) 2>&1 | sed 's/=(.*)/=(...)/'
+# At top level a compound is not special-cased at all: it takes the same silent
+# parse-unit discard a bare `GROUPS=(1 2)` does, so the `after` never binds.
+( declare GROUPS=(1 2) after=(9); declare -p after ); echo "rc=$?"
+# `export` and `readonly` bind at the global scope wherever they are invoked, so
+# their literal survives the call — where `declare -r`'s does not.
+( f() { export q=(1 2); }; f; declare -p q ) 2>&1
+( f() { readonly q=(1 2); }; f; declare -p q ) 2>&1
+( f() { declare -r q=(1 2); }; f; declare -p q ) 2>&1
+
 echo "=== the shell's own value is untouched by any of it"
 f() { echo "[${FUNCNAME[0]}]"; }
 FUNCNAME=z; f

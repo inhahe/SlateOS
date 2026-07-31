@@ -100,7 +100,13 @@ echo "=== the value function is still there afterwards"
 # negative number as readily as from a positive one.
 ( SECONDS=100; a=$SECONDS; sleep 1; b=$SECONDS
   [ "$a" != "$b" ] && echo climbing || echo "stuck [$a]" )
-( SECONDS=-3; echo "$SECONDS"; sleep 1; echo "$SECONDS" )
+# The second reading is compared rather than printed: `SECONDS` is whole
+# seconds of wall clock since the base, so what a 1 s sleep yields depends on
+# where in the current second the assignment landed, and the two shells start a
+# few milliseconds apart. Which second it lands on is not the point; that a
+# negative base counts *up* is.
+( SECONDS=-3; a=$SECONDS; echo "$a"; sleep 1; b=$SECONDS
+  [ "$b" -gt "$a" ] && echo climbing || echo "stuck [$b]" )
 
 echo "=== so the named form and the listing disagree, and go on disagreeing"
 ( SECONDS=0; sleep 2; declare -p SECONDS ) | m

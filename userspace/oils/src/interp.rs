@@ -7978,7 +7978,18 @@ impl Shell {
                 // binding, so `unset` takes it away with the rest: after `unset
                 // RANDOM` the name is ordinary and `RANDOM=5` really does store
                 // 5. See [`Shell::dyn_unset`].
-                let dynamic = !self.dyn_unset.contains(&a.name);
+                //
+                // A `local` of the name takes them away the same way, for the
+                // length of the frame: bash's value and assign functions belong
+                // to the *global* variable, so inside the function the name is
+                // an ordinary one that neither computes on a read nor reaches
+                // the counter on a write. `f() { local SECONDS=9; echo
+                // $SECONDS; }` prints 9 and leaves the clock outside alone, and
+                // `f() { local SECONDS; SECONDS=7; }` writes the local rather
+                // than rebasing anything. See [`Shell::is_locally_shadowed`],
+                // and the matching guard in [`Shell::dynamic_special_value`].
+                let dynamic =
+                    !self.dyn_unset.contains(&a.name) && !self.is_locally_shadowed(&a.name);
                 if dynamic && a.index.is_none() && a.name == "BASH_ARGV0" {
                     self.name = if a.append { bfmt![&self.name, &val] } else { val };
                     return true;
@@ -14867,14 +14878,20 @@ impl Shell {
         if self.dyn_unset.contains(name) {
             return None;
         }
-        // A `local` of the name shadows the dynamic binding with an ordinary,
-        // *unset* variable — `f() { local SECONDS; echo "${SECONDS-UNSET}"; }`
-        // prints UNSET, and the shell's own comes back when the function
-        // returns. A valueless local is exactly what [`Shell::declared`] holds,
-        // and a *global* declaration of one of these names never makes an entry
-        // there (see [`Shell::declare_dynamic_special`]), so an entry here can
-        // only be such a shadow.
-        if self.declared.contains(name) {
+        // A `local` of the name shadows the dynamic binding with an *ordinary*
+        // variable, value and all: bash's value and assign functions belong to
+        // the global, so inside the function the name neither computes nor
+        // reaches the counter, and the shell's own comes back when the frame
+        // pops. `f() { local SECONDS; echo "${SECONDS-UNSET}"; }` prints UNSET,
+        // and `f() { local SECONDS=9; echo $SECONDS; }` prints 9 while the
+        // clock outside is untouched.
+        //
+        // A valueless local is also what [`Shell::declared`] holds, and a
+        // *global* declaration of one of these names never makes an entry there
+        // (see [`Shell::declare_dynamic_special`]), so that check is the same
+        // answer by a second route — kept because it is the one that survives
+        // `unset` of the local's value.
+        if self.is_locally_shadowed(name) || self.declared.contains(name) {
             return None;
         }
         // bash's value function fills the name's value cell (and the rest of
@@ -20725,27 +20742,32 @@ impl Shell {
         AttrOperand::Done { status: 0 }
     }
 
-    /// Perform the store an `export`/`readonly` operand carries.
+    /// Perform the store a declaration builtin's `NAME=value` operand carries.
     ///
     /// bash reaches the same code a plain `name=value` does, so everything that
     /// path does happens here too, and none of it can be had by writing the
     /// table directly: the integer attribute evaluates the value
     /// (`declare -i q; export q=3+4` stores 7, and `export q+=3+4` *adds* rather
     /// than concatenating), the case attributes fold it (`declare -u q;
-    /// export q=ab` stores `AB`), a dynamic special keeps its value function
-    /// (`export SECONDS=100` really does set the clock), an existing array is
-    /// reached at element/key 0, and `set -x` traces the inner assignment on a
-    /// line of its own below the builtin's.
+    /// export q=ab` stores `AB`), a name the shell computes keeps its value
+    /// function (`export SECONDS=100` really does set the clock, and
+    /// `declare -i RANDOM=1` really does reseed), `set -a` marks the name for
+    /// export, and an existing array is reached at element/key 0.
+    ///
+    /// `traced` is whether `set -x` shows the inner assignment on a line of its
+    /// own below the builtin's — measured, and the one thing the four builtins
+    /// disagree about: `export`/`readonly` show it, `declare`/`local`/`typeset`
+    /// do not.
     ///
     /// Returns `false` when the value's arithmetic was malformed, which discards
     /// the whole command: `export q=3+ ok=1` leaves `ok` unset and the rest of
     /// the script unrun, exactly as the same operand does under `declare`.
     ///
-    /// The refusals these two builtins have of their own — a readonly target, a
-    /// name the shell maintains — are checked by the callers *before* this, and
+    /// The refusals the builtins have of their own — a readonly target, a name
+    /// the shell maintains — are checked by the callers *before* this, and
     /// report their own way (see [`Shell::noassign`]), so nothing gets here that
     /// `apply_assignment` would have to refuse a second time.
-    fn attr_store(&mut self, name: &str, append: bool, value: Str) -> bool {
+    fn attr_store(&mut self, name: &str, append: bool, value: Str, traced: bool) -> bool {
         let assignment = Assignment {
             name: name.to_string(),
             index: None,
@@ -20763,7 +20785,7 @@ impl Shell {
                 }],
             }),
         };
-        self.apply_assignment(&assignment, true);
+        self.apply_assignment(&assignment, traced);
         self.discard_error.is_none()
     }
 
@@ -20896,7 +20918,7 @@ impl Shell {
                 if assoc || indexed {
                     self.array_kind_apply(&k, assoc);
                 }
-                if !self.attr_store(&k, append, v) {
+                if !self.attr_store(&k, append, v, true) {
                     break;
                 }
                 if unexport {
@@ -22179,33 +22201,25 @@ impl Shell {
                                 .insert(0, stored);
                         }
                     }
-                } else if self.integer_attr.contains(name) {
-                    // Integer attribute: the initializer is an arithmetic
-                    // expression, evaluated and stored as its decimal value. With
-                    // `+=`, the result is added to the current numeric value. A
-                    // bad expression discards the command (`eval_int_assign` arms
-                    // the flag, which `run_builtin` turns into the discard) and
-                    // leaves the name created-but-unset, which is what bash reports
-                    // afterwards: `declare -i n=2+` then `declare -p n` gives
-                    // `declare -i n`.
-                    let cur = if append { self.vars.get(name).cloned() } else { None };
-                    match self.appended_attributed_value(name, cur, v, append) {
-                        Some(stored) => {
-                            self.put_var(name.to_string(), stored);
-                        }
-                        None => {
-                            self.declared.insert(name.to_string());
-                            break;
-                        }
-                    }
-                } else {
-                    // Case attribute (`-l`/`-u`/`-c`), if any, folds the value; with
-                    // `+=` the folded value is appended to the current string. No
-                    // `-i`, so the arithmetic arm of the helper cannot fail here.
-                    let cur = if append { self.vars.get(name).cloned() } else { None };
-                    if let Some(stored) = self.appended_attributed_value(name, cur, v, append) {
-                        self.put_var(name.to_string(), stored);
-                    }
+                } else if !self.attr_store(name, append, v, false) {
+                    // A plain scalar goes through the assignment, exactly as
+                    // `export`/`readonly` do (see [`Shell::attr_store`]) — the
+                    // integer attribute evaluates the value and makes `+=` add,
+                    // the case attributes fold it, `set -a` marks it for export,
+                    // and a name the shell computes keeps its value function, so
+                    // `declare -i RANDOM=1` really does reseed and
+                    // `declare SECONDS=7` really does set the clock. Untraced:
+                    // bash shows one `set -x` line for these three builtins where
+                    // it shows two for `export`/`readonly`.
+                    //
+                    // A bad `-i` expression discards the command
+                    // (`eval_int_assign` arms the flag, which `run_builtin` turns
+                    // into the discard), abandoning every operand after it, and
+                    // leaves the name created-but-unset — which is what bash
+                    // reports afterwards: `declare -i n=2+` then `declare -p n`
+                    // gives `declare -i n`.
+                    self.declared.insert(name.to_string());
+                    break;
                 }
             } else if !self.vars.contains_key(name)
                 && !self.arrays.contains_key(name)
@@ -22891,7 +22905,7 @@ impl Shell {
                 self.array_kind_apply(&name, assoc);
             }
             if let Some(v) = value {
-                if !self.attr_store(&name, append, v) {
+                if !self.attr_store(&name, append, v, true) {
                     break;
                 }
             } else if !self.vars.contains_key(&name)
@@ -41851,6 +41865,48 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The assignment leaves no ordinary variable behind: the name goes on
         // computing, which is what makes the reading move with the depth above.
         assert_eq!(run("BASH_SUBSHELL=9; declare -p BASH_SUBSHELL").0, "declare -- BASH_SUBSHELL=\"9\"\n");
+    }
+
+    #[test]
+    fn a_declarations_value_operand_is_the_ordinary_assignment() {
+        // bash reaches the same code `name=value` does, so everything that path
+        // does happens here too — including the side effect of a name the shell
+        // computes, which is what keeps `declare` from laying an ordinary
+        // variable over the top of one.
+        assert_eq!(run("declare -i q; declare q=3+4; echo $q").0, "7\n");
+        assert_eq!(run("declare -u q; declare q=ab; echo $q").0, "AB\n");
+        assert_eq!(run("declare -i q=10; declare q+=3+4; echo $q").0, "17\n");
+        assert_eq!(run("set -a; declare q=1; declare -p q").0, "declare -x q=\"1\"\n");
+        assert_eq!(run("declare BASH_SUBSHELL=9; echo $BASH_SUBSHELL; ( echo $BASH_SUBSHELL )").0, "9\n10\n");
+        assert_eq!(run("declare SECONDS=7; echo $SECONDS").0, "7\n");
+        assert_eq!(run("declare -i SECONDS=3+4; echo $SECONDS").0, "7\n");
+        assert_eq!(run("typeset BASH_SUBSHELL=4; echo $BASH_SUBSHELL").0, "4\n");
+        // The reseed is `RANDOM`'s own assign function, so it has to have run.
+        assert_eq!(
+            run("declare RANDOM=1; a=$RANDOM; declare RANDOM=1; b=$RANDOM; [ $a = $b ] && echo same").0,
+            "same\n"
+        );
+        // A malformed `-i` expression discards the command, abandoning every
+        // operand after it and leaving the name created-but-unset.
+        assert_eq!(run("declare -i q; declare q=3+ r=1; echo ${r-UNSET}").0, "");
+        // But a `local` of a computed name is an *ordinary* variable: bash's
+        // value and assign functions belong to the global, so inside the frame
+        // the name neither computes on a read nor reaches the counter on a
+        // write, and the shell's own comes back when the frame pops.
+        assert_eq!(
+            run("f() { local BASH_SUBSHELL=9; echo $BASH_SUBSHELL; }; f; echo $BASH_SUBSHELL").0,
+            "9\n0\n"
+        );
+        assert_eq!(run("f() { local SECONDS=9; echo $SECONDS; }; f; echo $SECONDS").0, "9\n0\n");
+        assert_eq!(run("f() { local SECONDS; SECONDS=7; echo $SECONDS; }; f; echo $SECONDS").0, "7\n0\n");
+        assert_eq!(run("f() { local SECONDS; echo ${SECONDS-UNSET}; }; f").0, "UNSET\n");
+        // …and `-g` names the global, which is the computed one.
+        assert_eq!(run("f() { declare -g BASH_SUBSHELL=9; }; f; echo $BASH_SUBSHELL").0, "9\n");
+        // A bare `declare` in a frame is a `local`, so it shadows the same way.
+        assert_eq!(
+            run("f() { declare BASH_SUBSHELL=9; echo $BASH_SUBSHELL; }; f; echo $BASH_SUBSHELL").0,
+            "9\n0\n"
+        );
     }
 
     #[test]

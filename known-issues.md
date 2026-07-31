@@ -681,6 +681,32 @@ elsewhere in the case, or it needs load the harness produces and this did
 not. The failing run's diff was not captured — the next occurrence should
 be, with both shells' output side by side, before any fix is attempted.
 
+### TD-OILS-CORPUS-SECONDS-BOUNDARY-FLAKE. `tests/corpus/dynamic-var-assign.sh` reads `SECONDS` across a second boundary — ✅ RESOLVED 2026-07-31 (test bug, not a shell bug)
+
+**Where:** `userspace/oils/tests/corpus/dynamic-var-assign.sh` line 103,
+`( SECONDS=-3; echo "$SECONDS"; sleep 1; echo "$SECONDS" )`.
+
+**Symptom.** A full run reported `174 matched, 1 failed` with the only
+difference being `-1` (bash) against `-2` (osh) on that second `echo`.
+Three re-runs of the case alone all matched.
+
+**Why.** `SECONDS` is whole seconds of wall clock since the base, so what
+`sleep 1` yields depends on where in the current second the assignment
+landed: a `-3` base set at .99 s reads `-2` after a 1 s sleep in one
+shell and `-1` in the other purely from the two shells starting a few
+milliseconds apart. Both are correct answers to "how many whole seconds
+have ticked"; only the boundary is being sampled.
+
+**Proper fix.** Assert the *difference* rather than the absolute reading —
+`( SECONDS=-3; a=$SECONDS; sleep 1; b=$SECONDS; [ "$a" != "$b" ] && echo
+climbing )`, as the line above it already does for the positive base — so
+the case tests that a negative base counts up without pinning which
+second it lands on. Leave the first `echo "$SECONDS"` (immediately after
+the assignment, no boundary to cross) as it is.
+
+**Fixed** exactly that way: the second reading is now compared with
+`[ "$b" -gt "$a" ] && echo climbing || echo "stuck [$b]"`.
+
 ### TD-OILS-CORPUS-JOBS-LIFETIME-RACE. `tests/corpus/jobs-lifetime.sh` raced on a 0.2 s margin — ✅ RESOLVED 2026-07-30 (flaky test, not a shell bug)
 
 **Where:** `userspace/oils/tests/corpus/jobs-lifetime.sh`, the two lines under
@@ -6137,7 +6163,7 @@ appended value is formed before the assign function is reached.
 Covered by the unit test `assigning_bash_subshell_moves_the_depth_counter`
 and the corpus case `bash-subshell-assign.sh`.
 
-### TD-OILS-DECL-VALUE-BYPASSES-DYNVAR. `declare NAME=v` on a variable the shell computes stores a shadow instead of moving the counter — 2026-07-31 — OPEN
+### TD-OILS-DECL-VALUE-BYPASSES-DYNVAR. `declare NAME=v` on a variable the shell computes stores a shadow instead of moving the counter — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_declare`'s scalar
 store, the three `put_var` arms at the end of the operand loop (integer
@@ -6172,6 +6198,34 @@ value still has to leave the name created-but-unset (`self.declared`) and
 `break` out of the operand loop, and the array/nameref arms above must
 keep their own paths. Check afterwards that `declare -p NAME` of a
 computed name still reports the live reading rather than a shadow.
+
+**Fixed.** `Shell::attr_store` — already the routing `export`/`readonly`
+use — gained a `traced: bool` parameter, because the one thing the four
+builtins disagree about is the `set -x` output: `export`/`readonly` show
+the inner assignment on a line of its own below the builtin's,
+`declare`/`local`/`typeset` do not. `builtin_declare`'s two scalar
+`put_var` arms collapsed into a single `attr_store(name, append, v,
+false)` call, so the declaration now reaches everything a plain
+`name=value` reaches — the integer attribute evaluating the value, the
+case attributes folding it, `set -a` marking the name for export, and the
+computed name's own assign function running.
+
+That last part turned up a rule the old code had accidentally been
+getting half-right: **a `local` of one of these names makes an *ordinary*
+variable.** bash's value and assign functions belong to the *global*, so
+inside the frame the name neither computes on a read nor reaches the
+counter on a write, and the shell's own comes back when the frame pops
+(`f() { local SECONDS=9; echo $SECONDS; }` prints 9 and leaves the clock
+alone; a bare `declare` in a frame is a `local` and behaves the same;
+only `declare -g` names the global). Routing the store made the write
+half wrong, and the read half — `f() { local SECONDS; SECONDS=7; }`
+writing the counter instead of the local — had been wrong all along. Both
+are now guarded by the existing `Shell::is_locally_shadowed`: one in
+`dynamic_special_value`, one on the `dynamic` flag in `apply_assignment`.
+
+Covered by the unit test
+`a_declarations_value_operand_is_the_ordinary_assignment` and by
+`tests/corpus/bash-declare-value-dynvar.sh`.
 
 ### TD-OILS-ASSIGN-PREFIX-BYPASSES-DYNVAR. An assignment *prefix* naming a computed variable does not run its side effect — 2026-07-31 — OPEN
 

@@ -6262,7 +6262,38 @@ layer that only ever *displays* it. What remains can land one layer per commit:
      expectation as a Rust string literal has a bug if it sees a non-text byte —
      while the non-text cases call `super::…` directly.
 
-   * **Left in step 9:** `ere.rs` (`TD-OILS-ERE-TEXT-ONLY`).
+   * **`ere.rs` — done 2026-07-30.** Closes `TD-OILS-ERE-TEXT-ONLY`. Both
+     `cond_regex` seams went away *by deletion*: the one that refused a pattern
+     that was not text (which made `[[ $f =~ … ]]` exit 2 as though the regex
+     were malformed) and the one that refused such a subject (which silently
+     matched nothing). `ere::Regex::new`/`new_flags`/`is_match`/`captures` now
+     take and return bytes.
+
+     Unlike `arith.rs` and `histexpand.rs`, the scanner is **not** byte-wise: it
+     reads `bytes::Ch`, exactly as the glob engine does, because ERE has
+     character-defined constructs. That is the only reading under which `.`
+     matches an undecodable byte as **one** character rather than as a third of
+     an `é`, `{3}` counts it once, `[^a-z]` matches it, no POSIX class does
+     (`PosixClass::matches` gates on `Ch::as_char`), and case-folding under
+     `nocasematch` folds such a byte only to itself — so two *different*
+     undecodable bytes never fold together and none ever folds into a letter.
+     Bracket ranges rely on `Ch`'s derived `Ord`, which orders every decoded
+     scalar below every undecodable byte. ERE *syntax* is entirely ASCII, so
+     every metacharacter test goes through `Ch::as_ascii` and no encoding
+     question arises in the parser. `captures` reassembles a group from the
+     decoded characters rather than slicing `text`, which keeps a group boundary
+     from ever landing inside a character.
+
+     `EreError` became `Str` (two of its messages quote a slice of the pattern
+     back) and its `Display` impl was **deleted** rather than made lossy: bash
+     prints nothing for an uncompilable `=~` right-hand side — it just makes
+     `[[` exit 2 — so the shell discards the error, and the only other reader is
+     a test asserting the pattern was rejected at all.
+
+     Two regression tests pin it: `ere::tests::matches_a_subject_and_a_pattern_that_are_not_text`
+     for the engine, and `interp::tests::cond_regex_matches_a_value_that_is_not_text`
+     end-to-end. The latter reads its capture through `run_raw`, not `run` —
+     `run` decodes lossily and would have hidden the very byte under test.
 10. The diagnostic layer (`errln`, `err_prefix`, `write_line`) — ~378 sites,
     almost all `format!` with static text, so it wants a `berrln!` macro rather
     than 378 hand edits. Closes what is left: `SourceFrame.path`, `BASH_SOURCE`
@@ -6293,6 +6324,9 @@ diagnostic seam**: `interp.rs:3005` `set_name`, `:3280` and `:22883`
 alter what a command *does*. After `histexpand.rs` (step 9, second of three
 files): still **7** — its three seams were removed by deletion, not converted
 into scaffolded ones, so the count is flat while the loss of function is gone.
+After `ere.rs` (step 9, third of three files — **step 9 complete**): still
+**7**, for the same reason; its two `cond_regex` seams were deleted outright.
+Everything that reaches step 10 is now purely diagnostic.
 
 **Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
 `TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts
@@ -6430,7 +6464,7 @@ should list them too, quoted byte-wise, once the diagnostic layer is byte-typed
 (TD-OILS-BYTE-STRINGS step 10). Low priority: the trigger needs a parent that
 exported an unspellable name in the first place.
 
-### TD-OILS-ERE-TEXT-ONLY. `[[ … =~ … ]]` cannot match a non-text subject or pattern — 2026-07-30
+### TD-OILS-ERE-TEXT-ONLY. `[[ … =~ … ]]` cannot match a non-text subject or pattern — 2026-07-30 — ✅ RESOLVED 2026-07-30
 
 **Where:** `userspace/oils/src/interp.rs` — `cond_regex` (~`:6285`), and the
 whole of `userspace/oils/src/ere.rs`, which is `&str`-typed
@@ -6456,6 +6490,16 @@ case-folding under `nocasematch`) — the same treatment the glob engine already
 got in TD-OILS-BYTE-STRINGS step 5, and directly modelled on it. `.` must match
 one `Ch`, so it matches an undecodable byte as a unit rather than a third of a
 character. Scheduled as TD-OILS-BYTE-STRINGS step 9.
+
+**Resolved 2026-07-30**, exactly as sketched: `ere.rs` now scans `Ch`, both
+`cond_regex` seams were deleted, and `EreError` carries `Str` with no `Display`
+(bash prints nothing for an uncompilable `=~` RHS, so nobody rendered it).
+`[[ $f =~ ^a ]]` is now true for `f=$'a\xffb'`, `.` matches that byte as one
+character, `[^a-z]` matches it while `[a-z]` and `[[:alpha:]]` do not, and the
+capture that reaches `BASH_REMATCH` is the byte itself. Pinned by
+`ere::tests::matches_a_subject_and_a_pattern_that_are_not_text` and
+`interp::tests::cond_regex_matches_a_value_that_is_not_text`. See
+TD-OILS-BYTE-STRINGS step 9 for the full write-up.
 
 ### TD-OILS-XTRACE-PIPE-ORDER. `set -x` traces multi-stage pipeline commands in reverse (last-stage-first) order rather than bash's left-to-right — cosmetic / documented tradeoff — 2026-07-20
 

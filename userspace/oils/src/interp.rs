@@ -6353,17 +6353,7 @@ impl Shell {
         self.cond_trace_binary(invert, &subject, "=~", &pattern);
         // `shopt -s nocasematch` also makes `=~` case-insensitive.
         let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
-        // TD-OILS-BYTE-STRINGS step 9: `crate::ere` still matches over `&str`,
-        // so a pattern or a subject that is not text cannot be handed to it. The
-        // honest answers are the ones the engine would give for input it cannot
-        // represent — an unrepresentable *pattern* is an uncompilable RHS, and
-        // an unrepresentable *subject* matches nothing — never a mangled
-        // approximation that might match a different string than the user has.
-        let Some(pattern) = bytes::as_str(&pattern) else {
-            self.cond_regex_error = true;
-            return false;
-        };
-        let re = match crate::ere::Regex::new_flags(pattern, ci) {
+        let re = match crate::ere::Regex::new_flags(&pattern, ci) {
             Ok(re) => re,
             Err(_) => {
                 // bash: an uncompilable `=~` RHS makes `[[` exit 2 (distinct from
@@ -6374,14 +6364,14 @@ impl Shell {
                 return false;
             }
         };
-        match bytes::as_str(&subject).and_then(|s| re.captures(s)) {
+        match re.captures(&subject) {
             Some(groups) => {
                 // Each capture slot maps 1:1 to a BASH_REMATCH index; unmatched
                 // optional groups are stored as empty strings, as bash does.
                 let elems: BTreeMap<usize, Str> = groups
                     .into_iter()
                     .enumerate()
-                    .map(|(i, g)| (i, g.unwrap_or_default().into_bytes()))
+                    .map(|(i, g)| (i, g.unwrap_or_default()))
                     .collect();
                 self.arrays.insert("BASH_REMATCH".to_string(), elems);
                 true
@@ -37856,6 +37846,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
              echo \"${BASH_REMATCH[0]} ${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}\"",
         );
         assert_eq!(o, "2026-07-18 2026 07 18\n");
+    }
+
+    /// A subject or a pattern that holds a byte which is not text — a SlateOS
+    /// filename may hold any byte but `/` and NUL. `crate::ere` used to be
+    /// `&str`-typed, so `cond_regex` refused: such a subject matched nothing and
+    /// such a pattern made `[[` exit 2 as though the regex were malformed.
+    #[test]
+    fn cond_regex_matches_a_value_that_is_not_text() {
+        // `^a` against `a\xffb`, the case named in TD-OILS-ERE-TEXT-ONLY.
+        assert_eq!(run("f=$'a\\xffb'; [[ $f =~ ^a ]]").1, 0);
+        assert_eq!(run("f=$'a\\xffb'; [[ $f =~ ^b ]]").1, 1);
+        // `.` matches the byte as one character, so this is `a`, one, `b`.
+        assert_eq!(run("f=$'a\\xffb'; [[ $f =~ ^a.b$ ]]").1, 0);
+        assert_eq!(run("f=$'a\\xffb'; [[ $f =~ ^a..b$ ]]").1, 1);
+        // The byte is writable in the pattern too, and still exits 0/1 rather
+        // than 2 — it is a literal, not a malformed regex.
+        assert_eq!(run("f=$'a\\xffb'; [[ $f =~ $'\\xff' ]]").1, 0);
+        assert_eq!(run("f=$'a\\xffb'; [[ $f =~ $'\\xfe' ]]").1, 1);
+        // And the capture that reaches BASH_REMATCH is the bytes themselves —
+        // read through `run_raw`, since `run`'s lossy decode would hide it.
+        let (o, s) = run_raw("f=$'a\\xffb'; [[ $f =~ ^a(.)b$ ]]; printf %s \"${BASH_REMATCH[1]}\"");
+        assert_eq!(o, b"\xff");
+        assert_eq!(s, 0);
     }
 
     #[test]

@@ -2724,6 +2724,22 @@ pub struct Shell {
     /// Cloned into subshells, so a subshell that unsets it does not affect the
     /// parent.
     dirstack_dynamic: bool,
+    /// The dynamic special variables (see [`Shell::DYNAMIC_SPECIALS`]) whose
+    /// binding `unset` has dropped.
+    ///
+    /// bash implements each of these as a name carrying a *value function*, so
+    /// `$SECONDS` is computed rather than stored. `unset` removes the whole
+    /// variable, value function included, and bash never puts it back: the name
+    /// is unset and **ordinary** from then on. `unset SECONDS; SECONDS=5` gives a
+    /// plain string variable (`declare -- SECONDS="5"`, and `$SECONDS` stays 5),
+    /// `unset RANDOM; RANDOM=5` gives a variable that reads back 5 every time
+    /// instead of reseeding a generator, and `unset LINENO; echo $LINENO` prints
+    /// nothing at all. The name also stops appearing in listings and in
+    /// `${!prefix*}`.
+    ///
+    /// Cloned into subshells, so a subshell that unsets one does not affect the
+    /// parent. `PPID` never lands here: it is readonly, so `unset PPID` fails.
+    dyn_unset: std::collections::HashSet<String>,
     /// The command history, oldest first, as recorded while `set -o history` is
     /// in effect. An entry's *number* is [`Shell::hist_base`] plus its index, so
     /// deleting one renumbers every entry after it — which is what bash does,
@@ -3063,6 +3079,7 @@ impl Shell {
             trap_suppress: Vec::new(),
             dir_stack: Vec::new(),
             dirstack_dynamic: true,
+            dyn_unset: HashSet::new(),
             history: Vec::new(),
             hist_base: 1,
             hist_max: None,
@@ -3161,6 +3178,14 @@ impl Shell {
         self.integer_attr.insert("EUID".to_string());
         self.readonly.insert("UID".to_string());
         self.readonly.insert("EUID".to_string());
+        // PPID: readonly too, and for the same reason — it is a fact about the
+        // process, not a setting. It has no entry in the variable tables (reads
+        // go through [`Shell::dynamic_special_value`]), so this set is the only
+        // place the attribute lives; it is what makes every write path refuse
+        // (`PPID: readonly variable`) and `unset PPID` fail rather than drop the
+        // name's value function. `declare -p PPID` gets its `r` from the dynamic
+        // table instead, since that entry is what carries the value.
+        self.readonly.insert("PPID".to_string());
         // GROUPS: bash's array of the invoking user's group IDs (`declare -a`,
         // not readonly, not exported, not integer). Materialised once — the
         // process's groups cannot change under it — from `reported_groups`,
@@ -7195,6 +7220,7 @@ impl Shell {
             trap_suppress: self.trap_suppress.clone(),
             dir_stack: self.dir_stack.clone(),
             dirstack_dynamic: self.dirstack_dynamic,
+            dyn_unset: self.dyn_unset.clone(),
             history: self.history.clone(),
             hist_base: self.hist_base,
             hist_max: self.hist_max,
@@ -7786,14 +7812,19 @@ impl Shell {
                 // yields `b`, not `ab`, unless a read intervened; osh uses the
                 // predictable append instead. See known-issues TD-OILS-MISSING-
                 // SPECIAL-ARRAYS.)
-                if a.index.is_none() && a.name == "BASH_ARGV0" {
+                // Each of these three hooks belongs to the name's *dynamic*
+                // binding, so `unset` takes it away with the rest: after `unset
+                // RANDOM` the name is ordinary and `RANDOM=5` really does store
+                // 5. See [`Shell::dyn_unset`].
+                let dynamic = !self.dyn_unset.contains(&a.name);
+                if dynamic && a.index.is_none() && a.name == "BASH_ARGV0" {
                     self.name = if a.append { bfmt![&self.name, &val] } else { val };
                     return true;
                 }
                 // `RANDOM=n` reseeds the generator; `SECONDS=n` rebases the
                 // elapsed-seconds counter. Both are dynamic and not stored in
                 // `vars` (reads go through `param_value`'s special arms).
-                if a.index.is_none() && !a.append {
+                if dynamic && a.index.is_none() && !a.append {
                     if a.name == "RANDOM" {
                         // A value that is not a number leaves the seed alone,
                         // and a value that is not text is not a number.
@@ -7817,7 +7848,7 @@ impl Shell {
                 // to it as having no effect, and swallowing them here is what
                 // keeps that true — a stored `vars` entry would shadow the
                 // dynamic read and freeze `$SRANDOM` at the assigned value.
-                if a.index.is_none() && a.name == "SRANDOM" {
+                if dynamic && a.index.is_none() && a.name == "SRANDOM" {
                     return true;
                 }
                 // With the integer attribute (`declare -i`), the value is an
@@ -9646,19 +9677,40 @@ impl Shell {
     ];
 
     /// The table entry for `name`, or `None` if it is not a dynamic special.
-    fn dynamic_special(name: &str) -> Option<&'static DynamicSpecial> {
+    /// The raw table lookup: [`Shell::dynamic_special`] is what callers want,
+    /// since it also answers `None` once `unset` has dropped the binding.
+    fn dynamic_special_entry(name: &str) -> Option<&'static DynamicSpecial> {
         Self::DYNAMIC_SPECIALS.iter().find(|d| d.name == name)
     }
 
+    /// The table entry for `name` while it is still *live*: `None` if the name
+    /// is not a dynamic special, and also once `unset` has dropped the binding
+    /// (see [`Shell::dyn_unset`]), after which it is an ordinary name.
+    fn dynamic_special(&self, name: &str) -> Option<&'static DynamicSpecial> {
+        if self.dyn_unset.contains(name) {
+            return None;
+        }
+        Self::dynamic_special_entry(name)
+    }
+
+    /// The dynamic special names a listing or a name enumeration should still
+    /// report — every table entry `unset` has not dropped.
+    fn dynamic_special_live_names<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
+        Self::DYNAMIC_SPECIALS
+            .iter()
+            .map(|d| d.name)
+            .filter(|n| !self.dyn_unset.contains(*n))
+    }
+
     /// The table entry a *listing* should use for `name`: `None` when the name
-    /// is not a dynamic special, and also when a real binding shadows it —
+    /// is not a live dynamic special, and also when a real binding shadows it —
     /// after `RANDOM=7` the name is an ordinary variable and must list with its
     /// own value and attributes, not the table's.
     fn dynamic_special_listed(&self, name: &str) -> Option<&'static DynamicSpecial> {
         if self.has_stored_binding(name) {
             return None;
         }
-        Self::dynamic_special(name)
+        self.dynamic_special(name)
     }
 
     /// The dynamic special variables carrying attribute letter `c`, for a
@@ -9692,7 +9744,10 @@ impl Shell {
             .chain(self.arrays.keys())
             .chain(self.assoc.keys())
             .map(String::as_str)
-            .chain(Self::DYNAMIC_SPECIALS.iter().map(|d| d.name))
+            // …plus the dynamic special variables, which have no entry in those
+            // tables. One `unset` has dropped is gone from here too, exactly as
+            // an ordinary unset variable is.
+            .chain(self.dynamic_special_live_names())
             .filter(|k| k.starts_with(prefix))
             .map(str::to_string)
             .collect();
@@ -14368,24 +14423,19 @@ impl Shell {
         }
     }
 
-    fn param_value(&self, name: &str) -> Option<Str> {
-        if let Some(v) = self.nameref_elem_value(name) {
-            return Some(v);
+    /// The value of one of the names bash answers with a *value function* —
+    /// computed on every read rather than stored — or `None` if `name` is not
+    /// one of them, or is one whose binding `unset` has dropped.
+    ///
+    /// The dropped case is why this is a lookup rather than match arms in
+    /// [`Shell::param_value`]: `unset SECONDS` takes the value function away
+    /// with the variable and bash never restores it, so afterwards the name has
+    /// to fall through to the ordinary variable tables. See [`Shell::dyn_unset`].
+    fn dynamic_special_value(&self, name: &str) -> Option<Str> {
+        if self.dyn_unset.contains(name) {
+            return None;
         }
-        // A reference designating an *element* names no variable, and the
-        // element's own value was already answered by `nameref_elem_value`.
-        let name = &self.resolve_ref_use(name).and_then(RefTarget::into_name)?;
-        match name.as_str() {
-            "?" => Some(self.last_status.to_string().into_bytes()),
-            "#" => Some(self.positional.len().to_string().into_bytes()),
-            "$" => Some(self.pid.to_string().into_bytes()),
-            "!" => self.last_bg_pid.map(|p| p.to_string().into_bytes()),
-            // `$@` in a single-string context joins with a space; `$*` joins
-            // with the first character of `$IFS` (unset ⇒ space, empty ⇒ none).
-            "@" => Some(self.positional.join(b" ".as_slice())),
-            "*" => Some(self.positional.join(self.star_sep().as_slice())),
-            "0" => Some(self.name.clone()),
-            "-" => Some(self.option_flags().into_bytes()),
+        match name {
             // `$BASH_ARGV0` mirrors `$0`; assigning it sets `$0` (see the
             // assignment hook in `apply_assignment`).
             "BASH_ARGV0" => Some(self.name.clone()),
@@ -14409,7 +14459,34 @@ impl Shell {
                 let (secs, micros) = unix_time();
                 Some(format!("{secs}.{micros:06}").into_bytes())
             }
+            _ => None,
+        }
+    }
+
+    fn param_value(&self, name: &str) -> Option<Str> {
+        if let Some(v) = self.nameref_elem_value(name) {
+            return Some(v);
+        }
+        // A reference designating an *element* names no variable, and the
+        // element's own value was already answered by `nameref_elem_value`.
+        let name = &self.resolve_ref_use(name).and_then(RefTarget::into_name)?;
+        match name.as_str() {
+            "?" => Some(self.last_status.to_string().into_bytes()),
+            "#" => Some(self.positional.len().to_string().into_bytes()),
+            "$" => Some(self.pid.to_string().into_bytes()),
+            "!" => self.last_bg_pid.map(|p| p.to_string().into_bytes()),
+            // `$@` in a single-string context joins with a space; `$*` joins
+            // with the first character of `$IFS` (unset ⇒ space, empty ⇒ none).
+            "@" => Some(self.positional.join(b" ".as_slice())),
+            "*" => Some(self.positional.join(self.star_sep().as_slice())),
+            "0" => Some(self.name.clone()),
+            "-" => Some(self.option_flags().into_bytes()),
             _ => {
+                // The names bash answers with a *value function*, which `unset`
+                // can take away — see [`Shell::dynamic_special_value`].
+                if let Some(v) = self.dynamic_special_value(name) {
+                    return Some(v);
+                }
                 if let Ok(n) = name.parse::<usize>() {
                     if n == 0 {
                         return Some(self.name.clone());
@@ -20553,7 +20630,7 @@ impl Shell {
             // …plus the dynamic special variables, which bash reports even
             // though they have no entry in any of those tables. `dedup` below
             // folds away any that a real binding has since shadowed.
-            .chain(Self::DYNAMIC_SPECIALS.iter().map(|d| d.name.to_string()))
+            .chain(self.dynamic_special_live_names().map(str::to_string))
             .collect();
         all.sort();
         all.dedup();
@@ -20666,7 +20743,7 @@ impl Shell {
     /// `name` is not one. The value is read live via [`Self::param_value`],
     /// because bash's named form calls the variable's own getter.
     fn format_dynamic_special_declare(&self, name: &str) -> Option<Str> {
-        let d = Self::dynamic_special(name)?;
+        let d = self.dynamic_special(name)?;
         if d.listed == DynListing::EmptyArray {
             // A call-stack array has no scalar value to read, and outside a
             // function bash prints it as the empty array either way.
@@ -22512,11 +22589,17 @@ impl Shell {
             // function, but `unset FUNCNAME` still means the *variable* — it
             // sheds the attribute (see [`Shell::unbind_var`]) rather than
             // looking for a function by that name.
+            //
+            // And so is one the shell answers with a *value function*
+            // ([`Shell::DYNAMIC_SPECIALS`]): `$SECONDS` is computed rather than
+            // stored, but it is still a variable, and `unset SECONDS` drops the
+            // value function with it rather than looking for a function.
             let is_var = self.vars.contains_key(a)
                 || self.arrays.contains_key(a)
                 || self.assoc.contains_key(a)
                 || self.declared.contains(a)
-                || self.noassign.contains(a);
+                || self.noassign.contains(a)
+                || self.dynamic_special(a).is_some();
             if !vars_only && !is_var {
                 // Not a set variable: fall back to unsetting a function.
                 if self.readonly_funcs.contains(a.as_bytes()) {
@@ -22566,6 +22649,13 @@ impl Shell {
         // [`Shell::dirstack_dynamic`].
         if name == "DIRSTACK" {
             self.dirstack_dynamic = false;
+        }
+        // The same for the names bash answers with a *value function*
+        // (`SECONDS`, `RANDOM`, `LINENO`, …): the function goes with the
+        // variable and is never restored, leaving an unset, ordinary name. See
+        // [`Shell::dyn_unset`].
+        if Self::dynamic_special_entry(name).is_some() {
+            self.dyn_unset.insert(name.to_string());
         }
         // Unsetting `HOSTFILE` throws the hostname list away, rather than
         // leaving it to be added to — the one asymmetry in
@@ -41173,6 +41263,57 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
              test \"${{DIRSTACK[0]}}\" = \"$(pwd)\" && echo caught-up"
         ));
         assert_eq!(out, "2 a b\n1\ncaught-up\n");
+    }
+
+    #[test]
+    fn unset_drops_a_dynamic_variables_value_function() {
+        // Every one of them is unset afterwards, and ordinary: the name holds
+        // whatever is assigned to it next, rather than answering dynamically.
+        for n in [
+            "SECONDS",
+            "RANDOM",
+            "SRANDOM",
+            "LINENO",
+            "BASHPID",
+            "BASH_SUBSHELL",
+            "EPOCHSECONDS",
+            "EPOCHREALTIME",
+            "HISTCMD",
+            "BASH_ARGV0",
+        ] {
+            let (out, _) = run(&format!(
+                "unset {n}; echo \"$? [${{{n}-UNSET}}]\"; {n}=zz; echo \"[${{{n}-UNSET}}]\""
+            ));
+            assert_eq!(out, "0 [UNSET]\n[zz]\n", "{n}");
+        }
+        // The hook each assignment used to run goes with the value function, so
+        // `RANDOM=5` stores 5 instead of reseeding the generator…
+        let (out, _) = run("unset RANDOM; RANDOM=5; a=$RANDOM; b=$RANDOM; [ \"$a\" = \"$b\" ] && echo stable");
+        assert_eq!(out, "stable\n");
+        // …and `SECONDS=5` stores 5 instead of rebasing the counter. The
+        // attributes went with the binding too, so it is `--`, not `-i`.
+        let (out, _) = run("unset SECONDS; SECONDS=5; declare -p SECONDS");
+        assert_eq!(out, "declare -- SECONDS=\"5\"\n");
+        // A name with no value function left and nothing assigned expands to
+        // nothing at all.
+        assert_eq!(run("unset LINENO; echo \"[$LINENO]\"").0, "[]\n");
+        // It is gone from the listings and from `${!prefix@}` as well.
+        assert_eq!(run("unset SECONDS; declare -p SECONDS").1, 1);
+        assert_eq!(run("unset EPOCHSECONDS; echo \"${!EPOCH@}\"").0, "EPOCHREALTIME\n");
+        let listed = "case \"$(declare -i)\" in *'declare -i RANDOM'*) echo present;; \
+                      *) echo gone;; esac";
+        assert_eq!(run(&format!("unset RANDOM; {listed}")).0, "gone\n");
+        assert_eq!(run(listed).0, "present\n");
+        // `unset` names the *variable*, not a function of the same name.
+        let (out, _) = run("RANDOM() { echo hi; }; unset RANDOM; RANDOM; echo \"[${RANDOM-UNSET}]\"");
+        assert_eq!(out, "hi\n[UNSET]\n");
+        // `PPID` is readonly, so it never gets there: the unset fails and the
+        // value function survives.
+        let (out, status) = run("unset PPID; echo \"rc=$? [$PPID]\"");
+        assert_eq!(status, 0);
+        assert!(out.starts_with("rc=1 [") && !out.starts_with("rc=1 []"), "{out}");
+        // A subshell's `unset` does not reach the parent.
+        assert_eq!(run("( unset RANDOM ); echo \"${RANDOM:+dynamic}\"").0, "dynamic\n");
     }
 
     #[test]

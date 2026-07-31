@@ -22019,8 +22019,14 @@ impl Shell {
             self.perrln("local: can only be used in a function");
             return 1;
         }
+        // Array kind: `-A`/`-a` set it. `+A`/`+a` cannot un-set it — bash has
+        // no way to turn an array back into a scalar — so, like `+r`, each is a
+        // no-op unless the name really is an array of the kind its letter
+        // names, and a refusal when it is.
         let mut assoc = false;
+        let mut unset_assoc = false;
         let mut indexed = false;
+        let mut unset_indexed = false;
         // Export attribute: `-x` sets it, `+x` removes it. When both directions
         // are given the removal wins, whichever order they came in — bash
         // collects the two into separate `flags_on`/`flags_off` sets and applies
@@ -22068,8 +22074,20 @@ impl Shell {
             {
                 for c in flags {
                     match c {
-                        b'A' => assoc = true,
-                        b'a' => indexed = true,
+                        b'A' => {
+                            if enable {
+                                assoc = true;
+                            } else {
+                                unset_assoc = true;
+                            }
+                        }
+                        b'a' => {
+                            if enable {
+                                indexed = true;
+                            } else {
+                                unset_indexed = true;
+                            }
+                        }
                         b'x' => {
                             if enable {
                                 export = true;
@@ -22347,6 +22365,10 @@ impl Shell {
                 }
                 continue;
             }
+            // The operand as the user wrote it, before a reference was followed
+            // — which is the name bash's "cannot destroy array variables"
+            // refusal quotes, unlike every other diagnostic here.
+            let operand_name = base_name;
             let (base_name, subscript) = match &target {
                 Some(t) => (t.base.as_str(), t.sub.as_deref().or(subscript)),
                 None => (base_name, subscript),
@@ -22450,20 +22472,57 @@ impl Shell {
             // indexed array (bash allows that: the local is a fresh binding,
             // not a conversion), while a same-scope `declare -A` on an existing
             // indexed array is still rejected.
-            if let Some((from_kind, to_kind)) =
-                self.array_kind_conflict(base_name, assoc, indexed)
+            let kind_conflict = self.array_kind_conflict(base_name, assoc, indexed);
+            // The kind this command asks for goes on before the `+a`/`+A`
+            // refusal below, because bash's own refusal comes from the variable
+            // it has already created: `declare -a +a fresh` really does leave
+            // `declare -a fresh` behind, and a subscripted operand's implicit
+            // array is made the same way.
+            if kind_conflict.is_none() {
+                if assoc {
+                    self.array_kind_apply(base_name, true);
+                } else if indexed
+                    || (subscript.is_some() && !self.assoc.contains_key(base_name))
+                {
+                    // A subscripted name auto-creates an *indexed* array (bash)
+                    // even with no explicit `-a` and no value — but never
+                    // clobbers an existing associative array of the same name.
+                    self.array_kind_apply(base_name, false);
+                }
+            }
+            // `+a`/`+A` ask for the one thing that cannot be undone: an array
+            // never becomes a scalar again. Each letter answers only for its own
+            // kind, so `+a` on an associative array — or on a scalar, or on a
+            // name that does not exist — is a plain no-op, and only a real
+            // indexed array is refused. The operand is then abandoned before any
+            // other flag lands (`declare -a q=(1 2); declare -i +a q` leaves `q`
+            // un-integer), and the refusal quotes the operand as *written*: with
+            // `declare -n r=arr` naming an array, `declare +a r` says `r`.
+            //
+            // It also outranks the kind conflict just checked — the conversion
+            // bash would refuse happens inside the same lookup, and the destroy
+            // complaint is the one that comes out — so `declare -a q=(1 2);
+            // declare -A +a q` reports "cannot destroy", not "cannot convert".
+            if (unset_indexed && self.arrays.contains_key(base_name))
+                || (unset_assoc && self.assoc.contains_key(base_name))
             {
-                self.perrln(&format!("{tag}: {base_name}: cannot convert {from_kind} to {to_kind} array"));
+                self.perrln(&format!(
+                    "{tag}: {operand_name}: cannot destroy array variables in this way"
+                ));
+                // The value never lands, but an operand that carried one still
+                // leaves the array *valued*, so `declare -p` prints the empty
+                // `=()` rather than a bare declaration — the same shape a bad
+                // `-i` value leaves behind. See [`Shell::array_valued`].
+                if value.is_some() {
+                    self.array_valued.insert(base_name.to_string());
+                }
                 status = 1;
                 continue;
             }
-            if assoc {
-                self.array_kind_apply(base_name, true);
-            } else if indexed || (subscript.is_some() && !self.assoc.contains_key(base_name)) {
-                // A subscripted name auto-creates an *indexed* array (bash) even
-                // with no explicit `-a` and no value — but never clobbers an
-                // existing associative array of the same name.
-                self.array_kind_apply(base_name, false);
+            if let Some((from_kind, to_kind)) = kind_conflict {
+                self.perrln(&format!("{tag}: {base_name}: cannot convert {from_kind} to {to_kind} array"));
+                status = 1;
+                continue;
             }
             // See `drop_local_scalar` above: the widening discarded the old
             // scalar, but the name still counts as valued for `declare -p`.
@@ -22878,6 +22937,14 @@ impl Shell {
         // sees them for scalar operands).
         let mut assoc = false;
         let mut indexed = false;
+        // `+A`/`+a` refuse rather than un-make the array — see
+        // `unset_assoc`/`unset_indexed` in [`Shell::builtin_declare_scoped`].
+        // The literal has already bound by the time the refusal is reached
+        // (bash performs a compound assignment during the word-expansion pass),
+        // which is why `declare +a q=(1 2)` leaves the whole array behind and
+        // still fails.
+        let mut unset_assoc = false;
+        let mut unset_indexed = false;
         let mut global = false;
         let mut integer = false;
         let mut unset_integer = false;
@@ -22908,8 +22975,10 @@ impl Shell {
             }
             for c in flags {
                 match c {
-                    b'A' => assoc = true,
-                    b'a' => indexed = true,
+                    b'A' if enable => assoc = true,
+                    b'A' => unset_assoc = true,
+                    b'a' if enable => indexed = true,
+                    b'a' => unset_indexed = true,
                     b'g' => global = enable,
                     b'i' if enable => integer = true,
                     b'i' => unset_integer = true,
@@ -23214,7 +23283,7 @@ impl Shell {
         };
         // A compound operand the builtin never saw (it lives in `decl_arrays`, not
         // `argv`) still failed the command when it was refused as a local above.
-        let status = if refused_status == 0 { status } else { refused_status };
+        let mut status = if refused_status == 0 { status } else { refused_status };
         // Phase 3 — the attributes the *builtin* applies, which it can only apply
         // to the scalar operands it was given: the array names live in
         // `decl_arrays`, so they are marked here instead. `readonly` in particular
@@ -23227,6 +23296,19 @@ impl Shell {
             // An operand refused as a local above took none of the attributes in
             // phase 1 and takes none of these either — bash abandons it whole.
             if refused_local.contains(a.name.as_str()) {
+                continue;
+            }
+            // `+a`/`+A` cannot un-make the array the literal just bound, so they
+            // refuse — and the operand takes none of the attributes below, not
+            // even the export of a `declare -x +a q=(1 2)`.
+            if (unset_indexed && self.arrays.contains_key(&a.name))
+                || (unset_assoc && self.assoc.contains_key(&a.name))
+            {
+                self.perrln(&format!(
+                    "{cmd}: {}: cannot destroy array variables in this way",
+                    a.name
+                ));
+                status = 1;
                 continue;
             }
             if nameref {
@@ -43389,6 +43471,93 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("x=5; export x; readonly x; declare +x x; echo \"rc=$?\"; declare -p x").0,
             "rc=0\ndeclare -r x=\"5\"\n"
+        );
+    }
+
+    /// `+a`/`+A` never un-make an array: each refuses for its own kind and does
+    /// nothing at all for anything else.
+    #[test]
+    fn the_off_direction_of_the_array_kinds_refuses_rather_than_converting() {
+        // A name that is not an indexed array is untouched by `+a` — including
+        // an *associative* one, which `+A` is what answers for.
+        assert_eq!(
+            run("x=5; declare +a x; echo \"rc=$?\"; declare -p x").0,
+            "rc=0\ndeclare -- x=\"5\"\n"
+        );
+        assert_eq!(
+            run("declare +a nope; echo \"rc=$?\"; declare -p nope").0,
+            "rc=0\ndeclare -- nope\n"
+        );
+        assert_eq!(
+            run("declare -A m=([k]=1); declare +a m; echo \"rc=$?\"").0,
+            "rc=0\n"
+        );
+        // A real one is refused, and the operand is abandoned before any other
+        // flag lands.
+        assert_eq!(
+            run("declare -a q=(1 2); declare -i +a q; echo \"rc=$?\"; declare -p q").0,
+            "rc=1\ndeclare -a q=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(
+            run("declare -A m=([k]=1); declare +A m; echo \"rc=$?\"").0,
+            "rc=1\n"
+        );
+        // Including the array the same command is making: the kind goes on
+        // first, so `declare -a +a` leaves the (empty) array behind, and an
+        // operand that carried a value leaves it *valued* but empty.
+        assert_eq!(
+            run("declare -a +a q; echo \"rc=$?\"; declare -p q").0,
+            "rc=1\ndeclare -a q\n"
+        );
+        assert_eq!(
+            run("declare -a +a q=5; echo \"rc=$?\"; declare -p q").0,
+            "rc=1\ndeclare -a q=()\n"
+        );
+        assert_eq!(
+            run("declare +a n[0]=5; echo \"rc=$?\"; declare -p n").0,
+            "rc=1\ndeclare -a n=()\n"
+        );
+        // A *compound* literal binds during the expansion pass, before the
+        // builtin runs, so the whole array survives the refusal — and takes
+        // none of the command's other attributes.
+        assert_eq!(
+            run("declare -x +a q=(1 2); echo \"rc=$?\"; declare -p q").0,
+            "rc=1\ndeclare -a q=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(
+            run("declare +A q=(1 2); echo \"rc=$?\"; declare -p q").0,
+            "rc=0\ndeclare -a q=([0]=\"1\" [1]=\"2\")\n"
+        );
+        // It outranks the kind-conflict complaint, and is outranked in turn by
+        // the readonly refusal.
+        assert_eq!(
+            run("declare -a q=(1 2); declare -A +a q; echo \"rc=$?\"").0,
+            "rc=1\n"
+        );
+        // The name quoted is the operand as written, even through a reference —
+        // unlike every other diagnostic here, which names the target.
+        assert_eq!(
+            run("declare -a arr=(1 2); declare -n r=arr; declare +a r; echo \"rc=$?\"").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("s=5; declare -n r=s; declare +a r; echo \"rc=$?\"; declare -p s").0,
+            "rc=0\ndeclare -- s=\"5\"\n"
+        );
+        // Inside a function the local shadow comes first, so the global array is
+        // simply hidden — but a frame that already binds the array, and a `-g`
+        // that reaches past the frame, are both refused.
+        assert_eq!(
+            run("declare -a q=(1 2); f() { declare +a q; echo \"rc=$?\"; declare -p q; }; f").0,
+            "rc=0\ndeclare -- q\n"
+        );
+        assert_eq!(
+            run("f() { local -a q=(1 2); declare +a q; echo \"rc=$?\"; }; f").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("declare -a q=(1 2); f() { declare -g +a q; echo \"rc=$?\"; }; f").0,
+            "rc=1\n"
         );
     }
 

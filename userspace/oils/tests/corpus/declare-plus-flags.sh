@@ -98,3 +98,58 @@ x25=5; export x25
 export +x x25; echo "rc=$?"; declare -p x25
 x26=5; readonly x26
 readonly +r x26; echo "rc=$?"; declare -p x26
+
+# `+a`/`+A` are the same shape as `+r`: an array never becomes a scalar again,
+# so each letter refuses when the name really is an array of the kind it names
+# and does nothing at all otherwise.
+
+echo "=== +a on a name that is not an indexed array is a no-op"
+x27=5
+declare +a x27; echo "rc=$?"; declare -p x27
+declare +a nope28; echo "rc=$?"; declare -p nope28
+declare -A m29=([k]=1)
+declare +a m29; echo "rc=$?"; declare -p m29
+declare -a q30=(1 2)
+declare +A q30; echo "rc=$?"; declare -p q30
+
+echo "=== +a on a real indexed array is refused, and abandons the operand"
+declare -a q31=(1 2)
+declare +a q31; echo "rc=$?"; declare -p q31
+declare -i +a q31; echo "rc=$?"; declare -p q31
+declare -A m32=([k]=1)
+declare +A m32; echo "rc=$?"; declare -p m32
+
+echo "=== the array the same command makes is refused too"
+declare -a +a q33; echo "rc=$?"; declare -p q33
+declare -A +A m34; echo "rc=$?"; declare -p m34
+declare -a +a q35=5; echo "rc=$?"; declare -p q35
+declare +a n36[0]=5; echo "rc=$?"; declare -p n36
+
+echo "=== a compound literal binds first, then the refusal"
+declare +a q37=(1 2); echo "rc=$?"; declare -p q37
+declare -x +a q38=(1 2); echo "rc=$?"; declare -p q38
+declare +A q39=(1 2); echo "rc=$?"; declare -p q39
+
+echo "=== the refusal outranks the kind conflict"
+declare -a q40=(1 2)
+declare -A +a q40; echo "rc=$?"; declare -p q40
+
+echo "=== a readonly refusal outranks it in turn"
+declare -a q41=(1 2); readonly q41
+declare +ar q41; echo "rc=$?"; declare -p q41
+
+echo "=== the refusal quotes the operand, not the reference's target"
+declare -a arr42=(1 2); declare -n r42=arr42
+declare +a r42; echo "rc=$?"; declare -p arr42 r42
+s43=5; declare -n r43=s43
+declare +a r43; echo "rc=$?"; declare -p s43 r43
+
+echo "=== inside a function the local shadow comes first"
+declare -a q44=(1 2)
+f44() { declare +a q44; echo "rc=$?"; declare -p q44; }
+f44; declare -p q44
+f45() { local -a q45=(1 2); declare +a q45; echo "rc=$?"; declare -p q45; }
+f45
+declare -a q46=(1 2)
+f46() { declare -g +a q46; echo "rc=$?"; }
+f46; declare -p q46

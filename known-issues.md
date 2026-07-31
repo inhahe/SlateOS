@@ -6361,7 +6361,7 @@ of the fix and are tracked separately below:
 TD-OILS-DECL-PLUS-A-DESTROYS-ARRAYS (`+a`/`+A`) and
 TD-OILS-DECL-FLAG-OFF-LOSES-TO-ON (`-i +i`, `-n +n`, `-t +t`).
 
-### TD-OILS-DECL-PLUS-A-DESTROYS-ARRAYS. `declare +a` / `declare +A` make an array instead of refusing to unmake one — 2026-07-31 — OPEN
+### TD-OILS-DECL-PLUS-A-DESTROYS-ARRAYS. `declare +a` / `declare +A` make an array instead of refusing to unmake one — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped`'s
 flag loop, whose `b'A' => assoc = true` and `b'a' => indexed = true` arms
@@ -6418,6 +6418,26 @@ kind-conflict check and the value store), quoting the pre-resolution
 operand name. Mirror it in `exec_declare_with_arrays_scoped`'s phase 3
 for compound operands. Probes: `target/dvscratch/px4.sh`,
 `px5.sh`, `px8.sh`.
+
+**✅ RESOLVED 2026-07-31**, exactly as above. Two details the fix had to
+get right that the plan glossed over:
+
+* **The kind goes on before the refusal.** `declare -a +a fresh` really
+  does leave `declare -a fresh` behind, and `declare +a n[0]=5` leaves
+  the subscripted operand's implicit `declare -a n=()`. So
+  `array_kind_apply` runs first and the refusal follows it — but the
+  *kind-conflict* check had to move to after both, since it would
+  otherwise pre-empt the refusal it is outranked by. It is now computed
+  up front (`kind_conflict`), used to gate the apply, and only reported
+  once the refusal has had its say.
+* **An operand that carried a value leaves the array valued.**
+  `declare -a +a q=5` prints back `declare -a q=()`, not a bare
+  `declare -a q` — the same shape a bad `-i` value leaves behind — so the
+  refusal inserts into `array_valued` when `value.is_some()`.
+
+Coverage: nine new sections in
+`userspace/oils/tests/corpus/declare-plus-flags.sh` and the unit test
+`the_off_direction_of_the_array_kinds_refuses_rather_than_converting`.
 
 ### TD-OILS-DECL-FLAG-OFF-LOSES-TO-ON. `-i +i` in one command sets the attribute where bash clears it — 2026-07-31 — OPEN
 

@@ -6950,12 +6950,10 @@ impl Shell {
     /// simply does not happen.
     fn scalar_write_dest(&self, name: &str) -> Option<ScalarDest> {
         let target = self.resolve_ref_use(name)?;
-        // A subscript is only ever a real one: no variable can be *named*
-        // `arr[0]`, so a target that looks like one is one.
-        if let Some((base, Some(sub))) = split_assignment_target(target.as_bytes()) {
-            return Some(ScalarDest::Elem(base.to_string(), sub.to_vec()));
-        }
-        Some(ScalarDest::Var(target))
+        Some(match target.sub {
+            Some(sub) => ScalarDest::Elem(target.base, sub),
+            None => ScalarDest::Var(target.base),
+        })
     }
 
     /// Store `val` at an already-resolved destination, applying `set -a` and
@@ -7089,13 +7087,8 @@ impl Shell {
     fn arith_elem(&self, name: &str) -> ArithElem {
         match self.resolve_ref_name(name) {
             None => ArithElem::Array(name.to_string()),
-            Some(t) => {
-                if nameref_target_base(&t).len() == t.len() {
-                    ArithElem::Array(t)
-                } else {
-                    ArithElem::Element(t)
-                }
-            }
+            Some(t) if t.sub.is_none() => ArithElem::Array(t.base),
+            Some(t) => ArithElem::Element(t.spelling()),
         }
     }
 
@@ -7108,7 +7101,7 @@ impl Shell {
     /// [`arith::ArithError`]. The name blamed is the target *as the nameref
     /// holds it*, and it carries the same builtin tag (`((`, `let`) an
     /// arithmetic error would — see [`Shell::arith_cmd`].
-    fn warn_elem_not_identifier(&mut self, target: &str) {
+    fn warn_elem_not_identifier(&mut self, target: BStr<'_>) {
         let line = match self.arith_cmd.clone() {
             Some(tag) => bfmt![tag.as_ref(), b": `", target, b"': not a valid identifier"],
             None => bfmt![b"`", target, b"': not a valid identifier"],
@@ -7214,19 +7207,27 @@ impl Shell {
         let Some(target) = self.resolve_ref_use(&a.name) else {
             return false;
         };
-        if target != a.name {
+        if target.sub.is_some() || target.base != a.name {
             let mut a2 = a.clone();
-            // A nameref may point at an array element (`declare -n ref=arr[0]`):
-            // convert `ref=v` into `arr[0]=v`. Only when `ref` carries no
-            // explicit subscript of its own (`ref[i]=v` is a different beast).
-            if a.index.is_none()
-                && let Some(open) = target.find('[')
-                && let Some(inner) = target.strip_suffix(']')
-            {
-                a2.name = target[..open].to_string();
-                a2.index = Some(Word::literal(&inner[open + 1..]));
-            } else {
-                a2.name = target;
+            match target.sub {
+                // A nameref may point at an array element (`declare -n
+                // ref=arr[0]`): convert `ref=v` into `arr[0]=v`. The subscript
+                // is a shell word, so it goes back into the rewritten
+                // assignment as the bytes the reference carried.
+                Some(sub) if a.index.is_none() => {
+                    a2.name = target.base;
+                    a2.index = Some(Word::literal(sub));
+                }
+                // `ref[i]=v` through a reference that already designates one
+                // element is a subscript on a subscript, which bash has no room
+                // for: it refuses and stores nothing (the same refusal the
+                // arithmetic path gives — see [`Shell::arith_elem`]).
+                Some(_) => {
+                    let spelled = target.spelling();
+                    self.warn_elem_not_identifier(&spelled);
+                    return false;
+                }
+                None => a2.name = target.base,
             }
             return self.apply_assignment(&a2, trace);
         }
@@ -7902,7 +7903,9 @@ impl Shell {
 
     /// All values of `name`, treating a plain scalar as a one-element array.
     fn array_elements(&self, name: &str) -> Vec<Str> {
-        let Some(name) = &self.resolve_ref_use(name) else {
+        // A reference designating one *element* names no array to enumerate, so
+        // it yields nothing — the same answer the lookups below would give.
+        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             return Vec::new();
         };
         if let Some(m) = self.assoc.get(name) {
@@ -8041,7 +8044,7 @@ impl Shell {
     /// array's flag letters, e.g. `a`/`A`/`ar`); positional params have no
     /// attributes, so each field is empty.
     fn bulk_attr_transform(&mut self, name: &str, op: char) -> Vec<Str> {
-        let Some(name) = &self.resolve_ref_use(name) else {
+        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             return Vec::new();
         };
         let positional = name == "@" || name == "*";
@@ -8101,7 +8104,7 @@ impl Shell {
             // *associative* array (`[m "1" ]`) but not for an indexed array or
             // the positional params (`[0 "x" 1 "y"]`). Mirror that quirk so the
             // re-inputtable form round-trips byte-for-byte.
-            let target = self.resolve_ref_name(name);
+            let target = self.resolve_ref_name(name).and_then(RefTarget::into_name);
             if !body.is_empty() && target.is_some_and(|t| self.assoc.contains_key(&t)) {
                 body.push(b' ');
             }
@@ -8154,7 +8157,7 @@ impl Shell {
 
     /// The keys (associative) or indices (indexed) of `name`, in order.
     fn array_keys(&self, name: &str) -> Vec<Str> {
-        let Some(name) = &self.resolve_ref_use(name) else {
+        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             return Vec::new();
         };
         if let Some(m) = self.assoc.get(name) {
@@ -8265,7 +8268,7 @@ impl Shell {
     /// *recognise* what a reference names and will resolve it again, in full, if
     /// it turns out not to be theirs: resolving twice must not complain twice.
     fn param_elem_lookup(&mut self, name: &str, index: &Option<Box<Word>>) -> ElemValue {
-        let Some(name) = &self.resolve_ref_use(name) else {
+        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             return ElemValue::Absent;
         };
         let found = match index {
@@ -8305,7 +8308,15 @@ impl Shell {
     fn assign_elem(&mut self, name: &str, index: &Option<Box<Word>>, value: Str) -> bool {
         // A circular chain names nothing to write to; the read that led here
         // has already reported it.
-        let Some(name) = &self.resolve_ref_name(name) else {
+        let Some(target) = self.resolve_ref_name(name) else {
+            return false;
+        };
+        // A reference that already designates one element leaves the subscript
+        // written here nothing to apply to — bash refuses and stores nothing,
+        // naming the target as the reference spells it.
+        let Some(name) = target.as_name() else {
+            let spelled = target.spelling();
+            self.warn_elem_not_identifier(&spelled);
             return false;
         };
         match index {
@@ -8411,7 +8422,9 @@ impl Shell {
         // name never becomes the answer.
         if index.is_none() && self.nameref_attr.contains(refname) {
             match self.resolve_ref_name(refname) {
-                Some(target) => return target.into_bytes(),
+                // The answer is the target *as spelled* — `arr[0]`, subscript
+                // and all — so it goes out as the bytes the reference carries.
+                Some(target) => return target.spelling(),
                 None => {
                     // A circular chain has no final name to report. bash does
                     // *not* warn here — it raises the same "invalid indirect
@@ -8482,7 +8495,7 @@ impl Shell {
             // the elements. The direct `${b[1]}` path and `array_elements`
             // above both already resolve first; this was the one subscript
             // lookup that did not, which made `ptr=b[1]; ${!ptr}` read nothing.
-            let name = &self.resolve_ref_use(name)?;
+            let name = &self.resolve_ref_use(name).and_then(RefTarget::into_name)?;
             if self.assoc.contains_key(name) {
                 return self.assoc_element(name, sub.as_bytes());
             }
@@ -9075,8 +9088,10 @@ impl Shell {
     }
 
     fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> Str {
-        let Some(name) = &self.resolve_ref_use(name) else {
-            // A circular chain is unset: `${a[@]}` is empty, `${#a[@]}` is 0.
+        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
+            // A circular chain is unset, and so is a reference that already
+            // designates one element (there is no array left to subscript):
+            // `${a[@]}` is empty, `${#a[@]}` is 0.
             return if length { b"0".to_vec() } else { Str::new() };
         };
         match index {
@@ -9414,7 +9429,11 @@ impl Shell {
         // stands in for its own name in this check.
         let ro_targets: Vec<String> = assigns
             .iter()
-            .map(|(k, _)| self.resolve_ref_name(k).unwrap_or_else(|| k.clone()))
+            // The readonly attribute lives on the *variable*, so an element
+            // target is checked through the array it belongs to.
+            .map(|(k, _)| {
+                self.resolve_ref_name(k).map_or_else(|| k.clone(), |t| t.base)
+            })
             .collect();
         if ro_targets.iter().any(|t| self.readonly.contains(t)) {
             let mut i = 0;
@@ -11353,7 +11372,9 @@ impl Shell {
                 // own error) can't double-print with the caller's report. A
                 // circular nameref is not readonly and is reported by the store
                 // itself, so it stands in for its own name here.
-                let target = self.resolve_ref_name(name).unwrap_or_else(|| name.clone());
+                // As above, the readonly attribute belongs to the variable, so
+                // an element target is checked through its array.
+                let target = self.resolve_ref_name(name).map_or_else(|| name.clone(), |t| t.base);
                 if self.readonly.contains(&target) {
                     // bash emits *two* diagnostics for a readonly varfd target:
                     // the generic readonly-variable error, then a
@@ -13019,7 +13040,9 @@ impl Shell {
                 let nameref = index.is_none() && self.nameref_attr.contains(refname);
                 let pointed_at: Option<Str> = if nameref {
                     match self.resolve_ref_name(refname) {
-                        Some(t) => Some(t.into_bytes()),
+                        // What the reference points *at*, spelled as it holds
+                        // it — `arr[0]`, subscript bytes and all.
+                        Some(t) => Some(t.spelling()),
                         None => {
                             self.perrln(&format!("{refname}: invalid indirect expansion"));
                             self.discard_error = Some(1);
@@ -13280,7 +13303,7 @@ impl Shell {
     ) -> Vec<Str> {
         // A circular nameref names nothing: `array_elements` below reports it,
         // so resolve silently here and let `None` make the name non-existent.
-        let resolved = self.resolve_ref_name(name);
+        let resolved = self.resolve_ref_name(name).and_then(RefTarget::into_name);
         let elements = self.array_elements(name);
         let exists = resolved.as_ref().is_some_and(|r| {
             self.arrays.contains_key(r) || self.assoc.contains_key(r) || self.vars.contains_key(r)
@@ -13424,9 +13447,9 @@ impl Shell {
         // A nameref stands for its target, so `-v ref` asks whether the
         // *target* is set — not whether the reference itself exists, which it
         // always does. A target naming an array *element* (`declare -n
-        // e=arr[1]`) is looked up as an ordinary variable name and so is never
-        // set, and a circular chain names nothing at all (both bash).
-        let Some(name) = &self.resolve_ref_use(name) else {
+        // e=arr[1]`) names no variable and so is never set, and a circular chain
+        // names nothing at all (both bash).
+        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             return false;
         };
         if self.vars.contains_key(name)
@@ -13444,9 +13467,10 @@ impl Shell {
     /// and therefore names nothing.
     ///
     /// A nameref's value is the name it points to; following stops at the first
-    /// non-nameref name (or an unset/empty target). Only the bare-name portion
-    /// is followed — a target that names an array element (`ref=arr[0]`) is
-    /// returned as-is for the caller's subscript logic.
+    /// non-nameref name (or an unset/empty target). A value that names an array
+    /// *element* (`ref=arr[0]`) ends the walk there: `arr[0]` is not a name that
+    /// could itself carry the nameref attribute, and the [`RefTarget`] keeps the
+    /// subscript apart from the base so the caller need not take it apart again.
     ///
     /// `declare -n a=b; declare -n b=a` is a reference with nowhere to go. bash
     /// treats it as *unset* (`[$a]` is empty, `${a:-d}` takes the default,
@@ -13456,28 +13480,41 @@ impl Shell {
     /// prints belongs to the *use* of the name, so it lives in
     /// [`Self::resolve_ref_use`] and the few paths that must not warn (`${!a}`,
     /// which reports `invalid indirect expansion` instead) call this directly.
-    fn resolve_ref_name(&self, name: &str) -> Option<String> {
+    fn resolve_ref_name(&self, name: &str) -> Option<RefTarget> {
         let mut cur = name.to_string();
         let mut seen: Vec<String> = Vec::new();
         loop {
             if !self.nameref_attr.contains(&cur) {
-                return Some(cur);
+                return Some(RefTarget::plain(cur));
             }
             if seen.contains(&cur) {
                 return None;
             }
-            // A nameref holds the *name* it points to, and a name is text — so
-            // a value that is not text names nothing, and the walk stops there
-            // exactly as it does on an empty target.
-            match self.vars.get(&cur).and_then(|v| bytes::as_str(v)) {
+            match self.vars.get(&cur).map(Vec::as_slice) {
                 // A nameref naming *itself* is not a cycle: inside a function
                 // `local -n r=r` legitimately means the caller's `r`, and bash
                 // rejects the global form at declaration time instead.
-                Some(target) if !target.is_empty() && target != cur => {
+                Some(v) if !v.is_empty() && v != cur.as_bytes() => {
+                    // An element reference ends the walk: no variable can be
+                    // *named* `arr[0]`, so it can carry no nameref attribute of
+                    // its own, and its subscript is a shell word whose bytes
+                    // have to reach the caller intact.
+                    if let Some((base, Some(sub))) = split_assignment_target(v) {
+                        return Some(RefTarget {
+                            base: base.to_string(),
+                            sub: Some(sub.to_vec()),
+                        });
+                    }
+                    // Otherwise the value is a plain name to follow. A *name* is
+                    // text, so a value that is not text names nothing and the
+                    // walk stops there exactly as it does on an empty target.
+                    let Some(target) = bytes::as_str(v) else {
+                        return Some(RefTarget::plain(cur));
+                    };
                     let target = target.to_owned();
                     seen.push(std::mem::replace(&mut cur, target));
                 }
-                _ => return Some(cur),
+                _ => return Some(RefTarget::plain(cur)),
             }
         }
     }
@@ -13488,7 +13525,7 @@ impl Shell {
     /// The warning names the variable the walk *started* from, not a fixed
     /// member of the cycle: with `a→b→c→a`, reading `$c` reports `c`. Callers
     /// then treat `None` as "no such variable".
-    fn resolve_ref_use(&self, name: &str) -> Option<String> {
+    fn resolve_ref_use(&self, name: &str) -> Option<RefTarget> {
         let target = self.resolve_ref_name(name);
         if target.is_none() {
             self.perrln(&format!("warning: {name}: circular name reference"));
@@ -13509,16 +13546,14 @@ impl Shell {
         // Silent: `param_value` resolves again right after and reports a
         // circular chain there, so warning here would double it.
         let target = self.resolve_ref_name(name)?;
-        let open = target.find('[')?;
-        let inner = target.strip_suffix(']')?;
-        let base = &target[..open];
-        let sub = &inner[open + 1..];
+        let sub = target.sub.as_ref()?;
+        let base = target.base.as_str();
         if self.assoc.contains_key(base) {
-            return self.assoc_element(base, sub.as_bytes());
+            return self.assoc_element(base, sub);
         }
         // A literal integer subscript (the common `arr[0]` case). Non-numeric
         // subscripts on an indexed array fall back to index 0, as bash does.
-        let idx = sub.parse::<i64>().unwrap_or(0);
+        let idx = bytes::as_str(sub).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         if self.subscript_is_bad(base, idx) {
             self.perrln(&format!("{base}: bad array subscript"));
             return None;
@@ -13596,7 +13631,9 @@ impl Shell {
         if let Some(v) = self.nameref_elem_value(name) {
             return Some(v);
         }
-        let name = &self.resolve_ref_use(name)?;
+        // A reference designating an *element* names no variable, and the
+        // element's own value was already answered by `nameref_elem_value`.
+        let name = &self.resolve_ref_use(name).and_then(RefTarget::into_name)?;
         match name.as_str() {
             "?" => Some(self.last_status.to_string().into_bytes()),
             "#" => Some(self.positional.len().to_string().into_bytes()),
@@ -19062,10 +19099,12 @@ impl Shell {
             let index = sub.map(|s| Box::new(Word::literal(s)));
             // A readonly target is rejected (status 1), leaving it intact; a
             // circular nameref names nothing to write to and fails the same way.
+            // The readonly attribute belongs to the variable, so a reference
+            // resolving to an element is checked through its array.
             let Some(resolved) = self.resolve_ref_use(&base) else {
                 return 1;
             };
-            if self.readonly.contains(&resolved) {
+            if self.readonly.contains(&resolved.base) {
                 self.perrln(&format!("{base}: readonly variable"));
                 return 1;
             }
@@ -21124,10 +21163,19 @@ impl Shell {
                 (!sub.is_empty()).then_some((base, sub))
             });
             if let Some((base, sub_src)) = subscript {
-                let name = self
-                    .resolve_ref_use(base)
-                    .unwrap_or_else(|| base.to_string());
-                if self.unset_element(&name, sub_src) {
+                // A reference already designating an element leaves this
+                // subscript nothing to apply to, so it names no array to remove
+                // from: the removal finds nothing, which is what the lookup
+                // through the target's spelling answered before it was split.
+                // A circular chain stands in for its own name, and finds
+                // nothing either.
+                let name = self.resolve_ref_use(base).map_or_else(
+                    || Some(base.to_string()),
+                    RefTarget::into_name,
+                );
+                if let Some(name) = name
+                    && self.unset_element(&name, sub_src)
+                {
                     continue;
                 }
                 if self.discard_error.is_some() {
@@ -21151,7 +21199,20 @@ impl Shell {
             // (bash semantics); resolve the target name first. A circular chain
             // points nowhere, so bash reports it and unsets the *reference*,
             // leaving the rest of the cycle in place.
-            let a = &self.resolve_ref_use(a).unwrap_or_else(|| a.to_string());
+            let target = self.resolve_ref_use(a);
+            // A reference designating one *element* names no variable at all,
+            // so what it unsets is that element: `declare -n r=arr[0]; unset r`
+            // removes `arr[0]`. The subscript travels as the bytes the
+            // reference carries, so an associative key that is not text names
+            // the entry it actually named.
+            if let Some(sub) = target.as_ref().and_then(|t| t.sub.clone()) {
+                let base = target.as_ref().map_or_else(String::new, |t| t.base.clone());
+                if !self.unset_element(&base, &sub) {
+                    status = 1;
+                }
+                continue;
+            }
+            let a = &target.and_then(RefTarget::into_name).unwrap_or_else(|| a.to_string());
             // A readonly variable cannot be unset.
             if self.readonly.contains(a) {
                 self.perrln(&format!("unset: {a}: cannot unset: readonly variable"));
@@ -22571,14 +22632,26 @@ impl Shell {
             ]);
             return 1;
         };
-        let array = match self.resolve_ref_use(text) {
-            Some(t) => t,
-            None => return 1,
-        };
-        if !crate::parser::is_valid_name(array.as_bytes()) {
-            self.perrln(&format!("{tag}: `{array}': not a valid identifier"));
+        let Some(target) = self.resolve_ref_use(text) else {
             return 1;
-        }
+        };
+        // A reference designating one *element* names no array to fill, so it is
+        // refused exactly as a malformed name is — quoting the target as the
+        // reference spells it, subscript and all.
+        let Some(array) = target
+            .as_name()
+            .filter(|a| crate::parser::is_valid_name(a.as_bytes()))
+            .map(str::to_string)
+        else {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                tag,
+                b": `",
+                target.spelling(),
+                b"': not a valid identifier"
+            ]);
+            return 1;
+        };
         if self.readonly.contains(&array) {
             self.perrln(&format!("{array}: readonly variable"));
             return 1;
@@ -24865,7 +24938,7 @@ impl VarLookup for Shell {
     fn refuse_empty_subscript_store(&mut self, name: &str) {
         // Same wording, tag and drop-the-store behaviour as an assignment
         // through a nameref that already names an element.
-        self.warn_elem_not_identifier(&format!("{name}[]"));
+        self.warn_elem_not_identifier(&bfmt![name, b"[]"]);
     }
 }
 
@@ -24912,9 +24985,10 @@ enum ArithElem {
     /// An array (or associative array) to subscript, by name.
     Array(String),
     /// A single element, already designated by the nameref — leaving the `[sub]`
-    /// that was written with nothing to apply to. The string is the target text
-    /// the nameref holds (`q[0]`), which is what bash's refusal names.
-    Element(String),
+    /// that was written with nothing to apply to. The value is the target as the
+    /// nameref spells it (`q[0]`), which is what bash's refusal names, and it is
+    /// bytes because the subscript in it is a shell word.
+    Element(Str),
 }
 
 /// The written form of a `${name[index]<op>arg}` modifier — everything the
@@ -24942,6 +25016,60 @@ struct ParamOpNode<'a> {
     /// `name`: through an indirection bash blames the reference the writer
     /// wrote (`ptr=b[1]; ${!ptr:?}` says `ptr`), not the name it resolved to.
     label: Option<BStr<'a>>,
+}
+
+/// Where a nameref chain ends: the variable, or the single array *element*,
+/// that a `declare -n` reference designates once the chain has been walked.
+/// See [`Shell::resolve_ref_name`].
+///
+/// The two halves are typed differently on purpose. A base name is an
+/// identifier — `[A-Za-z_][A-Za-z0-9_]*`, ASCII by construction — so `String`
+/// is exact rather than an approximation, and it keys the variable tables
+/// directly. A subscript is an ordinary shell word: `declare -n r='m[$k]'` may
+/// designate an associative key holding any byte, and the map stores such a key
+/// happily, so the subscript travels as the bytes the reference was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefTarget {
+    /// The variable the reference lands on.
+    base: String,
+    /// The subscript, when the reference designates one element of `base`
+    /// (`declare -n r=arr[0]`) rather than the whole variable.
+    sub: Option<Str>,
+}
+
+impl RefTarget {
+    /// A reference to a whole variable.
+    fn plain(base: String) -> Self {
+        Self { base, sub: None }
+    }
+
+    /// The target as a variable *name* — `None` when it designates an element,
+    /// which names no variable at all. Every table lookup goes through this, so
+    /// a reference to `arr[0]` reads as *unset* when asked for by name (bash).
+    fn as_name(&self) -> Option<&str> {
+        match self.sub {
+            None => Some(self.base.as_str()),
+            Some(_) => None,
+        }
+    }
+
+    /// [`Self::as_name`], taking ownership.
+    fn into_name(self) -> Option<String> {
+        match self.sub {
+            None => Some(self.base),
+            Some(_) => None,
+        }
+    }
+
+    /// The target as it is *spelled* — `arr`, or `arr[0]` — which is what
+    /// `${!ref}` yields and what a diagnostic quotes back. Bytes, because the
+    /// subscript is.
+    fn spelling(&self) -> Str {
+        match &self.sub {
+            None => self.base.clone().into_bytes(),
+            Some(sub) => bfmt![&self.base, b"[", sub, b"]"],
+        }
+    }
 }
 
 /// The place a plain scalar assignment ends up, after namerefs are followed.

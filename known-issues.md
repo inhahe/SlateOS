@@ -6221,7 +6221,7 @@ one, against osh's one. That is the pre-existing
 **TD-OILS-NAMEREF-WARNING-COUNT** below, so the corpus case deduplicates
 the warning rather than counting it.
 
-### TD-OILS-DECL-NAMEREF-SUBSCRIPT. A subscripted `declare` operand naming a nameref is neither resolved nor un-referenced — 2026-07-31 — OPEN
+### TD-OILS-DECL-NAMEREF-SUBSCRIPT. A subscripted `declare` operand naming a nameref is neither resolved nor un-referenced — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_declare`, whose
 nameref resolution is deliberately skipped for a subscripted operand

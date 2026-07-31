@@ -9433,7 +9433,13 @@ limitations remain:
    completion, so a registered `-F func`/`-C cmd`/`-W list` generator is stored
    but never invoked to produce candidates. `compgen` (which *does* generate
    candidates on demand) is the functional half; `complete` is the registration
-   half with no completion engine behind it.
+   half with no completion engine behind it. Note that the *generators*
+   themselves are no longer the gap: since 2026-07-31 `compgen -F func` calls the
+   function (binding `COMP_LINE`/`COMP_POINT`/`COMP_TYPE`/`COMP_KEY`/
+   `COMP_CWORD`/`COMP_WORDS` and reading `COMPREPLY`) and `compgen -C cmd`
+   substitutes the command, both with bash's "may not work as you expect"
+   warning. What is missing is only the *engine* that would consult a stored
+   spec at a prompt.
 2. **`complete -p` (list all) uses insertion order**, whereas bash iterates its
    internal hash table (an order that depends on bash's string-hash + bucket
    layout and is not reproducible without replicating those internals). Each

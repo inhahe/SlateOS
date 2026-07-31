@@ -108,7 +108,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::arith::{self, VarLookup};
 use crate::bfmt;
-use crate::bytes::{self, BStr, Ch, Str};
+use crate::bytes::{self, BStr, Ch, Str, StrBuf};
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseTerm,
     CmdSubBody, Command,
@@ -2298,9 +2298,10 @@ pub struct Shell {
     /// `this_command_name` with the parameter reference for the duration of the
     /// offset/length evaluation, so `${a[0]:1 z}` reports
     /// `a[0]: 1 z: syntax error in expression`. Hence the owned string — that
-    /// tag is computed at runtime. (An array *subscript* gets no such tag:
-    /// `${a[1 z]}` reports the bare expression.)
-    arith_cmd: Option<Cow<'static, str>>,
+    /// tag is computed at runtime — and being a parameter reference, it is
+    /// bytes. (An array *subscript* gets no such tag: `${a[1 z]}` reports the
+    /// bare expression.)
+    arith_cmd: Option<Cow<'static, [u8]>>,
     /// True while an assignment is being applied on behalf of a
     /// `declare`/`local`/`readonly`/`export` *operand* rather than a bare
     /// `name=…` / `name=(…)` assignment command. bash re-parses the builtin's
@@ -3719,20 +3720,26 @@ impl Shell {
             // earlier lines.
             for w in ip.take_reader_warnings() {
                 let msg = match w {
-                    crate::lexer::ReaderWarning::HeredocEof(hd) => format!(
-                        "{}warning: here-document at line {} delimited by end-of-file (wanted `{}')",
+                    // The delimiter is a shell word, so it goes back out as the
+                    // bytes the user wrote — `<<a\xffb` names the delimiter it
+                    // was actually looking for.
+                    crate::lexer::ReaderWarning::HeredocEof(hd) => bfmt![
                         self.err_prefix_at(hd.eof_line),
-                        hd.body_line,
-                        shown(&hd.delim)
-                    ),
-                    crate::lexer::ReaderWarning::SubstHeredoc(s) => format!(
-                        "{}warning: command substitution: {} unterminated here-document{}",
+                        b"warning: here-document at line ",
+                        hd.body_line.to_string(),
+                        b" delimited by end-of-file (wanted `",
+                        &hd.delim,
+                        b"')"
+                    ],
+                    crate::lexer::ReaderWarning::SubstHeredoc(s) => bfmt![
                         self.err_prefix_at(s.line),
-                        s.count,
-                        if s.count == 1 { "" } else { "s" }
-                    ),
+                        b"warning: command substitution: ",
+                        s.count.to_string(),
+                        b" unterminated here-document",
+                        if s.count == 1 { b"".as_slice() } else { b"s" }
+                    ],
                 };
-                self.errln(&msg);
+                self.berrln(&msg);
             }
             // bash records a line when it *reads* it, before it runs — which is
             // why `history` lists the `history` call that printed the list, and
@@ -3743,7 +3750,7 @@ impl Shell {
             let prog = match unit {
                 Ok(p) => p,
                 Err(e) => {
-                    self.errln(&self.format_parse_error(&e, src, map));
+                    self.berrln(&self.format_parse_error(&e, src, map));
                     return self.parse_error_flow(&e);
                 }
             };
@@ -3849,12 +3856,12 @@ impl Shell {
     /// *read*, which names that line rather than [`Shell::current_line`] (the
     /// line being executed). Otherwise identical to [`Shell::err_prefix`],
     /// including dropping the line number for an interactive shell.
-    fn read_error_prefix(&self, line: u32) -> String {
-        let src = self.error_source_shown();
+    fn read_error_prefix(&self, line: u32) -> Str {
+        let src = self.error_source();
         if self.is_interactive() {
-            format!("{src}: ")
+            bfmt![src, b": "]
         } else {
-            format!("{src}: line {line}: ")
+            bfmt![src, b": line ", line.to_string(), b": "]
         }
     }
 
@@ -4651,7 +4658,7 @@ impl Shell {
             StdinSrc::Pipe(r) => match r.borrow().get_ref().try_clone() {
                 Ok(rp) => Some(HeadIn::Pipe(rp)),
                 Err(e) => {
-                    self.errln(&format!("{}pipe: {e}", self.err_prefix()));
+                    self.perrln(&format!("pipe: {e}"));
                     None
                 }
             },
@@ -4667,7 +4674,7 @@ impl Shell {
                         Some(HeadIn::Pipe(r))
                     }
                     Err(e) => {
-                        self.errln(&format!("{}pipe: {e}", self.err_prefix()));
+                        self.perrln(&format!("pipe: {e}"));
                         None
                     }
                 },
@@ -4709,7 +4716,7 @@ impl Shell {
                     readers.push(Some(r)); // stage k+1 reads here
                 }
                 Err(e) => {
-                    self.errln(&format!("{}pipe: {e}", self.err_prefix()));
+                    self.perrln(&format!("pipe: {e}"));
                     self.last_status = 1;
                     return (vec![1; n], Flow::Next);
                 }
@@ -4882,7 +4889,7 @@ impl Shell {
             Out::Pipe(w) => match w.try_clone() {
                 Ok(dup) => Some(Stdio::from(dup)),
                 Err(e) => {
-                    self.errln(&format!("{}pipe: {e}", self.err_prefix()));
+                    self.perrln(&format!("pipe: {e}"));
                     Some(Stdio::null())
                 }
             },
@@ -5003,23 +5010,13 @@ impl Shell {
                 // status 1. The check is on the spelling, not the expansion, so
                 // `"f"()` fails even though `f` would be a fine name.
                 if !f.definable {
-                    self.emit_stderr(
-                        format!(
-                            "{}`{}': not a valid identifier\n",
-                            self.err_prefix(),
-                            shown(&f.name)
-                        )
-                        .as_bytes(),
-                    );
+                    self.perrln(&bfmt![b"`", &f.name, b"': not a valid identifier"]);
                     self.last_status = 1;
                 }
                 // A `readonly -f` function cannot be redefined (bash reports the
                 // attempt and fails the command, leaving the definition intact).
                 else if self.readonly_funcs.contains(&f.name) {
-                    self.emit_stderr(
-                        format!("{}{}: readonly function\n", self.err_prefix(), shown(&f.name))
-                            .as_bytes(),
-                    );
+                    self.perrln(&bfmt![&f.name, b": readonly function"]);
                     self.last_status = 1;
                 } else {
                     self.funcs.insert(f.name.clone(), f.body.clone());
@@ -5155,7 +5152,7 @@ impl Shell {
             return Err((Flow::Exit(code), code));
         };
         if rest.len() > 1 {
-            self.errln(&format!("{}{name}: too many arguments", self.err_prefix()));
+            self.perrln(&format!("{name}: too many arguments"));
             // bash's `no_args()` runs `top_level_cleanup()` before jumping, which
             // pops `parse_and_execute`'s handler — so this abort escapes an
             // enclosing `eval`/`source` rather than ending just that string.
@@ -5210,7 +5207,7 @@ impl Shell {
             return ExitArg::BadNumber;
         };
         if rest.len() > 1 {
-            self.errln(&format!("{}{name}: too many arguments", self.err_prefix()));
+            self.perrln(&format!("{name}: too many arguments"));
             return ExitArg::TooMany;
         }
         ExitArg::Status(n)
@@ -5320,9 +5317,7 @@ impl Shell {
             // of the command list still runs; only the loop is given up. (The
             // `set -x` header above has already been printed by then.)
             if self.readonly.contains(&c.var) {
-                self.emit_stderr(
-                    format!("{}{}: readonly variable\n", self.err_prefix(), c.var).as_bytes(),
-                );
+                self.perrln(&format!("{}: readonly variable", c.var));
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -5468,9 +5463,7 @@ impl Shell {
             // has been read (so the prompt has already been written), the loop
             // is given up with status 1, and the variable keeps its value.
             if self.readonly.contains(&c.var) {
-                self.emit_stderr(
-                    format!("{}{}: readonly variable\n", self.err_prefix(), c.var).as_bytes(),
-                );
+                self.perrln(&format!("{}: readonly variable", c.var));
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -5507,7 +5500,7 @@ impl Shell {
         // `let --` is `let` with no expression, not arithmetic on `--`.
         let args = strip_end_of_options(args);
         if args.is_empty() {
-            self.emit_stderr(format!("{}let: expression expected\n", self.err_prefix()).as_bytes());
+            self.perrln("let: expression expected");
             return 1;
         }
         let mut last = 0i64;
@@ -5523,7 +5516,7 @@ impl Shell {
     /// Evaluate an arithmetic string with a builtin/context tag set for the
     /// duration (bash's `this_command_name`) — used by the `(( … ))` command and
     /// the C-style `for (( … ))` sections, whose errors bash tags with `((`.
-    fn eval_arith_cmd(&mut self, raw: BStr<'_>, tag: &'static str) -> Option<i64> {
+    fn eval_arith_cmd(&mut self, raw: BStr<'_>, tag: &'static [u8]) -> Option<i64> {
         let saved = self.arith_cmd.take();
         self.arith_cmd = Some(Cow::Borrowed(tag));
         let r = self.eval_arith_raw(raw);
@@ -5658,14 +5651,14 @@ impl Shell {
         };
         self.last_status = 0;
         trace_section(self, &c.init);
-        if !c.init.is_empty() && self.eval_arith_cmd(&c.init, "((").is_none() {
+        if !c.init.is_empty() && self.eval_arith_cmd(&c.init, b"((").is_none() {
             self.last_status = 1;
             return self.arith_discard_flow();
         }
         loop {
             trace_section(self, &c.cond);
             if !c.cond.is_empty() {
-                match self.eval_arith_cmd(&c.cond, "((") {
+                match self.eval_arith_cmd(&c.cond, b"((") {
                     Some(0) => break,
                     Some(_) => {}
                     None => {
@@ -5691,7 +5684,7 @@ impl Shell {
                 other => return other,
             }
             trace_section(self, &c.update);
-            if !c.update.is_empty() && self.eval_arith_cmd(&c.update, "((").is_none() {
+            if !c.update.is_empty() && self.eval_arith_cmd(&c.update, b"((").is_none() {
                 self.last_status = 1;
                 return self.arith_discard_flow();
             }
@@ -5914,7 +5907,7 @@ impl Shell {
                         pushed_stderr = true;
                     }
                     Err(e) => {
-                        self.errln(&format!("{}pipe: {e}", self.err_prefix()));
+                        self.perrln(&format!("pipe: {e}"));
                         self.last_status = 1;
                         return Flow::Next;
                     }
@@ -5945,7 +5938,7 @@ impl Shell {
                             pushed_stderr = true;
                         }
                         Err(e) => {
-                            self.errln(&format!("{}stdout: {e}", self.err_prefix()));
+                            self.perrln(&format!("stdout: {e}"));
                             self.last_status = 1;
                             return Flow::Next;
                         }
@@ -5988,20 +5981,20 @@ impl Shell {
                 // have no writable descriptor behind it. Failing the redirect
                 // keeps the bytes from landing elsewhere — TD-OILS-FD0-WRITE.
                 Some(WriteFd::ReadOnly) => {
-                    self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                    self.perrln(&format!("{n}: Bad file descriptor"));
                     self.last_status = 1;
                     fd_alias_error = true;
                 }
                 Some(WriteFd::File(f)) => match f.try_clone() {
                     Ok(c) => stdout_file = Some(Arc::new(c)),
                     Err(_) => {
-                        self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                        self.perrln(&format!("{n}: Bad file descriptor"));
                         self.last_status = 1;
                         fd_alias_error = true;
                     }
                 },
                 None => {
-                    self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                    self.perrln(&format!("{n}: Bad file descriptor"));
                     self.last_status = 1;
                     fd_alias_error = true;
                 }
@@ -6021,7 +6014,7 @@ impl Shell {
                     stderr_file = Some(w);
                 }
                 None => {
-                    self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                    self.perrln(&format!("{n}: Bad file descriptor"));
                     self.last_status = 1;
                     fd_alias_error = true;
                 }
@@ -6193,7 +6186,7 @@ impl Shell {
                         self.open_write_fds.insert(*fd, w);
                     }
                     Err(e) => {
-                        self.errln(&format!("{}{fd}: {e}", self.err_prefix()));
+                        self.perrln(&format!("{fd}: {e}"));
                         self.last_status = 1;
                     }
                 },
@@ -6247,7 +6240,7 @@ impl Shell {
             self.bxtrace_emit(&bfmt![b"(( ", raw, b" ))"]);
         }
         // bash tags `(( … ))`-command arithmetic errors with `((`.
-        self.last_status = match self.eval_arith_cmd(raw, "((") {
+        self.last_status = match self.eval_arith_cmd(raw, b"((") {
             Some(v) => i32::from(v == 0),
             None => 1,
         };
@@ -7016,7 +7009,7 @@ impl Shell {
         };
         if self.readonly.contains(dest.base()) {
             let base = dest.base().to_string();
-            self.emit_stderr(format!("{}{base}: readonly variable\n", self.err_prefix()).as_bytes());
+            self.perrln(&format!("{base}: readonly variable"));
             return false;
         }
         self.scalar_write_store(&dest, val)
@@ -7082,12 +7075,11 @@ impl Shell {
     /// holds it*, and it carries the same builtin tag (`((`, `let`) an
     /// arithmetic error would — see [`Shell::arith_cmd`].
     fn warn_elem_not_identifier(&mut self, target: &str) {
-        let prefix = self.err_prefix();
         let line = match self.arith_cmd.clone() {
-            Some(tag) => format!("{prefix}{tag}: `{target}': not a valid identifier"),
-            None => format!("{prefix}`{target}': not a valid identifier"),
+            Some(tag) => bfmt![tag.as_ref(), b": `", target, b"': not a valid identifier"],
+            None => bfmt![b"`", target, b"': not a valid identifier"],
         };
-        self.errln(&line);
+        self.perrln(&line);
     }
 
     /// Refuse an arithmetic write to an element of a readonly array — the array
@@ -7216,7 +7208,7 @@ impl Shell {
         }
         // A readonly variable cannot be reassigned; report and leave it intact.
         if self.readonly.contains(&a.name) {
-            self.emit_stderr(format!("{}{}: readonly variable\n", self.err_prefix(), a.name).as_bytes());
+            self.perrln(&format!("{}: readonly variable", a.name));
             return false;
         }
         // `set -a` (allexport): any assigned variable is given the export
@@ -7310,11 +7302,7 @@ impl Shell {
                     // by arithmetic as 0. An empty *key* on an associative
                     // array is a separate rejection, below.
                     if crate::unparse::word_src(idx_word).is_empty() {
-                        self.errln(&format!(
-                            "{}{}[]: bad array subscript",
-                            self.err_prefix(),
-                            a.name
-                        ));
+                        self.perrln(&format!("{}[]: bad array subscript", a.name));
                         if !self.decl_builtin_ctx {
                             self.discard_error = Some(1);
                         }
@@ -7746,11 +7734,7 @@ impl Shell {
                         Some(idx) => match usize::try_from(idx) {
                             Ok(idx) => idx,
                             Err(_) => {
-                                self.errln(&format!(
-                                    "{}{}: bad array subscript",
-                                    self.err_prefix(),
-                                    a.name
-                                ));
+                                self.perrln(&format!("{}: bad array subscript", a.name));
                                 continue;
                             }
                         },
@@ -7944,7 +7928,7 @@ impl Shell {
                 // same fatal-arith abort machinery so the shell aborts at the
                 // main level and the subshell fails without aborting the parent.
                 if l < 0 {
-                    self.errln(&format!("{}{l}: substring expression < 0", self.err_prefix()));
+                    self.perrln(&format!("{l}: substring expression < 0"));
                     self.discard_error = Some(1);
                     return Vec::new();
                 }
@@ -8234,7 +8218,7 @@ impl Shell {
             ElemValue::Value(v) => Some(v),
             ElemValue::Absent => None,
             ElemValue::BadSubscript(base) => {
-                self.errln(&format!("{}{base}: bad array subscript", self.err_prefix()));
+                self.perrln(&format!("{base}: bad array subscript"));
                 None
             }
         }
@@ -8371,10 +8355,7 @@ impl Shell {
             // — or one whose subscript `param_elem_value` has already called bad
             // — leaves the reference pointing nowhere, which is not an error.
             None if index.is_none() => {
-                self.errln(&format!(
-                    "{}{refname}: invalid indirect expansion",
-                    self.err_prefix()
-                ));
+                self.perrln(&format!("{refname}: invalid indirect expansion"));
                 self.discard_error = Some(1);
                 Err(())
             }
@@ -8402,13 +8383,7 @@ impl Shell {
                     // *not* warn here — it raises the same "invalid indirect
                     // expansion" error as an unset pointer (status 1, the rest
                     // of the parse unit discarded).
-                    self.emit_stderr(
-                        format!(
-                            "{}{refname}: invalid indirect expansion\n",
-                            self.err_prefix()
-                        )
-                        .as_bytes(),
-                    );
+                    self.perrln(&format!("{refname}: invalid indirect expansion"));
                     self.discard_error = Some(1);
                     return Str::new();
                 }
@@ -9106,10 +9081,7 @@ impl Shell {
                             self.discard_error = Some(1);
                             return b"0".to_vec();
                         }
-                        self.errln(&format!(
-                            "{}{name}: bad array subscript",
-                            self.err_prefix()
-                        ));
+                        self.perrln(&format!("{name}: bad array subscript"));
                         None
                     } else {
                         self.assoc_element(name, &key)
@@ -9134,7 +9106,7 @@ impl Shell {
                             self.discard_error = Some(1);
                             return b"0".to_vec();
                         }
-                        self.errln(&format!("{}{name}: bad array subscript", self.err_prefix()));
+                        self.perrln(&format!("{name}: bad array subscript"));
                         // It named nothing, so there is nothing to expand to —
                         // not even the scalar that `a[-1]` would otherwise have
                         // been allowed to reach through index 0.
@@ -9418,9 +9390,7 @@ impl Shell {
                 keep
             });
             for t in ro_targets.iter().filter(|t| self.readonly.contains(*t)) {
-                self.emit_stderr(
-                    format!("{}{t}: readonly variable\n", self.err_prefix()).as_bytes(),
-                );
+                self.perrln(&format!("{t}: readonly variable"));
             }
         }
 
@@ -9858,19 +9828,6 @@ impl Shell {
         self.merged_frames()
             .last()
             .map_or_else(|| self.name.clone(), |f| f.1.clone())
-    }
-
-    /// [`Shell::error_source`] as text, for the three prefix builders.
-    ///
-    /// Seam: the diagnostic layer below still assembles its prefixes with
-    /// `format!`, so the label has to be text to reach them. This is the *only*
-    /// narrowing left on the source-label path — every store and every other
-    /// reader (`$0`, `BASH_ARGV0`, `BASH_SOURCE`, `caller`) is byte-exact — and
-    /// it disappears when TD-OILS-BYTE-STRINGS step 10b turns `err_prefix`,
-    /// `read_error_prefix` and `syntax_error_prefix` into `Str`.
-    fn error_source_shown(&self) -> String {
-        #[allow(deprecated)]
-        bytes::scaffold_lossy_string(&self.error_source())
     }
 
     /// The merged call stack — function calls and `source` invocations
@@ -10568,7 +10525,7 @@ impl Shell {
                         cmd.stdin(Stdio::from(f));
                     }
                     Err(e) => {
-                        self.errln(&format!("{}coproc: {e}", self.err_prefix()));
+                        self.perrln(&format!("coproc: {e}"));
                         self.last_status = 1;
                         return;
                     }
@@ -10635,7 +10592,7 @@ impl Shell {
                                 cmd.stdin(Stdio::from(rp));
                             }
                             Err(e) => {
-                                self.errln(&format!("{}pipe: {e}", self.err_prefix()));
+                                self.perrln(&format!("pipe: {e}"));
                                 self.last_status = 1;
                                 return;
                             }
@@ -10694,7 +10651,7 @@ impl Shell {
                             cmd.stdout(Stdio::from(f));
                         }
                         Err(_) => {
-                            self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                            self.perrln(&format!("{n}: Bad file descriptor"));
                             self.last_status = 1;
                             return;
                         }
@@ -10705,7 +10662,7 @@ impl Shell {
                     // host, so the shell refuses the redirect — same status and
                     // stream, different wording (TD-OILS-FD0-WRITE).
                     Some(WriteFd::ReadOnly) | None => {
-                        self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                        self.perrln(&format!("{n}: Bad file descriptor"));
                         self.last_status = 1;
                         return;
                     }
@@ -10721,7 +10678,7 @@ impl Shell {
                             cmd.stdout(s);
                         }
                         Err(e) => {
-                            self.errln(&format!("{}{e}", self.err_prefix()));
+                            self.perrln(&e.to_string());
                             self.last_status = 1;
                             return;
                         }
@@ -10733,7 +10690,7 @@ impl Shell {
                         // `exec 1>&0` onto a read-only fd 0: see the `>&N` case
                         // above — the child gets no descriptor it could write to.
                         WriteFd::ReadOnly => {
-                            self.errln(&format!("{}0: Bad file descriptor", self.err_prefix()));
+                            self.perrln("0: Bad file descriptor");
                             self.last_status = 1;
                             return;
                         }
@@ -10749,7 +10706,7 @@ impl Shell {
                                 cmd.stdout(Stdio::from(fc));
                             }
                             Err(e) => {
-                                self.errln(&format!("{}exec stdout: {e}", self.err_prefix()));
+                                self.perrln(&format!("exec stdout: {e}"));
                                 self.last_status = 1;
                                 return;
                             }
@@ -10766,7 +10723,7 @@ impl Shell {
                             cmd.stdout(Stdio::from(wp));
                         }
                         Err(e) => {
-                            self.errln(&format!("{}pipe: {e}", self.err_prefix()));
+                            self.perrln(&format!("pipe: {e}"));
                             self.last_status = 1;
                             return;
                         }
@@ -10776,7 +10733,7 @@ impl Shell {
                     // dup of the shared handle, so it writes at the live offset).
                     match w {
                         WriteFd::ReadOnly => {
-                            self.errln(&format!("{}0: Bad file descriptor", self.err_prefix()));
+                            self.perrln("0: Bad file descriptor");
                             self.last_status = 1;
                             return;
                         }
@@ -10790,7 +10747,7 @@ impl Shell {
                                 cmd.stdout(Stdio::from(fc));
                             }
                             Err(e) => {
-                                self.errln(&format!("{}exec stdout: {e}", self.err_prefix()));
+                                self.perrln(&format!("exec stdout: {e}"));
                                 self.last_status = 1;
                                 return;
                             }
@@ -10826,7 +10783,7 @@ impl Shell {
                         cmd.stderr(Stdio::from(f));
                     }
                     Err(_) => {
-                        self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                        self.perrln(&format!("{n}: Bad file descriptor"));
                         self.last_status = 1;
                         return;
                     }
@@ -10839,7 +10796,7 @@ impl Shell {
                     cmd.stderr(Stdio::null());
                 }
                 None => {
-                    self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                    self.perrln(&format!("{n}: Bad file descriptor"));
                     self.last_status = 1;
                     return;
                 }
@@ -10886,7 +10843,7 @@ impl Shell {
                     }
                 }
                 Err(e) => {
-                    self.errln(&format!("{}{e}", self.err_prefix()));
+                    self.perrln(&e.to_string());
                     self.last_status = 1;
                     return;
                 }
@@ -10906,7 +10863,7 @@ impl Shell {
                                 cmd.stderr(Stdio::from(fc));
                             }
                             Err(e) => {
-                                self.errln(&format!("{}exec stderr: {e}", self.err_prefix()));
+                                self.perrln(&format!("exec stderr: {e}"));
                                 self.last_status = 1;
                                 return;
                             }
@@ -10925,7 +10882,7 @@ impl Shell {
                         cmd.stderr(Stdio::from(fc));
                     }
                     Err(e) => {
-                        self.errln(&format!("{}stderr: {e}", self.err_prefix()));
+                        self.perrln(&format!("stderr: {e}"));
                         self.last_status = 1;
                         return;
                     }
@@ -10935,7 +10892,7 @@ impl Shell {
                         cmd.stderr(Stdio::from(pc));
                     }
                     Err(e) => {
-                        self.errln(&format!("{}pipe: {e}", self.err_prefix()));
+                        self.perrln(&format!("pipe: {e}"));
                         self.last_status = 1;
                         return;
                     }
@@ -10951,7 +10908,7 @@ impl Shell {
                         cmd.stderr(Stdio::from(fc));
                     }
                     Err(e) => {
-                        self.errln(&format!("{}stderr: {e}", self.err_prefix()));
+                        self.perrln(&format!("stderr: {e}"));
                         self.last_status = 1;
                         return;
                     }
@@ -11018,7 +10975,7 @@ impl Shell {
                 self.last_status = status.code().unwrap_or(1);
             }
             Err(e) => {
-                self.errln(&format!("{}wait failed: {e}", self.err_prefix()));
+                self.perrln(&format!("wait failed: {e}"));
                 self.last_status = 1;
             }
         }
@@ -11050,10 +11007,7 @@ impl Shell {
                     // Only a pipe can fail here, and only by running out of
                     // descriptors. Report it rather than silently detaching the
                     // job from the pipeline it belongs to.
-                    self.errln(&format!(
-                        "{}cannot duplicate output for `&': {e}",
-                        self.err_prefix()
-                    ));
+                    self.perrln(&format!("cannot duplicate output for `&': {e}"));
                     self.last_status = 1;
                     return;
                 }
@@ -11067,7 +11021,7 @@ impl Shell {
             match stdin.share() {
                 Ok(s) => Some(s),
                 Err(e) => {
-                    self.errln(&format!("{}cannot duplicate input for `&': {e}", self.err_prefix()));
+                    self.perrln(&format!("cannot duplicate input for `&': {e}"));
                     self.last_status = 1;
                     return;
                 }
@@ -11257,7 +11211,7 @@ impl Shell {
         let (child_stdin_r, parent_stdin_w) = match io::pipe() {
             Ok(p) => p,
             Err(e) => {
-                self.errln(&format!("{}coproc: {e}", self.err_prefix()));
+                self.perrln(&format!("coproc: {e}"));
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -11265,7 +11219,7 @@ impl Shell {
         let (parent_stdout_r, child_stdout_w) = match io::pipe() {
             Ok(p) => p,
             Err(e) => {
-                self.errln(&format!("{}coproc: {e}", self.err_prefix()));
+                self.perrln(&format!("coproc: {e}"));
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -12928,10 +12882,7 @@ impl Shell {
                 match param_substr(&value, off, len) {
                     Ok(s) => s,
                     Err(bad_len) => {
-                        self.errln(&format!(
-                            "{}{bad_len}: substring expression < 0",
-                            self.err_prefix()
-                        ));
+                        self.perrln(&format!("{bad_len}: substring expression < 0"));
                         self.discard_error = Some(1);
                         Str::new()
                     }
@@ -13036,9 +12987,7 @@ impl Shell {
                     match self.resolve_ref_name(refname) {
                         Some(t) => Some(t.into_bytes()),
                         None => {
-                            self.emit_stderr(
-                                format!("{}{refname}: invalid indirect expansion\n", self.err_prefix()).as_bytes(),
-                            );
+                            self.perrln(&format!("{refname}: invalid indirect expansion"));
                             self.discard_error = Some(1);
                             return Str::new();
                         }
@@ -13219,7 +13168,7 @@ impl Shell {
                         } else {
                             "invalid variable name"
                         };
-                        self.errln(&format!("{}{name}: {complaint}", self.err_prefix()));
+                        self.perrln(&format!("{name}: {complaint}"));
                         self.discard_error = Some(1);
                         return Str::new();
                     }
@@ -13347,9 +13296,7 @@ impl Shell {
                     // Assigning the default would require writing to `a[@]`/`a[*]`,
                     // which bash rejects as a "bad array subscript". Report the
                     // same and abort the expansion.
-                    self.emit_stderr(
-                        format!("{}{name}[{sub}]: bad array subscript\n", self.err_prefix()).as_bytes(),
-                    );
+                    self.perrln(&format!("{name}[{sub}]: bad array subscript"));
                     // bash discards the command with status **2** here — not
                     // the 1 every other bad-subscript site uses.
                     self.discard_error = Some(2);
@@ -13410,7 +13357,7 @@ impl Shell {
             // bash aborts a non-interactive shell with status 127 on a nounset
             // unset-variable reference.
             self.unbound_error = Some(127);
-            self.emit_stderr(format!("{}{name}: unbound variable\n", self.err_prefix()).as_bytes());
+            self.perrln(&format!("{name}: unbound variable"));
         }
     }
 
@@ -13510,13 +13457,7 @@ impl Shell {
     fn resolve_ref_use(&self, name: &str) -> Option<String> {
         let target = self.resolve_ref_name(name);
         if target.is_none() {
-            self.emit_stderr(
-                format!(
-                    "{}warning: {name}: circular name reference\n",
-                    self.err_prefix()
-                )
-                .as_bytes(),
-            );
+            self.perrln(&format!("warning: {name}: circular name reference"));
         }
         target
     }
@@ -13545,7 +13486,7 @@ impl Shell {
         // subscripts on an indexed array fall back to index 0, as bash does.
         let idx = sub.parse::<i64>().unwrap_or(0);
         if self.subscript_is_bad(base, idx) {
-            self.errln(&format!("{}{base}: bad array subscript", self.err_prefix()));
+            self.perrln(&format!("{base}: bad array subscript"));
             return None;
         }
         self.array_element(base, idx)
@@ -13707,10 +13648,7 @@ impl Shell {
             return;
         }
         buf.retain(|&b| b != 0);
-        self.errln(&format!(
-            "{}warning: command substitution: ignored null byte in input",
-            self.err_prefix()
-        ));
+        self.perrln("warning: command substitution: ignored null byte in input");
     }
 
     /// Substitute a `` `…` ``/`$( … )` body, re-reading it at expansion time.
@@ -14068,7 +14006,7 @@ impl Shell {
             return Some(0);
         }
         let saved = self.arith_cmd.take();
-        self.arith_cmd = Some(Cow::Borrowed("[["));
+        self.arith_cmd = Some(Cow::Borrowed(b"[["));
         let r = match arith::eval(s, self) {
             Ok(v) => Some(v),
             Err(e) => {
@@ -14181,7 +14119,7 @@ impl Shell {
     /// the parameter reference while evaluating those two expressions, so the
     /// diagnostic reads `a[0]: 1 z: syntax error in expression`.
     fn eval_arith_substr_bound(&mut self, w: &Word, param_ref: BStr<'_>) -> i64 {
-        let saved = self.arith_cmd.replace(Cow::Owned(shown(param_ref)));
+        let saved = self.arith_cmd.replace(Cow::Owned(param_ref.to_vec()));
         let v = self.eval_arith_index(w);
         self.arith_cmd = saved;
         v
@@ -14636,7 +14574,7 @@ impl Shell {
                     self.stderr_stack.push(w.as_stderr_target());
                     pushed_stderr = true;
                 } else {
-                    self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                    self.perrln(&format!("{n}: Bad file descriptor"));
                 }
             } else if redir.stderr_to_stdout {
                 // `2>&1` with fd 1 not a file: fd 2 mirrors fd 1's live sink.
@@ -14664,7 +14602,7 @@ impl Shell {
                                 pushed_stderr = true;
                             }
                             Err(e) => {
-                                self.errln(&format!("{}stdout: {e}", self.err_prefix()));
+                                self.perrln(&format!("stdout: {e}"));
                             }
                         }
                     }
@@ -14697,10 +14635,10 @@ impl Shell {
         });
         let saved_arith_cmd = self.arith_cmd.take();
         self.arith_cmd = match name {
-            "let" => Some(Cow::Borrowed("let")),
-            "declare" => Some(Cow::Borrowed("declare")),
-            "typeset" => Some(Cow::Borrowed("typeset")),
-            "local" => Some(Cow::Borrowed("local")),
+            "let" => Some(Cow::Borrowed(b"let")),
+            "declare" => Some(Cow::Borrowed(b"declare")),
+            "typeset" => Some(Cow::Borrowed(b"typeset")),
+            "local" => Some(Cow::Borrowed(b"local")),
             _ => None,
         };
         let status = match name {
@@ -14857,7 +14795,7 @@ impl Shell {
                         match self.write_fd_for(n, redir) {
                             Some(w) => self.exec_stdout = Some(w),
                             None => {
-                                self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                                self.perrln(&format!("{n}: Bad file descriptor"));
                                 rc = 1;
                             }
                         }
@@ -14866,7 +14804,7 @@ impl Shell {
                         match self.write_fd_for(n, redir) {
                             Some(w) => self.exec_stderr = Some(w),
                             None => {
-                                self.errln(&format!("{}{n}: Bad file descriptor", self.err_prefix()));
+                                self.perrln(&format!("{n}: Bad file descriptor"));
                                 rc = 1;
                             }
                         }
@@ -14913,7 +14851,7 @@ impl Shell {
                                         self.open_fds.remove(fd);
                                     }
                                     Err(e) => {
-                                        self.errln(&format!("{}{fd}: {e}", self.err_prefix()));
+                                        self.perrln(&format!("{fd}: {e}"));
                                         rc = 1;
                                     }
                                 },
@@ -14954,10 +14892,7 @@ impl Shell {
                 // bash's own source, so a non-interactive login shell logs out
                 // just as well.
                 if name == "logout" && !self.login_shell {
-                    self.errln(&format!(
-                        "{}logout: not login shell: use `exit'",
-                        self.err_prefix()
-                    ));
+                    self.perrln("logout: not login shell: use `exit'");
                     1
                 } else {
                     // A non-numeric argument still exits, with status 2; a
@@ -15013,9 +14948,7 @@ impl Shell {
                         1
                     }
                     Some(_) if self.fn_stack.is_empty() && self.source_stack.is_empty() => {
-                        self.errln(
-                            &format!("{}return: can only `return' from a function or sourced script", self.err_prefix()),
-                        );
+                        self.perrln("return: can only `return' from a function or sourced script");
                         2
                     }
                     Some(code) => {
@@ -15045,7 +14978,7 @@ impl Shell {
                 // rather than unwinding. The operand is not even looked at —
                 // `break abc` outside a loop is only the warning.
                 if self.loop_depth == 0 {
-                    self.errln(&format!("{}{name}: only meaningful in a `for', `while', or `until' loop", self.err_prefix()));
+                    self.perrln(&format!("{name}: only meaningful in a `for', `while', or `until' loop"));
                     0
                 } else {
                     match self.loop_count_arg(name, args) {
@@ -15065,7 +14998,7 @@ impl Shell {
                 }
             }
             _ => {
-                self.errln(&format!("{}{name}: not a builtin", self.err_prefix()));
+                self.perrln(&format!("{name}: not a builtin"));
                 127
             }
         };
@@ -15265,7 +15198,7 @@ impl Shell {
         // bash rejects a second operand outright (before any chdir), with a
         // bare message and no usage line: `cd a b` → "cd: too many arguments".
         if rest.len() > 1 {
-            self.errln(&format!("{}cd: too many arguments", self.err_prefix()));
+            self.perrln("cd: too many arguments");
             return 1;
         }
         // An empty operand is a *logical* no-op in bash: `cd ""` succeeds and
@@ -15275,10 +15208,7 @@ impl Shell {
         // Windows CRT reports "invalid syntax" for an empty path).
         if rest.first().is_some_and(|d| d.is_empty()) {
             if physical {
-                self.errln(&format!(
-                    "{}cd: : No such file or directory",
-                    self.err_prefix()
-                ));
+                self.perrln("cd: : No such file or directory");
                 return 1;
             }
             return 0;
@@ -15294,7 +15224,7 @@ impl Shell {
             Some(b"-") => match self.param_value("OLDPWD") {
                 Some(p) => (p, true),
                 None => {
-                    self.emit_stderr(format!("{}cd: OLDPWD not set\n", self.err_prefix()).as_bytes());
+                    self.perrln("cd: OLDPWD not set");
                     return 1;
                 }
             },
@@ -15416,7 +15346,7 @@ impl Shell {
             } else {
                 format!("{tag}: {}: directory stack index out of range", spec.n)
             };
-            self.errln(&format!("{}{msg}", self.err_prefix()));
+            self.perrln(&msg);
             return Err(1);
         }
         // `+N` counts from the left (0 = current dir), `-N` from the right.
@@ -15460,7 +15390,7 @@ impl Shell {
                 }
             }
             if dir.replace(a.clone()).is_some() {
-                self.errln(&format!("{}pushd: too many arguments", self.err_prefix()));
+                self.perrln("pushd: too many arguments");
                 return 1;
             }
             // The directory operand ends option processing: bash reads a
@@ -15515,7 +15445,7 @@ impl Shell {
             (None, None) if no_cd => return 0,
             (None, None) => {
                 if self.dir_stack.is_empty() {
-                    self.errln(&format!("{}pushd: no other directory", self.err_prefix()));
+                    self.perrln("pushd: no other directory");
                     return 1;
                 }
                 let top = self.dir_stack[0].clone();
@@ -15600,7 +15530,7 @@ impl Shell {
     /// `no_cd` (bash's `-n`) the entry is dropped but the cwd is left alone.
     fn popd_top(&mut self, no_cd: bool, out: &mut Out, redir: &RedirPlan) -> i32 {
         if self.dir_stack.is_empty() {
-            self.errln(&format!("{}popd: directory stack empty", self.err_prefix()));
+            self.perrln("popd: directory stack empty");
             return 1;
         }
         let top = self.dir_stack.remove(0);
@@ -16003,7 +15933,7 @@ impl Shell {
                 // The empty word is the one non-number bash does not put down to
                 // spelling; it has no spelling to fault.
                 None if target.is_empty() => {
-                    self.errln(&format!("{}kill: `': not a pid or valid job spec", self.err_prefix()));
+                    self.perrln("kill: `': not a pid or valid job spec");
                     return false;
                 }
                 None => {
@@ -16463,13 +16393,7 @@ impl Shell {
                     b's' => state = Some(JobState::Stopped),
                     b'x' => {
                         if listing_option {
-                            self.emit_stderr(
-                                format!(
-                                    "{}jobs: no other options allowed with `-x'\n",
-                                    self.err_prefix()
-                                )
-                                .as_bytes(),
-                            );
+                            self.perrln("jobs: no other options allowed with `-x'");
                             return 1;
                         }
                         execute = true;
@@ -16820,7 +16744,7 @@ impl Shell {
                         let rest = &cluster[at + 1..];
                         if rest.is_empty() {
                             let Some(v) = args.get(i) else {
-                                self.errln(&format!("{}wait: -p: option requires an argument", self.err_prefix()));
+                                self.perrln("wait: -p: option requires an argument");
                                 self.emit_stderr(USAGE);
                                 return 2;
                             };
@@ -17177,7 +17101,7 @@ impl Shell {
             match self.current_job_idx() {
                 Some(idx) => vec![self.jobs[idx].id],
                 None => {
-                    self.emit_stderr(format!("{}disown: current: no such job\n", self.err_prefix()).as_bytes());
+                    self.perrln("disown: current: no such job");
                     return 1;
                 }
             }
@@ -17225,7 +17149,7 @@ impl Shell {
         // `set -m`), bash refuses `fg` outright with `fg: no job control`,
         // regardless of any running background job. Match that.
         if !self.job_control_enabled() {
-            self.emit_stderr(format!("{}fg: no job control\n", self.err_prefix()).as_bytes());
+            self.perrln("fg: no job control");
             return 1;
         }
         self.poll_jobs();
@@ -17251,7 +17175,7 @@ impl Shell {
             None => match self.current_job_idx() {
                 Some(idx) => idx,
                 None => {
-                    self.emit_stderr(format!("{}fg: current: no such job\n", self.err_prefix()).as_bytes());
+                    self.perrln("fg: current: no such job");
                     return 1;
                 }
             },
@@ -17281,7 +17205,7 @@ impl Shell {
     fn builtin_bg(&mut self, args: &[Str], _out: &mut Out, _redir: &RedirPlan) -> i32 {
         // As with `fg`, no job control ⇒ bash prints `bg: no job control`.
         if !self.job_control_enabled() {
-            self.emit_stderr(format!("{}bg: no job control\n", self.err_prefix()).as_bytes());
+            self.perrln("bg: no job control");
             return 1;
         }
         self.poll_jobs();
@@ -17290,7 +17214,7 @@ impl Shell {
             match self.current_job_idx() {
                 Some(idx) => vec![idx],
                 None => {
-                    self.emit_stderr(format!("{}bg: current: no such job\n", self.err_prefix()).as_bytes());
+                    self.perrln("bg: current: no such job");
                     return 1;
                 }
             }
@@ -17318,9 +17242,7 @@ impl Shell {
         // — so a resolvable target always takes that path.
         for &idx in &idxs {
             let id = self.jobs[idx].id;
-            self.emit_stderr(
-                format!("{}bg: job {id} already in background\n", self.err_prefix()).as_bytes(),
-            );
+            self.perrln(&format!("bg: job {id} already in background"));
         }
         0
     }
@@ -17761,7 +17683,7 @@ impl Shell {
             if arg.as_slice() == b"-p" {
                 pathname = args.get(i + 1).cloned();
                 if pathname.is_none() {
-                    self.emit_stderr(format!("{}hash: -p: option requires an argument\n", self.err_prefix()).as_bytes());
+                    self.perrln("hash: -p: option requires an argument");
                     return 2;
                 }
                 i += 2;
@@ -17956,10 +17878,7 @@ impl Shell {
                         let tail = flags.get(at.saturating_add(1)..).unwrap_or_default();
                         if tail.is_empty() {
                             let Some(off) = args.get(i) else {
-                                self.errln(&format!(
-                                    "{}history: -d: option requires an argument",
-                                    self.err_prefix()
-                                ));
+                                self.perrln("history: -d: option requires an argument");
                                 self.errln(&format!("history: usage: {USAGE}"));
                                 return 2;
                             };
@@ -17984,10 +17903,7 @@ impl Shell {
             }
         }
         if file_ops.len() > 1 {
-            self.errln(&format!(
-                "{}history: cannot use more than one of -anrw",
-                self.err_prefix()
-            ));
+            self.perrln("history: cannot use more than one of -anrw");
             return 1;
         }
         let rest = args.get(i..).unwrap_or(&[]);
@@ -18335,10 +18251,7 @@ impl Shell {
                         let tail = flags.get(at.saturating_add(1)..).unwrap_or_default();
                         if tail.is_empty() {
                             let Some(name) = args.get(i) else {
-                                self.errln(&format!(
-                                    "{}fc: -e: option requires an argument",
-                                    self.err_prefix()
-                                ));
+                                self.perrln("fc: -e: option requires an argument");
                                 self.errln(&format!("fc: usage: {USAGE}"));
                                 return 2;
                             };
@@ -18412,14 +18325,11 @@ impl Shell {
         };
         let (mut beg, mut end) = match (beg, end) {
             (FcSpec::Invalid, _) | (_, FcSpec::Invalid) => {
-                self.errln(&format!(
-                    "{}fc: history specification out of range",
-                    self.err_prefix()
-                ));
+                self.perrln("fc: history specification out of range");
                 return 1;
             }
             (FcSpec::NotFound, _) | (_, FcSpec::NotFound) => {
-                self.errln(&format!("{}fc: no command found", self.err_prefix()));
+                self.perrln("fc: no command found");
                 return 1;
             }
             (FcSpec::Idx(b), FcSpec::Idx(e)) => (b.max(0), e.max(0)),
@@ -18505,12 +18415,12 @@ impl Shell {
         let idx = match self.fc_gethnum(spec, false, false) {
             FcSpec::Idx(n) if n >= 0 => usize::try_from(n).unwrap_or(0),
             _ => {
-                self.errln(&format!("{}fc: no command found", self.err_prefix()));
+                self.perrln("fc: no command found");
                 return 1;
             }
         };
         let Some(mut command) = self.history.get(idx).cloned() else {
-            self.errln(&format!("{}fc: no command found", self.err_prefix()));
+            self.perrln("fc: no command found");
             return 1;
         };
         for (pat, rep) in &subs {
@@ -18534,10 +18444,7 @@ impl Shell {
     ) -> i32 {
         let path = unique_temp_path("osh_fc");
         if std::fs::write(&path, text).is_err() {
-            self.errln(&format!(
-                "{}fc: {path}: cannot open temp file",
-                self.err_prefix()
-            ));
+            self.perrln(&format!("fc: {path}: cannot open temp file"));
             return 1;
         }
         // bash builds the editor invocation as a *shell command line* and parses
@@ -18722,7 +18629,7 @@ impl Shell {
         }
         // Any tokens after the value operand are extra arguments (bash errors).
         if i < args.len() {
-            self.emit_stderr(format!("{}ulimit: too many arguments\n", self.err_prefix()).as_bytes());
+            self.perrln("ulimit: too many arguments");
             return 1;
         }
 
@@ -19022,10 +18929,7 @@ impl Shell {
                 if glued.is_empty() {
                     // `-v NAME` — the name is the next token.
                     let Some(name) = args.get(1) else {
-                        self.errln(&format!(
-                            "{}printf: -v: option requires an argument",
-                            self.err_prefix()
-                        ));
+                        self.perrln("printf: -v: option requires an argument");
                         // bash follows the diagnostic with the usage synopsis.
                         self.emit_stderr(b"printf: usage: printf [-v var] format [arguments]\n");
                         return 2;
@@ -19132,7 +19036,7 @@ impl Shell {
                 return 1;
             };
             if self.readonly.contains(&resolved) {
-                self.emit_stderr(format!("{}{base}: readonly variable\n", self.err_prefix()).as_bytes());
+                self.perrln(&format!("{base}: readonly variable"));
                 return 1;
             }
             // A subscript that names nowhere fails the builtin (status 1) with
@@ -19272,9 +19176,7 @@ impl Shell {
                 // error, and — as in bash — the value is left unchanged and the
                 // export attribute is not applied for that operand.
                 if self.readonly.contains(&k) {
-                    self.emit_stderr(
-                        format!("{}{k}: readonly variable\n", self.err_prefix()).as_bytes(),
-                    );
+                    self.perrln(&format!("{k}: readonly variable"));
                     status = 1;
                     continue;
                 }
@@ -19789,26 +19691,20 @@ impl Shell {
             return None;
         }
         if self.local_frames.is_empty() {
-            Some(
-                format!(
-                    "{}{tag}: {name}: nameref variable self references not allowed\n",
-                    self.err_prefix()
-                )
-                .into_bytes(),
-            )
+            Some(bfmt![
+                self.err_prefix(),
+                format!("{tag}: {name}: nameref variable self references not allowed\n")
+            ])
         } else {
             // A warning, not an error: emit it here and let the caller proceed.
-            let prefix = self.err_prefix();
-            self.emit_stderr(
-                format!("{prefix}{tag}: warning: {name}: circular name reference\n").as_bytes(),
-            );
+            self.perrln(&format!("{tag}: warning: {name}: circular name reference"));
             None
         }
     }
 
     fn builtin_declare(&mut self, args: &[Str], is_local: bool, tag: &str) -> i32 {
         if is_local && self.local_frames.is_empty() {
-            self.emit_stderr(format!("{}local: can only be used in a function\n", self.err_prefix()).as_bytes());
+            self.perrln("local: can only be used in a function");
             return 1;
         }
         let mut assoc = false;
@@ -19999,10 +19895,7 @@ impl Shell {
             // bash tags the diagnostic with the invoking builtin's name
             // (`declare: y: readonly variable`, `local: …`, `typeset: …`).
             if value.is_some() && self.readonly.contains(base_name) {
-                self.emit_stderr(
-                    format!("{}{tag}: {base_name}: readonly variable\n", self.err_prefix())
-                        .as_bytes(),
-                );
+                self.perrln(&format!("{tag}: {base_name}: readonly variable"));
                 status = 1;
                 continue;
             }
@@ -20020,13 +19913,7 @@ impl Shell {
             if let Some((from_kind, to_kind)) =
                 self.array_kind_conflict(base_name, assoc, indexed)
             {
-                self.emit_stderr(
-                    format!(
-                        "{}{tag}: {base_name}: cannot convert {from_kind} to {to_kind} array\n",
-                        self.err_prefix()
-                    )
-                    .as_bytes(),
-                );
+                self.perrln(&format!("{tag}: {base_name}: cannot convert {from_kind} to {to_kind} array"));
                 status = 1;
                 continue;
             }
@@ -20372,7 +20259,7 @@ impl Shell {
             .unwrap_or_default();
         let is_local = cmd == "local";
         if is_local && self.local_frames.is_empty() {
-            self.emit_stderr(format!("{}local: can only be used in a function\n", self.err_prefix()).as_bytes());
+            self.perrln("local: can only be used in a function");
             self.last_status = 1;
             return Flow::Next;
         }
@@ -20499,14 +20386,7 @@ impl Shell {
                 // machinery, not by the builtin, so it carries no `declare:` tag
                 // (unlike the bare-name form in `builtin_declare`) and it
                 // discards the rest of the parse unit rather than merely failing.
-                self.emit_stderr(
-                    format!(
-                        "{}{}: cannot convert {from_kind} to {to_kind} array\n",
-                        self.err_prefix(),
-                        a.name
-                    )
-                    .as_bytes(),
-                );
+                self.perrln(&format!("{}: cannot convert {from_kind} to {to_kind} array", a.name));
                 self.last_status = 1;
                 return Flow::Discard;
             }
@@ -20772,7 +20652,7 @@ impl Shell {
                 continue;
             };
             if value.is_some() && self.readonly.contains(&name) {
-                self.emit_stderr(format!("{}{name}: readonly variable\n", self.err_prefix()).as_bytes());
+                self.perrln(&format!("{name}: readonly variable"));
                 status = 1;
                 continue;
             }
@@ -20901,13 +20781,7 @@ impl Shell {
         // not fall back to listing, and it says so plainly rather than with the
         // usage line an unknown flag gets.
         if flags.set && flags.unset {
-            self.emit_stderr(
-                format!(
-                    "{}shopt: cannot set and unset shell options simultaneously\n",
-                    self.err_prefix()
-                )
-                .as_bytes(),
-            );
+            self.perrln("shopt: cannot set and unset shell options simultaneously");
             return 1;
         }
         let names: Vec<&Str> = args[i..].iter().collect();
@@ -21244,9 +21118,7 @@ impl Shell {
             let a = &self.resolve_ref_use(a).unwrap_or_else(|| a.to_string());
             // A readonly variable cannot be unset.
             if self.readonly.contains(a) {
-                self.emit_stderr(
-                    format!("{}unset: {a}: cannot unset: readonly variable\n", self.err_prefix()).as_bytes(),
-                );
+                self.perrln(&format!("unset: {a}: cannot unset: readonly variable"));
                 status = 1;
                 continue;
             }
@@ -21260,9 +21132,7 @@ impl Shell {
             if !vars_only && !is_var {
                 // Not a set variable: fall back to unsetting a function.
                 if self.readonly_funcs.contains(a.as_bytes()) {
-                    self.emit_stderr(
-                        format!("{}unset: {a}: cannot unset: readonly function\n", self.err_prefix()).as_bytes(),
-                    );
+                    self.perrln(&format!("unset: {a}: cannot unset: readonly function"));
                     status = 1;
                     continue;
                 }
@@ -21310,9 +21180,7 @@ impl Shell {
         // An element of a readonly array cannot be unset either — bash reports
         // the base name as the readonly variable.
         if self.readonly.contains(name) {
-            self.emit_stderr(
-                format!("{}unset: {name}: cannot unset: readonly variable\n", self.err_prefix()).as_bytes(),
-            );
+            self.perrln(&format!("unset: {name}: cannot unset: readonly variable"));
             return false;
         }
         // An unset variable is not probed at all: bash never even evaluates the
@@ -21353,9 +21221,7 @@ impl Shell {
                 // A scalar has no all-elements subscript, and `@` is not an
                 // arithmetic expression, so this is reported before any
                 // evaluation is attempted.
-                self.emit_stderr(
-                    format!("{}unset: {name}: not an array variable\n", self.err_prefix()).as_bytes(),
-                );
+                self.perrln(&format!("unset: {name}: not an array variable"));
                 return false;
             }
             // `unset a[@]` empties the array but leaves it declared (and keeps
@@ -21379,9 +21245,7 @@ impl Shell {
             // element unsets the whole variable. Any other index — including a
             // negative one — is "not an array variable".
             if raw != 0 {
-                self.emit_stderr(
-                    format!("{}unset: {name}: not an array variable\n", self.err_prefix()).as_bytes(),
-                );
+                self.perrln(&format!("unset: {name}: not an array variable"));
                 return false;
             }
             self.vars.remove(name);
@@ -21794,9 +21658,7 @@ impl Shell {
                     return 1;
                 };
                 if args.len() > 1 {
-                    self.emit_stderr(
-                        format!("{}shift: too many arguments\n", self.err_prefix()).as_bytes(),
-                    );
+                    self.perrln("shift: too many arguments");
                     return 1;
                 }
                 if v < 0 {
@@ -22225,7 +22087,7 @@ impl Shell {
             && !self.open_fds.contains_key(&n)
             && !self.coproc_read_fds.contains_key(&n)
         {
-            self.errln(&format!("{}read: {n}: bad file descriptor", self.err_prefix()));
+            self.perrln(&format!("read: {n}: bad file descriptor"));
             return 1;
         }
         // A fresh `RedirPlan` masks `redir.stdin*` so the fd-N source is
@@ -22648,10 +22510,7 @@ impl Shell {
             && !self.open_fds.contains_key(&n)
             && !self.coproc_read_fds.contains_key(&n)
         {
-            self.errln(&format!(
-                "{}{tag}: {n}: invalid file descriptor: Bad file descriptor",
-                self.err_prefix()
-            ));
+            self.perrln(&format!("{tag}: {n}: invalid file descriptor: Bad file descriptor"));
             return 1;
         }
 
@@ -22681,21 +22540,15 @@ impl Shell {
             None => return 1,
         };
         if !crate::parser::is_valid_name(array.as_bytes()) {
-            self.errln(&format!(
-                "{}{tag}: `{array}': not a valid identifier",
-                self.err_prefix()
-            ));
+            self.perrln(&format!("{tag}: `{array}': not a valid identifier"));
             return 1;
         }
         if self.readonly.contains(&array) {
-            self.errln(&format!("{}{array}: readonly variable", self.err_prefix()));
+            self.perrln(&format!("{array}: readonly variable"));
             return 1;
         }
         if self.assoc.contains_key(&array) {
-            self.errln(&format!(
-                "{}{tag}: {array}: not an indexed array",
-                self.err_prefix()
-            ));
+            self.perrln(&format!("{tag}: {array}: not an indexed array"));
             return 1;
         }
 
@@ -22813,9 +22666,7 @@ impl Shell {
             args
         };
         let Some(path) = args.first() else {
-            self.emit_stderr(
-                format!("{}{tag}: filename argument required\n", self.err_prefix()).as_bytes(),
-            );
+            self.perrln(&format!("{tag}: filename argument required"));
             self.emit_stderr(format!("{tag}: usage: {tag} filename [arguments]\n").as_bytes());
             return 2;
         };
@@ -23011,10 +22862,7 @@ impl Shell {
                         match args.get(i) {
                             Some(v) => v.clone(),
                             None => {
-                                self.errln(&format!(
-                                    "{}compgen: -{c}: option requires an argument",
-                                    self.err_prefix()
-                                ));
+                                self.perrln(&format!("compgen: -{c}: option requires an argument"));
                                 self.emit_stderr(format!("compgen: usage: {USAGE}\n").as_bytes());
                                 return 2;
                             }
@@ -23455,10 +23303,7 @@ impl Shell {
                             match args.get(i) {
                                 Some(v) => v.clone(),
                                 None => {
-                                    self.errln(&format!(
-                                        "{}complete: -{c}: option requires an argument",
-                                        self.err_prefix()
-                                    ));
+                                    self.perrln(&format!("complete: -{c}: option requires an argument"));
                                     self.emit_stderr(USAGE);
                                     return 2;
                                 }
@@ -23519,10 +23364,7 @@ impl Shell {
                                 'E' => targets.push(CompKey::Empty),
                                 'I' => targets.push(CompKey::Initial),
                                 _ => {
-                                    self.errln(&format!(
-                                        "{}complete: -{c}: invalid option",
-                                        self.err_prefix()
-                                    ));
+                                    self.perrln(&format!("complete: -{c}: invalid option"));
                                     self.emit_stderr(USAGE);
                                     return 2;
                                 }
@@ -23660,7 +23502,7 @@ impl Shell {
                 b"-I" => targets.push(CompKey::Initial),
                 other if other.len() > 1 && other.starts_with(b"-") => {
                     let c = char::from(other.get(1).copied().unwrap_or(b'?'));
-                    self.errln(&format!("{}compopt: -{c}: invalid option", self.err_prefix()));
+                    self.perrln(&format!("compopt: -{c}: invalid option"));
                     self.emit_stderr(USAGE);
                     return 2;
                 }
@@ -23675,10 +23517,7 @@ impl Shell {
 
         if keys.is_empty() {
             // osh is never inside a completion function.
-            self.errln(&format!(
-                "{}compopt: not currently executing completion function",
-                self.err_prefix()
-            ));
+            self.perrln("compopt: not currently executing completion function");
             return 1;
         }
 
@@ -23907,7 +23746,7 @@ impl Shell {
             if a.last() == Some(&b"]".as_slice()) {
                 a.pop();
             } else {
-                self.errln(&format!("{}[: missing ']'", self.err_prefix()));
+                self.perrln("[: missing ']'");
                 return 2;
             }
         }
@@ -24249,7 +24088,7 @@ impl Shell {
                 self.finish_write(r)
             }
             None => {
-                self.errln(&format!("{}{fd}: Bad file descriptor", self.err_prefix()));
+                self.perrln(&format!("{fd}: Bad file descriptor"));
                 1
             }
         }
@@ -24284,7 +24123,7 @@ impl Shell {
                     Some(name) => format!("{name}: write error"),
                     None => "write error".to_string(),
                 };
-                self.errln(&format!("{prefix}{what}: {msg}"));
+                self.berrln(&bfmt![prefix, format!("{what}: {msg}")]);
                 1
             }
         }
@@ -24347,6 +24186,18 @@ impl Shell {
         self.berrln(msg.as_bytes());
     }
 
+    /// [`Shell::berrln`] with the shell's diagnostic prefix in front — the shape
+    /// of very nearly every shell error message (`osh: line 3: cd: nope: No such
+    /// file or directory`).
+    ///
+    /// Takes anything [`bytes::PushBytes`] accepts, so a `&str` literal, a
+    /// `format!` of purely-textual parts and a `bfmt!` of shell data all reach it
+    /// the same way — and the prefix itself, which carries `$0` or a script path,
+    /// stays bytes throughout.
+    fn perrln(&self, msg: &(impl bytes::PushBytes + ?Sized)) {
+        self.berrln(&bfmt![self.err_prefix(), msg]);
+    }
+
     /// [`Shell::errln`] for a message that contains shell data.
     ///
     /// A diagnostic routinely quotes a filename, a variable value or a word the
@@ -24374,7 +24225,7 @@ impl Shell {
     /// in a `-c` string; osh deliberately keeps its own `$0`-based name instead,
     /// since byte-matching bash's name is impossible anyway (osh's `$0` is `osh`,
     /// not `bash`) and osh's own name is the more meaningful diagnostic.
-    fn err_prefix(&self) -> String {
+    fn err_prefix(&self) -> Str {
         self.err_prefix_at(self.current_line)
     }
 
@@ -24389,7 +24240,7 @@ impl Shell {
     /// token, even from `-c` and even from inside an `eval`. (Measured; the token
     /// belongs to bash's `parser_error`, and this warning is a plain
     /// `internal_warning`.)
-    fn err_prefix_at(&self, line: u32) -> String {
+    fn err_prefix_at(&self, line: u32) -> Str {
         // bash labels a diagnostic with the source of the *currently-executing
         // frame* (its `get_name_for_error`): at the top level that is the shell
         // or script name (`$0`), but *inside a function* it is the function's
@@ -24400,15 +24251,15 @@ impl Shell {
         // `environment: line 1: x: readonly variable` under `-c`, as bash does,
         // and an error raised while a `source`d script is being read names that
         // script rather than the top-level one.
-        let src = self.error_source_shown();
+        let src = self.error_source();
         // bash shows the `line N:` token for every *non-interactive* input —
         // `-c`, a script file, *and* piped/redirected stdin — omitting it only
         // for a tty-attached interactive shell. `is_interactive()` folds all
         // three non-interactive cases into one predicate.
         if self.is_interactive() {
-            format!("{src}: ")
+            bfmt![src, b": "]
         } else {
-            format!("{src}: line {line}: ")
+            bfmt![src, b": line ", line.to_string(), b": "]
         }
     }
 
@@ -24425,8 +24276,8 @@ impl Shell {
     /// whatever the enclosing one was (`-c`, `eval`, or a script alike) — but
     /// only for the body's *own* read-eval loop, since an `eval`/`.` run inside
     /// it reports as itself. See [`Shell::comsub_read_eval`].
-    fn syntax_error_prefix(&self, line: u32) -> String {
-        let name = self.error_source_shown();
+    fn syntax_error_prefix(&self, line: u32) -> Str {
+        let name = self.error_source();
         // `eval` wins over the outer `-c`/script token (bash reports `eval:`
         // even for an `eval` run from a script).
         // The `-c` token names the *input source* being reported, so it drops
@@ -24450,14 +24301,14 @@ impl Shell {
         // substitution, so its errors always show a line.
         if !self.is_interactive() || self.eval_depth > 0 || in_backtick {
             match token {
-                Some(t) => format!("{name}: {t}: line {line}: "),
-                None => format!("{name}: line {line}: "),
+                Some(t) => bfmt![name, b": ", t, b": line ", line.to_string(), b": "],
+                None => bfmt![name, b": line ", line.to_string(), b": "],
             }
         } else {
             // Interactive tty REPL: bash shows just `<name>: `. (osh's REPL is
             // line-at-a-time, so even were it non-interactive `line` would reset
             // per logical line rather than accumulate across a compound.)
-            format!("{name}: ")
+            bfmt![name, b": "]
         }
     }
 
@@ -24480,17 +24331,17 @@ impl Shell {
         e: &crate::parser::ParseError,
         src: BStr<'_>,
         map: &LineMap,
-    ) -> String {
+    ) -> Str {
         let line = e.line.unwrap_or_else(|| self.current_line.max(1));
         let prefix = self.syntax_error_prefix(line);
         // A `ParseError` message may span several physical lines (bash emits
         // multi-line diagnostics, e.g. `unexpected argument \`]]' to conditional
         // binary operator` followed by `syntax error near \`]]'`). Prefix each
         // line the way bash tags every line with `<$0>: <src>: line N:`.
-        let mut out = String::new();
+        let mut out = Str::new();
         for (i, msg_line) in e.msg.split('\n').enumerate() {
             if i > 0 {
-                out.push('\n');
+                out.push(b'\n');
             }
             out.push_str(&wrap_parse_message(msg_line, &prefix));
         }
@@ -24498,10 +24349,14 @@ impl Shell {
         // line whenever it reports the error "near" a token (`near unexpected
         // token \`X'` or the conditional-expression `near \`X'` form) — but not
         // for `unexpected end of file` / `unexpected EOF while looking for …`.
+        //
+        // The echo is the source line *verbatim*: it is what the user typed, and
+        // a shell word may hold any byte, so it goes back out unchanged rather
+        // than through a decode that would rewrite the very text being blamed.
         if e.msg.contains("syntax error near ")
             && let Some(text) = map.unmap(line).and_then(|n| nth_source_line(src, n))
         {
-            out.push_str(&format!("\n{prefix}`{}'", shown(text)));
+            out.push_str(&bfmt![b"\n", &prefix, b"`", text, b"'"]);
         }
         // Under **errexit** only the *first* line of the whole diagnostic
         // survives, whatever its shape — the echoed source line, a follow-on
@@ -24526,7 +24381,7 @@ impl Shell {
         //     `-e -c '(eval "for")'` does not, because a plain subshell inherits
         //     it. This last pair looks like a bash bug until you notice `$-`
         //     really is `hBc` inside `$( … )`.
-        if self.errexit && let Some(nl) = out.find('\n') {
+        if self.errexit && let Some(nl) = bytes::find(&out, b"\n") {
             out.truncate(nl);
         }
         out
@@ -24966,9 +24821,9 @@ impl VarLookup for Shell {
         // see the trait's doc. The name is blamed exactly as written: bash
         // rejects the empty subscript before it resolves anything, so a nameref
         // is *not* followed (`declare -n r=x; (( r[] ))` blames `r[]`).
-        let line = format!("{}{name}[]: bad array subscript", self.err_prefix());
-        self.errln(&line);
-        self.errln(&line);
+        let line = format!("{name}[]: bad array subscript");
+        self.perrln(&line);
+        self.perrln(&line);
     }
 
     fn refuse_empty_subscript_store(&mut self, name: &str) {
@@ -26475,16 +26330,6 @@ fn syn_at(chs: &[Ch], i: usize) -> char {
     chs.get(i).copied().map_or('\0', syn)
 }
 
-/// Render a byte string for a diagnostic that is still `String`-typed.
-///
-/// The diagnostic layer is step 10 of TD-OILS-BYTE-STRINGS; until it lands,
-/// text that reaches a `format!`-built message goes through here, so every
-/// remaining lossy conversion is one call site and disappears with the scaffold.
-fn shown(s: BStr<'_>) -> String {
-    #[allow(deprecated)]
-    bytes::scaffold_lossy_string(s)
-}
-
 /// Collect a shell name table's `String` keys as byte strings. The tables are
 /// `String`-keyed (TD-OILS-BYTE-STRINGS steps 8-10), but the completion list
 /// they feed is byte-typed, so this is the one-way widening between them.
@@ -27485,7 +27330,7 @@ fn special_redirect_fd(path: BStr<'_>) -> Option<i32> {
 /// `\`NAME': not a valid identifier` message, and the `unexpected EOF while
 /// looking for matching \`C'` unclosed-quote/substitution diagnostic (bash
 /// emits these last two with no `syntax error:` tag).
-fn wrap_parse_message(msg: &str, prefix: &str) -> String {
+fn wrap_parse_message(msg: &str, prefix: BStr<'_>) -> Str {
     // Messages that are already in one of bash's canonical parser forms pass
     // through verbatim: `syntax error…`, any `unexpected …` diagnostic
     // (`unexpected EOF…`, `unexpected argument…`, `unexpected token…`), and the
@@ -27498,9 +27343,9 @@ fn wrap_parse_message(msg: &str, prefix: &str) -> String {
         || msg.starts_with("conditional ")
         || msg.ends_with("not a valid identifier")
     {
-        format!("{prefix}{msg}")
+        bfmt![prefix, msg]
     } else {
-        format!("{prefix}syntax error: {msg}")
+        bfmt![prefix, b"syntax error: ", msg]
     }
 }
 
@@ -29885,6 +29730,30 @@ mod tests {
         bytes::as_str(v).expect("test value is not text")
     }
 
+    /// [`Shell::format_parse_error`] as text, for assertions.
+    ///
+    /// The ~40 parse-error cases below spell bash's exact diagnostics as Rust
+    /// string literals while the shell speaks bytes, so — like [`as_text`] —
+    /// this panics rather than approximating: a diagnostic that stopped being
+    /// text is a failure of the case, not something to paper over. The one case
+    /// that *is* about a non-text diagnostic compares bytes directly.
+    #[track_caller]
+    fn parse_error(
+        sh: &Shell,
+        e: &crate::parser::ParseError,
+        src: BStr<'_>,
+        map: &LineMap,
+    ) -> String {
+        String::from_utf8(sh.format_parse_error(e, src, map)).expect("diagnostic is text")
+    }
+
+    /// [`super::wrap_parse_message`] over text — see [`parse_error`].
+    #[track_caller]
+    fn wrap_parse_message(msg: &str, prefix: &str) -> String {
+        String::from_utf8(super::wrap_parse_message(msg, prefix.as_bytes()))
+            .expect("diagnostic is text")
+    }
+
     /// [`Shell::param_value`] as an owned `String`, for assertions. Same rule as
     /// [`as_text`]: a value these tests set that will not decode is a failure.
     #[track_caller]
@@ -30171,7 +30040,7 @@ mod tests {
         let src = "echo hello world (";
         let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 1: syntax error near unexpected token `('\n\
              osh: -c: line 1: `echo hello world ('"
         );
@@ -30180,7 +30049,7 @@ mod tests {
         let src = ":\n:\necho a | | b";
         let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 3: syntax error near unexpected token `|'\n\
              osh: -c: line 3: `echo a | | b'"
         );
@@ -30189,7 +30058,7 @@ mod tests {
         let src = "if true";
         let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 2: syntax error: unexpected end of file"
         );
 
@@ -30197,7 +30066,7 @@ mod tests {
         let src = "if true\n\n\n";
         let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 4: syntax error: unexpected end of file"
         );
 
@@ -30206,7 +30075,7 @@ mod tests {
         let src = "echo (";
         let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: eval: line 1: syntax error near unexpected token `('\n\
              osh: eval: line 1: `echo ('"
         );
@@ -30214,7 +30083,56 @@ mod tests {
 
         // A runtime (non-parse) diagnostic must NOT gain the `-c:` token; that is
         // still driven by `err_prefix`, which omits it.
-        assert_eq!(sh.err_prefix(), "osh: line 1: ");
+        assert_eq!(sh.err_prefix(), b"osh: line 1: ");
+    }
+
+    #[test]
+    fn diagnostics_carry_bytes_that_are_not_text() {
+        // Both halves of a diagnostic can hold a byte that is not text: the
+        // *prefix*, which is built from `$0` (a script path — any byte but `/`
+        // and NUL), and the *echo*, which is the offending source line verbatim.
+        // These assertions go through `format_parse_error`/`err_prefix` directly
+        // rather than the text-decoding `parse_error` adapter, which would hide
+        // the very byte under test.
+        let mut sh = Shell::new();
+        sh.set_command_mode();
+        sh.set_interactive_shell(false);
+
+        // The echo is the source line as typed — the `\xff` reaches stderr as
+        // itself, so the line the user is being blamed for is the line they wrote.
+        let src = b"echo a\xffb (";
+        let e = parse(src).unwrap_err();
+        assert_eq!(
+            sh.format_parse_error(&e, src, &LineMap::Offset(0)),
+            b"osh: -c: line 1: syntax error near unexpected token `('\n\
+              osh: -c: line 1: `echo a\xffb ('"
+                .to_vec()
+        );
+
+        // The prefix carries `$0`, so a script path that is not text names the
+        // script it actually is.
+        let mut sh = Shell::new();
+        sh.set_name(b"/tmp/a\xffb.sh");
+        sh.set_script_mode();
+        sh.set_interactive_shell(false);
+        sh.current_line = 7;
+        assert_eq!(sh.err_prefix(), b"/tmp/a\xffb.sh: line 7: ");
+        assert_eq!(sh.read_error_prefix(3), b"/tmp/a\xffb.sh: line 3: ");
+        assert_eq!(
+            sh.syntax_error_prefix(2),
+            b"/tmp/a\xffb.sh: line 2: ".to_vec()
+        );
+
+        // …and it reaches fd 2 intact through `perrln`, the shape nearly every
+        // shell diagnostic has. (`2>&1` folds fd 2 into the capture.)
+        let buf = capture_sink();
+        let status = {
+            let mut out = Out::Capture(buf.clone());
+            sh.run_source_out(b"cd /no/such/dir/at/all 2>&1\n", &mut out, 0)
+        };
+        assert_ne!(status, 0);
+        let err = take_capture(&buf);
+        assert!(err.starts_with(b"/tmp/a\xffb.sh: line 1: cd: "), "{err:?}");
     }
 
     #[test]
@@ -30232,9 +30150,9 @@ mod tests {
         for src in ["echo hello world (", ":\n:\necho a | | b", "if true", "[[ a b ]]"] {
             let e = parse(src.as_bytes()).unwrap_err();
             sh.errexit = false;
-            let full = sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0));
+            let full = parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0));
             sh.errexit = true;
-            let terse = sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0));
+            let terse = parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0));
             assert_eq!(terse, full.split('\n').next().unwrap(), "{src:?}");
             assert!(!terse.contains('\n'), "{src:?} -> {terse:?}");
         }
@@ -30246,14 +30164,14 @@ mod tests {
         let e = parse(src.as_bytes()).unwrap_err();
         sh.errexit = true;
         assert_eq!(
-            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 1: syntax error near unexpected token `('"
         );
         // A diagnostic that is one line already is untouched.
         let src = "if true";
         let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
-            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 2: syntax error: unexpected end of file"
         );
     }
@@ -30268,7 +30186,7 @@ mod tests {
         sh.set_interactive_shell(false);
         let check = |sh: &Shell, src: &str, want: &str| {
             let e = parse(src.as_bytes()).unwrap_err();
-            assert_eq!(sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)), want, "src: {src}");
+            assert_eq!(parse_error(sh, &e, src.as_bytes(), &LineMap::Offset(0)), want, "src: {src}");
         };
         // A bare word primary followed by another word: bash wanted a binary
         // operator. Covers a plain operand, a non-`[[` operator, and a unary
@@ -30348,7 +30266,7 @@ mod tests {
         let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(e.line, Some(1));
         assert_eq!(
-            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 1: unexpected EOF while looking for matching `)'"
         );
 
@@ -30357,7 +30275,7 @@ mod tests {
         let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(e.line, Some(3));
         assert_eq!(
-            sh.format_parse_error(&e, src.as_bytes(), &LineMap::Offset(0)),
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
             "osh: -c: line 3: unexpected EOF while looking for matching `)'"
         );
 

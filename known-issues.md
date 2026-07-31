@@ -6310,16 +6310,39 @@ layer that only ever *displays* it. What remains can land one layer per commit:
      narrowing the three still-`String` prefix builders share. Pinned by
      `interp::tests::the_shell_name_and_source_labels_hold_bytes_that_are_not_text`.
 
-   * **10b — the prefix builders and their call sites.** `err_prefix` /
-     `err_prefix_at` (~285 sites), `read_error_prefix` and
-     `syntax_error_prefix` return `String` and are consumed almost entirely as
-     `self.errln(&format!("{}…", self.err_prefix()))`. Turning them into `Str`
-     means those sites become `berrln`/`bfmt!`, which wants a `berrln!` macro
-     rather than 285 hand edits. Removes `error_source_shown` and the
-     `interp.rs` / `parser.rs` `shown()` helpers.
+   * **10b — the prefix builders and their call sites. Done 2026-07-30.** All
+     four builders (`err_prefix`, `err_prefix_at`, `read_error_prefix`,
+     `syntax_error_prefix`) now return `Str` and assemble with `bfmt!`, so
+     `error_source_shown` is gone and the prefix carries `$0` / a script path as
+     bytes end to end. The ~285 call sites did *not* need 285 hand edits: about
+     110 already fed the prefix into a `bfmt!`, and `PushBytes for Vec<u8>` made
+     those compile untouched. The rest went through a new method rather than the
+     `berrln!` macro this entry originally sketched —
+
+     ```rust
+     fn perrln(&self, msg: &(impl bytes::PushBytes + ?Sized)) {
+         self.berrln(&bfmt![self.err_prefix(), msg]);
+     }
+     ```
+
+     — which reads better than a macro, needs no hygiene, and lets a `&str`
+     literal, a `format!` of purely-textual parts and a `bfmt!` of shell data all
+     reach the same call. It also *collapsed* the two spellings the same message
+     had: 84 `self.errln(&format!("{}…", self.err_prefix()))` and 39
+     `self.emit_stderr(format!("{}…\n", self.err_prefix()).as_bytes())` are now
+     both `self.perrln(…)`, with `perrln` appending the newline itself. Also
+     converted here, because they were the last consumers of `interp.rs`'s
+     `shown()`: `format_parse_error` and `wrap_parse_message` (now returning
+     `Str`, so a syntax error echoes the offending source line *verbatim* rather
+     than through a decode that would rewrite the very text being blamed), the
+     two here-document reader warnings (a `<<a\xffb` delimiter is quoted back as
+     written), and `arith_cmd`, which became `Option<Cow<'static, [u8]>>`.
+     `interp.rs`'s `shown()` is deleted. Pinned by
+     `interp::tests::diagnostics_carry_bytes_that_are_not_text`.
 
    * **10c — the parser's own text.** `LexError.msg`, `ParseError.msg`,
-     `token_display`, `unterminated_heredoc` (`lexer.rs:111`) and `arith_cmd`.
+     `token_display` and `unterminated_heredoc` (`lexer.rs:111`) — the last two
+     seams, and all that is left of this task.
 
 **Gate.** The branch does not merge until `scaffold_lossy_string` is deleted and
 a grep for it outside `bytes.rs` returns nothing. That grep count *is* the
@@ -6348,7 +6371,10 @@ After `ere.rs` (step 9, third of three files — **step 9 complete**): still
 Everything that reaches step 10 is now purely diagnostic. After step 10a:
 **4** — `interp.rs:9873` `error_source_shown`, `interp.rs:26485` and
 `parser.rs:63` the two `shown` helpers, and `lexer.rs:111` the
-unterminated-here-document delimiter.
+unterminated-here-document delimiter. After step 10b: **2** — `parser.rs:63`
+`shown` and `lexer.rs:111` the unterminated-here-document delimiter, both of
+which are step 10c and both of which live in the parser rather than the
+interpreter. `interp.rs` is now seam-free.
 
 **Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
 `TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts

@@ -5997,33 +5997,40 @@ Same root cause and disposition as `TD-OILS-PRINTF-QUOTE-CHAR` and
 for SlateOS, which has no C/POSIX byte locale), so the MSYS byte-wise result is
 a host-locale artifact, not an osh divergence. No action needed.
 
-### TD-OILS-BYTE-STRINGS. A byte that is not valid UTF-8 cannot survive osh: a script holding one is refused outright, and data holding one is replaced or dropped — OPEN 2026-07-30
+### TD-OILS-BYTE-STRINGS. A byte that is not valid UTF-8 cannot survive osh: a script holding one is refused outright, and data holding one is replaced or dropped — OPEN 2026-07-30 (steps 1–8 of 10 done; no path can still *alter data*, only *display* it)
 
-**Where:** the representation itself — osh stores a shell word, a variable value
+**Where:** the representation itself — osh stored a shell word, a variable value
 and a captured stream as a Rust `String`, which cannot hold invalid UTF-8. The
-observable boundaries are:
+observable boundaries were:
 - `userspace/oils/src/main.rs:517` (`Plan::Script` → `fs::read_to_string`) and
   `interp.rs:3199` / `3962` / `4059` / `21523` / `25789` (`.`/`source`, and the
-  other file readers) — these **refuse** the file.
+  other file readers) — these **refused** the file. Fixed at step 8: the script
+  readers hand raw bytes to a byte-typed parser.
 - `interp.rs` `substitute_file` (~13203), `finish_comsub` (~13278),
-  `builtin_mapfile` (~21455) and `read_record` (~26401) — these are
-  `String::from_utf8_lossy`, so the byte becomes U+FFFD.
+  `builtin_mapfile` (~21455) and `read_record` (~26401) — these were
+  `String::from_utf8_lossy`, so the byte became U+FFFD. Fixed at steps 5–6.
 - `read_one_line` (~26337) used `BufRead::read_line` with `.ok()?`, which turned
-  the UTF-8 error into a *fake EOF*. Fixed 2026-07-30 (see below); the remaining
-  two behaviours stand.
+  the UTF-8 error into a *fake EOF*. Fixed 2026-07-30.
+
+All of the above are closed. What is left is the *diagnostic* layer (step 10) —
+see **Remaining** below.
 
 **What.** Against bash 5.2.37, with `d.bin` = `a\xa9b\ncr\n` (`\xa9` is a lone
 continuation-less high byte):
 
-| | bash | osh, as first diagnosed | osh today (measured after step 7) |
+| | bash | osh, as first diagnosed | osh today (measured after step 8) |
 |---|---|---|---|
-| `osh d.bin` where the *script* holds `\xa9` | runs it, `echo` writes the raw byte | `osh: d.bin: stream did not contain valid UTF-8`, nothing runs | unchanged — still refuses (step 8) |
-| `. ./d.bin` | runs it | same refusal, tagged `osh: line 1: .:` | unchanged — still refuses (step 8) |
+| `osh d.bin` where the *script* holds `\xa9` | runs it, `echo` writes the raw byte | `osh: d.bin: stream did not contain valid UTF-8`, nothing runs | **fixed** — runs, writes `a9` |
+| `. ./d.bin` | runs it | same refusal, tagged `osh: line 1: .:` | **fixed** — runs, writes `a9` |
 | `v=$(cat d.bin)` | `a \xa9 b \n c` | `a \xef\xbf\xbd b \n c` (U+FFFD) | **fixed** — byte-exact |
 | `v=$(<d.bin)` | same as bash's above | U+FFFD | **fixed** — byte-exact |
 | `mapfile -t a < d.bin` | element 0 = `a\xa9b` | element 0 = `a\xef\xbf\xbdb` | **fixed** — `a\xa9b` |
 | `IFS= read -r l < d.bin` | status 0, `l=a\xa9b` | *was* status 1 with `l` empty; then U+FFFD, status 0 | **fixed** — status 0, `l=a\xa9b` |
-| `printf %s $'\xa9'` | one byte `a9` | two bytes `c2 a9` (U+00A9) | three bytes `ef bf bd` (U+FFFD) — see below |
+| `printf %s $'\xa9'` | one byte `a9` | two bytes `c2 a9` (U+00A9) | **fixed** — one byte `a9` |
+
+Every row now matches bash. What remains undone is not in this table: it is the
+*diagnostic* layer, where a path or a `$0` that is not text is still shown
+approximately (never *acted on* approximately) — step 10.
 
 The `read` row was the damaging one: `read_line` consumes the bytes and *then*
 reports `InvalidData`, which `.ok()?` mapped to `None` — the same value a real
@@ -6034,14 +6041,15 @@ truncates nor invents an EOF nor alters the line.
 
 The last row is the same defect seen from the writing side and was already noted
 as a "known remaining gap" under the ANSI-C escape work (~line 965); it is
-folded in here so the family has one home. Note that its *shape* changed at step
-2 and the old value in the table was stale: `escape.rs` became byte-native, so
-`ansi_c_unescape` now yields the single byte `a9` correctly — but the lexer that
-receives it is still `String`-typed, so the byte is re-encoded lossily and comes
-out as U+FFFD rather than the old U+00A9. Both are wrong; the corruption simply
-moved from the escape layer to the lexer, which is exactly what step 8 closes.
-Until then, a test that needs a value carrying an undecodable byte must build it
-with `$(printf '\xa9')` rather than `$'\xa9'`.
+folded in here so the family has one home. Its *shape* changed twice on the way
+out, which is worth recording because it shows how a half-converted stack
+behaves. Step 2 made `escape.rs` byte-native, so `ansi_c_unescape` yielded the
+single byte `a9` correctly — but the lexer that received it was still
+`String`-typed, so the byte was immediately re-encoded lossily and emerged as
+U+FFFD rather than the old U+00A9. Both were wrong; the corruption had merely
+moved from the escape layer to the lexer. Step 8 byte-typed the lexer and the
+byte now survives the whole path, so `$'\xa9'` and `$(printf '\xa9')` are
+finally interchangeable.
 
 **Why it matters beyond bash fidelity.** CLAUDE.md rule 7 is explicit: OS-boundary
 data — paths, environment values, pipe contents — is bytes, and
@@ -6144,22 +6152,52 @@ commit (build + test + clippy on `x86_64-pc-windows-gnu` *and* `x86_64-slateos`)
    compound array literal (`declare -a x=(…)`) and the `mapfile -C` callback
    line are shell *source*.
 
+8. **The syntax layer — done 2026-07-30** (two commits: the lexer/parser/interp
+   conversion, then a regression test for a bug it exposed). `lexer.rs`,
+   `ast.rs` and `parser.rs` are byte-native — `WordPart::Literal(Str)`,
+   `SingleQuoted { text: Str }`, the heredoc delimiter and body, the alias
+   table — dragging `brace.rs` and `unparse.rs` with them, and `parse` /
+   `run_source` / `eval_string` now take `BStr`. This is the step that made a
+   **script** able to hold a byte that is not text: the top three rows of the
+   table above all flipped here, because `main.rs`'s script reader and
+   `builtin_source` went from `read_to_string` (refuse the file) to `read`
+   (run it). `$'\xa9'` also finished its journey — step 2 had made the escape
+   layer produce the right byte only for the lexer to re-encode it lossily.
+
+   Eleven `bytes::as_str` seams were **deleted** rather than moved, because a
+   consumer that re-parses shell source no longer needs that source to be text:
+   `prompt_expand` (PS1/PS4 re-lex), `eval`, `jobs -x`, both `trap` handler
+   call sites plus the whole `trap_source` helper, the `declare -a x=(…)`
+   compound literal, the `mapfile -C` callback line, `source`'s file read, and
+   the `type` builtin's function-body lookup.
+
+   The conversion exposed a **live bug in `unset`**, now fixed with a
+   regression test. A subscript is an ordinary shell word and may hold any
+   byte, but `builtin_unset` applied its *identifier* gate to the whole operand
+   before splitting `name[sub]` apart — so `unset 'm[<non-text>]'` was silently
+   dropped and the element stayed. The gate now runs on the base name only,
+   after a raw-byte split. Three sibling sites have the same gate-ordering
+   shape but currently *refuse with a diagnostic* rather than corrupting, and
+   are tracked separately as `TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT`.
+
 **Remaining, in order.** Step 6 was the keystone — expansion and the variable
 store are each other's main producer and consumer, so converting either alone
 would have needed a scaffold at every site the other now satisfies for free.
-What is left is narrower and can land one layer per commit:
+Step 8 was the last one that could still *alter data*; everything left is the
+layer that only ever *displays* it. What remains can land one layer per commit:
 
-8. `lexer.rs` + `ast.rs` + `parser.rs` (`WordPart::Literal(Str)`,
-   `SingleQuoted { text: Str }`), dragging `brace.rs` and `unparse.rs`. Closes
-   the alias table, the `PS4`/`PS1` re-lex, `@P`, the `mapfile -C` callback seam
-   (`interp.rs:22416`) and `lexer.rs:2163`.
 9. `arith.rs`, `histexpand.rs`, `ere.rs`. Closes the `VarLookup` seams
-   (`interp.rs:24482`/`:24491`/`:24518`) and `TD-OILS-ERE-TEXT-ONLY`. `main.rs`
-   was pulled forward and is already done (see
-   `TD-OILS-ARGV-PANICS-ON-NON-UTF8`).
+   (`interp.rs:24931`/`:24940`/`:24967`), the `HistCtx` text accessors and the
+   `expand_history_lines` pass-through (two interim seams authored at step 8),
+   the `history -p` seam, and `TD-OILS-ERE-TEXT-ONLY`. `main.rs` was pulled
+   forward and is already done (see `TD-OILS-ARGV-PANICS-ON-NON-UTF8`).
 10. The diagnostic layer (`errln`, `err_prefix`, `write_line`) — ~378 sites,
     almost all `format!` with static text, so it wants a `berrln!` macro rather
-    than 378 hand edits.
+    than 378 hand edits. Closes what is left: `SourceFrame.path`, `BASH_SOURCE`
+    and `merged_frames`' source field, `Shell::set_name` / `$0` / `BASH_ARGV0`,
+    `arith_cmd`, `LexError.msg`, `unterminated_heredoc`, `ParseError.msg`,
+    `token_display`, and the two `shown()` helpers that concentrate the
+    remaining approximation into one named, auditable place.
 
 **Gate.** The branch does not merge until `scaffold_lossy_string` is deleted and
 a grep for it outside `bytes.rs` returns nothing. That grep count *is* the
@@ -6170,12 +6208,72 @@ step 5: **17**. After step 6: **14**. After the `main.rs` argv fix
 `Shell::set_name`, by pulling `$0` a layer earlier than step 10. After step 7:
 **11** (10 in `interp.rs`, 1 in `lexer.rs`) — that step removed five and added
 one, `builtin_source`'s `SourceFrame.path`, which is the same step-10 seam
-`Shell::set_name` is (`$0` and `BASH_SOURCE` both feed `err_prefix`).
+`Shell::set_name` is (`$0` and `BASH_SOURCE` both feed `err_prefix`). After
+step 8: **10** — 8 in `interp.rs` (`:3005` `set_name`, `:3280` and `:22883`
+`SourceFrame.path`, `:7300` `BASH_ARGV0`, `:24931`/`:24940`/`:24967` the
+arithmetic `VarLookup`, `:26541` the `shown` helper), 1 in `parser.rs` (its own
+`shown`) and 1 in `lexer.rs:111` (the unterminated-heredoc delimiter). Every
+one is now either a step-9 arithmetic seam or a step-10 diagnostic seam; none
+of them can alter what a command *does*.
 
 **Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
 `TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts
 where osh already matches UTF-8-locale bash, and the byte-string move must
 preserve their current character-wise answers.
+
+### TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT. An array *element* named by a subscript that is not text cannot be assigned to by `printf -v`, `read` or `declare -n` — OPEN 2026-07-30
+
+**Where:** `userspace/oils/src/interp.rs` — the three surviving callers of
+`is_valid_assignment_target` (`:27326`), each of which gates on
+`bytes::as_str(whole_word)` *before* the base name is split from the subscript:
+- `:19101` — `printf -v 'arr[SUB]'`
+- `:19816` — `declare -n r='arr[SUB]'` (and its `+=` form)
+- `:22325` / `:22435` — `read 'arr[SUB]'`, first name and later names
+
+**What.** A subscript is an ordinary shell word: `m[$k]` may hold any byte,
+and an associative array happily *stores* such a key — `m[$k]=v` works, and as
+of the fix below `unset 'm[$k]'` removes it. But the three builtins above ask
+whether the **whole** operand is text before looking at its shape, so the
+subscript's bytes disqualify the base name:
+
+```
+$ k=$(printf '\xa9'); declare -A m
+$ printf -v "m[$k]" %s hi
+osh: line 3: printf: `m[<0xa9>]': not a valid identifier
+$ echo val | read "m[$k]"
+osh: line 3: read: `m[<0xa9>]': not a valid identifier
+```
+
+bash assigns in both cases. Note the failure is **loud and inert** — a
+diagnostic and no assignment — not the silent wrong-target write that the rest
+of TD-OILS-BYTE-STRINGS was about. That is why it is debt rather than a bug to
+drop everything for.
+
+**How it was found.** The same gate-ordering mistake in a *fourth* caller,
+`builtin_unset`, was a real bug: it silently dropped the request, leaving the
+element in place with status 0. Fixed at TD-OILS-BYTE-STRINGS step 8, with the
+regression test `unset_element_addresses_a_subscript_that_is_not_text`. `unset`
+was separable because it only needs the base name as `&str` to index the
+variable tables; the other three do not have that luxury (below).
+
+**Proper fix.** Split before gating, and byte-type the nameref target storage:
+
+1. Add `fn split_assignment_target(s: BStr<'_>) -> Option<(&str, Option<BStr<'_>>)>`
+   next to `is_valid_assignment_target`, returning the base name as `&str`
+   (valid identifier syntax is ASCII by construction, so this narrowing is
+   exact, not an approximation) and the subscript as raw bytes. Replace all
+   four call sites with it. `is_valid_assignment_target` then becomes
+   `split_assignment_target(...).is_some()` and the `&str` overload disappears.
+2. `resolve_ref_name(&self, name: &str) -> Option<String>` (`:13503`) and
+   `nameref_elem_value(&self, name: &str)` (`:13555`) currently re-split the
+   subscript out of a `String`, so a nameref pointing at `a[<non-text>]` cannot
+   round-trip even once the callers are fixed. The nameref value must become
+   `Str`, which pulls in `nameref_attr` and `set_scalar_checked`.
+
+Step 1 alone fixes `printf -v` and `read`; `declare -n` needs step 2 as well.
+Do this **with or after** TD-OILS-BYTE-STRINGS step 9/10 — the nameref value is
+one of the last `String`s left, and converting it in isolation would need a
+scaffold at every site step 10 is about to satisfy for free.
 
 ### TD-OILS-ARGV-PANICS-ON-NON-UTF8. `osh` aborts at startup if any of its own arguments is not UTF-8 — FIXED 2026-07-30
 
@@ -10622,7 +10720,13 @@ guessed at by the interpreter, because both describe how the shell was
   `bash_tilde_expand`): substitutions yes, word splitting and globbing no, and a
   leading `~` afterwards. Reproduced by wrapping the value in real double quotes
   and parsing it, so `BASH_ENV='$HOME/rc'`, `BASH_ENV='/a b/rc'` and
-  `BASH_ENV='~/rc'` all behave.
+  `BASH_ENV='~/rc'` all behave. That wrapping had a bug, fixed 2026-07-30: the
+  value was interpolated raw, so a `"` in it closed the quote early and a
+  **trailing** `\` escaped the closing quote and left the word unterminated —
+  `BASH_ENV='/a"b/rc'` read the wrong path and `BASH_ENV='/rc\'` silently read
+  none. Exactly those two bytes are now escaped, and no others: a `\` anywhere
+  but the end already means inside real double quotes what it means in bash's
+  `Q_DOUBLE_QUOTES` mode, so escaping it there would corrupt `BASH_ENV='\$x'`.
 * `~/.bash_logout` is *not* part of that table. bash reads it from inside the
   `exit`/`logout` builtin (`exit_or_logout` → `bash_logout`), which is what
   confines it to a **login** shell leaving through that builtin — never on

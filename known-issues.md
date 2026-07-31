@@ -5811,7 +5811,7 @@ Covered by `tests/corpus/dynamic-var-assign.sh` and the unit tests
 `assigning_a_dynamic_variable_fills_its_value_cell_only` /
 `assigning_a_dynamic_variable_stores_the_number_not_the_text`.
 
-### TD-OILS-DYNVAR-ARRAY-CONVERT. `declare -a SECONDS` makes an empty array instead of converting the live value — 2026-07-31
+### TD-OILS-DYNVAR-ARRAY-CONVERT. `declare -a SECONDS` makes an empty array instead of converting the live value — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the `array_kind_apply` /
 valueless-declaration path of the `declare` family.
@@ -5833,6 +5833,75 @@ The fix is for the conversion to fall back to `dynamic_special_value`,
 seed element 0 with it, carry the row's `named_flags` into the real
 attribute sets, and mark the name in `dyn_unset` — the binding is now an
 ordinary array and the value function is gone.
+
+**Fixed.** `Shell::dyn_array_convert` does exactly that, and
+`Shell::array_carried_value` is the one place both array kinds ask for
+the value a conversion carries: the scalar in `vars` if there is one,
+otherwise a last reading of the value function. The reading is taken
+*then*, not lifted out of the value cell — after `SECONDS=7; sleep 2` the
+conversion carries 9, and after `LINENO=7` it carries the line the
+conversion is on. The letters come from the row's `named_flags` (the set
+`declare -p NAME` reports, not the half-filled one a listing sees) and
+become real attributes, so the carried `-i` then evaluates whatever a
+literal supplies (`declare -a SECONDS=(3+4 9)` → `([0]="7" [1]="9")`) and
+a converted `PPID` keeps refusing. `Shell::drop_dynamic_binding` — the
+`unset` side effect, factored out of `unbind_var` — is what takes the
+value function away, so a converted `LINENO` reports the same line for
+ever after and `unset` on the converted name leaves nothing at all.
+
+Two guards keep it off bindings that are not the dynamic one: the
+call-stack arrays (`DynListing::EmptyArray`) are arrays already, and a
+name a `local` has shadowed is in `Shell::declared`, so `local -a
+SECONDS` builds a fresh empty local array and the shell's own binding is
+still there when the function returns.
+
+Three things reach the conversion, and all three were wrong before:
+`declare -a`/`-A NAME`, the valued `export -a`/`readonly -a NAME=v`
+forms, and a bare subscripted assignment (`SECONDS[1]=9`). The last one
+did not widen *at all* — not even an ordinary scalar, so `w=5; w[1]=9`
+gave `([1]="9")` where bash gives `([0]="5" [1]="9")`, and `w=5;
+w[-1]=9` resolved against the wrong bound. The widening now happens
+after the subscript is validated (a malformed one converts nothing, as
+in bash) and before the bound is taken, and the integer attribute is
+re-read afterwards because the conversion can bring one with it and bash
+applies it to the very element being assigned (`SECONDS[1]=x` → 0).
+
+Covered by `tests/corpus/dynamic-var-array.sh` and the unit tests
+`giving_a_dynamic_variable_an_array_kind_converts_it` /
+`converting_a_dynamic_variable_takes_its_value_function_away`.
+
+### TD-OILS-DECL-NAMEREF-UNRESOLVED. The declaration builtins do not follow a nameref — 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare` and the
+`export`/`readonly` operand loops, which apply attributes to the operand
+name itself rather than to the name a `-n` reference resolves to.
+
+bash resolves a nameref before applying an attribute, so a declaration
+naming the reference declares the *target*:
+
+```sh
+w=5; declare -n r=w
+declare -i r; declare -p w   # bash declare -i w="5"        osh declare -- w="5"
+declare -x r; declare -p w   # bash declare -x w="5"        osh declare -- w="5"
+readonly r;   declare -p w   # bash declare -r w="5"        osh declare -- w="5"
+declare -a r; declare -p w   # bash declare -a w=([0]="5")  osh declare -- w="5"
+declare -a r; declare -p r   # bash declare -n r="w"        osh declare -an r=([0]="w")
+```
+
+The last line is the damaging one: osh applies the array kind to `r`
+itself, which converts the reference's *own* value — the target name —
+into element 0 of an array, so the nameref is destroyed and every later
+`r=…`/`$r` addresses the array instead of `w`. Assignment through a
+reference is resolved correctly already (`resolve_ref_use` at the top of
+`apply_assignment`, so `r[1]=9` reaches `w`); it is only the declaration
+builtins that skip the step.
+
+The fix is to resolve the operand through `resolve_ref_use` — as
+`apply_assignment` does — before the attribute/kind is applied, in both
+the `declare`/`local`/`typeset` loop and the `export`/`readonly` ones,
+and to keep the `-n` operand itself exempt (`declare -n r=x` is about
+`r`, not about `x`). Note bash's own exemption: an operand *carrying*
+`-n` is not resolved, and neither is `unset -n`.
 
 ### TD-OILS-NAMEREF-VALUELESS-VALIDATION. `declare -n NAME` on an already-set variable does not validate its value — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

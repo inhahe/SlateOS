@@ -8095,6 +8095,22 @@ impl Shell {
                             // assign anything.
                             return false;
                         }
+                        // An element assignment onto a name that is not an array
+                        // yet widens it, carrying what it held in as element 0 —
+                        // `w=5; w[1]=9` is `([0]="5" [1]="9")` in bash, and a
+                        // dynamic special carries a last reading of its value
+                        // function the same way (`SECONDS[1]=9` →
+                        // `declare -ai SECONDS=([0]="3" [1]="9")`), attributes
+                        // included. Done *after* the subscript is validated,
+                        // because a malformed one converts nothing, and *before*
+                        // the bound below, because the carried element 0 is what
+                        // `w=5; w[-1]=9` counts back from.
+                        self.array_kind_apply(&a.name, false);
+                        // The conversion can bring the integer attribute with it
+                        // (`SECONDS`, `RANDOM`, `PPID`, …), and bash applies it
+                        // to the very element being assigned: `SECONDS[1]=x`
+                        // stores 0, `SECONDS[1]=3+4` stores 7.
+                        let is_int = is_int || self.integer_attr.contains(&a.name);
                         let bound = self
                             .arrays
                             .get(&a.name)
@@ -9922,6 +9938,88 @@ impl Shell {
     /// pristine state the table-walking listings pass over.
     fn dyn_cell_value(&self, name: &str) -> Option<Str> {
         self.dyn_cell.borrow().get(name).cloned()
+    }
+
+    /// Take `name`'s dynamic binding away for good: the value function, the
+    /// value cell and the attributes the cell filled in. The name is an
+    /// ordinary — and here unset — one from then on, and nothing ever puts the
+    /// binding back. See [`Shell::dyn_unset`].
+    ///
+    /// Two things reach here: `unset`, which leaves nothing behind, and the
+    /// array conversion ([`Shell::dyn_array_convert`]), which replaces the
+    /// binding with an ordinary array holding the last value the function
+    /// computed.
+    fn drop_dynamic_binding(&mut self, name: &str) {
+        if Self::dynamic_special_entry(name).is_none() {
+            return;
+        }
+        self.dyn_unset.insert(name.to_string());
+        self.dyn_cell.borrow_mut().remove(name);
+        if let Some(bit) = Self::dyn_touch_bit(name) {
+            self.dyn_touched.set(self.dyn_touched.get() & !bit);
+        }
+    }
+
+    /// Turn a dynamic special variable into an ordinary array, and answer the
+    /// value the conversion carries in as element 0. `None` for a name that is
+    /// not a live dynamic special.
+    ///
+    /// `declare -a SECONDS`, `declare -A SECONDS` and `SECONDS[1]=9` all widen
+    /// the name the way they widen a scalar — except that there is no stored
+    /// scalar to carry, so bash reads the name one last time and carries *that*:
+    ///
+    /// ```text
+    /// declare -a SECONDS   →   declare -ai  SECONDS=([0]="0")
+    /// declare -a PPID      →   declare -air PPID=([0]="120465")
+    /// declare -a LINENO    →   declare -a   LINENO=([0]="6")
+    /// ```
+    ///
+    /// The letters come from the slot's own attribute set
+    /// ([`DynamicSpecial::named_flags`]) and become *real* attributes of the
+    /// array, which is why the carried `-i` then evaluates the elements a
+    /// literal supplies (`declare -a SECONDS=(3+4 9)` → `([0]="7" [1]="9")`) and
+    /// why `declare -a PPID` stays readonly.
+    ///
+    /// What the conversion does not keep is the value function: element 0 is
+    /// frozen at the reading it took, so `declare -a LINENO` leaves `$LINENO`
+    /// reporting the same line for ever after, and `declare -a RANDOM` stops it
+    /// varying. That is exactly what `unset` does to the binding, so it is
+    /// recorded the same way — after which `unset SECONDS` really does leave
+    /// nothing at all.
+    ///
+    /// The call-stack arrays are arrays already, so there is nothing to convert
+    /// and the caller's ordinary array handling applies to them unchanged.
+    fn dyn_array_convert(&mut self, name: &str) -> Option<Str> {
+        let d = self.dynamic_special(name)?;
+        if d.listed == DynListing::EmptyArray {
+            return None;
+        }
+        // A `local` of the name already shadowed the dynamic binding with an
+        // ordinary, unset variable ([`Shell::declared`]), so `local -a SECONDS`
+        // builds a fresh, empty local array and leaves the shell's own binding
+        // alone — it is still there when the function returns.
+        if self.declared.contains(name) {
+            return None;
+        }
+        // The reading is taken *now*, not from the value cell: after
+        // `SECONDS=7; sleep 2` the conversion carries 9, and after `LINENO=7`
+        // it carries the line the conversion is on rather than 7.
+        let carried = self.dynamic_special_value(name);
+        for letter in d.named_flags.chars() {
+            match letter {
+                'i' => {
+                    self.integer_attr.insert(name.to_string());
+                }
+                'r' => {
+                    self.readonly.insert(name.to_string());
+                }
+                // `a` is the only other letter the table carries, and it
+                // belongs to the call-stack arrays, which returned above.
+                _ => {}
+            }
+        }
+        self.drop_dynamic_binding(name);
+        carried
     }
 
     /// Record a declaration builtin naming `name`, and answer whether it is a
@@ -21977,7 +22075,7 @@ impl Shell {
             if self.assoc.contains_key(name) {
                 return;
             }
-            let carried = self.vars.remove(name);
+            let carried = self.array_carried_value(name);
             self.assoc.entry(name.to_string()).or_default();
             if let Some(v) = carried {
                 self.assoc_set(name, b"0".to_vec(), v, false);
@@ -21987,12 +22085,23 @@ impl Shell {
             if self.arrays.contains_key(name) {
                 return;
             }
-            let carried = self.vars.remove(name);
+            let carried = self.array_carried_value(name);
             let entry = self.arrays.entry(name.to_string()).or_default();
             if let Some(v) = carried {
                 entry.insert(0, v);
                 self.array_valued.insert(name.to_string());
             }
+        }
+    }
+
+    /// The value an array conversion carries in as element 0: the scalar the
+    /// name was holding, or — for one of the names bash answers with a value
+    /// function — a last reading of it, which also ends the dynamic binding
+    /// (see [`Shell::dyn_array_convert`]).
+    fn array_carried_value(&mut self, name: &str) -> Option<Str> {
+        match self.vars.remove(name) {
+            Some(v) => Some(v),
+            None => self.dyn_array_convert(name),
         }
     }
 
@@ -23136,16 +23245,7 @@ impl Shell {
         // (`SECONDS`, `RANDOM`, `LINENO`, …): the function goes with the
         // variable and is never restored, leaving an unset, ordinary name. See
         // [`Shell::dyn_unset`].
-        if Self::dynamic_special_entry(name).is_some() {
-            self.dyn_unset.insert(name.to_string());
-            // The value cell and the attributes it filled in went with the
-            // binding too, so a name looked up before the unset does not come
-            // back filled in.
-            self.dyn_cell.borrow_mut().remove(name);
-            if let Some(bit) = Self::dyn_touch_bit(name) {
-                self.dyn_touched.set(self.dyn_touched.get() & !bit);
-            }
-        }
+        self.drop_dynamic_binding(name);
         // Unsetting `HOSTFILE` throws the hostname list away, rather than
         // leaving it to be added to — the one asymmetry in
         // [`Shell::compgen_hostnames`], and the reason it needs a hook here:
@@ -42050,6 +42150,64 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (out, _) = run("RANDOM=1/0; echo \"rc=$? here\"");
         assert_eq!(out, "rc=0 here\n");
         assert_eq!(run("declare -i x=5; x=1/0; echo unreachable").0, "");
+    }
+
+    #[test]
+    fn giving_a_dynamic_variable_an_array_kind_converts_it() {
+        // The conversion carries a last reading of the value function into
+        // element 0, and the slot's own attribute letters — the ones
+        // `declare -p NAME` reports — along with it, as real attributes.
+        // `$HISTCMD` is whatever the harness's history is up to, so take a
+        // reading rather than writing the number in.
+        let h = run("echo $HISTCMD").0.trim_end().to_string();
+        for (decl, want) in [
+            ("declare -a HISTCMD", format!("declare -ai HISTCMD=([0]=\"{h}\")\n")),
+            ("declare -A HISTCMD", format!("declare -Ai HISTCMD=([0]=\"{h}\" )\n")),
+            ("HISTCMD[1]=9", format!("declare -ai HISTCMD=([0]=\"{h}\" [1]=\"9\")\n")),
+            ("HISTCMD+=(9)", format!("declare -ai HISTCMD=([0]=\"{h}\" [1]=\"9\")\n")),
+            // The carried `-i` reaches the very element being assigned…
+            ("HISTCMD[1]=3+4", format!("declare -ai HISTCMD=([0]=\"{h}\" [1]=\"7\")\n")),
+            // …and the elements a literal supplies, which replace the carried
+            // one outright (so `zz` is the `-i` reading of element 0 here, not
+            // the value function's).
+            ("declare -a HISTCMD=(zz 3+4)", "declare -ai HISTCMD=([0]=\"0\" [1]=\"7\")\n".to_string()),
+            // A `local` shadowed the binding first, so there is nothing to
+            // convert and the local array starts empty.
+            ("f() { local -a HISTCMD; declare -p HISTCMD; }; f #", "declare -a HISTCMD\n".to_string()),
+        ] {
+            assert_eq!(run(&format!("{decl}; declare -p HISTCMD")).0, want, "{decl}");
+        }
+        // `PPID` brings its `r` across and goes on refusing.
+        assert!(run("declare -a PPID; declare -p PPID").0.starts_with("declare -air PPID=([0]=\""));
+        assert_eq!(run("declare -a PPID; PPID[1]=3; echo unreachable").0, "");
+        // A malformed subscript converts nothing: the name is still the scalar
+        // it was, `-i` and all.
+        assert_eq!(run("HISTCMD[zz zz]=9; :").0, "");
+        assert_eq!(
+            run("(HISTCMD[zz zz]=9); declare -p HISTCMD").0,
+            format!("declare -i HISTCMD=\"{h}\"\n")
+        );
+    }
+
+    #[test]
+    fn converting_a_dynamic_variable_takes_its_value_function_away() {
+        // Element 0 is frozen at the reading the conversion took: a converted
+        // `LINENO` reports the same line for ever after…
+        assert_eq!(run("declare -a LINENO\necho $LINENO\necho $LINENO").0, "1\n1\n");
+        // …and a converted `RANDOM` stops varying.
+        let varies = "a=$RANDOM; b=$RANDOM; [ \"$a\" = \"$b\" ] && echo stable || echo varying";
+        assert_eq!(run(varies).0, "varying\n");
+        assert_eq!(run(&format!("declare -a RANDOM; {varies}")).0, "stable\n");
+        // The binding is gone in the sense `unset` means it: nothing comes back.
+        assert_eq!(run("declare -a HISTCMD; unset HISTCMD; declare -p HISTCMD").0, "");
+        assert_eq!(
+            run("declare -a HISTCMD; unset HISTCMD; HISTCMD=zz; declare -p HISTCMD").0,
+            "declare -- HISTCMD=\"zz\"\n"
+        );
+        // An ordinary scalar widens the same way, which is where the carried
+        // element 0 a negative subscript counts back from comes from.
+        assert_eq!(run("w=5; w[1]=9; declare -p w").0, "declare -a w=([0]=\"5\" [1]=\"9\")\n");
+        assert_eq!(run("w=5; w[-1]=9; declare -p w").0, "declare -a w=([0]=\"9\")\n");
     }
 
     #[test]

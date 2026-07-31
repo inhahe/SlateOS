@@ -5097,6 +5097,12 @@ impl Shell {
                 .iter()
                 .map(|a| self.assignment_prefix_value(a))
                 .collect();
+            // `set -x`: trace this stage. bash traces each stage as it expands
+            // it, left to right, so the traces come out in pipeline order even
+            // though the stages then run concurrently — and a stage whose
+            // command word expanded to nothing still traces its assignments
+            // (`set -x; A=1 $e | cat` prints `+ A=1` and then `+ cat`).
+            self.xtrace_simple(&assigns, &argv, !argv.is_empty());
             let Some(program) = argv.first() else {
                 // Expanded to nothing (e.g. `$empty`) — skip this stage; its
                 // successor sees EOF on stdin.
@@ -8910,6 +8916,41 @@ impl Shell {
         out
     }
 
+    /// Emit the `set -x` trace for one simple command. bash prints each
+    /// temporary assignment (`FOO=bar cmd`) on its own line first, then the
+    /// command with every argument minimally quoted, each line behind the
+    /// expanded `PS4` prefix ([`Shell::xtrace_prefix`]).
+    ///
+    /// `with_command` is false only for the `declare`-family array forms, whose
+    /// operands are traced from `exec_declare_with_arrays` at the point each is
+    /// expanded — tracing the collapsed argv here as well would double them up.
+    ///
+    /// Lives apart from the execution paths because two of them trace: simple
+    /// commands from [`Shell::exec_simple_inner`], and each stage of an
+    /// all-external pipeline from `exec_concurrent_pipeline`, which expands its
+    /// stages itself and would otherwise emit nothing at all.
+    fn xtrace_simple(&mut self, assigns: &[(String, Str)], argv: &[Str], with_command: bool) {
+        if !self.xtrace {
+            return;
+        }
+        let prefix = self.xtrace_prefix();
+        for (k, v) in assigns {
+            let line = bfmt![&prefix, k.as_str(), b"=", xtrace_quote_value(v), b"\n"];
+            self.emit_stderr(&line);
+        }
+        if with_command {
+            let mut line = prefix;
+            for (i, a) in argv.iter().enumerate() {
+                if i > 0 {
+                    line.push(b' ');
+                }
+                line.extend_from_slice(&xtrace_quote(a));
+            }
+            line.push(b'\n');
+            self.emit_stderr(&line);
+        }
+    }
+
     /// Emit a single `set -x` trace line (prefix + `text` + newline) to stderr,
     /// where `text` may hold any byte — a `[[ … ]]` operand, an expanded word.
     /// The trace shows the bytes the shell actually has, since a mangled trace
@@ -9727,27 +9768,8 @@ impl Shell {
                 b"declare" | b"typeset" | b"local" | b"readonly" | b"export"
             );
 
-        // `set -x`: trace the command before running it. bash emits each temporary
-        // prefix assignment (`FOO=bar cmd`) on its own line first, then the
-        // command with each argument minimally quoted, all behind the PS4 prefix.
-        if self.xtrace {
-            let prefix = self.xtrace_prefix();
-            for (k, v) in &assigns {
-                let line = bfmt![&prefix, k.as_str(), b"=", xtrace_quote_value(v), b"\n"];
-                self.emit_stderr(&line);
-            }
-            if !decl_with_arrays {
-                let mut line = prefix;
-                for (i, a) in argv.iter().enumerate() {
-                    if i > 0 {
-                        line.push(b' ');
-                    }
-                    line.extend_from_slice(&xtrace_quote(a));
-                }
-                line.push(b'\n');
-                self.emit_stderr(&line);
-            }
-        }
+        // `set -x`: trace the command before running it.
+        self.xtrace_simple(&assigns, &argv, !decl_with_arrays);
 
         // A redirection-only `exec` (`exec > file`, `exec 3>&1 1>&2 2>&3`,
         // `exec 1>&3`) mutates the shell's persistent fd table and must apply

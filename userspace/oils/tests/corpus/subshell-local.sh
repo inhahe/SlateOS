@@ -54,4 +54,35 @@ echo "=== unset of an inherited local inside the subshell"
 fb() { local u=1; ( unset u; echo "in=${u-unset}" ); echo "out=${u-unset}"; }
 fb 2>&1 | e
 
+echo "=== a callee inside the subshell still sees the caller's local"
+v=global
+sees() { echo "sees $v"; }
+fc() { local v=fc; ( sees ); echo "sub=$( sees )"; }
+fc 2>&1 | e
+
+echo "=== a local declared in one subshell is gone in the next"
+fd() { ( local w=1 ); ( echo "w=${w-unset}" ); echo "after=${w-unset}"; }
+fd 2>&1 | e
+
+echo "=== declare -g inside the subshell writes the subshell's global only"
+fe() { local g1=local; ( declare -g g1=global; echo "in=$g1" ); echo "out=$g1"; }
+( fe; echo "top=${g1-unset}" ) 2>&1 | e
+
+echo "=== the letters still apply to the subshell's local"
+t=5
+ff() { ( local -n r=t; echo "r=$r"; r=9; echo "t=$t" ); echo "after t=$t"; }
+ff 2>&1 | e
+fg() { ( local -r k=1; k=2; echo "rc=$?" ); echo "out=${k-unset}"; }
+fg 2>&1 | e
+fh() { ( local -a arr=(1 2 3); echo "${arr[@]}" ); echo "after=${arr[@]-unset}"; }
+fh 2>&1 | e
+
+echo "=== nested subshells each keep their own"
+fi() { local n=1; ( ( local n=2; echo "inner=$n" ); echo "mid=$n" ); echo "outer=$n"; }
+fi 2>&1 | e
+
+echo "=== return inside a subshell of a function unwinds only the subshell"
+fj() { ( return 3 ); echo "rc=$?"; echo "still here"; }
+fj 2>&1 | e
+
 echo "=== done"

@@ -6015,26 +6015,33 @@ observable boundaries are:
 **What.** Against bash 5.2.37, with `d.bin` = `a\xa9b\ncr\n` (`\xa9` is a lone
 continuation-less high byte):
 
-| | bash | osh |
-|---|---|---|
-| `osh d.bin` where the *script* holds `\xa9` | runs it, `echo` writes the raw byte | `osh: d.bin: stream did not contain valid UTF-8`, nothing runs |
-| `. ./d.bin` | runs it | same refusal, tagged `osh: line 1: .:` |
-| `v=$(cat d.bin)` | `a \xa9 b \n c` | `a \xef\xbf\xbd b \n c` (U+FFFD) |
-| `v=$(<d.bin)` | same as bash's above | U+FFFD |
-| `mapfile -t a < d.bin` | element 0 = `a\xa9b` | element 0 = `a\xef\xbf\xbdb` |
-| `IFS= read -r l < d.bin` | status 0, `l=a\xa9b` | *was* status 1 with `l` empty; now U+FFFD, status 0 |
-| `printf %s $'\xa9'` | one byte `a9` | two bytes `c2 a9` (U+00A9) |
+| | bash | osh, as first diagnosed | osh today (measured after step 7) |
+|---|---|---|---|
+| `osh d.bin` where the *script* holds `\xa9` | runs it, `echo` writes the raw byte | `osh: d.bin: stream did not contain valid UTF-8`, nothing runs | unchanged — still refuses (step 8) |
+| `. ./d.bin` | runs it | same refusal, tagged `osh: line 1: .:` | unchanged — still refuses (step 8) |
+| `v=$(cat d.bin)` | `a \xa9 b \n c` | `a \xef\xbf\xbd b \n c` (U+FFFD) | **fixed** — byte-exact |
+| `v=$(<d.bin)` | same as bash's above | U+FFFD | **fixed** — byte-exact |
+| `mapfile -t a < d.bin` | element 0 = `a\xa9b` | element 0 = `a\xef\xbf\xbdb` | **fixed** — `a\xa9b` |
+| `IFS= read -r l < d.bin` | status 0, `l=a\xa9b` | *was* status 1 with `l` empty; then U+FFFD, status 0 | **fixed** — status 0, `l=a\xa9b` |
+| `printf %s $'\xa9'` | one byte `a9` | two bytes `c2 a9` (U+00A9) | three bytes `ef bf bd` (U+FFFD) — see below |
 
 The `read` row was the damaging one: `read_line` consumes the bytes and *then*
 reports `InvalidData`, which `.ok()?` mapped to `None` — the same value a real
 EOF returns. So `while IFS= read -r l; do …; done < file` stopped at the first
 non-UTF-8 line and reported success, silently processing a prefix of the file.
-That is now lossy like every other reader (see the fix note); it still is not
-bash, but it no longer truncates a loop or invents an EOF.
+That is now fully fixed: the readers are byte-native, so the loop neither
+truncates nor invents an EOF nor alters the line.
 
 The last row is the same defect seen from the writing side and was already noted
 as a "known remaining gap" under the ANSI-C escape work (~line 965); it is
-folded in here so the family has one home.
+folded in here so the family has one home. Note that its *shape* changed at step
+2 and the old value in the table was stale: `escape.rs` became byte-native, so
+`ansi_c_unescape` now yields the single byte `a9` correctly — but the lexer that
+receives it is still `String`-typed, so the byte is re-encoded lossily and comes
+out as U+FFFD rather than the old U+00A9. Both are wrong; the corruption simply
+moved from the escape layer to the lexer, which is exactly what step 8 closes.
+Until then, a test that needs a value carrying an undecodable byte must build it
+with `$(printf '\xa9')` rather than `$'\xa9'`.
 
 **Why it matters beyond bash fidelity.** CLAUDE.md rule 7 is explicit: OS-boundary
 data — paths, environment values, pipe contents — is bytes, and

@@ -6283,12 +6283,12 @@ itself is in `vars`, which a subshell copies.
 Covered by the unit test `an_assignment_prefix_shadows_a_computed_name`
 and by `tests/corpus/bash-assign-prefix-dynvar.sh`.
 
-**Still divergent, in follow-ups:** `unset` through a prefix binding
-(TD-OILS-UNSET-THROUGH-TEMP-SHADOW), `unset` of a `local` of a computed
-name (TD-OILS-UNSET-LOCAL-KILLS-DYNVAR), and what `declare -p` reports
-for a prefix binding (TD-OILS-TEMP-BINDING-ATTRIBUTES).
+**Still divergent, in follow-ups:** what `declare -p` reports for a prefix
+binding (TD-OILS-TEMP-BINDING-ATTRIBUTES). (The two `unset` follow-ups,
+TD-OILS-UNSET-THROUGH-TEMP-SHADOW and TD-OILS-UNSET-LOCAL-KILLS-DYNVAR,
+are since fixed.)
 
-### TD-OILS-UNSET-THROUGH-TEMP-SHADOW. `unset` inside an assignment prefix's scope kills the name instead of revealing what it shadows — 2026-07-31 — OPEN
+### TD-OILS-UNSET-THROUGH-TEMP-SHADOW. `unset` inside an assignment prefix's scope kills the name instead of revealing what it shadows — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the `unset` builtin. osh has
 no scope for the prefix binding: it is a plain `vars` entry that the
@@ -6319,7 +6319,21 @@ nothing left to do for that name. Care is needed for a computed name: the
 reveal must also *not* set `dyn_unset`, or the value function is lost for
 good.
 
-### TD-OILS-UNSET-LOCAL-KILLS-DYNVAR. `unset` of a `local` of a computed name takes the global's value function with it — 2026-07-31 — OPEN
+**Fixed.** Exactly as prescribed. `Shell::temp_shadow` became
+`Vec<Vec<(String, Option<Str>)>>`: each prefix scope now carries what its
+binding displaced, so the scope *owns* the save/restore and the parallel
+`saved: Vec<(String, Option<Str>)>` vectors in `call_function` and
+`run_builtin_body` — and their restore loops — are gone, replaced by
+`push_temp_shadow`/`pop_temp_shadow`. The reveal is
+`Shell::reveal_temp_shadow(name)`: it finds the *innermost* scope binding
+the name (that is the one a lookup finds, so the one `unset` takes away),
+removes the entry and writes the displaced value back. `unbind_var` calls
+it **last**, after everything else it clears, so the reveal outranks the
+clearing; and because the name never reaches `drop_dynamic_binding` (see
+TD-OILS-UNSET-LOCAL-KILLS-DYNVAR) `dyn_unset` is untouched and the value
+function survives.
+
+### TD-OILS-UNSET-LOCAL-KILLS-DYNVAR. `unset` of a `local` of a computed name takes the global's value function with it — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the `unset` builtin's
 dynamic-special arm (`drop_dynamic_binding`). It records the name in
@@ -6338,6 +6352,19 @@ the *shadow* and must not touch the dynamic binding at all: the value
 function belongs to the global, which the frame is standing in front of,
 not to the local. So the `dyn_unset` insertion needs the same guard the
 read and write paths just got.
+
+**Fixed.** `unbind_var` now snapshots
+`let shadowed = self.is_ordinary_shadowed(name);` **before** it removes
+anything — it has to be decided first, because the temp-shadow reveal at
+the end takes the prefix's binding away — and calls
+`drop_dynamic_binding` only `if !shadowed`. So unsetting a `local` (or a
+prefix binding) of a computed name removes the shadow and leaves the
+global's value function intact, while unsetting the name itself still
+records it in `dyn_unset` as before.
+
+Both fixes are covered by the "unset empties the scope" section of
+`tests/corpus/bash-assign-prefix-dynvar.sh` and by five assertions at the
+end of the unit test `an_assignment_prefix_shadows_a_computed_name`.
 
 ### TD-OILS-TEMP-BINDING-ATTRIBUTES. A prefix binding is reported with the global's attributes, and never as exported — 2026-07-31 — OPEN
 
@@ -6358,11 +6385,46 @@ environment, so `-x` always), and it is a **fresh** variable that
 inherits none of the global's attributes — `declare -i q` does not make
 `q=3+4 cmd` evaluate, and the listing shows no `-i`.
 
-**Proper fix.** Follows TD-OILS-UNSET-THROUGH-TEMP-SHADOW: once the
-prefix has a real scope holding a `VarSnapshot`, the binding can be
-installed the way `declare_local` installs a local — clearing the
-attribute sets for the name and adding `exported` — and the snapshot puts
-the global's attributes back on teardown.
+**Proper fix.** TD-OILS-UNSET-THROUGH-TEMP-SHADOW has since given the
+prefix a real scope holding the displaced value, so the binding can now
+be installed the way `declare_local` installs a local — clearing the
+attribute sets for the name and adding `exported` — with the scope's
+saved entry putting the global's attributes back on teardown. That saved
+entry is currently only the *value* (`Option<Str>`); it has to grow to
+carry the attribute sets too.
+
+### TD-OILS-LOCAL-INHERITS-TEMP-BINDING. A valueless `local` of a name the caller bound with an assignment prefix starts out unset instead of taking the prefix's value — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `declare_local` for the
+valueless case. It makes the name unset for the frame regardless of what
+the enclosing prefix scope bound.
+
+Measured (`target/dvscratch/ap5.sh`):
+
+```sh
+( f() { local q; echo "[${q-UNSET}]"; }; q=2 f )              # bash [2]    osh [UNSET]
+( q=1; f() { local q; echo "[${q-UNSET}]"; }; q=2 f )         # bash [2]    osh [UNSET]
+( f() { local SECONDS; echo "[${SECONDS-UNSET}]"; }; SECONDS=100 f )
+#                                                              bash [100]  osh [UNSET]
+( f() { local q; declare -p q; }; q=2 f )   # bash declare -x q="2"   osh declare -- q
+```
+
+It is specifically the **prefix's** scope that is inherited, not the
+enclosing value in general: with no prefix in force, `local q` inside a
+function where `q=1` globally leaves the name unset for the frame in both
+shells (that part osh already gets right). And the `declare -p` line
+shows what is really happening — the `local` does not create a new
+binding at all, it *promotes the prefix's binding into the frame*, `-x`
+and all, so the value comes along with it.
+
+Only the valueless form is affected; `local NAME=v` obviously writes `v`.
+
+**Proper fix.** In `declare_local`, when an assignment-prefix scope
+(`Shell::temp_shadow`) binds the name, the valueless form should adopt
+that binding — value and attributes — rather than starting the frame with
+the name unset. Best done together with
+TD-OILS-TEMP-BINDING-ATTRIBUTES, since both need the prefix scope's saved
+entry to carry attributes as well as the value.
 
 ### TD-OILS-PIPELINE-STAGE-SUBSHELL-DEPTH. A simple-command pipeline stage counts as a subshell for `$BASH_SUBSHELL`; in bash it does not — 2026-07-31 — OPEN
 

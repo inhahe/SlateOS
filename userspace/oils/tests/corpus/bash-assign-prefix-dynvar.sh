@@ -37,6 +37,18 @@ echo "=== an assignment under it writes the binding, not the counter"
 ( SECONDS=100 eval 'SECONDS=5; echo "[$SECONDS]"'; back ) 2>&1
 ( BASH_SUBSHELL=9 eval 'BASH_SUBSHELL=5; echo "[$BASH_SUBSHELL]"'; echo "[$BASH_SUBSHELL]" ) 2>&1
 
+echo "=== unset empties the scope, so what it hid comes back at once"
+( q=1; q=2 eval 'unset q; echo "[${q-UNSET}]"'; echo "[${q-UNSET}]" ) 2>&1
+( SECONDS=100 eval 'unset SECONDS; back' ) 2>&1
+( BASH_SUBSHELL=9 eval 'unset BASH_SUBSHELL; echo "[${BASH_SUBSHELL-UNSET}]"' ) 2>&1
+( LINENO=9 eval 'unset LINENO; echo "[$LINENO]"' ) 2>&1
+# …where unsetting a `local` of one leaves it unset for the frame, and the
+# shell's own is still there when the frame pops: the value function belongs to
+# the global either way, and only the shadow was ever removed.
+( f() { local SECONDS=9; unset SECONDS; echo "[${SECONDS-UNSET}]"; }; f; back ) 2>&1
+( f() { local BASH_SUBSHELL=9; unset BASH_SUBSHELL; echo "[${BASH_SUBSHELL-UNSET}]"; }
+  f; echo "[$BASH_SUBSHELL]" ) 2>&1
+
 echo "=== and the string is taken as written"
 ( SECONDS=zz eval 'echo "[$SECONDS]"' ) 2>&1
 ( SECONDS=3+4 eval 'echo "[$SECONDS]"' ) 2>&1

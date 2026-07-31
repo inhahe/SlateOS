@@ -2597,19 +2597,25 @@ pub struct Shell {
     /// shadowed by `local` in that function call and their prior state, restored
     /// on return. Non-empty exactly while executing a function body.
     local_frames: Vec<Vec<(String, VarSnapshot)>>,
-    /// Stack of assignment-prefix scopes — the names `SECONDS=100 cmd` binds
-    /// for the command's duration — innermost last, one frame per builtin or
-    /// function the prefix runs.
+    /// Stack of assignment-prefix scopes — what `SECONDS=100 cmd` binds for the
+    /// command's duration — innermost last, one frame per builtin or function
+    /// the prefix runs. Each entry is a name and the value it displaced, which
+    /// the scope puts back when it closes.
     ///
-    /// bash puts a prefix's assignments in a variable scope of their own, so
-    /// for the command's duration the name is an *ordinary* variable. That is
-    /// invisible for an ordinary name — the binding is already the one a lookup
-    /// finds — and decisive for a name the shell otherwise computes:
-    /// `SECONDS=100 eval 'echo $SECONDS'` prints 100 and `LINENO=9 eval 'echo
-    /// $LINENO'` prints 9, where without the shadow both would go on computing
-    /// and ignore the binding altogether. So only those names are recorded
-    /// here; see [`Shell::is_ordinary_shadowed`].
-    temp_shadow: Vec<Vec<String>>,
+    /// bash puts a prefix's assignments in a variable scope of their own, and
+    /// having it be a scope rather than a write-and-restore is observable three
+    /// ways. A name the shell would otherwise *compute* reads the binding
+    /// instead — `LINENO=9 eval 'echo $LINENO'` prints 9, not the live line —
+    /// because the value function belongs to the global the scope stands in
+    /// front of. `unset` of the name empties the scope rather than the
+    /// variable, so what was underneath comes back *immediately*
+    /// (`q=1; q=2 eval 'unset q; echo $q'` prints 1). And the binding is a
+    /// fresh, exported variable that inherits none of the global's attributes.
+    ///
+    /// See [`Shell::is_ordinary_shadowed`] and
+    /// [`Shell::reveal_temp_shadow`]. (The third — attributes — is not
+    /// modelled yet; see known-issues TD-OILS-TEMP-BINDING-ATTRIBUTES.)
+    temp_shadow: Vec<Vec<(String, Option<Str>)>>,
     /// Per-function-call save slot for `local -`. Pushed (as `None`) in lockstep
     /// with `local_frames` on function entry and popped on return. The first
     /// `local -` executed in a given call captures the current `set`-option state
@@ -10787,15 +10793,10 @@ impl Shell {
         }
         // Temporarily apply assignments and swap positionals.
         let saved_pos = std::mem::replace(&mut self.positional, args.to_vec());
-        let saved: Vec<(String, Option<Str>)> = assigns
-            .iter()
-            .map(|(k, v)| {
-                let old = self.replace_var(k.clone(), v.clone());
-                (k.clone(), old)
-            })
-            .collect();
-        // …and shadow the computed names among them for the call's duration, so
-        // the body reads the binding rather than going on computing.
+        // The prefix's bindings live in a scope of their own for the call's
+        // duration (see [`Shell::temp_shadow`]), so a computed name reads them
+        // rather than going on computing, and an `unset` of one reveals what it
+        // displaced at once.
         let temp_pushed = self.push_temp_shadow(assigns);
 
         // Push a fresh local scope so `local` declarations inside the body are
@@ -10947,16 +10948,6 @@ impl Shell {
 
         self.positional = saved_pos;
         self.pop_temp_shadow(temp_pushed);
-        for (k, old) in saved {
-            match old {
-                Some(v) => {
-                    self.put_var(k, v);
-                }
-                None => {
-                    self.vars.remove(&k);
-                }
-            }
-        }
         // A trap handler's `exit` wins over the body's own flow: bash unwinds
         // the whole shell rather than merely returning from the function.
         if let Some(code) = trap_exit {
@@ -15966,13 +15957,10 @@ impl Shell {
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) -> Flow {
-        // Apply temporary assignments for the duration of the builtin, and
-        // shadow the computed names among them so the builtin — and anything it
-        // runs — reads the binding rather than going on computing.
-        let saved: Vec<(String, Option<Str>)> = assigns
-            .iter()
-            .map(|(k, v)| (k.clone(), self.replace_var(k.clone(), v.clone())))
-            .collect();
+        // Apply temporary assignments for the duration of the builtin, in a
+        // scope of their own (see [`Shell::temp_shadow`]), so a computed name
+        // among them reads the binding rather than going on computing and an
+        // `unset` of one reveals what it displaced at once.
         let temp_pushed = self.push_temp_shadow(assigns);
 
         // Install any fd ≥ 3 dups/opens created by this command's own redirects
@@ -16462,16 +16450,6 @@ impl Shell {
         // Restore temporary assignments (builtins don't persist them, except
         // pure-assignment which never reaches here).
         self.pop_temp_shadow(temp_pushed);
-        for (k, old) in saved {
-            match old {
-                Some(v) => {
-                    self.put_var(k, v);
-                }
-                None => {
-                    self.vars.remove(&k);
-                }
-            }
-        }
 
         self.last_status = status;
         // A builtin that must unwind the whole shell (`kill -TERM $$` with a
@@ -16848,33 +16826,82 @@ impl Shell {
     /// `SECONDS=100 eval 'echo $SECONDS'` prints 100, both leaving the clock
     /// itself alone.
     fn is_ordinary_shadowed(&self, name: &str) -> bool {
-        self.is_locally_shadowed(name) || self.temp_shadow.iter().flatten().any(|n| n == name)
+        self.is_locally_shadowed(name)
+            || self
+                .temp_shadow
+                .iter()
+                .any(|f| f.iter().any(|(n, _)| n == name))
     }
 
-    /// Open an assignment-prefix scope for the names in `assigns` that the
-    /// shell would otherwise compute, and answer whether one was opened.
+    /// Bind an assignment prefix's names for the duration of the command, in a
+    /// scope of their own, and answer whether a scope was opened.
     ///
-    /// Only those names need a frame — an ordinary name's prefix binding is
-    /// already the one a lookup finds — so the common prefix (`FOO=bar cmd`)
-    /// pushes nothing at all. Pair every `true` with
-    /// [`Shell::pop_temp_shadow`]; see [`Shell::temp_shadow`].
+    /// Pair every `true` with [`Shell::pop_temp_shadow`]; see
+    /// [`Shell::temp_shadow`]. The common case is no prefix at all, which
+    /// pushes nothing.
     fn push_temp_shadow(&mut self, assigns: &[(String, Str)]) -> bool {
-        let names: Vec<String> = assigns
-            .iter()
-            .filter(|(k, _)| self.dynamic_special(k).is_some())
-            .map(|(k, _)| k.clone())
-            .collect();
-        if names.is_empty() {
+        if assigns.is_empty() {
             return false;
         }
-        self.temp_shadow.push(names);
+        let frame: Vec<(String, Option<Str>)> = assigns
+            .iter()
+            .map(|(k, v)| (k.clone(), self.replace_var(k.clone(), v.clone())))
+            .collect();
+        self.temp_shadow.push(frame);
         true
     }
 
-    /// Close the scope [`Shell::push_temp_shadow`] opened, if it opened one.
+    /// Close the scope [`Shell::push_temp_shadow`] opened, if it opened one,
+    /// putting back whatever each binding displaced.
+    ///
+    /// A name `unset` already revealed is no longer in the frame, so it is not
+    /// restored a second time — see [`Shell::reveal_temp_shadow`].
     fn pop_temp_shadow(&mut self, pushed: bool) {
-        if pushed {
-            self.temp_shadow.pop();
+        if !pushed {
+            return;
+        }
+        let Some(frame) = self.temp_shadow.pop() else {
+            return;
+        };
+        for (name, old) in frame {
+            match old {
+                Some(v) => self.put_var(name, v),
+                None => {
+                    self.vars.remove(&name);
+                }
+            }
+        }
+    }
+
+    /// Take `name` out of the innermost assignment-prefix scope that binds it,
+    /// putting back what that binding displaced — bash's `unset` of a name in
+    /// the temporary environment, which reveals what was underneath *at once*
+    /// rather than at the end of the command:
+    ///
+    /// ```sh
+    /// q=1; q=2 eval 'unset q; echo "[$q]"'   # [1], not [] — and still 1 after
+    /// SECONDS=100 eval 'unset SECONDS; echo "[$SECONDS]"'   # the clock is back
+    /// ```
+    ///
+    /// Called from [`Shell::unbind_var`] after it has cleared the binding, so
+    /// what this writes is the last word.
+    fn reveal_temp_shadow(&mut self, name: &str) {
+        // Innermost first: that is the binding a lookup finds, and so the one
+        // `unset` takes away.
+        let Some(idx) = self
+            .temp_shadow
+            .iter()
+            .rposition(|f| f.iter().any(|(n, _)| n == name))
+        else {
+            return;
+        };
+        let old = self.temp_shadow.get_mut(idx).and_then(|f| {
+            f.iter()
+                .position(|(n, _)| n == name)
+                .map(|at| f.remove(at).1)
+        });
+        if let Some(Some(v)) = old {
+            self.put_var(name.to_string(), v);
         }
     }
 
@@ -23504,6 +23531,11 @@ impl Shell {
     /// that reports "no value" through a caller-named variable does to it
     /// (`wait -p VAR` clears `VAR` before it decides whether it has a pid).
     fn unbind_var(&mut self, name: &str) {
+        // Whether an ordinary binding — a `local`, or the assignment prefix of
+        // the command now running — is standing in front of the global one.
+        // Decided before anything is removed, because the reveal at the end
+        // takes the prefix's away.
+        let shadowed = self.is_ordinary_shadowed(name);
         self.vars.remove(name);
         self.arrays.remove(name);
         self.assoc.remove(name);
@@ -23532,7 +23564,20 @@ impl Shell {
         // (`SECONDS`, `RANDOM`, `LINENO`, …): the function goes with the
         // variable and is never restored, leaving an unset, ordinary name. See
         // [`Shell::dyn_unset`].
-        self.drop_dynamic_binding(name);
+        //
+        // Unless what was unset is a *shadow* of the name rather than the name:
+        // the value function belongs to the global, which a `local` or an
+        // assignment prefix is merely standing in front of, so unsetting the
+        // shadow leaves it intact. `f() { local SECONDS=9; unset SECONDS; }; f`
+        // leaves the shell's clock running, where without this it would take
+        // the value function down with the local.
+        if !shadowed {
+            self.drop_dynamic_binding(name);
+        }
+        // A prefix binding is not merely cleared but taken out of its scope, so
+        // what it displaced comes back at once rather than when the command
+        // ends. Last, so it outranks the clearing above.
+        self.reveal_temp_shadow(name);
         // Unsetting `HOSTFILE` throws the hostname list away, rather than
         // leaving it to be added to — the one asymmetry in
         // [`Shell::compgen_hostnames`], and the reason it needs a hook here:
@@ -42023,6 +42068,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // mode here), so the clock is still the shell's afterwards.
         assert_eq!(run("SECONDS=100 :; echo $SECONDS").0, "0\n");
         assert_eq!(run("SECONDS=100 eval :; echo $SECONDS").0, "0\n");
+        // `unset` empties the *scope* rather than the variable, so what the
+        // binding hid comes back at once — an ordinary value…
+        assert_eq!(
+            run("q=1; q=2 eval 'unset q; echo ${q-UNSET}'; echo ${q-UNSET}").0,
+            "1\n1\n"
+        );
+        // …or the value function, which the scope was only standing in front of.
+        assert_eq!(run("SECONDS=100 eval 'unset SECONDS; echo ${SECONDS-UNSET}'").0, "0\n");
+        assert_eq!(run("LINENO=9 eval 'unset LINENO; echo $LINENO'").0, "1\n");
+        // The same holds for a `local`, except that unsetting one leaves the
+        // name unset for the frame: only the shadow was ever removed, so the
+        // shell's own is still there when the frame pops.
+        assert_eq!(
+            run("f() { local SECONDS=9; unset SECONDS; echo ${SECONDS-UNSET}; }; f; echo $SECONDS").0,
+            "UNSET\n0\n"
+        );
+        assert_eq!(
+            run("f() { local BASH_SUBSHELL=9; unset BASH_SUBSHELL; }; f; echo $BASH_SUBSHELL").0,
+            "0\n"
+        );
     }
 
     #[test]

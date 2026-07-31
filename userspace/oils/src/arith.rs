@@ -14,6 +14,17 @@
 //! possible: an lvalue (`x`, `a[i]`, `m[key]`) can be recognised structurally
 //! before its right-hand side is evaluated, and `&&`/`||`/`?:` short-circuit so
 //! side effects only happen on the branch actually taken.
+//!
+//! Everything here is **byte-native**. Arithmetic syntax is entirely ASCII, so
+//! the lexer reads bytes and a byte that decodes to no character is simply one
+//! it has no token for — which is also what bash, reading the same bytes,
+//! reports. Two things in an expression are nevertheless not ASCII: an
+//! *associative subscript*, which is a literal key and may hold any byte the
+//! array's own `m[$k]=v` could store, and a variable *value*, which is
+//! recursively evaluated and echoed back in the diagnostic when it fails.
+
+use crate::bfmt;
+use crate::bytes::{self, BStr, Str};
 
 /// Resolves and mutates variables during arithmetic evaluation.
 ///
@@ -21,21 +32,24 @@
 /// variable/element (the evaluator treats that as `0`). The write methods have
 /// empty defaults so a read-only implementor need not provide them.
 pub trait VarLookup {
-    /// Return the scalar variable's raw *string* value, or `None` if unset
-    /// (treated as `0`). The value is not a plain integer: bash recursively
-    /// evaluates it as an arithmetic expression, so `b=a; a=5; $((b))` yields
-    /// `5` and `x="2+3"; $((x))` yields `5`. The evaluator performs that
-    /// recursion (with a depth guard for cycles like `x=x`); implementors just
-    /// return the stored text.
-    fn get_str(&self, name: &str) -> Option<String>;
+    /// Return the scalar variable's raw value, or `None` if unset (treated as
+    /// `0`). The value is not a plain integer: bash recursively evaluates it as
+    /// an arithmetic expression, so `b=a; a=5; $((b))` yields `5` and
+    /// `x="2+3"; $((x))` yields `5`. The evaluator performs that recursion
+    /// (with a depth guard for cycles like `x=x`); implementors just return
+    /// what is stored.
+    ///
+    /// Bytes, because a shell value is bytes. One that is not text is not an
+    /// arithmetic expression either, but it is still what the diagnostic must
+    /// echo back — see [`ArithError::expr_override`].
+    fn get_str(&self, name: &str) -> Option<Str>;
 
-    /// Return the raw *string* value of the array element `name[index]`, or
-    /// `None` if unset/out-of-range (treated as `0`). `index` has already been
-    /// evaluated arithmetically (so `(( a[i+1] ))` and negative indices work).
-    /// Like [`VarLookup::get_str`], the value is recursively arithmetic-
-    /// evaluated. The default ignores subscripts — array-backed implementors
-    /// override it.
-    fn get_index_str(&self, name: &str, index: i64) -> Option<String> {
+    /// Return the raw value of the array element `name[index]`, or `None` if
+    /// unset/out-of-range (treated as `0`). `index` has already been evaluated
+    /// arithmetically (so `(( a[i+1] ))` and negative indices work). Like
+    /// [`VarLookup::get_str`], the value is recursively arithmetic-evaluated.
+    /// The default ignores subscripts — array-backed implementors override it.
+    fn get_index_str(&self, name: &str, index: i64) -> Option<Str> {
         let _ = (name, index);
         None
     }
@@ -49,12 +63,13 @@ pub trait VarLookup {
         false
     }
 
-    /// Return the raw *string* value of associative element `name[key]`, or
-    /// `None` if unset (treated as `0`). `key` is the raw, already-expanded
-    /// subscript text (bash does not arithmetic-evaluate associative
-    /// subscripts). The value string is recursively arithmetic-evaluated. Only
-    /// consulted when [`VarLookup::is_assoc`] returns `true`.
-    fn get_assoc_str(&self, name: &str, key: &str) -> Option<String> {
+    /// Return the raw value of associative element `name[key]`, or `None` if
+    /// unset (treated as `0`). `key` is the raw, already-expanded subscript
+    /// (bash does not arithmetic-evaluate associative subscripts), so it is
+    /// **bytes**: the same arbitrary key `m[$k]=v` would have stored. The value
+    /// is recursively arithmetic-evaluated. Only consulted when
+    /// [`VarLookup::is_assoc`] returns `true`.
+    fn get_assoc_str(&self, name: &str, key: BStr<'_>) -> Option<Str> {
         let _ = (name, key);
         None
     }
@@ -77,7 +92,7 @@ pub trait VarLookup {
     }
 
     /// Assign `value` to the associative element `name[key]` (`m[key] = …`).
-    fn set_assoc(&mut self, name: &str, key: &str, value: i64) -> Result<(), ArithError> {
+    fn set_assoc(&mut self, name: &str, key: BStr<'_>, value: i64) -> Result<(), ArithError> {
         let _ = (name, key, value);
         Ok(())
     }
@@ -115,8 +130,10 @@ pub trait VarLookup {
 pub struct ArithError {
     /// The error body, matching bash's wording.
     pub msg: String,
-    /// The offending token (bash's `error token is "…"`), if known.
-    pub token: Option<String>,
+    /// The offending token (bash's `error token is "…"`), if known. A slice of
+    /// the source, so bytes: echoing it approximately would name something
+    /// other than what the shell actually read.
+    pub token: Option<Str>,
     /// When `true`, the token is a self-contained *number literal* the lexer
     /// rejected (`2#12`, `099`, `65#5`), so bash truncates the echoed source at
     /// the end of that literal (`5+2#12+9` is reported as `5+2#12`). For
@@ -131,7 +148,10 @@ pub struct ArithError {
     /// the variable reference (`x`). `str_to_val` records the innermost failing
     /// value here so [`Shell::emit_arith_error`] can prefer it. `None` for a
     /// direct expression, where the caller-supplied source is already correct.
-    pub expr_override: Option<String>,
+    /// Bytes for the same reason [`ArithError::token`] is — and more sharply,
+    /// since a variable's value is exactly the place a non-text byte arrives
+    /// from.
+    pub expr_override: Option<Str>,
     /// The *name* the diagnostic is about, when the failure is a property of a
     /// variable rather than of the expression's text. A refused write to a
     /// readonly variable reads `bash: line 1: x: readonly variable` — the
@@ -164,7 +184,7 @@ impl ArithError {
     }
 
     /// A diagnostic carrying bash's `(error token is "…")` suffix.
-    fn with_token(msg: impl Into<String>, token: impl Into<String>) -> Self {
+    fn with_token(msg: impl Into<String>, token: impl Into<Str>) -> Self {
         Self {
             msg: msg.into(),
             token: Some(token.into()),
@@ -177,7 +197,7 @@ impl ArithError {
 
     /// A number-literal lexer error whose token is a complete literal; the
     /// echoed source is truncated at the literal's end (bash behaviour).
-    fn lexeme_error(msg: impl Into<String>, lexeme: impl Into<String>) -> Self {
+    fn lexeme_error(msg: impl Into<String>, lexeme: impl Into<Str>) -> Self {
         Self {
             msg: msg.into(),
             token: Some(lexeme.into()),
@@ -201,13 +221,19 @@ impl ArithError {
             in_subscript: false,
         }
     }
-}
 
-impl core::fmt::Display for ArithError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    /// The diagnostic body bash prints after its `<expr>:` prefix — the message
+    /// and, when there is one, the `(error token is "…")` suffix.
+    ///
+    /// A method returning bytes rather than a `Display` impl, because the error
+    /// token is a slice of the source and the source may hold any byte. A
+    /// `Display` would have to approximate it, and the whole point of naming
+    /// the offending token is that the name is exact.
+    #[must_use]
+    pub fn body(&self) -> Str {
         match &self.token {
-            Some(t) => write!(f, "{} (error token is \"{t}\")", self.msg),
-            None => write!(f, "{}", self.msg),
+            Some(t) => bfmt![&self.msg, b" (error token is \"", t, b"\")"],
+            None => self.msg.clone().into_bytes(),
         }
     }
 }
@@ -220,8 +246,9 @@ enum Expr {
     Var(String),
     /// Indexed array element `name[index]` (subscript is arithmetic).
     Index(String, Box<Sub>),
-    /// Associative array element `name[key]` (subscript is a literal key).
-    Assoc(String, String),
+    /// Associative array element `name[key]` (subscript is a literal key, and
+    /// so arbitrary bytes).
+    Assoc(String, Str),
     /// A reference whose subscript is *lexically empty* — `a[]`. bash refuses
     /// this rather than reading it as index 0, and the refusal is a complaint
     /// rather than an error: the expression carries on with the value 0 (a read)
@@ -241,7 +268,7 @@ enum Expr {
     /// the right operand's start to the end of the expression) — used as bash's
     /// "error token" for an eval-time failure such as division by zero; `None`
     /// for operators that cannot fail at evaluation.
-    Bin(String, Box<Expr>, Box<Expr>, Option<Box<str>>),
+    Bin(String, Box<Expr>, Box<Expr>, Option<Box<[u8]>>),
     /// `cond ? then : else`.
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
     /// `left , right` — evaluate both, yield `right`.
@@ -261,7 +288,7 @@ enum Expr {
 enum Lvalue {
     Var(String),
     Index(String, Box<Sub>),
-    Assoc(String, String),
+    Assoc(String, Str),
     /// `a[] = …` — see [`Expr::EmptySub`]. Assignable only in the sense that
     /// bash parses it and then drops the store.
     EmptySub(String),
@@ -277,17 +304,17 @@ enum Lvalue {
 #[derive(Debug, Clone)]
 struct Sub {
     expr: Expr,
-    raw: Box<str>,
+    raw: Str,
 }
 
 impl Sub {
     /// Parse `raw` as a subscript expression. A *parse* failure is a subscript
     /// failure too: `((a[1+]=9))` reports `1+: syntax error: operand expected`.
-    fn parse(raw: &str, vars: &dyn VarLookup) -> Result<Self, ArithError> {
+    fn parse(raw: BStr<'_>, vars: &dyn VarLookup) -> Result<Self, ArithError> {
         let expr = parse(raw, vars).map_err(|e| tag_subscript(e, raw))?;
         Ok(Self {
             expr,
-            raw: raw.into(),
+            raw: raw.to_vec(),
         })
     }
 
@@ -302,9 +329,9 @@ impl Sub {
 /// The innermost subscript wins — `a[b[1/0]]` blames `1/0`, not `b[1/0]` — and a
 /// failure deeper still keeps what it recorded: for `x="1/0"; ((a[x]=9))` bash
 /// blames the *value* `1/0` that `str_to_val` recorded, not the subscript `x`.
-fn tag_subscript(mut e: ArithError, raw: &str) -> ArithError {
+fn tag_subscript(mut e: ArithError, raw: BStr<'_>) -> ArithError {
     if e.expr_override.is_none() {
-        e.expr_override = Some(raw.to_string());
+        e.expr_override = Some(raw.to_vec());
     }
     e.in_subscript = true;
     e
@@ -316,7 +343,7 @@ fn tag_subscript(mut e: ArithError, raw: &str) -> ArithError {
 enum ResolvedLv {
     Var(String),
     Index(String, i64),
-    Assoc(String, String),
+    Assoc(String, Str),
     /// `a[]` — see [`Expr::EmptySub`]. There is no index to resolve.
     EmptySub(String),
 }
@@ -327,35 +354,10 @@ enum ResolvedLv {
 /// # Errors
 /// Returns [`ArithError`] on a syntax error, division/modulo by zero, a
 /// negative exponent, or assignment to a non-lvalue.
-pub fn eval(expr: &str, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
+pub fn eval(expr: BStr<'_>, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
     // Parse with an immutable borrow, then evaluate with the mutable borrow.
     let ast = parse(expr, &*vars)?;
     eval_expr(&ast, vars, 0)
-}
-
-/// [`eval`] on an expression that arrives as *bytes* — the ordinary case for the
-/// shell, whose arithmetic text is assembled from variable values and command
-/// substitutions and so may hold any byte at all.
-///
-/// A byte that decodes to no character cannot be part of a well-formed
-/// expression: every arithmetic operator, digit and identifier character is
-/// ASCII, so such a byte is exactly the "invalid arithmetic operator" the lexer
-/// rejects — which is also what bash, reading the same bytes in the C locale,
-/// reports. Answering that is the honest result; converting the byte to U+FFFD
-/// and evaluating the mangled text could instead yield a *number*, and a wrong
-/// number is worse than an error.
-///
-/// TD-OILS-BYTE-STRINGS step 9 makes the lexer itself byte-native, at which
-/// point this becomes a thin wrapper and the diagnostic regains its
-/// `(error token is "…")` suffix, which cannot be built from a `String` today.
-///
-/// # Errors
-/// As [`eval`], plus a syntax error for an expression that is not text.
-pub fn eval_bytes(expr: crate::bytes::BStr<'_>, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
-    let Some(expr) = crate::bytes::as_str(expr) else {
-        return Err(ArithError::new("syntax error: invalid arithmetic operator"));
-    };
-    eval(expr, vars)
 }
 
 /// Maximum depth of recursive variable evaluation (`b=a; a=b` would loop
@@ -368,8 +370,8 @@ const RECURSION_LIMIT: u32 = 128;
 /// Evaluate a variable's raw string *value* as an arithmetic expression, the
 /// way bash does: `b="a"` with `a=5` yields `5`, `x="2+3"` yields `5`, and an
 /// unset/empty value yields `0`. `depth` guards against reference cycles.
-fn str_to_val(s: &str, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
-    let t = s.trim();
+fn str_to_val(s: BStr<'_>, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
+    let t = bytes::trim(s);
     if t.is_empty() {
         return Ok(0);
     }
@@ -382,8 +384,8 @@ fn str_to_val(s: &str, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
     if depth >= RECURSION_LIMIT {
         // bash reports the offending value token here, and uses the innermost
         // value as the `<expr>:` prefix (recorded via `expr_override`).
-        let mut e = ArithError::with_token("expression recursion level exceeded", t.to_string());
-        e.expr_override = Some(t.to_string());
+        let mut e = ArithError::with_token("expression recursion level exceeded", t);
+        e.expr_override = Some(t.to_vec());
         return Err(e);
     }
     // When evaluating a variable's *value* as arithmetic fails, bash echoes that
@@ -395,7 +397,7 @@ fn str_to_val(s: &str, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
         .and_then(|expr| eval_expr(&expr, vars, depth + 1))
         .map_err(|mut e| {
             if e.expr_override.is_none() {
-                e.expr_override = Some(t.to_string());
+                e.expr_override = Some(t.to_vec());
             }
             e
         })
@@ -404,19 +406,24 @@ fn str_to_val(s: &str, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
 /// Parse `t` as a plain decimal integer (optionally signed), returning `None`
 /// for anything that needs the full arithmetic parser: empty, non-digits, or a
 /// leading-zero form (`010`) which arithmetic treats as octal.
-fn plain_decimal(t: &str) -> Option<i64> {
-    let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
-    if digits.is_empty() || !digits.bytes().all(|c| c.is_ascii_digit()) {
+fn plain_decimal(t: BStr<'_>) -> Option<i64> {
+    let digits = match t.split_first() {
+        Some((b'+' | b'-', rest)) => rest,
+        _ => t,
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    if digits.len() > 1 && digits.starts_with('0') {
+    if digits.len() > 1 && digits.first() == Some(&b'0') {
         return None; // octal — let the full parser apply base rules
     }
-    t.parse::<i64>().ok()
+    // Every byte is an ASCII digit or a sign by now, so reading the run back as
+    // text is exact rather than an approximation.
+    bytes::as_str(t)?.parse::<i64>().ok()
 }
 
 /// Parse an arithmetic expression into an AST (no evaluation, no mutation).
-fn parse(expr: &str, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
+fn parse(expr: BStr<'_>, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
     let mut p = AParser {
         // Quotes reach here only if something *upstream* left them, and then
         // they are ordinary (invalid) characters. It is the expansion pass in
@@ -426,7 +433,7 @@ fn parse(expr: &str, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
         // `x='"3"'; $(( x+1 ))` is `"3": syntax error: operand expected`, as is
         // `let 'y="3"+4'`, whose argument no expansion pass ever saw. Single
         // quotes are never removed by either.
-        chars: expr.chars().collect(),
+        src: expr,
         pos: 0,
         last_op_start: 0,
         last_atom_start: 0,
@@ -436,12 +443,12 @@ fn parse(expr: &str, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
     p.skip_ws();
     // An empty (or whitespace-only) arithmetic expression is `0` in bash:
     // `$(( ))`, and — after expansion — `n=; echo $((n))` / `$(( $x ))`.
-    if p.pos == p.chars.len() {
+    if p.pos == p.src.len() {
         return Ok(Expr::Num(0));
     }
     let e = p.parse_comma()?;
     p.skip_ws();
-    if p.pos != p.chars.len() {
+    if p.pos != p.src.len() {
         // A complete expression parsed, but more input follows. bash splits
         // this into two diagnostics: a leftover token the lexer *recognises*
         // (a number, `)`, `:`, `!`, …) is "syntax error in expression"; one it
@@ -457,7 +464,9 @@ fn parse(expr: &str, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
 }
 
 struct AParser<'a> {
-    chars: Vec<char>,
+    /// The expression source. Bytes, not characters: every token arithmetic has
+    /// is ASCII, so a byte that begins no character begins no token either.
+    src: BStr<'a>,
     pos: usize,
     /// Start position of the most recently consumed *operator* token. When an
     /// operand is expected but the input ends (`3 +`), bash's "error token" is
@@ -483,8 +492,8 @@ struct AParser<'a> {
 /// token, so a `[` or `]` reached in operator position is a character bash's
 /// lexer has no token for — `let '2+3]'` is "invalid arithmetic operator",
 /// while `let '2+3:'` (a real token) is "syntax error in expression".
-fn is_arith_token_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || "+-*/%|^&<>=!~()?:,".contains(c)
+fn is_arith_token_char(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || b"+-*/%|^&<>=!~()?:,".contains(&c)
 }
 
 /// Binding power (and right-associativity) of a binary operator, or `None` if
@@ -525,15 +534,20 @@ fn assign_base(sym: &str) -> Option<String> {
 
 impl AParser<'_> {
     fn skip_ws(&mut self) {
-        while matches!(self.chars.get(self.pos), Some(c) if c.is_whitespace()) {
+        while matches!(self.src.get(self.pos), Some(&c) if bytes::is_space(c)) {
             self.pos += 1;
         }
     }
 
     /// The de-quoted source from `start` to the end of the expression — the
-    /// substring bash reports as its `(error token is "…")`.
-    fn rest_from(&self, start: usize) -> String {
-        self.chars[start..].iter().collect()
+    /// slice bash reports as its `(error token is "…")`.
+    fn rest_from(&self, start: usize) -> Str {
+        self.src.get(start..).unwrap_or_default().to_vec()
+    }
+
+    /// The source slice from `start` to the cursor — a lexeme just consumed.
+    fn lexeme(&self, start: usize) -> Str {
+        self.src.get(start..self.pos).unwrap_or_default().to_vec()
     }
 
     /// Record the operator token starting at the cursor.
@@ -554,32 +568,29 @@ impl AParser<'_> {
         self.last_tok_start = start;
     }
 
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
+    fn peek(&self) -> Option<u8> {
+        self.src.get(self.pos).copied()
     }
 
     /// The longest operator token at the cursor (without consuming). Recognises
     /// 3-, 2-, and 1-character operators, including assignment and
     /// increment/decrement forms so the binary-operator parser can tell `+`
     /// from `+=`/`++`.
-    fn read_op(&self) -> Option<String> {
-        let three: String = self.chars[self.pos..].iter().take(3).collect();
-        if matches!(three.as_str(), "<<=" | ">>=") {
-            return Some(three);
-        }
-        let two: String = self.chars[self.pos..].iter().take(2).collect();
-        if matches!(
-            two.as_str(),
-            "**" | "==" | "!=" | "<=" | ">=" | "<<" | ">>" | "&&" | "||" | "++" | "--" | "+="
-                | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
-        ) {
-            return Some(two);
-        }
-        let one = self.peek()?;
-        if "+-*/%|^&<>=!~".contains(one) {
-            return Some(one.to_string());
-        }
-        None
+    ///
+    /// Answers with the table's own `&'static str` rather than a slice of the
+    /// source, so `binop_bp`/`is_assign_op`/`apply` keep matching on text
+    /// without any byte of the input ever being converted. Sound because every
+    /// operator is ASCII, hence its own spelling.
+    fn read_op(&self) -> Option<&'static str> {
+        let rest = self.src.get(self.pos..)?;
+        // Longest match first: `<<=` before `<<` before `<`.
+        [
+            "<<=", ">>=", "**", "==", "!=", "<=", ">=", "<<", ">>", "&&", "||", "++", "--", "+=",
+            "-=", "*=", "/=", "%=", "&=", "|=", "^=", "+", "-", "*", "/", "%", "|", "^", "&", "<",
+            ">", "=", "!", "~",
+        ]
+        .into_iter()
+        .find(|op| rest.starts_with(op.as_bytes()))
     }
 
     /// Comma operator (`e1, e2, …`) — the loosest-binding arithmetic operator.
@@ -587,7 +598,7 @@ impl AParser<'_> {
         let mut e = self.parse_assign()?;
         loop {
             self.skip_ws();
-            if self.peek() == Some(',') {
+            if self.peek() == Some(b',') {
                 // Record the comma as the last operator so a missing operand
                 // after it (`3 ,`) reports bash's error token `, ` (from the
                 // comma) rather than the whole expression.
@@ -609,7 +620,7 @@ impl AParser<'_> {
         let lhs = self.parse_ternary()?;
         self.skip_ws();
         if let Some(op) = self.read_op()
-            && is_assign_op(&op)
+            && is_assign_op(op)
         {
             // The assignment operator's position is the error token bash reports
             // when the left side is not an lvalue (`1 = 2` → token `= 2`).
@@ -623,9 +634,9 @@ impl AParser<'_> {
             // is missing (`x = `, `y += `), bash's operand-expected error token
             // runs from the operator (`= `, `+= `), not the whole expression.
             self.mark_op();
-            self.pos += op.chars().count();
+            self.pos += op.len();
             let rhs = self.parse_assign()?;
-            return Ok(Expr::Assign(lv, assign_base(&op), Box::new(rhs)));
+            return Ok(Expr::Assign(lv, assign_base(op), Box::new(rhs)));
         }
         Ok(lhs)
     }
@@ -634,7 +645,7 @@ impl AParser<'_> {
     fn parse_ternary(&mut self) -> Result<Expr, ArithError> {
         let cond = self.parse_binary(0)?;
         self.skip_ws();
-        if self.peek() != Some('?') {
+        if self.peek() != Some(b'?') {
             return Ok(cond);
         }
         let qpos = self.pos;
@@ -645,7 +656,7 @@ impl AParser<'_> {
         // "expression expected" *before* attempting to parse an operand. The
         // error token is the `:` itself, or the `?` when the input ends there.
         match self.peek() {
-            Some(':') => {
+            Some(b':') => {
                 return Err(ArithError::with_token(
                     "expression expected",
                     self.rest_from(self.pos),
@@ -667,7 +678,7 @@ impl AParser<'_> {
         // comma there belongs to the enclosing expression (`1 ? 2 : 4,5` → 5).
         let then_e = self.parse_comma()?;
         self.skip_ws();
-        if self.peek() != Some(':') {
+        if self.peek() != Some(b':') {
             // bash: "`:' expected for conditional expression"; the error token is
             // the then-branch source (`1 ? 2` → `2`).
             return Err(ArithError::with_token(
@@ -707,27 +718,32 @@ impl AParser<'_> {
             // assignable. bash's lexer would never have formed the two-character
             // token at all, so read only its first character as the binary
             // operator and leave the second to the operand that follows.
-            let op = if op == "++" || op == "--" {
-                op[..1].to_string()
-            } else {
-                op
+            let op = match op {
+                "++" => "+",
+                "--" => "-",
+                other => other,
             };
-            let Some((bp, right)) = binop_bp(&op) else {
+            let Some((bp, right)) = binop_bp(op) else {
                 break;
             };
             if bp < min_bp {
                 break;
             }
             self.mark_op();
-            self.pos += op.chars().count();
+            self.pos += op.len();
             let next_min = if right { bp } else { bp + 1 };
             self.skip_ws();
             // Capture the RHS source (from here to end of input) for the
             // operators that can fail at evaluation — bash reports it as the
             // "error token" of a division-by-zero / negative-exponent failure.
-            let rhs_tok = matches!(op.as_str(), "/" | "%" | "**").then(|| self.rest_from(self.pos));
+            let rhs_tok = matches!(op, "/" | "%" | "**").then(|| self.rest_from(self.pos));
             let rhs = self.parse_binary(next_min)?;
-            lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs), rhs_tok.map(String::into_boxed_str));
+            lhs = Expr::Bin(
+                op.to_string(),
+                Box::new(lhs),
+                Box::new(rhs),
+                rhs_tok.map(Vec::into_boxed_slice),
+            );
         }
         Ok(lhs)
     }
@@ -757,22 +773,22 @@ impl AParser<'_> {
             return Ok(Expr::PreIncr(lv, op == "++"));
         }
         match self.peek() {
-            Some('-') => {
+            Some(b'-') => {
                 self.mark_op();
                 self.pos += 1;
                 Ok(Expr::Neg(Box::new(self.parse_unary()?)))
             }
-            Some('+') => {
+            Some(b'+') => {
                 self.mark_op();
                 self.pos += 1;
                 self.parse_unary()
             }
-            Some('!') => {
+            Some(b'!') => {
                 self.mark_op();
                 self.pos += 1;
                 Ok(Expr::Not(Box::new(self.parse_unary()?)))
             }
-            Some('~') => {
+            Some(b'~') => {
                 self.mark_op();
                 self.pos += 1;
                 Ok(Expr::BitNot(Box::new(self.parse_unary()?)))
@@ -788,10 +804,10 @@ impl AParser<'_> {
     /// so anything else means the two characters are separate operators.
     fn lvalue_follows(&self, n: usize) -> bool {
         let mut i = self.pos + n;
-        while matches!(self.chars.get(i), Some(c) if c.is_whitespace()) {
+        while matches!(self.src.get(i), Some(&c) if bytes::is_space(c)) {
             i += 1;
         }
-        matches!(self.chars.get(i), Some(c) if c.is_ascii_alphabetic() || *c == '_')
+        matches!(self.src.get(i), Some(c) if c.is_ascii_alphabetic() || *c == b'_')
     }
 
     /// A primary atom followed by an optional postfix `++`/`--`.
@@ -819,20 +835,20 @@ impl AParser<'_> {
         // expression from the name, and a name with a subscript is one token.
         let atom_start = self.pos;
         match self.peek() {
-            Some('(') => {
+            Some(b'(') => {
                 self.mark_tok(atom_start);
                 self.pos += 1;
                 // A parenthesised group is a full expression: ternary, comma,
                 // and assignment are allowed inside.
                 let e = self.parse_comma()?;
                 self.skip_ws();
-                if self.peek() != Some(')') {
+                if self.peek() != Some(b')') {
                     // bash names the token it is standing on when the `)` fails
                     // to appear (`( a b` → `b`, `((1)(2)` → `(2)`). At end of
                     // input it is standing on nothing, so it names the last
                     // token it did lex — which is why `(2+3` names `3` but
                     // `((2+3)` names the `)`.
-                    let token = if self.pos == self.chars.len() {
+                    let token = if self.pos == self.src.len() {
                         self.rest_from(self.last_tok_start)
                     } else {
                         self.rest_from(self.pos)
@@ -856,31 +872,35 @@ impl AParser<'_> {
                 self.mark_atom(atom_start);
                 Ok(Expr::Num(self.parse_number()?))
             }
-            Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+            Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
                 self.mark_atom(atom_start);
-                let mut name = String::new();
-                while let Some(c) = self.peek() {
-                    if c.is_ascii_alphanumeric() || c == '_' {
-                        name.push(c);
-                        self.pos += 1;
-                    } else {
-                        break;
-                    }
+                // A shell identifier is ASCII by its own syntax, so reading the
+                // name back as text is exact however the rest of the expression
+                // is spelled.
+                let name_start = self.pos;
+                while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || c == b'_') {
+                    self.pos += 1;
                 }
+                let name = self
+                    .src
+                    .get(name_start..self.pos)
+                    .and_then(bytes::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 // Array subscript `name[sub]`: for an indexed array the
                 // subscript is an arithmetic expression (`a[i+1]`, negatives);
                 // for an associative array it is a literal string key
                 // (`m[foo]`). Capture the raw bracketed text (balanced
                 // brackets), then dispatch on the array kind. No whitespace is
                 // allowed between the name and `[`.
-                if self.peek() == Some('[') {
+                if self.peek() == Some(b'[') {
                     self.pos += 1;
                     let sub_start = self.pos;
                     let mut depth = 1usize;
                     while let Some(c) = self.peek() {
                         match c {
-                            '[' => depth += 1,
-                            ']' => {
+                            b'[' => depth += 1,
+                            b']' => {
                                 depth -= 1;
                                 if depth == 0 {
                                     break;
@@ -890,7 +910,7 @@ impl AParser<'_> {
                         }
                         self.pos += 1;
                     }
-                    if self.peek() != Some(']') {
+                    if self.peek() != Some(b']') {
                         // bash: "bad array subscript"; the error token runs from
                         // the array name (`foo[` → token `foo[`).
                         return Err(ArithError::with_token(
@@ -898,7 +918,7 @@ impl AParser<'_> {
                             self.rest_from(atom_start),
                         ));
                     }
-                    let raw: String = self.chars[sub_start..self.pos].iter().collect();
+                    let raw = self.src.get(sub_start..self.pos).unwrap_or_default();
                     self.pos += 1; // consume the closing ']'
                     if raw.is_empty() {
                         // `a[]` — see `Expr::EmptySub`. Deliberately ahead of the
@@ -907,11 +927,14 @@ impl AParser<'_> {
                         return Ok(Expr::EmptySub(name));
                     }
                     if self.vars.is_assoc(&name) {
-                        return Ok(Expr::Assoc(name, raw.trim().to_string()));
+                        // An associative subscript is a literal *key*, not an
+                        // expression, so it may hold any byte — the same key
+                        // the `m[$k]=v` that stored the element carried.
+                        return Ok(Expr::Assoc(name, bytes::trim(raw).to_vec()));
                     }
                     // Indexed: parse the subscript as its own arithmetic
                     // expression (evaluated later against the live environment).
-                    let sub = Sub::parse(&raw, self.vars)?;
+                    let sub = Sub::parse(raw, self.vars)?;
                     return Ok(Expr::Index(name, Box::new(sub)));
                 }
                 Ok(Expr::Var(name))
@@ -937,7 +960,7 @@ impl AParser<'_> {
     fn parse_number(&mut self) -> Result<i64, ArithError> {
         let start = self.pos;
         // 0x / 0X hexadecimal.
-        if self.peek() == Some('0') && matches!(self.chars.get(self.pos + 1), Some('x' | 'X')) {
+        if self.peek() == Some(b'0') && matches!(self.src.get(self.pos + 1), Some(b'x' | b'X')) {
             self.pos += 2;
             let hstart = self.pos;
             while matches!(self.peek(), Some(c) if c.is_ascii_hexdigit()) {
@@ -952,7 +975,7 @@ impl AParser<'_> {
                 while matches!(self.peek(), Some(c) if digit_value(c, 64).is_some()) {
                     self.pos += 1;
                 }
-                let lexeme: String = self.chars[start..self.pos].iter().collect();
+                let lexeme = self.lexeme(start);
                 return Err(ArithError::lexeme_error("value too great for base", lexeme));
             }
             // A prefixed literal (`0x…`) cannot serve as the base of a
@@ -960,15 +983,15 @@ impl AParser<'_> {
             // `0x` prefix and rejects a subsequent `#` as "invalid number"
             // (`0x8#1`). Consume the rest of the token so the error names the
             // whole literal, matching bash.
-            if self.peek() == Some('#') {
+            if self.peek() == Some(b'#') {
                 self.pos += 1;
                 while matches!(self.peek(), Some(c) if digit_value(c, 64).is_some()) {
                     self.pos += 1;
                 }
-                let lexeme: String = self.chars[start..self.pos].iter().collect();
+                let lexeme = self.lexeme(start);
                 return Err(ArithError::lexeme_error("invalid number", lexeme));
             }
-            let hex: String = self.chars[hstart..self.pos].iter().collect();
+            let hex = self.src.get(hstart..self.pos).unwrap_or_default();
             // bash accepts a bare `0x`/`0X` with no following hex digits as 0
             // (e.g. `$((0x))` → 0, `$((1 + 0x))` → 1). Only a genuinely malformed
             // digit run reaches `from_str_radix`, so match bash's leniency here.
@@ -979,8 +1002,8 @@ impl AParser<'_> {
             // (`$((0xFFFFFFFFFFFFFFFFF))` → -1), matching bash. Every char is a
             // valid hex digit here (the run above only consumed hex digits).
             let mut val: i64 = 0;
-            for c in hex.chars() {
-                if let Some(d) = c.to_digit(16) {
+            for &c in hex {
+                if let Some(d) = digit_value(c, 16) {
                     val = val.wrapping_mul(16).wrapping_add(i64::from(d));
                 }
             }
@@ -992,8 +1015,8 @@ impl AParser<'_> {
             self.pos += 1;
         }
         // base#num — bash arbitrary-base literals, base 2..=64.
-        if self.peek() == Some('#') {
-            let base_str: String = self.chars[start..self.pos].iter().collect();
+        if self.peek() == Some(b'#') {
+            let base_str = self.src.get(start..self.pos).unwrap_or_default();
             self.pos += 1; // consume '#'
             let dstart = self.pos;
             // Consume the whole digit lexeme (every char that is a digit in
@@ -1003,7 +1026,7 @@ impl AParser<'_> {
             while matches!(self.peek(), Some(c) if digit_value(c, 64).is_some()) {
                 self.pos += 1;
             }
-            let lexeme: String = self.chars[start..self.pos].iter().collect();
+            let lexeme = self.lexeme(start);
             // A base written with a leading `0` is an octal-prefixed literal, so
             // bash's strlong() sets `foundbase` while reading it and then rejects
             // the `#` as "invalid number" (`064#1`, `0#1`). It reads the base
@@ -1011,9 +1034,9 @@ impl AParser<'_> {
             // is diagnosed earlier as "value too great for base" (`08#1`). A bare
             // `0` base (len 1) falls through to the base-range check below, where
             // `base == 0` also yields "invalid number".
-            if base_str.len() > 1 && base_str.starts_with('0') {
-                for c in base_str[1..].chars() {
-                    if c.to_digit(8).is_none() {
+            if base_str.len() > 1 && base_str.first() == Some(&b'0') {
+                for &c in base_str.get(1..).unwrap_or_default() {
+                    if digit_value(c, 8).is_none() {
                         return Err(ArithError::lexeme_error(
                             "value too great for base",
                             lexeme,
@@ -1022,9 +1045,13 @@ impl AParser<'_> {
                 }
                 return Err(ArithError::lexeme_error("invalid number", lexeme));
             }
-            let base: u32 = base_str.parse().map_err(|_| {
-                ArithError::lexeme_error("invalid arithmetic base", lexeme.clone())
-            })?;
+            // The base is a run of ASCII digits by construction, so reading it
+            // back as text is exact; only its *value* can be out of range.
+            let base: u32 = bytes::as_str(base_str)
+                .and_then(|b| b.parse().ok())
+                .ok_or_else(|| {
+                    ArithError::lexeme_error("invalid arithmetic base", lexeme.clone())
+                })?;
             // bash distinguishes base 0 ("invalid number") from base 1 / >64
             // ("invalid arithmetic base").
             if base == 0 {
@@ -1038,7 +1065,7 @@ impl AParser<'_> {
                 return Err(ArithError::lexeme_error("invalid integer constant", lexeme));
             }
             let mut val: i64 = 0;
-            for &c in &self.chars[dstart..self.pos] {
+            for &c in self.src.get(dstart..self.pos).unwrap_or_default() {
                 let Some(d) = digit_value(c, base) else {
                     // A digit valid in some base but not in *this* one is bash's
                     // "value too great for base" (`2#12`, `16#gz`, `10#0a`).
@@ -1058,22 +1085,19 @@ impl AParser<'_> {
             while matches!(self.peek(), Some(c) if digit_value(c, 64).is_some()) {
                 self.pos += 1;
             }
-            let lexeme: String = self.chars[start..self.pos].iter().collect();
+            let lexeme = self.lexeme(start);
             return Err(ArithError::lexeme_error("value too great for base", lexeme));
         }
-        let text: String = self.chars[start..self.pos].iter().collect();
+        let text = self.src.get(start..self.pos).unwrap_or_default();
         // A leading zero (other than bare "0") denotes octal. bash reports a
         // non-octal digit (`099`, `0778`) as "value too great for base", but an
         // octal literal that overflows i64 *wraps* rather than erroring
         // (`$((077777777777777777777777777))` → -1), matching C accumulation.
-        if text.len() > 1 && text.starts_with('0') {
+        if text.len() > 1 && text.first() == Some(&b'0') {
             let mut val: i64 = 0;
-            for c in text.chars() {
-                let Some(d) = c.to_digit(8) else {
-                    return Err(ArithError::lexeme_error(
-                        "value too great for base",
-                        text.clone(),
-                    ));
+            for &c in text {
+                let Some(d) = digit_value(c, 8) else {
+                    return Err(ArithError::lexeme_error("value too great for base", text));
                 };
                 val = val.wrapping_mul(8).wrapping_add(i64::from(d));
             }
@@ -1084,8 +1108,8 @@ impl AParser<'_> {
         // 1864712049423024127), so reproduce that instead of a parse error.
         // The lexer only consumed ASCII digits, so every char is a valid digit.
         let mut val: i64 = 0;
-        for c in text.chars() {
-            if let Some(d) = c.to_digit(10) {
+        for &c in text {
+            if let Some(d) = digit_value(c, 10) {
                 val = val.wrapping_mul(10).wrapping_add(i64::from(d));
             }
         }
@@ -1098,19 +1122,19 @@ impl AParser<'_> {
 /// letters, then the uppercase letters, then `@`, then `_`. For bases <= 36 the
 /// letter cases are interchangeable; for larger bases lowercase is 10..=35 and
 /// uppercase is 36..=61.
-fn digit_value(c: char, base: u32) -> Option<u32> {
+fn digit_value(c: u8, base: u32) -> Option<u32> {
     let v = match c {
-        '0'..='9' => c as u32 - '0' as u32,
-        'a'..='z' => 10 + (c as u32 - 'a' as u32),
-        'A'..='Z' => {
+        b'0'..=b'9' => u32::from(c.wrapping_sub(b'0')),
+        b'a'..=b'z' => 10 + u32::from(c.wrapping_sub(b'a')),
+        b'A'..=b'Z' => {
             if base <= 36 {
-                10 + (c as u32 - 'A' as u32)
+                10 + u32::from(c.wrapping_sub(b'A'))
             } else {
-                36 + (c as u32 - 'A' as u32)
+                36 + u32::from(c.wrapping_sub(b'A'))
             }
         }
-        '@' => 62,
-        '_' => 63,
+        b'@' => 62,
+        b'_' => 63,
         _ => return None,
     };
     if v < base { Some(v) } else { None }
@@ -1192,7 +1216,7 @@ fn eval_expr(e: &Expr, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
                     if e.token.is_none()
                         && let Some(t) = rhs_tok
                     {
-                        e.token = Some(t.to_string());
+                        e.token = Some(t.to_vec());
                     }
                     e
                 })
@@ -1359,8 +1383,8 @@ mod tests {
         }
     }
     impl VarLookup for Map {
-        fn get_str(&self, name: &str) -> Option<String> {
-            self.0.get(name).map(i64::to_string)
+        fn get_str(&self, name: &str) -> Option<Str> {
+            self.0.get(name).map(|v| v.to_string().into_bytes())
         }
         fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
             self.0.insert(name.to_string(), value);
@@ -1375,14 +1399,14 @@ mod tests {
         a: Vec<i64>,
     }
     impl VarLookup for ArrMap {
-        fn get_str(&self, name: &str) -> Option<String> {
-            self.scalars.get(name).map(i64::to_string)
+        fn get_str(&self, name: &str) -> Option<Str> {
+            self.scalars.get(name).map(|v| v.to_string().into_bytes())
         }
         fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
             self.scalars.insert(name.to_string(), value);
             Ok(())
         }
-        fn get_index_str(&self, name: &str, index: i64) -> Option<String> {
+        fn get_index_str(&self, name: &str, index: i64) -> Option<Str> {
             if name != "a" {
                 return None;
             }
@@ -1394,7 +1418,7 @@ mod tests {
             usize::try_from(real)
                 .ok()
                 .and_then(|i| self.a.get(i))
-                .map(i64::to_string)
+                .map(|v| v.to_string().into_bytes())
         }
         fn set_index(&mut self, name: &str, index: i64, value: i64) -> Result<(), ArithError> {
             if name != "a" {
@@ -1417,13 +1441,13 @@ mod tests {
             scalars,
             a: vec![10, 20, 30, 40],
         };
-        assert_eq!(eval("a[0]", &mut m).unwrap(), 10);
-        assert_eq!(eval("a[i]", &mut m).unwrap(), 30); // i = 2
-        assert_eq!(eval("a[i+1] + 1", &mut m).unwrap(), 41); // a[3]=40, +1
-        assert_eq!(eval("a[-1]", &mut m).unwrap(), 40); // negative from end
-        assert_eq!(eval("a[10]", &mut m).unwrap(), 0); // out of range → 0
+        assert_eq!(eval(b"a[0]", &mut m).unwrap(), 10);
+        assert_eq!(eval(b"a[i]", &mut m).unwrap(), 30); // i = 2
+        assert_eq!(eval(b"a[i+1] + 1", &mut m).unwrap(), 41); // a[3]=40, +1
+        assert_eq!(eval(b"a[-1]", &mut m).unwrap(), 40); // negative from end
+        assert_eq!(eval(b"a[10]", &mut m).unwrap(), 0); // out of range → 0
         // Missing ']' is a syntax error.
-        assert!(eval("a[1", &mut m).is_err());
+        assert!(eval(b"a[1", &mut m).is_err());
     }
 
     #[test]
@@ -1437,30 +1461,30 @@ mod tests {
             a: vec![10, 20, 30],
         };
         for src in ["a[1/0] = 9", "a[1/0]", "b = a[1/0]", "a[1/0]++", "a[1/0] += 2"] {
-            let e = eval(src, &mut m).expect_err(src);
-            assert_eq!(e.expr_override.as_deref(), Some("1/0"), "{src}");
+            let e = eval(src.as_bytes(), &mut m).expect_err(src);
+            assert_eq!(e.expr_override.as_deref(), Some(b"1/0".as_slice()), "{src}");
             assert!(e.in_subscript, "{src}");
             assert_eq!(e.msg, "division by 0");
         }
         // A *parse* failure inside the subscript counts too, and the raw text is
         // kept verbatim — trailing blanks and all, which is what reproduces
         // bash's `1/0  : division by 0 (error token is "0  ")`.
-        let e = eval("a[1+] = 9", &mut m).unwrap_err();
-        assert_eq!(e.expr_override.as_deref(), Some("1+"));
+        let e = eval(b"a[1+] = 9", &mut m).unwrap_err();
+        assert_eq!(e.expr_override.as_deref(), Some(b"1+".as_slice()));
         assert!(e.in_subscript);
-        let e = eval("a[  1/0  ] = 9", &mut m).unwrap_err();
-        assert_eq!(e.expr_override.as_deref(), Some("  1/0  "));
+        let e = eval(b"a[  1/0  ] = 9", &mut m).unwrap_err();
+        assert_eq!(e.expr_override.as_deref(), Some(b"  1/0  ".as_slice()));
         // The innermost subscript wins…
-        let e = eval("a[a[1/0]] = 9", &mut m).unwrap_err();
-        assert_eq!(e.expr_override.as_deref(), Some("1/0"));
+        let e = eval(b"a[a[1/0]] = 9", &mut m).unwrap_err();
+        assert_eq!(e.expr_override.as_deref(), Some(b"1/0".as_slice()));
         // …and a failure deeper still — a variable whose *value* is a bad
         // expression — keeps the value `str_to_val` recorded.
         m.scalars.insert("x".to_string(), 0);
-        let e = eval("a[x/0] = 9", &mut m).unwrap_err();
-        assert_eq!(e.expr_override.as_deref(), Some("x/0"));
+        let e = eval(b"a[x/0] = 9", &mut m).unwrap_err();
+        assert_eq!(e.expr_override.as_deref(), Some(b"x/0".as_slice()));
         // An error *outside* any subscript is untouched: it blames the whole
         // expression (the shell's caller-supplied source) and is not fatal.
-        let e = eval("a[0] = 1/0", &mut m).unwrap_err();
+        let e = eval(b"a[0] = 1/0", &mut m).unwrap_err();
         assert_eq!(e.expr_override, None);
         assert!(!e.in_subscript);
     }
@@ -1471,12 +1495,12 @@ mod tests {
             scalars: HashMap::new(),
             a: vec![10, 20, 30],
         };
-        assert_eq!(eval("a[0] = 99", &mut m).unwrap(), 99);
+        assert_eq!(eval(b"a[0] = 99", &mut m).unwrap(), 99);
         assert_eq!(m.a[0], 99);
-        assert_eq!(eval("a[1] += 5", &mut m).unwrap(), 25);
+        assert_eq!(eval(b"a[1] += 5", &mut m).unwrap(), 25);
         assert_eq!(m.a[1], 25);
         // Post-increment yields the old value, then mutates.
-        assert_eq!(eval("a[2]++", &mut m).unwrap(), 30);
+        assert_eq!(eval(b"a[2]++", &mut m).unwrap(), 30);
         assert_eq!(m.a[2], 31);
     }
 
@@ -1485,8 +1509,8 @@ mod tests {
     #[derive(Default)]
     struct NoWrite(HashMap<String, i64>);
     impl VarLookup for NoWrite {
-        fn get_str(&self, name: &str) -> Option<String> {
-            self.0.get(name).map(i64::to_string)
+        fn get_str(&self, name: &str) -> Option<Str> {
+            self.0.get(name).map(|v| v.to_string().into_bytes())
         }
         fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
             if name == "ro" {
@@ -1502,42 +1526,43 @@ mod tests {
         let mut m = NoWrite::default();
         // The refusal is the expression's error, and it names the variable
         // rather than any token of the source.
-        let e = eval("ro = 5", &mut m).unwrap_err();
+        let e = eval(b"ro = 5", &mut m).unwrap_err();
         assert_eq!(e.subject.as_deref(), Some("ro"));
         assert_eq!(e.msg, "readonly variable");
         assert_eq!(e.token, None);
         // Evaluation stops at the refusal: what came before it stands, what
         // comes after never happens.
-        assert!(eval("a = 1, ro = 2, b = 3", &mut m).is_err());
+        assert!(eval(b"a = 1, ro = 2, b = 3", &mut m).is_err());
         assert_eq!(m.0.get("a"), Some(&1));
         assert_eq!(m.0.get("b"), None);
         // Read-modify-write and the increments go through the same store.
-        assert!(eval("ro += 1", &mut m).is_err());
-        assert!(eval("ro++", &mut m).is_err());
-        assert!(eval("++ro", &mut m).is_err());
+        assert!(eval(b"ro += 1", &mut m).is_err());
+        assert!(eval(b"ro++", &mut m).is_err());
+        assert!(eval(b"++ro", &mut m).is_err());
         // An untaken branch never reaches the store, so it is no error at all.
-        assert_eq!(eval("0 ? ro = 9 : 7", &mut m).unwrap(), 7);
+        assert_eq!(eval(b"0 ? ro = 9 : 7", &mut m).unwrap(), 7);
     }
 
-    /// A lookup with one associative array `m` keyed by strings.
+    /// A lookup with one associative array `m`, keyed — as bash keys one — by
+    /// an arbitrary byte string rather than by text.
     #[derive(Default)]
-    struct AssocMap(HashMap<String, i64>);
+    struct AssocMap(HashMap<Str, i64>);
     impl VarLookup for AssocMap {
-        fn get_str(&self, _name: &str) -> Option<String> {
+        fn get_str(&self, _name: &str) -> Option<Str> {
             None
         }
         fn is_assoc(&self, name: &str) -> bool {
             name == "m"
         }
-        fn get_assoc_str(&self, name: &str, key: &str) -> Option<String> {
+        fn get_assoc_str(&self, name: &str, key: BStr<'_>) -> Option<Str> {
             if name != "m" {
                 return None;
             }
-            self.0.get(key).map(i64::to_string)
+            self.0.get(key).map(|v| v.to_string().into_bytes())
         }
-        fn set_assoc(&mut self, name: &str, key: &str, value: i64) -> Result<(), ArithError> {
+        fn set_assoc(&mut self, name: &str, key: BStr<'_>, value: i64) -> Result<(), ArithError> {
             if name == "m" {
-                self.0.insert(key.to_string(), value);
+                self.0.insert(key.to_vec(), value);
             }
             Ok(())
         }
@@ -1546,31 +1571,50 @@ mod tests {
     #[test]
     fn associative_subscripts() {
         let mut kv = HashMap::new();
-        kv.insert("foo".to_string(), 7);
-        kv.insert("bar".to_string(), 13);
+        kv.insert(b"foo".to_vec(), 7);
+        kv.insert(b"bar".to_vec(), 13);
         let mut m = AssocMap(kv);
         // The subscript is a literal string key, not arithmetic.
-        assert_eq!(eval("m[foo]", &mut m).unwrap(), 7);
-        assert_eq!(eval("m[bar] + 1", &mut m).unwrap(), 14);
+        assert_eq!(eval(b"m[foo]", &mut m).unwrap(), 7);
+        assert_eq!(eval(b"m[bar] + 1", &mut m).unwrap(), 14);
         // A key that looks like an operator expression is still literal.
-        assert_eq!(eval("m[missing]", &mut m).unwrap(), 0); // unset → 0
+        assert_eq!(eval(b"m[missing]", &mut m).unwrap(), 0); // unset → 0
         // Whitespace around the key is trimmed.
-        assert_eq!(eval("m[ foo ]", &mut m).unwrap(), 7);
+        assert_eq!(eval(b"m[ foo ]", &mut m).unwrap(), 7);
         // Assignment to an associative element.
-        assert_eq!(eval("m[foo] = 100", &mut m).unwrap(), 100);
-        assert_eq!(m.0.get("foo"), Some(&100));
+        assert_eq!(eval(b"m[foo] = 100", &mut m).unwrap(), 100);
+        assert_eq!(m.0.get(b"foo".as_slice()), Some(&100));
+    }
+
+    #[test]
+    fn an_associative_subscript_may_hold_any_byte() {
+        // A subscript of an associative array is a *literal key*, not
+        // arithmetic — so it is not text, and nothing about it need be UTF-8.
+        // osh used to gate the whole evaluator on the source decoding as UTF-8,
+        // so `k=$'\xa9'; m[$k]=7; (( m[$k] ))` failed with "syntax error:
+        // invalid arithmetic operator" — losing the read *and*, for
+        // `(( m[$k] = 9 ))`, silently dropping the store. bash answers 7, then 9.
+        let mut kv = HashMap::new();
+        kv.insert(b"\xa9".to_vec(), 7);
+        let mut m = AssocMap(kv);
+        assert_eq!(eval(b"m[\xa9]", &mut m).unwrap(), 7);
+        assert_eq!(eval(b"m[\xa9] = 9", &mut m).unwrap(), 9);
+        assert_eq!(m.0.get(b"\xa9".as_slice()), Some(&9));
+        // A key that is only *partly* undecodable is still exactly its bytes.
+        assert_eq!(eval(b"m[ a\xffb ] = 4", &mut m).unwrap(), 4);
+        assert_eq!(m.0.get(b"a\xffb".as_slice()), Some(&4));
     }
 
     /// A string-backed scalar lookup, so recursive value evaluation (a value
     /// that is itself a variable name or an expression) can be exercised.
     #[derive(Default)]
-    struct StrMap(HashMap<String, String>);
+    struct StrMap(HashMap<String, Str>);
     impl VarLookup for StrMap {
-        fn get_str(&self, name: &str) -> Option<String> {
+        fn get_str(&self, name: &str) -> Option<Str> {
             self.0.get(name).cloned()
         }
         fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
-            self.0.insert(name.to_string(), value.to_string());
+            self.0.insert(name.to_string(), value.to_string().into_bytes());
             Ok(())
         }
     }
@@ -1583,34 +1627,34 @@ mod tests {
         m.0.insert("c".into(), "b".into()); // c -> b -> a -> 5
         m.0.insert("expr".into(), "2+3".into()); // value is an expression
         m.0.insert("mixed".into(), "a * 2".into()); // uses another var
-        assert_eq!(eval("b", &mut m).unwrap(), 5);
-        assert_eq!(eval("c", &mut m).unwrap(), 5);
-        assert_eq!(eval("expr", &mut m).unwrap(), 5);
-        assert_eq!(eval("expr * 2", &mut m).unwrap(), 10);
-        assert_eq!(eval("mixed", &mut m).unwrap(), 10);
+        assert_eq!(eval(b"b", &mut m).unwrap(), 5);
+        assert_eq!(eval(b"c", &mut m).unwrap(), 5);
+        assert_eq!(eval(b"expr", &mut m).unwrap(), 5);
+        assert_eq!(eval(b"expr * 2", &mut m).unwrap(), 10);
+        assert_eq!(eval(b"mixed", &mut m).unwrap(), 10);
         // A value naming an unset variable evaluates to 0.
         m.0.insert("u".into(), "missing".into());
-        assert_eq!(eval("u + 1", &mut m).unwrap(), 1);
+        assert_eq!(eval(b"u + 1", &mut m).unwrap(), 1);
         // A leading-zero value keeps octal semantics through the recursion.
         m.0.insert("oct".into(), "010".into());
-        assert_eq!(eval("oct", &mut m).unwrap(), 8);
+        assert_eq!(eval(b"oct", &mut m).unwrap(), 8);
     }
 
     #[test]
     fn recursive_variable_cycle_is_bounded() {
         let mut m = StrMap::default();
         m.0.insert("x".into(), "x".into()); // self-reference
-        let e = eval("x", &mut m).unwrap_err();
+        let e = eval(b"x", &mut m).unwrap_err();
         assert!(e.msg.contains("recursion level exceeded"), "{}", e.msg);
         // Mutual cycle a -> b -> a.
         let mut m2 = StrMap::default();
         m2.0.insert("a".into(), "b".into());
         m2.0.insert("b".into(), "a".into());
-        assert!(eval("a", &mut m2).is_err());
+        assert!(eval(b"a", &mut m2).is_err());
     }
 
     fn ev(s: &str) -> i64 {
-        eval(s, &mut Map::default()).unwrap()
+        eval(s.as_bytes(), &mut Map::default()).unwrap()
     }
 
     #[test]
@@ -1630,7 +1674,7 @@ mod tests {
         // Hex literals wrap as well (`$((0xF…F))` → -1).
         assert_eq!(ev("0xFFFFFFFFFFFFFFFFF"), -1);
         // A non-octal digit in a leading-zero literal is still an error.
-        assert!(eval("099", &mut Map::default()).is_err());
+        assert!(eval(b"099", &mut Map::default()).is_err());
     }
 
     #[test]
@@ -1644,17 +1688,17 @@ mod tests {
         // bash where osh used to answer 4 and 7.
         // A quote where an operand belongs is an unexpected operand…
         for bad in [r#""3" + "4""#, r#""3""#, r#"'3'"#] {
-            let e = eval(bad, &mut Map::default()).unwrap_err();
+            let e = eval(bad.as_bytes(), &mut Map::default()).unwrap_err();
             assert_eq!(e.msg, "syntax error: operand expected", "{bad}");
         }
         // …and one after a complete operand is an unexpected *operator*, which is
         // how bash words `1"2"3` too.
-        let e = eval(r#"1"2"3"#, &mut Map::default()).unwrap_err();
+        let e = eval(br#"1"2"3"#, &mut Map::default()).unwrap_err();
         assert_eq!(e.msg, "syntax error: invalid arithmetic operator");
-        assert_eq!(e.token.as_deref(), Some(r#""2"3"#));
+        assert_eq!(e.token.as_deref(), Some(br#""2"3"#.as_slice()));
         // The error token starts at the quote, so the diagnostic shows it.
-        let e = eval(r#"y="3"+4"#, &mut Map::default()).unwrap_err();
-        assert_eq!(e.token.as_deref(), Some(r#""3"+4"#));
+        let e = eval(br#"y="3"+4"#, &mut Map::default()).unwrap_err();
+        assert_eq!(e.token.as_deref(), Some(br#""3"+4"#.as_slice()));
     }
 
     #[test]
@@ -1684,7 +1728,7 @@ mod tests {
         // Binds tighter than unary minus applies to the base? -2 ** 2 = -(2**2).
         assert_eq!(ev("2 ** 2 * 3"), 12);
         // Negative exponent is an error.
-        assert!(eval("2 ** -1", &mut Map::default()).is_err());
+        assert!(eval(b"2 ** -1", &mut Map::default()).is_err());
     }
 
     #[test]
@@ -1713,10 +1757,10 @@ mod tests {
         assert_eq!(ev("1 + 0x"), 1);
         assert_eq!(ev("0x1 + 0x"), 1);
         // Errors.
-        assert!(eval("2#12", &mut Map::default()).is_err()); // '2' not valid in base 2
-        assert!(eval("1#0", &mut Map::default()).is_err()); // base < 2
-        assert!(eval("65#0", &mut Map::default()).is_err()); // base > 64
-        assert!(eval("099", &mut Map::default()).is_err()); // bad octal digit
+        assert!(eval(b"2#12", &mut Map::default()).is_err()); // '2' not valid in base 2
+        assert!(eval(b"1#0", &mut Map::default()).is_err()); // base < 2
+        assert!(eval(b"65#0", &mut Map::default()).is_err()); // base > 64
+        assert!(eval(b"099", &mut Map::default()).is_err()); // bad octal digit
     }
 
     #[test]
@@ -1724,26 +1768,26 @@ mod tests {
         let mut m = HashMap::new();
         m.insert("x".to_string(), 10);
         m.insert("y".to_string(), 4);
-        assert_eq!(eval("x * y + 2", &mut Map(m)).unwrap(), 42);
+        assert_eq!(eval(b"x * y + 2", &mut Map(m)).unwrap(), 42);
     }
 
     #[test]
     fn assignment_scalars() {
         let mut m = Map::default();
-        assert_eq!(eval("x = 5", &mut m).unwrap(), 5);
+        assert_eq!(eval(b"x = 5", &mut m).unwrap(), 5);
         assert_eq!(m.get("x"), Some(5));
         // Compound assignment.
-        assert_eq!(eval("x += 3", &mut m).unwrap(), 8);
-        assert_eq!(eval("x *= 2", &mut m).unwrap(), 16);
-        assert_eq!(eval("x -= 1", &mut m).unwrap(), 15);
-        assert_eq!(eval("x /= 5", &mut m).unwrap(), 3);
+        assert_eq!(eval(b"x += 3", &mut m).unwrap(), 8);
+        assert_eq!(eval(b"x *= 2", &mut m).unwrap(), 16);
+        assert_eq!(eval(b"x -= 1", &mut m).unwrap(), 15);
+        assert_eq!(eval(b"x /= 5", &mut m).unwrap(), 3);
         assert_eq!(m.get("x"), Some(3));
         // Right-associative chained assignment: y = z = 7.
-        assert_eq!(eval("y = z = 7", &mut m).unwrap(), 7);
+        assert_eq!(eval(b"y = z = 7", &mut m).unwrap(), 7);
         assert_eq!(m.get("y"), Some(7));
         assert_eq!(m.get("z"), Some(7));
         // Assigning to a literal is an error.
-        assert!(eval("3 = 4", &mut Map::default()).is_err());
+        assert!(eval(b"3 = 4", &mut Map::default()).is_err());
     }
 
     #[test]
@@ -1751,17 +1795,17 @@ mod tests {
         let mut m = Map::default();
         m.put("x", 5);
         // Pre-increment yields the new value.
-        assert_eq!(eval("++x", &mut m).unwrap(), 6);
+        assert_eq!(eval(b"++x", &mut m).unwrap(), 6);
         assert_eq!(m.get("x"), Some(6));
         // Post-increment yields the old value.
-        assert_eq!(eval("x++", &mut m).unwrap(), 6);
+        assert_eq!(eval(b"x++", &mut m).unwrap(), 6);
         assert_eq!(m.get("x"), Some(7));
         // Pre/post decrement.
-        assert_eq!(eval("--x", &mut m).unwrap(), 6);
-        assert_eq!(eval("x--", &mut m).unwrap(), 6);
+        assert_eq!(eval(b"--x", &mut m).unwrap(), 6);
+        assert_eq!(eval(b"x--", &mut m).unwrap(), 6);
         assert_eq!(m.get("x"), Some(5));
         // Increment on an unset variable starts from 0.
-        assert_eq!(eval("++fresh", &mut m).unwrap(), 1);
+        assert_eq!(eval(b"++fresh", &mut m).unwrap(), 1);
     }
 
     /// `++` and `--` are increment operators only where an increment is
@@ -1772,18 +1816,18 @@ mod tests {
         let mut m = Map::default();
         m.put("v", 5);
         // Nothing assignable follows, so `--2` is `-(-2)` and `++2` is `+(+2)`.
-        assert_eq!(eval("--2", &mut m).unwrap(), 2);
-        assert_eq!(eval("++2", &mut m).unwrap(), 2);
-        assert_eq!(eval("--(3)", &mut m).unwrap(), 3);
-        assert_eq!(eval("++3+1", &mut m).unwrap(), 4);
+        assert_eq!(eval(b"--2", &mut m).unwrap(), 2);
+        assert_eq!(eval(b"++2", &mut m).unwrap(), 2);
+        assert_eq!(eval(b"--(3)", &mut m).unwrap(), 3);
+        assert_eq!(eval(b"++3+1", &mut m).unwrap(), 4);
         // Nor is the operand on the *left* assignable, so these are a binary
         // operator followed by a unary one: `2 - (-3)`, `3 - (-(-2))`.
-        assert_eq!(eval("2--3", &mut m).unwrap(), 5);
-        assert_eq!(eval("3---2", &mut m).unwrap(), 1);
+        assert_eq!(eval(b"2--3", &mut m).unwrap(), 5);
+        assert_eq!(eval(b"3---2", &mut m).unwrap(), 1);
         // A name may still follow across whitespace, and a real decrement wins
         // over the reading above wherever one is possible.
-        assert_eq!(eval("-- v", &mut m).unwrap(), 4);
-        assert_eq!(eval("v---3", &mut m).unwrap(), 1); // (v--) - 3, v now 4
+        assert_eq!(eval(b"-- v", &mut m).unwrap(), 4);
+        assert_eq!(eval(b"v---3", &mut m).unwrap(), 1); // (v--) - 3, v now 4
         assert_eq!(m.get("v"), Some(3));
         // With no operand at all, the error token starts at the *second*
         // character — which is just where the one operator bash did read
@@ -1795,19 +1839,19 @@ mod tests {
         // The right operand of && is skipped when the left is false, so its
         // assignment side effect must not happen.
         let mut m = Map::default();
-        eval("0 && (y = 9)", &mut m).unwrap();
+        eval(b"0 && (y = 9)", &mut m).unwrap();
         assert_eq!(m.get("y"), None);
-        eval("1 || (z = 9)", &mut m).unwrap();
+        eval(b"1 || (z = 9)", &mut m).unwrap();
         assert_eq!(m.get("z"), None);
         // The taken branch of a ternary runs; the other doesn't.
-        eval("1 ? (a = 1) : (b = 2)", &mut m).unwrap();
+        eval(b"1 ? (a = 1) : (b = 2)", &mut m).unwrap();
         assert_eq!(m.get("a"), Some(1));
         assert_eq!(m.get("b"), None);
     }
 
     #[test]
     fn div_zero() {
-        assert!(eval("1 / 0", &mut Map::default()).is_err());
+        assert!(eval(b"1 / 0", &mut Map::default()).is_err());
     }
 
     #[test]
@@ -1815,18 +1859,18 @@ mod tests {
         // bash reports both `/` and `%` by zero with the exact text "division by 0"
         // (not "division by zero"/"modulo by zero"), and exponent-by-negative with
         // "exponent less than 0". Keep the wording verbatim for bash-superset parity.
-        let div = eval("1 / 0", &mut Map::default()).unwrap_err();
+        let div = eval(b"1 / 0", &mut Map::default()).unwrap_err();
         assert_eq!(div.msg, "division by 0");
-        assert_eq!(div.to_string(), "division by 0 (error token is \"0\")");
-        let modulo = eval("1 % 0", &mut Map::default()).unwrap_err();
+        assert_eq!(div.body(), b"division by 0 (error token is \"0\")");
+        let modulo = eval(b"1 % 0", &mut Map::default()).unwrap_err();
         assert_eq!(modulo.msg, "division by 0");
-        let exp = eval("5 ** -1", &mut Map::default()).unwrap_err();
+        let exp = eval(b"5 ** -1", &mut Map::default()).unwrap_err();
         assert_eq!(exp.msg, "exponent less than 0");
     }
 
     #[test]
     fn error_bodies_and_tokens_match_bash() {
-        // The full `Display` (body + `(error token is "…")`) reproduces bash's
+        // The full body (message + `(error token is "…")`) reproduces bash's
         // arithmetic diagnostic body byte-for-byte across the common cases. The
         // enclosing shell prepends the `<name>: line N: <expr>:` prefix.
         let cases: &[(&str, &str)] = &[
@@ -1929,8 +1973,8 @@ mod tests {
             ("0x8#1", "invalid number (error token is \"0x8#1\")"),
         ];
         for (src, want) in cases {
-            let e = eval(src, &mut Map::default()).unwrap_err();
-            assert_eq!(&e.to_string(), want, "expr {src:?}");
+            let e = eval(src.as_bytes(), &mut Map::default()).unwrap_err();
+            assert_eq!(e.body().as_slice(), want.as_bytes(), "expr {src:?}");
         }
     }
 
@@ -1995,8 +2039,8 @@ mod tests {
             ("(2+3))", "syntax error in expression (error token is \")\")"),
         ];
         for (src, want) in cases {
-            let e = eval(src, &mut Map::default()).unwrap_err();
-            assert_eq!(&e.to_string(), want, "expr {src:?}");
+            let e = eval(src.as_bytes(), &mut Map::default()).unwrap_err();
+            assert_eq!(e.body().as_slice(), want.as_bytes(), "expr {src:?}");
         }
         // A balanced group still evaluates.
         assert_eq!(ev("(2+3)"), 5);
@@ -2010,11 +2054,11 @@ mod tests {
         // the source up to the literal's end (`5+2#12+9` → `5+2#12`). Ordinary
         // parse/eval errors leave it clear (the whole source is echoed).
         for src in ["2#12", "099", "65#5", "2#", "0#5", "5+2#12+9"] {
-            let e = eval(src, &mut Map::default()).unwrap_err();
+            let e = eval(src.as_bytes(), &mut Map::default()).unwrap_err();
             assert!(e.truncate_leading, "expr {src:?} should truncate leading");
         }
         for src in ["1/0", "5 +", "3 3"] {
-            let e = eval(src, &mut Map::default()).unwrap_err();
+            let e = eval(src.as_bytes(), &mut Map::default()).unwrap_err();
             assert!(!e.truncate_leading, "expr {src:?} should not truncate");
         }
     }
@@ -2036,14 +2080,14 @@ mod tests {
         assert_eq!(ev("0 ? 2,3 : 4"), 4);
         // A comma-separated assignment sequence works in the true branch too.
         let mut m = Map::default();
-        assert_eq!(eval("1 ? a=1, b=2, a+b : 0", &mut m).unwrap(), 3);
+        assert_eq!(eval(b"1 ? a=1, b=2, a+b : 0", &mut m).unwrap(), 3);
         assert_eq!(m.get("a"), Some(1));
         assert_eq!(m.get("b"), Some(2));
         // The else branch recurses at ternary level, so a trailing comma binds
         // to the enclosing expression: `1 ? 2 : 4,5` == `(1?2:4),5` == 5.
         assert_eq!(ev("1 ? 2 : 4,5"), 5);
         // Missing ':' is a syntax error.
-        assert!(eval("1 ? 2", &mut Map::default()).is_err());
+        assert!(eval(b"1 ? 2", &mut Map::default()).is_err());
     }
 
     #[test]
@@ -2054,7 +2098,7 @@ mod tests {
         assert_eq!(ev("1 ? 5 : 9, 7"), 7);
         // Comma sequences assignments (the C-style for-loop update idiom).
         let mut m = Map::default();
-        assert_eq!(eval("i = 0, j = 10", &mut m).unwrap(), 10);
+        assert_eq!(eval(b"i = 0, j = 10", &mut m).unwrap(), 10);
         assert_eq!(m.get("i"), Some(0));
         assert_eq!(m.get("j"), Some(10));
     }
@@ -2065,7 +2109,7 @@ mod tests {
         m.insert("x".to_string(), 5);
         m.insert("y".to_string(), 0);
         let mut vars = Map(m);
-        assert_eq!(eval("x ? x * 2 : -1", &mut vars).unwrap(), 10);
-        assert_eq!(eval("y ? 99 : x + 1", &mut vars).unwrap(), 6);
+        assert_eq!(eval(b"x ? x * 2 : -1", &mut vars).unwrap(), 10);
+        assert_eq!(eval(b"y ? 99 : x + 1", &mut vars).unwrap(), 6);
     }
 }

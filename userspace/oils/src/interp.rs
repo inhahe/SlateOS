@@ -5582,7 +5582,7 @@ impl Shell {
     /// survived quoting reaches the evaluator, which rejects it — `let 'x=$n+1'`
     /// is `let: x=$n+1: syntax error: operand expected`, not `x=6`.
     fn eval_arith_expanded(&mut self, expanded: BStr<'_>) -> Option<i64> {
-        match arith::eval_bytes(expanded, self) {
+        match arith::eval(expanded, self) {
             Ok(v) => Some(v),
             Err(e) => {
                 // Route through `emit_arith_error` (not `eprintln!`) so the
@@ -14094,7 +14094,7 @@ impl Shell {
         }
         let saved = self.arith_cmd.take();
         self.arith_cmd = Some(Cow::Borrowed("[["));
-        let r = match arith::eval_bytes(s, self) {
+        let r = match arith::eval(s, self) {
             Ok(v) => Some(v),
             Err(e) => {
                 self.emit_arith_error(s, &e);
@@ -14191,7 +14191,7 @@ impl Shell {
         if s.is_empty() {
             return 0;
         }
-        match arith::eval_bytes(s, self) {
+        match arith::eval(s, self) {
             Ok(v) => v,
             Err(e) => {
                 self.emit_arith_error(s, &e);
@@ -14216,7 +14216,7 @@ impl Shell {
         // Expand `$name` / `${name}` parameters inside the expression first;
         // bare identifiers are resolved by the evaluator via `VarLookup`.
         let expanded = self.expand_arith_params(expr);
-        match arith::eval_bytes(&expanded, self) {
+        match arith::eval(&expanded, self) {
             Ok(v) => v.to_string().into_bytes(),
             Err(e) => {
                 // Route through `emit_arith_error` so an active `2>`/`2>&1`
@@ -24600,15 +24600,15 @@ impl Shell {
         // The echoed source is *bytes*: an expression assembled from a variable
         // value can hold any of them, and a mangled echo would name something
         // other than what the user wrote.
-        let mut expr = bytes::trim_start(e.expr_override.as_ref().map_or(expr, |s| s.as_bytes()));
+        let mut expr = bytes::trim_start(e.expr_override.as_deref().unwrap_or(expr));
         // A rejected number literal (`2#12`, `099`) truncates the echoed source
         // at the literal's end — bash reports `5+2#12+9` as `5+2#12`. Ordinary
         // parse/eval errors echo the whole source unchanged.
         if e.truncate_leading
             && let Some(tok) = &e.token
-            && let Some(pos) = expr.find(tok.as_bytes())
+            && let Some(pos) = bytes::find(expr, tok)
         {
-            expr = expr.get(..pos + tok.len()).unwrap_or(expr);
+            expr = expr.get(..pos.saturating_add(tok.len())).unwrap_or(expr);
         }
         // A failure inside an array *subscript* wears no builtin tag: bash
         // evaluates the subscript through its own entry point, which never sees
@@ -24620,8 +24620,8 @@ impl Shell {
             self.arith_cmd.clone()
         };
         let line = match tag {
-            Some(tag) => bfmt![prefix, tag.as_ref(), b": ", expr, b": ", e.to_string()],
-            None => bfmt![prefix, expr, b": ", e.to_string()],
+            Some(tag) => bfmt![prefix, tag.as_ref(), b": ", expr, b": ", e.body()],
+            None => bfmt![prefix, expr, b": ", e.body()],
         };
         self.berrln(&line);
     }
@@ -24918,26 +24918,16 @@ impl Shell {
 
 /// Let the arithmetic evaluator read shell variables.
 impl VarLookup for Shell {
-    fn get_str(&self, name: &str) -> Option<String> {
-        // Return the raw value string; the arithmetic evaluator recursively
-        // evaluates it (`b=a; a=5; $((b))` → 5), including octal/hex literals.
-        //
-        // Seam: the arithmetic evaluator is still `str`-typed
-        // (TD-OILS-BYTE-STRINGS step 9). A value that is not text is not an
-        // arithmetic expression either, so approximating it here only decides
-        // *which* syntax error is reported, not whether one is — but the seam
-        // goes away with the evaluator's own conversion.
-        #[allow(deprecated)]
-        self.param_value(name).map(|v| bytes::scaffold_lossy_string(&v))
+    fn get_str(&self, name: &str) -> Option<Str> {
+        // Return the raw value; the arithmetic evaluator recursively evaluates
+        // it (`b=a; a=5; $((b))` → 5), including octal/hex literals.
+        self.param_value(name)
     }
 
-    fn get_index_str(&self, name: &str, index: i64) -> Option<String> {
+    fn get_index_str(&self, name: &str, index: i64) -> Option<Str> {
         match self.arith_elem(name) {
             // `array_element` already applies bash negative-index semantics.
-            #[allow(deprecated)]
-            ArithElem::Array(base) => self
-                .array_element(&base, index)
-                .map(|v| bytes::scaffold_lossy_string(&v)),
+            ArithElem::Array(base) => self.array_element(&base, index),
             // A subscript on a nameref that already designates an element names
             // nothing. Reading it is silent (bash yields 0); only *writing*
             // draws the complaint — see `set_index`.
@@ -24957,14 +24947,11 @@ impl VarLookup for Shell {
         }
     }
 
-    fn get_assoc_str(&self, name: &str, key: &str) -> Option<String> {
+    fn get_assoc_str(&self, name: &str, key: BStr<'_>) -> Option<Str> {
         match self.arith_elem(name) {
             // An unset key (or empty value) evaluates to 0; a non-empty value is
             // recursively arithmetic-evaluated by the caller.
-            #[allow(deprecated)]
-            ArithElem::Array(base) => self
-                .assoc_element(&base, key.as_bytes())
-                .map(|v| bytes::scaffold_lossy_string(&v)),
+            ArithElem::Array(base) => self.assoc_element(&base, key),
             ArithElem::Element(_) => None,
         }
     }
@@ -25001,7 +24988,7 @@ impl VarLookup for Shell {
         Ok(())
     }
 
-    fn set_assoc(&mut self, name: &str, key: &str, value: i64) -> Result<(), arith::ArithError> {
+    fn set_assoc(&mut self, name: &str, key: BStr<'_>, value: i64) -> Result<(), arith::ArithError> {
         let base = match self.arith_elem(name) {
             ArithElem::Array(base) => base,
             // See `set_index`: the reference leaves the subscript nothing to
@@ -25012,7 +24999,7 @@ impl VarLookup for Shell {
             }
         };
         self.arith_elem_writable(&base)?;
-        self.assoc_set(&base, key.as_bytes().to_vec(), value.to_string().into_bytes(), false);
+        self.assoc_set(&base, key.to_vec(), value.to_string().into_bytes(), false);
         Ok(())
     }
 

@@ -681,6 +681,21 @@ elsewhere in the case, or it needs load the harness produces and this did
 not. The failing run's diff was not captured — the next occurrence should
 be, with both shells' output side by side, before any fix is attempted.
 
+**2026-07-31 — the same nondeterminism reproduced in-process, which is a
+much better handle on it.** A full `cargo test -p oils --lib` run failed
+`interp::tests::a_pipelines_stages_begin_in_pipeline_order`; the test
+passed on its own immediately afterwards and the next full run passed
+too. That test asserts the `set -x` trace order of all-builtin pipelines
+(`{ set -x; true | :; } 2>&1` → `+ true\n+ :\n`), so it exercises exactly
+the stage-start handshake (`Shell::signal_stage_started`) suspected here —
+no bash, no harness, no subprocess. Reproducing it needs the *parallel*
+test load, which is consistent with "needs load the corpus harness
+produces". Next step: run that one test under `--test-threads` pressure
+in a loop (e.g. `cargo test … a_pipelines_stages_begin_in_pipeline_order
+-- --test-threads=16` repeatedly, or a loop harness inside the test) to
+get a capture of the wrong order, then audit the handshake for the case
+where a stage signals started before its trace has been written.
+
 ### TD-OILS-CORPUS-SECONDS-BOUNDARY-FLAKE. `tests/corpus/dynamic-var-assign.sh` reads `SECONDS` across a second boundary — ✅ RESOLVED 2026-07-31 (test bug, not a shell bug)
 
 **Where:** `userspace/oils/tests/corpus/dynamic-var-assign.sh` line 103,
@@ -6227,13 +6242,13 @@ Covered by the unit test
 `a_declarations_value_operand_is_the_ordinary_assignment` and by
 `tests/corpus/bash-declare-value-dynvar.sh`.
 
-### TD-OILS-ASSIGN-PREFIX-BYPASSES-DYNVAR. An assignment *prefix* naming a computed variable does not run its side effect — 2026-07-31 — OPEN
+### TD-OILS-ASSIGN-PREFIX-BYPASSES-DYNVAR. An assignment *prefix* naming a computed variable is ignored by the command — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the temporary-environment path
-that binds a simple command's assignment prefix. Like the `declare` case
-above it writes the binding directly, so the dynamic-special intercept in
-`apply_assignment` never runs and the name goes on computing from its old
-base for the command's duration.
+that binds a simple command's assignment prefix. It writes the binding
+into `vars` directly, and a computed name's read never consults `vars`,
+so the name went on computing and the binding was simply invisible for
+the command's duration.
 
 ```sh
 SECONDS=100 eval 'echo "[$SECONDS]"'       # bash [100]   osh [0]
@@ -6244,12 +6259,110 @@ echo "[$SECONDS]"                          # both [0] afterwards
 The *restore* half is already right — bash puts the old value back when
 the command ends, and so does osh — so this is exactly the store.
 
-**Proper fix.** The prefix binding has to run the same intercept, and then
-undo it: for a computed name the "old value" to restore is the counter's
-base, not a table entry. Cheapest correct shape is to snapshot and restore
-the base fields (`seconds_base`/`seconds_anchor`, `subshell_base`, `rng`)
-around the command when a prefix names one of those, which is the state
-bash's own save/restore of the variable amounts to.
+**Fixed** — and the original "proper fix" note here (run the assign
+function and snapshot the counter bases around the command) was **wrong**,
+which measuring settled. bash does not run the assign function for a
+prefix at all: it binds the name in a **variable scope of its own**, so
+for the command's duration the name is an *ordinary* variable. Decisive
+evidence: `LINENO=9 eval 'echo $LINENO'` prints `9`, not the live line;
+`RANDOM=5 eval 'echo $RANDOM $RANDOM'` prints `5 5`, not two draws; and
+`declare -i SECONDS; SECONDS=3+4 eval 'echo $SECONDS'` prints `3+4` — the
+string as written, neither parsed as a number nor evaluated, so no assign
+function can have seen it.
+
+That is the same rule `local` follows (see TD-OILS-DECL-VALUE-BYPASSES-
+DYNVAR), applied to a command rather than a frame, so the fix is the same
+guard: `Shell::temp_shadow` records the computed names a prefix binds,
+`Shell::push_temp_shadow`/`pop_temp_shadow` bracket the builtin
+(`run_builtin_body`) and the function call (`call_function`), and
+`Shell::is_ordinary_shadowed` — now asked by both
+`dynamic_special_value` and `apply_assignment` — answers `local`-or-prefix
+in one place. `clone_for_subshell` carries the stack, because the binding
+itself is in `vars`, which a subshell copies.
+
+Covered by the unit test `an_assignment_prefix_shadows_a_computed_name`
+and by `tests/corpus/bash-assign-prefix-dynvar.sh`.
+
+**Still divergent, in follow-ups:** `unset` through a prefix binding
+(TD-OILS-UNSET-THROUGH-TEMP-SHADOW), `unset` of a `local` of a computed
+name (TD-OILS-UNSET-LOCAL-KILLS-DYNVAR), and what `declare -p` reports
+for a prefix binding (TD-OILS-TEMP-BINDING-ATTRIBUTES).
+
+### TD-OILS-UNSET-THROUGH-TEMP-SHADOW. `unset` inside an assignment prefix's scope kills the name instead of revealing what it shadows — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the `unset` builtin. osh has
+no scope for the prefix binding: it is a plain `vars` entry that the
+command's teardown puts back, so `unset` removes the entry outright and
+the *outer* value stays hidden until the teardown restores it.
+
+bash removes the binding from the prefix's own scope, so what was
+underneath is revealed immediately:
+
+```sh
+( q=1; q=2 eval 'unset q; echo "[${q-UNSET}]"'; echo "[${q-UNSET}]" )
+#   bash [1] [1]        osh [UNSET] [1]
+( SECONDS=100 eval 'unset SECONDS; echo "[${SECONDS-UNSET}]"' )
+#   bash [0]  (the shell's own clock is back)   osh [UNSET]
+( BASH_SUBSHELL=9 eval 'unset BASH_SUBSHELL; echo "[${BASH_SUBSHELL-UNSET}]"' )
+#   bash [1]                                    osh [UNSET]
+```
+
+Note this is not specific to the computed names — the plain `q` case
+diverges too, so it is the scope that is missing, not the dynamic hook.
+
+**Proper fix.** Give `Shell::temp_shadow` the saved value alongside the
+name (a `VarSnapshot`, as `local_frames` already holds) rather than
+leaving it in the caller's parallel `saved` vector, and have `unset` of a
+name bound by the innermost prefix scope restore that snapshot and drop
+the entry — the "reveal" — instead of unsetting. The teardown then has
+nothing left to do for that name. Care is needed for a computed name: the
+reveal must also *not* set `dyn_unset`, or the value function is lost for
+good.
+
+### TD-OILS-UNSET-LOCAL-KILLS-DYNVAR. `unset` of a `local` of a computed name takes the global's value function with it — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the `unset` builtin's
+dynamic-special arm (`drop_dynamic_binding`). It records the name in
+`dyn_unset`, which is a *global* fact, so unsetting a local of the name
+destroys the shell's own binding permanently.
+
+```sh
+f() { local SECONDS=9; unset SECONDS; echo "[${SECONDS-UNSET}]"; }
+f                 # both [UNSET]  — right
+echo "[${SECONDS-UNSET}]"
+#   bash [0]  (the clock is untouched)      osh [UNSET]
+```
+
+**Proper fix.** `unset` of a name that is `is_ordinary_shadowed` unsets
+the *shadow* and must not touch the dynamic binding at all: the value
+function belongs to the global, which the frame is standing in front of,
+not to the local. So the `dyn_unset` insertion needs the same guard the
+read and write paths just got.
+
+### TD-OILS-TEMP-BINDING-ATTRIBUTES. A prefix binding is reported with the global's attributes, and never as exported — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the temporary-environment
+path again. The binding is an entry in `vars` and nothing else, so a
+listing reads the *global's* attribute sets for the name, and the export
+marking a prefix always carries is missing.
+
+```sh
+( q=2 eval 'declare -p q' )                   # bash declare -x q="2"    osh declare -- q="2"
+( declare -i q; q=3+4 eval 'declare -p q' )   # bash declare -x q="3+4"  osh declare -i q="3+4"
+( SECONDS=100 eval 'declare -p SECONDS' )     # bash declare -x SECONDS="100"
+#                                               osh  declare -- SECONDS="100"
+```
+
+Two facts in one: a prefix binding is **exported** (it is the command's
+environment, so `-x` always), and it is a **fresh** variable that
+inherits none of the global's attributes — `declare -i q` does not make
+`q=3+4 cmd` evaluate, and the listing shows no `-i`.
+
+**Proper fix.** Follows TD-OILS-UNSET-THROUGH-TEMP-SHADOW: once the
+prefix has a real scope holding a `VarSnapshot`, the binding can be
+installed the way `declare_local` installs a local — clearing the
+attribute sets for the name and adding `exported` — and the snapshot puts
+the global's attributes back on teardown.
 
 ### TD-OILS-PIPELINE-STAGE-SUBSHELL-DEPTH. A simple-command pipeline stage counts as a subshell for `$BASH_SUBSHELL`; in bash it does not — 2026-07-31 — OPEN
 

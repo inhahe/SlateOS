@@ -2597,6 +2597,19 @@ pub struct Shell {
     /// shadowed by `local` in that function call and their prior state, restored
     /// on return. Non-empty exactly while executing a function body.
     local_frames: Vec<Vec<(String, VarSnapshot)>>,
+    /// Stack of assignment-prefix scopes — the names `SECONDS=100 cmd` binds
+    /// for the command's duration — innermost last, one frame per builtin or
+    /// function the prefix runs.
+    ///
+    /// bash puts a prefix's assignments in a variable scope of their own, so
+    /// for the command's duration the name is an *ordinary* variable. That is
+    /// invisible for an ordinary name — the binding is already the one a lookup
+    /// finds — and decisive for a name the shell otherwise computes:
+    /// `SECONDS=100 eval 'echo $SECONDS'` prints 100 and `LINENO=9 eval 'echo
+    /// $LINENO'` prints 9, where without the shadow both would go on computing
+    /// and ignore the binding altogether. So only those names are recorded
+    /// here; see [`Shell::is_ordinary_shadowed`].
+    temp_shadow: Vec<Vec<String>>,
     /// Per-function-call save slot for `local -`. Pushed (as `None`) in lockstep
     /// with `local_frames` on function entry and popped on return. The first
     /// `local -` executed in a given call captures the current `set`-option state
@@ -3165,6 +3178,7 @@ impl Shell {
             compound_expanded: false,
             glob_error: None,
             local_frames: Vec::new(),
+            temp_shadow: Vec::new(),
             local_opt_saves: Vec::new(),
             fn_stack: Vec::new(),
             call_line_stack: Vec::new(),
@@ -7290,6 +7304,11 @@ impl Shell {
             // A subshell body is not itself a function frame; a `local` there is
             // an error until it enters one of its own function calls.
             local_frames: Vec::new(),
+            // …but the assignment prefix that is in force *is* inherited: the
+            // binding it made is in `vars`, which the subshell copies, so the
+            // shadow that makes a computed name read it has to come along or
+            // `SECONDS=100 eval '( echo $SECONDS )'` would go back to counting.
+            temp_shadow: self.temp_shadow.clone(),
             local_opt_saves: Vec::new(),
             // A subshell inherits the enclosing function context, so `FUNCNAME`
             // (and further nested calls) stay consistent.
@@ -7979,17 +7998,19 @@ impl Shell {
                 // RANDOM` the name is ordinary and `RANDOM=5` really does store
                 // 5. See [`Shell::dyn_unset`].
                 //
-                // A `local` of the name takes them away the same way, for the
-                // length of the frame: bash's value and assign functions belong
-                // to the *global* variable, so inside the function the name is
-                // an ordinary one that neither computes on a read nor reaches
-                // the counter on a write. `f() { local SECONDS=9; echo
-                // $SECONDS; }` prints 9 and leaves the clock outside alone, and
-                // `f() { local SECONDS; SECONDS=7; }` writes the local rather
-                // than rebasing anything. See [`Shell::is_locally_shadowed`],
-                // and the matching guard in [`Shell::dynamic_special_value`].
+                // A `local` of the name, or the assignment prefix of the command
+                // now running, takes them away the same way for as long as it
+                // stands: bash's value and assign functions belong to the
+                // *global* variable, so behind an ordinary binding of the name
+                // it neither computes on a read nor reaches the counter on a
+                // write. `f() { local SECONDS=9; echo $SECONDS; }` prints 9 and
+                // leaves the clock outside alone, `f() { local SECONDS;
+                // SECONDS=7; }` writes the local rather than rebasing anything,
+                // and `SECONDS=100 eval 'SECONDS=5'` leaves the clock at 0 too.
+                // See [`Shell::is_ordinary_shadowed`], and the matching guard in
+                // [`Shell::dynamic_special_value`].
                 let dynamic =
-                    !self.dyn_unset.contains(&a.name) && !self.is_locally_shadowed(&a.name);
+                    !self.dyn_unset.contains(&a.name) && !self.is_ordinary_shadowed(&a.name);
                 if dynamic && a.index.is_none() && a.name == "BASH_ARGV0" {
                     self.name = if a.append { bfmt![&self.name, &val] } else { val };
                     return true;
@@ -10773,6 +10794,9 @@ impl Shell {
                 (k.clone(), old)
             })
             .collect();
+        // …and shadow the computed names among them for the call's duration, so
+        // the body reads the binding rather than going on computing.
+        let temp_pushed = self.push_temp_shadow(assigns);
 
         // Push a fresh local scope so `local` declarations inside the body are
         // restored on return.
@@ -10922,6 +10946,7 @@ impl Shell {
         }
 
         self.positional = saved_pos;
+        self.pop_temp_shadow(temp_pushed);
         for (k, old) in saved {
             match old {
                 Some(v) => {
@@ -14878,20 +14903,22 @@ impl Shell {
         if self.dyn_unset.contains(name) {
             return None;
         }
-        // A `local` of the name shadows the dynamic binding with an *ordinary*
-        // variable, value and all: bash's value and assign functions belong to
-        // the global, so inside the function the name neither computes nor
-        // reaches the counter, and the shell's own comes back when the frame
-        // pops. `f() { local SECONDS; echo "${SECONDS-UNSET}"; }` prints UNSET,
-        // and `f() { local SECONDS=9; echo $SECONDS; }` prints 9 while the
-        // clock outside is untouched.
+        // A `local` of the name, or the assignment prefix of the command now
+        // running, shadows the dynamic binding with an *ordinary* variable,
+        // value and all: bash's value and assign functions belong to the
+        // global, so while the shadow is there the name neither computes nor
+        // reaches the counter, and the shell's own comes back when it goes.
+        // `f() { local SECONDS; echo "${SECONDS-UNSET}"; }` prints UNSET,
+        // `f() { local SECONDS=9; echo $SECONDS; }` prints 9, and
+        // `SECONDS=100 eval 'echo $SECONDS'` prints 100 — all leaving the clock
+        // outside untouched. See [`Shell::is_ordinary_shadowed`].
         //
         // A valueless local is also what [`Shell::declared`] holds, and a
         // *global* declaration of one of these names never makes an entry there
         // (see [`Shell::declare_dynamic_special`]), so that check is the same
         // answer by a second route — kept because it is the one that survives
         // `unset` of the local's value.
-        if self.is_locally_shadowed(name) || self.declared.contains(name) {
+        if self.is_ordinary_shadowed(name) || self.declared.contains(name) {
             return None;
         }
         // bash's value function fills the name's value cell (and the rest of
@@ -15939,11 +15966,14 @@ impl Shell {
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) -> Flow {
-        // Apply temporary assignments for the duration of the builtin.
+        // Apply temporary assignments for the duration of the builtin, and
+        // shadow the computed names among them so the builtin — and anything it
+        // runs — reads the binding rather than going on computing.
         let saved: Vec<(String, Option<Str>)> = assigns
             .iter()
             .map(|(k, v)| (k.clone(), self.replace_var(k.clone(), v.clone())))
             .collect();
+        let temp_pushed = self.push_temp_shadow(assigns);
 
         // Install any fd ≥ 3 dups/opens created by this command's own redirects
         // (`echo hi 3>&1 2>&3`) before resolving the `2>&N` / `>&N` duplications
@@ -16431,6 +16461,7 @@ impl Shell {
 
         // Restore temporary assignments (builtins don't persist them, except
         // pure-assignment which never reaches here).
+        self.pop_temp_shadow(temp_pushed);
         for (k, old) in saved {
             match old {
                 Some(v) => {
@@ -16802,6 +16833,49 @@ impl Shell {
         self.local_frames
             .iter()
             .any(|f| f.iter().any(|(n, _)| n == name))
+    }
+
+    /// Whether an *ordinary* binding of this name is standing in front of the
+    /// global one — either a `local` ([`Shell::is_locally_shadowed`]) or the
+    /// assignment prefix of the command now running
+    /// ([`Shell::temp_shadow`]).
+    ///
+    /// This is the question the names the shell computes have to ask before
+    /// computing: bash's value and assign functions belong to the *global*
+    /// variable, so while an ordinary binding of the name is in the way the
+    /// name neither computes on a read nor reaches the counter on a write.
+    /// `f() { local SECONDS=9; echo $SECONDS; }` prints 9 and
+    /// `SECONDS=100 eval 'echo $SECONDS'` prints 100, both leaving the clock
+    /// itself alone.
+    fn is_ordinary_shadowed(&self, name: &str) -> bool {
+        self.is_locally_shadowed(name) || self.temp_shadow.iter().flatten().any(|n| n == name)
+    }
+
+    /// Open an assignment-prefix scope for the names in `assigns` that the
+    /// shell would otherwise compute, and answer whether one was opened.
+    ///
+    /// Only those names need a frame — an ordinary name's prefix binding is
+    /// already the one a lookup finds — so the common prefix (`FOO=bar cmd`)
+    /// pushes nothing at all. Pair every `true` with
+    /// [`Shell::pop_temp_shadow`]; see [`Shell::temp_shadow`].
+    fn push_temp_shadow(&mut self, assigns: &[(String, Str)]) -> bool {
+        let names: Vec<String> = assigns
+            .iter()
+            .filter(|(k, _)| self.dynamic_special(k).is_some())
+            .map(|(k, _)| k.clone())
+            .collect();
+        if names.is_empty() {
+            return false;
+        }
+        self.temp_shadow.push(names);
+        true
+    }
+
+    /// Close the scope [`Shell::push_temp_shadow`] opened, if it opened one.
+    fn pop_temp_shadow(&mut self, pushed: bool) {
+        if pushed {
+            self.temp_shadow.pop();
+        }
     }
 
     /// The hook every user-facing write to a variable runs afterwards, for the
@@ -41907,6 +41981,48 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("f() { declare BASH_SUBSHELL=9; echo $BASH_SUBSHELL; }; f; echo $BASH_SUBSHELL").0,
             "9\n0\n"
         );
+    }
+
+    #[test]
+    fn an_assignment_prefix_shadows_a_computed_name() {
+        // The prefix binds the name in a scope of its own, so for the command's
+        // duration a name the shell would compute is an ordinary variable: it
+        // reads back what was written, an assignment to it writes that binding
+        // rather than moving the counter, and the shell's own comes back
+        // untouched when the command ends.
+        assert_eq!(run("SECONDS=100 eval 'echo $SECONDS'; echo $SECONDS").0, "100\n0\n");
+        assert_eq!(run("LINENO=9 eval 'echo $LINENO'").0, "9\n");
+        assert_eq!(
+            run("BASH_SUBSHELL=9 eval 'echo $BASH_SUBSHELL'; echo $BASH_SUBSHELL").0,
+            "9\n0\n"
+        );
+        assert_eq!(run("BASHPID=5 eval 'echo $BASHPID'").0, "5\n");
+        assert_eq!(run("BASH_ARGV0=zz eval 'echo $BASH_ARGV0'").0, "zz\n");
+        // …and it reads the same however often, where the computed one would
+        // not: `$RANDOM` draws a fresh number on every read.
+        assert_eq!(run("RANDOM=5 eval 'echo $RANDOM $RANDOM'").0, "5 5\n");
+        assert_eq!(run("LINENO=9 eval 'echo $LINENO; echo $LINENO'").0, "9\n9\n");
+        // A function's body is inside the scope, and a subshell of one.
+        assert_eq!(run("f() { echo $SECONDS; }; SECONDS=100 f; echo $SECONDS").0, "100\n0\n");
+        assert_eq!(
+            run("SECONDS=100 eval 'f() { echo $SECONDS; }; f; ( echo $SECONDS )'").0,
+            "100\n100\n"
+        );
+        // An assignment under it writes the binding, so nothing escapes.
+        assert_eq!(run("SECONDS=100 eval 'SECONDS=5; echo $SECONDS'; echo $SECONDS").0, "5\n0\n");
+        assert_eq!(
+            run("BASH_SUBSHELL=9 eval 'BASH_SUBSHELL=5; echo $BASH_SUBSHELL'; echo $BASH_SUBSHELL").0,
+            "5\n0\n"
+        );
+        // The string is taken as written — the prefix neither parses it as a
+        // number nor consults the attributes the global was declared with.
+        assert_eq!(run("SECONDS=zz eval 'echo $SECONDS'").0, "zz\n");
+        assert_eq!(run("SECONDS=3+4 eval 'echo $SECONDS'").0, "3+4\n");
+        assert_eq!(run("declare -i SECONDS; SECONDS=3+4 eval 'echo $SECONDS'").0, "3+4\n");
+        // A prefix on a special builtin does not persist (bash is not in POSIX
+        // mode here), so the clock is still the shell's afterwards.
+        assert_eq!(run("SECONDS=100 :; echo $SECONDS").0, "0\n");
+        assert_eq!(run("SECONDS=100 eval :; echo $SECONDS").0, "0\n");
     }
 
     #[test]

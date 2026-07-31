@@ -1653,6 +1653,22 @@ struct VarSnapshot {
     array_valued: bool,
 }
 
+/// One assignment-prefix scope — what `SECONDS=100 cmd` binds for the duration
+/// of `cmd`. See [`Shell::temp_shadow`].
+#[derive(Clone)]
+struct TempScope {
+    /// `local_frames.len()` when the scope was opened, so a `local` of one of
+    /// these names can be told apart from the scope itself. A local frame at
+    /// this index or deeper is *inside* the scope, and a binding it makes
+    /// stands in front of the prefix's — which is what decides whether an
+    /// `unset` reveals what the prefix hid or merely takes the local away
+    /// ([`Shell::reveal_temp_shadow`]) and whether a valueless `local` inherits
+    /// the prefix's value ([`Shell::declare_local`]).
+    local_depth: usize,
+    /// The names bound, each with the [`VarSnapshot`] it displaced.
+    binds: Vec<(String, VarSnapshot)>,
+}
+
 /// A background job started with `&`. Tracks the spawned child so `wait`/`jobs`
 /// can reap and report it. `child` becomes `None` once the process has been
 /// reaped (its final status is kept in `status`).
@@ -2598,7 +2614,7 @@ pub struct Shell {
     /// on return. Non-empty exactly while executing a function body.
     local_frames: Vec<Vec<(String, VarSnapshot)>>,
     /// Stack of assignment-prefix scopes — what `SECONDS=100 cmd` binds for the
-    /// command's duration — innermost last, one frame per builtin or function
+    /// command's duration — innermost last, one scope per builtin or function
     /// the prefix runs. Each entry is a name and the [`VarSnapshot`] it
     /// displaced, which the scope puts back when it closes — the same shape
     /// `local_frames` uses, because it is the same kind of scope.
@@ -2615,7 +2631,7 @@ pub struct Shell {
     ///
     /// See [`Shell::is_ordinary_shadowed`], [`Shell::reveal_temp_shadow`] and
     /// [`Shell::push_temp_shadow`] for the three in turn.
-    temp_shadow: Vec<Vec<(String, VarSnapshot)>>,
+    temp_shadow: Vec<TempScope>,
     /// Per-function-call save slot for `local -`. Pushed (as `None`) in lockstep
     /// with `local_frames` on function entry and popped on return. The first
     /// `local -` executed in a given call captures the current `set`-option state
@@ -11305,10 +11321,42 @@ impl Shell {
         if frame.iter().any(|(n, _)| n == name) {
             return true;
         }
+        // A binding made by an assignment prefix *outside* this frame is the one
+        // exception to starting fresh: bash's `local` of a name that came from
+        // the temporary environment keeps its value, and its export marking with
+        // it. `q=1; f() { local q; declare -p q; }; q=2 f` reports
+        // `declare -x q="2"`, where the same `local` with no prefix in force
+        // reports the bare `declare -- q`. The value is *taken as it stands* —
+        // `local -i q` under `q=3+4 f` still reports `q="3+4"` — so the flags on
+        // the declaration are applied on top afterwards, as usual.
+        //
+        // `local_frames.len() - 1` is this frame's index (`last` succeeded), and
+        // a scope opened at or before it is outside it.
+        let inherit_temp = self
+            .local_frames
+            .len()
+            .checked_sub(1)
+            .is_some_and(|here| self.temp_binds(name, here));
         let snap = self.snapshot_var(name);
         // `last_mut` is guaranteed present (we just checked `last`).
         if let Some(frame) = self.local_frames.last_mut() {
             frame.push((name.to_string(), snap));
+        }
+        if inherit_temp {
+            // Keep the value and the `-x`; the attribute sets are cleared below
+            // like any other `local`, and there is nothing in them anyway — a
+            // prefix binding carries none (see [`Shell::push_temp_shadow`]).
+            self.arrays.remove(name);
+            self.assoc.remove(name);
+            self.integer_attr.remove(name);
+            self.lower_attr.remove(name);
+            self.upper_attr.remove(name);
+            self.capcase_attr.remove(name);
+            self.nameref_attr.remove(name);
+            self.trace_attr.remove(name);
+            self.array_valued.remove(name);
+            self.declared.remove(name);
+            return true;
         }
         // Clear the binding being shadowed: a bare `local x` starts unset/empty
         // and without inherited attributes (bash: a local does not inherit a
@@ -16819,11 +16867,18 @@ impl Shell {
     /// `SECONDS=100 eval 'echo $SECONDS'` prints 100, both leaving the clock
     /// itself alone.
     fn is_ordinary_shadowed(&self, name: &str) -> bool {
-        self.is_locally_shadowed(name)
-            || self
-                .temp_shadow
-                .iter()
-                .any(|f| f.iter().any(|(n, _)| n == name))
+        self.is_locally_shadowed(name) || self.temp_binds(name, usize::MAX)
+    }
+
+    /// Whether an assignment-prefix scope opened at or before local-frame depth
+    /// `depth` binds `name` — that is, whether a prefix binding of the name is
+    /// *outside* the local frame at index `depth`.
+    ///
+    /// Pass `usize::MAX` to ask about any scope at all.
+    fn temp_binds(&self, name: &str, depth: usize) -> bool {
+        self.temp_shadow
+            .iter()
+            .any(|s| s.local_depth <= depth && s.binds.iter().any(|(n, _)| n == name))
     }
 
     /// Bind an assignment prefix's names for the duration of the command, in a
@@ -16845,9 +16900,9 @@ impl Shell {
         if assigns.is_empty() {
             return false;
         }
-        let mut frame: Vec<(String, VarSnapshot)> = Vec::with_capacity(assigns.len());
+        let mut binds: Vec<(String, VarSnapshot)> = Vec::with_capacity(assigns.len());
         for (k, v) in assigns {
-            frame.push((k.clone(), self.snapshot_var(k)));
+            binds.push((k.clone(), self.snapshot_var(k)));
             self.arrays.remove(k);
             self.assoc.remove(k);
             self.integer_attr.remove(k);
@@ -16861,7 +16916,10 @@ impl Shell {
             self.put_var(k.clone(), v.clone());
             self.exported.insert(k.clone());
         }
-        self.temp_shadow.push(frame);
+        self.temp_shadow.push(TempScope {
+            local_depth: self.local_frames.len(),
+            binds,
+        });
         true
     }
 
@@ -16874,10 +16932,10 @@ impl Shell {
         if !pushed {
             return;
         }
-        let Some(frame) = self.temp_shadow.pop() else {
+        let Some(scope) = self.temp_shadow.pop() else {
             return;
         };
-        for (name, snap) in frame {
+        for (name, snap) in scope.binds {
             self.restore_var(&name, snap);
         }
     }
@@ -16892,6 +16950,16 @@ impl Shell {
     /// SECONDS=100 eval 'unset SECONDS; echo "[$SECONDS]"'   # the clock is back
     /// ```
     ///
+    /// …unless a `local` inside the scope is standing in front of the prefix's
+    /// binding, in which case the `unset` took *that* away and the prefix's is
+    /// still hidden underneath — bash's `unset` of a local, which leaves the
+    /// name unset for the frame rather than revealing what it shadows:
+    ///
+    /// ```sh
+    /// q=1; f() { local q; unset q; echo "[${q-UNSET}]"; }; q=2 f
+    /// # [UNSET] inside, and q is 2 again for the rest of the call
+    /// ```
+    ///
     /// Called from [`Shell::unbind_var`] after it has cleared the binding, so
     /// what this writes is the last word.
     fn reveal_temp_shadow(&mut self, name: &str) {
@@ -16900,14 +16968,26 @@ impl Shell {
         let Some(idx) = self
             .temp_shadow
             .iter()
-            .rposition(|f| f.iter().any(|(n, _)| n == name))
+            .rposition(|s| s.binds.iter().any(|(n, _)| n == name))
         else {
             return;
         };
-        let old = self.temp_shadow.get_mut(idx).and_then(|f| {
-            f.iter()
+        // A local frame opened at or after the scope is inside it, so a `local`
+        // there is the nearer binding and the prefix's survives untouched.
+        let inside = self.temp_shadow.get(idx).is_some_and(|s| {
+            self.local_frames
+                .iter()
+                .skip(s.local_depth)
+                .any(|f| f.iter().any(|(n, _)| n == name))
+        });
+        if inside {
+            return;
+        }
+        let old = self.temp_shadow.get_mut(idx).and_then(|s| {
+            s.binds
+                .iter()
                 .position(|(n, _)| n == name)
-                .map(|at| f.remove(at).1)
+                .map(|at| s.binds.remove(at).1)
         });
         if let Some(snap) = old {
             self.restore_var(name, snap);
@@ -42117,6 +42197,45 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("SECONDS=100 eval 'declare -p SECONDS'").0,
             "declare -x SECONDS=\"100\"\n"
+        );
+        // A valueless `local` of a prefix-bound name is the one case where a
+        // bare `local` does not start empty: the binding's value comes with it,
+        // and the export marking too. Taken as it stands — `-i` does not re-read
+        // it as arithmetic.
+        assert_eq!(
+            run("q=1; f() { local q; declare -p q; }; q=2 f; declare -p q").0,
+            "declare -x q=\"2\"\ndeclare -- q=\"1\"\n"
+        );
+        assert_eq!(
+            run("q=1; f() { local -i q; declare -p q; }; q=3+4 f").0,
+            "declare -ix q=\"3+4\"\n"
+        );
+        assert_eq!(
+            run("f() { local SECONDS; declare -p SECONDS; }; SECONDS=100 f").0,
+            "declare -x SECONDS=\"100\"\n"
+        );
+        // …however deep the call, and through a `local` that already inherited
+        // it — but it is the *prefix's* binding, not an enclosing value in
+        // general, so with none in force a bare `local` starts empty as always.
+        assert_eq!(
+            run("q=1; f() { local q=7; g; }; g() { local q; declare -p q; }; q=2 f").0,
+            "declare -x q=\"7\"\n"
+        );
+        assert_eq!(
+            run("f() { local q=7; g; }; g() { local q; declare -p q; }; f").0,
+            "declare -- q\n"
+        );
+        // `unset` of such a local takes the local away rather than revealing the
+        // prefix's binding: the local is the nearer of the two, so the prefix's
+        // is still there for the rest of the call.
+        assert_eq!(
+            run("q=1; f() { local q; unset q; echo ${q-UNSET}; }; q=2 f; echo ${q-UNSET}").0,
+            "UNSET\n1\n"
+        );
+        assert_eq!(
+            run("q=1; f() { g; echo ${q-UNSET}; }; g() { local q; unset q; echo ${q-UNSET}; }; q=2 f")
+                .0,
+            "UNSET\n2\n"
         );
     }
 

@@ -65,6 +65,29 @@ echo "=== because the binding is a fresh, exported variable of its own"
 ( declare -a q=(1 2); q=zz eval 'declare -p q'; declare -p q ) 2>&1
 ( SECONDS=100 eval 'declare -p SECONDS' ) 2>&1
 
+echo "=== a valueless local of one keeps the value, where otherwise it would not"
+# The prefix's binding is the one exception to a bare `local` starting empty:
+# the value comes with it, and the export marking too. The value is taken as it
+# stands — `local -i` does not re-read it as arithmetic.
+( q=1; f() { local q; declare -p q; }; q=2 f; declare -p q ) 2>&1
+( declare -i q=5; f() { local q; declare -p q; }; q=3+4 f; declare -p q ) 2>&1
+( q=1; f() { local -i q; declare -p q; }; q=3+4 f ) 2>&1
+( f() { local SECONDS; declare -p SECONDS; }; SECONDS=100 f ) 2>&1
+# It reaches a function called under the prefix however deep, and through a
+# `local` that already inherited it…
+( q=1; f() { g; }; g() { local q; declare -p q; }; q=2 f ) 2>&1
+( q=1; f() { local q=7; g; }; g() { local q; declare -p q; }; q=2 f ) 2>&1
+# …but it is the *prefix's* binding that is inherited, not an enclosing value in
+# general: with no prefix in force a bare `local` starts empty as always.
+( f() { local q=7; g; }; g() { local q; declare -p q; }; f ) 2>&1
+( q=1; f() { local q; declare -p q; }; f ) 2>&1
+# And `unset` of such a local takes the local away rather than revealing the
+# prefix's binding — the local is the nearer of the two, so the prefix's is
+# still there for the rest of the call.
+( q=1; f() { local q; unset q; echo "[${q-UNSET}]"; }; q=2 f; echo "[${q-UNSET}]" ) 2>&1
+( q=1; f() { g; echo "[${q-UNSET}]"; }
+  g() { local q; unset q; echo "[${q-UNSET}]"; }; q=2 f; echo "[${q-UNSET}]" ) 2>&1
+
 echo "=== a prefix on a special builtin does not persist either"
 ( SECONDS=100 :; back ) 2>&1
 ( SECONDS=100 eval :; back ) 2>&1

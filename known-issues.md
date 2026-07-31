@@ -9829,7 +9829,7 @@ not a set of processes.
 already reports the last stage's status. Kept out of
 `tests/corpus/kill-dispositions.sh`, which signals only single-process jobs.
 
-### TD-OILS-JOB-SWEEP-LINE. A dead job that has been reported leaves osh's job table one operation later than bash's — OPEN 2026-07-31
+### TD-OILS-JOB-SWEEP-LINE. A dead job that has been reported leaves osh's job table one operation later than bash's — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::cleanup_dead_jobs` and its
 call sites (`Shell::builtin_jobs`, `Shell::notify_signalled_jobs`), against the
@@ -9856,25 +9856,76 @@ Newly visible through `compgen -A job`, which since 2026-07-31 reads the same
 table (`Shell::compgen_job_names`); before that only `jobs`/`wait` could see the
 extra row, and both sweep on entry, which hid it.
 
-**Proper fix.** Sweep reported dead jobs at the top-level command boundary, the
-way bash does — one `cleanup_dead_jobs()` per iteration of
-`run_source_flow_out`'s loop, whose unit *is* one logical line, replacing the
-on-demand sweeps. Needs care: `jobs-lifetime.sh`,
-`jobs-spec.sh` and `jobs-wait.sh` all pin the current timing, and bash's own
-behaviour past the sweep is not self-consistent (see below), so each corpus
-expectation has to be re-measured rather than assumed.
+**✅ RESOLVED 2026-07-31.** `run_source_flow_out` now calls
+`cleanup_dead_jobs()` once per iteration, immediately after `next_unit` has
+actually yielded a unit — that loop *is* bash's read-parse-execute loop, so the
+boundary lands exactly where bash's does. Three details had to be measured
+rather than assumed:
+
+* **After the unit is obtained, not at the top of the loop.** Reaching the end
+  of the input is not a boundary in bash either: `true & sleep 0.2; eval 'jobs';
+  jobs %1` still finds `%1`, because the `eval`'s own reader ends without
+  sweeping. Sweeping at the top of the loop broke that.
+* **Not inside a command substitution.** bash runs one in a child, so nothing it
+  does to the table reaches the shell that asked — the same reason
+  `notify_signalled_jobs` stays quiet there.
+* **A swept row must still answer `wait PID`.** bash's `delete_job` calls
+  `bgp_add`, so a reaped pid's status survives the row indefinitely. osh grew
+  `Shell::remember_reaped`, called from every path that drops a *background*
+  row (`cleanup_dead_jobs`, `notify_signalled_jobs`, `wait -n` and
+  `disown_job`), writing the same `reaped_status` map a targeted `wait` already
+  used. Without it, sweeping at the line boundary would have turned `jobs; wait
+  $p` into `127 / not a child`. `fg` is the one row-dropping path that does
+  *not* remember, matching bash: its `delete_job` skips `bgp_add` for a job it
+  ran in the foreground, so `set -m; (exit 3) & p=$!; fg %1; wait $p` reports
+  `not a child` in both shells.
+
+Granularity is observable and is the *reader's*, not the command's: `jobs; jobs
+%1` on one line still finds `%1`; the same two on separate lines do not; an
+`eval` or `source` body has boundaries of its own between its lines; a function
+body, being one parsed unit, has none inside it. Covered by
+`the_sweep_boundary_is_the_readers_unit_not_the_command`,
+`a_swept_job_is_still_answerable_by_pid` and the corpus case
+`tests/corpus/jobs-sweep-line.sh`.
 
 **Also measured, and deliberately *not* to be copied.** bash's table is left
 inconsistent by a bare `wait`: after `sleep & cat /dev/null & wait`, a following
 `compgen -A job` still answers `cat` but not `sleep` — the older slot was
 cleared and the newer one was not. That is a bash artefact of `js.j_lastj` not
 tracking the deletions, not a rule; osh answers nothing, which is what the table
-actually holds. The fix above should not chase it.
+actually holds. The fix does not chase it, and `jobs-sweep-line.sh` steers clear
+of it: the case's bare `wait` is the last thing it does.
 
-**Impact.** Narrow, and only across a line boundary: a script that lists a
-finished job and then names it again on the next line gets an answer from osh
-where bash reports `no such job`. `compgen-job.sh` steers clear of the region on
-purpose.
+**Impact (before the fix).** Narrow, and only across a line boundary: a script
+that listed a finished job and then named it again on the next line got an
+answer from osh where bash reports `no such job`. `compgen-job.sh` still steers
+clear of the region on purpose — job *lifetime* is `jobs-sweep-line.sh`'s
+subject, not that case's.
+
+### BUG-OILS-DISOWN-FORGETS-THE-STATUS-TOO. `wait PID` on a disowned job reported it as a stranger — 2026-07-31 — ✅ RESOLVED 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::disown_job`.
+
+**What.** Found while auditing the row-dropping paths for TD-OILS-JOB-SWEEP-LINE
+above. `disown` dropped the row and remembered nothing, so a later `wait $pid`
+fell through to the "not a child of this shell" path:
+
+```sh
+( exit 5 ) & p=$!; sleep 0.3; disown %1
+wait $p           # bash: rc=5   osh: osh: wait: pid N is not a child … / rc=127
+( sleep 5 ) & q=$!; disown %1
+wait $q           # bash: rc=0, at once   osh: rc=127
+```
+
+**✅ RESOLVED 2026-07-31.** `disown_job`'s no-`-h` arm now routes the dropped
+row through `Shell::remember_reaped`, like every other background-row drop —
+bash's `disown` deletes the job with the same `delete_job` that calls
+`bgp_add`. A job disowned while still running remembers 0, which is why bash
+answers 0 *immediately* rather than waiting: the shell has let go of the child
+and has no status to have learnt. The `-h` arm keeps the row, so it has nothing
+to remember and the job is still waited on for real. Covered by
+`disowning_a_job_still_leaves_its_status_answerable_by_pid` and a new section of
+`tests/corpus/jobs-disown.sh`.
 
 ### TD-OILS-KILL-PGRP. osh has no notion of a process group, so `kill 0` and a negative pid do not reach one — OPEN 2026-07-27
 

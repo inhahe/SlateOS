@@ -2743,8 +2743,8 @@ pub struct Shell {
     /// [`Shell::note_new_job`].
     current_job: Option<usize>,
     previous_job: Option<usize>,
-    /// Exit statuses of background jobs already reaped by a *targeted* `wait`
-    /// (`wait PID` or `wait -n`), keyed by pid.
+    /// Exit statuses of background jobs whose row has gone, keyed by pid —
+    /// bash's `bgpids`.
     ///
     /// bash remembers a terminated job's status after reaping it, so `wait PID`
     /// is repeatable and keeps returning the same value rather than degrading
@@ -2752,6 +2752,11 @@ pub struct Shell {
     /// *separate* from [`jobs`](Self::jobs): a reaped job vanishes from the
     /// `jobs` listing immediately, yet `wait` on its pid still answers — both
     /// verified against bash 5, and a single table could not model both.
+    ///
+    /// Written by a *targeted* `wait` (`wait PID`/`wait -n`) and by every path
+    /// that drops a row — [`Shell::remember_reaped`], which stands where bash's
+    /// `delete_job` calls `bgp_add`. That second half is what keeps `wait PID`
+    /// answering after a `jobs` listing has swept the job away.
     ///
     /// Cleared by an argument-less `wait`, which is bash's purge point: after a
     /// bare `wait`, re-waiting a previously reaped pid *does* report 127.
@@ -3834,6 +3839,24 @@ impl Shell {
             let Some(unit) = ip.next_unit(aliases, opts) else {
                 return Flow::Next;
             };
+            // A job that has finished *and* been reported leaves the table here,
+            // at the boundary *before* a unit — which is where bash sweeps it,
+            // because this loop is bash's read-parse-execute loop. The
+            // granularity is observable and is the loop's, not the command's:
+            // `jobs; jobs %1` on one line still finds `%1` while the same two on
+            // separate lines do not, and the boundary counts inside an
+            // `eval`/`source` body (its own read-parse-execute loop) but not
+            // between the commands of a function body (one parsed unit).
+            // Reaching the end of the input is not a boundary — `eval 'jobs'`
+            // leaves the row for the command after it, so this sits after the
+            // unit was actually obtained.
+            //
+            // Not inside a command substitution: bash runs one in a child, so
+            // nothing it does to the table reaches the shell that asked. Same
+            // reason `notify_signalled_jobs` holds its tongue there.
+            if !self.in_comsub {
+                self.cleanup_dead_jobs();
+            }
             // `set -v` echoes input as the *reader* consumes it, so it goes out
             // here — before the unit runs, and whether or not the unit parses.
             // The text is the raw span, unlike the history's cooked one:
@@ -16611,7 +16634,8 @@ impl Shell {
         let mut idx = 0;
         while idx < self.jobs.len() {
             if self.announce_signalled_job(idx) {
-                self.jobs.remove(idx);
+                let gone = self.jobs.remove(idx);
+                self.remember_reaped(gone.pid, gone.status.unwrap_or(0));
                 swept = true;
             } else {
                 idx += 1;
@@ -16665,10 +16689,32 @@ impl Shell {
     fn cleanup_dead_jobs(&mut self) {
         self.poll_jobs();
         let before = self.jobs.len();
-        self.jobs.retain(|j| j.status.is_none() || !j.notified);
+        let mut dropped: Vec<(u32, i32)> = Vec::new();
+        self.jobs.retain(|j| {
+            let keep = j.status.is_none() || !j.notified;
+            if !keep {
+                dropped.push((j.pid, j.status.unwrap_or(0)));
+            }
+            keep
+        });
+        for (pid, status) in dropped {
+            self.remember_reaped(pid, status);
+        }
         if self.jobs.len() != before {
             self.reset_job_markers();
         }
+    }
+
+    /// Remember what a background pid exited with, so `wait PID` can keep
+    /// answering after the job's row is gone — bash's `bgp_add`, which its
+    /// `delete_job` calls on the way out.
+    ///
+    /// Every path that drops a row goes through here, because bash's does: a
+    /// job swept after a listing reported it and one announced as killed are
+    /// both still answerable by pid afterwards. Only an argument-less `wait`
+    /// forgets them (see [`Shell::builtin_wait`]).
+    fn remember_reaped(&mut self, pid: u32, status: i32) {
+        self.reaped_status.insert(pid, status);
     }
 
     /// The job number a newly backgrounded job takes: the lowest one not in
@@ -17431,7 +17477,7 @@ impl Shell {
                     self.reset_job_markers();
                     // `wait -n` reaps just like a targeted `wait PID`, so the
                     // status stays answerable for a later `wait PID`.
-                    self.reaped_status.insert(pid, status);
+                    self.remember_reaped(pid, status);
                     if let Some(var) = pid_var {
                         self.put_var(var.to_string(), pid.to_string());
                     }
@@ -17560,7 +17606,23 @@ impl Shell {
                 j.no_hup = true;
             }
         } else {
+            // Dropping the row is bash's `delete_job`, which hands the pid to
+            // `bgpids` on the way out, so a disowned job's status stays
+            // answerable to `wait PID`: a finished one answers with what it
+            // exited with, and a still-running one answers 0 *immediately* —
+            // the shell no longer tracks the child, so there is nothing left to
+            // wait on and `status` is `None`. (`-h` keeps the row, so that arm
+            // has nothing to remember.)
+            let dropped: Vec<(u32, i32)> = self
+                .jobs
+                .iter()
+                .filter(|j| j.id == id)
+                .map(|j| (j.pid, j.status.unwrap_or(0)))
+                .collect();
             self.jobs.retain(|j| j.id != id);
+            for (pid, status) in dropped {
+                self.remember_reaped(pid, status);
+            }
             self.reset_job_markers();
         }
     }
@@ -23917,9 +23979,9 @@ impl Shell {
     ///
     /// `job` offers every job the table still holds, finished ones included: a
     /// job that has exited but not yet been swept is still a completion, so
-    /// what is on offer follows the table's own lifetime rules — where osh and
-    /// bash part company by one command boundary, which is
-    /// TD-OILS-JOB-SWEEP-LINE rather than anything this generator decides.
+    /// what is on offer follows the table's own lifetime rules — when a
+    /// reported job's row leaves is [`Shell::run_source_flow_out`]'s business,
+    /// not this generator's.
     /// `running` and `stopped` narrow by state; osh has no stopped jobs (no
     /// terminal job control — TD-OILS13), so `stopped` never offers anything.
     fn compgen_job_names(&mut self, state: Option<JobState>) -> Vec<Str> {
@@ -43757,26 +43819,122 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(sh.jobs.is_empty(), "a jobspec listing sweeps after it prints");
 
         // Naming a job in `kill` puts its fate back on the books, so a listing
-        // that already announced it announces it again.
+        // that already announced it announces it again — but only while the row
+        // is still there, which is to say only within the one line.
+        let mut sh = Shell::new();
+        sh.run_source("true &".as_bytes());
+        settle_job(&mut sh, 1);
+        let (o, _) = run_in(&mut sh, "jobs; kill -0 %1; jobs");
+        assert_eq!(o.lines().filter(|l| l.starts_with("[1]+  Done")).count(), 2, "{o}");
+        // On the next line the row is gone, so `%1` names nothing.
         let mut sh = Shell::new();
         sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         run_in(&mut sh, "jobs");
-        assert_eq!(run_in(&mut sh, "kill -0 %1").1, 0);
-        assert!(run_in(&mut sh, "jobs").0.starts_with("[1]+  Done"));
+        let (o, s) = run_in(&mut sh, "kill -0 %1 2>&1");
+        assert_eq!(o, "osh: kill: %1: no such job\n");
+        assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn the_sweep_boundary_is_the_readers_unit_not_the_command() {
+        // The read-parse-execute loop is where a reported dead job leaves the
+        // table, so an `eval` body — which has a loop of its own — sweeps
+        // between its lines, while a function body — one parsed unit — does not.
+        let one = |src: &str| {
+            let mut sh = Shell::new();
+            sh.run_source("true &".as_bytes());
+            settle_job(&mut sh, 1);
+            run_in(&mut sh, src).0
+        };
+        assert_eq!(one("jobs >/dev/null; jobs %1 >/dev/null 2>&1; echo \"rc=$?\""), "rc=0\n");
+        assert_eq!(
+            one("eval 'jobs >/dev/null\njobs %1 >/dev/null 2>&1; echo \"rc=$?\"'"),
+            "rc=1\n",
+            "an eval body's own line boundary sweeps"
+        );
+        assert_eq!(
+            one("g() { jobs >/dev/null\njobs %1 >/dev/null 2>&1; echo \"rc=$?\"; }; g"),
+            "rc=0\n",
+            "a function body is one unit, so it has no boundary inside it"
+        );
+        // Running out of input is not a boundary: the row survives an `eval`
+        // whose last unit reported it, for the command that follows.
+        assert_eq!(
+            one("eval 'jobs >/dev/null'; jobs %1 >/dev/null 2>&1; echo \"rc=$?\""),
+            "rc=0\n"
+        );
+    }
+
+    #[test]
+    fn a_swept_job_is_still_answerable_by_pid() {
+        // Dropping a row hands its status to the remembered-pid table, so
+        // `wait PID` keeps answering after the job itself is gone — bash's
+        // `delete_job`/`bgp_add`. The `jobs` listing here is what marks the job
+        // reported; the next line's sweep is what drops it.
+        let mut sh = Shell::new();
+        sh.run_source("( exit 5 ) & p=$!".as_bytes());
+        settle_job(&mut sh, 1);
+        run_in(&mut sh, "jobs");
+        assert_eq!(run_in(&mut sh, "wait $p").1, 5);
+        assert!(sh.jobs.is_empty(), "the row is gone; only the memory answered");
+        assert_eq!(run_in(&mut sh, "wait $p").1, 5, "and it answers as often as asked");
+        // A pid that was never a child is still an error, memory or no.
+        let (o, s) = run_in(&mut sh, "wait 99999 2>&1");
+        assert_eq!(o, "osh: wait: pid 99999 is not a child of this shell\n");
+        assert_eq!(s, 127);
+    }
+
+    #[test]
+    fn disowning_a_job_still_leaves_its_status_answerable_by_pid() {
+        // `disown` drops the row through the same door, so bash answers a later
+        // `wait PID` from the remembered table rather than calling it a
+        // stranger. A finished job answers with its own status.
+        let mut sh = Shell::new();
+        sh.run_source("( exit 5 ) & p=$!".as_bytes());
+        settle_job(&mut sh, 1);
+        run_in(&mut sh, "disown %1");
+        assert!(sh.jobs.is_empty());
+        assert_eq!(run_in(&mut sh, "wait $p").1, 5);
+
+        // A job disowned while still running answers 0, and answers at once:
+        // the shell has let go of the child, so there is nothing left to wait
+        // on and no status to have learnt.
+        let mut sh = Shell::new();
+        sh.run_source("( sleep 5; exit 6 ) & q=$!".as_bytes());
+        run_in(&mut sh, "disown %1");
+        let t = std::time::Instant::now();
+        assert_eq!(run_in(&mut sh, "wait $q").1, 0);
+        assert!(t.elapsed() < std::time::Duration::from_secs(3), "it did not wait");
+
+        // `-h` keeps the row, so the job is waited on for real.
+        let mut sh = Shell::new();
+        sh.run_source("( exit 4 ) & r=$!".as_bytes());
+        run_in(&mut sh, "disown -h %1");
+        assert_eq!(sh.jobs.len(), 1);
+        assert_eq!(run_in(&mut sh, "wait $r").1, 4);
     }
 
     #[test]
     fn waiting_on_a_job_answers_twice_before_the_row_is_gone() {
         // The sweep happens before the job is marked reported, so the row
-        // outlives the `wait` that read it: the second `wait` answers with the
-        // status again and is the one that drops the row.
+        // outlives the `wait` that read it: a second `wait` on the same line
+        // answers with the status again and is the one that drops the row.
+        let mut sh = Shell::new();
+        sh.run_source("( exit 7 ) &".as_bytes());
+        let (o, _) = run_in(
+            &mut sh,
+            "wait %1; echo \"1=$?\"; wait %1; echo \"2=$?\"; wait %1 2>&1; echo \"3=$?\"",
+        );
+        assert_eq!(o, "1=7\n2=7\nosh: wait: %1: no such job\n3=127\n");
+        assert!(sh.jobs.is_empty());
+
+        // Across a line boundary there is no second answer: the boundary is
+        // itself a sweep, so the row the first `wait` reported is already gone.
         let mut sh = Shell::new();
         sh.run_source("( exit 7 ) &".as_bytes());
         assert_eq!(run_in(&mut sh, "wait %1").1, 7);
-        assert_eq!(sh.jobs.len(), 1);
-        assert_eq!(run_in(&mut sh, "wait %1").1, 7);
-        assert!(sh.jobs.is_empty());
+        assert_eq!(sh.jobs.len(), 1, "the reporting line does not sweep on its way out");
         let (o, s) = run_in(&mut sh, "wait %1 2>&1");
         assert_eq!(o, "osh: wait: %1: no such job\n");
         assert_eq!(s, 127);

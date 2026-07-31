@@ -4,8 +4,8 @@
 # are all still running for the questions about running jobs and all finished
 # for the one about finished ones. Nothing here reports or waits for a job in
 # between, because a job's *lifetime in the table* — when a reported or reaped
-# job stops being offered — is bash's own tangle (see TD-OILS-JOB-SWEEP-LINE)
-# and not what this case is about.
+# job stops being offered — is `jobs-sweep-line.sh`'s subject and not this
+# case's.
 # TIMEOUT: 60
 
 echo "== with no jobs there is nothing to offer"

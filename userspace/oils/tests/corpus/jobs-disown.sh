@@ -39,3 +39,20 @@ wait
 echo "=== an unknown option is rejected with the usage line"
 sleep 0.7 & disown -z; echo "rc=$?"
 wait
+
+echo "=== a forgotten job's status still answers to its pid"
+# Dropping the row remembers the pid, so `wait PID` is not told it is a
+# stranger. A finished job answers with what it exited with…
+( exit 5 ) & p=$!
+sleep 0.3
+disown %1
+wait $p; echo "rc=$?"
+# …and one forgotten while it was still running answers 0, at once: the shell
+# has let go of the child, so there is nothing left to wait on.
+( sleep 0.4; exit 6 ) & q=$!
+disown %1
+wait $q; echo "rc=$?"
+# `-h` keeps the row, so that job is waited on for real.
+( exit 4 ) & r=$!
+disown -h %1
+wait $r; echo "rc=$?"

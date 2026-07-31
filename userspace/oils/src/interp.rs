@@ -20151,6 +20151,24 @@ impl Shell {
         Some((text.to_string(), append, value))
     }
 
+    /// The `builtin: ` the readonly-assignment diagnostic of `export` and
+    /// `readonly` carries when `-a`/`-A` is in play, and the empty string
+    /// otherwise.
+    ///
+    /// Measured: `readonly q=1; export q=2` says `q: readonly variable`, while
+    /// `export -a q=2` says `export: q: readonly variable` — and the same for
+    /// `readonly` — because the array flags send bash through
+    /// `declare_internal`, which tags its diagnostics with the calling builtin,
+    /// rather than through the plain assignment path, which does not. No other
+    /// flag makes the difference: `-n`, `-p` and `--` all keep the bare form.
+    fn attr_tag(assoc: bool, indexed: bool, builtin: &str) -> String {
+        if assoc || indexed {
+            format!("{builtin}: ")
+        } else {
+            String::new()
+        }
+    }
+
     fn builtin_export(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Parse leading flags: `-p` (list exported vars), `-n` (remove the export
         // attribute), `-a`/`-A` (declare the operand an array, as `readonly`
@@ -20218,11 +20236,21 @@ impl Shell {
                 continue;
             };
             if let Some(v) = value {
-                // `export NAME=value` is an assignment: a readonly target is an
-                // error, and — as in bash — the value is left unchanged and the
-                // export attribute is not applied for that operand.
+                // `export NAME=value` is an assignment, so a readonly target is
+                // an error and the value is left unchanged — but the *export
+                // attribute is still applied*, because bash marks the name
+                // before it tries the store: `readonly q=1; export q=2` reports
+                // `q: readonly variable`, exits 1 and leaves `declare -rx q="1"`.
+                // `export -n q=2` takes it off the same way. Only the value is
+                // refused. (`declare -x q=2` differs — it applies nothing — and
+                // so does the `noassign` refusal below, which reports 0.)
                 if self.readonly.contains(&k) {
-                    self.perrln(&format!("{k}: readonly variable"));
+                    self.perrln(&format!("{}{k}: readonly variable", Self::attr_tag(assoc, indexed, "export")));
+                    if unexport {
+                        self.exported.remove(&k);
+                    } else {
+                        self.exported.insert(k);
+                    }
                     status = 1;
                     continue;
                 }
@@ -22074,7 +22102,10 @@ impl Shell {
                 continue;
             };
             if value.is_some() && self.readonly.contains(&name) {
-                self.perrln(&format!("{name}: readonly variable"));
+                self.perrln(&format!(
+                    "{}{name}: readonly variable",
+                    Self::attr_tag(assoc, indexed, "readonly")
+                ));
                 status = 1;
                 continue;
             }
@@ -39229,6 +39260,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // At top level a compound is not special-cased: it takes the same silent
         // parse-unit discard a bare `GROUPS=(1 2)` does, so `after` never binds.
         assert_eq!(run("declare GROUPS=(1 2) after=(9); declare -p after").0, "");
+    }
+
+    /// A readonly target refuses `export NAME=value`'s *store*, but the export
+    /// attribute is applied anyway — bash marks the name before it tries the
+    /// value. `declare -x` is not the same thing, and `-a`/`-A` changes only
+    /// which diagnostic comes out.
+    #[test]
+    fn a_refused_export_still_exports() {
+        for script in ["export q=2", "export q+=2", "export -a q=2", "export -p q=2"] {
+            let (out, _) = run(&format!("readonly q=1; {script}; echo \"rc=$?\"; declare -p q"));
+            assert_eq!(out, "rc=1\ndeclare -rx q=\"1\"\n", "{script}");
+        }
+        // …and `-n` takes it off by the same route.
+        assert_eq!(
+            run("q=1; export q; readonly q; export -n q=2; echo \"rc=$?\"; declare -p q").0,
+            "rc=1\ndeclare -r q=\"1\"\n"
+        );
+        // `-a`/`-A` tag the diagnostic with the builtin's name; nothing else does.
+        for (flag, want) in [
+            ("", "q: readonly variable\n"),
+            ("-n", "q: readonly variable\n"),
+            ("-p", "q: readonly variable\n"),
+            ("--", "q: readonly variable\n"),
+            ("-a", "export: q: readonly variable\n"),
+            ("-A", "export: q: readonly variable\n"),
+            ("-na", "export: q: readonly variable\n"),
+        ] {
+            let (out, _) = run(&format!("readonly q=1; {{ export {flag} q=2; }} 2>&1"));
+            assert!(out.ends_with(want), "export {flag}: {out:?}");
+        }
+        for (flag, want) in [
+            ("", "q: readonly variable\n"),
+            ("-p", "q: readonly variable\n"),
+            ("--", "q: readonly variable\n"),
+            ("-a", "readonly: q: readonly variable\n"),
+            ("-A", "readonly: q: readonly variable\n"),
+        ] {
+            let (out, _) = run(&format!("readonly q=1; {{ readonly {flag} q=2; }} 2>&1"));
+            assert!(out.ends_with(want), "readonly {flag}: {out:?}");
+        }
+        // `declare -x` names itself and applies nothing.
+        assert_eq!(
+            run("readonly q=1; declare -x q=2; echo \"rc=$?\"; declare -p q").0,
+            "rc=1\ndeclare -r q=\"1\"\n"
+        );
     }
 
     /// `export`/`readonly` bind at the global scope wherever they are invoked —

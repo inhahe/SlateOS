@@ -19200,10 +19200,15 @@ impl Shell {
 
     fn builtin_export(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Parse leading flags: `-p` (list exported vars), `-n` (remove the export
-        // attribute), `--` ends option processing. (`-f`, exporting functions,
-        // is not modelled.)
+        // attribute), `-a`/`-A` (declare the operand an array, as `readonly`
+        // does), `--` ends option processing. (`-f`, exporting functions, is not
+        // modelled.) bash's usage synopsis still reads `[-fn]` and omits the
+        // array flags even though it accepts them, so the line below matches it
+        // as written rather than as documented.
         let mut print = false;
         let mut unexport = false;
+        let mut assoc = false;
+        let mut indexed = false;
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
@@ -19216,6 +19221,8 @@ impl Shell {
                     match c {
                         b'p' => print = true,
                         b'n' => unexport = true,
+                        b'A' => assoc = true,
+                        b'a' => indexed = true,
                         _ => {
                             self.berrln(&bfmt![
                                 self.err_prefix(),
@@ -19258,6 +19265,14 @@ impl Shell {
                     self.perrln(&format!("{k}: readonly variable"));
                     status = 1;
                     continue;
+                }
+                // `-a`/`-A` take effect only on an operand that carries a
+                // value, the same rule `readonly` follows: the array is created
+                // by the *assignment*, so `export -a fresh` leaves the name the
+                // plain scalar it was. Applied before the store so the value
+                // lands in the new array rather than beside it.
+                if assoc || indexed {
+                    self.array_kind_apply(&k, assoc);
                 }
                 // Both halves go through the array-aware store, so an operand
                 // naming an existing array reaches element/key 0 — the same
@@ -39920,6 +39935,34 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("export s=1; export s+=2; declare -p s").0,
             "declare -x s=\"12\"\n"
         );
+    }
+
+    #[test]
+    fn export_takes_the_array_kind_flags_readonly_does() {
+        // bash accepts `export -a`/`-A` (they reach the same `declare_internal`
+        // that `readonly` does); osh's option table omitted them and answered
+        // with an invalid-option usage error.
+        assert_eq!(
+            run("export -a v=5; declare -p v; export -A m=5; declare -p m").0,
+            "declare -ax v=([0]=\"5\")\ndeclare -Ax m=([0]=\"5\" )\n"
+        );
+        // As in `readonly`, the kind is created by the *assignment*, so a bare
+        // name keeps whatever it had: an unset name stays a plain scalar and an
+        // existing scalar is not widened.
+        assert_eq!(
+            run("export -a fresh; declare -p fresh; x=5; export -A x; declare -p x").0,
+            "declare -x fresh\ndeclare -x x=\"5\"\n"
+        );
+        // The append form sees the array the same operand's flag just created,
+        // so it extends element 0 rather than starting from empty.
+        assert_eq!(
+            run("export -a v=1; export -a v+=2; declare -p v").0,
+            "declare -ax v=([0]=\"12\")\n"
+        );
+        // An option letter that really is unknown still fails the same way.
+        let (out, st) = run("export -Z x 2>&1");
+        assert_eq!(st, 2);
+        assert!(out.contains("export: -Z: invalid option"), "{out:?}");
     }
 
     #[test]

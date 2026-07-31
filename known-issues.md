@@ -777,24 +777,36 @@ present in the current frame as a scalar, insert it into `array_valued` after
 creating the (empty) array. Needs a probe first to confirm bash's behaviour when
 the earlier `local` had no value at all (`local x; local -a x`).
 
-### TD-OILS-EXPORT-ARRAY-FLAG. `export -a` is accepted by bash and rejected by osh — 2026-07-30 — OPEN (low priority, MSYS-only observation)
+### TD-OILS-EXPORT-ARRAY-FLAG. `export -a` is accepted by bash and rejected by osh — 2026-07-30 — ✅ RESOLVED 2026-07-30 (see TD-OILS-DECL-LIST-KIND-FILTER for the listing half, split out)
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_export`'s option parsing.
 
-**What.** MSYS bash 5.2 accepts `export -a name` (silently: an exported array is
-not actually placed in the environment, and `declare -p` shows
-`declare -ax name`), while osh reports an invalid-option usage error. `readonly
--a` is accepted by both. The asymmetry is almost certainly an oversight in osh's
-`export` option table rather than a deliberate choice.
+**What.** bash 5.2 accepts `export -a name` (an exported array is not actually
+placed in the environment, but `declare -p` records the kind), while osh
+reported an invalid-option usage error. `readonly -a` is accepted by both. The
+asymmetry was an oversight in osh's `export` option table rather than a
+deliberate choice.
 
-**Proper fix.** Give `builtin_export` the same `-a`/`-A` handling
-`builtin_readonly` has (including the "the flag takes effect only when the
-operand carries a value" rule fixed in `readonly_array_flags_need_a_value_to_take_effect`).
-Measure against a non-MSYS bash first if one becomes available, since this was
-observed only on the MSYS build.
+**Fixed 2026-07-30.** `builtin_export`'s flag loop now takes `A`/`a` and applies
+`array_kind_apply` under the same rule `builtin_readonly` uses — *only* on an
+operand that carries a value, because the array is created by the assignment, so
+`export -a fresh` leaves the name the plain scalar it was and `x=5; export -A x`
+does not widen it. The call sits inside the valued branch, before the store, so
+the value lands in the new array rather than beside it, and the append form then
+reads element 0 back through `scalar_store` (`export -a v=1; export -a v+=2`
+→ `([0]="12")`, matching bash). bash's usage synopsis still reads `[-fn]` and
+omits the array flags even though it accepts them, so osh's matching usage line
+is unchanged — deliberately, and noted in the code. Covered by
+`export_takes_the_array_kind_flags_readonly_does`, which also pins that a
+genuinely unknown letter still fails with status 2.
+
+Re-measured against bash 5.2.37 rather than trusting the original note: the
+observation above that `declare -p` shows `declare -ax name` after a *bare*
+`export -a name` is wrong — bash shows `declare -x name`. The valued form is
+what carries the kind.
 
 **Prerequisite done 2026-07-30 — and it uncovered a worse bug.** Before `-a`
-can apply an array kind, `export`'s assignment has to *use* one:
+could apply an array kind, `export`'s assignment had to *use* one:
 `builtin_export` wrote `self.put_var(k, stored)`, i.e. the scalar slot, so
 `declare -a arr=(1 2); export arr=9` parked the 9 in a slot no expansion of an
 array name ever reads — `declare -p arr` still showed `([0]="1" [1]="2")` and
@@ -804,18 +816,39 @@ element 0.
 
 Both halves now go through the array-aware pair `scalar_store` /
 `set_scalar_store`, the same routing a bare `name=value` and `readonly
-name=value` already used, which also makes `-a` implementable (`array_kind_apply`
-would otherwise leave an empty array beside a live scalar). Covered by
-`export_assigns_through_the_array_aware_store`. The remaining work is the flag
-acceptance itself, plus the listing filter below.
+name=value` already used, which is also what makes `-a` implementable
+(`array_kind_apply` would otherwise leave an empty array beside a live scalar).
+Covered by `export_assigns_through_the_array_aware_store`.
 
-**Also measured on the way (still open).** With no operands, bash's `-a`/`-A`
-*filter the listing* rather than being ignored: `export -a` lists only exported
-indexed arrays, `export -A` only exported associative ones (`declare`-style).
-`readonly -a` filters the same way. osh's `export_list` and `readonly`'s
-nameless path both list everything regardless of the flag. bash's usage synopsis
-still reads `[-fn]`, with no mention of `-a`, so osh's matching usage line needs
-no change.
+### TD-OILS-DECL-LIST-KIND-FILTER. `export -a` / `readonly -a` with no operands should list only arrays; osh lists everything — 2026-07-30 — OPEN (low priority)
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::export_list`, and
+`builtin_readonly`'s nameless path (the `if names.is_empty()` branch), neither of
+which is told which flags were parsed.
+
+**What.** With no operands, bash's `-a`/`-A` *filter the listing* rather than
+being ignored — the `declare -a` rule, which these builtins share a code path
+with in bash. Measured on 5.2.37:
+
+```
+$ declare -ax arr=(1 2); foo=1; export foo
+$ export -a          # only the exported indexed arrays
+declare -ax arr=([0]="1" [1]="2")
+$ export             # everything exported
+declare -ax arr=([0]="1" [1]="2")
+declare -x foo="1"
+```
+
+`export -A` likewise lists only exported associative arrays, and `readonly -a` /
+`readonly -A` filter the readonly listing the same way. osh prints the full
+listing in every case, so the flag is silently a no-op there.
+
+**Proper fix.** Give both listing paths the parsed `assoc`/`indexed` pair and
+skip a name whose kind does not match (`self.arrays` / `self.assoc` membership).
+Worth doing together with the same filter for `declare -a` with no names if that
+one is also unfiltered — check before starting, since a shared helper is the
+right shape if all four sites need it. Split out of TD-OILS-EXPORT-ARRAY-FLAG,
+whose operand half is resolved.
 
 ### TD-OILS-DECL-COMPOUND-DISCARD-LEAK. A failed expansion in a declaration builtin's array operand discards the *next* command too — 2026-07-30 — ✅ RESOLVED 2026-07-30
 

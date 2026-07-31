@@ -22042,14 +22042,25 @@ impl Shell {
         // Integer attribute: `-i` sets it, `+i` removes it.
         let mut integer = false;
         let mut unset_integer = false;
-        // Case attribute directive, updated in flag order so the last one wins
-        // (`-l`/`-u`/`-c` are mutually exclusive; `+l`/`+u`/`+c` clear). `None` =
-        // untouched, `Some(0)` = clear, `Some(1)` = lowercase, `Some(2)` =
-        // uppercase, `Some(3)` = capitalize. When two *different* enable
-        // directions are given together bash cancels them all (stores unchanged,
-        // no attribute); `case_conflict` records that so we clear instead.
-        let mut case_dir: Option<u8> = None;
+        // Case attributes. The three folds are mutually exclusive as *values* —
+        // a name carries at most one — but each letter keeps its own on and off
+        // bits, which is what makes `declare -l x; declare +u x` leave the
+        // lowercase fold standing where a single "clear the case attributes"
+        // directive would drop it.
+        //
+        // `case_on` is the enable asked for: `Some(1)` lowercase, `Some(2)`
+        // uppercase, `Some(3)` capitalize; setting one clears the other two.
+        // Two *different* enables in one command cancel to none — and the
+        // cancellation drops a fold the name already had, so
+        // `declare -c y=ab; declare -l -u y` leaves `y` plain. `case_conflict`
+        // records that. The same letter twice is not a conflict.
+        let mut case_on: Option<u8> = None;
         let mut case_conflict = false;
+        // `+l`/`+u`/`+c`, each removing only its own fold, and applied after the
+        // enables so a letter written both ways ends up off.
+        let mut off_lower = false;
+        let mut off_upper = false;
+        let mut off_capcase = false;
         // Nameref attribute: `-n` sets it, `+n` removes it.
         let mut nameref = false;
         let mut unset_nameref = false;
@@ -22116,12 +22127,16 @@ impl Shell {
                                 _ => 3,
                             };
                             if enable {
-                                if matches!(case_dir, Some(prev) if prev != 0 && prev != dir) {
+                                if matches!(case_on, Some(prev) if prev != dir) {
                                     case_conflict = true;
                                 }
-                                case_dir = Some(dir);
+                                case_on = Some(dir);
                             } else {
-                                case_dir = Some(0);
+                                match c {
+                                    b'l' => off_lower = true,
+                                    b'u' => off_upper = true,
+                                    _ => off_capcase = true,
+                                }
                             }
                         }
                         b'n' => {
@@ -22562,34 +22577,48 @@ impl Shell {
             } else if trace {
                 self.trace_attr.insert(base_name.to_string());
             }
-            // Conflicting enable directions (e.g. `-lc`, `-lu`) cancel to none.
-            let case_dir = if case_conflict { Some(0) } else { case_dir };
-            match case_dir {
-                Some(1) => {
-                    // `-l`: lowercase (mutually exclusive with uppercase/capitalize).
-                    self.lower_attr.insert(base_name.to_string());
-                    self.upper_attr.remove(base_name);
-                    self.capcase_attr.remove(base_name);
+            if case_conflict {
+                // Two *different* enables in one command (`-lc`, `-lu`) cancel
+                // each other — and the cancellation is a real clear, not a
+                // no-op: it takes off a fold the name already carried.
+                self.lower_attr.remove(base_name);
+                self.upper_attr.remove(base_name);
+                self.capcase_attr.remove(base_name);
+            } else {
+                match case_on {
+                    Some(1) => {
+                        // `-l`: lowercase (mutually exclusive with uppercase/capitalize).
+                        self.lower_attr.insert(base_name.to_string());
+                        self.upper_attr.remove(base_name);
+                        self.capcase_attr.remove(base_name);
+                    }
+                    Some(2) => {
+                        // `-u`: uppercase.
+                        self.upper_attr.insert(base_name.to_string());
+                        self.lower_attr.remove(base_name);
+                        self.capcase_attr.remove(base_name);
+                    }
+                    Some(3) => {
+                        // `-c`: capitalize first char, lowercase the rest.
+                        self.capcase_attr.insert(base_name.to_string());
+                        self.lower_attr.remove(base_name);
+                        self.upper_attr.remove(base_name);
+                    }
+                    _ => {}
                 }
-                Some(2) => {
-                    // `-u`: uppercase.
-                    self.upper_attr.insert(base_name.to_string());
-                    self.lower_attr.remove(base_name);
-                    self.capcase_attr.remove(base_name);
-                }
-                Some(3) => {
-                    // `-c`: capitalize first char, lowercase the rest.
-                    self.capcase_attr.insert(base_name.to_string());
-                    self.lower_attr.remove(base_name);
-                    self.upper_attr.remove(base_name);
-                }
-                Some(_) => {
-                    // `+l`/`+u`/`+c`: clear all case attributes.
-                    self.lower_attr.remove(base_name);
-                    self.upper_attr.remove(base_name);
-                    self.capcase_attr.remove(base_name);
-                }
-                None => {}
+            }
+            // The removals come last, so a letter written both ways in one
+            // command ends up off — and each answers only for its own letter,
+            // which is why `declare -l x; declare +u x` leaves the lowercase
+            // fold standing.
+            if off_lower {
+                self.lower_attr.remove(base_name);
+            }
+            if off_upper {
+                self.upper_attr.remove(base_name);
+            }
+            if off_capcase {
+                self.capcase_attr.remove(base_name);
             }
             // A subscripted assignment (`name[sub]=value`) routes through the
             // normal array-element machinery: the subscript is arith-evaluated
@@ -22961,8 +22990,13 @@ impl Shell {
         let mut global = false;
         let mut integer = false;
         let mut unset_integer = false;
-        let mut case_dir: Option<u8> = None;
+        // Case attributes: one enable slot plus a removal bit per letter — see
+        // `case_on` in [`Shell::builtin_declare_scoped`] for the model.
+        let mut case_on: Option<u8> = None;
         let mut case_conflict = false;
+        let mut off_lower = false;
+        let mut off_upper = false;
+        let mut off_capcase = false;
         // `readonly`/`export` imply the corresponding attribute on every name.
         let mut readonly = cmd == "readonly";
         let mut export = cmd == "export";
@@ -23002,12 +23036,16 @@ impl Shell {
                             _ => 3,
                         };
                         if enable {
-                            if matches!(case_dir, Some(prev) if prev != 0 && prev != dir) {
+                            if matches!(case_on, Some(prev) if prev != dir) {
                                 case_conflict = true;
                             }
-                            case_dir = Some(dir);
+                            case_on = Some(dir);
                         } else {
-                            case_dir = Some(0);
+                            match c {
+                                b'l' => off_lower = true,
+                                b'u' => off_upper = true,
+                                _ => off_capcase = true,
+                            }
                         }
                     }
                     b'r' if enable => readonly = true,
@@ -23152,29 +23190,38 @@ impl Shell {
             } else if integer {
                 self.integer_attr.insert(a.name.clone());
             }
-            let case_dir = if case_conflict { Some(0) } else { case_dir };
-            match case_dir {
-                Some(1) => {
-                    self.lower_attr.insert(a.name.clone());
-                    self.upper_attr.remove(&a.name);
-                    self.capcase_attr.remove(&a.name);
+            if case_conflict {
+                self.lower_attr.remove(&a.name);
+                self.upper_attr.remove(&a.name);
+                self.capcase_attr.remove(&a.name);
+            } else {
+                match case_on {
+                    Some(1) => {
+                        self.lower_attr.insert(a.name.clone());
+                        self.upper_attr.remove(&a.name);
+                        self.capcase_attr.remove(&a.name);
+                    }
+                    Some(2) => {
+                        self.upper_attr.insert(a.name.clone());
+                        self.lower_attr.remove(&a.name);
+                        self.capcase_attr.remove(&a.name);
+                    }
+                    Some(3) => {
+                        self.capcase_attr.insert(a.name.clone());
+                        self.lower_attr.remove(&a.name);
+                        self.upper_attr.remove(&a.name);
+                    }
+                    _ => {}
                 }
-                Some(2) => {
-                    self.upper_attr.insert(a.name.clone());
-                    self.lower_attr.remove(&a.name);
-                    self.capcase_attr.remove(&a.name);
-                }
-                Some(3) => {
-                    self.capcase_attr.insert(a.name.clone());
-                    self.lower_attr.remove(&a.name);
-                    self.upper_attr.remove(&a.name);
-                }
-                Some(_) => {
-                    self.lower_attr.remove(&a.name);
-                    self.upper_attr.remove(&a.name);
-                    self.capcase_attr.remove(&a.name);
-                }
-                None => {}
+            }
+            if off_lower {
+                self.lower_attr.remove(&a.name);
+            }
+            if off_upper {
+                self.upper_attr.remove(&a.name);
+            }
+            if off_capcase {
+                self.capcase_attr.remove(&a.name);
             }
             // The silent half of the refusal above: a *global* target reached from
             // inside a function keeps its value and its status, having taken every
@@ -43519,6 +43566,62 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -i -i x=3+4; declare -p x").0,
             "declare -i x=\"7\"\n"
+        );
+    }
+
+    /// The three case folds are mutually exclusive as *values*, but each letter
+    /// keeps its own on and off bits — so a removal answers only for its own
+    /// letter and leaves a different fold standing.
+    #[test]
+    fn each_case_letter_is_removed_on_its_own() {
+        // One enable sets its own fold and clears the other two.
+        assert_eq!(
+            run("declare -l a=AB; declare -u b=ab; declare -c c=ab; declare -p a b c").0,
+            "declare -l a=\"ab\"\ndeclare -u b=\"AB\"\ndeclare -c c=\"Ab\"\n"
+        );
+        // The same letter both ways ends up off, in either order, and early
+        // enough that the value never takes the fold.
+        assert_eq!(
+            run("declare -l +l x=AB; declare -p x").0,
+            "declare -- x=\"AB\"\n"
+        );
+        assert_eq!(
+            run("declare +l -l x=AB; declare -p x").0,
+            "declare -- x=\"AB\"\n"
+        );
+        // A removal of a *different* letter leaves the fold — and the value
+        // folded — alone.
+        assert_eq!(
+            run("declare -l +u x=AB; declare -p x").0,
+            "declare -l x=\"ab\"\n"
+        );
+        assert_eq!(
+            run("declare -c +l x=ab; declare -p x").0,
+            "declare -c x=\"Ab\"\n"
+        );
+        // Including on a name that arrived with the fold already.
+        assert_eq!(
+            run("declare -l x=AB; declare +u x; declare -p x").0,
+            "declare -l x=\"ab\"\n"
+        );
+        assert_eq!(
+            run("declare -l x=AB; declare +l x; x=XY; declare -p x").0,
+            "declare -- x=\"XY\"\n"
+        );
+        // Two *different* enables cancel to none — and the cancellation drops a
+        // fold the name already carried.
+        assert_eq!(
+            run("declare -l -u x=Ab; declare -p x").0,
+            "declare -- x=\"Ab\"\n"
+        );
+        assert_eq!(
+            run("declare -c x=ab; declare -l -u x; declare -p x").0,
+            "declare -- x=\"Ab\"\n"
+        );
+        // The same letter twice is not a conflict.
+        assert_eq!(
+            run("declare -l -l x=AB; declare -p x").0,
+            "declare -l x=\"ab\"\n"
         );
     }
 

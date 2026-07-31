@@ -6439,7 +6439,7 @@ Coverage: nine new sections in
 `userspace/oils/tests/corpus/declare-plus-flags.sh` and the unit test
 `the_off_direction_of_the_array_kinds_refuses_rather_than_converting`.
 
-### TD-OILS-DECL-FLAG-OFF-LOSES-TO-ON. `-i +i` in one command sets the attribute where bash clears it — 2026-07-31 — OPEN
+### TD-OILS-DECL-FLAG-OFF-LOSES-TO-ON. `-i +i` in one command sets the attribute where bash clears it — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the attribute-application
 sites in `builtin_declare_scoped` and `exec_declare_with_arrays_scoped`,
@@ -6503,6 +6503,75 @@ enable slot plus three independent `off_lower`/`off_upper`/`off_cap`
 booleans, in both `builtin_declare_scoped` and
 `exec_declare_with_arrays_scoped`: apply the enable (or the conflict
 clear) first, then the three removals.
+
+**Case half resolved 2026-07-31.** Done exactly as above: `case_on:
+Option<u8>` plus `off_lower`/`off_upper`/`off_capcase`, in both
+functions; the conflict clear or the enable is applied first and the
+three removals last. Covered by `each_case_letter_is_removed_on_its_own`
+and eight sections of
+`userspace/oils/tests/corpus/declare-plus-flags.sh`. One thing the plan
+did not anticipate: which fold a *compound literal's* values take is a
+separate question from which attribute the name ends up with, and bash
+answers it differently — split out as
+TD-OILS-DECL-COMPOUND-FOLD-USES-MENTIONED-LETTERS.
+
+### TD-OILS-DECL-COMPOUND-FOLD-USES-MENTIONED-LETTERS. A compound literal's case fold follows the letters the command *mentions*, not the attribute the name ends up with — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` —
+`exec_declare_with_arrays_scoped`. osh folds a compound literal's values
+with the attribute the name is left holding (enable minus removals),
+which is the right rule for the scalar path but not for this one.
+
+For a *scalar* (and for a subscripted or non-compound operand, which
+route through `builtin_declare_scoped`) bash folds by the final
+attribute, and osh already matches: `declare -l +u s=AB` stores `ab`,
+`declare -l +l s=AB` stores `AB`. For a **compound literal** bash instead
+decides the fold from the case letters the command mentions *in either
+direction*, and cancels the fold entirely when it mentions more than one:
+
+```sh
+declare -l +l q=(AB);  declare -p q   # bash declare -a q=([0]="ab")   osh …"AB"
+declare -l +u q=(AB);  declare -p q   # bash declare -al q=([0]="AB")  osh …"ab"
+declare -l +c q=(AB);  declare -p q   # bash declare -al q=([0]="AB")  osh …"ab"
+declare -u +l q=(ab);  declare -p q   # bash declare -au q=([0]="ab")  osh …"AB"
+declare -Al +u m=([k]=AB)             # bash declare -Al m=([k]="AB")  osh …"ab"
+```
+
+Note that the *attribute* column is already right in every one of these —
+only the stored value differs.
+
+**Measured rule (bash 5.2.37, `target/dvscratch/px15.sh`, `px17.sh`,
+`px18.sh`).** Let `on` be the enable the command asked for and `off` the
+set of case letters it removed.
+
+* If the two enables conflicted (`-l -u`), no fold.
+* Else if `on` is set: the fold is `on` when `off` contains no case
+  letter *other than* `on` itself — so `-l +l` still folds lowercase
+  (and then drops the attribute), while `-l +u` and `-l +c` fold not at
+  all (and keep the attribute). Equivalently: the fold is the single case
+  letter in `on ∪ off`, and there is none when that set has two.
+* Else (`on` empty): the name's own existing fold applies, unless this
+  command removes exactly that letter. `declare -l q=(AB); declare +u
+  q=(CD)` stores `cd`; `declare -u q=(x); declare +u q=(ab)` stores `ab`.
+* Setting an attribute never re-folds a value already stored, in either
+  path: `q=(AB); declare -l q` leaves `AB`.
+
+The same "letters mentioned in either direction" shape shows up for `-i`
+as well — `declare -l +i q=(AB)` stores `0`, i.e. bash arithmetic-
+evaluated the literal because `i` was mentioned at all — so the fix
+should cover the integer attribute too rather than special-casing the
+case letters.
+
+**Proper fix.** In `exec_declare_with_arrays_scoped`, compute the
+attributes used to *bind* the literal separately from the ones stored on
+the name: bind with the union of the mentioned letters (case letters
+collapsing to none when more than one is named, or falling back to the
+name's existing fold when no enable was given), then store
+enable-minus-removals as it does now.
+
+**Low priority:** writing a case letter in both directions alongside a
+compound literal is a shape essentially no script uses; the attribute
+that survives — the part scripts actually observe — is already correct.
 
 ### TD-OILS-ATTR-ASSIGN-BYPASSES-DYNVAR. `export NAME=v` / `readonly NAME=v` store straight into the variable table, so a dynamic special loses its value function — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

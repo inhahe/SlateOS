@@ -178,3 +178,52 @@ declare -t x55=5; declare +t x55; declare -p x55
 echo "=== the same letter twice in one direction is not a conflict"
 declare -i -i x56=3+4; declare -p x56
 declare +i +i x57=3+4; declare -p x57
+
+# The three case folds are mutually exclusive as *values* — a name carries at
+# most one — but each letter keeps its own on and off bits. So `+u` takes off
+# the uppercase fold and nothing else, and a name that is lowercase stays
+# lowercase through it, where a single "clear the case attributes" directive
+# would have dropped it.
+
+echo "=== one enable sets its own fold and clears the other two"
+declare -l c58=AB; declare -p c58
+declare -u c59=ab; declare -p c59
+declare -c c60=ab; declare -p c60
+
+echo "=== the same letter both ways ends up off, in either order"
+declare -l +l c61=AB; declare -p c61
+declare +l -l c62=AB; declare -p c62
+declare -u +u c63=ab; declare -p c63
+declare -c +c c64=ab; declare -p c64
+
+echo "=== a removal answers only for its own letter"
+declare -l +u c65=AB; declare -p c65
+declare -u +l c66=ab; declare -p c66
+declare -l +c c67=AB; declare -p c67
+declare -c +l c68=ab; declare -p c68
+
+echo "=== and it leaves a fold the name already carried standing"
+declare -l c69=AB; declare +u c69; declare -p c69
+declare -u c70=ab; declare +l c70; declare -p c70
+declare -c c71=ab; declare +l c71; declare -p c71
+
+echo "=== removing the name's own letter really does take the fold off"
+declare -l c72=AB; declare +l c72; declare -p c72; c72=XY; declare -p c72
+declare -u c73=ab; declare +u c73; declare -p c73
+declare -c c74=ab; declare +c c74; declare -p c74
+declare -l c75=AB; declare +l +u +c c75; declare -p c75
+
+echo "=== two different enables cancel, and drop the fold the name had"
+declare -l -u c76=Ab; declare -p c76
+declare -u -l c77=Ab; declare -p c77
+declare -l -c c78=Ab; declare -p c78
+declare -c c79=ab; declare -l -u c79; declare -p c79
+declare -lu c80=Ab; declare -p c80
+
+echo "=== the same letter twice is not a conflict"
+declare -l -l c81=AB; declare -p c81
+declare -l c82=AB; declare -l -u c82; declare -p c82
+
+echo "=== enable, remove, enable: the cancellation still wins"
+declare -l +l -u c83=aB; declare -p c83
+declare -u +u -l c84=Ab; declare -p c84

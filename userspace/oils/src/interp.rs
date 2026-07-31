@@ -11462,11 +11462,17 @@ impl Shell {
         // Clear the binding being shadowed: a bare `local x` starts unset/empty
         // and without inherited attributes (bash: a local does not inherit a
         // global's `-i`/`-l`/`-u`/`-n`, nor its array *kind* — `declare -a g=(1)`
-        // then `local g` reports the plain `declare -- g`). `readonly` is
-        // intentionally left intact so a readonly global is not silently
-        // shadowed. Any flags on the `local` declaration itself are re-applied
-        // by the caller afterwards.
+        // then `local g` reports the plain `declare -- g`). `readonly` goes with
+        // them: the only shadow that gets this far is one bash allows — a
+        // deeper call hiding an *outer frame's* readonly local — and the fresh
+        // binding it makes is writable (`f() { local -r y=1; g; }; g() { local
+        // y; y=7; }` succeeds, and `y` is `1` again on return). A readonly
+        // *global* is refused by the callers before they ever shadow it. Any
+        // flags on the `local` declaration itself are re-applied by the caller
+        // afterwards, and the snapshot above puts the readonly marking back when
+        // the frame goes.
         self.vars.remove(name);
+        self.readonly.remove(name);
         self.arrays.remove(name);
         self.assoc.remove(name);
         self.integer_attr.remove(name);
@@ -22400,10 +22406,35 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // Whether a *fresh* local shadow is about to be made for this name,
+            // and whether the binding it would hide is a local some still-running
+            // call owns. bash's `make_local_variable` refuses to shadow a
+            // readonly **global**, but shadows a readonly *local* of an outer
+            // frame quite happily — the new local is a separate, writable
+            // binding, so the value and the flags land on it and the outer
+            // readonly is untouched (`f() { local -r y=1; g; }; g() { local y=9;
+            // }` succeeds, and `y` is back to `1` when `g` returns). A name this
+            // frame already holds is a *re*-declaration rather than a shadow, so
+            // it is the readonly binding itself that the operand meets.
+            let held_here = self
+                .local_frames
+                .last()
+                .is_some_and(|f| f.iter().any(|(n, _)| n == base_name));
+            let shadow_new = make_local && !held_here;
+            let held_outer = self
+                .local_frames
+                .iter()
+                .rev()
+                .skip(usize::from(!self.local_frames.is_empty()))
+                .any(|f| f.iter().any(|(n, _)| n == base_name));
+            // So: a readonly name stands in this operand's way unless the
+            // declaration is about to shadow it with a local of its own.
+            let readonly_blocks =
+                self.readonly.contains(base_name) && !(shadow_new && held_outer);
             // Reassigning a value to an existing readonly variable is an error.
             // bash tags the diagnostic with the invoking builtin's name
             // (`declare: y: readonly variable`, `local: …`, `typeset: …`).
-            if value.is_some() && self.readonly.contains(base_name) {
+            if value.is_some() && readonly_blocks {
                 self.perrln(&format!("{tag}: {base_name}: readonly variable"));
                 status = 1;
                 continue;
@@ -22417,8 +22448,10 @@ impl Shell {
             // brings `fresh` into being. Checked before the local shadow below
             // because that is where bash's own refusal lives: `local` will not
             // shadow a readonly name either, so a `declare +r ro` inside a
-            // function reports it whichever of the two objects.
-            if unset_readonly && self.readonly.contains(base_name) {
+            // function reports it whichever of the two objects — unless the
+            // shadow is one bash allows, where `+r` meets a fresh local that was
+            // never readonly and is the plain no-op again.
+            if unset_readonly && readonly_blocks {
                 self.perrln(&format!("{tag}: {base_name}: readonly variable"));
                 status = 1;
                 continue;
@@ -22442,6 +22475,17 @@ impl Shell {
                         "{tag}: {base_name}: variable may not be assigned value"
                     ));
                 }
+                status = 1;
+                continue;
+            }
+            // The shadow itself is refused too, so even a *valueless* `declare
+            // ro` inside a function reports and abandons the operand — where the
+            // same declaration at top level asks for no shadow, is a plain
+            // attribute update, and succeeds. Only a shadow is refused, so
+            // `declare -g ro`, `export ro` and `readonly ro` all go on reaching
+            // the readonly global itself.
+            if shadow_new && readonly_blocks {
+                self.perrln(&format!("{tag}: {base_name}: readonly variable"));
                 status = 1;
                 continue;
             }
@@ -23215,6 +23259,34 @@ impl Shell {
             if make_local && self.noassign.contains(&a.name) {
                 let func = self.fn_stack.last().cloned().unwrap_or_default();
                 let msg: Str = bfmt![&a.name, b": variable may not be assigned value"];
+                self.berrln(&bfmt![self.err_prefix(), &func, b": ", &msg]);
+                self.berrln(&bfmt![self.err_prefix(), cmd, b": ", &msg]);
+                refused_local.insert(a.name.as_str());
+                refused_status = 1;
+                continue;
+            }
+            // A local cannot shadow a readonly *global* — `make_local_variable`
+            // refuses rather than binding a writable copy — and the refusal is
+            // reported twice for the same reason the `noassign` one above is:
+            // once by the compound-assignment machinery, which tags its
+            // diagnostics with the running function's name, and once by the
+            // builtin handed the same operand. A readonly *local* of an outer
+            // frame is shadowed quite happily, though, and a name this frame
+            // already holds is a re-declaration that meets the readonly binding
+            // itself further down (in `apply_assignment`, untagged).
+            let held_here = self
+                .local_frames
+                .last()
+                .is_some_and(|f| f.iter().any(|(n, _)| *n == a.name));
+            let held_outer = self
+                .local_frames
+                .iter()
+                .rev()
+                .skip(usize::from(!self.local_frames.is_empty()))
+                .any(|f| f.iter().any(|(n, _)| *n == a.name));
+            if make_local && !held_here && !held_outer && self.readonly.contains(&a.name) {
+                let func = self.fn_stack.last().cloned().unwrap_or_default();
+                let msg: Str = bfmt![&a.name, b": readonly variable"];
                 self.berrln(&bfmt![self.err_prefix(), &func, b": ", &msg]);
                 self.berrln(&bfmt![self.err_prefix(), cmd, b": ", &msg]);
                 refused_local.insert(a.name.as_str());
@@ -39206,6 +39278,62 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `get_name_for_error`): `main` in the harness's stdin-like mode.
         let (o, _) = run("f(){ local y=1; readonly y; local y=2 2>&1; }; f");
         assert_eq!(o, "main: local: y: readonly variable\n");
+    }
+
+    /// A local cannot shadow a readonly *global* — the declaration is refused
+    /// even with no value at all — but a readonly *local* of an outer frame is
+    /// shadowed freely, because the new binding is a separate writable one.
+    #[test]
+    fn a_local_shadows_a_readonly_local_but_not_a_readonly_global() {
+        // Valueless, inside a function: refused, tagged with the builtin.
+        let (o, s) = run("readonly ro=5; f(){ declare ro; } 2>&1; f");
+        assert_eq!(o, "main: declare: ro: readonly variable\n");
+        assert_eq!(s, 1);
+        let (o, s) = run("readonly ro=5; f(){ local -a ro; } 2>&1; f");
+        assert_eq!(o, "main: local: ro: readonly variable\n");
+        assert_eq!(s, 1);
+        // The same words at top level ask for no shadow: they are a plain
+        // attribute update and succeed.
+        assert_eq!(
+            run("readonly ro=5; declare -i ro; echo rc=$?; declare -p ro").0,
+            "rc=0\ndeclare -ir ro=\"5\"\n"
+        );
+        // Nor does anything that reaches the global itself rather than hiding it.
+        assert_eq!(
+            run("readonly ro=5; f(){ declare -g ro; echo a=$?; export ro; echo b=$?; }; f").0,
+            "a=0\nb=0\n"
+        );
+        // A readonly local of an *outer* frame is shadowed, and the fresh local
+        // is writable, unset to begin with, and gone again on return.
+        assert_eq!(
+            run("f(){ local -r y=1; g; echo after=$y; }; g(){ local y; echo in=[${y-unset}]; y=7; echo w=$?/$y; }; f").0,
+            "in=[unset]\nw=0/7\nafter=1\n"
+        );
+        assert_eq!(
+            run("f(){ local -r y=1; g; }; g(){ local -a y=(9); declare -p y; }; f").0,
+            "declare -a y=([0]=\"9\")\n"
+        );
+        // `+r` on such a shadow meets a local that was never readonly, so it is
+        // the plain no-op rather than the refusal.
+        assert_eq!(
+            run("f(){ local -r y=1; g; }; g(){ declare -i +r y; echo rc=$?; declare -p y; }; f").0,
+            "rc=0\ndeclare -i y\n"
+        );
+        // Re-declaring a name *this* frame holds is not a shadow at all, so a
+        // valueless one is the same attribute update it is at top level…
+        assert_eq!(
+            run("f(){ local -r x=1; declare x; echo rc=$?; }; f").0,
+            "rc=0\n"
+        );
+        // …while anything that would *write* it meets the readonly binding.
+        let (o, _) = run("f(){ local -r x=1; declare x=9 2>&1; }; f");
+        assert_eq!(o, "main: declare: x: readonly variable\n");
+        let (o, _) = run("f(){ local -r x=1; declare +r x 2>&1; }; f");
+        assert_eq!(o, "main: declare: x: readonly variable\n");
+        // `readonly` inside a function marks the global, so that one is
+        // unshadowable again.
+        let (o, _) = run("f(){ readonly h=1; g; }; g(){ local h 2>&1; }; f");
+        assert_eq!(o, "main: local: h: readonly variable\n");
     }
 
     #[test]

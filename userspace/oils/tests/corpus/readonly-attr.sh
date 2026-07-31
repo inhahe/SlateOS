@@ -104,3 +104,56 @@ echo "  expand=[${ra-DEF}]"
 # …and it is readonly already, so the value it never got can never arrive.
 ra=late; echo "  not reached"
 echo "  late rc=$? ra=[${ra-unset}]"
+
+echo "=== a local cannot shadow a readonly name, even with no value"
+# bash's `make_local_variable` refuses outright rather than binding a mutable
+# copy, so the valueless declaration reports and abandons the operand — while
+# the same words at top level are a plain attribute update.
+readonly ro=5
+declare ro; echo "  top declare rc=$?"
+declare -i ro; echo "  top declare -i rc=$?"
+declare -p ro
+f1() { declare ro; echo "  declare rc=$?"; }; f1
+f2() { local ro; echo "  local rc=$?"; }; f2
+f3() { declare -i ro; echo "  declare -i rc=$?"; }; f3
+f4() { local -a ro; echo "  local -a rc=$?"; }; f4
+f5() { declare +i ro; echo "  declare +i rc=$?"; }; f5
+f6() { declare ro=6; echo "  valued rc=$?"; }; f6
+# Only a *shadow* is refused: these three reach the readonly global itself.
+f7() { declare -g ro; echo "  declare -g rc=$?"; }; f7
+f8() { export ro; echo "  export rc=$?"; }; f8
+f9() { readonly ro; echo "  readonly rc=$?"; }; f9
+# The refusal costs only its own operand.
+f10() { declare ro other=7; echo "  rc=$?"; declare -p other; }; f10
+f11() { declare other2=7 ro; echo "  rc=$?"; declare -p other2; }; f11
+# A name already local to this frame is re-declared, not shadowed afresh.
+f12() { local -r x=1; declare x; echo "  same-frame declare rc=$?"; }; f12
+f13() { local -r x=1; local x; echo "  same-frame local rc=$?"; }; f13
+# A nested call still sees the outer frame's readonly local as unshadowable.
+f14() { local -r y=1; g14; }; g14() { local y; echo "  nested local rc=$?"; }; f14
+declare -p ro
+
+echo "=== but a readonly *local* is shadowed freely by a deeper call"
+# It belongs to a call that is still running, and the new local is a separate
+# writable binding — so the value, the flags and later writes all land on it,
+# and the outer readonly is back when the call returns.
+s1() { local -r y=1; t1; echo "  after y=[$y]"; }; t1() { local y; echo "  local rc=$? y=[${y-unset}]"; }; s1
+s2() { local -r y=1; t2; }; t2() { declare y=9; echo "  declare y=9 rc=$? y=[$y]"; }; s2
+s3() { local -r y=1; t3; echo "  after y=[$y]"; }; t3() { local y=9; y=7; echo "  write rc=$? y=[$y]"; }; s3
+s4() { local -r y=1; t4; }; t4() { local -a y=(9); echo "  local -a rc=$?"; declare -p y; }; s4
+s5() { local -r y=1; t5; }; t5() { declare -A y=([k]=9); echo "  declare -A rc=$?"; declare -p y; }; s5
+# `+r` meets a fresh local that was never readonly, so it is the plain no-op.
+s6() { local -r y=1; t6; }; t6() { declare -i +r y; echo "  -i +r rc=$?"; declare -p y; }; s6
+# `declare -r` inside a function makes a *local* readonly, so the same applies.
+s7() { declare -r j=1; t7; }; t7() { local j; echo "  local rc=$? j=[${j-unset}]"; }; s7
+# Re-declaring a name this frame already holds is not a shadow: the operand
+# meets the readonly binding itself, and is refused.
+s8() { local -r x=1; local x=9; echo "  same frame rc=$? x=[$x]"; }; s8
+s9() { local -r x=1; declare +r x; echo "  same frame +r rc=$?"; }; s9
+# `readonly` inside a function marks the *global*, which is unshadowable again.
+s10() { readonly h=1; t10; }; t10() { local h; echo "  after readonly h rc=$? h=[$h]"; }; s10
+# A compound operand naming a readonly global reports twice — once from the
+# assignment machinery, tagged with the function, once from the builtin.
+readonly rog=5
+s11() { local -a rog=(1); echo "  compound rc=$?"; declare -p rog; }; s11
+s12() { declare -ga rog=(1); echo "  -ga rc=$?"; }; s12

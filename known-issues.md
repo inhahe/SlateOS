@@ -6104,16 +6104,44 @@ commit (build + test + clippy on `x86_64-pc-windows-gnu` *and* `x86_64-slateos`)
    whole; a byte that is part of no character delimits nothing and matches no
    option).
 
+7. **The builtin argv surface — done 2026-07-30.** Every `args: &[String]`
+   builtin signature is now `&[Str]`, which deleted the largest scaffold
+   cluster: `run_builtin`, `exec_declare_with_arrays`'s `argv_text` and the
+   `exec cmd` re-widening. Two subsystems that were `String`-typed all the way
+   down came with it, and each removed a live corruption bug rather than just a
+   type:
+   * **Completion** (`compgen`/`complete`/`compopt`). `CompKey`/`CompSpec` and
+     both candidate generators are byte-typed. `compgen_paths` and
+     `compgen_path_commands` had been running every directory entry through
+     `to_string_lossy`, so `compgen -f` could offer — and a script could then
+     act on — a *different* filename than the one on disk; `compgen -G` ran its
+     glob results through `scaffold_lossy_string`. `-W` now splits on IFS
+     **bytes** like every other IFS site, rather than only on IFS's decodable
+     characters.
+   * **`test`/`[`.** The recursive expression parser, both primary evaluators,
+     the operator tables and every diagnostic are byte-typed, so `[ -f "$file" ]`
+     stats the file it was given and `[ "$a" = "$b" ]` compares the bytes it was
+     given (byte-wise, which is what bash's C-locale `strcmp` does).
+
+   Seams authored along the way are all the same shape: an operand that must be
+   *text* to mean anything is narrowed with `bytes::as_str` and rejected with a
+   diagnostic rather than approximated — running an *altered* command is the one
+   outcome worse than running none. Narrowed: variable/function/array/alias and
+   shell-option names (`declare`, `readonly`, `unset`, `shopt`, `set`,
+   `getopts`' `name`, `mapfile`'s array), numeric counts, fd specs, and the
+   `test` primaries that name a namespace (`-v`/`-o`/`-R`, which answer *false*
+   — nothing that is not text is set, enabled or a nameref). Staying bytes:
+   `export`/`readonly`/`declare` values, `read -p`'s prompt and `-d` delimiter,
+   `mapfile` records, positional parameters, every path. Two seams remain only
+   **because the parser is still `str`-typed**, and close with step 8: a
+   compound array literal (`declare -a x=(…)`) and the `mapfile -C` callback
+   line are shell *source*.
+
 **Remaining, in order.** Step 6 was the keystone — expansion and the variable
 store are each other's main producer and consumer, so converting either alone
 would have needed a scaffold at every site the other now satisfies for free.
 What is left is narrower and can land one layer per commit:
 
-7. **The builtin argv surface.** The remaining `args: &[String]` signatures
-   become `&[Str]`, which deletes the largest scaffold cluster: `run_builtin`
-   (`interp.rs:14484`/`:14488`), `exec_declare_with_arrays` (`:20149`) and the
-   `exec cmd` re-widening. Drags `builtin_let`, `run_builtin_body`, `main.rs`'s
-   `Plan::Script` and `builtin_source`.
 8. `lexer.rs` + `ast.rs` + `parser.rs` (`WordPart::Literal(Str)`,
    `SingleQuoted { text: Str }`), dragging `brace.rs` and `unparse.rs`. Closes
    the alias table, the `PS4`/`PS1` re-lex, `@P`, the `mapfile -C` callback seam
@@ -6132,7 +6160,10 @@ tracker — because each seam needs `#[allow(deprecated)]` to keep the build
 warning-free, the deprecation warning itself never accumulates. Count after
 step 5: **17**. After step 6: **14**. After the `main.rs` argv fix
 (TD-OILS-ARGV-PANICS-ON-NON-UTF8): **15** — that one *added* a seam, at
-`Shell::set_name`, by pulling `$0` a layer earlier than step 10.
+`Shell::set_name`, by pulling `$0` a layer earlier than step 10. After step 7:
+**11** (10 in `interp.rs`, 1 in `lexer.rs`) — that step removed five and added
+one, `builtin_source`'s `SourceFrame.path`, which is the same step-10 seam
+`Shell::set_name` is (`$0` and `BASH_SOURCE` both feed `err_prefix`).
 
 **Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
 `TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts

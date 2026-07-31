@@ -7063,7 +7063,7 @@ too.
 **Still open, separately:** `local` used outside a function *with* a
 compound operand — see TD-OILS-DECL-LOCAL-OUTSIDE-FUNCTION-SKIPS-BINDING.
 
-### TD-OILS-DECL-LOCAL-OUTSIDE-FUNCTION-SKIPS-BINDING. `local q=(1)` outside a function refuses before binding, and the refusal escapes the redirection — 2026-07-31 — OPEN
+### TD-OILS-DECL-LOCAL-OUTSIDE-FUNCTION-SKIPS-BINDING. `local q=(1)` outside a function refuses before binding, and the refusal escapes the redirection — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` —
 `exec_declare_with_arrays_scoped`, the `is_local && self.local_frames
@@ -7087,13 +7087,53 @@ and the message is redirectable:
 Reproduce with `target/dvscratch/px82.sh` (the `local at top level`
 sections are the whole diff).
 
-**Proper fix.** Move the guard down to phase 2, next to the builtin call,
-so phase 1 runs and the message is emitted under the push. `make_local`
-has to stop being unconditionally true for `local` at the same time —
-`make_local = !self.local_frames.is_empty() && (is_local || !global &&
-!global_builtin)` — because at top level bash takes the plain
+**Fix.** The guard moved down to phase 2, immediately under the stderr
+push, so phase 1 runs first and the message is redirectable. `make_local`
+stopped being unconditionally true for `local` at the same time —
+`!self.local_frames.is_empty() && (is_local || (!global &&
+!global_builtin))` — because at top level bash takes the plain
 `apply_assignment` readonly path (one untagged message, then the parse
 unit is discarded) rather than the doubly-reported local-shadow one.
+Pinned by `userspace/oils/tests/corpus/local-outside-function.sh`.
+
+### BUG-OILS-SUBSHELL-LOSES-LOCAL-FRAMES. `local` inside a subshell or command substitution of a function is refused — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — whatever sets up a subshell /
+command substitution / pipeline element clears `self.local_frames`
+instead of inheriting the caller's. Every `local` reached from inside one
+therefore sees an empty frame stack and refuses with "can only be used in
+a function"; worse, the name it should have bound stays unset.
+
+A subshell in bash is a *fork*: it inherits the whole variable-context
+stack, so `local` there works and its binding disappears with the
+subshell, exactly as it would in the function proper.
+
+```sh
+f1() { ( local q=1; echo "q=$q" ); echo "after=${q-unset}"; }
+f1              # bash: "q=1" / "after=unset"
+                # osh:  "local: can only be used in a function" / "q=" / "after=unset"
+
+g=outer
+f3() { ( local g=inner; echo "in=$g" ); echo "out=$g"; }
+f3              # bash: "in=inner" / "out=outer".  osh: "in=outer"
+
+f4() { echo "sub=$( local s=1; echo "s=$s" )"; }
+f4              # bash: "sub=s=1".  osh: refuses, "sub=s="
+
+f7() { local o=1; ( local i=2; echo "o=$o i=$i" ); }
+f7              # bash: "o=1 i=2".  osh: refuses, "o=1 i="
+```
+
+Reproduce with `target/dvscratch/px85.sh` — every section diverges. Also
+affects pipeline elements (`f5() { local p=1 | cat; }`) and background
+subshells. This is a real-world idiom (`( local tmp=…; … )` to scope a
+helper), so it is worth fixing rather than waiving.
+
+**Proper fix.** Carry `local_frames` into the child context the same way
+the variable maps are carried, so a subshell starts with a copy of the
+caller's frame stack rather than an empty one. The frames must be a
+*copy*: bindings made inside the subshell must not be visible after it,
+which falls out of the subshell's own state being discarded.
 
 ### TD-OILS-DECL-COMPOUND-REFUSAL-TAG-IS-THE-FIRST-COMMAND-ONLY. the function name on a compound-assignment refusal appears only when the declaration is the function's first command — 2026-07-31 — OPEN (WONTFIX candidate)
 

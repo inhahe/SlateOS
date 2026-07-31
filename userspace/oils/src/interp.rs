@@ -23390,11 +23390,9 @@ impl Shell {
             .and_then(bytes::as_str)
             .unwrap_or_default();
         let is_local = cmd == "local";
-        if is_local && self.local_frames.is_empty() {
-            self.perrln("local: can only be used in a function");
-            self.last_status = 1;
-            return Flow::Next;
-        }
+        // `local` outside a function is refused by the *builtin*, which bash
+        // reaches only once the words have expanded — so the refusal waits for
+        // phase 2 below, and the compound literals bind (globally) before it.
         // Determine the array kind, the value attributes (integer/case/readonly/
         // export/nameref), and whether `-g` forces global, from the leading
         // dashed flags. The attributes must be applied to the *array names* here
@@ -23564,8 +23562,13 @@ impl Shell {
                 unset_export = true;
             }
         }
+        // `local` outside a function makes nothing local: bash's refusal comes
+        // from the builtin, after the literals have already bound as globals, so
+        // this phase behaves exactly as a bare `q=(1)` would — including taking
+        // the plain untagged readonly refusal rather than the doubly-reported
+        // local-shadow one.
         let make_local =
-            is_local || (!global && !global_builtin && !self.local_frames.is_empty());
+            !self.local_frames.is_empty() && (is_local || (!global && !global_builtin));
         // Naming both `-a` and `-A` in the `-` direction is a conflict with the
         // command itself, and a *different* refusal from the conversion one in
         // phase 1. The `-A` wins: the name becomes associative and the literal
@@ -24078,9 +24081,20 @@ impl Shell {
         //
         // This path never reaches [`Shell::run_builtin_body`], which is where an
         // ordinary builtin's push lives, so it installs its own. Every exit
-        // below has to pop it: there are two, the `-p` return and the end of the
-        // function.
+        // below has to pop it: there are three, this one, the `-p` return, and
+        // the end of the function.
         let pushed_stderr = self.push_builtin_stderr(redir, out);
+        // The first thing `local`'s builtin does — which is why `local q=(1)` at
+        // top level still leaves `declare -a q=([0]="1")` behind, and why the
+        // refusal is silenced by the command's own `2>/dev/null`.
+        if is_local && self.local_frames.is_empty() {
+            self.perrln("local: can only be used in a function");
+            if pushed_stderr {
+                self.stderr_stack.pop();
+            }
+            self.last_status = 1;
+            return Flow::Next;
+        }
         // The refusals phase 1 raised on the builtin's behalf, now that it is
         // the builtin speaking. See `builtin_refusals`.
         for msg in &builtin_refusals {

@@ -6587,7 +6587,7 @@ TD-OILS-DECL-ERROR-SKIPS-FLAG-APPLY — is bash's habit of abandoning a
 name's flag application after an error that is raised once the literal
 has already bound.
 
-### TD-OILS-DECL-ERROR-SKIPS-FLAG-APPLY. A per-name `declare` error abandons that name's flag application, but only *after* the compound literal has bound — 2026-07-31 — OPEN
+### TD-OILS-DECL-ERROR-SKIPS-FLAG-APPLY. A per-name `declare` error abandons that name's flag application, but only *after* the compound literal has bound — 2026-07-31 — OPEN (1 of 3 done)
 
 **Where:** `userspace/oils/src/interp.rs` —
 `exec_declare_with_arrays_scoped`. bash's `declare_internal` performs a
@@ -6598,28 +6598,100 @@ which skips the rest of the loop body for that name — including the
 already stored, so the name is left holding the attributes the
 *assignment* gave it and none of the removals.
 
-Measured (bash 5.2.37, `target/dvscratch/px22.sh`, `px24.sh`, `px25.sh`;
-stderr suppressed in each, which is why the value line is all that shows):
+Three separate checks behave this way, and they were badly understated
+when this entry was written: for two of the three osh emitted **no error
+at all**, so the status was wrong too, not just the attribute letters.
 
 ```sh
-declare +a -l +l k8=(AB)    # bash declare -al k8=([0]="ab")   osh declare -a k8=([0]="ab")
-declare -aA  +l v9=(AB)     # bash declare -Al v9=([AB]="")    osh declare -A  v9=([AB]="")
-declare -n   +i t_n=(2+3)   # bash declare -a  t_n=([0]="2+3") osh declare -an t_n=([0]="2+3")
+declare +a  -l +l k8=(AB)  # bash declare -al k8=([0]="ab")  osh declare -a k8=([0]="ab")   OPEN
+declare -aA +l    v9=(AB)  # bash declare -Al v9=([AB]="")   osh ditto                     ✅ DONE
+declare -n  +i    t1=(2+3) # bash declare -a  t1=([0]="2+3") osh declare -an t1=([0]="2+3") OPEN
 ```
 
-Each is a different check: `+a` on a name that is (by then) an array,
-`-a` and `-A` together, and `-n` on a compound literal. The value column
-is right in all three — only the attribute letters differ, and only for a
-name the command also errored on.
+**✅ `-a` and `-A` together — done 2026-07-31.** Naming both kinds in the
+`-` direction is a conflict with the command itself, and a *different*
+refusal from the conversion one: the `-A` wins, the name becomes
+associative and the literal binds as one, and only then does the builtin
+refuse the `-a` against the array it just made. So the diagnostic carries
+the builtin's tag (unlike a conversion failure, which comes from the
+word-expansion pass untagged), is emitted once per operand, and fails the
+command without discarding the rest of the parse unit. osh reported
+nothing at all and exited 0.
 
-**Proper fix.** Give the operand loop an explicit "this name errored"
-flag set by the three refusal paths, and skip the post-assignment
-attribute application (the `off_*` removals and the enable) when it is
-set, rather than the current mix of refusing before the bind and applying
-flags regardless.
+Measured with `target/dvscratch/px35.sh`, `px37`–`px41`; the model that
+came out of it:
+
+* `-A` outranks a `-a` in the same command everywhere — including in
+  `array_kind_conflict`, so `declare -A q=([k]=v); declare -aA q=(z)`
+  binds and then reports, where a plain `declare -a q=(z)` cannot bind at
+  all and discards the line.
+* The refusal abandons the operand where the builtin would have applied
+  the rest of its flags, so `declare -aA +i q=(2+3)` **keeps** the
+  integer attribute and `declare -aA +u q=(Ab)` keeps the fold.
+* A bare, subscripted or scalar operand binds *after* the check, so its
+  value never lands — but one that carried a value still leaves the array
+  valued (`declare -aA q[0]=z` → `declare -A q=()`).
+* `+a`/`+A` outrank it ("cannot destroy array variables in this way").
+* Only the `declare` family checks: `readonly -aA q=(1)` and
+  `export -aA q=(1)` succeed and apply their attribute, and `-p`
+  short-circuits into print mode first.
+
+Covered by `naming_both_array_kinds_binds_as_associative_and_then_refuses`
+and `userspace/oils/tests/corpus/declare-array-kind-conflict.sh`.
+
+**Still open — `+a`/`+A` on the array the same command makes.** Only the
+fold differs: `declare +a -l +l k8=(AB)` leaves `declare -al` in bash and
+`declare -a` in osh. The destroy refusal in phase 3 abandons the operand
+the same way, so `post_fold` in phase 1 has to be skipped for it too —
+the same treatment `self_kind_conflict` now gets, except that whether it
+fires is only known after the literal has bound.
+
+**Still open — `-n` with a compound literal.** bash refuses with
+`declare: NAME: reference variable cannot be an array`, rc 1; the array
+still binds, and neither `n` nor any other builtin-phase flag is applied.
+osh emits no error and applies `-n` and `-x`. This refusal outranks the
+`-a`/`-A` one (`declare -aA -n q=(1)` reports the reference message), so
+it has to be checked first. Reproduce with `px35.sh` lines 14–17 and
+`px38.sh` line 21.
 
 **Low priority:** every shape here is one bash prints an error for, so a
-script that hits it is already broken; only `declare -p` output differs.
+script that hits it is already broken.
+
+### TD-OILS-DECL-REFUSAL-ORDER. A refused *compound* operand's diagnostic is printed after a refused scalar one, whatever order they were written in — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` —
+`exec_declare_with_arrays_scoped`. bash has one loop over all of a
+declaration builtin's name operands, so its per-name diagnostics come out
+in operand order. osh splits them: compound operands bind in phase 1,
+phase 2 hands the *scalar* operands to `builtin_declare_scoped` (which
+emits their refusals), and phase 3 walks the compound operands again to
+apply the attributes the builtin could not see — and emits *their*
+refusals. So a compound operand's refusal always trails a scalar one.
+
+```sh
+declare -aA m11=(1) m12=zz
+# bash: declare: m11: …   osh: declare: m12: …
+#       declare: m12: …        declare: m11: …
+```
+
+Both diagnostics are right, both operands end up in the right state, and
+the status is 1 either way — only the two stderr lines are transposed.
+The same wart applies to the `cannot destroy array variables in this way`
+refusal, which has been in phase 3 much longer; it is simply invisible
+unless the *scalar* operand also fails.
+
+**Proper fix.** `ast::DeclArray` already carries `word_index`, so the
+original operand order is recoverable. Hand the compound operands to
+`builtin_declare_scoped` as pre-bound entries spliced into its operand
+list at their `word_index`, and let its single loop do the refusals and
+the attribute application for both kinds. That also removes the phase-3
+loop, and with it the "phase 3 must come after the builtin so `readonly`
+does not reject the initializer" constraint — a compound's value is bound
+in phase 1 regardless. `readonly`/`export` route to their own builtins
+and would keep a small phase-3 remnant.
+
+Reproduce with `target/dvscratch/px40.sh` (the last section) — it is the
+only line of that probe that still differs.
 
 ### TD-OILS-DECL-DIAGNOSTIC-ESCAPES-REDIRECTION. `declare`'s invalid-option and refusal messages ignore the command's own redirections — 2026-07-31 — OPEN
 

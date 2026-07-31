@@ -22033,6 +22033,9 @@ impl Shell {
         let mut unset_assoc = false;
         let mut indexed = false;
         let mut unset_indexed = false;
+        // `-p` asks to *print* rather than declare, and bash never reaches the
+        // `-a`/`-A` self-conflict refusal in that mode.
+        let mut print_mode = false;
         // Export attribute: `-x` sets it, `+x` removes it. When both directions
         // are given the removal wins, whichever order they came in — bash
         // collects the two into separate `flags_on`/`flags_off` sets and applies
@@ -22160,9 +22163,13 @@ impl Shell {
                                 unset_trace = true;
                             }
                         }
+                        // Print mode is handled by the caller; the letter is
+                        // still tracked because it suppresses the `-a`/`-A`
+                        // self-conflict refusal below.
+                        b'p' if enable => print_mode = true,
                         // Accepted but with no attribute effect in this
-                        // reimplementation: -p (print, handled elsewhere), -f/-F
-                        // (function restriction), -I (inherit).
+                        // reimplementation: +p, -f/-F (function restriction),
+                        // -I (inherit).
                         b'p' | b'f' | b'F' | b'I' => {}
                         _ => {
                             // Genuinely unknown option letter: bash prints an
@@ -22583,6 +22590,26 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // Naming both kinds in the `-` direction is a conflict with the
+            // command itself. The `-A` wins — the name really does become an
+            // associative array, which is why `declare -aA fresh` leaves
+            // `declare -A fresh` behind — and the `-a` is then refused against
+            // the array just made. The operand is abandoned there, so neither
+            // its value nor any of its attributes land: `declare -aA -l s=AB`
+            // gives an unfolded, empty `declare -A s=()`.
+            if assoc && indexed && !print_mode {
+                self.perrln(&format!(
+                    "{tag}: {base_name}: cannot convert associative to indexed array"
+                ));
+                // As in the `cannot destroy` refusal above, an operand that
+                // carried a value still leaves the array *valued*, so
+                // `declare -p` prints the empty `=()`.
+                if value.is_some() {
+                    self.array_valued.insert(base_name.to_string());
+                }
+                status = 1;
+                continue;
+            }
             // See `drop_local_scalar` above: the widening discarded the old
             // scalar, but the name still counts as valued for `declare -p`.
             if drop_local_scalar {
@@ -22872,6 +22899,15 @@ impl Shell {
     /// Check whether `declare -A`/`declare -a` on `name` would reinterpret an
     /// array that already exists under the *other* kind.
     ///
+    /// A `-A` outranks a `-a` named by the same command: bash builds the
+    /// associative array the `-A` asks for and only afterwards refuses the
+    /// `-a` against it, so the kind actually being *asked for* here is
+    /// associative whenever `want_assoc` holds, whatever `want_indexed` says.
+    /// That is why `declare -A q=([k]=v); declare -aA q=(z)` binds `q` and then
+    /// reports the conflict, where a plain `declare -a q=(z)` cannot bind at
+    /// all — see `self_kind_conflict` in
+    /// [`Shell::exec_declare_with_arrays_scoped`] for the other half.
+    ///
     /// Returns the `(from, to)` kind words for bash's
     /// "cannot convert FROM to TO array" diagnostic, or `None` when the
     /// declaration is compatible — including the common no-op cases of
@@ -22883,8 +22919,12 @@ impl Shell {
         want_assoc: bool,
         want_indexed: bool,
     ) -> Option<(&'static str, &'static str)> {
-        if want_assoc && self.arrays.contains_key(name) {
-            Some(("indexed", "associative"))
+        if want_assoc {
+            if self.arrays.contains_key(name) {
+                Some(("indexed", "associative"))
+            } else {
+                None
+            }
         } else if want_indexed && self.assoc.contains_key(name) {
             Some(("associative", "indexed"))
         } else {
@@ -23058,6 +23098,9 @@ impl Shell {
         // sees them for scalar operands).
         let mut assoc = false;
         let mut indexed = false;
+        // `-p` asks to *print*; bash never reaches the `-a`/`-A` self-conflict
+        // refusal in that mode (`declare -p -aA q=(1)` binds and prints, rc 0).
+        let mut print_mode = false;
         // `+A`/`+a` refuse rather than un-make the array — see
         // `unset_assoc`/`unset_indexed` in [`Shell::builtin_declare_scoped`].
         // The literal has already bound by the time the refusal is reached
@@ -23179,6 +23222,7 @@ impl Shell {
                     b'n' => unset_nameref = true,
                     b't' if enable => trace = true,
                     b't' => unset_trace = true,
+                    b'p' if enable => print_mode = true,
                     _ => {}
                 }
             }
@@ -23199,6 +23243,33 @@ impl Shell {
         let global_builtin = cmd == "export" || cmd == "readonly";
         let make_local =
             is_local || (!global && !global_builtin && !self.local_frames.is_empty());
+        // Naming both `-a` and `-A` in the `-` direction is a conflict with the
+        // command itself, and a *different* refusal from the conversion one in
+        // phase 1. The `-A` wins: the name becomes associative and the literal
+        // binds as an associative array (so `declare -aA q=(1)` really does
+        // leave `declare -A q=([1]="")` behind, values and all). Only then does
+        // the builtin refuse the `-a` against the array it just made — which is
+        // why this diagnostic carries the builtin's tag, is emitted once *per
+        // operand*, and merely fails the command instead of discarding the rest
+        // of the parse unit the way a conversion failure does.
+        //
+        // Because the refusal comes from the builtin, everything the builtin
+        // would have applied afterwards is abandoned for that operand: the
+        // export/readonly/nameref attributes below, and also the case and
+        // integer *removals* that normally run once the literal has bound. That
+        // is visible in the attributes bash leaves — `declare -aA +i q=(2+3)`
+        // keeps the integer attribute and `declare -aA +u q=(Ab)` keeps the
+        // uppercase fold, both of which a successful command would have taken
+        // straight back off.
+        //
+        // Only the `declare` family reports it. `readonly -aA q=(1)` and
+        // `export -aA q=(1)` are separate entry points that never make the
+        // check, and `-p` short-circuits into print mode before reaching it.
+        let self_kind_conflict = assoc
+            && indexed
+            && !print_mode
+            && !global_builtin
+            && matches!(cmd, "declare" | "typeset" | "local");
         // Phase 1 — the *compound* operands, in operand order, before the builtin
         // runs at all.
         //
@@ -23466,7 +23537,14 @@ impl Shell {
             let bound = self.apply_assignment(a, false);
             // A claimed fold was really set on the variable, so the removals run
             // against it rather than against the fold the name arrived with.
-            let post_fold = if claimed && single_case.is_some() {
+            //
+            // Unless the operand is about to be refused for naming both array
+            // kinds (see `self_kind_conflict`): that refusal abandons the
+            // operand where bash's builtin would have run these removals, so
+            // whatever the literal bound under is simply what the name keeps.
+            let post_fold = if self_kind_conflict {
+                bind_fold
+            } else if claimed && single_case.is_some() {
                 match bind_fold {
                     Some(1) if off_lower => None,
                     Some(2) if off_upper => None,
@@ -23479,7 +23557,7 @@ impl Shell {
             if post_fold != bind_fold {
                 self.set_case_attr(&a.name, post_fold);
             }
-            if bind_int != stored_int {
+            if bind_int != stored_int && !self_kind_conflict {
                 if stored_int {
                     self.integer_attr.insert(a.name.clone());
                 } else {
@@ -23601,6 +23679,19 @@ impl Shell {
             {
                 self.perrln(&format!(
                     "{cmd}: {}: cannot destroy array variables in this way",
+                    a.name
+                ));
+                status = 1;
+                continue;
+            }
+            // See `self_kind_conflict`: the literal has already bound as an
+            // associative array, and the `-a` is refused against it. The
+            // destroy refusal above outranks this one — `declare -a q=(1 2);
+            // declare -aA +a q` reports "cannot destroy" — because both come
+            // from the same lookup and bash checks the destroy first.
+            if self_kind_conflict {
+                self.perrln(&format!(
+                    "{cmd}: {}: cannot convert associative to indexed array",
                     a.name
                 ));
                 status = 1;
@@ -43975,6 +44066,87 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("declare -a +i q[0]=2+3; declare -p q").0,
             "declare -a q=([0]=\"2+3\")\n"
         );
+    }
+
+    /// Naming both array kinds in one command is a conflict with the command
+    /// itself: the `-A` wins and binds, then the `-a` is refused against it.
+    #[test]
+    fn naming_both_array_kinds_binds_as_associative_and_then_refuses() {
+        // Whichever order, and whether the letters share a word or not.
+        for src in [
+            "declare -a -A q=(x)",
+            "declare -A -a q=(x)",
+            "declare -aA q=(x)",
+            "declare -Aa q=(x)",
+        ] {
+            let (o, s) = run(&format!("{{ {src}; }} 2>&1; echo rc=$?; declare -p q"));
+            assert_eq!(
+                o,
+                "osh: declare: q: cannot convert associative to indexed array\nrc=1\ndeclare -A q=([x]=\"\" )\n",
+                "{src}"
+            );
+            assert_eq!(s, 0, "{src}");
+        }
+        // One letter twice is not two kinds, and a `+` letter names none.
+        for (src, want) in [
+            ("declare -a -a q=(x)", "declare -a q=([0]=\"x\")\n"),
+            ("declare -A +a q=([k]=x)", "declare -A q=([k]=\"x\" )\n"),
+            ("declare -a +A q=(x)", "declare -a q=([0]=\"x\")\n"),
+        ] {
+            assert_eq!(run(&format!("{src}; echo rc=$?; declare -p q")).0, format!("rc=0\n{want}"), "{src}");
+        }
+        // A bare, subscripted or scalar operand binds *after* the check, so its
+        // value never lands — but one that carried a value still leaves the
+        // array valued, hence the empty `=()`.
+        for (src, want) in [
+            ("declare -aA q", "declare -A q\n"),
+            ("declare -aA q[0]=zz", "declare -A q=()\n"),
+            ("declare -aA -l q=zz", "declare -A q=()\n"),
+        ] {
+            assert_eq!(
+                run(&format!("{{ {src}; }} 2>/dev/null; echo rc=$?; declare -p q")).0,
+                format!("rc=1\n{want}"),
+                "{src}"
+            );
+        }
+        // The refusal abandons the operand where the builtin would have applied
+        // the rest of its flags, so what the literal bound under is what stays:
+        // `+i` and `+u` no longer take back off what they put on, and `-x`/`-r`
+        // never go on at all.
+        for (src, want) in [
+            ("declare -aA +i q=(2+3)", "declare -Ai q=([2+3]=\"0\" )\n"),
+            ("declare -aA +u q=(Ab)", "declare -Au q=([Ab]=\"\" )\n"),
+            ("declare -aA -l -u q=(Ab)", "declare -A q=([Ab]=\"\" )\n"),
+            ("declare -aA -x q=(1)", "declare -A q=([1]=\"\" )\n"),
+            ("declare -aA -r q=(1)", "declare -A q=([1]=\"\" )\n"),
+        ] {
+            assert_eq!(
+                run(&format!("{{ {src}; }} 2>/dev/null; declare -p q")).0,
+                want,
+                "{src}"
+            );
+        }
+        // `+a`/`+A` outrank it: both refusals come from the same lookup and the
+        // destroy complaint is the one bash makes.
+        let (o, _) = run("declare -a q=(1 2); { declare -aA +a q; } 2>&1");
+        assert_eq!(o, "osh: declare: q: cannot destroy array variables in this way\n");
+        // Only the `declare` family checks. `readonly`/`export` are separate
+        // entry points, and they apply their attribute as usual.
+        for (src, want) in [
+            ("readonly -aA q=(1)", "declare -Ar q=([1]=\"\" )\n"),
+            ("export -aA q=(1)", "declare -Ax q=([1]=\"\" )\n"),
+        ] {
+            assert_eq!(
+                run(&format!("{{ {src}; }} 2>&1; echo rc=$?; declare -p q")).0,
+                format!("rc=0\n{want}"),
+                "{src}"
+            );
+        }
+        // The tag follows the builtin that was named.
+        let (o, _) = run("{ typeset -aA q=(1); } 2>&1");
+        assert_eq!(o, "osh: typeset: q: cannot convert associative to indexed array\n");
+        let (o, _) = run("f(){ local -aA q=(1); }; f 2>&1");
+        assert_eq!(o, "main: local: q: cannot convert associative to indexed array\n");
     }
 
     /// `+a`/`+A` never un-make an array: each refuses for its own kind and does

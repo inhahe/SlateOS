@@ -2201,6 +2201,14 @@ pub struct Shell {
     /// State for the `$RANDOM` pseudo-random generator. `Cell` so a read
     /// (`param_value(&self)`) can advance it; assigning `RANDOM=n` reseeds it.
     rng: std::cell::Cell<u32>,
+    /// Fallback state for `$SRANDOM`, used only when the system entropy source
+    /// is unreachable (see [`Shell::next_srandom`]). Separate from `rng` so
+    /// `RANDOM=n` cannot make `$SRANDOM` predictable.
+    srng: std::cell::Cell<u64>,
+    /// Whether `/dev/urandom` is worth trying for the next `$SRANDOM` read.
+    /// Cleared after the first failure so a host without the device does not
+    /// pay a failed open per expansion.
+    srng_device: std::cell::Cell<bool>,
     /// `set -e` (errexit): exit the shell when a command fails, except in the
     /// exempt positions (conditions, non-final `&&`/`||` operands, negated
     /// pipelines) tracked by [`Shell::errexit_suppress`].
@@ -2831,6 +2839,8 @@ impl Shell {
             seconds_base: 0,
             // Seed `$RANDOM` from the wall clock so successive runs differ.
             rng: std::cell::Cell::new(initial_rng_seed()),
+            srng: std::cell::Cell::new(initial_srng_seed()),
+            srng_device: std::cell::Cell::new(true),
             errexit: false,
             nounset: false,
             xtrace: false,
@@ -6800,6 +6810,17 @@ impl Shell {
             seconds_anchor: self.seconds_anchor,
             seconds_base: self.seconds_base,
             rng: std::cell::Cell::new(self.rng.get()),
+            // `$SRANDOM`'s fallback state is perturbed rather than copied, and
+            // the parent's is advanced with it, so neither a subshell and its
+            // parent nor two subshells started in the same instant repeat each
+            // other's numbers. (With the entropy device reachable — the normal
+            // case — this state is never read at all.)
+            srng: {
+                let child = splitmix64(self.srng.get() ^ initial_srng_seed());
+                self.srng.set(splitmix64(child));
+                std::cell::Cell::new(child)
+            },
+            srng_device: std::cell::Cell::new(self.srng_device.get()),
             errexit: self.errexit,
             nounset: self.nounset,
             xtrace: self.xtrace,
@@ -7437,6 +7458,14 @@ impl Shell {
                         self.seconds_anchor = std::time::Instant::now();
                         return true;
                     }
+                }
+                // `SRANDOM` draws from the system entropy source, so unlike
+                // `RANDOM` there is no seed to set: bash documents assignments
+                // to it as having no effect, and swallowing them here is what
+                // keeps that true — a stored `vars` entry would shadow the
+                // dynamic read and freeze `$SRANDOM` at the assigned value.
+                if a.index.is_none() && a.name == "SRANDOM" {
+                    return true;
                 }
                 // With the integer attribute (`declare -i`), the value is an
                 // arithmetic expression: it is evaluated before storing, and
@@ -9208,6 +9237,7 @@ impl Shell {
         // Measured: `SECONDS` loses its `i` in a listing but keeps it for
         // `declare -p SECONDS`.
         DynamicSpecial { name: "SECONDS", named_flags: "i", listed_flags: "", listed: DynListing::Bare },
+        DynamicSpecial { name: "SRANDOM", named_flags: "i", listed_flags: "i", listed: DynListing::Bare },
         DynamicSpecial { name: "EPOCHSECONDS", named_flags: "", listed_flags: "", listed: DynListing::Bare },
         DynamicSpecial { name: "EPOCHREALTIME", named_flags: "", listed_flags: "", listed: DynListing::Bare },
     ];
@@ -13685,6 +13715,33 @@ impl Shell {
         }
     }
 
+    /// A 32-bit value for `$SRANDOM`, from the system entropy source when there
+    /// is one. `param_value` reads through `&self`, so the fallback state lives
+    /// behind a `Cell`.
+    fn next_srandom(&self) -> u32 {
+        // bash's `$SRANDOM` is explicitly *not* the `$RANDOM` generator: it
+        // draws 32 bits from the system entropy source, which is why it has no
+        // seed and a full 32-bit range. Read the same way the rest of the
+        // userspace tree reads entropy (`/dev/urandom`), which on SlateOS is
+        // the kernel CSPRNG behind `getrandom`.
+        if self.srng_device.get() {
+            if let Some(v) = read_entropy_u32() {
+                return v;
+            }
+            // Not there (a host build, or the device is not mounted yet): stop
+            // paying a failed open per expansion.
+            self.srng_device.set(false);
+        }
+        // Fallback, as bash also falls back when it has no entropy source: a
+        // SplitMix64 stream seeded from the clock and pid. It is *not*
+        // cryptographic — a script that needs unpredictability must be running
+        // where `/dev/urandom` exists, which on SlateOS it always is.
+        let next = splitmix64(self.srng.get());
+        self.srng.set(next);
+        // The high half: SplitMix64's low bits are the weakest.
+        u32::try_from(next >> 32).unwrap_or(0)
+    }
+
     /// Advance the `$RANDOM` generator and return a value in `0..=32767`
     /// (matching bash's 15-bit range). Uses a classic LCG; `param_value` reads
     /// through `&self`, so the state lives behind a `Cell`.
@@ -13943,6 +14000,7 @@ impl Shell {
             "BASH_SUBSHELL" => Some(self.subshell_depth.to_string().into_bytes()),
             "LINENO" => Some(self.current_line.to_string().into_bytes()),
             "RANDOM" => Some(self.next_random().to_string().into_bytes()),
+            "SRANDOM" => Some(self.next_srandom().to_string().into_bytes()),
             "SECONDS" => Some(
                 self.seconds_base
                     .saturating_add(self.seconds_anchor.elapsed().as_secs())
@@ -26671,6 +26729,43 @@ fn initial_rng_seed() -> u32 {
     if mixed == 0 { 0x2545_F491 } else { mixed }
 }
 
+/// Seed for the `$SRANDOM` fallback stream (see [`Shell::next_srandom`]). Mixes
+/// the clock with the pid so two shells started in the same microsecond — the
+/// usual case for a pipeline of them — do not produce the same numbers.
+fn initial_srng_seed() -> u64 {
+    let (secs, micros) = unix_time();
+    let pid = u64::from(std::process::id());
+    splitmix64(
+        secs.wrapping_mul(1_000_000)
+            .wrapping_add(u64::from(micros))
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ pid.wrapping_mul(0xD1B5_4A32_D192_ED03),
+    )
+}
+
+/// One step of Steele/Lea/Flood's SplitMix64 — a fast, well-distributed 64-bit
+/// mixer. Used for the `$SRANDOM` fallback stream and for perturbing it across
+/// subshells; not a cryptographic generator.
+fn splitmix64(state: u64) -> u64 {
+    let mut z = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Four bytes from the system entropy source, or `None` if there is none.
+///
+/// `/dev/urandom` is how the rest of the SlateOS userspace tree reads entropy
+/// (`mktemp`, `passwd`, `useradm`), and on SlateOS it is the kernel CSPRNG. A
+/// host build has no such device, and the caller falls back.
+fn read_entropy_u32() -> Option<u32> {
+    use std::io::Read;
+    let mut buf = [0u8; 4];
+    let mut f = std::fs::File::open("/dev/urandom").ok()?;
+    f.read_exact(&mut buf).ok()?;
+    Some(u32::from_ne_bytes(buf))
+}
+
 /// Quote `s` so it can be reused verbatim as shell input (the `${v@Q}`
 /// transform). Values with control characters use ANSI-C `$'…'` quoting;
 /// every other non-empty value is single-quoted (with embedded single quotes
@@ -33260,6 +33355,43 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("OPTERR=3+4; declare -p OPTERR").0, "declare -- OPTERR=\"3+4\"\n");
         // A scan still starts at 1 and leaves the index past the last option.
         assert_eq!(run("set -- -a -b x; while getopts ab o; do :; done; echo $OPTIND").0, "3\n");
+    }
+
+    /// `$SRANDOM` (bash 5.1+) is 32 bits from the system entropy source — a
+    /// different generator from `$RANDOM`, with a full 32-bit range and no
+    /// seed, which is why bash documents assignments to it as having no effect.
+    #[test]
+    fn srandom_is_a_seedless_32_bit_random() {
+        // Two reads differ (a frozen value would be the obvious bug) and both
+        // fit in 32 bits.
+        let (o, st) = run(r#"a=$SRANDOM; b=$SRANDOM; echo "$a $b""#);
+        assert_eq!(st, 0);
+        let (a, b) = o.trim().split_once(' ').expect("two values");
+        let (a, b) = (a.parse::<u64>().expect("numeric"), b.parse::<u64>().expect("numeric"));
+        assert_ne!(a, b, "two reads returned the same value: {o:?}");
+        assert!(a <= u64::from(u32::MAX) && b <= u64::from(u32::MAX), "not 32-bit: {o:?}");
+        // An assignment is swallowed: it neither takes effect nor leaves a
+        // stored variable behind that would shadow the dynamic read.
+        assert_ne!(run("SRANDOM=5; echo $SRANDOM").0.trim(), "5");
+        assert_eq!(
+            run(r#"SRANDOM=5; a=$SRANDOM; b=$SRANDOM; [ "$a" != "$b" ] && echo differ"#).0,
+            "differ\n"
+        );
+        // Reseeding `$RANDOM` does not make `$SRANDOM` reproducible — the two
+        // generators are separate, as in bash.
+        assert_eq!(
+            run(r#"RANDOM=1; a=$SRANDOM; RANDOM=1; b=$SRANDOM; [ "$a" != "$b" ] && echo apart"#).0,
+            "apart\n"
+        );
+        // A subshell does not repeat its parent's stream.
+        assert_eq!(
+            run(r#"a=$(echo $SRANDOM); b=$(echo $SRANDOM); [ "$a" != "$b" ] && echo apart"#).0,
+            "apart\n"
+        );
+        // `declare -p` prints a live value with the integer attribute; the
+        // listing form is the bare name (see the dynamic-specials table).
+        let named = run("declare -p SRANDOM").0;
+        assert!(named.starts_with("declare -i SRANDOM=\""), "got {named:?}");
     }
 
     /// The *listing* forms — bare `declare -p`, the flag-filtered `declare -i`
@@ -43616,7 +43748,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             hide_ppid(o2),
             "declare -i BASHPID\ndeclare -ir EUID=\"0\"\ndeclare -i HISTCMD\n\
              declare -i OPTIND=\"1\"\ndeclare -ir PPID\ndeclare -i RANDOM\n\
-             declare -ir UID=\"0\"\n\
+             declare -i SRANDOM\ndeclare -ir UID=\"0\"\n\
              declare -i k=\"5\"\ndeclare -i k2=\"9\""
         );
 
@@ -43630,7 +43762,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             hide_ppid(o3),
             "declare -i BASHPID\ndeclare -ir EUID=\"0\"\ndeclare -i HISTCMD\n\
              declare -i OPTIND=\"1\"\ndeclare -ir PPID\ndeclare -i RANDOM\n\
-             declare -ir UID=\"0\"\n\
+             declare -i SRANDOM\ndeclare -ir UID=\"0\"\n\
              declare -i ii=\"1\"\ndeclare -l low=\"hello\""
         );
 

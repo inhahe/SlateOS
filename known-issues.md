@@ -4127,20 +4127,27 @@ the one row that lists with a value, because in bash it is an ordinary
 binding made once at startup rather than a computed variable.
 
 Result: the `declare -p` name set went from **21 names missing** vs. bash
-to **7**, none of them modelled by osh at all (`BASH_ARGC`/`BASH_ARGV` —
-extdebug-only here; `BASH_LOADABLES_PATH`, `COMP_WORDBREAKS`, `SRANDOM`;
-`GROUPS`, tracked under TD-OILS-MISSING-SPECIAL-ARRAYS; and `FUNCNAME`,
-which bash lists bare at the top level and osh lists correctly inside a
-function). Zero names are osh-only. Deliberately not faked: a name that
+to **6**, none of them modelled by osh at all (`BASH_ARGC`/`BASH_ARGV` —
+extdebug-only here; `BASH_LOADABLES_PATH`, `COMP_WORDBREAKS`; `GROUPS`,
+tracked under TD-OILS-MISSING-SPECIAL-ARRAYS; and `FUNCNAME`, which bash
+lists bare at the top level and osh lists correctly inside a function).
+Zero names are osh-only. Deliberately not faked: a name that
 lists but does not expand would be a worse lie than an absent one. Test:
 `listings_report_dynamic_special_variables`.
 
-Two of the names the diff turned up — `OPTIND` and `OPTERR` — were not
-listing bugs at all but a real missing binding, fixed separately in
-`seed_shell_vars`: bash has both bound from startup, and `$OPTIND` being
-empty rather than `1` breaks the standard `shift $((OPTIND - 1))` preamble
-in a script that reaches it without calling `getopts`. Test:
-`optind_and_opterr_are_bound_from_startup`.
+Three of the names the diff turned up were not listing bugs at all but
+missing features, fixed separately:
+
+* `OPTIND`/`OPTERR` — bash has both bound from startup; osh created them
+  only inside `getopts`, so `$OPTIND` was empty and the standard
+  `shift $((OPTIND - 1))` preamble shifted `-1` in a script that reached
+  it without calling `getopts`. Seeded in `seed_shell_vars`. Test:
+  `optind_and_opterr_are_bound_from_startup`.
+* `SRANDOM` (bash 5.1+) — 32 bits from the system entropy source, a
+  separate generator from `$RANDOM` with no seed, so assignments to it are
+  swallowed. Implemented via `/dev/urandom` (the kernel CSPRNG on
+  SlateOS), with a SplitMix64 fallback for hosts without the device; see
+  design-decisions.md. Test: `srandom_is_a_seedless_32_bit_random`.
 
 **Not replicated (a bash implementation artifact, deliberately):** bash's
 listing prints a *stale cache*. Reading or assigning a dynamic variable

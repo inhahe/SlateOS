@@ -7506,6 +7506,11 @@ impl Shell {
                 "readonly variable",
             ));
         }
+        // A variable the shell maintains is refused the same way, minus the
+        // diagnostic — see [`Shell::noassign`] and [`arith::ArithError::silent`].
+        if self.noassign.contains(dest.base()) {
+            return Err(arith::ArithError::silently_refused(dest.base()));
+        }
         Ok(Some(dest))
     }
 
@@ -7543,12 +7548,17 @@ impl Shell {
         self.perrln(&line);
     }
 
-    /// Refuse an arithmetic write to an element of a readonly array — the array
-    /// is what carries the attribute, so it is the array that is named. See
-    /// [`Self::arith_write_dest`] for why the refusal travels as an error.
+    /// Refuse an arithmetic write to an element of a readonly array, or of one
+    /// the shell maintains — the array is what carries the attribute, so it is
+    /// the array that is named (and, for the latter, silently: see
+    /// [`Shell::noassign`]). See [`Self::arith_write_dest`] for why the refusal
+    /// travels as an error.
     fn arith_elem_writable(&self, base: &str) -> Result<(), arith::ArithError> {
         if self.readonly.contains(base) {
             return Err(arith::ArithError::about_var(base, "readonly variable"));
+        }
+        if self.noassign.contains(base) {
+            return Err(arith::ArithError::silently_refused(base));
         }
         Ok(())
     }
@@ -19871,6 +19881,12 @@ impl Shell {
                 self.perrln(&format!("{base}: readonly variable"));
                 return 1;
             }
+            // A variable the shell maintains is refused too, and silently — see
+            // [`Shell::noassign`]. `printf -v GROUPS x` and
+            // `printf -v 'GROUPS[0]' x` both report 1 and print nothing.
+            if self.noassign.contains(&resolved.base) {
+                return 1;
+            }
             // A subscript that names nowhere fails the builtin (status 1) with
             // its own complaint; the line carries on.
             if !self.assign_elem(&base, &index, text) {
@@ -23390,6 +23406,11 @@ impl Shell {
                 self.berrln(&bfmt![self.err_prefix(), name, b": readonly variable"]);
                 return 1;
             }
+            // …and one the shell maintains is refused silently — see
+            // [`Shell::noassign`]. `read -a GROUPS` reports 1 and says nothing.
+            if self.noassign.contains(name) {
+                return 1;
+            }
             // The record replaces whatever the array held rather than merging
             // into it, so an EOF leaves a defined but empty array.
             // `-N` assigns the raw record without IFS splitting: a single
@@ -23733,6 +23754,10 @@ impl Shell {
         };
         if self.readonly.contains(&array) {
             self.perrln(&format!("{array}: readonly variable"));
+            return 1;
+        }
+        // …and one the shell maintains, silently — see [`Shell::noassign`].
+        if self.noassign.contains(&array) {
             return 1;
         }
         if self.assoc.contains_key(&array) {
@@ -25863,6 +25888,12 @@ impl Shell {
     /// through `errln` so an active `2>`/`2>&1` redirect on the enclosing
     /// command silences it, as in bash.
     fn emit_arith_error(&mut self, expr: BStr<'_>, e: &arith::ArithError) {
+        // A refused write to a variable the shell maintains says nothing at all,
+        // though it stops the expression and sets the status like any other
+        // arithmetic failure. See [`arith::ArithError::silent`].
+        if e.silent {
+            return;
+        }
         let prefix = self.err_prefix();
         // A failure that is a property of a *variable* (a refused write to a
         // readonly one) says so about the name and stops there: no expression
@@ -38787,6 +38818,39 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 "unset {name}: {out:?}"
             );
         }
+    }
+
+    /// Every *builtin* write path refuses them too, and just as silently: the
+    /// status is the only sign, and — unlike the array-literal assignment — the
+    /// rest of the parse unit still runs.
+    #[test]
+    fn the_builtin_write_paths_refuse_the_variables_the_shell_maintains() {
+        for script in [
+            "printf -v GROUPS x",
+            "printf -v 'GROUPS[0]' x",
+            "printf -v FUNCNAME x",
+            "mapfile GROUPS <<<hi",
+            "mapfile -t BASH_SOURCE <<<hi",
+            "read -a GROUPS <<<hi",
+        ] {
+            let (out, _) = run(&format!("{script} 2>&1; echo \"rc=$?\"; echo after"));
+            assert_eq!(out, "rc=1\nafter\n", "{script}");
+        }
+        // Arithmetic refuses it as an *error* would: the expression is abandoned
+        // where it stands, so `(( ))`/`let` report 1 …
+        for expr in ["(( GROUPS = 5 ))", "(( GROUPS[0] = 5 ))", "(( GROUPS++ ))", "let GROUPS=7"] {
+            let (out, _) = run(&format!("{expr} 2>&1; echo \"rc=$?\"; echo after"));
+            assert_eq!(out, "rc=1\nafter\n", "{expr}");
+        }
+        // … an assignment earlier in a comma list stands and a later one never
+        // happens …
+        assert_eq!(run("x=9; (( x = 3, GROUPS = 5 )); echo \"$? $x\"").0, "1 3\n");
+        assert_eq!(run("x=9; (( GROUPS = 5, x = 3 )); echo \"$? $x\"").0, "1 9\n");
+        // … and in expansion position it is fatal to the command list.
+        assert_eq!(run("echo \"[$(( GROUPS = 5 ))]\"; echo unreachable"), (String::new(), 1));
+        // Shedding the attribute makes every one of them ordinary again.
+        assert_eq!(run("unset GROUPS; printf -v GROUPS x; echo \"$? $GROUPS\"").0, "0 x\n");
+        assert_eq!(run("unset GROUPS; (( GROUPS = 5 )); echo \"$? $GROUPS\"").0, "0 5\n");
     }
 
     /// The `OSH_GROUPS` override, the counterpart of `OSH_UID`/`OSH_EUID`.

@@ -160,6 +160,15 @@ pub struct ArithError {
     /// since neither the command nor any token is what went wrong. `None` for
     /// the ordinary errors, which are about the expression and echo it.
     pub subject: Option<String>,
+    /// Set when the failure carries no diagnostic at all. A write refused
+    /// because the shell *maintains* the variable (`(( GROUPS = 5 ))`) fails
+    /// exactly as a readonly one does — the expression is abandoned where it
+    /// stands, so earlier assignments in a comma list stand and later ones never
+    /// happen; `(( ))` and `let` report 1; an arithmetic *expansion* is fatal to
+    /// the command list — but says nothing, because bash's `att_noassign`
+    /// refusal is silent wherever it happens. [`Shell::emit_arith_error`] honours
+    /// this by printing nothing; every other consequence is unchanged.
+    pub silent: bool,
     /// Set when the failure happened while evaluating an array *subscript*.
     /// bash evaluates a subscript through a separate entry point from the
     /// expression around it, and every diagnostic from there differs twice
@@ -179,6 +188,7 @@ impl ArithError {
             truncate_leading: false,
             expr_override: None,
             subject: None,
+            silent: false,
             in_subscript: false,
         }
     }
@@ -191,6 +201,7 @@ impl ArithError {
             truncate_leading: false,
             expr_override: None,
             subject: None,
+            silent: false,
             in_subscript: false,
         }
     }
@@ -204,6 +215,7 @@ impl ArithError {
             truncate_leading: true,
             expr_override: None,
             subject: None,
+            silent: false,
             in_subscript: false,
         }
     }
@@ -218,7 +230,21 @@ impl ArithError {
             truncate_leading: false,
             expr_override: None,
             subject: Some(name.into()),
+            silent: false,
             in_subscript: false,
+        }
+    }
+
+    /// A refusal with no diagnostic at all — see [`ArithError::silent`]. Used
+    /// for the variables the shell maintains, whose refusal bash never reports.
+    ///
+    /// The message is filled in anyway, so that an error escaping the silencing
+    /// would read as something rather than as an empty line.
+    #[must_use]
+    pub fn silently_refused(name: impl Into<String>) -> Self {
+        Self {
+            silent: true,
+            ..Self::about_var(name, "cannot be assigned to")
         }
     }
 

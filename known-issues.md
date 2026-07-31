@@ -5509,11 +5509,13 @@ arguably more useful and is self-consistent.
 port bash's `hash.c` hash function and bucket iteration for `self.assoc`.
 Not worth it absent a concrete need.
 
-### TD-OILS-NOASSIGN-VARS. bash's six unassignable variables can be clobbered in `osh` — 2026-07-31 — mostly fixed 2026-07-31, the builtin write paths remain
+### TD-OILS-NOASSIGN-VARS. bash's six unassignable variables can be clobbered in `osh` — 2026-07-31 — fixed 2026-07-31 except the `declare`/`local`/`export` family
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::noassign` (seeded from
-`NOASSIGN_VARS`), checked in `apply_assignment`, `scalar_write_checked`
-and `exec_for`; `NOUNSET_VARS` in `builtin_unset`.
+`NOASSIGN_VARS`), checked in `apply_assignment`, `scalar_write_checked`,
+`exec_for`, `arith_write_dest`, `arith_elem_writable`, `builtin_printf`,
+`builtin_read` and `builtin_mapfile`; `NOUNSET_VARS` in `builtin_unset`;
+`ArithError::silent` in `userspace/oils/src/arith.rs`.
 
 **What:** bash gives `FUNCNAME`, `GROUPS`, `BASH_SOURCE`, `BASH_LINENO`,
 `BASH_ARGC` and `BASH_ARGV` the `att_noassign` attribute, and the last
@@ -5529,8 +5531,8 @@ against bash 5.2.37 (MSYS):
 | `set -x; GROUPS=5` | traces `+ GROUPS=5` and then ignores it | — | ✅ |
 | `unset FUNCNAME` / `unset GROUPS` | succeeds; the name sheds the attribute and a later `FUNCNAME=(1 2)` makes an ordinary array | unset a *function* by that name (the variable holds no value outside a call, so it never looked like one) | ✅ |
 | `unset BASH_SOURCE`/`BASH_LINENO`/`BASH_ARGC`/`BASH_ARGV` | `unset: NAME: cannot unset`, status 1, no abort | unsets | ✅ |
-| `printf -v GROUPS x`, `mapfile GROUPS`, `read -a GROUPS` | status 1, value unchanged | assigns | ❌ still assigns |
-| `(( GROUPS = 5 ))`, `let GROUPS=7` | status 1, value unchanged, silent; in a *word* (`echo $(( GROUPS = 5 ))`) it abandons the parse unit like any fatal arithmetic error | assigns | ❌ still assigns |
+| `printf -v GROUPS x`, `printf -v 'GROUPS[0]' x`, `mapfile GROUPS`, `read -a GROUPS` | silently fails, status 1, value unchanged; the rest of the parse unit still runs | assigns | ✅ |
+| `(( GROUPS = 5 ))`, `(( GROUPS[0]=5 ))`, `(( GROUPS++ ))`, `let GROUPS=7` | status 1, value unchanged, silent; the expression is abandoned where it stands, so `(( x=3, GROUPS=5 ))` leaves `x` as 3 and `(( GROUPS=5, x=3 ))` leaves it as 9; in a *word* (`echo $(( GROUPS = 5 ))`) it abandons the parse unit like any fatal arithmetic error | assigns | ✅ |
 | `declare GROUPS=…` at top level | status 1, silent, unchanged | assigns | ❌ still assigns |
 | `declare GROUPS=(…)` at top level, `export GROUPS=(…)` | abandons the parse unit, silent | assigns | ❌ still assigns |
 | `declare`/`local GROUPS=…` **creating a local** | `<tag>: GROUPS: variable may not be assigned value`, status 1, no abort; the compound form emits it *twice*, once tagged with the enclosing function name and once with the builtin | assigns | ❌ still assigns |
@@ -5553,13 +5555,21 @@ diagnostic; `scalar_write_checked` refuses silently, which is where
 `noassign-vars.sh`; unit test
 `the_variables_the_shell_maintains_refuse_assignment`.
 
-**Still open (the ❌ rows):** the builtin write paths — `printf -v`,
-`mapfile`, `read -a`, arithmetic assignment, and the `declare`/`local`/
-`export` family. The first four want the same silent refusal pushed into
-the array-store and arithmetic-write choke points (arithmetic needs a
-*silent* `ArithError` variant, since `(( GROUPS=5 ))` prints nothing but
-still fails the expression). The `declare` family is the fiddly part and
-is worth weighing before copying: bash's own behaviour there is
+**Builtin and arithmetic write paths — fixed 2026-07-31 (second pass).**
+`arith::ArithError` gained a `silent` flag and an
+`ArithError::silently_refused` constructor: the refusal travels as an
+ordinary arithmetic error — abandoning the expression where it stands,
+failing `(( ))`/`let`, and staying fatal to the command list in expansion
+position — while `Shell::emit_arith_error` returns before printing
+anything. `arith_write_dest` and `arith_elem_writable` raise it beside
+their readonly checks. `builtin_printf`'s `-v` branch, `builtin_read`'s
+`-a` branch and `builtin_mapfile` each refuse silently beside their own
+readonly guard. Corpus case extended; unit test
+`the_builtin_write_paths_refuse_the_variables_the_shell_maintains`.
+
+**Still open (the ❌ rows):** only the `declare`/`local`/`export` family,
+which is the fiddly part and is worth weighing before copying: bash's own
+behaviour there is
 self-inconsistent — the same `declare NAME=(…)` abandons the parse unit
 at top level, prints two diagnostics when it would create a local, and
 silently succeeds under `-g` — because each case reaches a different

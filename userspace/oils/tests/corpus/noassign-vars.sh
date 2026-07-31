@@ -13,8 +13,11 @@
 #     variable does — so a `;`-separated command after it never runs, while one
 #     on the next line does.
 #
-# Writing through the name from somewhere else — `read`, a `for` loop's control
-# variable — fails too, and there the status is the only sign of it.
+# Writing through the name from somewhere else — `read`, `printf -v`, `mapfile`,
+# a `for` loop's control variable — fails too, and there the status is the only
+# sign of it. An *arithmetic* write behaves like an arithmetic error: it abandons
+# the expression where it stands, so `(( ))`/`let` report 1 while `$(( ))` is
+# fatal to the command list — and it says nothing either.
 #
 # `unset` drops the attribute along with every other one, after which the name
 # is ordinary. `DIRSTACK` and `COMP_WORDBREAKS` look like they belong to the
@@ -48,6 +51,27 @@ echo "=== a write through the name fails, and the status is the only sign"
 read FUNCNAME <<<hi; echo "rc=$?"
 for FUNCNAME in a b; do echo body; done; echo "rc=$?"
 for FUNCNAME in; do echo body; done; echo "rc=$?"
+printf -v GROUPS x; echo "rc=$?"
+printf -v 'GROUPS[0]' x; echo "rc=$?"
+mapfile GROUPS <<<hi; echo "rc=$?"
+mapfile -t BASH_SOURCE <<<hi; echo "rc=$?"
+read -a GROUPS <<<hi; echo "rc=$?"
+# None of them abandons the parse unit the way an array literal does.
+printf -v GROUPS x; echo "and the next command still runs"
+
+echo "=== arithmetic refuses it as if the expression had errored, but silently"
+(( GROUPS = 5 )); echo "rc=$?"
+(( GROUPS[0] = 5 )); echo "rc=$?"
+(( GROUPS++ )); echo "rc=$?"
+let GROUPS=7; echo "rc=$?"
+# The refusal stops the expression where it stands, so an assignment before it
+# in a comma list stands and one after it never happens — as a division by zero
+# would, only without the diagnostic.
+x=9; (( x = 3, GROUPS = 5 )); echo "rc=$? x=$x"
+x=9; (( GROUPS = 5, x = 3 )); echo "rc=$? x=$x"
+# And in *expansion* position it is fatal to the command list, again like any
+# other arithmetic error.
+( echo "[$(( GROUPS = 5 ))]"; echo unreachable ); echo "rc=$?"
 
 echo "=== the shell's own value is untouched by any of it"
 f() { echo "[${FUNCNAME[0]}]"; }

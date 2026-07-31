@@ -6441,7 +6441,7 @@ honest answer is a rejection rather than an approximation. The residual
 narrowings are tracked separately and are all of that shape —
 `TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT` and `TD-OILS-NONUTF8-ENV-NAME`.
 
-### TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT. An array *element* named by a subscript that is not text cannot be assigned to by `printf -v`, `read` or `declare -n` — OPEN 2026-07-30
+### TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT. An array *element* named by a subscript that is not text cannot be assigned to by `printf -v`, `read` or `declare -n` — STEP 1 DONE 2026-07-30 (`declare -n` still open, needs step 2)
 
 **Where:** `userspace/oils/src/interp.rs` — the three surviving callers of
 `is_valid_assignment_target` (`:27326`), each of which gates on
@@ -6494,6 +6494,41 @@ Step 1 alone fixes `printf -v` and `read`; `declare -n` needs step 2 as well.
 Do this **with or after** TD-OILS-BYTE-STRINGS step 9/10 — the nameref value is
 one of the last `String`s left, and converting it in isolation would need a
 scaffold at every site step 10 is about to satisfy for free.
+
+**Step 1 done 2026-07-30.** `printf -v 'm[$k]'` and `read 'm[$k]'` now assign
+the element bash assigns, whatever bytes `$k` holds. Regression test:
+`assignment_target_subscript_may_hold_bytes_that_are_not_text` (`interp.rs`),
+the write-side counterpart of step 8's `unset` test.
+
+- `is_valid_assignment_target` is gone, replaced by
+  `split_assignment_target(s: BStr<'_>) -> Option<(&str, Option<BStr<'_>>)>`
+  (`interp.rs`, next to `nameref_target_base`). The two halves are typed
+  differently on purpose: a base name is `[A-Za-z_][A-Za-z0-9_]*` and therefore
+  ASCII by construction, so `&str` is exact rather than an approximation and it
+  can key the name tables directly; a subscript is an ordinary shell word and
+  stays bytes.
+- `ScalarDest::Elem(String, String)` → `ScalarDest::Elem(String, Str)`, so a
+  resolved destination carries the subscript's bytes rather than a re-spelling
+  of them. `scalar_write_dest` now splits with `split_assignment_target` instead
+  of hand-rolling `find('[')`/`strip_suffix(']')`, which also drops two string
+  slicings.
+- New `set_scalar_target_checked(&mut self, base: &str, sub: Option<BStr<'_>>,
+  val: Str)` for callers that hold a *word* rather than a bare name, so they no
+  longer paste the halves back together for `scalar_write_dest` to take apart.
+  The readonly guard it shares with `set_scalar_checked` moved into
+  `scalar_write_checked`. Only the plain-name arm follows the nameref chain,
+  which is not a narrowing: no variable can be *named* `arr[0]`, so a
+  subscripted target was never a nameref's name and the chain never applied.
+- `read`'s two gates (the early first-name check and the per-field one) now
+  split before judging, and the later-name store goes through
+  `set_scalar_target_checked`.
+
+**Still open: `declare -n`.** `nameref_value_error` deliberately keeps its
+whole-operand text check — its comment now says why. A nameref's *stored value*
+is still a `String` walked by `resolve_ref_name`, so accepting
+`declare -n r='m[<non-text>]'` would bind a reference the resolver could not
+carry the subscript back out of. Refusing at the declaration is the loud
+failure; step 2 byte-types the value and lifts it.
 
 ### TD-OILS-ARGV-PANICS-ON-NON-UTF8. `osh` aborts at startup if any of its own arguments is not UTF-8 — FIXED 2026-07-30
 

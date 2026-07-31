@@ -6952,13 +6952,8 @@ impl Shell {
         let target = self.resolve_ref_use(name)?;
         // A subscript is only ever a real one: no variable can be *named*
         // `arr[0]`, so a target that looks like one is one.
-        if let Some(open) = target.find('[')
-            && let Some(sub) = target.strip_suffix(']')
-        {
-            return Some(ScalarDest::Elem(
-                target[..open].to_string(),
-                sub[open + 1..].to_string(),
-            ));
+        if let Some((base, Some(sub))) = split_assignment_target(target.as_bytes()) {
+            return Some(ScalarDest::Elem(base.to_string(), sub.to_vec()));
         }
         Some(ScalarDest::Var(target))
     }
@@ -6989,8 +6984,8 @@ impl Shell {
                 true
             }
             ScalarDest::Elem(n, sub) => {
-                let n = n.clone();
-                self.assign_elem(&n, &Some(Box::new(Word::literal(sub.as_bytes()))), val)
+                let (n, sub) = (n.clone(), sub.clone());
+                self.assign_elem(&n, &Some(Box::new(Word::literal(sub))), val)
             }
         }
     }
@@ -7007,12 +7002,51 @@ impl Shell {
         let Some(dest) = self.scalar_write_dest(name) else {
             return false;
         };
+        self.scalar_write_checked(&dest, val)
+    }
+
+    /// The same store as [`Self::set_scalar_checked`], for a target that the
+    /// caller has *already split* into a base name and an optional subscript.
+    ///
+    /// A name given as a word can carry a subscript (`read arr[0]`,
+    /// `printf -v 'm[key]'`), and that subscript is an ordinary shell word: it
+    /// may hold any byte, so it cannot be re-spelled as text on the way in
+    /// without naming a different element. Callers that have a word rather than
+    /// a bare name therefore gate it with [`split_assignment_target`] and hand
+    /// both halves here, instead of pasting them back together for
+    /// [`Self::scalar_write_dest`] to take apart again.
+    ///
+    /// Only a *plain* name follows the nameref chain, which is not a narrowing:
+    /// no variable can be named `arr[0]`, so a subscripted target is never a
+    /// nameref's name and the chain never applied to it.
+    fn set_scalar_target_checked(
+        &mut self,
+        base: &str,
+        sub: Option<BStr<'_>>,
+        val: Str,
+    ) -> bool {
+        let dest = match sub {
+            Some(sub) => ScalarDest::Elem(base.to_string(), sub.to_vec()),
+            None => {
+                let Some(dest) = self.scalar_write_dest(base) else {
+                    return false;
+                };
+                dest
+            }
+        };
+        self.scalar_write_checked(&dest, val)
+    }
+
+    /// The readonly guard and the store, shared by every checked scalar write.
+    /// Returns `false` with the diagnostic already emitted when the write was
+    /// refused.
+    fn scalar_write_checked(&mut self, dest: &ScalarDest, val: Str) -> bool {
         if self.readonly.contains(dest.base()) {
             let base = dest.base().to_string();
             self.perrln(&format!("{base}: readonly variable"));
             return false;
         }
-        self.scalar_write_store(&dest, val)
+        self.scalar_write_store(dest, val)
     }
 
     /// Where an *arithmetic* scalar write to `name` lands, or the refusal that
@@ -18959,14 +18993,15 @@ impl Shell {
         // never gets far enough to complain about the number. Nothing is
         // formatted, nothing is written, and the status is the usage error's 2
         // rather than the 1 a refused *store* would leave.
-        // A variable name is text by definition — the name tables are keyed by
-        // `String` and a name is spelled in the shell's own identifier syntax — so
-        // a `-v` word that is not text is not a valid identifier, which is the
-        // complaint it already gets.
-        let assign_var: Option<String> = match &assign_var {
+        // A base *name* is text by definition — the name tables are keyed by
+        // `String` and a name is spelled in the shell's own identifier syntax —
+        // but a **subscript** is an ordinary shell word and may hold any byte,
+        // so the two are separated before either is judged. `printf -v "m[$k]"`
+        // with a `$k` that is not text names a key an associative array stores
+        // perfectly well; gating on the whole operand rejected it.
+        let assign_var: Option<(String, Option<Str>)> = match &assign_var {
             Some(name) => {
-                let Some(valid) = bytes::as_str(name).filter(|n| is_valid_assignment_target(n))
-                else {
+                let Some((base, sub)) = split_assignment_target(name) else {
                     self.berrln(&bfmt![
                         self.err_prefix(),
                         b"printf: `",
@@ -18975,7 +19010,7 @@ impl Shell {
                     ]);
                     return 2;
                 };
-                Some(valid.to_string())
+                Some((base.to_string(), sub.map(<[u8]>::to_vec)))
             }
             None => None,
         };
@@ -19016,20 +19051,15 @@ impl Shell {
             // message follows everything produced before it.
             messages.push((text.len(), bfmt![self.err_prefix(), b"printf: ", msg, b"\n"]));
         }
-        if let Some(name) = assign_var {
+        if let Some((base, sub)) = assign_var {
             // `-v` captures stdout into a variable; diagnostics still go to
             // stderr, in the order they occurred.
             for (_, msg) in &messages {
                 self.emit_stderr(msg);
             }
-            // `-v` may target an array element: `printf -v 'arr[2]' …`.
-            let (base, index) = match (name.find('['), name.strip_suffix(']')) {
-                (Some(open), Some(inner)) => (
-                    name[..open].to_string(),
-                    Some(Box::new(Word::literal(&inner[open + 1..]))),
-                ),
-                _ => (name.clone(), None),
-            };
+            // `-v` may target an array element: `printf -v 'arr[2]' …`. The
+            // subscript is a shell word, so it reaches `assign_elem` as bytes.
+            let index = sub.map(|s| Box::new(Word::literal(s)));
             // A readonly target is rejected (status 1), leaving it intact; a
             // circular nameref names nothing to write to and fails the same way.
             let Some(resolved) = self.resolve_ref_use(&base) else {
@@ -19653,7 +19683,7 @@ impl Shell {
     ///
     /// Two separate rules, both measured against bash 5.2:
     ///
-    /// * The value must name a variable ([`is_valid_assignment_target`]). For the
+    /// * The value must name a variable ([`split_assignment_target`]). For the
     ///   `+=` form it is the *resulting* name that has to be valid — `declare -n
     ///   r=a; declare -n r+='[1]'` legitimately builds `a[1]` — but the message
     ///   quotes only the appended text, and it uses the generic "not a valid
@@ -19675,10 +19705,16 @@ impl Shell {
             Some(old) if append => bfmt![old, value],
             _ => value.to_vec(),
         };
-        // A nameref holds the *name* it points to, and a name is text — the
-        // variable tables are `String`-keyed — so a result that is not text
-        // names nothing and is rejected exactly as any other invalid target is.
-        let Some(result) = bytes::as_str(&joined).filter(|r| is_valid_assignment_target(r)) else {
+        // A nameref's *stored value* is still text-only, so a result that is not
+        // text is rejected here even when its shape is fine: `declare -n
+        // r='m[<non-text>]'` names an element an associative array would store
+        // happily, but the resolver that walks the chain could not carry the
+        // subscript back out again. Refusing at the declaration is the loud
+        // failure; see TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT step 2, which
+        // byte-types the nameref value and lifts this.
+        let Some(result) =
+            bytes::as_str(&joined).filter(|r| split_assignment_target(r.as_bytes()).is_some())
+        else {
             let what = if append || joined.is_empty() {
                 b": not a valid identifier\n".as_slice()
             } else {
@@ -22143,11 +22179,12 @@ impl Shell {
         // point the input is already gone. The `-a` array is an option argument
         // rather than an operand, so it is not part of this early check either
         // and is validated down with the assignment.
-        // The variable tables are keyed by `String` and an identifier is
-        // spelled in the shell's identifier syntax, so a name that is not text
-        // is not a valid assignment target either.
+        //
+        // A name may carry a subscript (`read arr[0]`, `read "m[$k]"`), and a
+        // subscript is an ordinary shell word: only the *base* has to be an
+        // identifier, so the word is split before either half is judged.
         if let Some(first) = names.first()
-            && !bytes::as_str(first).is_some_and(is_valid_assignment_target)
+            && split_assignment_target(first).is_none()
         {
             self.berrln(&bfmt![
                 self.err_prefix(),
@@ -22257,8 +22294,7 @@ impl Shell {
             // exactly as a readonly one does: the fields before it are already
             // stored and the ones after it never are. (The first name was
             // checked before the read, so only the later ones can fail here.)
-            let Some(name) = bytes::as_str(name).filter(|n| is_valid_assignment_target(n))
-            else {
+            let Some((base, sub)) = split_assignment_target(name) else {
                 self.berrln(&bfmt![
                     self.err_prefix(),
                     b"read: `",
@@ -22269,7 +22305,7 @@ impl Shell {
             };
             // A readonly target aborts the read at that field (bash: earlier
             // fields are already assigned, the read fails with status 1).
-            if !self.set_scalar_checked(name, val) {
+            if !self.set_scalar_target_checked(base, sub, val) {
                 return 1;
             }
         }
@@ -24915,11 +24951,18 @@ enum ScalarDest {
     /// A variable, written by name (which may still land on element 0 of an
     /// existing array — see [`Shell::set_scalar_store`]).
     Var(String),
-    /// The element a nameref designates (`declare -n r=arr[0]`, `-n r=m[key]`):
-    /// the array's name, and the subscript text the nameref carried. Which of
-    /// the two kinds of subscript it is — arithmetic index or associative key —
-    /// is settled at store time by what `arr` turns out to be.
-    Elem(String, String),
+    /// An array element: the array's name, and the subscript that named the
+    /// element. Which of the two kinds of subscript it is — arithmetic index or
+    /// associative key — is settled at store time by what the array turns out
+    /// to be.
+    ///
+    /// The two halves are typed differently on purpose. A base name is an
+    /// identifier and so is text by construction, but a subscript is an
+    /// ordinary shell word: `read "m[$k]"` and `printf -v "m[$k]"` name an
+    /// associative key that may hold any byte, and an associative array stores
+    /// such a key happily. It therefore travels as the bytes the word expanded
+    /// to, never as a re-spelling of them.
+    Elem(String, Str),
 }
 
 impl ScalarDest {
@@ -27103,8 +27146,9 @@ fn attr_assignment_split(word: BStr<'_>) -> Option<usize> {
     None
 }
 
-/// Whether `s` names somewhere a value can be put: a plain identifier, or an
-/// identifier with a non-empty subscript (`arr[0]`, `m[key]`).
+/// Split a word that names somewhere a value can be put into its base name and
+/// its subscript: `arr` → `("arr", None)`, `m[key]` → `("m", Some("key"))`.
+/// `None` when the word names nowhere at all.
 ///
 /// This is bash's `legal_identifier() || valid_array_reference()`, the pair it
 /// checks wherever a *name* is given as a word rather than parsed as an
@@ -27112,17 +27156,29 @@ fn attr_assignment_split(word: BStr<'_>) -> Option<usize> {
 /// is not evaluated here, so `a[x+1]` and `a[@]` are both accepted; what is
 /// rejected is anything that could never name a variable at all — an empty
 /// string, `1x`, `a-b`, an unbalanced `a[`, an empty `a[]`.
-fn is_valid_assignment_target(s: &str) -> bool {
-    let b = s.as_bytes();
-    match bytes::find(b, b"[") {
+///
+/// The two halves are typed differently *on purpose*, and that is the whole
+/// point of splitting before gating. A **base name** is an identifier —
+/// `[A-Za-z_][A-Za-z0-9_]*`, ASCII by construction — so returning it as `&str`
+/// is exact rather than an approximation, and it can key the name tables
+/// directly. A **subscript** is an ordinary shell word: `m[$k]` may hold any
+/// byte, and an associative array stores such a key happily. Asking whether the
+/// *whole* operand is text — as these callers used to — let a subscript's bytes
+/// disqualify a base name that was a perfectly good identifier, so
+/// `printf -v "m[$k]"` and `read "m[$k]"` refused an assignment bash makes.
+fn split_assignment_target(s: BStr<'_>) -> Option<(&str, Option<BStr<'_>>)> {
+    let name = |b| bytes::as_str(b).filter(|n| crate::parser::is_valid_name(n.as_bytes()));
+    match bytes::find(s, b"[") {
         // `BASE[SUB]`: the subscript must close at the very end and be
         // non-empty, and the base must still be an identifier.
         Some(p) => {
-            b.ends_with(b"]")
-                && b.len() > p.saturating_add(2)
-                && b.get(..p).is_some_and(crate::parser::is_valid_name)
+            let sub = s.get(p.saturating_add(1)..s.len().checked_sub(1)?)?;
+            if !s.ends_with(b"]") || sub.is_empty() {
+                return None;
+            }
+            Some((name(s.get(..p)?)?, Some(sub)))
         }
-        None => crate::parser::is_valid_name(b),
+        None => Some((name(s)?, None)),
     }
 }
 
@@ -44173,6 +44229,31 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let m = sh.assoc.get("m").expect("m is still declared");
         assert_eq!(m.len(), 1, "the non-text key was removed");
         assert_eq!(m[0].0, b"keep");
+    }
+
+    #[test]
+    fn assignment_target_subscript_may_hold_bytes_that_are_not_text() {
+        // A name given as a *word* rather than parsed as an assignment —
+        // `printf -v NAME`, `read NAME` — is a base name plus an optional
+        // subscript, and only the base has to be an identifier. The subscript is
+        // an ordinary shell word: `m[$k]` may hold any byte, and an associative
+        // array stores such a key happily (see the test above, which reaches the
+        // same key through `unset`). These two asked whether the *whole* operand
+        // was text before looking at its shape, so a subscript's bytes
+        // disqualified a base name that was a perfectly good identifier and the
+        // assignment was refused outright.
+        let mut sh = Shell::new();
+        let mut src: Str = b"declare -A m\nk='".to_vec();
+        src.push(0xff);
+        src.extend_from_slice(
+            b"'\nprintf -v \"m[p$k]\" %s.%s pr intf\nread \"m[r$k]\" <<< rd\n",
+        );
+        assert_eq!(sh.run_source(&src), 0, "no operand was refused");
+        let m = sh.assoc.get("m").expect("m is declared");
+        assert_eq!(m.len(), 2, "both keys stored: {m:?}");
+        let at = |k: BStr<'_>| m.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_slice());
+        assert_eq!(at(b"p\xff"), Some(b"pr.intf".as_slice()));
+        assert_eq!(at(b"r\xff"), Some(b"rd".as_slice()));
     }
 
     #[test]

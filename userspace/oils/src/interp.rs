@@ -101,7 +101,7 @@ use bstr::ByteSlice;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, IsTerminal, Read, Seek, Write};
 use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
@@ -1904,8 +1904,12 @@ pub struct Shell {
     /// Environment entries whose **name** the shell cannot spell, kept verbatim
     /// so they still reach children.
     ///
-    /// The shell grammar has no way to write a non-UTF-8 identifier — `a\xffb=1`
-    /// is not an assignment and `${a\xffb}` is not an expansion — so such an
+    /// Two kinds of name land here. A **non-UTF-8** one, which the shell grammar
+    /// has no way to write — `a\xffb=1` is not an assignment and `${a\xffb}` is
+    /// not an expansion. And a **non-identifier** one, which is textual but still
+    /// unwritable: the environment allows any byte but `=` in a name, so
+    /// `PROGRAMFILES(X86)` (Windows), `a.b`, `1abc` and `x-y` are all legal
+    /// there and none of them is a shell name. Either way the
     /// entry is unnameable inside osh and never enters [`Shell::vars`]. That is
     /// right for the shell's own purposes (mangling the name would invent a
     /// *different*, spellable variable that then gets exported over the real
@@ -3433,6 +3437,20 @@ impl Shell {
         self.put_var("BASH_EXECUTION_STRING".to_string(), src.to_vec());
     }
 
+    /// The shell-variable name an inherited environment entry becomes, or `None`
+    /// when the shell cannot spell it and the entry has to be passed through
+    /// verbatim instead (see [`Shell::opaque_env`]).
+    ///
+    /// The environment's rules are far looser than the shell's: a name there is
+    /// any byte sequence without `=`. So both a non-UTF-8 name and a textual but
+    /// non-identifier one (`PROGRAMFILES(X86)`, `a.b`, `1abc`, `x-y`) are legal
+    /// environment entries that no shell word can reference.
+    fn env_shell_name(k: &OsStr) -> Option<String> {
+        bytes::as_str(&bytes::os_to_bytes(k))
+            .filter(|n| crate::parser::is_valid_name(n.as_bytes()))
+            .map(str::to_owned)
+    }
+
     /// Import the real process environment into the shell variable namespace,
     /// marking every imported name exported (bash: environment variables *are*
     /// shell variables). Called once by the binary at startup. After this, the
@@ -3460,8 +3478,17 @@ impl Shell {
         // the shell grammar cannot spell a non-UTF-8 identifier, so such an
         // entry is unnameable and unusable here — so it is set aside verbatim in
         // `opaque_env` rather than mangled, and reaches children untouched.
+        //
+        // The same holds for a name that *is* text but is not an identifier:
+        // Windows exports `PROGRAMFILES(X86)`, and `a.b`, `1abc`, `x-y` are all
+        // legal environment names that no shell word can reference. bash keeps
+        // these in the process environment — a child still sees them — but does
+        // not make them shell variables, so they are invisible to `set`,
+        // `export -p` and `${name}`. Importing them as ordinary variables (which
+        // osh used to do) both listed names the script cannot expand and let a
+        // later `unset`-like operation silently fail to reach them.
         for (k, v) in std::env::vars_os() {
-            let Some(name) = bytes::as_str(&bytes::os_to_bytes(&k)).map(str::to_owned) else {
+            let Some(name) = Self::env_shell_name(&k) else {
                 self.opaque_env.push((k, v));
                 continue;
             };
@@ -45099,6 +45126,34 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             units.extend(tail.encode_utf16());
             OsString::from_wide(&units)
         }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn an_environment_name_that_is_not_an_identifier_is_not_a_shell_variable() {
+        // The environment permits any name without `=`, so a legal entry can be
+        // one no shell word references: Windows exports `PROGRAMFILES(X86)`,
+        // and `a.b` / `1abc` / `x-y` are all fine there. bash keeps these in the
+        // process environment — a child still sees them — without making them
+        // shell variables, so they never show in `set`, `export -p` or `${…}`.
+        // osh used to import them as ordinary exported variables
+        // (TD-OILS-ENVNAME-IMPORT).
+        for good in ["PATH", "_x", "A1_b", "_"] {
+            assert_eq!(
+                Shell::env_shell_name(OsStr::new(good)).as_deref(),
+                Some(good),
+                "{good} is a valid identifier"
+            );
+        }
+        for bad in ["PROGRAMFILES(X86)", "a.b", "1abc", "x-y", "", "a b"] {
+            assert_eq!(
+                Shell::env_shell_name(OsStr::new(bad)),
+                None,
+                "{bad} is not a shell name"
+            );
+        }
+        // A name that is not even text goes the same way.
+        assert_eq!(Shell::env_shell_name(&unspellable_os_string("K")), None);
     }
 
     #[cfg(any(unix, windows))]

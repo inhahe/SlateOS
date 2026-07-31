@@ -7856,7 +7856,7 @@ cycle's bytes to `out` as it is produced and flush before writing that cycle's
 error to stderr — instead of accumulating one String plus an error `Vec`. Only
 worth doing if a real script depends on the interleaving.
 
-### TD-OILS-ENVNAME-IMPORT. `osh` imports environment variables whose names are **not valid shell identifiers** (e.g. Windows' `PROGRAMFILES(X86)`) as ordinary shell variables; bash keeps them in the child environment but hides them from the shell-variable namespace — OPEN (host-only artifact; needs a separate raw-env passthrough store) 2026-07-19
+### TD-OILS-ENVNAME-IMPORT. `osh` imports environment variables whose names are **not valid shell identifiers** (e.g. Windows' `PROGRAMFILES(X86)`) as ordinary shell variables; bash keeps them in the child environment but hides them from the shell-variable namespace — 2026-07-19 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — `import_environment` (~633) inserts
 every `std::env::vars()` pair into `self.vars` + `self.exported` without checking
@@ -7880,6 +7880,21 @@ host programs that rely on `PROGRAMFILES(X86)`. On SlateOS the inherited
 environment will use well-formed identifier names, so this is purely a host-test
 artifact; parked until it matters. Impact: low — cosmetic `set`/`export -p`
 listing noise during host comparison testing only.
+
+**Fixed 2026-07-31.** The blocker named above — "needs a separate raw-env
+passthrough store" — was built for TD-OILS-NONUTF8-ENV-NAME: `Shell::opaque_env`
+holds entries verbatim as `OsString` pairs and `apply_child_env` is the single
+place a child environment is assembled, so both spawn paths already re-emit them.
+A non-identifier name is the same problem as a non-UTF-8 one — an environment
+name is any byte sequence without `=`, and neither kind can be written as a shell
+word — so `import_environment` now routes both through the same door. The
+classification moved into `Shell::env_shell_name`, which is the testable seam:
+`import_environment` itself reads the live process environment and cannot be
+exercised deterministically.
+
+Measured against bash 5.2.37 with `env 'a.b=1' '1abc=2' 'x-y=3'`: both shells
+list nothing for `export -p` and `set`, and both hand all three to a child.
+Covered by `an_environment_name_that_is_not_an_identifier_is_not_a_shell_variable`.
 
 ### TD-OILS-APPEND-EXTCHILD. External (MSYS) children fail to write to an `>>file` append redirect on the Windows host (`echo: write error: Bad file descriptor`) — OPEN (host-only artifact) 2026-07-19
 

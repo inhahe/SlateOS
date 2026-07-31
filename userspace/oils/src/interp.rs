@@ -3055,6 +3055,16 @@ impl Shell {
         self.put_var("OPTIND".to_string(), "1".to_string());
         self.integer_attr.insert("OPTIND".to_string());
         self.put_var("OPTERR".to_string(), "1".to_string());
+        // COMP_WORDBREAKS: the byte set readline breaks a completion word on.
+        // The shell only *publishes* it — readline is what consults it — but a
+        // completion function is expected to find it bound and often edits it
+        // around a call (bash-completion's `_get_comp_words_by_ref` does exactly
+        // that), so a function osh runs through `compgen -F` needs it there.
+        // Seeded before `import_environment`, which is what bash does: an
+        // inherited `COMP_WORDBREAKS=xy` does not win (bash still reports its own
+        // default) but does leave the name exported (`declare -x`). The value is
+        // bash's own default, byte for byte.
+        self.put_var("COMP_WORDBREAKS".to_string(), b" \t\n\"'@><=;|&(:".to_vec());
         // BASH_ALIASES / BASH_CMDS: bash exposes the alias table and the
         // command-hash table as *live* associative arrays that are present even
         // when empty (`declare -A BASH_ALIASES=()`), reflect the current tables
@@ -33514,6 +33524,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("OPTERR=3+4; declare -p OPTERR").0, "declare -- OPTERR=\"3+4\"\n");
         // A scan still starts at 1 and leaves the index past the last option.
         assert_eq!(run("set -- -a -b x; while getopts ab o; do :; done; echo $OPTIND").0, "3\n");
+    }
+
+    #[test]
+    fn comp_wordbreaks_is_bound_from_startup() {
+        // bash's own default, byte for byte — the set readline breaks a
+        // completion word on, which a completion function expects to find bound
+        // (and often edits around a call).
+        assert_eq!(
+            run("declare -p COMP_WORDBREAKS").0,
+            "declare -- COMP_WORDBREAKS=$' \\t\\n\"\\'@><=;|&(:'\n"
+        );
+        assert_eq!(run("echo ${#COMP_WORDBREAKS}").0, "14\n");
+        // It is an ordinary variable: a completion function may change it, and
+        // the change stands (that is how `_get_comp_words_by_ref` works).
+        assert_eq!(
+            run("f() { COMP_WORDBREAKS=x; }; compgen -F f q 2>/dev/null; echo \"<$COMP_WORDBREAKS>\"").0,
+            "<x>\n"
+        );
     }
 
     /// `$SRANDOM` (bash 5.1+) is 32 bits from the system entropy source — a

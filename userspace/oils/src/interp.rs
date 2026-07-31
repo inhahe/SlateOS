@@ -1765,7 +1765,10 @@ impl HistRead {
 struct SourceFrame {
     /// The file name as written on the `.`/`source` command line — what bash
     /// puts in `BASH_SOURCE` and uses to label diagnostics from that file.
-    path: String,
+    ///
+    /// Bytes, not text: it is a path, and a SlateOS path may hold any byte but
+    /// `/` and NUL, so `. ./a\xffb` must keep naming the file it actually read.
+    path: Str,
     /// The line of the `.`/`source` command itself, in *its* caller's source.
     call_line: u32,
     /// `fn_stack.len()` at the moment this frame was pushed.
@@ -1895,14 +1898,18 @@ pub struct Shell {
     /// entry for that function's frames. Kept as a parallel map for the same
     /// reason as `func_redirects`: the many `self.funcs.get()` sites stay
     /// unchanged.
-    func_sources: HashMap<Str, String>,
+    func_sources: HashMap<Str, Str>,
     /// Redirections attached to a function *definition* (`f() { …; } >log`).
     /// bash applies these on every invocation of the function, wrapping the
     /// body execution. Kept as a parallel map (rather than folding into
     /// `funcs`) so the many `self.funcs.get()` sites stay unchanged.
     func_redirects: HashMap<Str, Vec<Redirect>>,
     positional: Vec<Str>,
-    name: String,
+    /// `$0` — the script path, or the pseudo-name `osh` for `-c` and stdin.
+    ///
+    /// Bytes, because a script path may hold any byte but `/` and NUL, and
+    /// because `BASH_ARGV0=` can set it to any shell word at all.
+    name: Str,
     /// The shell's working directory — absolute, `/`-separated, no trailing
     /// slash (see [`shell_path`]).
     ///
@@ -2367,7 +2374,7 @@ pub struct Shell {
     /// `BASH_SOURCE[i]` names the file `FUNCNAME[i]` came from, not the file it
     /// was called from, so a function defined in a sourced script keeps
     /// reporting that script even once the `source` has returned.
-    fn_source_stack: Vec<String>,
+    fn_source_stack: Vec<Str>,
     /// The `BASH_ARGC` stack (only populated under `shopt -s extdebug`).
     /// `bash_argc[0]` is the *innermost* frame's argument count, then outward.
     /// The base frame (index last) is the shell's own positional-parameter count,
@@ -2710,7 +2717,7 @@ impl Shell {
             func_sources: HashMap::new(),
             func_redirects: HashMap::new(),
             positional: Vec::new(),
-            name: "osh".to_string(),
+            name: b"osh".to_vec(),
             cwd: shell_cwd(),
             last_status: 0,
             comsub_count: 0,
@@ -2993,17 +3000,8 @@ impl Shell {
     /// The argument is bytes because `$0` is routinely a *path* — the script
     /// osh was handed — and a path may hold any byte but `/` and NUL.
     ///
-    /// Seam: `$0` doubles as the label every diagnostic carries (`Shell::name`
-    /// feeds `error_source`, which feeds all 275 `err_prefix` sites), and that
-    /// layer is still `String`-typed (TD-OILS-BYTE-STRINGS step 10), so a name
-    /// that is not text is stored approximated for now. The narrowing lives
-    /// here, at the one place that writes the field, so step 10 removes it by
-    /// changing this line alone.
     pub fn set_name(&mut self, name: BStr<'_>) {
-        #[allow(deprecated)]
-        {
-            self.name = bytes::scaffold_lossy_string(name);
-        }
+        self.name = name.to_vec();
     }
 
     /// Set the positional parameters (`$1`, `$2`, …).
@@ -3274,10 +3272,7 @@ impl Shell {
             return Ok(false);
         };
         self.source_stack.push(SourceFrame {
-            // Seam: the source-name / diagnostic layer is still `String`
-            // (TD-OILS-BYTE-STRINGS step 10).
-            #[allow(deprecated)]
-            path: bytes::scaffold_lossy_string(&path),
+            path: path.to_vec(),
             call_line: self.current_line,
             fn_depth: self.fn_stack.len(),
             startup: true,
@@ -3855,7 +3850,7 @@ impl Shell {
     /// line being executed). Otherwise identical to [`Shell::err_prefix`],
     /// including dropping the line number for an interactive shell.
     fn read_error_prefix(&self, line: u32) -> String {
-        let src = self.error_source();
+        let src = self.error_source_shown();
         if self.is_interactive() {
             format!("{src}: ")
         } else {
@@ -7269,16 +7264,7 @@ impl Shell {
                 // predictable append instead. See known-issues TD-OILS-MISSING-
                 // SPECIAL-ARRAYS.)
                 if a.index.is_none() && a.name == "BASH_ARGV0" {
-                    // TD-OILS-BYTE-STRINGS step 10: `$0` doubles as the label
-                    // the diagnostic layer prints (`osh: line 3: …`), which is
-                    // still `String`; the seam closes when that layer converts.
-                    #[allow(deprecated)]
-                    let val = bytes::scaffold_lossy_string(&val);
-                    self.name = if a.append {
-                        format!("{}{val}", self.name)
-                    } else {
-                        val
-                    };
+                    self.name = if a.append { bfmt![&self.name, &val] } else { val };
                     return true;
                 }
                 // `RANDOM=n` reseeds the generator; `SECONDS=n` rebases the
@@ -9840,13 +9826,13 @@ impl Shell {
     /// (`caller` uses a *different* sentinel — `NULL` — for the non-file cases;
     /// see `caller_source`.) A function defined while a `source` was in
     /// progress records that file instead; see `func_sources`.
-    fn frame_source(&self) -> String {
+    fn frame_source(&self) -> Str {
         if self.script_mode {
             self.name.clone()
         } else if self.command_mode {
-            "environment".to_string()
+            b"environment".to_vec()
         } else {
-            "main".to_string()
+            b"main".to_vec()
         }
     }
 
@@ -9854,7 +9840,7 @@ impl Shell {
     /// the base label when no `source` is active. This is bash's
     /// `${BASH_SOURCE[0]}` at the point of a *definition*, and the label it
     /// puts on diagnostics.
-    fn current_source(&self) -> String {
+    fn current_source(&self) -> Str {
         self.source_stack
             .last()
             .map_or_else(|| self.frame_source(), |f| f.path.clone())
@@ -9868,10 +9854,23 @@ impl Shell {
     ///
     /// This is exactly `${BASH_SOURCE[0]}` except for the no-frame case, where
     /// bash's array still carries the script's base frame.
-    fn error_source(&self) -> String {
+    fn error_source(&self) -> Str {
         self.merged_frames()
             .last()
             .map_or_else(|| self.name.clone(), |f| f.1.clone())
+    }
+
+    /// [`Shell::error_source`] as text, for the three prefix builders.
+    ///
+    /// Seam: the diagnostic layer below still assembles its prefixes with
+    /// `format!`, so the label has to be text to reach them. This is the *only*
+    /// narrowing left on the source-label path — every store and every other
+    /// reader (`$0`, `BASH_ARGV0`, `BASH_SOURCE`, `caller`) is byte-exact — and
+    /// it disappears when TD-OILS-BYTE-STRINGS step 10b turns `err_prefix`,
+    /// `read_error_prefix` and `syntax_error_prefix` into `Str`.
+    fn error_source_shown(&self) -> String {
+        #[allow(deprecated)]
+        bytes::scaffold_lossy_string(&self.error_source())
     }
 
     /// The merged call stack — function calls and `source` invocations
@@ -9882,10 +9881,10 @@ impl Shell {
     /// so each source frame's recorded `fn_depth` is enough to place it: it
     /// sits directly above function frame `fn_depth - 1`.
     ///
-    /// Each entry is `(FUNCNAME, BASH_SOURCE, BASH_LINENO)`. The name is bytes
-    /// (a function may be defined under any word); the source label is still
-    /// text (TD-OILS-BYTE-STRINGS step 10).
-    fn merged_frames(&self) -> Vec<(Str, String, u32)> {
+    /// Each entry is `(FUNCNAME, BASH_SOURCE, BASH_LINENO)`. Both the name and
+    /// the source label are bytes: a function may be defined under any word, and
+    /// a source label is a path.
+    fn merged_frames(&self) -> Vec<(Str, Str, u32)> {
         let mut out = Vec::with_capacity(self.fn_stack.len() + self.source_stack.len());
         let mut si = 0usize;
         for k in 0..=self.fn_stack.len() {
@@ -9945,7 +9944,7 @@ impl Shell {
     /// `BASH_SOURCE[i]` — the source label of frame `i`: a function's
     /// *definition* file, or a `source` frame's path. The script-mode base
     /// frame reports the script path.
-    fn bash_source_at(&self, i: usize) -> Option<String> {
+    fn bash_source_at(&self, i: usize) -> Option<Str> {
         let frames = self.merged_frames();
         let depth = frames.len();
         if i < depth {
@@ -9985,7 +9984,7 @@ impl Shell {
                 names.insert(idx, name);
             }
             linenos.insert(idx, line.to_string().into_bytes());
-            sources.insert(idx, src.into_bytes());
+            sources.insert(idx, src);
             idx = idx.saturating_add(1);
         }
         if self.script_mode {
@@ -9995,7 +9994,7 @@ impl Shell {
             }
             // BASH_SOURCE/BASH_LINENO always carry the script's own base frame.
             linenos.insert(idx, b"0".to_vec());
-            sources.insert(idx, self.name.clone().into_bytes());
+            sources.insert(idx, self.name.clone());
         }
         if names.is_empty() && linenos.is_empty() && sources.is_empty() {
             self.arrays.remove("FUNCNAME");
@@ -13632,11 +13631,11 @@ impl Shell {
             // with the first character of `$IFS` (unset ⇒ space, empty ⇒ none).
             "@" => Some(self.positional.join(b" ".as_slice())),
             "*" => Some(self.positional.join(self.star_sep().as_slice())),
-            "0" => Some(self.name.clone().into_bytes()),
+            "0" => Some(self.name.clone()),
             "-" => Some(self.option_flags().into_bytes()),
             // `$BASH_ARGV0` mirrors `$0`; assigning it sets `$0` (see the
             // assignment hook in `apply_assignment`).
-            "BASH_ARGV0" => Some(self.name.clone().into_bytes()),
+            "BASH_ARGV0" => Some(self.name.clone()),
             "BASHPID" => Some(self.pid.to_string().into_bytes()),
             "PPID" => Some(self.ppid.to_string().into_bytes()),
             "BASH_SUBSHELL" => Some(self.subshell_depth.to_string().into_bytes()),
@@ -13659,7 +13658,7 @@ impl Shell {
             _ => {
                 if let Ok(n) = name.parse::<usize>() {
                     if n == 0 {
-                        return Some(self.name.clone().into_bytes());
+                        return Some(self.name.clone());
                     }
                     return self.positional.get(n - 1).cloned();
                 }
@@ -17355,8 +17354,8 @@ impl Shell {
                 let Some(line) = self.bash_lineno_at(0) else {
                     return 1;
                 };
-                let src = self.bash_source_at(1).unwrap_or_else(|| "NULL".to_string());
-                self.write_bytes(out, redir, format!("{line} {src}\n").as_bytes())
+                let src = self.bash_source_at(1).unwrap_or_else(|| b"NULL".to_vec());
+                self.write_bytes(out, redir, &bfmt![line.to_string(), b" ", src, b"\n"])
             }
             Some(expr) => {
                 // A frame number is ASCII digits, so a word that is not text is
@@ -17377,7 +17376,7 @@ impl Shell {
                 else {
                     return 1;
                 };
-                let src = self.bash_source_at(n + 1).unwrap_or_else(|| "NULL".to_string());
+                let src = self.bash_source_at(n + 1).unwrap_or_else(|| b"NULL".to_vec());
                 let text = bfmt![line.to_string(), b" ", &func, b" ", src, b"\n"];
                 self.write_bytes(out, redir, &text)
             }
@@ -21985,7 +21984,7 @@ impl Shell {
                 } else {
                     if report_errors {
                         let msg =
-                            bfmt![self.name.as_str(), b": illegal option -- ", &opt.to_str()];
+                            bfmt![&self.name, b": illegal option -- ", &opt.to_str()];
                         self.berrln(&msg);
                     }
                     self.vars.remove("OPTARG");
@@ -22022,7 +22021,7 @@ impl Shell {
                     } else {
                         if report_errors {
                             let msg = bfmt![
-                                self.name.as_str(),
+                                &self.name,
                                 b": option requires an argument -- ",
                                 &opt.to_str()
                             ];
@@ -22838,13 +22837,7 @@ impl Shell {
                 // it. The path goes in as written on the command line, which is
                 // what bash reports.
                 self.source_stack.push(SourceFrame {
-                    // Seam: the source-name / diagnostic layer is still
-                    // `String` (TD-OILS-BYTE-STRINGS step 10). This is only the
-                    // *label* the frame carries — the file was opened from its
-                    // own bytes above — so an approximation here cannot reach
-                    // the wrong file.
-                    #[allow(deprecated)]
-                    path: bytes::scaffold_lossy_string(path),
+                    path: path.to_vec(),
                     call_line: self.current_line,
                     fn_depth: self.fn_stack.len(),
                     startup: false,
@@ -24407,7 +24400,7 @@ impl Shell {
         // `environment: line 1: x: readonly variable` under `-c`, as bash does,
         // and an error raised while a `source`d script is being read names that
         // script rather than the top-level one.
-        let src = self.error_source();
+        let src = self.error_source_shown();
         // bash shows the `line N:` token for every *non-interactive* input —
         // `-c`, a script file, *and* piped/redirected stdin — omitting it only
         // for a tty-attached interactive shell. `is_interactive()` folds all
@@ -24433,7 +24426,7 @@ impl Shell {
     /// only for the body's *own* read-eval loop, since an `eval`/`.` run inside
     /// it reports as itself. See [`Shell::comsub_read_eval`].
     fn syntax_error_prefix(&self, line: u32) -> String {
-        let name = self.error_source();
+        let name = self.error_source_shown();
         // `eval` wins over the outer `-c`/script token (bash reports `eval:`
         // even for an `eval` run from a script).
         // The `-c` token names the *input source* being reported, so it drops
@@ -35605,6 +35598,46 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `$0` and every label derived from it are bytes.
+    ///
+    /// A script path may hold any byte but `/` and NUL, and `BASH_ARGV0=`
+    /// accepts any shell word at all. `Shell::name`, `SourceFrame::path`,
+    /// `func_sources` and `fn_source_stack` were `String`, so such a name was
+    /// stored already mangled: `$0`, `${BASH_SOURCE[0]}` and `caller` all named
+    /// a file the user could not then open, which is the whole complaint of
+    /// TD-OILS-BYTE-STRINGS.
+    #[test]
+    fn the_shell_name_and_source_labels_hold_bytes_that_are_not_text() {
+        // `BASH_ARGV0=` sets `$0`; both read back byte for byte.
+        let (o, s) = run_raw("BASH_ARGV0=$'a\\xffb'; printf '%s|%s' \"$0\" \"$BASH_ARGV0\"");
+        assert_eq!(o, b"a\xffb|a\xffb");
+        assert_eq!(s, 0);
+        // `+=` appends to it rather than replacing (osh's deliberate divergence
+        // from bash's lazy-materialization quirk — see `apply_assignment`).
+        let (o, _) = run_raw("BASH_ARGV0=$'a\\xff'; BASH_ARGV0+=$'\\xfeb'; printf %s \"$0\"");
+        assert_eq!(o, b"a\xff\xfeb");
+
+        // A script whose *path* is not text labels its frames with those bytes:
+        // `$0`, `${BASH_SOURCE[0]}` read from inside a function (which reports
+        // where the function was *defined*), and `caller`'s source field all
+        // agree, and none of them goes through a decode.
+        let mut sh = Shell::new();
+        sh.set_name(b"/tmp/a\xffb.sh");
+        sh.set_script_mode();
+        sh.set_interactive_shell(false);
+        let buf = capture_sink();
+        let status = {
+            let mut out = Out::Capture(buf.clone());
+            sh.run_source_out(
+                b"f() { printf '%s|%s|' \"$0\" \"${BASH_SOURCE[0]}\"; caller 0; }\nf\n",
+                &mut out,
+                0,
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(take_capture(&buf), b"/tmp/a\xffb.sh|/tmp/a\xffb.sh|2 main /tmp/a\xffb.sh\n");
     }
 
     #[test]

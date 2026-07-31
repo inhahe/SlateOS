@@ -6294,13 +6294,32 @@ layer that only ever *displays* it. What remains can land one layer per commit:
      for the engine, and `interp::tests::cond_regex_matches_a_value_that_is_not_text`
      end-to-end. The latter reads its capture through `run_raw`, not `run` —
      `run` decodes lossily and would have hidden the very byte under test.
-10. The diagnostic layer (`errln`, `err_prefix`, `write_line`) — ~378 sites,
-    almost all `format!` with static text, so it wants a `berrln!` macro rather
-    than 378 hand edits. Closes what is left: `SourceFrame.path`, `BASH_SOURCE`
-    and `merged_frames`' source field, `Shell::set_name` / `$0` / `BASH_ARGV0`,
-    `arith_cmd`, `LexError.msg`, `unterminated_heredoc`, `ParseError.msg`,
-    `token_display`, and the two `shown()` helpers that concentrate the
-    remaining approximation into one named, auditable place.
+10. The diagnostic layer. Split in two, because the *data* it labels and the
+    *formatting* of the label are separable:
+
+   * **10a — the source-label island. Done 2026-07-30.** `Shell::name` (`$0`),
+     `SourceFrame::path`, `func_sources` and `fn_source_stack` all hold a path
+     or a shell word, so all four became `Str`, along with the five accessors
+     over them (`frame_source`, `current_source`, `error_source`,
+     `merged_frames`, `bash_source_at`). That makes `$0`, `BASH_ARGV0`
+     (including its `+=` form), `BASH_SOURCE`, `FUNCNAME`'s parallel source
+     array and `caller`'s source field byte-exact: a script at `/tmp/a\xffb.sh`
+     now *names* the file you can open, where before every one of those read
+     back a U+FFFD. Four seams removed (`set_name`, both `SourceFrame.path`
+     pushes, `BASH_ARGV0`); one added, `error_source_shown`, which is the single
+     narrowing the three still-`String` prefix builders share. Pinned by
+     `interp::tests::the_shell_name_and_source_labels_hold_bytes_that_are_not_text`.
+
+   * **10b — the prefix builders and their call sites.** `err_prefix` /
+     `err_prefix_at` (~285 sites), `read_error_prefix` and
+     `syntax_error_prefix` return `String` and are consumed almost entirely as
+     `self.errln(&format!("{}…", self.err_prefix()))`. Turning them into `Str`
+     means those sites become `berrln`/`bfmt!`, which wants a `berrln!` macro
+     rather than 285 hand edits. Removes `error_source_shown` and the
+     `interp.rs` / `parser.rs` `shown()` helpers.
+
+   * **10c — the parser's own text.** `LexError.msg`, `ParseError.msg`,
+     `token_display`, `unterminated_heredoc` (`lexer.rs:111`) and `arith_cmd`.
 
 **Gate.** The branch does not merge until `scaffold_lossy_string` is deleted and
 a grep for it outside `bytes.rs` returns nothing. That grep count *is* the
@@ -6326,7 +6345,10 @@ files): still **7** — its three seams were removed by deletion, not converted
 into scaffolded ones, so the count is flat while the loss of function is gone.
 After `ere.rs` (step 9, third of three files — **step 9 complete**): still
 **7**, for the same reason; its two `cond_regex` seams were deleted outright.
-Everything that reaches step 10 is now purely diagnostic.
+Everything that reaches step 10 is now purely diagnostic. After step 10a:
+**4** — `interp.rs:9873` `error_source_shown`, `interp.rs:26485` and
+`parser.rs:63` the two `shown` helpers, and `lexer.rs:111` the
+unterminated-here-document delimiter.
 
 **Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
 `TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts

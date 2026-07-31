@@ -4066,7 +4066,7 @@ modeling the completion-related shopts, which only makes sense once osh
 has a completion subsystem. Until then the honest state is "unset".
 </details>
 
-### TD-OILS-DECLARE-P-BULK-DYNAMICS. bulk `declare -p` (no names) omits the dynamic special variables — 2026-07-19 — OPEN (very low priority)
+### TD-OILS-DECLARE-P-BULK-DYNAMICS. bulk `declare -p` (no names) omits the dynamic special variables — 2026-07-19 — ✅ RESOLVED 2026-07-31
 
 **What:** `declare -p NAME` for a scalar dynamic special variable now
 matches bash (e.g. `declare -i BASHPID="12345"`, `declare -- LINENO="1"`
@@ -4094,6 +4094,57 @@ with their fixed attribute flags and "has a live value vs. attribute-only"
 status, and have the no-names branch of `declare_print` merge that table
 into the enumeration (skipping any that are shadowed by a real `self.vars`
 entry). Verify the union and ordering against `bash -c 'declare -p'`.
+
+**Fixed (2026-07-31):** as proposed, with a wider blast radius than the
+entry expected — the omission was not specific to `declare -p`. *Every*
+listing that walks the variable tables missed these names, so `declare -i`
+did not list `BASHPID`/`RANDOM`, `declare -a` did not list `BASH_SOURCE`,
+and `readonly -p` did not list `PPID`.
+
+The curated table is now the single source of truth for the whole family:
+`Shell::DYNAMIC_SPECIALS: &[DynamicSpecial]` in `interp.rs`, one row per
+variable carrying `named_flags` (the letters `declare -p NAME` prints),
+`listed_flags` (the letters a *listing* prints) and a `DynListing`
+(`Bare` / `EmptyArray` / `Live`) saying how the listed line ends. It
+replaces the old `DYNAMIC_SPECIAL_NAMES` name-only list, which fed
+`${!prefix*}` alone — the names and the attribute letters used to live
+apart, which is exactly why only one of them was ever wired in.
+
+Wiring: `declare_p_names` chains the table in (`dedup` folds away any name
+a real binding has since shadowed); `format_declare_def` split into
+`format_declare_def_stored` plus a named-form (`format_dynamic_special_declare`,
+live value) and a listed-form (`format_dynamic_special_listing`) tail;
+`listing_names` gained `listed_has_attr`, which reads the letters from the
+table for a dynamic name; `listing_kind_admits` counts a table row with
+`a` as an indexed array; `readonly -p` chains in
+`dynamic_special_names_with_attr('r')`.
+
+Every column is measured against bash 5.2, including two forms that look
+like bugs and are not: the listing prints *no* value (bash lists a
+variable's stored value, and a computed one has none), and `SECONDS` loses
+its `i` in a listing while keeping it for `declare -p SECONDS`. `PPID` is
+the one row that lists with a value, because in bash it is an ordinary
+binding made once at startup rather than a computed variable.
+
+Result: the `declare -p` name set went from **21 names missing** vs. bash
+to **9**, none of them modelled by osh at all (`BASH_ARGC`/`BASH_ARGV` —
+extdebug-only here; `BASH_LOADABLES_PATH`, `COMP_WORDBREAKS`, `OPTERR`,
+`OPTIND`, `SRANDOM`; `GROUPS`, tracked under
+TD-OILS-MISSING-SPECIAL-ARRAYS; and `FUNCNAME`, which bash lists bare at
+the top level and osh lists correctly inside a function). Zero names are
+osh-only. Deliberately not faked: a name that lists but does not expand
+would be a worse lie than an absent one. Test:
+`listings_report_dynamic_special_variables`.
+
+**Not replicated (a bash implementation artifact, deliberately):** bash's
+listing prints a *stale cache*. Reading or assigning a dynamic variable
+writes the value back into the variable struct, so `x=$SECONDS; declare -p`
+prints `declare -i SECONDS="0"` — the value from the read, frozen, and
+with an `i` the untouched form does not show — and `RANDOM=7; echo $RANDOM;
+declare -p` lists the last number generated, not the seed. Reproducing
+that would mean caching every computed value purely so a listing can print
+a stale one. osh always lists the untouched (startup) form, which is what
+bash shows for a script that has not touched the variable.
 
 ### TD-OILS-COPROC. `osh` does not implement `coproc` — RESOLVED 2026-07-19
 

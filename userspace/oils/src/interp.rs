@@ -1810,6 +1810,46 @@ struct SetOpts {
     pipefail: bool,
 }
 
+/// One **dynamic special variable** — a name the shell answers by computing a
+/// value on demand (`RANDOM`, `LINENO`, `BASHPID`, …) rather than by storing one
+/// in [`Shell::vars`].
+///
+/// Because there is no stored entry, every path that walks the variable tables
+/// would miss these names: `declare -p`, the flag-filtered listings
+/// (`declare -i`, `declare -a`, `readonly -p`) and `${!prefix*}` all have to
+/// consult [`Shell::DYNAMIC_SPECIALS`] as well. Holding all the facts in one
+/// table is deliberate — the name list and the attribute letters used to live
+/// apart, and only the name list was ever wired into the listings.
+struct DynamicSpecial {
+    name: &'static str,
+    /// Attribute letters (no leading `-`) that `declare -p NAME` reports.
+    named_flags: &'static str,
+    /// Attribute letters a *listing* reports. Almost always the same as
+    /// `named_flags`; `SECONDS` is the measured exception — bash prints
+    /// `declare -i SECONDS="0"` for the name but `declare -- SECONDS` in the
+    /// bulk listing.
+    listed_flags: &'static str,
+    /// What follows the name in a listing.
+    listed: DynListing,
+}
+
+/// How a [`DynamicSpecial`]'s line ends in a listing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DynListing {
+    /// Nothing at all — `declare -i RANDOM`. A listing prints the value bash
+    /// has *stored*, and a computed variable has none until something assigns
+    /// it, so the name lists bare even though `declare -p RANDOM` prints a live
+    /// value.
+    Bare,
+    /// `=()`. The call-stack arrays are always present, and empty outside a
+    /// function: `declare -a BASH_SOURCE=()`.
+    EmptyArray,
+    /// The live value, exactly as the named form prints it. `PPID` is an
+    /// ordinary variable bash binds once at startup rather than a computed one,
+    /// so its stored value is there for the listing to print.
+    Live,
+}
+
 /// Which command(s) a programmable-completion spec applies to (see
 /// [`Shell::comp_specs`]). `Name` is an ordinary command name; the three
 /// specials mirror bash's `complete -D` (default, applied when no other spec
@@ -9118,29 +9158,80 @@ impl Shell {
         }
     }
 
-    /// Special variables that bash always reports from `${!prefix*}` but that
-    /// osh computes on demand (in `param_value`) or only materialises in a
-    /// narrower context than bash. The prefix listing must name them explicitly
-    /// so it matches bash. `BASH_SOURCE`/`BASH_LINENO` are call-stack arrays
-    /// that bash keeps present (possibly empty) at every level; osh only stores
-    /// them in `arrays` while inside a function/script, so they are listed here
-    /// too to match bash at the top level. `FUNCNAME` is deliberately *absent*:
-    /// bash does not list it outside a function, and osh's in-function
-    /// `arrays` entry is picked up there, so it appears only where bash lists it.
-    const DYNAMIC_SPECIAL_NAMES: &'static [&'static str] = &[
-        "BASHPID",
-        "BASH_ARGV0",
-        "BASH_LINENO",
-        "BASH_SOURCE",
-        "BASH_SUBSHELL",
-        "HISTCMD",
-        "LINENO",
-        "PPID",
-        "RANDOM",
-        "SECONDS",
-        "EPOCHSECONDS",
-        "EPOCHREALTIME",
+    /// Special variables that bash always reports — from `${!prefix*}`, from
+    /// `declare -p` and from the flag-filtered listings — but that osh computes
+    /// on demand (in `param_value`) or only materialises in a narrower context
+    /// than bash. Every listing that walks the variable tables must merge this
+    /// table in to match bash; see [`DynamicSpecial`].
+    ///
+    /// `BASH_SOURCE`/`BASH_LINENO` are call-stack arrays that bash keeps present
+    /// (possibly empty) at every level; osh only stores them in `arrays` while
+    /// inside a function/script, so they are listed here too to match bash at
+    /// the top level. `FUNCNAME` is deliberately *absent*: bash does not list it
+    /// outside a function, and osh's in-function `arrays` entry is picked up
+    /// there, so it appears only where bash lists it.
+    ///
+    /// Both flag columns and the listing form are measured against bash 5.2
+    /// (`declare -p`, `declare -p NAME`, `declare -i`, `declare -a`,
+    /// `readonly -p`). Names bash reports that osh does not model at all
+    /// (`SRANDOM`, `COMP_WORDBREAKS`, `OPTERR`, `BASH_LOADABLES_PATH`, and
+    /// `GROUPS` — see known-issues.md) are left out rather than faked: a name
+    /// that lists but does not expand would be a worse lie than an absent one.
+    const DYNAMIC_SPECIALS: &'static [DynamicSpecial] = &[
+        DynamicSpecial { name: "BASHPID", named_flags: "i", listed_flags: "i", listed: DynListing::Bare },
+        DynamicSpecial { name: "BASH_ARGV0", named_flags: "", listed_flags: "", listed: DynListing::Bare },
+        DynamicSpecial { name: "BASH_LINENO", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray },
+        DynamicSpecial { name: "BASH_SOURCE", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray },
+        DynamicSpecial { name: "BASH_SUBSHELL", named_flags: "", listed_flags: "", listed: DynListing::Bare },
+        DynamicSpecial { name: "HISTCMD", named_flags: "i", listed_flags: "i", listed: DynListing::Bare },
+        DynamicSpecial { name: "LINENO", named_flags: "", listed_flags: "", listed: DynListing::Bare },
+        // `$PPID` is a readonly integer, and a real binding rather than a
+        // computed one, so it is the one entry a listing prints with a value.
+        DynamicSpecial { name: "PPID", named_flags: "ir", listed_flags: "ir", listed: DynListing::Live },
+        DynamicSpecial { name: "RANDOM", named_flags: "i", listed_flags: "i", listed: DynListing::Bare },
+        // Measured: `SECONDS` loses its `i` in a listing but keeps it for
+        // `declare -p SECONDS`.
+        DynamicSpecial { name: "SECONDS", named_flags: "i", listed_flags: "", listed: DynListing::Bare },
+        DynamicSpecial { name: "EPOCHSECONDS", named_flags: "", listed_flags: "", listed: DynListing::Bare },
+        DynamicSpecial { name: "EPOCHREALTIME", named_flags: "", listed_flags: "", listed: DynListing::Bare },
     ];
+
+    /// The table entry for `name`, or `None` if it is not a dynamic special.
+    fn dynamic_special(name: &str) -> Option<&'static DynamicSpecial> {
+        Self::DYNAMIC_SPECIALS.iter().find(|d| d.name == name)
+    }
+
+    /// The table entry a *listing* should use for `name`: `None` when the name
+    /// is not a dynamic special, and also when a real binding shadows it —
+    /// after `RANDOM=7` the name is an ordinary variable and must list with its
+    /// own value and attributes, not the table's.
+    fn dynamic_special_listed(&self, name: &str) -> Option<&'static DynamicSpecial> {
+        if self.has_stored_binding(name) {
+            return None;
+        }
+        Self::dynamic_special(name)
+    }
+
+    /// The dynamic special variables carrying attribute letter `c`, for a
+    /// listing that enumerates a set of names (`readonly -p`) instead of
+    /// filtering [`Shell::declare_p_names`].
+    fn dynamic_special_names_with_attr(&self, c: char) -> Vec<String> {
+        Self::DYNAMIC_SPECIALS
+            .iter()
+            .filter(|d| d.listed_flags.contains(c) && self.dynamic_special_listed(d.name).is_some())
+            .map(|d| d.name.to_string())
+            .collect()
+    }
+
+    /// Whether `name` has an entry in the variable tables — set as a scalar or
+    /// either kind of array, or merely declared (see [`Shell::declared`]) — as
+    /// opposed to being answered dynamically or not existing at all.
+    fn has_stored_binding(&self, name: &str) -> bool {
+        self.vars.contains_key(name)
+            || self.arrays.contains_key(name)
+            || self.assoc.contains_key(name)
+            || self.declared.contains(name)
+    }
 
     /// `${!prefix*}` / `${!prefix@}` — the names of all set variables (scalars,
     /// indexed arrays, associative arrays) whose name begins with `prefix`,
@@ -9152,7 +9243,7 @@ impl Shell {
             .chain(self.arrays.keys())
             .chain(self.assoc.keys())
             .map(String::as_str)
-            .chain(Self::DYNAMIC_SPECIAL_NAMES.iter().copied())
+            .chain(Self::DYNAMIC_SPECIALS.iter().map(|d| d.name))
             .filter(|k| k.starts_with(prefix))
             .map(str::to_string)
             .collect();
@@ -19520,9 +19611,9 @@ impl Shell {
         names.dedup();
         let mut listing = Str::new();
         for name in &names {
-            if let Some(def) = self.format_declare_def(name) {
-                // `format_declare_def` already folds in the `x` (and any other)
-                // attribute flags for a set variable.
+            if let Some(def) = self.format_declare_def_listed(name) {
+                // `format_declare_def_listed` already folds in the `x` (and any
+                // other) attribute flags for a set variable.
                 listing.extend_from_slice(&def);
                 listing.push(b'\n');
             } else {
@@ -19749,24 +19840,32 @@ impl Shell {
     /// attribute letter keeps everything the restriction admits.
     fn listing_names(&self, want: &[char]) -> Vec<String> {
         let attrs: Vec<char> = want.iter().copied().filter(|c| !matches!(c, 'a' | 'A')).collect();
-        let has_attr = |sh: &Shell, name: &str| {
-            attrs.iter().any(|&c| match c {
-                'i' => sh.integer_attr.contains(name),
-                'x' => sh.exported.contains(name),
-                'r' => sh.readonly.contains(name),
-                'n' => sh.nameref_attr.contains(name),
-                't' => sh.trace_attr.contains(name),
-                'l' => sh.lower_attr.contains(name),
-                'u' => sh.upper_attr.contains(name),
-                'c' => sh.capcase_attr.contains(name),
-                _ => false,
-            })
-        };
         self.declare_p_names()
             .into_iter()
             .filter(|n| self.listing_kind_admits(n, want))
-            .filter(|n| attrs.is_empty() || has_attr(self, n))
+            .filter(|n| attrs.is_empty() || attrs.iter().any(|&c| self.listed_has_attr(n, c)))
             .collect()
+    }
+
+    /// Whether `name` carries attribute letter `c`, as a listing sees it. A
+    /// dynamic special variable has no entry in the attribute sets, so its
+    /// letters come from [`Shell::DYNAMIC_SPECIALS`] instead — that is what puts
+    /// `PPID` in `declare -r` and `BASHPID` in `declare -i`, as in bash.
+    fn listed_has_attr(&self, name: &str, c: char) -> bool {
+        if let Some(d) = self.dynamic_special_listed(name) {
+            return d.listed_flags.contains(c);
+        }
+        match c {
+            'i' => self.integer_attr.contains(name),
+            'x' => self.exported.contains(name),
+            'r' => self.readonly.contains(name),
+            'n' => self.nameref_attr.contains(name),
+            't' => self.trace_attr.contains(name),
+            'l' => self.lower_attr.contains(name),
+            'u' => self.upper_attr.contains(name),
+            'c' => self.capcase_attr.contains(name),
+            _ => false,
+        }
     }
 
     /// Whether the `a`/`A` **type restrictions** among `want` admit `name`.
@@ -19777,8 +19876,12 @@ impl Shell {
     /// that takes these flags — `declare`, `export` and `readonly` — because in
     /// bash they are one code path and must not drift apart.
     fn listing_kind_admits(&self, name: &str, want: &[char]) -> bool {
-        (!want.contains(&'a') || self.arrays.contains_key(name))
-            && (!want.contains(&'A') || self.assoc.contains_key(name))
+        // A dynamic special variable's kind comes from the table: the call-stack
+        // arrays are indexed arrays for `declare -a` even at the top level,
+        // where osh has no `arrays` entry for them.
+        let indexed = self.arrays.contains_key(name)
+            || self.dynamic_special_listed(name).is_some_and(|d| d.listed_flags.contains('a'));
+        (!want.contains(&'a') || indexed) && (!want.contains(&'A') || self.assoc.contains_key(name))
     }
 
     /// The attribute letters a listing call's leading flag words select, in
@@ -19811,7 +19914,7 @@ impl Shell {
         let names = self.listing_names(&want);
         let mut listing = Str::new();
         for name in &names {
-            if let Some(def) = self.format_declare_def(name) {
+            if let Some(def) = self.format_declare_def_listed(name) {
                 listing.extend_from_slice(&def);
                 listing.push(b'\n');
             }
@@ -19831,6 +19934,10 @@ impl Shell {
             .chain(self.assoc.keys())
             .chain(self.declared.iter())
             .cloned()
+            // …plus the dynamic special variables, which bash reports even
+            // though they have no entry in any of those tables. `dedup` below
+            // folds away any that a real binding has since shadowed.
+            .chain(Self::DYNAMIC_SPECIALS.iter().map(|d| d.name.to_string()))
             .collect();
         all.sort();
         all.dedup();
@@ -19846,7 +19953,7 @@ impl Shell {
             // Nothing here can fail, so the whole table is one write.
             let mut listing = Str::new();
             for name in self.declare_p_names() {
-                if let Some(def) = self.format_declare_def(&name) {
+                if let Some(def) = self.format_declare_def_listed(&name) {
                     listing.extend_from_slice(&def);
                     listing.push(b'\n');
                 }
@@ -19884,11 +19991,45 @@ impl Shell {
     /// Build the `declare` attribute-flag *group* for `name` — the letters from
     /// [`Shell::attr_flag_letters`] behind a `-`, or `--` when there are none.
     fn declare_attr_flags(&self, name: &str) -> String {
-        let s = self.attr_flag_letters(name);
-        if s.is_empty() { "--".to_string() } else { format!("-{s}") }
+        Self::flag_group(&self.attr_flag_letters(name))
+    }
+
+    /// The flag group a `declare` line carries: the attribute letters behind a
+    /// `-`, or `--` when there are none.
+    fn flag_group(letters: &str) -> String {
+        if letters.is_empty() { "--".to_string() } else { format!("-{letters}") }
+    }
+
+    /// One `declare` line: `declare <flags> NAME<tail>`, where `tail` is empty,
+    /// `=value` or `=(…)`.
+    fn declare_line(letters: &str, name: &str, tail: &[u8]) -> Str {
+        bfmt![b"declare ", Self::flag_group(letters), b" ", name, tail]
     }
 
     fn format_declare_def(&self, name: &str) -> Option<Str> {
+        // Dynamic special variables (`BASHPID`, `RANDOM`, …) have no entry in
+        // the variable tables but still answer `declare -p NAME` in bash, which
+        // prints the *live* value with the variable's fixed attributes. So
+        // `declare -p BASH_SUBSHELL` reports it rather than "not found", just as
+        // `$BASH_SUBSHELL` expands rather than being empty.
+        self.format_declare_def_stored(name)
+            .or_else(|| self.format_dynamic_special_declare(name))
+    }
+
+    /// As [`Shell::format_declare_def`], but for a *listing* — bare `declare -p`
+    /// and the flag-filtered forms. The two differ only on dynamic special
+    /// variables, which a listing reports from bash's stored (usually absent)
+    /// value rather than by computing one: `declare -p RANDOM` prints
+    /// `declare -i RANDOM="12365"` but `declare -p` lists a bare
+    /// `declare -i RANDOM`.
+    fn format_declare_def_listed(&self, name: &str) -> Option<Str> {
+        self.format_declare_def_stored(name)
+            .or_else(|| self.format_dynamic_special_listing(name))
+    }
+
+    /// The part of a `declare -p` line that comes from the variable tables, or
+    /// `None` if `name` has no entry in them.
+    fn format_declare_def_stored(&self, name: &str) -> Option<Str> {
         if self.assoc.contains_key(name) || self.arrays.contains_key(name) || self.vars.contains_key(name)
         {
             return self
@@ -19902,29 +20043,33 @@ impl Shell {
             // [`Shell::declared`].
             return Some(bfmt![b"declare ", self.declare_attr_flags(name), b" ", name]);
         }
-        // Scalar dynamic special variables (`BASHPID`, `RANDOM`, …) have no
-        // entry in `self.vars` but still respond to `declare -p NAME` in bash —
-        // it prints the live value with the variable's fixed attributes. Match
-        // that so `declare -p BASH_SUBSHELL` no longer reports "not found" while
-        // `$BASH_SUBSHELL` expands fine. (The attribute-only bulk `declare -p`
-        // listing of these is a separate, lower-value gap — see known-issues.md.)
-        self.format_scalar_dynamic_declare(name)
+        None
     }
 
-    /// `declare -p` line for a scalar dynamic special variable (integer-typed
-    /// counters like `BASHPID`/`RANDOM`/`SECONDS` print with `-i`; the rest with
-    /// `--`), or `None` if `name` is not one of them. Values are read live via
-    /// [`Self::param_value`].
-    fn format_scalar_dynamic_declare(&self, name: &str) -> Option<Str> {
-        let flags = match name {
-            // `$PPID` is a readonly integer in bash (`declare -ir`).
-            "PPID" => "-ir",
-            "BASHPID" | "HISTCMD" | "RANDOM" | "SECONDS" => "-i",
-            "BASH_ARGV0" | "BASH_SUBSHELL" | "LINENO" | "EPOCHSECONDS" | "EPOCHREALTIME" => "--",
-            _ => return None,
-        };
+    /// `declare -p NAME` line for a dynamic special variable, or `None` if
+    /// `name` is not one. The value is read live via [`Self::param_value`],
+    /// because bash's named form calls the variable's own getter.
+    fn format_dynamic_special_declare(&self, name: &str) -> Option<Str> {
+        let d = Self::dynamic_special(name)?;
+        if d.listed == DynListing::EmptyArray {
+            // A call-stack array has no scalar value to read, and outside a
+            // function bash prints it as the empty array either way.
+            return Some(Self::declare_line(d.named_flags, name, b"=()"));
+        }
         let val = self.param_value(name)?;
-        Some(bfmt![b"declare ", flags, b" ", name, b"=\"", &val, b"\""])
+        Some(Self::declare_line(d.named_flags, name, &bfmt![b"=\"", &val, b"\""]))
+    }
+
+    /// The line a listing prints for a dynamic special variable, or `None` if
+    /// `name` is not one (or is shadowed by a real binding). See
+    /// [`DynListing`] for why most of them list without a value.
+    fn format_dynamic_special_listing(&self, name: &str) -> Option<Str> {
+        let d = self.dynamic_special_listed(name)?;
+        match d.listed {
+            DynListing::Bare => Some(Self::declare_line(d.listed_flags, name, b"")),
+            DynListing::EmptyArray => Some(Self::declare_line(d.listed_flags, name, b"=()")),
+            DynListing::Live => self.format_dynamic_special_declare(name),
+        }
     }
 
     /// Format a variable as a re-inputtable `name=value` / `name=([i]="v" …)`
@@ -21110,16 +21255,21 @@ impl Shell {
             let mut ro: Vec<String> = self
                 .readonly
                 .iter()
-                .filter(|n| self.listing_kind_admits(n, &want))
                 .cloned()
+                // `PPID` is readonly in bash without having an entry in the
+                // variable tables, so `readonly -p` has to reach the dynamic
+                // table for it exactly as `declare -r` does.
+                .chain(self.dynamic_special_names_with_attr('r'))
+                .filter(|n| self.listing_kind_admits(n, &want))
                 .collect();
             ro.sort();
+            ro.dedup();
             let mut listing = Str::new();
             for name in &ro {
                 // bash's `readonly -p` reuses `declare -p` formatting: scalars
                 // as `declare -r name="value"`, arrays as `declare -ar name=(…)`,
                 // and a valueless readonly as a bare `declare -r name`.
-                match self.format_declare_def(name) {
+                match self.format_declare_def_listed(name) {
                     Some(def) => {
                         listing.extend_from_slice(&def);
                         listing.push(b'\n');
@@ -33074,6 +33224,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("declare -p NoSuchVar_xyz").1, 1);
     }
 
+    /// The *listing* forms — bare `declare -p`, the flag-filtered `declare -i`
+    /// and `declare -a`, and `readonly -p` — report the dynamic special
+    /// variables too. Their listing shape is not the named one: bash's listing
+    /// prints the value it has *stored*, and a computed variable has none, so
+    /// the name lists with its attributes and nothing else. osh used to omit
+    /// these names from every listing, so `declare -p` was missing 21 of the
+    /// names bash prints.
+    #[test]
+    fn listings_report_dynamic_special_variables() {
+        let lines = |src: &str| run(src).0.lines().map(str::to_string).collect::<Vec<String>>();
+        let has = |v: &[String], s: &str| v.iter().any(|l| l == s);
+
+        let all = lines("declare -p");
+        assert!(has(&all, "declare -i RANDOM"), "got {all:?}");
+        assert!(has(&all, "declare -i BASHPID"), "got {all:?}");
+        assert!(has(&all, "declare -- LINENO"), "got {all:?}");
+        assert!(has(&all, "declare -- BASH_SUBSHELL"), "got {all:?}");
+        assert!(has(&all, "declare -a BASH_SOURCE=()"), "got {all:?}");
+        // `SECONDS` keeps its `-i` for `declare -p SECONDS` but loses it in a
+        // listing — measured against bash 5.2, not a guess.
+        assert!(has(&all, "declare -- SECONDS"), "got {all:?}");
+        // `PPID` is a real binding rather than a computed one, so it is the one
+        // entry that lists *with* a value; only its shape is fixed.
+        assert!(all.iter().any(|l| l.starts_with("declare -ir PPID=\"")), "got {all:?}");
+
+        // The flag-filtered listings select on the same attributes.
+        let ints = lines("declare -i");
+        assert!(has(&ints, "declare -i BASHPID"), "got {ints:?}");
+        assert!(has(&ints, "declare -i RANDOM"), "got {ints:?}");
+        assert!(!ints.iter().any(|l| l.contains("SECONDS")), "got {ints:?}");
+        let arrays = lines("declare -a");
+        assert!(has(&arrays, "declare -a BASH_SOURCE=()"), "got {arrays:?}");
+        assert!(has(&arrays, "declare -a BASH_LINENO=()"), "got {arrays:?}");
+        let ro = lines("readonly -p");
+        assert!(ro.iter().any(|l| l.starts_with("declare -ir PPID=\"")), "got {ro:?}");
+        // …and a dynamic special without the letter stays out of that listing.
+        assert!(!ro.iter().any(|l| l.contains("RANDOM")), "got {ro:?}");
+
+        // A real binding shadows the table rather than doubling it: inside a
+        // function `BASH_SOURCE` has a live entry, and the listing prints that.
+        let inner = lines("f(){ declare -p; }; f");
+        assert_eq!(inner.iter().filter(|l| l.contains(" BASH_SOURCE")).count(), 1, "got {inner:?}");
+        assert!(!has(&inner, "declare -a BASH_SOURCE=()"), "got {inner:?}");
+    }
+
     #[test]
     fn bash_argv0_sets_dollar_zero() {
         // `BASH_ARGV0=name` sets `$0`; reading `$BASH_ARGV0` reflects the
@@ -43363,27 +43558,40 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
              declare -A m=([x]=\"1\" )\ndeclare -A n=([y]=\"2\" )\n"
         );
 
+        // `PPID` lists with the real parent pid, so it is normalised away before
+        // the listings below are compared literally.
+        let hide_ppid = |o: String| {
+            o.lines()
+                .map(|l| if l.starts_with("declare -ir PPID=") { "declare -ir PPID" } else { l })
+                .collect::<Vec<&str>>()
+                .join("\n")
+        };
+
         // `declare -i` lists all integer-attributed variables. Besides the
-        // user's `k`/`k2`, this now includes the always-present readonly-integer
-        // identity vars `EUID`/`UID` (seeded as real `declare -ir` vars, exactly
-        // as bash lists them ahead of user integers in sort order).
+        // user's `k`/`k2`, this includes the always-present readonly-integer
+        // identity vars `EUID`/`UID` (seeded as real `declare -ir` vars) and the
+        // integer dynamic specials, which have no entry in the variable tables
+        // but which bash lists all the same — all ahead of the user's integers
+        // in sort order, exactly as bash lists them.
         let (o2, _) = run("declare -i k=5; s=hi; declare -i k2=9; declare -i");
         assert_eq!(
-            o2,
-            "declare -ir EUID=\"0\"\ndeclare -ir UID=\"0\"\n\
-             declare -i k=\"5\"\ndeclare -i k2=\"9\"\n"
+            hide_ppid(o2),
+            "declare -i BASHPID\ndeclare -ir EUID=\"0\"\ndeclare -i HISTCMD\n\
+             declare -ir PPID\ndeclare -i RANDOM\ndeclare -ir UID=\"0\"\n\
+             declare -i k=\"5\"\ndeclare -i k2=\"9\""
         );
 
         // Union semantics: `declare -il` lists variables that are integer OR
         // lowercase-attributed (bash), each shown with its full attribute set.
-        // EUID/UID (integer) are included for the same reason as above; the
-        // `-il` (not `-ir`) union still excludes non-integer internal readonly
-        // vars like BASH_VERSINFO.
+        // EUID/UID and the integer dynamics are included for the same reason as
+        // above; the `-il` (not `-ir`) union still excludes non-integer internal
+        // readonly vars like BASH_VERSINFO.
         let (o3, _) = run("declare -i ii=1; declare -l low=HELLO; plain=3; declare -il");
         assert_eq!(
-            o3,
-            "declare -ir EUID=\"0\"\ndeclare -ir UID=\"0\"\n\
-             declare -i ii=\"1\"\ndeclare -l low=\"hello\"\n"
+            hide_ppid(o3),
+            "declare -i BASHPID\ndeclare -ir EUID=\"0\"\ndeclare -i HISTCMD\n\
+             declare -ir PPID\ndeclare -i RANDOM\ndeclare -ir UID=\"0\"\n\
+             declare -i ii=\"1\"\ndeclare -l low=\"hello\""
         );
 
         // A declaration *with* a name operand still declares (not a listing).

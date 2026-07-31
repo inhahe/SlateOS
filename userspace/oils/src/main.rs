@@ -26,6 +26,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::process;
 
+use osh::bytes::{self, BStr, Str};
 use osh::{Shell, StartupFiles};
 
 const VERSION: &str = concat!("osh (Oils for SlateOS) ", env!("CARGO_PKG_VERSION"));
@@ -70,11 +71,29 @@ enum InvokeMode {
 /// returns one of these, rather than running anything itself.
 enum Plan<'a> {
     /// `-c`: the command string to run.
-    Command(&'a str),
+    Command(BStr<'a>),
     /// A named script file, not yet opened.
-    Script(&'a str),
+    Script(BStr<'a>),
     /// Read commands from stdin (the REPL, `-s`, or a bare `-`).
     Repl,
+}
+
+/// Write one diagnostic line to stderr, assembled from byte fragments.
+///
+/// The words a startup diagnostic quotes come from argv, and argv is bytes, so
+/// the message is built and written as bytes: a token that is not text is
+/// reported verbatim. `eprintln!` cannot do that — it needs a `String`, and the
+/// only way to get one here is a lossy conversion that would print a *different*
+/// token than the user typed.
+fn ediag(parts: &[BStr<'_>]) {
+    let mut buf = Str::new();
+    for p in parts {
+        buf.extend_from_slice(p);
+    }
+    buf.push(b'\n');
+    // Nothing useful remains to be done if stderr itself is gone; the exit
+    // status still carries the failure to the caller.
+    let _ = io::stderr().write_all(&buf);
 }
 
 /// One recognised GNU-style long option, after its leading dashes are stripped.
@@ -137,8 +156,8 @@ struct LongOptions {
     verbose: bool,
     no_profile: bool,
     no_rc: bool,
-    /// The argument of the last `--rcfile`/`--init-file`.
-    rc_file: Option<String>,
+    /// The argument of the last `--rcfile`/`--init-file`. Bytes: it is a path.
+    rc_file: Option<Str>,
 }
 
 /// bash's `parse_long_options` (`shell.c`): a first pass over the command line
@@ -164,19 +183,22 @@ struct LongOptions {
 /// * `--help`/`--version` are recorded, not acted on: bash finishes the pass
 ///   first, so `osh --version --bogus` still reports the bad option, while `osh
 ///   --version -q` prints the version and never reaches the letter loop.
-fn parse_long_options(args: &[String], opts: &mut LongOptions) -> Result<usize, i32> {
+fn parse_long_options(args: &[Str], opts: &mut LongOptions) -> Result<usize, i32> {
     let mut i = 1;
     while let Some(arg) = args.get(i) {
-        if !arg.starts_with('-') {
+        if !arg.starts_with(b"-") {
             break;
         }
         // `--name` matches `name`, and so does `-name`. `--` and `-` have an
         // empty tail, which matches nothing.
-        let two_dash = arg.starts_with("--") && arg.len() > 2;
-        let name = if two_dash { &arg[2..] } else { &arg[1..] };
-        let Some(opt) = LongOpt::lookup(name) else {
+        let two_dash = arg.starts_with(b"--") && arg.len() > 2;
+        let name: BStr<'_> = if two_dash { &arg[2..] } else { &arg[1..] };
+        // An option name is text by construction — the table holds only ASCII
+        // spellings — so a tail that does not decode simply matches no entry,
+        // which is the same answer the lookup gives for `--bogus`.
+        let Some(opt) = bytes::as_str(name).and_then(LongOpt::lookup) else {
             if two_dash {
-                eprintln!("osh: {arg}: invalid option");
+                ediag(&[b"osh: ", arg, b": invalid option"]);
                 eprint_option_usage();
                 return Err(2);
             }
@@ -185,7 +207,7 @@ fn parse_long_options(args: &[String], opts: &mut LongOptions) -> Result<usize, 
         let mut value = None;
         if opt.takes_arg() {
             let Some(v) = args.get(i + 1) else {
-                eprintln!("osh: {name}: option requires an argument");
+                ediag(&[b"osh: ", name, b": option requires an argument"]);
                 return Err(2);
             };
             value = Some(v.clone());
@@ -206,8 +228,20 @@ fn parse_long_options(args: &[String], opts: &mut LongOptions) -> Result<usize, 
     Ok(i)
 }
 
+/// This process's argument vector, as bytes.
+///
+/// `args_os`, not `args`: `std::env::args()` **panics** on an argument that is
+/// not valid UTF-8, so a shell built on it dies before it starts when handed a
+/// SlateOS filename containing an arbitrary byte — `osh -c 'cat "$1"' -- <name>`
+/// would abort rather than run. Reading the OS strings and widening them keeps
+/// every argument intact all the way to `$1` (see known-issues
+/// TD-OILS-ARGV-PANICS-ON-NON-UTF8).
+fn os_argv() -> Vec<Str> {
+    std::env::args_os().map(|a| bytes::os_to_bytes(&a)).collect()
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let args = os_argv();
     // Run the shell on a dedicated large-stack thread (see `INTERP_STACK_SIZE`).
     // If the thread cannot be spawned, fall back to running directly on the
     // main thread — a smaller stack, but still functional for shallow use.
@@ -221,25 +255,19 @@ fn main() {
         }),
         Err(e) => {
             eprintln!("osh: warning: could not allocate interpreter stack ({e}); running with default stack");
-            let args: Vec<String> = std::env::args().collect();
-            run(&args)
+            run(&os_argv())
         }
     };
     process::exit(code);
 }
 
-/// The operands trailing the shell's own options, as the byte-typed positional
-/// parameters the shell stores.
-///
-/// A positional parameter is a *value* — routinely a path — so the shell holds
-/// it as bytes. The widening is lossless; what is still narrow is the argv this
-/// process was handed, read through `std::env::args()`
-/// (TD-OILS-BYTE-STRINGS step 9 moves that to `args_os`).
-fn positional_args(args: Option<&[String]>) -> Vec<Vec<u8>> {
-    args.unwrap_or_default().iter().map(|a| a.clone().into_bytes()).collect()
+/// The operands trailing the shell's own options, as the positional parameters
+/// the shell stores.
+fn positional_args(args: Option<&[Str]>) -> Vec<Str> {
+    args.unwrap_or_default().to_vec()
 }
 
-fn run(args: &[String]) -> i32 {
+fn run(args: &[Str]) -> i32 {
     let mut sh = Shell::new();
     // Take ownership of the inherited process environment: environment
     // variables become ordinary (exported) shell variables, so `unset`,
@@ -250,7 +278,7 @@ fn run(args: &[String]) -> i32 {
     // (`-bash`, `-osh`) rather than passing a flag, so bash checks the raw
     // `argv[0]` — not its basename — before it looks at any option. `-l` and
     // `--login` say the same thing explicitly.
-    if args.first().is_some_and(|a| a.starts_with('-')) {
+    if args.first().is_some_and(|a| a.starts_with(b"-")) {
         sh.set_login_shell();
     }
 
@@ -301,14 +329,17 @@ fn run(args: &[String]) -> i32 {
     let mut read_stdin = false;
     // Bare `-` also selects stdin, and unlike the letters it *does* end option
     // processing (bash returns from `parse_shell_options` on it).
+    // An argument that is not text cannot be any of the option spellings below
+    // — every one of them is ASCII — so it falls to the `None` arm and ends the
+    // option pass, which is right: it is an operand (a script path, or `$1`).
     while let Some(arg) = args.get(base) {
-        match arg.as_str() {
+        match bytes::as_str(arg) {
             // `--` and a bare `-` are the same thing: bash's option walk returns
             // on either, with no flag set. A bare `-` reads commands from stdin
             // only because nothing is *left* to run as a script — the classic `sh
             // -` spelling — so `osh - script.sh` runs the script, and `osh - -x`
             // looks for a file called `-x` rather than applying `-x`.
-            "--" | "-" => {
+            Some("--" | "-") => {
                 base += 1;
                 opts_ended = true;
                 break;
@@ -317,7 +348,7 @@ fn run(args: &[String]) -> i32 {
             // rejects it. Acted on here rather than left for the dispatch below so
             // it works in any option position, like `--version`. After `--` it is
             // a filename again, because that arm breaks out first.
-            "-V" => {
+            Some("-V") => {
                 println!("{VERSION}");
                 return 0;
             }
@@ -340,7 +371,7 @@ fn run(args: &[String]) -> i32 {
             // getopt sees `--norc` as the letters `-`, `n`, `o`, … and the very
             // first one is invalid, so bash reports `--: invalid option`. Letting
             // the cluster loop have it reproduces that wording exactly.
-            s if (s.starts_with('-') || s.starts_with('+')) && s.len() > 1 => {
+            Some(s) if (s.starts_with('-') || s.starts_with('+')) && s.len() > 1 => {
                 let enable = s.starts_with('-');
                 let sign = if enable { '-' } else { '+' };
                 // bash's `next_arg` cursor. `o`/`O` take the *next word* — never
@@ -386,17 +417,22 @@ fn run(args: &[String]) -> i32 {
                                 }
                                 continue;
                             };
-                            let ok = if is_shopt {
-                                sh.apply_shopt_option(name, enable)
-                            } else {
-                                sh.apply_named_option(name, enable)
+                            // An option *name* is text — every entry in either
+                            // table is ASCII — so a word that does not decode
+                            // names no option and takes the invalid-name path,
+                            // reporting the bytes it was actually given.
+                            let ok = match bytes::as_str(name) {
+                                Some(n) if is_shopt => sh.apply_shopt_option(n, enable),
+                                Some(n) => sh.apply_named_option(n, enable),
+                                None => false,
                             };
                             if !ok {
-                                if is_shopt {
-                                    eprintln!("osh: {name}: invalid shell option name");
+                                let tail: BStr<'_> = if is_shopt {
+                                    b": invalid shell option name"
                                 } else {
-                                    eprintln!("osh: {name}: invalid option name");
-                                }
+                                    b": invalid option name"
+                                };
+                                ediag(&[b"osh: ", name, tail]);
                                 return 2;
                             }
                             next_arg += 1;
@@ -471,9 +507,9 @@ fn run(args: &[String]) -> i32 {
             // `osh -c cmd [name [arg…]]`
             sh.set_command_mode();
             // bash exposes the `-c` command string as $BASH_EXECUTION_STRING.
-            sh.set_execution_string(command.clone());
+            sh.set_execution_string(command);
             if let Some(name) = args.get(base + 1) {
-                sh.set_name(name.clone());
+                sh.set_name(name);
                 sh.set_positional(positional_args(args.get(base + 2..)));
             }
             Plan::Command(command)
@@ -484,9 +520,9 @@ fn run(args: &[String]) -> i32 {
             sh.set_positional(positional_args(args.get(base..)));
             Plan::Repl
         }
-        InvokeMode::Repl => match args.get(base).map(String::as_str) {
-            Some(path) if opts_ended || !path.starts_with('-') => {
-                sh.set_name(path.to_string());
+        InvokeMode::Repl => match args.get(base).map(Vec::as_slice) {
+            Some(path) if opts_ended || !path.starts_with(b"-") => {
+                sh.set_name(path);
                 sh.set_script_mode();
                 sh.set_positional(positional_args(args.get(base + 1..)));
                 Plan::Script(path)
@@ -497,7 +533,7 @@ fn run(args: &[String]) -> i32 {
                 // cluster, each with bash's own wording. Kept so a future hole in
                 // that coverage still produces a diagnostic rather than an
                 // attempt to open the option as a script.
-                eprintln!("osh: {other}: invalid option");
+                ediag(&[b"osh: ", other, b": invalid option"]);
                 eprint_option_usage();
                 return 2;
             }
@@ -518,13 +554,25 @@ fn run(args: &[String]) -> i32 {
         status
     } else {
         match plan {
-            Plan::Command(command) => sh.run_source(command),
+            // Seam: the parser is still `str`-typed (TD-OILS-BYTE-STRINGS
+            // step 8), so a `-c` string that is not text cannot be parsed. It
+            // is rejected rather than approximated — running an *altered*
+            // command is the one outcome worse than running none.
+            Plan::Command(command) => match bytes::as_str(command) {
+                Some(src) => sh.run_source(src),
+                None => {
+                    ediag(&[b"osh: -c: command string is not valid text: ", command]);
+                    2
+                }
+            },
             // The script is opened only now: bash reads the startup files first,
             // so `osh -l nosuchfile` runs `~/.bash_profile` before reporting 127.
-            Plan::Script(path) => match std::fs::read_to_string(path) {
+            // The path is opened as *bytes*, so a script whose name is not text
+            // is still found (the diagnostic below quotes it verbatim too).
+            Plan::Script(path) => match std::fs::read_to_string(bytes::bytes_to_path(path)) {
                 Ok(src) => sh.run_source(&src),
                 Err(e) => {
-                    eprintln!("osh: {path}: {e}");
+                    ediag(&[b"osh: ", path, b": ", e.to_string().as_bytes()]);
                     127
                 }
             },
@@ -706,4 +754,65 @@ fn print_help() {
     println!("command and arithmetic substitution, if/while/until/for/case,");
     println!("functions, [[ … ]] conditionals, (( … )) arithmetic commands,");
     println!("filename globbing, indexed and associative arrays, and && || ; operators.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LongOptions, Str, parse_long_options, positional_args};
+
+    /// An argv word from a byte literal, as `os_argv` would produce it.
+    fn a(bytes: &[u8]) -> Str {
+        bytes.to_vec()
+    }
+
+    /// A byte that begins no valid UTF-8 sequence. Reading such a word through
+    /// `std::env::args()` panics, which is the bug these tests pin
+    /// (known-issues TD-OILS-ARGV-PANICS-ON-NON-UTF8): every one of them would
+    /// have aborted the process before it could assert anything.
+    const RAW: &[u8] = b"na\xffme";
+
+    #[test]
+    fn a_non_text_operand_ends_the_long_option_pass_rather_than_aborting() {
+        // The word is not any long option — it cannot be, they are all ASCII —
+        // so the pass stops at it and leaves it for the caller as an operand.
+        let args = [a(b"osh"), a(b"--norc"), a(RAW), a(b"--verbose")];
+        let mut opts = LongOptions::default();
+        assert_eq!(parse_long_options(&args, &mut opts), Ok(2));
+        assert!(opts.no_rc);
+        // `--verbose` sits *after* the operand, so the pass never saw it.
+        assert!(!opts.verbose);
+    }
+
+    #[test]
+    fn a_non_text_rcfile_argument_is_captured_verbatim() {
+        // `--rcfile` names a file, and a file name is not necessarily text: the
+        // bytes must reach `StartupFiles::rc_file` unchanged or the shell reads
+        // a different file (or, before the fix, never starts at all).
+        let args = [a(b"osh"), a(b"--rcfile"), a(RAW)];
+        let mut opts = LongOptions::default();
+        assert_eq!(parse_long_options(&args, &mut opts), Ok(3));
+        assert_eq!(opts.rc_file.as_deref(), Some(RAW));
+    }
+
+    #[test]
+    fn a_non_text_two_dash_word_is_a_fatal_invalid_option() {
+        // Two dashes make an unmatched word fatal, in bash and here. What must
+        // not happen is a panic, or the bytes being silently reinterpreted as
+        // some *other* option name.
+        let args = [a(b"osh"), a(b"--b\xffgus")];
+        let mut opts = LongOptions::default();
+        assert_eq!(parse_long_options(&args, &mut opts), Err(2));
+    }
+
+    #[test]
+    fn non_text_operands_reach_the_positional_parameters_intact() {
+        let args = [a(b"osh"), a(b"script.sh"), a(RAW), a(b"plain")];
+        assert_eq!(
+            positional_args(args.get(2..)),
+            vec![RAW.to_vec(), b"plain".to_vec()],
+            "a positional parameter is a value and must survive byte-for-byte"
+        );
+        // Past the end is no operands, not a panic.
+        assert!(positional_args(args.get(9..)).is_empty());
+    }
 }

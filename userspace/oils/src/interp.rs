@@ -386,7 +386,8 @@ pub struct StartupFiles<'a> {
     /// `--norc`: skip the interactive shell's rc file, `--rcfile` included.
     pub no_rc: bool,
     /// `--rcfile FILE` / `--init-file FILE`: read `FILE` instead of `~/.bashrc`.
-    pub rc_file: Option<&'a str>,
+    /// Bytes: it names a file, and a file name is not necessarily text.
+    pub rc_file: Option<BStr<'a>>,
 }
 
 /// Drop a single leading `--`, bash's end-of-options marker.
@@ -2981,8 +2982,21 @@ impl Shell {
     }
 
     /// Set `$0`, the shell/script name.
-    pub fn set_name(&mut self, name: impl Into<String>) {
-        self.name = name.into();
+    ///
+    /// The argument is bytes because `$0` is routinely a *path* — the script
+    /// osh was handed — and a path may hold any byte but `/` and NUL.
+    ///
+    /// Seam: `$0` doubles as the label every diagnostic carries (`Shell::name`
+    /// feeds `error_source`, which feeds all 275 `err_prefix` sites), and that
+    /// layer is still `String`-typed (TD-OILS-BYTE-STRINGS step 10), so a name
+    /// that is not text is stored approximated for now. The narrowing lives
+    /// here, at the one place that writes the field, so step 10 removes it by
+    /// changing this line alone.
+    pub fn set_name(&mut self, name: BStr<'_>) {
+        #[allow(deprecated)]
+        {
+            self.name = bytes::scaffold_lossy_string(name);
+        }
     }
 
     /// Set the positional parameters (`$1`, `$2`, …).
@@ -3177,8 +3191,8 @@ impl Shell {
                 }
             }
         } else if files.interactive && !files.no_rc {
-            let rc = files.rc_file.unwrap_or("~/.bashrc");
-            if let Err(code) = self.run_startup_file(rc.as_bytes()) {
+            let rc = files.rc_file.unwrap_or(b"~/.bashrc");
+            if let Err(code) = self.run_startup_file(rc) {
                 return Some(code);
             }
         }
@@ -3368,8 +3382,8 @@ impl Shell {
     /// as `$BASH_EXECUTION_STRING`. bash sets this only for `-c` invocations
     /// (unset for scripts and interactive shells); it is an ordinary,
     /// reassignable variable, so we simply seed it into the variable namespace.
-    pub fn set_execution_string(&mut self, src: impl Into<String>) {
-        self.put_var("BASH_EXECUTION_STRING".to_string(), src.into());
+    pub fn set_execution_string(&mut self, src: BStr<'_>) {
+        self.put_var("BASH_EXECUTION_STRING".to_string(), src.to_vec());
     }
 
     /// Import the real process environment into the shell variable namespace,
@@ -34357,7 +34371,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // bottom `main` pseudo-frame; `-c`/interactive (the plain harness) do not.
         let script_run = |src: &str| {
             let mut sh = Shell::new();
-            sh.set_name("scr.sh");
+            sh.set_name(b"scr.sh");
             sh.set_script_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
@@ -34498,7 +34512,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         sh.set_command_mode();
         sh.set_interactive_shell(false);
-        sh.set_execution_string("echo hi");
+        sh.set_execution_string(b"echo hi");
         let buf = capture_sink();
         let prog = parse("echo \"[$BASH_EXECUTION_STRING]\"; echo ${!BASH*}").expect("parse");
         {
@@ -45132,7 +45146,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         write_startup(&home, "my.rc", "SAW=my_rc");
         let rcfile = format!("{home}/my.rc");
         let named =
-            StartupFiles { interactive: true, rc_file: Some(&rcfile), ..StartupFiles::default() };
+            StartupFiles { interactive: true, rc_file: Some(rcfile.as_bytes()), ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&named), None);
         assert_eq!(pval(&sh, "SAW").as_deref(), Some("my_rc"));
 
@@ -45263,7 +45277,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         std::fs::create_dir_all(format!("{home}/dir.rc")).expect("mkdir");
         let rcfile = format!("{home}/dir.rc");
         let files =
-            StartupFiles { interactive: true, rc_file: Some(&rcfile), ..StartupFiles::default() };
+            StartupFiles { interactive: true, rc_file: Some(rcfile.as_bytes()), ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&files), None);
 
         // Nothing planted: no file exists, and that is not an error either.

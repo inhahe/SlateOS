@@ -6118,9 +6118,10 @@ What is left is narrower and can land one layer per commit:
    `SingleQuoted { text: Str }`), dragging `brace.rs` and `unparse.rs`. Closes
    the alias table, the `PS4`/`PS1` re-lex, `@P`, the `mapfile -C` callback seam
    (`interp.rs:22416`) and `lexer.rs:2163`.
-9. `arith.rs`, `histexpand.rs`, `ere.rs`, `main.rs`. Closes the `VarLookup`
-   seams (`interp.rs:24482`/`:24491`/`:24518`) and
-   `TD-OILS-ARGV-PANICS-ON-NON-UTF8`.
+9. `arith.rs`, `histexpand.rs`, `ere.rs`. Closes the `VarLookup` seams
+   (`interp.rs:24482`/`:24491`/`:24518`) and `TD-OILS-ERE-TEXT-ONLY`. `main.rs`
+   was pulled forward and is already done (see
+   `TD-OILS-ARGV-PANICS-ON-NON-UTF8`).
 10. The diagnostic layer (`errln`, `err_prefix`, `write_line`) — ~378 sites,
     almost all `format!` with static text, so it wants a `berrln!` macro rather
     than 378 hand edits.
@@ -6129,14 +6130,16 @@ What is left is narrower and can land one layer per commit:
 a grep for it outside `bytes.rs` returns nothing. That grep count *is* the
 tracker — because each seam needs `#[allow(deprecated)]` to keep the build
 warning-free, the deprecation warning itself never accumulates. Count after
-step 5: **17**. After step 6: **14**.
+step 5: **17**. After step 6: **14**. After the `main.rs` argv fix
+(TD-OILS-ARGV-PANICS-ON-NON-UTF8): **15** — that one *added* a seam, at
+`Shell::set_name`, by pulling `$0` a layer earlier than step 10.
 
 **Interaction.** `TD-OILS-UNICODE-ESC`, `TD-OILS-PRINTF-QUOTE-CHAR` and
 `TD-OILS-STRLEN-CHARS` are *not* part of this: those are host-locale artifacts
 where osh already matches UTF-8-locale bash, and the byte-string move must
 preserve their current character-wise answers.
 
-### TD-OILS-ARGV-PANICS-ON-NON-UTF8. `osh` aborts at startup if any of its own arguments is not UTF-8 — 2026-07-30
+### TD-OILS-ARGV-PANICS-ON-NON-UTF8. `osh` aborts at startup if any of its own arguments is not UTF-8 — FIXED 2026-07-30
 
 **Where:** `userspace/oils/src/main.rs:210` and `:224` —
 `let args: Vec<String> = std::env::args().collect();`
@@ -6155,14 +6158,35 @@ aborts rather than degrades — the environment already reads through `vars_os`
 (see `interp.rs:3402`), and the value layer is byte-typed as of
 TD-OILS-BYTE-STRINGS step 6.
 
-**Fix:** read `std::env::args_os()` and widen through `bytes::os_to_bytes`. The
-shell's own option parsing (`-c`, `-s`, `-o`, …) can stay text — an option is a
-name — by matching on `bytes::as_str(arg)` and treating a non-text argument as
-"not an option", which is what it is. The operands already have a byte-typed
-destination: `positional_args()` in `main.rs` builds `Vec<Vec<u8>>` and
-`Shell::set_positional` takes it. Scheduled as part of TD-OILS-BYTE-STRINGS
-step 9 (`main.rs`), but it is separable and could land sooner: it does not
-depend on steps 7 or 8.
+**Fixed 2026-07-30**, ahead of its place in TD-OILS-BYTE-STRINGS step 9 — it is
+separable (it depends on neither step 7 nor step 8) and it was the only
+remaining input that *aborted* rather than degraded. `os_argv()` reads
+`std::env::args_os()` and widens through `bytes::os_to_bytes`, and `run` /
+`parse_long_options` take `&[Str]`. The option parsing stays text — an option
+is a name, and every spelling in both tables is ASCII — by matching on
+`bytes::as_str(arg)`: a word that does not decode matches no option, which ends
+the option pass and makes it an operand, exactly what it is. Consequences that
+came with it:
+
+* `StartupFiles::rc_file` is `Option<BStr>` and `Shell::set_execution_string`
+  takes bytes (both name/carry data, not text).
+* `Plan::Script` opens the script through `bytes::bytes_to_path`, so a script
+  whose *name* is not text now runs.
+* `Plan::Command` (`-c`) still needs `str` — the parser is `str`-typed until
+  step 8 — so a `-c` string that is not text is **rejected** with a diagnostic
+  rather than approximated: running an *altered* command is the one outcome
+  worse than running none.
+* Diagnostics that quote an argv word are written by a new byte-level `ediag`
+  helper rather than `eprintln!`, so the token printed is the token given.
+* `Shell::set_name` (`$0`) takes bytes, but still narrows internally: `$0`
+  doubles as the label `error_source` feeds to all 275 `err_prefix` sites. That
+  is the one remaining seam here and it closes with TD-OILS-BYTE-STRINGS step
+  10; the narrowing is deliberately confined to the single line that writes the
+  field.
+
+Regression tests live in `main.rs`'s own `mod tests` (they exercise
+`parse_long_options`/`positional_args` with a `\xff` word — before the fix every
+one of them would have aborted the process).
 
 ### TD-OILS-NONUTF8-ENV-NAME. Environment entries whose *name* is not UTF-8 are dropped at import and not re-exported to children — 2026-07-30
 

@@ -101,6 +101,7 @@ use bstr::ByteSlice;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, IsTerminal, Read, Seek, Write};
 use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
@@ -1893,6 +1894,25 @@ pub struct Shell {
     /// importing, so they keep the on-demand `std::env` fallback and inherited
     /// child environment — staying deterministic and host-independent.
     env_imported: bool,
+    /// Environment entries whose **name** the shell cannot spell, kept verbatim
+    /// so they still reach children.
+    ///
+    /// The shell grammar has no way to write a non-UTF-8 identifier — `a\xffb=1`
+    /// is not an assignment and `${a\xffb}` is not an expansion — so such an
+    /// entry is unnameable inside osh and never enters [`Shell::vars`]. That is
+    /// right for the shell's own purposes (mangling the name would invent a
+    /// *different*, spellable variable that then gets exported over the real
+    /// one), but it must not make osh a filter: a wrapper script
+    /// `osh -c 'exec real-program "$@"'` has to hand `real-program` the
+    /// environment it would have had without the shell in between. bash on Linux
+    /// passes such entries through unchanged — it keeps the raw strings it was
+    /// given and only parses the ones it can — and so do we.
+    ///
+    /// Pairs are `OsString` because they never take part in shell name
+    /// resolution: nothing here can be read, written, unset or exported by any
+    /// script, so there is nothing to gain by giving them a shell-side
+    /// representation. Populated once, by [`Shell::import_environment`].
+    opaque_env: Vec<(OsString, OsString)>,
     funcs: HashMap<Str, Program>,
     /// The source label each function was *defined* in — bash's `BASH_SOURCE`
     /// entry for that function's frames. Kept as a parallel map for the same
@@ -2714,6 +2734,7 @@ impl Shell {
             assoc: HashMap::new(),
             exported: HashSet::new(),
             env_imported: false,
+            opaque_env: Vec::new(),
             funcs: HashMap::new(),
             func_sources: HashMap::new(),
             func_redirects: HashMap::new(),
@@ -3422,10 +3443,11 @@ impl Shell {
         // useless, and re-encoding it would hand the script a value that names
         // a different file (TD-OILS-BYTE-STRINGS). A *name* stays a `String`:
         // the shell grammar cannot spell a non-UTF-8 identifier, so such an
-        // entry is unnameable and unusable here — it is skipped rather than
-        // mangled (see known-issues TD-OILS-NONUTF8-ENV-NAME).
+        // entry is unnameable and unusable here — so it is set aside verbatim in
+        // `opaque_env` rather than mangled, and reaches children untouched.
         for (k, v) in std::env::vars_os() {
             let Some(name) = bytes::as_str(&bytes::os_to_bytes(&k)).map(str::to_owned) else {
+                self.opaque_env.push((k, v));
                 continue;
             };
             self.vars
@@ -6576,6 +6598,7 @@ impl Shell {
             assoc: self.assoc.clone(),
             exported: self.exported.clone(),
             env_imported: self.env_imported,
+            opaque_env: self.opaque_env.clone(),
             funcs: self.funcs.clone(),
             func_sources: self.func_sources.clone(),
             func_redirects: self.func_redirects.clone(),
@@ -10550,19 +10573,7 @@ impl Shell {
         cmd.current_dir(bytes::bytes_to_path(&self.cwd));
 
         // Environment: exported shell vars + this command's temp assignments.
-        // When the shell owns its environment, start from a cleared base so an
-        // unset/non-exported variable does not leak in via inheritance.
-        if self.env_imported {
-            cmd.env_clear();
-        }
-        for (k, v) in &self.vars {
-            if self.exported.contains(k) {
-                cmd.env(k, bytes::bytes_to_os(v));
-            }
-        }
-        for (k, v) in assigns {
-            cmd.env(k, bytes::bytes_to_os(v));
-        }
+        self.apply_child_env(&mut cmd, assigns);
 
         // stdin — a here-doc/here-string body takes precedence, then a file
         // redirect, then the inherited pipeline input.
@@ -11154,14 +11165,7 @@ impl Shell {
             // with an empty cursor.) Nothing that *is* redirected reaches here:
             // a command with redirections declines the shortcut.
             cmd.stdin(Stdio::null());
-            if self.env_imported {
-                cmd.env_clear();
-            }
-            for (k, v) in &self.vars {
-                if self.exported.contains(k) {
-                    cmd.env(k, bytes::bytes_to_os(v));
-                }
-            }
+            self.apply_child_env(&mut cmd, &[]);
             let id = self.next_job_id();
             let (pid, child, status) = match cmd.spawn() {
                 Ok(child) => (child.id(), Some(JobBody::Process(child)), None),
@@ -15172,6 +15176,12 @@ impl Shell {
         // via the parent process's inherited environment.
         if self.env_imported {
             pc.env_clear();
+        }
+        // Entries the shell cannot name go back exactly as they arrived — see
+        // `Shell::opaque_env`. They cannot collide with anything below: a name
+        // the shell holds is by definition one it could spell.
+        for (k, v) in &self.opaque_env {
+            pc.env(k, v);
         }
         for (k, v) in &self.vars {
             if self.exported.contains(k) {
@@ -44396,6 +44406,69 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // the reference, and the target `${!r}` reports — spelled with the byte
         // the subscript actually holds, since that is the key it names.
         assert_eq!(take_capture(&buf), b"through_ref|through_ref|m[\xff]\n");
+    }
+
+    /// An `OsString` that is deliberately not valid Unicode, built the way the
+    /// host allows: raw bytes on unix, an unpaired surrogate on Windows. Both
+    /// are names `bytes::as_str` refuses, which is exactly what puts an entry
+    /// in `opaque_env` instead of in the variable table.
+    #[cfg(any(unix, windows))]
+    fn unspellable_os_string(tail: &str) -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            let mut raw = b"a\xff".to_vec();
+            raw.extend_from_slice(tail.as_bytes());
+            OsString::from_vec(raw)
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::ffi::OsStringExt as _;
+            let mut units = vec![u16::from(b'a'), 0xD800];
+            units.extend(tail.encode_utf16());
+            OsString::from_wide(&units)
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn an_environment_entry_the_shell_cannot_name_still_reaches_a_child() {
+        // The shell grammar cannot spell a non-UTF-8 identifier, so such an
+        // inherited entry never enters `vars` — but osh must not become a
+        // filter: `osh -c 'exec real-program'` has to hand the child the
+        // environment it would have had without the shell in between
+        // (TD-OILS-NONUTF8-ENV-NAME).
+        let mut sh = Shell::new();
+        // `env_imported` is what makes `apply_child_env` clear the inherited
+        // base, which is precisely the step that used to drop these entries.
+        sh.env_imported = true;
+        let (k, v) = (unspellable_os_string("K"), unspellable_os_string("V"));
+        sh.opaque_env.push((k.clone(), v.clone()));
+        sh.vars.insert("SPELLABLE".to_string(), b"yes".to_vec());
+        sh.exported.insert("SPELLABLE".to_string());
+
+        let mut pc = PCommand::new("true");
+        sh.apply_child_env(&mut pc, &[("PREFIX".to_string(), b"set".to_vec())]);
+
+        let envs: Vec<(OsString, Option<OsString>)> = pc
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(std::ffi::OsStr::to_os_string)))
+            .collect();
+        let at = |want: &OsString| {
+            envs.iter()
+                .find(|(k, _)| k == want)
+                .map(|(_, v)| v.clone())
+        };
+        // Verbatim: the same `OsString` that arrived, not a re-encoding of it.
+        assert_eq!(at(&k), Some(Some(v)), "opaque entry dropped: {envs:?}");
+        assert_eq!(
+            at(&OsString::from("SPELLABLE")),
+            Some(Some(OsString::from("yes"))),
+        );
+        assert_eq!(
+            at(&OsString::from("PREFIX")),
+            Some(Some(OsString::from("set"))),
+        );
     }
 
     #[test]

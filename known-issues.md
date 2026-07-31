@@ -6437,10 +6437,12 @@ honest, *fallible* bytes-to-text conversion, now the only one in the crate.
 What remains genuinely text is text *by construction* and is documented as such
 at each site: variable/alias/reserved-word names and `HashMap<String, _>` keys
 are `[A-Za-z_][A-Za-z0-9_]*`, so bytes that are not text are not names and the
-honest answer is a rejection rather than an approximation. The one residual
-narrowing is tracked separately and is of that shape — `TD-OILS-NONUTF8-ENV-NAME`.
-(`TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT` was the other, and is now resolved: it
-was not a *name* narrowing at all but a subscript wrongly caught up in one.)
+honest answer is a rejection rather than an approximation. Both narrowings that
+were tracked separately are now resolved: `TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT`
+was not a *name* narrowing at all but a subscript wrongly caught up in one, and
+`TD-OILS-NONUTF8-ENV-NAME` was a genuine one whose fix is not to widen the name
+type but to stop an unnameable *inherited* entry from being lost — it is set
+aside verbatim and passed through to children without ever becoming a variable.
 
 ### TD-OILS-ELEMENT-TARGET-SUBSCRIPT-TEXT. An array *element* named by a subscript that is not text cannot be assigned to by `printf -v`, `read` or `declare -n` — ✅ RESOLVED 2026-07-30 (both steps)
 
@@ -6605,7 +6607,7 @@ Regression tests live in `main.rs`'s own `mod tests` (they exercise
 `parse_long_options`/`positional_args` with a `\xff` word — before the fix every
 one of them would have aborted the process).
 
-### TD-OILS-NONUTF8-ENV-NAME. Environment entries whose *name* is not UTF-8 are dropped at import and not re-exported to children — 2026-07-30
+### TD-OILS-NONUTF8-ENV-NAME. Environment entries whose *name* is not UTF-8 are dropped at import and not re-exported to children — 2026-07-30 — ✅ RESOLVED 2026-07-30
 
 **Where:** `userspace/oils/src/interp.rs:3402` — the `std::env::vars_os()` loop
 in the environment import, which does
@@ -6625,13 +6627,38 @@ different environment than it would have without the shell in between. bash on
 Linux passes them through unchanged (it keeps the raw `char *` strings it was
 given and only parses the ones it can).
 
-**Fix:** keep a side table of the raw `(OsString, OsString)` pairs that did not
-decode, and merge it back into the child environment in the process-spawn path
-(`Command::envs` on the `_os` values) so they are inherited verbatim while
-staying invisible to the shell's own name resolution. `export -p`/`env` output
-should list them too, quoted byte-wise, once the diagnostic layer is byte-typed
-(TD-OILS-BYTE-STRINGS step 10). Low priority: the trigger needs a parent that
-exported an unspellable name in the first place.
+**Fixed 2026-07-30.** `Shell` gained `opaque_env: Vec<(OsString, OsString)>`, a
+side table of the pairs that did not decode. `import_environment`'s `vars_os`
+loop pushes into it instead of dropping, `clone_for_subshell` carries it, and
+`apply_child_env` re-emits it into every child environment right after
+`env_clear()`. The pairs stay `OsString` because they never take part in shell
+name resolution — nothing can look them up, so there is nothing to gain from
+decoding them, and keeping the host type means they cross back out bit-exact.
+They cannot collide with a shell variable either: a name the shell holds is by
+definition one it could spell.
+
+Getting there also meant collapsing the three places that built a child
+environment (the synchronous external-exec path, the `&`-background fast path,
+and the pre-existing helper) onto `apply_child_env`, so the re-emit lives in
+exactly one function and a fourth spawn path cannot quietly reintroduce the
+filter.
+
+`export -p`/`env` deliberately do **not** list opaque entries. The sketch above
+proposed that they should, but bash does not: it only *parses* the environment
+strings it can, and `export -p` walks its variable table, which such an entry
+never enters. Listing them would make osh's output differ from bash's and,
+worse, print a line that cannot be fed back to a shell. The entries are
+pass-through only, which is exactly bash's behaviour.
+
+Regression test: `an_environment_entry_the_shell_cannot_name_still_reaches_a_child`
+in `interp.rs mod tests` — it sets `env_imported` (the flag that makes
+`apply_child_env` clear the inherited base, i.e. the step that used to lose
+these), pushes an entry whose name is genuinely not Unicode (raw `\xff` bytes on
+unix, an unpaired surrogate on Windows — a host-dependent helper, because
+`bytes::bytes_to_os`'s non-unix arm is lossy and a byte-built `OsString` would
+otherwise be valid Unicode on the dev host, making the assertion vacuous), and
+asserts via `Command::get_envs()` that it arrives verbatim alongside an ordinary
+exported variable and an assignment prefix.
 
 ### TD-OILS-ERE-TEXT-ONLY. `[[ … =~ … ]]` cannot match a non-text subject or pattern — 2026-07-30 — ✅ RESOLVED 2026-07-30
 

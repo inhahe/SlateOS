@@ -227,3 +227,45 @@ declare -l c82=AB; declare -l -u c82; declare -p c82
 echo "=== enable, remove, enable: the cancellation still wins"
 declare -l +l -u c83=aB; declare -p c83
 declare -u +u -l c84=Ab; declare -p c84
+
+# A compound literal does not bind under the attributes the command leaves the
+# name holding. If some `-`-direction word names a kind or a scope (`a`, `A`,
+# `g`), or the first mention of a value letter (`i`, `l`, `u`, `c`, `I`) is in
+# the `-` direction, the literal is *claimed*: it binds under every value
+# letter the command names in *either* direction — so `-a +i` still evaluates
+# and `-a +l` still folds. Otherwise it binds under what the name arrived
+# with, less what this command takes off.
+echo "=== a claimed literal binds under letters named in the off direction too"
+declare -a +i d1=(2+3); declare -p d1
+declare -a +l d2=(AB); declare -p d2
+declare -A +l d3=([q]=AB); declare -p d3
+declare -g +i d4=(2+3); declare -p d4
+declare -g +l d5=(AB); declare -p d5
+
+echo "=== the first value letter in the - direction claims it as well"
+declare -l +i d6=(2+3); declare -p d6
+declare -i +l d7=(AB); declare -p d7
+declare -u +i d8=(2+3); declare -p d8
+
+echo "=== an unclaimed literal binds under what the name arrived with"
+declare +i -i d9=(2+3); declare -p d9
+declare +i -a d10=(2+3); declare -p d10
+declare +l -i d11=(AB); declare -p d11
+declare -l d12=(A); declare +u d12=(bc); declare -p d12
+declare -l d13=(A); declare +l d13=(BC); declare -p d13
+
+echo "=== two case letters named leave the literal unfolded, and the name too"
+declare -a +l +u d14=(Ab); declare -p d14
+declare -a -l +u d15=(Ab); declare -p d15
+declare -l d16=(A); declare -a +u d16=(BC); declare -p d16
+declare -c d17=(ab); declare -a -l -u d17=(cD); declare -p d17
+
+echo "=== no case letter named: a claimed literal keeps the name's own fold"
+declare -l d18=(A); declare -a d18=(BC); declare -p d18
+declare -u d19=(a); declare -a +i d19=(bc); declare -p d19
+
+echo "=== a scalar or a subscript uses the final attributes, as always"
+declare -a +i d20=2+3; declare -p d20
+declare +i -i d21=2+3; declare -p d21
+declare -a +i d22[0]=2+3; declare -p d22
+declare -a +l d23[0]=AB; declare -p d23

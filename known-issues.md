@@ -6515,7 +6515,7 @@ separate question from which attribute the name ends up with, and bash
 answers it differently — split out as
 TD-OILS-DECL-COMPOUND-FOLD-USES-MENTIONED-LETTERS.
 
-### TD-OILS-DECL-COMPOUND-FOLD-USES-MENTIONED-LETTERS. A compound literal's case fold follows the letters the command *mentions*, not the attribute the name ends up with — 2026-07-31 — OPEN
+### TD-OILS-DECL-COMPOUND-FOLD-USES-MENTIONED-LETTERS. A compound literal's case fold follows the letters the command *mentions*, not the attribute the name ends up with — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` —
 `exec_declare_with_arrays_scoped`. osh folds a compound literal's values
@@ -6540,38 +6540,136 @@ declare -Al +u m=([k]=AB)             # bash declare -Al m=([k]="AB")  osh …"a
 Note that the *attribute* column is already right in every one of these —
 only the stored value differs.
 
-**Measured rule (bash 5.2.37, `target/dvscratch/px15.sh`, `px17.sh`,
-`px18.sh`).** Let `on` be the enable the command asked for and `off` the
-set of case letters it removed.
+**Measured rule (bash 5.2.37, `target/dvscratch/px15.sh`–`px27.sh`).**
+Three earlier models were falsified by measurement before this one held
+against every row of thirteen probe scripts. The rule turns on whether
+the command *claims* the literal:
 
-* If the two enables conflicted (`-l -u`), no fold.
-* Else if `on` is set: the fold is `on` when `off` contains no case
-  letter *other than* `on` itself — so `-l +l` still folds lowercase
-  (and then drops the attribute), while `-l +u` and `-l +c` fold not at
-  all (and keep the attribute). Equivalently: the fold is the single case
-  letter in `on ∪ off`, and there is none when that set has two.
-* Else (`on` empty): the name's own existing fold applies, unless this
-  command removes exactly that letter. `declare -l q=(AB); declare +u
-  q=(CD)` stores `cd`; `declare -u q=(x); declare +u q=(ab)` stores `ab`.
+> **claimed** = some word in the `-` direction names a kind or a scope
+> (`a`, `A`, `g`) — anywhere in the word list — **or** the first mention
+> of any *value* letter (`i`, `l`, `u`, `c`, `I`) is in the `-`
+> direction.
+
+* **Claimed** → the literal binds under every value letter the command
+  names in *either* direction: `declare -a +i q=(2+3)` stores `5` and
+  `declare -a +l q=(AB)` stores `ab`, even though `i`/`l` are only ever
+  removed. Two or more distinct case letters named → no fold at all
+  (`declare -a +l +u q=(Ab)` → `Ab`); no case letter named → the fold the
+  name arrived with (`declare -l q=(A); declare -a q=(BC)` → `bc`).
+* **Unclaimed** → it binds under what the name arrived with, less the
+  letters this command removes: `declare +i -i q=(2+3)` stores `2+3`
+  (never integer), and `declare +l -i q=(AB)` stores `AB` even though the
+  name ends up `-ai`.
+* A claimed fold is genuinely **set** on the variable — it clears the
+  other two folds — so the command's own removals then run against it,
+  and the *stored* attribute changes too: `declare -l x=(A); declare -a
+  +u x=(BC)` leaves `declare -a x=([0]="BC")` with no fold at all.
+* "Arrived with `-i`" is not simply the pre-command snapshot: converting
+  a dynamic name to an array (`declare -a HISTCMD=(zz 3+4)`) carries the
+  slot's own `-i` in during this very command, and the literal binds
+  under it (`[0]="0" [1]="7"`).
+* Scalars, subscripted operands (`q[0]=`) and non-compound right-hand
+  sides use the plain final-attribute rule and always did match.
 * Setting an attribute never re-folds a value already stored, in either
   path: `q=(AB); declare -l q` leaves `AB`.
 
-The same "letters mentioned in either direction" shape shows up for `-i`
-as well — `declare -l +i q=(AB)` stores `0`, i.e. bash arithmetic-
-evaluated the literal because `i` was mentioned at all — so the fix
-should cover the integer attribute too rather than special-casing the
-case letters.
+**Resolved 2026-07-31.** `exec_declare_with_arrays_scoped` now computes
+the pair the literal *binds* with (`claimed` / `single_case` /
+`bind_fold` / `bind_int`, against `pre_fold`/`pre_int` read out of the
+operand's `VarSnapshot`) separately from the pair the name is left
+holding, swaps it in around `apply_assignment`, and applies `post_fold`
+for the claimed case. Covered by
+`a_compound_literal_binds_under_the_letters_the_command_names` and six
+new sections of `userspace/oils/tests/corpus/declare-plus-flags.sh`.
 
-**Proper fix.** In `exec_declare_with_arrays_scoped`, compute the
-attributes used to *bind* the literal separately from the ones stored on
-the name: bind with the union of the mentioned letters (case letters
-collapsing to none when more than one is named, or falling back to the
-name's existing fold when no enable was given), then store
-enable-minus-removals as it does now.
+What is *not* covered — split out as
+TD-OILS-DECL-ERROR-SKIPS-FLAG-APPLY — is bash's habit of abandoning a
+name's flag application after an error that is raised once the literal
+has already bound.
 
-**Low priority:** writing a case letter in both directions alongside a
-compound literal is a shape essentially no script uses; the attribute
-that survives — the part scripts actually observe — is already correct.
+### TD-OILS-DECL-ERROR-SKIPS-FLAG-APPLY. A per-name `declare` error abandons that name's flag application, but only *after* the compound literal has bound — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` —
+`exec_declare_with_arrays_scoped`. bash's `declare_internal` performs a
+compound assignment first (under the flags it collected), then runs a
+series of per-name checks; several of them end in `NEXT_VARIABLE()`,
+which skips the rest of the loop body for that name — including the
+`VSETATTR`/`VUNSETATTR` that would have applied `flags_off`. The value is
+already stored, so the name is left holding the attributes the
+*assignment* gave it and none of the removals.
+
+Measured (bash 5.2.37, `target/dvscratch/px22.sh`, `px24.sh`, `px25.sh`;
+stderr suppressed in each, which is why the value line is all that shows):
+
+```sh
+declare +a -l +l k8=(AB)    # bash declare -al k8=([0]="ab")   osh declare -a k8=([0]="ab")
+declare -aA  +l v9=(AB)     # bash declare -Al v9=([AB]="")    osh declare -A  v9=([AB]="")
+declare -n   +i t_n=(2+3)   # bash declare -a  t_n=([0]="2+3") osh declare -an t_n=([0]="2+3")
+```
+
+Each is a different check: `+a` on a name that is (by then) an array,
+`-a` and `-A` together, and `-n` on a compound literal. The value column
+is right in all three — only the attribute letters differ, and only for a
+name the command also errored on.
+
+**Proper fix.** Give the operand loop an explicit "this name errored"
+flag set by the three refusal paths, and skip the post-assignment
+attribute application (the `off_*` removals and the enable) when it is
+set, rather than the current mix of refusing before the bind and applying
+flags regardless.
+
+**Low priority:** every shape here is one bash prints an error for, so a
+script that hits it is already broken; only `declare -p` output differs.
+
+### TD-OILS-DECL-DIAGNOSTIC-ESCAPES-REDIRECTION. `declare`'s invalid-option and refusal messages ignore the command's own redirections — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the declaration-builtin flag
+prescan, which runs while the command word list is being classified,
+before the redirections for that command are installed. bash emits the
+same diagnostics from inside the builtin, so `2>/dev/null` on the
+`declare` itself silences them.
+
+```sh
+declare -i+i n=(2+3) 2>/dev/null    # bash: silent.  osh: prints the
+                                   # "-+: invalid option" + usage pair
+declare +a -l +l k=(AB) 2>/dev/null # bash: silent.  osh: prints
+                                   # "cannot destroy array variables in this way"
+```
+
+Reproduce with `target/dvscratch/px21.sh` / `px22.sh` (both are otherwise
+matching; these two lines are the whole diff).
+
+**Proper fix.** Emit the prescan's diagnostics through the same
+redirection-aware path the builtin body uses — i.e. defer them until the
+command's redirections are in place, or hand them to the builtin to
+report. Related to TD-OILS-DECL-FLAG-PRESCAN, which is about *where* the
+prescan happens at all.
+
+### TD-OILS-DECL-VALUELESS-IGNORES-READONLY. `declare x` / `local x` inside a function shadows a readonly global instead of refusing — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the valueless-operand path of
+the declaration builtins. The readonly check is made when an operand
+carries a value; a bare name skips it and goes straight to making the
+local shadow.
+
+```sh
+readonly ro=5
+f() { declare ro; echo "rc=$?"; }   # bash: "declare: ro: readonly variable", rc=1
+g() { local ro;   echo "rc=$?"; }   # bash: "local: ro: readonly variable",   rc=1
+f; g                                # osh: rc=0 twice, and the name is shadowed
+```
+
+Reproduce with `target/dvscratch/px29.sh`. bash refuses because the
+readonly attribute is looked up on the *global* the local would hide —
+`local` cannot shadow a readonly name at all — so a function that tries
+it fails on the spot rather than quietly working with a mutable copy.
+That difference is observable: under `set -e` bash aborts the function
+where osh runs on.
+
+**Proper fix.** Run the same readonly refusal the valued path uses before
+creating a local shadow, tagged with the builtin that asked (`declare:`
+vs `local:` — see TD-OILS-READONLY-REFUSAL-NAMES-TARGET for the name the
+message must quote).
 
 ### TD-OILS-ATTR-ASSIGN-BYPASSES-DYNVAR. `export NAME=v` / `readonly NAME=v` store straight into the variable table, so a dynamic special loses its value function — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

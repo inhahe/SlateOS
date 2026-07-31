@@ -22950,6 +22950,41 @@ impl Shell {
         flow
     }
 
+    /// Which of the three case folds `name` currently carries, in the same
+    /// `1`/`2`/`3` encoding the declaration builtins use for `-l`/`-u`/`-c`.
+    fn case_attr_of(&self, name: &str) -> Option<u8> {
+        if self.lower_attr.contains(name) {
+            Some(1)
+        } else if self.upper_attr.contains(name) {
+            Some(2)
+        } else if self.capcase_attr.contains(name) {
+            Some(3)
+        } else {
+            None
+        }
+    }
+
+    /// Give `name` exactly the fold `fold` names, clearing the other two. The
+    /// three are mutually exclusive as values, so this is the only shape a
+    /// wholesale replacement can take.
+    fn set_case_attr(&mut self, name: &str, fold: Option<u8>) {
+        self.lower_attr.remove(name);
+        self.upper_attr.remove(name);
+        self.capcase_attr.remove(name);
+        match fold {
+            Some(1) => {
+                self.lower_attr.insert(name.to_string());
+            }
+            Some(2) => {
+                self.upper_attr.insert(name.to_string());
+            }
+            Some(3) => {
+                self.capcase_attr.insert(name.to_string());
+            }
+            _ => {}
+        }
+    }
+
     fn exec_declare_with_arrays_scoped(
         &mut self,
         argv: &[Str],
@@ -23012,6 +23047,31 @@ impl Shell {
         let mut unset_nameref = false;
         let mut trace = false;
         let mut unset_trace = false;
+        // The attributes a *compound literal's* values bind with are not the
+        // pair the name is left holding, and which set is used turns on whether
+        // the command "claims" the assignment word.
+        //
+        // bash claims it when the word list names `a`, `A` or `g` in the `-`
+        // direction — anywhere — or when the first of the value-shaping letters
+        // (`i`, `l`, `u`, `c`, `I`) to be named at all is named in the `-`
+        // direction. A claimed literal binds with every letter the command
+        // names *in either direction*, so `declare -a +i q=(2+3)` stores `5`
+        // and `declare -a +l q=(AB)` stores `ab`; an unclaimed one binds with
+        // the attributes the name already had, less the ones this command takes
+        // off, so `declare +i -i q=(2+3)` stores `2+3` and `declare +l -i
+        // q=(AB)` stores `AB` even though it ends up an integer.
+        //
+        // Either way, two different case letters in one command mean no fold at
+        // all. And on a claimed literal the fold is applied to the variable
+        // for real, so it takes the other two folds off and the removals then
+        // run against what it left: `declare -l x=(A); declare -a +u x=(BC)`
+        // ends up with no fold at all, not the lowercase one it started with.
+        let mut kind_or_scope_flag = false;
+        let mut first_value_letter_on: Option<bool> = None;
+        let mut int_named = false;
+        let mut seen_lower = false;
+        let mut seen_upper = false;
+        let mut seen_capcase = false;
         for arg in &argv[1..] {
             let enable = arg.starts_with(b"-");
             let Some(flags) = arg.strip_prefix(b"-").or_else(|| arg.strip_prefix(b"+")) else {
@@ -23020,21 +23080,40 @@ impl Shell {
             if arg.as_slice() == b"--" {
                 break; // `--` ends option parsing
             }
+            if enable && flags.iter().any(|c| matches!(c, b'a' | b'A' | b'g')) {
+                kind_or_scope_flag = true;
+            }
             for c in flags {
+                if first_value_letter_on.is_none()
+                    && matches!(c, b'i' | b'l' | b'u' | b'c' | b'I')
+                {
+                    first_value_letter_on = Some(enable);
+                }
                 match c {
                     b'A' if enable => assoc = true,
                     b'A' => unset_assoc = true,
                     b'a' if enable => indexed = true,
                     b'a' => unset_indexed = true,
                     b'g' => global = enable,
-                    b'i' if enable => integer = true,
-                    b'i' => unset_integer = true,
+                    b'i' => {
+                        int_named = true;
+                        if enable {
+                            integer = true;
+                        } else {
+                            unset_integer = true;
+                        }
+                    }
                     b'l' | b'u' | b'c' => {
                         let dir = match c {
                             b'l' => 1,
                             b'u' => 2,
                             _ => 3,
                         };
+                        match c {
+                            b'l' => seen_lower = true,
+                            b'u' => seen_upper = true,
+                            _ => seen_capcase = true,
+                        }
                         if enable {
                             if matches!(case_on, Some(prev) if prev != dir) {
                                 case_conflict = true;
@@ -23160,6 +23239,20 @@ impl Shell {
             // that one case can be rolled back; every other outcome keeps what was
             // applied.
             let snap = self.snapshot_var(&a.name);
+            // The attributes the name arrived with. An *unclaimed* compound
+            // literal binds against these rather than against whatever the
+            // command leaves behind, so they have to be read out here — `snap`
+            // itself is moved into the rollback below.
+            let pre_int = snap.integer;
+            let pre_fold = if snap.lower {
+                Some(1u8)
+            } else if snap.upper {
+                Some(2u8)
+            } else if snap.capcase {
+                Some(3u8)
+            } else {
+                None
+            };
             // An array's kind is fixed once set: bash refuses to reinterpret an
             // existing array under the other kind, because the two index spaces
             // have no meaningful mapping. Without this guard `declare -A` on an
@@ -23247,10 +23340,80 @@ impl Shell {
             if self.xtrace {
                 self.xtrace_compound = Some(Vec::new());
             }
+            // Swap in the pair the literal *binds* with — see
+            // `kind_or_scope_flag` above — for the length of the assignment. In
+            // the common case (no `+` letter anywhere) it is the pair already
+            // stored and nothing moves.
+            let claimed = kind_or_scope_flag || first_value_letter_on == Some(true);
+            let single_case = match (seen_lower, seen_upper, seen_capcase) {
+                (true, false, false) => Some(1),
+                (false, true, false) => Some(2),
+                (false, false, true) => Some(3),
+                _ => None,
+            };
+            let named_case = seen_lower || seen_upper || seen_capcase;
+            let stored_fold = self.case_attr_of(&a.name);
+            let stored_int = self.integer_attr.contains(&a.name);
+            let bind_fold = if claimed {
+                // Two different letters named in one command leave no fold at
+                // all; one letter is that fold whichever direction named it.
+                if named_case { single_case } else { pre_fold }
+            } else {
+                // The name's own fold, less what this command takes off.
+                match pre_fold {
+                    Some(1) if off_lower => None,
+                    Some(2) if off_upper => None,
+                    Some(3) if off_capcase => None,
+                    f => f,
+                }
+            };
+            // "Arrived with `-i`" is not quite the snapshot: converting a dynamic
+            // name (`HISTCMD`) to an array carries the slot's own `-i` in as a
+            // real attribute during this very command, and the literal binds
+            // under it. So count a stored `-i` this command's own `-i` did not
+            // put there as one the name arrived with.
+            let arrived_int = pre_int || (stored_int && !integer);
+            let bind_int = if claimed {
+                int_named || arrived_int
+            } else {
+                arrived_int && !unset_integer
+            };
+            if bind_fold != stored_fold {
+                self.set_case_attr(&a.name, bind_fold);
+            }
+            if bind_int != stored_int {
+                if bind_int {
+                    self.integer_attr.insert(a.name.clone());
+                } else {
+                    self.integer_attr.remove(&a.name);
+                }
+            }
             // The same call marks which of the operand's two passes a failure came
             // from, which decides whether the name is rolled back below.
             let saved_expanded = std::mem::replace(&mut self.compound_expanded, false);
             let bound = self.apply_assignment(a, false);
+            // A claimed fold was really set on the variable, so the removals run
+            // against it rather than against the fold the name arrived with.
+            let post_fold = if claimed && single_case.is_some() {
+                match bind_fold {
+                    Some(1) if off_lower => None,
+                    Some(2) if off_upper => None,
+                    Some(3) if off_capcase => None,
+                    f => f,
+                }
+            } else {
+                stored_fold
+            };
+            if post_fold != bind_fold {
+                self.set_case_attr(&a.name, post_fold);
+            }
+            if bind_int != stored_int {
+                if stored_int {
+                    self.integer_attr.insert(a.name.clone());
+                } else {
+                    self.integer_attr.remove(&a.name);
+                }
+            }
             let expanded = std::mem::replace(&mut self.compound_expanded, saved_expanded);
             self.xtrace_compound = saved_xtrace_compound;
             self.decl_builtin_ctx = saved_decl_ctx;
@@ -43622,6 +43785,67 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -l -l x=AB; declare -p x").0,
             "declare -l x=\"ab\"\n"
+        );
+    }
+
+    /// A compound literal does not bind under the attributes the command leaves
+    /// the name holding: a *claimed* literal binds under every value letter the
+    /// command names in either direction, an unclaimed one under what the name
+    /// arrived with, less what this command takes off.
+    #[test]
+    fn a_compound_literal_binds_under_the_letters_the_command_names() {
+        // A kind or a scope in the `-` direction claims the literal, so a letter
+        // that is only ever *removed* still reaches the values.
+        for (src, want) in [
+            ("declare -a +i q=(2+3)", "declare -a q=([0]=\"5\")\n"),
+            ("declare -a +l q=(AB)", "declare -a q=([0]=\"ab\")\n"),
+            ("declare -A +l q=([k]=AB)", "declare -A q=([k]=\"ab\" )\n"),
+            ("declare -g +i q=(2+3)", "declare -a q=([0]=\"5\")\n"),
+            // So does a value letter whose *first* mention is an enable, even
+            // when a later removal takes it back off the name.
+            ("declare -l +i q=(2+3)", "declare -al q=([0]=\"5\")\n"),
+            ("declare -i +l q=(AB)", "declare -ai q=([0]=\"0\")\n"),
+            // Two case letters named leave the literal unfolded either way.
+            ("declare -a +l +u q=(Ab)", "declare -a q=([0]=\"Ab\")\n"),
+            ("declare -a -l +u q=(Ab)", "declare -al q=([0]=\"Ab\")\n"),
+        ] {
+            assert_eq!(run(&format!("{src}; declare -p q")).0, want, "{src}");
+        }
+        // Unclaimed — no kind or scope named, and the first value letter is a
+        // removal — so the literal binds under what the name arrived with.
+        for (src, want) in [
+            ("declare +i -i q=(2+3)", "declare -a q=([0]=\"2+3\")\n"),
+            ("declare +l -i q=(AB)", "declare -ai q=([0]=\"AB\")\n"),
+            (
+                "declare -l q=(A); declare +u q=(bc)",
+                "declare -al q=([0]=\"bc\")\n",
+            ),
+            (
+                "declare -l q=(A); declare +l q=(BC)",
+                "declare -a q=([0]=\"BC\")\n",
+            ),
+        ] {
+            assert_eq!(run(&format!("{src}; declare -p q")).0, want, "{src}");
+        }
+        // A claimed fold is really *set* on the name, so it clears whatever fold
+        // the name carried — and the command's own removal then runs against it.
+        assert_eq!(
+            run("declare -l q=(A); declare -a +u q=(BC); declare -p q").0,
+            "declare -a q=([0]=\"BC\")\n"
+        );
+        // Claimed but naming no case letter: the name's own fold still folds.
+        assert_eq!(
+            run("declare -l q=(A); declare -a q=(BC); declare -p q").0,
+            "declare -al q=([0]=\"bc\")\n"
+        );
+        // A scalar or a subscripted operand uses the final attributes, as always.
+        assert_eq!(
+            run("declare -a +i q=2+3; declare -p q").0,
+            "declare -a q=([0]=\"2+3\")\n"
+        );
+        assert_eq!(
+            run("declare -a +i q[0]=2+3; declare -p q").0,
+            "declare -a q=([0]=\"2+3\")\n"
         );
     }
 

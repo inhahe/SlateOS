@@ -16973,6 +16973,21 @@ impl Shell {
             .any(|f| f.iter().any(|(n, _)| n == name))
     }
 
+    /// Whether the *innermost* call frame — the one a `local` would bind in —
+    /// already binds this name.
+    ///
+    /// Distinct from [`Shell::is_locally_shadowed`], which asks about any frame:
+    /// a binding a *caller* made is not one this declaration can re-declare, so
+    /// a `local` of the same name here still shadows it. What needs the
+    /// distinction is whether a declaration is about to *create* a binding or
+    /// to add to one it already owns — see the nameref rule in
+    /// [`Shell::builtin_declare_scoped`].
+    fn local_binds_here(&self, name: &str) -> bool {
+        self.local_frames
+            .last()
+            .is_some_and(|f| f.iter().any(|(n, _)| n == name))
+    }
+
     /// Whether an *ordinary* binding of this name is standing in front of the
     /// global one — either a `local` ([`Shell::is_locally_shadowed`]) or the
     /// assignment prefix of the command now running
@@ -22196,10 +22211,30 @@ impl Shell {
             // rule of its own — it resolves one that carries no value and
             // *un-references* one that does — see known-issues
             // TD-OILS-DECL-NAMEREF-SUBSCRIPT.
-            let follow = !nameref
-                && !unset_nameref
-                && subscript.is_none()
-                && self.nameref_attr.contains(base_name);
+            //
+            // And so is a declaration that is about to *make* the binding
+            // rather than add to one: what decides is whether the binding this
+            // declaration writes is itself a nameref, not whether the name
+            // resolves to one from here. A local-binding `declare`/`local`
+            // writes the innermost frame's binding, so a global nameref of the
+            // same name is simply the thing it shadows — bash gives the
+            // function a fresh, ordinary local and leaves the target alone:
+            //
+            // ```sh
+            // w=5; declare -n r=w
+            // f() { declare r=9; declare -p r; }   # declare -- r="9", w still 5
+            // g() { local -n r=w; local r=9; }     # the frame's r *is* a
+            //                                      # nameref, so this follows
+            // ```
+            //
+            // A `-g` declaration writes the global binding, and that is the one
+            // consulted even when a local hides it — which needs no test here
+            // because [`Shell::enter_global_scope`] has already swapped the
+            // global into the live tables for the whole builtin.
+            let binding_is_nameref = self.nameref_attr.contains(base_name)
+                && (!make_local || self.local_binds_here(base_name));
+            let follow =
+                !nameref && !unset_nameref && subscript.is_none() && binding_is_nameref;
             let target = if follow { self.resolve_ref_use(base_name) } else { None };
             if follow && target.is_none() {
                 // A circular chain names nothing to declare. The warning is
@@ -43127,6 +43162,66 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -n r=nope; export r=5; declare -p nope").0,
             "declare -x nope=\"5\"\n"
+        );
+    }
+
+    /// What decides whether a declaration follows a reference is *which binding
+    /// it writes*, not what the name resolves to from where the declaration
+    /// stands.
+    #[test]
+    fn a_declaration_follows_a_reference_only_when_its_own_binding_is_one() {
+        // A local-binding declaration writes the frame, so a global reference
+        // of the same name is merely what it shadows: an ordinary fresh local,
+        // and the target untouched.
+        for (decl, want) in [
+            ("declare r=9", "declare -- r=\"9\""),
+            ("local r=9", "declare -- r=\"9\""),
+            ("declare -i r", "declare -i r"),
+            ("local r", "declare -- r"),
+            ("declare -a r=(1 2)", "declare -a r=([0]=\"1\" [1]=\"2\")"),
+        ] {
+            assert_eq!(
+                run(&format!(
+                    "w=5; declare -n r=w; f() {{ {decl}; declare -p r; }}; f; declare -p w r"
+                ))
+                .0,
+                format!("{want}\ndeclare -- w=\"5\"\ndeclare -n r=\"w\"\n"),
+                "{decl}"
+            );
+        }
+        // A second declaration in the frame adds to the local already made.
+        assert_eq!(
+            run("w=5; declare -n r=w; f() { declare r=9; declare r=7; declare -p r; }; f").0,
+            "declare -- r=\"7\"\n"
+        );
+        // Once the frame's own binding *is* a reference, declarations there
+        // follow it — into a *local* of the target, this one binding locally too.
+        assert_eq!(
+            run("w=5; f() { local -n r=w; local -i r=3+4; declare -p w; }; f; declare -p w").0,
+            "declare -i w=\"7\"\ndeclare -- w=\"5\"\n"
+        );
+        // A caller's local reference is not this frame's binding either.
+        assert_eq!(
+            run("w=5; o() { local -n r=w; i; }; i() { declare r=9; declare -p r; }; o; declare -p w")
+                .0,
+            "declare -- r=\"9\"\ndeclare -- w=\"5\"\n"
+        );
+        // `-g` writes the global binding, and consults that one — from behind a
+        // local shadow of the same name…
+        assert_eq!(
+            run("w=5; declare -n r=w; f() { local r=1; declare -g r=9; declare -p r; }; f; declare -p w").0,
+            "declare -- r=\"1\"\ndeclare -- w=\"9\"\n"
+        );
+        // …and the other way round, where the local is the reference and the
+        // global is not one.
+        assert_eq!(
+            run("w=5; f() { local -n r=w; declare -g r=9; }; f; declare -p w r").0,
+            "declare -- w=\"5\"\ndeclare -- r=\"9\"\n"
+        );
+        // `export` and `readonly` bind no local, so they always follow.
+        assert_eq!(
+            run("w=5; declare -n r=w; f() { export r=9; }; f; declare -p w").0,
+            "declare -x w=\"9\"\n"
         );
     }
 

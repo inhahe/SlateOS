@@ -117,3 +117,35 @@ echo "=== the listings show the target, not the reference"
 echo "=== local -n follows the same way"
 ( w=5; f() { local -n r=w; declare -i r; }; f; declare -p w ) 2>&1
 ( w=5; f() { local -n r=w; export r; };    f; declare -p w ) 2>&1
+
+# What decides whether a declaration follows a reference is *which binding it
+# writes*, not what the name resolves to from where it stands. A declaration
+# that binds a local writes the current frame's binding, so a reference of the
+# same name further out is merely the thing it shadows: the function gets a
+# fresh, ordinary local and the target is untouched. Once the frame's own
+# binding is a reference, declarations in that frame follow it as anywhere else.
+echo "=== a local-binding declaration writes the frame, so it shadows a reference"
+( w=5; declare -n r=w; f() { declare r=9;  declare -p r; }; f; declare -p w r ) 2>&1
+( w=5; declare -n r=w; f() { local r=9;    declare -p r; }; f; declare -p w r ) 2>&1
+( w=5; declare -n r=w; f() { declare -i r; declare -p r; }; f; declare -p w r ) 2>&1
+( w=5; declare -n r=w; f() { local r;      declare -p r; }; f; declare -p w r ) 2>&1
+( w=5; declare -n r=w; f() { declare -a r=(1 2); declare -p r; }; f; declare -p w r ) 2>&1
+# A second declaration in the same frame adds to the local it already made.
+( w=5; declare -n r=w; f() { declare r=9; declare r=7; declare -p r; }; f; declare -p w ) 2>&1
+# …and once the frame's binding *is* a reference, the next one follows it —
+# into a local of the target, since that declaration binds locally too.
+( w=5; f() { local -n r=w; local r=9;      declare -p r w; }; f; declare -p w ) 2>&1
+( w=5; f() { local -n r=w; local -i r=3+4; declare -p r w; }; f; declare -p w ) 2>&1
+# A caller's local reference is not this frame's binding either.
+( w=5; o() { local -n r=w; i; declare -p r; }
+       i() { declare r=9; declare -p r; }; o; declare -p w r ) 2>&1
+
+echo "=== -g writes the global binding, and that is the one consulted"
+# The global is a reference, so it is followed even from behind a local shadow.
+( w=5; declare -n r=w; f() { local r=1; declare -g r=9; declare -p r; }; f; declare -p w r ) 2>&1
+# Here it is the *local* that is the reference, and the global is not one.
+( w=5; f() { local -n r=w; declare -g r=9; declare -p r; }; f; declare -p w r ) 2>&1
+
+echo "=== export and readonly bind no local, so they always follow"
+( w=5; declare -n r=w; f() { export r=9;   }; f; declare -p w r ) 2>&1
+( w=5; declare -n r=w; f() { readonly r=9; }; f; declare -p w r ) 2>&1

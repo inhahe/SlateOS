@@ -21066,6 +21066,73 @@ impl Shell {
         }
     }
 
+    /// Check the value a *valueless* `-n` declaration would inherit — the one
+    /// the binding already holds — returning the complete diagnostic line when
+    /// bash would refuse it.
+    ///
+    /// `declare -n NAME` does not merely tag a name: it declares that whatever
+    /// is stored there is the name of another variable, so bash judges the
+    /// value that is already in place exactly as it judges the one an
+    /// assignment supplies. `q=0; declare -n q` is refused, and refused
+    /// *whole* — neither `-n` nor any attribute beside it is applied, so
+    /// `declare -rn q` leaves a plain `declare -- q="0"`.
+    ///
+    /// Two rules of [`Shell::nameref_value_error`] deliberately do **not**
+    /// carry over, both measured against bash 5.2:
+    ///
+    /// * The self-reference rule does not apply. `q=q; declare -n q` is
+    ///   accepted at global scope, where `declare -n q=q` is an error — the
+    ///   value was not supplied by this command, so there is no circle to
+    ///   complain about.
+    /// * An empty value takes the nameref-specific wording (`` `': invalid
+    ///   variable name for name reference ``) rather than the generic "not a
+    ///   valid identifier" the assignment form gives it.
+    ///
+    /// An array cannot be a nameref at all, whatever its elements say, and
+    /// gets its own message. That covers the dynamic specials that list as
+    /// arrays (`BASH_SOURCE`, `BASH_LINENO`); the scalar ones are judged by
+    /// the value their function computes, so `declare -n SECONDS` is refused
+    /// for the number it reads back.
+    ///
+    /// A name with no binding at all — including one a `local` in this very
+    /// command has just shadowed — holds nothing to judge, so it is fine:
+    /// `q=0; f() { declare -n q; }` succeeds.
+    fn nameref_existing_value_error(&self, tag: &str, name: &str) -> Option<Str> {
+        let not_an_array = |shell: &Self| -> Str {
+            bfmt![
+                shell.err_prefix(),
+                format!("{tag}: {name}: reference variable cannot be an array\n")
+            ]
+        };
+        if self.arrays.contains_key(name) || self.assoc.contains_key(name) {
+            return Some(not_an_array(self));
+        }
+        let value = match self.vars.get(name) {
+            Some(v) => v.clone(),
+            None => {
+                // No stored binding: a live dynamic special still has a value
+                // function, unless an ordinary (unset) declaration shadows it.
+                let d = self
+                    .dynamic_special(name)
+                    .filter(|_| !self.declared.contains(name))?;
+                if d.named_flags.contains('a') {
+                    return Some(not_an_array(self));
+                }
+                self.dynamic_special_value(name)?
+            }
+        };
+        if split_assignment_target(&value).is_some() {
+            return None;
+        }
+        Some(bfmt![
+            self.err_prefix(),
+            tag,
+            b": `",
+            value.as_slice(),
+            b"': invalid variable name for name reference\n"
+        ])
+    }
+
     /// `declare`/`typeset`/`local` — the entry point, which handles `-g` by
     /// swapping each operand's global binding into place around the declaration
     /// proper (see [`Shell::enter_global_scope`]).
@@ -21318,6 +21385,19 @@ impl Shell {
             // declaration is function-local.
             if make_local {
                 self.declare_local(base_name);
+            }
+            // A valueless `-n` inherits whatever the binding already holds as
+            // the name it refers to, so that value is judged now — after the
+            // shadow step above, because a fresh local holds nothing to judge,
+            // and before any attribute is applied, because the refusal
+            // abandons the whole operand. See `nameref_existing_value_error`.
+            if nameref
+                && value.is_none()
+                && let Some(msg) = self.nameref_existing_value_error(tag, base_name)
+            {
+                self.emit_stderr(&msg);
+                status = 1;
+                continue;
             }
             // Giving a *local* scalar an array kind drops its value, where the
             // same widening at global scope keeps it as element 0: bash builds
@@ -40590,6 +40670,55 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("t=v; declare -n r=t; declare -p r").0,
             "declare -n r=\"t\"\n"
+        );
+    }
+
+    #[test]
+    fn valueless_nameref_declaration_judges_the_stored_value() {
+        // A nameref's value *is* the name it refers to, so `declare -n NAME`
+        // judges what the binding already holds, exactly as the assignment
+        // form judges what it is given.
+        assert_eq!(run("q=0; declare -n q; declare -p q").0, "declare -- q=\"0\"\n");
+        assert_eq!(run("q=0; declare -n q; echo rc=$?").0, "rc=1\n");
+        assert_eq!(run("q=zz; declare -n q; declare -p q").0, "declare -n q=\"zz\"\n");
+        // A subscript is an ordinary shell word; only the base must be a name.
+        assert_eq!(
+            run("q='a[1]'; declare -n q; declare -p q").0,
+            "declare -n q=\"a[1]\"\n"
+        );
+        // The self-reference rule of the assignment form does *not* apply: this
+        // command supplied no value, so there is no circle it could have made.
+        assert_eq!(run("q=q; declare -n q; declare -p q").0, "declare -n q=\"q\"\n");
+        assert_eq!(run("q=q; declare -n q=q; echo rc=$?").0, "rc=1\n");
+        // Nothing stored is nothing to judge.
+        assert_eq!(run("declare -n q; declare -p q").0, "declare -n q\n");
+        // An array cannot be a nameref whatever its elements say.
+        assert_eq!(
+            run("declare -a q=(zz); declare -n q; declare -p q").0,
+            "declare -a q=([0]=\"zz\")\n"
+        );
+        assert_eq!(run("declare -a q; declare -n q; echo rc=$?").0, "rc=1\n");
+        // The refusal abandons the whole operand — neither `-n` nor the letters
+        // beside it are applied — while later operands still bind.
+        assert_eq!(run("q=0; declare -rnu q; declare -p q").0, "declare -- q=\"0\"\n");
+        assert_eq!(run("q=0; declare -n q z=zz; declare -p z").0, "declare -n z=\"zz\"\n");
+        // `+n` removes the attribute and so judges nothing.
+        assert_eq!(run("q=0; declare +n q; echo rc=$?").0, "rc=0\n");
+        // A `local` shadows the value before it can be judged; `-g` names the
+        // global, which still holds it.
+        assert_eq!(
+            run("q=0; f() { declare -n q; declare -p q; }; f").0,
+            "declare -n q\n"
+        );
+        assert_eq!(run("q=0; f() { declare -gn q; }; f; declare -p q").0, "declare -- q=\"0\"\n");
+        // A dynamic variable is judged by the value its function computes.
+        assert_eq!(run("declare -n SECONDS; echo rc=$?").0, "rc=1\n");
+        assert_eq!(run("declare -n BASH_SOURCE; echo rc=$?").0, "rc=1\n");
+        // …and once `unset` has taken that function away, there is nothing left
+        // to judge, so the attribute simply lands.
+        assert_eq!(
+            run("unset SECONDS; declare -n SECONDS; declare -p SECONDS").0,
+            "declare -n SECONDS\n"
         );
     }
 

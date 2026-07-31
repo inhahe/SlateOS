@@ -1445,6 +1445,12 @@ and `unset a`, but one for `$a`, `${a:-d}`, `[ -v a ]` and `a=5`. osh emits
 exactly one everywhere. Values, exit statuses and stdout all match; only the
 number of stderr lines differs.
 
+The declaration builtins are the same story with a third count: a circular
+operand of `declare -i a` / `export a` / `readonly a` draws two lines from bash,
+and a valued one (`export a=5`) draws three — the extra being the store that
+fails on its own. osh still emits one. `tests/corpus/nameref-declare.sh`
+therefore deduplicates the warning (`sort -u`) rather than counting it.
+
 **Where.** `userspace\oils\src\interp.rs` — `Shell::resolve_ref_use`. The
 doubling is an artifact of bash resolving the variable twice internally (once to
 decide whether it exists, once to read it); osh's expansion paths resolve once.
@@ -5870,7 +5876,7 @@ Covered by `tests/corpus/dynamic-var-array.sh` and the unit tests
 `giving_a_dynamic_variable_an_array_kind_converts_it` /
 `converting_a_dynamic_variable_takes_its_value_function_away`.
 
-### TD-OILS-DECL-NAMEREF-UNRESOLVED. The declaration builtins do not follow a nameref — 2026-07-31
+### TD-OILS-DECL-NAMEREF-UNRESOLVED. The declaration builtins do not follow a nameref — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_declare` and the
 `export`/`readonly` operand loops, which apply attributes to the operand
@@ -5902,6 +5908,134 @@ the `declare`/`local`/`typeset` loop and the `export`/`readonly` ones,
 and to keep the `-n` operand itself exempt (`declare -n r=x` is about
 `r`, not about `x`). Note bash's own exemption: an operand *carrying*
 `-n` is not resolved, and neither is `unset -n`.
+
+**✅ RESOLVED 2026-07-31.** Both loops now resolve the operand.
+
+`builtin_declare` follows one immediately after the operand's
+identifier validation, so every attribute, kind, case flag and value
+below it sees the target. The exemptions are the declarations that are
+*about* the reference: `-n` (declaring or retargeting), `+n` (taking the
+attribute away) and `unset -n`, plus a subscripted operand — which bash
+answers with a rule of its own, now tracked as
+**TD-OILS-DECL-NAMEREF-SUBSCRIPT** below. A circular chain names nothing
+to declare, so the operand is dropped after the warning with the status
+left alone.
+
+`export`/`readonly` share `attr_operand`, which now returns the new
+two-variant `AttrOperand` (`Mark` — a name to mark — or `Done` — nothing
+left to mark, plus the status this operand contributes) instead of an
+`Option` tuple, and delegates a nameref operand to the new
+`attr_nameref`. These two have no exemption at all: neither has a `-n`
+operand of its own, and `export -n` removes the export attribute from the
+*target*. Their two failure shapes are both quiet about the status:
+
+* a **circular** chain reports 0 for a bare `export a` and 1 for
+  `export a=5`, the failure being the store that had nowhere to go;
+* an **element** reference (`declare -n r=arr[1]`) is refused with
+  `` export: `arr[1]': not a valid identifier `` and reports 0 — but the
+  *store* still happens, routed through the reference by
+  `apply_assignment` so the append form works too (`export r+=9` leaves
+  `arr[1]="29"`). This is where `declare` and these two part company:
+  `declare -i r` marks `arr` and stores into `arr[1]`.
+
+**Coverage.** New corpus case `tests/corpus/nameref-declare.sh` (which
+declarations follow the reference and which are about it, a target that
+does not exist yet, chains, element references through all three
+builtins, circular chains, a self reference, a subscripted operand,
+`readonly` naming the target when it refuses, the listings, and
+`local -n`) plus two unit tests. Full differential corpus: 172 matched,
+0 failed; 1032 unit tests pass; clippy clean on both targets.
+
+The one remaining divergence is the number of `warning: a: circular name
+reference` lines bash prints — two for a bare operand, three for a valued
+one, against osh's one. That is the pre-existing
+**TD-OILS-NAMEREF-WARNING-COUNT** below, so the corpus case deduplicates
+the warning rather than counting it.
+
+### TD-OILS-DECL-NAMEREF-SUBSCRIPT. A subscripted `declare` operand naming a nameref is neither resolved nor un-referenced — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare`, whose
+nameref resolution is deliberately skipped for a subscripted operand
+(`subscript.is_none()` in the `follow` condition) because bash's answer
+there is a *different* rule, not the same one — and osh implements
+neither half of it.
+
+bash splits on whether the subscripted operand carries a **value**:
+
+* **Without** a value it resolves like any other operand — the
+  attributes land on the target's base, the reference survives, and
+  nothing is warned about.
+* **With** a value it takes the nameref attribute *away* and declares the
+  operand as an array of its own, leaving the target untouched. This
+  happens whatever the reference points at — a scalar, a whole array, or
+  an element.
+
+```sh
+w=5; declare -n r=w; declare -i r[1];  declare -p w r
+# bash: declare -ai w=([0]="5") / declare -n r="w"
+# osh : declare -- w="5")       / declare -ain r=([0]="w")
+
+w=5; declare -n r=w; declare r[1]=9;   declare -p w r
+# bash: warning: r: removing nameref attribute
+#       declare -- w="5" / declare -a r=([1]="9")
+# osh : declare -- w="5" / declare -an r=([0]="w" [1]="9")
+
+declare -a arr=(1 2); declare -n r=arr; declare -i r[1]; declare -p arr
+# bash: declare -ai arr=([0]="1" [1]="2")      osh: declare -a arr=(…) (unchanged)
+```
+
+So osh gets the valueless form wrong by converting the *reference* into
+an array (destroying it, exactly as TD-OILS-DECL-NAMEREF-UNRESOLVED
+described for the unsubscripted `declare -a r`), and the valued form
+wrong by keeping the `-n` attribute on what is now an array.
+
+**Proper fix.** In `builtin_declare`, widen the `follow` condition to
+resolve a subscripted operand that carries no value — using the resolved
+`base` and *keeping the operand's own subscript* (a reference that
+already designates an element is a subscript on a subscript, which
+`apply_assignment` already refuses via `warn_elem_not_identifier`; reuse
+that). For a subscripted operand that does carry a value, emit
+`warning: NAME: removing nameref attribute`, drop `NAME` from
+`nameref_attr`, and declare `NAME` itself. Low priority: a subscripted
+operand on a nameref is a shape almost no script writes.
+
+### TD-OILS-ATTR-ASSIGN-BYPASSES-DYNVAR. `export NAME=v` / `readonly NAME=v` store straight into the variable table, so a dynamic special loses its value function — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the `export` and `readonly`
+operand loops, which perform their store with `set_scalar_store`
+directly. That is the raw table write; the dynamic-variable machinery
+lives in `apply_assignment`, which wraps `apply_assignment_inner` with
+the write-back hook (see TD-OILS-DYNVAR-CELL) and which these two never
+reach.
+
+A valued `export`/`readonly` operand naming one of the 13 dynamic
+specials therefore behaves as if the name were ordinary: the value is
+parked in `vars`, the slot's own letters are lost, and the value
+function stops being consulted.
+
+```sh
+export SECONDS=100; echo "[$SECONDS]"    # bash [100]                  osh [0]
+export SECONDS=9;   declare -p SECONDS   # bash declare -ix SECONDS=…  osh declare -x SECONDS="9"
+readonly SECONDS=9; declare -p SECONDS   # bash declare -ir SECONDS=…  osh declare -r SECONDS="9"
+export LINENO=9;    declare -p LINENO    # bash declare -x LINENO="1"  osh declare -x LINENO="9"
+export HISTCMD=9;   declare -p HISTCMD   # bash declare -ix HISTCMD=…  osh declare -x HISTCMD="9"
+```
+
+The *valueless* forms are already right (`export SECONDS` reports
+`declare -ix SECONDS=…`), because they only add to `exported` and leave
+the binding alone. A plain `SECONDS=9` is right too. It is exactly the
+attribute-builtin store that bypasses the model.
+
+**Proper fix.** Route the store through `apply_assignment` — building an
+`Assignment { name, index: None, append, value }` and calling it
+untraced, as `attr_nameref` already does for an element reference. That
+gets the dynamic write-back, the nameref resolution and the
+array-element-0 routing of `set_scalar_store` from one place instead of
+three, and would let the two loops drop their hand-rolled `append` read
+of `scalar_store`. The care needed is that `export`/`readonly` have their
+own refusal shapes for a readonly target and for `noassign` names, which
+must keep reporting what they report today (see `Shell::noassign`) rather
+than inheriting `apply_assignment`'s.
 
 ### TD-OILS-NAMEREF-VALUELESS-VALIDATION. `declare -n NAME` on an already-set variable does not validate its value — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

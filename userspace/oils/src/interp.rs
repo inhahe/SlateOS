@@ -20540,8 +20540,10 @@ impl Shell {
         }
     }
 
-    /// Split a `readonly`/`export` operand into `(name, append, value)`, or
-    /// report `` `WORD': not a valid identifier `` and return `None`.
+    /// Split a `readonly`/`export` operand into the name to mark, its append
+    /// flag and its value — following a nameref operand to what it points at —
+    /// or report `` `WORD': not a valid identifier `` and return
+    /// [`AttrOperand::Done`].
     ///
     /// These two builtins take a plain identifier and nothing more — unlike
     /// `declare`, which also accepts a subscripted `a[0]=v`. What makes them
@@ -20556,13 +20558,9 @@ impl Shell {
     /// * `readonly 1bad=2` does not even start like a name, so again the whole
     ///   word is quoted.
     ///
-    /// The caller reports status 1 and moves on to the next operand: one bad
-    /// name does not stop the others from being declared.
-    fn attr_operand(
-        &mut self,
-        tag: &str,
-        word: BStr<'_>,
-    ) -> Option<(String, bool, Option<Str>)> {
+    /// One bad name does not stop the others from being declared: the caller
+    /// folds in the status this operand contributes and moves on.
+    fn attr_operand(&mut self, tag: &str, word: BStr<'_>) -> AttrOperand {
         let (name, append, value) = match attr_assignment_split(word) {
             Some(eq) => {
                 let append = eq > 0 && word.get(eq - 1) == Some(&b'+');
@@ -20589,9 +20587,86 @@ impl Shell {
                 name,
                 b"': not a valid identifier"
             ]);
-            return None;
+            return AttrOperand::Done { status: 1 };
         };
-        Some((text.to_string(), append, value))
+        if self.nameref_attr.contains(text) {
+            return self.attr_nameref(tag, text, append, value);
+        }
+        AttrOperand::Mark {
+            name: text.to_string(),
+            append,
+            value,
+        }
+    }
+
+    /// Follow an `export`/`readonly` operand that carries the nameref attribute
+    /// to what it points at, the way bash does before it marks anything:
+    ///
+    /// ```sh
+    /// w=5; declare -n r=w
+    /// export r      # declare -x w="5",  and r is still declare -n r="w"
+    /// readonly r=9  # declare -r w="9"
+    /// export -a r=9 # declare -ax w=([0]="9")
+    /// ```
+    ///
+    /// Unlike `declare`, there is no operand here that is *about* the
+    /// reference — neither builtin has a `-n`, and `export -n` (which takes the
+    /// export attribute away) follows the reference like everything else — so
+    /// this is unconditional.
+    ///
+    /// The two ways it can fail to name something markable are both quiet about
+    /// the status:
+    ///
+    /// * A **circular** chain points at nothing. The warning is out;
+    ///   `export a` reports 0, and only the *store* a valued operand wanted
+    ///   fails, so `export a=5` reports 1.
+    /// * An **element** reference (`declare -n r=arr[1]`) names no variable, and
+    ///   a subscript is exactly what these two builtins refuse — so the
+    ///   marking is refused with `` export: `arr[1]': not a valid identifier ``.
+    ///   The *store* still happens, through the reference and with the append
+    ///   form intact (`export r+=9` leaves `arr[1]="29"`), and the status is
+    ///   still 0. `declare` differs: it marks `arr` and stores into `arr[1]`.
+    fn attr_nameref(
+        &mut self,
+        tag: &str,
+        name: &str,
+        append: bool,
+        value: Option<Str>,
+    ) -> AttrOperand {
+        let Some(target) = self.resolve_ref_use(name) else {
+            return AttrOperand::Done {
+                status: i32::from(value.is_some()),
+            };
+        };
+        if target.sub.is_none() {
+            return AttrOperand::Mark {
+                name: target.base,
+                append,
+                value,
+            };
+        }
+        if let Some(v) = value {
+            // Named as the *reference*, so `apply_assignment` performs the same
+            // rewrite `r=9` would — there is no second place that has to know
+            // how a subscript reaches an associative key. Untraced: the `set -x`
+            // line for the builtin itself is already out.
+            let assignment = Assignment {
+                name: name.to_string(),
+                index: None,
+                append,
+                value: AssignRhs::Scalar(Word::literal(v)),
+            };
+            self.apply_assignment(&assignment, false);
+        }
+        let spelled = target.spelling();
+        self.berrln(&bfmt![
+            self.err_prefix(),
+            tag,
+            b": `",
+            &spelled,
+            b"': not a valid identifier"
+        ]);
+        AttrOperand::Done { status: 0 }
     }
 
     /// The `builtin: ` the readonly-assignment diagnostic of `export` and
@@ -20674,9 +20749,12 @@ impl Shell {
         let _ = print; // `-p` with operands behaves like plain `export`.
         let mut status = 0;
         for a in operands {
-            let Some((k, append, value)) = self.attr_operand("export", a) else {
-                status = 1;
-                continue;
+            let (k, append, value) = match self.attr_operand("export", a) {
+                AttrOperand::Mark { name, append, value } => (name, append, value),
+                AttrOperand::Done { status: s } => {
+                    status |= s;
+                    continue;
+                }
             };
             if let Some(v) = value {
                 // `export NAME=value` is an assignment, so a readonly target is
@@ -21677,6 +21755,43 @@ impl Shell {
                 status = 1;
                 continue;
             };
+            // bash resolves a nameref *operand* before it applies anything, so
+            // a declaration naming the reference declares the target and leaves
+            // the reference the reference it was:
+            //
+            // ```sh
+            // w=5; declare -n r=w
+            // declare -i r    # declare -i w="5",       declare -n r="w"
+            // declare -i r=9  # declare -i w="9"
+            // declare -a r    # declare -a w=([0]="5")
+            // ```
+            //
+            // The value goes to the target with the attributes, and so does an
+            // element reference's subscript: with `declare -n r=arr[1]`,
+            // `declare r=zz` stores `arr[1]=zz` while the attributes still land
+            // on `arr`, which is where attributes always land.
+            //
+            // A declaration that is *about* the reference is exempt: `-n`
+            // (declaring or retargeting it) and `+n` (taking the attribute
+            // away). So is a subscripted operand, which bash answers with a
+            // rule of its own — it resolves one that carries no value and
+            // *un-references* one that does — see known-issues
+            // TD-OILS-DECL-NAMEREF-SUBSCRIPT.
+            let follow = !nameref
+                && !unset_nameref
+                && subscript.is_none()
+                && self.nameref_attr.contains(base_name);
+            let target = if follow { self.resolve_ref_use(base_name) } else { None };
+            if follow && target.is_none() {
+                // A circular chain names nothing to declare. The warning is
+                // out; the operand is dropped and the status left alone
+                // (`declare -n a=b; declare -n b=a; declare -i a; echo $?` → 0).
+                continue;
+            }
+            let (base_name, subscript) = match &target {
+                Some(t) => (t.base.as_str(), t.sub.as_deref()),
+                None => (base_name, subscript),
+            };
             // A `-n` declaration's value is the *name* it refers to, so bash
             // validates it here — before the readonly check below, which it
             // therefore pre-empts (`readonly r; declare -n r='a b'` reports the
@@ -22654,9 +22769,12 @@ impl Shell {
             // Supports `NAME=value` and the `NAME+=value` append form; anything
             // that is not a plain identifier is refused here, and only that
             // operand is lost.
-            let Some((name, append, value)) = self.attr_operand("readonly", name_val) else {
-                status = 1;
-                continue;
+            let (name, append, value) = match self.attr_operand("readonly", name_val) {
+                AttrOperand::Mark { name, append, value } => (name, append, value),
+                AttrOperand::Done { status: s } => {
+                    status |= s;
+                    continue;
+                }
             };
             if value.is_some() && self.readonly.contains(&name) {
                 self.perrln(&format!(
@@ -27384,6 +27502,23 @@ impl RefTarget {
             Some(sub) => bfmt![&self.base, b"[", sub, b"]"],
         }
     }
+}
+
+/// What one `export`/`readonly` operand turned out to name.
+/// See [`Shell::attr_operand`].
+#[derive(Debug)]
+enum AttrOperand {
+    /// A name to mark, with the value the operand carried (if any) and whether
+    /// that value appends.
+    Mark {
+        name: String,
+        append: bool,
+        value: Option<Str>,
+    },
+    /// Nothing left to mark. Any diagnostic is already out and any store the
+    /// operand carried has already happened; `status` is what this operand
+    /// contributes to the builtin's exit status.
+    Done { status: i32 },
 }
 
 /// The place a plain scalar assignment ends up, after namerefs are followed.
@@ -42208,6 +42343,93 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // element 0 a negative subscript counts back from comes from.
         assert_eq!(run("w=5; w[1]=9; declare -p w").0, "declare -a w=([0]=\"5\" [1]=\"9\")\n");
         assert_eq!(run("w=5; w[-1]=9; declare -p w").0, "declare -a w=([0]=\"9\")\n");
+    }
+
+    #[test]
+    fn a_declaration_naming_a_nameref_declares_its_target() {
+        // Every attribute, kind and value lands on the target; the reference is
+        // left the reference it was.
+        for (decl, want) in [
+            ("declare -i r", "declare -i w=\"5\""),
+            ("typeset -x r", "declare -x w=\"5\""),
+            ("export r", "declare -x w=\"5\""),
+            ("readonly r", "declare -r w=\"5\""),
+            ("declare -a r", "declare -a w=([0]=\"5\")"),
+            ("declare -i r=9", "declare -i w=\"9\""),
+            ("export r=9", "declare -x w=\"9\""),
+            ("readonly r=9", "declare -r w=\"9\""),
+            ("export -a r=9", "declare -ax w=([0]=\"9\")"),
+            // …and a `-n` operand is exempt: it is about the reference.
+            ("declare -n r", "declare -- w=\"5\""),
+        ] {
+            assert_eq!(
+                run(&format!("w=5; declare -n r=w; {decl}; declare -p w r")).0,
+                format!("{want}\ndeclare -n r=\"w\"\n"),
+                "{decl}"
+            );
+        }
+        // `+n` is exempt too — it takes the attribute off the reference, which
+        // is then an ordinary scalar holding the target's name.
+        assert_eq!(
+            run("w=5; declare -n r=w; declare +n r; declare -p w r").0,
+            "declare -- w=\"5\"\ndeclare -- r=\"w\"\n"
+        );
+        // `export -n` has no exemption either: it unexports the *target*.
+        assert_eq!(
+            run("w=5; declare -n r=w; export w; export -n r; declare -p w").0,
+            "declare -- w=\"5\"\n"
+        );
+        // A chain is followed the whole way, and a target need not exist yet.
+        assert_eq!(
+            run("w=5; declare -n a=w; declare -n b=a; declare -i b; declare -p w").0,
+            "declare -i w=\"5\"\n"
+        );
+        assert_eq!(
+            run("declare -n r=nope; export r=5; declare -p nope").0,
+            "declare -x nope=\"5\"\n"
+        );
+    }
+
+    #[test]
+    fn a_declaration_through_a_reference_to_an_element_splits_the_two_builtins() {
+        // `declare` marks the array and stores into the element…
+        let elem = "declare -a arr=(1 2); declare -n r=arr[1]";
+        assert_eq!(
+            run(&format!("{elem}; declare -i r; declare -p arr")).0,
+            "declare -ai arr=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(
+            run(&format!("{elem}; declare r=zz; declare -p arr")).0,
+            "declare -a arr=([0]=\"1\" [1]=\"zz\")\n"
+        );
+        // …while `export`/`readonly` refuse a subscript outright — yet still
+        // store through the reference, and still report success.
+        for tag in ["export", "readonly"] {
+            assert_eq!(
+                run(&format!("{elem}; {tag} r=9; echo \"rc=$?\"; declare -p arr")).0,
+                "rc=0\ndeclare -a arr=([0]=\"1\" [1]=\"9\")\n",
+                "{tag}"
+            );
+        }
+        assert_eq!(
+            run(&format!("{elem}; export r+=9; declare -p arr")).0,
+            "declare -a arr=([0]=\"1\" [1]=\"29\")\n"
+        );
+        // The refused `readonly` really did not take.
+        assert_eq!(
+            run(&format!("{elem}; readonly r; arr[1]=x; declare -p arr")).0,
+            "declare -a arr=([0]=\"1\" [1]=\"x\")\n"
+        );
+        // A circular chain declares nothing, and only a value that had nowhere
+        // to go makes it a failure.
+        let circ = "declare -n a=b; declare -n b=a";
+        for decl in ["declare -i a", "export a", "readonly a"] {
+            assert_eq!(run(&format!("{circ}; {decl}; echo \"rc=$?\"")).0, "rc=0\n", "{decl}");
+        }
+        for decl in ["export a=5", "readonly a=5"] {
+            assert_eq!(run(&format!("{circ}; {decl}; echo \"rc=$?\"")).0, "rc=1\n", "{decl}");
+        }
+        assert_eq!(run(&format!("{circ}; declare -i a; declare -p a")).0, "declare -n a=\"b\"\n");
     }
 
     #[test]

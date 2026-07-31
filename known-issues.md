@@ -6587,7 +6587,7 @@ TD-OILS-DECL-ERROR-SKIPS-FLAG-APPLY — is bash's habit of abandoning a
 name's flag application after an error that is raised once the literal
 has already bound.
 
-### TD-OILS-DECL-ERROR-SKIPS-FLAG-APPLY. A per-name `declare` error abandons that name's flag application, but only *after* the compound literal has bound — 2026-07-31 — OPEN (1 of 3 done)
+### TD-OILS-DECL-ERROR-SKIPS-FLAG-APPLY. A per-name `declare` error abandons that name's flag application, but only *after* the compound literal has bound — 2026-07-31 — OPEN (2 of 3 done)
 
 **Where:** `userspace/oils/src/interp.rs` —
 `exec_declare_with_arrays_scoped`. bash's `declare_internal` performs a
@@ -6605,7 +6605,7 @@ at all**, so the status was wrong too, not just the attribute letters.
 ```sh
 declare +a  -l +l k8=(AB)  # bash declare -al k8=([0]="ab")  osh declare -a k8=([0]="ab")   OPEN
 declare -aA +l    v9=(AB)  # bash declare -Al v9=([AB]="")   osh ditto                     ✅ DONE
-declare -n  +i    t1=(2+3) # bash declare -a  t1=([0]="2+3") osh declare -an t1=([0]="2+3") OPEN
+declare -n  +i    t1=(2+3) # bash declare -a  t1=([0]="2+3") osh ditto                     ✅ DONE
 ```
 
 **✅ `-a` and `-A` together — done 2026-07-31.** Naming both kinds in the
@@ -6646,13 +6646,37 @@ the same way, so `post_fold` in phase 1 has to be skipped for it too —
 the same treatment `self_kind_conflict` now gets, except that whether it
 fires is only known after the literal has bound.
 
-**Still open — `-n` with a compound literal.** bash refuses with
-`declare: NAME: reference variable cannot be an array`, rc 1; the array
-still binds, and neither `n` nor any other builtin-phase flag is applied.
-osh emits no error and applies `-n` and `-x`. This refusal outranks the
-`-a`/`-A` one (`declare -aA -n q=(1)` reports the reference message), so
-it has to be checked first. Reproduce with `px35.sh` lines 14–17 and
-`px38.sh` line 21.
+**✅ `-n` with a compound literal — done 2026-07-31.** bash refuses with
+`{tag}: NAME: reference variable cannot be an array`, rc 1; the literal
+still binds (under whatever kind the letters name), and the operand is
+abandoned exactly as above — neither `n` nor `-r`/`-t`/`-x` lands, and
+the case/integer removals are skipped too, so `declare -n -i +i q=(2+3)`
+keeps `-i` and `declare -n -l +l q=(AB)` keeps `-l`. osh emitted no error
+and applied `-n` along with everything else.
+
+Measured with `target/dvscratch/px42.sh` and `px45.sh`; the ordering that
+came out of it:
+
+* It outranks **both** later refusals — the destroy one
+  (`declare -n +a q=(3)` reports the reference message, and the `+a` does
+  not fire) and the array-kind self-conflict, in either order
+  (`declare -aA -n q=(1)` and `declare -n -aA q=(1)` both report it, with
+  the `-A` still winning the kind).
+* It does **not** outrank the phase-A refusals (conversion, readonly),
+  which stop the literal from binding at all and discard the parse unit.
+* Only a *compound* operand asks for it: a scalar operand of the same
+  command still becomes a reference (`declare -n q=(1) r=w` refuses `q`
+  and leaves `declare -n r="w"`), and bare/subscripted operands are
+  untouched.
+* A name that is **already** a reference is not being made one — the
+  literal binds through it into the target, which bash accepts silently
+  (`declare -A t=([k]=v); declare -n r=t; declare -n r=(z)` → rc 0).
+* `-n +n` still asks for it; `+n` alone does not. `-p` prints instead of
+  refusing, and `readonly`/`export` do not read `-n` as the nameref
+  letter at all (see the `-n` fix committed alongside).
+
+Covered by `a_compound_operand_under_n_binds_and_then_refuses_the_reference`
+and `userspace/oils/tests/corpus/declare-nameref-array-refusal.sh`.
 
 **Low priority:** every shape here is one bash prints an error for, so a
 script that hits it is already broken.

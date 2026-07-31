@@ -23286,6 +23286,26 @@ impl Shell {
             && !print_mode
             && !global_builtin
             && matches!(cmd, "declare" | "typeset" | "local");
+        // `-n` and a compound operand ask for a variable that is both a reference
+        // and an array, which bash refuses — `declare: NAME: reference variable
+        // cannot be an array`. It behaves exactly like the conflict above: the
+        // literal still binds (as whatever kind the letters name), the refusal is
+        // tagged with the builtin and emitted once per operand, the command fails
+        // but the parse unit continues, and everything the builtin would have
+        // applied afterwards is abandoned — `n` itself, `-r`/`-t`/`-x`, and the
+        // case/integer removals (`declare -n -i +i q=(2+3)` keeps `-i`).
+        //
+        // It outranks both the destroy refusal (`declare -n +a q=(3)` reports the
+        // reference message) and the array-kind conflict (`declare -aA -n q=(1)`
+        // likewise), but not the phase-A conversion or readonly failures, which
+        // stop the operand from binding at all and never reach here. `-p` prints
+        // instead of refusing, and `readonly`/`export` do not read `-n` as the
+        // nameref letter at all (see above), so `nameref` is already false there.
+        let nameref_array_refusal = nameref && !print_mode;
+        // Whether *this* operand is the one being refused: a name that is already
+        // a reference is not being made one — the literal binds through it into
+        // the target, which is an ordinary array assignment bash accepts.
+        let mut refused_nameref: HashSet<String> = HashSet::new();
         // Phase 1 — the *compound* operands, in operand order, before the builtin
         // runs at all.
         //
@@ -23504,6 +23524,12 @@ impl Shell {
             // the common case (no `+` letter anywhere) it is the pair already
             // stored and nothing moves.
             let claimed = kind_or_scope_flag || first_value_letter_on == Some(true);
+            let operand_refused = if nameref_array_refusal && !self.nameref_attr.contains(&a.name) {
+                refused_nameref.insert(a.name.clone());
+                true
+            } else {
+                self_kind_conflict
+            };
             let single_case = match (seen_lower, seen_upper, seen_capcase) {
                 (true, false, false) => Some(1),
                 (false, true, false) => Some(2),
@@ -23554,11 +23580,12 @@ impl Shell {
             // A claimed fold was really set on the variable, so the removals run
             // against it rather than against the fold the name arrived with.
             //
-            // Unless the operand is about to be refused for naming both array
-            // kinds (see `self_kind_conflict`): that refusal abandons the
+            // Unless the operand is about to be refused — for naming both array
+            // kinds (`self_kind_conflict`) or for asking a reference to be an
+            // array (`nameref_array_refusal`): either refusal abandons the
             // operand where bash's builtin would have run these removals, so
             // whatever the literal bound under is simply what the name keeps.
-            let post_fold = if self_kind_conflict {
+            let post_fold = if operand_refused {
                 bind_fold
             } else if claimed && single_case.is_some() {
                 match bind_fold {
@@ -23573,7 +23600,7 @@ impl Shell {
             if post_fold != bind_fold {
                 self.set_case_attr(&a.name, post_fold);
             }
-            if bind_int != stored_int && !self_kind_conflict {
+            if bind_int != stored_int && !operand_refused {
                 if stored_int {
                     self.integer_attr.insert(a.name.clone());
                 } else {
@@ -23685,6 +23712,17 @@ impl Shell {
             // An operand refused as a local above took none of the attributes in
             // phase 1 and takes none of these either — bash abandons it whole.
             if refused_local.contains(a.name.as_str()) {
+                continue;
+            }
+            // See `nameref_array_refusal`: the literal has bound, and the `-n`
+            // is refused against the array it made. This outranks both refusals
+            // below.
+            if refused_nameref.contains(&a.name) {
+                self.perrln(&format!(
+                    "{cmd}: {}: reference variable cannot be an array",
+                    a.name
+                ));
+                status = 1;
                 continue;
             }
             // `+a`/`+A` cannot un-make the array the literal just bound, so they
@@ -44172,6 +44210,73 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(o, "osh: typeset: q: cannot convert associative to indexed array\n");
         let (o, _) = run("f(){ local -aA q=(1); }; f 2>&1");
         assert_eq!(o, "main: local: q: cannot convert associative to indexed array\n");
+    }
+
+    /// `-n` and a compound operand together ask for a reference that is also an
+    /// array. bash binds the literal, then refuses — and abandons the operand,
+    /// so neither `n` nor anything else the builtin would have applied lands.
+    #[test]
+    fn a_compound_operand_under_n_binds_and_then_refuses_the_reference() {
+        assert_eq!(
+            run("{ declare -n q=(1); } 2>&1; echo rc=$?; declare -p q").0,
+            "osh: declare: q: reference variable cannot be an array\nrc=1\n\
+             declare -a q=([0]=\"1\")\n"
+        );
+        // Abandoning the operand means the removals that normally run once the
+        // literal has bound never do: the fold and the integer attribute the
+        // literal bound *under* are simply what the name keeps.
+        for (src, want) in [
+            ("declare -n -l +l q=(AB)", "declare -al q=([0]=\"ab\")\n"),
+            ("declare -n +l -l q=(AB)", "declare -a q=([0]=\"AB\")\n"),
+            ("declare -n -i +i q=(2+3)", "declare -ai q=([0]=\"5\")\n"),
+            // …and none of the builtin's own attributes land either.
+            ("declare -n -r q=(1)", "declare -a q=([0]=\"1\")\n"),
+            ("declare -n -x q=(1)", "declare -a q=([0]=\"1\")\n"),
+            ("declare -n -t q=(1)", "declare -a q=([0]=\"1\")\n"),
+            // It outranks the destroy refusal and the array-kind conflict, in
+            // either order, and the `-A` still wins the kind.
+            ("declare -a q=(9); declare -n +a q=(1)", "declare -a q=([0]=\"1\")\n"),
+            ("declare -n -a -A q=(1)", "declare -A q=([1]=\"\" )\n"),
+            ("declare -a -A -n q=(1)", "declare -A q=([1]=\"\" )\n"),
+        ] {
+            assert_eq!(
+                run(&format!("{{ {src}; }} 2>/dev/null; echo rc=$?; declare -p q")).0,
+                format!("rc=1\n{want}"),
+                "{src}"
+            );
+        }
+        // Every operand is reported and every one binds; a scalar operand
+        // alongside is not a compound, so it still becomes a reference.
+        assert_eq!(
+            run("w=hi; { declare -n q=(1) r=w; } 2>&1; declare -p q r").0,
+            "osh: declare: q: reference variable cannot be an array\n\
+             declare -a q=([0]=\"1\")\ndeclare -n r=\"w\"\n"
+        );
+        // A name that is *already* a reference is not being made one: the
+        // literal binds through it into the target, which bash accepts.
+        assert_eq!(
+            run("declare -A t=([k]=v); declare -n r=t; { declare -n r=(z); } 2>&1; \
+                 echo rc=$?; declare -p t")
+                .0,
+            "rc=0\ndeclare -A t=([z]=\"\" )\n"
+        );
+        // Bare and subscripted operands are not compounds, and `+n` alone does
+        // not ask for a reference at all.
+        assert_eq!(run("{ declare +n q=(1); } 2>&1; echo rc=$?").0, "rc=0\n");
+        assert_eq!(
+            run("{ declare -n +n q=(1); } 2>&1; echo rc=$?").0,
+            "osh: declare: q: reference variable cannot be an array\nrc=1\n"
+        );
+        // The tag follows the builtin that was named.
+        let (o, _) = run("{ typeset -n q=(1); } 2>&1");
+        assert_eq!(o, "osh: typeset: q: reference variable cannot be an array\n");
+        let (o, _) = run("f(){ local -n q=(1); }; f 2>&1");
+        assert_eq!(o, "main: local: q: reference variable cannot be an array\n");
+        // `readonly`/`export` read `-n` as their own flag, so they never refuse.
+        assert_eq!(
+            run("readonly -n q=(1); echo rc=$?; declare -p q").0,
+            "rc=0\ndeclare -a q=([0]=\"1\")\n"
+        );
     }
 
     /// `+a`/`+A` never un-make an array: each refuses for its own kind and does

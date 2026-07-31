@@ -5311,17 +5311,20 @@ extern "C" fn kernel_main() -> ! {
     }
 
     // Create /etc directory and write a default service list.
-    // Init reads this at startup to auto-register services.
+    // Init reads this at startup to auto-register services.  The name is
+    // `/etc/startup.conf`, not `/etc/services` — the latter is the IANA
+    // port/protocol database that `getent services` and POSIX's
+    // `_PATH_SERVICES` resolve, and a plain file cannot be both.
     if let Err(e) = fs::Vfs::mkdir("/etc") {
         serial_println!("[init] Note: /etc mkdir: {:?} (may already exist)", e);
     }
     if let Err(e) = fs::Vfs::write_file(
-        "/etc/services",
+        "/etc/startup.conf",
         b"# Startup services (one per line)\n# Format: /path/to/elf [depends:dep1,dep2]\n/bin/ticker\n",
     ) {
-        serial_println!("[init] Note: /etc/services write: {:?}", e);
+        serial_println!("[init] Note: /etc/startup.conf write: {:?}", e);
     } else {
-        serial_println!("[init] Created /etc/services");
+        serial_println!("[init] Created /etc/startup.conf");
     }
 
     serial_println!("[init] Spawning init process ({} bytes ELF)", INIT_ELF.len());

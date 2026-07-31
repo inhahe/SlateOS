@@ -7,7 +7,7 @@
 //! 3. Enter a loop: sleep 5 seconds, print a tick message, repeat.
 //!
 //! This exercises:
-//! - Service auto-start from `/etc/services`
+//! - Service auto-start from `/etc/startup.conf`
 //! - Readiness notification (init detects the `ready` flag)
 //! - Long-running service monitoring (init polls with `try_wait`)
 //! - Graceful shutdown via `svc stop` (kernel sends PROCESS_KILL)

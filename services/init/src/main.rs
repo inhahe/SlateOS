@@ -631,13 +631,13 @@ struct Service {
     waiting_on_deps: bool,
 
     /// Extra arguments (argv[1..]).  argv[0] is always the service path.
-    /// Parsed from `args:` in /etc/services.
+    /// Parsed from `args:` in /etc/startup.conf.
     svc_args: [[u8; MAX_SVC_ARG_LEN]; MAX_SVC_ARGS],
     svc_arg_lens: [usize; MAX_SVC_ARGS],
     svc_arg_count: usize,
 
     /// Per-service environment variables (KEY=VALUE format).
-    /// Parsed from `env:` in /etc/services.  These are appended
+    /// Parsed from `env:` in /etc/startup.conf.  These are appended
     /// after the default environment (PATH=/bin).
     svc_env: [[u8; MAX_SVC_ENV_LEN]; MAX_SVC_ENV],
     svc_env_lens: [usize; MAX_SVC_ENV],
@@ -1910,10 +1910,10 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
             }
         }
     } else if bytes_eq(sub, b"cfg") {
-        // Reload /etc/services — register and start any new entries.
+        // Reload /etc/startup.conf — register and start any new entries.
         // Already-running services are not duplicated because register
         // doesn't check for duplicates (the user should stop first).
-        print("[svc] Reloading /etc/services...\n");
+        print("[svc] Reloading /etc/startup.conf...\n");
         load_startup_services(registry);
     } else {
         print("svc: unknown subcommand '");
@@ -1952,7 +1952,7 @@ fn execute(line: &[u8], registry: &mut ServiceRegistry) {
         print("  svc remove <n> - unregister a service\n");
         print("  svc list       - list all services\n");
         print("  svc status <n> - detailed service info\n");
-        print("  svc cfg        - reload /etc/services\n");
+        print("  svc cfg        - reload /etc/startup.conf\n");
         print("  pid            - show task ID\n");
         print("  uptime         - show time since boot\n");
         print("  logs           - show kernel log entries\n");
@@ -2026,7 +2026,11 @@ const POLL_INTERVAL_IDLE_NS: u64 = 50_000_000;
 /// 100 ms — balance between responsiveness and CPU usage.
 const POLL_INTERVAL_ACTIVE_NS: u64 = 100_000_000;
 
-/// Load the startup service list from `/etc/services`.
+/// Load the startup service list from `/etc/startup.conf`.
+///
+/// Not `/etc/services`: that name is the IANA port/protocol database that
+/// `getent services` and POSIX's `_PATH_SERVICES` resolve, and it is a plain
+/// file, so it cannot also hold this list.
 ///
 /// Format (one service per line):
 /// ```text
@@ -2050,14 +2054,14 @@ const POLL_INTERVAL_ACTIVE_NS: u64 = 100_000_000;
 /// If the file doesn't exist, this is a no-op.
 fn load_startup_services(registry: &mut ServiceRegistry) {
     let mut buf = [0u8; 2048];
-    let result = fs_read_file(b"/etc/services", &mut buf);
+    let result = fs_read_file(b"/etc/startup.conf", &mut buf);
     if result < 0 {
         // File not found or other error — silently skip.
         return;
     }
 
     let data = &buf[..result as usize];
-    print("[init] Loading startup services from /etc/services\n");
+    print("[init] Loading startup services from /etc/startup.conf\n");
 
     // Parse line by line.  Lines are separated by '\n'.
     let mut start = 0;
@@ -2227,7 +2231,7 @@ pub extern "C" fn _start() -> ! {
 
     let mut registry = ServiceRegistry::new();
 
-    // Auto-start services from /etc/services (if it exists).
+    // Auto-start services from /etc/startup.conf (if it exists).
     load_startup_services(&mut registry);
 
     print("Type 'help' for available commands.\n\n");

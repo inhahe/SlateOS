@@ -155,10 +155,15 @@ struct ServiceInfo {
 ///   /run/services/<name>/restarts   — restart count
 ///
 /// Service definitions live in:
-///   /etc/services/<name>.service    — YAML service definition
+///   /etc/service.d/<name>.service    — YAML service definition
+///
+/// The directory is `/etc/service.d`, not `/etc/services`: that name belongs
+/// to the IANA port/protocol database (`getent services`, POSIX's
+/// `_PATH_SERVICES`), which is a plain file and so cannot also be this
+/// directory.
 fn read_service_status(name: &str) -> Option<ServiceInfo> {
     let run_path = format!("/run/services/{name}");
-    let def_path = format!("/etc/services/{name}.service");
+    let def_path = format!("/etc/service.d/{name}.service");
 
     let status = read_file(&format!("{run_path}/status")).unwrap_or_else(|| "stopped".to_string());
     let pid = read_file(&format!("{run_path}/pid")).and_then(|s| s.parse::<u32>().ok());
@@ -230,7 +235,7 @@ fn read_service_def(path: &str) -> (String, Vec<String>, String, bool) {
     (description, dependencies, exec_path, enabled)
 }
 
-/// List all known services by scanning /etc/services/ and /run/services/.
+/// List all known services by scanning /etc/service.d/ and /run/services/.
 fn list_all_services() -> Vec<ServiceInfo> {
     let mut services = Vec::new();
     let mut seen = Vec::new();
@@ -247,14 +252,14 @@ fn list_all_services() -> Vec<ServiceInfo> {
         }
     }
 
-    // Scan /etc/services/ for defined but not running services.
-    if let Ok(entries) = fs::read_dir("/etc/services") {
+    // Scan /etc/service.d/ for defined but not running services.
+    if let Ok(entries) = fs::read_dir("/etc/service.d") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 let svc_name = name.strip_suffix(".service").unwrap_or(name);
                 if !seen.contains(&svc_name.to_string()) {
                     let (desc, deps, exec, enabled) =
-                        read_service_def(&format!("/etc/services/{name}"));
+                        read_service_def(&format!("/etc/service.d/{name}"));
                     services.push(ServiceInfo {
                         name: svc_name.to_string(),
                         status: "stopped".to_string(),
@@ -332,7 +337,7 @@ fn cmd_list() {
 
     if services.is_empty() {
         println!("No services found.");
-        println!("Service definitions go in /etc/services/<name>.service");
+        println!("Service definitions go in /etc/service.d/<name>.service");
         return;
     }
 
@@ -418,7 +423,7 @@ fn cmd_start(name: &str) {
         Err(e) => {
             // Fall back to direct execution if service manager is unavailable.
             eprintln!("IPC failed ({e}), trying direct start...");
-            let def_path = format!("/etc/services/{name}.service");
+            let def_path = format!("/etc/service.d/{name}.service");
             let (_, _, exec_path, _) = read_service_def(&def_path);
             if exec_path.is_empty() {
                 eprintln!("No exec path found for service '{name}'");
@@ -457,9 +462,9 @@ fn cmd_enable(name: &str) {
     match send_service_command("ENABLE", name) {
         Ok(resp) => println!("{}", resp.trim()),
         Err(_) => {
-            // Fall back: create a symlink in /etc/services/enabled/
-            let link = format!("/etc/services/enabled/{name}");
-            let target = format!("/etc/services/{name}.service");
+            // Fall back: create a symlink in /etc/service.d/enabled/
+            let link = format!("/etc/service.d/enabled/{name}");
+            let target = format!("/etc/service.d/{name}.service");
             match make_symlink(&target, &link) {
                 Ok(()) => println!("Enabled {name}"),
                 Err(e) => {
@@ -476,7 +481,7 @@ fn cmd_disable(name: &str) {
         Ok(resp) => println!("{}", resp.trim()),
         Err(_) => {
             // Fall back: remove the symlink.
-            let link = format!("/etc/services/enabled/{name}");
+            let link = format!("/etc/service.d/enabled/{name}");
             match fs::remove_file(&link) {
                 Ok(()) => println!("Disabled {name}"),
                 Err(e) => {
@@ -660,7 +665,7 @@ fn main() {
                 eprintln!("error: 'reload' requires a service name");
                 process::exit(1);
             }
-            print!("Reloading {}... ", &args[2]);
+            print!("Reloading {}... ", args[2]);
             match send_service_command("RELOAD", &args[2]) {
                 Ok(resp) => println!("{}", resp.trim()),
                 Err(e) => {

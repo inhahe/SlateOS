@@ -32141,6 +32141,43 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(s2, 1);
     }
 
+    /// `test`/`[` compares the bytes it was given. Its operands are most often
+    /// filenames, so a comparison that first approximated them would answer
+    /// about a *different* name than the one it was asked about.
+    #[test]
+    fn test_builtin_compares_bytes_that_are_not_text() {
+        // Equal bytes are equal; two values that differ only in a byte that
+        // decodes to nothing are not — approximating both to U+FFFD would have
+        // made them compare equal.
+        assert_eq!(run("v=$(printf 'a\\xffb'); [ \"$v\" = \"$v\" ]").1, 0);
+        assert_eq!(
+            run("v=$(printf 'a\\xffb'); w=$(printf 'a\\xfeb'); [ \"$v\" = \"$w\" ]").1,
+            1
+        );
+        assert_eq!(
+            run("v=$(printf 'a\\xffb'); w=$(printf 'a\\xfeb'); [ \"$v\" != \"$w\" ]").1,
+            0
+        );
+        // Ordering is byte-wise, which is what bash's C-locale `strcmp` does.
+        assert_eq!(
+            run("v=$(printf 'a\\xfeb'); w=$(printf 'a\\xffb'); [ \"$v\" \\< \"$w\" ]").1,
+            0
+        );
+        // `-n`/`-z` see a non-empty value, not an undecodable one.
+        assert_eq!(run("v=$(printf '\\xff'); [ -n \"$v\" ]").1, 0);
+        assert_eq!(run("v=$(printf '\\xff'); [ -z \"$v\" ]").1, 1);
+        // The operand is quoted back into the diagnostic as its own bytes.
+        assert_eq!(
+            run_raw("[ \"$(printf 'a\\xffb')\" -eq 1 ] 2>&1").0,
+            b"osh: [: a\xffb: integer expression expected\n"
+        );
+        // A namespace primary answers false for a name that is not text —
+        // nothing that is not text can be a set variable or a nameref, since
+        // both namespaces are text.
+        assert_eq!(run("[ -v \"$(printf 'a\\xffb')\" ]").1, 1);
+        assert_eq!(run("[ -R \"$(printf 'a\\xffb')\" ]").1, 1);
+    }
+
     #[test]
     fn test_builtin_integer_expression_error() {
         // A non-integer operand to an arithmetic comparison is an *error*
@@ -36139,6 +36176,52 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, st) = run("compgen -W 'foo bar' xyz; echo \"st=$?\"");
         assert_eq!(o, "st=1\n");
         assert_eq!(st, 0);
+    }
+
+    /// The completion surface carries whatever bytes it was given. A wordlist,
+    /// a `-P`/`-S` decoration and a `-X` filter are all ordinary shell data, so
+    /// a byte that begins no valid UTF-8 sequence has to survive them intact —
+    /// a candidate the shell hands back is a word the script will then act on,
+    /// and an *altered* one names something else.
+    #[test]
+    fn compgen_carries_bytes_that_are_not_text() {
+        // A candidate holding a lone high byte comes back as that byte, and the
+        // trailing word prefix-filters on bytes too.
+        assert_eq!(
+            run_raw("compgen -W \"$(printf 'a\\xffb a\\xfeb c')\" \"$(printf 'a\\xff')\"").0,
+            b"a\xffb\n"
+        );
+        // Splitting is per *byte*, as everywhere else IFS is used: a delimiter
+        // that decodes to nothing still delimits. (IFS is set through `printf`
+        // rather than `$'\xff'` because the lexer is `str`-typed until
+        // TD-OILS-BYTE-STRINGS step 8, so ANSI-C quoting cannot yet carry the
+        // byte — see the `$'\xa9'` row of that entry.)
+        assert_eq!(
+            run_raw("IFS=$(printf '\\xff'); compgen -W \"$(printf 'x\\xffy')\"").0,
+            b"x\ny\n"
+        );
+        // -P/-S decorate with their own bytes rather than a replacement.
+        assert_eq!(
+            run_raw("compgen -P \"$(printf '\\xff')\" -W 'a' a").0,
+            b"\xffa\n"
+        );
+        // A pattern with a lone high byte matches that byte and nothing else,
+        // so `-X` drops exactly the one candidate holding it.
+        assert_eq!(
+            run_raw("compgen -W \"$(printf 'a\\xffb a\\xfeb')\" -X \"$(printf 'a\\xffb')\"").0,
+            b"a\xfeb\n"
+        );
+    }
+
+    /// `complete -p` must reproduce a definition byte for byte — that is the
+    /// whole reason osh stores specs it never generates from. A `-W` wordlist
+    /// holding a byte that is not text is still what the script wrote.
+    #[test]
+    fn complete_round_trips_a_wordlist_that_is_not_text() {
+        assert_eq!(
+            run_raw("complete -W \"$(printf 'a\\xffb')\" foo; complete -p foo").0,
+            b"complete -W 'a\xffb' foo\n"
+        );
     }
 
     #[test]

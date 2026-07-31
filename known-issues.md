@@ -9438,8 +9438,11 @@ limitations remain:
    function (binding `COMP_LINE`/`COMP_POINT`/`COMP_TYPE`/`COMP_KEY`/
    `COMP_CWORD`/`COMP_WORDS` and reading `COMPREPLY`) and `compgen -C cmd`
    substitutes the command, both with bash's "may not work as you expect"
-   warning. What is missing is only the *engine* that would consult a stored
-   spec at a prompt.
+   warning; the same day the `job`/`running`/`stopped` actions grew to read the
+   job table and `hostname` to read `$HOSTFILE`. What is missing is only the
+   *engine* that would consult a stored spec at a prompt — and the four actions
+   that need a host database or a live line editor
+   (`user`/`group`/`service`/`binding`), which are parsed and ignored.
 2. **`complete -p` (list all) uses insertion order**, whereas bash iterates its
    internal hash table (an order that depends on bash's string-hash + bucket
    layout and is not reproducible without replicating those internals). Each
@@ -9453,6 +9456,40 @@ deliberate trade — matching bash's hash-bucket order byte-for-byte has no prac
 value (scripts that care read `complete -p NAME`, not the unordered full dump) and
 would require hard-coding bash's hash function. Fixing (1) would also make (2)
 moot in practice (real completion never depends on listing order).
+
+### TD-OILS-COMPGEN-HOSTFILE-REASSIGN. A *redundant* `HOSTFILE=` assignment offers the file's hostnames a second time in bash; osh treats it as the no-op it reads as — OPEN 2026-07-31 (deliberate)
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::compgen_hostnames` and the
+`hostname_list`/`hostname_source` pair it caches into.
+
+**What.** bash keeps the hostname list between completions, and re-reads
+`$HOSTFILE` whenever the variable is **assigned** rather than whenever its value
+changes. Since `snarf_hosts_from_file` appends, assigning the same path twice
+offers everything in it twice:
+
+```sh
+HOSTFILE=h.txt; compgen -A hostname   # both: one
+HOSTFILE=h.txt; compgen -A hostname   # bash: one one   osh: one
+```
+
+Everything else about the list matches byte-for-byte and is covered by
+`tests/corpus/compgen-hostname.sh`: what a line contributes (first field is the
+address, `#` starts a comment wherever it appears, no dedup), that naming a
+*different* file **adds** to the list, that *unsetting* `HOSTFILE` throws the
+list away first, and that an unreadable file contributes nothing without being
+an error.
+
+**Proper fix.** None wanted. osh compares the value it last read the list from,
+which is what the manual describes ("the next time hostname completion is
+attempted **after the value is changed**"); bash's extra copy falls out of
+hanging the invalidation off the assignment hook instead. Reproducing it would
+mean threading a side effect through every path that can write a variable —
+`HOSTFILE=x cmd`, `read HOSTFILE`, `declare`, `printf -v`, a `local` going out
+of scope — purely to emit duplicate output. The *unset* half genuinely is
+behaviour, not an artefact, and osh does hook it (`Shell::unbind_var`).
+
+**Impact.** Duplicate candidates after a redundant assignment, in a shell with
+no interactive completion to show them. Kept out of the corpus on purpose.
 
 ### TD-OILS-INVALID-OPTION-MSG. `osh`'s unknown-invocation-option error differs from bash (wording + no usage dump, and reports the whole token not the offending letter) — ✅ RESOLVED 2026-07-20
 

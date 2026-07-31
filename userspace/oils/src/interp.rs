@@ -2764,6 +2764,22 @@ pub struct Shell {
     /// NOT inherited by subshell clones, for the same reason `jobs` isn't — a
     /// subshell has no children of its own.
     reaped_status: HashMap<u32, i32>,
+    /// The hostnames `compgen -A hostname` offers, and the `$HOSTFILE` they
+    /// were read from — the outer `None` meaning "nothing read yet", the inner
+    /// one "`HOSTFILE` was unset, so the list came from `/etc/hosts`".
+    ///
+    /// bash keeps the list rather than re-reading the file per completion, and
+    /// the difference shows: naming a *new* `HOSTFILE` **adds** that file's
+    /// hosts to the list already there, while *unsetting* `HOSTFILE` clears it
+    /// (both documented, and both measured against bash 5.2). Remembering
+    /// which value the list came from is what tells those two apart without a
+    /// hook on every assignment; see [`Shell::compgen_hostnames`] for the one
+    /// bash quirk this deliberately does not reproduce.
+    ///
+    /// Not inherited by subshell clones only in the sense that a clone re-reads
+    /// on first use — the list is a cache of a file, not shell state.
+    hostname_list: Vec<Str>,
+    hostname_source: Option<Option<Str>>,
     /// The file-creation mask (`umask`). The low 9 bits (owner/group/other rwx)
     /// are the bits *cleared* from a newly created file's permissions. Consulted
     /// when a redirection creates a file (applied via the file mode on unix-family
@@ -2926,6 +2942,8 @@ impl Shell {
             current_job: None,
             previous_job: None,
             reaped_status: HashMap::new(),
+            hostname_list: Vec::new(),
+            hostname_source: None,
             umask_val: 0o022,
             cmd_hash: std::collections::HashMap::new(),
             rlimits: default_rlimits(),
@@ -7004,6 +7022,12 @@ impl Shell {
             current_job: None,
             previous_job: None,
             reaped_status: HashMap::new(),
+            // The hostname list is a cache of a file, so a clone inherits it
+            // for the same reason it inherits the command hash: re-reading
+            // would be work, not a difference. (bash's subshell inherits it as
+            // a fork of the parent's memory, which comes to the same thing.)
+            hostname_list: self.hostname_list.clone(),
+            hostname_source: self.hostname_source.clone(),
             // The umask is a process attribute, inherited by subshells.
             umask_val: self.umask_val,
             // The command hash table is inherited by subshells (bash).
@@ -21980,6 +22004,17 @@ impl Shell {
         self.trace_attr.remove(name);
         self.array_valued.remove(name);
         self.declared.remove(name);
+        // Unsetting `HOSTFILE` throws the hostname list away, rather than
+        // leaving it to be added to — the one asymmetry in
+        // [`Shell::compgen_hostnames`], and the reason it needs a hook here:
+        // the clearing happens *when the name goes*, so a later `HOSTFILE=other`
+        // starts from an empty list instead of appending to what was offered
+        // before. This is where bash's `unbind_variable` reaches
+        // `sv_hostfile`/`clear_hostname_list`.
+        if name == "HOSTFILE" {
+            self.hostname_list.clear();
+            self.hostname_source = None;
+        }
     }
 
     /// `unset name[sub]` — remove one element (or, for `name[@]`/`name[*]` on an
@@ -23626,10 +23661,11 @@ impl Shell {
     /// [`Shell::compgen_command_matches`]) — which, as in bash, are run but
     /// warned about, since outside a completion they see an empty command line.
     /// The job actions (`-j`/`-A job`, `-A running`, `-A stopped`) read the
-    /// shell's own job table — see [`Shell::compgen_job_names`]. The actions
-    /// that need a host database or a live line editor
-    /// (user/group/hostname/service/binding) are parsed-and-ignored so scripts
-    /// that pass them still run without error.
+    /// shell's own job table — see [`Shell::compgen_job_names`]; `-A hostname`
+    /// reads `$HOSTFILE` — see [`Shell::compgen_hostnames`]. The actions that
+    /// need a host database or a live line editor (user/group/service/binding)
+    /// are parsed-and-ignored so scripts that pass them still run without
+    /// error.
     ///
     /// Options are read the way bash reads them: clustered, with an
     /// argument-taking letter swallowing the rest of its cluster (`-Wab`,
@@ -23863,8 +23899,11 @@ impl Shell {
                 "job" => cands.extend(self.compgen_job_names(None)),
                 "running" => cands.extend(self.compgen_job_names(Some(JobState::Running))),
                 "stopped" => cands.extend(self.compgen_job_names(Some(JobState::Stopped))),
-                // binding/group/hostname/service/user need either a live
-                // readline or a host database osh has neither of.
+                // `$HOSTFILE`, or `/etc/hosts` (see
+                // [`Shell::compgen_hostnames`]).
+                "hostname" => cands.extend(self.compgen_hostnames()),
+                // binding/group/service/user need either a live readline or a
+                // host database osh has neither of.
                 _ => {}
             }
         }
@@ -23998,6 +24037,43 @@ impl Shell {
             })
             .map(|j| j.cmd.split(|b| *b == b' ').next().map_or_else(Vec::new, <[u8]>::to_vec))
             .collect()
+    }
+
+    /// The hostnames the `hostname` action offers — the names in `$HOSTFILE`,
+    /// or in `/etc/hosts` when `HOSTFILE` is unset.
+    ///
+    /// bash builds the list once and keeps it, and the two ways it can change
+    /// are not symmetric: naming a *different* `HOSTFILE` **adds** the new
+    /// file's hosts to the ones already offered, while *unsetting* `HOSTFILE`
+    /// throws the list away (so the next completion starts again from
+    /// `/etc/hosts`). Both are in bash's manual and both are measured here. A
+    /// file that cannot be read contributes nothing and is not an error — an
+    /// empty list is simply `compgen`'s ordinary "no matches", status 1.
+    ///
+    /// **One bash behaviour deliberately not reproduced.** bash re-reads
+    /// whenever `HOSTFILE` is *assigned*, not when its value actually changes,
+    /// so `HOSTFILE=f; compgen -A hostname; HOSTFILE=f; compgen -A hostname`
+    /// offers every name in `f` twice. That falls out of bash hanging the
+    /// invalidation off the assignment hook rather than the value; osh compares
+    /// the value, so a redundant assignment is the no-op it reads as. Copying it
+    /// would mean threading a side effect through every path that can write a
+    /// variable in order to reproduce duplicate output.
+    fn compgen_hostnames(&mut self) -> Vec<Str> {
+        // `scalar_store` rather than a raw `vars` lookup, because a
+        // subscript-less reference to an array-valued `HOSTFILE` reads element
+        // 0 — which is what bash's own `get_string_value` would hand back.
+        let cur = self.scalar_store("HOSTFILE");
+        if self.hostname_source.as_ref() != Some(&cur) {
+            // Unsetting is the only thing that empties the list; naming a file
+            // adds to it.
+            if cur.is_none() {
+                self.hostname_list.clear();
+            }
+            let path = cur.clone().unwrap_or_else(|| DEFAULT_HOSTS_FILE.to_vec());
+            self.hostname_list.extend(read_hostnames(&path));
+            self.hostname_source = Some(cur);
+        }
+        self.hostname_list.clone()
     }
 
     /// The matches a completion *function* offers — `compgen -F NAME word`.
@@ -27433,6 +27509,46 @@ fn single_quote_bytes(s: BStr<'_>) -> Str {
 /// action shortcut.
 fn comp_short_action(c: char) -> Option<&'static str> {
     COMP_ACTIONS.iter().find(|(_, flag)| *flag == c).map(|(name, _)| *name)
+}
+
+/// Where [`Shell::compgen_hostnames`] looks when `$HOSTFILE` is unset — bash's
+/// `DEFAULT_HOSTS_FILE`. A path, so bytes.
+const DEFAULT_HOSTS_FILE: &[u8] = b"/etc/hosts";
+
+/// The hostnames in one `/etc/hosts`-format file, in file order.
+///
+/// Each line is an address followed by the names that answer to it, so the
+/// first field is skipped and the rest are names. A `#` starts a comment
+/// wherever it appears — on its own line, or after some of the names, in which
+/// case the names before it still count. Nothing is deduplicated: a name that
+/// two lines both answer to is offered twice, which is what bash does.
+///
+/// A file that cannot be read yields nothing. bash treats it the same way: a
+/// `HOSTFILE` naming a missing file simply leaves the list empty, and
+/// `compgen`'s own "no matches" status follows from that rather than from any
+/// diagnostic. Bytes throughout — a hostname is OS-boundary data and the file
+/// may hold any byte.
+fn read_hostnames(path: BStr<'_>) -> Vec<Str> {
+    let Ok(data) = std::fs::read(bytes::bytes_to_path(path)) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for line in data.split(|b| *b == b'\n') {
+        let line = match line.iter().position(|b| *b == b'#') {
+            Some(i) => line.get(..i).unwrap_or_default(),
+            None => line,
+        };
+        // `\r` counts as whitespace here (as it does to bash's own reader), so
+        // a CRLF hosts file does not leave a carriage return glued to the last
+        // name on every line.
+        let mut fields = line.split(|b: &u8| b.is_ascii_whitespace()).filter(|f| !f.is_empty());
+        // The address; a line with nothing else on it contributes no names.
+        if fields.next().is_none() {
+            continue;
+        }
+        names.extend(fields.map(<[u8]>::to_vec));
+    }
+    names
 }
 
 /// The ASCII syntax view of a scanned character, mirroring `lexer::syn`.
@@ -37808,6 +37924,81 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("sleep 0.4 & compgen -A stopped"), (String::new(), 1));
         // With no jobs at all there is nothing to offer.
         assert_eq!(run("compgen -A job"), (String::new(), 1));
+    }
+
+    #[test]
+    fn hosts_file_names_are_every_field_but_the_address() {
+        let names = |src: &str| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let p = std::env::temp_dir()
+                .join(format!("osh_hosts_{}_{nanos}.txt", std::process::id()));
+            std::fs::write(&p, src).expect("write");
+            let got = read_hostnames(p.to_string_lossy().replace('\\', "/").as_bytes());
+            std::fs::remove_file(&p).ok();
+            got.iter().map(|n| String::from_utf8_lossy(n).into_owned()).collect::<Vec<_>>()
+        };
+        // The first field is the address; every field after it is a name, and
+        // tabs separate as well as spaces.
+        assert_eq!(names("1.2.3.4 alpha alpha.example\n5.6.7.8\tbeta\n"), [
+            "alpha",
+            "alpha.example",
+            "beta"
+        ]);
+        // A `#` starts a comment wherever it is: the names before it on the
+        // line still count, and a line that begins with one contributes none.
+        assert_eq!(names("# all comment\n1.1.1.1 a b # c d\n"), ["a", "b"]);
+        // An address with no names, and a blank line, contribute nothing.
+        assert_eq!(names("9.9.9.9\n\n   \n1.1.1.1 z\n"), ["z"]);
+        // Nothing is deduplicated — a name is offered once per line naming it.
+        assert_eq!(names("1.1.1.1 dup\n2.2.2.2 dup\n"), ["dup", "dup"]);
+        // A file with no final newline still yields its last line's names.
+        assert_eq!(names("1.1.1.1 tail"), ["tail"]);
+        // A file that cannot be read is simply no names.
+        assert!(read_hostnames(b"no/such/file/at/all").is_empty());
+    }
+
+    #[test]
+    fn hostname_completion_follows_hostfile_and_is_kept_between_changes() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("osh_hostfile_{}_{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("a"), "1.1.1.1 alpha alpha.example\n").expect("a");
+        std::fs::write(dir.join("b"), "2.2.2.2 beta\n").expect("b");
+        let base = dir.to_string_lossy().replace('\\', "/");
+
+        let mut sh = Shell::new();
+        run_in(&mut sh, &format!("HOSTFILE={base}/a"));
+        assert_eq!(run_in(&mut sh, "compgen -A hostname").0, "alpha\nalpha.example\n");
+        // The word narrows the answer, as for every other action.
+        assert_eq!(run_in(&mut sh, "compgen -A hostname alpha.").0, "alpha.example\n");
+        assert_eq!(run_in(&mut sh, "compgen -A hostname zz"), (String::new(), 1));
+
+        // Naming a different file *adds* to what is already offered…
+        run_in(&mut sh, &format!("HOSTFILE={base}/b"));
+        assert_eq!(run_in(&mut sh, "compgen -A hostname").0, "alpha\nalpha.example\nbeta\n");
+        // …while unsetting the variable throws the list away, so the next file
+        // named starts from nothing.
+        run_in(&mut sh, "unset HOSTFILE");
+        run_in(&mut sh, &format!("HOSTFILE={base}/a"));
+        assert_eq!(run_in(&mut sh, "compgen -A hostname").0, "alpha\nalpha.example\n");
+
+        // A file that cannot be read adds nothing and is not an error: the list
+        // already there still answers.
+        run_in(&mut sh, &format!("HOSTFILE={base}/nosuch"));
+        assert_eq!(run_in(&mut sh, "compgen -A hostname").0, "alpha\nalpha.example\n");
+        // With the list cleared and no readable file, there is nothing to
+        // offer — `compgen`'s ordinary empty answer, not a diagnostic.
+        run_in(&mut sh, "unset HOSTFILE");
+        run_in(&mut sh, &format!("HOSTFILE={base}/nosuch"));
+        assert_eq!(run_in(&mut sh, "compgen -A hostname 2>&1"), (String::new(), 1));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -1538,6 +1538,9 @@ struct VarSnapshot {
     upper: bool,
     capcase: bool,
     nameref: bool,
+    /// The (inert, display-only) variable trace attribute; see
+    /// [`Shell::trace_attr`].
+    trace: bool,
     readonly: bool,
     /// Whether the name merely *existed* (declared without a value); see
     /// [`Shell::declared`].
@@ -2486,6 +2489,13 @@ pub struct Shell {
     /// are transparently redirected to that target (following chains, with a
     /// depth guard against cycles). Inherited by subshell clones.
     nameref_attr: HashSet<String>,
+    /// Names with the trace attribute (`declare -t`). On a *variable* this is
+    /// inert in bash too — it only shows up in `declare -p`/`${v@a}` and selects
+    /// the name for a `declare -t` listing — but it is recorded so those three
+    /// report it. The trace attribute with behaviour behind it is the *function*
+    /// one, [`Shell::fn_trace_attr`], which `declare -ft` sets.
+    /// Inherited by subshell clones.
+    trace_attr: HashSet<String>,
     /// Function names carrying the trace attribute (`declare -ft name`). Such a
     /// function inherits the caller's `DEBUG` and `RETURN` traps even when
     /// `functrace` (`set -T`) is off. Inherited by subshell clones.
@@ -2828,6 +2838,7 @@ impl Shell {
             upper_attr: HashSet::new(),
             capcase_attr: HashSet::new(),
             nameref_attr: HashSet::new(),
+            trace_attr: HashSet::new(),
             fn_trace_attr: HashSet::new(),
             trap_suppress: Vec::new(),
             dir_stack: Vec::new(),
@@ -6780,6 +6791,7 @@ impl Shell {
             upper_attr: self.upper_attr.clone(),
             capcase_attr: self.capcase_attr.clone(),
             nameref_attr: self.nameref_attr.clone(),
+            trace_attr: self.trace_attr.clone(),
             fn_trace_attr: self.fn_trace_attr.clone(),
             // Keep the suppression stack in lockstep with the cloned `fn_stack`.
             // A subshell resets non-ignored traps, so most suppression flags are
@@ -8603,14 +8615,21 @@ impl Shell {
         } else if self.arrays.contains_key(name) {
             s.push('a');
         }
-        if self.nameref_attr.contains(name) {
-            s.push('n');
-        }
+        // bash emits the letters in a fixed order — kind, then `i n r t x`, then
+        // the case letter — not in the order they were given: `declare -tinlrx v`
+        // reports `declare -inrtxl v`. osh had `n` before `i`, which showed up on
+        // the one variable that can carry both (`declare -ni`).
         if self.integer_attr.contains(name) {
             s.push('i');
         }
+        if self.nameref_attr.contains(name) {
+            s.push('n');
+        }
         if self.readonly.contains(name) {
             s.push('r');
+        }
+        if self.trace_attr.contains(name) {
+            s.push('t');
         }
         if self.exported.contains(name) {
             s.push('x');
@@ -9022,7 +9041,8 @@ impl Shell {
             || self.lower_attr.contains(name)
             || self.upper_attr.contains(name)
             || self.capcase_attr.contains(name)
-            || self.nameref_attr.contains(name);
+            || self.nameref_attr.contains(name)
+            || self.trace_attr.contains(name);
         // Both the plain (`name='value'`) and attributed (`declare -r name='value'`)
         // scalar forms single-quote the value: bash's `@A` uses sh_single_quote
         // here, unlike `declare -p`, which double-quotes.
@@ -10152,6 +10172,7 @@ impl Shell {
             upper: self.upper_attr.contains(name),
             capcase: self.capcase_attr.contains(name),
             nameref: self.nameref_attr.contains(name),
+            trace: self.trace_attr.contains(name),
             declared: self.declared.contains(name),
             readonly: self.readonly.contains(name),
             array_valued: self.array_valued.contains(name),
@@ -10184,6 +10205,7 @@ impl Shell {
         Self::restore_flag(&mut self.upper_attr, name, snap.upper);
         Self::restore_flag(&mut self.capcase_attr, name, snap.capcase);
         Self::restore_flag(&mut self.nameref_attr, name, snap.nameref);
+        Self::restore_flag(&mut self.trace_attr, name, snap.trace);
         Self::restore_flag(&mut self.readonly, name, snap.readonly);
         Self::restore_flag(&mut self.array_valued, name, snap.array_valued);
         // A `local n` that was never assigned leaves the name existing-but-unset
@@ -10238,6 +10260,7 @@ impl Shell {
         self.upper_attr.remove(name);
         self.capcase_attr.remove(name);
         self.nameref_attr.remove(name);
+        self.trace_attr.remove(name);
         self.array_valued.remove(name);
         // The local starts out existing-but-unset, which is what a bare
         // `local x; declare -p x` reports.
@@ -14865,7 +14888,12 @@ impl Shell {
                 // `declare -ft name` / `+ft name` toggles a function's trace
                 // attribute (so it inherits DEBUG/RETURN traps); it is a
                 // mutation, not a listing, and accepts a `+` sign.
-                if let Some((enable, start)) = Self::func_trace_op(args) {
+                // With *no* name operands it is not a mutation but a listing
+                // filtered by the trace attribute (`declare -Ft`), so it falls
+                // through to `declare_functions` below.
+                if let Some((enable, start)) = Self::func_trace_op(args)
+                    && args.get(start).is_some()
+                {
                     self.set_func_trace(enable, &args[start..])
                 } else if lead.contains(&b'F') || lead.contains(&b'f') {
                     // `declare -F`/`-f` operate on functions (name listing).
@@ -19541,8 +19569,10 @@ impl Shell {
 
     /// Apply (`enable`) or remove (`+t`) the trace attribute on each named
     /// function, so it inherits the caller's `DEBUG`/`RETURN` traps even when
-    /// `functrace` is off. A name that is not a defined function is an error
-    /// (bash: `not found`, exit 1), matching `declare -f` on an unknown name.
+    /// `functrace` is off. A name that is not a defined function fails
+    /// *silently* — status 1 and no diagnostic — which is what `declare -fr` on
+    /// an unknown name does too, and what bash 5.2 measurably does here
+    /// (`declare -ft nope` prints nothing and exits 1).
     fn set_func_trace(&mut self, enable: bool, names: &[Str]) -> i32 {
         let mut status = 0;
         for name in names {
@@ -19554,10 +19584,7 @@ impl Shell {
                         self.fn_trace_attr.remove(n);
                     }
                 }
-                None => {
-                    self.berrln(&bfmt![self.err_prefix(), name, b": not found"]);
-                    status = 1;
-                }
+                None => status = 1,
             }
         }
         status
@@ -19591,19 +19618,49 @@ impl Shell {
             return status;
         }
         if names.is_empty() {
-            let mut all: Vec<&Str> = self.funcs.keys().collect();
+            // `-r`/`-t` in a *nameless* listing are filters, not mutations, and
+            // they union exactly as the variable listing's attribute letters do
+            // (`declare -Frt` lists the readonly functions *or* the traced
+            // ones). No filter letter keeps everything.
+            let trace = args
+                .iter()
+                .take_while(|a| a.starts_with(b"-"))
+                .flat_map(|a| a.iter())
+                .any(|c| *c == b't');
+            let mut all: Vec<&Str> = self
+                .funcs
+                .keys()
+                .filter(|n| {
+                    (!readonly && !trace)
+                        || (readonly && self.readonly_funcs.contains(*n))
+                        || (trace && self.fn_trace_attr.contains(*n))
+                })
+                .collect();
             all.sort();
             let mut listing = Str::new();
             for name in all {
+                // The attribute line each function carries: `declare -f` plus
+                // `r` (readonly) and `t` (traced), in that order — bash prints
+                // `declare -frt f`. `-F` renders this *instead of* the body;
+                // plain `-f` prints the body and then this line, but only when
+                // there is an attribute to report.
+                let mut flags = b"-f".to_vec();
+                if self.readonly_funcs.contains(name) {
+                    flags.push(b'r');
+                }
+                if self.fn_trace_attr.contains(name) {
+                    flags.push(b't');
+                }
                 if name_only {
-                    // `declare -F` — list each function as a `declare -f NAME`
-                    // line (`-fr` when the function is readonly).
-                    let flags: BStr<'_> =
-                        if self.readonly_funcs.contains(name) { b"-fr" } else { b"-f" };
-                    listing.extend_from_slice(&bfmt![b"declare ", flags, b" ", name, b"\n"]);
-                } else if let Some(body) = self.funcs.get(name) {
+                    listing.extend_from_slice(&bfmt![b"declare ", &flags, b" ", name, b"\n"]);
+                    continue;
+                }
+                if let Some(body) = self.funcs.get(name) {
                     // `declare -f` — print every function's reconstructed source.
                     listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+                }
+                if flags.len() > 2 {
+                    listing.extend_from_slice(&bfmt![b"declare ", &flags, b" ", name, b"\n"]);
                 }
             }
             return self.write_bytes(out, redir, &listing);
@@ -19671,6 +19728,7 @@ impl Shell {
                 'x' => sh.exported.contains(name),
                 'r' => sh.readonly.contains(name),
                 'n' => sh.nameref_attr.contains(name),
+                't' => sh.trace_attr.contains(name),
                 'l' => sh.lower_attr.contains(name),
                 'u' => sh.upper_attr.contains(name),
                 'c' => sh.capcase_attr.contains(name),
@@ -19705,7 +19763,7 @@ impl Shell {
             // that is not one selects no attribute.
             for &b in a.iter() {
                 let c = char::from(b);
-                if matches!(c, 'A' | 'a' | 'i' | 'x' | 'r' | 'n' | 'l' | 'u' | 'c')
+                if matches!(c, 'A' | 'a' | 'i' | 'x' | 'r' | 'n' | 't' | 'l' | 'u' | 'c')
                     && !want.contains(&c)
                 {
                     want.push(c);
@@ -20033,6 +20091,11 @@ impl Shell {
         // `-g`: force global scope even inside a function (bash: `declare`
         // inside a function otherwise creates a *local*, like `local`).
         let mut global = false;
+        // Trace attribute: `-t` sets it, `+t` removes it. Inert on a variable
+        // (it is the *function* form that inherits DEBUG/RETURN traps), but
+        // recorded so `declare -p`, `${v@a}` and `declare -t` report it.
+        let mut trace = false;
+        let mut unset_trace = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
             if arg.as_slice() == b"--" {
@@ -20080,10 +20143,17 @@ impl Shell {
                             }
                         }
                         b'g' => global = enable,
+                        b't' => {
+                            if enable {
+                                trace = true;
+                            } else {
+                                unset_trace = true;
+                            }
+                        }
                         // Accepted but with no attribute effect in this
                         // reimplementation: -p (print, handled elsewhere), -f/-F
-                        // (function restriction), -I (inherit), -t (trace).
-                        b'p' | b'f' | b'F' | b'I' | b't' => {}
+                        // (function restriction), -I (inherit).
+                        b'p' | b'f' | b'F' | b'I' => {}
                         _ => {
                             // Genuinely unknown option letter: bash prints an
                             // "invalid option" diagnostic plus the usage synopsis
@@ -20267,6 +20337,11 @@ impl Shell {
                 self.nameref_attr.insert(base_name.to_string());
             } else if unset_nameref {
                 self.nameref_attr.remove(base_name);
+            }
+            if trace {
+                self.trace_attr.insert(base_name.to_string());
+            } else if unset_trace {
+                self.trace_attr.remove(base_name);
             }
             // Conflicting enable directions (e.g. `-lc`, `-lu`) cancel to none.
             let case_dir = if case_conflict { Some(0) } else { case_dir };
@@ -20647,6 +20722,8 @@ impl Shell {
         let mut export = cmd == "export";
         let mut nameref = false;
         let mut unset_nameref = false;
+        let mut trace = false;
+        let mut unset_trace = false;
         for arg in &argv[1..] {
             let enable = arg.starts_with(b"-");
             let Some(flags) = arg.strip_prefix(b"-").or_else(|| arg.strip_prefix(b"+")) else {
@@ -20681,6 +20758,8 @@ impl Shell {
                     b'x' if enable => export = true,
                     b'n' if enable => nameref = true,
                     b'n' => unset_nameref = true,
+                    b't' if enable => trace = true,
+                    b't' => unset_trace = true,
                     _ => {}
                 }
             }
@@ -20916,6 +20995,11 @@ impl Shell {
                 self.nameref_attr.insert(a.name.clone());
             } else if unset_nameref {
                 self.nameref_attr.remove(&a.name);
+            }
+            if trace {
+                self.trace_attr.insert(a.name.clone());
+            } else if unset_trace {
+                self.trace_attr.remove(&a.name);
             }
             if export {
                 self.exported.insert(a.name.clone());
@@ -21570,6 +21654,7 @@ impl Shell {
         self.upper_attr.remove(name);
         self.capcase_attr.remove(name);
         self.nameref_attr.remove(name);
+        self.trace_attr.remove(name);
         self.array_valued.remove(name);
         self.declared.remove(name);
     }
@@ -21661,6 +21746,7 @@ impl Shell {
             self.upper_attr.remove(name);
             self.capcase_attr.remove(name);
             self.nameref_attr.remove(name);
+            self.trace_attr.remove(name);
             self.array_valued.remove(name);
             self.declared.remove(name);
             return true;
@@ -40346,6 +40432,63 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("x=5; declare -a x; declare -p x").0,
             "declare -a x=([0]=\"5\")\n"
         );
+    }
+
+    #[test]
+    fn declare_t_records_the_trace_attribute_on_a_variable() {
+        // On a *variable* `-t` is inert even in bash — it only has to survive
+        // into `declare -p`, `${v@a}` and a `declare -t` listing. osh parsed the
+        // letter and dropped it.
+        assert_eq!(run("declare -tirx v=1; declare -p v").0, "declare -irtx v=\"1\"\n");
+        assert_eq!(run("declare -t v=1; declare +t v; declare -p v").0, "declare -- v=\"1\"\n");
+        assert_eq!(run("declare -t q=1; echo \"${q@a}|${q@A}\"").0, "t|declare -t q='1'\n");
+        // A nameless `-t` is a listing filtered by the attribute.
+        assert_eq!(
+            run("declare -t a=1; b=2; declare -ti c=3; declare -t").0,
+            "declare -t a=\"1\"\ndeclare -it c=\"3\"\n"
+        );
+        // The kind and the case letter bracket the attribute letters.
+        assert_eq!(run("declare -ta v=(1); declare -p v").0, "declare -at v=([0]=\"1\")\n");
+        assert_eq!(run("declare -tu v=ab; declare -p v").0, "declare -tu v=\"AB\"\n");
+        // bash emits the attribute letters in a fixed order (`i n r t x`), not
+        // the order they were written; osh had `n` before `i`.
+        assert_eq!(run("declare -ni v; declare -p v").0, "declare -in v\n");
+        assert_eq!(run("declare -tinlrx v; declare -p v").0, "declare -inrtxl v\n");
+        // It is a per-name attribute like the others: a `local` does not inherit
+        // it, and `unset` drops it.
+        assert_eq!(
+            run("declare -t g=1; f(){ local g; declare -p g; }; f").0,
+            "declare -- g\n"
+        );
+    }
+
+    #[test]
+    fn a_function_listing_reports_the_readonly_and_trace_attributes() {
+        let setup = "f(){ :; }; g(){ :; }; h(){ :; }; i(){ :; }; \
+                     declare -ft f; readonly -f f; readonly -f g; declare -ft h;";
+        // `declare -F` renders each function's attributes as `-f` plus `r`/`t`.
+        assert_eq!(
+            run(&format!("{setup} declare -F")).0,
+            "declare -frt f\ndeclare -fr g\ndeclare -ft h\ndeclare -f i\n"
+        );
+        // With no names, `-r`/`-t` filter the listing rather than marking
+        // anything, and they union — as the variable listing's letters do.
+        assert_eq!(run(&format!("{setup} declare -Ft")).0, "declare -frt f\ndeclare -ft h\n");
+        assert_eq!(run(&format!("{setup} declare -Fr")).0, "declare -frt f\ndeclare -fr g\n");
+        assert_eq!(
+            run(&format!("{setup} declare -Frt")).0,
+            "declare -frt f\ndeclare -fr g\ndeclare -ft h\n"
+        );
+        // A nameless `-f` prints the body, then the attribute line for the
+        // functions that have one.
+        assert_eq!(
+            run("f(){ :; }; g(){ :; }; declare -ft f; declare -f").0,
+            "f () \n{ \n    :\n}\ndeclare -ft f\ng () \n{ \n    :\n}\n"
+        );
+        // `-ft` with names is still the mutation, and an unknown name fails
+        // silently (status 1, no diagnostic), as `declare -fr` does.
+        let (out, code) = run("declare -ft nope");
+        assert_eq!((out.as_str(), code), ("", 1));
     }
 
     #[test]

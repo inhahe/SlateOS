@@ -1522,6 +1522,10 @@ fn child_out_from_write_fd(w: &WriteFd, what: &str) -> Result<ChildOut, String> 
 /// A saved snapshot of one variable's complete state (scalar, indexed array,
 /// associative array, export flag), captured when `local` shadows the name
 /// inside a function so it can be restored when the function returns.
+///
+/// `Clone` is needed by `declare -g`, which reads a frame's saved snapshot to
+/// reach the global binding a local is shadowing without disturbing the frame.
+#[derive(Clone)]
 struct VarSnapshot {
     scalar: Option<Str>,
     indexed: Option<BTreeMap<usize, Str>>,
@@ -10239,6 +10243,120 @@ impl Shell {
         // `local x; declare -p x` reports.
         self.declared.insert(name.to_string());
         true
+    }
+
+    /// Make each name's **global** binding the live one, for the duration of a
+    /// `declare -g` (or `typeset -g`) declaration.
+    ///
+    /// `-g` does not merely skip the local-shadowing step: it declares the
+    /// *global* variable of that name even when a local of the same name is in
+    /// the way, leaving the local alone. bash:
+    ///
+    /// ```sh
+    /// f(){ local x=5; declare -ga x; declare -p x; }; f   # declare -- x="5"
+    /// declare -p x                                        # declare -a x
+    /// ```
+    ///
+    /// The global of a shadowed name is not in `vars`/`arrays` — it is the
+    /// snapshot the *outermost* frame that shadows the name saved when it first
+    /// went local. So rather than reimplementing every declaration effect
+    /// against a snapshot, this swaps that snapshot into the live tables, lets
+    /// the ordinary declaration code run against it, and
+    /// [`Shell::leave_global_scope`] writes the result back into the frame and
+    /// restores the local. A name with no local shadow needs no swap: it is
+    /// already global.
+    ///
+    /// Returns the entries to hand back to `leave_global_scope`, in the order
+    /// they were swapped.
+    fn enter_global_scope(&mut self, names: &[String]) -> Vec<(String, usize, VarSnapshot)> {
+        let mut saved = Vec::new();
+        for name in names {
+            // The *outermost* shadowing frame, so a name localized at several
+            // call depths still resolves to the true global (bash writes the
+            // global from any depth).
+            let Some(idx) = self
+                .local_frames
+                .iter()
+                .position(|f| f.iter().any(|(n, _)| n == name))
+            else {
+                continue;
+            };
+            let Some(global) = self
+                .local_frames
+                .get(idx)
+                .and_then(|f| f.iter().find(|(n, _)| n == name))
+                .map(|(_, snap)| snap.clone())
+            else {
+                continue;
+            };
+            let live = self.snapshot_var(name);
+            self.restore_var(name, global);
+            saved.push((name.clone(), idx, live));
+        }
+        saved
+    }
+
+    /// Undo [`Shell::enter_global_scope`]: park what the declaration made of the
+    /// global back in the frame that shadows it (so it survives the return) and
+    /// put the local binding back in the live tables.
+    fn leave_global_scope(&mut self, saved: Vec<(String, usize, VarSnapshot)>) {
+        // Reverse order, so a name swapped twice (it cannot be, but the pairing
+        // should not depend on that) unwinds as a stack.
+        for (name, idx, live) in saved.into_iter().rev() {
+            let updated = self.snapshot_var(&name);
+            if let Some(frame) = self.local_frames.get_mut(idx)
+                && let Some(slot) = frame.iter_mut().find(|(n, _)| *n == name)
+            {
+                slot.1 = updated;
+            }
+            self.restore_var(&name, live);
+        }
+    }
+
+    /// Whether a declaration builtin's leading flags leave `-g` in force.
+    ///
+    /// A separate scan from the builtins' own flag loops because the swap has to
+    /// happen *around* them — the global binding must already be live when the
+    /// first operand is processed. `+g` cancels, last one wins, exactly as the
+    /// builtins parse it.
+    fn declare_global_flag(args: &[Str]) -> bool {
+        let mut global = false;
+        for arg in args.get(..Self::declare_flag_end(args)).unwrap_or_default() {
+            if arg.as_slice() == b"--" {
+                break;
+            }
+            let enable = arg.starts_with(b"-");
+            let Some(flags) = arg.strip_prefix(b"-").or_else(|| arg.strip_prefix(b"+")) else {
+                break;
+            };
+            if flags.contains(&b'g') {
+                global = enable;
+            }
+        }
+        global
+    }
+
+    /// The identifier each operand of a declaration builtin declares: the part
+    /// before any `[subscript]`, `=` or `+=`. Operands that are not valid
+    /// identifiers are skipped — the declaration itself rejects them, and there
+    /// is no binding of that name to retarget.
+    fn declare_operand_names(args: &[Str]) -> Vec<String> {
+        let mut names = Vec::new();
+        for arg in args.get(Self::declare_flag_end(args)..).unwrap_or_default() {
+            let end = arg
+                .iter()
+                .position(|b| matches!(b, b'[' | b'='))
+                .unwrap_or(arg.len());
+            let base = arg.get(..end).unwrap_or_default();
+            // `name+=v`: the `+` belongs to the operator, not the identifier.
+            let base = base.strip_suffix(b"+").unwrap_or(base);
+            if let Some(n) = bytes::as_str(base).filter(|n| crate::parser::is_valid_name(n.as_bytes()))
+                && !names.iter().any(|s: &String| s == n)
+            {
+                names.push(n.to_string());
+            }
+        }
+        names
     }
 
     /// `command [-v|-V] [-p] name [args]` — run `name` bypassing shell
@@ -19872,7 +19990,24 @@ impl Shell {
         }
     }
 
+    /// `declare`/`typeset`/`local` — the entry point, which handles `-g` by
+    /// swapping each operand's global binding into place around the declaration
+    /// proper (see [`Shell::enter_global_scope`]).
     fn builtin_declare(&mut self, args: &[Str], is_local: bool, tag: &str) -> i32 {
+        // `local` is never global, whatever flags it is given.
+        if is_local || !Self::declare_global_flag(args) {
+            return self.builtin_declare_scoped(args, is_local, tag);
+        }
+        let saved = self.enter_global_scope(&Self::declare_operand_names(args));
+        let status = self.builtin_declare_scoped(args, is_local, tag);
+        self.leave_global_scope(saved);
+        status
+    }
+
+    /// The declaration proper, run with the bindings it is to act on already
+    /// live — so it never has to care whether `-g` was given beyond skipping the
+    /// local-shadowing step.
+    fn builtin_declare_scoped(&mut self, args: &[Str], is_local: bool, tag: &str) -> i32 {
         if is_local && self.local_frames.is_empty() {
             self.perrln("local: can only be used in a function");
             return 1;
@@ -20442,6 +20577,45 @@ impl Shell {
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
+        // `-g` retargets every operand — compound and scalar alike — at the
+        // global binding, so the swap wraps all three phases below rather than
+        // sitting inside the builtin: the compound literals are bound in phase 1
+        // without ever reaching it. `local` is never global. See
+        // [`Shell::enter_global_scope`].
+        if argv.first().map(Vec::as_slice) == Some(b"local".as_slice())
+            || !Self::declare_global_flag(argv.get(1..).unwrap_or_default())
+        {
+            return self.exec_declare_with_arrays_scoped(
+                argv,
+                decl_arrays,
+                trace_words,
+                out,
+                redir,
+            );
+        }
+        let mut names = Self::declare_operand_names(argv.get(1..).unwrap_or_default());
+        // Compound operands were lifted out of `argv` into `decl_arrays`, so
+        // their names have to be collected separately.
+        for d in decl_arrays {
+            if !names.contains(&d.assign.name) {
+                names.push(d.assign.name.clone());
+            }
+        }
+        let saved = self.enter_global_scope(&names);
+        let flow =
+            self.exec_declare_with_arrays_scoped(argv, decl_arrays, trace_words, out, redir);
+        self.leave_global_scope(saved);
+        flow
+    }
+
+    fn exec_declare_with_arrays_scoped(
+        &mut self,
+        argv: &[Str],
+        decl_arrays: &[DeclArray],
+        trace_words: Option<&[Str]>,
+        out: &mut Out,
+        redir: &RedirPlan,
+    ) -> Flow {
         // The command word named a declaration builtin, so it is text by
         // construction — the builtin table is keyed by `String`, and this
         // function is only reached through it.
@@ -20724,7 +20898,10 @@ impl Shell {
             "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir),
             "export" if has_scalar_operand => self.builtin_export(&argv[1..], out, redir),
             "readonly" | "export" => 0,
-            _ => self.builtin_declare(&argv[1..], is_local, cmd),
+            // `_scoped`: any `-g` swap is already in force for the whole
+            // command (see the wrapper below), and re-entering it here would
+            // pair the inner restore with the outer's saved binding.
+            _ => self.builtin_declare_scoped(&argv[1..], is_local, cmd),
         };
         // Phase 3 — the attributes the *builtin* applies, which it can only apply
         // to the scalar operands it was given: the array names live in
@@ -40168,6 +40345,56 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("x=5; declare -a x; declare -p x").0,
             "declare -a x=([0]=\"5\")\n"
+        );
+    }
+
+    #[test]
+    fn declare_g_reaches_past_a_local_to_the_global_binding() {
+        // `-g` declares the *global* variable even when a local of the same
+        // name is in the way: the local is left alone and the global survives
+        // the return. osh used to convert the local instead, so the
+        // declaration's effects died with the frame and no global was made.
+        assert_eq!(
+            run("f(){ local x=5; declare -ga x; declare -p x; }; f; declare -p x").0,
+            "declare -- x=\"5\"\ndeclare -a x\n"
+        );
+        // A value goes to the global too, and an *existing* global is widened
+        // from its own value rather than the local's.
+        assert_eq!(
+            run("f(){ local x=5; declare -g x=9; declare -p x; }; f; declare -p x").0,
+            "declare -- x=\"5\"\ndeclare -- x=\"9\"\n"
+        );
+        assert_eq!(
+            run("x=1; f(){ local x=5; declare -ga x; }; f; declare -p x").0,
+            "declare -a x=([0]=\"1\")\n"
+        );
+        // Attributes and appends likewise resolve against the global.
+        assert_eq!(
+            run("x=1; f(){ local x=5; declare -gi x; }; f; declare -p x").0,
+            "declare -i x=\"1\"\n"
+        );
+        assert_eq!(
+            run("x=ab; f(){ local x=5; declare -g x+=9; }; f; declare -p x").0,
+            "declare -- x=\"ab9\"\n"
+        );
+        // A compound operand is bound before the builtin ever runs, so the
+        // retarget has to wrap the whole command, not just the builtin.
+        assert_eq!(
+            run("f(){ local x=5; declare -ga x=(7 8); declare -p x; }; f; declare -p x").0,
+            "declare -- x=\"5\"\ndeclare -a x=([0]=\"7\" [1]=\"8\")\n"
+        );
+        // From two frames deep it is still the *global*, not the enclosing
+        // function's local, that is declared — and that local is untouched.
+        assert_eq!(
+            run("f(){ local x=5; g; declare -p x; }; \
+                 g(){ local x=7; declare -g x=9; declare -p x; }; f; declare -p x")
+                .0,
+            "declare -- x=\"7\"\ndeclare -- x=\"5\"\ndeclare -- x=\"9\"\n"
+        );
+        // With no local in the way `-g` is an ordinary global declaration.
+        assert_eq!(
+            run("x=1; f(){ declare -ga x; }; f; declare -p x").0,
+            "declare -a x=([0]=\"1\")\n"
         );
     }
 

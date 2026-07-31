@@ -8789,7 +8789,7 @@ TD-OILS-ARITH-ERRFMT and is now **RESOLVED** (2026-07-19) — osh emits bash's f
 
 **Original report follows for reference.**
 
-### TD-OILS-ERRLINE (original). Error diagnostics lack bash's `<name>: line N:` prefix — OPEN 2026-07-19
+### TD-OILS-ERRLINE (original report — SUPERSEDED by the ✅ RESOLVED entry above, kept for reference). Error diagnostics lack bash's `<name>: line N:` prefix — 2026-07-19
 
 **Where:** `userspace/oils/src/interp.rs` — all ~40 error-emission sites, which
 hardcode a bare `osh: ` prefix in three different ways: `eprintln!("osh: …")`,

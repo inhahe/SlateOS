@@ -6409,7 +6409,7 @@ different places, and only the name they quote tells them apart:
   one the builtin found — which is why the compound path reports the
   operand as written unconditionally.
 
-### TD-OILS-DECL-UNSET-NAMEREF-DOES-NOT-FOLLOW. `declare +n` applies its *other* flags to the reference instead of the target — 2026-07-31 — OPEN
+### TD-OILS-DECL-UNSET-NAMEREF-DOES-NOT-FOLLOW. `declare +n` applies its *other* flags to the reference instead of the target — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped`,
 where `unset_nameref` is one of the conditions that suppress the `follow`
@@ -6440,6 +6440,99 @@ untouched, where a subscripted operand with any other flag array-ifies it
 (`declare +n r[1]` leaves `declare -- w="5"`, `declare -x +n r[1]` makes
 `declare -ax w`). Low priority: `+n` combined with other flags is a shape
 almost no script writes.
+
+**✅ RESOLVED 2026-07-31.** `unset_nameref` no longer suppresses the
+follow; it only redirects the letter it is about. The rule, measured
+against bash 5.2.37 with probes `target/dvscratch/px69`–`px77`:
+
+* **`+n` follows on the same terms as every other letter.** The gate is
+  the existing `binding_is_nameref` rule plus `!make_local`: a
+  local-binding `declare`/`local` writes the frame's own binding, so it
+  never follows and its own name is what loses the attribute — even for a
+  chain (`f() { local -n m=w; local -n r=m; declare -x +n r; }` exports
+  `r`, leaving `m` a reference). A `-g` declaration does follow, because
+  `enter_global_scope` has already swapped the global binding in.
+* **The letter comes off the *last* reference in the chain**, not the
+  operand's own name — bash reaches it through
+  `find_variable_last_nameref`. With `w=5; declare -n m=w; declare -n
+  r=m`, `declare -x +n r` exports `w`, leaves `m` a plain `"w"`, and
+  leaves `r` a reference *to `m`*. New helper `Shell::last_nameref_of`
+  does the walk, mirroring `resolve_ref_name`'s stopping conditions.
+* **An operand whose only content is `+n` asks nothing of the target.**
+  A subscript is not a request (`declare +n 'r[1]'` makes no array,
+  though `declare -x +n 'r[1]'` makes `declare -ax w=([0]="5")`) and
+  neither is `-g`. The new `other_attrs` predicate collects every letter
+  that *is* one; when none is set and there is no value, the attribute
+  comes off and the operand stops there.
+* **A cycle is a complete no-op.** `declare -n c1=c2; declare -n c2=c1;
+  declare -x +n c1` warns and changes nothing — not even the attribute —
+  which falls out of the existing "circular chain names nothing to
+  declare" `continue`. A *subscripted* cycle operand still unreferences
+  itself and makes its own array, so the skip re-checks
+  `nameref_attr.contains` to stay out of that path.
+* **A refused operand keeps the attribute.** The removal sits with the
+  other attribute applications, after every refusal's `continue`, so
+  `readonly w; declare -n r=w; declare +n r=9` reports `r: readonly
+  variable` and leaves `r` a reference.
+
+Coverage: `userspace/oils/tests/corpus/declare-unset-nameref.sh` (11
+sections, matching bash) and the unit test
+`unset_nameref_takes_the_letter_off_the_reference_and_gives_the_rest_away`.
+
+Two corners deliberately left divergent, both recorded as
+TD-OILS-DECL-UNSET-NAMEREF-BASH-CORNERS below.
+
+### TD-OILS-DECL-UNSET-NAMEREF-BASH-CORNERS. two `declare +n` corners where bash contradicts itself — 2026-07-31 — OPEN (WONTFIX candidate)
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped`, the
+`nameref_off_name` / `unset_nameref` handling added for
+TD-OILS-DECL-UNSET-NAMEREF-DOES-NOT-FOLLOW above.
+
+Two shapes left divergent on purpose, because bash's own answers there do
+not follow from any rule the rest of `+n` obeys. Probes:
+`target/dvscratch/px76.sh`, `target/dvscratch/px77.sh`.
+
+**1. `+n` with another letter, through a reference onto an array
+*element*, with a subscript of its own.** bash refuses the name it builds
+and *still* takes the attribute off — where every other refusal (readonly
+assignment, `-a`/`-A` conversion, `noassign`) leaves the reference alone:
+
+```sh
+declare -a a=(1 2); declare -n r='a[1]'
+declare -x +n 'r[1]'   # bash declare: `a[1][1]': not a valid identifier, rc=1
+                       #      …and declare -- r="a[1]" — attribute gone
+                       # osh  same refusal and rc, but declare -n r="a[1]"
+```
+
+osh puts the removal with the other attribute applications, after the
+refusal's `continue`, which is what makes the *other* five refusals come
+out right. Matching this one case would mean a special-case removal
+inside that single refusal branch. Not worth it.
+
+**2. `+n` on a *local* reference with a subscript, or with a value.** The
+subscripted forms make bash emit uninitialised memory in the diagnostic
+and produce an impossible variable, so there is no behaviour to match:
+
+```sh
+f() { local w=5; local -n r=w; declare +n 'r[1]'; declare -p r; }
+f                      # bash declare -a r=()
+g() { local w=5; local -n r=w; declare +n 'r[1]=9'; declare -p r; }
+g                      # bash declare: `<garbage bytes>': not a valid identifier
+                       #      declare -an r=()     ← array *and* nameref
+h() { local w=5; local -n r=w; declare +n r=9; declare -p r; }
+h                      # bash declare: `9': not a valid identifier
+                       #      declare -n r="w"  — operand abandoned entirely
+                       # osh  declare -- r="9"
+```
+
+The third is not garbage but is still bash validating `9` as a *nameref
+target* for an operand that is asking for the attribute to be removed.
+osh's answer — take the letter off, then bind the value — is the one the
+non-local form gives and the one the rule predicts.
+
+**Proper fix if ever wanted:** case 1 only, by moving the `+n` removal
+ahead of the `t.sub`/`osub` refusal. Leave case 2 alone; matching a
+use-of-uninitialised-memory diagnostic is not a goal.
 
 ### TD-OILS-DECL-PLUS-X-R-SETS-INSTEAD-OF-CLEARING. `declare +x` / `declare +r` set the attribute they should remove — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

@@ -14976,6 +14976,52 @@ impl Shell {
         target
     }
 
+    /// Walk a nameref chain to the *last* reference in it — the one whose value
+    /// names something that is not itself a reference.
+    ///
+    /// `declare +n` asks about this name rather than the one it was handed: with
+    /// `w=5; declare -n m=w; declare -n r=m`, `declare +n r` takes the attribute
+    /// off `m` and leaves `r` a reference to it. (bash reaches the same variable
+    /// through `find_variable_last_nameref`.) A one-link chain answers with the
+    /// name it started from, which is why the common case looks like no walk at
+    /// all.
+    ///
+    /// A chain that closes on itself has no last link, so the walk answers with
+    /// the name it started from there too; callers reach this only after
+    /// [`Self::resolve_ref_use`] has already refused such a chain. The caller is
+    /// expected to have checked that `name` carries the attribute at all —
+    /// otherwise the answer is just `name`.
+    fn last_nameref_of(&self, name: &str) -> String {
+        let mut cur = name.to_string();
+        let mut seen: Vec<String> = Vec::new();
+        loop {
+            // `cur` is a reference; the step below only ever advances onto
+            // another one, so this holds for every iteration.
+            let Some(v) = self.vars.get(&cur).map(Vec::as_slice) else {
+                return cur;
+            };
+            // The same stopping conditions [`Self::resolve_ref_name`] uses: an
+            // empty or self-naming value, an element reference (nothing is
+            // *named* `arr[0]`, so it carries no attribute of its own), and a
+            // value that is not text at all.
+            let elem_ref = matches!(split_assignment_target(v), Some((_, Some(_))));
+            if v.is_empty() || v == cur.as_bytes() || elem_ref {
+                return cur;
+            }
+            let Some(next) = bytes::as_str(v).filter(|n| self.nameref_attr.contains(*n)) else {
+                return cur;
+            };
+            // A chain that closes on itself has no last link — every name in it
+            // refers to another reference — so there is nothing for the walk to
+            // answer with but the name it was asked about.
+            if next == name || seen.iter().any(|s| s == next) {
+                return name.to_string();
+            }
+            let next = next.to_owned();
+            seen.push(std::mem::replace(&mut cur, next));
+        }
+    }
+
     /// Take the nameref attribute off `name` — and with it the target name it
     /// was holding — so a declaration can bind `name` itself.
     ///
@@ -22347,6 +22393,28 @@ impl Shell {
         // `local` builtin is always local. Outside a function everything is
         // global regardless.
         let make_local = is_local || (!global && !self.local_frames.is_empty());
+        // Whether the command asks for anything of its operands *besides* the
+        // nameref letter. `-g` does not count — it chooses which binding the
+        // declaration writes rather than saying anything about it — and neither
+        // does a subscript, which belongs to the operand and not to the command.
+        // Only `+n` consults this: an operand that asks for nothing else leaves
+        // the reference's target completely alone. See the follow rule below.
+        let other_attrs = assoc
+            || unset_assoc
+            || indexed
+            || unset_indexed
+            || export
+            || unset_export
+            || readonly
+            || unset_readonly
+            || integer
+            || unset_integer
+            || case_on.is_some()
+            || off_lower
+            || off_upper
+            || off_capcase
+            || trace
+            || unset_trace;
         let mut status = 0;
         for name_val in &args[i..] {
             // `local -`: make the shell's `set` options local to this function.
@@ -22450,9 +22518,10 @@ impl Shell {
             // `declare r=zz` stores `arr[1]=zz` while the attributes still land
             // on `arr`, which is where attributes always land.
             //
-            // A declaration that is *about* the reference is exempt: `-n`
-            // (declaring or retargeting it) and `+n` (taking the attribute
-            // away).
+            // A declaration that is *about* the reference is exempt — but only
+            // `-n` is, wholly. `+n` names the reference for its own letter and
+            // the target for everything else: `w=5; declare -n r=w;
+            // declare -x +n r` exports `w` and leaves `r` a plain string `"w"`.
             //
             // And so is a declaration that is about to *make* the binding
             // rather than add to one: what decides is whether the binding this
@@ -22503,7 +22572,25 @@ impl Shell {
                 self.perrln(&format!("warning: {base_name}: removing nameref attribute"));
                 self.unreference_for_declare(base_name);
             }
-            let follow = !nameref && !unset_nameref && binding_is_nameref && !unreference;
+            // `+n` follows on the same terms as any other letter, save that a
+            // *local* binding never does: inside a function, `local -n r=w;
+            // declare -x +n r` exports `r` and leaves `w` alone, exactly as a
+            // plain `declare -x r` there would.
+            let follow = !nameref
+                && binding_is_nameref
+                && !unreference
+                && (!unset_nameref || !make_local);
+            // …and `+n` takes the attribute off the last reference in the
+            // chain rather than the operand's own name, which is only the same
+            // name when the chain is one link long. Read before the walk can be
+            // disturbed by anything below. Where the operand does not follow,
+            // the name it was written with is the binding this declaration is
+            // about, so that is the one that loses it.
+            let nameref_off_name = if unset_nameref && follow {
+                self.last_nameref_of(base_name)
+            } else {
+                base_name.to_string()
+            };
             let target = if follow { self.resolve_ref_use(base_name) } else { None };
             if follow && target.is_none() {
                 // A circular chain names nothing to declare. The warning is
@@ -22515,6 +22602,25 @@ impl Shell {
                     continue;
                 }
                 self.unreference_for_declare(base_name);
+            }
+            // An operand that asks for nothing but `+n` asks nothing of the
+            // target: `w=5; declare -n r=w; declare +n r` leaves `w` exactly as
+            // it was, where `declare -x +n r` exports it. A subscript is not a
+            // request either — `declare +n 'r[1]'` makes no array, though
+            // `declare -x +n 'r[1]'` makes `declare -ax w=([0]="5")` — so once
+            // the attribute is off the chain there is nothing left to do.
+            //
+            // The re-check is what keeps the two `unreference` paths above out:
+            // an operand that has just stopped being a reference is declaring
+            // an array of its own, and still has that to do.
+            if unset_nameref
+                && !nameref
+                && !other_attrs
+                && value.is_none()
+                && self.nameref_attr.contains(base_name)
+            {
+                self.nameref_attr.remove(&nameref_off_name);
+                continue;
             }
             // The target's own subscript and the operand's cannot both stand:
             // nothing is *named* `arr[1]`, so `arr[1][0]` is no identifier
@@ -22816,7 +22922,10 @@ impl Shell {
             // that judgement happens while the flag is being parsed, not when
             // the attribute lands.
             if unset_nameref {
-                self.nameref_attr.remove(base_name);
+                // Not `base_name`, which by here is the target the reference
+                // led to: the letter is about the reference itself. See
+                // `nameref_off_name` above.
+                self.nameref_attr.remove(&nameref_off_name);
             } else if nameref {
                 self.nameref_attr.insert(base_name.to_string());
             }
@@ -44959,6 +45068,82 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("w=5; f() { local -n r=w; declare -a r=(z); declare -p w; }; f; declare -p w").0,
             "declare -a w=([0]=\"z\")\ndeclare -- w=\"5\"\n"
+        );
+    }
+
+    /// `+n` names two variables at once: the reference, for its own letter, and
+    /// the target it leads to, for everything else the operand asks for.
+    #[test]
+    fn unset_nameref_takes_the_letter_off_the_reference_and_gives_the_rest_away() {
+        let r = "w=5; declare -n r=w";
+        // Every other letter, and the value, reach the target; the reference is
+        // left holding the target's name as a plain string.
+        for (op, want) in [
+            ("declare -x +n r", "declare -x w=\"5\"\n"),
+            ("declare -i +n r", "declare -i w=\"5\"\n"),
+            ("declare -a +n r", "declare -a w=([0]=\"5\")\n"),
+            ("declare +n r=9", "declare -- w=\"9\"\n"),
+            // A subscript is not a request of its own, so `+n` alone leaves the
+            // target exactly as it was — where any other letter makes its array.
+            ("declare +n r", "declare -- w=\"5\"\n"),
+            ("declare +n r[1]", "declare -- w=\"5\"\n"),
+            ("declare -x +n r[1]", "declare -ax w=([0]=\"5\")\n"),
+            // Nor is `-g`, which only says which binding is being written.
+            ("declare -g +n r", "declare -- w=\"5\"\n"),
+        ] {
+            assert_eq!(
+                run(&format!("{r}; {op}; declare -p w r")).0,
+                format!("{want}declare -- r=\"w\"\n"),
+                "{op}"
+            );
+        }
+        // A removal follows just as an enable does.
+        assert_eq!(
+            run(&format!("{r}; declare -x w; declare +x +n r; declare -p w r")).0,
+            "declare -- w=\"5\"\ndeclare -- r=\"w\"\n"
+        );
+        // The letter comes off the *last* reference in the chain, not the name
+        // the command was handed — which are the same name only in a one-link
+        // chain. The rest of the operand still reaches the end of the chain.
+        assert_eq!(
+            run("w=5; declare -n m=w; declare -n r=m; declare -x +n r; declare -p w m r").0,
+            "declare -x w=\"5\"\ndeclare -- m=\"w\"\ndeclare -n r=\"m\"\n"
+        );
+        // `-n` in the same command suppresses the follow altogether, so there
+        // the operand's own name is the one that loses it.
+        assert_eq!(
+            run("w=5; declare -n m=w; declare -n r=m; declare -n +n r; declare -p w m r").0,
+            "declare -- w=\"5\"\ndeclare -n m=\"w\"\ndeclare -- r=\"m\"\n"
+        );
+        // A *local* binding never follows — the same rule the other letters
+        // obey — so its own name is the one the letter comes off, chain or no.
+        assert_eq!(
+            run("f() { local w=5; local -n m=w; local -n r=m; declare -x +n r; declare -p w m r; }; f").0,
+            "declare -- w=\"5\"\ndeclare -n m=\"w\"\ndeclare -x r=\"m\"\n"
+        );
+        // …and a frame merely shadowing a global reference does not hold it at
+        // all, so the global keeps the attribute and the target is untouched.
+        assert_eq!(
+            run("w=5; declare -n r=w; f() { declare -x +n r; }; f; declare -p w r").0,
+            "declare -- w=\"5\"\ndeclare -n r=\"w\"\n"
+        );
+        assert_eq!(
+            run("w=5; declare -n r=w; f() { declare -g -x +n r; }; f; declare -p w r").0,
+            "declare -x w=\"5\"\ndeclare -- r=\"w\"\n"
+        );
+        // An operand the builtin refuses keeps the attribute it would have lost,
+        // because the letter lands with the others rather than before them.
+        assert_eq!(
+            run("declare -A t=([k]=v); declare -n q=t; { declare -a +n q; } 2>&1; declare -p q").0,
+            "osh: declare: q: cannot convert associative to indexed array\n\
+             declare -n q=\"t\"\n"
+        );
+        // A cycle names nothing to declare, so nothing loses the attribute
+        // either — the warning is the whole of the command's effect.
+        assert_eq!(
+            run("declare -n c1=c2; declare -n c2=c1; { declare -x +n c1; } 2>&1; declare -p c1 c2").0,
+            "osh: warning: c1: circular name reference\n\
+             declare -n c1=\"c2\"\ndeclare -n c2=\"c1\"\n"
         );
     }
 

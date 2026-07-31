@@ -5509,7 +5509,39 @@ arguably more useful and is self-consistent.
 port bash's `hash.c` hash function and bucket iteration for `self.assoc`.
 Not worth it absent a concrete need.
 
-### TD-OILS-MISSING-SPECIAL-ARRAYS. `osh` does not define some bash special array variables (`GROUPS`) — 2026-07-19
+### TD-OILS-NOASSIGN-VARS. bash's six unassignable variables can be clobbered in `osh` — 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — the assignment paths
+(`scalar_write_checked`, the compound-assignment/`declare` paths), which
+today know only about `self.readonly`.
+
+**What:** bash gives `FUNCNAME`, `GROUPS`, `BASH_SOURCE`, `BASH_LINENO`,
+`BASH_ARGC` and `BASH_ARGV` the `att_noassign` attribute. Measured
+against bash 5.2.37 (MSYS):
+
+| form | bash | osh |
+|---|---|---|
+| `GROUPS=5`, `GROUPS[0]=5`, `read GROUPS`, `for GROUPS in …` | silently ignored, status 0, value unchanged | assigns |
+| `GROUPS=(1 2)`, `GROUPS+=(1)` | silently fails, status 1, **aborts the rest of the parsed command list** (`GROUPS=(1); echo after` prints nothing; `GROUPS=(1)⏎echo after` prints `after=1` — the same abort osh already reproduces for `readonly x=1; x=2`) | assigns |
+| `declare GROUPS=…` at top level | status 1, silent, value unchanged | assigns |
+| `declare`/`local GROUPS=…` inside a function | `<tag>: GROUPS: variable may not be assigned value` on stderr, non-fatal; the compound form emits it twice, once tagged with the enclosing function name and once with the builtin | assigns |
+| `unset GROUPS` | succeeds and the name loses the attribute permanently — a later `GROUPS=(1 2)` makes an ordinary array | already matches (nothing to lose) |
+
+`DIRSTACK` and `COMP_WORDBREAKS` are *not* in the family: both are
+freely assignable in bash.
+
+**Why it matters:** the four `BASH_*` names and `FUNCNAME` are osh's own
+materialised call-stack state, so a script that assigns to one corrupts
+the shell's bookkeeping rather than merely disagreeing with bash.
+
+**Proper fix:** a `noassign: HashSet<String>` on `Shell`, seeded with the
+six names and cleared per-name by `unset`, checked in the same places
+`readonly` is: scalar writes become silent no-ops, compound writes take
+the existing readonly-abort path with the message suppressed. The
+function-only `declare`/`local` diagnostics are the fiddliest part and
+can be a second step.
+
+### TD-OILS-MISSING-SPECIAL-ARRAYS. `osh` does not define some bash special array variables (`GROUPS`) — 2026-07-19 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` variable seeding
 (`seed_shell_vars`) and the dynamic-array materialisers (cf.
@@ -5523,12 +5555,51 @@ implemented (see `refresh_dirstack`); FUNCNAME, BASH_SOURCE, BASH_LINENO
 already were; **`BASH_ARGC`/`BASH_ARGV` are now implemented — RESOLVED
 2026-07-20** (see below).
 
-**Why deferred:** `GROUPS` needs a host notion of Unix supplementary
-groups, which the Windows host build and the current slateos user model
-do not expose. Low value; no known script depends on it.
+**Why deferred (at the time):** `GROUPS` needs a host notion of Unix
+supplementary groups, which the Windows host build and the current
+slateos user model do not expose.
 
-**Proper fix:** when the process/identity layer exposes supplementary
-groups, materialise `GROUPS` from it (like `refresh_dirstack`).
+**GROUPS — RESOLVED 2026-07-31.** Seeded in `seed_shell_vars` as an
+indexed array (bash's `declare -a`: not readonly, not integer, not
+exported) from the new `reported_groups`, which continues the identity
+story `reported_identity` (`UID`/`EUID`) began. Three sources, in order:
+
+1. **`OSH_GROUPS`** in the environment — numeric IDs separated by
+   whitespace and/or commas, order kept, repeats dropped (`getgroups`
+   never reports one twice), non-numeric entries ignored
+   (`parse_group_list`). This is the counterpart of the `OSH_UID` /
+   `OSH_EUID` overrides: a login session that already knows the user's
+   identity hands it over whole.
+2. **The host user database** — `passwd_record_for_uid` finds the
+   `/etc/passwd` record carrying the reported UID and takes the user's
+   name and *primary* GID from it; `group_ids_for_member` then adds the
+   GID of every `/etc/group` record listing that name as a member, in
+   file order. That is exactly what `initgroups(3)` builds, which is why
+   the primary group is not looked for in the group file (it is usually
+   absent from the member lists there).
+3. **Group 0**, which goes with the default root `UID`/`EUID` report.
+   This is the answer on the Windows host the differential corpus runs
+   on, which has no user database at all.
+
+An **inherited environment `GROUPS`** suppresses the seed entirely, so it
+is imported as an ordinary exported scalar and no dynamic array is
+created — bash's precedence, measured with `env GROUPS=x bash -c
+'declare -p GROUPS'` (you cannot see it from bash itself, because a
+`GROUPS=x` assignment prefix in bash is a silent no-op).
+
+Tests: `groups_come_from_the_passwd_and_group_files` (both readers, over
+temp databases: first-match-wins, unparsable UID/GID fields, comment and
+short lines, member-name substrings, missing file),
+`the_group_override_list_takes_numbers_in_order_without_repeats`, and
+`groups_is_a_bound_non_empty_array_of_ids` for the seeded contract
+(bound, non-empty, all-numeric, `declare -a`, `unset`-able). No corpus
+case: the *values* are host identity and differ from the reference shell
+by construction (MSYS bash reports its Windows RID).
+
+**Still open — assignment semantics.** bash marks `GROUPS` (and
+`FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`)
+`att_noassign`; osh lets all six be clobbered. Tracked separately as
+TD-OILS-NOASSIGN-VARS.
 
 **BASH_ARGC / BASH_ARGV — RESOLVED 2026-07-20.** Implemented as the
 extended-debugging call-argument stack (`bash_argc: Vec<usize>`,

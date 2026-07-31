@@ -192,6 +192,76 @@ fn reported_identity() -> (u32, u32) {
     (uid, euid)
 }
 
+/// One numeric ID field — a `/etc/passwd` GID, an `OSH_GROUPS` entry — or
+/// `None` when it is not a plain non-negative decimal number.
+///
+/// Deliberately stricter than [`bytes::parse_i64`]: a database field is not a
+/// shell arithmetic context, so ` 10 ` and `-1` are malformed records rather
+/// than the numbers they would be in `$(( ))`.
+fn parse_id_field(field: BStr<'_>) -> Option<u32> {
+    bytes::as_str(field)?.parse::<u32>().ok()
+}
+
+/// The supplementary group IDs `osh` reports through `$GROUPS` — bash's
+/// `getgroups(2)`, which SlateOS has no syscall for yet.
+///
+/// Three sources, tried in order:
+///
+///   * `OSH_GROUPS` in the environment: numeric IDs separated by whitespace or
+///     commas. This is the counterpart of the `OSH_UID`/`OSH_EUID` overrides
+///     (see [`reported_identity`]) — a login session that already knows the
+///     user's identity can hand it over whole. An entry that is not a number is
+///     ignored, and an ID already listed is dropped, because `getgroups` never
+///     reports one twice.
+///   * the host user database: the `/etc/passwd` record carrying the reported
+///     UID gives the user's name and primary group, and every `/etc/group`
+///     record listing that name as a member adds its GID. That is what
+///     `initgroups(3)` builds — primary group first, the rest in file order.
+///   * group 0, which goes with the root identity `UID`/`EUID` report by
+///     default. This is the answer on the Windows host the differential corpus
+///     runs on, which has no user database at all.
+///
+/// Never empty: bash's `GROUPS` always has at least one element, and a script
+/// reading `${GROUPS[0]}` should not find nothing there.
+///
+/// Once SlateOS exposes a real credential this should read it instead, exactly
+/// as [`reported_identity`] should (known-issues TD-OILS-IDVARS).
+fn reported_groups() -> Vec<u32> {
+    if let Some(spec) = std::env::var_os("OSH_GROUPS") {
+        let ids = parse_group_list(&bytes::os_to_bytes(&spec));
+        if !ids.is_empty() {
+            return ids;
+        }
+    }
+    if let Some((user, primary)) = passwd_record_for_uid(PASSWD_FILE, reported_identity().0) {
+        let mut ids = vec![primary];
+        for gid in group_ids_for_member(GROUP_FILE, &user) {
+            if !ids.contains(&gid) {
+                ids.push(gid);
+            }
+        }
+        return ids;
+    }
+    vec![0]
+}
+
+/// Parse an `OSH_GROUPS` list: numeric IDs separated by any run of whitespace
+/// and/or commas, keeping the order given and dropping repeats. Both separators
+/// are accepted because the two obvious ways to write the list — `id -G`'s
+/// space-separated output and `/etc/group`'s comma-separated member syntax —
+/// each look natural to someone setting it.
+fn parse_group_list(spec: BStr<'_>) -> Vec<u32> {
+    let mut ids: Vec<u32> = Vec::new();
+    for field in spec.split(|b: &u8| b.is_ascii_whitespace() || *b == b',') {
+        if let Some(id) = parse_id_field(field)
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
 /// The complete `shopt` option inventory (bash 5.2), in bash's own listing
 /// order (roughly, but not strictly, alphabetical — it mirrors bash's internal
 /// table), each paired with its default state for a **non-interactive** shell
@@ -3029,6 +3099,26 @@ impl Shell {
         self.integer_attr.insert("EUID".to_string());
         self.readonly.insert("UID".to_string());
         self.readonly.insert("EUID".to_string());
+        // GROUPS: bash's array of the invoking user's group IDs (`declare -a`,
+        // not readonly, not exported, not integer). Materialised once — the
+        // process's groups cannot change under it — from `reported_groups`,
+        // which is the identity story of UID/EUID continued: an `OSH_GROUPS`
+        // override, else the host user database, else group 0 to go with the
+        // default root identity.
+        //
+        // Skipped entirely when the *environment* carries a `GROUPS`, which is
+        // bash's precedence: an inherited `GROUPS=x` is imported as an ordinary
+        // exported scalar and the dynamic array is never created (bash's own
+        // `GROUPS=x` assignment cannot produce that, because assigning to
+        // GROUPS is a no-op — `env GROUPS=x bash` is how you see it).
+        if std::env::var_os("GROUPS").is_none() {
+            let groups: BTreeMap<usize, Str> = reported_groups()
+                .into_iter()
+                .enumerate()
+                .map(|(i, g)| (i, g.to_string().into_bytes()))
+                .collect();
+            self.arrays.insert("GROUPS".to_string(), groups);
+        }
         // BASH_VERSINFO: (major, minor, patch, build, status, machtype). bash
         // marks it readonly; matching that guards scripts that probe the level.
         // Gated on the same `advertise_bash` toggle as BASH_VERSION so the two
@@ -27851,6 +27941,86 @@ fn read_passwd_home(path: BStr<'_>, user: BStr<'_>) -> Option<Str> {
     None
 }
 
+/// The name and primary group of the user carrying `uid` in one
+/// `/etc/passwd`-format file — fields 0 and 3 of
+/// `name:passwd:uid:gid:gecos:home:shell` — or `None` if no record has that UID.
+///
+/// This is `getpwuid`, the lookup [`reported_groups`] needs to turn the numeric
+/// identity `osh` reports into the name `/etc/group` lists members by. The first
+/// matching record wins, as it does for `getpwuid`.
+///
+/// A record whose UID or GID field is not a plain number does not parse, and so
+/// does not match: a malformed line must not be able to hand back a group the
+/// user is not in. Comment and blank lines are skipped on the same rule as
+/// [`read_colon_table_names`].
+fn passwd_record_for_uid(path: BStr<'_>, uid: u32) -> Option<(Str, u32)> {
+    let data = std::fs::read(bytes::bytes_to_path(path)).ok()?;
+    for line in data.split(|b| *b == b'\n') {
+        let line = match line.iter().position(|b| !b.is_ascii_whitespace()) {
+            Some(i) => line.get(i..).unwrap_or_default(),
+            None => continue,
+        };
+        if line.first() == Some(&b'#') {
+            continue;
+        }
+        let mut fields = line.split(|b| *b == b':');
+        let Some(name) = fields.next() else { continue };
+        // Past the name sits the password field, then the UID and the GID.
+        if fields.nth(1).and_then(parse_id_field) != Some(uid) {
+            continue;
+        }
+        if let Some(gid) = fields.next().and_then(parse_id_field) {
+            return Some((name.to_vec(), gid));
+        }
+    }
+    None
+}
+
+/// The GIDs of every group in one `/etc/group`-format file that lists `user`
+/// among its members — field 3 of `name:passwd:gid:members`, a comma-separated
+/// list — in file order.
+///
+/// This is the supplementary half of `initgroups(3)`. The user's *primary*
+/// group is deliberately not looked for here: it comes from the passwd record
+/// (see [`passwd_record_for_uid`]) and is usually absent from the group file's
+/// member list, which is exactly why `initgroups` takes it as a separate
+/// argument.
+///
+/// A record with an unparsable GID contributes nothing, and an empty member
+/// field matches nobody — not even a user whose name is empty, which no record
+/// can name anyway.
+fn group_ids_for_member(path: BStr<'_>, user: BStr<'_>) -> Vec<u32> {
+    let Ok(data) = std::fs::read(bytes::bytes_to_path(path)) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for line in data.split(|b| *b == b'\n') {
+        let line = match line.iter().position(|b| !b.is_ascii_whitespace()) {
+            Some(i) => line.get(i..).unwrap_or_default(),
+            None => continue,
+        };
+        if line.first() == Some(&b'#') {
+            continue;
+        }
+        let mut fields = line.split(|b| *b == b':');
+        // Name and password come first; the GID is field 2 and the members
+        // field 3.
+        let Some(gid) = fields.nth(2).and_then(parse_id_field) else {
+            continue;
+        };
+        // `\r` would otherwise glue itself to the last member name of a CRLF
+        // file, so a trailing one is trimmed off the whole field.
+        let members = fields
+            .next()
+            .map(|m| m.strip_suffix(b"\r").unwrap_or(m))
+            .unwrap_or_default();
+        if !user.is_empty() && members.split(|b| *b == b',').any(|m| m == user) {
+            ids.push(gid);
+        }
+    }
+    ids
+}
+
 /// The ASCII syntax view of a scanned character, mirroring `lexer::syn`.
 ///
 /// Arithmetic and parameter-expansion syntax is entirely ASCII, so a non-ASCII
@@ -38412,6 +38582,99 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(home("# a comment"), None);
         // No database at all is simply no answer.
         assert_eq!(read_passwd_home(b"no/such/file/at/all", b"root"), None);
+    }
+
+    /// `$GROUPS` is built the way `initgroups(3)` builds a credential: the
+    /// passwd record with the reported UID names the user and its primary
+    /// group, and the group file supplies the rest. See [`reported_groups`].
+    #[test]
+    fn groups_come_from_the_passwd_and_group_files() {
+        let pw = |uid: u32| {
+            with_temp_file(
+                "gpw",
+                "# a comment\nroot:x:0:0:root:/root:/bin/sh\n\
+                 amy:x:1000:100:Amy:/home/amy:/bin/sh\n\
+                 dup:x:1000:101::/home/dup:/bin/sh\n\
+                 bad:x:x7:1::/home/bad:/bin/sh\n\
+                 nogid:x:7\n",
+                |p| {
+                    passwd_record_for_uid(p, uid)
+                        .map(|(n, g)| (String::from_utf8_lossy(&n).into_owned(), g))
+                },
+            )
+        };
+        assert_eq!(pw(0), Some(("root".to_string(), 0)));
+        // The first record with the UID wins, as it does for `getpwuid`.
+        assert_eq!(pw(1000), Some(("amy".to_string(), 100)));
+        // A UID field that is not a number does not parse, so the record
+        // matches nothing rather than being mistaken for some other user.
+        assert_eq!(pw(7), None);
+        assert_eq!(pw(4242), None);
+        // No database at all is no answer — which is the Windows host, where
+        // `reported_groups` therefore falls back to group 0.
+        assert_eq!(passwd_record_for_uid(b"no/such/file/at/all", 0), None);
+
+        let member = |user: &str| {
+            with_temp_file(
+                "ggrp",
+                "# a comment\nroot:x:0:\n\
+                 wheel:x:10:amy,bo\n\
+                 staff:x:20:bo\n\
+                 devs:x:30:amy\n\
+                 badgid:x:xx:amy\n\
+                 nomembers:x:40\n",
+                |p| group_ids_for_member(p, user.as_bytes()),
+            )
+        };
+        // File order, and only the groups that actually list the name — a
+        // substring of a member name (`am` in `amy`) is not a member.
+        assert_eq!(member("amy"), [10, 30]);
+        assert_eq!(member("bo"), [10, 20]);
+        assert_eq!(member("am"), [] as [u32; 0]);
+        assert_eq!(member("nosuch"), [] as [u32; 0]);
+        // An empty member field matches nobody, and neither does an empty name.
+        assert_eq!(member(""), [] as [u32; 0]);
+        assert!(group_ids_for_member(b"no/such/file/at/all", b"amy").is_empty());
+    }
+
+    /// The `OSH_GROUPS` override, the counterpart of `OSH_UID`/`OSH_EUID`.
+    #[test]
+    fn the_group_override_list_takes_numbers_in_order_without_repeats() {
+        assert_eq!(parse_group_list(b"10 20 30"), [10, 20, 30]);
+        // Commas as well as blanks, because both spellings look natural.
+        assert_eq!(parse_group_list(b"10,20,30"), [10, 20, 30]);
+        assert_eq!(parse_group_list(b" 10, ,20\t30\n"), [10, 20, 30]);
+        // `getgroups` never reports an ID twice, so a repeat is dropped rather
+        // than duplicated into the array.
+        assert_eq!(parse_group_list(b"10 20 10"), [10, 20]);
+        // Anything that is not a plain non-negative number is not an ID.
+        assert_eq!(parse_group_list(b"10 x -1 0x20 1.5 40"), [10, 40]);
+        assert_eq!(parse_group_list(b""), [] as [u32; 0]);
+        assert_eq!(parse_group_list(b"  ,, "), [] as [u32; 0]);
+    }
+
+    /// bash always has `$GROUPS` bound as a non-empty indexed array of numeric
+    /// IDs. The *values* depend on the host identity, so only that contract is
+    /// asserted here; the sources are tested above.
+    #[test]
+    fn groups_is_a_bound_non_empty_array_of_ids() {
+        assert_eq!(run("echo ${GROUPS+set}").0, "set\n");
+        let (out, _) = run(r#"echo "${#GROUPS[@]}"; printf '%s\n' "${GROUPS[@]}""#);
+        let mut lines = out.lines();
+        let n: usize = lines.next().expect("count").parse().expect("numeric count");
+        assert!(n >= 1, "GROUPS must have at least one element: {out:?}");
+        let ids: Vec<&str> = lines.collect();
+        assert_eq!(ids.len(), n, "element count disagrees with ${{#GROUPS[@]}}");
+        for id in ids {
+            assert!(
+                !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
+                "not a group ID: {id:?}"
+            );
+        }
+        // An indexed array, as `declare -a` — not a scalar, and not readonly:
+        // bash lets the name be `unset`, after which it is an ordinary name.
+        assert!(run("declare -p GROUPS").0.starts_with("declare -a GROUPS="));
+        assert_eq!(run("unset GROUPS; echo ${GROUPS+set}-${GROUPS[@]+set}").0, "-\n");
     }
 
     #[test]

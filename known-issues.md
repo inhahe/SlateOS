@@ -5592,6 +5592,192 @@ gates on `value.is_some() || make_local` (which is why the valueless
 carries the compound half. Corpus case extended; unit test
 `a_declaration_builtin_refuses_the_variables_the_shell_maintains`.
 
+### TD-OILS-DYNVAR-DECLARED. `export SECONDS` cost the name its value function, and never reached the child's environment — 2026-07-31 — ✅ RESOLVED 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::dyn_declared`,
+`declare_dynamic_special`, `dynamic_special_listed_flags`,
+`dynamic_special_letters`, `dynamic_special_names_with_attr`,
+`listed_has_attr`, `listing_kind_admits`,
+`format_dynamic_special_declare` / `_listing`, `format_var_setline`,
+`dynamic_special_value`, `apply_child_env`, the bare-`set` listing in
+`builtin_set`, `unbind_var`, and the three valueless-declaration sites in
+`builtin_export`, `builtin_readonly` and the `declare` family.
+
+The names bash answers with a value function (`SECONDS`, `RANDOM`,
+`PPID`, … — see TD-OILS-DYNVAR-UNSET) already exist, so naming one in a
+declaration builtin creates nothing: bash applies the attribute to the
+binding that is there and stops. osh instead took the ordinary
+valueless-declaration path, making a `Shell::declared` entry, which
+`has_stored_binding` reports and `dynamic_special_listed` treats as a
+shadow — so the name lost its whole table row, value and attributes
+together:
+
+```sh
+export SECONDS;      declare -p SECONDS   # bash declare -ix SECONDS="12"   osh declare -x SECONDS
+readonly SECONDS;    declare -p SECONDS   # bash declare -ir SECONDS="12"   osh declare -r SECONDS
+declare -u RANDOM;   declare -p RANDOM    # bash declare -iu RANDOM="4931"  osh declare -u RANDOM
+export PPID;         declare -p PPID      # bash declare -irx PPID="734"    osh declare -rx PPID
+export SECONDS;      env | grep -c ^SECONDS=       # bash 1                 osh 0
+```
+
+The last of those is the one that is not merely cosmetic: an `export`ed
+dynamic variable never reached a child process at all, because
+`apply_child_env` walks `Shell::vars` and these names have no entry
+there. Same for `RANDOM` and `LINENO`.
+
+The other half of the divergence is what a declaration *does* cost the
+name. bash marks these `att_invisible`, which keeps them out of the
+listings that walk the variable table (bare `declare -p`, the
+flag-filtered `declare -i`, a bare `set`) while `declare -p NAME` reports
+them all along. A declaration clears the mark, and from then on the
+listings carry the name in the same full form the named lookup gives —
+`declare -i SECONDS="12"` rather than nothing, `declare -i RANDOM="4931"`
+rather than a bare `declare -i RANDOM`.
+
+**Fixed 2026-07-31.** `Shell::dyn_declared` records the dynamic specials a
+declaration builtin has named; the three valueless-declaration sites call
+`declare_dynamic_special`, which populates it and tells the caller to
+leave `declared` alone. `dynamic_special_letters` unions the table's
+letters with the attribute sets in bash's fixed order, and
+`dynamic_special_listed_flags` switches a promoted name from the table's
+`listed_flags` to its `named_flags` — together that is what turns `export
+SECONDS` into `declare -ix SECONDS="12"` in `declare -p SECONDS` and in
+every listing that admits it. `apply_child_env` now walks `exported` for
+names with no `vars` entry and calls the value function, so the child
+really sees `SECONDS=`. `format_var_setline` does the same for a bare
+`set`. A `local` of the name is unaffected: it still makes a `declared`
+entry, which now also stops `dynamic_special_value` answering — so
+`f() { local SECONDS; echo "${SECONDS-UNSET}"; }` prints `UNSET` as in
+bash, where before the dynamic value leaked through the shadow. `unset`
+clears the promotion with the rest of the binding. Corpus case
+`dynamic-var-declared.sh`; unit test
+`declaring_a_dynamic_variable_keeps_its_value_function`.
+
+### TD-OILS-DYNVAR-INVISIBLE. Reading a dynamic special variable does not make it visible to the listings — 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::dyn_declared` and
+`dynamic_special_value` / `param_value`.
+
+bash's `att_invisible` on the dynamic special variables is cleared by
+*any* touch, and a plain read is one. TD-OILS-DYNVAR-DECLARED implemented
+the declaration half; the read half is still missing. Measured against
+bash 5.2.37, with `p` = `declare -p SECONDS`, `i` = `declare -i` and
+`set` = a bare `set`, values masked:
+
+```
+pristine            p=[declare -i SECONDS="N"]  i=[]                        set=[]
+read (: $SECONDS)   p=[declare -i SECONDS="N"]  i=[declare -i SECONDS="N"]  set=[SECONDS=0]
+SECONDS=5           p=[declare -i SECONDS="N"]  i=[]                        set=[SECONDS=5]
+assign, then read   p=[declare -i SECONDS="N"]  i=[declare -i SECONDS="N"]  set=[SECONDS=5]
+declare SECONDS     p=[declare -i SECONDS="N"]  i=[declare -i SECONDS="N"]  set=[SECONDS=1]
+export SECONDS      p=[declare -ix SECONDS="N"] i=[declare -ix SECONDS="N"] set=[SECONDS=1]
+RANDOM pristine     p=[declare -i RANDOM="N"]   i=[declare -i RANDOM]
+RANDOM read         p=[declare -i RANDOM="N"]   i=[declare -i RANDOM="N"]
+RANDOM=5            p=[declare -i RANDOM="N"]   i=[declare -i RANDOM="N"]
+```
+
+So a read promotes for both listings; a *scalar assignment* promotes for
+`set` but not for `declare -i` on `SECONDS`, while on `RANDOM` it
+promotes for both — the difference being that `SECONDS`'s assignment hook
+rebases a counter without storing, where `RANDOM`'s reseeds and bash
+marks the variable set either way.
+
+**The proper fix.** `dyn_declared` is populated from `&mut self` paths
+only. A read goes through `param_value`, which is `&self`, so promotion
+on read needs interior mutability — a `Cell<u16>` bitmask over the
+`DYNAMIC_SPECIALS` rows would do it without allocating, and
+`Shell::rng` already establishes the pattern (`Cell` on the `&self` read
+path). Do that rather than making `param_value` take `&mut self`: it is
+called from expansion paths that hold other borrows.
+
+### TD-OILS-DYNVAR-ARRAY-CONVERT. `declare -a SECONDS` makes an empty array instead of converting the live value — 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — the `array_kind_apply` /
+valueless-declaration path of the `declare` family.
+
+bash converts a *set* scalar to an array by making its value element 0,
+and a dynamic special variable is set, so its computed value goes to
+element 0 — and the conversion also kills the value function, leaving an
+ordinary array:
+
+```sh
+declare -a SECONDS; declare -p SECONDS   # bash declare -ai SECONDS=([0]="7")   osh declare -a SECONDS
+declare -A SECONDS; declare -p SECONDS   # bash declare -Ai SECONDS=([0]="7" )  osh declare -A SECONDS
+```
+
+(The `i` survives because in bash it is a real attribute on the binding,
+not a property of the table row osh keeps.) osh's conversion reads
+`Shell::vars`, where these names have no entry, so it converts nothing.
+The fix is for the conversion to fall back to `dynamic_special_value`,
+seed element 0 with it, carry the row's `named_flags` into the real
+attribute sets, and mark the name in `dyn_unset` — the binding is now an
+ordinary array and the value function is gone.
+
+### TD-OILS-NAMEREF-VALUELESS-VALIDATION. `declare -n NAME` on an already-set variable does not validate its value — 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — `nameref_value_error` covers
+only the `declare -n NAME=value` form; the valueless form applies the
+attribute unconditionally.
+
+A nameref's target is its *value*, so `declare -n` on a variable that
+already has one has to check that value the same way the assignment form
+does. bash refuses, with the value quoted in the message, and applies
+nothing:
+
+```sh
+q=0;  declare -n q; echo "rc=$?"; declare -p q
+# bash: declare: `0': invalid variable name for name reference / rc=1 / declare -- q="0"
+# osh :                                                          rc=0 / declare -n q="0"
+q=zz; declare -n q; declare -p q     # both: declare -n q="zz"   (a valid name, so it stands)
+declare -n q;       declare -p q     # both: declare -n q        (unset, so nothing to check)
+```
+
+This is a general rule, not a dynamic-variable one, but it is most
+visible on the dynamic specials, whose values are numbers:
+`declare -n SECONDS` reports `declare: \`0': invalid variable name for
+name reference` in bash and leaves `declare -i SECONDS="0"`, where osh
+reports nothing and leaves `declare -in SECONDS="0"`. Fix: reuse
+`nameref_value_error` against the current value on the valueless path.
+
+### TD-OILS-WIN-ARG-QUOTING. An argument containing `"` or `\` is mangled on the way to an external MSYS command — 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — the `std::process::Command`
+argument building (`apply_child_env`'s callers, `spawn_external`).
+**Windows development host only**; on the SlateOS target `exec` takes an
+argv vector and there is no command line to quote.
+
+Windows has no argv: the parent builds one string and the child parses
+it. Rust's `Command::arg` uses the MSVC convention (backslash is an
+escape before a quote), and MSYS/Cygwin's own parser uses a different one
+(backslash is an escape everywhere, `"` is a quote delimiter). So an
+argument osh hands to an MSYS binary comes out different from the one it
+was given:
+
+```sh
+env printf '[%s]\n' 'a"b' 'e\f'
+# bash: [a"b]  [e\f]
+# osh : [a\b e\f]        — one argument, the quote swallowed the space
+printf 'y="3"\n' | sed -E 's/="[0-9]+"/=N/'
+# bash: y=N        osh: y="3"   (sed sees s/=\"[0-9]+\"/=N/ and errors on the backref)
+printf 'SECONDS=3\n' | sed -E 's/^([A-Z]+)=[0-9]+$/\1=Q/'
+# bash: SECONDS=Q  osh: 1=Q     (the \1 lost its backslash)
+```
+
+This is invisible for builtins (no command line is built) and for
+native-Windows children (same convention), so it only bites the MSYS
+toolchain — which is exactly what the differential corpus uses, so it
+silently limits what a corpus case can express. Corpus cases work around
+it today by spelling no `"` and no `\` in an argument to an external
+command.
+
+**The proper fix** is to quote per the callee's convention: detect a
+Cygwin/MSYS child (its import table names `msys-2.0.dll`/`cygwin1.dll`)
+and build the command line with `CommandExt::raw_arg` using Cygwin's
+rules, falling back to Rust's MSVC quoting for everything else. Worth
+doing because it is the differential harness's fidelity, but it is host
+scaffolding rather than shell semantics, so it is not on the critical
+path.
+
 ### TD-OILS-EXPORT-READONLY-ATTR. A refused `export NAME=value` dropped the export attribute along with the value — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the readonly branch of

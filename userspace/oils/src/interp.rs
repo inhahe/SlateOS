@@ -1936,6 +1936,29 @@ struct DynamicSpecial {
     listed_flags: &'static str,
     /// What follows the name in a listing.
     listed: DynListing,
+    /// What an assignment to the name does with the string it was given.
+    assign: DynAssign,
+}
+
+/// What an assignment to a [`DynamicSpecial`] does with the string it was
+/// given, over and above the name's own side effect (reseeding `RANDOM`,
+/// rebasing `SECONDS`, renaming `$0`). Either way the string never becomes an
+/// ordinary [`Shell::vars`] entry: the dynamic binding stays, and reads go on
+/// computing — `LINENO=7` does not stop `$LINENO` reporting the real line.
+///
+/// Measured against bash 5.2 with `NAME=7; declare -p | grep NAME`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DynAssign {
+    /// Stored in the name's value cell, so every table-walking listing reports
+    /// it from then on: `SECONDS=7` lists as `declare -- SECONDS="7"` and shows
+    /// up in a bare `set`. Note the `--`: an assignment fills the value in
+    /// without filling the attributes, so the name still stays out of
+    /// `declare -i` until something looks it up. See [`Shell::dyn_cell`].
+    Cell,
+    /// Dropped. The name's assign function never stores the string, so the
+    /// listings pass over the name exactly as before — `BASHPID=7` is not an
+    /// error and leaves nothing at all behind.
+    Discard,
 }
 
 /// How a [`DynamicSpecial`]'s line ends in a listing.
@@ -2315,7 +2338,9 @@ pub struct Shell {
     /// Anchor instant for `$SECONDS` (reset when `SECONDS` is assigned).
     seconds_anchor: std::time::Instant,
     /// Base value added to elapsed seconds for `$SECONDS` (set by assignment).
-    seconds_base: u64,
+    /// Signed, because bash counts on from whatever number it was given:
+    /// `SECONDS=-3` reads `-3`, then `-2` a second later.
+    seconds_base: i64,
     /// State for the `$RANDOM` pseudo-random generator. `Cell` so a read
     /// (`param_value(&self)`) can advance it; assigning `RANDOM=n` reseeds it.
     rng: std::cell::Cell<u32>,
@@ -2765,6 +2790,11 @@ pub struct Shell {
     /// listing that admits it). Enumerating *names* — `${!SEC@}` — does not,
     /// since it never asks for a value.
     ///
+    /// This is the *attribute* half; [`Shell::dyn_cell`] is the value half, and
+    /// they come apart: an assignment fills the value cell without touching the
+    /// attributes, which is why `SECONDS=7` lists as `declare -- SECONDS="7"`
+    /// and stays out of `declare -i`.
+    ///
     /// A [`std::cell::Cell`] because the read path ([`Shell::param_value`]) is
     /// `&self`, and it is called from expansion paths that hold other borrows;
     /// a bitmask because the table is fixed and small, so no allocation is
@@ -2775,6 +2805,30 @@ pub struct Shell {
     /// an ordinary variable instead, and is recorded in [`Shell::declared`] as
     /// any other local is.
     dyn_touched: std::cell::Cell<u32>,
+    /// The *value cell* of each dynamic special variable — the string bash's
+    /// variable table is holding for the name right now, as against the one its
+    /// value function would compute if asked.
+    ///
+    /// The two are not the same, and the difference is visible: the listings
+    /// that walk the table print what is in the cell, so they go **stale**,
+    /// while `declare -p NAME` looks the name up first and so is always fresh.
+    ///
+    /// ```text
+    /// : $SECONDS; sleep 2; declare -p | grep SECONDS   # declare -i SECONDS="0"
+    /// : $SECONDS; sleep 2; declare -p SECONDS          # declare -i SECONDS="2"
+    /// : $RANDOM; declare -p | grep RANDOM              # the same number twice
+    /// ```
+    ///
+    /// Two things fill the cell: a lookup, which stores what it computed, and
+    /// an assignment, which stores the string it was given — and only the
+    /// former also fills the attributes in (see [`Shell::dyn_touched`]). A name
+    /// with an empty cell is the pristine one the listings pass over.
+    ///
+    /// Keyed by the table's own `&'static str`, so filling the cell on the read
+    /// path costs no key allocation. A [`std::cell::RefCell`] for the same
+    /// reason `dyn_touched` is a `Cell`. Cloned into subshells; `unset` empties
+    /// the entry with the rest of the binding.
+    dyn_cell: std::cell::RefCell<HashMap<&'static str, Str>>,
     /// The command history, oldest first, as recorded while `set -o history` is
     /// in effect. An entry's *number* is [`Shell::hist_base`] plus its index, so
     /// deleting one renumbers every entry after it — which is what bash does,
@@ -3116,6 +3170,7 @@ impl Shell {
             dirstack_dynamic: true,
             dyn_unset: HashSet::new(),
             dyn_touched: std::cell::Cell::new(0),
+            dyn_cell: std::cell::RefCell::new(HashMap::new()),
             history: Vec::new(),
             hist_base: 1,
             hist_max: None,
@@ -7258,6 +7313,7 @@ impl Shell {
             dirstack_dynamic: self.dirstack_dynamic,
             dyn_unset: self.dyn_unset.clone(),
             dyn_touched: self.dyn_touched.clone(),
+            dyn_cell: self.dyn_cell.clone(),
             history: self.history.clone(),
             hist_base: self.hist_base,
             hist_max: self.hist_max,
@@ -7438,6 +7494,51 @@ impl Shell {
             }
             None => val,
         })
+    }
+
+    /// [`Self::appended_attributed_value`] for a dynamic special variable: the
+    /// *number* an assignment to it leaves behind. Every one of these names is a
+    /// number to bash, so what goes in the value cell — and what the name's own
+    /// side effect acts on — is the parse, never the text as typed.
+    ///
+    /// Which parse it is depends on the slot's integer attribute (`int`), the
+    /// same one that decides what `+=` means:
+    ///
+    ///   * with `-i` the value is an arithmetic expression and `+=` adds, so
+    ///     `RANDOM=3+4` seeds with 7, and `SECONDS=100; SECONDS+=5` gives 105 —
+    ///     but only once a lookup has filled `SECONDS`'s attributes in;
+    ///   * without it the value is read as a plain decimal (bash's
+    ///     `legal_number`: blanks around a whole number and nothing else) and
+    ///     anything else is 0 — an expression included — while `+=` runs the two
+    ///     strings together and reads *that*, so a pristine
+    ///     `SECONDS=100; SECONDS+=5` gives 1005.
+    ///
+    /// `cur` is the value cell's current contents, which is what a `+=` appends
+    /// to; `None` means the cell is still empty. `None` comes back for a bad
+    /// `-i` expression, which must leave the slot untouched.
+    fn dyn_assigned_number(
+        &mut self,
+        int: bool,
+        cur: Option<Str>,
+        val: Str,
+        append: bool,
+    ) -> Option<i64> {
+        if int {
+            let add = self.eval_int_assign(&val)?;
+            if !append {
+                return Some(add);
+            }
+            let cur = cur.as_deref().and_then(bytes::parse_i64).unwrap_or_default();
+            return Some(cur.wrapping_add(add));
+        }
+        let text = match cur {
+            Some(mut cur) if append => {
+                cur.extend_from_slice(&val);
+                cur
+            }
+            _ => val,
+        };
+        Some(bytes::parse_i64(&text).unwrap_or_default())
     }
 
     /// Where a plain scalar write to `name` lands once nameref chains are
@@ -7858,34 +7959,59 @@ impl Shell {
                     self.name = if a.append { bfmt![&self.name, &val] } else { val };
                     return true;
                 }
-                // `RANDOM=n` reseeds the generator; `SECONDS=n` rebases the
-                // elapsed-seconds counter. Both are dynamic and not stored in
-                // `vars` (reads go through `param_value`'s special arms).
-                if dynamic && a.index.is_none() && !a.append {
-                    if a.name == "RANDOM" {
-                        // A value that is not a number leaves the seed alone,
-                        // and a value that is not text is not a number.
-                        if let Some(seed) =
-                            bytes::as_str(bytes::trim(&val)).and_then(|s| s.parse::<u32>().ok())
-                        {
-                            self.rng.set(seed);
+                // An assignment to any other dynamic special runs the name's own
+                // side effect — `RANDOM=n` reseeds the generator, `SECONDS=n`
+                // rebases the elapsed-seconds counter — and then either fills
+                // the name's value cell or drops the string on the floor, per
+                // [`DynamicSpecial::assign`]. What it never does is make a
+                // `vars` entry: that would shadow the dynamic read and freeze
+                // the name at the assigned value, where bash keeps computing
+                // (`LINENO=7` leaves `$LINENO` reporting the real line, and
+                // `SECONDS=7` restarts the count rather than stopping it).
+                if dynamic
+                    && a.index.is_none()
+                    && let Some(d) = self.dynamic_special(&a.name)
+                    // The call-stack arrays take an assignment as an ordinary
+                    // array store; only the scalars are intercepted here.
+                    && d.listed != DynListing::EmptyArray
+                {
+                    // Every one of these names is a number to bash, so the
+                    // string is parsed here and it is the *number* that is
+                    // stored and acted on. `+=` resolves against the value
+                    // cell, not against a fresh reading.
+                    let int = self.dyn_integer_attr(d);
+                    let cur = self.dyn_cell_value(&a.name);
+                    let Some(n) = self.dyn_assigned_number(int, cur, val, a.append) else {
+                        // A bad `-i` expression leaves the slot exactly as it
+                        // was — but, unlike the same expression assigned to an
+                        // ordinary `-i` variable, it does not abort: bash
+                        // prints the diagnostic and carries on with a status of
+                        // 0 (`RANDOM=1/0; echo $?` → the error, then `0`), so
+                        // the abort `eval_int_assign` armed is disarmed here.
+                        self.discard_error = armed;
+                        return true;
+                    };
+                    match a.name.as_str() {
+                        "RANDOM" => {
+                            // The generator is seeded from the number, when it
+                            // fits the seed: bash's is a 32-bit one.
+                            if let Ok(seed) = u32::try_from(n) {
+                                self.rng.set(seed);
+                            }
                         }
-                        return true;
+                        "SECONDS" => {
+                            self.seconds_base = n;
+                            self.seconds_anchor = std::time::Instant::now();
+                        }
+                        // The rest have no counter to move: `SRANDOM` draws
+                        // from the system entropy source, so there is no seed
+                        // to set, and `LINENO`/`HISTCMD`/`EPOCHSECONDS` are
+                        // read off the shell's own state.
+                        _ => {}
                     }
-                    if a.name == "SECONDS" {
-                        self.seconds_base = bytes::as_str(bytes::trim(&val))
-                            .and_then(|s| s.parse::<u64>().ok())
-                            .unwrap_or(0);
-                        self.seconds_anchor = std::time::Instant::now();
-                        return true;
+                    if d.assign == DynAssign::Cell {
+                        self.set_dyn_cell(&a.name, n.to_string().into_bytes());
                     }
-                }
-                // `SRANDOM` draws from the system entropy source, so unlike
-                // `RANDOM` there is no seed to set: bash documents assignments
-                // to it as having no effect, and swallowing them here is what
-                // keeps that true — a stored `vars` entry would shadow the
-                // dynamic read and freeze `$SRANDOM` at the assigned value.
-                if dynamic && a.index.is_none() && a.name == "SRANDOM" {
                     return true;
                 }
                 // With the integer attribute (`declare -i`), the value is an
@@ -9693,24 +9819,27 @@ impl Shell {
     /// (`SRANDOM`, `COMP_WORDBREAKS`, `OPTERR`, `BASH_LOADABLES_PATH`, and
     /// `GROUPS` — see known-issues.md) are left out rather than faked: a name
     /// that lists but does not expand would be a worse lie than an absent one.
+    #[rustfmt::skip]
     const DYNAMIC_SPECIALS: &'static [DynamicSpecial] = &[
-        DynamicSpecial { name: "BASHPID", named_flags: "i", listed_flags: "i", listed: DynListing::Bare },
-        DynamicSpecial { name: "BASH_ARGV0", named_flags: "", listed_flags: "", listed: DynListing::Bare },
-        DynamicSpecial { name: "BASH_LINENO", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray },
-        DynamicSpecial { name: "BASH_SOURCE", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray },
-        DynamicSpecial { name: "BASH_SUBSHELL", named_flags: "", listed_flags: "", listed: DynListing::Bare },
-        DynamicSpecial { name: "HISTCMD", named_flags: "i", listed_flags: "i", listed: DynListing::Bare },
-        DynamicSpecial { name: "LINENO", named_flags: "", listed_flags: "", listed: DynListing::Bare },
-        // `$PPID` is a readonly integer, and a real binding rather than a
-        // computed one, so it is the one entry a listing prints with a value.
-        DynamicSpecial { name: "PPID", named_flags: "ir", listed_flags: "ir", listed: DynListing::Live },
-        DynamicSpecial { name: "RANDOM", named_flags: "i", listed_flags: "i", listed: DynListing::Bare },
+        DynamicSpecial { name: "BASHPID", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Discard },
+        DynamicSpecial { name: "BASH_ARGV0", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard },
+        DynamicSpecial { name: "BASH_LINENO", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray, assign: DynAssign::Discard },
+        DynamicSpecial { name: "BASH_SOURCE", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray, assign: DynAssign::Discard },
+        DynamicSpecial { name: "BASH_SUBSHELL", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard },
+        DynamicSpecial { name: "HISTCMD", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Cell },
+        DynamicSpecial { name: "LINENO", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Cell },
+        // `$PPID` is a readonly integer whose value cell is filled in before the
+        // first command runs, so it is the one entry a listing prints with a
+        // value from the start. The assignment column never comes up: the
+        // readonly refusal gets there first.
+        DynamicSpecial { name: "PPID", named_flags: "ir", listed_flags: "ir", listed: DynListing::Live, assign: DynAssign::Discard },
+        DynamicSpecial { name: "RANDOM", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Cell },
         // Measured: `SECONDS` loses its `i` in a listing but keeps it for
         // `declare -p SECONDS`.
-        DynamicSpecial { name: "SECONDS", named_flags: "i", listed_flags: "", listed: DynListing::Bare },
-        DynamicSpecial { name: "SRANDOM", named_flags: "i", listed_flags: "i", listed: DynListing::Bare },
-        DynamicSpecial { name: "EPOCHSECONDS", named_flags: "", listed_flags: "", listed: DynListing::Bare },
-        DynamicSpecial { name: "EPOCHREALTIME", named_flags: "", listed_flags: "", listed: DynListing::Bare },
+        DynamicSpecial { name: "SECONDS", named_flags: "i", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Cell },
+        DynamicSpecial { name: "SRANDOM", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Cell },
+        DynamicSpecial { name: "EPOCHSECONDS", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard },
+        DynamicSpecial { name: "EPOCHREALTIME", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard },
     ];
 
     /// The table entry for `name`, or `None` if it is not a dynamic special.
@@ -9774,9 +9903,25 @@ impl Shell {
         }
     }
 
-    /// Whether `name`'s value cell has been filled in by a lookup.
+    /// Whether `name`'s attributes have been filled in by a lookup.
     fn dyn_touched(&self, name: &str) -> bool {
         Self::dyn_touch_bit(name).is_some_and(|bit| self.dyn_touched.get() & bit != 0)
+    }
+
+    /// Put `value` in `name`'s value cell — what a lookup computed, or what an
+    /// assignment was given. See [`Shell::dyn_cell`].
+    ///
+    /// Takes `&self`: the read path is `&self`, and a lookup fills the cell.
+    fn set_dyn_cell(&self, name: &str, value: Str) {
+        if let Some(d) = Self::dynamic_special_entry(name) {
+            self.dyn_cell.borrow_mut().insert(d.name, value);
+        }
+    }
+
+    /// What is in `name`'s value cell, or `None` while it is still empty — the
+    /// pristine state the table-walking listings pass over.
+    fn dyn_cell_value(&self, name: &str) -> Option<Str> {
+        self.dyn_cell.borrow().get(name).cloned()
     }
 
     /// Record a declaration builtin naming `name`, and answer whether it is a
@@ -9794,7 +9939,11 @@ impl Shell {
         if self.declared.contains(name) || self.dynamic_special(name).is_none() {
             return false;
         }
-        self.touch_dynamic_special(name);
+        // A real lookup, not just a flag flip: it fills the value cell as well
+        // as the attributes, so `export SECONDS; declare -p | grep SECONDS`
+        // reports the value the declaration read. The value itself is of no use
+        // here — the side effect is the whole point.
+        let _ = self.dynamic_special_value(name);
         true
     }
 
@@ -9808,6 +9957,15 @@ impl Shell {
     /// truth: the named form's letters.
     fn dynamic_special_listed_flags(&self, d: &DynamicSpecial) -> &'static str {
         if self.dyn_touched(d.name) { d.named_flags } else { d.listed_flags }
+    }
+
+    /// Whether `name`'s slot currently carries the integer attribute — the one
+    /// that makes an assignment to it an arithmetic expression and its `+=`
+    /// numeric addition. `RANDOM` has it from the start; `SECONDS` gains it
+    /// from its first lookup, which is why `SECONDS=3+4` stores 0 in a pristine
+    /// shell and 7 in one that has read the name; `LINENO` never has it.
+    fn dyn_integer_attr(&self, d: &DynamicSpecial) -> bool {
+        self.dynamic_special_listed_flags(d).contains('i') || self.integer_attr.contains(d.name)
     }
 
     /// The attribute letters a dynamic special variable is reported with: the
@@ -14581,7 +14739,7 @@ impl Shell {
         // untouched `SECONDS` start listing as `declare -i SECONDS="42"`. See
         // [`Shell::dyn_touched`].
         self.touch_dynamic_special(name);
-        match name {
+        let value = match name {
             // `$BASH_ARGV0` mirrors `$0`; assigning it sets `$0` (see the
             // assignment hook in `apply_assignment`).
             "BASH_ARGV0" => Some(self.name.clone()),
@@ -14593,7 +14751,10 @@ impl Shell {
             "SRANDOM" => Some(self.next_srandom().to_string().into_bytes()),
             "SECONDS" => Some(
                 self.seconds_base
-                    .saturating_add(self.seconds_anchor.elapsed().as_secs())
+                    .saturating_add(
+                        i64::try_from(self.seconds_anchor.elapsed().as_secs())
+                            .unwrap_or(i64::MAX),
+                    )
                     .to_string()
                     .into_bytes(),
             ),
@@ -14606,7 +14767,34 @@ impl Shell {
                 Some(format!("{secs}.{micros:06}").into_bytes())
             }
             _ => None,
+        };
+        // What the value function computed is *stored*, and the table-walking
+        // listings print it from there rather than asking again — which is why
+        // `: $SECONDS; sleep 2; declare -p | grep SECONDS` still says `"0"`
+        // while `declare -p SECONDS`, a fresh lookup, says `"2"`. See
+        // [`Shell::dyn_cell`].
+        if let Some(v) = &value {
+            self.set_dyn_cell(name, v.clone());
         }
+        value
+    }
+
+    /// The value a table-walking listing prints for `name`: what is in its
+    /// value cell, or — for one of the few valued from the start — a reading
+    /// taken now. `None` while the cell is still empty, and `None` when an
+    /// ordinary binding shadows the dynamic one or `unset` has dropped it.
+    fn dynamic_special_listed_value(&self, name: &str) -> Option<Str> {
+        let d = self.dynamic_special_listed(name)?;
+        if let Some(v) = self.dyn_cell_value(name) {
+            return Some(v);
+        }
+        // `PPID`'s cell is filled in before the first command runs, so there is
+        // never a pristine state to report; the value it holds is a constant,
+        // so reading it now is the same thing bash's stored one says.
+        if d.listed == DynListing::Live {
+            return self.dynamic_special_value(name);
+        }
+        None
     }
 
     fn param_value(&self, name: &str) -> Option<Str> {
@@ -20950,17 +21138,20 @@ impl Shell {
     /// [`DynListing`] for why most of them list without a value.
     fn format_dynamic_special_listing(&self, name: &str) -> Option<Str> {
         let d = self.dynamic_special_listed(name)?;
-        // A lookup has filled the value cell in, so the listing says everything
-        // the named form says — the live value included. See
-        // [`Shell::dyn_touched`].
-        if self.dyn_touched(name) {
-            return self.format_dynamic_special_declare(name);
+        let letters = self.dynamic_special_letters(name, self.dynamic_special_listed_flags(d));
+        if d.listed == DynListing::EmptyArray {
+            // A call-stack array has no scalar value cell to print from.
+            return Some(Self::declare_line(&letters, name, b"=()"));
         }
-        let letters = self.dynamic_special_letters(name, d.listed_flags);
-        match d.listed {
-            DynListing::Bare => Some(Self::declare_line(&letters, name, b"")),
-            DynListing::EmptyArray => Some(Self::declare_line(&letters, name, b"=()")),
-            DynListing::Live => self.format_dynamic_special_declare(name),
+        // The value cell, not a fresh reading: a listing walks the variable
+        // table and prints what is in it, so it reports the value the last
+        // lookup left there — or the one the last assignment did, which fills
+        // the cell without filling the attributes, so `SECONDS=7` lists as
+        // `declare -- SECONDS="7"`. An empty cell prints no value at all. See
+        // [`Shell::dyn_cell`].
+        match self.dynamic_special_listed_value(name) {
+            Some(v) => Some(Self::declare_line(&letters, name, &bfmt![b"=\"", &v, b"\""])),
+            None => Some(Self::declare_line(&letters, name, b"")),
         }
     }
 
@@ -21024,9 +21215,9 @@ impl Shell {
         if let Some(v) = self.vars.get(name) {
             return Some(bfmt![name, b"=", quote_set_value(v)]);
         }
-        // A dynamic special variable a declaration builtin has made visible
-        // lists with the value its function computes now.
-        let v = self.dynamic_special_value(name)?;
+        // A dynamic special variable lists from its value cell, like every
+        // other table walk — see [`Shell::dynamic_special_listed_value`].
+        let v = self.dynamic_special_listed_value(name)?;
         Some(bfmt![name, b"=", quote_set_value(&v)])
     }
 
@@ -22947,8 +23138,10 @@ impl Shell {
         // [`Shell::dyn_unset`].
         if Self::dynamic_special_entry(name).is_some() {
             self.dyn_unset.insert(name.to_string());
-            // The value cell went with the binding too, so a name looked up
-            // before the unset does not come back filled in.
+            // The value cell and the attributes it filled in went with the
+            // binding too, so a name looked up before the unset does not come
+            // back filled in.
+            self.dyn_cell.borrow_mut().remove(name);
             if let Some(bit) = Self::dyn_touch_bit(name) {
                 self.dyn_touched.set(self.dyn_touched.get() & !bit);
             }
@@ -23100,16 +23293,13 @@ impl Shell {
                 .cloned()
                 // …plus any dynamic special variable whose value cell is filled
                 // in. A bare `set` is about *values*, so it lists the ones a
-                // lookup has reached and the ones that were valued from the
-                // start (`PPID`), and passes over the rest — and over the merely
-                // `declared`. See [`Shell::dyn_touched`].
+                // lookup or an assignment has put something in and the ones
+                // valued from the start (`PPID`), and passes over the rest —
+                // and over the merely `declared`. See [`Shell::dyn_cell`].
                 .chain(
                     Self::DYNAMIC_SPECIALS
                         .iter()
-                        .filter(|d| {
-                            !self.dyn_unset.contains(d.name)
-                                && (self.dyn_touched(d.name) || d.listed == DynListing::Live)
-                        })
+                        .filter(|d| self.dynamic_special_listed_value(d.name).is_some())
                         .map(|d| d.name.to_string()),
                 )
                 .collect();
@@ -41765,6 +41955,101 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("case \"$(set)\" in *'PPID='*) echo listed;; *) echo absent;; esac").0,
             "listed\n"
         );
+    }
+
+    #[test]
+    fn assigning_a_dynamic_variable_fills_its_value_cell_only() {
+        // The assignment stores the string in the name's value cell without
+        // filling the attributes in, so `SECONDS=7` lists *with* a value and
+        // *without* the `-i` a lookup would have added.
+        let p = |name: &str| {
+            format!(
+                "case \"$(declare -p)\" in *'declare -i {name}=\"7\"'*) echo int;; \
+                 *'declare -- {name}=\"7\"'*) echo plain;; \
+                 *'{name}='*) echo other;; *) echo bare;; esac"
+            )
+        };
+        assert_eq!(run(&format!("SECONDS=7; {}", p("SECONDS"))).0, "plain\n");
+        assert_eq!(run(&format!("RANDOM=7; {}", p("RANDOM"))).0, "int\n");
+        assert_eq!(run(&format!("SRANDOM=7; {}", p("SRANDOM"))).0, "int\n");
+        assert_eq!(run(&format!("LINENO=7; {}", p("LINENO"))).0, "plain\n");
+        assert_eq!(run(&format!("HISTCMD=7; {}", p("HISTCMD"))).0, "int\n");
+        // …and the names whose assign function drops the string leave the slot
+        // exactly as it was.
+        for name in ["BASHPID", "EPOCHSECONDS", "EPOCHREALTIME", "BASH_SUBSHELL"] {
+            assert_eq!(run(&format!("{name}=7; {}", p(name))).0, "bare\n", "{name}");
+        }
+        // A filled cell is a value, so a bare `set` lists the name…
+        let s = "case \"$(set)\" in *'SECONDS=7'*) echo listed;; *) echo absent;; esac";
+        assert_eq!(run(&format!("SECONDS=7; {s}")).0, "listed\n");
+        // …but the attribute half is untouched, so `declare -i` still is not.
+        let i = "case \"$(declare -i)\" in *'SECONDS'*) echo listed;; *) echo absent;; esac";
+        assert_eq!(run(&format!("SECONDS=7; {i}")).0, "absent\n");
+        assert_eq!(run(&format!("SECONDS=7; : $SECONDS; {i}")).0, "listed\n");
+        // The read is still live: the assignment rebases the counter or is
+        // dropped, but it never freezes the name at the assigned string.
+        assert_eq!(run("LINENO=7; echo $LINENO").0, "1\n");
+        assert_eq!(run("BASHPID=7; [ \"$BASHPID\" = 7 ] && echo frozen || echo live").0, "live\n");
+        assert_eq!(
+            run("EPOCHSECONDS=7; [ \"$EPOCHSECONDS\" = 7 ] && echo frozen || echo live").0,
+            "live\n"
+        );
+        // A listing prints the cell, not a fresh reading, so it goes stale
+        // where the named form does not: the same `RANDOM` twice running.
+        let (out, _) = run(
+            "declare -p RANDOM >/dev/null; \
+             a=$(declare -p | grep '^declare -i RANDOM'); \
+             b=$(declare -p | grep '^declare -i RANDOM'); \
+             [ \"$a\" = \"$b\" ] && echo same || echo differ",
+        );
+        assert_eq!(out, "same\n");
+        // `unset` empties the cell with the rest of the binding, and what a
+        // later assignment makes is an ordinary variable.
+        assert_eq!(run(&format!("SECONDS=7; unset SECONDS; {}", p("SECONDS"))).0, "bare\n");
+        assert_eq!(run("SECONDS=7; unset SECONDS; SECONDS=9; echo $SECONDS").0, "9\n");
+    }
+
+    #[test]
+    fn assigning_a_dynamic_variable_stores_the_number_not_the_text() {
+        // What lands in the cell is the parse, and which parse depends on the
+        // slot's `-i`: an arithmetic expression with it, a plain decimal
+        // without — so `3+4` is 7 for `RANDOM` and 0 for `SECONDS`, until a
+        // lookup has given `SECONDS` its `-i` too.
+        let cell = |src: &str, name: &str| {
+            run(&format!(
+                "{src}; case \"$(declare -p)\" in \
+                 *'{name}=\"'*) x=\"$(declare -p | grep -E '^declare -[^ ]+ {name}=')\"; \
+                 echo \"${{x##*=}}\";; *) echo none;; esac"
+            ))
+            .0
+        };
+        for (val, secs, rand) in [
+            ("7", "\"7\"\n", "\"7\"\n"),
+            ("007", "\"7\"\n", "\"7\"\n"),
+            ("-3", "\"-3\"\n", "\"-3\"\n"),
+            ("zz", "\"0\"\n", "\"0\"\n"),
+            ("3+4", "\"0\"\n", "\"7\"\n"),
+        ] {
+            assert_eq!(cell(&format!("SECONDS={val}"), "SECONDS"), secs, "SECONDS={val}");
+            assert_eq!(cell(&format!("RANDOM={val}"), "RANDOM"), rand, "RANDOM={val}");
+        }
+        assert_eq!(cell(": $SECONDS; SECONDS=3+4", "SECONDS"), "\"7\"\n");
+        // `+=` resolves against the cell: string append without the `-i`,
+        // numeric addition with it.
+        assert_eq!(cell("SECONDS=100; SECONDS+=5", "SECONDS"), "\"1005\"\n");
+        assert_eq!(cell(": $SECONDS; SECONDS=100; SECONDS+=5", "SECONDS"), "\"105\"\n");
+        assert_eq!(cell("RANDOM=100; RANDOM+=5", "RANDOM"), "\"105\"\n");
+        assert_eq!(cell("SECONDS+=5", "SECONDS"), "\"5\"\n");
+        // The number is what the side effect acts on, so the counter counts on
+        // from it — from a negative one as readily as a positive one.
+        assert_eq!(run("SECONDS=-3; echo $SECONDS").0, "-3\n");
+        assert_eq!(run("SECONDS=100; SECONDS+=5; echo $SECONDS").0, "1005\n");
+        // A bad expression prints its diagnostic, leaves the slot alone and
+        // carries on — where the same one assigned to an ordinary `-i`
+        // variable abandons the script.
+        let (out, _) = run("RANDOM=1/0; echo \"rc=$? here\"");
+        assert_eq!(out, "rc=0 here\n");
+        assert_eq!(run("declare -i x=5; x=1/0; echo unreachable").0, "");
     }
 
     #[test]

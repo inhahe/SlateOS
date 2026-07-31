@@ -5716,15 +5716,9 @@ start (`PPID`), which osh was omitting. Corpus case
 `dynamic-var-visible.sh`; unit test
 `looking_a_dynamic_variable_up_fills_its_slot_in`.
 
-**Still open, split out as TD-OILS-DYNVAR-ASSIGN-CELL:** the *assignment*
-half of the same value cell. `SECONDS=7` stores `7` in the cell without
-touching the attributes, so bash then lists `declare -- SECONDS="7"` and
-`SECONDS=7` in a bare `set` while still omitting it from `declare -i`;
-osh stores nothing. And the names with no assignment hook
-(`BASH_SUBSHELL`, `EPOCHSECONDS`, `EPOCHREALTIME`) discard the assignment
-entirely in bash, where osh keeps it.
+The assignment half followed in TD-OILS-DYNVAR-ASSIGN-CELL, also fixed.
 
-### TD-OILS-DYNVAR-ASSIGN-CELL. Assigning to a dynamic special variable does not fill its value cell — 2026-07-31
+### TD-OILS-DYNVAR-ASSIGN-CELL. Assigning to a dynamic special variable does not fill its value cell — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::dyn_touched` covers
 the lookup half of bash's value cell; the assignment half is missing.
@@ -5767,6 +5761,55 @@ receives. `SECONDS=100; SECONDS+=5` gives **1005** (string append to the
 the cell *and* set `-i`, so the append became arithmetic. osh gives 100
 for both. `SECONDS=7; SECONDS+=abc` gives 0 in bash (the hook cannot
 parse `7abc`) against `abc` in osh.
+
+**Fixed.** The cell is now real: `Shell::dyn_cell`, a
+`RefCell<HashMap<&'static str, Str>>` beside the `dyn_touched` bitmask
+that holds the attribute half. A lookup fills both (`dynamic_special_value`
+stores what it computed); an assignment fills only the value. Every listing
+that walks the variable table — bare `declare -p`, the flag-filtered forms,
+bare `set` — now prints *the cell* through `dynamic_special_listed_value`
+rather than taking a fresh reading, so it goes stale exactly where bash's
+does:
+
+```sh
+SECONDS=0; sleep 2; declare -p          # declare -- SECONDS="0"   (the cell)
+SECONDS=0; sleep 2; declare -p SECONDS  # declare -i SECONDS="2"   (a lookup)
+```
+
+…and the lookup refills the cell as it goes, so the two agree again
+afterwards. `unset` empties it along with the rest of the binding.
+
+`DynamicSpecial` gained an `assign: DynAssign` column recording what an
+assignment does with the string — `Cell` for `SECONDS`, `RANDOM`,
+`SRANDOM`, `LINENO` and `HISTCMD`, `Discard` for `BASHPID`, `BASH_ARGV0`,
+`BASH_SUBSHELL`, `EPOCHSECONDS`, `EPOCHREALTIME` and the two call-stack
+arrays. Either way the string never becomes a `Shell::vars` entry now,
+which is what used to shadow the value function: after `LINENO=7`,
+`$LINENO` reports the real line again, and `EPOCHSECONDS=7` leaves the
+clock alone.
+
+What is stored is the **number**, never the text as typed, and which
+parse it is depends on the slot's `-i` (`Shell::dyn_integer_attr`) — the
+same attribute that decides what `+=` means. `Shell::dyn_assigned_number`
+does both: an arithmetic expression with the `-i` and numeric addition for
+`+=`, a plain decimal without it (bash's `legal_number`: blanks around a
+whole number and nothing else, everything else 0) and string append for
+`+=`, the concatenation then read the same way. So `SECONDS=3+4` stores 0
+but `: $SECONDS; SECONDS=3+4` stores 7; `SECONDS=100; SECONDS+=5` gives
+1005 and `: $SECONDS; SECONDS=100; SECONDS+=5` gives 105; and
+`SECONDS=7; SECONDS+=abc` gives 0. `Shell::seconds_base` became `i64` on
+the way, because bash counts on from a negative number as readily as a
+positive one (`SECONDS=-3` reads `-3`, then `-2`).
+
+One measured oddity is preserved: a bad expression assigned to one of
+these names prints its diagnostic, leaves the slot untouched and then
+*carries on* with a status of 0 — `RANDOM=1/0; echo $?` prints the error
+and `0` — where the same expression assigned to an ordinary `-i`
+variable abandons the script.
+
+Covered by `tests/corpus/dynamic-var-assign.sh` and the unit tests
+`assigning_a_dynamic_variable_fills_its_value_cell_only` /
+`assigning_a_dynamic_variable_stores_the_number_not_the_text`.
 
 ### TD-OILS-DYNVAR-ARRAY-CONVERT. `declare -a SECONDS` makes an empty array instead of converting the live value — 2026-07-31
 

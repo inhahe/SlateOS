@@ -47909,6 +47909,32 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn a_backtick_body_in_double_quotes_loses_its_quote_escapes() {
+        // The escapes belong to the enclosing text, so they are stripped before
+        // the body is parsed as a command. Inside double quotes `\"` is one of
+        // them — even where the body would itself have quoted the character.
+        assert_eq!(run(r#"echo "`echo \"x\"`""#).0, "x\n");
+        assert_eq!(run(r#"echo "`echo '\"'`""#).0, "\"\n");
+        assert_eq!(run(r#"echo "abc`echo \"q\"`def""#).0, "abcqdef\n");
+        assert_eq!(run(r#"v="`echo \"y\"`"; echo "[$v]""#).0, "[y]\n");
+        // Outside double quotes the backslash is the body's own.
+        assert_eq!(run(r#"echo `echo \"x\"`"#).0, "\"x\"\n");
+        assert_eq!(run(r#"w=`echo \"y\"`; echo "[$w]""#).0, "[\"y\"]\n");
+        // A here-doc body is a double-quoted *context*, not a quoted string.
+        assert_eq!(run("cat <<EOF\n`echo \\\"x\\\"`\nEOF\n").0, "\"x\"\n");
+        // `$( … )` is parsed as ordinary source and strips nothing.
+        assert_eq!(run(r#"echo "$(echo \"x\")""#).0, "\"x\"\n");
+        // The other three escapes are stripped in both contexts.
+        assert_eq!(run(r#"echo "`echo \\\$HOME`""#).0, "$HOME\n");
+        assert_eq!(run(r#"echo "`echo \`echo inner\``""#).0, "inner\n");
+        // …and the source spelling is what `declare -f` prints back.
+        let src = r#"f() { echo "`echo \"x\"`"; }"#;
+        let (o, _) = run(&format!("{src}; declare -f f"));
+        assert_eq!(o, "f () \n{ \n    echo \"`echo \\\"x\\\"`\"\n}\n");
+        assert_eq!(run(&format!("{src}; eval \"$(declare -f f)\"; f")).0, "x\n");
+    }
+
+    #[test]
     fn cmdsub_syntax_error_names_the_closing_paren() {
         // bash parses a `$( … )` body in the enclosing token stream, so a body
         // that runs out mid-construct is not an end of file there: the next

@@ -1847,7 +1847,7 @@ impl Lexer {
                 '`' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
-                    let (raw, src) = self.read_backtick()?;
+                    let (raw, src) = self.read_backtick(false)?;
                     let close = self.cur_line();
                     segs.push(Seg::CmdSub(raw, close, Some(src)));
                 }
@@ -1914,7 +1914,7 @@ impl Lexer {
                 '`' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
-                    let (raw, src) = self.read_backtick()?;
+                    let (raw, src) = self.read_backtick(false)?;
                     let close = self.cur_line();
                     segs.push(Seg::CmdSub(raw, close, Some(src)));
                 }
@@ -2121,7 +2121,7 @@ impl Lexer {
                 '`' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
-                    let (raw, src) = self.read_backtick()?;
+                    let (raw, src) = self.read_backtick(false)?;
                     let close = self.cur_line();
                     segs.push(Seg::CmdSub(raw, close, Some(src)));
                 }
@@ -2289,7 +2289,7 @@ impl Lexer {
                 '`' => {
                     self.pos += 1;
                     flush_lit(&mut segs, &mut lit);
-                    let (raw, src) = self.read_backtick()?;
+                    let (raw, src) = self.read_backtick(true)?;
                     let close = self.cur_line();
                     segs.push(Seg::CmdSub(raw, close, Some(src)));
                 }
@@ -2559,7 +2559,7 @@ impl Lexer {
                         continue;
                     }
                     '`' => {
-                        let (_, verbatim) = self.read_backtick()?;
+                        let (_, verbatim) = self.read_backtick(false)?;
                         raw.push(b'`');
                         raw.extend_from_slice(&verbatim);
                         raw.push(b'`');
@@ -3134,7 +3134,7 @@ impl Lexer {
     /// They differ exactly where an escape appeared, and printing the parsed
     /// text instead would not merely lose the spelling — a nested backtick
     /// would come out unescaped, and the result would no longer parse.
-    fn read_backtick(&mut self) -> Result<(Str, Str), LexError> {
+    fn read_backtick(&mut self, in_dquote: bool) -> Result<(Str, Str), LexError> {
         let open = self.cur_line();
         let start = self.pos;
         let mut raw = Str::new();
@@ -3148,10 +3148,24 @@ impl Lexer {
                 Some('\\') => {
                     self.pos += 1;
                     // Inside backticks, `\`` and `\\` and `\$` are unescaped.
+                    // Inside *double quotes* `\"` is too, because the escape
+                    // belongs to the enclosing quoted string and is removed
+                    // before the body is ever parsed as a command — so it is
+                    // stripped even where the body would have quoted it:
+                    //
+                    // ```sh
+                    // echo "`echo \"x\"`"      # x    — not "x"
+                    // echo "`echo '\"'`"       # "    — the body is echo '"'
+                    // echo `echo \"x\"`        # "x"  — unquoted, so kept
+                    // ```
                     match self.peek() {
                         Some(n @ ('`' | '\\' | '$')) => {
                             self.pos += 1;
                             push1(&mut raw, n);
+                        }
+                        Some('"') if in_dquote => {
+                            self.pos += 1;
+                            raw.push(b'"');
                         }
                         _ => raw.push(b'\\'),
                     }
@@ -3209,7 +3223,10 @@ fn scan_heredoc_segs(body: BStr<'_>, expand: bool) -> Result<Vec<Seg>, LexError>
             '`' => {
                 lx.pos += 1;
                 flush_lit(&mut segs, &mut lit);
-                let (raw, src) = lx.read_backtick()?;
+                // `false`: a here-doc body is a double-quoted *context*, but it
+                // is not inside a double-quoted string, and bash keeps the
+                // backslash there — `<<EOF` … `` `echo \"x\"` `` prints `"x"`.
+                let (raw, src) = lx.read_backtick(false)?;
                 segs.push(Seg::CmdSub(raw, lx.cur_line(), Some(src)));
             }
             '$' => {

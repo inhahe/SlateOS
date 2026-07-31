@@ -10203,18 +10203,29 @@ impl Shell {
         let Some(frame) = self.local_frames.last() else {
             return false;
         };
-        if !frame.iter().any(|(n, _)| n == name) {
-            let snap = self.snapshot_var(name);
-            // `last_mut` is guaranteed present (we just checked `last`).
-            if let Some(frame) = self.local_frames.last_mut() {
-                frame.push((name.to_string(), snap));
-            }
+        // Only the *first* `local` of a name in a frame shadows. A second one
+        // re-declares a binding that is already local, and bash leaves that
+        // binding's value and attributes entirely alone, applying the new flags
+        // on top: `local -i n=5; local n` still reports `declare -i n="5"`, and
+        // `local -a a=(1 2); local a` keeps both elements. Clearing here as well
+        // would make a re-`local` silently destroy the value the caller just
+        // set — and it is not the same operation, since there is no outer
+        // binding left to shadow.
+        if frame.iter().any(|(n, _)| n == name) {
+            return true;
         }
-        // Clear the current binding: a bare `local x` starts unset/empty and
-        // without inherited attributes (bash: a local does not inherit a global's
-        // `-i`/`-l`/`-u`/`-n`). `readonly` is intentionally left intact so a
-        // readonly global is not silently shadowed. Any flags on the `local`
-        // declaration itself are re-applied by the caller afterwards.
+        let snap = self.snapshot_var(name);
+        // `last_mut` is guaranteed present (we just checked `last`).
+        if let Some(frame) = self.local_frames.last_mut() {
+            frame.push((name.to_string(), snap));
+        }
+        // Clear the binding being shadowed: a bare `local x` starts unset/empty
+        // and without inherited attributes (bash: a local does not inherit a
+        // global's `-i`/`-l`/`-u`/`-n`, nor its array *kind* — `declare -a g=(1)`
+        // then `local g` reports the plain `declare -- g`). `readonly` is
+        // intentionally left intact so a readonly global is not silently
+        // shadowed. Any flags on the `local` declaration itself are re-applied
+        // by the caller afterwards.
         self.vars.remove(name);
         self.arrays.remove(name);
         self.assoc.remove(name);
@@ -20063,6 +20074,24 @@ impl Shell {
             if make_local {
                 self.declare_local(base_name);
             }
+            // Giving a *local* scalar an array kind drops its value, where the
+            // same widening at global scope keeps it as element 0: bash builds
+            // the local array with `make_local_array_variable`, which rebinds
+            // the name as a fresh array instead of converting the variable in
+            // place. So `local x=5; local -a x` is `declare -a x=()` while
+            // `x=5; declare -a x` is `declare -a x=([0]="5")`. The name still
+            // counts as *valued*, which is what tells `declare -p` to print the
+            // empty `=()` rather than a bare declaration.
+            //
+            // Read *after* the shadow step above, so it sees the local binding
+            // rather than a global one this `local` is about to hide: with a
+            // global `g=9`, `local -a g` reports the unvalued `declare -a g`,
+            // because by then there is no local scalar left to drop.
+            let drop_local_scalar =
+                make_local && (assoc || indexed) && self.vars.contains_key(base_name);
+            if drop_local_scalar {
+                self.vars.remove(base_name);
+            }
             // An array's kind is fixed once set — see `array_kind_conflict`.
             // Checked *after* the local-shadowing step above, which is what
             // makes `local -A g` legal inside a function whose global `g` is an
@@ -20083,6 +20112,11 @@ impl Shell {
                 // with no explicit `-a` and no value — but never clobbers an
                 // existing associative array of the same name.
                 self.array_kind_apply(base_name, false);
+            }
+            // See `drop_local_scalar` above: the widening discarded the old
+            // scalar, but the name still counts as valued for `declare -p`.
+            if drop_local_scalar {
+                self.array_valued.insert(base_name.to_string());
             }
             // Apply/remove the integer and case attributes before binding the
             // value, so a `declare -i x=5+3` initial value is evaluated
@@ -40078,6 +40112,62 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -Ax m=([k]=v); foo=1; export foo; export -A").0,
             "declare -Ax m=([k]=\"v\" )\n"
+        );
+    }
+
+    #[test]
+    fn a_second_local_of_a_name_redeclares_rather_than_reshadows() {
+        // Only the *first* `local` of a name in a frame shadows. A second one
+        // re-declares a binding that is already local, and bash leaves its value
+        // and attributes alone, applying the new flags on top. osh cleared on
+        // every `local`, so a re-declaration silently destroyed the value the
+        // caller had just set.
+        let f = |body: &str| run(&format!("f(){{ {body}; }}; f")).0;
+        assert_eq!(f("local -i n=5; local n; declare -p n"), "declare -i n=\"5\"\n");
+        assert_eq!(f("local -l s=AB; local s; declare -p s"), "declare -l s=\"ab\"\n");
+        assert_eq!(f("local -x e=1; local e; declare -p e"), "declare -x e=\"1\"\n");
+        assert_eq!(
+            f("local -a a=(1 2); local a; declare -p a"),
+            "declare -a a=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(
+            f("local -A m=([k]=v); local -A m; declare -p m"),
+            "declare -A m=([k]=\"v\" )\n"
+        );
+        // The first `local` still shadows: the outer binding's value *and* its
+        // attributes are dropped, including its array kind.
+        let g = |setup: &str, body: &str| run(&format!("{setup} f(){{ {body}; }}; f")).0;
+        assert_eq!(g("declare -i o=5;", "local o; declare -p o"), "declare -- o\n");
+        assert_eq!(g("declare -l o=AB;", "local o; declare -p o"), "declare -- o\n");
+        assert_eq!(g("declare -a o=(1);", "local o; declare -p o"), "declare -- o\n");
+    }
+
+    #[test]
+    fn giving_a_local_scalar_an_array_kind_drops_its_value_but_not_its_valuedness() {
+        // bash builds a local array with `make_local_array_variable`, which
+        // rebinds the name as a fresh array instead of converting the variable
+        // in place — so the scalar's value is lost, unlike the global widening
+        // that keeps it as element 0. The name still reports as *valued*, which
+        // is the difference between `declare -a x=()` and a bare `declare -a x`.
+        let f = |body: &str| run(&format!("f(){{ {body}; }}; f")).0;
+        assert_eq!(f("local x=5; local -a x; declare -p x"), "declare -a x=()\n");
+        assert_eq!(f("local x=5; local -A x; declare -p x"), "declare -A x=()\n");
+        // Other attributes on the name survive the widening.
+        assert_eq!(f("local -i n=5; local -a n; declare -p n"), "declare -ai n=()\n");
+        // With no value to begin with there is nothing to drop, so the name
+        // stays unvalued and prints as a bare declaration.
+        assert_eq!(f("local x; local -a x; declare -p x"), "declare -a x\n");
+        assert_eq!(f("local -a x; declare -p x"), "declare -a x\n");
+        // A *first* local widening a global scalar is unvalued too: the shadow
+        // step runs first, so by then there is no local scalar to drop.
+        assert_eq!(
+            run("g=9; f(){ local -a g; declare -p g; }; f").0,
+            "declare -a g\n"
+        );
+        // The global widening is unchanged — it still carries the scalar.
+        assert_eq!(
+            run("x=5; declare -a x; declare -p x").0,
+            "declare -a x=([0]=\"5\")\n"
         );
     }
 

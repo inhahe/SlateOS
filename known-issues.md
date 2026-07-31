@@ -756,7 +756,7 @@ only if the same pre-expansion word list is needed for another reason. Note the
 turned out *not* to be that trigger: it records where each compound operand sat
 among the words, not the words' pre-expansion text.
 
-### TD-OILS-LOCAL-ARRAY-KIND-VALUED. `local -a` on an existing local scalar leaves the name unvalued where bash reports an empty array — 2026-07-30 — OPEN (very low priority)
+### TD-OILS-LOCAL-ARRAY-KIND-VALUED. `local -a` on an existing local scalar leaves the name unvalued where bash reports an empty array — 2026-07-30 — ✅ RESOLVED 2026-07-30
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_declare`'s local path and
 `array_kind_apply`.
@@ -776,6 +776,80 @@ not `([0]="5")` — so the fix is not to route the local path through
 present in the current frame as a scalar, insert it into `array_valued` after
 creating the (empty) array. Needs a probe first to confirm bash's behaviour when
 the earlier `local` had no value at all (`local x; local -a x`).
+
+**Fixed 2026-07-30 — and the probe the entry asked for found a bigger bug
+underneath.** Probing the full matrix against bash 5.2.37 first (rather than
+implementing the sketch above) showed the diagnosis was incomplete. Two separate
+rules were wrong:
+
+**1. A second `local` of a name in the same frame re-declares; it does not
+re-shadow.** bash leaves the existing local binding's value *and* attributes
+alone and applies the new flags on top, so `local -i n=5; local n` still reports
+`declare -i n="5"` and `local -a a=(1 2); local a` keeps both elements. osh's
+`declare_local` cleared unconditionally, so a re-declaration silently destroyed
+the value the caller had just set — a data-losing bug, and the reason the entry's
+symptom looked like a mere display flag. `declare_local` now returns early when
+the name is already in the frame; the clearing runs only on the first `local`,
+which is the one that actually shadows an outer binding (and there it clears the
+value, the attributes, *and* the array kind, as bash does: `declare -a g=(1)`
+then `local g` gives the plain `declare -- g`).
+
+**2. Widening a *local* scalar to an array drops the value.** bash uses
+`make_local_array_variable`, which rebinds the name as a fresh array rather than
+converting the variable in place — so `local x=5; local -a x` is
+`declare -a x=()`, while the global `x=5; declare -a x` keeps the 5 as
+`([0]="5")`. The name is still *valued*, which is what selects the empty `=()`
+over a bare declaration. The `drop_local_scalar` flag in `builtin_declare` is
+read *after* the shadow step, so a first `local -a g` over a global `g=9` is
+correctly unvalued — by then there is no local scalar to drop. Other attributes
+survive the widening (`local -i n=5; local -a n` → `declare -ai n=()`).
+
+All 13 cases in the probe matrix now match bash byte-for-byte. Covered by
+`a_second_local_of_a_name_redeclares_rather_than_reshadows` and
+`giving_a_local_scalar_an_array_kind_drops_its_value_but_not_its_valuedness`,
+which pin both directions (re-declare preserves, first-local clears) plus the
+unchanged global widening.
+
+### BUG-OILS-DECLARE-G-HITS-THE-LOCAL-BINDING. `declare -g` inside a function operates on the local binding instead of the global one — 2026-07-30 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare`. `make_local` is
+computed as `is_local || (!global && !self.local_frames.is_empty())`, so `-g`
+correctly suppresses the *local shadowing* step — but nothing then redirects the
+declaration's effects to the global binding. Every subsequent step (the array
+kind, the attributes, the value) is applied to whatever `self.vars`/`arrays`
+currently resolve to, which inside a function is the local shadow.
+
+**What.** `declare -g` means "act on the global variable of this name, even
+inside a function". When a local of the same name exists, bash's `-g` reaches
+*past* it. osh converts the local instead, and the global is never touched.
+
+```sh
+f(){ local x=5; declare -ga x; declare -p x; }; f
+echo "after:"; declare -p x
+```
+
+```
+bash                          osh
+declare -- x="5"              declare -a x=([0]="5")
+after:                        after:
+declare -a x                  osh: line 1: declare: x: not found
+```
+
+bash makes the *global* `x` an empty array and leaves the local scalar alone, so
+`declare -p x` inside the function still shows the local `x="5"` and the global
+array survives the return. osh converts the local, so the array is discarded with
+the frame and no global is ever created. Note the two shells agree when no local
+shadow exists (`f(){ x=5; declare -ga x; }` and a pre-existing global both give
+`declare -a x=([0]="5")`), which is why this went unnoticed.
+
+**Proper fix.** `-g` has to *target* the global binding, not merely skip the
+shadowing step. The frame stack records the shadowed value for each local name
+(`snapshot_var`), so the global for a shadowed name is reachable — a `-g`
+declaration should write the outermost binding: update the frame's saved snapshot
+(so the value survives the return) rather than the live `vars`/`arrays` entry
+when a local shadow is in the way. Found while probing
+TD-OILS-LOCAL-ARRAY-KIND-VALUED; kept separate because it is a scoping bug, not a
+display one, and the fix touches the frame representation.
 
 ### TD-OILS-EXPORT-ARRAY-FLAG. `export -a` is accepted by bash and rejected by osh — 2026-07-30 — ✅ RESOLVED 2026-07-30 (listing half split out as TD-OILS-DECL-LIST-KIND-FILTER, also resolved)
 

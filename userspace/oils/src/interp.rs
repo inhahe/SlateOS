@@ -23547,11 +23547,13 @@ impl Shell {
     /// action selectors (`-A action` plus the `-a -b -c -d -e -f -k -v`
     /// shortcuts: alias, builtin, command, directory, export, file, keyword,
     /// variable — and `-A function`), `-P prefix` / `-S suffix` (added to each
-    /// match after filtering), and `-X filterpat` (glob-remove matches; a
-    /// leading `!` inverts to keep-only). The interactive/programmable
-    /// selectors that require a live completion context (`-F`/`-C`/`-o`/`-G`
-    /// and the user/group/job/service actions) are parsed-and-ignored so
-    /// scripts that pass them still run without error.
+    /// match after filtering), `-X filterpat` (glob-remove matches; a leading
+    /// `!` inverts to keep-only), and `-F function` — see
+    /// [`Shell::compgen_function_matches`], which also warns the way bash does
+    /// about running a completion function outside a completion. The remaining
+    /// selectors that require a live completion context (`-C` and the
+    /// user/group/job/service actions) are parsed-and-ignored so scripts that
+    /// pass them still run without error.
     ///
     /// Options are read the way bash reads them: clustered, with an
     /// argument-taking letter swallowing the rest of its cluster (`-Wab`,
@@ -23582,6 +23584,7 @@ impl Shell {
         let mut suffix = Str::new();
         let mut filter: Option<Str> = None;
         let mut o_opts: Vec<Str> = Vec::new();
+        let mut func: Option<Str> = None;
         // Whether any option that asks for candidates was given. bash builds a
         // compspec only if there is something to put in it, and a `compgen` with
         // nothing to build succeeds silently rather than reporting "no matches".
@@ -23655,7 +23658,8 @@ impl Shell {
                         // Unlike the rest, `-o` is a set of flags, so a second
                         // one adds to the first.
                         'o' => o_opts.push(val),
-                        // -F/-C need a live completion context; kept only as
+                        'F' => func = Some(val),
+                        // -C needs a live completion context; kept only as
                         // "something was asked for".
                         _ => {}
                     }
@@ -23674,6 +23678,19 @@ impl Shell {
         let word = args.get(i).cloned().unwrap_or_default();
         if !has_spec {
             return 0;
+        }
+
+        // bash warns about the sources that were meant to run inside a live
+        // completion, since outside one they see an empty command line. The
+        // warning comes only after the whole option scan, so a usage error above
+        // wins and nothing is said; it is printed once per option however many
+        // times the option was written, and always in this order rather than the
+        // order the options appeared in.
+        if func.is_some() {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"compgen: warning: -F option may not work as you expect"
+            ]);
         }
 
         // ---- gather raw candidates from every specified source ----
@@ -23800,6 +23817,13 @@ impl Shell {
             );
         }
 
+        // ---- -F function: whatever the function leaves in COMPREPLY ----
+        // Unnarrowed by the word, like `-G` and unlike everything else: choosing
+        // what fits the word is the function's own job.
+        if let Some(f) = func {
+            list.extend(self.compgen_function_matches(&f, &word, out, redir));
+        }
+
         // ---- -X filterpat: glob-remove (leading '!' keeps only matches) ----
         if let Some(pat) = &filter
             && !pat.is_empty()
@@ -23850,6 +23874,93 @@ impl Shell {
         let write_status = self.write_bytes(out, redir, &result);
         // bash: status 1 when no candidates were produced, else the write status.
         if empty { 1 } else { write_status }
+    }
+
+    /// The matches a completion *function* offers — `compgen -F NAME word`.
+    ///
+    /// The function is called like an ordinary command in the **current** shell,
+    /// so whatever it changes stays changed, with `$1` the name of the command
+    /// being completed (`compgen` itself here), `$2` the word being completed
+    /// and `$3` the word before it — always empty, since `compgen` has no
+    /// command line to look back into.
+    ///
+    /// The completion environment is bound around the call and removed
+    /// afterwards. Without a live line editor every one of those variables
+    /// describes an empty line, which is exactly what bash binds here too
+    /// (measured against bash 5.2: `COMP_LINE=""`, `COMP_POINT=0`,
+    /// `COMP_TYPE=0`, `COMP_KEY=0`, `COMP_CWORD=-1`, `COMP_WORDS=()`), and the
+    /// removal is unconditional — a value the caller had set before is gone
+    /// afterwards.
+    ///
+    /// The answer is whatever the function left in `COMPREPLY`: its elements in
+    /// index order, or the whole value when it is a scalar (so an empty scalar
+    /// is one empty match). An *associative* `COMPREPLY` answers nothing at all,
+    /// which is bash's own behaviour rather than an omission here. `COMPREPLY`
+    /// is deliberately **not** cleared before the call — a function that sets
+    /// nothing answers with whatever was already there — but it is unbound
+    /// after, even when readonly, because bash removes the binding directly
+    /// rather than through `unset`.
+    ///
+    /// A function that returns 124 is asking bash to rebuild the compspec and
+    /// complete again; `compgen` has no compspec to rebuild, so its matches are
+    /// dropped and the source contributes nothing.
+    fn compgen_function_matches(
+        &mut self,
+        name: BStr<'_>,
+        word: BStr<'_>,
+        out: &mut Out,
+        redir: &RedirPlan,
+    ) -> Vec<Str> {
+        /// The readline state a completion function reads, as it looks when
+        /// there is no line being edited.
+        const COMP_ENV: [(&str, &str); 5] = [
+            ("COMP_LINE", ""),
+            ("COMP_POINT", "0"),
+            ("COMP_TYPE", "0"),
+            ("COMP_KEY", "0"),
+            ("COMP_CWORD", "-1"),
+        ];
+
+        if !self.funcs.contains_key(name) {
+            // Not labelled `compgen:` — bash reports this from the completion
+            // machinery, which does not know which builtin asked.
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"completion: function `",
+                name,
+                b"' not found"
+            ]);
+            return Vec::new();
+        }
+        for (var, val) in COMP_ENV {
+            self.put_var(var.to_string(), val.as_bytes().to_vec());
+        }
+        self.arrays.insert("COMP_WORDS".to_string(), BTreeMap::new());
+
+        let args = vec![b"compgen".to_vec(), word.to_vec(), Str::new()];
+        // An `exit` inside the function unwinds the whole shell; a builtin can
+        // only return a status, so the side channel carries it (as `eval` does).
+        if let Flow::Exit(code) =
+            self.call_function(name, &args, &[], out, &StdinSrc::Inherit, redir)
+        {
+            self.pending_builtin_exit = Some(code);
+        }
+        let matches = if self.last_status == 124 {
+            Vec::new()
+        } else if let Some(a) = self.arrays.get("COMPREPLY") {
+            a.values().cloned().collect()
+        } else if self.assoc.contains_key("COMPREPLY") {
+            Vec::new()
+        } else {
+            self.vars.get("COMPREPLY").cloned().into_iter().collect()
+        };
+
+        for (var, _) in COMP_ENV {
+            self.unbind_var(var);
+        }
+        self.unbind_var("COMP_WORDS");
+        self.unbind_var("COMPREPLY");
+        matches
     }
 
     /// Filesystem completion for `compgen -f`/`-d`: treat `word` as a partial
@@ -37400,6 +37511,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         std::env::set_current_dir(&orig).expect("restore cwd");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compgen_f_runs_the_completion_function() {
+        // The function is called with the command being completed, the word,
+        // and the (always empty) word before it — and answers with COMPREPLY,
+        // unnarrowed by the word, since choosing is the function's own job.
+        let warn = "osh: compgen: warning: -F option may not work as you expect\n";
+        assert_eq!(
+            run("f() { COMPREPLY=(\"$1|$2|$3\" zz); }; compgen -F f wo 2>&1").0,
+            format!("{warn}compgen|wo|\nzz\n")
+        );
+        // It runs in the current shell, so what it changes stays changed…
+        assert_eq!(run("f() { x=$2; COMPREPLY=(a); }; compgen -F f q >/dev/null 2>&1; echo \"<$x>\"").0, "<q>\n");
+        // …but the completion environment it reads is bound only for the call,
+        // and describes an empty line, there being none.
+        assert_eq!(
+            run("f() { echo \"$COMP_LINE|$COMP_POINT|$COMP_TYPE|$COMP_KEY|$COMP_CWORD|${#COMP_WORDS[@]}\"; }; compgen -F f q 2>/dev/null; declare -p COMP_LINE COMP_CWORD 2>&1").0,
+            "|0|0|0|-1|0\nosh: declare: COMP_LINE: not found\nosh: declare: COMP_CWORD: not found\n"
+        );
+        // COMPREPLY is not cleared before the call but is gone after it.
+        assert_eq!(
+            run("f() { :; }; COMPREPLY=(kept); compgen -F f q 2>/dev/null; declare -p COMPREPLY 2>&1").0,
+            "kept\nosh: declare: COMPREPLY: not found\n"
+        );
+        // A scalar answers as one match (even an empty one); an associative
+        // COMPREPLY answers nothing at all, as in bash.
+        assert_eq!(run("f() { COMPREPLY=one; }; compgen -F f q 2>/dev/null").0, "one\n");
+        assert_eq!(run("f() { COMPREPLY=; }; compgen -F f q 2>/dev/null"), ("\n".to_string(), 0));
+        assert_eq!(
+            run("f() { declare -A COMPREPLY=([k]=v); }; compgen -F f q 2>/dev/null"),
+            (String::new(), 1)
+        );
+        // 124 asks for the compspec to be rebuilt; there is none, so the
+        // function's matches are dropped.
+        assert_eq!(
+            run("f() { COMPREPLY=(a); return 124; }; compgen -F f q 2>/dev/null"),
+            (String::new(), 1)
+        );
+        // An undefined function is reported by the completion machinery, which
+        // does not name the builtin that asked.
+        assert_eq!(
+            run("compgen -F nosuch q 2>&1"),
+            (format!("{warn}osh: completion: function `nosuch' not found\n"), 1)
+        );
+        // The warning waits for the whole option scan, so a usage error wins…
+        assert_eq!(run("f() { :; }; compgen -F f -A bogus q 2>&1").0, "osh: compgen: bogus: invalid action name\n");
+        // …and it is said once however many times `-F` was written, the last
+        // one being the function that runs (one compspec slot).
+        assert_eq!(
+            run("f() { COMPREPLY=(ff); }; g() { COMPREPLY=(gg); }; compgen -F f -F g q 2>&1").0,
+            format!("{warn}gg\n")
+        );
+        // Its matches sit after the actions and the wordlist, and -X/-P/-S
+        // still apply to them.
+        assert_eq!(
+            run("f() { COMPREPLY=(iq ix); }; compgen -k -W 'iw' -F f -X 'ix' -P '<' i 2>/dev/null").0,
+            "<if\n<in\n<iw\n<iq\n"
+        );
     }
 
     #[test]

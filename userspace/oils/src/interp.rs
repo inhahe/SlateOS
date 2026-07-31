@@ -1938,6 +1938,20 @@ struct DynamicSpecial {
     listed: DynListing,
     /// What an assignment to the name does with the string it was given.
     assign: DynAssign,
+    /// Whether the name's assign function reads its value as an *arithmetic
+    /// expression* when the name carries the integer attribute.
+    ///
+    /// bash's assign functions are hand-written and only two of them
+    /// (`assign_seconds`, `assign_random`) ask whether the variable is an
+    /// integer; the others always take the string as a plain decimal, because
+    /// nothing evaluates it on the way in — the generic assignment code hands a
+    /// non-appending value to the assign function untouched. So
+    /// `declare -i SECONDS=3+4` sets the clock to 7 while
+    /// `declare -i BASH_SUBSHELL=3+4` sets the depth to 0.
+    ///
+    /// An *appending* assignment is evaluated whatever this says, since bash
+    /// forms the appended value before reaching the assign function at all.
+    assign_evals: bool,
 }
 
 /// What an assignment to a [`DynamicSpecial`] does with the string it was
@@ -2164,6 +2178,14 @@ pub struct Shell {
     /// `( … )` group, command substitution, pipeline stage, or other subshell
     /// increments it for its clone (bash).
     subshell_depth: u32,
+    /// Base added to [`Shell::subshell_depth`] to give `$BASH_SUBSHELL`, set by
+    /// assigning to the name. bash's `BASH_SUBSHELL` is not a read-only mirror
+    /// of the depth: its assign function writes the very counter the shell
+    /// increments on the way into a subshell, so `BASH_SUBSHELL=9` reads back 9
+    /// and one level further in reads 10. Signed and separate from the depth
+    /// itself, because the number assigned may be negative and because nothing
+    /// but the reported value may move — a subshell is still a subshell.
+    subshell_base: i64,
     last_bg_pid: Option<u32>,
     /// `set -o pipefail`: a pipeline's status is the rightmost non-zero stage.
     pipefail: bool,
@@ -3082,6 +3104,7 @@ impl Shell {
             comsub_read_eval: false,
             builtin_stdout: None,
             subshell_depth: 0,
+            subshell_base: 0,
             last_bg_pid: None,
             pipefail: false,
             pipe_broken: false,
@@ -7131,6 +7154,7 @@ impl Shell {
             builtin_stdout: None,
             // Entering a subshell increments the nesting depth (`$BASH_SUBSHELL`).
             subshell_depth: self.subshell_depth.saturating_add(1),
+            subshell_base: self.subshell_base,
             last_bg_pid: self.last_bg_pid,
             pipefail: self.pipefail,
             pipe_broken: false,
@@ -7977,9 +8001,21 @@ impl Shell {
                 {
                     // Every one of these names is a number to bash, so the
                     // string is parsed here and it is the *number* that is
-                    // stored and acted on. `+=` resolves against the value
-                    // cell, not against a fresh reading.
-                    let int = self.dyn_integer_attr(d);
+                    // stored and acted on.
+                    let has_int = self.dyn_integer_attr(d);
+                    // The integer attribute only reaches the *value* of a
+                    // non-appending assignment for the names whose own assign
+                    // function consults it. bash's `assign_seconds` and
+                    // `assign_random` do; the rest take the string as a plain
+                    // decimal however it was declared, so
+                    // `declare -i BASH_SUBSHELL; BASH_SUBSHELL=3+4` stores 0
+                    // where the same on `SECONDS` stores 7. An *appending*
+                    // assignment is evaluated either way, because bash forms
+                    // the appended string before the assign function is
+                    // reached. See [`DynamicSpecial::assign_evals`].
+                    let int = has_int && (a.append || d.assign_evals);
+                    // `+=` resolves against the value cell either way, not
+                    // against a fresh reading.
                     let cur = self.dyn_cell_value(&a.name);
                     let Some(n) = self.dyn_assigned_number(int, cur, val, a.append) else {
                         // A bad `-i` expression leaves the slot exactly as it
@@ -8002,6 +8038,13 @@ impl Shell {
                         "SECONDS" => {
                             self.seconds_base = n;
                             self.seconds_anchor = std::time::Instant::now();
+                        }
+                        "BASH_SUBSHELL" => {
+                            // The counter bash's assign function writes is the
+                            // very one a subshell increments, so the number
+                            // given is what this level reads and each level
+                            // further in reads one more.
+                            self.subshell_base = n.saturating_sub(i64::from(self.subshell_depth));
                         }
                         // The rest have no counter to move: `SRANDOM` draws
                         // from the system entropy source, so there is no seed
@@ -9837,25 +9880,27 @@ impl Shell {
     /// that lists but does not expand would be a worse lie than an absent one.
     #[rustfmt::skip]
     const DYNAMIC_SPECIALS: &'static [DynamicSpecial] = &[
-        DynamicSpecial { name: "BASHPID", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Discard },
-        DynamicSpecial { name: "BASH_ARGV0", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard },
-        DynamicSpecial { name: "BASH_LINENO", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray, assign: DynAssign::Discard },
-        DynamicSpecial { name: "BASH_SOURCE", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray, assign: DynAssign::Discard },
-        DynamicSpecial { name: "BASH_SUBSHELL", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard },
-        DynamicSpecial { name: "HISTCMD", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Cell },
-        DynamicSpecial { name: "LINENO", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Cell },
+        DynamicSpecial { name: "BASHPID", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Discard, assign_evals: true },
+        DynamicSpecial { name: "BASH_ARGV0", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard, assign_evals: false },
+        DynamicSpecial { name: "BASH_LINENO", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray, assign: DynAssign::Discard, assign_evals: false },
+        DynamicSpecial { name: "BASH_SOURCE", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray, assign: DynAssign::Discard, assign_evals: false },
+        // Assignable: the number given moves the depth counter itself, so it is
+        // what this level reads and each level further in reads one more.
+        DynamicSpecial { name: "BASH_SUBSHELL", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard, assign_evals: false },
+        DynamicSpecial { name: "HISTCMD", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Cell, assign_evals: true },
+        DynamicSpecial { name: "LINENO", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Cell, assign_evals: false },
         // `$PPID` is a readonly integer whose value cell is filled in before the
         // first command runs, so it is the one entry a listing prints with a
         // value from the start. The assignment column never comes up: the
         // readonly refusal gets there first.
-        DynamicSpecial { name: "PPID", named_flags: "ir", listed_flags: "ir", listed: DynListing::Live, assign: DynAssign::Discard },
-        DynamicSpecial { name: "RANDOM", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Cell },
+        DynamicSpecial { name: "PPID", named_flags: "ir", listed_flags: "ir", listed: DynListing::Live, assign: DynAssign::Discard, assign_evals: true },
+        DynamicSpecial { name: "RANDOM", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Cell, assign_evals: true },
         // Measured: `SECONDS` loses its `i` in a listing but keeps it for
         // `declare -p SECONDS`.
-        DynamicSpecial { name: "SECONDS", named_flags: "i", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Cell },
-        DynamicSpecial { name: "SRANDOM", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Cell },
-        DynamicSpecial { name: "EPOCHSECONDS", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard },
-        DynamicSpecial { name: "EPOCHREALTIME", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard },
+        DynamicSpecial { name: "SECONDS", named_flags: "i", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Cell, assign_evals: true },
+        DynamicSpecial { name: "SRANDOM", named_flags: "i", listed_flags: "i", listed: DynListing::Bare, assign: DynAssign::Cell, assign_evals: true },
+        DynamicSpecial { name: "EPOCHSECONDS", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard, assign_evals: false },
+        DynamicSpecial { name: "EPOCHREALTIME", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard, assign_evals: false },
     ];
 
     /// The table entry for `name`, or `None` if it is not a dynamic special.
@@ -14843,7 +14888,12 @@ impl Shell {
             "BASH_ARGV0" => Some(self.name.clone()),
             "BASHPID" => Some(self.pid.to_string().into_bytes()),
             "PPID" => Some(self.ppid.to_string().into_bytes()),
-            "BASH_SUBSHELL" => Some(self.subshell_depth.to_string().into_bytes()),
+            "BASH_SUBSHELL" => Some(
+                self.subshell_base
+                    .saturating_add(i64::from(self.subshell_depth))
+                    .to_string()
+                    .into_bytes(),
+            ),
             "LINENO" => Some(self.current_line.to_string().into_bytes()),
             "RANDOM" => Some(self.next_random().to_string().into_bytes()),
             "SRANDOM" => Some(self.next_srandom().to_string().into_bytes()),
@@ -41747,6 +41797,60 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("( ( echo $BASH_SUBSHELL ) )").0, "2\n");
         // A command substitution is also a subshell.
         assert_eq!(run("echo $(echo $BASH_SUBSHELL)").0, "1\n");
+    }
+
+    #[test]
+    fn assigning_bash_subshell_moves_the_depth_counter() {
+        // The name is not a read-only mirror of the depth: assigning it writes
+        // the counter the shell increments on the way in, so the number given
+        // is what this level reads and each level further in reads one more.
+        assert_eq!(run("BASH_SUBSHELL=9; echo $BASH_SUBSHELL").0, "9\n");
+        assert_eq!(run("BASH_SUBSHELL=9; ( echo $BASH_SUBSHELL )").0, "10\n");
+        assert_eq!(run("BASH_SUBSHELL=9; ( ( echo $BASH_SUBSHELL ) )").0, "11\n");
+        assert_eq!(run("BASH_SUBSHELL=9; echo $(echo $BASH_SUBSHELL)").0, "10\n");
+        // Assigned one level in, and the level itself is what it counts from.
+        assert_eq!(run("( BASH_SUBSHELL=9; echo $BASH_SUBSHELL )").0, "9\n");
+        assert_eq!(run("( BASH_SUBSHELL=9; ( echo $BASH_SUBSHELL ) )").0, "10\n");
+        // …and a subshell's counter is its own: the parent reads on unchanged.
+        assert_eq!(run("( BASH_SUBSHELL=9 ); echo $BASH_SUBSHELL").0, "0\n");
+        // The string is read as a plain decimal, as the other computed names
+        // are: blanks around a whole number and nothing else, anything else 0.
+        for (val, want) in [
+            ("9", "9\n"),
+            ("-3", "-3\n"),
+            (" 4 ", "4\n"),
+            ("zz", "0\n"),
+            ("3x", "0\n"),
+            ("", "0\n"),
+            ("0x10", "0\n"),
+            ("010", "10\n"),
+            ("99999999999999999999", "0\n"),
+        ] {
+            let out = run(&format!("BASH_SUBSHELL='{val}'; echo $BASH_SUBSHELL")).0;
+            assert_eq!(out, want, "BASH_SUBSHELL={val}");
+        }
+        // …and a plain decimal it stays under `-i`, because bash's own assign
+        // function for this name never asks about the integer attribute — where
+        // `SECONDS`'s does. An *appending* assignment is arithmetic either way:
+        // bash forms the appended value before the assign function is reached.
+        assert_eq!(run("declare -i BASH_SUBSHELL; BASH_SUBSHELL=3+4; echo $BASH_SUBSHELL").0, "0\n");
+        assert_eq!(run("declare -i SECONDS; SECONDS=3+4; echo $SECONDS").0, "7\n");
+        assert_eq!(run("declare -i BASH_SUBSHELL; BASH_SUBSHELL+=5; echo $BASH_SUBSHELL").0, "5\n");
+        assert_eq!(
+            run("( declare -i BASH_SUBSHELL; BASH_SUBSHELL+=5; echo $BASH_SUBSHELL )").0,
+            "6\n"
+        );
+        // A `+=` without the attribute runs the value cell and the new text
+        // together — and the cell is filled by a *reading*, never by an
+        // assignment, so a pristine one appends to nothing at all.
+        assert_eq!(run("BASH_SUBSHELL=7; BASH_SUBSHELL+=5; echo $BASH_SUBSHELL").0, "5\n");
+        assert_eq!(
+            run("BASH_SUBSHELL=7; : $BASH_SUBSHELL; BASH_SUBSHELL+=5; echo $BASH_SUBSHELL").0,
+            "75\n"
+        );
+        // The assignment leaves no ordinary variable behind: the name goes on
+        // computing, which is what makes the reading move with the depth above.
+        assert_eq!(run("BASH_SUBSHELL=9; declare -p BASH_SUBSHELL").0, "declare -- BASH_SUBSHELL=\"9\"\n");
     }
 
     #[test]

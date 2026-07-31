@@ -6091,7 +6091,7 @@ attributes, which apply to the stored value.
 **Coverage.** New corpus case `tests/corpus/export-readonly-store.sh` and
 one unit test. Full differential corpus: 173 matched, 0 failed.
 
-### TD-OILS-BASH-SUBSHELL-ASSIGNABLE. `BASH_SUBSHELL` discards an assignment; bash lets it move the counter — 2026-07-31 — OPEN
+### TD-OILS-BASH-SUBSHELL-ASSIGNABLE. `BASH_SUBSHELL` discards an assignment; bash lets it move the counter — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the dynamic-special table row
 for `BASH_SUBSHELL`, whose `DynAssign` is `Discard`, and whose value
@@ -6114,12 +6114,112 @@ declare -p BASH_SUBSHELL                       # bash declare -- BASH_SUBSHELL="
 `unset BASH_SUBSHELL` already agrees (both leave the name empty), and the
 unassigned readings agree, so this is exactly the assignment.
 
-**Proper fix.** Give the row `DynAssign::Cell` and make the value function
-`cell + depth`, storing the cell as the assigned number *minus the depth
-the assignment happened at* — which is what "the assignment sets the
-counter" means. Check: assigning 9 at depth 1 stores 8, reads 9 there, 10
-one level in, 11 two; assigning `zz` at depth 1 stores −1 and reads 0.
-Low priority: scripts read `BASH_SUBSHELL`, they do not write it.
+**Fixed 2026-07-31.** A `subshell_base: i64` is added to
+[`Shell::subshell_depth`] to give the reported value, and an assignment
+sets it to the number given *minus the depth the assignment happened at*
+— which is what "the assignment sets the counter" means. The base is
+copied into a subshell's clone alongside `seconds_base`, so the number
+given is what that level reads and each level further in reads one more,
+while the counter a subshell moves stays the subshell's own. The row
+keeps `DynAssign::Discard`: bash's assign function for this name does
+*not* fill the value cell (only a reading does), which is exactly why a
+pristine `BASH_SUBSHELL=7; BASH_SUBSHELL+=5` gives 5 and not 75.
+
+The measurement also turned up a second rule, now modelled by a new
+`DynamicSpecial::assign_evals` column: the integer attribute reaches the
+value of a *non-appending* assignment only for the names whose own assign
+function consults it. bash's `assign_seconds`/`assign_random` (and
+`HISTCMD`/`SRANDOM`) do; `BASH_SUBSHELL` and `LINENO` do not, so
+`declare -i BASH_SUBSHELL=3+4` stores 0 where the same on `SECONDS`
+stores 7. An *appending* assignment is arithmetic either way, because the
+appended value is formed before the assign function is reached.
+
+Covered by the unit test `assigning_bash_subshell_moves_the_depth_counter`
+and the corpus case `bash-subshell-assign.sh`.
+
+### TD-OILS-DECL-VALUE-BYPASSES-DYNVAR. `declare NAME=v` on a variable the shell computes stores a shadow instead of moving the counter — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare`'s scalar
+store, the three `put_var` arms at the end of the operand loop (integer
+attribute / case attribute / plain). They write the variable table
+directly, so none of the dynamic-special assignment machinery in
+`apply_assignment` is reached: the name's side effect never runs and the
+`vars` entry that is made is then ignored by the dynamic read, which is
+what makes the value simply vanish.
+
+This is the same bug `TD-OILS-ATTR-ASSIGN-BYPASSES-DYNVAR` described for
+`export`/`readonly`, which were fixed by routing their store through
+`Shell::attr_store`; `declare`/`local`/`typeset` were not.
+
+```sh
+SECONDS=7;             echo "[$SECONDS]"   # both [7]
+declare SECONDS=7;     echo "[$SECONDS]"   # bash [7]   osh [0]
+declare -i SECONDS=7;  echo "[$SECONDS]"   # bash [7]   osh [0]
+declare -i SECONDS; SECONDS=7; echo "[$SECONDS]"        # both [7]
+export SECONDS=7;      echo "[$SECONDS]"   # both [7]   (fixed already)
+declare -i RANDOM=1; a=$RANDOM
+declare -i RANDOM=1; b=$RANDOM             # bash a=b   osh a≠b (never reseeded)
+declare -i BASH_SUBSHELL=9; echo "[$BASH_SUBSHELL]"     # bash [9]   osh [1]
+declare -i HISTCMD=3+4; declare -p HISTCMD # bash declare -i HISTCMD="0"   osh "7"
+```
+
+**Proper fix.** Route the scalar store through `apply_assignment` the way
+`Shell::attr_store` does — the same `WordPart::SingleQuoted` carrier, so
+the already-expanded value is not expanded a second time. The three arms
+collapse into one call, because `apply_assignment` applies the integer
+and case attributes itself. Two things must survive the move: a bad `-i`
+value still has to leave the name created-but-unset (`self.declared`) and
+`break` out of the operand loop, and the array/nameref arms above must
+keep their own paths. Check afterwards that `declare -p NAME` of a
+computed name still reports the live reading rather than a shadow.
+
+### TD-OILS-ASSIGN-PREFIX-BYPASSES-DYNVAR. An assignment *prefix* naming a computed variable does not run its side effect — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the temporary-environment path
+that binds a simple command's assignment prefix. Like the `declare` case
+above it writes the binding directly, so the dynamic-special intercept in
+`apply_assignment` never runs and the name goes on computing from its old
+base for the command's duration.
+
+```sh
+SECONDS=100 eval 'echo "[$SECONDS]"'       # bash [100]   osh [0]
+BASH_SUBSHELL=9 eval 'echo "[$BASH_SUBSHELL]"'  # bash [9]   osh [1]
+echo "[$SECONDS]"                          # both [0] afterwards
+```
+
+The *restore* half is already right — bash puts the old value back when
+the command ends, and so does osh — so this is exactly the store.
+
+**Proper fix.** The prefix binding has to run the same intercept, and then
+undo it: for a computed name the "old value" to restore is the counter's
+base, not a table entry. Cheapest correct shape is to snapshot and restore
+the base fields (`seconds_base`/`seconds_anchor`, `subshell_base`, `rng`)
+around the command when a prefix names one of those, which is the state
+bash's own save/restore of the variable amounts to.
+
+### TD-OILS-PIPELINE-STAGE-SUBSHELL-DEPTH. A simple-command pipeline stage counts as a subshell for `$BASH_SUBSHELL`; in bash it does not — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `clone_for_subshell` is used
+for every pipeline stage, and it increments `subshell_depth`
+unconditionally.
+
+bash increments its `subshell_level` in `execute_in_subshell`, which runs
+*compound* commands; a simple command in a pipeline is forked and then
+executed directly, so the counter does not move for it.
+
+```sh
+echo "[$BASH_SUBSHELL]" | cat        # bash [0]   osh [1]
+( echo "[$BASH_SUBSHELL]" | cat )    # bash [1]   osh [2]
+{ echo "[$BASH_SUBSHELL]"; } | cat   # both [1]   — a group *is* compound
+```
+
+**Proper fix.** Make the increment belong to the *compound* subshell
+constructs (`( … )`, command substitution, a braced/compound pipeline
+stage, process substitution) rather than to the clone itself: pass the
+depth change into `clone_for_subshell` from the caller, so a simple
+command run as a pipeline stage clones without it. Note that whatever
+shape is chosen must keep `$$` vs `$BASHPID` behaviour intact, which uses
+the same clone.
 
 ### TD-OILS-NAMEREF-VALUELESS-VALIDATION. `declare -n NAME` on an already-set variable does not validate its value — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

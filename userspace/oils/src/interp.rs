@@ -10763,7 +10763,12 @@ impl Shell {
             // further right than its recorded position — every earlier operand has
             // already been spliced in ahead of it. A `word_index` past the last word
             // means the operand was written after every word, hence appended.
-            let trace_words = self.xtrace.then(|| {
+            //
+            // The same list answers a second question, so it is built whether or
+            // not tracing is on: under `-p` the builtin is *asked about* its
+            // operands, and the compound ones have to be in the list it is asked
+            // with or `declare -p q r=(1)` would report only `q`.
+            let spliced = {
                 let mut w = argv.clone();
                 for (k, d) in sc.decl_arrays.iter().enumerate() {
                     let at = word_starts
@@ -10775,11 +10780,13 @@ impl Shell {
                     w.insert(at, d.assign.name.clone().into_bytes());
                 }
                 w
-            });
+            };
+            let trace = self.xtrace;
             return self.exec_declare_with_arrays(
                 &argv,
                 &sc.decl_arrays,
-                trace_words.as_deref(),
+                &spliced,
+                trace,
                 out,
                 &redir,
             );
@@ -16280,7 +16287,7 @@ impl Shell {
                     // `declare -F`/`-f` operate on functions (name listing).
                     self.declare_functions(args, lead.contains(&b'F'), out, redir)
                 } else if lead.contains(&b'p') {
-                    self.declare_print(args, out, redir)
+                    self.declare_print(args, name, out, redir)
                 } else {
                     // An attribute flag with NO name operands is a *listing*
                     // filtered by those attributes (bash), not a declaration.
@@ -16300,7 +16307,22 @@ impl Shell {
                     }
                 }
             }
-            "local" => self.builtin_declare(args, true, "local"),
+            "local" => {
+                // `local -p` lists this frame's locals rather than declaring
+                // anything — the same split `declare -p` makes, against a
+                // different table. Outside a function there is no frame to list,
+                // and `local` refuses before reading its flags at all.
+                let lead: Str =
+                    args.iter().take_while(|a| a.starts_with(b"-")).flatten().copied().collect();
+                if !lead.contains(&b'p') {
+                    self.builtin_declare(args, true, "local")
+                } else if self.local_frames.is_empty() {
+                    self.perrln("local: can only be used in a function");
+                    1
+                } else {
+                    self.local_print(args, out, redir)
+                }
+            }
             "readonly" => self.builtin_readonly(args, out, redir),
             "shopt" => self.builtin_shopt(args, out, redir),
             "unset" => self.builtin_unset(args),
@@ -21644,9 +21666,72 @@ impl Shell {
         all
     }
 
-    fn declare_print(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
-        // Names are the non-flag operands after the leading dashed flags.
-        let names: Vec<&Str> = args.iter().skip_while(|a| a.starts_with(b"-")).collect();
+    /// `local -p [name …]` — the listing `local` answers with, which is a
+    /// different question from `declare -p`'s: it reports only the names made
+    /// local in the *current* function frame.
+    ///
+    /// So a global is not found even though it exists (`gv=G; f() { local -p
+    /// gv; }` says `local: gv: not found`), nor is a name local to the
+    /// *caller*, and a declared-but-unset local still lists as a bare
+    /// `declare -- q`. With no names the frame's own names are listed sorted.
+    /// `-p` asks a question rather than making a declaration, so an operand
+    /// that looks like an assignment is taken whole as a name to look up —
+    /// `local -p n=5` reports `n=5: not found` and assigns nothing.
+    fn local_print(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
+        let mut frame: Vec<String> = self
+            .local_frames
+            .last()
+            .map(|f| f.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_default();
+        frame.sort();
+        frame.dedup();
+        let names = Self::print_operand_names(args);
+        if names.is_empty() {
+            let mut listing = Str::new();
+            for name in &frame {
+                if let Some(def) = self.format_declare_def(name) {
+                    listing.extend_from_slice(&def);
+                    listing.push(b'\n');
+                }
+            }
+            return self.write_bytes(out, redir, &listing);
+        }
+        let mut status = 0;
+        let mut write_status = 0;
+        for name in names {
+            // Answered where it is reached, so definitions and complaints
+            // interleave in operand order — as in `declare_print`.
+            match bytes::as_str(name)
+                .filter(|n| frame.iter().any(|f| f == n))
+                .and_then(|n| self.format_declare_def(n))
+            {
+                Some(def) => {
+                    let w = self.write_bytes(out, redir, &bfmt![&def, b"\n"]);
+                    if w != 0 {
+                        write_status = w;
+                    }
+                }
+                None => {
+                    self.berrln(&bfmt![self.err_prefix(), b"local: ", name, b": not found"]);
+                    status = 1;
+                }
+            }
+        }
+        if write_status != 0 { write_status } else { status }
+    }
+
+    /// The names a `-p` listing was asked about: the operands left once the
+    /// leading flag words are dropped. Both directions are flag words — `declare
+    /// -p +a q` asks about `q` alone — and no identifier can begin with either
+    /// sign, so the two are told apart by position rather than by shape.
+    fn print_operand_names(args: &[Str]) -> Vec<&Str> {
+        args.iter()
+            .skip_while(|a| a.starts_with(b"-") || a.starts_with(b"+"))
+            .collect()
+    }
+
+    fn declare_print(&mut self, args: &[Str], tag: &str, out: &mut Out, redir: &RedirPlan) -> i32 {
+        let names = Self::print_operand_names(args);
         let mut status = 0;
         let mut write_status = 0;
         if names.is_empty() {
@@ -21676,7 +21761,15 @@ impl Shell {
                         }
                     }
                     None => {
-                        self.berrln(&bfmt![self.err_prefix(), b"declare: ", name, b": not found"]);
+                        // The complaint carries the name the *command* was
+                        // called by, so `typeset -p nosuch` says `typeset:`.
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            tag,
+                            b": ",
+                            name,
+                            b": not found"
+                        ]);
                         status = 1;
                     }
                 }
@@ -22990,16 +23083,18 @@ impl Shell {
     /// each array literal is marked with the declared kind (`-A` → assoc,
     /// `-a`/default → indexed) and applied via [`Shell::apply_assignment`].
     ///
-    /// `trace_words` is `Some` only under `set -x`: it is `argv` with each compound
-    /// operand's bare name spliced back in at its source position, which is how bash
-    /// renders the builtin's own trace line. That line is emitted here, after the
-    /// per-operand `name=(…)` lines that phase 1 produces, so the caller must not
-    /// trace this command itself.
+    /// `spliced` is `argv` with each compound operand's bare name put back at its
+    /// source position. It answers two questions. Under `set -x` (`xtrace_on`) it is
+    /// the builtin's own trace line, emitted here after the per-operand `name=(…)`
+    /// lines that phase 1 produces, so the caller must not trace this command itself.
+    /// And under `-p` it is the operand list the builtin is *asked about*: the
+    /// compound names have to be in it or `declare -p q r=(1)` would report only `q`.
     fn exec_declare_with_arrays(
         &mut self,
         argv: &[Str],
         decl_arrays: &[DeclArray],
-        trace_words: Option<&[Str]>,
+        spliced: &[Str],
+        xtrace_on: bool,
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
@@ -23014,7 +23109,8 @@ impl Shell {
             return self.exec_declare_with_arrays_scoped(
                 argv,
                 decl_arrays,
-                trace_words,
+                spliced,
+                xtrace_on,
                 out,
                 redir,
             );
@@ -23028,8 +23124,8 @@ impl Shell {
             }
         }
         let saved = self.enter_global_scope(&names);
-        let flow =
-            self.exec_declare_with_arrays_scoped(argv, decl_arrays, trace_words, out, redir);
+        let flow = self
+            .exec_declare_with_arrays_scoped(argv, decl_arrays, spliced, xtrace_on, out, redir);
         self.leave_global_scope(saved);
         flow
     }
@@ -23073,7 +23169,8 @@ impl Shell {
         &mut self,
         argv: &[Str],
         decl_arrays: &[DeclArray],
-        trace_words: Option<&[Str]>,
+        spliced: &[Str],
+        xtrace_on: bool,
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
@@ -23669,9 +23766,9 @@ impl Shell {
         // line comes now — after them, and only if the command got this far: bash
         // does not trace the builtin at all when an operand's binding aborted the
         // command above.
-        if let Some(words) = trace_words {
+        if xtrace_on {
             let mut line = self.xtrace_prefix();
-            for (i, w) in words.iter().enumerate() {
+            for (i, w) in spliced.iter().enumerate() {
                 if i > 0 {
                     line.push(b' ');
                 }
@@ -23679,6 +23776,24 @@ impl Shell {
             }
             line.push(b'\n');
             self.emit_stderr(&line);
+        }
+        // `-p` asks the builtin about its operands rather than telling it about
+        // them, so the compound ones — which phase 2 never sees, since they live
+        // in `decl_arrays` rather than `argv` — have to be asked about here, from
+        // the spliced list. The literal has already bound, so what gets printed is
+        // the array the same command just made; phase 3 is skipped entirely
+        // because a printing command applies none of the builtin's own attributes
+        // (`declare -px q=(1)` prints `declare -a q=…` and exports nothing).
+        // `readonly -p`/`export -p` are not this: they take `-p` as "print in a
+        // form that can be re-read", still mark, and print nothing extra here.
+        if print_mode && !matches!(cmd, "readonly" | "export") {
+            let asked = spliced.get(1..).unwrap_or_default();
+            self.last_status = if is_local {
+                self.local_print(asked, out, redir)
+            } else {
+                self.declare_print(asked, cmd, out, redir)
+            };
+            return Flow::Next;
         }
         // Phase 2 — the builtin: the flags, and any *scalar* operands
         // (e.g. `declare -x FOO=bar`). For `readonly`/`export`, route scalar
@@ -44276,6 +44391,106 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("readonly -n q=(1); echo rc=$?; declare -p q").0,
             "rc=0\ndeclare -a q=([0]=\"1\")\n"
+        );
+    }
+
+    /// `-p` asks the builtin about its operands instead of telling it about
+    /// them. A compound one has still bound — the assignment happens during
+    /// word expansion — so what is printed is the array the same command just
+    /// made, and none of the builtin's own attributes are applied to it.
+    #[test]
+    fn print_mode_reports_the_compound_operand_it_just_bound() {
+        assert_eq!(
+            run("declare -p q=(1 2); echo rc=$?").0,
+            "declare -a q=([0]=\"1\" [1]=\"2\")\nrc=0\n"
+        );
+        // Plain names and assignments are answered together, in source order —
+        // which is only possible because the compound operand is put back at
+        // its own position in the list the listing is asked with.
+        assert_eq!(
+            run("p=zz; declare -p p q=(9)").0,
+            "declare -- p=\"zz\"\ndeclare -a q=([0]=\"9\")\n"
+        );
+        assert_eq!(
+            run("p=zz; declare -p q=(9) p").0,
+            "declare -a q=([0]=\"9\")\ndeclare -- p=\"zz\"\n"
+        );
+        // The kind letters still choose what the literal binds as, but the
+        // value attributes are not applied at all.
+        assert_eq!(
+            run("declare -pA q=([k]=v)").0,
+            "declare -A q=([k]=\"v\" )\n"
+        );
+        assert_eq!(
+            run("declare -px q=(1); declare -p q").0,
+            "declare -a q=([0]=\"1\")\ndeclare -a q=([0]=\"1\")\n"
+        );
+        assert_eq!(
+            run("declare -pr q=(1); q[0]=9; echo rc=$?; declare -p q").0,
+            "declare -a q=([0]=\"1\")\nrc=0\ndeclare -a q=([0]=\"9\")\n"
+        );
+        // Nor are the refusals a non-printing command would reach.
+        for src in [
+            "declare -a q=(1 2); declare -p +a q=(3)",
+            "declare -p -a -A q=(3)",
+            "declare -p -n q=(1)",
+        ] {
+            assert_eq!(run(&format!("{{ {src}; }} 2>&1 >/dev/null; echo rc=$?")).0, "rc=0\n", "{src}");
+        }
+        // An unknown name is complained about under the name the command was
+        // *called* by, and the answers interleave in operand order.
+        assert_eq!(
+            run("declare q; { declare -p q nope; } 2>&1; echo rc=$?").0,
+            "declare -- q\nosh: declare: nope: not found\nrc=1\n"
+        );
+        assert_eq!(
+            run("{ typeset -p nope; } 2>&1; echo rc=$?").0,
+            "osh: typeset: nope: not found\nrc=1\n"
+        );
+        // `readonly -p`/`export -p` are not this listing: they still mark.
+        assert_eq!(
+            run("readonly -p q=(1) >/dev/null; declare -p q").0,
+            "declare -ar q=([0]=\"1\")\n"
+        );
+    }
+
+    /// `local -p` answers a narrower question than `declare -p`: only the names
+    /// made local in the *current* frame exist for it.
+    #[test]
+    fn local_print_lists_only_the_current_frames_locals() {
+        assert_eq!(
+            run("f() { local m1=1 m2; local -p; echo rc=$?; }; f").0,
+            "declare -- m1=\"1\"\ndeclare -- m2\nrc=0\n"
+        );
+        // A global is not a local, and neither is the *caller's* local.
+        assert_eq!(
+            run("g=G; f() { local -p g; echo rc=$?; }; f 2>&1").0,
+            "main: local: g: not found\nrc=1\n"
+        );
+        assert_eq!(
+            run("i() { local -p m; echo rc=$?; }; o() { local m=1; i; }; o 2>&1").0,
+            "main: local: m: not found\nrc=1\n"
+        );
+        // Asking a question rather than making a declaration: an operand that
+        // looks like an assignment is taken whole as a name, and assigns nothing.
+        assert_eq!(
+            run("f() { local -p m=5; echo rc=$?; declare -p m; }; f 2>&1").0,
+            "main: local: m=5: not found\nrc=1\nmain: declare: m: not found\n"
+        );
+        // Kind letters do not filter the listing, and a compound operand binds
+        // as a local first and is then listed.
+        assert_eq!(
+            run("f() { local m=1; local -a n=(x); local -pa; }; f").0,
+            "declare -- m=\"1\"\ndeclare -a n=([0]=\"x\")\n"
+        );
+        assert_eq!(
+            run("f() { local -p m=(1 2); echo rc=$?; }; f").0,
+            "declare -a m=([0]=\"1\" [1]=\"2\")\nrc=0\n"
+        );
+        // Outside a function there is no frame to list at all.
+        assert_eq!(
+            run("local -p 2>&1; echo rc=$?").0,
+            "osh: local: can only be used in a function\nrc=1\n"
         );
     }
 

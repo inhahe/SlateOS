@@ -6763,6 +6763,48 @@ and would keep a small phase-3 remnant.
 Reproduce with `target/dvscratch/px40.sh` (the last section) — it is the
 only line of that probe that still differs.
 
+The `spliced` word list added for `-p` on 2026-07-31 (see
+TD-OILS-DECL-COMPOUND-HIDES-FLAG-ORDER below) is exactly the list this
+fix wants: `argv` with each compound operand's bare name put back at its
+source position. It is already threaded from `exec_simple_inner` down
+through `exec_declare_with_arrays` to `exec_declare_with_arrays_scoped`.
+
+### TD-OILS-DECL-COMPOUND-HIDES-FLAG-ORDER. A flag word written *after* a compound operand is still read as a flag — 2026-07-31 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_declare_with_arrays_scoped`'s
+flag loop and its phase-2 call, both of which run over `argv`. Compound
+`name=(…)` operands were lifted out of `argv` into `decl_arrays` before
+either sees it, so a flag word that in the source sat *behind* an operand
+looks to them like a leading flag.
+
+bash parses a declaration builtin's flags with getopt, which stops at the
+first non-option word; everything from there on is an operand, and an
+operand that is not an identifier is refused:
+
+```sh
+declare k1=1  -p    # bash and osh agree: `-p': not a valid identifier, rc 1
+declare k4=(1) -x   # bash: `-x': not a valid identifier, rc 1
+                    # osh:  binds k4 and exports it, rc 0
+declare k5=(1) -a   # bash: `-a': not a valid identifier, rc 1;  osh: rc 0
+```
+
+The scalar spelling already matches — `builtin_declare` does stop at its
+first operand. Only the compound spelling diverges, because the operand
+that should have stopped the scan is not in the list being scanned.
+
+Reproduce with `target/dvscratch/px50.sh` (the "compound case" section is
+the whole diff) and the `-p after the operand` line of `px46.sh`.
+
+**Proper fix.** `exec_simple_inner` knows where each compound operand sat
+(`word_starts[d.word_index]`), so it can hand down the argv index at which
+flag parsing must stop — the position of the earliest compound operand.
+The scoped function's own loop then runs over `argv[1..limit]`, and
+`builtin_declare_scoped` needs the same limit so the words past it are
+refused as operands rather than read as flags. Better still, fold this
+into the TD-OILS-DECL-REFUSAL-ORDER refactor above: once the compound
+operands are spliced back into the builtin's own operand list, its single
+getopt-shaped loop stops in the right place for free.
+
 ### TD-OILS-DECL-DIAGNOSTIC-ESCAPES-REDIRECTION. `declare`'s invalid-option and refusal messages ignore the command's own redirections — 2026-07-31 — OPEN
 
 **Where:** `userspace/oils/src/interp.rs` — the declaration-builtin flag

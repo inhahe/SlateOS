@@ -23484,10 +23484,60 @@ impl Shell {
         // local*; phase 3 skips them, since bash applies none of the builtin's
         // attributes to an operand it turned away that way. See the refusal in
         // the loop below.
-        let mut refused_local: HashSet<&str> = HashSet::new();
+        let mut refused_local: HashSet<String> = HashSet::new();
         let mut refused_status = 0;
+        // Where each operand's binding actually lands, in operand order, so that
+        // phase 3 can apply the builtin's attributes to the same name phase 1
+        // bound. See the resolution at the head of the loop.
+        let mut targets: Vec<String> = Vec::with_capacity(decl_arrays.len());
         for d in decl_arrays {
             let a = &d.assign;
+            // bash resolves a nameref before it does anything with a compound
+            // operand. `apply_assignment` already follows the reference to store
+            // the values; everything *around* that store follows it too — the
+            // local shadow, the array kind, the value attributes, and the
+            // attributes phase 3 applies — so `t=1; declare -n r=t; declare -ax
+            // r=(z)` leaves `declare -ax t=([0]="z")` behind with `r` still a
+            // plain reference to it.
+            //
+            // The diagnostics do not all follow. The two refusals that turn on
+            // *where the binding would land* name the target (`local -n r=ro`
+            // against a readonly global reports `ro`), while the ones raised
+            // against the operand the command was handed name it as it was
+            // written (`declare -n r=t; declare -aA r=(z)` reports `r`).
+            // …but only when the binding this declaration *writes* is itself the
+            // reference. A local-binding `declare`/`local` writes the innermost
+            // frame, so a *global* reference of the same name is merely the thing
+            // it shadows and the frame gets a fresh, ordinary array of its own.
+            // That is the same rule `binding_is_nameref` states for scalar
+            // operands in [`Shell::builtin_declare_scoped`], and the one
+            // `apply_assignment` already follows when it stores the values.
+            let follow =
+                self.nameref_attr.contains(&a.name) && (!make_local || self.local_binds_here(&a.name));
+            let target = match if follow { self.resolve_ref_use(&a.name) } else { None } {
+                Some(RefTarget { base, sub: None }) => base,
+                // An element reference names no variable a whole array literal
+                // could bind to. bash refuses it in the compound-assignment
+                // machinery's untagged spelling — the reference's own text, not
+                // the operand's — and discards the rest of the parse unit.
+                Some(RefTarget { base, sub: Some(sub) }) => {
+                    let msg = bfmt![b"`", base.as_bytes(), b"[", &sub, b"]': not a valid identifier"];
+                    self.berrln(&bfmt![self.err_prefix(), &msg]);
+                    self.last_status = 1;
+                    return Flow::Discard;
+                }
+                // A followed reference that resolves to no name at all is a cycle
+                // — `resolve_ref_use` has already warned — so the operand falls
+                // back to the name it was written with, and the reference
+                // attribute goes with the fallback: the literal is about to make
+                // that name an array, and no variable is both.
+                None if follow => {
+                    self.unreference_for_declare(&a.name);
+                    a.name.clone()
+                }
+                None => a.name.clone(),
+            };
+            targets.push(target.clone());
             // A variable the shell maintains refuses a compound literal with the
             // same split the scalar path has (see [`Shell::noassign`] and the
             // refusal in `builtin_declare_scoped`), and the split is by *where the
@@ -23506,12 +23556,22 @@ impl Shell {
             //   * A **global** one at top level is not special-cased at all: it
             //     goes through `apply_assignment` like a bare `GROUPS=(1 2)` and
             //     gets that path's silent parse-unit discard.
-            if make_local && self.noassign.contains(&a.name) {
-                let func = self.fn_stack.last().cloned().unwrap_or_default();
-                let msg: Str = bfmt![&a.name, b": variable may not be assigned value"];
-                self.berrln(&bfmt![self.err_prefix(), &func, b": ", &msg]);
+            // Both of the refusals below are reported twice over — once by the
+            // compound-assignment machinery, which inside a function tags its
+            // diagnostics with the function's name, and once by the builtin
+            // handed the same operand. An operand reached *through a reference*
+            // loses the first tag: the refusal is raised from the resolution,
+            // which has no source word to name the function from.
+            let func_tag: Str = if follow {
+                Vec::new()
+            } else {
+                bfmt![&self.fn_stack.last().cloned().unwrap_or_default(), b": "]
+            };
+            if make_local && self.noassign.contains(&target) {
+                let msg: Str = bfmt![&target, b": variable may not be assigned value"];
+                self.berrln(&bfmt![self.err_prefix(), &func_tag, &msg]);
                 self.berrln(&bfmt![self.err_prefix(), cmd, b": ", &msg]);
-                refused_local.insert(a.name.as_str());
+                refused_local.insert(target);
                 refused_status = 1;
                 continue;
             }
@@ -23527,26 +23587,25 @@ impl Shell {
             let held_here = self
                 .local_frames
                 .last()
-                .is_some_and(|f| f.iter().any(|(n, _)| *n == a.name));
+                .is_some_and(|f| f.iter().any(|(n, _)| *n == target));
             let held_outer = self
                 .local_frames
                 .iter()
                 .rev()
                 .skip(usize::from(!self.local_frames.is_empty()))
-                .any(|f| f.iter().any(|(n, _)| *n == a.name));
-            if make_local && !held_here && !held_outer && self.readonly.contains(&a.name) {
-                let func = self.fn_stack.last().cloned().unwrap_or_default();
-                let msg: Str = bfmt![&a.name, b": readonly variable"];
-                self.berrln(&bfmt![self.err_prefix(), &func, b": ", &msg]);
+                .any(|f| f.iter().any(|(n, _)| *n == target));
+            if make_local && !held_here && !held_outer && self.readonly.contains(&target) {
+                let msg: Str = bfmt![&target, b": readonly variable"];
+                self.berrln(&bfmt![self.err_prefix(), &func_tag, &msg]);
                 self.berrln(&bfmt![self.err_prefix(), cmd, b": ", &msg]);
-                refused_local.insert(a.name.as_str());
+                refused_local.insert(target);
                 refused_status = 1;
                 continue;
             }
             // A function-local array declaration shadows the name in the current
             // frame first.
             if make_local {
-                self.declare_local(&a.name);
+                self.declare_local(&target);
             }
             // The kind and the value attributes have to go on before the literal
             // binds (the kind picks the binding branch, and `-i`/`-l` transform each
@@ -23560,7 +23619,7 @@ impl Shell {
             // `local` shadow, so restoring undoes only what *this operand* did — so
             // that one case can be rolled back; every other outcome keeps what was
             // applied.
-            let snap = self.snapshot_var(&a.name);
+            let snap = self.snapshot_var(&target);
             // The attributes the name arrived with. An *unclaimed* compound
             // literal binds against these rather than against whatever the
             // command leaves behind, so they have to be read out here — `snap`
@@ -23583,7 +23642,7 @@ impl Shell {
             // `self.arrays` — which looks exactly like silent data loss to a
             // script. Reject with bash's message and status 1, leaving the
             // variable untouched (`unset` first is the way to change kind).
-            if let Some(from) = self.array_kind_conflict(&a.name, assoc, indexed) {
+            if let Some(from) = self.array_kind_conflict(&target, assoc, indexed) {
                 let (from_kind, to_kind) = from;
                 // The *literal* form is diagnosed by bash's compound-assignment
                 // machinery, not by the builtin, so it carries no `declare:` tag
@@ -23594,56 +23653,56 @@ impl Shell {
                 return Flow::Discard;
             }
             if assoc {
-                self.array_kind_apply(&a.name, true);
+                self.array_kind_apply(&target, true);
             } else if indexed {
-                self.array_kind_apply(&a.name, false);
+                self.array_kind_apply(&target, false);
             }
             // Apply the value attributes to the array name (mirrors the scalar
             // path in `builtin_declare`, removals last and all).
             if unset_integer {
-                self.integer_attr.remove(&a.name);
+                self.integer_attr.remove(&target);
             } else if integer {
-                self.integer_attr.insert(a.name.clone());
+                self.integer_attr.insert(target.clone());
             }
             if case_conflict {
-                self.lower_attr.remove(&a.name);
-                self.upper_attr.remove(&a.name);
-                self.capcase_attr.remove(&a.name);
+                self.lower_attr.remove(&target);
+                self.upper_attr.remove(&target);
+                self.capcase_attr.remove(&target);
             } else {
                 match case_on {
                     Some(1) => {
-                        self.lower_attr.insert(a.name.clone());
-                        self.upper_attr.remove(&a.name);
-                        self.capcase_attr.remove(&a.name);
+                        self.lower_attr.insert(target.clone());
+                        self.upper_attr.remove(&target);
+                        self.capcase_attr.remove(&target);
                     }
                     Some(2) => {
-                        self.upper_attr.insert(a.name.clone());
-                        self.lower_attr.remove(&a.name);
-                        self.capcase_attr.remove(&a.name);
+                        self.upper_attr.insert(target.clone());
+                        self.lower_attr.remove(&target);
+                        self.capcase_attr.remove(&target);
                     }
                     Some(3) => {
-                        self.capcase_attr.insert(a.name.clone());
-                        self.lower_attr.remove(&a.name);
-                        self.upper_attr.remove(&a.name);
+                        self.capcase_attr.insert(target.clone());
+                        self.lower_attr.remove(&target);
+                        self.upper_attr.remove(&target);
                     }
                     _ => {}
                 }
             }
             if off_lower {
-                self.lower_attr.remove(&a.name);
+                self.lower_attr.remove(&target);
             }
             if off_upper {
-                self.upper_attr.remove(&a.name);
+                self.upper_attr.remove(&target);
             }
             if off_capcase {
-                self.capcase_attr.remove(&a.name);
+                self.capcase_attr.remove(&target);
             }
             // The silent half of the refusal above: a *global* target reached from
             // inside a function keeps its value and its status, having taken every
             // attribute on the way here. At top level there is no case to make —
             // the binding below is the same one a bare `GROUPS=(1 2)` performs, and
             // refuses itself.
-            if !self.local_frames.is_empty() && self.noassign.contains(&a.name) {
+            if !self.local_frames.is_empty() && self.noassign.contains(&target) {
                 continue;
             }
             // Default (no flag): an array literal makes an indexed array — which
@@ -23680,8 +23739,8 @@ impl Shell {
                 _ => None,
             };
             let named_case = seen_lower || seen_upper || seen_capcase;
-            let stored_fold = self.case_attr_of(&a.name);
-            let stored_int = self.integer_attr.contains(&a.name);
+            let stored_fold = self.case_attr_of(&target);
+            let stored_int = self.integer_attr.contains(&target);
             let bind_fold = if claimed {
                 // Two different letters named in one command leave no fold at
                 // all; one letter is that fold whichever direction named it.
@@ -23707,13 +23766,13 @@ impl Shell {
                 arrived_int && !unset_integer
             };
             if bind_fold != stored_fold {
-                self.set_case_attr(&a.name, bind_fold);
+                self.set_case_attr(&target, bind_fold);
             }
             if bind_int != stored_int {
                 if bind_int {
-                    self.integer_attr.insert(a.name.clone());
+                    self.integer_attr.insert(target.clone());
                 } else {
-                    self.integer_attr.remove(&a.name);
+                    self.integer_attr.remove(&target);
                 }
             }
             // The same call marks which of the operand's two passes a failure came
@@ -23726,8 +23785,8 @@ impl Shell {
             // is only knowable once the literal *has* bound, which is why this
             // half is folded in here rather than with the others above.
             let operand_refused = operand_refused
-                || (unset_indexed && self.arrays.contains_key(&a.name))
-                || (unset_assoc && self.assoc.contains_key(&a.name));
+                || (unset_indexed && self.arrays.contains_key(&target))
+                || (unset_assoc && self.assoc.contains_key(&target));
             // A claimed fold was really set on the variable, so the removals run
             // against it rather than against the fold the name arrived with.
             //
@@ -23750,13 +23809,13 @@ impl Shell {
                 stored_fold
             };
             if post_fold != bind_fold {
-                self.set_case_attr(&a.name, post_fold);
+                self.set_case_attr(&target, post_fold);
             }
             if bind_int != stored_int && !operand_refused {
                 if stored_int {
-                    self.integer_attr.insert(a.name.clone());
+                    self.integer_attr.insert(target.clone());
                 } else {
-                    self.integer_attr.remove(&a.name);
+                    self.integer_attr.remove(&target);
                 }
             }
             let expanded = std::mem::replace(&mut self.compound_expanded, saved_expanded);
@@ -23803,7 +23862,7 @@ impl Shell {
                 // been written: `declare -ai b=([0]=1 [1]=2+ [2]=3)` leaves
                 // `declare -ai b=([0]="1")`.
                 if !expanded {
-                    self.restore_var(&a.name, snap);
+                    self.restore_var(&target, snap);
                 }
                 return flow;
             }
@@ -23881,11 +23940,17 @@ impl Shell {
         // `apply_assignment` would otherwise reject the initializer — and an
         // array-literal-only `readonly arr=(1 2)` has no builtin call at all to
         // rely on.
-        for d in decl_arrays {
+        //
+        // Each operand is paired with the name phase 1 actually bound, which a
+        // nameref operand's own name is not: `t=1; declare -n r=t; declare -x
+        // r=(z)` exports `t`, leaving `r` a plain reference. The *diagnostics*
+        // below still name the operand as it was written, which is what bash
+        // reports for the refusals its builtin raises.
+        for (d, target) in decl_arrays.iter().zip(&targets) {
             let a = &d.assign;
             // An operand refused as a local above took none of the attributes in
             // phase 1 and takes none of these either — bash abandons it whole.
-            if refused_local.contains(a.name.as_str()) {
+            if refused_local.contains(target) {
                 continue;
             }
             // See `nameref_array_refusal`: the literal has bound, and the `-n`
@@ -23902,8 +23967,8 @@ impl Shell {
             // `+a`/`+A` cannot un-make the array the literal just bound, so they
             // refuse — and the operand takes none of the attributes below, not
             // even the export of a `declare -x +a q=(1 2)`.
-            if (unset_indexed && self.arrays.contains_key(&a.name))
-                || (unset_assoc && self.assoc.contains_key(&a.name))
+            if (unset_indexed && self.arrays.contains_key(target))
+                || (unset_assoc && self.assoc.contains_key(target))
             {
                 self.perrln(&format!(
                     "{cmd}: {}: cannot destroy array variables in this way",
@@ -23931,17 +23996,17 @@ impl Shell {
                 self.nameref_attr.insert(a.name.clone());
             }
             if unset_trace {
-                self.trace_attr.remove(&a.name);
+                self.trace_attr.remove(target);
             } else if trace {
-                self.trace_attr.insert(a.name.clone());
+                self.trace_attr.insert(target.clone());
             }
             if unset_export {
-                self.exported.remove(&a.name);
+                self.exported.remove(target);
             } else if export {
-                self.exported.insert(a.name.clone());
+                self.exported.insert(target.clone());
             }
             if readonly && !unset_readonly {
-                self.readonly.insert(a.name.clone());
+                self.readonly.insert(target.clone());
             }
         }
         self.last_status = status;
@@ -44785,6 +44850,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("w=5; declare -n r=w; f() { export r=9; }; f; declare -p w").0,
             "declare -x w=\"9\"\n"
+        );
+    }
+
+    /// A *compound* operand follows a reference by the same rule the scalar one
+    /// does — and takes every attribute the command names along with it, since
+    /// the array it makes belongs to the target.
+    #[test]
+    fn a_compound_operand_follows_a_reference_with_its_attributes() {
+        // The kind converts the target, not the reference, which is left as it
+        // was; the value attributes are in force while the literal binds.
+        assert_eq!(
+            run("declare -A t=([k]=v); declare -n r=t; declare -A r=(z); declare -p t r").0,
+            "declare -A t=([z]=\"\" )\ndeclare -n r=\"t\"\n"
+        );
+        assert_eq!(
+            run("t=1; declare -n r=t; declare -i r=(2+3); declare -p t r").0,
+            "declare -ai t=([0]=\"5\")\ndeclare -n r=\"t\"\n"
+        );
+        // The attributes the builtin applies in phase 3 follow too.
+        assert_eq!(
+            run("t=1; declare -n r=t; declare -x r=(5); declare -p t r").0,
+            "declare -ax t=([0]=\"5\")\ndeclare -n r=\"t\"\n"
+        );
+        assert_eq!(
+            run("t=1; declare -n r=t; readonly r=(z); declare -p t r").0,
+            "declare -ar t=([0]=\"z\")\ndeclare -n r=\"t\"\n"
+        );
+        // A refusal the builtin raises names the operand as it was *written* —
+        // and abandons it, so the array the literal made keeps its kind.
+        assert_eq!(
+            run("declare -a t=(1); declare -n r=t; { declare +a r=(z); } 2>&1; declare -p t r").0,
+            "osh: declare: r: cannot destroy array variables in this way\n\
+             declare -a t=([0]=\"z\")\ndeclare -n r=\"t\"\n"
+        );
+        // A local binding does not follow a *global* reference: the frame is
+        // about to make its own array of that name, so it merely shadows it.
+        assert_eq!(
+            run("w=5; declare -n r=w; f() { declare -a r=(z); declare -p r; }; f; declare -p w r").0,
+            "declare -a r=([0]=\"z\")\ndeclare -- w=\"5\"\ndeclare -n r=\"w\"\n"
+        );
+        // The frame's *own* reference is followed, and the target it names
+        // becomes a local of this frame too.
+        assert_eq!(
+            run("w=5; f() { local -n r=w; declare -a r=(z); declare -p w; }; f; declare -p w").0,
+            "declare -a w=([0]=\"z\")\ndeclare -- w=\"5\"\n"
         );
     }
 

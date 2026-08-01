@@ -8851,6 +8851,17 @@ the `/tmp`→`D:\tmp` path and `$HOME` format artifacts: a host-execution
 difference, not a target-behavior bug. No action needed; validate argv[0]
 behavior on the slateos target when a ring-3 exec self-test exists.
 
+**Same mechanism, same host-only limits (2026-07-31):** `exec -a name` and
+`exec -l` (which choose the `argv[0]` a command sees, and prefix it with `-`)
+are implemented through that very `#[cfg(unix)]` override, so on the Windows
+host they parse and are consumed but have no observable effect; on the slateos
+target they work. `exec -c` has a neighbouring artifact: it clears the child's
+environment (`Command::env_clear`), which is exact, but the MSYS runtime then
+synthesises `HOME`/`TERM` for an MSYS child, so a host probe of `exec -c env`
+prints those two lines where MSYS bash prints `MSYSTEM`/`SYSTEMROOT`/`WINDIR`.
+Both are why `tests/corpus/exec-options.sh` exercises the option *parsing* and
+diagnostics rather than the observable `argv[0]`/environment.
+
 ### TD-OILS-UNICODE-ESC. `$'\uHHHH'` / `$'\UHHHHHHHH'` always emit UTF-8 (correct for SlateOS; differs only from MSYS bash's C-locale default) — NOT-A-BUG / documented probe artifact — 2026-07-20
 
 **Where:** `userspace/oils/src/lexer.rs` (ANSI-C `$'…'` unescaping, `\u`/`\U`

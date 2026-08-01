@@ -602,12 +602,37 @@ fn resolve_against(cwd: BStr<'_>, path: BStr<'_>) -> Str {
     if path.is_empty() {
         return Str::new();
     }
+    join_under(cwd, path)
+}
+
+/// Join `rel` under the directory `cwd` unconditionally: `cwd`'s trailing
+/// slashes are trimmed and exactly one separator is written between the two.
+///
+/// Unlike [`resolve_against`] this does not ask whether `rel` looks absolute —
+/// the caller has already decided that it is not — so a `rel` that happens to
+/// start with a slash still lands under `cwd`.
+fn join_under(cwd: BStr<'_>, rel: BStr<'_>) -> Str {
     let base = match cwd.iter().rposition(|&b| b != b'/') {
         Some(last) => cwd.get(..=last).unwrap_or(cwd),
         // An all-`/` cwd trims to nothing, and `//x` must not become `x`.
         None => b"",
     };
-    bfmt![base, b"/", path]
+    bfmt![base, b"/", rel]
+}
+
+/// The absolute path `exec` names a command by in its diagnostics.
+///
+/// `exec` has to hold an absolute path for the command it is about to become,
+/// so that it can go on being the shell if the exec fails — and what it reports
+/// is that path rather than the word it was given. A leading `./` is dropped on
+/// the way, because it says "here" and the directory being prepended already
+/// says that; `../` is kept, since only the filesystem can say what it names.
+/// (bash's `sh_makepath (…, MP_RMDOT)`.)
+fn exec_path_name(cwd: BStr<'_>, word: BStr<'_>) -> Str {
+    if path_is_rooted(word) || cwd.is_empty() {
+        return word.to_vec();
+    }
+    join_under(cwd, word.strip_prefix(b"./".as_slice()).unwrap_or(word))
 }
 
 /// Whether two paths name the same directory. bash compares device+inode; the
@@ -723,14 +748,62 @@ const STANDARD_SET_O_OPTIONS: &[&str] = &[
 ///     reports the underlying OS error — `No such file or directory` (127) for
 ///     ENOENT, `Permission denied` / `Is a directory` etc. (126) otherwise.
 ///
-/// The returned string has no `err_prefix`; the caller prepends it.
-fn spawn_error_message(word: BStr<'_>, e: &std::io::Error) -> (Str, i32) {
+/// `exec` words its failures differently, because it is not reporting a command
+/// that would not run but a replacement of the shell that did not happen:
+///   * a word it could not find at all is `exec: WORD: not found` — it was never
+///     going to be looked up as anything but a program.
+///   * a file that exists but will not run is `exec: PATH: cannot execute: …`,
+///     naming the file `$PATH` resolution actually produced.
+///   * a directory says so twice: once as the plain error of trying to run it,
+///     and once in the `cannot execute` form.
+///   * only ENOENT on a pathname keeps the bare `PATH: No such file or
+///     directory`, the same as an ordinary command.
+///
+/// The returned lines have no `err_prefix`; the caller prepends it to each.
+fn spawn_error_message(word: BStr<'_>, e: &std::io::Error, as_exec: bool) -> (Vec<Str>, i32) {
+    use std::io::ErrorKind;
     let is_path = word.contains(&b'/') || word.contains(&b'\\');
-    if e.kind() == std::io::ErrorKind::NotFound && !is_path {
-        return (bfmt![word, b": command not found"], 127);
+    if e.kind() == ErrorKind::NotFound {
+        let msg = if !is_path && as_exec {
+            bfmt![b"exec: ", word, b": not found"]
+        } else if is_path {
+            bfmt![word, b": ", io_error_message(e)]
+        } else {
+            bfmt![word, b": command not found"]
+        };
+        return (vec![msg], 127);
     }
-    let status = if e.kind() == std::io::ErrorKind::NotFound { 127 } else { 126 };
-    (bfmt![word, b": ", io_error_message(e)], status)
+    let text = io_error_message(e);
+    if as_exec {
+        let mut lines = Vec::new();
+        if e.kind() == ErrorKind::IsADirectory {
+            lines.push(bfmt![word, b": ", &text]);
+        }
+        lines.push(bfmt![b"exec: ", word, b": cannot execute: ", &text]);
+        return (lines, 126);
+    }
+    (vec![bfmt![word, b": ", &text]], 126)
+}
+
+/// The way `exec` asks for a command to be started differently from an
+/// ordinary one: `-a name` chooses the `argv[0]` the command sees, `-l` puts a
+/// `-` in front of it (how a login shell is started), and `-c` hands the
+/// command an empty environment — not even the assignments written in front of
+/// the `exec`, which reach the shell itself rather than the command.
+#[derive(Debug, Default, Clone)]
+struct ExecOpts {
+    arg0: Option<Str>,
+    login: bool,
+    clear_env: bool,
+}
+
+impl ExecOpts {
+    /// The `argv[0]` a command started under these options should see, given
+    /// the word that named it.
+    fn arg0_for(&self, word: BStr<'_>) -> Str {
+        let base = self.arg0.as_deref().unwrap_or(word);
+        if self.login { bfmt![b"-", base] } else { base.to_vec() }
+    }
 }
 
 /// Non-local control flow produced while executing statements.
@@ -5608,8 +5681,10 @@ impl Shell {
                     children.push(child);
                 }
                 Err(e) => {
-                    let (msg, status) = spawn_error_message(program, &e);
-                    self.berrln(&bfmt![self.err_prefix(), msg]);
+                    let (msgs, status) = spawn_error_message(program, &e, false);
+                    for msg in &msgs {
+                        self.berrln(&bfmt![self.err_prefix(), msg]);
+                    }
                     prev_stdout = None;
                     stage_status[i] = status;
                 }
@@ -10914,7 +10989,7 @@ impl Shell {
         } else {
             self.install_extra_fds(&redir.extra_fds, out)
         };
-        self.run_external(&argv, &assigns, out, stdin, &redir);
+        self.run_external(&argv, &assigns, out, stdin, &redir, None);
         self.restore_extra_fds(ext_saved_fds);
         Flow::Next
     }
@@ -11717,7 +11792,7 @@ impl Shell {
         {
             return self.run_builtin(&name, rest, assigns, out, stdin, redir);
         }
-        self.run_external(rest, assigns, out, stdin, redir);
+        self.run_external(rest, assigns, out, stdin, redir, None);
         Flow::Next
     }
 
@@ -12014,10 +12089,29 @@ impl Shell {
         out: &mut Out,
         stdin: &StdinSrc,
         redir: &RedirPlan,
+        xopts: Option<&ExecOpts>,
     ) {
+        // `exec -a name` / `exec -l` choose what the command sees as its own
+        // name; everything else hands over the word as typed.
+        #[cfg_attr(not(unix), allow(unused_variables))]
+        let arg0 = xopts.map_or_else(|| argv[0].clone(), |x| x.arg0_for(&argv[0]));
         // Resolve via the shell's `$PATH` (and the `hash` cache) when possible;
         // fall back to the bare name so the OS can still try to locate it.
-        let mut cmd = match self.resolve_external(&argv[0]) {
+        let resolved = self.resolve_external(&argv[0]);
+        // The word a failure is reported against. `exec` names the *file* it
+        // tried to become — an absolute path, because it has to have one to go
+        // on being the shell if the exec fails — so a word that resolved is
+        // quoted as the resolved path and one that only looks like a path is
+        // made absolute against the shell's directory. A word that resolved to
+        // nothing and has no slash was never a path, and keeps its spelling.
+        let reported: Str = match (&resolved, xopts) {
+            (Some(p), Some(_)) => exec_path_name(&self.cwd, &shell_path(p)),
+            (None, Some(_)) if argv[0].contains(&b'/') || argv[0].contains(&b'\\') => {
+                exec_path_name(&self.cwd, &argv[0])
+            }
+            _ => argv[0].clone(),
+        };
+        let mut cmd = match resolved {
             Some(path) => {
                 #[cfg_attr(not(unix), allow(unused_mut))]
                 let mut c = PCommand::new(path);
@@ -12028,7 +12122,7 @@ impl Shell {
                 // as arg0. (Unix-only — Windows has no argv[0] override in std,
                 // and on the host the MSYS runtime reconstructs argv[0] itself.)
                 #[cfg(unix)]
-                std::os::unix::process::CommandExt::arg0(&mut c, bytes::bytes_to_os(&argv[0]));
+                std::os::unix::process::CommandExt::arg0(&mut c, bytes::bytes_to_os(&arg0));
                 c
             }
             None => PCommand::new(bytes::bytes_to_os(&self.resolve_program(&argv[0]))),
@@ -12039,8 +12133,16 @@ impl Shell {
         cmd.args(argv[1..].iter().map(|a| bytes::bytes_to_os(a)));
         cmd.current_dir(bytes::bytes_to_path(&self.cwd));
 
-        // Environment: exported shell vars + this command's temp assignments.
-        self.apply_child_env(&mut cmd, assigns);
+        // Environment: exported shell vars + this command's temp assignments —
+        // or, under `exec -c`, nothing at all. The assignments written in front
+        // of an `exec` are the *shell's* (it is a special builtin, so they
+        // persist there rather than being handed to the command), which is why
+        // `-c` leaves the child with a genuinely empty environment.
+        if xopts.is_some_and(|x| x.clear_env) {
+            cmd.env_clear();
+        } else {
+            self.apply_child_env(&mut cmd, assigns);
+        }
 
         // stdin — a here-doc/here-string body takes precedence, then a file
         // redirect, then the inherited pipeline input.
@@ -12450,9 +12552,11 @@ impl Shell {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                let (msg, status) = spawn_error_message(&argv[0], &e);
-                let line = bfmt![self.err_prefix(), msg];
-                self.bemit_cmd_stderr(out, redir, &line);
+                let (msgs, status) = spawn_error_message(&reported, &e, xopts.is_some());
+                for msg in &msgs {
+                    let line = bfmt![self.err_prefix(), msg];
+                    self.bemit_cmd_stderr(out, redir, &line);
+                }
                 self.last_status = status;
                 return;
             }
@@ -12641,8 +12745,10 @@ impl Shell {
                     // without execute permission, a bad executable format. bash
                     // reports this from the child it already forked, so the job
                     // exists and has already exited with the failure status.
-                    let (msg, code) = spawn_error_message(&argv[0], &e);
-                    self.berrln(&bfmt![self.err_prefix(), msg]);
+                    let (msgs, code) = spawn_error_message(&argv[0], &e, false);
+                    for msg in &msgs {
+                        self.berrln(&bfmt![self.err_prefix(), msg]);
+                    }
                     let pid = SYNTH_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     (pid, None, Some(code))
                 }
@@ -16524,7 +16630,72 @@ impl Shell {
             "umask" => self.builtin_umask(args, out, redir),
             "ulimit" => self.builtin_ulimit(args, out, redir),
             "exec" => {
-                if args.is_empty() {
+                const USAGE_EXEC_BODY: &str =
+                    "exec [-cl] [-a name] [command [argument ...]] [redirection ...]";
+                const USAGE_EXEC: &[u8] =
+                    b"exec: usage: exec [-cl] [-a name] [command [argument ...]] [redirection ...]\n";
+                // `exec` takes options of its own in front of the command word.
+                // Option parsing stops at the first word that is not one, at
+                // `--`, and at a lone `-` — which bash treats as a command word,
+                // not as a terminator (`exec -` reports `-: not found`).
+                let mut xopts = ExecOpts::default();
+                let mut i = 0usize;
+                let mut usage_error = None;
+                'opts: while let Some(a) = args.get(i) {
+                    if a.as_slice() == b"--" {
+                        i += 1;
+                        break;
+                    }
+                    if a.len() < 2 || a.first() != Some(&b'-') {
+                        break;
+                    }
+                    let cluster = a.get(1..).unwrap_or_default().to_vec();
+                    let mut j = 0usize;
+                    while let Some(&c) = cluster.get(j) {
+                        match c {
+                            b'c' => xopts.clear_env = true,
+                            b'l' => xopts.login = true,
+                            b'a' => {
+                                // The name may be attached to the letter
+                                // (`-afoo`) or be the next word (`-a foo`).
+                                let rest = cluster.get(j + 1..).unwrap_or_default();
+                                let val = if rest.is_empty() {
+                                    i += 1;
+                                    args.get(i).cloned()
+                                } else {
+                                    Some(rest.to_vec())
+                                };
+                                let Some(val) = val else {
+                                    self.berrln(&bfmt![
+                                        self.err_prefix(),
+                                        b"exec: -a: option requires an argument"
+                                    ]);
+                                    self.emit_stderr(USAGE_EXEC);
+                                    usage_error = Some(2);
+                                    break 'opts;
+                                };
+                                xopts.arg0 = Some(val);
+                                break;
+                            }
+                            // Only the offending letter is named, not the whole
+                            // cluster it was written in: `exec -cZ` says `-Z`.
+                            other => {
+                                usage_error = Some(self.builtin_invalid_option(
+                                    "exec",
+                                    &bfmt![b"-", &[other][..]],
+                                    USAGE_EXEC_BODY,
+                                ));
+                                break 'opts;
+                            }
+                        }
+                        j += 1;
+                    }
+                    i += 1;
+                }
+                let args = args.get(i..).unwrap_or_default();
+                if let Some(rc) = usage_error {
+                    rc
+                } else if args.is_empty() {
                     // Redirection-only `exec`: rebind the shell's own fds for
                     // every subsequent command. We model fd 1 / fd 2 file
                     // targets (`exec > log 2>&1` etc) and fd 0 input redirects
@@ -16672,7 +16843,7 @@ impl Shell {
                     // in-place `execve` that preserves the pid awaits kernel
                     // support; observationally the shell does not continue past
                     // `exec` (a following command never runs).
-                    self.run_external(args, assigns, out, stdin, redir);
+                    self.run_external(args, assigns, out, stdin, redir, Some(&xopts));
                     let code = self.last_status;
                     flow = Flow::Exit(code);
                     code
@@ -46388,6 +46559,104 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // No host `os error NN` suffix leaks through for a mapped kind.
         assert!(!io_error_message(&Error::from(ErrorKind::NotFound)).contains("os error"));
+    }
+
+    #[test]
+    fn spawn_error_message_has_execs_own_wording() {
+        use std::io::{Error, ErrorKind};
+        let text = |m: &(Vec<Str>, i32)| {
+            m.0.iter()
+                .map(|l| String::from_utf8_lossy(l).into_owned())
+                .collect::<Vec<_>>()
+        };
+        // A name that resolved to nothing: `exec` names itself and says only
+        // "not found", where an ordinary command word says "command not found".
+        let plain = spawn_error_message(b"zz", &Error::from(ErrorKind::NotFound), false);
+        assert_eq!(text(&plain), ["zz: command not found"]);
+        assert_eq!(plain.1, 127);
+        let ex = spawn_error_message(b"zz", &Error::from(ErrorKind::NotFound), true);
+        assert_eq!(text(&ex), ["exec: zz: not found"]);
+        assert_eq!(ex.1, 127);
+        // ENOENT on something spelled as a path keeps the bare errno wording in
+        // both, because the word said where to look and nothing was there.
+        let ex = spawn_error_message(b"/a/zz", &Error::from(ErrorKind::NotFound), true);
+        assert_eq!(text(&ex), ["/a/zz: No such file or directory"]);
+        assert_eq!(ex.1, 127);
+        // A file that exists but will not run is `cannot execute` under `exec`.
+        let ex = spawn_error_message(b"/a/zz", &Error::from(ErrorKind::PermissionDenied), true);
+        assert_eq!(text(&ex), ["exec: /a/zz: cannot execute: Permission denied"]);
+        assert_eq!(ex.1, 126);
+        let plain = spawn_error_message(b"/a/zz", &Error::from(ErrorKind::PermissionDenied), false);
+        assert_eq!(text(&plain), ["/a/zz: Permission denied"]);
+        // A directory says so twice: once as the plain error of trying to run
+        // it, and once in the `cannot execute` form.
+        let ex = spawn_error_message(b"/a/d", &Error::from(ErrorKind::IsADirectory), true);
+        assert_eq!(
+            text(&ex),
+            ["/a/d: Is a directory", "exec: /a/d: cannot execute: Is a directory"]
+        );
+        assert_eq!(ex.1, 126);
+    }
+
+    #[test]
+    fn exec_path_name_drops_only_a_leading_dot() {
+        // `exec` reports the absolute path of what it tried to become. A leading
+        // `./` is dropped (the directory being prepended already says "here"),
+        // but nothing else is tidied: extra slashes and `..` survive, and a path
+        // that is already rooted is left exactly as it is.
+        assert_eq!(exec_path_name(b"/w", b"./zz"), b"/w/zz");
+        assert_eq!(exec_path_name(b"/w", b".//zz"), b"/w//zz");
+        assert_eq!(exec_path_name(b"/w", b"././zz"), b"/w/./zz");
+        assert_eq!(exec_path_name(b"/w", b"../zz"), b"/w/../zz");
+        assert_eq!(exec_path_name(b"/w", b".zz/x"), b"/w/.zz/x");
+        assert_eq!(exec_path_name(b"/w/", b"./zz"), b"/w/zz");
+        assert_eq!(exec_path_name(b"/w", b"/zz"), b"/zz");
+        // No tracked directory: the word is all there is to report.
+        assert_eq!(exec_path_name(b"", b"./zz"), b"./zz");
+    }
+
+    #[test]
+    fn exec_parses_its_own_options() {
+        // A redirection written on an `exec` is the shell's own, so the
+        // diagnostics are folded onto stdout from outside it.
+        // Option parsing stops at `--`, at the first word that is not an option,
+        // and at a lone `-` — which bash treats as a command word.
+        let (o, _) = run("( exec -Z; echo rc=$? ) 2>&1");
+        assert!(o.contains("exec: -Z: invalid option"), "got {o:?}");
+        assert!(
+            o.contains(
+                "exec: usage: exec [-cl] [-a name] [command [argument ...]] [redirection ...]"
+            ),
+            "got {o:?}"
+        );
+        assert!(o.contains("rc=2"), "got {o:?}");
+        // Only the offending letter is named, not the cluster it was written in.
+        let (o, _) = run("( exec -cZ; echo rc=$? ) 2>&1");
+        assert!(o.contains("exec: -Z: invalid option"), "got {o:?}");
+        assert!(o.contains("rc=2"), "got {o:?}");
+        let (o, _) = run("( exec -a; echo rc=$? ) 2>&1");
+        assert!(o.contains("exec: -a: option requires an argument"), "got {o:?}");
+        assert!(o.contains("rc=2"), "got {o:?}");
+        // Options with nothing to run are just the redirections: status 0, and
+        // the shell carries on.
+        assert_eq!(run("exec -cl; echo on").0, "on\n");
+        assert_eq!(run("exec -a foo; echo on").0, "on\n");
+        assert_eq!(run("exec --; echo on").0, "on\n");
+        // A lone `-` is a command word, so it is looked up and not found.
+        let (o, _) = run("( exec - ) 2>&1");
+        assert!(o.contains("exec: -: not found"), "got {o:?}");
+        // `--` ends the options, so what follows is a command word even when it
+        // is spelled like one of them.
+        let (o, _) = run("( exec -- -Z ) 2>&1");
+        assert!(o.contains("exec: -Z: not found"), "got {o:?}");
+        // And a word after the command belongs to the command.
+        let (o, _) = run("( exec zznosuchprog -c ) 2>&1");
+        assert!(o.contains("exec: zznosuchprog: not found"), "got {o:?}");
+        // The name `-a` asks for may be attached to its letter or follow it.
+        let (o, _) = run("( exec -afoo zznosuchprog ) 2>&1");
+        assert!(o.contains("exec: zznosuchprog: not found"), "got {o:?}");
+        let (o, _) = run("( exec -la foo zznosuchprog ) 2>&1");
+        assert!(o.contains("exec: zznosuchprog: not found"), "got {o:?}");
     }
 
     #[test]

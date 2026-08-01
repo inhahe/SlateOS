@@ -25519,3 +25519,37 @@ materialised arrays if they ever grow the behaviour.
 **Impact.** A script that unsets `FUNCNAME` and then reads it inside a function.
 Rare — `unset FUNCNAME` is nearly always a mistake — and independent of
 `set -u`, which reports the name identically either way.
+
+### TD-OILS-INDIRECT-BANG-UNWIND. `${!r}` with `r=!` under `set -u` reports once where bash reports twice — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — the indirect-expansion path
+(`expand_indirect` / `resolve_indirect_target`), which reads the pointer's value
+as a parameter name and raises the unbound error against the name it built.
+
+**What.** With `set -u` and a pointer holding the one special parameter that can
+be unset, bash unwinds through two layers and prints both complaints; osh prints
+one, and names it differently.
+
+```
+$ bash --norc --noprofile -c 'set -u; r=!; echo "[${!r}]"'
+bash: line 1: $!: unbound variable
+bash: line 1: [${!r}]: bad substitution
+$ osh -c 'set -u; r=!; echo "[${!r}]"'
+osh: line 1: !r: unbound variable
+```
+
+Both exit 1 and neither prints the word, so only the diagnostics differ. Without
+`set -u` the two agree exactly (empty, status 0), and every other pointer value
+agrees under `set -u` too — it is `!` alone, because it is the only special
+parameter that is ever unset (see the `$!` work in
+`tests/corpus/nounset-last-bg-pid.sh`).
+
+**Proper fix.** Raise the unbound error against the *target* spelling (`$!`)
+rather than the concatenated `!r`, and let the failure propagate back out to the
+indirection, which then reports its own "bad substitution" naming the whole
+reference as written. That means the indirect path has to distinguish "the
+pointer named something that is unset" from "the pointer named nothing", and
+report at both levels rather than collapsing to one.
+
+**Impact.** Cosmetic: the wording and count of a diagnostic in a corner that
+takes a deliberately perverse pointer to reach. No effect on values or status.

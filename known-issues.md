@@ -26565,13 +26565,12 @@ fall off the end of the chain silently. The bad-fd message names the raw source
 word, the ambiguous one the expansion. Corpus case:
 `tests/corpus/dup-word-that-is-not-a-descriptor.sh`.
 
-**Still open — two pieces**, tracked below as their own entries:
-`TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING` (which text the bad-fd message uses
-when the redirector is not the operator's default) and
+**Still open — one piece**, tracked below as its own entry:
 `TD-OILS-EXEC-DUP-WORD-MISCLASSIFIES` (the `exec` path, which still tests
-"parses as a number").
+"parses as a number"). The other,
+`TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING`, is resolved.
 
-### TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING. a bad-fd dup on a non-default redirector names the word, not the redirector — OPEN — 2026-08-01
+### TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING. a bad-fd dup on a non-default redirector names the word, not the redirector — ✅ RESOLVED — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs`, `resolve_dup_out` / `resolve_dup_in`
 — the `DupWord::BadFd` arm, which always formats
@@ -26604,11 +26603,76 @@ redirector in *all* cases), so do not "simplify" it away without re-measuring.
 **Impact.** Only the diagnostic text, and only for a redirector other than the
 default — which is the rarer form. Nothing in the corpus exercises it yet.
 
-**Proper fix.** In both `resolve_dup_*`, pick the `BadFd` message's subject by
-comparing `fd` against the operator's default and formatting the redirector
-number when they differ. Extend
-`tests/corpus/dup-word-that-is-not-a-descriptor.sh` with the explicit-redirector
-rows.
+**Fixed** (2026-08-01) by `Shell::dup_error_subject`, which all four
+bad-descriptor reports in `resolve_dup_out`/`resolve_dup_in` now call instead of
+formatting `word_src` unconditionally.
+
+Re-measuring for the fix turned up a **third** answer the entry above had
+missed, and it takes precedence over both of the others: a redirectee that is a
+bare run of digits fitting an `i32` — no quotes, no backslashes, no expansions —
+is not a word to bash at all but a `NUMBER` token, and the redirect it builds
+carries the *number*. So the message names that number reprinted, which need not
+be what was typed and does not depend on the redirector: `<&007` and `2>&007`
+both say `7`. One quote or backslash anywhere in the run (`<&9""`, `<&\9`) makes
+it a word again, and so does a run too long for an `i32` — which is why
+`0<&99999999999999999999` names the whole run while `7<&99999999999999999999`
+names `7`.
+
+The corpus case gained three sections for this: the same bad word under nine
+different redirectors, all three ways of being bad under both operators, and the
+number/word split. Every row is byte-identical to bash on both streams.
+
+**Not fixed here**, and split out below as
+`TD-OILS-DUP-ONTO-A-NON-STD-FD-IS-WRONG`: an input dup with a non-zero
+redirector never checks its source at all, and a dup of a descriptor onto itself
+is checked when bash does not check it.
+
+### TD-OILS-DUP-ONTO-A-NON-STD-FD-IS-WRONG. `N<&M` never checks its source, `N>&M` retargets stdout, `N>&N` fails — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs`, `resolve_dup_in` (the
+`DupWord::Fd(n)` arm, which acts only `if fd == 0 && n >= 3`) and
+`resolve_dup_out` (its final `else if let Some(n) = target_num` arm, which
+validates `n` unconditionally and then writes `plan.stdout_to_fd` for every
+redirector that is not 2).
+
+**Reproduce** (fd 9 closed, `exec 5>f5` first):
+
+```sh
+read -r l 7<&9    # bash: 9: Bad file descriptor    osh: silent, rc=0
+read -r l 7<&"9"  # bash: 7: Bad file descriptor    osh: silent, rc=0
+read -r l 7<&7    # bash: silent, rc=0              osh: silent, rc=0  (agrees)
+echo hi 7>&007    # bash: prints hi, rc=0           osh: 7: Bad file descriptor
+echo hi 7>&5      # bash: prints hi, f5 empty       osh: prints nothing, f5=hi
+```
+
+**Three separate faults, all in the same corner — a dup whose *redirector* is
+not the operator's own standard descriptor:**
+
+1. **The input side does not check.** `resolve_dup_in` only looks at the source
+   when the redirector is fd 0, so `7<&9` is silently accepted where bash
+   reports `EBADF` and abandons the command. (The message it should print is
+   already covered: `Shell::dup_error_subject(r, fd, 0)` gives bash's text.)
+2. **A self-dup is checked when it should not be.** bash skips the `dup2`
+   entirely when the redirector equals the source, so `7>&7` and `7<&7` succeed
+   even though fd 7 is closed — there is nothing to duplicate. osh validates the
+   source first and so rejects `7>&007`.
+3. **The output side redirects the wrong descriptor.** `plan.stdout_to_fd` is
+   set for any redirector other than 2, so `7>&5` reroutes *stdout* to fd 5
+   instead of aliasing fd 7. The `AliasStd` arm just above handles `3>&1` and
+   friends correctly; this arm has no equivalent for a non-standard source.
+
+**Impact.** Fault 1 loses a diagnostic and lets a doomed command run; fault 3
+actively corrupts a redirect, though only for a shape (`N>&M`, both ≥ 3, outside
+`exec`) that is rare. Fault 2 is a spurious failure. None is exercised by the
+corpus — `tests/corpus/dup-word-that-is-not-a-descriptor.sh` documents in its
+header why it stays away from these shapes.
+
+**Proper fix.** Give the output arm the same `fd >= 3` treatment the `AliasStd`
+arm has, extending `ExtraFdOp` so a user-space write descriptor can alias
+another user-space one; give the input arm a matching `ExtraFdOp` for input
+aliases so `resolve_dup_in` can validate and record `N<&M` for `N >= 1`; and
+skip validation in both when `n == fd`. Then extend the corpus case with the
+rows its header currently excludes.
 
 ### TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP. `>&-` / `<&-` on fd 0, 1 or 2 of a *command* closes nothing — OPEN — 2026-08-01
 

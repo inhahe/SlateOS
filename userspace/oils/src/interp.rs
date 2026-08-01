@@ -14343,6 +14343,49 @@ impl Shell {
         DupWord::NotAFd
     }
 
+    /// Which text a `<&WORD`/`>&WORD` names when the descriptor turns out to be
+    /// bad. bash has two answers and picks between them by *how the word was
+    /// written*, not by what went wrong:
+    ///
+    /// * A bare run of digits that fits an `i32` — no quotes, no backslashes,
+    ///   no expansions — is not a word to bash at all but a `NUMBER` token, and
+    ///   the redirect it builds carries the number instead of any text. So the
+    ///   diagnostic is that number reprinted, which is not always what was
+    ///   typed: `7<&007` says `7`. It says it whatever the redirector is.
+    /// * Anything else stays a word, and then the subject is the word *as
+    ///   written*, quotes and all — but only when the redirector is the one the
+    ///   operator supplies by itself (0 for `<&`, 1 for `>&`). Write any other
+    ///   redirector and bash names *that* instead: `7<&"9"` says `7`, `2>&$n`
+    ///   says `2`, `9<&""` says `9`.
+    ///
+    /// The second rule is bash's behaviour as *measured* — twenty-odd samples
+    /// across both operators, every redirector from 0 to 9, and all three ways
+    /// a word can be a bad descriptor (empty, out of range, merely closed). It
+    /// is not reasoned from bash's source, and no reading of that source has
+    /// yet explained it. Do not "simplify" it into naming the word always.
+    ///
+    /// `operator_default_fd` is 0 for `<&` and 1 for `>&`. A `{var}<&…`
+    /// redirect has no meaningful redirector number to name — bash prints the
+    /// fd it allocated, which is an arbitrary large number — so it keeps the
+    /// word.
+    fn dup_error_subject(r: &Redirect, fd: i32, operator_default_fd: i32) -> Str {
+        let src = crate::unparse::word_src(&r.target);
+        // Digits alone are a `NUMBER` only while they fit; a longer run falls
+        // back to being a word, and so back to the rule below — which is why
+        // `7<&99999999999999999999` says `7` where `7<&007` says `7` for an
+        // entirely different reason and `0<&99999999999999999999` says the run.
+        if !src.is_empty()
+            && src.iter().all(u8::is_ascii_digit)
+            && let Some(n) = bytes::as_str(&src).and_then(|t| t.parse::<i32>().ok())
+        {
+            return n.to_string().into_bytes();
+        }
+        if fd != operator_default_fd && r.varfd.is_none() {
+            return fd.to_string().into_bytes();
+        }
+        src
+    }
+
     fn expand_redirect_target(&mut self, w: &Word) -> Result<Str, Str> {
         let mut fields = self.expand_word(w, true);
         if fields.len() == 1 {
@@ -14763,12 +14806,10 @@ impl Shell {
         // as a number" — see [`Shell::classify_dup_word`].
         let dup = Self::classify_dup_word(target);
         if dup == DupWord::BadFd {
-            // An all-digit word that is no descriptor. bash names the word as
-            // written here, not the expansion it just failed on.
-            return Err(bfmt![
-                crate::unparse::word_src(&r.target),
-                b": Bad file descriptor"
-            ]);
+            // An all-digit word that is no descriptor. Never the expansion it
+            // just failed on — see [`Shell::dup_error_subject`] for which of
+            // the word and the redirector gets named.
+            return Err(bfmt![Self::dup_error_subject(r, fd, 1), b": Bad file descriptor"]);
         }
         let target_num = match dup {
             DupWord::Fd(n) => Some(n),
@@ -14836,12 +14877,11 @@ impl Shell {
             // descriptor (`echo … >&3`, `cmd 2>&3`). Routed to
             // `Shell::open_write_fds[N]` by write_bytes / run_external. bash
             // validates the source fd when setting up the redirect and, on
-            // failure, echoes the *word as written* (`>&$n` → "$n: Bad file
-            // descriptor", not the expanded "5"). Reconstruct the source with
-            // `word_src` so the diagnostic matches. A scratch fd opened earlier
-            // in the *same* command's redirect list is staged in
-            // `plan.extra_fds` (not yet in `open_write_fds`), so an in-command
-            // dup like `3>&1 2>&3` must still resolve.
+            // failure, never echoes the expansion — it names either the word as
+            // written or the redirector, per [`Shell::dup_error_subject`]. A
+            // scratch fd opened earlier in the *same* command's redirect list
+            // is staged in `plan.extra_fds` (not yet in `open_write_fds`), so
+            // an in-command dup like `3>&1 2>&3` must still resolve.
             let staged_write = plan.extra_fds.iter().any(|(f, op)| {
                 *f == n && matches!(op, ExtraFdOp::OutputFile(..) | ExtraFdOp::AliasStd(_))
             });
@@ -14849,10 +14889,7 @@ impl Shell {
             // it is *writable* is settled at write time (see
             // [`Shell::stdin_write_fd`]).
             if n != 0 && !self.open_write_fds.contains_key(&n) && !staged_write {
-                return Err(bfmt![
-                    crate::unparse::word_src(&r.target),
-                    b": Bad file descriptor"
-                ]);
+                return Err(bfmt![Self::dup_error_subject(r, fd, 1), b": Bad file descriptor"]);
             }
             if fd == 2 {
                 plan.stderr_to_fd = Some(n);
@@ -14885,12 +14922,10 @@ impl Shell {
         // redirect.
         let dup = Self::classify_dup_word(target);
         if dup == DupWord::BadFd {
-            // All digits but no descriptor — the empty word included. Named as
-            // written, like every other bad-descriptor report.
-            return Err(bfmt![
-                crate::unparse::word_src(&r.target),
-                b": Bad file descriptor"
-            ]);
+            // All digits but no descriptor — the empty word included. The
+            // subject is the word or the redirector, never the expansion; see
+            // [`Shell::dup_error_subject`].
+            return Err(bfmt![Self::dup_error_subject(r, fd, 0), b": Bad file descriptor"]);
         }
         if dup == DupWord::Close {
             if fd >= 3 {
@@ -14906,12 +14941,9 @@ impl Shell {
                 // pipe. An unbound source fd fails the whole redirect (bash:
                 // "N: Bad file descriptor"), rather than silent EOF.
                 if !self.open_fds.contains_key(&n) && !self.coproc_read_fds.contains_key(&n) {
-                    // Echo the word as written (`<&$r` → "$r"), as bash does,
-                    // not the expanded fd number.
-                    return Err(bfmt![
-                        crate::unparse::word_src(&r.target),
-                        b": Bad file descriptor"
-                    ]);
+                    // Never the expansion: `<&$r` names `$r`, and a bare `<&007`
+                    // names `7`. See [`Shell::dup_error_subject`].
+                    return Err(bfmt![Self::dup_error_subject(r, fd, 0), b": Bad file descriptor"]);
                 }
                 plan.stdin_from_fd = Some(n);
                 plan.stdin = None;

@@ -1342,6 +1342,21 @@ fn lock_input(c: &InputFd) -> InputGuard<'_> {
     InputGuard(c.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
 }
 
+/// The parent-side read endpoint of a running `coproc` — a live OS pipe with a
+/// buffered reader in front of it (see [`Shell::coproc_read_fds`]).
+///
+/// `Arc<Mutex<…>>` for the same two reasons as [`InputFd`]: the handle crosses
+/// threads (a `&` job or a nested coproc inherits it), and several descriptor
+/// numbers may name one reader once `exec {v}<&"${NAME[0]}"` has duplicated it.
+type CoprocRead = Arc<Mutex<io::BufReader<std::fs::File>>>;
+
+/// Lock a [`CoprocRead`], recovering from poisoning — same reasoning as
+/// [`lock_input`]: a partial read leaves the stream position meaningful, so
+/// there is no invariant a panicking reader could have broken.
+fn lock_coproc(c: &CoprocRead) -> std::sync::MutexGuard<'_, io::BufReader<std::fs::File>> {
+    c.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// How a child process is given fd 0 over an input descriptor.
 enum ChildIn {
     /// A duplicate of a real OS descriptor: the child shares the shell's open
@@ -2596,7 +2611,12 @@ pub struct Shell {
     /// shared OS pipe), unlike the byte-snapshot used for `open_fds`. The
     /// *write* endpoint (`NAME[1]`) is stored in [`Shell::open_write_fds`]
     /// instead, so `>&"${NAME[1]}"` needs no write-path changes.
-    coproc_read_fds: std::collections::HashMap<i32, RefCell<io::BufReader<std::fs::File>>>,
+    ///
+    /// Two entries may name the *same* reader: `exec {v}<&"${NAME[0]}"` is a dup,
+    /// and a dup shares one open file description — so it must share the buffer
+    /// in front of it too, or a byte the buffer holds for one number would be
+    /// invisible to the other. That is what the [`Arc`] is for.
+    coproc_read_fds: std::collections::HashMap<i32, CoprocRead>,
     /// Temp files backing *input* process substitutions `<(cmd)` created while
     /// expanding the current command's words. Each holds `cmd`'s captured output;
     /// the enclosing command reads it, then it is deleted once the command
@@ -7884,14 +7904,13 @@ impl Shell {
                 .coproc_read_fds
                 .iter()
                 .filter_map(|(&fd, rd)| {
-                    rd.borrow()
+                    lock_coproc(rd)
                         .get_ref()
                         .try_clone()
                         .ok()
-                        .map(|f| (fd, RefCell::new(io::BufReader::new(f))))
+                        .map(|f| (fd, Arc::new(Mutex::new(io::BufReader::new(f)))))
                 })
                 .collect(),
-            // The subshell cannot join the parent's coproc threads.
             // A subshell manages its own process-substitution lifetimes.
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
@@ -12948,7 +12967,7 @@ impl Shell {
                 // read pipe so it streams (slurping would block until the coproc
                 // closed its stdout). Bytes already buffered by an earlier `read`
                 // on this fd are not replayed (rare mixed use — documented).
-                match rd.borrow().get_ref().try_clone() {
+                match lock_coproc(rd).get_ref().try_clone() {
                     Ok(f) => {
                         cmd.stdin(Stdio::from(f));
                     }
@@ -13696,7 +13715,7 @@ impl Shell {
         let read_fd = self.alloc_varfd(&[]);
         let read_file = pipe_reader_into_file(parent_stdout_r);
         self.coproc_read_fds
-            .insert(read_fd, RefCell::new(io::BufReader::new(read_file)));
+            .insert(read_fd, Arc::new(Mutex::new(io::BufReader::new(read_file))));
         let write_fd = self.alloc_varfd(&[]);
         let write_file = pipe_writer_into_file(parent_stdin_w);
         self.open_write_fds
@@ -13967,6 +13986,7 @@ impl Shell {
                 _ => {
                     self.open_write_fds.remove(&fd);
                     self.open_fds.remove(&fd);
+                    self.coproc_read_fds.remove(&fd);
                 }
             }
         } else if let Some(n) = bytes::as_str(target).and_then(|t| t.parse::<i32>().ok()) {
@@ -13990,6 +14010,7 @@ impl Shell {
                     };
                     self.open_write_fds.insert(fd, handle);
                     self.open_fds.remove(&fd);
+                    self.coproc_read_fds.remove(&fd);
                 }
             }
         } else if fd == 1 {
@@ -14016,8 +14037,24 @@ impl Shell {
             } else {
                 self.open_fds.remove(&fd);
                 self.open_write_fds.remove(&fd);
+                self.coproc_read_fds.remove(&fd);
             }
         } else if let Some(n) = bytes::as_str(target).and_then(|t| t.parse::<i32>().ok()) {
+            // `exec {v}<&"${NAME[0]}"`: a coproc's read end is a live pipe kept
+            // in its own table, and a dup of it must name the *same* reader —
+            // sharing the buffer, not just the descriptor, or a byte already
+            // pulled off the pipe for one number would be invisible to the
+            // other. fd 0 is left out: `exec_stdin` holds an `InputFd`, which
+            // cannot alias a coproc reader (see known-issues).
+            if fd != 0
+                && let Some(rd) = self.coproc_read_fds.get(&n)
+            {
+                let shared = Arc::clone(rd);
+                self.coproc_read_fds.insert(fd, shared);
+                self.open_fds.remove(&fd);
+                self.open_write_fds.remove(&fd);
+                return Ok(());
+            }
             // `M<&N`: fd M becomes a dup of input fd N's *current* source —
             // literally the same descriptor, sharing one position, as `dup2`
             // gives. `exec 4<&3; read -u3 a; read -u4 b` therefore reads two
@@ -14033,6 +14070,7 @@ impl Shell {
             } else {
                 self.open_fds.insert(fd, cloned);
                 self.open_write_fds.remove(&fd);
+                self.coproc_read_fds.remove(&fd);
             }
         } else {
             return Err(bfmt![target, b": ambiguous redirect"]);
@@ -17895,6 +17933,10 @@ impl Shell {
                     // `read -u N` can consume them.
                     if rc == 0 {
                         for (fd, op) in &redir.extra_fds {
+                            // Whatever the number named before, it names this
+                            // now — including a coproc read end it may have been
+                            // aliased onto by `exec {v}<&"${NAME[0]}"`.
+                            self.coproc_read_fds.remove(fd);
                             match op {
                                 ExtraFdOp::Input(src) => {
                                     self.open_fds.insert(*fd, Arc::clone(src));
@@ -27851,7 +27893,7 @@ impl Shell {
         }
         if let Some(n) = redir.stdin_from_fd {
             if let Some(rd) = self.coproc_read_fds.get(&n) {
-                return take(&mut *rd.borrow_mut(), delim, max);
+                return take(&mut *lock_coproc(rd), delim, max);
             }
             return match self.input_fd_cursor(n) {
                 Some(c) => take(&mut *lock_input(&c), delim, max),
@@ -30511,7 +30553,7 @@ impl Shell {
             // `read <&N`: read from and advance descriptor N's shared source — a
             // live coproc pipe, or a `read -u`/`exec 3<` byte cursor.
             if let Some(rd) = self.coproc_read_fds.get(&n) {
-                return read_one_line(&mut *rd.borrow_mut(), raw);
+                return read_one_line(&mut *lock_coproc(rd), raw);
             }
             let c = self.input_fd_cursor(n)?;
             return read_one_line(&mut *lock_input(&c), raw);
@@ -30569,7 +30611,7 @@ impl Shell {
     ) -> Option<(Str, bool)> {
         if let Some(n) = redir.stdin_from_fd {
             if let Some(rd) = self.coproc_read_fds.get(&n) {
-                return read_record(&mut *rd.borrow_mut(), delim, nchars, exact, raw);
+                return read_record(&mut *lock_coproc(rd), delim, nchars, exact, raw);
             }
             let c = self.input_fd_cursor(n)?;
             return read_record(&mut *lock_input(&c), delim, nchars, exact, raw);

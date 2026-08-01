@@ -25961,7 +25961,7 @@ a single command's status is the pipeline's already, so skipping
 
 Covered by `tests/corpus/pipestatus-is-not-written-by-a-compound-command.sh`.
 
-### TD-OILS-COPROC-IS-NOT-A-JOB. A coproc cannot be waited for, and its endpoints are not real descriptors — half fixed 2026-08-01, endpoint half still OPEN
+### TD-OILS-COPROC-IS-NOT-A-JOB. A coproc cannot be waited for, and its endpoints are not real descriptors — ✅ RESOLVED 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — `exec_coproc`. It spawned the body on
 a thread and published `NAME[0]`/`NAME[1]`/`NAME_PID`, but registered no entry in
@@ -25995,19 +25995,25 @@ parked in is gone. Covered by `tests/corpus/coproc-is-a-job.sh`, which prints no
 raw fd number — bash allocates the endpoints near the process's fd limit (63,
 62, …) and osh from 10 up, so the numbers are a property of the host.
 
-**Still OPEN — the endpoints.** `${NAME[0]}` lives in `coproc_read_fds`, which
-the `read`/`<&` *input* path consults but the `exec` builtin's fd-alias path
-does not, so `exec {v}<&"${NAME[0]}"` is still "Bad file descriptor". The write
-end is already an ordinary `open_write_fds` entry and needs nothing.
+**✅ The endpoint half is fixed too.** `${NAME[0]}` lives in `coproc_read_fds`,
+which the `read`/`<&` *input* path consulted but the `exec` builtin's fd-alias
+path did not, so `exec {v}<&"${NAME[0]}"` was "Bad file descriptor". The alias
+path now looks there first — and a dup names one open file description, so the
+two numbers had to share the *reader*, not just the descriptor: a buffered
+reader has already pulled bytes off the pipe that neither number has handed
+out, and a `try_clone` would have stranded them under the original. Hence
+`coproc_read_fds` holds `Arc<Mutex<BufReader<File>>>` (the new `CoprocRead`)
+rather than `RefCell<…>`, and the alias is an `Arc::clone`. Every path that
+rebinds or closes a number now clears any coproc entry it had, so a descriptor
+is one thing at a time. The write end was already an ordinary `open_write_fds`
+entry and needed nothing. Covered by
+`tests/corpus/coproc-read-end-can-be-duped.sh`.
 
-**Proper fix (remaining).** Teach the `exec` builtin's input-alias handling
-about `coproc_read_fds` — an alias of a coproc read end has to share the one
-live pipe, not snapshot bytes the way an `exec 3<file` alias may, so it is a
-`try_clone` of the same handle rather than a copy.
-
-**Impact.** `coproc` now behaves as a job; what remains is aliasing its read end
-onto another descriptor, which a script does to keep the coproc readable after
-`NAME` is unset or to hand it to a redirect that takes a fixed number.
+**Left out deliberately:** `exec 0<&"${NAME[0]}"`. fd 0's binding is an
+`InputFd` (`Arc<Mutex<InputSrc>>`), which cannot alias a `CoprocRead`; joining
+the two would mean one input representation for pipes and byte snapshots alike.
+Nothing in the corpus does it, and `read <&"${NAME[0]}"` — the way a script
+actually reads a coproc — has always worked.
 
 ### TD-OILS-SIGNAL-DEATH-EXIT-STATUS. A child killed by a signal reported the raw Windows exit code, not `128 + sig` — ✅ **RESOLVED 2026-08-01**
 
@@ -26279,3 +26285,42 @@ matches bash — a child cannot `wait` for its parent's jobs either.
 which is exactly how a script reads it (`jobs | wc -l`, `n=$(jobs -p)`). Found
 while making a coproc a real job: the probe piped `jobs` through `sed` to blank
 out pids and so saw nothing at all.
+
+### TD-OILS-COPROC-SECOND-IS-NOT-WARNED. bash warns when a coproc is started while another is still alive; osh starts it silently — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_coproc`. It keeps no notion of
+"the current coproc", so nothing can notice a second one.
+
+**Reproduce:**
+
+```sh
+coproc A { read x; echo "a:$x"; }
+coproc B { read y; echo "b:$y"; }
+```
+
+bash writes to stderr:
+
+```
+bash: line 2: warning: execute_coproc: coproc [1103354:A] still exists
+```
+
+…and then starts B anyway. Everything after that matches: both coprocs run,
+both endpoint pairs work, `jobs` lists both, `wait` reaps both. osh prints
+nothing and behaves identically otherwise.
+
+**Why bash warns.** It has exactly one `sh_coproc` struct, so a second live
+coproc is a state it cannot fully represent — the warning is bash admitting it
+is about to lose track of the first one's bookkeeping. osh has no such limit
+(each coproc is an ordinary job with its own fds), so the warning is pure
+diagnostic fidelity, not a shared limitation.
+
+**Proper fix.** Record the name and synthetic pid of the most recently started
+coproc, clear it when that job is reaped, and emit
+`warning: execute_coproc: coproc [PID:NAME] still exists` — through the normal
+`line N:` prefix machinery — when `exec_coproc` runs while it is still set.
+Note bash's condition is "the tracked coproc has not been reaped", not "a
+coproc job exists": `coproc C { :; }; wait "$C_PID"; coproc D { :; }` is silent.
+
+**Impact.** Diagnostic only, and it lands on stderr, so a script that merges
+streams (`2>&1`) sees an extra line under bash that it does not under osh.
+Found while probing the coproc endpoint dup.

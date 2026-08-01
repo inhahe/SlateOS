@@ -25961,6 +25961,87 @@ a single command's status is the pipeline's already, so skipping
 
 Covered by `tests/corpus/pipestatus-is-not-written-by-a-compound-command.sh`.
 
+### TD-OILS-COPROC-IS-NOT-A-JOB. A coproc cannot be waited for, and its endpoints are not real descriptors — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_coproc`. It spawns the body on
+a thread and publishes `NAME[0]`/`NAME[1]`/`NAME_PID`, but registers no entry in
+`self.jobs`, and the two array elements are osh-internal fd numbers rather than
+descriptors the rest of the shell can dup.
+
+**Reproduce:**
+
+```sh
+coproc C { :; }
+wait "$C_PID"; echo "wait=$?"
+coproc D { sleep 0; }
+exec {w}<&"${D[0]}"
+```
+
+bash: `wait=0`, and the `exec` is silent. osh:
+
+```
+wait: pid 900000 is not a child of this shell
+wait=127
+12: Bad file descriptor
+```
+
+**Proper fix.** Register the coproc's thread in the job table under its
+synthetic pid the way `exec_background` does, so `wait`, `jobs` and `kill` all
+find it; and make the published endpoints ordinary entries in the shell's fd
+table so `<&`, `>&` and `exec {v}<&` resolve them like any other number.
+
+**Impact.** `coproc` is usable for the common `echo … >&"${C[1]}"` /
+`read … <&"${C[0]}"` shape and not much beyond it. Found while measuring which
+commands write `${PIPESTATUS[@]}` (a coproc writes none), not by a corpus case
+— nothing in the corpus waits for a coproc yet.
+
+### TD-OILS-SIGNAL-DEATH-EXIT-STATUS. A child killed by a signal reports the raw Windows exit code, not `128 + sig` — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — every site that turns a reaped
+child's `std::process::ExitStatus` into a shell status: `JobBody::wait_blocking`
+(~1793), the concurrent-pipeline reaper in `exec_concurrent_pipeline` (~5996),
+and the simple-command wait in `exec_simple_inner` (~13340). All three do
+`status.code().unwrap_or(1)` and hand the number straight to `$?`.
+
+On Windows there is no wait status to decode — `code()` is the raw value the
+process passed to `ExitProcess`. That is fine for a process that exited
+normally, but the externals the corpus runs are Cygwin/MSYS binaries, and
+Cygwin's `signal_exit()` encodes a signal death as `ExitProcess(sig << 8)`. So
+osh publishes 3328 where bash publishes 141.
+
+**Reproduce:**
+
+```sh
+seq 100000 | head -n 1 > /dev/null; echo "ps=[${PIPESTATUS[*]}]"
+```
+
+bash: `ps=[141 0]` (SIGPIPE, `128 + 13`). osh: `ps=[3328 0]` (`13 << 8`). The
+same holds for every signal — SIGTERM 143 vs 3840, SIGKILL 137 vs 2304, SIGINT
+130 vs 512 — while a plain `exit 7` reads 7 in both. This is not a regression
+from the DEBUG-trap pipeline work: it reproduces on a pipeline with no trap set
+at all.
+
+Note that the shell's *own* exit-status truncation is already right: `exit 300`,
+`( exit 300 )`, `return 300` and `sh -c 'exit 300'` all agree with bash. Only
+the code lifted off a reaped child escapes untruncated.
+
+**Proper fix.** Give the Windows child-reaping path one shared translation
+function instead of three open-coded `code()` calls, and have it recognise the
+Cygwin encoding: an exit code of `sig << 8` for `sig` in `1..=64` becomes
+`128 + sig`, and anything else is masked to its low 8 bits the way a wait status
+would be. The `sig << 8` test is a heuristic — a native Windows program is free
+to exit with 3328 and mean it — but it is the same bet bash makes by trusting
+Cygwin's own wait status, and osh cannot match bash on this platform without it.
+Keep the heuristic in the host-specific reaping path so the eventual SlateOS
+build, which will have a real `waitpid`, decodes properly instead of guessing.
+
+**Impact.** `$?` and `${PIPESTATUS[@]}` are wrong for any externally-killed
+child, which includes the very common SIGPIPE from a short-circuiting reader
+(`… | head -n 1`). Scripts that test `[ $? -eq 141 ]` or `(( $? > 128 ))` to
+detect a signal death misbehave. Found while probing the all-external
+concurrent pipeline path (`exec_concurrent_pipeline`) for the DEBUG-trap stage
+work; no corpus case covers it yet, because writing one requires the fix first.
+
 ### TD-OILS-DEBUG-TRAP-VERDICT-AT-FUNCTION-ENTRY. The extdebug verdict is ignored at the function-entry DEBUG firing — OPEN — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — `call_function`'s extra entry-time

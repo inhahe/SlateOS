@@ -15542,30 +15542,111 @@ impl Shell {
             || self.named_param_is_set(name)
     }
 
+    /// Split a runtime array reference `name[subscript]` the way bash's
+    /// `valid_array_reference` does.
+    ///
+    /// The base has to be an identifier, the bracket must not open the token,
+    /// and the `]` closing *that* bracket has to be the token's last character —
+    /// so `a[0]x`, `a[0][0]`, `[0]` and `m[k` are not references at all but
+    /// ordinary, and necessarily unset, variable names. A syntactically empty
+    /// subscript (`m[]`) is not one either, which is what keeps it apart from a
+    /// subscript that merely *expands* to nothing (`m[$empty]`, a bad array
+    /// subscript). Brackets are counted rather than searched for, because a
+    /// subscript is an expression that may hold its own (`a[b[0]]`).
+    fn split_array_ref(text: &str) -> Option<(&str, &str)> {
+        let open = text.find('[').filter(|&o| o > 0)?;
+        let base = text
+            .get(..open)
+            .filter(|b| crate::parser::is_valid_name(b.as_bytes()))?;
+        let mut depth = 0usize;
+        for (i, c) in text.char_indices().skip_while(|&(i, _)| i < open) {
+            match c {
+                '[' => depth = depth.saturating_add(1),
+                ']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        if i.saturating_add(1) != text.len() {
+                            return None;
+                        }
+                        let sub = text.get(open.saturating_add(1)..i)?;
+                        return (!sub.is_empty()).then_some((base, sub));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Whether `base[sub_src]` addresses an element that exists.
+    ///
+    /// The subscript is live shell syntax, so answering can run a command
+    /// substitution and can assign — `[ -v 'a[i=5]' ]` leaves `i` at 5 — and
+    /// bash evaluates it even when the name is not set at all, only then finding
+    /// there is nothing to look in. Which language it is depends on the name: an
+    /// associative array's subscript is an expanded string key, everything
+    /// else's is arithmetic, with a negative index counting back from one past
+    /// the highest index the name holds.
+    fn element_is_set(&mut self, base: &str, sub_src: &str) -> bool {
+        // A nameref stands for its target here too, so `-v 'r[1]'` asks about
+        // the target's element. A reference that already names an element, and a
+        // circular chain, name no array to look in.
+        let Some(name) = self.resolve_ref_use(base).and_then(RefTarget::into_name) else {
+            return false;
+        };
+        let Ok(word) =
+            crate::parser::word_verbatim_from_source(sub_src.as_bytes(), self.lex_opts())
+        else {
+            return false;
+        };
+        if self.assoc.contains_key(&name) {
+            // Keys are strings, so `[@]` and `[*]` are ordinary ones here:
+            // `m[@]=v` makes `-v 'm[@]'` true, and `-v 'm[-1]'` asks for a key
+            // spelled `-1` rather than counting back from anywhere. An empty key
+            // names nothing an associative array can hold, and is reported
+            // exactly as an out-of-range index is.
+            let key = self.expand_to_string(&word);
+            if key.is_empty() {
+                self.perrln(&format!("{name}: bad array subscript"));
+                return false;
+            }
+            return self.assoc_element(&name, &key).is_some();
+        }
+        // `[@]`/`[*]` ask whether there is *any* element rather than about one
+        // of them. An indexed array answers for its contents and a scalar for
+        // itself; a name that is not set has none. None of that is an arithmetic
+        // question, so nothing is evaluated to answer it.
+        if sub_src == "@" || sub_src == "*" {
+            return self
+                .arrays
+                .get(&name)
+                .map_or_else(|| self.vars.contains_key(&name), |a| !a.is_empty());
+        }
+        // bash never tags a subscript's arithmetic error with the command that
+        // asked, so evaluate with the tag cleared. A malformed expression is a
+        // discarding error: the diagnostic is already out and the parse unit is
+        // abandoned, so there is no answer left to give.
+        let saved_tag = self.arith_cmd.take();
+        let idx = self.eval_arith_index(&word);
+        self.arith_cmd = saved_tag;
+        if self.discard_error.is_some() {
+            return false;
+        }
+        if self.subscript_is_bad(&name, idx) {
+            self.perrln(&format!("{name}: bad array subscript"));
+            return false;
+        }
+        self.array_element(&name, idx).is_some()
+    }
+
     /// Whether a reference is "set" for `-v` / `test -v`. Accepts a plain scalar
     /// name, an array/associative name (which addresses that array's element 0),
     /// or an explicit element reference `name[subscript]`. Special parameters
     /// (`$?`, `$#`, positional `$1`, …) count as set when they have a value.
-    fn var_is_set(&self, name: &str) -> bool {
-        // Explicit element reference `name[subscript]`.
-        if let Some(open) = name.find('[')
-            && name.ends_with(']')
-        {
-            let base = &name[..open];
-            let sub = &name[open + 1..name.len() - 1];
-            if let Some(map) = self.assoc.get(base) {
-                return map.iter().any(|(k, _)| k.as_slice() == sub.as_bytes());
-            }
-            if let Some(arr) = self.arrays.get(base) {
-                // `[@]`/`[*]` — set if the array has any element.
-                if sub == "@" || sub == "*" {
-                    return !arr.is_empty();
-                }
-                if let Ok(idx) = sub.parse::<usize>() {
-                    return arr.contains_key(&idx);
-                }
-            }
-            return false;
+    fn var_is_set(&mut self, name: &str) -> bool {
+        // An explicit element reference addresses that one element.
+        if let Some((base, sub_src)) = Self::split_array_ref(name) {
+            return self.element_is_set(base, sub_src);
         }
         // A nameref stands for its target, so `-v ref` asks whether the
         // *target* is set — not whether the reference itself exists, which it
@@ -28802,7 +28883,7 @@ impl Shell {
     /// precedence), `-a` (AND), `!` (NOT) and `( … )` grouping. Being a method,
     /// it resolves the state-dependent unary primaries `-v`/`-o`/`-R` against the
     /// live shell in *every* position, not just the bare two-argument form.
-    fn eval_test_expr(&self, a: &[BStr<'_>]) -> Result<bool, Str> {
+    fn eval_test_expr(&mut self, a: &[BStr<'_>]) -> Result<bool, Str> {
         match a.len() {
             0 => Ok(false),
             1 => Ok(!a[0].is_empty()),
@@ -28880,7 +28961,7 @@ impl Shell {
     /// anything else is just surplus, and gets the anonymous "too many
     /// arguments". So `[ x -a y -Q z ]` names `-Q` but `[ a b c d e ]` names
     /// nothing.
-    fn eval_test_parser(&self, a: &[BStr<'_>]) -> Result<bool, Str> {
+    fn eval_test_parser(&mut self, a: &[BStr<'_>]) -> Result<bool, Str> {
         let mut p = TestExpr { toks: a, pos: 0 };
         let v = p.or_expr(self)?;
         match a.get(p.pos) {
@@ -28895,7 +28976,7 @@ impl Shell {
     /// Evaluate a `test`/`[` *unary* primary, resolving the three primaries that
     /// need live shell state (`-v NAME` set?, `-o OPT` enabled?, `-R NAME`
     /// nameref?) and delegating the filesystem/string ones to [`eval_unary`].
-    fn eval_test_unary(&self, op: BStr<'_>, x: BStr<'_>) -> bool {
+    fn eval_test_unary(&mut self, op: BStr<'_>, x: BStr<'_>) -> bool {
         match op {
             // These three name a variable or a shell option, and both
             // namespaces are text — so an operand that is not text names
@@ -34878,18 +34959,22 @@ impl<'a> TestExpr<'a> {
         self.toks.get(self.pos).copied()
     }
 
-    fn or_expr(&mut self, sh: &Shell) -> Result<bool, Str> {
+    fn or_expr(&mut self, sh: &mut Shell) -> Result<bool, Str> {
         let mut v = self.and_expr(sh)?;
         while self.peek() == Some(b"-o".as_slice()) {
             self.pos += 1;
-            // Evaluate both sides (test primaries are side-effect free); OR them.
+            // Both sides are evaluated whichever way the left one went, as
+            // bash's `expr()` does. That is observable rather than merely
+            // wasteful now that `-v` takes a reference whose subscript is live
+            // shell syntax: `[ -v x -o -v 'a[i=5]' ]` assigns `i` even when `x`
+            // is set. OR them afterwards.
             let rhs = self.and_expr(sh)?;
             v = v || rhs;
         }
         Ok(v)
     }
 
-    fn and_expr(&mut self, sh: &Shell) -> Result<bool, Str> {
+    fn and_expr(&mut self, sh: &mut Shell) -> Result<bool, Str> {
         let mut v = self.term(sh)?;
         while self.peek() == Some(b"-a".as_slice()) {
             self.pos += 1;
@@ -34899,7 +34984,7 @@ impl<'a> TestExpr<'a> {
         Ok(v)
     }
 
-    fn term(&mut self, sh: &Shell) -> Result<bool, Str> {
+    fn term(&mut self, sh: &mut Shell) -> Result<bool, Str> {
         match self.peek() {
             None => Err(b"argument expected".to_vec()),
             Some(b"!") => {
@@ -34925,7 +35010,7 @@ impl<'a> TestExpr<'a> {
         }
     }
 
-    fn primary(&mut self, sh: &Shell) -> Result<bool, Str> {
+    fn primary(&mut self, sh: &mut Shell) -> Result<bool, Str> {
         let rem = self.toks.len() - self.pos;
         // Dyadic primary first (bash checks a binary operator in the second
         // position before treating the first token as a unary op), so e.g.

@@ -861,6 +861,26 @@ enum Flow {
     Abort,
 }
 
+/// What the DEBUG trap left behind for the command it just announced.
+///
+/// Under `shopt -s extdebug` the handler's exit status is an instruction rather
+/// than a status: a non-zero one takes the command away, and a 2 raised where
+/// there is a body to leave takes the rest of that body with it. This is what
+/// makes a debugger able to step over a line or out of a function without the
+/// script's cooperation. Without extdebug a status is only a status and the
+/// command runs whatever the handler thought of it.
+enum DebugVerdict {
+    /// Run the command, as always without extdebug.
+    Run,
+    /// Drop the command. It leaves status 0 behind, as if it had run and
+    /// succeeded, so nothing downstream can tell it was skipped.
+    Skip,
+    /// Leave the innermost function or sourced script, with status 2.
+    Return,
+    /// The handler ran `exit N`: unwind the shell instead of running anything.
+    Exit(i32),
+}
+
 /// Where a command's standard output should go.
 enum Out {
     /// Inherit the shell's real stdout.
@@ -10943,13 +10963,21 @@ impl Shell {
         // own commands don't recurse). Suppressed inside an untraced function
         // frame that merely inherited the caller's DEBUG trap (bash).
         // An `exit N` in the handler unwinds the shell *instead of* running the
-        // command it was about to announce (bash).
-        if !self.in_trap
-            && self.traps.contains_key("DEBUG")
-            && !self.trap_suppressed("DEBUG")
-            && let Flow::Exit(code) = self.fire_trap_flow("DEBUG", out, stdin)
-        {
-            return Flow::Exit(code);
+        // command it was about to announce (bash), and under extdebug the
+        // handler's status can take the command away as well ([`DebugVerdict`]).
+        if !self.in_trap && self.traps.contains_key("DEBUG") && !self.trap_suppressed("DEBUG") {
+            match self.fire_debug_trap(out, stdin) {
+                DebugVerdict::Run => {}
+                DebugVerdict::Skip => {
+                    self.last_status = 0;
+                    return Flow::Next;
+                }
+                DebugVerdict::Return => {
+                    self.last_status = 2;
+                    return Flow::Return;
+                }
+                DebugVerdict::Exit(code) => return Flow::Exit(code),
+            }
         }
         // Expand the command words into argv (with the current variable values,
         // before any prefix assignments take effect).
@@ -21779,14 +21807,26 @@ impl Shell {
     /// substitution's capture, exactly as bash's does (its handler runs in the
     /// substitution's subshell, whose fd 1 is the pipe).
     fn fire_trap_flow(&mut self, name: &str, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        self.fire_trap_status(name, out, stdin).0
+    }
+
+    /// [`Shell::fire_trap_flow`], also reporting the status the handler's body
+    /// left behind.
+    ///
+    /// That status is not otherwise observable — these traps are required not to
+    /// disturb `$?`, and it is put back below — and only the DEBUG trap has any
+    /// use for it: under `extdebug` its status is an instruction about the
+    /// command it was announcing (see [`Shell::fire_debug_trap`]). A handler
+    /// that did not run at all reports 0, which is the "nothing to say" answer.
+    fn fire_trap_status(&mut self, name: &str, out: &mut Out, stdin: &StdinSrc) -> (Flow, i32) {
         if self.in_trap {
-            return Flow::Next;
+            return (Flow::Next, 0);
         }
         let Some(action) = self.traps.get(name).cloned() else {
-            return Flow::Next;
+            return (Flow::Next, 0);
         };
         if action.is_empty() {
-            return Flow::Next;
+            return (Flow::Next, 0);
         }
         self.in_trap = true;
         let saved = self.last_status;
@@ -21800,6 +21840,7 @@ impl Shell {
         let saved_line = self.current_line;
         let map = LineMap::Offset(self.current_line.saturating_sub(1));
         let flow = self.run_source_flow_out(&action, out, stdin, &map, HistRead::Off);
+        let handler_status = self.last_status;
         // Preserve the pre-trap status unless the handler asked to exit, in
         // which case its code is the shell's exit status.
         if !matches!(flow, Flow::Exit(_)) {
@@ -21810,7 +21851,27 @@ impl Shell {
         // its own line, however far the handler's body ran.
         self.current_line = saved_line;
         self.in_trap = false;
-        flow
+        (flow, handler_status)
+    }
+
+    /// Fire the DEBUG trap for the command about to run, and read the verdict
+    /// its exit status carries. See [`DebugVerdict`].
+    fn fire_debug_trap(&mut self, out: &mut Out, stdin: &StdinSrc) -> DebugVerdict {
+        let (flow, status) = self.fire_trap_status("DEBUG", out, stdin);
+        if let Flow::Exit(code) = flow {
+            return DebugVerdict::Exit(code);
+        }
+        if status == 0 || !self.extdebug_on() {
+            return DebugVerdict::Run;
+        }
+        // The simulated return needs somewhere to return to. At the top level of
+        // a script there is none — as for the `return` builtin, a sourced file
+        // and a function body are the only two — and the 2 is then merely
+        // non-zero, so the command is dropped like any other.
+        if status == 2 && !(self.fn_stack.is_empty() && self.source_stack.is_empty()) {
+            return DebugVerdict::Return;
+        }
+        DebugVerdict::Skip
     }
 
     /// The source text of a trap handler, or `None` after reporting that the

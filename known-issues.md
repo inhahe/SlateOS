@@ -25646,3 +25646,132 @@ source as `environment` and its line as 0 so `declare -F` under extdebug agrees.
 `find -exec bash -c`, `xargs bash -c`, `parallel`) fails outright rather than
 silently misbehaving, so it is visible rather than dangerous. Also blocks
 `declare -F`'s `0 environment` form, which is otherwise implemented.
+
+### TD-OILS-EVAL-SWALLOWS-RETURN. `return` inside `eval` does not return from the enclosing function — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — the `eval` builtin, which runs its
+argument through the same read-eval path a sourced file uses and then reports
+only a status, so a `Flow::Return` raised inside the eval'd text stops there.
+
+**What:** bash's `eval` is not a return boundary. The text runs in the calling
+context, so a `return` in it returns from whatever function or sourced script
+encloses the `eval`, taking the rest of that body with it.
+
+```
+$ cat z.sh
+g() { eval "echo a; return 3; echo b"; echo "after eval"; }
+g
+echo "g rc=$?"
+$ bash z.sh          $ osh z.sh
+a                    a
+g rc=3               after eval
+                     g rc=0
+```
+
+The same swallowing happens for a subshell that encloses the eval:
+`f() { ( eval "return 2"; echo sub ); }` prints `sub` under osh and nothing
+under bash.
+
+**Proper fix.** `eval` already has a side channel for the two flows a builtin
+cannot express directly — `pending_builtin_exit` for `Flow::Exit` and
+`pending_abort` for `Flow::Abort` (see the `Flow::Abort` docs). `Flow::Return`
+needs the same treatment: a `pending_return` set by `eval` (and re-raised by
+its caller in `exec_simple`) so the return unwinds past the builtin into the
+enclosing function/source frame, where `return`'s own "can only return from a
+function or sourced script" check has already decided it is legal. `break` and
+`continue` inside an `eval` want the identical treatment and should be checked
+in the same pass.
+
+**Impact.** Found while measuring the extdebug DEBUG-trap verdict (a DEBUG trap
+returning 2 simulates a `return`), where the probe harness ran its cases through
+`eval` inside a function and so could not observe the unwind. Any script using
+`eval` to build a guard clause — `eval "$check" || return 1` is unaffected, but
+`eval 'return 1'` is not — keeps running past the return.
+
+### TD-OILS-DEBUG-TRAP-PIPELINE-DOUBLE-FIRE. The DEBUG trap fires twice per pipeline stage under functrace — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_pipeline` fires DEBUG in the
+parent once per simple-command stage before the pipeline runs, and
+`clone_for_subshell` hands the DEBUG trap on to the stage's own shell whenever
+`functrace` is set (which `shopt -s extdebug` now also sets), so the stage fires
+it a second time from `exec_simple`.
+
+```
+$ b() { echo "B:[$BASH_COMMAND]" >&2; }
+$ ( set -T; trap b DEBUG; echo one | cat )
+bash: B:[echo one] B:[cat]                  osh: B:[echo one] B:[cat] B:[echo one] B:[cat]
+```
+
+Without functrace both agree (the stage's shell resets the trap, so only the
+parent-side firing is observable), which is why the existing corpus cases pass.
+
+**Proper fix.** The parent-side firing is the one that matches bash — bash
+announces a simple-command stage from the parent, before forking, which is why
+its `B:` lines all appear before the pipeline's output. So the stage-side firing
+is the duplicate: a pipeline stage that the parent has already announced must
+run with DEBUG masked for its own top-level command, using the same
+`trap_suppress` frame mechanism `call_function` uses for an untraced function.
+Note the mask has to cover only the stage's *own* command — a function called by
+the stage still announces its body commands under functrace.
+
+**Impact.** Any script that counts DEBUG firings (a step-debugger, a coverage
+counter) sees double for pipeline stages under `set -T` or `shopt -s extdebug`.
+
+### TD-OILS-DEBUG-TRAP-VERDICT-IN-A-PIPELINE. The extdebug DEBUG-trap verdict is not applied to a pipeline stage — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_pipeline`'s parent-side DEBUG
+loop still uses `fire_trap_flow`, so it honours only an `exit` in the handler;
+the `DebugVerdict` a non-zero status carries (see
+`tests/corpus/extdebug-debug-trap-status-skips-a-command.sh`) is read only by
+`exec_simple`.
+
+**What:** measured bash behaviour is confusing enough to be worth writing down
+before implementing. For **bare simple-command stages** at the top level of a
+script, a non-zero DEBUG status for *any* stage takes the **whole pipeline**
+away — `T='cat'; echo one > f1 | cat` leaves no `f1`, i.e. the first stage never
+ran even though it was the second stage's announcement that was refused. For
+**group stages** (`{ echo one > f1; } | { cat > f2; }`) the skip is per-stage:
+refusing the second leaves `f1` behind. And the same bare-stage pipeline run
+*inside a function* behaved per-stage, with a one-element `${PIPESTATUS[@]}`.
+
+**Proper fix.** Re-measure the three cases above in isolation to find the rule
+(the likely shape: the parent-side announcement belongs to the pipeline as a
+whole, so refusing it skips the pipeline and leaves one status behind, while a
+group stage is announced from inside its own child and only that child is
+skipped). Then apply the verdict in `exec_pipeline` and give
+`${PIPESTATUS[@]}` whatever shape bash leaves. Best done together with
+`TD-OILS-DEBUG-TRAP-PIPELINE-DOUBLE-FIRE`, since both hinge on which side does
+the announcing.
+
+**Impact.** A debugger cannot step over a pipeline under osh; the pipeline runs.
+
+### TD-OILS-DEBUG-TRAP-VERDICT-AT-FUNCTION-ENTRY. The extdebug verdict is ignored at the function-entry DEBUG firing — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `call_function`'s extra entry-time
+DEBUG firing (and the extra one before a RETURN trap's action) still uses
+`fire_trap_flow`, so only an `exit` in the handler is honoured.
+
+**What:** under functrace bash announces a function call twice — once for the
+call word from the call site, once on entry to the body, both with
+`$BASH_COMMAND` still the call word. Refusing the *second* one behaves unlike
+refusing the first:
+
+- the body does not run, **and neither does the RETURN trap**;
+- the call's status is the **handler's own** status, not 0 (bash leaves
+  `execute_function`'s `result` at the trap's value), so a handler returning 1
+  makes the call return 1 — where a refused *body* command leaves 0;
+- a handler returning 2 at the entry firing returns from the function being
+  entered, with status 2 (its frame is already pushed).
+
+Measured with a counting handler (`n=$((n+1)); [ "$n" != "$K" ]`) so the two
+firings for the same `$BASH_COMMAND` can be told apart.
+
+**Proper fix.** Have both extra firings go through `Shell::fire_debug_trap` and
+read the `DebugVerdict`, carrying the handler's status on `Skip` (the two sites
+use it differently — `exec_simple` forces 0, `call_function` keeps it) and
+suppressing the RETURN trap on a refused entry.
+
+**Impact.** Only reachable with a DEBUG handler whose status varies between two
+firings of the same command, i.e. a real step-debugger. Ordinary "refuse this
+command" handlers are refused at the call site first, where the verdict is
+already honoured.

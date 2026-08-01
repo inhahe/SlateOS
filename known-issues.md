@@ -26342,7 +26342,7 @@ Corpus case `coproc-second-warns-about-the-first.sh` covers all of those plus
 the unnamed (`COPROC`) form. It collects stderr in a file and filters the pid
 out at the end, since the pid is a property of the host, not of the shell.
 
-### TD-OILS-COPROC-VARS-SURVIVE-REAPING. bash unsets `NAME`/`NAME_PID` and closes the endpoints when a coproc is reaped; osh keeps them forever — OPEN — 2026-08-01
+### TD-OILS-COPROC-VARS-SURVIVE-REAPING. bash unsets `NAME`/`NAME_PID` and closes the endpoints when a coproc is reaped; osh keeps them forever — ✅ RESOLVED — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — `exec_coproc` publishes the array
 and the pid variable, and nothing ever takes them away. The endpoints live on
@@ -26380,6 +26380,34 @@ same treatment, and closing the write end has to be visible to `>&"${P[1]}"`.
 Note the reap point is asynchronous in bash but synchronous in osh, so the
 exact moment the variables vanish will differ for a coproc that exits with no
 `wait` and no intervening builtin; keep the corpus case away from that window.
+
+**Fixed.** `coproc_tracked` grew from a `(name, pid)` pair into a
+`TrackedCoproc { name, pid, read_fd, write_fd }`, so disposal can close the
+endpoints the `coproc` actually opened rather than whatever `NAME` says by then
+— a script is free to assign over `NAME`, and bash's `sh_coproc` keeps its own
+copy for the same reason. `Shell::dispose_reaped_coproc` hangs off `poll_jobs`,
+the one place a finished body is reaped, and `forget_tracked_coproc` drops both
+fd-table entries and `unbind_var`s `NAME` and `NAME_PID`. A job that a `wait`
+already swept out of the table counts as reaped too, so an absent job disposes
+just like one whose handle has been taken; `notify_signalled_jobs` therefore no
+longer takes its empty-table shortcut while a coproc is still tracked.
+
+A displaced coproc is deliberately left alone — only the coproc the shell is
+still tracking is ever disposed of, which is the other half of the
+`execute_coproc` warning. Corpus case
+`coproc-is-disposed-of-when-it-is-reaped.sh` covers waiting for one, letting one
+finish and running anything at all, the descriptors being *closed* and not just
+forgotten (the fd numbers are saved by hand first, since disposal takes `NAME`
+away), a coproc read before any command boundary — which still works — and a
+displaced one keeping everything.
+
+One deliberate deviation came out of this: the *first* reap sweep after a
+`coproc` never disposes, because osh's body is a thread and can finish before
+the shell reaches the next command, where bash's forked child cannot. Without
+that grace `coproc C { … }` followed by a line naming `${C[1]}` was a coin
+flip. See design-decisions.md §97. The same race had made the older corpus
+cases and two `coproc_*` unit tests latently flaky; they now keep their bodies
+alive with a trailing `read` instead of betting on the window.
 
 ### TD-OILS-EXTERNAL-DUP-TO-STDERR. `cmd >&2` sent an *external* command's output to stdout — ✅ RESOLVED — 2026-08-01
 
@@ -26457,3 +26485,93 @@ resolved path — `std::os::…::CommandExt::arg0` on Unix; on Windows there is 
 such split, so this may have to stay a documented host limitation. Confirm the
 Windows behaviour before writing the fix off: the MSYS tools read `argv[0]`
 from the command line, which `Command` does control.
+
+### TD-OILS-DUP-REDIRECT-WORD-ERRORS. `<&WORD`/`>&WORD` misclassifies and misquotes its failures — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — the redirect path that resolves a
+`<&`/`>&` whose target is a *word* rather than a literal fd number.
+
+**Reproduce:**
+
+```sh
+e=""
+read -r l <&"$e"                    # empty after expansion
+echo hi >&"$e"
+read -r l <&"abc"                   # not a number
+read -r l <&"-1"
+read -r l <&"99999999999999999999"  # all digits, out of range
+```
+
+Four separate divergences, all measured against bash 5.2.37:
+
+| word | bash | osh |
+|---|---|---|
+| `""` (input) | `"$e": Bad file descriptor` | `"$e": ambiguous redirect` |
+| `""` (output) | `"$e": Bad file descriptor` | `: No such file or directory` |
+| `"abc"` | `abc: ambiguous redirect` | `"abc": ambiguous redirect` |
+| `"-1"` | `-1: ambiguous redirect` | *(nothing printed)* |
+| `"99999999999999999999"` | `…: Bad file descriptor` | `…: ambiguous redirect` |
+
+**Root cause (bash's rule).** `do_redirection_internal` splits on
+`all_digits(word)`, which is vacuously true for the empty string: an all-digit
+word that is not a *legal number* (empty, or out of `int` range) is `BADFD`
+— "Bad file descriptor" — while anything with a non-digit in it is
+`AMBIGUOUS_REDIRECT`. osh appears to test "parses as a number" instead, which
+sends the empty and the out-of-range cases down the ambiguous path. The empty
+*output* case is worse still: `>&""` is being taken for a redirect to a file
+named by the empty string, so it reports `No such file or directory` and never
+reaches the dup logic at all. And `<&"-1"` fails silently, with no diagnostic.
+
+The quoting difference is bash's too: the ambiguous message names the *expanded*
+word (bash overwrites the redirect's word with the expansion before reporting),
+while the bad-fd message names the word as it was written, quotes and all. osh
+prints the source text in both.
+
+**Impact.** Any script that duplicates onto a computed fd — which is exactly
+what a disposed coproc's `<&"${R[0]}"` becomes — gets the wrong diagnostic, and
+`>&""` gets the wrong *kind* of failure entirely. This is why
+`coproc-is-disposed-of-when-it-is-reaped.sh` saves the fd numbers by hand rather
+than reading through the unset array.
+
+**Proper fix.** Classify exactly as bash does: expand the word, then branch on
+"every byte is a digit" (empty included) → parse as an `i32` and report
+`WORD: Bad file descriptor` on failure, else `WORD: ambiguous redirect`. Route
+`>&WORD` through the same code as `<&WORD` so an empty word cannot fall through
+to the file-redirect path, give `-1` its message, and pass the expanded word to
+the ambiguous message and the raw source word to the bad-fd one.
+
+### TD-OILS-ARITH-FOR-LOOP-IS-SLOW. a `for ((…))` loop costs ~9× what bash charges — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — the arithmetic-`for` execution path
+and the per-item work it does each time round (`notify_signalled_jobs`, line
+bookkeeping, arithmetic evaluation).
+
+**Reproduce:**
+
+```sh
+for ((i = 0; i < 300000; i++)); do :; done
+```
+
+| shell | wall clock | per iteration |
+|---|---|---|
+| bash 5.2.37 | 2.5 s | ~8 µs |
+| osh (debug build) | 22.0 s | ~73 µs |
+
+**Caveat on the measurement.** That is a *debug* Rust build, which is routinely
+10–30× slower than release, so the release figure is probably well under bash's.
+The number to act on is the release one; this entry exists because nobody has
+measured it yet, not because osh is known to be slow.
+
+**Impact.** Real, and already felt: a corpus case that spun 300 000 times as a
+builtin-only delay blew through `osh-bash-diff.py`'s 20 s per-case timeout and
+failed the whole corpus run. Any case wanting a busy-wait has to keep the count
+small or use `sleep` instead. More broadly, shell loops are the one place a
+script does its own computation, so this is the interpreter's headline number.
+
+**Proper fix.** Measure the release build first, against bash on the same
+machine. If the gap survives: profile one iteration and look at what is done
+*per item* rather than per loop — `notify_signalled_jobs` runs at the top of
+every item (`exec_items`), and now sweeps the job table whenever a coproc is
+tracked; the arithmetic evaluator re-parses its expression strings each time
+round rather than keeping the parsed form on the AST node. Both are the usual
+suspects and both are fixable without changing semantics.

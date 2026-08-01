@@ -1902,6 +1902,36 @@ struct Job {
     exit_seen: bool,
 }
 
+/// The one coproc a shell keeps track of (see [`Shell::coproc_tracked`]).
+///
+/// The two descriptors are recorded here rather than read back out of `NAME`
+/// when they are needed, because disposal has to close the endpoints the
+/// `coproc` actually opened — a script is free to assign over `NAME` in the
+/// meantime, and bash's `sh_coproc` holds its own copy for the same reason.
+#[derive(Clone)]
+struct TrackedCoproc {
+    /// The array/`_PID` name the endpoints were published under (`COPROC` when
+    /// the `coproc` was written without one).
+    name: String,
+    /// The job's synthetic pid — how the job table names it.
+    pid: u32,
+    /// `NAME[0]`, the parent's read end, in [`Shell::coproc_read_fds`].
+    read_fd: i32,
+    /// `NAME[1]`, the parent's write end, in [`Shell::open_write_fds`].
+    write_fd: i32,
+    /// Whether no reap sweep has passed over this coproc yet, in which case the
+    /// next one leaves it alone however finished its body looks.
+    ///
+    /// bash's coproc is a forked child, which cannot possibly be reaped before
+    /// the parent has run the command after the `coproc` — the fork alone costs
+    /// far more than a builtin. osh's is a thread, which can finish first, so
+    /// without this the commonest idiom of all (`coproc X { … }` followed by a
+    /// line that names `${X[1]}` or `$X_PID`) would work or not depending on how
+    /// the two were scheduled. One sweep of grace buys back what the cost of a
+    /// process buys bash. See design-decisions.md §"coproc disposal grace".
+    fresh: bool,
+}
+
 /// How `jobs` prints what it has selected.
 ///
 /// bash keeps one *form*, not a set of flags, so the last of `-l`/`-p`/`-n`
@@ -2617,9 +2647,9 @@ pub struct Shell {
     /// in front of it too, or a byte the buffer holds for one number would be
     /// invisible to the other. That is what the [`Arc`] is for.
     coproc_read_fds: std::collections::HashMap<i32, CoprocRead>,
-    /// The name and pid of the coproc bash would call *the* coproc: the most
-    /// recently started one. bash keeps a single `sh_coproc`, so starting a
-    /// second while this one is still running is a mistake it warns about
+    /// The coproc bash would call *the* coproc: the most recently started one.
+    /// bash keeps a single `sh_coproc`, so starting a second while this one is
+    /// still running is a mistake it warns about
     /// (`warning: execute_coproc: coproc [PID:NAME] still exists`) before
     /// starting it anyway and forgetting the old one — whose descriptors are
     /// then unreachable, since `NAME` has been overwritten.
@@ -2630,7 +2660,7 @@ pub struct Shell {
     /// warning even with no `wait` in sight (measured). A subshell starts with
     /// no tracked coproc at all — bash closes the coproc out in a subshell, and
     /// a `coproc` there is silent even while the parent's is still running.
-    coproc_tracked: Option<(String, u32)>,
+    coproc_tracked: Option<TrackedCoproc>,
     /// Temp files backing *input* process substitutions `<(cmd)` created while
     /// expanding the current command's words. Each holds `cmd`'s captured output;
     /// the enclosing command reads it, then it is deleted once the command
@@ -13690,26 +13720,49 @@ impl Shell {
     /// forgotten even if nothing has `wait`ed for it, because bash reaps it
     /// asynchronously; hence the liveness question is put to the job body
     /// itself rather than answered from the presence of the job.
+    ///
     /// The tracked coproc is *not* cleared here on the way past: the caller may
     /// still fail to start the new one (a pipe the host refuses), and a failed
-    /// `coproc` leaves the old one in place to be warned about again.
+    /// `coproc` leaves the old one in place to be warned about again. Nor is the
+    /// displaced coproc *disposed* of — its descriptors and variables survive
+    /// for good, since only the coproc the shell is still tracking is ever
+    /// cleaned up (see [`Shell::forget_tracked_coproc`]).
     fn warn_coproc_still_exists(&mut self) {
-        let Some((name, pid)) = self.coproc_tracked.clone() else {
+        let Some(tracked) = self.coproc_tracked.clone() else {
             return;
         };
         let alive = self
             .jobs
             .iter_mut()
-            .find(|j| j.pid == pid)
+            .find(|j| j.pid == tracked.pid)
             .and_then(|j| j.child.as_mut())
             .is_some_and(|body| !body.is_finished());
         if alive {
+            let (pid, name) = (tracked.pid, &tracked.name);
             self.perrln(&format!(
                 "warning: execute_coproc: coproc [{pid}:{name}] still exists"
             ));
         } else {
             self.coproc_tracked = None;
         }
+    }
+
+    /// Dispose of the tracked coproc, as bash does when it reaps one: close both
+    /// parent-side endpoints and unset `NAME` and `NAME_PID`.
+    ///
+    /// This is why the usual idiom reads a coproc *before* anything else runs —
+    /// a read put off until after the next command boundary finds the descriptor
+    /// already closed. The endpoints come from the tracked record rather than
+    /// from `NAME`, because a script may have assigned over `NAME` in the
+    /// meantime and the descriptors to close are still the ones `coproc` opened.
+    fn forget_tracked_coproc(&mut self) {
+        let Some(tracked) = self.coproc_tracked.take() else {
+            return;
+        };
+        self.coproc_read_fds.remove(&tracked.read_fd);
+        self.open_write_fds.remove(&tracked.write_fd);
+        self.unbind_var(&tracked.name);
+        self.unbind_var(&format!("{}_PID", tracked.name));
     }
 
     /// Execute `coproc [NAME] body`: run `body` on a background thread with its
@@ -13794,7 +13847,13 @@ impl Shell {
             exit_seen: false,
         });
         self.note_new_job(id);
-        self.coproc_tracked = Some((name.clone(), synth_pid));
+        self.coproc_tracked = Some(TrackedCoproc {
+            name: name.clone(),
+            pid: synth_pid,
+            read_fd,
+            write_fd,
+            fresh: true,
+        });
         let mut elems = BTreeMap::new();
         elems.insert(0usize, read_fd.to_string().into_bytes());
         elems.insert(1usize, write_fd.to_string().into_bytes());
@@ -19645,6 +19704,33 @@ impl Shell {
                 job.exit_seen = true;
             }
         }
+        self.dispose_reaped_coproc();
+    }
+
+    /// Dispose of the tracked coproc if its body has been reaped — the moment
+    /// bash closes a coproc's descriptors and unsets its variables.
+    ///
+    /// Reaping is what counts, not merely finishing, which is why this hangs off
+    /// [`Shell::poll_jobs`]: the same sweep that collects a finished body is the
+    /// one that notices the coproc is over. A body already swept out of the job
+    /// table entirely (a `wait` that removed its row) is reaped too, so an
+    /// absent job counts the same as one whose handle has been taken.
+    ///
+    /// The first sweep after a `coproc` is a no-op whatever it finds; see
+    /// [`TrackedCoproc::fresh`] for why a thread needs that and a process does
+    /// not.
+    fn dispose_reaped_coproc(&mut self) {
+        let Some(tracked) = self.coproc_tracked.as_mut() else {
+            return;
+        };
+        if tracked.fresh {
+            tracked.fresh = false;
+            return;
+        }
+        let pid = tracked.pid;
+        if self.jobs.iter().find(|j| j.pid == pid).is_none_or(|j| j.child.is_none()) {
+            self.forget_tracked_coproc();
+        }
     }
 
     /// Announce every reaped job that a signal killed, the way bash does
@@ -19669,7 +19755,10 @@ impl Shell {
         // A command substitution is collecting a value on the parent's behalf;
         // bash keeps it quiet so the announcement cannot appear in the middle of
         // that. See `in_comsub`.
-        if self.in_comsub || self.jobs.is_empty() {
+        // An empty job table normally means there is nothing to sweep — but a
+        // tracked coproc still has to be noticed as over, and its job may
+        // already have been swept out of the table by a `wait`.
+        if self.in_comsub || (self.jobs.is_empty() && self.coproc_tracked.is_none()) {
             return;
         }
         self.poll_jobs();
@@ -37749,12 +37838,24 @@ echo \"[${i[a]}] [${i[x]-absent}]\""
         );
     }
 
+    // Every body below ends in a `read` that nothing feeds until the test is
+    // done with the endpoints, so the coproc is unambiguously *live* for as long
+    // as the script still names it. A body that exits earlier would be disposed
+    // of at the first command boundary the shell reaches afterwards — see
+    // [`Shell::dispose_reaped_coproc`] — which would make what `${COPROC[0]}`
+    // holds a race between the body and the next command rather than something
+    // the test decides.
+
     #[test]
     fn coproc_basic_default_name() {
         // `coproc { … }` with no explicit name → array `COPROC`; `COPROC[0]`
         // reads the coproc's stdout.
         assert_eq!(
-            run(r#"coproc { echo fromco; }; read x <&"${COPROC[0]}"; echo "$x""#).0,
+            run(r#"coproc { echo fromco; read -r _; }
+read x <&"${COPROC[0]}"
+echo bye >&"${COPROC[1]}"
+echo "$x""#)
+            .0,
             "fromco\n"
         );
     }
@@ -37762,9 +37863,15 @@ echo \"[${i[a]}] [${i[x]-absent}]\""
     #[test]
     fn coproc_simple_command_body() {
         // A *simple* command body also works and defaults to `COPROC` (no
-        // explicit name is accepted before a simple command).
+        // explicit name is accepted before a simple command). The body is a
+        // function so that a simple command can still outlive the read.
         assert_eq!(
-            run(r#"coproc echo hello; read x <&"${COPROC[0]}"; echo "$x""#).0,
+            run(r#"greet() { echo hello; read -r _; }
+coproc greet
+read x <&"${COPROC[0]}"
+echo bye >&"${COPROC[1]}"
+echo "$x""#)
+            .0,
             "hello\n"
         );
     }
@@ -37773,7 +37880,11 @@ echo \"[${i[a]}] [${i[x]-absent}]\""
     fn coproc_named() {
         // `coproc NAME compound` → the named array holds the endpoints.
         assert_eq!(
-            run(r#"coproc myco { echo hi; }; read x <&"${myco[0]}"; echo "$x""#).0,
+            run(r#"coproc myco { echo hi; read -r _; }
+read x <&"${myco[0]}"
+echo bye >&"${myco[1]}"
+echo "$x""#)
+            .0,
             "hi\n"
         );
     }
@@ -37783,9 +37894,10 @@ echo \"[${i[a]}] [${i[x]-absent}]\""
         // Write to `COPROC[1]` (the coproc's stdin), read its reply from
         // `COPROC[0]` — the full round trip through both pipes.
         assert_eq!(
-            run(r#"coproc { read line; echo "got:$line"; }
+            run(r#"coproc { read line; echo "got:$line"; read -r _; }
 echo feed >&"${COPROC[1]}"
 read out <&"${COPROC[0]}"
+echo bye >&"${COPROC[1]}"
 echo "$out""#)
             .0,
             "got:feed\n"
@@ -37796,7 +37908,11 @@ echo "$out""#)
     fn coproc_read_u_fd() {
         // `read -u "${COPROC[0]}"` reads the coproc's stdout via the -u path.
         assert_eq!(
-            run(r#"coproc { echo viaU; }; read -u "${COPROC[0]}" x; echo "$x""#).0,
+            run(r#"coproc { echo viaU; read -r _; }
+read -u "${COPROC[0]}" x
+echo bye >&"${COPROC[1]}"
+echo "$x""#)
+            .0,
             "viaU\n"
         );
     }
@@ -37806,9 +37922,10 @@ echo "$out""#)
         // Successive `read <&N` on a live coproc fd must consume successive
         // lines — a fresh chunk-buffering reader per read would drop the second.
         assert_eq!(
-            run(r#"coproc { printf 'a\nb\n'; }
+            run(r#"coproc { printf 'a\nb\n'; read -r _; }
 read x <&"${COPROC[0]}"
 read y <&"${COPROC[0]}"
+echo bye >&"${COPROC[1]}"
 echo "$x $y""#)
             .0,
             "a b\n"
@@ -37819,7 +37936,11 @@ echo "$x $y""#)
     fn coproc_pid_is_set() {
         // `NAME_PID` is populated (a synthetic id for the in-process body).
         assert_eq!(
-            run(r#"coproc { echo x; }; read _ <&"${COPROC[0]}"; [[ -n $COPROC_PID ]] && echo haspid"#).0,
+            run(r#"coproc { echo x; read -r _; }
+read _ <&"${COPROC[0]}"
+[[ -n $COPROC_PID ]] && echo haspid
+echo bye >&"${COPROC[1]}""#)
+                .0,
             "haspid\n"
         );
     }
@@ -37829,9 +37950,10 @@ echo "$x $y""#)
         // Both endpoints are auto-allocated descriptors ≥ 10 (like varfds), and
         // the two are distinct.
         assert_eq!(
-            run(r#"coproc { echo x; }
+            run(r#"coproc { echo x; read -r _; }
 read _ <&"${COPROC[0]}"
 r=${COPROC[0]}; w=${COPROC[1]}
+echo bye >&"$w"
 if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             .0,
             "ok\n"

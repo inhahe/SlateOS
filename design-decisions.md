@@ -6315,3 +6315,62 @@ rename like this one will need one.
 `userspace/service/src/main.rs` for `/etc/service.d`. If the service manager is
 later unified, both should collapse into whichever path the unified manager
 picks — but not back onto `/etc/services`.
+
+## §97 — osh gives a coproc one reap sweep of grace before disposing of it
+
+**Date:** 2026-08-01
+**Decided by:** Claude (autonomous)
+
+bash disposes of a coproc when it reaps the body: both parent-side descriptors
+are closed and `NAME`/`NAME_PID` are unset. That is now osh's behaviour too
+(`Shell::dispose_reaped_coproc`, hung off the job sweep in `poll_jobs`) — with
+one deliberate deviation: the *first* sweep after a `coproc` never disposes,
+however finished the body already looks.
+
+**The problem.** bash's coproc body is a forked child. A fork costs orders of
+magnitude more than the builtin the parent runs next, so the child cannot be
+reaped before the parent has moved past the `coproc` statement — bash's window
+is not guaranteed by anything in the code, but in practice it is hundreds of
+fast builtins wide. osh's body is a thread on the same machine, and a body like
+`{ exit 7; }` routinely finishes before the shell reaches the next command
+boundary. Without a grace period, the commonest idiom of all —
+
+```sh
+coproc C { … }
+echo feed >&"${C[1]}"
+```
+
+— works or does not work depending on how the two were scheduled. Measured: the
+same script alternated between `waitC=7` and `wait: `': not a pid or valid job
+spec` across runs, and two `interp.rs` unit tests failed intermittently for the
+same reason.
+
+**Alternatives considered.**
+
+- *No grace (dispose at the first sweep that finds the body reaped).* The purest
+  reading of bash's rule, and what was implemented first. Rejected: it makes
+  osh's observable behaviour depend on thread scheduling, which is not a
+  property a shell should have. Every test touching a coproc becomes flaky, and
+  worse, so does every *script*.
+- *Require two consecutive sweeps to find it reaped.* Equivalent in effect for
+  the idiom above, but it also delays disposal for a long-running body whose
+  end bash notices in one sweep, and it is harder to state.
+- *A wall-clock minimum lifetime.* Would model the fork cost most literally, but
+  it makes behaviour depend on a timer, which is worse than depending on a
+  scheduler, and it is untestable.
+- *Spawn the body as a real process.* Would remove the divergence at the root,
+  but osh's whole job model is threads (`JobBody::Thread`); changing that is a
+  different, much larger decision, and on the SlateOS target processes are not
+  cheaper anyway.
+
+**The cost.** A script that puts *two* command boundaries between an
+instantaneous body and a use of `NAME` still diverges from bash, which would
+usually keep it alive there too. That is accepted: such a script is relying on
+an unspecified race in bash as well, and the corpus and unit tests are written
+to keep bodies alive with a trailing `read` rather than to bet on the window.
+
+**How to reverse.** Delete `TrackedCoproc::fresh` and the early return at the
+top of `Shell::dispose_reaped_coproc`. The corpus cases `coproc-is-a-job.sh`,
+`coproc-read-end-can-be-duped.sh` and
+`coproc-is-disposed-of-when-it-is-reaped.sh` already avoid the window, so they
+would keep passing; the `coproc_*` unit tests in `interp.rs` likewise.

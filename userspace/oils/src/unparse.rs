@@ -391,7 +391,7 @@ fn command_block(cmd: &Command, level: usize) -> Str {
             let trimmed = trimmed.strip_suffix(b"\n").unwrap_or(trimmed);
             bfmt![b"( ", trimmed, b" )"]
         }
-        Command::Cond(expr) => bfmt![b"[[ ", &cond_src(expr), b" ]]"],
+        Command::Cond(expr) => cond_command_src(expr),
         Command::Arith(text) => bfmt![b"((", text, b"))"],
         Command::Coproc { name, body } => {
             let mut s = b"coproc ".to_vec();
@@ -511,7 +511,7 @@ fn command_inline(cmd: &Command) -> Str {
         }
         Command::BraceGroup(prog) => bfmt![b"{ ", &program_inline(prog), b"; }"],
         Command::Subshell(prog) => bfmt![b"( ", &program_inline(prog), b" )"],
-        Command::Cond(expr) => bfmt![b"[[ ", &cond_src(expr), b" ]]"],
+        Command::Cond(expr) => cond_command_src(expr),
         Command::Arith(text) => bfmt![b"((", text, b"))"],
         Command::Coproc { name, body } => {
             let mut s = b"coproc ".to_vec();
@@ -777,6 +777,17 @@ fn fd_prefixed(fd: i32, default: i32, op: &str, sep: &str, target: BStr<'_>) -> 
     } else {
         bfmt![fd, op, sep, target]
     }
+}
+
+/// Reconstruct source text for a `[[ … ]]` conditional, brackets included.
+///
+/// Shared by both command printers and by the DEBUG trap, which announces a
+/// conditional with this same spelling — normalised whitespace and a bare word
+/// written out as the `-n` test it means, but every operator, quote and
+/// unexpanded expansion kept as it was written.
+#[must_use]
+pub fn cond_command_src(expr: &CondExpr) -> Str {
+    bfmt![b"[[ ", &cond_src(expr), b" ]]"]
 }
 
 fn cond_src(expr: &CondExpr) -> Str {

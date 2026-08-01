@@ -5926,7 +5926,7 @@ impl Shell {
                 Flow::Next
             }
             Command::Case(c) => self.exec_case(c, out, stdin),
-            Command::Cond(e) => self.exec_cond(e),
+            Command::Cond(e) => self.exec_cond(e, out, stdin),
             Command::Arith(raw) => self.exec_arith(raw, out, stdin),
             Command::BraceGroup(p) => self.exec_program(p, out, stdin),
             Command::Coproc { name, body } => self.exec_coproc(name.as_deref(), body),
@@ -7193,7 +7193,27 @@ impl Shell {
     }
 
     /// Execute a `[[ … ]]` conditional expression: exit 0 if true, 1 if false.
-    fn exec_cond(&mut self, e: &CondExpr) -> Flow {
+    fn exec_cond(&mut self, e: &CondExpr, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // The DEBUG trap hears the conditional read back off the parse tree
+        // rather than off the source, so `[[ -n    x ]]` announces as
+        // `[[ -n x ]]` and `[[ x ]]` as the `-n` test it means. That is a
+        // different printer from the one `set -x` uses, which traces each
+        // sub-test separately, *expanded*, as it is evaluated.
+        match self.announce_debug(crate::unparse::cond_command_src(e), out, stdin) {
+            DebugVerdict::Run => {}
+            // A refused conditional is not evaluated at all — an expansion in it
+            // does not even run — and leaves 0 behind whatever it would have
+            // come out as.
+            DebugVerdict::Skip(_) => {
+                self.last_status = 0;
+                return Flow::Next;
+            }
+            DebugVerdict::Return => {
+                self.last_status = 2;
+                return Flow::Return;
+            }
+            DebugVerdict::Exit(code) => return Flow::Exit(code),
+        }
         self.cond_regex_error = false;
         let ok = self.cond_eval(e);
         // A `=~` RHS that failed to compile as a regex makes bash return 2, not
@@ -7209,15 +7229,17 @@ impl Shell {
     /// *subscript* and a failed nested expansion; `arith_discard_flow` turns
     /// either into a `Flow::Discard`.
     fn exec_arith(&mut self, raw: BStr<'_>, out: &mut Out, stdin: &StdinSrc) -> Flow {
-        if self.xtrace {
-            self.bxtrace_emit(&bfmt![b"(( ", raw, b" ))"]);
-        }
-        // The DEBUG trap is told the same expression, but under the command
-        // printer's tighter spelling: `((` and `))` sit straight against the
-        // source text, where the trace pads them out. `(( 1 + 1 ))` is written
-        // with the spaces it was typed with either way, since `raw` is the
-        // untouched source between the parens — which is why the trace of it
-        // ends up with *doubled* spaces and this does not.
+        // The DEBUG trap comes first — a command is announced before anything is
+        // done about it, the trace of it included, so a handler that itself
+        // traces has all of its own output out of the way before the `+ (( … ))`
+        // line appears, and a *refused* command is never traced at all.
+        //
+        // It is told the same expression, but under the command printer's
+        // tighter spelling: `((` and `))` sit straight against the source text,
+        // where the trace pads them out. `(( 1 + 1 ))` is written with the
+        // spaces it was typed with either way, since `raw` is the untouched
+        // source between the parens — which is why the trace of it ends up with
+        // *doubled* spaces and this does not.
         match self.announce_debug(bfmt![b"((", raw, b"))"], out, stdin) {
             DebugVerdict::Run => {}
             // A refused arithmetic command is simply not evaluated, and leaves
@@ -7231,6 +7253,9 @@ impl Shell {
                 return Flow::Return;
             }
             DebugVerdict::Exit(code) => return Flow::Exit(code),
+        }
+        if self.xtrace {
+            self.bxtrace_emit(&bfmt![b"(( ", raw, b" ))"]);
         }
         // bash tags `(( … ))`-command arithmetic errors with `((`.
         self.last_status = match self.eval_arith_cmd(raw, b"((") {

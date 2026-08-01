@@ -25553,3 +25553,59 @@ report at both levels rather than collapsing to one.
 
 **Impact.** Cosmetic: the wording and count of a diagnostic in a corner that
 takes a deliberately perverse pointer to reach. No effect on values or status.
+
+### TD-OILS-READ-LONE-BACKSLASH-CTLESC. `read` on input that is nothing but a trailing backslash leaves bash's internal `CTLESC` (`\001`) in the variable; osh leaves it empty — NOT-A-BUG (bash defect, deliberately not replicated) — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `read_record`, the non-`-r` reader.
+osh drops a backslash that has nothing left to escape, so the record is empty.
+
+**What:** with the whole input being one backslash and no newline,
+
+```
+$ printf '\' | { read v; printf '%s' "$v" | od -c; echo "len=${#v}"; }
+0000000 001            <- bash 5.2.37
+len=1
+$ printf '\' | { read -a A; printf '<%s>' "${A[@]}" | od -c; }
+0000000   < 001   >    <- bash 5.2.37
+```
+
+osh gives an empty value and length 0 in both. The exit status agrees (1 in
+both, since no delimiter was seen), and every neighbouring case agrees exactly:
+`printf 'a\' | read v` gives `a` in both, and `printf '\' | read -r v` gives a
+single backslash in both.
+
+**Why NOT a bug in osh:** `\001` is bash's `CTLESC`, the sentinel it prefixes to
+a byte internally so that later quote-removal knows the byte was quoted. It is
+supposed to be stripped before the value is stored. Here the backslash is
+retained as `CTLESC` while the character it was to escape never arrives, so
+nothing pairs with the sentinel and it escapes into the variable as data — a
+sentinel leak, not a documented behaviour. Reproducing it would mean giving osh
+a `CTLESC` representation purely to be able to leak it.
+
+**Impact.** None. Reachable only from input consisting of exactly one backslash
+with no terminator; `tests/corpus/read-processes-backslashes-as-it-reads.sh`
+covers the surrounding cases and deliberately omits this one.
+
+### TD-OILS-READ-NCHARS-CHARS. `read -n`/`-N` count Unicode characters, not UTF-8 bytes (correct for SlateOS; differs only from MSYS bash's byte-wise C locale) — NOT-A-BUG / documented probe artifact — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `read_record`, whose character
+counter advances on every byte that is not a `10xxxxxx` continuation byte.
+
+**What:** for the four-byte input `a<c3><a9>b` (`aéb` in UTF-8), `read -N 2 v`
+gives osh `a<c3><a9>` (the characters `a`, `é`) and MSYS bash `a<c3>` (the bytes
+`a`, `\303`). The escaped form counts alike: `read -N 3` on `a\<c3><a9>b` is
+`aéb` for osh and `aé` for MSYS bash.
+
+**Why NOT a bug:** the *same* MSYS bash under a UTF-8 locale agrees with osh —
+
+```
+$ LC_ALL=en_US.UTF-8 bash -c 'printf "a\303\251b\n" | { read -N 2 v; printf "%s" "$v"; }' | od -c
+0000000   a 303 251
+```
+
+Same root cause and disposition as `TD-OILS-STRLEN-CHARS`,
+`TD-OILS-PRINTF-QUOTE-CHAR` and `TD-OILS-UNICODE-ESC`: osh is unconditionally
+UTF-8-native, which is the correct target for SlateOS (it has no C/POSIX byte
+locale), so the MSYS byte-wise result is a host-locale artifact rather than an
+osh divergence. `tests/corpus/read-processes-backslashes-as-it-reads.sh` keeps
+to ASCII for exactly this reason. No action needed.

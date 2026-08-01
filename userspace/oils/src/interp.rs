@@ -6218,7 +6218,9 @@ impl Shell {
                 show_menu = false;
             }
             self.emit_stderr(&ps3);
-            let line = match self.read_line(stdin, &redir) {
+            // `select` answers its prompt with the `read` builtin's own default
+            // reading, so a reply can be continued over a backslash-newline.
+            let line = match self.read_line(stdin, &redir, false) {
                 Some((l, _)) => l,
                 None => {
                     // EOF terminates the loop. Three details, all verified
@@ -27002,23 +27004,21 @@ impl Shell {
             (Str::new(), true)
         } else if delim.is_some() || nchars.is_some() {
             let d = delim.unwrap_or(b'\n');
-            self.read_record_input(rd_stdin, rd_redir, d, nchars, exact)
+            self.read_record_input(rd_stdin, rd_redir, d, nchars, exact, raw)
                 .unwrap_or_else(|| (Str::new(), false))
         } else {
             // A final line ending at EOF without a newline is a partial read:
             // the value is still assigned, but status is 1 (bash).
-            self.read_line(rd_stdin, rd_redir).unwrap_or_else(|| (Str::new(), false))
+            self.read_line(rd_stdin, rd_redir, raw).unwrap_or_else(|| (Str::new(), false))
         };
-        // Exit status: for `-N`, success iff exactly N characters were read
-        // (a short read at EOF is status 1). For `-d`/`-n`, success iff the
-        // record was terminated (delimiter seen or the `-n` count reached); a
-        // missing delimiter at EOF is a partial read (status 1) but the value
-        // is still assigned. The default line path always reports success.
-        let eof_status = if exact {
-            i32::from(nchars.is_some_and(|n| bytes::char_count(&line) < n))
-        } else {
-            i32::from(!terminated)
-        };
+        // Exit status: success iff the record finished the way it was asked to
+        // — a delimiter seen, or the requested character count reached. A short
+        // read at EOF is status 1, though the value is still assigned. The
+        // reader is what answers this rather than a count taken from the record
+        // afterwards: the record holds the backslashes it read, which are no
+        // characters, so `read -N 5` on the four characters of `x\ny` would
+        // otherwise look satisfied by five bytes.
+        let eof_status = i32::from(!terminated);
 
         let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| b" \t\n".to_vec());
 
@@ -27132,7 +27132,9 @@ impl Shell {
         fn take<R: BufRead>(r: &mut R, delim: u8, max: Option<usize>) -> Vec<Vec<u8>> {
             let mut out: Vec<Vec<u8>> = Vec::new();
             while max.is_none_or(|m| out.len() < m) {
-                let Some((text, terminated)) = read_record(r, delim, None, false) else {
+                // `mapfile` has no `-r`: a backslash is data, so the records are
+                // read raw and reach the array with their backslashes intact.
+                let Some((text, terminated)) = read_record(r, delim, None, false, true) else {
                     break;
                 };
                 let mut bytes = text;
@@ -29780,46 +29782,49 @@ impl Shell {
         }
     }
 
-    fn read_line(&self, stdin: &StdinSrc, redir: &RedirPlan) -> Option<(Str, bool)> {
+    /// Read one line for `read`. Without `raw` a backslash is live while the
+    /// line is being read, so what comes back may span several of the input's —
+    /// see [`read_record`].
+    fn read_line(&self, stdin: &StdinSrc, redir: &RedirPlan, raw: bool) -> Option<(Str, bool)> {
         if let Some(n) = redir.stdin_from_fd {
             // `read <&N`: read from and advance descriptor N's shared source — a
             // live coproc pipe, or a `read -u`/`exec 3<` byte cursor.
             if let Some(rd) = self.coproc_read_fds.get(&n) {
-                return read_one_line(&mut *rd.borrow_mut());
+                return read_one_line(&mut *rd.borrow_mut(), raw);
             }
             let c = self.input_fd_cursor(n)?;
-            return read_one_line(&mut *lock_input(&c));
+            return read_one_line(&mut *lock_input(&c), raw);
         }
         if let Some(data) = &redir.stdin_data {
             // Here-doc/here-string: read the first line. (Multi-line `read`
             // loops over here-docs require compound-command redirects, which are
             // not yet supported — see the module limitations.)
             let mut r = io::BufReader::new(&data[..]);
-            return read_one_line(&mut r);
+            return read_one_line(&mut r, raw);
         }
         if let Some(c) = &redir.stdin {
-            return read_one_line(&mut *lock_input(c));
+            return read_one_line(&mut *lock_input(c), raw);
         }
         match stdin {
             StdinSrc::Fd(c) => {
                 // `io::Cursor` implements `BufRead`; `read_line` advances its
                 // position exactly past the consumed newline, so successive
                 // reads yield successive lines.
-                read_one_line(&mut *lock_input(c))
+                read_one_line(&mut *lock_input(c), raw)
             }
             StdinSrc::Pipe(r) => {
                 // Streaming upstream stage: the `BufReader` yields successive
                 // lines as the producer writes them.
-                read_one_line(&mut *r.borrow_mut())
+                read_one_line(&mut *r.borrow_mut(), raw)
             }
             StdinSrc::Inherit => {
                 // A persistent `exec < file` rebinds the shell's ambient fd 0.
                 if let Some(cur) = &self.exec_stdin {
-                    return read_one_line(&mut *lock_input(cur));
+                    return read_one_line(&mut *lock_input(cur), raw);
                 }
                 let stdin = io::stdin();
                 let mut lock = stdin.lock();
-                read_one_line(&mut lock)
+                read_one_line(&mut lock, raw)
             }
         }
     }
@@ -29830,7 +29835,8 @@ impl Shell {
     /// ignores `delim` and reads exactly `nchars` characters. Returns
     /// `(text, terminated)` where `terminated` is true when a delimiter was
     /// consumed (for `-N`, true when the full character count was read).
-    /// `None` signals immediate EOF with no data.
+    /// `None` signals immediate EOF with no data. Without `raw`, backslashes are
+    /// live while the record is read — see [`read_record`].
     fn read_record_input(
         &self,
         stdin: &StdinSrc,
@@ -29838,31 +29844,32 @@ impl Shell {
         delim: u8,
         nchars: Option<usize>,
         exact: bool,
+        raw: bool,
     ) -> Option<(Str, bool)> {
         if let Some(n) = redir.stdin_from_fd {
             if let Some(rd) = self.coproc_read_fds.get(&n) {
-                return read_record(&mut *rd.borrow_mut(), delim, nchars, exact);
+                return read_record(&mut *rd.borrow_mut(), delim, nchars, exact, raw);
             }
             let c = self.input_fd_cursor(n)?;
-            return read_record(&mut *lock_input(&c), delim, nchars, exact);
+            return read_record(&mut *lock_input(&c), delim, nchars, exact, raw);
         }
         if let Some(data) = &redir.stdin_data {
             let mut r = io::BufReader::new(&data[..]);
-            return read_record(&mut r, delim, nchars, exact);
+            return read_record(&mut r, delim, nchars, exact, raw);
         }
         if let Some(c) = &redir.stdin {
-            return read_record(&mut *lock_input(c), delim, nchars, exact);
+            return read_record(&mut *lock_input(c), delim, nchars, exact, raw);
         }
         match stdin {
-            StdinSrc::Fd(c) => read_record(&mut *lock_input(c), delim, nchars, exact),
-            StdinSrc::Pipe(r) => read_record(&mut *r.borrow_mut(), delim, nchars, exact),
+            StdinSrc::Fd(c) => read_record(&mut *lock_input(c), delim, nchars, exact, raw),
+            StdinSrc::Pipe(r) => read_record(&mut *r.borrow_mut(), delim, nchars, exact, raw),
             StdinSrc::Inherit => {
                 if let Some(cur) = &self.exec_stdin {
-                    return read_record(&mut *lock_input(cur), delim, nchars, exact);
+                    return read_record(&mut *lock_input(cur), delim, nchars, exact, raw);
                 }
                 let stdin = io::stdin();
                 let mut lock = stdin.lock();
-                read_record(&mut lock, delim, nchars, exact)
+                read_record(&mut lock, delim, nchars, exact, raw)
             }
         }
     }
@@ -33329,6 +33336,10 @@ fn pipe_reader_readable_now(_r: &io::PipeReader) -> bool {
 /// an unterminated final line (matching bash), so the caller needs to know
 /// which case occurred. Returns `None` only on immediate EOF with no bytes.
 ///
+/// Without `raw` a backslash is live while the line is being *read*, so a line
+/// can span several of the input's — see [`read_record`], which is what does the
+/// reading then.
+///
 /// Reads *bytes* rather than going through `BufRead::read_line`: that returns
 /// `InvalidData` for a line that is not valid UTF-8, having already consumed it,
 /// and mapping the error to `None` made a non-UTF-8 line indistinguishable from
@@ -33336,7 +33347,10 @@ fn pipe_reader_readable_now(_r: &io::PipeReader) -> bool {
 /// success, silently processing only a prefix of the file. The bytes are the
 /// value: a line that is not text reaches the variable exactly as it was read,
 /// so `read -r p; rm "$p"` names the file the input named.
-fn read_one_line<R: BufRead>(r: &mut R) -> Option<(Str, bool)> {
+fn read_one_line<R: BufRead>(r: &mut R, raw: bool) -> Option<(Str, bool)> {
+    if !raw {
+        return read_record(r, b'\n', None, false, false);
+    }
     let mut line: Str = Vec::new();
     let n = r.read_until(b'\n', &mut line).ok()?;
     if n == 0 {
@@ -33354,22 +33368,41 @@ fn read_one_line<R: BufRead>(r: &mut R) -> Option<(Str, bool)> {
     Some((line, terminated))
 }
 
-/// Read a record for `read -d`/`-n`/`-N`. Reads byte-by-byte so streaming
-/// pipes yield data as produced. `delim` terminates the record (consumed, not
-/// stored) unless `exact` is set. `nchars` caps the record at that many
-/// *characters* (UTF-8 aware: a byte begins a new character when it is not a
-/// `10xxxxxx` continuation byte). `exact` (`-N`) ignores `delim`. Returns
-/// `(text, terminated)`; `None` on immediate EOF with no bytes read.
+/// Read a record for `read`. Reads byte-by-byte so streaming pipes yield data
+/// as produced. `delim` terminates the record (consumed, not stored) unless
+/// `exact` is set. `nchars` caps the record at that many *characters* (UTF-8
+/// aware: a byte begins a new character when it is not a `10xxxxxx` continuation
+/// byte). `exact` (`-N`) ignores `delim`. Returns `(text, terminated)`; `None`
+/// on immediate EOF with no bytes read.
+///
+/// Without `raw`, a backslash is part of *reading* rather than something done to
+/// the record afterwards, and that is visible three ways. It hides whatever
+/// follows from the delimiter, so `read -d :` on `a\:b:c` comes back with one
+/// field rather than stopping at the first colon. A backslash before a newline
+/// is a line continuation — both bytes leave the input and the record goes on
+/// over the next line, which is why `read v` on `x\`⏎`y` sets `v` to `xy`. And
+/// the backslash itself is no character: an escaped pair counts as one toward
+/// `-n`/`-N`, so `read -N 3` on `x\ny` reads all four bytes. The continuation is
+/// specifically a *newline*, whatever `-d` was given: `read -d :` still joins
+/// across one.
+///
+/// The backslashes that survive stay in the record. Removing them is the split
+/// stage's job ([`read_split`], [`unescape_read_line`]) because it needs them:
+/// an escaped IFS character must not delimit a field, and by then there is
+/// nothing else to tell it apart from a bare one.
 fn read_record<R: BufRead>(
     r: &mut R,
     delim: u8,
     nchars: Option<usize>,
     exact: bool,
+    raw: bool,
 ) -> Option<(Str, bool)> {
     let mut bytes: Str = Vec::new();
     let mut chars = 0usize;
     let mut hit_delim = false;
     let mut any = false;
+    // Set between consuming a backslash and reading the character it escapes.
+    let mut escaped = false;
     loop {
         // Peek at the next byte without holding the borrow across `consume`.
         let b = {
@@ -33380,6 +33413,23 @@ fn read_record<R: BufRead>(
             buf[0]
         };
         let is_char_start = b & 0xC0 != 0x80;
+        if escaped {
+            // The backslash has already committed the reader to this byte, so
+            // neither the delimiter nor the character limit is consulted first.
+            r.consume(1);
+            escaped = false;
+            if b == b'\n' {
+                // A line continuation: neither byte is part of the record and
+                // neither is counted, so reading simply carries on.
+                continue;
+            }
+            bytes.push(b'\\');
+            bytes.push(b);
+            if is_char_start {
+                chars += 1;
+            }
+            continue;
+        }
         // Stop once the character limit is reached, at the next char boundary.
         if let Some(n) = nchars
             && is_char_start
@@ -33387,6 +33437,15 @@ fn read_record<R: BufRead>(
         {
             hit_delim = true; // full requested count read
             break;
+        }
+        if !raw && b == b'\\' {
+            // Held back rather than stored: a backslash at end of input escapes
+            // nothing and is not part of the record either, so it is only worth
+            // keeping once the character it escapes has actually arrived.
+            r.consume(1);
+            any = true;
+            escaped = true;
+            continue;
         }
         // `-n` (not `-N`) also stops at the delimiter.
         if !exact && b == delim {
@@ -33401,6 +33460,13 @@ fn read_record<R: BufRead>(
         if is_char_start {
             chars += 1;
         }
+    }
+    // Input that ends exactly on the requested count still satisfied it. The
+    // loop can only notice the limit when there is a further byte to look at —
+    // it stops *before* the character that would overrun — so a count reached at
+    // end of input has to be recognised here instead.
+    if nchars.is_some_and(|n| chars >= n) {
+        hit_delim = true;
     }
     if !any && bytes.is_empty() {
         return None;

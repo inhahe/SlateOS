@@ -25882,6 +25882,27 @@ impl Shell {
         }
     }
 
+    /// Whether a `-u` operand names a descriptor this shell actually holds,
+    /// complaining in bash's words when it does not.
+    ///
+    /// A number that parses is a legal file-descriptor *specification*, so the
+    /// rejection comes one step later — from the attempt to use the descriptor
+    /// — and therefore carries the `errno` text rather than a syntax
+    /// complaint. `read` and `mapfile` word it identically, so they share one
+    /// renderer and cannot drift apart. Descriptors below 3 are the ambient
+    /// standard streams and are never checked here. Both an `exec N< file`
+    /// byte cursor and a live `coproc` read end count as open.
+    fn ufd_is_open(&mut self, tag: &str, ufd: Option<i32>) -> bool {
+        let Some(n) = ufd.filter(|n| *n >= 3) else {
+            return true;
+        };
+        if self.open_fds.contains_key(&n) || self.coproc_read_fds.contains_key(&n) {
+            return true;
+        }
+        self.perrln(&format!("{tag}: {n}: invalid file descriptor: Bad file descriptor"));
+        false
+    }
+
     /// The `read [-r] [-a array] [-p prompt] [-s] name...` builtin. Reads one
     /// line from the current input, then splits it on `$IFS` (honoring the
     /// whitespace-vs-non-whitespace IFS distinction) and assigns the fields to
@@ -26049,14 +26070,8 @@ impl Shell {
 
         // `-u N` (N ≥ 3): read from the user-space fd table instead of the
         // ambient input, ignoring any `redir` stdin. Validate the fd up front
-        // (before borrowing) so a bad descriptor is a clean error. Both the
-        // `exec 3<`/`read -u` byte cursors and live `coproc` read ends qualify.
-        if let Some(n) = ufd
-            && n >= 3
-            && !self.open_fds.contains_key(&n)
-            && !self.coproc_read_fds.contains_key(&n)
-        {
-            self.perrln(&format!("read: {n}: bad file descriptor"));
+        // (before borrowing) so a bad descriptor is a clean error.
+        if !self.ufd_is_open("read", ufd) {
             return 1;
         }
         // A fresh `RedirPlan` masks `redir.stdin*` so the fd-N source is
@@ -26482,12 +26497,7 @@ impl Shell {
                 }
             },
         };
-        if let Some(n) = ufd
-            && n >= 3
-            && !self.open_fds.contains_key(&n)
-            && !self.coproc_read_fds.contains_key(&n)
-        {
-            self.perrln(&format!("{tag}: {n}: invalid file descriptor: Bad file descriptor"));
+        if !self.ufd_is_open(tag, ufd) {
             return 1;
         }
 
@@ -52761,7 +52771,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A simple-command builtin honors its own `2> file`: the `read` bad-fd
         // diagnostic lands in the file, not on the real stderr.
         let contents = run_exec_redirect("read -u 88 v 2> \"{FILE}\"");
-        assert_eq!(contents, "osh: read: 88: bad file descriptor\n");
+        assert_eq!(contents, "osh: read: 88: invalid file descriptor: Bad file descriptor\n");
     }
 
     #[test]
@@ -52771,7 +52781,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let contents = run_exec_redirect(
             "exec 3> \"{FILE}\"\nread -u 88 v 2>&3\nexec 3>&-",
         );
-        assert_eq!(contents, "osh: read: 88: bad file descriptor\n");
+        assert_eq!(contents, "osh: read: 88: invalid file descriptor: Bad file descriptor\n");
     }
 
     #[test]
@@ -52779,7 +52789,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `2>&1` on a builtin folds its stderr into the (captured) stdout sink,
         // so a command substitution sees the diagnostic as stdout.
         let (out, _) = run("v=$(read -u 88 x 2>&1); echo \"[$v]\"");
-        assert_eq!(out, "[osh: read: 88: bad file descriptor]\n");
+        assert_eq!(out, "[osh: read: 88: invalid file descriptor: Bad file descriptor]\n");
     }
 
     #[test]
@@ -52802,7 +52812,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Inside a function bash labels the error with the frame's source
         // (`get_name_for_error`): in the test harness's stdin-like mode that is
         // `main` (as bash prints for a function run from a piped script).
-        assert_eq!(contents, "main: read: 88: bad file descriptor\n");
+        assert_eq!(contents, "main: read: 88: invalid file descriptor: Bad file descriptor\n");
     }
 
     #[test]

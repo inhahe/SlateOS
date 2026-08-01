@@ -7417,7 +7417,17 @@ impl Shell {
         // body only, saving each touched fd's prior binding so it is restored —
         // and the scoped fd removed — when the body finishes. This is what makes
         // `read -u 3` inside the body read the file while fd 0 stays free.
-        let saved_fds = self.install_extra_fds(&plan.extra_fds, out);
+        //
+        // The fd 1 / fd 2 files opened above are handed over so a `3>&1` in this
+        // same list copies *them* — `{ …; } >f 3>&1` writes through fd 3 into
+        // `f`, and shares its offset — rather than the stdout the command
+        // arrived with. Which of the two a dup means is decided by where it sat
+        // in the list, and was recorded then; see [`AliasSink`].
+        let saved_fds = self.install_extra_fds(
+            &plan.extra_fds,
+            out,
+            StagedStdSinks { stdout: stdout_file.as_ref(), stderr: stderr_file.as_ref() },
+        );
 
         // `{ …; } 1>&N` / `{ …; } 2>&N` (N ≥ 3): route fd 1 / fd 2 to the write
         // descriptor fd N currently holds — bash dup's the std fd onto fd N's
@@ -7636,7 +7646,17 @@ impl Shell {
     /// earlier one created (`echo hi 3>&1 2>&3`): the collapsed [`RedirPlan`]
     /// loses left-to-right order, so the fd must be materialised in the table
     /// first. Shared by the compound-command path and simple builtins.
-    fn install_extra_fds(&mut self, extra_fds: &[(i32, ExtraFdOp)], out: &Out) -> Vec<SavedFd> {
+    ///
+    /// `staged` carries the fd 1 / fd 2 sinks this same list has already opened,
+    /// so a `>out 3>&1` copies `out` rather than the ambient stdout — see
+    /// [`AliasSink`]. Callers that have not opened the std sinks by this point
+    /// pass [`StagedStdSinks::default`] and get the ambient descriptor.
+    fn install_extra_fds(
+        &mut self,
+        extra_fds: &[(i32, ExtraFdOp)],
+        out: &Out,
+        staged: StagedStdSinks<'_>,
+    ) -> Vec<SavedFd> {
         let mut saved_fds: Vec<SavedFd> = Vec::new();
         let mut already_saved: std::collections::HashSet<i32> = std::collections::HashSet::new();
         for (fd, op) in extra_fds {
@@ -7671,9 +7691,16 @@ impl Shell {
                         self.last_status = 1;
                     }
                 },
-                ExtraFdOp::AliasFd(n, rd) => {
-                    self.open_fds.insert(*fd, Arc::clone(rd));
-                    match self.alias_write_fd(*n, out) {
+                ExtraFdOp::AliasFd { src, read, sink } => {
+                    self.open_fds.insert(*fd, Arc::clone(read));
+                    // A `>out 3>&1` copies the file this list opened for fd 1,
+                    // not the stdout the command arrived with — and copies the
+                    // *handle*, so the two names share one offset.
+                    let w = match sink {
+                        AliasSink::StagedFile => staged.get(*src),
+                        AliasSink::Live => None,
+                    };
+                    match w.map_or_else(|| self.alias_write_fd(*src, out), Ok) {
                         Ok(w) => {
                             self.open_write_fds.insert(*fd, w);
                         }
@@ -12080,7 +12107,11 @@ impl Shell {
         let ext_saved_fds = if redir.extra_fds.is_empty() {
             Vec::new()
         } else {
-            self.install_extra_fds(&redir.extra_fds, out)
+            // No staged std sinks: an external command's own `> file` is opened
+            // inside `run_external`, after this point, so a same-command
+            // `>out 3>&1` still copies the ambient fd 1. See known-issues
+            // TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR.
+            self.install_extra_fds(&redir.extra_fds, out, StagedStdSinks::default())
         };
         self.run_external(&argv, &assigns, out, stdin, &redir, None);
         self.restore_extra_fds(ext_saved_fds);
@@ -14749,7 +14780,7 @@ impl Shell {
             return match op {
                 ExtraFdOp::Input(src)
                 | ExtraFdOp::ReadWrite(src, _)
-                | ExtraFdOp::AliasFd(_, src)
+                | ExtraFdOp::AliasFd { read: src, .. }
                     if !matches!(&*lock_input(src), InputSrc::Closed) =>
                 {
                     Some(Arc::clone(src))
@@ -14783,6 +14814,22 @@ impl Shell {
             1 | 2 => Some(write_only_input()),
             _ => self.plan_input_fd(plan, n),
         }
+    }
+
+    /// Which fd 1 / fd 2 a dup of one of them copies — the one this list has
+    /// already opened a file for, or the ambient one. See [`AliasSink`].
+    ///
+    /// Asked at *resolution* time because that is where the answer still exists:
+    /// the plan keeps one slot per std fd, so by apply time a later `> other`
+    /// has overwritten what the dup was looking at. A source of 3 or more needs
+    /// no marker — `extra_fds` is an ordered list and already replays in order.
+    fn alias_sink(plan: &RedirPlan, n: i32) -> AliasSink {
+        let staged = match n {
+            1 => plan.stdout.is_some(),
+            2 => plan.stderr.is_some(),
+            _ => false,
+        };
+        if staged { AliasSink::StagedFile } else { AliasSink::Live }
     }
 
     /// Whether the redirect list being resolved has itself bound fd `n`, as
@@ -15437,7 +15484,7 @@ impl Shell {
             let read_half =
                 if fd >= 3 || n >= 3 { self.dup_read_half(plan, n) } else { None };
             let staged_write = plan.extra_fds.iter().any(|(f, op)| {
-                *f == n && matches!(op, ExtraFdOp::OutputFile(..) | ExtraFdOp::AliasFd(..))
+                *f == n && matches!(op, ExtraFdOp::OutputFile(..) | ExtraFdOp::AliasFd { .. })
             });
             if n >= 3
                 && read_half.is_none()
@@ -15474,9 +15521,11 @@ impl Shell {
                 // writes goes through fd 7. Aliasing fd 0 is legal even when
                 // fd 0 is read-only: bash's dup succeeds, and it is the later
                 // *write* through fd 3 that reports `EBADF`.
-                f if f >= 3 => plan
-                    .extra_fds
-                    .push((f, ExtraFdOp::AliasFd(n, read_half.unwrap_or_else(write_only_input)))),
+                f if f >= 3 => {
+                    let sink = Self::alias_sink(plan, n);
+                    let read = read_half.unwrap_or_else(write_only_input);
+                    plan.extra_fds.push((f, ExtraFdOp::AliasFd { src: n, read, sink }));
+                }
                 // `0>&N` duplicates onto *stdin*, which osh does not model as a
                 // write target; the source is still validated above.
                 _ => {}
@@ -15600,7 +15649,10 @@ impl Shell {
                 // Consumed by `exec` and the scoped compound-command path;
                 // invisible on an ordinary command, as it is in bash.
                 match plan_src {
-                    Some(rd) => plan.extra_fds.push((fd, ExtraFdOp::AliasFd(n, rd))),
+                    Some(read) => {
+                        let sink = Self::alias_sink(plan, n);
+                        plan.extra_fds.push((fd, ExtraFdOp::AliasFd { src: n, read, sink }));
+                    }
                     // A `coproc` read end — the one source that is open and yet
                     // has no descriptor a plan can hold, its live pipe not
                     // living in `open_fds`. Validated above, left unmodelled.
@@ -18598,7 +18650,11 @@ impl Shell {
         // `exec` is exempt — it applies redirects to the *persistent* fd table
         // itself (further down), and must not have them torn down here.
         let builtin_saved_fds = if name != "exec" && !redir.extra_fds.is_empty() {
-            self.install_extra_fds(&redir.extra_fds, out)
+            // No staged std sinks: a builtin's own `> file` is opened by the
+            // caller that built `out`, not here, so a same-command
+            // `>out 3>&1` still copies the ambient fd 1. See known-issues
+            // TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR.
+            self.install_extra_fds(&redir.extra_fds, out, StagedStdSinks::default())
         } else {
             Vec::new()
         };
@@ -18944,7 +19000,13 @@ impl Shell {
                                 // outlives the `exec` but not the substitution,
                                 // so it is the same resolution a scoped `3>&1`
                                 // gets.
-                                ExtraFdOp::AliasFd(n, rd) => {
+                                // The staged-sink question [`AliasSink`] answers
+                                // for a scoped list does not arise here: `exec`
+                                // installs its own fd 1 / fd 2 into the
+                                // *persistent* table before this loop runs, so
+                                // `alias_write_fd` already sees the sink this
+                                // same `exec` just set.
+                                ExtraFdOp::AliasFd { src: n, read: rd, .. } => {
                                     self.open_fds.insert(*fd, Arc::clone(rd));
                                     match self.alias_write_fd(*n, out) {
                                         Ok(w) => {
@@ -32407,14 +32469,15 @@ enum ExtraFdOp {
     /// as `3>&1` does, and `4>&3` after `3< file` gives fd 4 the file's read
     /// end just as `4<&3` does.
     ///
-    /// The `i32` is the source fd, standard or not; at apply time its *current*
+    /// `src` is the source fd, standard or not; at apply time its *current*
     /// sink is duplicated into fd N (a snapshot, matching bash's dup semantics
-    /// — a later `exec > file` does not retarget the alias). The [`InputFd`] is
-    /// the read half, taken at *resolution* time instead, because that is what
-    /// gives the two names one cursor and what makes the source the one an
-    /// earlier entry in the same list left. It is [`InputSrc::WriteOnly`] when
-    /// the source has no read half to share.
-    AliasFd(i32, InputFd),
+    /// — a later `exec > file` does not retarget the alias). `read` is the read
+    /// half, taken at *resolution* time instead, because that is what gives the
+    /// two names one cursor and what makes the source the one an earlier entry
+    /// in the same list left. It is [`InputSrc::WriteOnly`] when the source has
+    /// no read half to share. `sink` says which fd 1 / fd 2 the write half is a
+    /// copy of — see [`AliasSink`].
+    AliasFd { src: i32, read: InputFd, sink: AliasSink },
     /// Bind fd N for both reading and writing (`exec {fd}<> file`): the two
     /// halves of one `O_RDWR | O_CREAT` open (created if absent, never
     /// truncated), made by [`open_rw_pair`] at resolution time. They are
@@ -32423,6 +32486,56 @@ enum ExtraFdOp {
     ReadWrite(InputFd, Arc<File>),
     /// Close fd N (`N<&-` / `N>&-`).
     Close,
+}
+
+/// Which fd 1 / fd 2 a `3>&1` or `3>&2` copies: the ambient one, or the one an
+/// earlier entry in the *same* redirect list installed.
+///
+/// A list is resolved left to right and each entry sees the descriptors the
+/// ones before it left, so `>out 3>&1` copies `out` while `3>&1 >out` copies
+/// the stdout the command started with. A [`RedirPlan`] keeps only the last
+/// binding for fd 1 and fd 2 (they are slots, not list entries), so the order
+/// has to be recorded here, at resolution time, where it is still known.
+///
+/// Only a *file* binding is distinguished. A `>&1` onto a pipe or a capture,
+/// a `2>&1`, and a `>&-` all leave [`AliasSink::Live`], which resolves the
+/// alias against the shell's current sink exactly as before — the group's own
+/// handle for those shapes is not a plain file, and in the capture case not a
+/// descriptor at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AliasSink {
+    /// Nothing in this list had rebound the source std fd yet: copy the sink
+    /// the command inherited.
+    Live,
+    /// This list had already pointed the source std fd at a file: copy *that*
+    /// open file, sharing its offset, so `{ echo A >&3; echo B; } >f 3>&1`
+    /// appends rather than clobbers.
+    StagedFile,
+}
+
+/// The fd 1 / fd 2 sinks a redirect list has already opened by the time its
+/// fd ≥ 3 entries are installed, for an [`AliasSink::StagedFile`] alias to copy.
+///
+/// Handed in rather than looked up because the file is opened by the caller,
+/// and because sharing the *same* handle is the point: a `try_clone` of one
+/// `Arc<File>` is one open file description with one offset, which is what a
+/// `dup2` gives and what makes two names of it interleave instead of clobber.
+#[derive(Clone, Copy, Default)]
+struct StagedStdSinks<'a> {
+    stdout: Option<&'a Arc<File>>,
+    stderr: Option<&'a WriteFd>,
+}
+
+impl StagedStdSinks<'_> {
+    /// The staged sink for source fd `n`, or `None` when this list staged none
+    /// (or staged something that is not a file handle to copy).
+    fn get(self, n: i32) -> Option<WriteFd> {
+        match n {
+            1 => self.stdout.map(|f| WriteFd::File(Arc::clone(f))),
+            2 => self.stderr.cloned(),
+            _ => None,
+        }
+    }
 }
 
 /// A single expanded character tagged with whether it came from a quoted
@@ -57084,6 +57197,56 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("r=$({ echo o; echo e >&2; } 3>&1 2>&3); echo \"[$r]\"");
         assert_eq!(s, 0);
         assert_eq!(o, "[o\ne]\n");
+    }
+
+    #[test]
+    fn a_dup_of_a_std_fd_copies_the_sink_the_same_list_installed() {
+        // A redirect list is resolved left to right and each entry sees the
+        // descriptors the ones before it left, so `>f 3>&1` copies the file
+        // *this list* opened for fd 1 — not the stdout the command arrived
+        // with. Regression: `alias_write_fd` snapshotted the live fd 1, so the
+        // `>&3` write leaked past `f` onto the ambient stdout.
+        let path = uniq_path("aliassink");
+        let (o, s) = run(&format!("{{ echo W >&3; }} >{path} 3>&1"));
+        let body = std::fs::read_to_string(&path).unwrap_or_default();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(s, 0);
+        assert_eq!(o, "", "nothing should reach the ambient stdout: {o:?}");
+        assert_eq!(body, "W\n", "`>f 3>&1` should write through fd 3 into f");
+
+        // The other order copies the other descriptor, which is the whole point
+        // of asking where in the list the dup sat.
+        let path = uniq_path("aliassink");
+        let (o, s) = run(&format!("{{ echo W >&3; }} 3>&1 >{path}"));
+        let body = std::fs::read_to_string(&path).unwrap_or_default();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(s, 0);
+        assert_eq!(o, "W\n", "`3>&1 >f` should copy the ambient stdout: {o:?}");
+        assert_eq!(body, "", "…and leave f empty");
+
+        // What is copied is the descriptor, not the path: the two names share
+        // one offset, so the second write appends instead of clobbering.
+        let path = uniq_path("aliassink");
+        let (_, s) = run(&format!("{{ echo A >&3; echo B; }} >{path} 3>&1"));
+        let body = std::fs::read_to_string(&path).unwrap_or_default();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(s, 0);
+        assert_eq!(body, "A\nB\n", "fd 3 and fd 1 should share one position");
+
+        // fd 2 answers the same way, and so does a dup of the dup.
+        let path = uniq_path("aliassink");
+        let (_, s) = run(&format!("{{ echo W >&3; }} 2>{path} 3>&2"));
+        let body = std::fs::read_to_string(&path).unwrap_or_default();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(s, 0);
+        assert_eq!(body, "W\n", "`2>f 3>&2` should write through fd 3 into f");
+
+        let path = uniq_path("aliassink");
+        let (_, s) = run(&format!("{{ echo W >&5; }} >{path} 3>&1 5>&3"));
+        let body = std::fs::read_to_string(&path).unwrap_or_default();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(s, 0);
+        assert_eq!(body, "W\n", "a chained dup should reach the same file");
     }
 
     #[test]

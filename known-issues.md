@@ -149,35 +149,90 @@ own rather than folded into the dup-mode work. The corpus case
 `tests/corpus/dup-copies-the-descriptor-not-the-arrow.sh` names it in its
 header as deliberately absent.
 
-### TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR. `>out 3>&1` copies the ambient fd 1, not the sink the same list just installed — 2026-08-01 — OPEN (low priority)
+### TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR. `>out 3>&1` copies the ambient fd 1, not the sink the same list just installed — 2026-08-01 — ✅ **RESOLVED 2026-08-01** for every shape but a *second* std-fd redirect after the dup (below)
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::alias_write_fd`, which
-snapshots the *live* fd 1 at apply time instead of consulting the
+snapshotted the *live* fd 1 at apply time instead of consulting the
 `RedirPlan`'s own `stdout`.
 
-**Reproduce** (`target/dvscratch/t3/pf.sh`):
+**Reproduce** (`target/dvscratch/t3/pf.sh`, `pg.sh`, `ph.sh`):
 
 ```sh
-( { echo W >&3; } >o1 3>&1; )   # bash: o1=[W]   osh: o1=[] and W on the terminal
+( { echo W >&3; } >o1 3>&1; )   # bash: o1=[W]   osh was: o1=[] and W on the terminal
 ( { echo W >&3; } >o3 3<&1; )   # same both arrows — it is the sink, not the arrow
+( { echo A >&3; echo B; } >o7 3>&1; )   # bash: A\nB — one open file, one offset
 ```
 
 A redirect list is resolved left to right and each entry sees the fds the
-ones before it left, which osh already gets right on the *read* side
-(`<in 3<&0` copies the file). The write side does not: `alias_write_fd` looks
-at the shell's current stdout rather than at what `>o1` staged, so fd 3 ends
-up naming the ambient sink.
+ones before it left, which osh already got right on the *read* side
+(`<in 3<&0` copies the file). The write side did not: `alias_write_fd` looked
+at the shell's current stdout rather than at what `>o1` staged, so fd 3 ended
+up naming the ambient sink. It reached every body that carries its own
+redirect list — group, subshell, `if`, `for`, `while`, function call — and
+fd 2 (`2>e 3>&2`) as much as fd 1.
 
-**Proper fix.** `alias_write_fd` should ask the plan first — the same way
-`plan_input_fd` walks `plan.extra_fds` in reverse and only then falls back to
-the live table — so that a `>o1` earlier in the list is what a later `3>&1`
-copies. The plan's `stdout`/`stderr` slots are the ones to consult for
-`n == 1` / `n == 2`.
+**Fixed** by recording the order where it still exists. A `RedirPlan` keeps
+one *slot* per standard fd rather than a list entry, so by apply time the slot
+holds whatever the list ended on; the new `AliasSink` enum, set by
+`Shell::alias_sink` at resolution time, says whether the list had already
+pointed the source std fd at a file when this dup was resolved.
+`install_extra_fds` then takes the group's already-opened sinks — passed in as
+`StagedStdSinks`, holding the very `Arc<File>` that fd 1 / fd 2 will use — and
+copies *that handle* rather than re-opening the path, which is what gives the
+two names one offset. `exec` needed nothing: it installs its own fd 1 / fd 2
+into the persistent table before its `extra_fds` loop runs, so
+`alias_write_fd` already saw the right sink.
 
-**Why not now.** Pre-existing on both arrows and independent of the
-dup-access-mode work that turned it up; it deserves its own change and its
-own corpus case. Named as deliberately absent in the header of
-`tests/corpus/dup-copies-the-descriptor-not-the-arrow.sh`.
+Covered by `tests/corpus/dup-of-a-std-fd-copies-the-sink-the-list-installed.sh`
+and `a_dup_of_a_std_fd_copies_the_sink_the_same_list_installed`.
+
+**What is left.** A *second* std-fd redirect after the dup:
+
+```sh
+( { echo W >&3; } >oa 3>&1 >ob; )   # bash: oa=[W] ob=[]   osh: oa=[] ob=[W]
+```
+
+bash's fd 3 holds the `oa` description the dup copied, and fd 1 then moves on
+to `ob`. osh's plan has one stdout slot, which `>ob` overwrote, so
+`AliasSink::StagedFile` resolves to `ob`. Closing this needs the plan to keep
+fd 1 and fd 2 as *ordered entries* rather than slots — the same order-free
+simplification already documented at `Shell::resolve_dup_out`'s close-versus-dup
+comment, and worth doing as its own change. Named as deliberately absent in
+the corpus case's header.
+
+### TD-OILS-EXTERNAL-CHILD-HAS-NO-FD-3. A spawned external command never inherits any descriptor above fd 2 — 2026-08-01 — OPEN (medium priority)
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::run_external` and the
+spawn path under it, which map only fd 0, fd 1 and fd 2 onto the child.
+`Shell::install_extra_fds` puts the scratch descriptor in the *shell's*
+`open_fds` / `open_write_fds`, which is a table the child cannot see.
+
+**Reproduce** (`target/dvscratch/t3/pk.sh`) — all three write `W` into the
+file under bash and all three fail under osh with
+`sh: line 1: 3: Bad file descriptor`:
+
+```sh
+( exec 3>o1; sh -c 'echo W >&3' )      # persistent
+( sh -c 'echo W >&3' 3>o2 )            # transient
+( sh -c 'echo W >&3' >o3 3>&1 )        # a dup of the list's own fd 1
+```
+
+Every fd ≥ 3 osh models is an in-process handle, so `>&3` inside a *builtin*
+or a compound body resolves and a `>&3` inside a spawned process does not.
+Shell idioms that hand a scratch descriptor to a real program —
+`prog 3>log`, `prog >out 3>&1`, and the `exec 3>` + long-running-child
+pattern — all silently lose the writes and the child reports `EBADF`.
+
+**Proper fix.** Give the child the descriptor: on Windows, mark the handle
+inheritable and pass it in the `STARTUPINFOEX` attribute list (or, more
+simply, materialise fd ≥ 3 as an inherited handle at the right numeric slot);
+on the SlateOS target, hand the capability across in the spawn message. Either
+way `run_external` needs the extra-fd table, which it does not currently take.
+
+**Why not now.** It is a spawn-plumbing change with a per-platform half, not a
+redirect-resolution change, and it is orthogonal to the dup work that turned
+it up. Named as deliberately absent in the header of
+`tests/corpus/dup-of-a-std-fd-copies-the-sink-the-list-installed.sh`.
 
 ### BUG-OILS-XTRACE-TRAP-LEVEL. A trap handler's body traces at the caller's `PS4` depth instead of one level deeper — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 

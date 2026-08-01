@@ -22052,7 +22052,17 @@ impl Shell {
         // command that failed, RETURN after the last line of the function body.
         let saved_line = self.current_line;
         let map = LineMap::Offset(self.current_line.saturating_sub(1));
+        // A handler body is a level of indirection to the tracer, the way a
+        // command substitution is: `set -x; trap b DEBUG; echo one` traces the
+        // handler as `++ b` / `++ echo B` and only then the `+ echo one` it was
+        // announcing. That holds for every trap that comes through here — DEBUG,
+        // ERR, RETURN and a signal — and for an inline handler as much as a
+        // function one, since it is the trap and not the call that counts.
+        // (bash's EXIT trap is the exception, but that runs at shutdown, from
+        // `run_exit_trap_out`, and traces at the ordinary depth.)
+        self.xtrace_level = self.xtrace_level.saturating_add(1);
         let flow = self.run_source_flow_out(&action, out, stdin, &map, HistRead::Off);
+        self.xtrace_level = self.xtrace_level.saturating_sub(1);
         let handler_status = self.last_status;
         // Preserve the pre-trap status unless the handler asked to exit, in
         // which case its code is the shell's exit status.

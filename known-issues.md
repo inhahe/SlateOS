@@ -14,7 +14,7 @@ work that should be done now."
 
 ## Active Bugs
 
-### BUG-OILS-XTRACE-TRAP-LEVEL. A trap handler's body traces at the caller's `PS4` depth instead of one level deeper — 2026-08-01 — OPEN
+### BUG-OILS-XTRACE-TRAP-LEVEL. A trap handler's body traces at the caller's `PS4` depth instead of one level deeper — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 
 **Where:** `userspace/oils/src/interp.rs` — `fire_trap_status`, which runs the
 handler body via `run_source_flow_out` without touching `Shell::xtrace_level`.
@@ -48,11 +48,16 @@ path that bumps the level, and traces its body at `+`. osh already matches
 there, so the fix must go in `fire_trap_status` alone and leave
 `run_exit_trap_out` as it is.
 
-**Proper fix:** bump `self.xtrace_level` around the `run_source_flow_out` call
-in `fire_trap_status` (saturating, restored on every exit path — the body can
-return `Flow::Exit`), the way `expand_command_sub` and the `eval` builtin
-already do. Add a corpus case covering a DEBUG, an ERR, a RETURN and a signal
-handler under `set -x`, plus an `EXIT` handler as the negative case.
+**Fixed** by bumping `self.xtrace_level` around the `run_source_flow_out` call
+in `fire_trap_status`, the way `expand_command_sub` and the `eval` builtin
+already do. One site covers all four traps, since they all come through there;
+`run_exit_trap_out` is deliberately left alone. Covered by
+`tests/corpus/xtrace-traces-a-trap-handler-one-level-deeper.sh`, which pins the
+DEBUG, ERR and RETURN handlers, the inline-versus-function equivalence, the
+plain call and the `( … )` subshell that add nothing, the command substitution
+that does, and the `EXIT` handler that does not. The signal case is not in the
+corpus — `kill -USR1 $$` puts a pid in the trace — but is in the probe
+`target/dvscratch/t3/xtl.sh`, and shares the fixed code path.
 
 ### BUG-OILS-DECL-NAMEREF-LOCAL-SCOPE. A `declare`/`local` that binds a local followed a nameref it was only shadowing — 2026-07-31 — ✅ **RESOLVED 2026-07-31**
 

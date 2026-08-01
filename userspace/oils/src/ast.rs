@@ -474,8 +474,12 @@ pub enum WordPart {
     SingleQuoted { text: Str, escaped: bool },
     /// Double-quoted run of parts (expansion, but no splitting/globbing).
     DoubleQuoted(Vec<WordPart>),
-    /// `$name` / `${name}` parameter reference.
-    Param(String),
+    /// `$name` / `${name}` parameter reference. `braced` records which of the
+    /// two spellings the source used. The two expand alike, but the spelling
+    /// survives into what the shell prints and says: `declare -f` reproduces a
+    /// function body as written, and a nounset diagnostic names the parameter
+    /// the same way (`$1` from `$1`, but `1` from `${1}`).
+    Param { name: String, braced: bool },
     /// `${name:-word}`-style parameter expansion with an operator.
     ParamOp {
         name: String,

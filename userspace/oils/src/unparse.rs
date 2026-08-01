@@ -891,7 +891,16 @@ fn part_src(p: &WordPart) -> Str {
             s.push(b'"');
             s
         }
-        WordPart::Param(name) => dollar_name(name),
+        // bash reproduces a parameter reference with the braces the source
+        // wrote — `declare -f` on a body containing `${x}` prints `${x}`, not
+        // `$x` — so the spelling is taken from the AST, not re-derived.
+        WordPart::Param { name, braced } => {
+            if *braced {
+                bfmt![b"${", name, b"}"]
+            } else {
+                dollar_name(name)
+            }
+        }
         // `label` is not rendered: it only ever holds the reference an indirect
         // expansion goes by, and the `IndirectOp` arm splices that back in
         // itself, from the reference it kept.

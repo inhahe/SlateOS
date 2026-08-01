@@ -3047,7 +3047,7 @@ fn seg_to_part(seg: &Seg, opts: LexOpts) -> Result<WordPart, ParseError> {
             }
             WordPart::DoubleQuoted(parts)
         }
-        Seg::Param(n) => WordPart::Param(n.clone()),
+        Seg::Param(n) => WordPart::Param { name: n.clone(), braced: false },
         Seg::ParamBraced(raw) => parse_braced_param(raw, opts)?,
         // A backtick body is not parsed here at all: bash reads it only when the
         // word is expanded, as an input of its own. See [`CmdSubBody`].
@@ -3254,7 +3254,7 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: LexOpts) -> Result<WordPar
     if let Some(after_hash) = raw.strip_prefix(b"#") {
         if after_hash.is_empty() {
             // `${#}` is the positional-parameter count — treat as `$#`.
-            return Ok(WordPart::Param("#".into()));
+            return Ok(WordPart::Param { name: "#".into(), braced: true });
         }
         // The length operator wants a *complete* parameter reference after the
         // `#` — nothing may be left over. When what follows is anything less,
@@ -3538,7 +3538,7 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: LexOpts) -> Result<WordPar
         });
     }
     if rest.is_empty() {
-        return Ok(WordPart::Param(name));
+        return Ok(WordPart::Param { name, braced: true });
     }
     match syn_at(&rest, 0) {
         // Prefix / suffix trimming: `#`, `##`, `%`, `%%`.

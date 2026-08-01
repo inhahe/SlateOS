@@ -120,6 +120,7 @@ use crate::ast::{
     ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
 use crate::histexpand::{Expansion, HistCtx};
+use crate::lexer;
 use crate::parser::{
     IncrementalParser, UnitLine, UnitLineKind, parse_opts, parse_with_aliases,
 };
@@ -14304,7 +14305,9 @@ impl Shell {
                         // `"$@"` expands to one field per positional parameter,
                         // preserving embedded whitespace (`"$*"` joins instead and
                         // is handled by the scalar fallback below).
-                        [WordPart::Param(p)] if p == "@" => Some(self.positional.clone()),
+                        [WordPart::Param { name, .. }] if name == "@" => {
+                            Some(self.positional.clone())
+                        }
                         _ => None,
                     };
                     self.bad_sub_word = saved_word;
@@ -14679,10 +14682,10 @@ impl Shell {
     /// it; every other part expands the same either way.
     fn expand_dynamic_with(&mut self, part: &WordPart, operand: Operand) -> Str {
         match part {
-            WordPart::Param(name) => match self.param_value(name) {
+            WordPart::Param { name, braced } => match self.param_value(name) {
                 Some(v) => v,
                 None => {
-                    self.note_unbound(name);
+                    self.note_unbound(name, *braced);
                     Str::new()
                 }
             },
@@ -14696,7 +14699,9 @@ impl Shell {
             WordPart::Length(name) => match self.param_value(name) {
                 Some(v) => bytes::char_count(&v).to_string().into_bytes(),
                 None => {
-                    self.note_unbound(name);
+                    // `${#name}` has no unbraced spelling, so it names the
+                    // parameter without a `$` whatever the parameter is.
+                    self.note_unbound(name, true);
                     b"0".to_vec()
                 }
             },
@@ -15250,12 +15255,21 @@ impl Shell {
     /// flags an error (checked by the simple-command driver, which aborts) and
     /// prints a diagnostic; special parameters (`$@`, `$*`, `$?`, `$!`, etc.)
     /// are always considered set and never trigger it.
-    fn note_unbound(&mut self, name: &str) {
+    /// `braced` is whether the reference was written `${name}` rather than
+    /// `$name`: bash names the parameter in the diagnostic exactly as the source
+    /// spelled it, so `$1` is reported as `$1` while `${1}` is reported as `1`.
+    /// The two read alike for an identifier — only a positional or special
+    /// parameter has an unbraced spelling that carries the `$` along.
+    fn note_unbound(&mut self, name: &str, braced: bool) {
         if self.nounset && !is_special_param(name) {
             // bash aborts a non-interactive shell with status 127 on a nounset
             // unset-variable reference.
             self.unbound_error = Some(127);
-            self.perrln(&format!("{name}: unbound variable"));
+            if braced || lexer::is_valid_name(name.as_bytes()) {
+                self.perrln(&format!("{name}: unbound variable"));
+            } else {
+                self.perrln(&format!("${name}: unbound variable"));
+            }
         }
     }
 

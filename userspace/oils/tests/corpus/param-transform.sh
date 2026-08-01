@@ -44,6 +44,42 @@ echo "${v@A}"
 echo "${num@A}"
 echo "${arr@A}"
 
+# @a and @A ask about the *variable*, so a nameref is resolved to the one it
+# names before either answers: `${nr@A}` recreates the target's declaration,
+# not the reference's.
+declare -n nr=num
+declare -n nchain=nr
+declare -n narr=arr
+declare -n nplain=v
+echo "nr=${nr@a}|${nr@A}"
+echo "chain=${nchain@a}|${nchain@A}"
+echo "arr=${narr@a}|${narr@A}"
+echo "elem=${narr[1]@a}|${narr[1]@A}"
+echo "plain=[${nplain@a}]|${nplain@A}"
+# The value operators still see the value, so they are unaffected.
+echo "vals=${nr@Q}|${nr@U}|${nplain@Q}"
+# A reference the chain cannot walk to a variable answers with nothing: one
+# with no target at all, one naming a variable that does not exist, and one
+# naming an array *element* (nothing is named `arr[1]`).
+declare -n nnone
+declare -n nmissing=no_such_variable_here
+declare -n nelem=arr[1]
+echo "none=[${nnone@a}][${nnone@A}] missing=[${nmissing@a}][${nmissing@A}] elem=[${nelem@a}][${nelem@A}]"
+
+# A variable declared without a value has no `=value` to print, but @A still
+# recreates the declaration — unless there are no attributes to recreate.
+declare -i decl_i
+declare -x decl_x
+declare decl_bare
+declare -a decl_a
+declare -A decl_A
+echo "i=[${decl_i@A}] x=[${decl_x@A}] bare=[${decl_bare@A}] a=[${decl_a@A}] A=[${decl_A@A}]"
+# Unsetting takes the attributes with it, so nothing is left to report — while
+# a readonly one cannot be unset and so keeps reporting.
+declare -i gone=1; unset -v gone
+declare -ir kept=1; unset -v kept 2>/dev/null
+echo "gone=[${gone@a}][${gone@A}] kept=[${kept@a}][${kept@A}]"
+
 # @k / @K on an array: @K quotes the whole key/value list as one word.
 echo "${arr[@]@Q}"
 echo "${arr[@]@A}"

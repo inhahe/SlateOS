@@ -9761,6 +9761,32 @@ impl Shell {
         s
     }
 
+    /// The variable `${x@a}` and `${x@A}` report on — `x` itself, or, when `x` is
+    /// a nameref, the variable at the end of its chain.
+    ///
+    /// Both operators ask about the *variable*, and a reference is not the
+    /// variable it names: with `v=x; declare -n r=v`, bash answers `${r@A}` with
+    /// `v='x'` and `${r@a}` with `v`'s attributes (here none) — not with
+    /// `declare -n r='v'` and `n`. Only the value-reading operators (`@Q`, `@U`,
+    /// …) see the reference at all, and they see it as its target's value, which
+    /// the ordinary read already resolves.
+    ///
+    /// `None` — an empty answer for both operators — when the chain reaches no
+    /// variable: a reference with no target (`declare -n r`, which resolves to
+    /// itself and so is still a reference), a circular one (reported here, as
+    /// bash reports it at the point of use), or one naming an array *element*
+    /// (nothing is *named* `arr[1]`, so it carries no attributes of its own and
+    /// there is no declaration to recreate).
+    fn attr_report_target(&self, name: &str) -> Option<String> {
+        if !self.nameref_attr.contains(name) {
+            return Some(name.to_string());
+        }
+        let target = self.resolve_ref_use(name)?.into_name()?;
+        // The walk stops on a reference that names nothing, answering with the
+        // reference itself; that is "nowhere", not "this variable".
+        (!self.nameref_attr.contains(&target)).then_some(target)
+    }
+
     /// `${name@op}` parameter transformation. Supports `Q` (quote so the value
     /// can be reused as shell input), `U`/`u`/`L` (upper-all/upper-first/
     /// lower-all), `E` (expand ANSI-C backslash escapes), `a` (attribute
@@ -9787,18 +9813,23 @@ impl Shell {
         op: char,
         operand: Operand,
     ) -> Str {
-        // The `a` (attributes) transform reports type even for an unset scalar.
-        // It asks about the *variable*, so an indirection's resolved value is
-        // none of its business — `${!r@a}` reports what `r` points at.
-        if op == 'a' {
-            // Attribute letters are ASCII by construction.
-            return self.attr_flag_letters(name).into_bytes();
-        }
-        // `@A` recreates an assignment/`declare` statement for the variable.
-        // The whole-array forms (`${arr[@]@A}` / `${arr[*]@A}`) are handled in
-        // the bulk path; here `index` is either absent or a single element.
-        if op == 'A' {
-            return self.transform_assign(name, index);
+        // `@a` (attributes) and `@A` (a declaration recreating the variable)
+        // both ask about the *variable*, so an indirection's resolved value is
+        // none of their business — `${!r@a}` reports what `r` points at — and a
+        // nameref is resolved to the variable it names first. See
+        // [`Self::attr_report_target`].
+        if op == 'a' || op == 'A' {
+            let Some(target) = self.attr_report_target(name) else {
+                return Str::new();
+            };
+            if op == 'a' {
+                // Reports type even for an unset scalar. Attribute letters are
+                // ASCII by construction.
+                return self.attr_flag_letters(&target).into_bytes();
+            }
+            // The whole-array forms (`${arr[@]@A}` / `${arr[*]@A}`) are handled
+            // in the bulk path; here `index` is either absent or one element.
+            return self.transform_assign(&target, index);
         }
         // An unset variable yields the empty string for every transform (bash):
         // `${x@Q}` on unset is empty, whereas a set-but-empty variable is still
@@ -10207,6 +10238,14 @@ impl Shell {
             };
         }
         let Some(v) = self.vars.get(name) else {
+            // Declared without a value (`declare -x xx`): there is no `=value`
+            // to print, but the declaration itself is still worth recreating,
+            // so bash renders the bare `declare -x xx`. A name declared with no
+            // attributes either (`declare t`) has nothing to recreate — bash
+            // gives the empty string, even though `declare -p` still lists it.
+            if self.declared.contains(name) && !self.attr_flag_letters(name).is_empty() {
+                return bfmt![b"declare ", self.declare_attr_flags(name), b" ", name];
+            }
             return Str::new();
         };
         let attributed = self.readonly.contains(name)
@@ -43449,6 +43488,60 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // A plain scalar has no attribute flags.
         assert_eq!(run("p=1; echo \"[${p@a}]\"").0, "[]\n");
+    }
+
+    #[test]
+    fn attribute_transforms_ask_about_the_variable_a_nameref_names() {
+        // `@a`/`@A` report on the *variable*, and a reference is not the one it
+        // names: they resolve the chain first, where the value operators see
+        // only the value the ordinary read already resolved.
+        let sh = "declare -i n=5; declare -n r=n; declare -n r2=r; ";
+        assert_eq!(run(&format!("{sh}echo \"${{r@a}}|${{r2@a}}\"")).0, "i|i\n");
+        assert_eq!(
+            run(&format!("{sh}echo \"${{r@A}}|${{r2@A}}\"")).0,
+            "declare -i n='5'|declare -i n='5'\n"
+        );
+        assert_eq!(run(&format!("{sh}echo \"${{r@Q}}\"")).0, "'5'\n");
+        // An array target keeps the whole-array form in the bulk path and the
+        // one-element form here, both reported against the target's name.
+        let arr = "a=(x y); declare -n r=a; ";
+        assert_eq!(run(&format!("{arr}echo \"${{r@a}}\"")).0, "a\n");
+        assert_eq!(
+            run(&format!("{arr}echo \"${{r@A}}|${{r[1]@A}}\"")).0,
+            "declare -a a='x'|declare -a a='y'\n"
+        );
+        // A chain that reaches no variable answers with nothing: no target at
+        // all, a target that does not exist, an *element* target (nothing is
+        // named `a[1]`, so it has no attributes of its own), and a cycle — for
+        // which bash also warns, at the point of use.
+        for decl in ["declare -n r", "declare -n r=nosuch", "a=(x y); declare -n r=a[1]"] {
+            assert_eq!(run(&format!("{decl}; echo \"[${{r@a}}][${{r@A}}]\"")).0, "[][]\n", "{decl}");
+        }
+        // (The redirect is on a group, so that it is already in place when the
+        // words inside it expand and the warning is emitted.)
+        let out = run("declare -n r=s; declare -n s=r; { echo \"[${r@a}][${r@A}]\"; } 2>&1").0;
+        assert!(out.contains("warning: r: circular name reference"), "{out}");
+        assert!(out.ends_with("[][]\n"), "{out}");
+    }
+
+    #[test]
+    fn assign_transform_recreates_a_valueless_declaration() {
+        // A name declared without a value has no `=value` to print, but the
+        // declaration is still worth recreating — where one with no attributes
+        // either has nothing to recreate, and yields the empty string (even
+        // though `declare -p` still lists it).
+        for (decl, want) in [
+            ("declare -i v", "declare -i v"),
+            ("declare -x v", "declare -x v"),
+            ("declare -r v", "declare -r v"),
+            ("declare -a v", "declare -a v"),
+            ("declare -A v", "declare -A v"),
+            ("declare v", ""),
+        ] {
+            assert_eq!(run(&format!("{decl}; echo \"[${{v@A}}]\"")).0, format!("[{want}]\n"), "{decl}");
+        }
+        // Unsetting takes the attributes with it, so nothing is left to report.
+        assert_eq!(run("declare -i v=1; unset -v v; echo \"[${v@a}][${v@A}]\"").0, "[][]\n");
     }
 
     #[test]

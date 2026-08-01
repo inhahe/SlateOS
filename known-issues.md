@@ -25777,11 +25777,68 @@ Measured with a counting handler (`n=$((n+1)); [ "$n" != "$K" ]`) so the two
 firings for the same `$BASH_COMMAND` can be told apart.
 
 **Proper fix.** Have both extra firings go through `Shell::fire_debug_trap` and
-read the `DebugVerdict`, carrying the handler's status on `Skip` (the two sites
-use it differently — `exec_simple` forces 0, `call_function` keeps it) and
-suppressing the RETURN trap on a refused entry.
+read the `DebugVerdict` — whose `Skip` already carries the handler's status,
+which the two sites would use differently (`exec_simple` forces 0,
+`call_function` keeps it) — and suppress the RETURN trap on a refused entry.
 
 **Impact.** Only reachable with a DEBUG handler whose status varies between two
 firings of the same command, i.e. a real step-debugger. Ordinary "refuse this
 command" handlers are refused at the call site first, where the verdict is
 already honoured.
+
+### TD-OILS-DEBUG-TRAP-NOT-FIRED-FOR-A-BACKGROUND-COMMAND. `cmd &` is never announced — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — the `&` path (the async-job branch
+of the pipeline/list driver) reaches the child without passing through
+`exec_simple`'s DEBUG firing in the *parent*.
+
+**Reproduce:**
+
+```sh
+b() { echo "B:[$BASH_COMMAND]"; }
+trap b DEBUG
+echo one &
+wait
+```
+
+bash prints `B:[echo one]` (from the parent, before the fork) and then
+`B:[wait]`; osh prints only `B:[wait]`.
+
+**Proper fix.** bash announces an asynchronous command in the parent, before
+forking. osh should do the same: announce where the `&` job is created, in the
+parent, so a handler's writes to shell state are the parent's. The extdebug
+verdict then decides whether the job is started at all.
+
+**Impact.** A step-debugger cannot see background commands. Small and
+self-contained; filed rather than fixed only because the announce plumbing
+(`Shell::announce_debug`) landed with the compound-command work and the `&` path
+was outside that change's scope.
+
+### TD-OILS-DEBUG-TRAP-NOT-FIRED-FOR-A-CONDITIONAL. `[[ … ]]` is never announced — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_cond`, which unlike
+`exec_arith`/`exec_for`/`exec_case` does not call `Shell::announce_debug`.
+
+**Reproduce:**
+
+```sh
+b() { echo "B:[$BASH_COMMAND]"; }
+trap b DEBUG
+[[ -n x ]]
+```
+
+bash prints `B:[[[ -n x ]]]`; osh prints nothing. (A `[ -n x ]` *is* announced —
+that one is an ordinary simple command.)
+
+**Proper fix.** The blocker is the text, not the firing: `$BASH_COMMAND` holds a
+one-line reconstruction of the whole conditional, and osh has no unparser for a
+`CondExpr` — only `cond_trace_unary` and its siblings, which print one term at a
+time for `set -x`. Write a `crate::unparse::cond_src(&CondExpr) -> Str`
+following bash's `print_cond_command` (which re-quotes nothing, joins with
+single spaces, and renders a group as `( … )` and a negation as `! …`), measure
+it against bash across the operator set — unary, binary, `=~`, `&&`/`||`,
+grouping, `!` placement — and then announce it from `exec_cond` exactly as
+`exec_arith` does, with `Skip` leaving status 0.
+
+**Impact.** A step-debugger does not stop on `[[ … ]]`, and a `$BASH_COMMAND`
+read after one names the previous command instead.

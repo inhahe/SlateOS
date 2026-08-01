@@ -872,9 +872,14 @@ enum Flow {
 enum DebugVerdict {
     /// Run the command, as always without extdebug.
     Run,
-    /// Drop the command. It leaves status 0 behind, as if it had run and
-    /// succeeded, so nothing downstream can tell it was skipped.
-    Skip,
+    /// Drop the command, carrying the handler's own exit status.
+    ///
+    /// Most sites throw that status away and leave 0 behind, as if the command
+    /// had run and succeeded, so nothing downstream can tell it was skipped. A
+    /// `for` loop is the exception: refusing its header skips only *that*
+    /// iteration, so the handler's status becomes the loop's own unless a later
+    /// iteration overwrites it.
+    Skip(i32),
     /// Leave the innermost function or sourced script, with status 2.
     Return,
     /// The handler ran `exit N`: unwind the shell instead of running anything.
@@ -5866,7 +5871,7 @@ impl Shell {
             }
             Command::Case(c) => self.exec_case(c, out, stdin),
             Command::Cond(e) => self.exec_cond(e),
-            Command::Arith(raw) => self.exec_arith(raw),
+            Command::Arith(raw) => self.exec_arith(raw, out, stdin),
             Command::BraceGroup(p) => self.exec_program(p, out, stdin),
             Command::Coproc { name, body } => self.exec_coproc(name.as_deref(), body),
             Command::Redirected { inner, redirects } => {
@@ -6114,10 +6119,12 @@ impl Shell {
             return Flow::Discard;
         }
         // A `for` over an empty list runs no body and has exit status 0.
-        // `set -x` prints the (source-form) loop header before *each* iteration,
-        // matching bash. A `for name; do` with no explicit list traces as
-        // `for name in "$@"`.
-        let header: Option<Str> = if self.xtrace {
+        // bash rebuilds the loop header, in source form, before *each*
+        // iteration: `set -x` prints it and `$BASH_COMMAND` records it for the
+        // DEBUG trap. A `for name; do` with no explicit list reads as
+        // `for name in "$@"` — the parser writes that list in, so it is what
+        // both of them see.
+        let header: Str = {
             let words = match &c.words {
                 Some(words) => bytes::join(
                     &words.iter().map(crate::unparse::word_src).collect::<Vec<_>>(),
@@ -6125,16 +6132,29 @@ impl Shell {
                 ),
                 None => b"\"$@\"".to_vec(),
             };
-            Some(bfmt![b"for ", c.var.as_str(), b" in ", &words])
-        } else {
-            None
+            bfmt![b"for ", c.var.as_str(), b" in ", &words]
         };
         let mut body_status = 0;
         for item in items {
-            if let Some(h) = &header {
+            if self.xtrace {
                 let prefix = self.xtrace_prefix();
-                let line = bfmt![prefix, h, b"\n"];
+                let line = bfmt![prefix, &header, b"\n"];
                 self.emit_stderr(&line);
+            }
+            match self.announce_debug(header.clone(), out, stdin) {
+                DebugVerdict::Run => {}
+                // A refused header takes away *this iteration* only — the loop
+                // variable is not even bound — and the handler's status stands
+                // as the loop's own until a later iteration overwrites it.
+                DebugVerdict::Skip(status) => {
+                    body_status = status;
+                    continue;
+                }
+                DebugVerdict::Return => {
+                    self.last_status = 2;
+                    return Flow::Return;
+                }
+                DebugVerdict::Exit(code) => return Flow::Exit(code),
             }
             // A readonly loop variable cannot be bound. bash finds this out at
             // the moment it first tries — so the word list is expanded either
@@ -6221,6 +6241,38 @@ impl Shell {
     /// EOF or `break`. The loop's exit status is the last body execution (0 if the
     /// body never runs).
     fn exec_select(&mut self, c: &SelectClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // The `select` header is announced once, and — unlike `for`, which
+        // announces its own once per iteration — *before* the word list is
+        // expanded: `set -x` prints it ahead of any trace the list's own
+        // substitutions produce, and it is announced even when the list turns
+        // out to be empty and the menu never appears.
+        let header: Str = {
+            let words = match &c.words {
+                Some(words) => bytes::join(
+                    &words.iter().map(crate::unparse::word_src).collect::<Vec<_>>(),
+                    b" ",
+                ),
+                None => b"\"$@\"".to_vec(),
+            };
+            bfmt![b"select ", c.var.as_str(), b" in ", &words]
+        };
+        if self.xtrace {
+            self.bxtrace_emit(&header);
+        }
+        match self.announce_debug(header, out, stdin) {
+            DebugVerdict::Run => {}
+            // Refusing the header takes the whole loop away — there is no menu
+            // and no body — and leaves 0 behind, as if it had run.
+            DebugVerdict::Skip(_) => {
+                self.last_status = 0;
+                return Flow::Next;
+            }
+            DebugVerdict::Return => {
+                self.last_status = 2;
+                return Flow::Return;
+            }
+            DebugVerdict::Exit(code) => return Flow::Exit(code),
+        }
         let items: Vec<Str> = match &c.words {
             Some(words) => {
                 let mut v = Vec::new();
@@ -6237,18 +6289,6 @@ impl Shell {
         if items.is_empty() {
             self.last_status = 0;
             return Flow::Next;
-        }
-        // `set -x` prints the (source-form) `select` header once, before the
-        // menu — bash does not re-emit it per iteration.
-        if self.xtrace {
-            let words = match &c.words {
-                Some(words) => bytes::join(
-                    &words.iter().map(crate::unparse::word_src).collect::<Vec<_>>(),
-                    b" ",
-                ),
-                None => b"\"$@\"".to_vec(),
-            };
-            self.bxtrace_emit(&bfmt![b"select ", c.var.as_str(), b" in ", &words]);
         }
         let ps3 = self.vars.get("PS3").cloned().unwrap_or_else(|| b"#? ".to_vec());
         let redir = RedirPlan::default();
@@ -6476,32 +6516,15 @@ impl Shell {
     /// `update` runs after each iteration (including after `continue`). An
     /// arithmetic error in any section aborts the loop with status 1.
     fn exec_for_arith(&mut self, c: &ForArithClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
-        // `set -x` traces each section as `(( expr ))`; bash substitutes an
-        // always-true `1` for an *empty* section (init/cond/update) and still
-        // prints it, so `for ((;;))` traces `(( 1 ))` for init and cond.
-        let trace_section = |s: &mut Self, raw: BStr<'_>| {
-            if s.xtrace {
-                let expr: BStr<'_> = if raw.is_empty() { b"1" } else { raw };
-                s.bxtrace_emit(&bfmt![b"(( ", expr, b" ))"]);
-            }
-        };
         self.last_status = 0;
-        trace_section(self, &c.init);
-        if !c.init.is_empty() && self.eval_arith_cmd(&c.init, b"((").is_none() {
-            self.last_status = 1;
-            return self.arith_discard_flow();
+        if let Err(flow) = self.run_arith_section(&c.init, out, stdin) {
+            return flow;
         }
         loop {
-            trace_section(self, &c.cond);
-            if !c.cond.is_empty() {
-                match self.eval_arith_cmd(&c.cond, b"((") {
-                    Some(0) => break,
-                    Some(_) => {}
-                    None => {
-                        self.last_status = 1;
-                        return self.arith_discard_flow();
-                    }
-                }
+            match self.run_arith_section(&c.cond, out, stdin) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(flow) => return flow,
             }
             match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
@@ -6519,20 +6542,78 @@ impl Shell {
                 }
                 other => return other,
             }
-            trace_section(self, &c.update);
-            if !c.update.is_empty() && self.eval_arith_cmd(&c.update, b"((").is_none() {
-                self.last_status = 1;
-                return self.arith_discard_flow();
+            if let Err(flow) = self.run_arith_section(&c.update, out, stdin) {
+                return flow;
             }
         }
         Flow::Next
     }
 
+    /// Announce and evaluate one arithmetic section of a `for (( … ))` header,
+    /// yielding its value — or the flow to unwind with.
+    ///
+    /// bash substitutes an always-true `1` for an *omitted* section, and that
+    /// substitution is what everything downstream sees: `for ((;;))` traces and
+    /// announces `(( 1 ))` for its init and its condition, and evaluates the
+    /// `1`. The two announcements are spelled differently — `set -x` pads the
+    /// parens apart, the DEBUG trap's `$BASH_COMMAND` sets them straight
+    /// against the text — because bash prints them with two different printers.
+    ///
+    /// A section the DEBUG trap refuses under `extdebug` is not evaluated at
+    /// all and is valued 0: for the condition that is what ends the loop, and
+    /// for the other two it makes the section a no-op.
+    fn run_arith_section(
+        &mut self,
+        raw: BStr<'_>,
+        out: &mut Out,
+        stdin: &StdinSrc,
+    ) -> Result<i64, Flow> {
+        let expr: BStr<'_> = if raw.is_empty() { b"1" } else { raw };
+        if self.xtrace {
+            self.bxtrace_emit(&bfmt![b"(( ", expr, b" ))"]);
+        }
+        match self.announce_debug(bfmt![b"((", expr, b"))"], out, stdin) {
+            DebugVerdict::Run => {}
+            DebugVerdict::Skip(_) => return Ok(0),
+            DebugVerdict::Return => {
+                self.last_status = 2;
+                return Err(Flow::Return);
+            }
+            DebugVerdict::Exit(code) => return Err(Flow::Exit(code)),
+        }
+        match self.eval_arith_cmd(expr, b"((") {
+            Some(v) => Ok(v),
+            None => {
+                self.last_status = 1;
+                Err(self.arith_discard_flow())
+            }
+        }
+    }
+
     fn exec_case(&mut self, c: &CaseClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
         // `set -x` prints `case WORD in` (WORD in source form, unexpanded) once
         // before pattern matching, matching bash.
+        let word_src = crate::unparse::word_src(&c.word);
         if self.xtrace {
-            self.bxtrace_emit(&bfmt![b"case ", crate::unparse::word_src(&c.word), b" in"]);
+            self.bxtrace_emit(&bfmt![b"case ", &word_src, b" in"]);
+        }
+        // The DEBUG trap sees the same header — but with the trailing space
+        // bash's command printer leaves after `in`, which the trace does not
+        // have. Both come before the word is expanded, so a `case $(echo z) in`
+        // announces the substitution rather than its output.
+        match self.announce_debug(bfmt![b"case ", &word_src, b" in "], out, stdin) {
+            DebugVerdict::Run => {}
+            // Refusing the header drops the whole statement — no arm is even
+            // tested — and leaves 0 behind.
+            DebugVerdict::Skip(_) => {
+                self.last_status = 0;
+                return Flow::Next;
+            }
+            DebugVerdict::Return => {
+                self.last_status = 2;
+                return Flow::Return;
+            }
+            DebugVerdict::Exit(code) => return Flow::Exit(code),
         }
         let subject: Vec<Ch> = bytes::chars(self.expand_to_string(&c.word).as_bytes()).collect();
         // `shopt -s nocasematch` makes `case` (and `[[ == ]]`) matching
@@ -7071,9 +7152,29 @@ impl Shell {
     /// abandon the rest of the parse unit instead — a failure inside an array
     /// *subscript* and a failed nested expansion; `arith_discard_flow` turns
     /// either into a `Flow::Discard`.
-    fn exec_arith(&mut self, raw: BStr<'_>) -> Flow {
+    fn exec_arith(&mut self, raw: BStr<'_>, out: &mut Out, stdin: &StdinSrc) -> Flow {
         if self.xtrace {
             self.bxtrace_emit(&bfmt![b"(( ", raw, b" ))"]);
+        }
+        // The DEBUG trap is told the same expression, but under the command
+        // printer's tighter spelling: `((` and `))` sit straight against the
+        // source text, where the trace pads them out. `(( 1 + 1 ))` is written
+        // with the spaces it was typed with either way, since `raw` is the
+        // untouched source between the parens — which is why the trace of it
+        // ends up with *doubled* spaces and this does not.
+        match self.announce_debug(bfmt![b"((", raw, b"))"], out, stdin) {
+            DebugVerdict::Run => {}
+            // A refused arithmetic command is simply not evaluated, and leaves
+            // 0 behind however the expression would have come out.
+            DebugVerdict::Skip(_) => {
+                self.last_status = 0;
+                return Flow::Next;
+            }
+            DebugVerdict::Return => {
+                self.last_status = 2;
+                return Flow::Return;
+            }
+            DebugVerdict::Exit(code) => return Flow::Exit(code),
         }
         // bash tags `(( … ))`-command arithmetic errors with `((`.
         self.last_status = match self.eval_arith_cmd(raw, b"((") {
@@ -10981,7 +11082,7 @@ impl Shell {
         if !self.in_trap && self.traps.contains_key("DEBUG") && !self.trap_suppressed("DEBUG") {
             match self.fire_debug_trap(out, stdin) {
                 DebugVerdict::Run => {}
-                DebugVerdict::Skip => {
+                DebugVerdict::Skip(_) => {
                     self.last_status = 0;
                     return Flow::Next;
                 }
@@ -21911,7 +22012,33 @@ impl Shell {
         if status == 2 && !(self.fn_stack.is_empty() && self.source_stack.is_empty()) {
             return DebugVerdict::Return;
         }
-        DebugVerdict::Skip
+        DebugVerdict::Skip(status)
+    }
+
+    /// Announce a **compound** command to the DEBUG trap, under the header text
+    /// bash reconstructs for it.
+    ///
+    /// `$BASH_COMMAND` is not only a simple command's argv. Before running a
+    /// `for`, `select` or `case` — and each arithmetic clause of a `for (( ))`
+    /// — bash rebuilds a one-line source form of the header, `for i in a b` or
+    /// `case x in `, and records it there. The record happens whether or not a
+    /// DEBUG trap is armed, because it is readable in its own right and an ERR
+    /// trap can see it, so the write is not folded into the firing below.
+    ///
+    /// What a refusal *means* is the caller's to decide — a `for` header
+    /// refused skips one iteration, a `case` refused drops the whole statement
+    /// — so the verdict is handed back rather than acted on here.
+    fn announce_debug(&mut self, text: Str, out: &mut Out, stdin: &StdinSrc) -> DebugVerdict {
+        // A handler's own commands do not re-announce: `$BASH_COMMAND` has to
+        // keep naming the command the handler was told about.
+        if self.in_trap {
+            return DebugVerdict::Run;
+        }
+        self.put_var("BASH_COMMAND", text);
+        if !self.traps.contains_key("DEBUG") || self.trap_suppressed("DEBUG") {
+            return DebugVerdict::Run;
+        }
+        self.fire_debug_trap(out, stdin)
     }
 
     /// The source text of a trap handler, or `None` after reporting that the

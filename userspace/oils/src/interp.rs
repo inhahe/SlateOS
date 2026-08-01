@@ -9231,6 +9231,11 @@ impl Shell {
     /// *separate* word (`0 x 1 y`); `@K` yields a single field holding the pairs
     /// with each value double-quoted (`0 "x" 1 "y"`), matching bash's
     /// re-inputtable form.
+    ///
+    /// "Re-inputtable" applies to the *keys* too, and to exactly the same degree
+    /// as in `declare -p`: a key that would not read back as itself is quoted
+    /// ([`quote_declare_key`]), so an associative key of `a b` comes out
+    /// `"a b" "v"`. An indexed array's keys are numbers, which never need it.
     fn bulk_keyvalue(&mut self, name: &str, quoted: bool) -> Vec<Str> {
         let (keys, values): (Vec<Str>, Vec<Str>) = if name == "@" || name == "*" {
             let vals = self.positional.clone();
@@ -9243,7 +9248,7 @@ impl Shell {
             let mut body = keys
                 .iter()
                 .zip(&values)
-                .map(|(k, v)| bfmt![k, b" ", quote_declare_value(v)])
+                .map(|(k, v)| bfmt![quote_declare_key(k), b" ", quote_declare_value(v)])
                 .collect::<Vec<_>>()
                 .join(&b' ');
             // bash appends a trailing space to the `@K` field for an
@@ -44071,6 +44076,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -A m; m[a]=1; m[b]=2; echo ${m[@]@k}").0,
             "a 1 b 2\n"
+        );
+        // A key is quoted when it would not read back as itself — the same test
+        // `declare -p` makes on a subscript, so `@K` stays re-inputtable. `@k`
+        // quotes nothing, key or value.
+        let key = |k: &str| {
+            run(&format!(
+                "declare -A m; m[{k}]=v; echo \"[${{m[@]@K}}][${{m[@]@k}}]\""
+            ))
+            .0
+        };
+        assert_eq!(key("'a b'"), "[\"a b\" \"v\" ][a b v]\n");
+        assert_eq!(key("'d\"e'"), "[\"d\\\"e\" \"v\" ][d\"e v]\n");
+        assert_eq!(key("'x$y'"), "[\"x\\$y\" \"v\" ][x$y v]\n");
+        assert_eq!(key("'#c'"), "[\"#c\" \"v\" ][#c v]\n");
+        assert_eq!(key("$'f\\tg'"), "[$'f\\tg' \"v\" ][f\tg v]\n");
+        // `=` and `-` do not force quoting, and a plain key stays bare.
+        assert_eq!(key("'a=b'"), "[a=b \"v\" ][a=b v]\n");
+        assert_eq!(key("plain"), "[plain \"v\" ][plain v]\n");
+        // An indexed array's subscripts are numbers, so none is ever quoted.
+        assert_eq!(
+            run("a=(x 'y z'); echo \"[${a[@]@K}]\"").0,
+            "[0 \"x\" 1 \"y z\"]\n"
         );
         // The positional parameters are not an array, so `@k`/`@K` degrade to
         // `@Q` (each value quoted, no interleaved index) — matching bash, which

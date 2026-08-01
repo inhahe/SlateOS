@@ -47,6 +47,24 @@ echo "${arr@A}"
 # @k / @K on an array: @K quotes the whole key/value list as one word.
 echo "${arr[@]@Q}"
 echo "${arr[@]@A}"
+echo "[${arr[@]@K}][${arr[@]@k}]"
+set -- p 'q r'
+echo "[${@@K}][${@@k}]"
+
+# @K is meant to read back as shell input, so it quotes a *key* that would not
+# — to exactly the degree `declare -p` does. @k quotes neither key nor value.
+# (One key per array: bash walks its own hash order, which osh does not share.)
+k() { unset -v m; declare -A m; m[$1]=v; echo "K=[${m[@]@K}] k=[${m[@]@k}]"; }
+k 'a b'
+k 'd"e'
+k "it's"
+k 'x$y'
+k 'p*q'
+k '~t'
+k '#c'
+k $'f\tg'
+k 'a=b'
+k plain
 
 # Transformations apply element-wise across "${arr[@]}" but produce a single
 # word for "${arr[*]}".

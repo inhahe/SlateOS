@@ -1785,12 +1785,59 @@ enum JobBody {
     Thread(std::thread::JoinHandle<i32>),
 }
 
+/// The number the shell reports in `$?` for a child it has just reaped.
+///
+/// A shell answers `128 + sig` for a child killed by a signal, and the exit
+/// code — eight bits of it, a wait status having room for no more — for one
+/// that exited of its own accord. On a unix host the kernel keeps the two
+/// apart and this is a straight translation.
+///
+/// Windows keeps no such record: there is one exit code, and a signal is not
+/// something the OS has an opinion about. The externals a shell runs on Windows
+/// are Cygwin/MSYS binaries all the same, and Cygwin manufactures the
+/// distinction for its own `waitpid` by exiting with `sig << 8` — so reading
+/// that encoding back is the only way to answer 141 for the `SIGPIPE` that ends
+/// `… | head -n 1`, which is what every other shell on the platform answers.
+///
+/// Reading it back is a guess, and it is worth being explicit about which way
+/// the guess errs. A native Windows program is free to exit with 3328 and mean
+/// it, and would be misreported as `SIGPIPE`. But bash makes the same guess by
+/// trusting Cygwin's wait status, the alternative is a four-digit `$?` that no
+/// `[ $? -gt 128 ]` test can read, and an exit code that is an exact multiple
+/// of 256 is already unreachable through any shell — every one of them
+/// truncates `exit` to eight bits. The guess is wrong far less often than not
+/// guessing.
+fn child_exit_status(status: &std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128i32.saturating_add(sig);
+        }
+        status.code().unwrap_or(1) & 0xff
+    }
+    #[cfg(windows)]
+    {
+        let Some(code) = status.code() else {
+            return 1;
+        };
+        // Cygwin's `signal_exit`: the signal sits in the second byte with the
+        // first one clear. Signal numbers stop at `NSIG`, so a second byte
+        // beyond that is an ordinary code that happens to be a multiple of 256.
+        let sig = (code >> 8) & 0xff;
+        if code & 0xff == 0 && (1..=64).contains(&sig) {
+            return 128 + sig;
+        }
+        code & 0xff
+    }
+}
+
 impl JobBody {
     /// Block until the job body finishes and return its exit status. A thread
     /// that panicked is reported as status 1 (the shell keeps running).
     fn wait_blocking(self) -> i32 {
         match self {
-            JobBody::Process(mut c) => c.wait().ok().and_then(|s| s.code()).unwrap_or(1),
+            JobBody::Process(mut c) => c.wait().as_ref().map_or(1, child_exit_status),
             JobBody::Thread(h) => h.join().unwrap_or(1),
         }
     }
@@ -5990,7 +6037,7 @@ impl Shell {
 
         // Wait for every child and record its exit code at its pipeline position.
         for (pos, mut child) in children.into_iter().enumerate() {
-            let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
+            let code = child.wait().as_ref().map_or(1, child_exit_status);
             if let Some(&cmd_i) = child_cmd_idx.get(pos) {
                 stage_status[cmd_i] = code;
             }
@@ -13334,7 +13381,7 @@ impl Shell {
 
         match child.wait() {
             Ok(status) => {
-                self.last_status = status.code().unwrap_or(1);
+                self.last_status = child_exit_status(&status);
             }
             Err(e) => {
                 self.perrln(&format!("wait failed: {e}"));

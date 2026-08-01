@@ -25995,13 +25995,13 @@ table so `<&`, `>&` and `exec {v}<&` resolve them like any other number.
 commands write `${PIPESTATUS[@]}` (a coproc writes none), not by a corpus case
 — nothing in the corpus waits for a coproc yet.
 
-### TD-OILS-SIGNAL-DEATH-EXIT-STATUS. A child killed by a signal reports the raw Windows exit code, not `128 + sig` — OPEN — 2026-08-01
+### TD-OILS-SIGNAL-DEATH-EXIT-STATUS. A child killed by a signal reported the raw Windows exit code, not `128 + sig` — ✅ **RESOLVED 2026-08-01**
 
 **Where:** `userspace/oils/src/interp.rs` — every site that turns a reaped
-child's `std::process::ExitStatus` into a shell status: `JobBody::wait_blocking`
-(~1793), the concurrent-pipeline reaper in `exec_concurrent_pipeline` (~5996),
-and the simple-command wait in `exec_simple_inner` (~13340). All three do
-`status.code().unwrap_or(1)` and hand the number straight to `$?`.
+child's `std::process::ExitStatus` into a shell status: `JobBody::wait_blocking`,
+the concurrent-pipeline reaper in `exec_concurrent_pipeline`, and the
+simple-command wait in `exec_simple_inner`. All three did
+`status.code().unwrap_or(1)` and handed the number straight to `$?`.
 
 On Windows there is no wait status to decode — `code()` is the raw value the
 process passed to `ExitProcess`. That is fine for a process that exited
@@ -26025,22 +26025,33 @@ Note that the shell's *own* exit-status truncation is already right: `exit 300`,
 `( exit 300 )`, `return 300` and `sh -c 'exit 300'` all agree with bash. Only
 the code lifted off a reaped child escapes untruncated.
 
-**Proper fix.** Give the Windows child-reaping path one shared translation
-function instead of three open-coded `code()` calls, and have it recognise the
-Cygwin encoding: an exit code of `sig << 8` for `sig` in `1..=64` becomes
-`128 + sig`, and anything else is masked to its low 8 bits the way a wait status
-would be. The `sig << 8` test is a heuristic — a native Windows program is free
-to exit with 3328 and mean it — but it is the same bet bash makes by trusting
-Cygwin's own wait status, and osh cannot match bash on this platform without it.
-Keep the heuristic in the host-specific reaping path so the eventual SlateOS
-build, which will have a real `waitpid`, decodes properly instead of guessing.
+**Fixed** by one shared `child_exit_status` in place of the three open-coded
+`code()` calls. On unix it reads `ExitStatusExt::signal` and needs no guesswork;
+on Windows it recognises the Cygwin encoding — an exit code of `sig << 8` for
+`sig` in `1..=64` becomes `128 + sig` — and masks everything else to eight bits,
+a wait status having room for no more. The eventual SlateOS build takes the unix
+arm, so the guess stays confined to the host platform that forces it.
 
-**Impact.** `$?` and `${PIPESTATUS[@]}` are wrong for any externally-killed
-child, which includes the very common SIGPIPE from a short-circuiting reader
-(`… | head -n 1`). Scripts that test `[ $? -eq 141 ]` or `(( $? > 128 ))` to
-detect a signal death misbehave. Found while probing the all-external
+The `sig << 8` test is a heuristic, and it is worth being explicit about which
+way it errs: a native Windows program is free to exit with 3328 and mean it, and
+would be misreported as SIGPIPE. Against that, bash makes the same bet by
+trusting Cygwin's wait status, an exit code that is an exact multiple of 256 is
+unreachable through any shell (they all truncate `exit` to eight bits), and the
+alternative was a four-digit `$?` that no `[ $? -gt 128 ]` test could read.
+
+**Impact (before the fix).** `$?` and `${PIPESTATUS[@]}` were wrong for any
+externally-killed child, which includes the very common SIGPIPE from a
+short-circuiting reader (`… | head -n 1`). Found while probing the all-external
 concurrent pipeline path (`exec_concurrent_pipeline`) for the DEBUG-trap stage
-work; no corpus case covers it yet, because writing one requires the fix first.
+work.
+
+**Still divergent:** osh prints no notice for a foreground child killed by a
+signal, where bash writes `Terminated` / `<pid> Killed …` to stderr. The corpus
+case drops stderr rather than assert on it; the notice is job-control output and
+belongs with that work.
+
+Covered by
+`tests/corpus/a-child-killed-by-a-signal-answers-128-plus-the-signal.sh`.
 
 ### TD-OILS-DEBUG-TRAP-VERDICT-AT-FUNCTION-ENTRY. The extdebug verdict is ignored at the function-entry DEBUG firing — OPEN — 2026-08-01
 

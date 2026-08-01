@@ -1230,6 +1230,27 @@ enum InputSrc {
     Bytes(io::Cursor<Vec<u8>>),
     /// A real file, buffered — see [`FileInput`].
     File(FileInput),
+    /// A descriptor that is not open at all — what `<&-` leaves behind
+    /// (`read -r l <&-`, `{ …; } <&-`, `exec 0<&-`).
+    ///
+    /// A third shape rather than an absent binding, for the reason
+    /// [`WriteFd::Closed`] is one on the write side: a shell that has never
+    /// redirected fd 0 and a shell that has just *closed* it both have nothing
+    /// recorded for fd 0, and yet the first must read the terminal while the
+    /// second must answer with `EBADF`. Recording the close by clearing the
+    /// field would turn `exec 0<&-` into a reset to the terminal.
+    ///
+    /// It is deliberately not an empty [`InputSrc::Bytes`]: a closed descriptor
+    /// is not one at end of file. `read` distinguishes them — EOF is a silent
+    /// status 1, `EBADF` is `read: read error: 0: Bad file descriptor` — and so
+    /// does anything that asks whether fd 0 can be duplicated.
+    Closed,
+}
+
+/// Wrap the absence of a descriptor as an [`InputFd`], so a closed fd 0 can be
+/// held wherever an open one is and every reader of it fails alike.
+fn closed_input() -> InputFd {
+    Arc::new(Mutex::new(InputSrc::Closed))
 }
 
 impl io::Read for InputSrc {
@@ -1237,6 +1258,7 @@ impl io::Read for InputSrc {
         match self {
             InputSrc::Bytes(c) => c.read(out),
             InputSrc::File(f) => f.read(out),
+            InputSrc::Closed => Err(ebadf()),
         }
     }
 }
@@ -1246,6 +1268,7 @@ impl BufRead for InputSrc {
         match self {
             InputSrc::Bytes(c) => c.fill_buf(),
             InputSrc::File(f) => f.fill_buf(),
+            InputSrc::Closed => Err(ebadf()),
         }
     }
 
@@ -1253,6 +1276,8 @@ impl BufRead for InputSrc {
         match self {
             InputSrc::Bytes(c) => c.consume(n),
             InputSrc::File(f) => f.consume(n),
+            // Nothing was ever handed out to consume.
+            InputSrc::Closed => {}
         }
     }
 }
@@ -1265,6 +1290,7 @@ impl std::fmt::Debug for InputSrc {
         match self {
             InputSrc::Bytes(c) => write!(f, "InputSrc::Bytes(@{})", c.position()),
             InputSrc::File(_) => f.write_str("InputSrc::File"),
+            InputSrc::Closed => f.write_str("InputSrc::Closed"),
         }
     }
 }
@@ -1367,6 +1393,17 @@ enum ChildIn {
     /// has no OS object to hand over, so the shell replays it instead; the
     /// bytes are consumed from the source, which keeps its offset honest.
     Bytes(Vec<u8>),
+    /// The descriptor is closed (`cat <&-`), so the child should have no fd 0
+    /// at all.
+    ///
+    /// Known limitation: [`Stdio`] cannot express a *missing* descriptor —
+    /// `null()` is as close as it comes — so the child sees an empty stdin
+    /// rather than `EBADF`, and `cat <&-` exits 0 where bash's `cat` exits 1
+    /// complaining about the descriptor. Handing over a genuinely closed fd 0
+    /// needs a platform-specific `pre_exec`/handle dance; the same trade is
+    /// already made for a child's closed fd 1 and fd 2. See known-issues
+    /// TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP.
+    Closed,
 }
 
 /// Prepare an input descriptor for a child process's fd 0.
@@ -1388,6 +1425,7 @@ fn child_input(c: &InputFd) -> ChildIn {
             let _ = cur.read_to_end(&mut rest);
             ChildIn::Bytes(rest)
         }
+        InputSrc::Closed => ChildIn::Closed,
     }
 }
 
@@ -1398,6 +1436,10 @@ enum HeadIn {
     Pipe(io::PipeReader),
     /// A duplicate of a real input file, sharing the shell's offset.
     File(File),
+    /// No fd 0 at all — the pipeline runs under a `<&-`. An in-process stage
+    /// keeps the closure faithfully; a child gets [`ChildIn::Closed`]'s
+    /// approximation of it.
+    Closed,
 }
 
 impl HeadIn {
@@ -1406,6 +1448,7 @@ impl HeadIn {
         match self {
             HeadIn::Pipe(r) => StdinSrc::pipe(r),
             HeadIn::File(f) => StdinSrc::Fd(file_input(f)),
+            HeadIn::Closed => StdinSrc::Fd(closed_input()),
         }
     }
 }
@@ -1415,6 +1458,7 @@ impl From<HeadIn> for Stdio {
         match h {
             HeadIn::Pipe(r) => Stdio::from(r),
             HeadIn::File(f) => Stdio::from(f),
+            HeadIn::Closed => Stdio::null(),
         }
     }
 }
@@ -1703,7 +1747,10 @@ impl WriteFd {
     }
 }
 
-/// The error a write to a descriptor that is not open for writing produces.
+/// The error a descriptor that cannot serve the operation asked of it produces:
+/// a write to one that is not open for writing ([`WriteFd::ReadOnly`],
+/// [`WriteFd::Closed`]), or a read of one that is not open at all
+/// ([`InputSrc::Closed`]).
 ///
 /// `std::io::ErrorKind` has no portable `EBADF`, and the host's own message
 /// differs per platform, so the POSIX `strerror` text is carried directly —
@@ -5770,6 +5817,7 @@ impl Shell {
             },
             StdinSrc::Fd(c) => match child_input(c) {
                 ChildIn::Handle(f) => Some(HeadIn::File(f)),
+                ChildIn::Closed => Some(HeadIn::Closed),
                 ChildIn::Bytes(rest) => match io::pipe() {
                     Ok((r, mut w)) => {
                         std::thread::spawn(move || {
@@ -6751,8 +6799,8 @@ impl Shell {
             // `select` answers its prompt with the `read` builtin's own default
             // reading, so a reply can be continued over a backslash-newline.
             let line = match self.read_line(stdin, &redir, false) {
-                Some((l, _)) => l,
-                None => {
+                Ok(Some((l, _))) => l,
+                Ok(None) => {
                     // EOF terminates the loop. Three details, all verified
                     // against bash 5 with the streams separated:
                     //   * the closing newline goes to *stdout*, even though the
@@ -6763,6 +6811,22 @@ impl Shell {
                     //     input" from a loop the body left via `break`.
                     self.write_bytes(out, &redir, b"\n");
                     self.put_var("REPLY".to_string(), Str::new());
+                    self.last_status = 1;
+                    return Flow::Next;
+                }
+                Err(e) => {
+                    // A descriptor that cannot be read at all ends the loop the
+                    // same way — it would otherwise spin forever — but it is
+                    // not end of input, so REPLY keeps what it held and the
+                    // failure is reported. bash's wording here is bare
+                    // `read error:`, without the `read:` the builtin prefixes
+                    // its own copy of this message with.
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"read error: 0: ",
+                        io_error_message(&e)
+                    ]);
+                    self.write_bytes(out, &redir, b"\n");
                     self.last_status = 1;
                     return Flow::Next;
                 }
@@ -13211,6 +13275,12 @@ impl Shell {
                         input_bytes = Some(rest);
                         cmd.stdin(Stdio::piped());
                     }
+                    // `cmd <&0` under an `exec 0<&-`: the child ought to have no
+                    // fd 0 — see [`ChildIn::Closed`] for why it gets an empty
+                    // one instead.
+                    Some(ChildIn::Closed) => {
+                        cmd.stdin(Stdio::null());
+                    }
                     // An unbound descriptor reads as immediate EOF.
                     None => {
                         input_bytes = Some(Vec::new());
@@ -13244,6 +13314,11 @@ impl Shell {
                     ChildIn::Bytes(rest) => {
                         input_bytes = Some(rest);
                         cmd.stdin(Stdio::piped());
+                    }
+                    // `cmd <&-`: no fd 0 for the child, as far as [`Stdio`]
+                    // can express it. See [`ChildIn::Closed`].
+                    ChildIn::Closed => {
+                        cmd.stdin(Stdio::null());
                     }
                 },
                 None => match stdin {
@@ -14320,6 +14395,13 @@ impl Shell {
             DupWord::Close => {
                 // `N>&-` / `N<&-`: close the descriptor.
                 match fd {
+                    // `exec 0>&-` closes fd 0 exactly as `exec 0<&-` does. Not
+                    // `None`, which means "the real stdin"; see
+                    // [`Shell::apply_persistent_dup_in`].
+                    0 => {
+                        self.exec_stdin = Some(closed_input());
+                        self.exec_stdin_write = None;
+                    }
                     // Not `None`, which for fd 1 means "the real stdout": a
                     // shell that closed fd 1 must answer its own writes with
                     // `EBADF` (`echo: write error: …`), not print to the
@@ -14414,7 +14496,11 @@ impl Shell {
             DupWord::Close => {
                 // `N<&-`: close the input descriptor.
                 if fd == 0 {
-                    self.exec_stdin = None;
+                    // Not `None`, which for fd 0 means "the real stdin": a
+                    // shell that closed fd 0 must answer a `read` of it with
+                    // `EBADF`, not go on reading the terminal. See
+                    // [`InputSrc::Closed`].
+                    self.exec_stdin = Some(closed_input());
                     self.exec_stdin_write = None;
                 } else if fd == 1 {
                     // `exec 1<&-` closes fd 1 exactly as `exec 1>&-` does: which
@@ -14512,6 +14598,11 @@ impl Shell {
             self.open_fds.get(&n)
         };
         match cur {
+            // A descriptor a `<&-` closed is not one to dup *from*:
+            // `exec 0<&-; exec 3<&0` is bash's `0: Bad file descriptor`,
+            // reported at the dup rather than deferred to a read through the
+            // second closed name.
+            Some(c) if matches!(&*lock_input(c), InputSrc::Closed) => None,
             Some(c) => Some(Arc::clone(c)),
             // fd 0 with no bound stdin: treat as an empty input stream so a dup
             // of it does not error (bash's stdin would be the terminal).
@@ -14873,8 +14964,8 @@ impl Shell {
                         let f = std::fs::File::open(bytes::bytes_to_path(&self.host_path(&path)))
                             .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
                         if fd == 0 {
+                            plan.clear_stdin();
                             plan.stdin = Some(file_input(f));
-                            plan.stdin_data = None;
                         } else {
                             plan.extra_fds.push((fd, ExtraFdOp::Input(file_input(f))));
                         }
@@ -14901,9 +14992,9 @@ impl Shell {
                         // resolve to it — the two are duplicates of one
                         // descriptor, so a `read` and a following `echo >&0`
                         // continue from the same position.
+                        plan.clear_stdin();
                         plan.stdin = Some(rd);
                         plan.stdin_write = Some(wr);
-                        plan.stdin_data = None;
                     } else if fd >= 3 {
                         // `{fd}<> file`: a read+write descriptor, opened here so
                         // the binding and any duplicate of it share one position.
@@ -14926,7 +15017,7 @@ impl Shell {
                         // Here-doc bodies expand like a double-quoted context:
                         // no tilde expansion, no field splitting, no globbing.
                         let body = self.expand_double_quoted(&r.target.parts);
-                        plan.stdin = None;
+                        plan.clear_stdin();
                         plan.stdin_data = Some(body);
                     } else if fd >= 3 {
                         let body = self.expand_double_quoted(&r.target.parts);
@@ -14937,7 +15028,7 @@ impl Shell {
                     if fd == 0 {
                         let mut s = self.expand_to_string(&r.target);
                         s.push(b'\n');
-                        plan.stdin = None;
+                        plan.clear_stdin();
                         plan.stdin_data = Some(s);
                     } else if fd >= 3 {
                         let mut s = self.expand_to_string(&r.target);
@@ -15123,9 +15214,15 @@ impl Shell {
                 // (`cd /nosuchdir 2>&-` still exits 1, silently).
                 plan.clear_stderr();
                 plan.stderr_closed = true;
+            } else {
+                // `0>&-`: fd 0 is gone, so a `read` of it answers `EBADF`
+                // instead of the ambient stdin — which is not the same as
+                // reading it and finding end of file. Which side of the `&`
+                // the `-` is on says nothing about the descriptor meant, so
+                // this is `0<&-`; see [`Shell::resolve_dup_in`].
+                plan.clear_stdin();
+                plan.stdin = Some(closed_input());
             }
-            // An fd 0 close is not modelled yet — see
-            // TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP.
         } else if let Some(n) = target_num
             && !Self::dup_needs_no_source(origin, fd, n)
         {
@@ -15225,9 +15322,14 @@ impl Shell {
                 // `2<&-`, likewise, is `2>&-`.
                 plan.clear_stderr();
                 plan.stderr_closed = true;
+            } else {
+                // `<&-` / `0<&-`: fd 0 is closed for this command. A later
+                // redirect in the same list can still give it back
+                // (`<&- <file`), which is why this goes through the same
+                // last-writer-wins slot as every other fd-0 source.
+                plan.clear_stdin();
+                plan.stdin = Some(closed_input());
             }
-            // `0<&-` (close stdin) is not modelled yet — see
-            // TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP.
         } else if let DupWord::Fd(n) = dup
             && !Self::dup_needs_no_source(origin, fd, n)
         {
@@ -15256,9 +15358,8 @@ impl Shell {
             }
             if fd == 0 && n >= 3 {
                 // fd 0 reads from input descriptor N's shared cursor.
+                plan.clear_stdin();
                 plan.stdin_from_fd = Some(n);
-                plan.stdin = None;
-                plan.stdin_data = None;
             } else if fd >= 3
                 && let Some(src) = self.open_fds.get(&n)
             {
@@ -15418,8 +15519,13 @@ impl Shell {
                 // callers resolve back to that std fd.
                 Err(_) => Ok(None),
             },
-            // fd 0 is always open; only its access mode is in question.
-            0 => Ok(Some(self.ambient_stdin_write_fd())),
+            // fd 0 is open unless an `exec 0<&-` closed it; short of that only
+            // its access mode is in question, and a read-only fd 0 is still a
+            // descriptor one may dup (the `EBADF` waits for the write).
+            0 => match self.ambient_stdin_write_fd() {
+                Some(w) => Ok(Some(w)),
+                None => Err(0),
+            },
             _ => match self.open_write_fds.get(&n) {
                 Some(f) => Ok(Some(f.clone())),
                 None => Err(n),
@@ -28432,18 +28538,41 @@ impl Shell {
         // the failure. The two ways to come back with nothing differ solely in
         // the status they leave: a count of zero is *satisfied* by reading
         // nothing, while EOF is a record that never finished.
-        let (line, terminated) = if nchars == Some(0) {
+        let record = if nchars == Some(0) {
             // Asking for no characters is answered without touching the input,
             // so a following read still sees the whole of it.
-            (Str::new(), true)
+            Ok(Some((Str::new(), true)))
         } else if delim.is_some() || nchars.is_some() {
             let d = delim.unwrap_or(b'\n');
             self.read_record_input(rd_stdin, rd_redir, d, nchars, exact, raw)
-                .unwrap_or_else(|| (Str::new(), false))
         } else {
+            self.read_line(rd_stdin, rd_redir, raw)
+        };
+        // A descriptor that could not be read at all is not end of input, and
+        // the two part company right here: EOF goes on to assign the empty
+        // record it did not find, while a read error assigns *nothing* — the
+        // names keep whatever they held — and says so. `read -r l <&-` on a
+        // closed fd 0 leaves `l` alone; `read -r l < /dev/null` empties it.
+        let (line, terminated) = match record {
+            Ok(Some(r)) => r,
             // A final line ending at EOF without a newline is a partial read:
             // the value is still assigned, but status is 1 (bash).
-            self.read_line(rd_stdin, rd_redir, raw).unwrap_or_else(|| (Str::new(), false))
+            Ok(None) => (Str::new(), false),
+            Err(e) => {
+                // The descriptor named is the one `read` was pointed at, which
+                // is fd 0 unless `-u N` moved it. Not the fd a `<&N` copied
+                // *from*: `read -r l <&3` reads fd 0 and bash says so, where
+                // `read -u 3 l` says `3`.
+                let named = if ufd_active { ufd.unwrap_or(0) } else { 0 };
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"read: read error: ",
+                    named,
+                    b": ",
+                    io_error_message(&e)
+                ]);
+                return 1;
+            }
         };
         // Exit status: success iff the record finished the way it was asked to
         // — a delimiter seen, or the requested character count reached. A short
@@ -28568,7 +28697,12 @@ impl Shell {
             while max.is_none_or(|m| out.len() < m) {
                 // `mapfile` has no `-r`: a backslash is data, so the records are
                 // read raw and reach the array with their backslashes intact.
-                let Some((text, terminated)) = read_record(r, delim, None, false, true) else {
+                // A read error ends the array exactly as end of input does, and
+                // just as quietly: `mapfile -t a <&-` is bash's status 0 with no
+                // elements and nothing on stderr, unlike `read`, which reports
+                // it. The array is what `mapfile` answers with, and an empty one
+                // is the honest answer either way.
+                let Ok(Some((text, terminated))) = read_record(r, delim, None, false, true) else {
                     break;
                 };
                 let mut bytes = text;
@@ -30610,7 +30744,9 @@ impl Shell {
         // fd 0 has no "real terminal handle" fallback: it is writable only when
         // an `<>` open gave it a write half, and otherwise `EBADF` on write.
         if n == 0 {
-            return Ok(self.ambient_stdin_write_fd());
+            return self
+                .ambient_stdin_write_fd()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Bad file descriptor"));
         }
         let redirected = if n == 1 {
             self.exec_stdout.as_ref()
@@ -30672,33 +30808,55 @@ impl Shell {
     /// [`WriteFd::ReadOnly`] rather than "no such descriptor". `redir` decides
     /// which fd 0 is meant: a command that rebinds fd 0 itself supplies its own
     /// access mode, otherwise the ambient one applies.
-    fn stdin_write_fd(&self, redir: &RedirPlan) -> WriteFd {
+    ///
+    /// `None` is the one case where fd 0 genuinely is no such descriptor: a
+    /// `<&-` closed it, so `{ echo Q >&0; } <&-` fails at the *redirect*
+    /// (`0: Bad file descriptor`) rather than at the write. The distinction is
+    /// visible — a read-only fd 0 is `echo: write error: …` — which is why a
+    /// closed fd 0 cannot be folded into [`WriteFd::ReadOnly`].
+    fn stdin_write_fd(&self, redir: &RedirPlan) -> Option<WriteFd> {
+        if redir.stdin_is_closed() {
+            return None;
+        }
         if redir.rebinds_stdin() {
-            match redir.stdin_write.as_ref() {
+            Some(match redir.stdin_write.as_ref() {
                 Some(f) => WriteFd::File(Arc::clone(f)),
                 None => WriteFd::ReadOnly,
-            }
+            })
         } else {
             self.ambient_stdin_write_fd()
         }
     }
 
     /// The *ambient* fd 0 as a write descriptor — what `exec 3>&0` snapshots,
-    /// and what a command that does not rebind fd 0 itself inherits.
-    fn ambient_stdin_write_fd(&self) -> WriteFd {
-        match self.exec_stdin_write.as_ref() {
+    /// and what a command that does not rebind fd 0 itself inherits. `None`
+    /// when a persistent `exec 0<&-` closed it.
+    fn ambient_stdin_write_fd(&self) -> Option<WriteFd> {
+        if self.stdin_is_closed() {
+            return None;
+        }
+        Some(match self.exec_stdin_write.as_ref() {
             Some(f) => WriteFd::File(Arc::clone(f)),
             None => WriteFd::ReadOnly,
-        }
+        })
+    }
+
+    /// Whether the shell's ambient fd 0 has been closed by a persistent
+    /// `exec 0<&-`, as opposed to merely never redirected.
+    fn stdin_is_closed(&self) -> bool {
+        self.exec_stdin
+            .as_ref()
+            .is_some_and(|s| matches!(&*lock_input(s), InputSrc::Closed))
     }
 
     /// The descriptor `>&N` / `2>&N` names, for any N a redirect may mention:
     /// fd 0 via [`Shell::stdin_write_fd`], fd ≥ 3 from the `exec`-installed
     /// table. `None` is "no such descriptor" (bash's `N: Bad file descriptor`),
-    /// which fd 0 never is.
+    /// which fd 0 is only when a `<&-` closed it — a read-only fd 0 is a
+    /// descriptor that exists and refuses writes, which is a different error.
     fn write_fd_for(&self, n: i32, redir: &RedirPlan) -> Option<WriteFd> {
         if n == 0 {
-            Some(self.stdin_write_fd(redir))
+            self.stdin_write_fd(redir)
         } else {
             self.open_write_fds.get(&n).cloned()
         }
@@ -31346,14 +31504,24 @@ impl Shell {
     /// Read one line for `read`. Without `raw` a backslash is live while the
     /// line is being read, so what comes back may span several of the input's —
     /// see [`read_record`].
-    fn read_line(&self, stdin: &StdinSrc, redir: &RedirPlan, raw: bool) -> Option<(Str, bool)> {
+    fn read_line(
+        &self,
+        stdin: &StdinSrc,
+        redir: &RedirPlan,
+        raw: bool,
+    ) -> io::Result<Option<(Str, bool)>> {
         if let Some(n) = redir.stdin_from_fd {
             // `read <&N`: read from and advance descriptor N's shared source — a
             // live coproc pipe, or a `read -u`/`exec 3<` byte cursor.
             if let Some(rd) = self.coproc_read_fds.get(&n) {
                 return read_one_line(&mut *lock_coproc(rd), raw);
             }
-            let c = self.input_fd_cursor(n)?;
+            // An unbound descriptor is not an error here: the redirect resolver
+            // has already refused a genuinely bad one, so this is fd 0 with
+            // nothing recorded for it, which reads as immediate EOF.
+            let Some(c) = self.input_fd_cursor(n) else {
+                return Ok(None);
+            };
             return read_one_line(&mut *lock_input(&c), raw);
         }
         if let Some(data) = &redir.stdin_data {
@@ -31396,8 +31564,9 @@ impl Shell {
     /// ignores `delim` and reads exactly `nchars` characters. Returns
     /// `(text, terminated)` where `terminated` is true when a delimiter was
     /// consumed (for `-N`, true when the full character count was read).
-    /// `None` signals immediate EOF with no data. Without `raw`, backslashes are
-    /// live while the record is read — see [`read_record`].
+    /// `Ok(None)` signals immediate EOF with no data, `Err` a descriptor that
+    /// could not be read at all. Without `raw`, backslashes are live while the
+    /// record is read — see [`read_record`].
     fn read_record_input(
         &self,
         stdin: &StdinSrc,
@@ -31406,12 +31575,15 @@ impl Shell {
         nchars: Option<usize>,
         exact: bool,
         raw: bool,
-    ) -> Option<(Str, bool)> {
+    ) -> io::Result<Option<(Str, bool)>> {
         if let Some(n) = redir.stdin_from_fd {
             if let Some(rd) = self.coproc_read_fds.get(&n) {
                 return read_record(&mut *lock_coproc(rd), delim, nchars, exact, raw);
             }
-            let c = self.input_fd_cursor(n)?;
+            // As in [`Shell::read_line`]: nothing bound is immediate EOF.
+            let Some(c) = self.input_fd_cursor(n) else {
+                return Ok(None);
+            };
             return read_record(&mut *lock_input(&c), delim, nchars, exact, raw);
         }
         if let Some(data) = &redir.stdin_data {
@@ -31733,6 +31905,13 @@ struct RedirPlan {
     /// file description; re-opening per read would hand back the first line
     /// over and over, and re-opening for a child would give it an offset of
     /// its own.
+    ///
+    /// A `<&-` records itself here too, as an [`InputSrc::Closed`] — a closed
+    /// fd 0 is a *source* like any other, not the absence of one. `None` means
+    /// "inherit fd 0", and the two must not be confused: `read -r l <&-` has to
+    /// answer `EBADF`, where an unredirected `read` reads the terminal. Fds 1
+    /// and 2 need a separate `…_closed` flag only because their plan slots hold
+    /// a path rather than a descriptor, with no room for a third state.
     stdin: Option<InputFd>,
     /// The *write* half of a `<> file` on fd 0 — a duplicate of the very
     /// descriptor in `stdin`, so the two share one offset. Present only for
@@ -31838,12 +32017,37 @@ impl RedirPlan {
         self.stderr_closed = false;
     }
 
+    /// [`RedirPlan::clear_stdout`] for fd 0.
+    ///
+    /// `stdin_write` goes with the source it qualifies — it is the write half
+    /// of the very descriptor in `stdin` — so it is cleared with it and re-set
+    /// by whichever writer opens an `<>`.
+    fn clear_stdin(&mut self) {
+        self.stdin = None;
+        self.stdin_write = None;
+        self.stdin_data = None;
+        self.stdin_from_fd = None;
+    }
+
     /// Whether this command's own redirections rebind fd 0. Such a command
     /// decides fd 0's *access mode* for itself (see [`Shell::stdin_write_fd`]):
     /// `{ echo x >&0; } < f` writes to the `< f` descriptor, not to an ambient
     /// `exec 0<> other`.
     fn rebinds_stdin(&self) -> bool {
         self.stdin.is_some() || self.stdin_data.is_some() || self.stdin_from_fd.is_some()
+    }
+
+    /// Whether this command's own redirections *closed* fd 0 (`<&-`), as
+    /// opposed to leaving it alone or binding it to something readable.
+    ///
+    /// Only the write side has to ask: a read of a closed descriptor is already
+    /// answered by [`InputSrc::Closed`] itself, but `>&0` has to fail at the
+    /// *redirect* (`0: Bad file descriptor`) rather than at the write, so it
+    /// needs to know before it has anything to write.
+    fn stdin_is_closed(&self) -> bool {
+        self.stdin
+            .as_ref()
+            .is_some_and(|s| matches!(&*lock_input(s), InputSrc::Closed))
     }
 }
 
@@ -34942,7 +35146,9 @@ fn pipe_reader_readable_now(_r: &io::PipeReader) -> bool {
 /// `terminated` is true when an actual `\n` delimiter was consumed and false
 /// when the input ended (EOF) before any newline. `read` reports status 1 for
 /// an unterminated final line (matching bash), so the caller needs to know
-/// which case occurred. Returns `None` only on immediate EOF with no bytes.
+/// which case occurred. `Ok(None)` is immediate EOF with no bytes; `Err` is a
+/// descriptor that could not be read at all, which is a different answer — see
+/// [`read_record`].
 ///
 /// Without `raw` a backslash is live while the line is being *read*, so a line
 /// can span several of the input's — see [`read_record`], which is what does the
@@ -34955,14 +35161,14 @@ fn pipe_reader_readable_now(_r: &io::PipeReader) -> bool {
 /// success, silently processing only a prefix of the file. The bytes are the
 /// value: a line that is not text reaches the variable exactly as it was read,
 /// so `read -r p; rm "$p"` names the file the input named.
-fn read_one_line<R: BufRead>(r: &mut R, raw: bool) -> Option<(Str, bool)> {
+fn read_one_line<R: BufRead>(r: &mut R, raw: bool) -> io::Result<Option<(Str, bool)>> {
     if !raw {
         return read_record(r, b'\n', None, false, false);
     }
     let mut line: Str = Vec::new();
-    let n = r.read_until(b'\n', &mut line).ok()?;
+    let n = r.read_until(b'\n', &mut line)?;
     if n == 0 {
-        return None;
+        return Ok(None);
     }
     // Only the delimiter comes off. A `\r` before it is ordinary data that bash
     // keeps — `printf 'a\r\n' | read -r l` leaves `l` two characters long — and
@@ -34973,15 +35179,21 @@ fn read_one_line<R: BufRead>(r: &mut R, raw: bool) -> Option<(Str, bool)> {
     if terminated {
         line.pop();
     }
-    Some((line, terminated))
+    Ok(Some((line, terminated)))
 }
 
 /// Read a record for `read`. Reads byte-by-byte so streaming pipes yield data
 /// as produced. `delim` terminates the record (consumed, not stored) unless
 /// `exact` is set. `nchars` caps the record at that many *characters* (UTF-8
 /// aware: a byte begins a new character when it is not a `10xxxxxx` continuation
-/// byte). `exact` (`-N`) ignores `delim`. Returns `(text, terminated)`; `None`
-/// on immediate EOF with no bytes read.
+/// byte). `exact` (`-N`) ignores `delim`. Returns `(text, terminated)`;
+/// `Ok(None)` on immediate EOF with no bytes read.
+///
+/// A descriptor that cannot be read *at all* — the `EBADF` an [`InputSrc::Closed`]
+/// answers with — comes back as `Err`, not as `Ok(None)`. bash tells the two
+/// apart and so must this: end of input assigns the empty record and reports
+/// status 1, while a read error assigns *nothing* (the names keep the values
+/// they had) and reports `read: read error: N: …` besides.
 ///
 /// Without `raw`, a backslash is part of *reading* rather than something done to
 /// the record afterwards, and that is visible three ways. It hides whatever
@@ -35004,7 +35216,7 @@ fn read_record<R: BufRead>(
     nchars: Option<usize>,
     exact: bool,
     raw: bool,
-) -> Option<(Str, bool)> {
+) -> io::Result<Option<(Str, bool)>> {
     let mut bytes: Str = Vec::new();
     let mut chars = 0usize;
     let mut hit_delim = false;
@@ -35014,10 +35226,10 @@ fn read_record<R: BufRead>(
     loop {
         // Peek at the next byte without holding the borrow across `consume`.
         let b = {
-            let buf = match r.fill_buf() {
-                Ok(b) if !b.is_empty() => b,
-                _ => break, // EOF or read error
-            };
+            let buf = r.fill_buf()?;
+            if buf.is_empty() {
+                break; // EOF
+            }
             buf[0]
         };
         let is_char_start = b & 0xC0 != 0x80;
@@ -35077,9 +35289,9 @@ fn read_record<R: BufRead>(
         hit_delim = true;
     }
     if !any && bytes.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some((bytes, hit_delim))
+    Ok(Some((bytes, hit_delim)))
 }
 
 /// Quote a value for a `declare`/`readonly -p` listing: wrap in double quotes
@@ -56800,6 +57012,112 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "pipe stdin should be read-only, got {out:?}"
         );
         assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
+    }
+
+    #[test]
+    fn a_closed_stdin_is_not_the_inherited_one() {
+        // `<&-` takes fd 0 away for the command's duration, which is not what
+        // "this command redirects nothing" means: the `read` must fail rather
+        // than fall back to the ambient stdin, and must leave the ambient
+        // descriptor's position alone — the following unredirected `read` still
+        // gets the *first* line. Regression: osh recorded the close by removing
+        // fd 0 from its fd tables, where fd 0 never lived, so the redirect did
+        // nothing at all (TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP).
+        let (out, _) = run_over_seeded_file(
+            "one\ntwo\n",
+            "exec 0< {FILE}; read -r a <&-; s=$?; read -r b; echo \"a=[$a] s=$s b=[$b]\"",
+        );
+        assert_eq!(out, "a=[] s=1 b=[one]\n", "the close should have bitten: {out:?}");
+        // Which side of the `&` the `-` is written on says nothing about which
+        // descriptor is meant, so all three spellings close fd 0.
+        for form in ["<&-", "0<&-", "0>&-"] {
+            let (out, _) = run_over_seeded_file(
+                "one\n",
+                &format!("exec 0< {{FILE}}; read -r a {form}; echo \"s=$? a=[$a]\""),
+            );
+            assert_eq!(out, "s=1 a=[]\n", "`{form}` should close fd 0: {out:?}");
+        }
+        // A body's close reaches every command inside it.
+        let (out, _) = run_over_seeded_file(
+            "one\n",
+            "exec 0< {FILE}; { read -r a; } <&-; echo \"s=$? a=[$a]\"",
+        );
+        assert_eq!(out, "s=1 a=[]\n", "a group's close should reach its body: {out:?}");
+        // `mapfile` is the exception bash makes: no fd 0 is an empty array and
+        // status 0, not an error.
+        let (out, _) = run("mapfile -t a <&-; echo \"s=$? n=${#a[@]}\"");
+        assert_eq!(out, "s=0 n=0\n", "`mapfile` should stay silent: {out:?}");
+    }
+
+    #[test]
+    fn the_last_mention_of_a_closed_stdin_wins() {
+        // A redirect list is applied left to right, so a close can be undone by
+        // a later source and can itself undo an earlier one.
+        let (out, _) =
+            run_over_seeded_file("one\n", "read -r a <&- < {FILE}; echo \"s=$? a=[$a]\"");
+        assert_eq!(out, "s=0 a=[one]\n", "the reopen should win: {out:?}");
+        let (out, _) =
+            run_over_seeded_file("one\n", "read -r a < {FILE} <&-; echo \"s=$? a=[$a]\"");
+        assert_eq!(out, "s=1 a=[]\n", "the later close should win: {out:?}");
+        // A here-string is a source like any other, on both sides of the close.
+        let (out, _) = run("read -r a <&- <<< hs; echo \"s=$? a=[$a]\"");
+        assert_eq!(out, "s=0 a=[hs]\n", "the here-string should win: {out:?}");
+        let (out, _) = run("read -r a <<< hs <&-; echo \"s=$? a=[$a]\"");
+        assert_eq!(out, "s=1 a=[]\n", "the later close should win: {out:?}");
+        // And a persistent close is not permanent either.
+        let (out, _) = run_over_seeded_file(
+            "one\n",
+            "exec 0<&-; exec 0< {FILE}; read -r a; echo \"s=$? a=[$a]\"",
+        );
+        assert_eq!(out, "s=0 a=[one]\n", "the reopened fd 0 should read: {out:?}");
+    }
+
+    #[test]
+    fn a_closed_stdin_is_not_a_descriptor_to_dup() {
+        // `>&0` resolves fd 0 when the redirect is set up, so a *closed* fd 0
+        // fails there — "no such descriptor" — where a merely read-only one
+        // exists and fails later, at the write. The two carry different text.
+        let (out, _) = run("{ echo Q >&0; } <&- 2>&1; echo \"s=$?\"");
+        assert_eq!(
+            out, "osh: 0: Bad file descriptor\ns=1\n",
+            "expected a redirect error naming the descriptor, got {out:?}"
+        );
+        // `exec 3<&0` / `exec 3>&0` likewise cannot copy a descriptor that is
+        // not there, and fail at the `exec` rather than at some later use.
+        let (_, st) = run("exec 0<&-; exec 3<&0");
+        assert_eq!(st, 1, "`exec 3<&0` should fail with fd 0 closed");
+        let (_, st) = run("exec 0<&-; exec 3>&0");
+        assert_eq!(st, 1, "`exec 3>&0` should fail with fd 0 closed");
+    }
+
+    #[test]
+    fn a_read_error_is_not_end_of_input() {
+        // Both leave `read` with nothing and status 1, and bash still tells
+        // them apart: end of input overwrites the names with the empty record
+        // it did not find, while a descriptor that could not be read leaves
+        // them exactly as they were — and says so, where EOF is silent.
+        let (out, _) =
+            run_over_seeded_file("", "l=keep; read -r l < {FILE} 2>&1; echo \"s=$? l=[$l]\"");
+        assert_eq!(out, "s=1 l=[]\n", "EOF should have emptied the name: {out:?}");
+        let (out, _) = run("l=keep; read -r l <&- 2>&1; echo \"s=$? l=[$l]\"");
+        assert_eq!(
+            out, "osh: read: read error: 0: Bad file descriptor\ns=1 l=[keep]\n",
+            "a read error should report and assign nothing, got {out:?}"
+        );
+        // `mapfile` is the exception bash makes: an unreadable descriptor is an
+        // empty array, status 0, and nothing on stderr — EOF's answer exactly.
+        let (out, _) = run("mapfile -t a <&- 2>&1; echo \"s=$? n=${#a[@]}\"");
+        assert_eq!(out, "s=0 n=0\n", "`mapfile` should stay silent: {out:?}");
+        // `select` reads through the same path and must end its loop rather
+        // than spin on a descriptor that will never yield. Its wording is the
+        // bare `read error:`, without the `read:` the builtin prefixes.
+        let (out, _) =
+            run("REPLY=keep; select x in a; do :; done <&- 2>&1; echo \"REPLY=[$REPLY]\"");
+        assert!(
+            out.contains("osh: read error: 0: Bad file descriptor"),
+            "`select` should report the read error, got {out:?}"
+        );
+        assert!(out.ends_with("REPLY=[keep]\n"), "REPLY should be untouched, got {out:?}");
     }
 
     #[test]

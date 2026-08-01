@@ -15191,9 +15191,13 @@ unmodelled-syntax cases:
    Same status 1, same stream, different wording — the shell refuses to hand the
    child a descriptor it knows is unwritable rather than letting the child
    discover it.
-2. `{ echo Q >&0; } <&-` gives a *write-time* error where bash gives a
+2. ~~`{ echo Q >&0; } <&-` gives a *write-time* error where bash gives a
    *redirect-time* `0: Bad file descriptor`, because `0<&-` (closing fd 0) is not
-   modelled — fd 0 has no "closed" state distinct from "read-only".
+   modelled — fd 0 has no "closed" state distinct from "read-only".~~ **Closed
+   2026-08-01** by `TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP`: fd 0 now has
+   that state (`InputSrc::Closed`), and `Shell::stdin_write_fd` answers it with
+   `None` — no such descriptor — where a read-only fd 0 is `WriteFd::ReadOnly`.
+   Covered by `tests/corpus/redirect-close-of-stdin.sh`.
 3. `exec 0<&N` where fd N was opened `<>` does not carry the write half across:
    the input table (`open_input_fds`) and the write table (`open_write_fds`) are
    separate, and the dup consults only the former. Fixing this properly means
@@ -26707,7 +26711,7 @@ onto itself is unchanged), while the check is skipped only for a *word*
 (`Shell::dup_needs_no_source` / `DupOrigin`), since a special filename is an
 `open` that can fail where a dup bash never makes cannot.
 
-### TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP. `>&-` / `<&-` on fd 0, 1 or 2 of a *command* closes nothing — PARTIALLY FIXED (fds 1 and 2 done; fd 0 open) — 2026-08-01
+### TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP. `>&-` / `<&-` on fd 0, 1 or 2 of a *command* closes nothing — ✅ RESOLVED (all three fds) — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — `resolve_dup_out` / `resolve_dup_in`,
 the `DupWord::Close` arm. For a redirect on a command (not `exec`) the close is
@@ -26716,8 +26720,9 @@ fds 0–2 do not live in those tables, so the removal finds nothing and the
 command runs with its stream still attached.
 
 **Reproduce** (measured 2026-08-01 against the reference bash; `rc` and the
-diagnostic are bash's, the osh column is what it did *before* the fixes
-below — the rows naming fd 1 or fd 2 now match bash, the fd 0 ones still do not):
+diagnostic are bash's, the osh column is what it did *before* the fixes below.
+Every row now matches bash except the external-command ones, which are the
+documented trade recorded at the end):
 
 | | bash | osh |
 |---|---|---|
@@ -26755,9 +26760,10 @@ differ from bash.
 therefore not a close but a **reset to the terminal**, which is its opposite.
 
 **Related.** `TD-OILS-FD0-WRITE`'s residual divergence 2 (`{ echo Q >&0; } <&-`)
-is the same gap seen from the write side; fixing this subsumes it.
+is the same gap seen from the write side; fixing this subsumed it.
 
-**Proper fix.** Give the transient redirect plan a *closed* state for fds 0–2,
+**Proper fix** (what was done — see the three sections below). Give the transient
+redirect plan a *closed* state for fds 0–2,
 distinct from "absent, so inherit the real one", so that a builtin resolving its
 stdin/stdout/stderr through the plan gets `Bad file descriptor` rather than the
 inherited handle — and so an external child is handed a closed descriptor. The
@@ -26828,9 +26834,45 @@ not) is the order-free-plan limit, identical in kind to `>&- 3>&1`.
 
 Covered by `tests/corpus/redirect-close-of-stderr.sh` plus three unit tests.
 
-**Still open:** fd 0 (`0<&-`, `exec 0<&-` — needs the
-`read: read error: 0: Bad file descriptor` shape, which also subsumes
-`TD-OILS-FD0-WRITE`'s residual divergence 2).
+**Fixed last — fd 0 (2026-08-01).** fd 0 needed no new plan field at all. Its
+plan slot already holds a descriptor (`RedirPlan::stdin: Option<InputFd>`) rather
+than a path, so the closed state fits *inside* it as a third `InputSrc` variant,
+`InputSrc::Closed`, whose `read`/`fill_buf` answer `EBADF`. Because
+`InputFd = Arc<Mutex<InputSrc>>`, that reaches every reader in the interpreter
+with no type change anywhere: a `<&-` simply records itself as a source like any
+other, and `RedirPlan::clear_stdin` gives fd 0 the same one-place
+last-writer-wins ordering fds 1 and 2 got (`<&- <in` reads the file, `<in <&-`
+does not). The persistent side is `exec_stdin = Some(closed_input())` — where it
+used to be `None`, which means *inherit the real stdin* and made `exec 0<&-` a
+reset to the terminal, the same inversion fds 1 and 2 had.
+
+The read side's error shape came with it. `read_record` / `read_one_line` /
+`Shell::read_line` / `Shell::read_record_input` returned `Option`, folding "could
+not read" into "end of input"; they now return `io::Result<Option<…>>`, and the
+distinction is worth the churn because bash makes it visible twice over — EOF
+*assigns* the empty record it did not find while a read error assigns nothing
+(`l=keep; read -r l <&-` leaves `l` as `keep`), and EOF is silent while a read
+error prints `read: read error: 0: Bad file descriptor`. `mapfile` is bash's
+exception and stays one: an unreadable descriptor is an empty array, status 0 and
+no message. `select` reads through the same path, ends its loop rather than
+spinning, and uses bash's bare `read error:` wording without the builtin's
+`read:` prefix.
+
+On the write side a closed fd 0 is now `None` from `Shell::stdin_write_fd`, i.e.
+genuinely no such descriptor, where a read-only one is `WriteFd::ReadOnly`. That
+is the distinction `{ echo Q >&0; } <&-` turns on — bash fails it at the
+*redirect* (`0: Bad file descriptor`) and `{ echo Q >&0; } < file` at the *write*
+(`echo: write error: …`) — and it resolves `TD-OILS-FD0-WRITE`'s residual
+divergence 2. `exec 0<&-; exec 3<&0` and `exec 3>&0` likewise fail at the `exec`,
+since a descriptor that is not there cannot be duplicated.
+
+One divergence is knowingly left, the fd 1 trade again: an external `cmd <&-`
+gets `Stdio::null()` (`ChildIn::Closed`), so it sees an empty stdin rather than
+`EBADF` and `cat <&-` exits 0 where bash's `cat` exits 1 complaining about the
+descriptor. `Stdio` cannot express a missing descriptor and forging one needs a
+platform-specific `pre_exec`/handle dance.
+
+Covered by `tests/corpus/redirect-close-of-stdin.sh` plus four unit tests.
 
 ### TD-OILS-EXEC-STDERR-DOES-NOT-SHADOW-AN-ENCLOSING-REDIRECT. A runtime `exec 2>…` is ignored inside a body that redirected fd 2 — ✅ RESOLVED — 2026-08-01
 

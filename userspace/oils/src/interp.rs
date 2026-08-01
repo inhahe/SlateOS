@@ -14611,6 +14611,36 @@ impl Shell {
         }
     }
 
+    /// The descriptor fd 0 names *at this point in the redirect list*, for a
+    /// `N<&0` to duplicate. `None` when fd 0 is closed there.
+    ///
+    /// Not simply [`Shell::clone_input_fd`] of 0, because a redirect list is
+    /// resolved left to right and the dup copies whatever fd 0 was when it was
+    /// reached: `<in 3<&0` gives fd 3 the file, `3<&0 <in` gives it the
+    /// *ambient* fd 0 and only then rebinds fd 0. The plan itself carries no
+    /// order, so the choice has to be made here, while the list is still being
+    /// walked.
+    fn plan_stdin_fd(&self, plan: &mut RedirPlan) -> Option<InputFd> {
+        if let Some(n) = plan.stdin_from_fd {
+            return self.clone_input_fd(n);
+        }
+        if let Some(data) = plan.stdin_data.take() {
+            // A here-document is a source like any other and a dup of it shares
+            // its position — `{ read -r a <&3; read -r b; } <<< $'x\ny' 3<&0`
+            // reads `x` and then `y`, not `x` twice. Materialising the bytes
+            // into the descriptor slot is what gives both names one cursor; the
+            // compound-command path does the same thing with them anyway.
+            plan.stdin = Some(bytes_input(data));
+        }
+        if let Some(c) = &plan.stdin {
+            if matches!(&*lock_input(c), InputSrc::Closed) {
+                return None;
+            }
+            return Some(Arc::clone(c));
+        }
+        self.clone_input_fd(0)
+    }
+
     /// Expand a redirection target word the way bash does for a `>`/`<`/`>>`/
     /// `>&`/`<&` (and `&>`) target: parameter/command/arithmetic expansion,
     /// tilde expansion, then **field splitting and pathname (glob) expansion**,
@@ -15360,6 +15390,19 @@ impl Shell {
                 // fd 0 reads from input descriptor N's shared cursor.
                 plan.clear_stdin();
                 plan.stdin_from_fd = Some(n);
+            } else if fd >= 3 && n == 0 {
+                // `3<&0`: a second name for fd 0's description, sharing its
+                // cursor. Which fd 0 is copied depends on where the dup sits in
+                // the list — see [`Shell::plan_stdin_fd`] — and a closed one is
+                // no descriptor to copy, which bash reports against the
+                // *source* (`0: Bad file descriptor`), not against fd 3.
+                let Some(src) = self.plan_stdin_fd(plan) else {
+                    return Err(bfmt![
+                        Self::dup_subject(origin, fd, 0, target),
+                        b": Bad file descriptor"
+                    ]);
+                };
+                plan.extra_fds.push((fd, ExtraFdOp::Input(src)));
             } else if fd >= 3
                 && let Some(src) = self.open_fds.get(&n)
             {
@@ -57118,6 +57161,58 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "`select` should report the read error, got {out:?}"
         );
         assert!(out.ends_with("REPLY=[keep]\n"), "REPLY should be untouched, got {out:?}");
+    }
+
+    #[test]
+    fn a_transient_dup_of_stdin_shares_its_position() {
+        // `3<&0` gives fd 0's open file description a second name, so a read
+        // through either advances both — the second `read` gets the *next*
+        // line, not the first one again. Regression: osh resolved a transient
+        // `N<&0` by looking fd 0 up in the fd≥3 table, where it never lives, so
+        // the redirect bound nothing and the later `<&3` failed.
+        let (out, _) = run_over_seeded_file(
+            "one\ntwo\n",
+            "exec 0< {FILE}; { read -r a <&3; read -r b; } 3<&0; echo \"a=[$a] b=[$b]\"",
+        );
+        assert_eq!(out, "a=[one] b=[two]\n", "the dup should share fd 0's cursor: {out:?}");
+        // A here-document is a source like any other, and copying it shares its
+        // position too.
+        let (out, _) =
+            run("{ read -r a <&3; read -r b; } <<< $'x\\ny' 3<&0; echo \"a=[$a] b=[$b]\"");
+        assert_eq!(out, "a=[x] b=[y]\n", "the here-string's position should be shared: {out:?}");
+    }
+
+    #[test]
+    fn a_dup_copies_the_stdin_the_redirects_before_it_left() {
+        // A redirect list is resolved left to right and each entry sees the
+        // fd 0 the ones before it left, so where the dup sits decides which
+        // fd 0 it copies — the plan it resolves into carries no order of its
+        // own, which is exactly why this has to be settled during the walk.
+        let (out, _) = run_over_seeded_file(
+            "file\n",
+            "{ read -r l <&3; } 3<&0 < {FILE}; echo \"s=$? l=[$l]\"",
+        );
+        assert_eq!(out, "s=1 l=[]\n", "the dup should have copied the ambient fd 0: {out:?}");
+        let (out, _) = run_over_seeded_file(
+            "file\n",
+            "{ read -r l <&3; } < {FILE} 3<&0; echo \"s=$? l=[$l]\"",
+        );
+        assert_eq!(out, "s=0 l=[file]\n", "the dup should have copied the file: {out:?}");
+        // And a closed fd 0 is no descriptor to copy: the complaint names the
+        // *source*, not the fd 3 that was being made.
+        let (out, _) = run_over_seeded_file(
+            "file\n",
+            "exec 0< {FILE}; { { read -r l <&3; } 0<&- 3<&0; } 2>&1; echo \"s=$?\"",
+        );
+        assert_eq!(
+            out, "osh: 0: Bad file descriptor\ns=1\n",
+            "expected the source descriptor to be named, got {out:?}"
+        );
+        let (out, _) = run_over_seeded_file(
+            "file\n",
+            "exec 0< {FILE}; { read -r l <&3; } 3<&0 0<&-; echo \"s=$? l=[$l]\"",
+        );
+        assert_eq!(out, "s=0 l=[file]\n", "the earlier dup should still hold: {out:?}");
     }
 
     #[test]

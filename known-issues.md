@@ -14,6 +14,57 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-TRANSIENT-DUP-SOURCE-IS-NOT-THE-LIST-SO-FAR. A transient `N<&M` looks its source up in the `exec`-installed table only, so a descriptor the *same* redirect list just made, and fds 1 and 2, are invisible to it — 2026-08-01 — OPEN (low priority)
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_dup_in`, the
+`fd >= 3` arms. The `n == 0` case now resolves through
+`Shell::plan_stdin_fd`, which consults the plan being built and so sees the
+redirects to its left; the `n >= 3` case still goes straight to
+`self.open_fds`, and `n == 1` / `n == 2` are not modelled at all.
+
+**Reproduce** (`target/dvscratch/t3/pw.sh`, `py.sh`):
+
+```sh
+printf 'one\n' > in
+exec 0<in; { read -r l <&4; } 3<&0 4<&3; echo "rc=$? l=[$l]"   # bash: rc=0 l=[one]
+{ read -r l <&3; } 3<&1;                 echo "rc=$? l=[$l]"   # bash: rc=1 l=[]
+```
+
+osh answers both with `3: Bad file descriptor` and never runs the body.
+
+* **Chained dup.** `4<&3` is resolved by looking fd 3 up in `open_fds`, where
+  only an `exec 3<` / `read -u` descriptor lives. The `3<&0` to its left put
+  fd 3 in `plan.extra_fds` instead, so the validity check just above declares
+  fd 3 unbound and fails the whole redirect. bash chains them: fd 4 ends up a
+  third name for the same description.
+* **`3<&1` / `3<&2`.** bash *makes* the dup — fd 1 is an open descriptor, so
+  `dup2` succeeds — and lets the failure surface at the read through it
+  (`read: read error: 0: Bad file descriptor`, naming fd 0 because that is
+  what `read` was pointed at). osh refuses the redirect instead, so the body
+  never runs and the message names fd 3.
+
+**Proper fix.** Two parts, and they are independent:
+
+1. A `plan_input_fd(&self, plan, n)` beside `plan_stdin_fd` that scans
+   `plan.extra_fds` from the right for the last mention of fd `n` before
+   falling back to `open_fds`, used both by the `n >= 3` validity check and
+   by the source lookup. `ExtraFdOp::Close` on fd `n` means closed, so it
+   answers `None`. The same lookup is owed to the `fd == 0 && n >= 3` arm,
+   whose `stdin_from_fd` is resolved against `open_fds` at apply time —
+   `{ read -r l; } 3<&0 <&3` has the same gap.
+2. An `InputSrc` shape for a descriptor that exists but has no read half, so
+   `3<&1` can succeed as a redirect and fail at the read. `InputSrc::Closed`
+   is not it — that is *no* descriptor, and the difference shows in whether a
+   further `exec 4<&3` may copy it.
+
+**Why not now.** Split off from the `N<&0` fix (`a transient N<&0 is a second
+name for fd 0`) to keep that commit to one logical change. Neither shape is
+common — a chained transient dup and a read through a write-only descriptor
+are both things scripts write by accident more than on purpose — and the
+current answer is a clean error rather than a wrong result. The corpus case
+`tests/corpus/dup-of-stdin-onto-a-high-descriptor.sh` names both in its
+header as deliberately absent.
+
 ### BUG-OILS-XTRACE-TRAP-LEVEL. A trap handler's body traces at the caller's `PS4` depth instead of one level deeper — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 
 **Where:** `userspace/oils/src/interp.rs` — `fire_trap_status`, which runs the

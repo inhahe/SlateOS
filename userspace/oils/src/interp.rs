@@ -7328,6 +7328,16 @@ impl Shell {
             self.stderr_stack.push(StderrTarget::Discard);
             stderr_file = Some(WriteFd::Closed);
             pushed_stderr = true;
+        } else if plan.stderr_is_read_only() {
+            // `{ …; } 2<in`: fd 2 is bound to a source with no write half, so a
+            // write to it fails and the diagnostic saying so has nowhere to be
+            // reported — visibly the same as a closed fd 2. The descriptor is
+            // *there*, though, which is why the state is `ReadOnly` rather than
+            // `Closed`: a `3>&2` beside it copies a descriptor rather than being
+            // refused one.
+            self.stderr_stack.push(StderrTarget::Discard);
+            stderr_file = Some(WriteFd::ReadOnly);
+            pushed_stderr = true;
         } else if let Some((path, append)) = &plan.stderr {
             // `> f 2>&1` / `&> f` / `2>f 1>&2`: fd 2 is a *dup* of fd 1's handle
             // (the resolver set `stderr_shares_stdout`). Share fd 1's already-open
@@ -7423,11 +7433,17 @@ impl Shell {
         // `f`, and shares its offset — rather than the stdout the command
         // arrived with. Which of the two a dup means is decided by where it sat
         // in the list, and was recorded then; see [`AliasSink`].
-        let saved_fds = self.install_extra_fds(
+        let mut saved_fds = self.install_extra_fds(
             &plan.extra_fds,
             out,
-            StagedStdSinks { stdout: stdout_file.as_ref(), stderr: stderr_file.as_ref() },
+            StagedStdSinks {
+                stdout: stdout_file.as_ref(),
+                stderr: stderr_file.as_ref(),
+                stdout_read_only: plan.stdout_is_read_only(),
+                stderr_read_only: plan.stderr_is_read_only(),
+            },
         );
+        saved_fds.extend(self.install_std_reads(&plan));
 
         // `{ …; } 1>&N` / `{ …; } 2>&N` (N ≥ 3): route fd 1 / fd 2 to the write
         // descriptor fd N currently holds — bash dup's the std fd onto fd N's
@@ -7445,17 +7461,24 @@ impl Shell {
         // second writer, and fd 1 runs the body with the sink as its ambient
         // `Out` (`stdout_capture_fd`).
         let mut fd_alias_error = false;
+        // `{ …; } 1>&0` onto a read-only fd 0, or `{ …; } 3<in 1>&3`: the dup is
+        // made — the arrow picks nothing, so fd 1 becomes a second name for a
+        // descriptor that has no write half — and it is each write *through* it
+        // that fails, with the body running as usual. Recorded here rather than
+        // in the plan because only the lookup below can tell a read-only source
+        // from a writable one: fd 3's binding may be one this same list staged.
+        let mut stdout_read_only = plan.stdout_is_read_only();
         let mut stdout_capture_fd: Option<CaptureSink> = None;
         if stdout_file.is_none()
             && let Some(n) = plan.stdout_to_fd
         {
             match self.write_fd_for(n, &plan) {
                 Some(WriteFd::Capture(sink)) => stdout_capture_fd = Some(sink.clone()),
-                // `{ …; } 1>&0` onto a read-only fd 0 — or onto a descriptor a
-                // `>&-` closed: the group's fd 1 would have no writable
-                // descriptor behind it. Failing the redirect keeps the bytes
-                // from landing elsewhere — TD-OILS-FD0-WRITE.
-                Some(WriteFd::ReadOnly | WriteFd::Closed) => {
+                Some(WriteFd::ReadOnly) => stdout_read_only = true,
+                // A descriptor a `>&-` closed is no descriptor to copy at all,
+                // so — unlike the read-only case — the redirect itself is what
+                // bash refuses, and the body never runs.
+                Some(WriteFd::Closed) => {
                     self.perrln(&format!("{n}: Bad file descriptor"));
                     self.last_status = 1;
                     fd_alias_error = true;
@@ -7517,10 +7540,14 @@ impl Shell {
         // inherits: the `> file` handle opened above, or — for `{ …; } >&-` —
         // an explicitly *closed* descriptor, which is not the same as leaving
         // the ambient fd 1 alone.
-        let scoped_stdout = match (&stdout_file, plan.stdout_closed) {
-            (Some(f), _) => Some(WriteFd::File(Arc::clone(f))),
-            (None, true) => Some(WriteFd::Closed),
-            (None, false) => None,
+        // A `{ …; } 1<in` is the third shape: fd 1 is bound, and to something
+        // that cannot be written — so the body inherits a descriptor whose
+        // writes fail rather than the ambient stdout.
+        let scoped_stdout = match (&stdout_file, plan.stdout_closed, stdout_read_only) {
+            (Some(f), _, _) => Some(WriteFd::File(Arc::clone(f))),
+            (None, true, _) => Some(WriteFd::Closed),
+            (None, false, true) => Some(WriteFd::ReadOnly),
+            (None, false, false) => None,
         };
         let saved_exec_stdout = scoped_stdout.map(|w| self.exec_stdout.replace(w));
         // fd 2's save covers more ground than fd 1's: it is taken whenever the
@@ -7561,7 +7588,7 @@ impl Shell {
                 }
                 None => stdin,
             };
-            if stdout_file.is_some() || plan.stdout_closed {
+            if stdout_file.is_some() || plan.stdout_closed || stdout_read_only {
                 // fd 1 flows to the file — or to nothing at all, for `>&-` — via
                 // `exec_stdout`; run with an ambient `Out::Inherit` (the group
                 // redirect fully rebinds fd 1, so the enclosing capture/pipe is
@@ -7697,7 +7724,7 @@ impl Shell {
                     // not the stdout the command arrived with — and copies the
                     // *handle*, so the two names share one offset.
                     let w = match sink {
-                        AliasSink::StagedFile => staged.get(*src),
+                        AliasSink::Staged => staged.get(*src),
                         AliasSink::Live => None,
                     };
                     match w.map_or_else(|| self.alias_write_fd(*src, out), Ok) {
@@ -7722,6 +7749,27 @@ impl Shell {
             }
         }
         saved_fds
+    }
+
+    /// Bind fd 1 / fd 2's *read* half for the duration of a command's body,
+    /// returning the prior bindings for [`Self::restore_extra_fds`] alongside
+    /// the ones [`Self::install_extra_fds`] saved.
+    ///
+    /// A standard write descriptor's *write* half lives in `exec_stdout` and the
+    /// stderr stack, but a read half — which only a redirect that gave it one
+    /// can produce — lives in `open_fds` beside every other descriptor's, so
+    /// that a `read -u 1` or a `<&2` inside the body finds it exactly the way it
+    /// finds fd 3's. Nothing else in the shell writes those two keys, so the
+    /// save is only ever restoring the binding an enclosing scope left.
+    fn install_std_reads(&mut self, plan: &RedirPlan) -> Vec<SavedFd> {
+        let mut saved = Vec::new();
+        for (fd, src) in [(1, &plan.stdout_read), (2, &plan.stderr_read)] {
+            if let Some(s) = src {
+                let prev_r = self.open_fds.insert(fd, Arc::clone(s));
+                saved.push((fd, prev_r, self.open_write_fds.remove(&fd)));
+            }
+        }
+        saved
     }
 
     /// Restore fd bindings saved by [`Self::install_extra_fds`]: remove whatever
@@ -14322,7 +14370,14 @@ impl Shell {
                     // `exec 0< f` reopens fd 0 read-only, dropping any write
                     // half an earlier `exec 0<> other` had installed.
                     self.exec_stdin_write = None;
-                } else if fd >= 3 {
+                } else if fd == 1 || fd == 2 {
+                    // `exec 1< file`: the standard write descriptor is rebound
+                    // to a source that has no write half, so the shell's own
+                    // writes to it fail from here on — with fd 2's diagnostics
+                    // simply dropped, having nowhere to be reported.
+                    self.set_std_read_half(fd, Some(file_input(f)));
+                    self.set_std_write_half(fd, Some(WriteFd::ReadOnly));
+                } else {
                     self.open_fds.insert(fd, file_input(f));
                     // Open, but with no write half — which is what makes a
                     // later `echo >&N` fail at the *write* and a `M>&N` copy it
@@ -14340,17 +14395,19 @@ impl Shell {
                 }
                 let (rd, wr) = open_rw_pair(&self.cwd, &path)
                     .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
-                // fd 0 and fd ≥ 3 keep *both* halves — one open, two duplicates,
-                // one shared offset — so `exec 0<> f; read a; echo x >&0`
-                // overwrites from where the read stopped. fds 1 and 2 have only
-                // a write table, so their read half is dropped (closing it).
+                // Every descriptor keeps *both* halves — one open, two
+                // duplicates, one shared offset — so `exec 0<> f; read a;
+                // echo x >&0` overwrites from where the read stopped, and
+                // `exec 2<> f` leaves fd 2 both writable and readable.
                 match fd {
                     0 => {
                         self.exec_stdin = Some(rd);
                         self.exec_stdin_write = Some(wr);
                     }
-                    1 => self.exec_stdout = Some(WriteFd::File(wr)),
-                    2 => self.set_exec_stderr(Some(WriteFd::File(wr))),
+                    1 | 2 => {
+                        self.set_std_read_half(fd, Some(rd));
+                        self.set_std_write_half(fd, Some(WriteFd::File(wr)));
+                    }
                     _ => {
                         self.open_fds.insert(fd, rd);
                         self.open_write_fds.insert(fd, WriteFd::File(wr));
@@ -14368,7 +14425,13 @@ impl Shell {
                 if fd == 0 {
                     self.exec_stdin = Some(bytes_input(body));
                     self.exec_stdin_write = None;
-                } else if fd >= 3 {
+                } else if fd == 1 || fd == 2 {
+                    // `exec 1<<< text`: a here-document is a read-only source
+                    // like any other, and binding one to a standard write
+                    // descriptor takes its write half away just as `1< f` does.
+                    self.set_std_read_half(fd, Some(bytes_input(body)));
+                    self.set_std_write_half(fd, Some(WriteFd::ReadOnly));
+                } else {
                     self.open_fds.insert(fd, bytes_input(body));
                     self.open_write_fds.insert(fd, WriteFd::ReadOnly);
                 }
@@ -14381,10 +14444,13 @@ impl Shell {
                 }
                 let f = open_out(&self.cwd, &target, append)
                     .map_err(|e| bfmt![&target, b": ", io_error_message(&e)])?;
-                // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one handle.
+                // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one handle, and
+                // both lose whatever read half an earlier `exec 1< f` gave them.
                 let a = WriteFd::File(std::sync::Arc::new(f));
                 self.exec_stdout = Some(a.clone());
                 self.set_exec_stderr(Some(a));
+                self.set_std_read_half(1, None);
+                self.set_std_read_half(2, None);
             }
             RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
                 let target = self.expand_to_string(&r.target);
@@ -14405,8 +14471,16 @@ impl Shell {
                     .map_err(|e| bfmt![&target, b": ", io_error_message(&e)])?;
                 let a = std::sync::Arc::new(f);
                 match fd {
-                    0 | 1 => self.exec_stdout = Some(WriteFd::File(a)),
-                    2 => self.set_exec_stderr(Some(WriteFd::File(a))),
+                    // A `>` open has no read half, so it takes away any that an
+                    // earlier `exec 1< f` left on the same descriptor.
+                    0 | 1 => {
+                        self.exec_stdout = Some(WriteFd::File(a));
+                        self.set_std_read_half(1, None);
+                    }
+                    2 => {
+                        self.set_exec_stderr(Some(WriteFd::File(a)));
+                        self.set_std_read_half(2, None);
+                    }
                     _ => {
                         self.open_write_fds.insert(fd, WriteFd::File(a));
                         // Open, with no read half — the mirror of `exec 3< f`
@@ -14480,12 +14554,15 @@ impl Shell {
                     // shell that closed fd 1 must answer its own writes with
                     // `EBADF` (`echo: write error: …`), not print to the
                     // terminal. See [`WriteFd::Closed`].
-                    1 => self.exec_stdout = Some(WriteFd::Closed),
                     // As for fd 1: `None` would mean "the real stderr". A shell
                     // that closed fd 2 has nowhere to report a failed write, so
                     // its diagnostics are dropped — but they must not appear on
-                    // the terminal instead.
-                    2 => self.set_exec_stderr(Some(WriteFd::Closed)),
+                    // the terminal instead. A close takes the *whole* descriptor,
+                    // so any read half an `exec 1< f` gave it goes with it.
+                    1 | 2 => {
+                        self.set_std_write_half(fd, Some(WriteFd::Closed));
+                        self.set_std_read_half(fd, None);
+                    }
                     _ => {
                         self.open_write_fds.remove(&fd);
                         self.open_fds.remove(&fd);
@@ -14520,8 +14597,14 @@ impl Shell {
                     ]
                 })?;
                 match fd {
-                    1 => self.exec_stdout = src,
-                    2 => self.set_exec_stderr(src),
+                    // Both halves, as ever: `exec 3<> f; exec 1>&3` leaves fd 1
+                    // readable as well as writable, and `exec 0< f; exec 1>&0`
+                    // leaves it readable and not writable.
+                    1 | 2 => {
+                        let rd = self.exec_dup_read_half(n);
+                        self.set_std_read_half(fd, Some(rd));
+                        self.set_std_write_half(fd, src);
+                    }
                     _ => {
                         // A user-space write fd needs a concrete handle: reuse
                         // the source handle, or (when the source is a std fd
@@ -14583,14 +14666,13 @@ impl Shell {
                     // [`InputSrc::Closed`].
                     self.exec_stdin = Some(closed_input());
                     self.exec_stdin_write = None;
-                } else if fd == 1 {
+                } else if fd == 1 || fd == 2 {
                     // `exec 1<&-` closes fd 1 exactly as `exec 1>&-` does: which
                     // side of the `&` the `-` is written on says nothing about
                     // which descriptor is meant. See
                     // [`Shell::apply_persistent_dup_out`].
-                    self.exec_stdout = Some(WriteFd::Closed);
-                } else if fd == 2 {
-                    self.set_exec_stderr(Some(WriteFd::Closed));
+                    self.set_std_write_half(fd, Some(WriteFd::Closed));
+                    self.set_std_read_half(fd, None);
                 } else {
                     self.open_fds.remove(&fd);
                     self.open_write_fds.remove(&fd);
@@ -14672,12 +14754,14 @@ impl Shell {
                     }
                     self.coproc_read_fds.remove(&fd);
                 } else {
-                    // `exec 1<&N` / `exec 2<&N` — a dup onto a standard *write*
-                    // descriptor, which osh keeps no read half for. See
-                    // known-issues TD-OILS-DUP-ONTO-A-STD-FD-IGNORES-THE-SOURCE-MODE.
-                    if let Some(rd) = read_half {
-                        self.open_fds.insert(fd, rd);
-                    }
+                    // `exec 1<&N` / `exec 2<&N` — one `dup2`, so the standard
+                    // write descriptor takes fd N's whole description: the read
+                    // half a source like `exec 3< f` carries, and whatever write
+                    // half that source had. A source with none leaves fd 1 / fd 2
+                    // a descriptor the shell's own writes fail on, which is not
+                    // the same as leaving it on the terminal.
+                    self.set_std_read_half(fd, Some(read_half.unwrap_or_else(write_only_input)));
+                    self.set_std_write_half(fd, write_half.unwrap_or(Some(WriteFd::ReadOnly)));
                     self.open_write_fds.remove(&fd);
                     self.coproc_read_fds.remove(&fd);
                 }
@@ -14700,6 +14784,39 @@ impl Shell {
     /// dup is refused for.
     fn exec_dup_read_half(&self, n: i32) -> InputFd {
         self.clone_input_fd(n).unwrap_or_else(write_only_input)
+    }
+
+    /// Bind — or unbind — the *read* half of standard write descriptor `fd`
+    /// (1 or 2) in the persistent fd table.
+    ///
+    /// fd 1 and fd 2 keep their write half in `exec_stdout` / `exec_stderr` and
+    /// their read half, when a redirect gives them one, in `open_fds` with
+    /// every other descriptor's. Every `exec` that rebinds one of the two goes
+    /// through here, including the ones that leave it write-only, so that a read
+    /// half an earlier `exec 1< file` installed cannot outlive the redirect that
+    /// replaced it.
+    /// Bind the *write* half of standard descriptor `fd` (1 or 2) in the
+    /// persistent fd table, so a caller holding the number rather than a
+    /// literal 1 or 2 need not repeat the two-way split. `None` restores the
+    /// terminal; see [`Shell::set_exec_stderr`] for why fd 2's assignment is
+    /// never a plain field write.
+    fn set_std_write_half(&mut self, fd: i32, w: Option<WriteFd>) {
+        if fd == 1 {
+            self.exec_stdout = w;
+        } else {
+            self.set_exec_stderr(w);
+        }
+    }
+
+    fn set_std_read_half(&mut self, fd: i32, src: Option<InputFd>) {
+        match src {
+            Some(s) => {
+                self.open_fds.insert(fd, s);
+            }
+            None => {
+                self.open_fds.remove(&fd);
+            }
+        }
     }
 
     /// Resolve input fd `n`'s current source for an input dup (`M<&N`). fd 0
@@ -14741,7 +14858,13 @@ impl Shell {
     /// walked.
     fn plan_stdin_fd(&self, plan: &mut RedirPlan) -> Option<InputFd> {
         if let Some(n) = plan.stdin_from_fd {
-            return self.plan_input_fd(plan, n);
+            return if n == 1 || n == 2 {
+                // fd 1 and fd 2 keep their read half in a slot of their own, not
+                // in `extra_fds`, so `read -r l <&1 1<in` has to look there.
+                Some(self.std_read_half(plan, n))
+            } else {
+                self.plan_input_fd(plan, n)
+            };
         }
         if let Some(data) = plan.stdin_data.take() {
             // A here-document is a source like any other and a dup of it shares
@@ -14808,12 +14931,26 @@ impl Shell {
     fn dup_read_half(&self, plan: &mut RedirPlan, n: i32) -> Option<InputFd> {
         match n {
             0 => self.plan_stdin_fd(plan),
-            // fd 1 and fd 2 are write descriptors; osh models no read half for
-            // either, and a shell that has closed one answers for that on the
-            // write side, where the alias is resolved.
-            1 | 2 => Some(write_only_input()),
+            1 | 2 => Some(self.std_read_half(plan, n)),
             _ => self.plan_input_fd(plan, n),
         }
+    }
+
+    /// The read half fd 1 / fd 2 names *at this point in the redirect list*: the
+    /// one this list bound (`1<in 3<&1`), else the one an `exec 1< file`
+    /// installed, else [`InputSrc::WriteOnly`] for the ordinary write-only
+    /// standard descriptor.
+    ///
+    /// Never `None`: fd 1 and fd 2 are always open — a `1>&-` takes the write
+    /// half away and is answered on the write side, where the dup that asked is
+    /// resolved — so the question here is only ever *what* is behind them.
+    fn std_read_half(&self, plan: &RedirPlan, n: i32) -> InputFd {
+        let staged = if n == 1 { &plan.stdout_read } else { &plan.stderr_read };
+        staged
+            .as_ref()
+            .map(Arc::clone)
+            .or_else(|| self.clone_input_fd(n))
+            .unwrap_or_else(write_only_input)
     }
 
     /// Which fd 1 / fd 2 a dup of one of them copies — the one this list has
@@ -14825,11 +14962,11 @@ impl Shell {
     /// no marker — `extra_fds` is an ordered list and already replays in order.
     fn alias_sink(plan: &RedirPlan, n: i32) -> AliasSink {
         let staged = match n {
-            1 => plan.stdout.is_some(),
-            2 => plan.stderr.is_some(),
+            1 => plan.stdout.is_some() || plan.stdout_is_read_only(),
+            2 => plan.stderr.is_some() || plan.stderr_is_read_only(),
             _ => false,
         };
-        if staged { AliasSink::StagedFile } else { AliasSink::Live }
+        if staged { AliasSink::Staged } else { AliasSink::Live }
     }
 
     /// Whether the redirect list being resolved has itself bound fd `n`, as
@@ -15037,6 +15174,13 @@ impl Shell {
             self.stderr_stack.push(StderrTarget::Discard);
             return true;
         }
+        // `cd /nosuchdir 2<in`: fd 2 has no write half, so the diagnostic is
+        // dropped just as a closed fd 2 drops it — the status is the command's
+        // own, unchanged.
+        if redir.stderr_is_read_only() {
+            self.stderr_stack.push(StderrTarget::Discard);
+            return true;
+        }
         if let Some((path, append)) = &redir.stderr {
             if let Ok(f) = open_out(&self.cwd, path, *append) {
                 self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
@@ -15181,27 +15325,39 @@ impl Shell {
             }
             match r.op {
                 RedirectOp::Read => {
-                    if fd == 0 || fd >= 3 {
-                        let path = self.expand_redirect_target(&r.target)?;
-                        // `< /dev/stdin`, `< /dev/fd/N`: a dup, not an open.
-                        if self.resolve_special_redirect(fd, &path, true, plan)? {
-                            return Ok(());
-                        }
-                        // bash opens the redirect *before* the command runs and
-                        // reports a missing/unreadable file at redirection time —
-                        // even for a builtin that never reads stdin (`true < x`,
-                        // `: < x`, `echo hi < x`). Opening here both produces that
-                        // diagnostic and gives every later reader of the descriptor
-                        // the *same* open file description, which is what makes a
-                        // child's consumption visible to the shell afterwards.
-                        let f = std::fs::File::open(bytes::bytes_to_path(&self.host_path(&path)))
-                            .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
-                        if fd == 0 {
+                    let path = self.expand_redirect_target(&r.target)?;
+                    // `< /dev/stdin`, `< /dev/fd/N`: a dup, not an open.
+                    if self.resolve_special_redirect(fd, &path, true, plan)? {
+                        return Ok(());
+                    }
+                    // bash opens the redirect *before* the command runs and
+                    // reports a missing/unreadable file at redirection time —
+                    // even for a builtin that never reads stdin (`true < x`,
+                    // `: < x`, `echo hi < x`). Opening here both produces that
+                    // diagnostic and gives every later reader of the descriptor
+                    // the *same* open file description, which is what makes a
+                    // child's consumption visible to the shell afterwards.
+                    let f = std::fs::File::open(bytes::bytes_to_path(&self.host_path(&path)))
+                        .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
+                    match fd {
+                        0 => {
                             plan.clear_stdin();
                             plan.stdin = Some(file_input(f));
-                        } else {
-                            plan.extra_fds.push((fd, ExtraFdOp::Input(file_input(f))));
                         }
+                        // `1< file` / `2< file`: the redirect is legal on a
+                        // standard *write* descriptor and binds it to a source
+                        // with no write half, so the command's own writes fail
+                        // (`echo: write error: Bad file descriptor`) while a
+                        // `read <&1` in its body finds the file's bytes.
+                        1 => {
+                            plan.clear_stdout();
+                            plan.stdout_read = Some(file_input(f));
+                        }
+                        2 => {
+                            plan.clear_stderr();
+                            plan.stderr_read = Some(file_input(f));
+                        }
+                        _ => plan.extra_fds.push((fd, ExtraFdOp::Input(file_input(f)))),
                     }
                 }
                 RedirectOp::ReadWrite => {
@@ -15236,38 +15392,30 @@ impl Shell {
                         // `2<> file`: fd 2 writes to the file without truncating
                         // it. osh models the write side as a no-truncate (append)
                         // sink — the offset-0 write position of a real `O_RDWR`
-                        // fd is not modelled (documented limitation).
+                        // fd is not modelled (documented limitation). The read
+                        // half is kept beside it, since `<>` is the one shape
+                        // that leaves a standard write descriptor with *both*:
+                        // `{ read -r l <&2; } 2<> file` finds the file's bytes.
                         plan.clear_stderr();
                         plan.stderr = Some((path, true));
+                        plan.stderr_read = Some(rd);
                     } else {
                         // `1<> file` (or a bare `>`-side fd): as above for fd 1.
                         plan.clear_stdout();
                         plan.stdout = Some((path, true));
+                        plan.stdout_read = Some(rd);
                     }
                 }
                 RedirectOp::HereDoc => {
-                    if fd == 0 {
-                        // Here-doc bodies expand like a double-quoted context:
-                        // no tilde expansion, no field splitting, no globbing.
-                        let body = self.expand_double_quoted(&r.target.parts);
-                        plan.clear_stdin();
-                        plan.stdin_data = Some(body);
-                    } else if fd >= 3 {
-                        let body = self.expand_double_quoted(&r.target.parts);
-                        plan.extra_fds.push((fd, ExtraFdOp::Input(bytes_input(body))));
-                    }
+                    // Here-doc bodies expand like a double-quoted context: no
+                    // tilde expansion, no field splitting, no globbing.
+                    let body = self.expand_double_quoted(&r.target.parts);
+                    Self::plan_here_bytes(fd, body, plan);
                 }
                 RedirectOp::HereStr => {
-                    if fd == 0 {
-                        let mut s = self.expand_to_string(&r.target);
-                        s.push(b'\n');
-                        plan.clear_stdin();
-                        plan.stdin_data = Some(s);
-                    } else if fd >= 3 {
-                        let mut s = self.expand_to_string(&r.target);
-                        s.push(b'\n');
-                        plan.extra_fds.push((fd, ExtraFdOp::Input(bytes_input(s))));
-                    }
+                    let mut s = self.expand_to_string(&r.target);
+                    s.push(b'\n');
+                    Self::plan_here_bytes(fd, s, plan);
                 }
                 RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
                     // `&>file` / `&>>file` / `>&file` → both stdout and stderr to
@@ -15352,6 +15500,34 @@ impl Shell {
         Ok(())
     }
 
+    /// Bind a here-document's or here-string's already-expanded `body` to `fd`
+    /// in `plan`.
+    ///
+    /// The spooled bytes are a read-only descriptor, so which fd they land on
+    /// is the only thing that varies: fd 0 is the ordinary case, fd ≥ 3 a
+    /// scratch descriptor, and fd 1 / fd 2 the case where a *write* descriptor
+    /// is bound to a source — `{ echo W; } 1<<<'zz'` is
+    /// `echo: write error: Bad file descriptor` and `{ read -r l <&1; }
+    /// 1<<<'zz'` reads `zz`. bash spells all four the same way because the
+    /// descriptor does not care which number it was given.
+    fn plan_here_bytes(fd: i32, body: Str, plan: &mut RedirPlan) {
+        match fd {
+            0 => {
+                plan.clear_stdin();
+                plan.stdin_data = Some(body);
+            }
+            1 => {
+                plan.clear_stdout();
+                plan.stdout_read = Some(bytes_input(body));
+            }
+            2 => {
+                plan.clear_stderr();
+                plan.stderr_read = Some(bytes_input(body));
+            }
+            _ => plan.extra_fds.push((fd, ExtraFdOp::Input(bytes_input(body)))),
+        }
+    }
+
     /// Resolve an output dup (`M>&N`, `M>&-`, and the special filenames that
     /// mean the same thing) into `plan`. `target` is the already-expanded dup
     /// word; `origin` says which of the two spellings asked, which decides both
@@ -15412,20 +15588,33 @@ impl Shell {
         } else if fd == 2 && target == b"1" {
             // fd 2's destination is being (re)set: drop any earlier stderr
             // file/fd target — or close — so this dup wins (last-writer).
+            let fd1_read_only = plan.stdout_is_read_only();
+            let fd1_read = plan.stdout_read.clone();
             plan.clear_stderr();
             if plan.stdout.is_some() {
                 // `>file 2>&1`: fd 2 dup's fd 1's file — shared offset.
                 plan.stderr = plan.stdout.clone();
                 plan.stderr_shares_stdout = true;
+            } else if fd1_read_only {
+                // `1<in 2>&1`: fd 1 has no write half to follow, so fd 2 has
+                // none either — and the diagnostic saying so is itself dropped,
+                // fd 2 being where it would have gone. The read half is handed
+                // over as it stands, so the two names share one cursor.
+                plan.stderr_read = fd1_read;
             } else {
                 plan.stderr_to_stdout = true;
             }
         } else if fd == 1 && target == b"2" {
+            let fd2_read_only = plan.stderr_is_read_only();
+            let fd2_read = plan.stderr_read.clone();
             plan.clear_stdout();
             if plan.stderr.is_some() {
                 // `2>file 1>&2`: fd 1 dup's fd 2's file — shared offset.
                 plan.stdout = plan.stderr.clone();
                 plan.stderr_shares_stdout = true;
+            } else if fd2_read_only {
+                // `2<in 1>&2`: the fd-2 mirror of the case just above.
+                plan.stdout_read = fd2_read;
             } else {
                 plan.stdout_to_stderr = true;
             }
@@ -15478,11 +15667,10 @@ impl Shell {
             // "Open" is not "open for writing": `exec 3< file; exec 4>&3` is a
             // dup bash makes, and the write through fd 4 is what then fails.
             // So the read half decides the question too — a source with one is
-            // a source, whichever way this dup was written. It is asked for
-            // only when it can matter: a target below fd 3 keeps no read half,
-            // and a source below fd 3 is open whatever the answer.
-            let read_half =
-                if fd >= 3 || n >= 3 { self.dup_read_half(plan, n) } else { None };
+            // a source, whichever way this dup was written. Every target keeps
+            // it: fd 1 and fd 2 have a slot of their own for the case where the
+            // source turns out to be readable and not writable.
+            let read_half = self.dup_read_half(plan, n);
             let staged_write = plan.extra_fds.iter().any(|(f, op)| {
                 *f == n && matches!(op, ExtraFdOp::OutputFile(..) | ExtraFdOp::AliasFd { .. })
             });
@@ -15503,13 +15691,18 @@ impl Shell {
                 return Ok(());
             }
             match fd {
+                // The dup carries fd N's read half across as well as its sink:
+                // `2>&3` after a `3< file` leaves fd 2 readable, and — since
+                // that source has no write half — reported-nowhere on a write.
                 2 => {
                     plan.clear_stderr();
                     plan.stderr_to_fd = Some(n);
+                    plan.stderr_read = read_half;
                 }
                 1 => {
                     plan.clear_stdout();
                     plan.stdout_to_fd = Some(n);
+                    plan.stdout_read = read_half;
                 }
                 // `3>&1`, `3>&2`, `3>&0`, `7>&5`: give fd 3 a second name for
                 // fd N's descriptor — both halves of it, since a `dup2` copies
@@ -15669,12 +15862,15 @@ impl Shell {
                         ]);
                     }
                 }
+            } else {
+                // `1<&N` / `2<&N` is the very `dup2` that `1>&N` / `2>&N` is —
+                // the arrow picks nothing — so the sink is settled by the same
+                // code rather than by a second copy of it, and the read half
+                // that a source like `3< file` carries across comes with it.
+                // The source was validated above, so the only paths that code
+                // can take from here are the ones that bind fd 1 / fd 2.
+                self.resolve_dup_out(origin, fd, target, plan)?;
             }
-            // `1<&N` / `2<&N` make a standard *output* descriptor a copy of
-            // another, which is not modelled: fd 1 and fd 2 keep only a write
-            // half, so a read-only source's access mode has nowhere to go and
-            // `{ echo W >&2; } 2<&0` writes where bash reports `EBADF`. See
-            // known-issues TD-OILS-DUP-ONTO-A-STD-FD-IGNORES-THE-SOURCE-MODE.
         } else if dup == DupWord::NotAFd {
             // A non-numeric input-dup target (`<&file`) is ambiguous — there is
             // no `>&file` fallback on the input side. bash names the expansion
@@ -18649,12 +18845,19 @@ impl Shell {
         // below, so a later redirect can see a descriptor an earlier one made.
         // `exec` is exempt — it applies redirects to the *persistent* fd table
         // itself (further down), and must not have them torn down here.
-        let builtin_saved_fds = if name != "exec" && !redir.extra_fds.is_empty() {
+        // A read half a `1< file` on the same command gave fd 1 or fd 2 is
+        // installed with them, so a `read -u 1` finds it where it finds fd 3's.
+        let installs_fds = !redir.extra_fds.is_empty()
+            || redir.stdout_read.is_some()
+            || redir.stderr_read.is_some();
+        let builtin_saved_fds = if name != "exec" && installs_fds {
             // No staged std sinks: a builtin's own `> file` is opened by the
             // caller that built `out`, not here, so a same-command
             // `>out 3>&1` still copies the ambient fd 1. See known-issues
             // TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR.
-            self.install_extra_fds(&redir.extra_fds, out, StagedStdSinks::default())
+            let mut saved = self.install_extra_fds(&redir.extra_fds, out, StagedStdSinks::default());
+            saved.extend(self.install_std_reads(redir));
+            saved
         } else {
             Vec::new()
         };
@@ -30973,6 +31176,12 @@ impl Shell {
         if redir.stdout_closed {
             return self.finish_write(Err(ebadf()));
         }
+        // `echo msg 1<file`: fd 1 is a descriptor with no write half. A write to
+        // one fails exactly as a write to a closed fd 1 does — the difference
+        // between the two is visible only to a dup of it.
+        if redir.stdout_is_read_only() {
+            return self.finish_write(Err(ebadf()));
+        }
         // `echo msg >&3` on the builtin: fd 1 is a user-space write descriptor.
         if let Some(n) = redir.stdout_to_fd
             && redir.stdout.is_none()
@@ -30997,7 +31206,8 @@ impl Shell {
             let skip_top = redir.stderr.is_some()
                 || redir.stderr_to_fd.is_some()
                 || redir.stderr_to_stdout
-                || redir.stderr_closed;
+                || redir.stderr_closed
+                || redir.stderr_is_read_only();
             let depth = if skip_top {
                 self.stderr_stack.len().saturating_sub(1)
             } else {
@@ -31625,6 +31835,14 @@ impl Shell {
     fn bemit_cmd_stderr(&mut self, out: &mut Out, redir: &RedirPlan, msg: BStr<'_>) {
         let mut bytes = msg.to_vec();
         bytes.push(b'\n');
+        // `nosuchcmd 2>&-` / `nosuchcmd 2<in`: this command has no fd 2 to be
+        // told on — closed outright, or bound to a source with no write half —
+        // so the diagnostic is dropped and only the status survives (127). The
+        // enclosing sink is emphatically *not* the fallback: that is the shell's
+        // fd 2, which the command redirected away from.
+        if redir.stderr_closed || redir.stderr_is_read_only() {
+            return;
+        }
         if let Some((path, append)) = &redir.stderr {
             if let Ok(mut f) = open_out(&self.cwd, path, *append) {
                 let _ = f.write_all(&bytes);
@@ -32250,6 +32468,23 @@ struct RedirPlan {
     /// in [`Shell::open_fds`] (or [`Shell::exec_stdin`] for N == 0), matching
     /// bash's shared-offset dup. Takes precedence over `stdin` / `stdin_data`.
     stdin_from_fd: Option<i32>,
+    /// `1< file` / `1<&N` / `1<> file` — the *read* half a redirect gave fd 1.
+    ///
+    /// A dup is one `dup2` and the arrow it was written with picks nothing, so a
+    /// standard write descriptor can end up bound to a source that is readable
+    /// and not writable: `{ read -r l <&1; } 1<in` reads a line, and
+    /// `{ echo W; } 1<in` is `echo: write error: Bad file descriptor`. `None` is
+    /// the ordinary case of fd 1 having no read half at all, which
+    /// [`Shell::std_read_half`] renders as [`InputSrc::WriteOnly`].
+    ///
+    /// Whether the same redirect left fd 1 a *write* half is a separate
+    /// question, answered by the other fd-1 slots — see
+    /// [`RedirPlan::stdout_is_read_only`].
+    stdout_read: Option<InputFd>,
+    /// [`RedirPlan::stdout_read`] for fd 2. The visible difference is where the
+    /// failed write is reported: a diagnostic that cannot reach fd 2 is dropped,
+    /// so `{ cd /nosuchdir; } 2<in` exits 1 in silence.
+    stderr_read: Option<InputFd>,
     stdout: Option<(Str, bool)>,
     stderr: Option<(Str, bool)>,
     /// True when `stderr`'s file target is a *dup* of `stdout`'s (from `&>file`,
@@ -32301,6 +32536,8 @@ impl RedirPlan {
         self.stdin.is_none()
             && self.stdin_data.is_none()
             && self.stdin_from_fd.is_none()
+            && self.stdout_read.is_none()
+            && self.stderr_read.is_none()
             && self.stdout.is_none()
             && self.stderr.is_none()
             && !self.stderr_to_stdout
@@ -32325,6 +32562,7 @@ impl RedirPlan {
         self.stdout_to_stderr = false;
         self.stdout_to_fd = None;
         self.stdout_closed = false;
+        self.stdout_read = None;
     }
 
     /// [`RedirPlan::clear_stdout`] for fd 2.
@@ -32338,6 +32576,7 @@ impl RedirPlan {
         self.stderr_to_stdout = false;
         self.stderr_to_fd = None;
         self.stderr_closed = false;
+        self.stderr_read = None;
     }
 
     /// [`RedirPlan::clear_stdout`] for fd 0.
@@ -32371,6 +32610,33 @@ impl RedirPlan {
         self.stdin
             .as_ref()
             .is_some_and(|s| matches!(&*lock_input(s), InputSrc::Closed))
+    }
+
+    /// Whether this command's redirects left fd 1 a descriptor with a read half
+    /// and no write one (`1< file`, `1<&0` under a `< file`) — as opposed to
+    /// leaving it writable, or taking it away entirely.
+    ///
+    /// The three are separate answers to separate questions. A write to a
+    /// read-only fd 1 fails exactly as a write to a closed one does, but a *dup*
+    /// of it succeeds where a dup of a closed one is refused, so the two cannot
+    /// be folded together. A read half arrives alongside a write half only from
+    /// a source that has both (`1<> file`, `1<&3` on an `exec 3<> f`), and then
+    /// fd 1 is writable and this is false.
+    fn stdout_is_read_only(&self) -> bool {
+        self.stdout_read.is_some()
+            && self.stdout.is_none()
+            && !self.stdout_to_stderr
+            && self.stdout_to_fd.is_none()
+            && !self.stdout_closed
+    }
+
+    /// [`RedirPlan::stdout_is_read_only`] for fd 2.
+    fn stderr_is_read_only(&self) -> bool {
+        self.stderr_read.is_some()
+            && self.stderr.is_none()
+            && !self.stderr_to_stdout
+            && self.stderr_to_fd.is_none()
+            && !self.stderr_closed
     }
 }
 
@@ -32437,6 +32703,11 @@ impl RedirPlan {
             || self.stdout_to_stderr
             || self.stdout_closed
             || self.stderr_closed
+            // `myfunc 1< file`: fd 1 is bound to a read half — and so has lost
+            // its write half — for the body's whole duration, exactly as `>&-`
+            // takes it away for the body's whole duration.
+            || self.stdout_read.is_some()
+            || self.stderr_read.is_some()
             || !self.extra_fds.is_empty()
     }
 }
@@ -32497,24 +32768,25 @@ enum ExtraFdOp {
 /// binding for fd 1 and fd 2 (they are slots, not list entries), so the order
 /// has to be recorded here, at resolution time, where it is still known.
 ///
-/// Only a *file* binding is distinguished. A `>&1` onto a pipe or a capture,
-/// a `2>&1`, and a `>&-` all leave [`AliasSink::Live`], which resolves the
-/// alias against the shell's current sink exactly as before — the group's own
-/// handle for those shapes is not a plain file, and in the capture case not a
-/// descriptor at all.
+/// Only a binding that *has* a handle of its own is distinguished — a file, or
+/// the absence of a write half a `1< file` leaves. A `>&1` onto a pipe or a
+/// capture, a `2>&1`, and a `>&-` all leave [`AliasSink::Live`], which resolves
+/// the alias against the shell's current sink exactly as before — the group's
+/// own handle for those shapes is not a plain file, and in the capture case not
+/// a descriptor at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AliasSink {
     /// Nothing in this list had rebound the source std fd yet: copy the sink
     /// the command inherited.
     Live,
-    /// This list had already pointed the source std fd at a file: copy *that*
-    /// open file, sharing its offset, so `{ echo A >&3; echo B; } >f 3>&1`
-    /// appends rather than clobbers.
-    StagedFile,
+    /// This list had already bound the source std fd itself: copy *that*, so
+    /// `{ echo A >&3; echo B; } >f 3>&1` appends rather than clobbers, and
+    /// `{ echo W >&3; } 1<in 3>&1` copies a descriptor it cannot write to.
+    Staged,
 }
 
-/// The fd 1 / fd 2 sinks a redirect list has already opened by the time its
-/// fd ≥ 3 entries are installed, for an [`AliasSink::StagedFile`] alias to copy.
+/// The fd 1 / fd 2 sinks a redirect list has already bound by the time its
+/// fd ≥ 3 entries are installed, for an [`AliasSink::Staged`] alias to copy.
 ///
 /// Handed in rather than looked up because the file is opened by the caller,
 /// and because sharing the *same* handle is the point: a `try_clone` of one
@@ -32524,6 +32796,12 @@ enum AliasSink {
 struct StagedStdSinks<'a> {
     stdout: Option<&'a Arc<File>>,
     stderr: Option<&'a WriteFd>,
+    /// This list bound fd 1 to a source with no write half (`1< file`), so what
+    /// a dup of fd 1 copies is a descriptor writes fail on — not the ambient
+    /// stdout, and not a handle at all.
+    stdout_read_only: bool,
+    /// [`StagedStdSinks::stdout_read_only`] for fd 2.
+    stderr_read_only: bool,
 }
 
 impl StagedStdSinks<'_> {
@@ -32531,7 +32809,9 @@ impl StagedStdSinks<'_> {
     /// (or staged something that is not a file handle to copy).
     fn get(self, n: i32) -> Option<WriteFd> {
         match n {
+            1 if self.stdout_read_only => Some(WriteFd::ReadOnly),
             1 => self.stdout.map(|f| WriteFd::File(Arc::clone(f))),
+            2 if self.stderr_read_only => Some(WriteFd::ReadOnly),
             2 => self.stderr.cloned(),
             _ => None,
         }
@@ -57484,6 +57764,77 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "pipe stdin should be read-only, got {out:?}"
         );
         assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
+    }
+
+    #[test]
+    fn a_std_fd_bound_to_a_read_only_source_keeps_only_its_read_half() {
+        // `1< file` is a legal redirect on a *write* descriptor: fd 1 becomes a
+        // second name for a description opened read-only. So the writes through
+        // it fail with `EBADF` (named against the builtin, status 1, file
+        // untouched) while a `read <&1` through the very same descriptor finds
+        // the file's bytes — and finds them from one shared cursor, so two reads
+        // give successive lines. Regression: osh dropped `1< file` on the floor,
+        // leaving fd 1 the ambient stdout
+        // (TD-OILS-DUP-ONTO-A-STD-FD-IGNORES-THE-SOURCE-MODE).
+        let (out, disk) =
+            run_over_seeded_file("l1\nl2\n", "( { echo W; } 1< {FILE} ) 2>&1; echo \"st=$?\"");
+        assert!(
+            out.contains("echo: write error: Bad file descriptor"),
+            "expected an EBADF write error naming `echo`, got {out:?}"
+        );
+        assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
+        assert_eq!(disk, "l1\nl2\n");
+        let (out, _) = run_over_seeded_file(
+            "l1\nl2\n",
+            "{ read -r a <&1; read -r b <&1; } 1< {FILE}; echo \"a=[$a] b=[$b]\"",
+        );
+        assert_eq!(out, "a=[l1] b=[l2]\n");
+    }
+
+    #[test]
+    fn a_read_only_fd2_drops_the_diagnostics_it_cannot_be_told() {
+        // fd 2 with no write half is visibly a fd 2 with nowhere to report: the
+        // failure that would be announced there is silent and only the status
+        // survives. That holds for the shell's own command-level diagnostics
+        // (`command not found`) as much as for a builtin's, which is why the
+        // not-found path has to consult the command's plan rather than fall back
+        // to the shell's fd 2.
+        let (out, _) = run_over_seeded_file(
+            "l1\n",
+            "( nosuchcmd_ro_zz 2< {FILE} ) 2>&1; echo \"st=$?\"; \
+             ( cd /nosuchdir_ro_zz 2< {FILE} ) 2>&1; echo \"cd=$?\"",
+        );
+        assert_eq!(out, "st=127\ncd=1\n");
+    }
+
+    #[test]
+    fn a_dup_onto_a_std_fd_carries_the_sources_access_mode() {
+        // `2<&3` after a `3< file` is one `dup2`, so fd 2 inherits the source's
+        // missing write half — the arrow the dup was written with picks nothing.
+        // The descriptor is nonetheless *there*: a `3>&2` beside it copies one
+        // rather than being refused one, and reads through fd 2 find bytes.
+        let (out, _) = run_over_seeded_file(
+            "l1\nl2\n",
+            "( { echo W >&2; } 3< {FILE} 2<&3 ) 2>&1; echo \"st=$?\"; \
+             { read -r l <&2; } 3< {FILE} 2<&3; echo \"l=[$l]\"",
+        );
+        assert_eq!(out, "st=1\nl=[l1]\n");
+        // `1>&0` onto a read-only fd 0 is a dup bash *makes*; it is the write
+        // through fd 1 that then fails, with the body running as usual.
+        // Regression: osh refused the redirect outright (TD-OILS-FD0-WRITE).
+        let (out, disk) = run_over_seeded_file(
+            "l1\nl2\n",
+            "( exec 0< {FILE}; { echo W; read -r l <&1; echo \"l=[$l] st=$?\" >&2; } 1>&0 ) 2>&1",
+        );
+        assert!(
+            out.contains("echo: write error: Bad file descriptor"),
+            "the write through the dup should fail, got {out:?}"
+        );
+        assert!(
+            out.ends_with("l=[l1] st=0\n"),
+            "the body should run on and read through fd 1, got {out:?}"
+        );
+        assert_eq!(disk, "l1\nl2\n");
     }
 
     #[test]

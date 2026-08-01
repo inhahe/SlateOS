@@ -111,43 +111,131 @@ records a `write_only_input()`.
 Covered by `tests/corpus/dup-copies-the-descriptor-not-the-arrow.sh` and the
 unit tests `a_dup_copies_the_descriptor_and_not_the_arrow` and
 `reading_a_standard_write_descriptor_is_an_error_not_end_of_input`. Two
-shapes are deliberately left out and tracked separately:
-TD-OILS-DUP-ONTO-A-STD-FD-IGNORES-THE-SOURCE-MODE and
+shapes were deliberately left out and tracked separately:
+TD-OILS-DUP-ONTO-A-STD-FD-IGNORES-THE-SOURCE-MODE (since resolved) and
 TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR.
 
-### TD-OILS-DUP-ONTO-A-STD-FD-IGNORES-THE-SOURCE-MODE. `1<&0` / `2<&0` keeps the standard descriptor's write half instead of the read-only source's — 2026-08-01 — OPEN (low priority)
+### TD-OILS-DUP-ONTO-A-STD-FD-IGNORES-THE-SOURCE-MODE. `1<&0` / `2<&0` keeps the standard descriptor's write half instead of the read-only source's — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_dup_in`, the
-comment at the end that reads "`1<&N` / `2<&N` …", and the `fd <= 2` arm of
+comment at the end that read "`1<&N` / `2<&N` …", and the `fd <= 2` arm of
 `Shell::apply_persistent_dup_in`.
 
-**Reproduce** (`target/dvscratch/t3/pc.sh`):
+**Reproduce** (`target/dvscratch/t3/pc.sh`, `pn.sh`):
 
 ```sh
 printf 'one\n' > in
 ( exec 0<in; { echo W >&2; } 2<&0 )   # bash: echo: write error: Bad file descriptor
-                                      # osh:  W, on the real stderr
-( exec 0<in; { read -r l <&2; } 2<&0; echo "l=[$l]" )   # bash: l=[one]  osh: EBADF
+                                      # osh was:  W, on the real stderr
+( exec 0<in; { read -r l <&2; } 2<&0; echo "l=[$l]" )   # bash: l=[one]  osh was: EBADF
+( { echo W; } 1<in )                  # bash: echo: write error — osh was: W
+( nosuchcmd 2<in )                    # bash: silent, 127 — osh was: the diagnostic
 ```
 
-A dup *onto* fd 1 or fd 2 from a read-only source should leave that fd with
-the source's access mode — readable, and not writable. osh models fds 0, 1
+A dup *onto* fd 1 or fd 2 from a read-only source has to leave that fd with
+the source's access mode — readable, and not writable — and the whole family
+of shapes that bind a std fd to a source (`1< file`, `2<&3`, `1>&0`,
+`1<> file`, a here-doc on fd 1) has to answer alike. osh modelled fds 0, 1
 and 2 as the shell's own streams rather than as entries in `open_fds` /
-`open_write_fds`, so a dup onto one of them has nowhere to put the source's
-mode: the write half stays whatever the standard stream was, and the read
-half is not installed at all.
+`open_write_fds`, so a dup onto one of them had nowhere to put the source's
+mode: the write half stayed whatever the standard stream was, and the read
+half was not installed at all.
 
-**Proper fix.** Give the plan a way to say "fd 1 is now this input source and
-has no write half" — the `WriteFd::ReadOnly` / `InputSrc::WriteOnly` pair
-already exists (see TD-OILS-TRANSIENT-DUP-SOURCE-IS-NOT-THE-LIST-SO-FAR),
-but `RedirPlan` has no slot for a read half on fd 1 or fd 2, nor a
-write-suppression flag for them. That slot is the work.
+**Fixed** by giving `RedirPlan` the missing slot. New fields `stdout_read` /
+`stderr_read` hold the read half a redirect gave fd 1 / fd 2, and the derived
+predicates `stdout_is_read_only()` / `stderr_is_read_only()` say when that
+binding has displaced the write half. The read half is installed for a body's
+duration by the new `Shell::install_std_reads` (into `open_fds` keyed 1 / 2,
+beside every other descriptor's, which is where `clone_input_fd` already
+looked) and permanently by the new `set_std_read_half` / `set_std_write_half`
+pair; the write half is expressed with the existing `WriteFd::ReadOnly`, which
+every consumer already handled — `as_stderr_target()` gives `Discard`,
+`write_to_write_fd` gives `EBADF`, and a `1>&N` naming it is refused.
 
-**Why not now.** `1<&0` and `2<&0` are written by accident far more than on
-purpose, and the fix is a `RedirPlan` shape change that is worth doing on its
-own rather than folded into the dup-mode work. The corpus case
-`tests/corpus/dup-copies-the-descriptor-not-the-arrow.sh` names it in its
-header as deliberately absent.
+`ReadOnly` is deliberately *not* folded into `Closed`: a write to either fails
+identically, but `1<in 3>&1` must **make** the dup (and fail at the write)
+where `1>&- 3>&1` must refuse it.
+
+Every shape that binds a std fd to a source now goes through that slot, not
+just the dups: `1< file` / `2< file` (the `RedirectOp::Read` arm's `fd == 0 ||
+fd >= 3` guard is gone), `1<> file`, and a here-document or here-string on
+fd 1 / fd 2 — the last via the new `Shell::plan_here_bytes`, which replaces
+three copies of "fd 0 or fd ≥ 3, otherwise silently drop it". `2>&1` after a
+`1< file` follows fd 1 into having no write half, sharing its read half, which
+is the `plan.stdout.is_some()` test in `resolve_dup_out`'s `2>&1` branch
+gaining a read-only sibling.
+
+Four call sites had to learn the state beyond the plan itself:
+
+* `RedirPlan::needs_scope` — a function invocation (`myfunc 1< file`) binds
+  fd 1 body-wide, exactly as `>&-` does, so it must run inside a redirect
+  scope. Without this the body wrote to the ambient stdout.
+* `Shell::exec_with_redirects` — a `1>&N` whose source turns out to have no
+  write half is now *made* (local `stdout_read_only`) rather than refused;
+  only a `Closed` source is still refused, which is what bash does. This
+  resolves TD-OILS-FD0-WRITE's last residue, where `{ echo W; } 1>&0 < f`
+  reported `0: Bad file descriptor` instead of running the body and failing
+  the write.
+* `Shell::bemit_cmd_stderr` — the shell's own command-level diagnostics
+  (`command not found`, spawn failures) are dropped when the command's fd 2 is
+  closed or read-only, rather than falling back to the *shell's* fd 2. This
+  was already wrong for the plain `nosuchcmd 2>&-`.
+
+Covered by `tests/corpus/a-std-fd-bound-to-a-read-only-source.sh` and the unit
+tests `a_std_fd_bound_to_a_read_only_source_keeps_only_its_read_half`,
+`a_read_only_fd2_drops_the_diagnostics_it_cannot_be_told` and
+`a_dup_onto_a_std_fd_carries_the_sources_access_mode`.
+
+**What is left.** Two residues, both already tracked elsewhere:
+
+* an *external* child never sees the read-only std fd — `sh -c 'echo W' 1<in`
+  writes to the ambient stdout under osh and is `EBADF` under bash. Same cause
+  as TD-OILS-EXTERNAL-CHILD-HAS-NO-FD-3: `run_external` maps only the shell's
+  own three streams onto the child, and does so from the ambient handles.
+* `1>&0 <>rw` and `1>&0 0<&-`, where the entry *after* the dup changes what
+  fd 0 is — the ordering residue of
+  TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR, recorded there.
+
+A third, found while closing this one, is
+TD-OILS-RW-ON-A-STD-WRITE-FD-APPENDS below: `1<> file` now installs a read
+half, but the *write* half is still a reopened path, so the two do not share
+an offset.
+
+### TD-OILS-RW-ON-A-STD-WRITE-FD-APPENDS. `1<> file` / `2<> file` write at the end instead of at offset 0, and the read half does not see it — 2026-08-01 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the `RedirectOp::ReadWrite` arm of
+`Shell::resolve_one_redirect`, the `fd == 2` / `else` branches, which record
+`plan.stderr = Some((path, true))` / `plan.stdout = Some((path, true))`: a
+*path* to be reopened in append mode, rather than the `wr` handle
+`open_rw_pair` just cloned from the read half.
+
+**Reproduce** (`target/dvscratch/t3/q3.sh`):
+
+```sh
+printf 'one\ntwo\n' > in
+( { echo W; } 1<>in )            # bash: in = "W\ne\ntwo\n"   osh: "one\ntwo\nW\n"
+( { read -r l <&1; } 1<>in; echo "l=[$l]" )   # bash: l=[W]   osh: l=[one]
+```
+
+TD-OILS-RW-OFFSET fixed this for fd 0 (`plan.stdin` + `plan.stdin_write`, one
+handle `try_clone`d) and for fd ≥ 3 (`ExtraFdOp::ReadWrite(rd, wr)`), but fd 1
+and fd 2 kept the older path-and-append representation because `RedirPlan` has
+a *path* slot for them and no handle slot. Two consequences: the write lands at
+EOF rather than at offset 0 (so `1<> file` behaves as `>> file`), and — since
+2026-08-01, when `stdout_read` / `stderr_read` gave fd 1 and fd 2 a read half
+at all — the read half is a different open file description from the write
+half, so neither sees the other's position.
+
+**Proper fix.** Give `RedirPlan` `stdout_write` / `stderr_write:
+Option<Arc<File>>` beside the existing path slots, exactly as `stdin_write`
+sits beside `stdin`, and have the handle win where it is set. The consumers
+are `Shell::exec_with_redirects` (which opens `plan.stdout` with `open_out`
+and `plan.stderr` likewise), `Shell::write_bytes`'s `redir.stdout` branch and
+`Shell::push_builtin_stderr`. `open_rw_pair` already produces the shared pair,
+so nothing new has to be opened.
+
+Named as deliberately absent in the header of
+`tests/corpus/a-std-fd-bound-to-a-read-only-source.sh`.
 
 ### TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR. `>out 3>&1` copies the ambient fd 1, not the sink the same list just installed — 2026-08-01 — ✅ **RESOLVED 2026-08-01** for every shape but a *second* std-fd redirect after the dup (below)
 
@@ -194,11 +282,30 @@ and `a_dup_of_a_std_fd_copies_the_sink_the_same_list_installed`.
 
 bash's fd 3 holds the `oa` description the dup copied, and fd 1 then moves on
 to `ob`. osh's plan has one stdout slot, which `>ob` overwrote, so
-`AliasSink::StagedFile` resolves to `ob`. Closing this needs the plan to keep
+`AliasSink::Staged` resolves to `ob`. Closing this needs the plan to keep
 fd 1 and fd 2 as *ordered entries* rather than slots — the same order-free
 simplification already documented at `Shell::resolve_dup_out`'s close-versus-dup
 comment, and worth doing as its own change. Named as deliberately absent in
 the corpus case's header.
+
+The same slot-not-a-list shape reaches a dup whose *source* is a std fd the
+list goes on to rebind (found 2026-08-01 while closing
+TD-OILS-DUP-ONTO-A-STD-FD-IGNORES-THE-SOURCE-MODE):
+
+```sh
+printf 'A\nB\n' > rw
+( { echo W; } 1>&0 <>rw )   # bash: echo: write error   osh: writes W into rw
+( { echo W; } 1>&0 0<&- )   # bash: echo: write error   osh: 0: Bad file descriptor
+```
+
+Both dups sit *before* the entry that changes fd 0, so bash copies the ambient
+fd 0 (read-only, from the script's own stdin) and the write through fd 1
+fails. `Shell::exec_with_redirects` resolves the source with
+`write_fd_for(n, &plan)` against the **finished** plan, so it sees the `<>`
+and the close instead. Fixing it means the same ordered-entries change: fd 0's
+write half would have to be snapshotted where the dup sat, as `AliasSink`
+already does for fd 1 and fd 2 on the sink side. Named as deliberately absent
+in `tests/corpus/a-std-fd-bound-to-a-read-only-source.sh`.
 
 ### TD-OILS-EXTERNAL-CHILD-HAS-NO-FD-3. A spawned external command never inherits any descriptor above fd 2 — 2026-08-01 — OPEN (target-blocked; unverifiable on the Windows dev host)
 

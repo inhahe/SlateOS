@@ -23,12 +23,13 @@
 # and is still a descriptor for a `4>&3` to copy.
 #
 # Deliberately absent: `1<&0` and `2<&0` — a dup *onto* a standard write
-# descriptor from a read-only source. osh keeps no read half for fd 1 or fd 2,
-# so the copy's access mode has nowhere to go and the write through it
-# succeeds where bash reports `EBADF`. See
-# TD-OILS-DUP-ONTO-A-STD-FD-IGNORES-THE-SOURCE-MODE. Absent too: `>out 3>&1`,
-# where the sink copied is the ambient fd 1 rather than the one the redirect
-# before it left — see TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR.
+# descriptor from a read-only source, which is the same question asked of a
+# target that is one of the shell's own streams. It has a case of its own,
+# `a-std-fd-bound-to-a-read-only-source.sh`, because a std fd is where the
+# three questions come apart most visibly: fd 2 with no write half is a fd 2
+# with nowhere to report the failure. Absent too: `>oa 3>&1 >ob`, where a
+# *second* stdout redirect follows the dup — see
+# TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR.
 #
 # Every persistent probe runs in a subshell so an `exec` cannot reach the next
 # one. Stderr is collected and replayed at the end so it can be compared in a

@@ -35011,6 +35011,82 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// A collision-free basename for a test's scratch file or directory.
+    ///
+    /// The pid keeps concurrent `cargo test` runs apart and the nanosecond stamp
+    /// keeps the tests within one run apart, so no two of them can pick the same
+    /// name however the harness happens to schedule them.
+    fn uniq_name(tag: &str) -> String {
+        format!(
+            "osh_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        )
+    }
+
+    /// A uniquely-named empty directory that deletes itself — and everything
+    /// under it — when it goes out of scope.
+    ///
+    /// The cleanup has to be a `Drop` rather than a call at the end of the test
+    /// body, because a failed assertion unwinds straight past that call: the tree
+    /// then survives the run, and for the cwd-relative ones it survives as
+    /// untracked junk in the working copy. `Drop` runs on the panicking path too,
+    /// so a failure leaves nothing behind but the failure.
+    struct ScratchDir {
+        path: std::path::PathBuf,
+    }
+
+    impl ScratchDir {
+        /// A new directory under the system temp dir. Prefer this: an absolute
+        /// path needs no cwd lock, so the test never races the cwd-mutating ones.
+        fn new(tag: &str) -> Self {
+            Self::at(std::env::temp_dir().join(uniq_name(tag)))
+        }
+
+        /// A new directory *relative to the process cwd*, for the glob tests whose
+        /// patterns have to stay relative. Those hold [`cwd_guard`] — and must
+        /// take it *before* this, so that the guard outlives the `Drop` that
+        /// resolves this relative path one last time.
+        fn relative(tag: &str) -> Self {
+            Self::at(std::path::PathBuf::from(uniq_name(tag)))
+        }
+
+        /// A new directory at exactly `path`, for the few tests that have to name
+        /// it themselves — a sibling pair, or a name some other string must spell
+        /// out in turn.
+        fn at(path: std::path::PathBuf) -> Self {
+            std::fs::create_dir_all(&path).expect("create scratch dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+
+        /// A path inside the directory.
+        fn join(&self, rel: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+            self.path.join(rel)
+        }
+
+        /// The directory as a shell word: forward slashes whatever the platform
+        /// spells its separators as, so it drops straight into a script.
+        fn slashed(&self) -> String {
+            self.path.to_string_lossy().replace('\\', "/")
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            // Best-effort: a directory a test already removed itself, or a file a
+            // child still holds open on Windows, must not turn cleanup into a
+            // second failure stacked on whatever is already being reported.
+            std::fs::remove_dir_all(&self.path).ok();
+        }
+    }
+
     /// Run `src` through the *real* top-level driver ([`Shell::run_source_out`])
     /// with stdout captured, returning `(stdout, $?)`.
     ///
@@ -41000,15 +41076,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // than with the top-level shell name. Verified against bash 5.2; the
         // end-to-end shapes live in tests/corpus/source-frames.sh and
         // tests/corpus/source-error-name.sh.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("osh_srcframe_{}_{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let dir = ScratchDir::new("srcframe");
         // Absolute forward-slash paths, so the test needs no cwd mutation and
         // the label the shell reports is exactly what we pass in.
-        let base = dir.to_string_lossy().replace('\\', "/");
+        let base = dir.slashed();
         let show = "echo \"F=[${FUNCNAME[@]}] set=${FUNCNAME+yes} \
                     S=[${BASH_SOURCE[@]}] L=[${BASH_LINENO[@]}]\"";
         let inner = format!("{base}/inner.sh");
@@ -41060,8 +41131,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             o.ends_with("osh: nosuchcmd_after: command not found\nF=[] set= S=[] L=[]\n"),
             "frames should unwind after the source returns, got {o:?}"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// `$0` and every label derived from it are bytes.
@@ -41645,8 +41714,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // stray config file that happens to sit in a PATH directory. Build a
         // throwaway PATH dir with one executable-extension file and one `.json`.
         use std::io::Write as _;
-        let dir = std::env::temp_dir().join(format!("osh_compgen_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = ScratchDir::new("compgen_test");
         // On Windows the gate is the extension; on Unix it is the execute bit.
         #[cfg(windows)]
         let exe = dir.join("mycmd.exe");
@@ -41668,7 +41736,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
 
         let mut sh = Shell::new();
-        sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(&dir));
+        sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(dir.path()));
         let cmds = sh.compgen_path_commands(b"");
         // The executable is offered by its bare name; the `.json` is not (in
         // either its raw or extension-stripped form).
@@ -41677,8 +41745,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             !cmds.iter().any(|c| c.as_slice() == b"mycfg" || c.as_slice() == b"mycfg.json"),
             "config file leaked into {cmds:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -41687,8 +41753,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `access(X_OK)` probe: a non-executable data file sharing a command's
         // name must not be treated as that command.
         use std::io::Write as _;
-        let dir = std::env::temp_dir().join(format!("osh_path_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = ScratchDir::new("path_test");
 
         // A real executable — gated by extension on Windows, by the exec bit on
         // Unix. `find_in_path` must locate it.
@@ -41707,7 +41772,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
 
         let mut sh = Shell::new();
-        sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(&dir));
+        sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(dir.path()));
         assert!(sh.find_in_path(b"mytool").is_some(), "executable not found in PATH");
 
         // A non-executable, plain-named data file. On Unix the missing exec bit
@@ -41727,8 +41792,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 "non-executable file was resolved as a command"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -41859,15 +41922,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // hidden name is offered to an empty word like any other; `.` and `..`
         // are the only entries an empty word does not see.
         let _cwd = cwd_guard();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("osh_compgen_p_{}_{nanos}", std::process::id()));
+        let dir = ScratchDir::new("compgen_p");
         std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
         std::fs::write(dir.join("a1"), b"").expect("a1");
         std::fs::write(dir.join(".ahid"), b"").expect("hidden");
-        let base = dir.to_string_lossy().replace('\\', "/");
+        let base = dir.slashed();
         let orig = std::env::current_dir().expect("cwd");
         // Compare as sets: the order is the directory's own, which is the
         // filesystem's business rather than the shell's.
@@ -41890,7 +41949,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(g("-f adir/."), ["adir/.", "adir/.."]);
 
         std::env::set_current_dir(&orig).expect("restore cwd");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -41899,15 +41957,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // rather than compspec sources, so the compspec's -X, -P and -S do not
         // reach them.
         let _cwd = cwd_guard();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("osh_compgen_o_{}_{nanos}", std::process::id()));
+        let dir = ScratchDir::new("compgen_o");
         std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
         std::fs::create_dir_all(dir.join("bdir")).expect("mkdir");
         std::fs::write(dir.join("a1"), b"").expect("a1");
-        let base = dir.to_string_lossy().replace('\\', "/");
+        let base = dir.slashed();
         let orig = std::env::current_dir().expect("cwd");
         let g = |rest: &str| run(&format!("cd {base}\ncompgen {rest}"));
 
@@ -41934,7 +41988,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(g("-o nosort a"), (String::new(), 1));
 
         std::env::set_current_dir(&orig).expect("restore cwd");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -41943,15 +41996,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // expanded as a pathname and the whole expansion is handed back, in
         // reverse. Give it a directory of its own so nothing else can match.
         let _cwd = cwd_guard();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("osh_compgen_g_{}_{nanos}", std::process::id()));
+        let dir = ScratchDir::new("compgen_g");
         std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
         std::fs::write(dir.join("a1"), b"").expect("a1");
         std::fs::write(dir.join("b1"), b"").expect("b1");
-        let base = dir.to_string_lossy().replace('\\', "/");
+        let base = dir.slashed();
         let orig = std::env::current_dir().expect("cwd");
         let g = |rest: &str| run(&format!("cd {base}\ncompgen {rest}")).0;
 
@@ -41970,7 +42019,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(g("-k -G 'a*' -W 'iq' i"), "if\nin\nadir\na1\niq\n");
 
         std::env::set_current_dir(&orig).expect("restore cwd");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -42130,15 +42178,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn hostname_completion_follows_hostfile_and_is_kept_between_changes() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("osh_hostfile_{}_{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let dir = ScratchDir::new("hostfile");
         std::fs::write(dir.join("a"), "1.1.1.1 alpha alpha.example\n").expect("a");
         std::fs::write(dir.join("b"), "2.2.2.2 beta\n").expect("b");
-        let base = dir.to_string_lossy().replace('\\', "/");
+        let base = dir.slashed();
 
         let mut sh = Shell::new();
         run_in(&mut sh, &format!("HOSTFILE={base}/a"));
@@ -42165,8 +42208,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         run_in(&mut sh, "unset HOSTFILE");
         run_in(&mut sh, &format!("HOSTFILE={base}/nosuch"));
         assert_eq!(run_in(&mut sh, "compgen -A hostname 2>&1"), (String::new(), 1));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -44701,16 +44742,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let _cwd = cwd_guard();
         // Use a uniquely-named cwd-relative dir to avoid the process-wide-cwd
         // race between parallel tests (no `set_current_dir`).
-        let uniq = format!(
-            "osh_globtest_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        );
-        let dir = std::path::Path::new(&uniq);
-        std::fs::create_dir_all(dir).expect("mkdir");
+        let dir = ScratchDir::relative("globtest");
+        let uniq = dir.slashed();
         for n in ["a.txt", "b.txt", "c.log", ".hidden"] {
             std::fs::File::create(dir.join(n)).expect("touch");
         }
@@ -44734,8 +44767,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // An explicit leading `.` matches hidden files.
         let dot = glob_expand_field(b"", &field_lit(&format!("{uniq}/.*")), false, false, false, false);
         assert!(dot.iter().any(|p| p.ends_with(b".hidden")));
-
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -44745,13 +44776,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `canonicalize()` hand back `C:\a\b` and `\\?\C:\a\b`; neither form may
         // reach `$PWD`, `pwd`, `$OLDPWD` or `$DIRSTACK`.
         let _cwd = cwd_guard();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("osh_slash_{}_{nanos}", std::process::id()));
+        let dir = ScratchDir::new("slash");
         std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
-        let base = dir.to_string_lossy().replace('\\', "/");
+        let base = dir.slashed();
         let orig = std::env::current_dir().expect("cwd");
         // `cd`, `cd -P`, `pwd`, `pwd -P` and the directory stack must all agree
         // and all be free of `\` and of the extended-length `\\?\` prefix.
@@ -44773,7 +44800,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 "every path should be the shell-form path: {line:?}"
             );
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -46238,16 +46264,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn globignore_filesystem_filtering() {
         let _cwd = cwd_guard();
-        let uniq = format!(
-            "osh_globignore_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        );
-        let dir = std::path::Path::new(&uniq);
-        std::fs::create_dir_all(dir).expect("mkdir");
+        let dir = ScratchDir::relative("globignore");
+        let uniq = dir.slashed();
         for n in ["a.txt", "b.txt", "c.log", ".hidden"] {
             std::fs::File::create(dir.join(n)).expect("touch");
         }
@@ -46299,23 +46317,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let names: Vec<Str> = out.iter().map(&basename).collect();
         assert!(names.iter().all(|n| n != b"." && n != b".."));
         assert!(names.contains(&b".hidden".to_vec()));
-
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
     fn glob_globstar_recursive() {
         let _cwd = cwd_guard();
         // Build a small tree:  root/{a.rs, sub/{b.rs, deep/c.rs}}
-        let uniq = format!(
-            "osh_gstar_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        );
-        let root = std::path::Path::new(&uniq);
+        let root = ScratchDir::relative("gstar");
+        let uniq = root.slashed();
         std::fs::create_dir_all(root.join("sub").join("deep")).expect("mkdir");
         std::fs::File::create(root.join("a.rs")).expect("touch");
         std::fs::File::create(root.join("sub").join("b.rs")).expect("touch");
@@ -46407,23 +46416,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             false,
         );
         assert_eq!(dbl, vec![format!("{uniq}//a.rs").into_bytes()]);
-
-        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
     fn shopt_nocaseglob_matches_case_insensitively() {
         let _cwd = cwd_guard();
-        let uniq = format!(
-            "osh_nocaseglob_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        );
-        let dir = std::path::Path::new(&uniq);
-        std::fs::create_dir_all(dir).expect("mkdir");
+        let dir = ScratchDir::relative("nocaseglob_test");
+        let uniq = dir.slashed();
         for n in ["README.md", "Notes.TXT"] {
             std::fs::File::create(dir.join(n)).expect("touch");
         }
@@ -46436,8 +46435,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let ci = glob_expand_field(b"", &field, false, true, false, false);
         assert_eq!(ci.len(), 1);
         assert!(ci[0].ends_with(b"Notes.TXT"));
-
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -46535,16 +46532,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn shopt_dotglob_includes_hidden() {
         let _cwd = cwd_guard();
-        let uniq = format!(
-            "osh_dotglob_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        );
-        let dir = std::path::Path::new(&uniq);
-        std::fs::create_dir_all(dir).expect("mkdir");
+        let dir = ScratchDir::relative("dotglob_test");
+        let uniq = dir.slashed();
         for n in ["a.txt", ".hidden"] {
             std::fs::File::create(dir.join(n)).expect("touch");
         }
@@ -46560,8 +46549,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let b = p.rsplit(|&b| b == b'/').next().unwrap_or(p);
             b != b"." && b != b".."
         }));
-
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -46570,19 +46557,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // glob tests.
         let _cwd = cwd_guard();
         let orig = std::env::current_dir().expect("cwd");
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let uniq = format!("osh_dirstack_{}_{}", std::process::id(), nanos);
-        let da = std::env::temp_dir().join(format!("{uniq}_a"));
-        let db = std::env::temp_dir().join(format!("{uniq}_b"));
-        std::fs::create_dir_all(&da).expect("mkdir a");
-        std::fs::create_dir_all(&db).expect("mkdir b");
+        let uniq = uniq_name("dirstack");
+        let da = ScratchDir::at(std::env::temp_dir().join(format!("{uniq}_a")));
+        let db = ScratchDir::at(std::env::temp_dir().join(format!("{uniq}_b")));
         // Feed the shell forward-slash paths (accepted by the OS on all
         // platforms); the stored/echoed paths come back in native form.
-        let pa = da.to_string_lossy().replace('\\', "/");
-        let pb = db.to_string_lossy().replace('\\', "/");
+        let pa = da.slashed();
+        let pb = db.slashed();
 
         // pushd a, pushd b -> stack top is b, next is a. popd returns to a.
         let script = format!(
@@ -46613,9 +46594,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "dirs +0 after popd should be a, got {:?}",
             lines[eq + 1]
         );
-
-        std::fs::remove_dir_all(&da).ok();
-        std::fs::remove_dir_all(&db).ok();
     }
 
     #[test]
@@ -46623,15 +46601,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Mutates the process-global cwd; serialize with the other cwd tests.
         let _cwd = cwd_guard();
         let orig = std::env::current_dir().expect("cwd");
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let uniq = format!("osh_cdpath_{}_{}", std::process::id(), nanos);
+        let uniq = uniq_name("cdpath");
         let tmp = std::env::temp_dir();
-        let base = tmp.join(&uniq);
-        let sub = base.join("proj");
-        std::fs::create_dir_all(&sub).expect("mkdir");
+        let base = ScratchDir::at(tmp.join(&uniq));
+        std::fs::create_dir_all(base.join("proj")).expect("mkdir");
         let ptmp = tmp.to_string_lossy().replace('\\', "/");
 
         // `CDPATH` is a colon-separated list; on the Windows host we use a
@@ -46648,22 +46621,15 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // the existing `cd -` behavior, so it is not in the captured buffer.)
         assert!(o.contains(&uniq), "expected cwd under {uniq}, got {o:?}");
         assert!(o.contains("proj"), "expected to land in proj, got {o:?}");
-
-        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn cd_physical_flag_changes_directory() {
         let _cwd = cwd_guard();
         let orig = std::env::current_dir().expect("cwd");
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let uniq = format!("osh_cdp_{}_{}", std::process::id(), nanos);
-        let dir = std::env::temp_dir().join(&uniq);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let pdir = dir.to_string_lossy().replace('\\', "/");
+        let uniq = uniq_name("cdp");
+        let dir = ScratchDir::at(std::env::temp_dir().join(&uniq));
+        let pdir = dir.slashed();
 
         // `cd -P dir` accepts the flag and changes directory (canonical PWD).
         let (o, st) = run(&format!("cd -P {pdir}\npwd"));
@@ -46671,8 +46637,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         assert_eq!(st, 0, "cd -P should succeed; output {o:?}");
         assert!(o.contains(&uniq), "expected cwd under {uniq}, got {o:?}");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -49323,22 +49287,16 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run(src).0, "bar\nfoo\n");
     }
 
-    /// A unique cwd-relative temp path (no `set_current_dir`, so parallel-safe).
+    /// A unique scratch *file* path, in the forward-slash form a script needs.
+    ///
+    /// Absolute, under the temp dir: that makes these tests independent of the
+    /// process cwd, so they never race the cwd-mutating ones (`cd`/`pushd`) even
+    /// though they don't hold [`cwd_guard`]. Unlike [`ScratchDir`] there is
+    /// nothing to remove afterwards — the caller writes one file, and the temp
+    /// dir is the system's to sweep.
     fn uniq_path(tag: &str) -> String {
-        // Absolute path under the temp dir (forward slashes so it feeds cleanly
-        // into shell scripts). Using an absolute path makes these tests
-        // independent of the process cwd, so they never race the cwd-mutating
-        // tests (`cd`/`pushd`) even though they don't hold `cwd_guard`.
         let tmp = std::env::temp_dir().to_string_lossy().replace('\\', "/");
-        let tmp = tmp.trim_end_matches('/');
-        format!(
-            "{tmp}/osh_{tag}_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        )
+        format!("{}/{}", tmp.trim_end_matches('/'), uniq_name(tag))
     }
 
     #[test]
@@ -49889,12 +49847,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // send it down the general path, or it would simply be dropped — bash
         // forks, so a `&` job keeps its assignments, its redirections, and the
         // expansions in its words exactly as a foreground command would.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
-        let dir = std::env::temp_dir().join(format!("osh_bg_{}_{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create scratch dir");
-        let cd = dir.to_string_lossy().replace('\\', "/");
+        let dir = ScratchDir::new("bg");
+        let cd = dir.slashed();
 
         let mut sh = Shell::new();
         assert_eq!(sh.run_source(format!("cd '{cd}'").as_bytes()), 0);
@@ -49924,8 +49878,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             0
         );
         assert_eq!(sh.run_source("wait $!".as_bytes()), 9);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -49985,14 +49937,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // it is being read from. `exec < file` rebinds the *shell's* fd 0, which
         // is not a redirection of the job, so the rule still applies — and the
         // shell's own read position is untouched by the job.
-        let dir = std::env::temp_dir().join(format!(
-            "osh_bgstdin_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let dir = ScratchDir::new("bgstdin");
         std::fs::write(dir.join("two.txt"), "l1\nl2\n").expect("write two.txt");
         let mut sh = Shell::new();
         let cap = capture_sink();
@@ -50005,14 +49950,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                  read a & wait; echo \"read=[${{a-unset}}]\"\n\
                  read b; echo \"parent=[$b]\"\n\
                  cat < two.txt & wait\n",
-                dir.display().to_string().replace('\\', "/")
+                dir.slashed()
             );
             sh.run_source_out(src.as_bytes(), &mut out, 0);
         }
         let got = String::from_utf8_lossy(&take_capture(&cap)).into_owned();
         assert_eq!(got, "read=[unset]\nparent=[l1]\nl1\nl2\n");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(windows)]
@@ -52231,15 +52174,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     /// A directory of this test module's own, plus its path in the forward-slash
-    /// form the shell needs. Removed by the caller when it is done with it.
-    fn history_file_dir(tag: &str) -> (std::path::PathBuf, String) {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("osh_hist_{tag}_{}_{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let s = dir.to_string_lossy().replace('\\', "/");
+    /// form the shell needs. It removes itself once the caller drops it.
+    fn history_file_dir(tag: &str) -> (ScratchDir, String) {
+        let dir = ScratchDir::new(&format!("hist_{tag}"));
+        let s = dir.slashed();
         (dir, s)
     }
 
@@ -52273,7 +52211,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A file that cannot be read or written fails quietly, status 1.
         assert_eq!(run_script(&format!("history -r {d}/nope")), (String::new(), 1));
         assert_eq!(run_script(&format!("history -w {d}/no/dir")), (String::new(), 1));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -52300,7 +52237,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                  \x20   5  history -n {d}/g\n    6  n3\n    7  history\n"
             )
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -52315,7 +52251,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // not capture); the same one twice is not.
         assert_eq!(run(&format!("history -a -w {d}/f")), (String::new(), 1));
         assert_eq!(run(&format!("history -aa {d}/f")).1, 0);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -52348,7 +52283,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(std::fs::read_to_string(dir.join("h")).expect("read").lines().count(), 5);
         assert_eq!(run(&format!("{body}HISTFILESIZE=1\nhistory -c\n: p\n: q\nhistory -w")).1, 0);
         assert_eq!(std::fs::read_to_string(dir.join("h")).expect("read").lines().count(), 3);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

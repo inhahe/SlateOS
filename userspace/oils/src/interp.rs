@@ -28021,7 +28021,9 @@ impl Shell {
             if a.last() == Some(&b"]".as_slice()) {
                 a.pop();
             } else {
-                self.perrln("[: missing ']'");
+                // bash quotes the missing bracket the way it quotes every other
+                // token it names: an opening backtick and a closing apostrophe.
+                self.perrln("[: missing `]'");
                 return 2;
             }
         }
@@ -28095,6 +28097,15 @@ impl Shell {
                 // `[ ! foo -o bar ]` is `!(foo -o bar)` = false, not `(!foo) -o bar`).
                 Ok(!self.eval_test_expr(&a[1..])?)
             }
+            4 if a[0] == b"(" && a[3] == b")" => {
+                // The other four-argument special case: fully parenthesised
+                // operands are the *two-argument* test of what is inside, not a
+                // grouped expression. The difference shows in the diagnostic —
+                // `[ ( x y ) ]` is `x: unary operator expected`, the two-argument
+                // complaint, where the general parser would instead stop at `y`
+                // and ask for the closing paren.
+                self.eval_test_expr(&a[1..3])
+            }
             _ => {
                 // Four-or-more arguments: bash's full recursive expression parser.
                 self.eval_test_parser(a)
@@ -28103,15 +28114,24 @@ impl Shell {
     }
 
     /// Run bash's full recursive `test` expression parser over `a`, erroring on
-    /// any operands left unconsumed after a complete expression (bash's
-    /// "syntax error: `X' unexpected").
+    /// any operands left unconsumed after a complete expression.
+    ///
+    /// bash words that error two ways, and the first leftover word decides
+    /// which: a word starting with `-` looked like it was meant to be an
+    /// operator, so it is named — "syntax error: `-Q' unexpected" — while
+    /// anything else is just surplus, and gets the anonymous "too many
+    /// arguments". So `[ x -a y -Q z ]` names `-Q` but `[ a b c d e ]` names
+    /// nothing.
     fn eval_test_parser(&self, a: &[BStr<'_>]) -> Result<bool, Str> {
         let mut p = TestExpr { toks: a, pos: 0 };
         let v = p.or_expr(self)?;
-        if p.pos != a.len() {
-            return Err(bfmt![b"syntax error: `", a[p.pos], b"' unexpected"]);
+        match a.get(p.pos) {
+            None => Ok(v),
+            Some(t) if t.starts_with(b"-") => {
+                Err(bfmt![b"syntax error: `", t, b"' unexpected"])
+            }
+            Some(_) => Err(b"too many arguments".to_vec()),
         }
-        Ok(v)
     }
 
     /// Evaluate a `test`/`[` *unary* primary, resolving the three primaries that
@@ -34079,11 +34099,16 @@ impl<'a> TestExpr<'a> {
             Some(b"(") => {
                 self.pos += 1;
                 let v = self.or_expr(sh)?;
-                if self.peek() == Some(b")".as_slice()) {
-                    self.pos += 1;
-                    Ok(v)
-                } else {
-                    Err(b"`)' expected".to_vec())
+                // bash names the word that got in the way when there is one —
+                // "`)' expected, found b" — and reserves the bare form for a
+                // group that simply ran out of words.
+                match self.peek() {
+                    Some(b")") => {
+                        self.pos += 1;
+                        Ok(v)
+                    }
+                    Some(t) => Err(bfmt![b"`)' expected, found ", t]),
+                    None => Err(b"`)' expected".to_vec()),
                 }
             }
             Some(_) => self.primary(sh),
@@ -34223,22 +34248,51 @@ fn cd_is_explicit(t: BStr<'_>) -> bool {
         || bytes::bytes_to_path(t).is_absolute()
 }
 
+/// Evaluate a `test`/`[`/`[[` unary primary that needs nothing from the shell
+/// beyond its working directory. Kept in sync with [`is_test_unary_op`], which
+/// decides which spellings ever reach here; the shell-aware primaries (`-v`,
+/// `-o`, `-R`) are answered by [`Shell::eval_test_unary`] before delegating.
+///
+/// Every primary that asks a question about a *file* must be false when the
+/// file is not there, so each one stats the path rather than falling through to
+/// a catch-all. (An earlier version answered "the operand is non-empty" for the
+/// primaries it did not implement, which made `[ -p nosuchfile ]` — and every
+/// other unimplemented spelling — unconditionally true.)
 fn eval_unary(cwd: BStr<'_>, op: BStr<'_>, x: BStr<'_>) -> bool {
     // The filesystem primaries name a path relative to *this shell's* directory.
     let p = || bytes::bytes_to_path(&resolve_against(cwd, x));
     match op {
         b"-z" => x.is_empty(),
         b"-n" => !x.is_empty(),
-        b"-e" => p().exists(),
+        // `-a` is the older spelling of `-e`; as a *primary* (rather than the
+        // `[` connective, which the grammar takes first) it too asks whether
+        // the path exists.
+        b"-e" | b"-a" => p().exists(),
         b"-f" => p().is_file(),
         b"-d" => p().is_dir(),
         b"-s" => std::fs::metadata(p()).map(|m| m.len() > 0).unwrap_or(false),
-        b"-r" | b"-w" | b"-x" => p().exists(),
+        b"-r" | b"-w" | b"-x" => unary_access(&p(), op),
         // `-L`/`-h` — the path is a symbolic link. `symlink_metadata` does not
         // follow the final component, so a broken symlink still tests true.
         b"-L" | b"-h" => std::fs::symlink_metadata(p())
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false),
+        b"-b" | b"-c" | b"-p" | b"-S" => unary_file_type(&p(), op),
+        b"-u" | b"-g" | b"-k" => unary_mode_bit(&p(), op),
+        b"-O" | b"-G" => unary_owner(&p(), op),
+        // `-N` — the file has been modified since it was last read. Both
+        // timestamps come from one `stat`, so a file that has never been read
+        // since it was written (the usual case for a freshly created file,
+        // whose two stamps are equal) is *not* newer: the test is strict.
+        b"-N" => match std::fs::metadata(p()) {
+            Ok(md) => match (md.modified(), md.accessed()) {
+                (Ok(m), Ok(a)) => m > a,
+                // A filesystem that does not keep one of the stamps cannot
+                // answer the question, and bash reports false when `stat` fails.
+                _ => false,
+            },
+            Err(_) => false,
+        },
         // `-t FD` — file descriptor `FD` is open and refers to a terminal.
         // Only the standard streams (0/1/2) are addressable from a shell.
         // An operand that is not text is not a descriptor number either.
@@ -34248,8 +34302,134 @@ fn eval_unary(cwd: BStr<'_>, op: BStr<'_>, x: BStr<'_>) -> bool {
             Some(2) => io::stderr().is_terminal(),
             _ => false,
         },
-        _ => !x.is_empty(),
+        // Unreachable for a recognised primary; an unrecognised one never gets
+        // this far (see `is_test_unary_op`). False is the safe answer.
+        _ => false,
     }
+}
+
+/// `-r`, `-w`, `-x` — the file is readable / writable / executable *by us*.
+///
+/// bash asks the kernel (`sh_eaccess`), which answers for the effective
+/// credential, so this reproduces `access(2)`'s rule: pick the permission
+/// triad by how we relate to the file's owner, and let root past the read and
+/// write bits entirely (root still needs *some* execute bit for `-x`, which is
+/// the one place `access(2)` does not simply say yes).
+#[cfg(unix)]
+fn unary_access(path: &std::path::Path, op: BStr<'_>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(md) = std::fs::metadata(path) else {
+        return false;
+    };
+    let mode = md.mode();
+    let euid = reported_identity().1;
+    if euid == 0 {
+        return op != b"-x" || mode & 0o111 != 0;
+    }
+    let shift = if md.uid() == euid {
+        6
+    } else if reported_groups().contains(&md.gid()) {
+        3
+    } else {
+        0
+    };
+    let want = match op {
+        b"-r" => 0o4,
+        b"-w" => 0o2,
+        _ => 0o1,
+    };
+    mode.checked_shr(shift).unwrap_or(0) & want != 0
+}
+
+/// The Windows host has no permission bits, so the honest answers are the ones
+/// the platform can actually give: everything readable, writable unless the
+/// read-only attribute is set, and "executable" decided by extension the way
+/// the loader itself decides it. A directory is executable in the traversal
+/// sense, matching every Unix shell.
+#[cfg(windows)]
+fn unary_access(path: &std::path::Path, op: BStr<'_>) -> bool {
+    let Ok(md) = std::fs::metadata(path) else {
+        return false;
+    };
+    match op {
+        b"-r" => true,
+        b"-w" => !md.permissions().readonly(),
+        _ => {
+            md.is_dir()
+                || path.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|e| {
+                    matches!(e.to_ascii_lowercase().as_str(), "exe" | "com" | "bat" | "cmd")
+                })
+        }
+    }
+}
+
+/// `-b`, `-c`, `-p`, `-S` — the path is a block device, character device, FIFO
+/// or socket. `metadata` follows symlinks, which is what bash's `stat` does.
+#[cfg(unix)]
+fn unary_file_type(path: &std::path::Path, op: BStr<'_>) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    let Ok(md) = std::fs::metadata(path) else {
+        return false;
+    };
+    let t = md.file_type();
+    match op {
+        b"-b" => t.is_block_device(),
+        b"-c" => t.is_char_device(),
+        b"-p" => t.is_fifo(),
+        _ => t.is_socket(),
+    }
+}
+
+/// None of these node types is reachable through a Windows path: devices live
+/// in the `\\.\` namespace and named pipes in `\\.\pipe\`, neither of which a
+/// filesystem path names. So the answer is always no — never "the operand was
+/// non-empty".
+#[cfg(windows)]
+fn unary_file_type(_path: &std::path::Path, _op: BStr<'_>) -> bool {
+    false
+}
+
+/// `-u`, `-g`, `-k` — the set-user-ID, set-group-ID and sticky bits.
+#[cfg(unix)]
+fn unary_mode_bit(path: &std::path::Path, op: BStr<'_>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let bit = match op {
+        b"-u" => 0o4000,
+        b"-g" => 0o2000,
+        _ => 0o1000,
+    };
+    std::fs::metadata(path).is_ok_and(|md| md.mode() & bit != 0)
+}
+
+/// Windows keeps no such bits, so they are never set.
+#[cfg(windows)]
+fn unary_mode_bit(_path: &std::path::Path, _op: BStr<'_>) -> bool {
+    false
+}
+
+/// `-O`/`-G` — the file is owned by our effective UID / GID. bash compares
+/// against the effective credential only, not the supplementary group list, so
+/// `-G` uses the first entry of [`reported_groups`] (the primary group).
+#[cfg(unix)]
+fn unary_owner(path: &std::path::Path, op: BStr<'_>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(md) = std::fs::metadata(path) else {
+        return false;
+    };
+    if op == b"-O" {
+        md.uid() == reported_identity().1
+    } else {
+        reported_groups().first().is_some_and(|g| *g == md.gid())
+    }
+}
+
+/// Windows has an ACL owner rather than a UID, and nothing std exposes maps
+/// onto one, so every file the shell can stat counts as ours — which is also
+/// what the MSYS bash the differential corpus is measured against reports.
+/// A path that does not exist is still not ours.
+#[cfg(windows)]
+fn unary_owner(path: &std::path::Path, _op: BStr<'_>) -> bool {
+    path.exists()
 }
 
 /// Whether `op` is a `test`/`[` binary primary. Used to disambiguate the
@@ -37549,6 +37729,61 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A genuine unary operator with one argument still works.
         assert_eq!(run("[ -n x ]; echo $?").0, "0\n");
         assert_eq!(run("[ -z x ]; echo $?").0, "1\n");
+    }
+
+    #[test]
+    fn every_file_primary_is_false_for_a_path_that_is_not_there() {
+        // A primary that asks a question about a file has to answer "no" when
+        // there is no file. `eval_unary` used to end in a catch-all reading
+        // "the operand is non-empty", so every primary it had not implemented
+        // — `-b -c -p -S -g -u -k -O -G -N`, and `-a` — came back *true* for
+        // any name at all, including one that names nothing.
+        for op in [
+            "-a", "-b", "-c", "-d", "-e", "-f", "-g", "-h", "-k", "-p", "-r", "-s", "-u", "-w",
+            "-x", "-G", "-L", "-N", "-O", "-S",
+        ] {
+            let (o, _) = run(&format!("[ {op} /no/such/path/at/all ]; echo $?"));
+            assert_eq!(o, "1\n", "{op} answered true for a path that is not there");
+        }
+        // The two string primaries still ask about the string, not a file.
+        assert_eq!(run("[ -n /no/such/path ]; echo $?").0, "0\n");
+        assert_eq!(run("[ -z /no/such/path ]; echo $?").0, "1\n");
+        // `-a` in the operator position is `-e`; in the connective position it
+        // is still AND, which the grammar decides before either is evaluated.
+        assert_eq!(run("[ -a . ]; echo $?").0, "0\n");
+        assert_eq!(run("[ x -a y ]; echo $?").0, "0\n");
+        assert_eq!(run("[ x -a '' ]; echo $?").0, "1\n");
+    }
+
+    #[test]
+    fn leftover_test_operands_are_named_only_when_they_look_like_operators() {
+        // bash decides between its two surplus-operand complaints by looking at
+        // the first word it could not use: one starting with `-` was probably
+        // meant to be an operator, so it is named; anything else is just extra.
+        assert_eq!(
+            run("test x -a y -Q z 2>&1").0,
+            "osh: test: syntax error: `-Q' unexpected\n"
+        );
+        assert_eq!(run("test a b c d e 2>&1").0, "osh: test: too many arguments\n");
+        assert_eq!(run("test '(' x ')' '(' 2>&1").0, "osh: test: too many arguments\n");
+        assert_eq!(run("test a b c d e; echo $?").0, "2\n");
+        // A group that ran out of words asks for the paren; one that hit a word
+        // that is not the paren says which word it found instead.
+        assert_eq!(
+            run("test '(' a b c ')' 2>&1").0,
+            "osh: test: `)' expected, found b\n"
+        );
+        // Exactly four fully parenthesised words are the *two-argument* test of
+        // what is inside, so the complaint is the two-argument one.
+        assert_eq!(
+            run("test '(' x y ')' 2>&1").0,
+            "osh: test: x: unary operator expected\n"
+        );
+        assert_eq!(run("test '(' -n x ')'; echo $?").0, "0\n");
+        assert_eq!(run("test '(' -z x ')'; echo $?").0, "1\n");
+        // `[` still needs its bracket, quoted bash's way.
+        assert_eq!(run("[ x 2>&1").0, "osh: [: missing `]'\n");
+        assert_eq!(run("[ x ] extra 2>&1; echo $?").0, "osh: [: missing `]'\n2\n");
     }
 
     #[test]

@@ -5578,8 +5578,24 @@ but an operator written flush against its neighbour picks the neighbour up:
 [[ a $(echo x) ]] # bash near `x)'         osh near `$(echo x)'
 ```
 
+The closing `]]` is the same story, re-measured 2026-07-31: because the scan
+stops at `" \n\t;|&"`, a `;`/`|`/`&` written flush against `]]` *becomes* the
+whole reported span, while a `)` — not a stop character — is glued onto it:
+
+```sh
+[[ -n ]];echo z    # bash near `;'     osh near `]]'
+[[ -n ]] ;echo z   # bash near `]]'    osh near `]]'   (a space and they agree)
+[[ -n ]]&&echo z   # bash near `&'     osh near `]]'
+[[ -n ]]|cat       # bash near `|'     osh near `]]'
+[[ -n ]])          # bash near `]])'   osh near `]]'
+```
+
 Both shells agree the input is a syntax error and both exit 2; only the quoted
 span differs, and only when tokens are written without separating whitespace.
+The rest of the diagnostic — the first line (``unexpected argument `]]' to
+conditional unary operator``) and the echoed source line — already matches in
+every case above, which is why `tests/corpus/test-arity-errors.sh` and the
+`[[ … ]]` corpus cases pass despite this.
 
 **Proper fix:** give `Parser` the source text and the per-token character
 offsets (`Tokenized::offsets`, added for TD-OILS-EXTGLOB-UNGATED) and compute

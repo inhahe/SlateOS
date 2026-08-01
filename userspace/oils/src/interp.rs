@@ -9607,12 +9607,25 @@ impl Shell {
                 }
             }
         }
-        // An unset pointer variable is a fatal "invalid indirect expansion":
-        // status 1, the rest of the parse unit discarded, but the shell kept
-        // alive so the *next* line still runs. An element that is merely absent
-        // points at nothing instead, which expands to nothing.
-        let Ok(Some(target)) = self.indirect_pointer_value(refname, index) else {
-            return Str::new();
+        let target = match self.indirect_pointer_value(refname, index) {
+            Ok(Some(t)) => t,
+            // An element that is merely absent points at nothing, which expands
+            // to nothing — but nothing is exactly what `set -u` objects to, and
+            // the complaint names the reference as written: `${!x[5]}` on a
+            // two-element `x` reports `!x[5]`. What is exempt from nounset is a
+            // *parameter* like `$@`, not a reference through one, so `${!@}`
+            // with no positionals reports `!@` and this asks no such question.
+            Ok(None) => {
+                if self.nounset {
+                    let shown = bfmt![b"!", Self::indirect_ref_src(refname, index)];
+                    self.raise_unbound(&shown);
+                }
+                return Str::new();
+            }
+            // An unset pointer variable is a fatal "invalid indirect expansion":
+            // status 1, the rest of the parse unit discarded, but the shell kept
+            // alive so the *next* line still runs. The complaint is already out.
+            Err(()) => return Str::new(),
         };
         // The resolved name must be a valid parameter name. An empty or
         // malformed name (`ptr=`, `ptr="a b"`, `ptr=1abc`) is a fatal
@@ -10714,6 +10727,10 @@ impl Shell {
     }
 
     fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> Str {
+        // A nounset complaint quotes the reference the writer typed, so it is
+        // made about `written` rather than about whatever nameref chain the
+        // read went down: `declare -n r=a; ${r[5]}` reports `r[5]`, not `a[5]`.
+        let written = name;
         let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             // A circular chain is unset, and so is a reference that already
             // designates one element (there is no array left to subscript):
@@ -10793,7 +10810,25 @@ impl Shell {
                 if length {
                     val.map_or(0, |v| bytes::char_count(&v)).to_string().into_bytes()
                 } else {
-                    val.unwrap_or_default()
+                    match val {
+                        Some(v) => v,
+                        None => {
+                            // An element that is not there is an unset parameter
+                            // like any other, and under `set -u` it faults.
+                            // bash names it as the source wrote it, subscript
+                            // included and *unevaluated*: `${x[1+1]}` reports
+                            // `x[1+1]`, `${x[n]}` reports `x[n]`, and
+                            // `${m[$(echo k)]}` reports the substitution itself.
+                            // A subscript already reported as bad says both
+                            // things, in that order.
+                            if self.unbound_is_error(written) {
+                                let shown =
+                                    bfmt![written, b"[", crate::unparse::word_src(w), b"]"];
+                                self.note_unbound(written, &shown);
+                            }
+                            Str::new()
+                        }
+                    }
                 }
             }
         }
@@ -15342,11 +15377,19 @@ impl Shell {
     /// bytes because a subscript is a word and may hold any of them.
     fn note_unbound(&mut self, name: &str, shown: BStr<'_>) {
         if self.unbound_is_error(name) {
-            // bash aborts a non-interactive shell with status 127 on a nounset
-            // unset-variable reference.
-            self.unbound_error = Some(127);
-            self.perrln(&bfmt![shown, b": unbound variable"]);
+            self.raise_unbound(shown);
         }
+    }
+
+    /// [`Shell::note_unbound`] without the "is this parameter exempt?" question,
+    /// for a reference that is not a parameter name at all. `${!@}` with no
+    /// positionals indirects through nothing and so reports `!@` even though
+    /// `$@` itself is never unset.
+    fn raise_unbound(&mut self, shown: BStr<'_>) {
+        // bash aborts a non-interactive shell with status 127 on a nounset
+        // unset-variable reference.
+        self.unbound_error = Some(127);
+        self.perrln(&bfmt![shown, b": unbound variable"]);
     }
 
     /// Whether a reference to unset `name` is an error at all. Checking this

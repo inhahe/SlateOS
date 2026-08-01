@@ -15187,6 +15187,21 @@ impl Shell {
                 if is_active {
                     cur.unwrap_or_default()
                 } else {
+                    // A parameter the shell answers for itself has nowhere to
+                    // put a default, and bash refuses before the word is even
+                    // expanded: `${1=d}`, `${@=d}` and `${!=d}` complain with
+                    // the parameter spelled as `$1` / `$@` / `$!`. Only the
+                    // *inactive* case asks — with a value in hand the `=` never
+                    // fires, so `set -- x; ${@=d}` is simply `x`. An
+                    // indirection is judged further down instead, by the name
+                    // it resolved to and after its default has run.
+                    if matches!(operand, Operand::Param)
+                        && !crate::parser::is_valid_name(name.as_bytes())
+                    {
+                        self.perrln(&format!("${name}: cannot assign in this way"));
+                        self.discard_error = Some(1);
+                        return Str::new();
+                    }
                     let v = self.expand_to_string(arg);
                     // Reached through a reference, the default is stored under
                     // the name the reference *resolved to*, and bash insists

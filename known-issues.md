@@ -25483,3 +25483,39 @@ subscript word for that to be expressible.
 **Impact.** A side-effecting array subscript inside `${…@a}` / `${…@A}` under
 `set -u`. No effect on the expansion's value, only on how many times the
 subscript's side effect happens.
+
+### TD-OILS-UNSET-FUNCNAME. `unset FUNCNAME` does not stop osh re-materialising it — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::refresh_funcname`, which
+rebuilds `FUNCNAME` (and `BASH_SOURCE`/`BASH_LINENO`) into `Shell::arrays` from
+the live call stack on every function entry and exit, with nothing recording
+that the script asked for the name to go away.
+
+**What.** bash lets `FUNCNAME` be unset, and unsetting it is permanent: the
+dynamic behaviour is destroyed for the rest of the shell, leaving an ordinary
+name that no longer tracks the call stack. osh keeps rebuilding it.
+
+```
+$ bash -c 'unset FUNCNAME; f(){ echo "[${FUNCNAME[0]-U}]"; }; f; FUNCNAME=x; f'
+[U]
+[x]
+$ osh -c '...same...'
+[f]
+[f]
+```
+
+Two ends of it agree already: at the top level `${FUNCNAME+s}` is empty in both,
+and `declare -p FUNCNAME` says `not found` in both. The divergence shows only
+*inside* a function after the `unset`. `PIPESTATUS` is not affected (bash
+re-materialises that one too, and osh matches); `BASH_SOURCE`/`BASH_LINENO`
+refuse to be unset at all in both.
+
+**Proper fix.** Give the shell a set of dynamic names the script has retired —
+`unset` adds to it, an explicit assignment need not remove it (bash's assignment
+just writes the now-ordinary variable) — and have `refresh_funcname` skip any
+name in it. The same set is what `unset` should consult for the other
+materialised arrays if they ever grow the behaviour.
+
+**Impact.** A script that unsets `FUNCNAME` and then reads it inside a function.
+Rare — `unset FUNCNAME` is nearly always a mistake — and independent of
+`set -u`, which reports the name identically either way.

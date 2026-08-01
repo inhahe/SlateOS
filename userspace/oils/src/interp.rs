@@ -13140,8 +13140,12 @@ impl Shell {
                     // stderr sink (an enclosing compound `2>` redirect, or the
                     // shell's real stderr).
                     match self.child_stdio_for_stderr() {
-                        Ok(s) => {
+                        Ok(ChildOut::Handle(s)) => {
                             cmd.stdout(s);
+                        }
+                        Ok(ChildOut::Sink(sink)) => {
+                            cmd.stdout(Stdio::piped());
+                            stdout_capture_fd = Some(sink);
                         }
                         Err(e) => {
                             self.perrln(&e.to_string());
@@ -30532,21 +30536,41 @@ impl Shell {
         }
     }
 
-    fn child_stdio_for_stderr(&self) -> Result<Stdio, String> {
+    fn child_stdio_for_stderr(&self) -> Result<ChildOut, String> {
         match self.stderr_stack.last() {
-            None | Some(StderrTarget::Buffer(_)) => Ok(Stdio::inherit()),
-            Some(StderrTarget::Discard) => Ok(Stdio::null()),
+            // Base fd 2: a persistent `exec 2> file` target if one is set, else
+            // a *dup of fd 2* — not `Stdio::inherit()`, because this descriptor
+            // is about to become the child's fd **1** (`cmd >&2`), and
+            // inheriting there would hand it the shell's stdout, which is where
+            // every `cmd >&2` used to land (TD-OILS-EXTERNAL-DUP-TO-STDERR).
+            None => match &self.exec_stderr {
+                // `exec 2>&0` left fd 2 open for reading only. The base fd 2
+                // path drops the child's diagnostics on the floor for that (as
+                // bash does, whose writes simply fail with nowhere to report
+                // it), so a dup of it drops them too — rather than refusing the
+                // redirect, which is what the generic helper would do.
+                Some(WriteFd::ReadOnly) => Ok(ChildOut::Handle(Stdio::null())),
+                Some(w) => child_out_from_write_fd(w, "exec stderr"),
+                None => dup_std_handle(false)
+                    .map(|f| ChildOut::Handle(Stdio::from(f)))
+                    .map_err(|e| format!("stderr: {e}")),
+            },
+            // fd 2 is a command substitution's capture buffer, which has no OS
+            // descriptor to give the child: pipe it and drain into the buffer,
+            // exactly as [`Shell::child_stdio_for_stdout`] does for fd 1.
+            Some(StderrTarget::Buffer(sink)) => Ok(ChildOut::Sink(sink.clone())),
+            Some(StderrTarget::Discard) => Ok(ChildOut::Handle(Stdio::null())),
             Some(StderrTarget::File(f)) => f
                 .try_clone()
-                .map(Stdio::from)
+                .map(|f| ChildOut::Handle(Stdio::from(f)))
                 .map_err(|e| format!("stderr: {e}")),
             Some(StderrTarget::Pipe(p)) => p
                 .try_clone()
-                .map(Stdio::from)
+                .map(|p| ChildOut::Handle(Stdio::from(p)))
                 .map_err(|e| format!("pipe: {e}")),
             Some(StderrTarget::WriteFd(f)) => f
                 .try_clone()
-                .map(Stdio::from)
+                .map(|f| ChildOut::Handle(Stdio::from(f)))
                 .map_err(|e| format!("stderr: {e}")),
         }
     }

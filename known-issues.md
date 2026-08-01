@@ -26381,7 +26381,7 @@ Note the reap point is asynchronous in bash but synchronous in osh, so the
 exact moment the variables vanish will differ for a coproc that exits with no
 `wait` and no intervening builtin; keep the corpus case away from that window.
 
-### TD-OILS-EXTERNAL-DUP-TO-STDERR. `cmd >&2` sends an *external* command's output to stdout — OPEN — 2026-08-01
+### TD-OILS-EXTERNAL-DUP-TO-STDERR. `cmd >&2` sent an *external* command's output to stdout — ✅ RESOLVED — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — the external-spawn redirection path.
 A builtin honours `>&2`; only a spawned process gets it wrong, so the two
@@ -26414,11 +26414,23 @@ data stream of any pipeline that uses it, and hiding the message from a
 `2>log`. Found while writing `coproc-second-warns-about-the-first.sh`, whose
 first draft replayed a captured stderr file with `sed … >&2`.
 
-**Proper fix.** Make the external path resolve a `>&N` target through the same
-table the builtin path uses, so fd 2 means the command's stderr — including
-when an earlier `exec 2>file` has moved it — rather than defaulting to the
-shell's `Out`. A corpus case should cover `>&2` on an external both bare and
-after `exec 2>file`, and both orders of `>&2 2>…`.
+**Root cause.** `child_stdio_for_stderr` answered `Stdio::inherit()` for the
+base case. That is right for a descriptor destined to *be* the child's fd 2,
+but this one becomes the child's fd **1** — and fd 1 inherited is the shell's
+stdout. It also ignored a persistent `exec 2> file` binding, and answered
+`inherit` for a capture buffer, which has no descriptor to inherit at all.
+
+**Fixed** by making it return a `ChildOut` — the same two-armed answer
+`child_stdio_for_stdout` gives — and resolving the base case the way the base
+fd 2 path already did: a persistent `exec 2>` target if one is set, otherwise
+`dup_std_handle(false)`, a genuine dup of the process's fd 2. A capture buffer
+is now `ChildOut::Sink`, so the child is piped and drained into it, and an
+`exec 2>&0` read-only binding drops the bytes as the base path does rather
+than refusing the redirect.
+
+Corpus case `external-dup-to-stderr.sh` covers the bare form, both orders of
+`>&2` and `2>…`, an enclosing compound `2>` redirect, a subshell `exec 2>`, a
+command substitution's buffer, and a pipeline with and without `2>&1`.
 
 ### TD-OILS-EXTERNAL-ARGV0-IS-THE-FULL-PATH. an external command sees its resolved path as `argv[0]`, not the word that named it — OPEN — 2026-08-01
 

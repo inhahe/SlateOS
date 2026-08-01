@@ -26682,7 +26682,7 @@ be `BadFd` and can pass its own. Fold in
 `TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING` at the same time, since the same
 `fd`-versus-default test applies here.
 
-### TD-OILS-WAIT-NOARGS-LEAVES-A-JOB-FOR-WAIT-N. an argument-less `wait` sometimes does not consume the job it waited for — OPEN (rare race) — 2026-08-01
+### TD-OILS-WAIT-NOARGS-LEAVES-A-JOB-FOR-WAIT-N. an argument-less `wait` sometimes does not consume the job it waited for — ✅ RESOLVED — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — the `wait` builtin's no-job-spec path
 and the bookkeeping (`Job::notified` / the reaped-status memory) that decides
@@ -26719,12 +26719,48 @@ likely, which is why only the full corpus run has hit it.
 Narrow, but it is exactly the shape a script uses to drain a job pool and then
 ask whether anything is left.
 
-**Proper fix.** Make the blocking branch of the no-args `wait` mark every job it
-waited for as reported, the same way the already-reaped branch does — ideally by
-funnelling both branches through one "consume this job" helper rather than
-duplicating the bookkeeping. Then add the two lines above to a corpus case in a
-form that forces the blocking branch (a body that sleeps briefly), so the fix is
-covered rather than merely believed.
+**Fixed** the same day, and the diagnosis above was wrong in an instructive way.
+The blocking branch marks the job perfectly well; what varied was *which* branch
+ran. `drain_jobs` splits the jobs into the ones it waited for and the ones it
+found already over, and reads `Job::exit_seen` to tell them apart — after calling
+`poll_jobs` to catch up first. That catch-up is the bug: bash learns of an exit
+asynchronously, from a `SIGCHLD` that arrived while it was busy, so what it knew
+when the `wait` was reached is what it had been *told*, not what it could find
+out by asking now. osh's glance is instantaneous and free, so a body that ended a
+microsecond earlier was filed as "already over" and spared.
+
+Two changes; see design-decisions.md §98 for the reasoning and the measurements.
+
+* `drain_jobs` records which jobs were `exit_seen` *before* its own catch-up
+  poll, and counts everything else as waited for.
+* `Job::born_at` — a job's exit is not *seen* until `JOB_EXIT_NOTICE_GRACE`
+  (20 ms) after it started, however finished the body looks. bash's job is a
+  forked child and hearing that it ended costs a fork, an exit and a signal, so
+  `( exit 3 ) & wait` always waits; osh's is a thread that can be over first.
+  The grace is measured in *time*, not in commands, because bash's is: four `:`
+  in a row buy bash nothing, and neither does a twenty-iteration `for ((…))`
+  loop, but a two-hundred-thousand-iteration one does — with no external command
+  anywhere in it. Only `exit_seen` is held back, not the reap, so `jobs` and
+  `wait` still report the status without delay.
+
+Two further divergences fell out of the same probe and were fixed with it:
+
+* `poll_jobs` now clears `Job::notified` when it reaps a job. A job that
+  *changes* state is owed to the user again — bash's `waitchld` clears
+  `J_NOTIFIED` on every status change for exactly this reason — so
+  `( sleep .3; exit 3 ) & jobs; sleep .6; jobs` reports it `Running` and then
+  `Exit 3`, where osh's first listing used to swallow the second.
+* `wait -n` no longer says `no such job` about a row it can see but has already
+  reported. Measured: `( exit 3 ) & p=$!; sleep .3; wait; jobs; wait -n $p` is a
+  *silent* 127 in bash, where `wait -n 12345` names the pid. The difference is
+  whether the row is still in the table, so spreading that same line over four
+  lines — which lets bash sweep at each input-unit boundary — makes bash name the
+  pid after all.
+
+Covered by `tests/corpus/wait-with-no-operands-and-a-job-that-just-ended.sh`,
+which pins both sides of the grace, the `$!`-sparing rule and the re-announcement
+rule, and was byte-identical to bash on both streams over three consecutive runs
+of each shell.
 
 ### TD-OILS-ARITH-FOR-LOOP-IS-SLOW. a `for ((…))` loop costs ~9× what bash charges — OPEN — 2026-08-01
 

@@ -1900,7 +1900,37 @@ struct Job {
     /// status down itself — is not one. The distinction decides whether an
     /// operand-less `wait` counts the job as one it waited *for*.
     exit_seen: bool,
+    /// When this job was started. Its exit is not *seen* until
+    /// [`JOB_EXIT_NOTICE_GRACE`] has passed, however finished the body looks.
+    ///
+    /// bash's background job is a forked child, and hearing that it ended costs
+    /// a fork, an exit and a `SIGCHLD` — so `( exit 3 ) & wait` always waits,
+    /// because at the `wait` the child is not merely alive but barely started.
+    /// osh's job is a thread, which can be over before the `&` has finished
+    /// being executed, and an operand-less `wait` treats the two cases
+    /// differently (see [`Shell::drain_jobs`]).
+    ///
+    /// The grace is measured in *time* rather than in commands because that is
+    /// what bash measures. Eight `:` in a row do not give bash long enough to
+    /// hear anything, and neither does a `for ((…))` loop of twenty — but one
+    /// of two hundred thousand does, with no external command anywhere in it,
+    /// and so does a single `sleep 0.05`. No count of commands separates those.
+    ///
+    /// Only `exit_seen` is held back, not the reap itself: the status is still
+    /// collected as soon as it is available, so `jobs` and `wait` report it
+    /// without delay. What waits is the shell's claim to have *heard* about it.
+    born_at: std::time::Instant,
 }
+
+/// How long a background job's death goes unnoticed after it was started — the
+/// wall-clock stand-in for what bash spends on a fork, an exit and a `SIGCHLD`.
+/// See [`Job::born_at`], and design-decisions.md §98.
+///
+/// Measured bounds on the reference bash: a twenty-iteration builtin loop is
+/// still inside the window, and a `sleep 0.05` is outside it. 20 ms sits an
+/// order of magnitude above any run of builtins and comfortably below the
+/// shortest delay bash was seen to notice within.
+const JOB_EXIT_NOTICE_GRACE: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// What the word after a `<&`/`>&` names — see [`Shell::classify_dup_word`].
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -13695,6 +13725,7 @@ impl Shell {
                 // A job that never got off the ground is one the shell knows
                 // the fate of the moment it exists.
                 exit_seen: status.is_some(),
+                born_at: std::time::Instant::now(),
                 status,
                 signal: None,
                 no_hup: false,
@@ -13759,6 +13790,7 @@ impl Shell {
             no_hup: false,
             notified: false,
             exit_seen: false,
+            born_at: std::time::Instant::now(),
         });
         self.note_new_job(id);
         self.last_bg_pid = Some(pid);
@@ -13899,6 +13931,7 @@ impl Shell {
             no_hup: false,
             notified: false,
             exit_seen: false,
+            born_at: std::time::Instant::now(),
         });
         self.note_new_job(id);
         self.coproc_tracked = Some(TrackedCoproc {
@@ -19809,7 +19842,19 @@ impl Shell {
             {
                 // Finished: reap it (join the thread / collect the exit code).
                 job.status = Some(job.child.take().map_or(1, JobBody::wait_blocking));
-                job.exit_seen = true;
+                // A job that *changes* state is owed to the user again, however
+                // recently it was listed — bash's `waitchld` clears `J_NOTIFIED`
+                // on every status change for exactly this reason. So
+                // `( exit 3 ) & jobs` reports it `Running` and a later `jobs`
+                // still reports it `Exit 3`, where without this the first
+                // listing would swallow the second.
+                job.notified = false;
+                // …but a job started a moment ago is one bash could not have
+                // heard about yet, whatever osh's thread has managed: hearing
+                // costs it a fork, an exit and a signal. See [`Job::born_at`].
+                if job.born_at.elapsed() >= JOB_EXIT_NOTICE_GRACE {
+                    job.exit_seen = true;
+                }
             }
         }
         self.dispose_reaped_coproc();
@@ -20408,17 +20453,26 @@ impl Shell {
     /// has to do before it can call its output complete — bash's collecting pipe
     /// stays open as long as any child still holds a copy of its write end.
     ///
-    /// Only the jobs actually blocked on are marked: one that had already
-    /// finished before the `wait` was reached is not something the `wait`
-    /// reported, so it stays unreported and a later `jobs` still announces it.
+    /// Only the jobs the shell had not already been *told* the end of are
+    /// marked: one whose death it had heard of before the `wait` was reached is
+    /// not something the `wait` reported, so it stays unreported and a later
+    /// `jobs` still announces it.
     ///
     /// No status comes back because neither caller reports one: an operand-less
     /// `wait` names no job and so returns 0, and a command substitution's result
     /// is its output, not its jobs' fates.
     fn drain_jobs(&mut self) {
-        // Reap first, so "still had a live body" means what it meant when the
-        // `wait` was reached. bash learns of an exit asynchronously, so a job
-        // that had already finished is not one this `wait` waited for.
+        // What the shell already knew, recorded *before* the catch-up reap
+        // below. bash learns of an exit asynchronously — from a SIGCHLD that
+        // arrived while it was doing something else — so what it knew when the
+        // `wait` was reached is what it had been told, not what it could find
+        // out by asking now. Polling first and then reading `exit_seen` would
+        // count the `wait`'s own instantaneous glance as prior knowledge, and
+        // so treat a job that ended a microsecond ago as one it never waited
+        // for.
+        let known: Vec<usize> =
+            self.jobs.iter().filter(|j| j.exit_seen).map(|j| j.id).collect();
+        // Reap anyway, so a job whose body is over does not block below.
         self.poll_jobs();
         let mut waited: Vec<usize> = Vec::new();
         for job in &mut self.jobs {
@@ -20426,10 +20480,11 @@ impl Shell {
                 job.status = Some(body.wait_blocking());
                 job.exit_seen = true;
                 waited.push(job.id);
-            } else if !job.exit_seen {
+            } else if !known.contains(&job.id) {
                 // Dead, but not as far as the shell knew a moment ago — a job
-                // `kill` reaped for itself. bash, which would not have heard
-                // yet, blocks on it here, so it counts as waited for too.
+                // `kill` reaped for itself, or one whose body ended just now.
+                // bash, which would not have heard yet, blocks on it here, so
+                // it counts as waited for too.
                 job.exit_seen = true;
                 waited.push(job.id);
             }
@@ -20667,14 +20722,13 @@ impl Shell {
         // answers with the next job to finish, and one whose death has been
         // announced already did that; a row lingering unswept after the
         // announcement (see `notified`) is there for a `jobs`/`wait %1` to read,
-        // not for `-n` to re-report. bash goes as far as denying it exists:
-        // `( exit 3 ) & p=$!; sleep .3; wait; jobs; wait -n $p` reports
-        // `wait: <pid>: no such job` and 127, where osh answered 3. That
-        // *timing*-dependent leftover is what made
-        // `wait_without_operands_names_no_job` flake under parallel test load:
-        // an operand-less `wait` spares the `$!` job from being marked reported
-        // only when it had already finished before the wait, so whether a later
-        // `-n` found a stale row came down to how fast the job's thread ran.
+        // not for `-n` to re-report. It is not, however, something `-n` complains
+        // about: bash names only the ids it cannot find at all, so
+        // `( exit 3 ) & p=$!; sleep .3; wait; jobs; wait -n $p` is a silent 127
+        // where `wait -n 12345` is a `no such job` one. The difference is whether
+        // the row is still there, and bash sweeps at the end of an input unit —
+        // so putting that same line on four lines instead of one makes bash
+        // name the pid after all.
         let candidates: Vec<usize> = if operands.is_empty() {
             self.jobs
                 .iter()
@@ -20687,7 +20741,10 @@ impl Shell {
                 match self.lookup_job(spec, BareNumber::Pid) {
                     JobLookup::Found(idx) if !self.jobs[idx].notified => v.push(self.jobs[idx].id),
                     JobLookup::Ambiguous(text) => self.ambiguous_job_spec("wait", &text),
-                    JobLookup::Found(_) | JobLookup::NotFound => {
+                    // Found, but already reported: not a candidate, and not a
+                    // complaint either — bash can see the row perfectly well.
+                    JobLookup::Found(_) => {}
+                    JobLookup::NotFound => {
                         self.berrln(&bfmt![self.err_prefix(), b"wait: ", spec, b": no such job"]);
                     }
                 }
@@ -52367,6 +52424,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// the job is long since known to be over; a test that backgrounds a job and
     /// looks at it in the same breath would instead catch it still running.
     fn settle_job(sh: &mut Shell, id: usize) {
+        // Past the grace in which a job's death is not yet news (see
+        // [`Job::born_at`]) — "settled" has to mean the shell will admit to
+        // knowing, not merely that the body is over.
+        std::thread::sleep(JOB_EXIT_NOTICE_GRACE + std::time::Duration::from_millis(5));
         loop {
             sh.poll_jobs();
             let Some(job) = sh.jobs.iter().find(|j| j.id == id) else {

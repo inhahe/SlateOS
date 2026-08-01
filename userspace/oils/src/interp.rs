@@ -14310,15 +14310,11 @@ impl Shell {
         match &r.varfd {
             Some(name) => {
                 if redir_is_close(r) {
-                    // `{v}>&-`: operate on the fd currently held in `$v`.
-                    // A descriptor number is decimal ASCII, so a value that is
-                    // not text cannot name one — the same "ambiguous redirect"
-                    // any other non-numeric value gets.
-                    return match self
-                        .vars
-                        .get(name)
-                        .and_then(|s| bytes::as_str(s))
-                        .and_then(|s| s.parse::<i32>().ok())
+                    // `{v}>&-`: operate on the fd currently held in `$v`. An
+                    // unset or empty variable names no descriptor, and neither
+                    // does a value outside the range a descriptor can have —
+                    // see [`varfd_close_target`] for the whole rule.
+                    return match self.vars.get(name).map(Vec::as_slice).and_then(varfd_close_target)
                     {
                         Some(n) => Ok(n),
                         None => Err(bfmt![name, b": ambiguous redirect"]),
@@ -35602,6 +35598,56 @@ fn redir_is_close(r: &Redirect) -> bool {
         && matches!(r.target.parts.as_slice(), [WordPart::Literal(s)] if s.as_slice() == b"-")
 }
 
+/// Which descriptor a `{v}>&-` closes, read out of `$v`'s value — `None` if the
+/// value names none, which the caller reports as an ambiguous redirect.
+///
+/// bash reads it with `legal_number`, i.e. `strtoimax` over the *whole* string:
+/// surrounding whitespace is skipped, so `v=' 10 '` closes fd 10, and a leading
+/// `+` or `-` is a sign, so `v=+1` closes fd 1. It then refuses anything outside
+/// `0 ..= INT_MAX`, which is why `v=-1` and `v=2147483648` are ambiguous
+/// redirects rather than closes of nothing. A number naming a descriptor that is
+/// not open is not an error — `close(2)`'s `EBADF` is ignored, as it is for a
+/// literal `9>&-`.
+///
+/// A value that is not a number **at all** — `abc`, `1 2`, or a run of digits
+/// that overflows `intmax_t` — is bash's one loose end here, and osh does not
+/// copy it: `legal_number` zeroes its result on failure and `redir_varvalue`
+/// returns that unchecked, so bash closes **fd 0** and `u=abc; exec {u}>&-`
+/// silently takes the shell's stdin away with status 0. That is a bug rather
+/// than a rule, and it gets the same refusal an out-of-range number does. See
+/// TD-OILS-VARFD-CLOSE-OF-A-NON-NUMBER-CLOSES-STDIN in `known-issues.md`.
+fn varfd_close_target(value: BStr<'_>) -> Option<i32> {
+    // C's `isspace` in the "C" locale, which is what `strtoimax` skips — and
+    // one character wider than Rust's `is_ascii_whitespace`, which omits the
+    // vertical tab.
+    let ws = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r');
+    let mut s = value;
+    while s.first().is_some_and(ws) {
+        s = s.get(1..).unwrap_or_default();
+    }
+    while s.last().is_some_and(ws) {
+        s = s.get(..s.len().saturating_sub(1)).unwrap_or_default();
+    }
+    let (negative, digits) = match s.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        Some((b'+', rest)) => (false, rest),
+        _ => (false, s),
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    // Overflow is "not a number" to `legal_number` (it sets `errno`), so it
+    // takes the same refusal every other non-number does.
+    let mut n: i64 = 0;
+    for d in digits {
+        n = n.checked_mul(10)?.checked_add(i64::from(d - b'0'))?;
+    }
+    if negative && n != 0 {
+        return None;
+    }
+    i32::try_from(n).ok()
+}
+
 /// Duplicate the process's real standard stdout (`is_stdout`) or stderr into an
 /// owned [`File`]. Used to snapshot fd 1 / fd 2's *terminal* sink for
 /// `exec 3>&1` / `exec 3>&2` when that fd is not currently redirected to a file.
@@ -56710,6 +56756,44 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "osh: v: readonly variable\nosh: v: cannot assign fd to variable\n"
         );
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn varfd_close_reads_its_variable_the_way_bash_does() {
+        // `{v}>&-` names its descriptor by the *value* of `$v`, which bash reads
+        // with `legal_number`: `strtoimax` over the whole string, so surrounding
+        // whitespace is skipped and a leading sign is a sign — and then refuses
+        // anything outside `0 ..= INT_MAX`. Regression: osh used `str::parse`,
+        // which rejects ` 10 ` (ambiguous where bash closes fd 10) and accepts
+        // `-1` (a silent no-op where bash refuses).
+        assert_eq!(varfd_close_target(b" 10 "), Some(10));
+        assert_eq!(varfd_close_target(b"\t\n\x0b\x0c\r7 "), Some(7));
+        assert_eq!(varfd_close_target(b"+1"), Some(1));
+        assert_eq!(varfd_close_target(b"010"), Some(10));
+        assert_eq!(varfd_close_target(b"-0"), Some(0));
+        assert_eq!(varfd_close_target(b"2147483647"), Some(i32::MAX));
+        // Refused: no value, no digits, a sign with nothing behind it, a
+        // negative descriptor, and one past `INT_MAX`.
+        for bad in [
+            &b""[..],
+            b" ",
+            b"-1",
+            b" -1 ",
+            b"+",
+            b"2147483648",
+            b"abc",
+            b"1x",
+            b"1 2",
+            b"0x10",
+            b"999999999999999999999",
+        ] {
+            assert_eq!(varfd_close_target(bad), None, "bad: {bad:?}");
+        }
+        // …and the shell reports that refusal as an ambiguous redirect, naming
+        // the variable rather than its value.
+        let (o, s) = run("v=-1; { exec {v}>&-; } 2>&1; echo \"rc=$?\"");
+        assert_eq!(o, "osh: v: ambiguous redirect\nrc=1\n");
+        assert_eq!(s, 0);
     }
 
     #[test]

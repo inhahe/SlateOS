@@ -3748,6 +3748,9 @@ impl Shell {
             let base = self.positional.clone();
             self.push_arg_frame(&base);
         }
+        if name == "extdebug" {
+            self.sync_extdebug_tracing(enable);
+        }
         self.refresh_bashopts();
         true
     }
@@ -11717,6 +11720,23 @@ impl Shell {
     /// Whether the `extdebug` shell option is currently enabled.
     fn extdebug_on(&self) -> bool {
         self.shopt.get("extdebug").copied().unwrap_or(false)
+    }
+
+    /// Bring `functrace`/`errtrace` into line with an `extdebug` that has just
+    /// been named by `shopt -s`/`-u` (or `-O`/`+O`).
+    ///
+    /// A debugger wants the DEBUG, RETURN and ERR traps to reach into the
+    /// functions it is stepping through, so bash sets `set -T` and `set -E`
+    /// alongside extdebug rather than asking for them separately. The write goes
+    /// the one way: it happens whenever extdebug is *named*, whatever it held
+    /// before and whatever the two options held before — `set -T -E` followed by
+    /// `shopt -u extdebug` leaves both off even though extdebug was never on —
+    /// and a later `set +T` turns tracing off without disturbing extdebug.
+    fn sync_extdebug_tracing(&mut self, enable: bool) {
+        self.functrace = enable;
+        self.errtrace = enable;
+        // Both are `set -o` options, so `$SHELLOPTS` and `$-` have to follow.
+        self.refresh_shellopts();
     }
 
     /// Push an argument frame onto the `BASH_ARGC`/`BASH_ARGV` stack: the frame's
@@ -25587,6 +25607,9 @@ impl Shell {
         // captures a static "base" argument frame equal to the current positional
         // parameters (see the extdebug base-frame handling below).
         let extdebug_before = self.extdebug_on();
+        // Whether `extdebug` was named at all, which is what decides the
+        // `functrace`/`errtrace` write — not whether it *changed*.
+        let mut named_extdebug = false;
         for name in names {
             let Some(name) = bytes::as_str(name.as_slice()).filter(|n| shopt_is_known(n)) else {
                 self.berrln(&bfmt![
@@ -25603,8 +25626,12 @@ impl Shell {
                 // this is not the error an unknown name gets.
                 continue;
             }
+            named_extdebug |= name == "extdebug";
             self.shopt.insert(name.to_string(), flags.set);
             changed = true;
+        }
+        if named_extdebug {
+            self.sync_extdebug_tracing(flags.set);
         }
         // On an extdebug OFF→ON transition, seed the BASH_ARGC/BASH_ARGV stack
         // with a base frame holding the shell's *current* positional parameters.

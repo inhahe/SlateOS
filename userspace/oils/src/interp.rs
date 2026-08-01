@@ -38937,6 +38937,58 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn bang_is_the_parameter_when_no_indirection_follows() {
+        // `${!…}` is an indirection only when what follows the `!` could name a
+        // parameter. Otherwise the `!` *is* the parameter — `$!`, the last
+        // background job's pid — and the rest is an operator on it. The pid
+        // itself varies, so each case is checked against `$!`.
+        for expr in ["${!}", "${!-x}", "${!:-x}", "${!=x}", "${!:?m}", "${!^}", "${!,}"] {
+            let script = format!("true & pid=$!; [ \"{expr}\" = \"$pid\" ] && echo same");
+            assert_eq!(run(&script).0, "same\n", "{expr}");
+        }
+        assert_eq!(run("true & echo \"[${!+y}]\"").0, "[y]\n");
+        // (`run` expands history, which would eat the `!` of `${#!}`.)
+        assert_eq!(
+            run_script("true & pid=$!; [ \"${#!}\" = \"${#pid}\" ] && echo same").0,
+            "same\n"
+        );
+        // A leftover that opens no operator is still a bad substitution — and a
+        // fatal one, so the rest of the script never runs.
+        for expr in ["${!$}", "${!!}", "${! }", "${![0]}", "${!)}"] {
+            let (out, code) = run_script(&format!("echo \"[{expr}]\"; echo after"));
+            assert_eq!((out.as_str(), code), ("", 1), "{expr}");
+        }
+        // Round-trips through the unparser.
+        assert_eq!(
+            crate::bytes::trim(&crate::unparse::program_inline(
+                &parse("echo ${!-x}".as_bytes()).unwrap()
+            )),
+            b"echo ${!-x}".as_slice()
+        );
+    }
+
+    #[test]
+    fn a_special_parameter_may_be_an_indirect_referent_with_a_modifier() {
+        // The referent need not be a plain name: a positional or special
+        // parameter reads the same way, and carries a modifier the same way.
+        let setup = "one=ONEVAL; two=TWOVAL; set -- one two;";
+        assert_eq!(run(&format!("{setup} echo \"[${{!1}}]\"")).0, "[ONEVAL]\n");
+        assert_eq!(run(&format!("{setup} echo \"[${{!1,,}}]\"")).0, "[oneval]\n");
+        assert_eq!(run(&format!("{setup} echo \"[${{!1#ONE}}]\"")).0, "[VAL]\n");
+        // `$#` is 2 here, so the referent's *value* is `2` and the parameter
+        // read through it is `$2`.
+        assert_eq!(run(&format!("{setup} echo \"[${{!#}}]\"")).0, "[two]\n");
+        assert_eq!(run(&format!("{setup} echo \"[${{!#@Q}}]\"")).0, "['two']\n");
+        assert_eq!(run(&format!("{setup} echo \"[${{!#:-z}}]\"")).0, "[two]\n");
+        // What is left over must still open an operator on the referent, so a
+        // `1` after `${!#` is no modifier, and `^` opens none on `$#` at all.
+        for expr in ["${!#1}", "${!?m}", "${!#^}", "${!@Q}", "${!*Q}"] {
+            let (out, code) = run_script(&format!("{setup} echo \"[{expr}]\"; echo after"));
+            assert_eq!((out.as_str(), code), ("", 1), "{expr}");
+        }
+    }
+
+    #[test]
     fn indirect_expansion_bad_pointer_is_fatal() {
         // An indirect expansion whose pointer is unset (or holds a malformed
         // name) is a fatal word-expansion error in a non-interactive shell

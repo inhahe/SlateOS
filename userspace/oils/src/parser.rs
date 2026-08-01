@@ -3278,7 +3278,15 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: LexOpts) -> Result<WordPar
             });
         }
     }
-    if let Some(after_bang) = raw.strip_prefix(b"!") {
+    // Indirection needs something that could name a parameter right after the
+    // `!`. Where there is none — `${!}`, `${!-x}`, `${!:0:1}` — bash reads the
+    // `!` itself as the parameter (`$!`, the last background job's pid) and the
+    // rest as an operator on it, so those fall through to the general path
+    // below instead of being refused here.
+    if let Some(after_bang) = raw.strip_prefix(b"!")
+        && let Some(first) = bytes::chars(after_bang).next()
+        && is_indirection_starter(syn(first))
+    {
         // `${!prefix*}` / `${!prefix@}` — names of set variables beginning with
         // `prefix`. Distinguished from the array-keys form (`${!a[@]}`) by
         // ending in a bare `*`/`@` (no closing `]`). A valid name prefix is
@@ -3344,27 +3352,29 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: LexOpts) -> Result<WordPar
             // (`${!ref:-def}`, `${!ref^^}`, `${!ref#pat}`, `${!ref/a/b}`, …).
             // Parse the modifier as if it were written against `ref` directly;
             // the placeholder name is rewritten to the resolved target at
-            // expansion time. Only scalar modifiers combine with indirection,
-            // and only a plain-name referent may carry a trailing modifier.
-            if is_valid_name(name.as_bytes()) {
-                let mut modifier_src = name.clone().into_bytes();
-                modifier_src.extend(bytes::from_chars(remaining.iter().copied()));
-                let target = parse_braced_param(&modifier_src, opts)?;
-                if matches!(
-                    target,
-                    WordPart::ParamOp { .. }
-                        | WordPart::ParamTrim { .. }
-                        | WordPart::ParamSubstr { .. }
-                        | WordPart::ParamReplace { .. }
-                        | WordPart::ParamCase { .. }
-                        | WordPart::ParamTransform { .. }
-                ) {
-                    return Ok(WordPart::IndirectOp {
-                        refname: name,
-                        index,
-                        target: Box::new(target),
-                    });
-                }
+            // expansion time. Any referent may carry one — `${!#:-z}` and
+            // `${!1^}` are as good as `${!name^}` — so re-parsing against the
+            // referent is also what draws the line: it is a modifier only if
+            // what comes back is one, which is how `${!@Q}` (a `Q` that opens
+            // no operator on `$@`) and `${!#1}` (a length, not a modifier) end
+            // up refused.
+            let mut modifier_src = name.clone().into_bytes();
+            modifier_src.extend(bytes::from_chars(remaining.iter().copied()));
+            let target = parse_braced_param(&modifier_src, opts)?;
+            if matches!(
+                target,
+                WordPart::ParamOp { .. }
+                    | WordPart::ParamTrim { .. }
+                    | WordPart::ParamSubstr { .. }
+                    | WordPart::ParamReplace { .. }
+                    | WordPart::ParamCase { .. }
+                    | WordPart::ParamTransform { .. }
+            ) {
+                return Ok(WordPart::IndirectOp {
+                    refname: name,
+                    index,
+                    target: Box::new(target),
+                });
             }
         }
         // bash accepts this at parse time and rejects it only during expansion
@@ -3883,10 +3893,20 @@ fn balanced_subscript_end(s: BStr<'_>) -> Option<usize> {
     None
 }
 
+/// Could `c`, standing right after the `!` of a `${!…}`, begin the name of the
+/// parameter being indirected through?
+///
+/// This is the whole test bash makes before reading a `${!…}` as an indirection
+/// at all: a name, a digit, or one of `# ? @ *`. Notably absent is `-`, so
+/// `${!-x}` is `$!` with a default rather than an indirection through `$-`, as
+/// are all the operator characters — `${!:0:1}` slices `$!`.
+fn is_indirection_starter(c: char) -> bool {
+    is_name_start(c) || c.is_ascii_digit() || matches!(c, '#' | '?' | '@' | '*')
+}
+
 /// A referent usable in a *bare* indirect expansion `${!name}`: a plain
-/// identifier, a positional parameter (all digits, `${!1}`), or a special
-/// single-char parameter. bash accepts `#`, `?`, and `-` here but **rejects**
-/// `$` and `!` (`${!$}`/`${!!}` are a "bad substitution"). A bare `@`/`*` is
+/// identifier, a positional parameter (all digits, `${!1}`), or one of the
+/// special parameters [`is_indirection_starter`] admits. A bare `@`/`*` is
 /// indirect expansion through the positional list: `${!@}` / `${!*}` treat
 /// each positional parameter's *value* as a variable name to indirect through
 /// (bash then rejects them as "invalid variable name" unless empty). Only a
@@ -3894,7 +3914,7 @@ fn balanced_subscript_end(s: BStr<'_>) -> Option<usize> {
 fn is_indirect_referent(name: &str) -> bool {
     is_valid_name(name.as_bytes())
         || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
-        || matches!(name, "#" | "?" | "-" | "@" | "*")
+        || matches!(name, "#" | "?" | "@" | "*")
 }
 
 /// True when a `>&`/`<&` target denotes an fd duplication (a bare number or

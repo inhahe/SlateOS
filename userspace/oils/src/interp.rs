@@ -2670,6 +2670,24 @@ pub struct Shell {
     /// capture). Consulted by [`Shell::emit_stderr`] and external children as
     /// the base fd-2 sink beneath any `stderr_stack` entry.
     exec_stderr: Option<WriteFd>,
+    /// The [`Shell::stderr_stack`] depth at which the current [`Shell::exec_stderr`]
+    /// was installed — how many entries were already on the stack when the
+    /// `exec` ran.
+    ///
+    /// It is what lets a runtime `exec 2>…` *shadow* an enclosing body's stderr
+    /// redirect instead of being buried under it. `{ exec 2> f; cd /nope; } 2>&1`
+    /// must put the diagnostic in `f`, not in the `2>&1` sink: the group's entry
+    /// was pushed *before* the `exec`, so the `exec` is the later word on fd 2
+    /// and wins. Reverse the order — `exec 2> f; { cd /nope; } 2>&1` — and the
+    /// group's entry is the later one, so it wins instead. Depth is exactly the
+    /// question "which came last", which a bare `Option` cannot answer: without
+    /// it the stack top always won and the `exec` did nothing until the body
+    /// ended (TD-OILS-EXEC-STDERR-DOES-NOT-SHADOW-AN-ENCLOSING-REDIRECT).
+    ///
+    /// The fd 1 twin of this is [`Shell::exec_stdout_shadowing`], which can ask
+    /// the cheaper question — fd 1's ambient sink is a value (`Out`), not a
+    /// stack, so "is it not the real fd 1?" suffices there.
+    exec_stderr_depth: usize,
     /// Persistent stdin source set by a redirection-only `exec < file` (or an
     /// `exec << EOF` here-doc): the file's bytes are read once into a
     /// position-tracking cursor so successive ambient `read` calls (and an
@@ -3619,6 +3637,7 @@ impl Shell {
             stderr_stack: Vec::new(),
             exec_stdout: None,
             exec_stderr: None,
+            exec_stderr_depth: 0,
             exec_stdin: None,
             exec_stdin_write: None,
             stdin_redirected: false,
@@ -7402,9 +7421,18 @@ impl Shell {
             (None, false) => None,
         };
         let saved_exec_stdout = scoped_stdout.map(|w| self.exec_stdout.replace(w));
-        let saved_exec_stderr = stderr_file
-            .as_ref()
-            .map(|w| self.exec_stderr.replace(w.clone()));
+        // fd 2's save covers more ground than fd 1's: it is taken whenever the
+        // body has *any* stderr redirect in force, not only one that produced a
+        // `stderr_file`. A `{ …; } 2>&1` collected by a capture pushes a
+        // `Buffer` entry and leaves `stderr_file` unset, and a runtime
+        // `exec 2>…` inside such a body now shadows that entry — so without a
+        // save here the `exec` would go on applying after the body ended,
+        // whereas bash restores fd 2 with the rest of the group's redirects.
+        let saved_exec_stderr =
+            (stderr_file.is_some() || pushed_stderr).then(|| match &stderr_file {
+                Some(w) => (self.exec_stderr.replace(w.clone()), self.exec_stderr_depth),
+                None => (self.exec_stderr.clone(), self.exec_stderr_depth),
+            });
         // fd 0 gets the same treatment, for the same reason: the group's `< file`
         // rebinds the *ambient* input for the body, so a subshell forked inside
         // it inherits the descriptor. That is what makes the `$( … )` in
@@ -7469,8 +7497,9 @@ impl Shell {
         if let Some(prev) = saved_exec_stdout {
             self.exec_stdout = prev;
         }
-        if let Some(prev) = saved_exec_stderr {
+        if let Some((prev, prev_depth)) = saved_exec_stderr {
             self.exec_stderr = prev;
+            self.exec_stderr_depth = prev_depth;
         }
         if let Some((prev, prev_write)) = saved_exec_stdin {
             self.exec_stdin = prev;
@@ -8049,6 +8078,9 @@ impl Shell {
             // `exec > file` / `exec 2> file` redirection.
             exec_stdout: self.exec_stdout.clone(),
             exec_stderr: self.exec_stderr.clone(),
+            // The stack is cloned whole just above, so the depth the `exec` was
+            // installed at still names the same entry in the clone.
+            exec_stderr_depth: self.exec_stderr_depth,
             // A subshell inherits fd 0 itself, not a copy of it: a `fork` shares
             // the open file description, so what the subshell consumes the
             // parent no longer sees (`x=$(read a; echo "$a"); read b` reads two
@@ -14171,7 +14203,7 @@ impl Shell {
                         self.exec_stdin_write = Some(wr);
                     }
                     1 => self.exec_stdout = Some(WriteFd::File(wr)),
-                    2 => self.exec_stderr = Some(WriteFd::File(wr)),
+                    2 => self.set_exec_stderr(Some(WriteFd::File(wr))),
                     _ => {
                         self.open_fds.insert(fd, rd);
                         self.open_write_fds.insert(fd, WriteFd::File(wr));
@@ -14205,7 +14237,7 @@ impl Shell {
                 // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one handle.
                 let a = WriteFd::File(std::sync::Arc::new(f));
                 self.exec_stdout = Some(a.clone());
-                self.exec_stderr = Some(a);
+                self.set_exec_stderr(Some(a));
             }
             RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
                 let target = self.expand_to_string(&r.target);
@@ -14227,7 +14259,7 @@ impl Shell {
                 let a = std::sync::Arc::new(f);
                 match fd {
                     0 | 1 => self.exec_stdout = Some(WriteFd::File(a)),
-                    2 => self.exec_stderr = Some(WriteFd::File(a)),
+                    2 => self.set_exec_stderr(Some(WriteFd::File(a))),
                     _ => {
                         self.open_write_fds.insert(fd, WriteFd::File(a));
                         self.open_fds.remove(&fd);
@@ -14297,7 +14329,7 @@ impl Shell {
                     // that closed fd 2 has nowhere to report a failed write, so
                     // its diagnostics are dropped — but they must not appear on
                     // the terminal instead.
-                    2 => self.exec_stderr = Some(WriteFd::Closed),
+                    2 => self.set_exec_stderr(Some(WriteFd::Closed)),
                     _ => {
                         self.open_write_fds.remove(&fd);
                         self.open_fds.remove(&fd);
@@ -14333,7 +14365,7 @@ impl Shell {
                 })?;
                 match fd {
                     1 => self.exec_stdout = src,
-                    2 => self.exec_stderr = src,
+                    2 => self.set_exec_stderr(src),
                     _ => {
                         // A user-space write fd needs a concrete handle: reuse
                         // the source handle, or (when the source is a std fd
@@ -14357,7 +14389,7 @@ impl Shell {
                     .map_err(|e| bfmt![target, b": ", e.to_string()])?;
                 let a = WriteFd::File(std::sync::Arc::new(f));
                 self.exec_stdout = Some(a.clone());
-                self.exec_stderr = Some(a);
+                self.set_exec_stderr(Some(a));
             }
             // Any other redirector has no `>&file` fallback. bash names the
             // *expansion* here, not the word as written.
@@ -14391,7 +14423,7 @@ impl Shell {
                     // [`Shell::apply_persistent_dup_out`].
                     self.exec_stdout = Some(WriteFd::Closed);
                 } else if fd == 2 {
-                    self.exec_stderr = Some(WriteFd::Closed);
+                    self.set_exec_stderr(Some(WriteFd::Closed));
                 } else {
                     self.open_fds.remove(&fd);
                     self.open_write_fds.remove(&fd);
@@ -18473,7 +18505,7 @@ impl Shell {
                     if rc == 0 && let Some((path, append)) = &redir.stderr {
                         match open_out(&self.cwd, path, *append) {
                             Ok(f) => {
-                                self.exec_stderr = Some(WriteFd::File(std::sync::Arc::new(f)));
+                                self.set_exec_stderr(Some(WriteFd::File(std::sync::Arc::new(f))));
                             }
                             Err(e) => {
                                 let msg =
@@ -18486,7 +18518,8 @@ impl Shell {
                     // `2>&1` with fd 1 not a file: fd 2 mirrors the fd 1 target
                     // (shares the same handle — a true dup, one offset).
                     if rc == 0 && redir.stderr_to_stdout {
-                        self.exec_stderr = self.exec_stdout.clone();
+                        let w = self.exec_stdout.clone();
+                        self.set_exec_stderr(w);
                     }
                     // `1>&2` with fd 2 not a file: fd 1 mirrors the fd 2 target.
                     if rc == 0 && redir.stdout_to_stderr {
@@ -18507,7 +18540,7 @@ impl Shell {
                     }
                     if rc == 0 && let Some(n) = redir.stderr_to_fd {
                         match self.write_fd_for(n, redir) {
-                            Some(w) => self.exec_stderr = Some(w),
+                            Some(w) => self.set_exec_stderr(Some(w)),
                             None => {
                                 self.perrln(&format!("{n}: Bad file descriptor"));
                                 rc = 1;
@@ -30730,11 +30763,36 @@ impl Shell {
         self.emit_stderr_depth(bytes, self.stderr_stack.len());
     }
 
-    /// Like [`emit_stderr`], but only consider the first `depth` entries of the
-    /// `stderr_stack` when choosing the sink. `depth == stderr_stack.len()` is
-    /// the normal case; a smaller depth lets `>&2` on a command that also has
-    /// its own `2>file` redirect skip that just-pushed per-command stderr and
-    /// target the *pre-redirect* sink (the dup-first ordering — see TD-OILS14).
+    /// Install a persistent fd 2 target — `exec 2> file`, `exec 2>&-`,
+    /// `exec 2>&N`, or the fd 2 half of `exec &> file`.
+    ///
+    /// Always used in place of assigning [`Shell::exec_stderr`] directly, so
+    /// that [`Shell::exec_stderr_depth`] records where in the enclosing stderr
+    /// stack the `exec` happened and the new target can shadow the entries
+    /// already below it.
+    fn set_exec_stderr(&mut self, w: Option<WriteFd>) {
+        self.exec_stderr = w;
+        self.exec_stderr_depth = self.stderr_stack.len();
+    }
+
+    /// The stderr target in force `depth` entries into the stack, or `None`
+    /// when fd 2 falls through to its base binding (a persistent `exec 2>…`,
+    /// else the shell's real stderr).
+    ///
+    /// A stack entry only counts while it is still the *later* word on fd 2: an
+    /// `exec 2>…` that ran with the entry already pushed rebound fd 2 after it
+    /// and therefore supersedes it, which is what
+    /// [`Shell::exec_stderr_depth`] records. The entry is not discarded, only
+    /// shadowed — the scope that pushed it restores the previous `exec_stderr`
+    /// when it pops, so the `exec` stops applying exactly where the body ends.
+    fn stderr_target_at(&self, depth: usize) -> Option<&StderrTarget> {
+        let visible = depth.min(self.stderr_stack.len());
+        if visible <= self.exec_stderr_depth {
+            return None;
+        }
+        self.stderr_stack.get(..visible).and_then(<[_]>::last)
+    }
+
     /// Whether fd 2, as it stands `depth` entries into the stderr stack, has no
     /// writable description behind it at all — because it was closed (`2>&-`)
     /// or aliased onto one that cannot be written (`2>&0` on a read-only fd 0).
@@ -30746,7 +30804,7 @@ impl Shell {
     /// `{ echo x >&2; } 2>&0 < f` both exit 1 having written nothing, with the
     /// `2: Bad file descriptor` itself invisible for the same reason.
     fn stderr_has_no_write_half(&self, depth: usize) -> bool {
-        match self.stderr_stack.get(..depth).and_then(<[_]>::last) {
+        match self.stderr_target_at(depth) {
             Some(StderrTarget::Discard) => true,
             Some(_) => false,
             None => matches!(
@@ -30756,8 +30814,13 @@ impl Shell {
         }
     }
 
+    /// Like [`emit_stderr`], but only consider the first `depth` entries of the
+    /// `stderr_stack` when choosing the sink. `depth == stderr_stack.len()` is
+    /// the normal case; a smaller depth lets `>&2` on a command that also has
+    /// its own `2>file` redirect skip that just-pushed per-command stderr and
+    /// target the *pre-redirect* sink (the dup-first ordering — see TD-OILS14).
     fn emit_stderr_depth(&self, bytes: &[u8], depth: usize) {
-        match self.stderr_stack.get(..depth).and_then(<[_]>::last) {
+        match self.stderr_target_at(depth) {
             None => {
                 // Base fd 2: a persistent `exec 2> file` target if set, else the
                 // shell's real stderr.
@@ -56846,6 +56909,58 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (out, disk) = run_over_seeded_file("", "exec 1> {FILE}; exec 3>&1; echo hi >&3");
         assert_eq!(disk, "hi\n", "the dup should follow fd 1 to the file");
         assert_eq!(out, "", "nothing should have reached the capture: {out:?}");
+    }
+
+    #[test]
+    fn a_runtime_exec_shadows_an_enclosing_stderr_redirect() {
+        // A body's own `2>…` is in force for the whole body, but an `exec 2>…`
+        // *inside* it is the later word on fd 2 and supersedes it for the rest
+        // of the body. Regression: the enclosing push always won, so the `exec`
+        // did nothing until the body ended and the diagnostic went exactly
+        // where it should not have
+        // (TD-OILS-EXEC-STDERR-DOES-NOT-SHADOW-AN-ENCLOSING-REDIRECT).
+        let (out, disk) =
+            run_over_seeded_file("", "v=$( { exec 2> {FILE}; cd /nosuchdir; } 2>&1 ); echo \"v=[$v]\"");
+        assert_eq!(out, "v=[]\n", "the capture should not have seen it");
+        assert!(
+            disk.contains("No such file or directory"),
+            "the `exec` should have won, got {disk:?}"
+        );
+        // Written the other way round the group's redirect is the later word,
+        // so it wins instead — which is what makes this a question of *order*
+        // rather than a standing precedence of one over the other.
+        let (out, disk) =
+            run_over_seeded_file("", "v=$( exec 2> {FILE}; { cd /nosuchdir; } 2>&1 ); echo \"v=[$v]\"");
+        assert!(
+            out.contains("No such file or directory"),
+            "the group's `2>&1` should have won, got {out:?}"
+        );
+        assert_eq!(disk, "", "nothing should have reached the file");
+        // `exec 2>&-` shadows the same way: the diagnostic is dropped, not
+        // diverted into the enclosing sink.
+        let (out, _) = run("v=$( { exec 2>&-; cd /nosuchdir; } 2>&1 ); echo \"v=[$v]\"");
+        assert_eq!(out, "v=[]\n", "a shadowing close should drop it: {out:?}");
+    }
+
+    #[test]
+    fn an_exec_stderr_stops_applying_where_its_body_ends() {
+        // The enclosing entry is only *shadowed*, not discarded: the body's
+        // redirect is still torn down normally, and tearing it down restores
+        // the fd 2 the `exec` replaced — so the command after the body writes
+        // where it would have written had the `exec` never run.
+        let (out, disk) = run_over_seeded_file(
+            "",
+            "v=$( { { exec 2> {FILE}; cd /nosuchdir; } 2>&1; cd /alsonosuchdir; } 2>&1 ); \
+             echo \"v=[$v]\"",
+        );
+        assert!(
+            disk.contains("/nosuchdir") && !disk.contains("/alsonosuchdir"),
+            "only the shadowed part belongs in the file, got {disk:?}"
+        );
+        assert!(
+            out.contains("/alsonosuchdir") && !out.contains("cd: /nosuchdir"),
+            "the rest belongs to the outer redirect, got {out:?}"
+        );
     }
 
     #[test]

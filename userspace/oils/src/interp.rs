@@ -5415,10 +5415,15 @@ impl Shell {
         };
         // Publish `${PIPESTATUS[@]}` and fold per-stage statuses into `$?` —
         // one element per stage that was actually started, and none at all when
-        // the pipeline was abandoned or its lone command taken away.
+        // the pipeline was abandoned, its lone command taken away, or that lone
+        // command a compound one that writes no array of its own
+        // ([`Shell::publishes_pipestatus`]). `$?` needs no folding in that last
+        // case: a single command's status is the pipeline's already.
+        let writes_array = pipe.commands.len() != 1
+            || pipe.commands.first().is_some_and(Self::publishes_pipestatus);
         if abandoned {
             self.last_status = 0;
-        } else if !std::mem::take(&mut self.debug_skipped) {
+        } else if !std::mem::take(&mut self.debug_skipped) && writes_array {
             let started: Vec<i32> = statuses
                 .iter()
                 .enumerate()
@@ -5784,6 +5789,41 @@ impl Shell {
             Command::Simple(sc) => Some(sc),
             Command::Redirected { inner, .. } => Self::stage_simple(inner),
             _ => None,
+        }
+    }
+
+    /// Whether running this command as a one-command "pipeline" writes a
+    /// `${PIPESTATUS[@]}` of its own.
+    ///
+    /// Most do not. bash writes the array where it *waits for something* — a
+    /// simple command (including a function call), a subshell, `[[ … ]]`,
+    /// `(( … ))` — and a compound command that runs in the current shell is not
+    /// one of those: it is a way of arranging other commands, so the array is
+    /// left exactly as the last command *inside* it wrote it. Hence
+    /// `false | false; { true | true; }` reads `[0 0]` (the inner pipeline's,
+    /// not a one-element `[0]` for the group) and `false | false; case x in y)
+    /// :;; esac` still reads `[1 1]`, nothing inside the `case` having run.
+    ///
+    /// A function *definition* writes nothing either, and neither does
+    /// `coproc`. Redirections do not change the answer for the command they are
+    /// attached to: `( … ) > f` writes one element, `{ … } > f` writes none —
+    /// including when the redirection fails, which reports an error and leaves
+    /// the array alone.
+    fn publishes_pipestatus(cmd: &Command) -> bool {
+        match cmd {
+            Command::Simple(_) | Command::Cond(_) | Command::Arith(_) | Command::Subshell(_) => {
+                true
+            }
+            Command::Redirected { inner, .. } => Self::publishes_pipestatus(inner),
+            Command::If(_)
+            | Command::Loop(_)
+            | Command::For(_)
+            | Command::ForArith(_)
+            | Command::Select(_)
+            | Command::Function(_)
+            | Command::Case(_)
+            | Command::BraceGroup(_)
+            | Command::Coproc { .. } => false,
         }
     }
 

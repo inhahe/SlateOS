@@ -2741,6 +2741,14 @@ pub struct Shell {
     /// The `failglob` pattern that matched nothing, as bytes: it is a path
     /// pattern, and a path may hold any byte.
     glob_error: Option<Str>,
+    /// The last word of the simple command currently running, waiting to be
+    /// bound to `$_` when that command *finishes* (bash binds it at the end of
+    /// the command, so the command's own body — a function's, an `eval`'s —
+    /// still reads the previous one). A command with no words at all binds the
+    /// empty string, which is why this is `Some("")` rather than `None` for a
+    /// pure assignment. [`Self::exec_simple`] saves and restores the slot around
+    /// each command, so a nested one cannot be mistaken for its parent.
+    pending_last_arg: Option<Str>,
     /// Stack of function-local variable scopes. Each frame records the variables
     /// shadowed by `local` in that function call and their prior state, restored
     /// on return. Non-empty exactly while executing a function body.
@@ -3344,6 +3352,7 @@ impl Shell {
             xtrace_compound: None,
             compound_expanded: false,
             glob_error: None,
+            pending_last_arg: None,
             local_frames: Vec::new(),
             temp_shadow: Vec::new(),
             local_opt_saves: Vec::new(),
@@ -7503,6 +7512,7 @@ impl Shell {
             xtrace_compound: None,
             compound_expanded: false,
             glob_error: None,
+            pending_last_arg: None,
             // A subshell is a *fork*, so it inherits the whole call-frame stack:
             // `f() { ( local q=1; echo "$q" ); }` really does declare a local of
             // `f`'s frame, and the binding disappears with the subshell rather
@@ -10665,7 +10675,18 @@ impl Shell {
         // running deferred `>(cmd)` bodies and deleting all temp files.
         let in_mark = self.procsub_in_temps.len();
         let out_mark = self.procsub_out_jobs.len();
+        // `$_` takes this command's last word only once the command is *done*,
+        // so the command's own body still reads the previous binding: bash's
+        // `f() { echo "$_"; }; f zz` prints what came before `f`, not `zz`, and
+        // `eval ': ev'` leaves `$_` as the string `: ev` rather than as the `ev`
+        // the eval'd command bound. Saving the slot keeps the nesting straight —
+        // the commands run inside this one each fill and empty it in turn, and
+        // the restore puts this command's own word back for the bind below.
+        let outer = self.pending_last_arg.take();
         let flow = self.exec_simple_inner(sc, out, stdin);
+        if let Some(last) = std::mem::replace(&mut self.pending_last_arg, outer) {
+            self.put_var("_", last);
+        }
         self.finish_procsubs(in_mark, out_mark);
         // bash applies `HISTSIZE`/`HISTFILESIZE` from a variable-assignment hook.
         // osh instead re-derives them here, once per simple command, which is
@@ -10747,6 +10768,12 @@ impl Shell {
                 argv.extend(self.expand_word(&bw, true));
             }
         }
+        // Arm `$_` with this command's last *expanded* word, for
+        // [`Self::exec_simple`] to bind once the command is over. A command with
+        // no words at all — a pure assignment, or a bare redirection — binds the
+        // empty string rather than leaving the previous value in place, so
+        // `echo a b c; v=x; echo "[$_]"` prints `[]` in bash and not `[c]`.
+        self.pending_last_arg = Some(argv.last().cloned().unwrap_or_default());
 
         // `set -u`: a reference to an unset variable during expansion aborts the
         // shell (matching a non-interactive bash under nounset). The abort status
@@ -10950,15 +10977,6 @@ impl Shell {
         // exist — while `name` itself stays bytes for the `$PATH` search and the
         // `execve`, which must name the file the user actually wrote.
         let name_str = bytes::as_str(&name).map(str::to_owned);
-
-        // `$_` tracks the last argument of the most recent simple command, to be
-        // read by the *next* command (bash). argv is fully expanded now — and
-        // any `$_` inside it already read the previous value — so update it here
-        // for the following command. (The startup form, where `$_` is the shell/
-        // script pathname, is not modelled.)
-        if let Some(last) = argv.last() {
-            self.put_var("_".to_string(), last.clone());
-        }
 
         // `declare -A m=([k]=v)` one-liner: array-literal operands are attached
         // to the command as `decl_arrays`; apply them with the declared kind.
@@ -41687,6 +41705,35 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("echo solo; echo $_").0, "solo\nsolo\n");
         // Updates across commands.
         assert_eq!(run(": one; : two; echo $_").0, "two\n");
+    }
+
+    #[test]
+    fn underscore_is_bound_when_the_command_ends() {
+        // The binding happens *after* the command, so the command's own body
+        // still reads the previous one — and the command then overwrites
+        // whatever its body bound.
+        assert_eq!(
+            run("f() { echo \"[$_]\"; : inner; }; : A; f zz; echo \"[$_]\"").0,
+            "[A]\n[zz]\n"
+        );
+        assert_eq!(run(": A; eval ': ev'; echo \"[$_]\"").0, "[: ev]\n");
+        // A command with no words at all binds the empty string rather than
+        // leaving the previous value standing.
+        assert_eq!(run("echo a b c; v=x; echo \"[$_]\"").0, "a b c\n[]\n");
+        assert_eq!(run(": A; v=x w=y; echo \"[$_]\"").0, "[]\n");
+        assert_eq!(run(": A; x=$(: cs); echo \"[$_]\"").0, "[]\n");
+        assert_eq!(run(": A; > /dev/null; echo \"[$_]\"").0, "[]\n");
+        // `unset _` is itself a command whose last word is `_`, so it rebinds
+        // the variable it just removed. An assignment to `_` by hand, being a
+        // wordless command, is undone the same way.
+        assert_eq!(run(": A; unset _; echo \"[$_]\"").0, "[_]\n");
+        assert_eq!(run(": A; _=custom; echo \"[$_]\"").0, "[]\n");
+        assert_eq!(run(": A; _=custom :; echo \"[$_]\"").0, "[:]\n");
+        // A compound command is not a simple command: what its body bound
+        // stands, and a subshell's binding does not escape.
+        assert_eq!(run(": A; { : br; }; echo \"[$_]\"").0, "[br]\n");
+        assert_eq!(run(": A; (: sub); echo \"[$_]\"").0, "[A]\n");
+        assert_eq!(run(": A; [[ -n x ]]; ((1)); echo \"[$_]\"").0, "[A]\n");
     }
 
     #[test]

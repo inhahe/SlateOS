@@ -2617,6 +2617,20 @@ pub struct Shell {
     /// in front of it too, or a byte the buffer holds for one number would be
     /// invisible to the other. That is what the [`Arc`] is for.
     coproc_read_fds: std::collections::HashMap<i32, CoprocRead>,
+    /// The name and pid of the coproc bash would call *the* coproc: the most
+    /// recently started one. bash keeps a single `sh_coproc`, so starting a
+    /// second while this one is still running is a mistake it warns about
+    /// (`warning: execute_coproc: coproc [PID:NAME] still exists`) before
+    /// starting it anyway and forgetting the old one — whose descriptors are
+    /// then unreachable, since `NAME` has been overwritten.
+    ///
+    /// Liveness is asked of the job table rather than recorded here: bash's
+    /// condition is that the tracked coproc has not been *reaped*, and a
+    /// coproc that exited on its own is reaped asynchronously, so it draws no
+    /// warning even with no `wait` in sight (measured). A subshell starts with
+    /// no tracked coproc at all — bash closes the coproc out in a subshell, and
+    /// a `coproc` there is silent even while the parent's is still running.
+    coproc_tracked: Option<(String, u32)>,
     /// Temp files backing *input* process substitutions `<(cmd)` created while
     /// expanding the current command's words. Each holds `cmd`'s captured output;
     /// the enclosing command reads it, then it is deleted once the command
@@ -3466,6 +3480,7 @@ impl Shell {
             open_fds: std::collections::HashMap::new(),
             open_write_fds: std::collections::HashMap::new(),
             coproc_read_fds: std::collections::HashMap::new(),
+            coproc_tracked: None,
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
             getopts_col: 0,
@@ -7911,6 +7926,10 @@ impl Shell {
                         .map(|f| (fd, Arc::new(Mutex::new(io::BufReader::new(f)))))
                 })
                 .collect(),
+            // bash closes the coproc out of a subshell, so a `coproc` started
+            // there is silent even while the parent's is still running
+            // (measured). Nothing to track.
+            coproc_tracked: None,
             // A subshell manages its own process-substitution lifetimes.
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
@@ -13658,6 +13677,37 @@ impl Shell {
         self.last_status = 0;
     }
 
+    /// Warn that a coproc is about to be forgotten, as bash's `execute_coproc`
+    /// does: a shell tracks exactly one coproc, so starting a second while the
+    /// first is still running overwrites the only handle on it.
+    ///
+    /// The condition is that the tracked coproc has not been reaped — *not*
+    /// that a coproc job exists. A coproc whose body has finished is silently
+    /// forgotten even if nothing has `wait`ed for it, because bash reaps it
+    /// asynchronously; hence the liveness question is put to the job body
+    /// itself rather than answered from the presence of the job.
+    /// The tracked coproc is *not* cleared here on the way past: the caller may
+    /// still fail to start the new one (a pipe the host refuses), and a failed
+    /// `coproc` leaves the old one in place to be warned about again.
+    fn warn_coproc_still_exists(&mut self) {
+        let Some((name, pid)) = self.coproc_tracked.clone() else {
+            return;
+        };
+        let alive = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.pid == pid)
+            .and_then(|j| j.child.as_mut())
+            .is_some_and(|body| !body.is_finished());
+        if alive {
+            self.perrln(&format!(
+                "warning: execute_coproc: coproc [{pid}:{name}] still exists"
+            ));
+        } else {
+            self.coproc_tracked = None;
+        }
+    }
+
     /// Execute `coproc [NAME] body`: run `body` on a background thread with its
     /// stdin/stdout wired to two OS pipes, and expose the parent-side endpoints
     /// as `NAME[0]` (read the coproc's stdout), `NAME[1]` (write its stdin) plus
@@ -13670,6 +13720,7 @@ impl Shell {
     /// `jobs` prints.
     fn exec_coproc(&mut self, name: Option<&str>, body: &Command, whole: &Command) -> Flow {
         let name = name.unwrap_or("COPROC").to_string();
+        self.warn_coproc_still_exists();
         // Pipe A carries the parent's writes to the coproc's stdin; pipe B
         // carries the coproc's stdout back to the parent.
         let (child_stdin_r, parent_stdin_w) = match io::pipe() {
@@ -13739,6 +13790,7 @@ impl Shell {
             exit_seen: false,
         });
         self.note_new_job(id);
+        self.coproc_tracked = Some((name.clone(), synth_pid));
         let mut elems = BTreeMap::new();
         elems.insert(0usize, read_fd.to_string().into_bytes());
         elems.insert(1usize, write_fd.to_string().into_bytes());

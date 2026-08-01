@@ -26286,10 +26286,10 @@ which is exactly how a script reads it (`jobs | wc -l`, `n=$(jobs -p)`). Found
 while making a coproc a real job: the probe piped `jobs` through `sed` to blank
 out pids and so saw nothing at all.
 
-### TD-OILS-COPROC-SECOND-IS-NOT-WARNED. bash warns when a coproc is started while another is still alive; osh starts it silently — OPEN — 2026-08-01
+### TD-OILS-COPROC-SECOND-IS-NOT-WARNED. bash warns when a coproc is started while another is still alive; osh started it silently — ✅ RESOLVED — 2026-08-01
 
-**Where:** `userspace/oils/src/interp.rs` — `exec_coproc`. It keeps no notion of
-"the current coproc", so nothing can notice a second one.
+**Where:** `userspace/oils/src/interp.rs` — `exec_coproc`. It kept no notion of
+"the current coproc", so nothing could notice a second one.
 
 **Reproduce:**
 
@@ -26314,13 +26314,134 @@ is about to lose track of the first one's bookkeeping. osh has no such limit
 (each coproc is an ordinary job with its own fds), so the warning is pure
 diagnostic fidelity, not a shared limitation.
 
-**Proper fix.** Record the name and synthetic pid of the most recently started
-coproc, clear it when that job is reaped, and emit
-`warning: execute_coproc: coproc [PID:NAME] still exists` — through the normal
-`line N:` prefix machinery — when `exec_coproc` runs while it is still set.
-Note bash's condition is "the tracked coproc has not been reaped", not "a
-coproc job exists": `coproc C { :; }; wait "$C_PID"; coproc D { :; }` is silent.
-
 **Impact.** Diagnostic only, and it lands on stderr, so a script that merges
-streams (`2>&1`) sees an extra line under bash that it does not under osh.
+streams (`2>&1`) saw an extra line under bash that it did not under osh.
 Found while probing the coproc endpoint dup.
+
+**Fixed** by giving `Shell` a `coproc_tracked: Option<(String, u32)>` — the name
+and synthetic pid of the most recently started coproc — set at the end of
+`exec_coproc` and consulted at its start by `warn_coproc_still_exists`, which
+emits the message through the ordinary `perrln` prefix machinery so it carries
+the same `case.sh: line N:` bash gives it.
+
+Three measured details decided the shape:
+
+- **The condition is "not reaped", not "a coproc job exists".** A body that has
+  already exited draws no warning even with no `wait` in sight, because bash
+  reaps it asynchronously: `coproc F { :; }; sleep 1; coproc G { :; }` is
+  silent. So liveness is asked of the job body (`JobBody::is_finished`) rather
+  than inferred from the job's presence in the table.
+- **Each new coproc replaces the tracked one**, so a chain of three warns twice
+  — about the first, then about the second — never about the same one twice.
+- **A subshell has no coproc to lose.** bash closes the coproc out in a
+  subshell, so a `coproc` started there is silent even while the parent's is
+  still running; `clone_for_subshell` therefore starts with `coproc_tracked:
+  None`.
+
+Corpus case `coproc-second-warns-about-the-first.sh` covers all of those plus
+the unnamed (`COPROC`) form. It collects stderr in a file and filters the pid
+out at the end, since the pid is a property of the host, not of the shell.
+
+### TD-OILS-COPROC-VARS-SURVIVE-REAPING. bash unsets `NAME`/`NAME_PID` and closes the endpoints when a coproc is reaped; osh keeps them forever — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `exec_coproc` publishes the array
+and the pid variable, and nothing ever takes them away. The endpoints live on
+in `coproc_read_fds` / `open_write_fds` too.
+
+**Reproduce:**
+
+```sh
+coproc P { read -r x; echo "P<$x>"; }
+echo pp >&"${P[1]}"; read -r l <&"${P[0]}"
+wait "$P_PID"
+echo "after: P_PID=[$P_PID] P=[${P[*]}] set=${P+y}"
+```
+
+bash prints `after: P_PID=[] P=[] set=` — the variables are gone, and so are
+the two descriptors. osh prints `after: P_PID=[900000] P=[10 11] set=y`.
+
+It is not the `wait` that does it: bash unsets them at whatever reap point
+comes first, so a plain `sleep 1; true` after the body has exited is enough.
+Only the *tracked* coproc is cleaned up this way — one that a later `coproc`
+displaced (see TD-OILS-COPROC-SECOND-IS-NOT-WARNED) keeps its variables for
+good, which is exactly why the warning exists.
+
+**Impact.** A script that tests `[[ -v P ]]` or `[ -n "$P_PID" ]` to ask
+"is the coproc still there?" gets the wrong answer under osh, and the pipe fds
+leak for the life of the shell — an `exec {v}<&"${P[0]}"` after the reap
+succeeds under osh and fails under bash (`Bad file descriptor`).
+
+**Proper fix.** Clear the tracked coproc's `NAME`, `NAME_PID` and both fd-table
+entries when its job is reaped. The natural home is wherever job reaping
+already records a status (the `wait` builtin's reap and the table sweep both
+route through it), keyed off the same `coproc_tracked` pair the warning uses;
+`unset`-through-`put_var` is not enough — `arrays` and the two fd maps need the
+same treatment, and closing the write end has to be visible to `>&"${P[1]}"`.
+Note the reap point is asynchronous in bash but synchronous in osh, so the
+exact moment the variables vanish will differ for a coproc that exits with no
+`wait` and no intervening builtin; keep the corpus case away from that window.
+
+### TD-OILS-EXTERNAL-DUP-TO-STDERR. `cmd >&2` sends an *external* command's output to stdout — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — the external-spawn redirection path.
+A builtin honours `>&2`; only a spawned process gets it wrong, so the two
+paths resolve a `>&N` dup target differently.
+
+**Reproduce:**
+
+```sh
+printf 'x\n' > f.txt
+cat f.txt >&2
+```
+
+bash writes `x` to **stderr**; osh writes it to **stdout**. The same script
+with `echo x >&2` (a builtin) is correct under both, and `cat f.txt >&3` after
+`exec 3>&2` is correct too — it is specifically the number `2` as a *dup
+target* for a spawned command that resolves to the shell's stdout.
+
+`cat f.txt >&2 2>/dev/null` pins it down: bash discards nothing (fd 1 was
+already pointed at the original stderr before fd 2 was redirected, so `x`
+still reaches stderr), while osh prints `x` on stdout — i.e. osh gave the
+child a fd 1 that is the shell's stdout, not a dup of fd 2.
+
+Note the *diagnostics* of an external are routed correctly: `cat nosuchfile`
+lands on stderr under both. So the child's own fd 2 is fine; what is wrong is
+the dup that `>&2` is supposed to install on fd 1.
+
+**Impact.** Large. `cmd >&2` is the ordinary way a script emits an error from
+a non-builtin, and every such line silently moves to stdout — corrupting the
+data stream of any pipeline that uses it, and hiding the message from a
+`2>log`. Found while writing `coproc-second-warns-about-the-first.sh`, whose
+first draft replayed a captured stderr file with `sed … >&2`.
+
+**Proper fix.** Make the external path resolve a `>&N` target through the same
+table the builtin path uses, so fd 2 means the command's stderr — including
+when an earlier `exec 2>file` has moved it — rather than defaulting to the
+shell's `Out`. A corpus case should cover `>&2` on an external both bare and
+after `exec 2>file`, and both orders of `>&2 2>…`.
+
+### TD-OILS-EXTERNAL-ARGV0-IS-THE-FULL-PATH. an external command sees its resolved path as `argv[0]`, not the word that named it — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — the external-spawn path passes the
+resolved executable path as the program *and* as `argv[0]`.
+
+**Reproduce:**
+
+```sh
+cat nosuchfile
+```
+
+bash: `cat: nosuchfile: No such file or directory`.
+osh: `/usr/bin/cat: nosuchfile: No such file or directory`.
+
+**Impact.** Every diagnostic printed by every external tool is prefixed with an
+absolute path instead of the command name, so the output of a script that runs
+`grep`, `sed`, `cat`, … does not match bash's byte-for-byte. It also breaks the
+multi-call convention (`busybox`-style binaries and `bash`-as-`sh` decide their
+personality from `argv[0]`).
+
+**Proper fix.** Pass the *word as written* as `argv[0]` while executing the
+resolved path — `std::os::…::CommandExt::arg0` on Unix; on Windows there is no
+such split, so this may have to stay a documented host limitation. Confirm the
+Windows behaviour before writing the fix off: the MSYS tools read `argv[0]`
+from the command line, which `Command` does control.

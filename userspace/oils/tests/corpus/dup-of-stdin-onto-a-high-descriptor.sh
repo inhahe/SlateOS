@@ -19,14 +19,16 @@
 # rather than the fd 3 that was being made. Reverse the two and the dup came
 # first, so it succeeds and the close only takes fd 0 away.
 #
-# Deliberately absent:
+# All of which holds one dup further along: a descriptor the list has just
+# made is a descriptor the rest of the list can copy, so `3<&0 4<&3` gives the
+# same description a third name, and a `3<&-` or a `3> file` in between leaves
+# nothing readable for the `4<&3` to copy.
 #
-#   * `4<&3` where fd 3 was made by an earlier `3<&0` in the *same* list —
-#     bash chains them, osh only looks fd 3 up in the `exec`-installed table.
-#   * `3<&1` / `3<&2`, where bash makes the dup and lets the *read* through it
-#     fail; osh refuses the redirect instead.
-#
-# Both are TD-OILS-TRANSIENT-DUP-SOURCE-IS-NOT-THE-LIST-SO-FAR.
+# Deliberately absent: `3<&1` / `3<&2`, and `3> out 4<&3` — a dup of a
+# descriptor that is open but has no read half. bash makes the dup and lets
+# the *read* through it fail (`read: read error: 0: …`, naming the fd `read`
+# was pointed at); osh refuses the redirect instead, naming the source. See
+# TD-OILS-TRANSIENT-DUP-SOURCE-IS-NOT-THE-LIST-SO-FAR.
 #
 # Every persistent probe runs in a subshell so an `exec` cannot reach the next
 # one. Stderr is collected and replayed at the end so it can be compared in a
@@ -56,6 +58,21 @@ echo "=== a closed fd 0 is no descriptor to copy"
 
 echo "=== 3<&3 needs no source at all"
 ( exec 0<in; { read -r l <&3; } 3<&3;      echo "  rc=$? l=[$l]" )
+
+echo "=== a descriptor the list just made is one the list can copy"
+( exec 0<in; { read -r l <&4; } 3<&0 4<&3;     echo "  0-3-4 rc=$? l=[$l]" )
+( { read -r l <&4; } 3<in 4<&3;                echo "  file-3-4 rc=$? l=[$l]" )
+( { read -r a <&3; read -r b <&4; } 3<in 4<&3; echo "  shared a=[$a] b=[$b]" )
+( { read -r l; } 3<in <&3;                     echo "  back-to-0 rc=$? l=[$l]" )
+( exec 0<in; { read -r l; } 3<&0 <&3;          echo "  0-3-0 rc=$? l=[$l]" )
+
+echo "=== but a closed one is not"
+( { read -r l <&4; } 3<in 3<&- 4<&3;           echo "  in-list rc=$? l=[$l]" )
+( exec 3<in; { read -r l <&4; } 3<&- 4<&3;     echo "  exec rc=$? l=[$l]" )
+
+echo "=== and the exec-installed table still answers for itself"
+( exec 3<in; read -r a <&3; read -r b <&3;     echo "  a=[$a] b=[$b]" )
+( exec 3<in; { read -r l <&4; } 4<&3;          echo "  4<&3 rc=$? l=[$l]" )
 
 exec 2>&4 4>&-
 echo "=== what went to stderr"

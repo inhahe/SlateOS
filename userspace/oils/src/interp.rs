@@ -14622,7 +14622,7 @@ impl Shell {
     /// walked.
     fn plan_stdin_fd(&self, plan: &mut RedirPlan) -> Option<InputFd> {
         if let Some(n) = plan.stdin_from_fd {
-            return self.clone_input_fd(n);
+            return self.plan_input_fd(plan, n);
         }
         if let Some(data) = plan.stdin_data.take() {
             // A here-document is a source like any other and a dup of it shares
@@ -14639,6 +14639,46 @@ impl Shell {
             return Some(Arc::clone(c));
         }
         self.clone_input_fd(0)
+    }
+
+    /// The descriptor input fd `n` (≥ 3) names *at this point in the redirect
+    /// list*: an earlier entry in the same list before the `exec`-installed
+    /// table, since resolution runs left to right and the last mention of a
+    /// descriptor wins. `None` when nothing readable is bound there.
+    ///
+    /// This is what lets one list chain dups — `3<&0 4<&3` makes fd 4 a third
+    /// name for the same description — where looking only at `open_fds` would
+    /// call the fd 3 the list had just made unbound.
+    fn plan_input_fd(&self, plan: &RedirPlan, n: i32) -> Option<InputFd> {
+        for (f, op) in plan.extra_fds.iter().rev() {
+            if *f != n {
+                continue;
+            }
+            return match op {
+                ExtraFdOp::Input(src) | ExtraFdOp::ReadWrite(src, _)
+                    if !matches!(&*lock_input(src), InputSrc::Closed) =>
+                {
+                    Some(Arc::clone(src))
+                }
+                // Bound by this list, but not to anything with a read half — an
+                // output file, an alias of a write descriptor, or a close.
+                // Nothing here to copy a cursor from.
+                _ => None,
+            };
+        }
+        self.clone_input_fd(n)
+    }
+
+    /// Whether the redirect list being resolved has itself bound fd `n`, as
+    /// opposed to fd `n` coming from the `exec`-installed table.
+    ///
+    /// The two are worth telling apart because a list-local descriptor exists
+    /// only while this plan does: a `<&N` naming one has to take the
+    /// descriptor now, where a `<&N` naming an `exec`-installed one is better
+    /// left to `stdin_from_fd`, which resolves late enough to also cover a
+    /// `coproc` read end.
+    fn list_binds_fd(plan: &RedirPlan, n: i32) -> bool {
+        plan.extra_fds.iter().any(|(f, _)| *f == n)
     }
 
     /// Expand a redirection target word the way bash does for a `>`/`<`/`>>`/
@@ -15368,12 +15408,14 @@ impl Shell {
             // succeeds whatever fd 7 is — see [`Shell::dup_needs_no_source`].
             //
             // A source of 3 or more is an input descriptor a `read -u`/`exec 3<`
-            // opened, or a `coproc` read end; an unbound one fails the whole
-            // redirect (bash: "N: Bad file descriptor") rather than reading EOF.
-            // The check is owed to *every* redirector, not just fd 0: `7<&9` is
-            // as dead as `<&9` is, and used to pass silently here. Descriptors
-            // 0, 1 and 2 are always open, so they need no check.
-            if n >= 3 && !self.open_fds.contains_key(&n) && !self.coproc_read_fds.contains_key(&n) {
+            // opened, an earlier entry in *this* list, or a `coproc` read end;
+            // an unbound one fails the whole redirect (bash:
+            // "N: Bad file descriptor") rather than reading EOF. The check is
+            // owed to *every* redirector, not just fd 0: `7<&9` is as dead as
+            // `<&9` is, and used to pass silently here. Descriptors 0, 1 and 2
+            // are always open, so they need no check.
+            let plan_src = if n >= 3 { self.plan_input_fd(plan, n) } else { None };
+            if n >= 3 && plan_src.is_none() && !self.coproc_read_fds.contains_key(&n) {
                 // Never the expansion: `<&$r` names `$r`, and a bare `<&007`
                 // names `7`. See [`Shell::dup_error_subject`].
                 return Err(bfmt![
@@ -15387,9 +15429,19 @@ impl Shell {
                 return Ok(());
             }
             if fd == 0 && n >= 3 {
-                // fd 0 reads from input descriptor N's shared cursor.
                 plan.clear_stdin();
-                plan.stdin_from_fd = Some(n);
+                match plan_src.filter(|_| Self::list_binds_fd(plan, n)) {
+                    // fd N was bound by an earlier entry in this same list, so
+                    // the descriptor is already in hand — take it directly
+                    // rather than through `stdin_from_fd`, which is resolved
+                    // against the `exec`-installed table long after this list
+                    // has been forgotten.
+                    Some(src) => plan.stdin = Some(src),
+                    // fd 0 reads from input descriptor N's shared cursor,
+                    // resolved late — which is what a `coproc` read end needs,
+                    // its live pipe not being a descriptor a plan can hold.
+                    None => plan.stdin_from_fd = Some(n),
+                }
             } else if fd >= 3 && n == 0 {
                 // `3<&0`: a second name for fd 0's description, sharing its
                 // cursor. Which fd 0 is copied depends on where the dup sits in
@@ -15404,15 +15456,18 @@ impl Shell {
                 };
                 plan.extra_fds.push((fd, ExtraFdOp::Input(src)));
             } else if fd >= 3
-                && let Some(src) = self.open_fds.get(&n)
+                && let Some(src) = plan_src
             {
                 // `7<&3`: a second name for one input descriptor, sharing its
                 // cursor — which `ExtraFdOp::Input` gives by handing over the
-                // same `InputFd`. Consumed by `exec` and the scoped
-                // compound-command path; invisible on an ordinary command, as it
-                // is in bash. A `coproc` read end is not modelled here (its live
-                // pipe does not live in `open_fds`), only validated above.
-                plan.extra_fds.push((fd, ExtraFdOp::Input(Arc::clone(src))));
+                // same `InputFd`. fd 3 may be one this very list made
+                // (`3<&0 4<&3`), which is why the source comes from
+                // [`Shell::plan_input_fd`] rather than from `open_fds` alone.
+                // Consumed by `exec` and the scoped compound-command path;
+                // invisible on an ordinary command, as it is in bash. A
+                // `coproc` read end is not modelled here (its live pipe does
+                // not live in `open_fds`), only validated above.
+                plan.extra_fds.push((fd, ExtraFdOp::Input(src)));
             }
             // `<&0` (and the rare `<&1`/`<&2`) leave fd 0 as the ambient stdin,
             // and `1<&N`/`2<&N` make a standard *output* descriptor readable —
@@ -57213,6 +57268,34 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "exec 0< {FILE}; { read -r l <&3; } 3<&0 0<&-; echo \"s=$? l=[$l]\"",
         );
         assert_eq!(out, "s=0 l=[file]\n", "the earlier dup should still hold: {out:?}");
+    }
+
+    #[test]
+    fn a_descriptor_the_list_just_made_is_one_the_list_can_copy() {
+        // Resolution runs left to right, so `4<&3` may name an fd 3 the same
+        // list made a moment earlier. Regression: the source was looked up in
+        // the `exec`-installed table alone, which called that fd 3 unbound and
+        // failed the whole redirect.
+        let (out, _) = run_over_seeded_file(
+            "one\ntwo\n",
+            "{ read -r a <&3; read -r b <&4; } 3< {FILE} 4<&3; echo \"a=[$a] b=[$b]\"",
+        );
+        assert_eq!(out, "a=[one] b=[two]\n", "the chained dup should share one cursor: {out:?}");
+        let (out, _) = run_over_seeded_file(
+            "one\n",
+            "exec 0< {FILE}; { read -r l <&4; } 3<&0 4<&3; echo \"s=$? l=[$l]\"",
+        );
+        assert_eq!(out, "s=0 l=[one]\n", "fd 4 should reach fd 0's description: {out:?}");
+        // A close in the list is a mention like any other, and the last one
+        // wins: fd 3 is gone by the time the `4<&3` asks for it.
+        let (out, _) = run_over_seeded_file(
+            "one\n",
+            "{ { read -r l <&4; } 3< {FILE} 3<&- 4<&3; } 2>&1; echo \"s=$?\"",
+        );
+        assert_eq!(
+            out, "osh: 3: Bad file descriptor\ns=1\n",
+            "a closed fd 3 should not be copyable, got {out:?}"
+        );
     }
 
     #[test]

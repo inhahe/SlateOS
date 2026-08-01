@@ -14,56 +14,74 @@ work that should be done now."
 
 ## Active Bugs
 
-### TD-OILS-TRANSIENT-DUP-SOURCE-IS-NOT-THE-LIST-SO-FAR. A transient `N<&M` looks its source up in the `exec`-installed table only, so a descriptor the *same* redirect list just made, and fds 1 and 2, are invisible to it — 2026-08-01 — OPEN (low priority)
+### TD-OILS-READ-PARSES-OPTIONS-AFTER-THE-FIRST-NAME. `read` keeps scanning for options past its first operand, where bash stops — 2026-08-01 — OPEN (low priority)
 
-**Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_dup_in`, the
-`fd >= 3` arms. The `n == 0` case now resolves through
-`Shell::plan_stdin_fd`, which consults the plan being built and so sees the
-redirects to its left; the `n >= 3` case still goes straight to
-`self.open_fds`, and `n == 1` / `n == 2` are not modelled at all.
+**Where:** `userspace/oils/src/interp.rs` — the `read` builtin's argument
+loop, which walks every argument looking for a leading `-` instead of
+stopping at the first word that is not one.
 
-**Reproduce** (`target/dvscratch/t3/pw.sh`, `py.sh`):
+**Reproduce** (found while probing chained dups, `target/dvscratch/t3/pv.sh`):
 
 ```sh
-printf 'one\n' > in
-exec 0<in; { read -r l <&4; } 3<&0 4<&3; echo "rc=$? l=[$l]"   # bash: rc=0 l=[one]
-{ read -r l <&3; } 3<&1;                 echo "rc=$? l=[$l]"   # bash: rc=1 l=[]
+exec 3<in; read -r a -u 3; echo "a=[$a]"
 ```
 
-osh answers both with `3: Bad file descriptor` and never runs the body.
+bash stops option parsing at `a`, so `-u` and `3` are *names*, and `-u` is
+not a valid one:
 
-* **Chained dup.** `4<&3` is resolved by looking fd 3 up in `open_fds`, where
-  only an `exec 3<` / `read -u` descriptor lives. The `3<&0` to its left put
-  fd 3 in `plan.extra_fds` instead, so the validity check just above declares
-  fd 3 unbound and fails the whole redirect. bash chains them: fd 4 ends up a
-  third name for the same description.
-* **`3<&1` / `3<&2`.** bash *makes* the dup — fd 1 is an open descriptor, so
-  `dup2` succeeds — and lets the failure surface at the read through it
-  (`read: read error: 0: Bad file descriptor`, naming fd 0 because that is
-  what `read` was pointed at). osh refuses the redirect instead, so the body
-  never runs and the message names fd 3.
+```
+bash: read: `-u': not a valid identifier
+```
 
-**Proper fix.** Two parts, and they are independent:
+osh reads a line from fd 3 into `a` instead. The same holds for any option
+letter written after a name.
 
-1. A `plan_input_fd(&self, plan, n)` beside `plan_stdin_fd` that scans
-   `plan.extra_fds` from the right for the last mention of fd `n` before
-   falling back to `open_fds`, used both by the `n >= 3` validity check and
-   by the source lookup. `ExtraFdOp::Close` on fd `n` means closed, so it
-   answers `None`. The same lookup is owed to the `fd == 0 && n >= 3` arm,
-   whose `stdin_from_fd` is resolved against `open_fds` at apply time —
-   `{ read -r l; } 3<&0 <&3` has the same gap.
-2. An `InputSrc` shape for a descriptor that exists but has no read half, so
-   `3<&1` can succeed as a redirect and fail at the read. `InputSrc::Closed`
-   is not it — that is *no* descriptor, and the difference shows in whether a
-   further `exec 4<&3` may copy it.
+**Proper fix.** Break the option scan at the first argument that is not a
+`-`-prefixed word (bash's `getopts`-style loop does), and treat everything
+from there on as names — including a later `-x`, which then has to go
+through the same "not a valid identifier" check every other name does.
+Worth checking the other operand-taking builtins for the same shape while
+in there; `mapfile`/`readarray` share the argument loop's structure.
 
-**Why not now.** Split off from the `N<&0` fix (`a transient N<&0 is a second
-name for fd 0`) to keep that commit to one logical change. Neither shape is
-common — a chained transient dup and a read through a write-only descriptor
-are both things scripts write by accident more than on purpose — and the
-current answer is a clean error rather than a wrong result. The corpus case
-`tests/corpus/dup-of-stdin-onto-a-high-descriptor.sh` names both in its
-header as deliberately absent.
+**Why not now.** Found while measuring a redirect fix and kept out of that
+commit, which was already one logical change. The divergence only shows when
+a script writes an option after an operand, which is a typo more than a
+usage — and osh's answer is more permissive, so nothing that works in bash
+breaks under osh.
+
+### TD-OILS-TRANSIENT-DUP-SOURCE-IS-NOT-THE-LIST-SO-FAR. A transient `N<&M` cannot copy a descriptor that is open but has no read half — 2026-08-01 — OPEN (low priority; the list-local half was resolved 2026-08-01)
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_dup_in`, the
+`fd >= 3` arms, and `Shell::plan_input_fd`.
+
+**Reproduce** (`target/dvscratch/t3/py.sh`, `pv.sh`):
+
+```sh
+{ read -r l <&3; } 3<&1;        echo "rc=$? l=[$l]"   # bash: rc=1 l=[]
+{ read -r l <&4; } 3>out 4<&3;  echo "rc=$? l=[$l]"   # bash: rc=1 l=[]
+```
+
+bash *makes* both dups — fd 1 and a `3> out` are open descriptors, so
+`dup2` succeeds — and lets the failure surface at the read through them:
+`read: read error: 0: Bad file descriptor`, naming fd 0 because that is what
+`read` was pointed at. osh refuses the redirect instead, so the body never
+runs and the message names the source.
+
+**Proper fix.** An `InputSrc` shape for a descriptor that exists but has no
+read half, so the dup can succeed and the read fail. `InputSrc::Closed` is
+not it — that is *no* descriptor, and the difference shows in whether a
+further `4<&3` may copy it (it may) and in which of the two errors is
+reported. `plan_input_fd`'s `_ => None` arm and the `n == 1` / `n == 2`
+gap in `resolve_dup_in` are the two places that would then answer with it.
+
+**Why not now.** The other half of this entry — a `N<&M` whose fd M was made
+by an earlier entry in the *same* list — was fixed in `a transient N<&M may
+copy a descriptor the same list just made`. What is left is a read through a
+descriptor that was never readable, which scripts write by accident more
+than on purpose, and osh's answer is a clean error rather than a wrong
+result. The corpus case
+`tests/corpus/dup-of-stdin-onto-a-high-descriptor.sh` names it in its header
+as deliberately absent.
 
 ### BUG-OILS-XTRACE-TRAP-LEVEL. A trap handler's body traces at the caller's `PS4` depth instead of one level deeper — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 

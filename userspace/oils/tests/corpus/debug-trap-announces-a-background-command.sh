@@ -45,7 +45,15 @@ q 'trap b DEBUG; time echo one >o.txt & wait; cat o.txt'
 echo "=== and the job does not announce it a second time"
 p 'set -T; trap b DEBUG; echo one >o.txt & wait; cat o.txt'
 p 'set -T; trap b DEBUG; echo a | cat >o.txt & wait; cat o.txt'
-p 'set -T; f() { echo in >o.txt; }; trap b DEBUG; f & wait; cat o.txt'
+# The job's own stdout is sent to a file here, and replayed after `wait`, so
+# that the two sides' announcements cannot interleave: this is the one shape
+# where the job announces on the *shared* stdout, and which of the job's first
+# trace and the parent's `wait` trace gets there first is a fork race that
+# neither shell decides — bash answers it both ways depending on load. What the
+# section is about is which side announces what, and separating the streams
+# says that more plainly anyway. (The two shapes below need no such care: the
+# job's stdout is already the pipe into `cat > o.txt`.)
+p 'set -T; f() { echo in >o.txt; }; trap b DEBUG; f >j.txt & wait; cat o.txt j.txt'
 p 'set -T; f() { echo in; }; trap b DEBUG; f | cat >o.txt & wait; cat o.txt'
 # ... which is the same count a foreground pipeline gets.
 p 'set -T; trap b DEBUG; echo a | cat >o.txt; cat o.txt'

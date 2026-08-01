@@ -14,60 +14,59 @@ work that should be done now."
 
 ## Active Bugs
 
-### TD-OILS-CORPUS-BG-DEBUG-TRACE-RACE. `debug-trap-announces-a-background-command.sh` interleaves a background job's traces with the parent's about 1 run in 6 — 2026-08-01 — OPEN
+### TD-OILS-CORPUS-BG-DEBUG-TRACE-RACE. `debug-trap-announces-a-background-command.sh` interleaves a background job's traces with the parent's about 1 run in 6 — 2026-08-01 — ✅ **RESOLVED 2026-08-01** (the *case* raced, not osh)
 
-**Where:** `userspace/oils/src/interp.rs` — whatever orders a `cmd &` job's
-first output against the parent's next command. The corpus case is
-`tests/corpus/debug-trap-announces-a-background-command.sh`; the one section
-that races is
+**Where:** `tests/corpus/debug-trap-announces-a-background-command.sh`. The one
+section that raced was
 
 ```sh
 set -T; f() { echo in >o.txt; }; trap b DEBUG; f & wait; cat o.txt
 ```
 
-**Reproduce.** Run the case in a loop; it failed 1 of 6 and 1 of ~250 in the
-two runs measured on 2026-08-01:
+Under `set -T` the job's subshell inherits the DEBUG trap, so *both* sides
+announce on the *same* stdout: the parent announces `f` and then `wait`, the
+job announces `f` again at function entry and then `echo in > o.txt`. Which of
+the job's first trace and the parent's `wait` trace reaches stdout first is
+decided by nothing in either shell — it is a plain fork race.
+
+**What was actually measured.** The entry originally read as an osh bug on the
+strength of one full-sweep failure whose recorded bash order was
 
 ```
-for i in 1 2 3 4 5 6; do python scripts/osh-bash-diff.py -k debug-trap-announces-a-background-command; done
+B:<f>  B:<f>  B:<echo in > o.txt>  B:<wait>
 ```
 
-bash always gives
+against osh's
 
 ```
-B:<f>            <- the parent announcing the job
-B:<f>            <- the job re-announcing the call at function entry (-T)
-B:<echo in > o.txt>
-B:<wait>         <- the parent's next command
+B:<f>  B:<wait>  B:<f>  B:<echo in > o.txt>
 ```
 
-osh usually gives the same and sometimes gives
+Re-measuring settled it the other way round. In isolation — 8 runs each with
+stdout a pipe, 10 each with stdout a file, 10 more through the harness itself,
+and 10 runs of the whole case file — **bash and osh agreed every single time**,
+and what they agreed on was the order the sweep had recorded as osh's *wrong*
+answer. So it is bash that answers both ways, and only when the machine is
+loaded by a full 250-case sweep; osh was stable throughout. The hypothesis this
+entry first recorded — that bash's ordering is stable by construction because
+the parent block-buffers while the child flushes at exit — is **wrong**, and
+there was no ordering discipline for osh to adopt.
 
-```
-B:<f>
-B:<wait>
-B:<f>
-B:<echo in > o.txt>
-```
+**Fixed** by making the case deterministic rather than by changing osh: the job
+now gets its own stdout (`f >j.txt &`) and the parent replays it after `wait`
+(`cat o.txt j.txt`), so the two sides' announcements cannot interleave at all.
+That is also the plainer record of what the section is about — which side
+announces what — and it is what the two shapes below it already did implicitly,
+their job's stdout being the pipe into `cat > o.txt`.
 
-— the parent reaching `wait`'s DEBUG trap before the job thread has emitted
-its own two traces. Nothing else in the case differs, and no other section
-races.
-
-**Not caused by** the `<>` work of the same day: the case contains no `<>`
-redirect at all, and that change only alters behaviour where
+**Not caused by** the `<>` work of the same day, as suspected at the time: the
+case contains no `<>` redirect, and that change only alters behaviour where
 `RedirPlan::stdout_write` / `stderr_write` is set, which only
 `RedirectOp::ReadWrite` on fd 1 / fd 2 does.
 
-**Worth understanding before fixing.** In bash this is a genuine fork race and
-yet it is stable, which suggests the ordering is not luck: most likely the
-parent's stdout is block-buffered onto the harness's file while the child
-flushes at exit, so the child's bytes land first by construction. If that is
-it, the honest fix is not a sleep or a handshake but making osh's job threads
-and the parent share one write ordering discipline — the same question
-`signal_stage_started` answers for pipeline stages, asked for background jobs.
-Until then the case is a known intermittent failure of the differential
-harness, not a shell bug that a script would see.
+**Standing lesson for the corpus:** a case that puts a background job's output
+and its parent's output on one stream is measuring the host's scheduler, not
+the shell. Give the job a stream of its own and replay it after `wait`.
 
 ### TD-OILS-READ-PARSES-OPTIONS-AFTER-THE-FIRST-NAME. `read` keeps scanning for options past its first operand, where bash stops — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 

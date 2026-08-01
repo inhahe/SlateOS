@@ -243,6 +243,53 @@ pub enum Tok {
     },
 }
 
+/// The words after which a reserved word — and so an arithmetic command — is
+/// still recognised. bash's `reserved_word_acceptable` (parse.y), plus `for`.
+///
+/// `for` is there because bash reads the arithmetic `for (( … ))` header by a
+/// route of its own; osh gets the same shape from the ordinary `((` token. The
+/// others bash leaves out are left out here too: after `in`, `case` or `select`
+/// what follows is a pattern or a name, which is why `case x in ((p)` is a
+/// pattern that opens with a paren rather than an arithmetic command.
+const ARITH_CMD_AFTER: &[&str] = &[
+    "{", "}", "!", "do", "done", "elif", "else", "esac", "fi", "for", "if", "then", "time",
+    "until", "while", "coproc",
+];
+
+/// Whether a `((` standing here opens an arithmetic command rather than two
+/// nested subshells.
+///
+/// bash decides this from the token it has just read: `((` is an `ARITH_CMD`
+/// only where a reserved word would be recognised — the start of the input,
+/// after a separator, and after the words that open or close a compound
+/// command. Anywhere else it hands back a single `(` and reads the second one
+/// again as the next token, so `echo ((1))` is a syntax error near `(` and not
+/// an arithmetic command. An assignment prefix blocks it too (`x=1 ((2))` is
+/// the same error), which falls out of the same rule: bash does not recognise a
+/// reserved word after one either.
+fn arith_cmd_position(prev: Option<&Tok>) -> bool {
+    match prev {
+        None | Some(Tok::Newline) => true,
+        Some(Tok::Op(op)) => matches!(
+            op,
+            Op::Semi
+                | Op::DSemi
+                | Op::SemiAmp
+                | Op::DSemiAmp
+                | Op::LParen
+                | Op::RParen
+                | Op::Pipe
+                | Op::PipeAmp
+                | Op::Amp
+                | Op::AndIf
+                | Op::OrIf
+        ),
+        Some(Tok::Word(segs)) => matches!(segs.as_slice(),
+            [Seg::Lit(s)] if ARITH_CMD_AFTER.iter().any(|w| w.as_bytes() == s.as_slice())),
+        _ => false,
+    }
+}
+
 /// Shell options that change how source text is *lexed*, so they must be known
 /// before a unit is tokenized rather than when it runs.
 ///
@@ -1424,8 +1471,11 @@ impl Lexer {
                 '(' => {
                     self.pos += 1;
                     // `((` (with no intervening space) begins an arithmetic
-                    // command; `( (` (a space between) is nested subshells.
-                    if self.peek() == Some('(') {
+                    // command; `( (` (a space between) is nested subshells. So
+                    // does `((` standing where no command can start — there it
+                    // is a plain `(`, and the second one is read again as the
+                    // next token.
+                    if self.peek() == Some('(') && arith_cmd_position(out.last()) {
                         self.pos += 1;
                         let raw = self.read_arith()?;
                         out.push(Tok::ArithCmd(raw));

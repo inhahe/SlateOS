@@ -35146,13 +35146,15 @@ mod tests {
             "osh: -c: line 4: syntax error: unexpected end of file"
         );
 
-        // Inside `eval`, the input-source token is `eval`, not `-c`.
+        // Inside `eval`, the input-source token is `eval`, not `-c`. (The `(`
+        // itself is accepted — `WORD (` opens a function definition — so what
+        // the diagnostic names is the newline standing where the `)` should be.)
         sh.eval_depth = 1;
         let src = "echo (";
         let e = parse(src.as_bytes()).unwrap_err();
         assert_eq!(
             parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
-            "osh: eval: line 1: syntax error near unexpected token `('\n\
+            "osh: eval: line 1: syntax error near unexpected token `newline'\n\
              osh: eval: line 1: `echo ('"
         );
         sh.eval_depth = 0;

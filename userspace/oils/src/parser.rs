@@ -1695,8 +1695,17 @@ impl Parser {
         // the definition *executes*. See [`FunctionDef::definable`].
         if matches!(self.peek(), Some(Tok::Word(segs)) if !word_is_assignment(segs))
             && matches!(self.toks.get(self.pos + 1), Some(Tok::Op(Op::LParen)))
-            && matches!(self.toks.get(self.pos + 2), Some(Tok::Op(Op::RParen)))
         {
+            // bash's parser has shifted the `(` by the time it looks for the
+            // `)`, so from here there is no other production to fall back to:
+            // whatever stands where the `)` should be *is* the error, and is
+            // the token the diagnostic names. `a ( b` is reported near `b`,
+            // and `a (` — where only the line's own newline follows — near
+            // `newline`, neither of them near the `(` that was accepted.
+            if !matches!(self.toks.get(self.pos + 2), Some(Tok::Op(Op::RParen))) {
+                self.pos += 2;
+                return Err(self.unexpected_here());
+            }
             // A name written as a bare word is definable and *is* its literal;
             // any other spelling is not, and is kept as written so the run-time
             // error can quote it back exactly as typed.
@@ -4267,6 +4276,59 @@ mod tests {
             panic!("expected function");
         };
         assert_eq!(text(&f.name), "greet");
+    }
+
+    /// A `(` after a word is the start of a function definition and nothing
+    /// else, so once it has been read the `)` is compulsory and whatever stands
+    /// in its place is what the diagnostic names — never the `(` itself. Every
+    /// expectation is bash 5.2.37's own.
+    #[test]
+    fn a_paren_after_a_word_commits_to_a_function_definition() {
+        let err = |src: &str| String::from_utf8_lossy(&parse(src).unwrap_err().msg).into_owned();
+        assert_eq!(err("a ( b"), "syntax error near unexpected token `b'");
+        assert_eq!(err("a (b)"), "syntax error near unexpected token `b'");
+        assert_eq!(err("a ( ;"), "syntax error near unexpected token `;'");
+        assert_eq!(err("a (\nb"), "syntax error near unexpected token `newline'");
+        // The unit's own closing newline counts as the token that was found.
+        assert_eq!(err("a ("), "syntax error near unexpected token `newline'");
+        // `((` where no command can start is two `(` tokens, so the second one
+        // is the token found where the `)` was wanted.
+        assert_eq!(err("a (("), "syntax error near unexpected token `('");
+        assert_eq!(err("echo ((1))"), "syntax error near unexpected token `('");
+        assert_eq!(err("x=1 ((2))"), "syntax error near unexpected token `('");
+        // An assignment word is not part of the production, so `(` after one is
+        // still reported as itself.
+        assert_eq!(err("a=b ( c"), "syntax error near unexpected token `('");
+        // And the definition itself still parses.
+        assert!(parse("a ( ) { :; }").is_ok());
+    }
+
+    /// `((` opens an arithmetic command only where a reserved word would be
+    /// recognised. Everywhere else it is a `(` followed by another `(`.
+    #[test]
+    fn arith_command_only_where_a_command_can_start() {
+        for src in [
+            "((1))",
+            "if ((1)); then :; fi",
+            "while ((1)); do :; done",
+            "true && ((1))",
+            "true | ((1))",
+            "true; ((1))",
+            "true &\n((1))",
+            "{ ((1)); }",
+            "( ((1)) )",
+            "! ((0))",
+            "time ((1))",
+            "for ((i=0;i<2;i++)); do :; done",
+            "case x in a) ((1));; esac",
+        ] {
+            assert!(parse(src).is_ok(), "should have parsed: {src}");
+        }
+        // After a word, an assignment, or `in`, the `((` is two parens — which
+        // is a syntax error in each of these, as it is in bash.
+        for src in ["echo ((1))", "x=1 ((2))", "case x in ((x) :;; esac"] {
+            assert!(parse(src).is_err(), "should not have parsed: {src}");
+        }
     }
 
     /// bash's `WORD ( )` production accepts any word, and defers the name check

@@ -2227,6 +2227,11 @@ pub struct Shell {
     /// reason as `func_redirects`: the many `self.funcs.get()` sites stay
     /// unchanged.
     func_sources: HashMap<Str, Str>,
+    /// The line each function's definition began on, within the source
+    /// [`func_sources`] names. Only `declare -F NAME` under `shopt -s extdebug`
+    /// reports it, which is why it is kept beside the source label rather than
+    /// on the definition itself.
+    func_lines: HashMap<Str, u32>,
     /// Redirections attached to a function *definition* (`f() { …; } >log`).
     /// bash applies these on every invocation of the function, wrapping the
     /// body execution. Kept as a parallel map (rather than folding into
@@ -3289,6 +3294,7 @@ impl Shell {
             opaque_env: Vec::new(),
             funcs: HashMap::new(),
             func_sources: HashMap::new(),
+            func_lines: HashMap::new(),
             func_redirects: HashMap::new(),
             positional: Vec::new(),
             name: b"osh".to_vec(),
@@ -5808,6 +5814,9 @@ impl Shell {
                     // naming that script for the rest of the shell's life.
                     let src = self.current_source();
                     self.func_sources.insert(f.name.clone(), src);
+                    // …and which line of it the definition began on, the other
+                    // half of what `declare -F NAME` reports under extdebug.
+                    self.func_lines.insert(f.name.clone(), self.current_line);
                     // Redirections attached to the definition apply on every
                     // invocation (bash semantics). Store them, or clear a
                     // prior set when the function is redefined without any.
@@ -7371,6 +7380,7 @@ impl Shell {
             opaque_env: self.opaque_env.clone(),
             funcs: self.funcs.clone(),
             func_sources: self.func_sources.clone(),
+            func_lines: self.func_lines.clone(),
             func_redirects: self.func_redirects.clone(),
             positional: self.positional.clone(),
             name: self.name.clone(),
@@ -22614,6 +22624,19 @@ impl Shell {
             if let Some(body) = self.funcs.get(name) {
                 if name_only {
                     listing.extend_from_slice(name);
+                    // `shopt -s extdebug` is what makes `declare -F NAME` worth
+                    // asking: the name is followed by where the definition was
+                    // read from, as line then source. Only the *named* form
+                    // says so — the nameless listing prints its `declare -f`
+                    // attribute lines the same either way — and only for a
+                    // function the shell watched being defined, so one arriving
+                    // in the environment has nowhere to name.
+                    if self.extdebug_on()
+                        && let Some(line) = self.func_lines.get(name)
+                        && let Some(src) = self.func_sources.get(name)
+                    {
+                        listing.extend_from_slice(&bfmt![b" ", line.to_string().as_bytes(), b" ", src.as_slice()]);
+                    }
                     listing.push(b'\n');
                 } else {
                     // `declare -f NAME` prints the function's reconstructed source.
@@ -25760,6 +25783,7 @@ impl Shell {
                 }
                 self.funcs.remove(a.as_slice());
                 self.func_sources.remove(a.as_slice());
+                self.func_lines.remove(a.as_slice());
                 self.fn_trace_attr.remove(a.as_slice());
                 continue;
             }
@@ -25888,6 +25912,7 @@ impl Shell {
                 }
                 self.funcs.remove(a.as_bytes());
                 self.func_sources.remove(a.as_bytes());
+                self.func_lines.remove(a.as_bytes());
                 self.fn_trace_attr.remove(a.as_bytes());
                 continue;
             }

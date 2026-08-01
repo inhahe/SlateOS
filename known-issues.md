@@ -25609,3 +25609,40 @@ UTF-8-native, which is the correct target for SlateOS (it has no C/POSIX byte
 locale), so the MSYS byte-wise result is a host-locale artifact rather than an
 osh divergence. `tests/corpus/read-processes-backslashes-as-it-reads.sh` keeps
 to ASCII for exactly this reason. No action needed.
+
+### TD-OILS-EXPORT-F. `export -f` is rejected: a function cannot be passed to a child shell — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — the `export` builtin's flag loop
+accepts only `-n` and `-p`, so `-f` comes back as `invalid option`.
+
+**What:** bash exports a function by putting it in the environment under the
+name `BASH_FUNC_<name>%%`, with the value being the function's body in
+`() { … }` form; a bash child imports any such variable back as a function.
+
+```
+$ bash -c 'f(){ :; }; export -f f; bash -c "declare -F f"'
+f
+$ osh -c 'f(){ :; }; export -f f'
+osh: line 1: export: -f: invalid option
+```
+
+An imported function has no definition site the shell watched, so bash reports
+it as line 0 of `environment`:
+
+```
+$ bash -c 'f(){ :; }; export -f f; bash -c "shopt -s extdebug; declare -F f"'
+f 0 environment
+```
+
+**Proper fix.** Accept `-f` on `export` (and on `declare -x`, which is the same
+path), keep a set of exported *function* names, and serialise each into the
+child environment as `BASH_FUNC_<name>%%=() { <body> }` — the body being what
+`declare -f` already reconstructs. On startup, recognise that name shape in
+`import_environment` and bind the function instead of a variable, recording its
+source as `environment` and its line as 0 so `declare -F` under extdebug agrees.
+`unset -f` and `export -fn` both have to drop the name from the exported set.
+
+**Impact.** A script that exports a helper to a subshell (`export -f` plus
+`find -exec bash -c`, `xargs bash -c`, `parallel`) fails outright rather than
+silently misbehaving, so it is visible rather than dangerous. Also blocks
+`declare -F`'s `0 environment` form, which is otherwise implemented.

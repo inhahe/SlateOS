@@ -22068,6 +22068,12 @@ impl Shell {
         }
         self.in_trap = true;
         let saved = self.last_status;
+        // `${PIPESTATUS[@]}` is put back with `$?`, and for the same reason: a
+        // handler is an interruption, so the command that fired it must still
+        // read the pipeline it followed. The handler's own body sees the array
+        // live and moving — it is only the *caller's* view that is restored —
+        // which is why this is saved here rather than suppressed for the body.
+        let saved_pipestatus = self.arrays.get("PIPESTATUS").cloned();
         // A handler's body is numbered from the line the shell had reached when
         // it fired, not from 1: bash re-reads the handler where it stands, so
         // `trap 'nosuch' DEBUG` blames the line of the command it announced, and
@@ -22093,6 +22099,10 @@ impl Shell {
         // which case its code is the shell's exit status.
         if !matches!(flow, Flow::Exit(_)) {
             self.last_status = saved;
+            match saved_pipestatus {
+                Some(ps) => self.arrays.insert("PIPESTATUS".to_string(), ps),
+                None => self.arrays.remove("PIPESTATUS"),
+            };
         }
         // The handler is an interruption, not a move: what the triggering
         // command sees in `$LINENO` (and blames in its own diagnostics) is still

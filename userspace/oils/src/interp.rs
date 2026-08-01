@@ -14847,9 +14847,17 @@ impl Shell {
             WordPart::Length(name) => match self.param_value(name) {
                 Some(v) => bytes::char_count(&v).to_string().into_bytes(),
                 None => {
-                    // `${#name}` has no unbraced spelling, so it names the
-                    // parameter without a `$` whatever the parameter is.
-                    self.note_unbound(name, name.as_bytes());
+                    // `${#!}` answers 0 rather than faulting: asking how long
+                    // the last background pid is asks about the *parameter*,
+                    // which bash counts among the always-set specials here even
+                    // though a plain `$!` read is not one. Every other special
+                    // always has a value, so this is the only place the two
+                    // questions come apart.
+                    if name != "!" {
+                        // `${#name}` has no unbraced spelling, so it names the
+                        // parameter without a `$` whatever the parameter is.
+                        self.note_unbound(name, name.as_bytes());
+                    }
                     b"0".to_vec()
                 }
             },
@@ -15432,7 +15440,7 @@ impl Shell {
     /// before composing the diagnostic's text keeps the ordinary unset read —
     /// which happens constantly with `set -u` off — free of that work.
     fn unbound_is_error(&self, name: &str) -> bool {
-        self.nounset && !is_special_param(name)
+        self.nounset && !is_nounset_exempt(name)
     }
 
     /// [`Shell::note_unbound`] for a plain `$name` / `${name}` reference.
@@ -33347,10 +33355,21 @@ fn quote_set_value(v: BStr<'_>) -> Str {
 }
 
 
-/// A special shell parameter that is always considered "set" for `nounset`
-/// purposes (referencing it never yields an unbound-variable error).
+/// One of the shell's punctuation parameters — the names that are not
+/// identifiers and that the shell answers for itself.
 fn is_special_param(name: &str) -> bool {
     matches!(name, "@" | "*" | "#" | "?" | "$" | "!" | "0" | "-" | "_")
+}
+
+/// A parameter that is always considered "set" for `nounset` purposes, so that
+/// referencing it never yields an unbound-variable error.
+///
+/// This is every special parameter *except* `$!`, which is the one with a
+/// genuinely empty state: it holds the pid of the last background job, and a
+/// shell that has not started one has no answer to give. bash faults on it
+/// like any other unset name.
+fn is_nounset_exempt(name: &str) -> bool {
+    matches!(name, "@" | "*" | "#" | "?" | "$" | "0" | "-" | "_")
 }
 
 /// Whether `s` is a valid parameter name to use as the *target* of an indirect

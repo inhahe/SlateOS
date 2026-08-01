@@ -7806,6 +7806,48 @@ doing because it is the differential harness's fidelity, but it is host
 scaffolding rather than shell semantics, so it is not on the critical
 path.
 
+**Measured (2026-08-01).** Cygwin's parser was probed directly, by
+handing a real MSYS bash a raw command line from native-Windows Python
+(`subprocess.run(<string>)` on `os.name == 'nt'` passes the string
+through unaltered) and printing the argv it built. Two findings:
+
+*The mangling is not only quoting: an **unquoted** argument is glob- and
+tilde-expanded by the child.* Cygwin's `build_argv` runs the expansions a
+Unix shell would have run before `exec`, on the assumption that no shell
+did. So `tr '\n' '~'` reaches `tr` as `/c/Users/inhah`, and a bare `*`
+reaches it as the whole directory listing — a divergence with no `"` or
+`\` anywhere in sight, which is how it was found (a probe's `tr` output
+came back with `/` where bash had `~`). Arguments only survive today when
+they happen to match nothing (`~x`, `a*b`).
+
+The parse, in full (raw fragment → argv element):
+
+| raw | argv | raw | argv |
+|---|---|---|---|
+| `plain` | `plain` | `a\\b` | `a\\b` |
+| `~` | `/c/Users/inhah` | `"a\\b"` | `a\b` |
+| `"~"` | `~` | `"a\"` | `a"` |
+| `~x` | `~x` | `"a\\"` | `a\` |
+| `*` | *(the cwd listing)* | `q"r` | `qr` |
+| `"*"` | `*` | `"q""r"` | `q"r` |
+| `a*b` | `a*b` | `"q\"r"` | `q"r` |
+| `a\nb` | `a\nb` | `""` | *(empty)* |
+| `"a\nb"` | `a\nb` | `a"b c"d` | `ab cd` |
+
+That is: inside `"…"`, `\\`→`\`, `\"`→`"`, `""`→`"`, and everything else
+is literal (`\n` stays two characters, unlike the MSVC rule where a
+backslash run before a quote halves); the closing `"` ends the section
+rather than the argument, and quotes are removed in place. `$`, backtick,
+`'`, tab, `%PATH%`, `;|&`, `()<>^` all pass through a quoted section
+untouched.
+
+**Derived encoding:** wrap *every* argument in `"…"` — which also
+suppresses the glob/tilde pass — and inside it replace `\` with `\\` and
+`"` with `\"`. Verified round-trip for `a\b`, `q"r`, `a\`, `~`, `*` and
+the empty string. Note it differs from Rust's MSVC quoting on exactly one
+point, `\\` inside quotes, which is why the encoder cannot be global: it
+has to be chosen per callee.
+
 ### TD-OILS-EXPORT-READONLY-ATTR. A refused `export NAME=value` dropped the export attribute along with the value — 2026-07-31 — ✅ RESOLVED 2026-07-31
 
 **Where:** `userspace/oils/src/interp.rs` — the readonly branch of

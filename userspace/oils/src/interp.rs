@@ -7208,7 +7208,16 @@ impl Shell {
         // rather than a plain handle because `2>&1` can land on a capture (fd 1
         // dup'd from a `3>&1` taken inside `$( … )`), which has no OS file.
         let mut stderr_file: Option<WriteFd> = None;
-        if let Some((path, append)) = &plan.stderr {
+        if plan.stderr_closed {
+            // `{ …; } 2>&-`: the body has no fd 2. Every diagnostic it or
+            // anything it forks produces is dropped, and — because the binding
+            // is what a subshell clone inherits — `stderr_file` carries the
+            // closed state rather than being left unset, which would mean the
+            // ambient stderr.
+            self.stderr_stack.push(StderrTarget::Discard);
+            stderr_file = Some(WriteFd::Closed);
+            pushed_stderr = true;
+        } else if let Some((path, append)) = &plan.stderr {
             // `> f 2>&1` / `&> f` / `2>f 1>&2`: fd 2 is a *dup* of fd 1's handle
             // (the resolver set `stderr_shares_stdout`). Share fd 1's already-open
             // handle (a `try_clone`, referencing the same open file description and
@@ -13426,7 +13435,14 @@ impl Shell {
         // For `2>&1` with a captured stdout, fd 2 is appended to the same
         // capture buffer as fd 1.
         let mut stderr_to_stdout_capture = false;
-        if let Some(n) = redir.stderr_to_fd {
+        if redir.stderr_closed {
+            // `cmd 2>&-`: bash hands the child a closed fd 2 and lets its writes
+            // fail. `Stdio::null()` is behaviourally the same from outside — the
+            // diagnostics are lost and the child's own status is untouched
+            // (`ls /nosuchdir 2>&-` still exits 2) — so unlike fd 1 there is
+            // nothing here worth refusing the redirect over.
+            cmd.stderr(Stdio::null());
+        } else if let Some(n) = redir.stderr_to_fd {
             // `cmd 2>&N` (N ≥ 3): the child's fd 2 is a user-space write fd —
             // piped and drained when that fd names a capture, as for fd 1 above.
             match self.write_fd_for(n, redir) {
@@ -14277,7 +14293,11 @@ impl Shell {
                     // `EBADF` (`echo: write error: …`), not print to the
                     // terminal. See [`WriteFd::Closed`].
                     1 => self.exec_stdout = Some(WriteFd::Closed),
-                    2 => self.exec_stderr = None,
+                    // As for fd 1: `None` would mean "the real stderr". A shell
+                    // that closed fd 2 has nowhere to report a failed write, so
+                    // its diagnostics are dropped — but they must not appear on
+                    // the terminal instead.
+                    2 => self.exec_stderr = Some(WriteFd::Closed),
                     _ => {
                         self.open_write_fds.remove(&fd);
                         self.open_fds.remove(&fd);
@@ -14370,6 +14390,8 @@ impl Shell {
                     // which descriptor is meant. See
                     // [`Shell::apply_persistent_dup_out`].
                     self.exec_stdout = Some(WriteFd::Closed);
+                } else if fd == 2 {
+                    self.exec_stderr = Some(WriteFd::Closed);
                 } else {
                     self.open_fds.remove(&fd);
                     self.open_write_fds.remove(&fd);
@@ -14650,6 +14672,15 @@ impl Shell {
     /// routes `>&2` to the file (the `2>file >&2` ordering) rather than the
     /// pre-redirect stderr — see known-issues TD-OILS14.
     fn push_builtin_stderr(&mut self, redir: &RedirPlan, out: &mut Out) -> bool {
+        // `2>&-`: fd 2 is gone, so a diagnostic has nowhere to go — and no
+        // second stderr on which to report that it could not. Dropping is the
+        // whole visible effect; the status is the command's own, unchanged.
+        // Checked first because the resolver has already applied
+        // last-writer-wins between fd 2's destinations.
+        if redir.stderr_closed {
+            self.stderr_stack.push(StderrTarget::Discard);
+            return true;
+        }
         if let Some((path, append)) = &redir.stderr {
             if let Ok(f) = open_out(&self.cwd, path, *append) {
                 self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
@@ -14850,10 +14881,8 @@ impl Shell {
                         // it. osh models the write side as a no-truncate (append)
                         // sink — the offset-0 write position of a real `O_RDWR`
                         // fd is not modelled (documented limitation).
+                        plan.clear_stderr();
                         plan.stderr = Some((path, true));
-                        plan.stderr_shares_stdout = false;
-                        plan.stderr_to_stdout = false;
-                        plan.stderr_to_fd = None;
                     } else {
                         // `1<> file` (or a bare `>`-side fd): as above for fd 1.
                         plan.clear_stdout();
@@ -14900,13 +14929,12 @@ impl Shell {
                     // Both fds now target the file: clear every competing dup so
                     // this (later) redirect wins over earlier `2>&1`/`>&N` forms.
                     plan.clear_stdout();
+                    plan.clear_stderr();
                     plan.stdout = Some((target.clone(), append));
                     plan.stderr = Some((target, append));
                     // `&>` is `>file 2>&1`: fd 2 is a dup of fd 1, sharing one
                     // open file description (and offset) — writes interleave.
                     plan.stderr_shares_stdout = true;
-                    plan.stderr_to_stdout = false;
-                    plan.stderr_to_fd = None;
                 }
                 RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
                     let target = self.expand_redirect_target(&r.target)?;
@@ -14934,14 +14962,13 @@ impl Shell {
                     open_output_target(&self.cwd, &target, append)?;
                     match fd {
                         2 => {
-                            plan.stderr = Some((target, append));
                             // An explicit `2>file` is an *independent* open, even
                             // if it names the same path as `>file`: bash gives each
-                            // its own offset, so the writes clobber (not share).
-                            plan.stderr_shares_stdout = false;
-                            // Later file redirect overrides any earlier stderr dup.
-                            plan.stderr_to_stdout = false;
-                            plan.stderr_to_fd = None;
+                            // its own offset, so the writes clobber (not share) —
+                            // hence no `stderr_shares_stdout`. And, being later,
+                            // it overrides any earlier dup or close of fd 2.
+                            plan.clear_stderr();
+                            plan.stderr = Some((target, append));
                         }
                         // fd ≥ 3 (`exec 3> file`): a user-space write descriptor,
                         // not stdout. Only `exec` consumes it; on any other
@@ -15014,13 +15041,12 @@ impl Shell {
                 let target = target.to_vec();
                 open_output_target(&self.cwd, &target, false)?;
                 plan.clear_stdout();
+                plan.clear_stderr();
                 plan.stdout = Some((target.clone(), false));
                 plan.stderr = Some((target, false));
                 // `>&file` is `>file 2>&1` — fd 2 dup's fd 1 (shared offset,
                 // interleaved writes).
                 plan.stderr_shares_stdout = true;
-                plan.stderr_to_stdout = false;
-                plan.stderr_to_fd = None;
             } else {
                 // The ambiguous message names the *expansion*, unlike the bad-fd
                 // one above: bash overwrites the redirect's word with the
@@ -15029,15 +15055,13 @@ impl Shell {
             }
         } else if fd == 2 && target == b"1" {
             // fd 2's destination is being (re)set: drop any earlier stderr
-            // file/fd target so this dup wins (last-writer).
-            plan.stderr_to_fd = None;
+            // file/fd target — or close — so this dup wins (last-writer).
+            plan.clear_stderr();
             if plan.stdout.is_some() {
                 // `>file 2>&1`: fd 2 dup's fd 1's file — shared offset.
                 plan.stderr = plan.stdout.clone();
                 plan.stderr_shares_stdout = true;
-                plan.stderr_to_stdout = false;
             } else {
-                plan.stderr = None;
                 plan.stderr_to_stdout = true;
             }
         } else if fd == 1 && target == b"2" {
@@ -15061,8 +15085,14 @@ impl Shell {
                 // last-writer-wins slot as every other fd-1 destination.
                 plan.clear_stdout();
                 plan.stdout_closed = true;
+            } else if fd == 2 {
+                // `2>&-`: fd 2 is gone, so the command's diagnostics have
+                // nowhere to go and are dropped — the status is unchanged
+                // (`cd /nosuchdir 2>&-` still exits 1, silently).
+                plan.clear_stderr();
+                plan.stderr_closed = true;
             }
-            // fd 0 and fd 2 closes are not modelled yet — see
+            // An fd 0 close is not modelled yet — see
             // TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP.
         } else if let Some(n) = target_num
             && !Self::dup_needs_no_source(origin, fd, n)
@@ -15099,9 +15129,8 @@ impl Shell {
             }
             match fd {
                 2 => {
+                    plan.clear_stderr();
                     plan.stderr_to_fd = Some(n);
-                    plan.stderr = None;
-                    plan.stderr_to_stdout = false;
                 }
                 1 => {
                     plan.clear_stdout();
@@ -15160,8 +15189,12 @@ impl Shell {
                 // descriptor. See [`Shell::resolve_dup_out`].
                 plan.clear_stdout();
                 plan.stdout_closed = true;
+            } else if fd == 2 {
+                // `2<&-`, likewise, is `2>&-`.
+                plan.clear_stderr();
+                plan.stderr_closed = true;
             }
-            // `0<&-` / `2<&-` (close stdin / stderr) are not modelled yet — see
+            // `0<&-` (close stdin) is not modelled yet — see
             // TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP.
         } else if let DupWord::Fd(n) = dup
             && !Self::dup_needs_no_source(origin, fd, n)
@@ -30467,13 +30500,25 @@ impl Shell {
             // ordering (a `2>file >&2` sequence copies the file into `stdout`
             // instead), so when a per-command stderr redirect is present it is the
             // freshly-pushed top of `stderr_stack` — skip it. See TD-OILS14.
-            let skip_top =
-                redir.stderr.is_some() || redir.stderr_to_fd.is_some() || redir.stderr_to_stdout;
+            // `>&-` counts as one of those per-command stderr redirects: it too
+            // pushed a target (`Discard`), and `echo msg >&2 2>&-` must reach
+            // the *pre-close* stderr rather than be dropped by it — the dup took
+            // fd 2 while it was still open.
+            let skip_top = redir.stderr.is_some()
+                || redir.stderr_to_fd.is_some()
+                || redir.stderr_to_stdout
+                || redir.stderr_closed;
             let depth = if skip_top {
                 self.stderr_stack.len().saturating_sub(1)
             } else {
                 self.stderr_stack.len()
             };
+            // `1>&2` is a *dup*, and a dup of an fd 2 with no write half fails
+            // when the redirect is set up — the bytes are never offered to it.
+            // See [`Shell::stderr_has_no_write_half`].
+            if self.stderr_has_no_write_half(depth) {
+                return 1;
+            }
             self.emit_stderr_depth(bytes, depth);
             return 0;
         }
@@ -30690,6 +30735,27 @@ impl Shell {
     /// the normal case; a smaller depth lets `>&2` on a command that also has
     /// its own `2>file` redirect skip that just-pushed per-command stderr and
     /// target the *pre-redirect* sink (the dup-first ordering — see TD-OILS14).
+    /// Whether fd 2, as it stands `depth` entries into the stderr stack, has no
+    /// writable description behind it at all — because it was closed (`2>&-`)
+    /// or aliased onto one that cannot be written (`2>&0` on a read-only fd 0).
+    ///
+    /// Writing a *diagnostic* to such an fd 2 is simply dropped; there is
+    /// nowhere to report the failure. But duplicating *from* it is a different
+    /// question: `1>&2` is a dup that bash performs when the redirect is set up,
+    /// so it fails outright — `{ echo x >&2; } 2>&-` and
+    /// `{ echo x >&2; } 2>&0 < f` both exit 1 having written nothing, with the
+    /// `2: Bad file descriptor` itself invisible for the same reason.
+    fn stderr_has_no_write_half(&self, depth: usize) -> bool {
+        match self.stderr_stack.get(..depth).and_then(<[_]>::last) {
+            Some(StderrTarget::Discard) => true,
+            Some(_) => false,
+            None => matches!(
+                self.exec_stderr,
+                Some(WriteFd::Closed | WriteFd::ReadOnly)
+            ),
+        }
+    }
+
     fn emit_stderr_depth(&self, bytes: &[u8], depth: usize) {
         match self.stderr_stack.get(..depth).and_then(<[_]>::last) {
             None => {
@@ -31647,6 +31713,14 @@ struct RedirPlan {
     /// `EBADF` (`echo: write error: Bad file descriptor`, status 1) rather than
     /// print to the terminal. See [`WriteFd::Closed`].
     stdout_closed: bool,
+    /// `2>&-` — fd 2 is *closed* for this command, as [`RedirPlan::stdout_closed`]
+    /// is for fd 1.
+    ///
+    /// The visible effect differs, because a failed write to fd 2 has nowhere to
+    /// be reported: the diagnostic is simply **dropped**. `cd /nosuchdir 2>&-`
+    /// still exits 1, silently — which is why this cannot be modelled as "fd 2
+    /// unset" either, since that would print to the terminal.
+    stderr_closed: bool,
     /// Redirections to descriptors other than 0/1/2 (`3< file`, `4> log`,
     /// `4<&-`, …). Only the `exec` builtin currently consumes these, installing
     /// them in the shell's persistent [`Shell::open_fds`] / [`Shell::open_write_fds`]
@@ -31669,6 +31743,7 @@ impl RedirPlan {
             && self.stdout_to_fd.is_none()
             && self.stderr_to_fd.is_none()
             && !self.stdout_closed
+            && !self.stderr_closed
             && self.extra_fds.is_empty()
     }
 
@@ -31685,6 +31760,19 @@ impl RedirPlan {
         self.stdout_to_stderr = false;
         self.stdout_to_fd = None;
         self.stdout_closed = false;
+    }
+
+    /// [`RedirPlan::clear_stdout`] for fd 2.
+    ///
+    /// `stderr_shares_stdout` goes with the destination it qualifies (it says
+    /// fd 2's file is fd 1's *same* description, not merely the same path), so
+    /// it is cleared here too and re-set by whichever writer wants it.
+    fn clear_stderr(&mut self) {
+        self.stderr = None;
+        self.stderr_shares_stdout = false;
+        self.stderr_to_stdout = false;
+        self.stderr_to_fd = None;
+        self.stderr_closed = false;
     }
 
     /// Whether this command's own redirections rebind fd 0. Such a command
@@ -31758,6 +31846,7 @@ impl RedirPlan {
             || self.stderr_to_stdout
             || self.stdout_to_stderr
             || self.stdout_closed
+            || self.stderr_closed
             || !self.extra_fds.is_empty()
     }
 }
@@ -56757,6 +56846,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (out, disk) = run_over_seeded_file("", "exec 1> {FILE}; exec 3>&1; echo hi >&3");
         assert_eq!(disk, "hi\n", "the dup should follow fd 1 to the file");
         assert_eq!(out, "", "nothing should have reached the capture: {out:?}");
+    }
+
+    #[test]
+    fn a_closed_stderr_drops_the_diagnostic_and_keeps_the_status() {
+        // `2>&-` takes fd 2 away, and a failed write to fd 2 has nowhere to be
+        // reported — so the only visible effect is that the diagnostic stops.
+        // The status is exactly what it would have been: `cd /nosuchdir 2>&-`
+        // still exits 1. Regression: osh recorded the close by removing fd 2
+        // from tables it never lived in, so the message came out anyway
+        // (TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP).
+        let (out, _) = run("{ cd /nosuchdir 2>&-; } 2>&1; echo \"st=$?\"");
+        assert_eq!(out, "st=1\n", "the diagnostic should have been dropped");
+        // Which side of the `&` the `-` is on says nothing about which
+        // descriptor is meant: `2<&-` closes fd 2 too.
+        let (out, _) = run("{ cd /nosuchdir 2<&-; } 2>&1; echo \"st=$?\"");
+        assert_eq!(out, "st=1\n", "`2<&-` should close fd 2 as well");
+        // A whole body inherits the absence.
+        let (out, _) = run("{ { cd /nosuchdir; } 2>&-; } 2>&1; echo \"st=$?\"");
+        assert_eq!(out, "st=1\n", "a group's close should reach its body");
+    }
+
+    #[test]
+    fn a_closed_stderr_is_not_a_descriptor_to_dup_from() {
+        // `>&2` is a *dup*, performed when the redirect is set up, so it fails
+        // outright once fd 2 is gone: status 1 and nothing written — with the
+        // `2: Bad file descriptor` itself invisible, for the same reason every
+        // other diagnostic is.
+        let (out, _) = run("{ { echo A >&2; } 2>&-; } 2>&1; echo \"st=$?\"");
+        assert_eq!(out, "st=1\n", "duplicating a closed fd 2 should fail: {out:?}");
+        // The same holds for the persistent spelling, and for `exec 3>&2`,
+        // which likewise cannot copy a descriptor that is not there. Nothing
+        // wraps these in `2>&1`: with fd 2 closed the dup's own complaint is
+        // invisible, so a `B` on stdout — or a status 0 — is the only way the
+        // failure could show, and both are checked by the equality below.
+        let (out, _) = run("exec 2>&-; echo B >&2; echo \"st=$?\"");
+        assert_eq!(out, "st=1\n", "`exec 2>&-` should stick: {out:?}");
+        let (_, st) = run("exec 2>&-; exec 3>&2");
+        assert_eq!(st, 1, "`exec 3>&2` should fail with fd 2 closed");
+    }
+
+    #[test]
+    fn a_dup_of_stderr_taken_before_the_close_still_holds() {
+        // A redirect list is applied left to right, so `>&2` written before
+        // `2>&-` copies fd 2 while it is still open and the write lands.
+        let (out, _) = run("{ echo D >&2 2>&-; } 2>&1; echo \"st=$?\"");
+        assert_eq!(out, "D\nst=0\n", "the earlier dup should survive: {out:?}");
+        // And a close is not permanent: a later `2> file` in the same list, or
+        // a later `exec 2>`, gives fd 2 back.
+        let (out, disk) = run_over_seeded_file("", "{ { echo C >&2; } 2>&- 2> {FILE}; } 2>&1");
+        assert_eq!(disk, "C\n", "the reopen should win: {out:?}");
+        let (_, disk) = run_over_seeded_file("", "exec 2>&-; exec 2> {FILE}; cd /nosuchdir");
+        assert!(
+            disk.contains("No such file or directory"),
+            "a later `exec 2>` should give fd 2 back, got {disk:?}"
+        );
+        // A close after a file wins, as any later redirect does.
+        let (out, disk) = run_over_seeded_file("", "{ cd /nosuchdir 2> {FILE} 2>&-; } 2>&1");
+        assert_eq!(disk, "", "the later close should win: {out:?}");
+        assert_eq!(out, "", "and the diagnostic should be dropped");
     }
 
     #[test]

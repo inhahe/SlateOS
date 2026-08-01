@@ -26707,7 +26707,7 @@ onto itself is unchanged), while the check is skipped only for a *word*
 (`Shell::dup_needs_no_source` / `DupOrigin`), since a special filename is an
 `open` that can fail where a dup bash never makes cannot.
 
-### TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP. `>&-` / `<&-` on fd 0, 1 or 2 of a *command* closes nothing — PARTIALLY FIXED (fd 1 done; fd 0 and fd 2 open) — 2026-08-01
+### TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP. `>&-` / `<&-` on fd 0, 1 or 2 of a *command* closes nothing — PARTIALLY FIXED (fds 1 and 2 done; fd 0 open) — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — `resolve_dup_out` / `resolve_dup_in`,
 the `DupWord::Close` arm. For a redirect on a command (not `exec`) the close is
@@ -26716,8 +26716,8 @@ fds 0–2 do not live in those tables, so the removal finds nothing and the
 command runs with its stream still attached.
 
 **Reproduce** (measured 2026-08-01 against the reference bash; `rc` and the
-diagnostic are bash's, the osh column is what it did *before* the fd 1 fix
-below — the rows naming fd 1 now match bash, the rest still do not):
+diagnostic are bash's, the osh column is what it did *before* the fixes
+below — the rows naming fd 1 or fd 2 now match bash, the fd 0 ones still do not):
 
 | | bash | osh |
 |---|---|---|
@@ -26801,10 +26801,81 @@ Covered by `tests/corpus/redirect-close-of-stdout.sh` (which states in its heade
 which forms it deliberately leaves out, and why) plus five unit tests in
 `interp.rs`.
 
-**Still open:** fd 2 (`2>&-`, `exec 2>&-` — the diagnostic must be dropped, not
-printed) and fd 0 (`0<&-`, `exec 0<&-` — needs the
+**Fixed next — fd 2 (2026-08-01).** `RedirPlan::stderr_closed` and
+`exec_stderr = Some(WriteFd::Closed)` are the fd 2 halves of the same pair, with
+`RedirPlan::clear_stderr` giving fd 2's destinations the same one-place
+last-writer-wins ordering fd 1 got. What is *visible* differs, though, because a
+failed write to fd 2 has nowhere to be reported: closing fd 2 does not turn the
+diagnostic into an error, it simply **drops** it, and the status stays exactly
+what it would have been (`cd /nosuchdir 2>&-` still exits 1, silently). So a
+closed fd 2 resolves to the existing `StderrTarget::Discard` — no new stderr
+variant was needed.
+
+The interesting part is what other redirects can then do with fd 2. `1>&2` is a
+*dup* performed at redirect setup, so with fd 2 gone it fails outright: status 1,
+nothing written, and its own `2: Bad file descriptor` invisible for the same
+reason everything else is. Measurement showed bash answers a *read-only* fd 2
+(`2>&0` under a plain `< file`) identically, which is why `Discard` can stand for
+"no write half" uniformly rather than splitting closed from read-only. `exec
+3>&2` likewise fails, while a `>&2` taken *before* the close copies fd 2 while it
+is still open, so `echo hi >&2 2>&-` writes to the original stderr and exits 0.
+External children get `Stdio::null()`, which drops their diagnostics the same way
+without needing a closed `Stdio` — the fd 1 trade above does not arise here,
+because dropping is the correct answer rather than a substitute for one.
+
+The same divergence fd 1 has remains: `2>&- >&2` (bash fails the dup, osh does
+not) is the order-free-plan limit, identical in kind to `>&- 3>&1`.
+
+Covered by `tests/corpus/redirect-close-of-stderr.sh` plus three unit tests.
+
+**Still open:** fd 0 (`0<&-`, `exec 0<&-` — needs the
 `read: read error: 0: Bad file descriptor` shape, which also subsumes
 `TD-OILS-FD0-WRITE`'s residual divergence 2).
+
+### TD-OILS-EXEC-STDERR-DOES-NOT-SHADOW-AN-ENCLOSING-REDIRECT. A runtime `exec 2>…` is ignored inside a body that redirected fd 2 — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::emit_stderr_depth` and the
+`stderr_stack` (declared ~2655, ~25 push/pop sites). A compound command's own
+`2>…` pushes a `StderrTarget` for the body's duration; a diagnostic raised inside
+the body takes the top of that stack. A `exec 2>…` executed *in* the body sets
+`self.exec_stderr` instead, which is only consulted when the stack is empty — so
+the enclosing push keeps winning and the `exec` does nothing until the body ends.
+
+**Reproduce** (measured 2026-08-01 against the reference bash):
+
+```sh
+v=$( { exec 2> f1; cd /nosuchdir; } 2>&1 )
+# bash: v=[]                                f1=[…: cd: /nosuchdir: No such file or directory]
+# osh : v=[…: cd: /nosuchdir: No such …]    f1=[]
+
+v=$( { exec 2>&-; cd /nosuchdir; } 2>&1 )
+# bash: v=[]      (fd 2 closed, diagnostic dropped)
+# osh : v=[…: cd: /nosuchdir: No such file or directory]
+```
+
+Exactly backwards in the first case: the message goes wherever the *enclosing*
+redirect points rather than where the `exec` just pointed it.
+
+**Impact.** The `{ exec 2> log; …; } 2>&1` idiom — divert a body's diagnostics
+partway through, having first pointed fd 2 somewhere for the part before it —
+sends everything to the wrong place. Independent of `>&-`: it predates
+`TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP` and was found while testing it.
+It is why `redirect-close-of-stderr.sh` runs its persistent probes in subshells
+rather than in groups, and why the fd 2 unit tests avoid the
+`{ exec 2>&-; … } 2>&1` shape.
+
+**Related.** fd 1 has the same shape and it is already handled:
+`Shell::exec_stdout_shadowing` answers "did a persistent `exec` rebind fd 1 after
+this ambient sink was installed?" and both `write_bytes` and `alias_write_fd` ask
+it first. fd 2 has no equivalent.
+
+**Proper fix.** Give `stderr_stack` entries a generation: store
+`(StderrTarget, u64)` (or a small struct) stamped from a monotonic counter
+bumped on every `exec_stderr` assignment, and have `emit_stderr_depth` prefer
+`exec_stderr` when its generation is newer than the top entry's. That is the
+stderr twin of `exec_stdout_shadowing`, and it must not disturb the *restore* on
+scope exit — a body's saved `exec_stderr` is put back when the scope pops, so the
+`exec` correctly stops applying at the body's end, exactly as bash has it.
 
 ### TD-OILS-EXEC-DUP-WORD-MISCLASSIFIES. `exec M>&WORD` still splits on "parses as a number" — ✅ RESOLVED — 2026-08-01
 

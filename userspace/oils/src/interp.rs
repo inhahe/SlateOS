@@ -14825,10 +14825,32 @@ impl Shell {
         self.expand_dynamic_with(part, Operand::Param)
     }
 
+    /// Whether an expansion error has already been raised and the command is on
+    /// its way to being discarded.
+    ///
+    /// bash gives up on a word at the first such error and does not look at the
+    /// rest of it — `call_expand_word_internal` propagates the failure straight
+    /// out of the word list — so only one diagnostic ever comes out of one
+    /// command, and whatever the rest of the word would have done is not done.
+    /// That is visible beyond the message count: `"$a$(cmd)"` under `set -u`
+    /// reports the unset `a` and never runs `cmd`. Both flags say the command is
+    /// being dropped, so neither leaves anything for a later part to contribute.
+    fn expansion_failed(&self) -> bool {
+        self.unbound_error.is_some() || self.discard_error.is_some()
+    }
+
     /// [`Self::expand_dynamic`] with the text a modifier works on supplied by
     /// the caller — see [`Operand`]. Only the parameter-modifier parts consult
     /// it; every other part expands the same either way.
     fn expand_dynamic_with(&mut self, part: &WordPart, operand: Operand) -> Str {
+        // One error ends the expansion, so the parts after it are not expanded
+        // at all — see [`Self::expansion_failed`]. Guarding here rather than in
+        // each of the parts loops catches the nested cases too: a command
+        // substitution inside a later part, a subscript, and the operand of a
+        // modifier all arrive back through this one door.
+        if self.expansion_failed() {
+            return Str::new();
+        }
         match part {
             WordPart::Param { name, braced } => match self.param_value(name) {
                 Some(v) => v,

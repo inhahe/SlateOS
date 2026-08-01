@@ -32,6 +32,11 @@ pub mod interp;
 pub mod lexer;
 pub mod parser;
 pub mod unparse;
+/// Windows host only: the command line a child parses is not always the one
+/// Rust knows how to spell. On SlateOS a child is handed an argv vector and
+/// there is no command line to encode.
+#[cfg(windows)]
+pub(crate) mod wincmd;
 
 pub use interp::{Shell, StartupFiles};
 pub use parser::parse;

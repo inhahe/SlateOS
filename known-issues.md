@@ -7767,10 +7767,11 @@ differ from the assignment form:
 Covered by the corpus case `nameref-valueless.sh` and the unit test
 `valueless_nameref_declaration_judges_the_stored_value`.
 
-### TD-OILS-WIN-ARG-QUOTING. An argument containing `"` or `\` is mangled on the way to an external MSYS command — 2026-07-31
+### TD-OILS-WIN-ARG-QUOTING. An argument containing `"` or `\` is mangled on the way to an external MSYS command — 2026-07-31 — ✅ RESOLVED 2026-08-01
 
-**Where:** `userspace/oils/src/interp.rs` — the `std::process::Command`
-argument building (`apply_child_env`'s callers, `spawn_external`).
+**Where:** `userspace/oils/src/wincmd.rs` (the whole module) and
+`userspace/oils/src/interp.rs` — `Shell::push_child_args`, through which
+all three spawn sites now hand a child its arguments.
 **Windows development host only**; on the SlateOS target `exec` takes an
 argv vector and there is no command line to quote.
 
@@ -7847,6 +7848,26 @@ suppresses the glob/tilde pass — and inside it replace `\` with `\\` and
 the empty string. Note it differs from Rust's MSVC quoting on exactly one
 point, `\\` inside quotes, which is why the encoder cannot be global: it
 has to be chosen per callee.
+
+**Fixed 2026-08-01.** The three inline `cmd.args(…)` sites were collapsed
+into `Shell::push_child_args`, and on Windows that helper asks
+`wincmd::is_cygwin_program` whether the callee links `cygwin1.dll` or
+`msys-2.0.dll` — read from the executable's PE import table, since it is
+the *runtime* and not the program that re-parses the command line. When
+it does, each argument goes through `wincmd::quote_arg` and is appended
+with `CommandExt::raw_arg`; everything else keeps Rust's MSVC quoting.
+The lookup is cached by command spelling, so the `$PATH` search behind it
+is paid once per distinct command rather than once per spawn, and it goes
+through `find_in_path` rather than `resolve_external` so that asking the
+question does not disturb the `hash` cache.
+
+The workaround is retired with it: a corpus case may now spell `"` and
+`\` in an argument to an external command. Corpus case
+`external-args.sh`, which pins the whole surface — quotes, backslashes,
+regex backreferences, glob and tilde characters, empty and
+space-bearing arguments, tabs/newlines/high-bit bytes, and the argument
+*count* — plus the `wincmd` unit tests, which cover the encoder and drive
+the import walk over a synthetic PE image and every truncation of it.
 
 ### TD-OILS-EXPORT-READONLY-ATTR. A refused `export NAME=value` dropped the export attribute along with the value — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

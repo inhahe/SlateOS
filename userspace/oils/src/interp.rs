@@ -123,6 +123,8 @@ use crate::histexpand::{Expansion, HistCtx};
 use crate::parser::{
     IncrementalParser, UnitLine, UnitLineKind, parse_opts, parse_with_aliases,
 };
+#[cfg(windows)]
+use crate::wincmd;
 
 /// The bash release level this shell emulates, exposed via `$BASH_VERSION`
 /// (and parsed into `$BASH_VERSINFO`). Scripts branch on this to gate features;
@@ -17245,7 +17247,35 @@ impl Shell {
     /// Every argument crosses the OS boundary as bytes: one that is not UTF-8
     /// must reach the child unchanged, so it goes through [`bytes::bytes_to_os`]
     /// rather than any lossy conversion (TD-OILS-BYTE-STRINGS).
+    ///
+    /// On the Windows host there is no argv to hand over — the parent builds a
+    /// command line and the child parses it — and a Cygwin/MSYS child parses it
+    /// by rules of its own, re-expanding globs and tildes and reading
+    /// backslashes differently. Encoding for it there is not an optimisation
+    /// but the difference between the child seeing what the shell expanded and
+    /// seeing something else; see [`crate::wincmd`].
     fn push_child_args(&self, pc: &mut PCommand, args: &[Str]) {
+        #[cfg(windows)]
+        {
+            let program = bytes::os_to_bytes(pc.get_program());
+            // The answer is about the file the word resolves to, so the cache
+            // key carries the search path along with the word. (NUL cannot
+            // appear in either, so joining on it cannot make two different
+            // pairs collide.)
+            let key = bfmt![self.param_value("PATH").unwrap_or_default(), b"\0", &program];
+            // Resolved without the `hash` cache: this is a question about a
+            // file on disk, and answering it must not disturb what the shell
+            // reports about which commands it has run.
+            if wincmd::is_cygwin_program(&key, || self.find_in_path(&program)) {
+                for a in args {
+                    std::os::windows::process::CommandExt::raw_arg(
+                        pc,
+                        bytes::bytes_to_os(&wincmd::quote_arg(a)),
+                    );
+                }
+                return;
+            }
+        }
         pc.args(args.iter().map(|a| bytes::bytes_to_os(a)));
     }
 

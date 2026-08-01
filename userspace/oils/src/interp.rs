@@ -15515,7 +15515,15 @@ impl Shell {
         {
             return true;
         }
-        // Special/positional parameters: set iff they resolve to a value.
+        // A positional parameter is set iff it resolves to a value, `$0`
+        // included. The shell's *punctuation* parameters are a different matter:
+        // bash's `-v` only ever answers about something it can look up by name,
+        // so `-v @`, `-v *`, `-v #`, `-v ?`, `-v $`, `-v !` and `-v -` are all
+        // false however much of a value the parameter has. (`_` is not among
+        // them — it is a perfectly ordinary identifier, and `-v _` says yes.)
+        if !name.bytes().all(|b| b.is_ascii_digit()) && !lexer::is_valid_name(name.as_bytes()) {
+            return false;
+        }
         self.param_value(name).is_some()
     }
 

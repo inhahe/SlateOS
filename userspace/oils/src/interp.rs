@@ -2367,6 +2367,23 @@ pub struct Shell {
     /// taken rather than tested: `eval 'eval "echo \$BASH_SUBSHELL"' | cat`
     /// reports 1, not 2.
     stage_pending_level: bool,
+    /// Set on the clone a pipeline stage or a `&` job runs in: the simple
+    /// command this shell was forked to run has *already* been announced to the
+    /// DEBUG trap by the shell that forked it, so it must not be announced a
+    /// second time here.
+    ///
+    /// bash announces a command and forks for it in that order — one firing,
+    /// in the parent — where osh announces in the parent and then re-enters the
+    /// executor in the clone, which would announce it again. Under `functrace`
+    /// (which is what makes a clone inherit the DEBUG trap at all) that showed
+    /// up as `echo a | cat` firing four times instead of two.
+    ///
+    /// It suppresses the *outermost* announcement only, which is why it is
+    /// taken rather than tested: everything the command goes on to do is the
+    /// clone's own work and announces normally, including the extra firing bash
+    /// makes on entry to a function (`f | cat` announces `f` in the parent, and
+    /// `f` again from inside the stage as the call is entered).
+    debug_announced: bool,
     last_bg_pid: Option<u32>,
     /// `set -o pipefail`: a pipeline's status is the rightmost non-zero stage.
     pipefail: bool,
@@ -3344,6 +3361,7 @@ impl Shell {
             subshell_level: 0,
             subshell_base: 0,
             stage_pending_level: false,
+            debug_announced: false,
             last_bg_pid: None,
             pipefail: false,
             pipe_broken: false,
@@ -5097,11 +5115,18 @@ impl Shell {
             self.notify_signalled_jobs();
             self.current_line = item.line;
             if item.background {
+                // The DEBUG trap hears about the job here, in the parent, before
+                // it is started — see [`Shell::announce_async`].
+                let announced = match self.announce_async(&item.list, out, stdin) {
+                    Ok(announced) => announced,
+                    Err(Flow::Next) => continue,
+                    Err(other) => return other,
+                };
                 // A single external command backgrounds as an OS process; every
                 // other form (builtin, function, compound, pipeline, …) runs on a
                 // background thread. Both register a job and set `$!`. See
                 // `exec_background` and TD-OILS13.
-                self.exec_background(&item.list, out, stdin);
+                self.exec_background(&item.list, announced, out, stdin);
                 continue;
             }
             let flow = self.exec_and_or(&item.list, out, stdin);
@@ -5283,15 +5308,24 @@ impl Shell {
         }
         // bash fires the DEBUG trap in the parent shell once for each pipeline
         // stage that is a simple command, left-to-right, before the pipeline
-        // runs. Compound/group stages don't fire it, and each stage's own
-        // subshell resets the trap, so without functrace only these parent-side
-        // firings are observable. A single-command "pipeline" fires DEBUG via
-        // the normal `exec_simple` path instead, so handle only `len > 1` here.
+        // runs. Compound/group stages don't fire it. A single-command
+        // "pipeline" fires DEBUG via the normal `exec_simple` path instead, so
+        // handle only `len > 1` here.
+        //
+        // Whether the stages have been announced, here or by a parent that
+        // forked us for this very pipeline, travels with them: with `functrace`
+        // a stage's clone inherits the DEBUG trap and would otherwise announce
+        // its own command over again ([`Shell::debug_announced`]). The claim is
+        // taken here and handed on per stage, so that nothing nested deeper can
+        // pick it up by accident.
+        let mut stages_announced = std::mem::take(&mut self.debug_announced);
         if pipe.commands.len() > 1
+            && !stages_announced
             && !self.in_trap
             && self.traps.contains_key("DEBUG")
             && !self.trap_suppressed("DEBUG")
         {
+            stages_announced = true;
             for cmd in &pipe.commands {
                 if let Some(sc) = Self::stage_simple(cmd) {
                     self.put_var("BASH_COMMAND", crate::unparse::simple_src(sc));
@@ -5309,7 +5343,15 @@ impl Shell {
             None
         };
         let (statuses, flow) = if pipe.commands.len() == 1 {
+            // The lone stage runs in this very shell, so pass the claim straight
+            // on to its own dispatch — and only if it is the kind of command the
+            // announcement was for. Cleared afterwards so an unclaimed one (a
+            // redirection that failed to open, say) cannot outlive the command
+            // it belonged to.
+            self.debug_announced =
+                stages_announced && Self::stage_simple(&pipe.commands[0]).is_some();
             let flow = self.exec_command(&pipe.commands[0], out, stdin);
+            self.debug_announced = false;
             (vec![self.last_status], flow)
         } else if pipe.commands.iter().all(|c| self.stage_is_plain_external(c)) {
             // All-external pipeline → real OS pipes (concurrent, SIGPIPE-aware).
@@ -5317,7 +5359,7 @@ impl Shell {
         } else {
             // A builtin/function/compound stage is present → threaded pipeline
             // (each in-process stage on its own thread, real OS pipes between).
-            self.exec_threaded_pipeline(&pipe.commands, out, stdin)
+            self.exec_threaded_pipeline(&pipe.commands, stages_announced, out, stdin)
         };
         // Publish `${PIPESTATUS[@]}` and fold per-stage statuses into `$?`.
         self.finish_pipeline(&statuses);
@@ -5441,9 +5483,14 @@ impl Shell {
     /// its input (`SIGPIPE` for an external producer; the [`Shell::pipe_broken`]
     /// flag unwinds an in-process producer). Returns the per-stage exit codes
     /// (in pipeline order) for `${PIPESTATUS[@]}` / `pipefail`.
+    ///
+    /// `announced` says the caller has already told the DEBUG trap about every
+    /// stage that is a simple command, so those stages' own clones must not
+    /// announce them again — see [`Shell::debug_announced`].
     fn exec_threaded_pipeline(
         &mut self,
         cmds: &[Command],
+        announced: bool,
         out: &mut Out,
         stdin: &StdinSrc,
     ) -> (Vec<i32>, Flow) {
@@ -5510,6 +5557,9 @@ impl Shell {
             for i in 0..n - 1 {
                 let mut sub = self.clone_for_pipeline_stage();
                 let cmd = &cmds[i];
+                // Only a simple-command stage was announced; a compound one
+                // never is, here or in bash.
+                sub.debug_announced = announced && Self::stage_simple(cmd).is_some();
                 // bash's `do_piping` sets `stdin_redir` for a stage that reads
                 // an upstream pipe, so a `&` job inside it inherits that pipe
                 // instead of `/dev/null`. It runs *after* the stage node's own
@@ -5589,6 +5639,7 @@ impl Shell {
             };
             // `do_piping` again: the last stage always has an upstream pipe.
             let stage_root_redirected = matches!(&cmds[last], Command::Redirected { .. });
+            let last_announced = announced && Self::stage_simple(&cmds[last]).is_some();
             if lastpipe {
                 // Run in the current shell (not a subshell): mutations persist
                 // and control flow propagates. No EXIT trap firing here — this
@@ -5597,7 +5648,11 @@ impl Shell {
                 // shell itself carries on afterwards.
                 let saved = std::mem::replace(&mut self.stdin_redirected, true);
                 self.pipe_stage_redirect_root = stage_root_redirected;
+                // No fork for this stage, but the announcement already
+                // happened above all the same.
+                self.debug_announced = last_announced;
                 last_flow = self.exec_command(&cmds[last], out, &stdin);
+                self.debug_announced = false;
                 self.stdin_redirected = saved;
                 self.pipe_stage_redirect_root = false;
                 statuses[last] = self.last_status;
@@ -5605,6 +5660,7 @@ impl Shell {
                 let mut sub = self.clone_for_pipeline_stage();
                 sub.stdin_redirected = true;
                 sub.pipe_stage_redirect_root = stage_root_redirected;
+                sub.debug_announced = last_announced;
                 sub.exec_command(&cmds[last], out, &stdin);
                 // The last stage is a subshell too: fire its own EXIT trap.
                 sub.run_exit_trap_out(out, &stdin);
@@ -7546,6 +7602,9 @@ impl Shell {
             subshell_base: self.subshell_base,
             // A fresh subshell is not a pipeline stage until said otherwise.
             stage_pending_level: false,
+            // Nor has anything been announced on its behalf; the callers that
+            // forked for an already-announced command say so themselves.
+            debug_announced: false,
             last_bg_pid: self.last_bg_pid,
             pipefail: self.pipefail,
             pipe_broken: false,
@@ -11079,7 +11138,16 @@ impl Shell {
         // An `exit N` in the handler unwinds the shell *instead of* running the
         // command it was about to announce (bash), and under extdebug the
         // handler's status can take the command away as well ([`DebugVerdict`]).
-        if !self.in_trap && self.traps.contains_key("DEBUG") && !self.trap_suppressed("DEBUG") {
+        // A command the *forking* shell already announced is not announced
+        // again here: this shell exists only to run it. Claimed unconditionally
+        // so nothing nested inside can claim it instead
+        // ([`Shell::debug_announced`]).
+        let announced = std::mem::take(&mut self.debug_announced);
+        if !announced
+            && !self.in_trap
+            && self.traps.contains_key("DEBUG")
+            && !self.trap_suppressed("DEBUG")
+        {
             match self.fire_debug_trap(out, stdin) {
                 DebugVerdict::Run => {}
                 DebugVerdict::Skip(_) => {
@@ -13100,7 +13168,10 @@ impl Shell {
         }
     }
 
-    fn exec_background(&mut self, ao: &AndOr, out: &Out, stdin: &StdinSrc) {
+    /// `announced` says [`Shell::announce_async`] has already told the DEBUG
+    /// trap about this job's stages, so the clone that runs them must not
+    /// announce them a second time.
+    fn exec_background(&mut self, ao: &AndOr, announced: bool, out: &Out, stdin: &StdinSrc) {
         // A job writes to whatever fd 1 was where it was started, so it needs a
         // handle on the enclosing sink that outlives this call. Inside `$( … )`
         // or a pipeline stage that is the capture or pipe the caller is
@@ -13266,6 +13337,7 @@ impl Shell {
         // subshell" behaviour; osh uses a thread rather than a fork. See
         // TD-OILS13.
         let mut sub = self.clone_for_subshell();
+        sub.debug_announced = announced;
         // The job outlives this call, so every descriptor it inherited that
         // names a capture must hold it open for as long as the job runs.
         sub.share_write_fds();
@@ -22041,7 +22113,57 @@ impl Shell {
         self.fire_debug_trap(out, stdin)
     }
 
-    /// The source text of a trap handler, or `None` after reporting that the
+    /// Announce an **asynchronous** command to the DEBUG trap, in the *parent*,
+    /// before the job is started.
+    ///
+    /// A `&` job runs in a subshell, and a subshell without `functrace` has no
+    /// DEBUG trap of its own, so this parent-side firing is the only one there
+    /// is — without it a step-debugger never sees a background command at all.
+    /// What bash announces here is exactly what it announces for a foreground
+    /// pipeline: each stage that is a simple command, left to right. An
+    /// `&&`/`||` list, a compound command and a `time`d pipeline are not
+    /// announced at all — those are handed to the child whole.
+    ///
+    /// `Ok` means go ahead and start the job, and carries whether the
+    /// announcement happened — which the job's own clone needs, so that it does
+    /// not announce the same stages over again ([`Shell::debug_announced`]).
+    /// `Err(flow)` means do not start it, and take `flow` instead —
+    /// `Flow::Next` when `extdebug` took the job away.
+    fn announce_async(
+        &mut self,
+        ao: &AndOr,
+        out: &mut Out,
+        stdin: &StdinSrc,
+    ) -> Result<bool, Flow> {
+        if !ao.rest.is_empty() || ao.first.timed {
+            return Ok(false);
+        }
+        let single_stage = ao.first.commands.len() == 1;
+        for cmd in &ao.first.commands {
+            let Some(sc) = Self::stage_simple(cmd) else {
+                continue;
+            };
+            match self.announce_debug(crate::unparse::simple_src(sc), out, stdin) {
+                DebugVerdict::Run => {}
+                // A refusal costs the stage it was announcing, which for a
+                // one-stage pipeline is the whole job. What it costs one stage
+                // of a *longer* pipeline is TD-OILS-DEBUG-TRAP-VERDICT-IN-A-
+                // PIPELINE, unimplemented in the foreground case too.
+                DebugVerdict::Skip(_) if single_stage => {
+                    self.last_status = 0;
+                    return Err(Flow::Next);
+                }
+                DebugVerdict::Skip(_) => {}
+                DebugVerdict::Return => {
+                    self.last_status = 2;
+                    return Err(Flow::Return);
+                }
+                DebugVerdict::Exit(code) => return Err(Flow::Exit(code)),
+            }
+        }
+        Ok(true)
+    }
+
     /// Run the `EXIT` trap, if set, exactly once when the top-level shell exits.
     /// Called by the binary driver at each true-exit point.
     ///

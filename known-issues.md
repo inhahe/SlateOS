@@ -14,6 +14,46 @@ work that should be done now."
 
 ## Active Bugs
 
+### BUG-OILS-XTRACE-TRAP-LEVEL. A trap handler's body traces at the caller's `PS4` depth instead of one level deeper — 2026-08-01 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `fire_trap_status`, which runs the
+handler body via `run_source_flow_out` without touching `Shell::xtrace_level`.
+
+**Reproduce** (found while measuring the DEBUG trap's view of `[[ … ]]`,
+`target/dvscratch/t3/xtl.sh`):
+
+```sh
+b() { echo B; }
+set -x; trap b DEBUG; echo one
+```
+
+bash traces the handler one level deeper than the command that fired it:
+
+```
++ trap b DEBUG
+++ b
+++ echo B
+B
++ echo one
+```
+
+osh emits `+ b` / `+ echo B`. The same one-level bump applies to an `ERR`
+handler, a `RETURN` handler and a signal handler (`trap h USR1; kill -USR1 $$`),
+and to an inline handler as much as to a function one — so it is the *trap*
+that counts, not the function call (a plain call to `b` traces at `+`, and so
+does a `( … )` subshell; only a command substitution otherwise adds a level).
+
+**Not** the `EXIT` trap: bash runs that at shutdown, outside the pending-trap
+path that bumps the level, and traces its body at `+`. osh already matches
+there, so the fix must go in `fire_trap_status` alone and leave
+`run_exit_trap_out` as it is.
+
+**Proper fix:** bump `self.xtrace_level` around the `run_source_flow_out` call
+in `fire_trap_status` (saturating, restored on every exit path — the body can
+return `Flow::Exit`), the way `expand_command_sub` and the `eval` builtin
+already do. Add a corpus case covering a DEBUG, an ERR, a RETURN and a signal
+handler under `set -x`, plus an `EXIT` handler as the negative case.
+
 ### BUG-OILS-DECL-NAMEREF-LOCAL-SCOPE. A `declare`/`local` that binds a local followed a nameref it was only shadowing — 2026-07-31 — ✅ **RESOLVED 2026-07-31**
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped`, the
@@ -25737,7 +25777,7 @@ the loop the `.` stood in either. A `return` in a sourced file is still caught
 where it was, since ending the file is what it means. Measured against bash and
 locked down by `tests/corpus/eval-and-source-are-not-a-boundary-for-return.sh`.
 
-### TD-OILS-DEBUG-TRAP-PIPELINE-DOUBLE-FIRE. The DEBUG trap fires twice per pipeline stage under functrace — OPEN — 2026-08-01
+### TD-OILS-DEBUG-TRAP-PIPELINE-DOUBLE-FIRE. The DEBUG trap fires twice per pipeline stage under functrace — RESOLVED 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — `exec_pipeline` fires DEBUG in the
 parent once per simple-command stage before the pipeline runs, and
@@ -25754,17 +25794,23 @@ bash: B:[echo one] B:[cat]                  osh: B:[echo one] B:[cat] B:[echo on
 Without functrace both agree (the stage's shell resets the trap, so only the
 parent-side firing is observable), which is why the existing corpus cases pass.
 
-**Proper fix.** The parent-side firing is the one that matches bash — bash
-announces a simple-command stage from the parent, before forking, which is why
-its `B:` lines all appear before the pipeline's output. So the stage-side firing
-is the duplicate: a pipeline stage that the parent has already announced must
-run with DEBUG masked for its own top-level command, using the same
-`trap_suppress` frame mechanism `call_function` uses for an untraced function.
-Note the mask has to cover only the stage's *own* command — a function called by
-the stage still announces its body commands under functrace.
-
 **Impact.** Any script that counts DEBUG firings (a step-debugger, a coverage
 counter) sees double for pipeline stages under `set -T` or `shopt -s extdebug`.
+
+**Fixed** by `Shell::debug_announced`: a one-shot flag, set on the clone a
+pipeline stage (or a `&` job) is run in, that suppresses the *outermost*
+DEBUG announcement there because the forking shell has already made it. It is
+taken rather than tested, so it covers only the stage's own command — a
+function stage still makes bash's extra entry-time firing from inside, and the
+function's body commands still announce normally under functrace.
+`exec_pipeline` decides whether the stages were announced (by itself, or by a
+parent that forked it for this very pipeline) and passes that down to
+`exec_threaded_pipeline`, which marks each simple-command stage's clone; the
+`lastpipe` stage, which is not forked at all, is marked the same way.
+
+Covered by `tests/corpus/debug-trap-announces-a-background-command.sh`, whose
+last section runs the same pipelines in the foreground under `set -T` for the
+comparison.
 
 ### TD-OILS-DEBUG-TRAP-VERDICT-IN-A-PIPELINE. The extdebug DEBUG-trap verdict is not applied to a pipeline stage — OPEN — 2026-08-01
 
@@ -25788,9 +25834,11 @@ refusing the second leaves `f1` behind. And the same bare-stage pipeline run
 whole, so refusing it skips the pipeline and leaves one status behind, while a
 group stage is announced from inside its own child and only that child is
 skipped). Then apply the verdict in `exec_pipeline` and give
-`${PIPESTATUS[@]}` whatever shape bash leaves. Best done together with
-`TD-OILS-DEBUG-TRAP-PIPELINE-DOUBLE-FIRE`, since both hinge on which side does
-the announcing.
+`${PIPESTATUS[@]}` whatever shape bash leaves. Which side does the announcing
+is now settled — see `TD-OILS-DEBUG-TRAP-PIPELINE-DOUBLE-FIRE` — so the
+remaining work is the verdict alone; `exec_pipeline` should read a
+`DebugVerdict` where it now reads a `Flow`, and `Shell::announce_async` has the
+same gap for a multi-stage `&` job.
 
 **Impact.** A debugger cannot step over a pipeline under osh; the pipeline runs.
 
@@ -25825,7 +25873,7 @@ firings of the same command, i.e. a real step-debugger. Ordinary "refuse this
 command" handlers are refused at the call site first, where the verdict is
 already honoured.
 
-### TD-OILS-DEBUG-TRAP-NOT-FIRED-FOR-A-BACKGROUND-COMMAND. `cmd &` is never announced — OPEN — 2026-08-01
+### TD-OILS-DEBUG-TRAP-NOT-FIRED-FOR-A-BACKGROUND-COMMAND. `cmd &` is never announced — RESOLVED 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — the `&` path (the async-job branch
 of the pipeline/list driver) reaches the child without passing through
@@ -25843,15 +25891,21 @@ wait
 bash prints `B:[echo one]` (from the parent, before the fork) and then
 `B:[wait]`; osh prints only `B:[wait]`.
 
-**Proper fix.** bash announces an asynchronous command in the parent, before
-forking. osh should do the same: announce where the `&` job is created, in the
-parent, so a handler's writes to shell state are the parent's. The extdebug
-verdict then decides whether the job is started at all.
+**Impact.** A step-debugger cannot see background commands.
 
-**Impact.** A step-debugger cannot see background commands. Small and
-self-contained; filed rather than fixed only because the announce plumbing
-(`Shell::announce_debug`) landed with the compound-command work and the `&` path
-was outside that change's scope.
+**Fixed** by `Shell::announce_async`, called from the `&` branch of
+`exec_items` before `exec_background`. It announces what a foreground pipeline
+announces — each stage that is a simple command, left to right — and nothing at
+all for an `&&`/`||` list, a compound command or a `time`d pipeline, which bash
+hands to the child whole. The extdebug verdict is honoured: a refusal takes a
+one-stage job away entirely (leaving 0), a `return 2` leaves the function the
+job was written in, and an `exit` in the handler unwinds before the job starts.
+Refusing one stage of a *longer* pipeline is still
+`TD-OILS-DEBUG-TRAP-VERDICT-IN-A-PIPELINE`, unimplemented in the foreground
+case too. The job's own clone is marked `debug_announced` so it does not repeat
+the announcement (see `TD-OILS-DEBUG-TRAP-PIPELINE-DOUBLE-FIRE`).
+
+Covered by `tests/corpus/debug-trap-announces-a-background-command.sh`.
 
 ### TD-OILS-DEBUG-TRAP-NOT-FIRED-FOR-A-CONDITIONAL. `[[ … ]]` is never announced — OPEN — 2026-08-01
 

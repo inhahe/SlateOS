@@ -21382,13 +21382,25 @@ impl Shell {
         }
         self.in_trap = true;
         let saved = self.last_status;
-        let flow =
-            self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), HistRead::Off);
+        // A handler's body is numbered from the line the shell had reached when
+        // it fired, not from 1: bash re-reads the handler where it stands, so
+        // `trap 'nosuch' DEBUG` blames the line of the command it announced, and
+        // a two-line handler blames that line and the one after it. The
+        // triggering line is already in `current_line` for all three of these
+        // traps — DEBUG is fired after the command sets it, ERR after the
+        // command that failed, RETURN after the last line of the function body.
+        let saved_line = self.current_line;
+        let map = LineMap::Offset(self.current_line.saturating_sub(1));
+        let flow = self.run_source_flow_out(&action, out, stdin, &map, HistRead::Off);
         // Preserve the pre-trap status unless the handler asked to exit, in
         // which case its code is the shell's exit status.
         if !matches!(flow, Flow::Exit(_)) {
             self.last_status = saved;
         }
+        // The handler is an interruption, not a move: what the triggering
+        // command sees in `$LINENO` (and blames in its own diagnostics) is still
+        // its own line, however far the handler's body ran.
+        self.current_line = saved_line;
         self.in_trap = false;
         flow
     }

@@ -26707,7 +26707,7 @@ onto itself is unchanged), while the check is skipped only for a *word*
 (`Shell::dup_needs_no_source` / `DupOrigin`), since a special filename is an
 `open` that can fail where a dup bash never makes cannot.
 
-### TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP. `>&-` / `<&-` on fd 0, 1 or 2 of a *command* closes nothing — OPEN — 2026-08-01
+### TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP. `>&-` / `<&-` on fd 0, 1 or 2 of a *command* closes nothing — PARTIALLY FIXED (fd 1 done; fd 0 and fd 2 open) — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — `resolve_dup_out` / `resolve_dup_in`,
 the `DupWord::Close` arm. For a redirect on a command (not `exec`) the close is
@@ -26715,20 +26715,44 @@ recorded by removing fd from `open_fds` / `open_write_fds` / `coproc_read_fds`;
 fds 0–2 do not live in those tables, so the removal finds nothing and the
 command runs with its stream still attached.
 
-**Reproduce:**
+**Reproduce** (measured 2026-08-01 against the reference bash; `rc` and the
+diagnostic are bash's, the osh column is what it did *before* the fd 1 fix
+below — the rows naming fd 1 now match bash, the rest still do not):
 
-```sh
-echo hi >&-       # bash: echo: write error: Bad file descriptor, status 1
-                  # osh:  prints "hi", status 0
-read -r l <&-     # bash: read: read error: 0: Bad file descriptor, status 1
-                  # osh:  reads from the real stdin
-```
+| | bash | osh |
+|---|---|---|
+| `echo hi >&-` | rc 1, `echo: write error: Bad file descriptor` | prints `hi`, rc 0 |
+| `printf 'x\n' >&-` | rc 1, `printf: write error: Bad file descriptor` | prints `x`, rc 0 |
+| `read -r l <&-` | rc 1, `read: read error: 0: Bad file descriptor` | reads the real stdin |
+| `{ echo A; } >&-` | rc 1, `echo: write error: …` | prints `A`, rc 0 |
+| `{ read -r l; } <&-` | rc 1, `read: read error: 0: …` | rc 1, silent |
+| `{ echo Q >&0; } <&-` | rc 1, `0: Bad file descriptor` (a *redirect* error) | rc 1, `echo: write error: …` |
+| `echo hi >&- >&-` | rc 1, `echo: write error: …` | prints `hi`, rc 0 |
+| `echo hi >&- 1>f1` | rc 0, `f1=[hi]` | same |
+| `{ echo Z; } >&- 3>&1` | rc 1, `1: Bad file descriptor` | prints `Z`, rc 0 |
+| `echo hi >&2 2>&-` | rc 0, `hi` on the *original* fd 2 | same |
+| external `cmd >&-` | rc 1, the child's own `cmd: write error: …` | n/a on this host |
+
+Two shapes of failure, then: a *write/read* error named against the builtin when
+the command runs with the stream gone, and a *redirect* error naming the number
+when a later redirect in the same list tries to dup from what an earlier one
+closed. The last is order-sensitive — `>&- 3>&1` fails, `3>&1 >&-` does not —
+and so runs into the order-free `RedirPlan` (see `TD-OILS14` and
+`Shell::reconcile_dup_then_close`, which today drops a transient close of any fd
+the plan still dups from). Reopening a closed descriptor in the same list is
+fine and must stay fine.
 
 **Impact.** The idiom that runs a command with a stream deliberately taken away
 — `cmd >&-` to prove it writes nothing, `cmd <&-` to prove it reads nothing —
 silently does the opposite of what it says. Both statuses and both streams
-differ from bash. `exec`'s own `M>&-` is *not* affected: `apply_persistent_dup_out`
-has explicit fd 1/2 arms that clear `exec_stdout`/`exec_stderr`.
+differ from bash.
+
+`exec`'s own `M>&-` was affected too, contrary to what this entry first claimed:
+`apply_persistent_dup_out`'s fd 1/2 arms set `exec_stdout`/`exec_stderr` to
+`None`, and `None` does not mean *closed* — it means *inherit the real one*. So
+`exec 1>&-; echo hi` printed `hi` with status 0 where bash gives
+`echo: write error: Bad file descriptor` and status 1. A persistent close was
+therefore not a close but a **reset to the terminal**, which is its opposite.
 
 **Related.** `TD-OILS-FD0-WRITE`'s residual divergence 2 (`{ echo Q >&0; } <&-`)
 is the same gap seen from the write side; fixing this subsumes it.
@@ -26742,6 +26766,45 @@ gives `echo: write error: …` named against the builtin); the read side needs t
 matching `read: read error: N: …` shape. Then extend
 `tests/corpus/dup-word-that-is-not-a-descriptor.sh`, which deliberately avoids
 `-` today for exactly this reason.
+
+**Fixed so far — fd 1 (2026-08-01).** `WriteFd::Closed` is that closed state: a
+descriptor that is not open at all, distinct both from "no binding" (inherit the
+real fd 1) and from `WriteFd::ReadOnly` (open, but with no write half). The
+transient side carries it as `RedirPlan::stdout_closed`, the persistent side as
+`exec_stdout = Some(WriteFd::Closed)`, and every write path answers it with
+`EBADF`. Order between fd 1's destinations now runs through one
+`RedirPlan::clear_stdout`, so `echo hi >&- 1>f1` still writes the file while
+`echo hi 1>f1 >&-` fails — last writer wins either way. A closed fd 1 is also not
+a descriptor to dup *from*: `exec 1>&-; exec 3>&1` reports `1: Bad file
+descriptor` at the `exec`.
+
+Two divergences are knowingly left in the fd 1 case:
+
+* **External children.** bash hands the child the closed descriptor and lets the
+  *child's* write fail (`cmd: write error: …`); `Stdio` has no closed form and a
+  forged one is not portable, so the shell refuses the redirect instead —
+  `1: Bad file descriptor`, same status (1) and same stream, different wording.
+  The same trade `TD-OILS-FD0-WRITE` already makes.
+* **A dup *from* fd 1 later in the list that closed it** — `{ echo Z; } >&- 3>&1`,
+  `$( { echo E; } >&- 2>&1 )`. bash fails both with `1: Bad file descriptor`, osh
+  succeeds: `install_extra_fds` (and the `2>&1` resolution) run before the scoped
+  `exec_stdout` override, and the order-free plan cannot tell `>&- 3>&1` from
+  `3>&1 >&-`. Same class as `TD-OILS14` / `reconcile_dup_then_close`.
+
+A neighbouring bug fell out of this and is fixed with it: `alias_write_fd`
+answered `exec 3>&1` with the *ambient* capture/pipe sink without first asking
+whether a persistent `exec` had rebound fd 1 underneath it, so
+`x=$( exec 1>f; exec 3>&1; echo hi >&3 )` put `hi` in the substitution's buffer
+instead of in `f`. It now consults `exec_stdout_shadowing` first.
+
+Covered by `tests/corpus/redirect-close-of-stdout.sh` (which states in its header
+which forms it deliberately leaves out, and why) plus five unit tests in
+`interp.rs`.
+
+**Still open:** fd 2 (`2>&-`, `exec 2>&-` — the diagnostic must be dropped, not
+printed) and fd 0 (`0<&-`, `exec 0<&-` — needs the
+`read: read error: 0: Bad file descriptor` shape, which also subsumes
+`TD-OILS-FD0-WRITE`'s residual divergence 2).
 
 ### TD-OILS-EXEC-DUP-WORD-MISCLASSIFIES. `exec M>&WORD` still splits on "parses as a number" — ✅ RESOLVED — 2026-08-01
 

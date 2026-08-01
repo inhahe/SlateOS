@@ -1660,6 +1660,21 @@ enum WriteFd {
     /// read-only handle raises a platform-specific error (Windows says access
     /// denied), whereas "this description has no write half" is portable.
     ReadOnly,
+    /// A descriptor that is not open at all — what `>&-` leaves behind
+    /// (`echo hi >&-`, `{ …; } >&-`, `exec 1>&-`).
+    ///
+    /// Distinct from *no binding at all*, which means "inherit the real one": a
+    /// shell whose fd 1 was closed must answer its own writes with `EBADF`, not
+    /// fall back to the terminal, so recording the close by clearing the field
+    /// would turn it into its exact opposite.
+    ///
+    /// Distinct too from [`WriteFd::ReadOnly`], which is a descriptor that
+    /// *does* exist but has no write half (an fd 0 opened without `<>`). Both
+    /// answer a write with `EBADF`, but they are not the same descriptor: when a
+    /// child cannot be handed one, the diagnostic names fd 0 for the read-only
+    /// case and the *closed* fd's own number here — and only this one is also
+    /// unusable as a dup source (`exec 1>&-; exec 3>&1` fails).
+    Closed,
 }
 
 impl WriteFd {
@@ -1668,7 +1683,9 @@ impl WriteFd {
         match self {
             WriteFd::File(f) => StderrTarget::WriteFd(Arc::clone(f)),
             WriteFd::Capture(sink) => StderrTarget::Buffer(sink.clone()),
-            WriteFd::ReadOnly => StderrTarget::Discard,
+            // Neither can take bytes, and there is no second stderr on which to
+            // report that they could not — so what fd 2 is handed is dropped.
+            WriteFd::ReadOnly | WriteFd::Closed => StderrTarget::Discard,
         }
     }
 
@@ -1681,6 +1698,7 @@ impl WriteFd {
             WriteFd::File(f) => WriteFd::File(Arc::clone(f)),
             WriteFd::Capture(sink) => WriteFd::Capture(sink.share()),
             WriteFd::ReadOnly => WriteFd::ReadOnly,
+            WriteFd::Closed => WriteFd::Closed,
         }
     }
 }
@@ -1719,7 +1737,7 @@ fn write_to_write_fd(w: &WriteFd, bytes: &[u8]) -> io::Result<()> {
             Ok(())
         }
         WriteFd::File(f) => f.try_clone()?.write_all(bytes),
-        WriteFd::ReadOnly => Err(ebadf()),
+        WriteFd::ReadOnly | WriteFd::Closed => Err(ebadf()),
     }
 }
 
@@ -1732,11 +1750,12 @@ fn child_out_from_write_fd(w: &WriteFd, what: &str) -> Result<ChildOut, String> 
             .try_clone()
             .map(|f| ChildOut::Handle(Stdio::from(f)))
             .map_err(|e| format!("{what}: {e}")),
-        // bash hands the child the read-only description and lets the child's
-        // own write fail; we cannot forge a descriptor that behaves that way on
-        // every host, so the shell refuses the redirect instead. Same status
-        // (1) and same stream, different wording — see TD-OILS-FD0-WRITE.
-        WriteFd::ReadOnly => Err(format!("{what}: Bad file descriptor")),
+        // bash hands the child the read-only (or absent) description and lets
+        // the child's own write fail; we cannot forge a descriptor that behaves
+        // that way on every host — `Stdio` has no "closed" form — so the shell
+        // refuses the redirect instead. Same status (1) and same stream,
+        // different wording — see TD-OILS-FD0-WRITE.
+        WriteFd::ReadOnly | WriteFd::Closed => Err(format!("{what}: Bad file descriptor")),
     }
 }
 
@@ -7302,10 +7321,11 @@ impl Shell {
         {
             match self.write_fd_for(n, &plan) {
                 Some(WriteFd::Capture(sink)) => stdout_capture_fd = Some(sink.clone()),
-                // `{ …; } 1>&0` onto a read-only fd 0: the group's fd 1 would
-                // have no writable descriptor behind it. Failing the redirect
-                // keeps the bytes from landing elsewhere — TD-OILS-FD0-WRITE.
-                Some(WriteFd::ReadOnly) => {
+                // `{ …; } 1>&0` onto a read-only fd 0 — or onto a descriptor a
+                // `>&-` closed: the group's fd 1 would have no writable
+                // descriptor behind it. Failing the redirect keeps the bytes
+                // from landing elsewhere — TD-OILS-FD0-WRITE.
+                Some(WriteFd::ReadOnly | WriteFd::Closed) => {
                     self.perrln(&format!("{n}: Bad file descriptor"));
                     self.last_status = 1;
                     fd_alias_error = true;
@@ -7363,9 +7383,16 @@ impl Shell {
         // persistent `exec > other`, or the real handles) to restore afterwards.
         // Subshell clones inherit these handles (but not `stderr_stack`), so a
         // `( … ) > f 2>&1` body reaches the file — matching bash fd inheritance.
-        let saved_exec_stdout = stdout_file
-            .as_ref()
-            .map(|f| self.exec_stdout.replace(WriteFd::File(Arc::clone(f))));
+        // The group's fd 1 as a binding the body (and anything it forks)
+        // inherits: the `> file` handle opened above, or — for `{ …; } >&-` —
+        // an explicitly *closed* descriptor, which is not the same as leaving
+        // the ambient fd 1 alone.
+        let scoped_stdout = match (&stdout_file, plan.stdout_closed) {
+            (Some(f), _) => Some(WriteFd::File(Arc::clone(f))),
+            (None, true) => Some(WriteFd::Closed),
+            (None, false) => None,
+        };
+        let saved_exec_stdout = scoped_stdout.map(|w| self.exec_stdout.replace(w));
         let saved_exec_stderr = stderr_file
             .as_ref()
             .map(|w| self.exec_stderr.replace(w.clone()));
@@ -7395,10 +7422,11 @@ impl Shell {
                 }
                 None => stdin,
             };
-            if stdout_file.is_some() {
-                // fd 1 flows to the file via `exec_stdout`; run with an ambient
-                // `Out::Inherit` (the group redirect fully rebinds fd 1, so the
-                // enclosing capture/pipe is bypassed for stdout).
+            if stdout_file.is_some() || plan.stdout_closed {
+                // fd 1 flows to the file — or to nothing at all, for `>&-` — via
+                // `exec_stdout`; run with an ambient `Out::Inherit` (the group
+                // redirect fully rebinds fd 1, so the enclosing capture/pipe is
+                // bypassed for stdout).
                 let mut o = Out::Inherit;
                 run(self, &mut o, sin)
             } else if let Some(sink) = &stdout_capture_fd {
@@ -13203,6 +13231,16 @@ impl Shell {
         }
 
         // stdout
+        if redir.stdout_closed {
+            // `cmd >&-`: bash hands the child a closed fd 1 and lets the child's
+            // own write fail. `Stdio` has no closed form and a forged one is not
+            // portable, so the shell refuses the redirect instead — same status
+            // (1) and same stream, different wording. Same trade as
+            // [`child_out_from_write_fd`]'s; see TD-OILS-FD0-WRITE.
+            self.perrln("1: Bad file descriptor");
+            self.last_status = 1;
+            return;
+        }
         let capturing =
             matches!(out, Out::Capture(_)) && redir.stdout.is_none() && redir.stdout_to_fd.is_none();
         // For dup forms like `>f 2>&1` / `&>f` the resolver rewrites fd 2 to the
@@ -13261,7 +13299,7 @@ impl Shell {
                     // own write fail; we cannot forge such a descriptor on every
                     // host, so the shell refuses the redirect — same status and
                     // stream, different wording (TD-OILS-FD0-WRITE).
-                    Some(WriteFd::ReadOnly) | None => {
+                    Some(WriteFd::ReadOnly | WriteFd::Closed) | None => {
                         self.perrln(&format!("{n}: Bad file descriptor"));
                         self.last_status = 1;
                         return;
@@ -13295,6 +13333,12 @@ impl Shell {
                         // above — the child gets no descriptor it could write to.
                         WriteFd::ReadOnly => {
                             self.perrln("0: Bad file descriptor");
+                            self.last_status = 1;
+                            return;
+                        }
+                        // `exec 1>&-`: likewise, and named after fd 1 itself.
+                        WriteFd::Closed => {
+                            self.perrln("1: Bad file descriptor");
                             self.last_status = 1;
                             return;
                         }
@@ -13338,6 +13382,14 @@ impl Shell {
                     match w {
                         WriteFd::ReadOnly => {
                             self.perrln("0: Bad file descriptor");
+                            self.last_status = 1;
+                            return;
+                        }
+                        // A persistent `exec 1>&-`: the child has no fd 1 to be
+                        // given, so the shell refuses rather than let it inherit
+                        // the terminal.
+                        WriteFd::Closed => {
+                            self.perrln("1: Bad file descriptor");
                             self.last_status = 1;
                             return;
                         }
@@ -13392,11 +13444,11 @@ impl Shell {
                         return;
                     }
                 },
-                // `2>&0` onto a read-only fd 0: every write fails and there is
-                // nowhere to report it, so the child's diagnostics are lost.
-                // bash behaves identically — `ls /nosuch 2>&0 < f` prints
-                // nothing and still exits 2.
-                Some(WriteFd::ReadOnly) => {
+                // `2>&0` onto a read-only fd 0 (or a closed descriptor): every
+                // write fails and there is nowhere to report it, so the child's
+                // diagnostics are lost. bash behaves identically —
+                // `ls /nosuch 2>&0 < f` prints nothing and still exits 2.
+                Some(WriteFd::ReadOnly | WriteFd::Closed) => {
                     cmd.stderr(Stdio::null());
                 }
                 None => {
@@ -13472,7 +13524,10 @@ impl Shell {
                                 return;
                             }
                         },
-                        Some(WriteFd::ReadOnly) => {
+                        // A fd 2 with no writable description behind it — an
+                        // `exec 2>&0` onto a read-only fd 0, or a closed one:
+                        // the child's diagnostics go nowhere, as in bash.
+                        Some(WriteFd::ReadOnly | WriteFd::Closed) => {
                             cmd.stderr(Stdio::null());
                         }
                         None => {}
@@ -14217,7 +14272,11 @@ impl Shell {
             DupWord::Close => {
                 // `N>&-` / `N<&-`: close the descriptor.
                 match fd {
-                    1 => self.exec_stdout = None,
+                    // Not `None`, which for fd 1 means "the real stdout": a
+                    // shell that closed fd 1 must answer its own writes with
+                    // `EBADF` (`echo: write error: …`), not print to the
+                    // terminal. See [`WriteFd::Closed`].
+                    1 => self.exec_stdout = Some(WriteFd::Closed),
                     2 => self.exec_stderr = None,
                     _ => {
                         self.open_write_fds.remove(&fd);
@@ -14305,6 +14364,12 @@ impl Shell {
                 if fd == 0 {
                     self.exec_stdin = None;
                     self.exec_stdin_write = None;
+                } else if fd == 1 {
+                    // `exec 1<&-` closes fd 1 exactly as `exec 1>&-` does: which
+                    // side of the `&` the `-` is written on says nothing about
+                    // which descriptor is meant. See
+                    // [`Shell::apply_persistent_dup_out`].
+                    self.exec_stdout = Some(WriteFd::Closed);
                 } else {
                     self.open_fds.remove(&fd);
                     self.open_write_fds.remove(&fd);
@@ -14791,9 +14856,8 @@ impl Shell {
                         plan.stderr_to_fd = None;
                     } else {
                         // `1<> file` (or a bare `>`-side fd): as above for fd 1.
+                        plan.clear_stdout();
                         plan.stdout = Some((path, true));
-                        plan.stdout_to_stderr = false;
-                        plan.stdout_to_fd = None;
                     }
                 }
                 RedirectOp::HereDoc => {
@@ -14833,16 +14897,15 @@ impl Shell {
                         return Ok(());
                     }
                     open_output_target(&self.cwd, &target, append)?;
+                    // Both fds now target the file: clear every competing dup so
+                    // this (later) redirect wins over earlier `2>&1`/`>&N` forms.
+                    plan.clear_stdout();
                     plan.stdout = Some((target.clone(), append));
                     plan.stderr = Some((target, append));
                     // `&>` is `>file 2>&1`: fd 2 is a dup of fd 1, sharing one
                     // open file description (and offset) — writes interleave.
                     plan.stderr_shares_stdout = true;
-                    // Both fds now target the file: clear every competing dup so
-                    // this (later) redirect wins over earlier `2>&1`/`>&N` forms.
                     plan.stderr_to_stdout = false;
-                    plan.stdout_to_stderr = false;
-                    plan.stdout_to_fd = None;
                     plan.stderr_to_fd = None;
                 }
                 RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
@@ -14888,9 +14951,8 @@ impl Shell {
                             .extra_fds
                             .push((f, ExtraFdOp::OutputFile(target, append))),
                         _ => {
+                            plan.clear_stdout();
                             plan.stdout = Some((target, append));
-                            plan.stdout_to_stderr = false;
-                            plan.stdout_to_fd = None;
                         }
                     }
                 }
@@ -14951,14 +15013,13 @@ impl Shell {
             if fd == 1 {
                 let target = target.to_vec();
                 open_output_target(&self.cwd, &target, false)?;
+                plan.clear_stdout();
                 plan.stdout = Some((target.clone(), false));
                 plan.stderr = Some((target, false));
                 // `>&file` is `>file 2>&1` — fd 2 dup's fd 1 (shared offset,
                 // interleaved writes).
                 plan.stderr_shares_stdout = true;
                 plan.stderr_to_stdout = false;
-                plan.stdout_to_stderr = false;
-                plan.stdout_to_fd = None;
                 plan.stderr_to_fd = None;
             } else {
                 // The ambiguous message names the *expansion*, unlike the bad-fd
@@ -14980,19 +15041,29 @@ impl Shell {
                 plan.stderr_to_stdout = true;
             }
         } else if fd == 1 && target == b"2" {
-            plan.stdout_to_fd = None;
+            plan.clear_stdout();
             if plan.stderr.is_some() {
                 // `2>file 1>&2`: fd 1 dup's fd 2's file — shared offset.
                 plan.stdout = plan.stderr.clone();
                 plan.stderr_shares_stdout = true;
-                plan.stdout_to_stderr = false;
             } else {
-                plan.stdout = None;
                 plan.stdout_to_stderr = true;
             }
-        } else if fd >= 3 && target == b"-" {
-            // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
-            plan.extra_fds.push((fd, ExtraFdOp::Close));
+        } else if dup == DupWord::Close {
+            if fd >= 3 {
+                // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
+                plan.extra_fds.push((fd, ExtraFdOp::Close));
+            } else if fd == 1 {
+                // `>&-` / `1>&-`: fd 1 is gone for this command, so its own
+                // writes get `EBADF` instead of the ambient stdout. A later
+                // redirect in the same list may still give fd 1 back
+                // (`>&- 1>f`), which is why this goes through the same
+                // last-writer-wins slot as every other fd-1 destination.
+                plan.clear_stdout();
+                plan.stdout_closed = true;
+            }
+            // fd 0 and fd 2 closes are not modelled yet — see
+            // TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP.
         } else if let Some(n) = target_num
             && !Self::dup_needs_no_source(origin, fd, n)
         {
@@ -15033,9 +15104,8 @@ impl Shell {
                     plan.stderr_to_stdout = false;
                 }
                 1 => {
+                    plan.clear_stdout();
                     plan.stdout_to_fd = Some(n);
-                    plan.stdout = None;
-                    plan.stdout_to_stderr = false;
                 }
                 // `3>&1`, `3>&2`, `3>&0`, `7>&5`: alias a user-space write
                 // descriptor to another descriptor. Consumed only by `exec` and
@@ -15084,9 +15154,15 @@ impl Shell {
             if fd >= 3 {
                 // `exec 3<&-`: close descriptor 3 (consumed by `exec`).
                 plan.extra_fds.push((fd, ExtraFdOp::Close));
+            } else if fd == 1 {
+                // `1<&-` closes fd 1 exactly as `1>&-` does — which side of the
+                // operator the `-` is written on says nothing about the
+                // descriptor. See [`Shell::resolve_dup_out`].
+                plan.clear_stdout();
+                plan.stdout_closed = true;
             }
-            // `0<&-` (close stdin) on a non-exec command is a rare corner not
-            // modelled here (documented limitation).
+            // `0<&-` / `2<&-` (close stdin / stderr) are not modelled yet — see
+            // TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP.
         } else if let DupWord::Fd(n) = dup
             && !Self::dup_needs_no_source(origin, fd, n)
         {
@@ -15266,9 +15342,17 @@ impl Shell {
     /// but not past the substitution whose fd 1 it copied.
     fn exec_dup_source(&self, n: i32, out: &Out) -> Result<Option<WriteFd>, i32> {
         match n {
-            // `Ok(None)` on failure: a pathological closed std fd, which callers
-            // resolve back to the real std fd.
-            1 | 2 => Ok(self.alias_write_fd(n, out).ok()),
+            1 | 2 => match self.alias_write_fd(n, out) {
+                // A std fd an earlier `exec N>&-` closed is not a descriptor to
+                // dup *from*: `exec 1>&-; exec 3>&1` is bash's
+                // `1: Bad file descriptor`, reported at the dup rather than
+                // deferred to a write through a second closed alias.
+                Ok(WriteFd::Closed) => Err(n),
+                Ok(w) => Ok(Some(w)),
+                // A pathological failure to duplicate the real std fd, which
+                // callers resolve back to that std fd.
+                Err(_) => Ok(None),
+            },
             // fd 0 is always open; only its access mode is in question.
             0 => Ok(Some(self.ambient_stdin_write_fd())),
             _ => match self.open_write_fds.get(&n) {
@@ -30359,6 +30443,13 @@ impl Shell {
     }
 
     fn write_bytes(&mut self, out: &mut Out, redir: &RedirPlan, bytes: &[u8]) -> i32 {
+        // `echo msg >&-`: this command has no fd 1 at all. Checked before every
+        // other destination because the resolver already applied last-writer-wins
+        // between them — the flag being set means the *close* is what fd 1 ended
+        // up as. bash answers the write with `EBADF`, named against the builtin.
+        if redir.stdout_closed {
+            return self.finish_write(Err(ebadf()));
+        }
         // `echo msg >&3` on the builtin: fd 1 is a user-space write descriptor.
         if let Some(n) = redir.stdout_to_fd
             && redir.stdout.is_none()
@@ -30468,7 +30559,21 @@ impl Shell {
     ///
     /// A non-standard source (`7>&5`) is simply its current handle, shared —
     /// two names for one descriptor, as `dup2` makes them.
+    ///
+    /// The ambient `out` is only fd 1's sink while nothing has *persistently*
+    /// rebound fd 1 underneath it. A runtime `exec > file` (or `exec 1>&-`)
+    /// inside a capture or a pipeline stage takes fd 1 away from that sink for
+    /// good, so `x=$( exec 1>f; exec 3>&1; echo hi >&3 )` must alias fd 3 to
+    /// the *file* — writing `hi` into the substitution's buffer instead would
+    /// make a redirect the shell already honours for its own writes invisible
+    /// to a dup of the same descriptor. That shadowing is exactly what
+    /// [`Shell::exec_stdout_shadowing`] reports, so ask it first.
     fn alias_write_fd(&self, n: i32, out: &Out) -> io::Result<WriteFd> {
+        if n == 1
+            && let Some(w) = self.exec_stdout_shadowing(out)
+        {
+            return Ok(w.clone());
+        }
         match (n, out) {
             (1, Out::Capture(sink)) => Ok(WriteFd::Capture(sink.clone())),
             (1, Out::Pipe(w)) => {
@@ -31536,6 +31641,12 @@ struct RedirPlan {
     stdout_to_fd: Option<i32>,
     /// `2>&N` with N ≥ 3 — fd 2 duplicated onto a user-space write descriptor.
     stderr_to_fd: Option<i32>,
+    /// `1>&-` / `>&-` — fd 1 is *closed* for this command. Distinct from every
+    /// other field being unset, which means "inherit the ambient fd 1": a
+    /// command whose stdout was taken away must answer its own writes with
+    /// `EBADF` (`echo: write error: Bad file descriptor`, status 1) rather than
+    /// print to the terminal. See [`WriteFd::Closed`].
+    stdout_closed: bool,
     /// Redirections to descriptors other than 0/1/2 (`3< file`, `4> log`,
     /// `4<&-`, …). Only the `exec` builtin currently consumes these, installing
     /// them in the shell's persistent [`Shell::open_fds`] / [`Shell::open_write_fds`]
@@ -31557,7 +31668,23 @@ impl RedirPlan {
             && !self.stdout_to_stderr
             && self.stdout_to_fd.is_none()
             && self.stderr_to_fd.is_none()
+            && !self.stdout_closed
             && self.extra_fds.is_empty()
+    }
+
+    /// Forget every destination this plan holds for fd 1, so that the redirect
+    /// about to be recorded is the one that decides it.
+    ///
+    /// bash applies a command's redirects left to right and the last one to
+    /// name fd 1 wins; the plan is order-free, so each writer clears its
+    /// predecessors here rather than relying on a field being untouched. Having
+    /// one place to do it is what keeps a newly added form (a *close*, say)
+    /// from being silently outvoted by a stale earlier one.
+    fn clear_stdout(&mut self) {
+        self.stdout = None;
+        self.stdout_to_stderr = false;
+        self.stdout_to_fd = None;
+        self.stdout_closed = false;
     }
 
     /// Whether this command's own redirections rebind fd 0. Such a command
@@ -31630,6 +31757,7 @@ impl RedirPlan {
             || self.stderr.is_some()
             || self.stderr_to_stdout
             || self.stdout_to_stderr
+            || self.stdout_closed
             || !self.extra_fds.is_empty()
     }
 }
@@ -56520,6 +56648,115 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "pipe stdin should be read-only, got {out:?}"
         );
         assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
+    }
+
+    #[test]
+    fn a_closed_stdout_is_not_the_inherited_one() {
+        // `>&-` takes fd 1 away for the command's duration, which is not what
+        // "this command redirects nothing" means: the builtin's own write must
+        // fail with `EBADF` rather than fall back to the ambient stdout.
+        // Regression: osh recorded the close by removing fd 1 from its fd
+        // tables, where fd 1 never lived, so the redirect did nothing at all
+        // (TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP).
+        for cmd in ["echo hi", "printf 'hi\\n'"] {
+            let (out, _) = run(&format!("{{ {cmd} >&-; }} 2>&1; echo \"st=$?\""));
+            let name = if cmd.starts_with("echo") { "echo" } else { "printf" };
+            assert!(
+                out.contains(&format!("{name}: write error: Bad file descriptor")),
+                "expected an EBADF write error naming `{name}`, got {out:?}"
+            );
+            assert!(!out.contains("hi\n"), "the write should not have landed: {out:?}");
+            assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
+        }
+        // Which side of the operator the `-` is written on says nothing about
+        // *which* descriptor is closed: `1<&-` closes fd 1 too.
+        let (out, _) = run("{ echo hi 1<&-; } 2>&1; echo \"st=$?\"");
+        assert!(
+            out.contains("echo: write error: Bad file descriptor") && !out.contains("hi\n"),
+            "`1<&-` should close fd 1, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_closed_stdout_covers_a_whole_compound_body() {
+        // A group's `>&-` binds fd 1 for the body's whole duration, so a
+        // command inside it — and a `$( … )` collecting it from outside — sees
+        // the closed descriptor, not the enclosing capture.
+        let (out, _) = run("{ echo A; } >&- 2>&1; echo \"st=$?\"");
+        assert!(
+            out.contains("echo: write error: Bad file descriptor") && !out.contains("A\n"),
+            "the group's fd 1 should be closed for its body, got {out:?}"
+        );
+        assert!(out.ends_with("st=1\n"), "expected status 1, got {out:?}");
+        let (out, _) = run("x=$( { echo A; } >&- 2>/dev/null ); echo \"x=[$x]\"");
+        assert_eq!(out, "x=[]\n");
+        // A function invocation's own redirects apply to its whole body too.
+        let (out, _) = run("f() { echo F; }; { f >&-; } 2>&1; echo \"st=$?\"");
+        assert!(
+            out.contains("echo: write error: Bad file descriptor") && !out.contains("F\n"),
+            "a function's `>&-` should reach its body, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_closed_stdout_can_be_reopened_by_a_later_redirect() {
+        // bash applies a command's redirects left to right and the last one to
+        // name fd 1 decides it, so a close is not sticky within its own list —
+        // and neither is an open that a following close revokes.
+        let (out, _) = run_over_seeded_file("", "{ echo hi >&- 1> {FILE}; } 2>&1; echo \"st=$?\"");
+        assert_eq!(out, "st=0\n");
+        let (out, disk) =
+            run_over_seeded_file("", "{ echo hi 1> {FILE} >&-; } 2>&1; echo \"st=$?\"");
+        assert!(
+            out.contains("echo: write error: Bad file descriptor"),
+            "the later close should win, got {out:?}"
+        );
+        assert_eq!(disk, "", "nothing should have reached the file");
+    }
+
+    #[test]
+    fn a_persistent_close_of_stdout_is_not_a_reset_to_the_terminal() {
+        // `exec 1>&-` closes the shell's own fd 1. Clearing the binding instead
+        // would mean "back to the real stdout", which is the opposite.
+        let (out, _) = run("exec 1>&-; { echo hi; } 2>&1; echo \"st=$?\"");
+        assert!(
+            out.contains("echo: write error: Bad file descriptor") && !out.contains("hi\n"),
+            "a persistent close should stick, got {out:?}"
+        );
+        // And a closed fd 1 is not a descriptor to dup *from*: bash reports the
+        // failure at the `exec` rather than at some later write through the
+        // alias it would otherwise have made. Nothing follows the group, because
+        // a persistent close leaves no fd 1 for a trailing `echo "st=$?"` — the
+        // status comes back from `run` instead.
+        let (out, st) = run("{ exec 1>&-; exec 3>&1; } 2>&1");
+        assert!(
+            out.contains("1: Bad file descriptor"),
+            "expected the dup to fail naming fd 1, got {out:?}"
+        );
+        assert_eq!(st, 1, "expected status 1, got {out:?}");
+        // `exec 1<&-` says the same thing on the other side of the operator.
+        let (out, _) = run("{ exec 1<&-; echo hi; } 2>&1");
+        assert!(
+            out.contains("echo: write error: Bad file descriptor") && !out.contains("hi\n"),
+            "`exec 1<&-` should close fd 1, got {out:?}"
+        );
+        // And a close is not permanent: a later `exec` gives fd 1 back.
+        let (out, disk) = run_over_seeded_file("", "exec 1>&-; exec 1> {FILE}; echo hi");
+        assert_eq!(disk, "hi\n", "reopening should work, got {out:?}");
+    }
+
+    #[test]
+    fn an_exec_rebound_stdout_is_what_a_dup_of_fd1_copies() {
+        // `exec > file` inside a command substitution takes fd 1 away from the
+        // capture for good, so a later `exec 3>&1` must alias fd 3 to the *file*.
+        // Regression: `alias_write_fd` answered `3>&1` with the ambient capture
+        // sink without first asking whether a persistent `exec` had rebound fd 1
+        // underneath it, so `hi` landed in the substitution's buffer instead of
+        // on disk — a redirect the shell honoured for its own writes but not for
+        // a dup of the same descriptor.
+        let (out, disk) = run_over_seeded_file("", "exec 1> {FILE}; exec 3>&1; echo hi >&3");
+        assert_eq!(disk, "hi\n", "the dup should follow fd 1 to the file");
+        assert_eq!(out, "", "nothing should have reached the capture: {out:?}");
     }
 
     #[test]

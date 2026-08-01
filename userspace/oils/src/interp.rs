@@ -7486,7 +7486,7 @@ impl Shell {
                         self.last_status = 1;
                     }
                 },
-                ExtraFdOp::AliasStd(n) => match self.alias_std_write_fd(*n, out) {
+                ExtraFdOp::AliasFd(n) => match self.alias_write_fd(*n, out) {
                     Ok(w) => {
                         self.open_write_fds.insert(*fd, w);
                     }
@@ -14861,44 +14861,53 @@ impl Shell {
         } else if fd >= 3 && target == b"-" {
             // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
             plan.extra_fds.push((fd, ExtraFdOp::Close));
-        } else if fd >= 3 && matches!(target, b"0" | b"1" | b"2") {
-            // `exec 3>&1` / `exec 3>&2` / `exec 3>&0`: alias a user-space write
-            // descriptor to a standard fd. Consumed only by `exec` (and the
-            // scoped compound-command path), which snapshots that fd's current
-            // sink into `open_write_fds[fd]`. Aliasing fd 0 is legal even when
-            // fd 0 is read-only: bash's dup succeeds, and it is the later
-            // *write* through fd 3 that reports `EBADF`.
-            let n = target_num.unwrap_or(1);
-            plan.extra_fds.push((fd, ExtraFdOp::AliasStd(n)));
         } else if let Some(n) = target_num
-            && (n >= 3 || n == 0)
+            && n != fd
         {
-            // `M>&N` with N ≥ 3: duplicate fd M onto a user-space write
-            // descriptor (`echo … >&3`, `cmd 2>&3`). Routed to
-            // `Shell::open_write_fds[N]` by write_bytes / run_external. bash
-            // validates the source fd when setting up the redirect and, on
+            // `M>&N`: fd M becomes a second name for fd N's sink. bash reaches
+            // this by `dup2`, and skips the call outright when the two are the
+            // same descriptor — which is why `7>&7` succeeds even with fd 7
+            // closed, and why the `n != fd` guard above is not an optimisation
+            // but the rule.
+            //
+            // bash validates the source when setting up the redirect and, on
             // failure, never echoes the expansion — it names either the word as
             // written or the redirector, per [`Shell::dup_error_subject`]. A
-            // scratch fd opened earlier in the *same* command's redirect list
-            // is staged in `plan.extra_fds` (not yet in `open_write_fds`), so
-            // an in-command dup like `3>&1 2>&3` must still resolve.
-            let staged_write = plan.extra_fds.iter().any(|(f, op)| {
-                *f == n && matches!(op, ExtraFdOp::OutputFile(..) | ExtraFdOp::AliasStd(_))
-            });
-            // fd 0 is always open, so `>&0` is always a valid redirect; whether
-            // it is *writable* is settled at write time (see
+            // scratch fd opened earlier in the *same* command's redirect list is
+            // staged in `plan.extra_fds` (not yet in `open_write_fds`), so an
+            // in-command dup like `3>&1 2>&3` must still resolve. fd 0, 1 and 2
+            // are always open, so only a source of 3 or more can be missing —
+            // and whether fd 0 is *writable* is settled at write time (see
             // [`Shell::stdin_write_fd`]).
-            if n != 0 && !self.open_write_fds.contains_key(&n) && !staged_write {
+            let staged_write = plan.extra_fds.iter().any(|(f, op)| {
+                *f == n && matches!(op, ExtraFdOp::OutputFile(..) | ExtraFdOp::AliasFd(_))
+            });
+            if n >= 3 && !self.open_write_fds.contains_key(&n) && !staged_write {
                 return Err(bfmt![Self::dup_error_subject(r, fd, 1), b": Bad file descriptor"]);
             }
-            if fd == 2 {
-                plan.stderr_to_fd = Some(n);
-                plan.stderr = None;
-                plan.stderr_to_stdout = false;
-            } else {
-                plan.stdout_to_fd = Some(n);
-                plan.stdout = None;
-                plan.stdout_to_stderr = false;
+            match fd {
+                2 => {
+                    plan.stderr_to_fd = Some(n);
+                    plan.stderr = None;
+                    plan.stderr_to_stdout = false;
+                }
+                1 => {
+                    plan.stdout_to_fd = Some(n);
+                    plan.stdout = None;
+                    plan.stdout_to_stderr = false;
+                }
+                // `3>&1`, `3>&2`, `3>&0`, `7>&5`: alias a user-space write
+                // descriptor to another descriptor. Consumed only by `exec` and
+                // the scoped compound-command path, which snapshot the source's
+                // current sink into `open_write_fds[fd]`; on an ordinary command
+                // the alias is invisible, exactly as it is in bash — nothing the
+                // shell itself writes goes through fd 7. Aliasing fd 0 is legal
+                // even when fd 0 is read-only: bash's dup succeeds, and it is
+                // the later *write* through fd 3 that reports `EBADF`.
+                f if f >= 3 => plan.extra_fds.push((f, ExtraFdOp::AliasFd(n))),
+                // `0>&N` duplicates onto *stdin*, which osh does not model as a
+                // write target; the source is still validated above.
+                _ => {}
             }
         }
         Ok(())
@@ -14934,27 +14943,44 @@ impl Shell {
             }
             // `0<&-` (close stdin) on a non-exec command is a rare corner not
             // modelled here (documented limitation).
-        } else if let DupWord::Fd(n) = dup {
+        } else if let DupWord::Fd(n) = dup
+            && n != fd
+        {
+            // `M<&N`. As on the output side, bash reaches this by `dup2` and
+            // skips the call when the two descriptors are the same, so `7<&7`
+            // succeeds whatever fd 7 is — hence the `n != fd` guard.
+            //
+            // A source of 3 or more is an input descriptor a `read -u`/`exec 3<`
+            // opened, or a `coproc` read end; an unbound one fails the whole
+            // redirect (bash: "N: Bad file descriptor") rather than reading EOF.
+            // The check is owed to *every* redirector, not just fd 0: `7<&9` is
+            // as dead as `<&9` is, and used to pass silently here. Descriptors
+            // 0, 1 and 2 are always open, so they need no check.
+            if n >= 3 && !self.open_fds.contains_key(&n) && !self.coproc_read_fds.contains_key(&n) {
+                // Never the expansion: `<&$r` names `$r`, and a bare `<&007`
+                // names `7`. See [`Shell::dup_error_subject`].
+                return Err(bfmt![Self::dup_error_subject(r, fd, 0), b": Bad file descriptor"]);
+            }
             if fd == 0 && n >= 3 {
-                // fd 0 reads from input descriptor N's shared cursor (a `read
-                // -u`/`exec 3<` byte fd) or, for a `coproc` read end, the live
-                // pipe. An unbound source fd fails the whole redirect (bash:
-                // "N: Bad file descriptor"), rather than silent EOF.
-                if !self.open_fds.contains_key(&n) && !self.coproc_read_fds.contains_key(&n) {
-                    // Never the expansion: `<&$r` names `$r`, and a bare `<&007`
-                    // names `7`. See [`Shell::dup_error_subject`].
-                    return Err(bfmt![Self::dup_error_subject(r, fd, 0), b": Bad file descriptor"]);
-                }
+                // fd 0 reads from input descriptor N's shared cursor.
                 plan.stdin_from_fd = Some(n);
                 plan.stdin = None;
                 plan.stdin_data = None;
+            } else if fd >= 3
+                && let Some(src) = self.open_fds.get(&n)
+            {
+                // `7<&3`: a second name for one input descriptor, sharing its
+                // cursor — which `ExtraFdOp::Input` gives by handing over the
+                // same `InputFd`. Consumed by `exec` and the scoped
+                // compound-command path; invisible on an ordinary command, as it
+                // is in bash. A `coproc` read end is not modelled here (its live
+                // pipe does not live in `open_fds`), only validated above.
+                plan.extra_fds.push((fd, ExtraFdOp::Input(Arc::clone(src))));
             }
-            // `<&0` (and the rare `<&1`/`<&2`) leave fd 0 as the ambient stdin —
-            // a dup of fd 0 onto itself is a no-op, so the command reads from
-            // the inherited pipe/terminal/cursor unchanged. `exec 5<&3` (fd ≥ 3
-            // input alias) is only meaningful for `exec`, which walks the raw
-            // redirects.
-        } else {
+            // `<&0` (and the rare `<&1`/`<&2`) leave fd 0 as the ambient stdin,
+            // and `1<&N`/`2<&N` make a standard *output* descriptor readable —
+            // neither is modelled, both being dups osh has no reader for.
+        } else if dup == DupWord::NotAFd {
             // A non-numeric input-dup target (`<&file`) is ambiguous — there is
             // no `>&file` fallback on the input side. bash names the expansion
             // here, not the word as written.
@@ -15079,7 +15105,7 @@ impl Shell {
     /// fails (pathological — a closed std fd), in which case callers fall back
     /// to the real std fd. This is the swap-idiom fix (`exec 3>&1 1>&2 2>&3`).
     ///
-    /// fd 1 is resolved through [`Shell::alias_std_write_fd`], so `exec 3>&1`
+    /// fd 1 is resolved through [`Shell::alias_write_fd`], so `exec 3>&1`
     /// run inside a `$( … )` or a pipeline stage aliases fd 3 to *that* sink
     /// rather than to the terminal — the descriptor persists past the `exec`,
     /// but not past the substitution whose fd 1 it copied.
@@ -15087,7 +15113,7 @@ impl Shell {
         match n {
             // `Ok(None)` on failure: a pathological closed std fd, which callers
             // resolve back to the real std fd.
-            1 | 2 => Ok(self.alias_std_write_fd(n, out).ok()),
+            1 | 2 => Ok(self.alias_write_fd(n, out).ok()),
             // fd 0 is always open; only its access mode is in question.
             0 => Ok(Some(self.ambient_stdin_write_fd())),
             _ => match self.open_write_fds.get(&n) {
@@ -18256,7 +18282,7 @@ impl Shell {
                                 // outlives the `exec` but not the substitution,
                                 // so it is the same resolution a scoped `3>&1`
                                 // gets.
-                                ExtraFdOp::AliasStd(n) => match self.alias_std_write_fd(*n, out) {
+                                ExtraFdOp::AliasFd(n) => match self.alias_write_fd(*n, out) {
                                     Ok(w) => {
                                         self.open_write_fds.insert(*fd, w);
                                         self.open_fds.remove(fd);
@@ -30273,7 +30299,7 @@ impl Shell {
         }
     }
 
-    /// Resolve `N>&n` (N ≥ 3 aliasing standard fd `n`) against the ambient
+    /// Resolve `N>&n` (N ≥ 3 aliasing write descriptor `n`) against the ambient
     /// stdout `out` of the command carrying the redirect.
     ///
     /// `N>&1` must alias fd N to whatever fd 1 *is here*, not to the terminal /
@@ -30284,12 +30310,18 @@ impl Shell {
     /// the sink the caller is collecting. Only fd 1 gets this treatment: `out`
     /// describes fd 1 alone, and fd 2's live sink is already what
     /// `snapshot_std_fd(2)` returns.
-    fn alias_std_write_fd(&self, n: i32, out: &Out) -> io::Result<WriteFd> {
+    ///
+    /// A non-standard source (`7>&5`) is simply its current handle, shared —
+    /// two names for one descriptor, as `dup2` makes them.
+    fn alias_write_fd(&self, n: i32, out: &Out) -> io::Result<WriteFd> {
         match (n, out) {
             (1, Out::Capture(sink)) => Ok(WriteFd::Capture(sink.clone())),
             (1, Out::Pipe(w)) => {
                 pipe_writer_to_file(w).map(|f| WriteFd::File(std::sync::Arc::new(f)))
             }
+            _ if n >= 3 => self.open_write_fds.get(&n).cloned().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "Bad file descriptor")
+            }),
             _ => self.snapshot_std_fd(n),
         }
     }
@@ -31465,11 +31497,12 @@ enum ExtraFdOp {
     /// Open fd N for writing to `path` (`N> file` / `N>> file`); the `bool` is
     /// the append flag.
     OutputFile(Str, bool),
-    /// Alias fd N to a standard write fd (`exec 3>&1` / `exec 3>&2`): the inner
-    /// value is the target standard fd (`1` or `2`). At apply time the target's
-    /// *current* sink is duplicated into fd N (a snapshot, matching bash's dup
-    /// semantics — a later `exec > file` does not retarget the alias).
-    AliasStd(i32),
+    /// Alias fd N to another write descriptor (`3>&1`, `3>&2`, `7>&5`): the
+    /// inner value is the source fd, standard or not. At apply time the
+    /// source's *current* sink is duplicated into fd N (a snapshot, matching
+    /// bash's dup semantics — a later `exec > file` does not retarget the
+    /// alias).
+    AliasFd(i32),
     /// Bind fd N for both reading and writing (`exec {fd}<> file`): the two
     /// halves of one `O_RDWR | O_CREAT` open (created if absent, never
     /// truncated), made by [`open_rw_pair`] at resolution time. They are
@@ -56074,7 +56107,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `{ …; } 3>&1 | downstream` where fd 1 is the OS pipe to the next stage:
         // a `>&3` write inside the body must land in the pipe (reaching the
         // downstream stage), not leak to the ambient terminal. Regression:
-        // `AliasStd(1)` snapshotted the persistent/real fd 1 instead of the
+        // `AliasFd(1)` snapshotted the persistent/real fd 1 instead of the
         // stage's `Out::Pipe`.
         let (o, s) = run("{ echo x >&3; } 3>&1 | cat");
         assert_eq!(s, 0);

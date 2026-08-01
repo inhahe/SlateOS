@@ -26627,7 +26627,7 @@ number/word split. Every row is byte-identical to bash on both streams.
 redirector never checks its source at all, and a dup of a descriptor onto itself
 is checked when bash does not check it.
 
-### TD-OILS-DUP-ONTO-A-NON-STD-FD-IS-WRONG. `N<&M` never checks its source, `N>&M` retargets stdout, `N>&N` fails — OPEN — 2026-08-01
+### TD-OILS-DUP-ONTO-A-NON-STD-FD-IS-WRONG. `N<&M` never checks its source, `N>&M` retargets stdout, `N>&N` fails — ✅ RESOLVED — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs`, `resolve_dup_in` (the
 `DupWord::Fd(n)` arm, which acts only `if fd == 0 && n >= 3`) and
@@ -26673,6 +26673,31 @@ another user-space one; give the input arm a matching `ExtraFdOp` for input
 aliases so `resolve_dup_in` can validate and record `N<&M` for `N >= 1`; and
 skip validation in both when `n == fd`. Then extend the corpus case with the
 rows its header currently excludes.
+
+**Fixed** (2026-08-01), along those lines but with one simplification the plan
+did not anticipate: no new `ExtraFdOp` variant was needed on either side.
+
+* `ExtraFdOp::AliasStd(i32)` became `ExtraFdOp::AliasFd(i32)` — the variant only
+  ever named a *source* descriptor, and nothing about it was specific to 0/1/2.
+  `Shell::alias_write_fd` (was `alias_std_write_fd`) grew one arm that answers a
+  source of 3 or more from `open_write_fds`, so `7>&5` shares fd 5's handle the
+  way `dup2` shares it.
+* The input side reuses `ExtraFdOp::Input`, handing over the very same `InputFd`
+  the source holds. That is exactly the cursor-sharing a dup gives, which is why
+  no aliasing variant was called for.
+* `resolve_dup_out`'s two numeric arms collapsed into one that dispatches on the
+  *redirector*: 2 and 1 keep `stderr_to_fd`/`stdout_to_fd`, 3-and-up push an
+  `AliasFd`, and 0 does nothing (`0>&N` dups onto stdin, which osh has no write
+  model for — the source is still validated). Both sides gained an `n != fd`
+  guard, which is bash's skipped `dup2` rather than an optimisation.
+* `resolve_dup_in` now validates for every redirector instead of only fd 0.
+
+Covered by a new corpus case,
+`tests/corpus/dup-onto-a-non-standard-descriptor.sh`: a missing source under
+four redirectors, both self-dups, a scoped alias proving stdout is not diverted
+and that the binding dies with the scope, the same alias made to persist by
+`exec`, and two names for one input sharing a cursor. The naming case gained the
+`7<&"9"` / `7<&9` rows its header used to exclude.
 
 ### TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP. `>&-` / `<&-` on fd 0, 1 or 2 of a *command* closes nothing — OPEN — 2026-08-01
 

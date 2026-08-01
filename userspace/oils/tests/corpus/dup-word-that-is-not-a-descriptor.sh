@@ -27,10 +27,8 @@
 # The fourth answer to the first question, `-`, is missing on purpose: closing
 # fd 0/1/2 for the duration of one command is not modelled yet, so `echo hi >&-`
 # still prints (see known-issues TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP).
-# For a related reason no case below writes `N<&M` for a valid-looking M with N
-# other than 0, nor `N>&N` — an input dup onto a non-zero descriptor does not
-# check its source yet, and a dup of a descriptor onto *itself* needs no source
-# to check but is checked anyway. See TD-OILS-DUP-ONTO-A-NON-STD-FD-IS-WRONG.
+# What a dup onto a non-standard descriptor *does* once it succeeds is a
+# different question, covered by dup-onto-a-non-standard-descriptor.
 #
 # Stderr is collected and replayed at the end so it can be compared in a fixed
 # place; nothing here prints a pid, so it is replayed unfiltered.
@@ -89,12 +87,14 @@ echo "=== which holds for every way of being a bad one"
 read -r l 7<&"99999999999999999999"; echo "  7<& too long rc=$?"
 echo hi   2>&"99999999999999999999"; echo "  2>& too long rc=$?"
 read -r l  <&"9"; echo "  0<& merely closed rc=$?"
+read -r l 7<&"9"; echo "  7<& merely closed rc=$?"
 echo hi   1>&"9"; echo "  1>& merely closed rc=$?"
 echo hi   2>&"9"; echo "  2>& merely closed rc=$?"
 echo hi   7>&"9"; echo "  7>& merely closed rc=$?"
 
 echo "=== bare digits are a number, and a number is named as one"
 read -r l <&9;   echo "  0<&9   rc=$?"
+read -r l 7<&9;  echo "  7<&9   rc=$?"
 read -r l <&007; echo "  0<&007 rc=$?"
 echo hi   >&007; echo "  1>&007 rc=$?"
 echo hi  2>&007; echo "  2>&007 rc=$?"

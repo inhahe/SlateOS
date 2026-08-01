@@ -3157,6 +3157,17 @@ pub struct Shell {
     /// caches every PATH search here and consults it before re-searching; the
     /// table is inherited by subshell clones. See `resolve_external`.
     cmd_hash: std::collections::HashMap<Str, (std::path::PathBuf, u64)>,
+    /// Whether anything has *ever* been hashed in this shell — sticky, so
+    /// `hash -r` does not clear it.
+    ///
+    /// bash allocates its hash table lazily, on the first insertion, and
+    /// `phash_remove()` short-circuits to success while the table is still
+    /// null. The visible consequence is that `hash -d nosuch` is silent and
+    /// exits 0 in a shell that has never hashed anything, but reports
+    /// `hash: nosuch: not found` and exits 1 once it has — even if `hash -r`
+    /// has since emptied the table, because flushing keeps the table
+    /// allocated. Measured against bash 5.2.37; see `builtin_hash`.
+    cmd_hash_created: bool,
     /// Per-shell resource limits for the `ulimit` builtin, keyed by the bash
     /// option letter (`'n'`, `'s'`, …). The value is a `(soft, hard)` pair in
     /// the *display units* bash uses for that resource (`None` == unlimited).
@@ -3320,6 +3331,7 @@ impl Shell {
             hostname_source: None,
             umask_val: 0o022,
             cmd_hash: std::collections::HashMap::new(),
+            cmd_hash_created: false,
             rlimits: default_rlimits(),
         };
         sh.seed_shell_vars();
@@ -7546,6 +7558,9 @@ impl Shell {
             umask_val: self.umask_val,
             // The command hash table is inherited by subshells (bash).
             cmd_hash: self.cmd_hash.clone(),
+            // Sticky and inherited: a fork carries the parent's table, so it
+            // also carries the fact that the table exists.
+            cmd_hash_created: self.cmd_hash_created,
             // Resource limits are a process attribute inherited by subshells.
             rlimits: self.rlimits.clone(),
         }
@@ -8795,8 +8810,7 @@ impl Shell {
             } else {
                 val
             };
-            self.cmd_hash
-                .insert(key, (bytes::bytes_to_path(&final_val), 0));
+            self.hash_remember(key, bytes::bytes_to_path(&final_val), 0);
             self.sync_bash_cmds();
             return;
         }
@@ -11193,16 +11207,20 @@ impl Shell {
         out
     }
 
-    /// `FUNCNAME[i]`, or `None` past the end. Index 0 is the innermost frame;
-    /// in script-file mode a bottom `main` pseudo-frame sits just past the real
-    /// ones — but only while at least one *function* frame is active, since
-    /// bash leaves `FUNCNAME` unset entirely otherwise (verified: at the top
+    /// The name of call-stack frame `i`, or `None` past the end. Index 0 is the
+    /// innermost frame; in script-file mode a bottom `main` pseudo-frame sits
+    /// just past the real ones.
+    ///
+    /// This is the *stack*, not the `FUNCNAME` variable: bash leaves `FUNCNAME`
+    /// unset entirely while no function frame is active (verified: at the top
     /// level of a sourced script `${FUNCNAME+set}` is empty even though
-    /// `BASH_SOURCE` has two entries).
-    fn funcname_at(&self, i: usize) -> Option<Str> {
-        if self.fn_stack.is_empty() {
-            return None;
-        }
+    /// `BASH_SOURCE` has two entries), and `refresh_funcname` applies that rule
+    /// when it materialises the array. The `caller` builtin reads the stack
+    /// directly instead, which is why it disagrees exactly where the rule
+    /// bites: inside that same sourced file `${FUNCNAME[1]}` is empty, yet
+    /// `caller 0` still names the sourcing context (`main`). Measured against
+    /// bash 5.2.37.
+    fn frame_name_at(&self, i: usize) -> Option<Str> {
         let frames = self.merged_frames();
         let depth = frames.len();
         if i < depth {
@@ -11765,6 +11783,26 @@ impl Shell {
         if self.aliases_enabled() { self.aliases.get(name) } else { None }
     }
 
+    /// bash's description of a *function*: the `name is a function` sentence
+    /// followed by the reconstructed source of its body.
+    ///
+    /// `type f` and `command -V f` print exactly the same thing — bash routes
+    /// both through one `describe_command()` — so they share this rather than
+    /// each spelling it out, which is how `command -V` came to print only the
+    /// sentence.
+    fn write_function_description(&mut self, name: BStr<'_>, out: &mut Out, redir: &RedirPlan) {
+        let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a function"]);
+        let Some(body) = self.funcs.get(name) else {
+            return;
+        };
+        let src = crate::unparse::unparse_function(
+            name,
+            body,
+            self.func_redirects.get(name).map_or(&[][..], Vec::as_slice),
+        );
+        let _ = self.write_bytes(out, redir, &src);
+    }
+
     /// `command -v` / `command -V` — describe what `target` would run without
     /// running it.
     ///
@@ -11807,12 +11845,11 @@ impl Shell {
             let _ = self.write_line(out, redir, &line);
             self.last_status = 0;
         } else if self.funcs.contains_key(target.as_bytes()) {
-            let line = if verbose {
-                format!("{target} is a function")
+            if verbose {
+                self.write_function_description(target.as_bytes(), out, redir);
             } else {
-                target.to_string()
-            };
-            let _ = self.write_line(out, redir, &line);
+                let _ = self.write_line(out, redir, target);
+            }
             self.last_status = 0;
         } else if self.builtin_enabled(target) {
             let line = if verbose {
@@ -11901,6 +11938,16 @@ impl Shell {
         None
     }
 
+    /// Remember `name` as resolving to `path`, with `hits` prior uses.
+    ///
+    /// The one way an entry enters [`Shell::cmd_hash`], so that
+    /// [`Shell::cmd_hash_created`] can never fall out of step with the table
+    /// it describes.
+    fn hash_remember(&mut self, name: Str, path: std::path::PathBuf, hits: u64) {
+        self.cmd_hash.insert(name, (path, hits));
+        self.cmd_hash_created = true;
+    }
+
     /// Resolve an external command name to a full path for execution, consulting
     /// and populating the `hash` cache. A name containing a slash is used as-is
     /// (never hashed). For a bare name: a cached entry is reused (and its hit
@@ -11916,7 +11963,7 @@ impl Shell {
             return Some(path.clone());
         }
         let path = self.find_in_path(name)?;
-        self.cmd_hash.insert(name.to_vec(), (path.clone(), 1));
+        self.hash_remember(name.to_vec(), path.clone(), 1);
         // Refresh the BASH_CMDS mirror only when a *new* command is hashed (rare,
         // once per distinct command). The cache-hit branch above mutates only the
         // hit count, which the mirror doesn't expose, so it stays sync-free.
@@ -19268,27 +19315,49 @@ impl Shell {
     }
 
     /// `caller [expr]` — report the context of an active subroutine call.
-    /// Without `expr`, prints "LINE SOURCE" for the current function's call
+    /// Without `expr`, prints "LINE SOURCE" for the current context's call
     /// site. With a non-negative `expr`, prints "LINE FUNCNAME SOURCE" for that
-    /// frame in the call stack (0 = the current function). Returns 1 when not
-    /// executing a function or `expr` is out of range / non-numeric, matching
-    /// bash. The stack mirrors the `FUNCNAME`/`BASH_LINENO`/`BASH_SOURCE`
-    /// arrays: frame `i` names `fn_stack[len-1-i]`, called at
-    /// `call_line_stack[len-1-i]`, in source `$0`.
+    /// frame in the call stack (0 = the caller of the current function). The
+    /// stack mirrors the `FUNCNAME`/`BASH_LINENO`/`BASH_SOURCE` arrays: frame
+    /// `i` names `fn_stack[len-1-i]`, called at `call_line_stack[len-1-i]`.
+    ///
+    /// bash checks those arrays in a specific order that the diagnostics
+    /// expose, and this follows it:
+    ///
+    /// 1. an empty `BASH_SOURCE` — a `-c` or stdin shell outside any function
+    ///    — is a *silent* status 1, decided before the arguments are even
+    ///    looked at (so `caller -1` under `-c` says nothing);
+    /// 2. a leading `-x` is an invalid option (status 2 with the usage line);
+    /// 3. no operand prints `BASH_LINENO[0] BASH_SOURCE[1]`, with the literal
+    ///    `NULL` for a missing source — which is why `caller` at the top level
+    ///    of a *script* succeeds with `0 NULL` rather than failing: the script
+    ///    itself is a frame;
+    /// 4. a non-numeric operand is an invalid number (status 2 + usage);
+    /// 5. a frame that does not exist — including a negative index, which
+    ///    parses fine and then matches nothing — is a silent status 1.
     fn builtin_caller(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
-        let depth = self.fn_stack.len();
-        // Not inside any function → no call context. bash returns 1 *silently*
-        // here (the empty-stack check runs before any argument validation, so
-        // even `caller badarg` at top level just returns 1 with no message).
-        if depth == 0 {
+        // Step 1: no call stack at all.
+        if self.bash_source_at(0).is_none() {
             return 1;
+        }
+        // Step 2: `caller` takes no options, and `--` ends them. Only a leading
+        // word can be one, so the scan stops at the first operand.
+        let mut rest = args;
+        if let Some((first, tail)) = rest.split_first() {
+            if first.as_slice() == b"--" {
+                rest = tail;
+            } else if first.len() > 1 && first.starts_with(b"-") {
+                self.berrln(&bfmt![self.err_prefix(), b"caller: ", first, b": invalid option"]);
+                self.emit_stderr(b"caller: usage: caller [expr]\n");
+                return 2;
+            }
         }
         // bash prints the source label of the *caller's* frame — BASH_SOURCE[n+1]
         // for `caller n`, BASH_SOURCE[1] for bare `caller` — with the literal
         // `NULL` when that frame does not exist (e.g. the caller is the
         // top-level of a `-c`/interactive shell, which has no bottom frame).
-        let spec = args.iter().find(|a| a.as_slice() != b"--");
-        match spec {
+        // Any operand past the first is ignored, as in bash.
+        match rest.first() {
             None => {
                 // Bare `caller`: line of the current call site (BASH_LINENO[0])
                 // and the source of its caller (BASH_SOURCE[1]). Unlike the
@@ -19301,8 +19370,11 @@ impl Shell {
             }
             Some(expr) => {
                 // A frame number is ASCII digits, so a word that is not text is
-                // not a number either — it takes the same message.
-                let Some(Ok(n)) = bytes::as_str(expr).map(str::parse::<usize>) else {
+                // not a number either — it takes the same message. It is read
+                // as *signed*, because bash's `legal_number` accepts a minus
+                // sign and only then fails to find the frame: `caller -- -1` is
+                // a silent 1, not an invalid number.
+                let Some(Ok(n)) = bytes::as_str(expr).map(str::parse::<i64>) else {
                     // bash: a non-numeric expr prints the invalid-number error
                     // (with the shell location prefix) followed by the
                     // unprefixed usage line, and returns 2.
@@ -19310,11 +19382,17 @@ impl Shell {
                     self.emit_stderr(b"caller: usage: caller [expr]\n");
                     return 2;
                 };
+                let Ok(n) = usize::try_from(n) else {
+                    return 1;
+                };
                 // Frame n reports BASH_LINENO[n] + FUNCNAME[n+1] (the caller of
                 // the function at depth n). Out of range when the caller frame
                 // does not exist — e.g. `caller 0` from a single function under
-                // `-c`, where there is no bottom `main` frame.
-                let (Some(line), Some(func)) = (self.bash_lineno_at(n), self.funcname_at(n + 1))
+                // `-c`, where there is no bottom `main` frame. The name comes
+                // from `frame_name_at`, not `funcname_at`: inside a sourced
+                // file the frame exists for `caller` even though `FUNCNAME`
+                // presents itself as unset.
+                let (Some(line), Some(func)) = (self.bash_lineno_at(n), self.frame_name_at(n + 1))
                 else {
                     return 1;
                 };
@@ -19688,6 +19766,22 @@ impl Shell {
     /// `-p pathname name` remembers `name` at `pathname` without a search; `-l`
     /// lists entries in re-inputtable form. Bare `name`s force a fresh `$PATH`
     /// search and remember the result. Unknown/unfound names are a status-1 error.
+    ///
+    /// The flags are less orthogonal than that summary suggests, and this
+    /// follows bash 5.2.37 where they overlap:
+    ///
+    /// * `-l` re-shapes output but selects nothing. Alone with no operand it
+    ///   lists the table; *with* operands it does not list at all — they fall
+    ///   through to the ordinary `$PATH` search — and combined with `-t` it
+    ///   turns that lookup's output into the re-inputtable form.
+    /// * `-r` is not terminal: with operands it flushes the table and then
+    ///   processes them, so `hash -r ls` forgets everything and re-hashes `ls`.
+    /// * a name containing a slash is a path, not something to remember, so it
+    ///   is skipped in silence — by `-d` and `-p` as well as by a bare name.
+    ///   `-t` is the exception: it is answered before that check, and reports
+    ///   `not found`.
+    /// * `-d`/`-t` with no operand is `option requires an argument` (status 1,
+    ///   no usage line), decided before `-r` gets to flush anything.
     fn builtin_hash(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let mut clear = false;
         let mut delete = false;
@@ -19700,136 +19794,179 @@ impl Shell {
                 i += 1;
                 break;
             }
-            if arg.as_slice() == b"-p" {
-                pathname = args.get(i + 1).cloned();
-                if pathname.is_none() {
-                    self.perrln("hash: -p: option requires an argument");
-                    return 2;
-                }
-                i += 2;
-                continue;
-            }
-            if let Some(flags) = arg.strip_prefix(b"-")
-                && !flags.is_empty()
-            {
-                if let Some(c) = flags.iter().find(|c| !matches!(c, b'r' | b'd' | b't' | b'l')) {
-                    return self.builtin_invalid_option(
-                        "hash",
-                        &[b'-', *c],
-                        "hash [-lr] [-p pathname] [-dt] [name ...]",
-                    );
-                }
-                for c in flags {
-                    match c {
-                        b'r' => clear = true,
-                        b'd' => delete = true,
-                        b't' => print_path = true,
-                        b'l' => list = true,
-                        _ => {}
+            let Some(flags) = arg.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
+                break;
+            };
+            // `-p` takes an argument the way getopt does: the rest of the
+            // cluster if there is any (`-p/x`), otherwise the next word
+            // (`-rp /x`). Anything after it in the cluster is the argument,
+            // never more flags.
+            let mut consumed_next = false;
+            let mut invalid = None;
+            let mut j = 0usize;
+            while let Some(&c) = flags.get(j) {
+                match c {
+                    b'r' => clear = true,
+                    b'd' => delete = true,
+                    b't' => print_path = true,
+                    b'l' => list = true,
+                    b'p' => {
+                        let attached = flags.get(j.saturating_add(1)..).unwrap_or_default();
+                        if attached.is_empty() {
+                            let Some(next) = args.get(i.saturating_add(1)) else {
+                                self.berrln(&bfmt![
+                                    self.err_prefix(),
+                                    b"hash: -p: option requires an argument"
+                                ]);
+                                self.emit_stderr(
+                                    b"hash: usage: hash [-lr] [-p pathname] [-dt] [name ...]\n",
+                                );
+                                return 2;
+                            };
+                            pathname = Some(next.clone());
+                            consumed_next = true;
+                        } else {
+                            pathname = Some(attached.to_vec());
+                        }
+                        break;
+                    }
+                    _ => {
+                        invalid = Some(c);
+                        break;
                     }
                 }
-                i += 1;
-                continue;
+                j = j.saturating_add(1);
             }
-            break;
+            if let Some(c) = invalid {
+                return self.builtin_invalid_option(
+                    "hash",
+                    &[b'-', c],
+                    "hash [-lr] [-p pathname] [-dt] [name ...]",
+                );
+            }
+            i = i.saturating_add(if consumed_next { 2 } else { 1 });
         }
-        let names = &args[i..];
+        let names = args.get(i..).unwrap_or_default();
 
-        if clear {
-            self.cmd_hash.clear();
-            self.sync_bash_cmds();
-            return 0;
-        }
-        if let Some(p) = pathname {
-            // `-p pathname name`: remember without searching.
-            let Some(name) = names.first() else {
+        if names.is_empty() {
+            // `-d` and `-t` describe *named* commands, so bash's `sh_needarg`
+            // fires before anything else — even before `-r` would have flushed
+            // the table — and it prints no usage line and exits 1, unlike the
+            // getopt-level complaint about a missing `-p` argument above.
+            if delete || print_path {
+                let opt = if delete { "-d" } else { "-t" };
+                self.perrln(&format!("hash: {opt}: option requires an argument"));
+                return 1;
+            }
+            if clear {
+                // `hash -r` is silent: it forgets everything and prints no
+                // table, not even the empty-table note.
+                self.cmd_hash.clear();
+                self.sync_bash_cmds();
                 return 0;
-            };
-            self.cmd_hash
-                .insert(name.clone(), (bytes::bytes_to_path(&p), 0));
-            self.sync_bash_cmds();
-            return 0;
-        }
-        if list {
+            }
             let mut entries: Vec<(&Str, &(std::path::PathBuf, u64))> =
                 self.cmd_hash.iter().collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
             let mut s = Str::new();
-            for (name, (path, _)) in entries {
-                // Re-inputtable output: the path is emitted as its own bytes, so
-                // feeding the line back reproduces the same entry.
-                s.extend_from_slice(&bfmt![
-                    b"builtin hash -p ",
-                    bytes::path_to_bytes(path),
-                    b" ",
-                    name,
-                    b"\n"
-                ]);
+            if list {
+                // Re-inputtable output: the path is emitted as its own bytes,
+                // so feeding the line back reproduces the same entry. An empty
+                // table prints nothing at all in this form.
+                for (name, (path, _)) in entries {
+                    s.extend_from_slice(&bfmt![
+                        b"builtin hash -p ",
+                        bytes::path_to_bytes(path),
+                        b" ",
+                        name,
+                        b"\n"
+                    ]);
+                }
+            } else if entries.is_empty() {
+                // bash reports an empty table with a note on *stdout*, exit 0.
+                s.extend_from_slice(b"hash: hash table empty\n");
+            } else {
+                s.extend_from_slice(b"hits\tcommand\n");
+                for (_, (path, hits)) in entries {
+                    s.extend_from_slice(&bfmt![
+                        format!("{hits:>4}"),
+                        b"\t",
+                        bytes::path_to_bytes(path),
+                        b"\n"
+                    ]);
+                }
             }
             return self.write_bytes(out, redir, &s);
         }
-        if delete {
-            let mut status = 0;
-            for name in names {
-                if self.cmd_hash.remove(name.as_slice()).is_none() {
-                    self.berrln(&bfmt![self.err_prefix(), b"hash: ", name, b": not found"]);
-                    status = 1;
-                }
-            }
+
+        // With names, `-r` still flushes first and then lets them through:
+        // `hash -r ls` forgets everything and re-hashes `ls`.
+        if clear {
+            self.cmd_hash.clear();
             self.sync_bash_cmds();
-            return status;
         }
-        if print_path {
-            let mut s = Str::new();
-            let mut status = 0;
-            let multiple = names.len() > 1;
-            for name in names {
+        let mut status = 0;
+        // bash's `-t` reports which name each path belongs to only when it was
+        // asked about more than one.
+        let multiple = names.len() > 1;
+        for name in names {
+            if print_path {
+                // `-t` runs before the slash check below, so `hash -t /bin/sh`
+                // is a "not found" rather than a silent skip. `-l` reshapes its
+                // output into the re-inputtable form.
                 let hit = self
                     .cmd_hash
                     .get(name.as_slice())
                     .map(|(path, _)| bytes::path_to_bytes(path));
-                if let Some(path) = hit {
-                    if multiple {
-                        s.extend_from_slice(&bfmt![name, b"\t", path, b"\n"]);
-                    } else {
-                        s.extend_from_slice(&bfmt![path, b"\n"]);
-                    }
+                let Some(path) = hit else {
+                    self.berrln(&bfmt![self.err_prefix(), b"hash: ", name, b": not found"]);
+                    status = 1;
+                    continue;
+                };
+                let line = if list {
+                    bfmt![b"builtin hash -p ", path, b" ", name, b"\n"]
+                } else if multiple {
+                    bfmt![name, b"\t", path, b"\n"]
                 } else {
+                    bfmt![path, b"\n"]
+                };
+                // Written per name rather than batched, so a hit and the next
+                // name's "not found" interleave on a shared sink the way
+                // bash's do.
+                let w = self.write_bytes(out, redir, &line);
+                if w != 0 {
+                    status = w;
+                }
+                continue;
+            }
+            // A name with a slash names a file directly, so bash never hashes
+            // it — and skips it silently for *every* remaining mode, including
+            // `-d` and `-p`. (`-l` with names is not a listing at all: the
+            // names fall through to the search below, as in bash.)
+            if name.contains(&b'/') || name.contains(&b'\\') {
+                continue;
+            }
+            if delete {
+                // Removing a name that was never there is an error — *unless*
+                // nothing has ever been hashed, in which case bash's table has
+                // not been allocated yet and its `phash_remove()` returns
+                // success without looking. See `cmd_hash_created`.
+                if self.cmd_hash.remove(name.as_slice()).is_none() && self.cmd_hash_created {
                     self.berrln(&bfmt![self.err_prefix(), b"hash: ", name, b": not found"]);
                     status = 1;
                 }
+                continue;
             }
-            let w = self.write_bytes(out, redir, &s);
-            return if w != 0 { w } else { status };
-        }
-        if names.is_empty() {
-            // Print the table. bash reports an empty table with the message
-            // `hash: hash table empty` (on stdout, exit 0) rather than nothing.
-            if self.cmd_hash.is_empty() {
-                return self.write_bytes(out, redir, b"hash: hash table empty\n");
+            if let Some(p) = &pathname {
+                // `-p pathname name …`: remember each name at that path,
+                // without a search.
+                self.hash_remember(name.clone(), bytes::bytes_to_path(p), 0);
+                continue;
             }
-            let mut entries: Vec<(&Str, &(std::path::PathBuf, u64))> =
-                self.cmd_hash.iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
-            let mut s = Str::from(&b"hits\tcommand\n"[..]);
-            for (_, (path, hits)) in entries {
-                s.extend_from_slice(&bfmt![
-                    format!("{hits:>4}"),
-                    b"\t",
-                    bytes::path_to_bytes(path),
-                    b"\n"
-                ]);
-            }
-            return self.write_bytes(out, redir, &s);
-        }
-        // Bare names: forget any old entry and force a fresh `$PATH` search.
-        let mut status = 0;
-        for name in names {
+            // Bare name: forget any old entry and force a fresh `$PATH` search.
             self.cmd_hash.remove(name.as_slice());
             match self.find_in_path(name) {
-                Some(path) => {
-                    self.cmd_hash.insert(name.clone(), (path, 0));
-                }
+                Some(path) => self.hash_remember(name.clone(), path, 0),
                 None => {
                     self.berrln(&bfmt![self.err_prefix(), b"hash: ", name, b": not found"]);
                     status = 1;
@@ -27830,11 +27967,7 @@ impl Shell {
                     let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell keyword"]);
                 }
                 if is_fn {
-                    let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a function"]);
-                    if let Some(body) = self.funcs.get(name.as_slice()) {
-                        let src = crate::unparse::unparse_function(name, body, self.func_redirects.get(name.as_slice()).map_or(&[][..], Vec::as_slice));
-                        let _ = self.write_bytes(out, redir, &src);
-                    }
+                    self.write_function_description(name, out, redir);
                 }
                 if is_bi {
                     let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell builtin"]);
@@ -27849,13 +27982,7 @@ impl Shell {
                 } else if is_kw {
                     let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell keyword"]);
                 } else if is_fn {
-                    // bash prints the "is a function" line followed by the
-                    // reconstructed function source.
-                    let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a function"]);
-                    if let Some(body) = self.funcs.get(name.as_slice()) {
-                        let src = crate::unparse::unparse_function(name, body, self.func_redirects.get(name.as_slice()).map_or(&[][..], Vec::as_slice));
-                        let _ = self.write_bytes(out, redir, &src);
-                    }
+                    self.write_function_description(name, out, redir);
                 } else if is_bi {
                     let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell builtin"]);
                 } else if let Some(p) = self
@@ -39630,6 +39757,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, c) = run("f() { caller abc; }\nf");
         assert_eq!(o, "");
         assert_eq!(c, 2);
+        // `caller` takes no options; `--` ends them and leaves the bare form.
+        let (o, c) = run("f() { caller -x; }\nf");
+        assert_eq!(o, "");
+        assert_eq!(c, 2);
+        assert_eq!(run("f() { caller --; }\nf").0, "2 NULL\n");
+        // A negative frame is a *number* bash then fails to find — silent 1,
+        // not the invalid-number complaint.
+        let (o, c) = run("f() { caller -- -1; }\nf");
+        assert_eq!(o, "");
+        assert_eq!(c, 1);
+        // Operands past the first are ignored.
+        assert_eq!(run("g() { caller 0 9; }\nf() { g; }\nf").0, "2 f main\n");
     }
 
     #[test]
@@ -40526,6 +40665,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // -v on a function prints the name; an unknown name → status 1, no output.
         assert_eq!(run("greet() { :; }; command -v greet").0, "greet\n");
         assert_eq!(run("command -v no_such_cmd_xyz; echo $?").0, "1\n");
+        // -V on a function prints the same thing `type` does: the sentence and
+        // then the reconstructed body (bash routes both through one
+        // `describe_command`).
+        let body = "greet is a function\ngreet () \n{ \n    :\n}\n";
+        assert_eq!(run("greet() { :; }; command -V greet").0, body);
+        assert_eq!(run("greet() { :; }; type greet").0, body);
     }
 
     #[test]
@@ -51057,7 +51202,50 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn hash_delete_and_missing() {
         assert_eq!(run("hash -p /a x; hash -d x; hash -t x").1, 1);
-        assert_eq!(run("hash -d nope").1, 1);
+        // Deleting a name that is not in the table is an error only once the
+        // table exists: bash's `phash_remove` succeeds without looking while
+        // its table is still unallocated, and flushing it with `-r` does not
+        // deallocate it. See `Shell::cmd_hash_created`.
+        assert_eq!(run("hash -d nope").1, 0);
+        assert_eq!(run("hash -p /a x; hash -d nope").1, 1);
+        assert_eq!(run("hash -p /a x; hash -r; hash -d nope").1, 1);
+    }
+
+    #[test]
+    fn hash_flags_overlap_the_way_bashs_do() {
+        // `-r` is not terminal: with names it flushes and then processes them,
+        // so the flushed `yy` is looked for on $PATH and reported missing.
+        let (o, s) = run("hash -p /a yy; hash -r yy 2>&1; hash");
+        assert_eq!(o, "osh: hash: yy: not found\nhash: hash table empty\n");
+        assert_eq!(s, 0);
+        // A name with a slash is a path, so nothing remembers it — silently,
+        // for `-p` and `-d` as much as for a bare name.
+        assert_eq!(run("hash /a/b; hash").0, "hash: hash table empty\n");
+        assert_eq!(run("hash -p /x /a/b; hash").0, "hash: hash table empty\n");
+        assert_eq!(run("hash -p /a yy; hash -d /a/b; echo $?").0, "0\n");
+        // …but `-t` answers before that check.
+        assert_eq!(run("hash -t /a/b").1, 1);
+        // `-l` selects nothing: with names it is the plain search, and with
+        // `-t` it only reshapes the output.
+        assert_eq!(run("hash -p /a yy; hash -l yy 2>&1").0, "osh: hash: yy: not found\n");
+        assert_eq!(
+            run("hash -p /a yy; hash -lt yy").0,
+            "builtin hash -p /a yy\n"
+        );
+        // `-d`/`-t` with no operand: status 1, no usage line, and decided
+        // before `-r` would have flushed.
+        let (o, s) = run("hash -rd 2>&1");
+        assert_eq!(o, "osh: hash: -d: option requires an argument\n");
+        assert_eq!(s, 1);
+        assert_eq!(run("hash -rt 2>&1").0, "osh: hash: -t: option requires an argument\n");
+        // `-p` takes its argument attached or as the next word.
+        assert_eq!(run("hash -p/x y; hash -lt y").0, "builtin hash -p /x y\n");
+        assert_eq!(run("hash -rp /x y; hash -lt y").0, "builtin hash -p /x y\n");
+        // …and complains at the getopt level (status 2, with the usage line).
+        let (o, s) = run("hash -rp 2>&1");
+        assert!(o.contains("hash: -p: option requires an argument"), "got {o:?}");
+        assert!(o.contains("hash: usage: hash [-lr]"), "got {o:?}");
+        assert_eq!(s, 2);
     }
 
     #[cfg(windows)]

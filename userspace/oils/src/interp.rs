@@ -2384,6 +2384,29 @@ pub struct Shell {
     /// makes on entry to a function (`f | cat` announces `f` in the parent, and
     /// `f` again from inside the stage as the call is entered).
     debug_announced: bool,
+    /// Set when a simple command was taken away by the extdebug DEBUG-trap
+    /// verdict, so that [`Shell::exec_pipeline`] knows not to publish a
+    /// `${PIPESTATUS[@]}` for it.
+    ///
+    /// A command that never ran writes no status list: bash leaves the array
+    /// exactly as the previous command left it, so `false | false; true` with
+    /// the `true` refused still reads `[1 1]`. That is specific to a *simple*
+    /// command — a refused `[[ … ]]` or `(( … ))` does publish a one-element
+    /// `[0]`, which is what osh does for every command anyway, so only this
+    /// case needs the flag.
+    debug_skipped: bool,
+    /// Which stages of the pipeline this shell is about to run were already
+    /// taken away by a DEBUG-trap verdict *somewhere else* — set on the clone
+    /// that runs a `&` job, whose stages [`Shell::announce_async`] announced in
+    /// the parent (and, being the parent, refused there).
+    ///
+    /// It is separate from the skips [`Shell::exec_pipeline`] decides itself
+    /// because only the latter can abandon the pipeline. Refusing the last
+    /// stage abandons it precisely because that stage is the one the announcing
+    /// shell would have run itself; a `&` job's last stage is not — the shell
+    /// that refused it forks the job and never runs any of it — so there the
+    /// refusal costs the stage and nothing more.
+    debug_stage_skips: Vec<bool>,
     last_bg_pid: Option<u32>,
     /// `set -o pipefail`: a pipeline's status is the rightmost non-zero stage.
     pipefail: bool,
@@ -3362,6 +3385,8 @@ impl Shell {
             subshell_base: 0,
             stage_pending_level: false,
             debug_announced: false,
+            debug_skipped: false,
+            debug_stage_skips: Vec::new(),
             last_bg_pid: None,
             pipefail: false,
             pipe_broken: false,
@@ -5118,7 +5143,7 @@ impl Shell {
                 // The DEBUG trap hears about the job here, in the parent, before
                 // it is started — see [`Shell::announce_async`].
                 let announced = match self.announce_async(&item.list, out, stdin) {
-                    Ok(announced) => announced,
+                    Ok(skips) => skips,
                     Err(Flow::Next) => continue,
                     Err(other) => return other,
                 };
@@ -5319,6 +5344,16 @@ impl Shell {
         // taken here and handed on per stage, so that nothing nested deeper can
         // pick it up by accident.
         let mut stages_announced = std::mem::take(&mut self.debug_announced);
+        // Which stages the extdebug verdict took away. A refused stage is simply
+        // never started: its endpoints are made and dropped, so its successor
+        // reads an immediate EOF and its predecessor writes to a pipe nobody
+        // holds — exactly the hole bash leaves where the stage would have been.
+        //
+        // Skips decided elsewhere arrive with the claim ([`Shell::
+        // debug_stage_skips`]) and are honoured but never abandon the pipeline.
+        let mut skipped = std::mem::take(&mut self.debug_stage_skips);
+        skipped.resize(pipe.commands.len(), false);
+        let mut abandoned = false;
         if pipe.commands.len() > 1
             && !stages_announced
             && !self.in_trap
@@ -5326,22 +5361,39 @@ impl Shell {
             && !self.trap_suppressed("DEBUG")
         {
             stages_announced = true;
-            for cmd in &pipe.commands {
+            for (i, cmd) in pipe.commands.iter().enumerate() {
                 if let Some(sc) = Self::stage_simple(cmd) {
-                    self.put_var("BASH_COMMAND", crate::unparse::simple_src(sc));
                     // An `exit N` in the handler unwinds the shell before the
-                    // pipeline runs at all (bash), so no stage is started.
-                    if let Flow::Exit(code) = self.fire_trap_flow("DEBUG", out, stdin) {
-                        return Flow::Exit(code);
+                    // pipeline runs at all (bash), so no stage is started; a
+                    // `return` leaves the function the pipeline is written in,
+                    // likewise before any stage runs.
+                    match self.announce_debug(crate::unparse::simple_src(sc), out, stdin) {
+                        DebugVerdict::Run => {}
+                        DebugVerdict::Skip(_) => skipped[i] = true,
+                        DebugVerdict::Return => {
+                            self.last_status = 2;
+                            return Flow::Return;
+                        }
+                        DebugVerdict::Exit(code) => return Flow::Exit(code),
                     }
                 }
             }
+            // Refusing the **last** stage abandons the pipeline's result rather
+            // than just that stage: bash runs the last stage in the shell that
+            // owns the pipeline, so the refusal returns out of the pipeline
+            // before it ever publishes anything. The earlier stages have
+            // already been started and still run — bash does not even wait for
+            // them, which osh does — but the pipeline answers 0 and
+            // `${PIPESTATUS[@]}` keeps whatever it held before, exactly as for
+            // a refused lone command.
+            abandoned = skipped.last().copied().unwrap_or(false);
         }
         let start = if pipe.timed {
             Some(std::time::Instant::now())
         } else {
             None
         };
+        self.debug_skipped = false;
         let (statuses, flow) = if pipe.commands.len() == 1 {
             // The lone stage runs in this very shell, so pass the claim straight
             // on to its own dispatch — and only if it is the kind of command the
@@ -5355,14 +5407,26 @@ impl Shell {
             (vec![self.last_status], flow)
         } else if pipe.commands.iter().all(|c| self.stage_is_plain_external(c)) {
             // All-external pipeline → real OS pipes (concurrent, SIGPIPE-aware).
-            self.exec_concurrent_pipeline(&pipe.commands, out, stdin)
+            self.exec_concurrent_pipeline(&pipe.commands, &skipped, out, stdin)
         } else {
             // A builtin/function/compound stage is present → threaded pipeline
             // (each in-process stage on its own thread, real OS pipes between).
-            self.exec_threaded_pipeline(&pipe.commands, stages_announced, out, stdin)
+            self.exec_threaded_pipeline(&pipe.commands, stages_announced, &skipped, out, stdin)
         };
-        // Publish `${PIPESTATUS[@]}` and fold per-stage statuses into `$?`.
-        self.finish_pipeline(&statuses);
+        // Publish `${PIPESTATUS[@]}` and fold per-stage statuses into `$?` —
+        // one element per stage that was actually started, and none at all when
+        // the pipeline was abandoned or its lone command taken away.
+        if abandoned {
+            self.last_status = 0;
+        } else if !std::mem::take(&mut self.debug_skipped) {
+            let started: Vec<i32> = statuses
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !skipped.get(*i).copied().unwrap_or(false))
+                .map(|(_, s)| *s)
+                .collect();
+            self.finish_pipeline(&started);
+        }
         if pipe.negated {
             self.last_status = i32::from(self.last_status == 0);
         }
@@ -5487,10 +5551,17 @@ impl Shell {
     /// `announced` says the caller has already told the DEBUG trap about every
     /// stage that is a simple command, so those stages' own clones must not
     /// announce them again — see [`Shell::debug_announced`].
+    ///
+    /// `skipped[i]` says the extdebug verdict took stage `i` away. Such a stage
+    /// is not started at all; its endpoints are dropped instead, so the stage
+    /// after it reads an immediate EOF and the stage before it writes into a
+    /// pipe with no reader. Its entry in the returned vector is a placeholder
+    /// the caller drops rather than a status.
     fn exec_threaded_pipeline(
         &mut self,
         cmds: &[Command],
         announced: bool,
+        skipped: &[bool],
         out: &mut Out,
         stdin: &StdinSrc,
     ) -> (Vec<i32>, Flow) {
@@ -5555,6 +5626,20 @@ impl Shell {
         std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(n.saturating_sub(1));
             for i in 0..n - 1 {
+                if skipped.get(i).copied().unwrap_or(false) {
+                    // Taken away by the extdebug verdict. Dropping the endpoints
+                    // is the whole of it: the write end going leaves the next
+                    // stage at EOF, the read end going leaves the previous one
+                    // writing to nobody, and dropping the start signal releases
+                    // the next stage at once rather than after its timeout.
+                    drop(readers[i].take());
+                    drop(writers[i].take());
+                    if i == 0 {
+                        drop(head_stdin.take());
+                    }
+                    drop(start_tx.get_mut(i).and_then(Option::take));
+                    continue;
+                }
                 let mut sub = self.clone_for_pipeline_stage();
                 let cmd = &cmds[i];
                 // Only a simple-command stage was announced; a compound one
@@ -5640,7 +5725,13 @@ impl Shell {
             // `do_piping` again: the last stage always has an upstream pipe.
             let stage_root_redirected = matches!(&cmds[last], Command::Redirected { .. });
             let last_announced = announced && Self::stage_simple(&cmds[last]).is_some();
-            if lastpipe {
+            if skipped.get(last).copied().unwrap_or(false) {
+                // Taken away like any other stage. Whether its absence also
+                // costs the pipeline its answer depends on which shell refused
+                // it, which is the caller's business (see
+                // [`Shell::exec_pipeline`]); here it only means the upstream
+                // producer loses its reader, which `drop(stdin)` below does.
+            } else if lastpipe {
                 // Run in the current shell (not a subshell): mutations persist
                 // and control flow propagates. No EXIT trap firing here — this
                 // is the running shell, whose EXIT trap fires only on true exit.
@@ -5722,9 +5813,14 @@ impl Shell {
     /// concurrently. Returns the per-stage exit codes (in pipeline order) so the
     /// caller can publish `${PIPESTATUS[@]}` and apply `pipefail`. The caller
     /// guarantees every stage passes [`Shell::stage_is_plain_external`].
+    ///
+    /// `skipped[i]` says the extdebug DEBUG-trap verdict took stage `i` away, so
+    /// it is not spawned — its successor reads an EOF and its predecessor's pipe
+    /// has no reader, which is the hole bash leaves too.
     fn exec_concurrent_pipeline(
         &mut self,
         cmds: &[Command],
+        skipped: &[bool],
         out: &mut Out,
         stdin: &StdinSrc,
     ) -> (Vec<i32>, Flow) {
@@ -5759,6 +5855,14 @@ impl Shell {
         let mut child_cmd_idx: Vec<usize> = Vec::with_capacity(cmds.len());
 
         for (i, cmd) in cmds.iter().enumerate() {
+            if skipped.get(i).copied().unwrap_or(false) {
+                // Taken away by the extdebug verdict: not spawned, not expanded,
+                // not traced. Clearing `prev_stdout` closes the upstream pipe's
+                // only reader and leaves the next stage reading nothing — the
+                // same treatment a stage whose command word expanded away gets.
+                prev_stdout = None;
+                continue;
+            }
             let Command::Simple(sc) = cmd else {
                 continue; // guaranteed Simple by the classifier
             };
@@ -7630,6 +7734,8 @@ impl Shell {
             // Nor has anything been announced on its behalf; the callers that
             // forked for an already-announced command say so themselves.
             debug_announced: false,
+            debug_skipped: false,
+            debug_stage_skips: Vec::new(),
             last_bg_pid: self.last_bg_pid,
             pipefail: self.pipefail,
             pipe_broken: false,
@@ -11177,6 +11283,10 @@ impl Shell {
                 DebugVerdict::Run => {}
                 DebugVerdict::Skip(_) => {
                     self.last_status = 0;
+                    // A command that never ran leaves no status list behind, so
+                    // `${PIPESTATUS[@]}` keeps whatever the last command that
+                    // *did* run put there.
+                    self.debug_skipped = true;
                     return Flow::Next;
                 }
                 DebugVerdict::Return => {
@@ -13193,10 +13303,17 @@ impl Shell {
         }
     }
 
-    /// `announced` says [`Shell::announce_async`] has already told the DEBUG
-    /// trap about this job's stages, so the clone that runs them must not
-    /// announce them a second time.
-    fn exec_background(&mut self, ao: &AndOr, announced: bool, out: &Out, stdin: &StdinSrc) {
+    /// `announced` is `Some` when [`Shell::announce_async`] has already told the
+    /// DEBUG trap about this job's stages, so the clone that runs them must not
+    /// announce them a second time; it carries one flag per stage saying which
+    /// the trap's verdict refused, which the clone must leave unstarted.
+    fn exec_background(
+        &mut self,
+        ao: &AndOr,
+        announced: Option<Vec<bool>>,
+        out: &Out,
+        stdin: &StdinSrc,
+    ) {
         // A job writes to whatever fd 1 was where it was started, so it needs a
         // handle on the enclosing sink that outlives this call. Inside `$( … )`
         // or a pipeline stage that is the capture or pipe the caller is
@@ -13362,7 +13479,10 @@ impl Shell {
         // subshell" behaviour; osh uses a thread rather than a fork. See
         // TD-OILS13.
         let mut sub = self.clone_for_subshell();
-        sub.debug_announced = announced;
+        if let Some(skips) = announced {
+            sub.debug_announced = true;
+            sub.debug_stage_skips = skips;
+        }
         // The job outlives this call, so every descriptor it inherited that
         // names a capture must hold it open for as long as the job runs.
         sub.share_write_fds();
@@ -22169,36 +22289,42 @@ impl Shell {
     /// `&&`/`||` list, a compound command and a `time`d pipeline are not
     /// announced at all — those are handed to the child whole.
     ///
-    /// `Ok` means go ahead and start the job, and carries whether the
-    /// announcement happened — which the job's own clone needs, so that it does
-    /// not announce the same stages over again ([`Shell::debug_announced`]).
-    /// `Err(flow)` means do not start it, and take `flow` instead —
-    /// `Flow::Next` when `extdebug` took the job away.
+    /// `Ok` means go ahead and start the job, and carries `Some(skips)` if the
+    /// announcement happened — which the job's own clone needs, both so that it
+    /// does not announce the same stages over again
+    /// ([`Shell::debug_announced`]) and so that it leaves out the ones refused
+    /// here ([`Shell::debug_stage_skips`]). `Err(flow)` means do not start it,
+    /// and take `flow` instead — `Flow::Next` when `extdebug` took the job away.
     fn announce_async(
         &mut self,
         ao: &AndOr,
         out: &mut Out,
         stdin: &StdinSrc,
-    ) -> Result<bool, Flow> {
+    ) -> Result<Option<Vec<bool>>, Flow> {
         if !ao.rest.is_empty() || ao.first.timed {
-            return Ok(false);
+            return Ok(None);
         }
         let single_stage = ao.first.commands.len() == 1;
-        for cmd in &ao.first.commands {
+        let mut skips = vec![false; ao.first.commands.len()];
+        for (i, cmd) in ao.first.commands.iter().enumerate() {
             let Some(sc) = Self::stage_simple(cmd) else {
                 continue;
             };
             match self.announce_debug(crate::unparse::simple_src(sc), out, stdin) {
                 DebugVerdict::Run => {}
                 // A refusal costs the stage it was announcing, which for a
-                // one-stage pipeline is the whole job. What it costs one stage
-                // of a *longer* pipeline is TD-OILS-DEBUG-TRAP-VERDICT-IN-A-
-                // PIPELINE, unimplemented in the foreground case too.
+                // one-stage pipeline is the whole job. In a longer one it costs
+                // that stage and only that stage — including the last, which in
+                // a *foreground* pipeline would take the pipeline's answer with
+                // it. The difference is not about pipelines: there the last
+                // stage is the one the announcing shell runs itself, so refusing
+                // it returns out before anything is published, whereas here the
+                // announcing shell forks the job and runs none of it.
                 DebugVerdict::Skip(_) if single_stage => {
                     self.last_status = 0;
                     return Err(Flow::Next);
                 }
-                DebugVerdict::Skip(_) => {}
+                DebugVerdict::Skip(_) => skips[i] = true,
                 DebugVerdict::Return => {
                     self.last_status = 2;
                     return Err(Flow::Return);
@@ -22206,7 +22332,7 @@ impl Shell {
                 DebugVerdict::Exit(code) => return Err(Flow::Exit(code)),
             }
         }
-        Ok(true)
+        Ok(Some(skips))
     }
 
     /// Run the `EXIT` trap, if set, exactly once when the top-level shell exits.

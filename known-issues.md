@@ -25852,35 +25852,70 @@ it and then read its own.
 
 Covered by `tests/corpus/trap-handler-preserves-pipestatus.sh`.
 
-### TD-OILS-DEBUG-TRAP-VERDICT-IN-A-PIPELINE. The extdebug DEBUG-trap verdict is not applied to a pipeline stage — OPEN — 2026-08-01
+### TD-OILS-DEBUG-TRAP-VERDICT-IN-A-PIPELINE. The extdebug DEBUG-trap verdict is not applied to a pipeline stage — ✅ **RESOLVED 2026-08-01**
 
 **Where:** `userspace/oils/src/interp.rs` — `exec_pipeline`'s parent-side DEBUG
-loop still uses `fire_trap_flow`, so it honours only an `exit` in the handler;
-the `DebugVerdict` a non-zero status carries (see
-`tests/corpus/extdebug-debug-trap-status-skips-a-command.sh`) is read only by
+loop used `fire_trap_flow`, so it honoured only an `exit` in the handler; the
+`DebugVerdict` a non-zero status carries (see
+`tests/corpus/extdebug-debug-trap-status-skips-a-command.sh`) was read only by
 `exec_simple`.
 
-**What:** measured bash behaviour is confusing enough to be worth writing down
-before implementing. For **bare simple-command stages** at the top level of a
-script, a non-zero DEBUG status for *any* stage takes the **whole pipeline**
-away — `T='cat'; echo one > f1 | cat` leaves no `f1`, i.e. the first stage never
-ran even though it was the second stage's announcement that was refused. For
-**group stages** (`{ echo one > f1; } | { cat > f2; }`) the skip is per-stage:
-refusing the second leaves `f1` behind. And the same bare-stage pipeline run
-*inside a function* behaved per-stage, with a one-element `${PIPESTATUS[@]}`.
+**What the rule actually is.** The description this entry carried until now was
+wrong, and wrong in an instructive way — it was written from measurements taken
+through two separate flaws, both since found. It claimed that refusing *any*
+bare stage takes the **whole pipeline** away, on the evidence of
+`echo one > f1 | cat` leaving no `f1` when the second stage was refused. Both
+halves of that were measurement error:
 
-**Proper fix.** Re-measure the three cases above in isolation to find the rule
-(the likely shape: the parent-side announcement belongs to the pipeline as a
-whole, so refusing it skips the pipeline and leaves one status behind, while a
-group stage is announced from inside its own child and only that child is
-skipped). Then apply the verdict in `exec_pipeline` and give
-`${PIPESTATUS[@]}` whatever shape bash leaves. Which side does the announcing
-is now settled — see `TD-OILS-DEBUG-TRAP-PIPELINE-DOUBLE-FIRE` — so the
-remaining work is the verdict alone; `exec_pipeline` should read a
-`DebugVerdict` where it now reads a `Flow`, and `Shell::announce_async` has the
-same gap for a multi-stage `&` job.
+- the probe used `(exit N)` and `{ …; }` stages, which are **compound** and so
+  are not announced by the owning shell at all — each is announced inside its
+  own child, off that child's own counter — so the `K`th firing was not the
+  stage the probe thought it was;
+- the missing `f1` was a **race**, not a skip. bash does not wait for the
+  stages of an abandoned pipeline, so the file genuinely is not there the
+  instant the pipeline returns. Given a `sleep 1` to settle, it appears.
 
-**Impact.** A debugger cannot step over a pipeline under osh; the pipeline runs.
+The rule, re-measured cleanly, is per-stage and has one exception:
+
+- every **simple-command** stage is announced in the shell that owns the
+  pipeline, left to right, before any stage starts;
+- a refused **non-last** stage is simply never started. Its element vanishes
+  from `${PIPESTATUS[@]}` and its neighbours are *not* joined to each other:
+  the stage after it reads an immediate EOF and the stage before it writes into
+  a pipe nobody holds. `$?`, `pipefail` and `!` then read only the stages that
+  ran;
+- a refused **last** stage abandons the pipeline's *result*, which is not
+  really a rule about pipelines at all — the last stage is the one the owning
+  shell runs itself, so refusing it returns out before anything is published.
+  The pipeline answers 0 and leaves `${PIPESTATUS[@]}` exactly as the previous
+  command left it, identical to refusing a lone command. The earlier stages
+  have already been started and still run;
+- the enclosing command carries on regardless (`if`, `&&`, `||`, `{ … }`), and
+  `!` negates the abandoned 0 to 1;
+- a **group** stage is announced inside its own child, so refusing that
+  announcement costs a command *inside* a stage that runs either way — the
+  stage stays in `${PIPESTATUS[@]}`, merely empty.
+
+**Fixed** by giving `exec_pipeline` a `skipped: &[bool]`, one flag per stage,
+filled in by the announce loop now that it reads a `DebugVerdict` rather than a
+`Flow`. Both pipeline runners (`exec_threaded_pipeline`,
+`exec_concurrent_pipeline`) take it and leave a refused stage unstarted,
+dropping its endpoints so the hole propagates the way bash's does; the caller
+then folds only the started stages into `${PIPESTATUS[@]}`. Refusing the last
+stage sets `abandoned` and publishes nothing at all, for which a lone refused
+simple command needed the same treatment — hence `Shell::debug_skipped`, set by
+`exec_simple_inner`'s `Skip` arm and consumed by `exec_pipeline`.
+
+**Known remaining divergence.** osh waits for the already-started stages of an
+abandoned pipeline; bash does not. This is visible only in when side effects
+land, not whether they do, so the corpus case settles with a `sleep` where it
+reads them. Making osh not wait would mean orphaning stage threads, which is a
+worse trade than the wait.
+
+**Impact (before the fix).** A debugger could not step over a pipeline under
+osh; the pipeline ran.
+
+Covered by `tests/corpus/debug-trap-verdict-takes-a-pipeline-stage.sh`.
 
 ### TD-OILS-DEBUG-TRAP-VERDICT-AT-FUNCTION-ENTRY. The extdebug verdict is ignored at the function-entry DEBUG firing — OPEN — 2026-08-01
 
@@ -25940,10 +25975,16 @@ all for an `&&`/`||` list, a compound command or a `time`d pipeline, which bash
 hands to the child whole. The extdebug verdict is honoured: a refusal takes a
 one-stage job away entirely (leaving 0), a `return 2` leaves the function the
 job was written in, and an `exit` in the handler unwinds before the job starts.
-Refusing one stage of a *longer* pipeline is still
-`TD-OILS-DEBUG-TRAP-VERDICT-IN-A-PIPELINE`, unimplemented in the foreground
-case too. The job's own clone is marked `debug_announced` so it does not repeat
-the announcement (see `TD-OILS-DEBUG-TRAP-PIPELINE-DOUBLE-FIRE`).
+Refusing one stage of a *longer* pipeline costs that stage and nothing else —
+including the last stage, unlike a foreground pipeline, where refusing the last
+stage abandons the pipeline's answer (see
+`TD-OILS-DEBUG-TRAP-VERDICT-IN-A-PIPELINE`). The difference is not about
+pipelines: a foreground pipeline's last stage is the one the announcing shell
+runs itself, whereas here the announcing shell forks the job and runs none of
+it. The refusals travel to the job's clone as `Shell::debug_stage_skips`, which
+`exec_pipeline` honours without letting them abandon anything. The clone is
+also marked `debug_announced` so it does not repeat the announcement (see
+`TD-OILS-DEBUG-TRAP-PIPELINE-DOUBLE-FIRE`).
 
 Covered by `tests/corpus/debug-trap-announces-a-background-command.sh`.
 

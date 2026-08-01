@@ -13817,8 +13817,91 @@ looks like an artifact of which internal lookup happened to fail first. Logged
 so the divergence is not mistaken for an oversight. If it is ever matched, the
 condition is "the resolved target is array- or assoc-valued".
 
+**Scope narrowed 2026-07-31.** A *temporary environment* assignment is its own
+path and has its own rule — it names the reference whatever the target is — and
+osh now matches it there (`Shell::prefix_assignments`), covered by
+`tests/corpus/env-prefix.sh`:
+
+```
+$ bash -c 'declare -n n=r; readonly r=1; n=2 true'   # n: readonly variable
+$ bash -c 'declare -n n=r; readonly r=1; n=2'        # r: readonly variable
+```
+
+What remains open is only the arithmetic/`set_scalar_checked` path above.
+
 **Impact.** Wording of one stderr line, in a shape combining `readonly`, a
 nameref and an array. Kept out of `tests/corpus/nameref.sh`.
+
+### TD-OILS-DECL-COMPOUND-OPERAND-TRACED-AFTER-THE-PREFIX. `set -x` orders a declaration builtin's compound operands after the command's prefix assignments, where bash puts them first — OPEN 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::exec_simple_inner`, which
+expands (and so traces) a `declare -a x=(1 2)` operand inside
+`exec_declare_with_arrays` at *dispatch* time, after
+`Shell::prefix_assignments` has run.
+
+**What.** bash expands a declaration builtin's compound operands during the
+word-expansion pass, i.e. before it processes the command's temporary
+assignments, so their traces come first:
+
+```
+$ bash -c 'set -x; A=(1 2) declare -a x=(3 4)'
++ x=('3' '4')
++ A='(1 2)'
++ declare -a x
+$ osh -c 'set -x; A=(1 2) declare -a x=(3 4)'
++ A='(1 2)'
++ x=('3' '4')
++ declare -a x
+```
+
+Only the trace order differs — the bindings and the environment are the same,
+and with either half alone (`declare -a x=(1 2)`, or an array prefix on a
+non-declaration command) osh matches bash exactly.
+
+**Proper fix.** Expand the `decl_arrays` operands in the word-expansion loop
+where the other words are expanded, stash the resulting `(name, values)` pairs,
+and have `exec_declare_with_arrays` bind the stashed values rather than
+re-expanding. The trace then falls out at bash's point for free. Deferred
+because that function's *binding* order is load-bearing for a whole family of
+already-matched behaviours (`TD-OILS-DECL-REFUSAL-ORDER`,
+`TD-OILS-DECL-COMPOUND-REFUSAL-TAG-IS-THE-FIRST-COMMAND-ONLY`,
+`TD-OILS-DECL-FLAG-PRESCAN`), so separating expansion from binding wants its own
+measured pass.
+
+**Impact.** Two `set -x` lines swapped, in a command that both prefixes an
+array literal and passes a compound operand to a declaration builtin. Probe:
+`target/dvscratch/pc6.sh`. Kept out of `tests/corpus/env-prefix.sh`.
+
+### TD-OILS-DISCARD-LINENO-DRIFT. bash's `$LINENO` never recovers from a discard; osh deliberately keeps counting correctly — WONTFIX 2026-07-31
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::run_source_flow_out` /
+`Shell::exec_program_top`, which abandon the current parse unit and read the
+next one with `current_line` still tracking the real source line.
+
+**What.** When a non-fatal word-expansion error discards a parse unit, bash
+jumps to its read-parse-execute loop *without* advancing `line_number` over the
+lines of the unit that never ran — and it never resynchronises afterwards, so
+every subsequent line in that input is reported low by however many lines were
+skipped, cumulatively:
+
+```
+$ printf '{ a[-9]=v\necho no; }\necho $LINENO\n' > f; bash f
+f: line 1: a[-9]: bad array subscript
+2                      # the `echo` is on line 3
+```
+
+osh reports 3. Every diagnostic after a discard therefore differs by the same
+drift, which is why `tests/corpus/discard-scope.sh` strips line numbers with
+`sed` and says so in its header comment.
+
+**Proper fix.** None wanted. Reproducing it would mean deliberately
+mis-counting lines and would corrupt `$LINENO`, `caller`, `BASH_LINENO` and
+every error message after the first discard in a script. Logged so the
+difference is not mistaken for an osh counting bug. If bash ever fixes it the
+two agree automatically.
+
+**Impact.** Line numbers in diagnostics (and `$LINENO`) after a discarded parse
+unit. osh's are right; bash's are not.
 
 ### TD-OILS-ASSIGN-WORD-SUBSCRIPT-EQ. `a[x=3]=1` is taken for a command name because assignment-word detection stops at the first `=` — 2026-07-28 — ✅ RESOLVED 2026-07-28
 

@@ -4979,10 +4979,22 @@ impl Shell {
     }
 
     /// Execute a program at a read-eval-loop top level (script, stdin, `-c`,
-    /// `eval`, `source`). A [`Flow::Discard`] here aborts only the rest of the
-    /// current top-level parse unit — every item sharing the offending item's
-    /// source line — and then resumes with the next unit, matching bash's
-    /// `jump_to_top_level(DISCARD)`.
+    /// `eval`, `source`). A [`Flow::Discard`] here aborts the rest of this
+    /// program and then resumes with the next one, matching bash's
+    /// `jump_to_top_level(DISCARD)`: the jump lands in the read-parse-execute
+    /// loop, which simply reads the next unit.
+    ///
+    /// `prog` therefore has to *be* one parse unit — which is what
+    /// [`Shell::run_source_flow_out`] hands it, since that loop parses one unit
+    /// at a time. The unit is not the same thing as one source line: a compound
+    /// command spanning several lines and the command after its closing word are
+    /// one unit, and a discard inside the compound takes that trailing command
+    /// with it.
+    ///
+    /// ```sh
+    /// { a[-9]=v
+    ///   echo no ; }; echo "rc=$?"   # bash prints neither `no` nor `rc=`
+    /// ```
     fn exec_program_top(&mut self, prog: &Program, out: &mut Out, stdin: &StdinSrc) -> Flow {
         self.exec_items(&prog.items, out, stdin, true)
     }
@@ -5005,17 +5017,7 @@ impl Shell {
         stdin: &StdinSrc,
         top_level: bool,
     ) -> Flow {
-        // After a top-level DISCARD, `skip_line` holds the source line of the
-        // aborted parse unit so the remaining `;`-separated commands on that same
-        // line are swallowed before execution resumes.
-        let mut skip_line: Option<u32> = None;
         for item in items {
-            if let Some(line) = skip_line {
-                if item.line == line {
-                    continue;
-                }
-                skip_line = None;
-            }
             // Between one command and the next is where bash lets a script hear
             // that a background job was killed — before `$LINENO` moves on, so
             // the message carries the line just finished rather than this one.
@@ -5032,13 +5034,23 @@ impl Shell {
             let flow = self.exec_and_or(&item.list, out, stdin);
             match flow {
                 Flow::Next => {}
-                Flow::Discard if top_level => {
-                    // bash DISCARD: abort the rest of this top-level parse unit
-                    // (same source line), then resume with the next unit. The
-                    // diagnostic was already printed and `last_status` set to 1.
-                    skip_line = Some(item.line);
-                    continue;
-                }
+                // bash DISCARD: abandon the rest of this top-level parse unit
+                // and resume with the next one (see [`Shell::exec_program_top`]).
+                // The diagnostic was already printed and `last_status` set to 1.
+                //
+                // Only a read-eval loop in the **main shell environment** ends
+                // the jump, though. bash's `parse_and_execute` hands DISCARD
+                // straight on when `subshell_environment` is set, so a discard
+                // raised in a command substitution's body — or in an `eval`/
+                // `source` that a subshell is running — takes the subshell with
+                // it rather than merely losing a parse unit:
+                //
+                // ```sh
+                // x=$( a[-9]=v
+                //      echo no ); echo "[$x]"   # bash: [] — `no` never ran
+                // ( eval 'a[-9]=v'; echo no ); echo "rc=$?"   # bash: rc=1
+                // ```
+                Flow::Discard if top_level && self.subshell_depth == 0 => return Flow::Next,
                 // The same, but only once the unwind has left every `eval` and
                 // `source`: inside one it keeps propagating, so the string's
                 // *caller* is what loses the rest of its parse unit.
@@ -5625,17 +5637,17 @@ impl Shell {
             for w in &sc.words {
                 argv.extend(self.expand_word(w, true));
             }
-            let assigns: Vec<(String, Str)> = sc
-                .assignments
-                .iter()
-                .map(|a| self.assignment_prefix_value(a))
-                .collect();
             // `set -x`: trace this stage. bash traces each stage as it expands
             // it, left to right, so the traces come out in pipeline order even
             // though the stages then run concurrently — and a stage whose
             // command word expanded to nothing still traces its assignments
-            // (`set -x; A=1 $e | cat` prints `+ A=1` and then `+ cat`).
-            self.xtrace_simple(&assigns, &argv, !argv.is_empty());
+            // (`set -x; A=1 $e | cat` prints `+ A=1` and then `+ cat`). The
+            // assignment half of that happens inside `prefix_assignments`,
+            // which alone knows where a refusal falls among them.
+            let assigns = self.prefix_assignments(&sc.assignments);
+            if !argv.is_empty() {
+                self.xtrace_command(&argv);
+            }
             let Some(program) = argv.first() else {
                 // Expanded to nothing (e.g. `$empty`) — skip this stage; its
                 // successor sees EOF on stdin.
@@ -8904,23 +8916,117 @@ impl Shell {
         }
     }
 
-    /// Collapse an assignment into a `(name, value)` pair for command-prefix use
-    /// (`FOO=bar cmd`). Arrays join their elements with a single space.
-    fn assignment_prefix_value(&mut self, a: &Assignment) -> (String, Str) {
-        let val = match &a.value {
-            AssignRhs::Scalar(w) => self.expand_to_string(w),
-            AssignRhs::Array(items) => {
-                let mut elems: Vec<Str> = Vec::new();
-                for e in items {
-                    match e {
-                        ArrayElem::Positional(w) => elems.extend(self.expand_word(w, true)),
-                        ArrayElem::Keyed { value, .. } => elems.push(self.expand_to_string(value)),
-                    }
-                }
-                elems.join(&b' ')
-            }
+    /// The name a command-prefix assignment (`FOO=bar cmd`) binds, or `None`
+    /// once it has been refused as no name at all.
+    ///
+    /// A temporary environment holds plain `NAME=value` strings, so a subscript
+    /// has nowhere to go: bash refuses the whole word as a name rather than
+    /// assigning an element. The refusal names the word **as it was written** —
+    /// nothing in it is expanded first, so `a[$((1/0))]=v cmd` reports the text
+    /// and raises no division error — and it comes before every other check, so
+    /// a subscripted readonly name is refused as a name and not as readonly.
+    /// The assignment is then dropped entirely: it reaches neither the child's
+    /// environment nor a called function's scope, leaves the variable alone,
+    /// and never expands its value (so a `$(…)` in it has no side effect). The
+    /// command still runs, with its status untouched.
+    ///
+    /// ```sh
+    /// v=1 a[0]=Z w=2 true   # bash: `a[0]': not a valid identifier, then rc=0
+    /// ```
+    fn prefix_assignment_name(&mut self, a: &Assignment) -> Option<String> {
+        let Some(idx) = a.index.as_ref() else {
+            return Some(a.name.clone());
         };
-        (a.name.clone(), val)
+        // `+=` is not part of what is quoted back: bash echoes the name and its
+        // subscript, not the operator.
+        let msg = bfmt![
+            self.err_prefix(),
+            b"`",
+            a.name.as_bytes(),
+            b"[",
+            &crate::unparse::word_src(idx),
+            b"]': not a valid identifier"
+        ];
+        self.berrln(&msg);
+        None
+    }
+
+    /// The value a command-prefix assignment (`FOO=bar cmd`) puts in the
+    /// temporary environment.
+    fn prefix_assignment_value(&mut self, a: &Assignment) -> Str {
+        match &a.value {
+            // A prefix assignment expands its value in *assignment context*, so
+            // `PATH=~/a:~/b cmd` expands both tildes.
+            AssignRhs::Scalar(w) => self.expand_assignment_value(w),
+            AssignRhs::Array(items) => {
+                // The same context, applied to the *whole* re-serialised
+                // literal rather than to each element: `a=(x:~/a) cmd` passes
+                // `(x:/hh/a)`, while `a=(~/a) cmd` passes `(~/a)` — the
+                // element's leading tilde is not leading in the value.
+                let w = array_literal_word(items);
+                self.expand_assignment_value(&w)
+            }
+        }
+    }
+
+    /// Expand a command's prefix assignments (`FOO=bar cmd`) into the temporary
+    /// environment the command will run with.
+    ///
+    /// bash takes them strictly one at a time, in source order, finishing with
+    /// each before it looks at the next: refuse a subscripted name
+    /// ([`Shell::prefix_assignment_name`]), then refuse a readonly one —
+    /// *without* expanding its value, so `readonly r=1; r=$((1/0)) cmd` reports
+    /// the readonly variable and never divides — then expand the value and
+    /// trace it. Hence the interleaving:
+    ///
+    /// ```sh
+    /// set -x; readonly r=1; v=1 r=2 w=2 true
+    /// # + v=1 / r: readonly variable / + w=2 / + true
+    /// ```
+    ///
+    /// Neither refusal is fatal (unlike the same rejection in a *bare*
+    /// assignment): the assignment is dropped and the command runs with its own
+    /// status. A word-expansion error in a value *is*, though, and stops the
+    /// loop where it happened — the assignments after it are never expanded, so
+    /// `x=$((1/0)) a[0]=Z cmd` reports only the division. The error is left in
+    /// its side channel for the caller, which alone knows what to do with it.
+    fn prefix_assignments(&mut self, assignments: &[Assignment]) -> Vec<(String, Str)> {
+        let mut assigns: Vec<(String, Str)> = Vec::with_capacity(assignments.len());
+        for a in assignments {
+            let Some(name) = self.prefix_assignment_name(a) else {
+                continue;
+            };
+            // The readonly attribute lives on the *variable*, so a reference is
+            // tested through what it resolves to — but reported by the name as
+            // written, which is what bash's temporary-environment path quotes
+            // back (`declare -n n=r; readonly r=1; n=2 cmd` says `n`, where the
+            // same refusal reached through `((n=5))` says `r`). A circular
+            // nameref resolves to nothing and stands in for its own name, since
+            // reporting it here would double up with the assignment's own
+            // diagnostic.
+            let target = self
+                .resolve_ref_name(&name)
+                .map_or_else(|| name.clone(), |t| t.base);
+            if self.readonly.contains(&target) {
+                // bash (non-POSIX) reports this but STILL runs the command: the
+                // assignment is simply dropped from the temporary environment
+                // and the command's own exit status stands, so a succeeding
+                // command yields 0, not 1. Dropping it here also means no
+                // dispatch path downstream can mutate the readonly variable.
+                self.perrln(&format!("{name}: readonly variable"));
+                continue;
+            }
+            let val = self.prefix_assignment_value(a);
+            if self.discard_error.is_some()
+                || self.unbound_error.is_some()
+                || self.glob_error.is_some()
+            {
+                return assigns;
+            }
+            self.xtrace_assignment(&name, &val);
+            assigns.push((name, val));
+        }
+        assigns
     }
 
     /// All values of `name`, treating a plain scalar as a one-element array.
@@ -9739,39 +9845,50 @@ impl Shell {
         }
     }
 
-    /// Emit the `set -x` trace for one simple command. bash prints each
-    /// temporary assignment (`FOO=bar cmd`) on its own line first, then the
-    /// command with every argument minimally quoted, each line behind the
-    /// expanded `PS4` prefix ([`Shell::xtrace_prefix`]).
+    /// Emit the `set -x` trace for one temporary assignment (`FOO=bar cmd`),
+    /// behind the expanded `PS4` prefix ([`Shell::xtrace_prefix`]).
     ///
-    /// `with_command` is false only for the `declare`-family array forms, whose
-    /// operands are traced from `exec_declare_with_arrays` at the point each is
-    /// expanded — tracing the collapsed argv here as well would double them up.
+    /// Traced one at a time, from [`Shell::prefix_assignments`], because bash
+    /// processes the assignments one at a time: a refusal in the middle of the
+    /// list comes out *between* the traces either side of it rather than before
+    /// or after all of them.
+    fn xtrace_assignment(&mut self, name: &str, value: BStr<'_>) {
+        if !self.xtrace {
+            return;
+        }
+        let line = bfmt![
+            self.xtrace_prefix(),
+            name,
+            b"=",
+            xtrace_quote_value(value),
+            b"\n"
+        ];
+        self.emit_stderr(&line);
+    }
+
+    /// Emit the `set -x` trace for a command word list — every argument
+    /// minimally quoted, behind the expanded `PS4` prefix.
     ///
     /// Lives apart from the execution paths because two of them trace: simple
     /// commands from [`Shell::exec_simple_inner`], and each stage of an
     /// all-external pipeline from `exec_concurrent_pipeline`, which expands its
-    /// stages itself and would otherwise emit nothing at all.
-    fn xtrace_simple(&mut self, assigns: &[(String, Str)], argv: &[Str], with_command: bool) {
+    /// stages itself and would otherwise emit nothing at all. The
+    /// `declare`-family array forms call neither: their operands are traced
+    /// from `exec_declare_with_arrays` at the point each is expanded, and
+    /// tracing the collapsed argv as well would double them up.
+    fn xtrace_command(&mut self, argv: &[Str]) {
         if !self.xtrace {
             return;
         }
-        let prefix = self.xtrace_prefix();
-        for (k, v) in assigns {
-            let line = bfmt![&prefix, k.as_str(), b"=", xtrace_quote_value(v), b"\n"];
-            self.emit_stderr(&line);
-        }
-        if with_command {
-            let mut line = prefix;
-            for (i, a) in argv.iter().enumerate() {
-                if i > 0 {
-                    line.push(b' ');
-                }
-                line.extend_from_slice(&xtrace_quote(a));
+        let mut line = self.xtrace_prefix();
+        for (i, a) in argv.iter().enumerate() {
+            if i > 0 {
+                line.push(b' ');
             }
-            line.push(b'\n');
-            self.emit_stderr(&line);
+            line.extend_from_slice(&xtrace_quote(a));
         }
+        line.push(b'\n');
+        self.emit_stderr(&line);
     }
 
     /// Emit a single `set -x` trace line (prefix + `text` + newline) to stderr,
@@ -10743,12 +10860,11 @@ impl Shell {
             return Flow::Next;
         }
 
-        // Command present: build scalar env prefixes (`FOO=bar cmd`). Array and
-        // indexed prefix assignments collapse to a space-joined scalar.
-        let mut assigns: Vec<(String, Str)> = Vec::with_capacity(sc.assignments.len());
-        for a in &sc.assignments {
-            assigns.push(self.assignment_prefix_value(a));
-        }
+        // Command present: build the env prefixes (`FOO=bar cmd`) — expanded,
+        // vetted and `set -x`-traced one at a time, in source order, which is
+        // also where a subscripted or readonly name is refused and dropped (see
+        // [`Shell::prefix_assignments`]).
+        let assigns = self.prefix_assignments(&sc.assignments);
 
         // A non-fatal word-expansion error while expanding a prefix assignment
         // value (`x=$((1/0)) cmd`, `x=${!nonexist} cmd`) discards the command
@@ -10783,36 +10899,6 @@ impl Shell {
             return Flow::Discard;
         }
 
-        // A readonly variable cannot be set even as a temporary command prefix
-        // (`readonly x; x=1 cmd`). bash (non-POSIX) reports the error but STILL
-        // runs the command: the failed assignment is simply dropped from the
-        // temporary environment and the command's own exit status stands (so a
-        // succeeding command yields 0, not 1). Filter the offending assignments
-        // out — no dispatch path can then mutate the readonly var — and emit one
-        // diagnostic per hit before continuing.
-        // A circular nameref is not readonly, and reporting it here would
-        // double up with the diagnostic the assignment itself emits, so it
-        // stands in for its own name in this check.
-        let ro_targets: Vec<String> = assigns
-            .iter()
-            // The readonly attribute lives on the *variable*, so an element
-            // target is checked through the array it belongs to.
-            .map(|(k, _)| {
-                self.resolve_ref_name(k).map_or_else(|| k.clone(), |t| t.base)
-            })
-            .collect();
-        if ro_targets.iter().any(|t| self.readonly.contains(t)) {
-            let mut i = 0;
-            assigns.retain(|_| {
-                let keep = !self.readonly.contains(&ro_targets[i]);
-                i += 1;
-                keep
-            });
-            for t in ro_targets.iter().filter(|t| self.readonly.contains(*t)) {
-                self.perrln(&format!("{t}: readonly variable"));
-            }
-        }
-
         // `declare -a x=(1 2)` and friends: the array-literal operands are bound
         // during this word-expansion pass rather than by the builtin (see
         // `exec_declare_with_arrays`), and bash traces them accordingly — one
@@ -10825,8 +10911,11 @@ impl Shell {
                 b"declare" | b"typeset" | b"local" | b"readonly" | b"export"
             );
 
-        // `set -x`: trace the command before running it.
-        self.xtrace_simple(&assigns, &argv, !decl_with_arrays);
+        // `set -x`: trace the command before running it (its assignments were
+        // traced as they were expanded, above).
+        if !decl_with_arrays {
+            self.xtrace_command(&argv);
+        }
         // …and only now is this pipeline stage "started", so the next stage may
         // begin: the point of the handshake is that the *trace* comes out in
         // pipeline order, which a signal at thread entry would not guarantee.
@@ -16431,19 +16520,54 @@ impl Shell {
         // three-line string reports 3, 4, 5.) `current_line` is already
         // absolute, so nested evals compose.
         let eval_base = self.current_line.saturating_sub(1);
+        // Re-reading a string is a level of *indirection* to bash, counted the
+        // same way a command substitution's body is: `set -x; eval :` traces
+        // `+ eval :` and then `++ :`, and the two nest (`eval 'v=$(echo q)'`
+        // traces the `echo` at three).
+        self.xtrace_level = self.xtrace_level.saturating_add(1);
         let eval_flow =
             self.run_source_flow_out(src, out, stdin, &LineMap::Offset(eval_base), HistRead::Off);
+        self.xtrace_level = self.xtrace_level.saturating_sub(1);
         self.eval_depth = self.eval_depth.saturating_sub(1);
-        match eval_flow {
+        self.read_eval_builtin_status(eval_flow)
+    }
+
+    /// The status a builtin that ran a nested read-eval loop — `eval`, `.`/
+    /// `source` — should yield, re-raising through the side channels whatever
+    /// the loop's [`Flow`] cannot be said in an `i32`.
+    ///
+    /// A [`Flow::Exit`] unwinds the whole shell and a [`Flow::Abort`] was raised
+    /// past this handler on purpose (see [`Flow::Abort`]), so both cross the
+    /// boundary. A [`Flow::Discard`] normally does *not*: the handler bash
+    /// installs in `parse_and_execute` is where its `jump_to_top_level(DISCARD)`
+    /// lands, so only the string being run is abandoned and the caller carries
+    /// on — `eval 'a[-9]=x'; echo "rc=$?"` still reaches the `echo`.
+    ///
+    /// That handler ends the jump only in the **main shell environment**,
+    /// though. Inside a subshell bash keeps unwinding past it, and what ends is
+    /// the subshell:
+    ///
+    /// ```sh
+    /// ( eval 'a[-9]=x'; echo no ); echo "rc=$?"   # bash: no `no`, then rc=1
+    /// x=$( eval 'a[-9]=x'; echo no ); echo "[$x]" # bash: []
+    /// f() { eval 'a[-9]=x'; echo yes; }; f        # not a subshell: prints yes
+    /// ```
+    ///
+    /// The re-raise goes through `discard_error` because a builtin handler can
+    /// only return an `i32`; the teardown in [`Shell::run_builtin_body`] turns
+    /// it back into a `Flow::Discard` once the builtin's scopes are unwound.
+    fn read_eval_builtin_status(&mut self, flow: Flow) -> i32 {
+        match flow {
             Flow::Exit(code) => {
                 self.pending_builtin_exit = Some(code);
                 code
             }
-            // An abort that reached here was raised past this `eval`'s handler
-            // on purpose; re-raise it so the caller's parse unit is discarded
-            // too (see [`Flow::Abort`]).
             Flow::Abort => {
                 self.pending_abort = true;
+                self.last_status
+            }
+            Flow::Discard if self.subshell_depth > 0 => {
+                self.discard_error = Some(self.last_status);
                 self.last_status
             }
             _ => self.last_status,
@@ -26885,7 +27009,13 @@ impl Shell {
                 });
                 // The script's stdout belongs to *this* command's sink, so
                 // `x=$(. script)` captures it (bash).
+                //
+                // Re-reading a file is a level of expansion indirection to
+                // bash, just as `eval`'s string is: `set -x; . f` traces
+                // `+ . f` and then the script's own commands one `+` deeper.
+                self.xtrace_level = self.xtrace_level.saturating_add(1);
                 let flow = self.run_source_flow_out(&src, out, stdin, &LineMap::Offset(0), HistRead::Off);
+                self.xtrace_level = self.xtrace_level.saturating_sub(1);
                 self.trap_suppress.pop();
                 self.source_stack.pop();
                 self.refresh_funcname();
@@ -26894,20 +27024,10 @@ impl Shell {
                 }
                 // `return N` inside the script unwinds just this source (its
                 // status becomes the builtin's); `exit N` unwinds the whole
-                // shell, which a builtin can only request via the side channel.
-                let code = match flow {
-                    Flow::Exit(n) => {
-                        self.pending_builtin_exit = Some(n);
-                        n
-                    }
-                    // Raised past this `source`'s handler on purpose, so it
-                    // keeps unwinding into the caller (see [`Flow::Abort`]).
-                    Flow::Abort => {
-                        self.pending_abort = true;
-                        self.last_status
-                    }
-                    _ => self.last_status,
-                };
+                // shell, and a discard raised inside a subshell takes the
+                // subshell with it — a builtin can only ask for either through
+                // the side channels (see [`Shell::read_eval_builtin_status`]).
+                let code = self.read_eval_builtin_status(flow);
                 // bash fires the RETURN trap when a script run with `.`/`source`
                 // finishes, exactly as it does for a returning function. Unlike
                 // the function case this is not gated on functrace — but it IS
@@ -30457,6 +30577,47 @@ fn param_trim(
         }
     }
     value.to_vec()
+}
+
+/// The single word bash re-reads when a command *prefix* assigns an array
+/// literal (`a=(1 2) cmd`).
+///
+/// A temporary environment has no arrays in it, so the literal cannot be
+/// assigned as one; bash instead puts the element tokens back together into one
+/// value and expands *that*. The parentheses are part of the value the child
+/// sees, and the elements are joined by exactly one space whatever the source
+/// spacing was, because it is the tokens that are re-serialised, not the text
+/// between them.
+///
+/// Building it as a [`Word`] — rather than expanding each element and joining —
+/// is what gets the details right for free. It expands with no splitting and no
+/// globbing (`a=($x) cmd` with `x='a  b'` keeps both spaces; `a=(*) cmd` stays
+/// `(*)`), and it puts the tilde positions where the *value* has them rather
+/// than where the elements do: an element's leading tilde is not leading in the
+/// value — only the `(` is — so `a=(~/a) cmd` passes `(~/a)`, while the
+/// assignment context's after-a-colon rule still applies and `a=(x:~/a) cmd`
+/// passes `(x:/home/…/a)`. A keyed element keeps its brackets, and its index is
+/// expanded but not evaluated: `a=([1+1]=p) cmd` passes `([1+1]=p)`.
+///
+/// The variable itself is left unset either way; only the child sees this.
+fn array_literal_word(items: &[ArrayElem]) -> Word {
+    let mut parts = vec![WordPart::Literal(b"(".to_vec())];
+    for (i, e) in items.iter().enumerate() {
+        if i > 0 {
+            parts.push(WordPart::Literal(b" ".to_vec()));
+        }
+        match e {
+            ArrayElem::Positional(w) => parts.extend(w.parts.iter().cloned()),
+            ArrayElem::Keyed { index, value } => {
+                parts.push(WordPart::Literal(b"[".to_vec()));
+                parts.extend(index.parts.iter().cloned());
+                parts.push(WordPart::Literal(b"]=".to_vec()));
+                parts.extend(value.parts.iter().cloned());
+            }
+        }
+    }
+    parts.push(WordPart::Literal(b")".to_vec()));
+    Word { parts }
 }
 
 /// `${name^pat}` / `${name^^pat}` (upper) / `${name,pat}` / `${name,,pat}`
@@ -35074,13 +35235,15 @@ mod tests {
         sh.set_command_mode();
         sh.set_interactive_shell(false);
         let buf = capture_sink();
-        let prog = parse(src.as_bytes()).expect("parse");
-        {
+        // Through `run_source_out` — the real driver — for the same reason
+        // [`run`] does: one parse unit at a time, which is the granularity a
+        // discard is defined against (see [`Shell::exec_program_top`]).
+        let status = {
             let mut out = Out::Capture(buf.clone());
-            sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit);
-        }
+            sh.run_source_out(src.as_bytes(), &mut out, 0)
+        };
         let buf = take_capture(&buf);
-        (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+        (String::from_utf8_lossy(&buf).into_owned(), status)
     }
 
     #[test]
@@ -39522,15 +39685,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = Shell::new();
         setup(&mut sh);
         let buf = capture_sink();
-        let prog = parse(src.as_bytes()).expect("parse");
-        {
+        // As in [`run`]: the real driver, so the unit-at-a-time reading a
+        // discard's scope depends on is the one under test.
+        let status = {
             let mut out = Out::Capture(buf.clone());
-            if let Flow::Exit(code) = sh.exec_program_top(&prog, &mut out, &StdinSrc::Inherit) {
-                sh.last_status = code;
-            }
-        }
+            sh.run_source_out(src.as_bytes(), &mut out, 0)
+        };
         let buf = take_capture(&buf);
-        (String::from_utf8_lossy(&buf).into_owned(), sh.last_status)
+        (String::from_utf8_lossy(&buf).into_owned(), status)
     }
 
     #[test]
@@ -40720,6 +40882,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             o,
             "osh: declare: 1+*2: syntax error: operand expected (error token is \"*2\")\nnext=1\n"
         );
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn a_discard_ends_the_whole_parse_unit_not_just_its_line() {
+        // The unit a discard abandons is what the *reader* read, which is a
+        // whole multi-line compound command plus whatever follows it up to the
+        // newline — so the `echo after` written after the closing brace goes
+        // too, even though it sits on another line than the assignment. Only
+        // the next unit runs. (bash: prints the diagnostic and `next`.)
+        let (o, s) = run("{ a[-9]=v\necho no; } 2>&1; echo after\necho next");
+        assert_eq!(o, "osh: a[-9]: bad array subscript\nnext\n");
+        assert_eq!(s, 0);
+        // A single-line unit is the same rule seen from the other side: the
+        // rest of *that* line goes and the following line runs.
+        let (o, s) = run("{ a[-9]=v; echo no; } 2>&1; echo after\necho next");
+        assert_eq!(o, "osh: a[-9]: bad array subscript\nnext\n");
+        assert_eq!(s, 0);
+        // The failing command need not be the unit's first: an `if` spanning
+        // lines loses its own tail and the command after `fi` alike.
+        let (o, s) = run("if true\nthen a[-9]=v\nfi 2>&1; echo after\necho next");
+        assert_eq!(o, "osh: a[-9]: bad array subscript\nnext\n");
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn a_discard_inside_a_subshell_ends_the_subshell() {
+        // A read-eval loop ends the unwind only in the main shell environment.
+        // Inside a subshell bash hands the jump straight on, so an `eval`'s
+        // string is *not* the boundary — the subshell is, and it fails with 1.
+        let (o, s) = run("( eval 'a[-9]=v'; echo no ) 2>&1; echo \"rc=$?\"");
+        assert_eq!(o, "osh: a[-9]: bad array subscript\nrc=1\n");
+        assert_eq!(s, 0);
+        // Same for the body of a command substitution, which is a read-eval
+        // loop of its own: `echo no` never runs, so all the substitution can
+        // hold is the diagnostic its own `2>&1` folded into the capture.
+        let (o, s) = run("x=$( { a[-9]=v\necho no ; } 2>&1 )\necho \"[$x] rc=$?\"");
+        assert_eq!(o, "[osh: a[-9]: bad array subscript] rc=1\n");
+        assert_eq!(s, 0);
+        // A function is not a subshell, so the `eval` inside one still ends the
+        // unwind and the rest of the body runs.
+        // (Inside a function the diagnostic is prefixed with the frame's name,
+        // which for a shell that has no `$0` of its own is `main`.)
+        let (o, s) = run("f() { eval 'a[-9]=v'; echo yes; }\nf 2>&1\necho \"rc=$?\"");
+        assert_eq!(o, "main: a[-9]: bad array subscript\nyes\nrc=0\n");
         assert_eq!(s, 0);
     }
 
@@ -53574,6 +53781,109 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // so with it discarded the captured stdout is just "5|0".
         let (out, _) = run("readonly y=5; y=9 : 2>/dev/null; echo \"$y|$?\"");
         assert_eq!(out, "5|0\n");
+    }
+
+    /// A temporary environment holds plain names, so a *subscripted* prefix is
+    /// no assignment at all: bash refuses the word as a name, quoting it as it
+    /// was written, drops it and runs the command anyway.
+    #[test]
+    fn env_prefix_subscript_is_refused_as_a_name() {
+        // The diagnostic is the *shell's*, not the command's, so the command's
+        // own redirect cannot silence it — hence the group redirect here.
+        // Reported before anything in the word is expanded (the subscript's
+        // division never happens and the value's command substitution has no
+        // effect), and the command's own status stands.
+        let (o, s) = run("{ q=(1); q[0]=Z true; echo \"rc=$? q=${q[0]}\"; } 2>&1");
+        assert_eq!(o, "osh: `q[0]': not a valid identifier\nrc=0 q=1\n");
+        assert_eq!(s, 0);
+        let (o, _) = run("{ a[$((1/0))]=Z true; } 2>&1");
+        assert_eq!(o, "osh: `a[$((1/0))]': not a valid identifier\n");
+        let (o, _) = run("{ a[0]=$(echo SIDE) true; } 2>&1");
+        assert_eq!(o, "osh: `a[0]': not a valid identifier\n");
+        // `+=` is not part of what is quoted back, and each offender is
+        // reported once, in source order, while the valid neighbours still
+        // reach the command.
+        let (o, _) = run("{ a[0]+=Z b[1]=Y v=ok sh -c 'echo $v'; } 2>&1");
+        assert_eq!(
+            o,
+            "osh: `a[0]': not a valid identifier\nosh: `b[1]': not a valid identifier\nok\n"
+        );
+        // It outranks the readonly refusal: a subscripted readonly name is
+        // refused as a name, not as readonly.
+        let (o, _) = run("{ q=(1); readonly q; q[0]=Z true; } 2>&1");
+        assert_eq!(o, "osh: `q[0]': not a valid identifier\n");
+    }
+
+    /// There are no arrays in a temporary environment either, so an array
+    /// *literal* prefix is re-serialised into one parenthesised value — which
+    /// is what the child sees, parentheses and all.
+    #[test]
+    fn env_prefix_array_literal_keeps_its_parentheses() {
+        let show = "sh -c 'printf \"[%s]\\n\" \"$a\"'";
+        // The elements are joined by exactly one space whatever the source
+        // spacing, and expanded without splitting or globbing.
+        assert_eq!(run(&format!("a=(1  2) {show}")).0, "[(1 2)]\n");
+        assert_eq!(run(&format!("x='p  q'; a=($x) {show}")).0, "[(p  q)]\n");
+        assert_eq!(run(&format!("a=(\"q r\" s) {show}")).0, "[(q r s)]\n");
+        assert_eq!(run(&format!("a=(*) {show}")).0, "[(*)]\n");
+        assert_eq!(run(&format!("a=($(echo z)) {show}")).0, "[(z)]\n");
+        // An empty element still contributes its separator; an empty literal
+        // and an unset expansion both collapse to `()`.
+        assert_eq!(run(&format!("a=(\"\" b) {show}")).0, "[( b)]\n");
+        assert_eq!(run(&format!("a=(  ) {show}")).0, "[()]\n");
+        assert_eq!(run(&format!("a=($nosuch) {show}")).0, "[()]\n");
+        // A keyed element keeps its brackets; its index is expanded but not
+        // arithmetically evaluated.
+        assert_eq!(run(&format!("i=2; a=([$i]=p) {show}")).0, "[([2]=p)]\n");
+        assert_eq!(run(&format!("a=([1+1]=p) {show}")).0, "[([1+1]=p)]\n");
+        // `+=` makes no difference, and the variable itself stays unset.
+        assert_eq!(run(&format!("a+=(1 2) {show}")).0, "[(1 2)]\n");
+        assert_eq!(run("a=(1 2) true; echo \"[${a[*]}]\"").0, "[]\n");
+    }
+
+    /// bash finishes with each prefix assignment before it looks at the next,
+    /// so the refusals and the `set -x` lines come out interleaved in source
+    /// order — and a readonly name is refused *before* its value is expanded.
+    #[test]
+    fn env_prefix_assignments_are_processed_one_at_a_time() {
+        let (o, _) = run("{ set -x; readonly r=1; v=1 r=2 w=2 true; } 2>&1");
+        assert!(
+            o.ends_with("+ v=1\nosh: r: readonly variable\n+ w=2\n+ true\n"),
+            "got: {o:?}"
+        );
+        // The value of a readonly name is never expanded, so its error is the
+        // only one reported.
+        let (o, _) = run("{ readonly r=1; r=$((1/0)) true; echo \"rc=$?\"; } 2>&1");
+        assert_eq!(o, "osh: r: readonly variable\nrc=0\n");
+        // A word-expansion error in a value, by contrast, *is* fatal to the
+        // command: it stops the loop where it happened, so the assignment after
+        // it is never even looked at, and the parse unit is discarded.
+        let (o, _) = run("{ x=$((1/0)) a[0]=Z true; echo after; } 2>&1\necho next");
+        assert_eq!(o, "osh: 1/0: division by 0 (error token is \"0\")\nnext\n");
+        // The refusal names the reference, not what it resolves to — which is
+        // this path's own rule (`((n=5))` on the same nameref says `r`).
+        let (o, _) = run("{ declare -n n=r; readonly r=1; n=2 true; } 2>&1");
+        assert_eq!(o, "osh: n: readonly variable\n");
+    }
+
+    /// Re-reading a string or a file is a level of expansion indirection to
+    /// bash, counted exactly as a command substitution's body is: every trace
+    /// line inside it repeats `PS4`'s first character once more.
+    #[test]
+    fn xtrace_counts_eval_and_source_as_indirection() {
+        let trace = |src: &str| run(&format!("{{ set -x; {src}; }} 2>&1")).0;
+        assert_eq!(trace("eval :"), "+ eval :\n++ :\n");
+        assert_eq!(trace("eval 'eval :'"), "+ eval 'eval :'\n++ eval :\n+++ :\n");
+        // …and it composes with the substitution level.
+        assert_eq!(
+            trace("eval 'v=$(echo q)'"),
+            "+ eval 'v=$(echo q)'\n+++ echo q\n++ v=q\n"
+        );
+        // A `( … )` subshell, a function call and a pipeline are not
+        // indirection and still do not count. (A function *definition* is not
+        // traced at all, so `f` is the first line here.)
+        assert_eq!(trace("eval '( : )'"), "+ eval '( : )'\n++ :\n");
+        assert_eq!(trace("f() { :; }; eval f"), "+ eval f\n++ f\n++ :\n");
     }
 
     #[test]

@@ -24,7 +24,7 @@ wait
 # A special parameter as the *referent* — its value is the name indirected
 # through — and it may carry a modifier just as a plain name may.
 set -- one two
-one=ONEVAL
+one=OneVal
 two=TWOVAL
 echo "[${!1}][${!1,,}][${!1#O}][${!#}][${!#:-z}][${!#@Q}][${!?+set}]"
 
@@ -34,8 +34,27 @@ for b in '${!$}' '${!!}' '${!)}' '${! }' '${![0]}' '${!@Q}' '${!*Q}' '${!#1}' \
   ( eval "echo \"[$b]\"" ) 2>&1 | sed 's/^.*: line [0-9]*: //'
 done
 
-# The positional list as referent indirects through each *value*; a modifier
-# does not change that, so both report the same refusal.
+# The positional list as referent indirects through its *value*; a modifier
+# does not change that, so both report the same refusal for a list of two.
 ( echo "[${!@}]" ) 2>&1 | sed 's/^.*: line [0-9]*: //'
+( echo "[${!@:-z}]" ) 2>&1 | sed 's/^.*: line [0-9]*: //'
+
+# With one positional the indirection resolves, and the modifier that follows
+# is the *scalar* one: `${!@:0:3}` takes a substring where `${@:0:3}` would
+# have sliced the list.
+set -- one
+echo "[${!@}][${!@:0:3}][${!@#One}][${!@%Val}][${!@//a/X}][${!@@Q}][${!@:-z}]"
+# Case modification is the one modifier bash refuses with an `@` referent —
+# and accepts with a `*` one.
+echo "[${!*^^}][${!*,,}][${!*:0:3}][${!*@Q}]"
+for b in '${!@^}' '${!@^^}' '${!@,}' '${!@,,}'; do
+  ( eval "echo \"[$b]\"" ) 2>&1 | sed 's/^.*: line [0-9]*: //'
+done
+
+# No positionals at all: nothing to indirect through, so the reference points
+# nowhere and reads as unset — where an empty-but-present target is malformed.
+set --
+echo "[${!@}][${!*}][${!@:-z}][${!@+y}][${!@#x}]"
+set -- ""
 ( echo "[${!@:-z}]" ) 2>&1 | sed 's/^.*: line [0-9]*: //'
 echo "=== done"

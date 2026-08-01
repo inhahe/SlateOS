@@ -3358,9 +3358,28 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: LexOpts) -> Result<WordPar
             // what comes back is one, which is how `${!@Q}` (a `Q` that opens
             // no operator on `$@`) and `${!#1}` (a length, not a modifier) end
             // up refused.
-            let mut modifier_src = name.clone().into_bytes();
+            //
+            // `@`/`*` are the exception, because the indirection collapses the
+            // whole positional list to one name before the modifier ever runs:
+            // `${!@:0:1}` takes a *substring* of the value, where `${@:0:1}`
+            // would slice the list. So those parse against a stand-in name and
+            // have the referent put back afterwards. Only case modification
+            // does not survive the round trip — bash refuses `${!@^^}` while
+            // accepting `${!*^^}`, and that asymmetry is bash's own.
+            let positional = matches!(name.as_str(), "@" | "*");
+            let mut modifier_src = if positional {
+                PLACEHOLDER_REFERENT.to_vec()
+            } else {
+                name.clone().into_bytes()
+            };
             modifier_src.extend(bytes::from_chars(remaining.iter().copied()));
-            let target = parse_braced_param(&modifier_src, opts)?;
+            let mut target = parse_braced_param(&modifier_src, opts)?;
+            if positional {
+                if name == "@" && matches!(target, WordPart::ParamCase { .. }) {
+                    return Ok(WordPart::BadSubst(raw.to_vec()));
+                }
+                target.set_param_name(name.clone());
+            }
             if matches!(
                 target,
                 WordPart::ParamOp { .. }
@@ -3892,6 +3911,13 @@ fn balanced_subscript_end(s: BStr<'_>) -> Option<usize> {
     }
     None
 }
+
+/// The stand-in name a `${!@<op>}` / `${!*<op>}` modifier is parsed against, so
+/// that it comes out as the scalar operator bash applies rather than the
+/// whole-list one the same text would mean written directly. It never survives
+/// into the tree — the referent replaces it immediately — so its only
+/// requirement is to be a plain identifier.
+const PLACEHOLDER_REFERENT: &[u8] = b"x";
 
 /// Could `c`, standing right after the `!` of a `${!…}`, begin the name of the
 /// parameter being indirected through?

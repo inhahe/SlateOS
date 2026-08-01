@@ -685,6 +685,28 @@ pub enum WordPart {
     },
 }
 
+impl WordPart {
+    /// Rename the parameter a scalar modifier works on.
+    ///
+    /// The modifiers of a `${!ref<op>}` are parsed against a placeholder name
+    /// and only later learn which variable they really read, so both the parser
+    /// (putting the referent back after parsing against a stand-in) and the
+    /// expander (substituting the name the reference resolved to) have to swap
+    /// the name out of an already-built node. Anything that is not one of those
+    /// modifiers has no such name, and is left alone.
+    pub fn set_param_name(&mut self, new_name: String) {
+        match self {
+            WordPart::ParamOp { name, .. }
+            | WordPart::ParamTrim { name, .. }
+            | WordPart::ParamSubstr { name, .. }
+            | WordPart::ParamReplace { name, .. }
+            | WordPart::ParamCase { name, .. }
+            | WordPart::ParamTransform { name, .. } => *name = new_name,
+            _ => {}
+        }
+    }
+}
+
 /// How a fragment's own line numbers become the numbers the shell reports.
 ///
 /// A source lexed on its own numbers its lines from 1, which is wrong whenever

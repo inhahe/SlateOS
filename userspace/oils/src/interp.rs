@@ -9530,6 +9530,15 @@ impl Shell {
         refname: &str,
         index: &Option<Box<Word>>,
     ) -> Result<Option<Str>, ()> {
+        // `${!@}` / `${!*}` indirect through the positional list: the value of
+        // `$@`/`$*` becomes the target name. With **no** positionals there is
+        // nothing to indirect through, and bash has the reference point
+        // nowhere — `${!@}` is empty with status 0 and `${!@:-z}` takes the
+        // default — rather than raise the fatal "invalid variable name" that an
+        // empty-but-present target earns (`set -- ""`).
+        if index.is_none() && matches!(refname, "@" | "*") && self.positional.is_empty() {
+            return Ok(None);
+        }
         if index.is_some() && !self.var_is_set(refname) {
             let src = Self::indirect_ref_src(refname, index);
             self.berrln(&bfmt![
@@ -9581,14 +9590,6 @@ impl Shell {
                     return Str::new();
                 }
             }
-        }
-        // `${!@}` / `${!*}` indirect through the positional list: the value of
-        // `$@`/`$*` becomes the target name. With **no** positionals there is
-        // nothing to indirect through — bash yields empty with status 0 (unlike
-        // a non-empty-but-malformed target, which is a fatal "invalid variable
-        // name"). Handle the empty case here so it never reaches the validator.
-        if index.is_none() && (refname == "@" || refname == "*") && self.positional.is_empty() {
-            return Str::new();
         }
         // An unset pointer variable is a fatal "invalid indirect expansion":
         // status 1, the rest of the parse unit discarded, but the shell kept
@@ -33112,77 +33113,12 @@ fn is_valid_indirect_target(s: &str) -> bool {
 /// asking about a name they never wrote down, so being told the resolved one
 /// would name a variable they never mentioned.
 fn rename_param_target(part: &WordPart, new_name: &str, label: BStr<'_>) -> WordPart {
-    let name = new_name.to_string();
-    match part.clone() {
-        WordPart::ParamOp {
-            index,
-            op,
-            colon,
-            arg,
-            ..
-        } => WordPart::ParamOp {
-            name,
-            index,
-            op,
-            colon,
-            arg,
-            label: Some(label.to_vec()),
-        },
-        WordPart::ParamTrim {
-            index,
-            suffix,
-            longest,
-            pattern,
-            ..
-        } => WordPart::ParamTrim {
-            name,
-            index,
-            suffix,
-            longest,
-            pattern,
-        },
-        WordPart::ParamSubstr {
-            index,
-            offset,
-            length,
-            ..
-        } => WordPart::ParamSubstr {
-            name,
-            index,
-            offset,
-            length,
-        },
-        WordPart::ParamReplace {
-            index,
-            all,
-            anchor,
-            pattern,
-            replacement,
-            ..
-        } => WordPart::ParamReplace {
-            name,
-            index,
-            all,
-            anchor,
-            pattern,
-            replacement,
-        },
-        WordPart::ParamCase {
-            index,
-            mode,
-            all,
-            pattern,
-            ..
-        } => WordPart::ParamCase {
-            name,
-            index,
-            mode,
-            all,
-            pattern,
-        },
-        WordPart::ParamTransform { index, op, .. } => WordPart::ParamTransform { name, index, op },
-        other => other,
+    let mut out = part.clone();
+    out.set_param_name(new_name.to_string());
+    if let WordPart::ParamOp { label: slot, .. } = &mut out {
+        *slot = Some(label.to_vec());
     }
+    out
 }
 
 /// Remove `read`'s backslash escapes from a whole line (non-`-r` mode): a
@@ -38985,6 +38921,45 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         for expr in ["${!#1}", "${!?m}", "${!#^}", "${!@Q}", "${!*Q}"] {
             let (out, code) = run_script(&format!("{setup} echo \"[{expr}]\"; echo after"));
             assert_eq!((out.as_str(), code), ("", 1), "{expr}");
+        }
+    }
+
+    #[test]
+    fn the_positional_list_as_an_indirect_referent_carries_scalar_modifiers() {
+        // The indirection collapses `$@`/`$*` to a single target name before
+        // the modifier runs, so the modifier is the *scalar* one: `${!@:0:1}`
+        // is a substring of the value, where `${@:0:1}` would slice the list.
+        let setup = "one=OneVal; set -- one;";
+        assert_eq!(run(&format!("{setup} echo \"[${{!@}}]\"")).0, "[OneVal]\n");
+        assert_eq!(run(&format!("{setup} echo \"[${{!@:0:3}}]\"")).0, "[One]\n");
+        assert_eq!(run(&format!("{setup} echo \"[${{!@#One}}]\"")).0, "[Val]\n");
+        assert_eq!(run(&format!("{setup} echo \"[${{!@%Val}}]\"")).0, "[One]\n");
+        assert_eq!(run(&format!("{setup} echo \"[${{!@//a/X}}]\"")).0, "[OneVXl]\n");
+        assert_eq!(run(&format!("{setup} echo \"[${{!@@Q}}]\"")).0, "['OneVal']\n");
+        assert_eq!(run(&format!("{setup} echo \"[${{!@:-z}}]\"")).0, "[OneVal]\n");
+        // Case modification is the one modifier bash refuses to combine with an
+        // `@` referent — and accepts with a `*` one. The asymmetry is bash's.
+        assert_eq!(run(&format!("{setup} echo \"[${{!*^^}}]\"")).0, "[ONEVAL]\n");
+        assert_eq!(run(&format!("{setup} echo \"[${{!*,,}}]\"")).0, "[oneval]\n");
+        for expr in ["${!@^}", "${!@^^}", "${!@,}", "${!@,,}"] {
+            let (out, code) = run_script(&format!("{setup} echo \"[{expr}]\"; echo after"));
+            assert_eq!((out.as_str(), code), ("", 1), "{expr}");
+        }
+        // No positionals at all: nothing to indirect *through*, so the
+        // reference points nowhere and reads as unset — not as the malformed
+        // target an empty-but-present one would be.
+        assert_eq!(run("set --; echo \"[${!@}][${!@:-z}][${!@+y}][${!@#x}]\"").0, "[][z][][]\n");
+        let (out, code) = run_script("set -- \"\"; echo \"[${!@:-z}]\"; echo after");
+        assert_eq!((out.as_str(), code), ("", 1));
+        // Round-trips through the unparser: the stand-in name the modifier was
+        // parsed against never reaches the tree.
+        for src in ["echo ${!@#O}", "echo ${!*:0:1}"] {
+            assert_eq!(
+                crate::bytes::trim(&crate::unparse::program_inline(
+                    &parse(src.as_bytes()).unwrap()
+                )),
+                src.as_bytes()
+            );
         }
     }
 

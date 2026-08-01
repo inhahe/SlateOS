@@ -2694,6 +2694,17 @@ pub struct Shell {
     /// the `i32` return; this carries the abort so the post-builtin teardown
     /// can re-raise it, exactly as `pending_builtin_exit` does for `Exit`.
     pending_abort: bool,
+    /// Set when a `return`/`break`/`continue` raised inside an `eval` string or
+    /// a sourced file has to cross the builtin boundary, for the same reason
+    /// `pending_abort` exists: the flow is lost at the builtin's `i32` return.
+    ///
+    /// Neither `eval` nor `.`/`source` is a boundary for these in bash — the
+    /// text runs in the calling context, so `eval 'return 3'` returns from the
+    /// enclosing function and a `break` in a sourced file breaks the loop the
+    /// `.` was written in. The one that *is* caught is a `return` in a sourced
+    /// file, which is what ends the file rather than its caller; `source` keeps
+    /// that one for itself and only ever puts a loop flow here.
+    pending_unwind: Option<Flow>,
     /// Source text of the word (or double-quoted section) currently being
     /// expanded, for the "bad substitution" diagnostic. bash names the *whole*
     /// string its `expand_word_internal` was handed, not just the offending
@@ -3380,6 +3391,7 @@ impl Shell {
             unbound_error: None,
             discard_error: None,
             pending_abort: false,
+            pending_unwind: None,
             bad_sub_word: None,
             ref_label: None,
             cond_regex_error: false,
@@ -7558,6 +7570,7 @@ impl Shell {
             unbound_error: None,
             discard_error: None,
             pending_abort: false,
+            pending_unwind: None,
             bad_sub_word: None,
             ref_label: None,
             cond_regex_error: false,
@@ -17037,6 +17050,16 @@ impl Shell {
             self.run_source_flow_out(src, out, stdin, &LineMap::Offset(eval_base), HistRead::Off);
         self.xtrace_level = self.xtrace_level.saturating_sub(1);
         self.eval_depth = self.eval_depth.saturating_sub(1);
+        // A `return` in the string is the caller's, not `eval`'s: the string
+        // runs in the calling context, so `f() { eval "return 3"; echo no; }`
+        // returns from `f` with 3 and never reaches the `echo`. This is where
+        // `eval` and `.`/`source` part company — a sourced file *is* what a
+        // `return` in it ends — so it is read here rather than in the shared
+        // [`Shell::read_eval_builtin_status`].
+        if matches!(eval_flow, Flow::Return) {
+            self.pending_unwind = Some(eval_flow);
+            return self.last_status;
+        }
         self.read_eval_builtin_status(eval_flow)
     }
 
@@ -17078,6 +17101,17 @@ impl Shell {
                 self.discard_error = Some(self.last_status);
                 self.last_status
             }
+            // A loop flow belongs to the caller's loop: neither `eval` nor a
+            // sourced file is a boundary for one, so `for …; do . lib.sh; done`
+            // with a `break` in the file ends the loop. (A function *is* a
+            // boundary, and the `break` builtin has already warned and yielded
+            // `Flow::Next` when there was no loop to leave.)
+            Flow::Break(_) | Flow::Continue(_) => {
+                self.pending_unwind = Some(flow);
+                self.last_status
+            }
+            // Everything else — including a `return`, which is what ends a
+            // *sourced file* rather than its caller — stops here.
             _ => self.last_status,
         }
     }
@@ -17634,6 +17668,12 @@ impl Shell {
         if std::mem::take(&mut self.pending_abort) {
             self.discard_error = None;
             return Flow::Abort;
+        }
+        // A `return`/`break`/`continue` that `eval` or a sourced file raised on
+        // the caller's behalf resumes here, after the same teardown, so it
+        // unwinds the caller rather than stopping at the builtin.
+        if let Some(flow) = self.pending_unwind.take() {
+            return flow;
         }
         // An arithmetic error while binding an integer-attribute value
         // (`declare -i k="3 apples"`, `local -i n=1/0`, `declare -ia a=(x)`)

@@ -25647,7 +25647,7 @@ source as `environment` and its line as 0 so `declare -F` under extdebug agrees.
 silently misbehaving, so it is visible rather than dangerous. Also blocks
 `declare -F`'s `0 environment` form, which is otherwise implemented.
 
-### TD-OILS-EVAL-SWALLOWS-RETURN. `return` inside `eval` does not return from the enclosing function — OPEN — 2026-08-01
+### TD-OILS-EVAL-SWALLOWS-RETURN. `return` inside `eval` does not return from the enclosing function — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 
 **Where:** `userspace/oils/src/interp.rs` — the `eval` builtin, which runs its
 argument through the same read-eval path a sourced file uses and then reports
@@ -25687,6 +25687,16 @@ returning 2 simulates a `return`), where the probe harness ran its cases through
 `eval` inside a function and so could not observe the unwind. Any script using
 `eval` to build a guard clause — `eval "$check" || return 1` is unaffected, but
 `eval 'return 1'` is not — keeps running past the return.
+
+**✅ RESOLVED 2026-08-01.** A `pending_unwind: Option<Flow>` field now carries
+the flow across the builtin boundary, converted back in `run_builtin_body`'s
+teardown beside `pending_builtin_exit` and `pending_abort`. `eval_string` puts a
+`Flow::Return` there; the shared `read_eval_builtin_status` puts a
+`Flow::Break`/`Flow::Continue` there for `eval` **and** `.`/`source` alike,
+which was the second half of the bug — a `break` in a sourced file did not end
+the loop the `.` stood in either. A `return` in a sourced file is still caught
+where it was, since ending the file is what it means. Measured against bash and
+locked down by `tests/corpus/eval-and-source-are-not-a-boundary-for-return.sh`.
 
 ### TD-OILS-DEBUG-TRAP-PIPELINE-DOUBLE-FIRE. The DEBUG trap fires twice per pipeline stage under functrace — OPEN — 2026-08-01
 

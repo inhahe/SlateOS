@@ -1902,6 +1902,23 @@ struct Job {
     exit_seen: bool,
 }
 
+/// What the word after a `<&`/`>&` names — see [`Shell::classify_dup_word`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DupWord {
+    /// `-`: close the descriptor rather than duplicate anything.
+    Close,
+    /// All digits, and a descriptor number: duplicate that one.
+    Fd(i32),
+    /// All digits, but not a descriptor number — the empty word, or a run of
+    /// digits too long for one. `WORD: Bad file descriptor`, naming the word as
+    /// it was *written*.
+    BadFd,
+    /// Something with a non-digit in it. `<&` has nowhere to go with that and
+    /// calls it ambiguous, naming the *expanded* word; `>&` on fd 1 takes it for
+    /// a `>&file` redirect instead, and on any other fd calls it ambiguous too.
+    NotAFd,
+}
+
 /// The one coproc a shell keeps track of (see [`Shell::coproc_tracked`]).
 ///
 /// The two descriptors are recorded here rather than read back out of `NAME`
@@ -1919,17 +1936,42 @@ struct TrackedCoproc {
     read_fd: i32,
     /// `NAME[1]`, the parent's write end, in [`Shell::open_write_fds`].
     write_fd: i32,
-    /// Whether no reap sweep has passed over this coproc yet, in which case the
-    /// next one leaves it alone however finished its body looks.
+    /// The value of [`Shell::item_seq`] when this coproc was started. It is not
+    /// disposed of while the shell is still on that item.
     ///
     /// bash's coproc is a forked child, which cannot possibly be reaped before
     /// the parent has run the command after the `coproc` — the fork alone costs
     /// far more than a builtin. osh's is a thread, which can finish first, so
     /// without this the commonest idiom of all (`coproc X { … }` followed by a
     /// line that names `${X[1]}` or `$X_PID`) would work or not depending on how
-    /// the two were scheduled. One sweep of grace buys back what the cost of a
+    /// the two were scheduled. A command of grace buys back what the cost of a
     /// process buys bash. See design-decisions.md §"coproc disposal grace".
-    fresh: bool,
+    ///
+    /// The grace is counted in *commands* rather than in sweeps of the job table
+    /// because the number of sweeps between one command and the next is not
+    /// fixed: a reap runs both at the input-unit boundary
+    /// ([`Shell::cleanup_dead_jobs`]) and at the top of every item
+    /// ([`Shell::notify_signalled_jobs`]), so a grace of one sweep still left
+    /// `coproc C { exit 7; }` / `cpid=$C_PID` a race — one that lost under load.
+    born_item: u64,
+    /// The value of [`Shell::item_seq`] at the first sweep that found the body
+    /// finished, if one has. Disposal waits for a *later* item than that.
+    ///
+    /// The birth grace alone is not enough, because a body is commonly released
+    /// by the command after the `coproc` rather than by the `coproc` itself:
+    ///
+    /// ```sh
+    /// coproc D { read -r x; }
+    /// echo d >&"${D[1]}"     # the body reads, and ends, during this command
+    /// wait "$D_PID"          # …and must still be able to name it here
+    /// ```
+    ///
+    /// Requiring the death to be *noticed* in one item and acted on in a later
+    /// one gives every such pair a whole command in which the body may end
+    /// without the shell pretending it never existed. bash gets the same effect
+    /// for free: its body is a process, so between the write that releases it
+    /// and the next command there is not enough time to exit *and* be reaped.
+    seen_dead_item: Option<u64>,
 }
 
 /// How `jobs` prints what it has selected.
@@ -2661,6 +2703,11 @@ pub struct Shell {
     /// no tracked coproc at all — bash closes the coproc out in a subshell, and
     /// a `coproc` there is silent even while the parent's is still running.
     coproc_tracked: Option<TrackedCoproc>,
+    /// How many *items* — commands separated by `;`, `&` or a newline — the
+    /// shell has begun. Only [`TrackedCoproc::born_item`] reads it, to give a
+    /// new coproc a grace period measured in commands rather than in sweeps of
+    /// the job table; see there for why that has to be deterministic.
+    item_seq: u64,
     /// Temp files backing *input* process substitutions `<(cmd)` created while
     /// expanding the current command's words. Each holds `cmd`'s captured output;
     /// the enclosing command reads it, then it is deleted once the command
@@ -3511,6 +3558,7 @@ impl Shell {
             open_write_fds: std::collections::HashMap::new(),
             coproc_read_fds: std::collections::HashMap::new(),
             coproc_tracked: None,
+            item_seq: 0,
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
             getopts_col: 0,
@@ -5243,6 +5291,11 @@ impl Shell {
             // that a background job was killed — before `$LINENO` moves on, so
             // the message carries the line just finished rather than this one.
             self.notify_signalled_jobs();
+            // *After* the sweep above, so that the sweep still belongs to the
+            // item just finished: a coproc started by that item has to survive
+            // both this sweep and the whole of this item. See
+            // [`TrackedCoproc::born_item`].
+            self.item_seq = self.item_seq.wrapping_add(1);
             self.current_line = item.line;
             if item.background {
                 // The DEBUG trap hears about the job here, in the parent, before
@@ -7960,6 +8013,7 @@ impl Shell {
             // there is silent even while the parent's is still running
             // (measured). Nothing to track.
             coproc_tracked: None,
+            item_seq: 0,
             // A subshell manages its own process-substitution lifetimes.
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
@@ -13852,7 +13906,8 @@ impl Shell {
             pid: synth_pid,
             read_fd,
             write_fd,
-            fresh: true,
+            born_item: self.item_seq,
+            seen_dead_item: None,
         });
         let mut elems = BTreeMap::new();
         elems.insert(0usize, read_fd.to_string().into_bytes());
@@ -14224,6 +14279,37 @@ impl Shell {
     /// echoes the word **as written** (`>$r` → "$r: ambiguous redirect"), not
     /// the expansion. Here-documents and here-strings are exempt and never routed
     /// through here. On success returns the single expanded field.
+    /// What the word after a `<&`/`>&` turns out to name.
+    ///
+    /// bash splits on `all_digits`, *not* on "parses as a number", and the two
+    /// disagree in three places that matter (`do_redirection_internal`):
+    ///
+    /// * the empty word is vacuously all-digits, so `<&""` is a bad descriptor
+    ///   rather than a nonsensical one — and `>&""` is not a redirect to a file
+    ///   whose name is empty either;
+    /// * a sign makes a word non-numeric, so `<&"+3"` and `<&"-1"` are
+    ///   *ambiguous* even though both parse perfectly well as integers;
+    /// * an all-digit word too large for a descriptor is a bad one, not an
+    ///   ambiguous one.
+    ///
+    /// The distinction is not academic: the two errors carry different text,
+    /// and on fd 1 the ambiguous case is not an error at all but a `>&file`
+    /// redirect.
+    fn classify_dup_word(target: BStr<'_>) -> DupWord {
+        if target == b"-" {
+            return DupWord::Close;
+        }
+        if target.iter().all(u8::is_ascii_digit) {
+            // The empty word reaches here — and fails to parse, which is
+            // precisely bash's `all_digits("")` followed by a `legal_number`
+            // that says no. So does a run of digits past `i32`.
+            return bytes::as_str(target)
+                .and_then(|t| t.parse::<i32>().ok())
+                .map_or(DupWord::BadFd, DupWord::Fd);
+        }
+        DupWord::NotAFd
+    }
+
     fn expand_redirect_target(&mut self, w: &Word) -> Result<Str, Str> {
         let mut fields = self.expand_word(w, true);
         if fields.len() == 1 {
@@ -14639,10 +14725,23 @@ impl Shell {
         // `>&file` (which the parser already rewrote to `WriteBoth` for the
         // no-explicit-fd literal form). On any other fd a non-numeric target is
         // an ambiguous redirect, as bash reports.
-        // A dup target must be a descriptor number or `-`; a target that is not
-        // text is certainly neither, and takes the non-numeric path below.
-        let target_num = bytes::as_str(target).and_then(|t| t.parse::<i32>().ok());
-        if target != b"-" && target_num.is_none() {
+        // A dup target must be a descriptor number or `-`; anything else takes
+        // the non-numeric path below. `all digits` is what decides, not "parses
+        // as a number" — see [`Shell::classify_dup_word`].
+        let dup = Self::classify_dup_word(target);
+        if dup == DupWord::BadFd {
+            // An all-digit word that is no descriptor. bash names the word as
+            // written here, not the expansion it just failed on.
+            return Err(bfmt![
+                crate::unparse::word_src(&r.target),
+                b": Bad file descriptor"
+            ]);
+        }
+        let target_num = match dup {
+            DupWord::Fd(n) => Some(n),
+            _ => None,
+        };
+        if dup == DupWord::NotAFd {
             if fd == 1 {
                 let target = target.to_vec();
                 open_output_target(&self.cwd, &target, false)?;
@@ -14656,10 +14755,10 @@ impl Shell {
                 plan.stdout_to_fd = None;
                 plan.stderr_to_fd = None;
             } else {
-                return Err(bfmt![
-                    crate::unparse::word_src(&r.target),
-                    b": ambiguous redirect"
-                ]);
+                // The ambiguous message names the *expansion*, unlike the bad-fd
+                // one above: bash overwrites the redirect's word with the
+                // expanded text before it reports this.
+                return Err(bfmt![target, b": ambiguous redirect"]);
             }
         } else if fd == 2 && target == b"1" {
             // fd 2's destination is being (re)set: drop any earlier stderr
@@ -14738,6 +14837,8 @@ impl Shell {
     /// Resolve an input dup (`M<&N`, `M<&-`, and the special filenames that mean
     /// the same thing) into `plan`. `target` is the already-expanded dup word;
     /// `r` is kept for diagnostics, which echo the word as written.
+    ///
+    /// See [`classify_dup_word`] for how the word decides which of those it is.
     fn resolve_dup_in(
         &mut self,
         r: &Redirect,
@@ -14749,14 +14850,23 @@ impl Shell {
         // dup shares the source cursor's offset (see `stdin_from_fd`), matching
         // bash. A `<&-` closes; a non-numeric expansion is an ambiguous
         // redirect.
-        if target == b"-" {
+        let dup = Self::classify_dup_word(target);
+        if dup == DupWord::BadFd {
+            // All digits but no descriptor — the empty word included. Named as
+            // written, like every other bad-descriptor report.
+            return Err(bfmt![
+                crate::unparse::word_src(&r.target),
+                b": Bad file descriptor"
+            ]);
+        }
+        if dup == DupWord::Close {
             if fd >= 3 {
                 // `exec 3<&-`: close descriptor 3 (consumed by `exec`).
                 plan.extra_fds.push((fd, ExtraFdOp::Close));
             }
             // `0<&-` (close stdin) on a non-exec command is a rare corner not
             // modelled here (documented limitation).
-        } else if let Some(n) = bytes::as_str(target).and_then(|t| t.parse::<i32>().ok()) {
+        } else if let DupWord::Fd(n) = dup {
             if fd == 0 && n >= 3 {
                 // fd 0 reads from input descriptor N's shared cursor (a `read
                 // -u`/`exec 3<` byte fd) or, for a `coproc` read end, the live
@@ -14780,12 +14890,10 @@ impl Shell {
             // input alias) is only meaningful for `exec`, which walks the raw
             // redirects.
         } else {
-            // A non-numeric input-dup target (`<&file`) is ambiguous; bash
-            // echoes the word as written, not the expansion.
-            return Err(bfmt![
-                crate::unparse::word_src(&r.target),
-                b": ambiguous redirect"
-            ]);
+            // A non-numeric input-dup target (`<&file`) is ambiguous — there is
+            // no `>&file` fallback on the input side. bash names the expansion
+            // here, not the word as written.
+            return Err(bfmt![target, b": ambiguous redirect"]);
         }
         Ok(())
     }
@@ -19716,20 +19824,35 @@ impl Shell {
     /// table entirely (a `wait` that removed its row) is reaped too, so an
     /// absent job counts the same as one whose handle has been taken.
     ///
-    /// The first sweep after a `coproc` is a no-op whatever it finds; see
-    /// [`TrackedCoproc::fresh`] for why a thread needs that and a process does
-    /// not.
+    /// A coproc gets a command of grace first, however finished its body looks:
+    /// the item that started it never disposes of it
+    /// ([`TrackedCoproc::born_item`]), and the item that first *notices* the body
+    /// is over never does either ([`TrackedCoproc::seen_dead_item`]). Both exist
+    /// because osh's body is a thread and can finish where bash's process cannot.
     fn dispose_reaped_coproc(&mut self) {
-        let Some(tracked) = self.coproc_tracked.as_mut() else {
+        let Some(tracked) = self.coproc_tracked.as_ref() else {
             return;
         };
-        if tracked.fresh {
-            tracked.fresh = false;
+        if tracked.born_item == self.item_seq {
             return;
         }
-        let pid = tracked.pid;
-        if self.jobs.iter().find(|j| j.pid == pid).is_none_or(|j| j.child.is_none()) {
-            self.forget_tracked_coproc();
+        let (pid, seen) = (tracked.pid, tracked.seen_dead_item);
+        // An absent job counts as reaped just as a taken handle does: a `wait`
+        // removes the row outright. A reap never runs backwards, so once this is
+        // true it stays true and the count below cannot restart.
+        let dead = self.jobs.iter().find(|j| j.pid == pid).is_none_or(|j| j.child.is_none());
+        if !dead {
+            return;
+        }
+        match seen {
+            // The first item to notice only records that it did.
+            None => {
+                if let Some(t) = self.coproc_tracked.as_mut() {
+                    t.seen_dead_item = Some(self.item_seq);
+                }
+            }
+            Some(first) if self.item_seq > first => self.forget_tracked_coproc(),
+            Some(_) => {}
         }
     }
 

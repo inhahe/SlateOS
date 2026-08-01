@@ -26401,13 +26401,29 @@ forgotten (the fd numbers are saved by hand first, since disposal takes `NAME`
 away), a coproc read before any command boundary — which still works — and a
 displaced one keeping everything.
 
-One deliberate deviation came out of this: the *first* reap sweep after a
-`coproc` never disposes, because osh's body is a thread and can finish before
-the shell reaches the next command, where bash's forked child cannot. Without
-that grace `coproc C { … }` followed by a line naming `${C[1]}` was a coin
-flip. See design-decisions.md §97. The same race had made the older corpus
-cases and two `coproc_*` unit tests latently flaky; they now keep their bodies
-alive with a trailing `read` instead of betting on the window.
+One deliberate deviation came out of this: neither the command that started a
+coproc nor the command in which the shell first notices the body is over may
+dispose of it, because osh's body is a thread and can finish before the shell
+reaches the next command, where bash's forked child cannot. Without that grace
+`coproc C { … }` followed by a line naming `${C[1]}` was a coin flip. See
+design-decisions.md §97. The same race had made the older corpus cases and two
+`coproc_*` unit tests latently flaky; they now keep their bodies alive with a
+trailing `read` instead of betting on the window.
+
+**Two follow-ups the same day, both found by the corpus.** The grace was first
+written as "the next reap sweep is a no-op", and that was not enough:
+`coproc-is-a-job.sh` failed under the load of a full corpus run with an empty
+`$C_PID`, because *two* sweeps separate one top-level command from the next
+(`cleanup_dead_jobs` at the input-unit boundary and `notify_signalled_jobs` at
+the top of the item). Recounting it in commands (`Shell::item_seq` versus
+`TrackedCoproc::born_item`) fixed that case but not
+`coproc-second-warns-about-the-first.sh`, where the body is released by the
+command *after* the `coproc` — `echo d >&"${D[1]}"` — so the birth grace has
+already expired by the time `wait "$D_PID"` needs the name. The rule is now
+two-phase: `TrackedCoproc::seen_dead_item` records the item at which the body
+was first seen finished, and disposal waits for a strictly later one. Both
+halves are arguments from the code rather than probabilities — no sweep count,
+no timer.
 
 ### TD-OILS-EXTERNAL-DUP-TO-STDERR. `cmd >&2` sent an *external* command's output to stdout — ✅ RESOLVED — 2026-08-01
 
@@ -26486,7 +26502,7 @@ such split, so this may have to stay a documented host limitation. Confirm the
 Windows behaviour before writing the fix off: the MSYS tools read `argv[0]`
 from the command line, which `Command` does control.
 
-### TD-OILS-DUP-REDIRECT-WORD-ERRORS. `<&WORD`/`>&WORD` misclassifies and misquotes its failures — OPEN — 2026-08-01
+### TD-OILS-DUP-REDIRECT-WORD-ERRORS. `<&WORD`/`>&WORD` misclassifies and misquotes its failures — ✅ RESOLVED (command redirects) — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — the redirect path that resolves a
 `<&`/`>&` whose target is a *word* rather than a literal fd number.
@@ -26539,6 +26555,132 @@ than reading through the unset array.
 `>&WORD` through the same code as `<&WORD` so an empty word cannot fall through
 to the file-redirect path, give `-1` its message, and pass the expanded word to
 the ambiguous message and the raw source word to the bad-fd one.
+
+**Fixed** for redirects written on a *command* (`interp.rs`): a `DupWord` enum
+and `Shell::classify_dup_word` now split the word bash's way — `-` closes,
+every-byte-a-digit (the empty word included) parses to an `i32` or is `BadFd`,
+anything else is `NotAFd` — and `resolve_dup_out`/`resolve_dup_in` branch on it,
+so `>&""` can no longer reach the file-redirect path and `<&"-1"` can no longer
+fall off the end of the chain silently. The bad-fd message names the raw source
+word, the ambiguous one the expansion. Corpus case:
+`tests/corpus/dup-word-that-is-not-a-descriptor.sh`.
+
+**Still open — two pieces**, tracked below as their own entries:
+`TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING` (which text the bad-fd message uses
+when the redirector is not the operator's default) and
+`TD-OILS-EXEC-DUP-WORD-MISCLASSIFIES` (the `exec` path, which still tests
+"parses as a number").
+
+### TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING. a bad-fd dup on a non-default redirector names the word, not the redirector — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs`, `resolve_dup_out` / `resolve_dup_in`
+— the `DupWord::BadFd` arm, which always formats
+`crate::unparse::word_src(&r.target)`.
+
+**Reproduce:**
+
+```sh
+e=""
+read -r l <&"$e"     # bash: "$e": Bad file descriptor
+read -r l 0<&"$e"    # bash: "$e": Bad file descriptor
+read -r l 7<&"$e"    # bash: 7: Bad file descriptor      osh: "$e": …
+echo hi >&"$e"       # bash: "$e": Bad file descriptor
+echo hi 2>&"$e"      # bash: 2: Bad file descriptor      osh: "$e": …
+```
+
+**The measured rule.** bash names the *word as written* only when the redirector
+is the operator's own default — 0 for `<&`, 1 for `>&`. Any other redirector
+number, including one that merely *is* the default written out (`0<&` still
+counts as default, `1<&` does not), makes the message name the **redirector
+number** instead. Fourteen samples across command/`exec`, quoted/bare and
+literal/expanded words agree, and writing the default explicitly is
+indistinguishable from omitting it — so this is a test on the redirector's
+*value*, not on whether the parser saw a number.
+
+This is recorded as measured behaviour: no reading of bash's `redirection_error`
+accounts for it (the obvious paths would print either the expansion or the
+redirector in *all* cases), so do not "simplify" it away without re-measuring.
+
+**Impact.** Only the diagnostic text, and only for a redirector other than the
+default — which is the rarer form. Nothing in the corpus exercises it yet.
+
+**Proper fix.** In both `resolve_dup_*`, pick the `BadFd` message's subject by
+comparing `fd` against the operator's default and formatting the redirector
+number when they differ. Extend
+`tests/corpus/dup-word-that-is-not-a-descriptor.sh` with the explicit-redirector
+rows.
+
+### TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP. `>&-` / `<&-` on fd 0, 1 or 2 of a *command* closes nothing — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `resolve_dup_out` / `resolve_dup_in`,
+the `DupWord::Close` arm. For a redirect on a command (not `exec`) the close is
+recorded by removing fd from `open_fds` / `open_write_fds` / `coproc_read_fds`;
+fds 0–2 do not live in those tables, so the removal finds nothing and the
+command runs with its stream still attached.
+
+**Reproduce:**
+
+```sh
+echo hi >&-       # bash: echo: write error: Bad file descriptor, status 1
+                  # osh:  prints "hi", status 0
+read -r l <&-     # bash: read: read error: 0: Bad file descriptor, status 1
+                  # osh:  reads from the real stdin
+```
+
+**Impact.** The idiom that runs a command with a stream deliberately taken away
+— `cmd >&-` to prove it writes nothing, `cmd <&-` to prove it reads nothing —
+silently does the opposite of what it says. Both statuses and both streams
+differ from bash. `exec`'s own `M>&-` is *not* affected: `apply_persistent_dup_out`
+has explicit fd 1/2 arms that clear `exec_stdout`/`exec_stderr`.
+
+**Related.** `TD-OILS-FD0-WRITE`'s residual divergence 2 (`{ echo Q >&0; } <&-`)
+is the same gap seen from the write side; fixing this subsumes it.
+
+**Proper fix.** Give the transient redirect plan a *closed* state for fds 0–2,
+distinct from "absent, so inherit the real one", so that a builtin resolving its
+stdin/stdout/stderr through the plan gets `Bad file descriptor` rather than the
+inherited handle — and so an external child is handed a closed descriptor. The
+write side already knows how to report this (`TD-OILS-WRITE-ERROR-REPORTING`
+gives `echo: write error: …` named against the builtin); the read side needs the
+matching `read: read error: N: …` shape. Then extend
+`tests/corpus/dup-word-that-is-not-a-descriptor.sh`, which deliberately avoids
+`-` today for exactly this reason.
+
+### TD-OILS-EXEC-DUP-WORD-MISCLASSIFIES. `exec M>&WORD` still splits on "parses as a number" — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `apply_persistent_dup_out` (~14112)
+and `apply_persistent_dup_in` (~14163), which still do
+`bytes::as_str(target).and_then(|t| t.parse::<i32>().ok())` where the command
+path now calls `Shell::classify_dup_word`.
+
+**Reproduce:**
+
+```sh
+e=""
+(exec 7<&"$e")                    # bash: 7: Bad file descriptor   osh: : ambiguous redirect
+(exec 7<&"99999999999999999999")  # bash: 7: Bad file descriptor   osh: 99…: ambiguous redirect
+(exec 7<&"+3")                    # bash: +3: ambiguous redirect   osh: 3: Bad file descriptor
+(exec 7>&"-1")                    # bash: -1: ambiguous redirect   osh: -1: Bad file descriptor
+```
+
+Both directions of the same confusion: `parse::<i32>()` accepts a *sign*, which
+bash's `all_digits` rejects, and rejects the empty and out-of-range words, which
+`all_digits` accepts. So the signed words wrongly become descriptor numbers (and
+then fail as bad descriptors) while the too-long and empty ones wrongly become
+ambiguous redirects.
+
+**Impact.** `exec {v}<&"$fd"` with a computed descriptor — the natural way to
+park a coproc endpoint on a fixed number — reports the wrong failure whenever
+the computation produced nothing.
+
+**Proper fix.** Route both helpers through `Shell::classify_dup_word`, exactly
+as `resolve_dup_out`/`resolve_dup_in` do. The bad-fd message needs the word as
+written, which the caller at the `RedirectOp::DupOut`/`DupIn` arms has as
+`crate::unparse::word_src(&r.target)` but the helpers do not, so they need it
+passed in; `persistent_special_dup` synthesises an all-digit word that can never
+be `BadFd` and can pass its own. Fold in
+`TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING` at the same time, since the same
+`fd`-versus-default test applies here.
 
 ### TD-OILS-ARITH-FOR-LOOP-IS-SLOW. a `for ((…))` loop costs ~9× what bash charges — OPEN — 2026-08-01
 

@@ -3164,11 +3164,17 @@ fn split_name_subscript(chs: &[Ch], opts: LexOpts) -> Result<NameSubscript, Pars
         return Err(ParseError::new("empty '${}' expansion"));
     }
     let mut i = 0;
+    // Only a genuine identifier may carry a `[subscript]`. bash refuses
+    // `${@[0]}`, `${1[0]}` and `${#[0]}` outright, so for those the `[` is not
+    // part of the parameter at all: it stays in the remainder, where the
+    // operator dispatch finds no operator it opens and reports the refusal.
+    let mut identifier = false;
     if syn_at(chs, 0).is_ascii_digit() {
         while i < chs.len() && syn_at(chs, i).is_ascii_digit() {
             i += 1;
         }
     } else if is_name_start(syn_at(chs, 0)) {
+        identifier = true;
         while i < chs.len() && is_name_char(syn_at(chs, i)) {
             i += 1;
         }
@@ -3183,7 +3189,8 @@ fn split_name_subscript(chs: &[Ch], opts: LexOpts) -> Result<NameSubscript, Pars
     let Some(name) = name_text(&raw_name) else {
         return Ok(NameSubscript::Deferred);
     };
-    if syn_at(chs, i) == '['
+    if identifier
+        && syn_at(chs, i) == '['
         && let Some(close) = matching_subscript_close(chs, i)
     {
         let inner =
@@ -3231,36 +3238,45 @@ fn parse_slice_bounds(
     Ok((Box::new(word_from_source(&off_text, opts)?), length))
 }
 
+/// Is `name` a parameter that `${#…}` may take the length of?
+///
+/// An identifier, a positional number, or one of the special parameters that
+/// can stand alone after the `#`. Notably absent are the operator characters
+/// (`^`, `,`, `:`, `/`, …): `${#^}` is not a length, because `^` names no
+/// parameter.
+fn is_length_target(name: &str) -> bool {
+    matches!(name, "@" | "*" | "#" | "?" | "-" | "$" | "!")
+        || is_valid_name(name.as_bytes())
+        || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
+}
+
 pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: LexOpts) -> Result<WordPart, ParseError> {
     if let Some(after_hash) = raw.strip_prefix(b"#") {
         if after_hash.is_empty() {
             // `${#}` is the positional-parameter count — treat as `$#`.
             return Ok(WordPart::Param("#".into()));
         }
+        // The length operator wants a *complete* parameter reference after the
+        // `#` — nothing may be left over. When what follows is anything less,
+        // bash reads the `#` itself as the parameter and the remainder as an
+        // operator on it: `${#+x}` is `$#` with `+x`, and `${##a}` strips a
+        // leading `a` from `$#`. Hence the fall-through to the general path
+        // below rather than an immediate refusal.
         let chs: Vec<Ch> = bytes::chars(after_hash).collect();
-        let NameSubscript::Split(name, subscript, remaining) =
-            split_name_subscript(&chs, opts)?
-        else {
-            return Ok(WordPart::BadSubst(raw.to_vec()));
-        };
-        if let Some(index) = subscript {
-            if !remaining.is_empty() {
-                // bash accepts this at parse time and rejects it only during
-                // expansion as a runtime "bad substitution" (DISCARD-class).
-                return Ok(WordPart::BadSubst(raw.to_vec()));
-            }
-            // `${#name[@]}` / `${#name[i]}` — array element count / element length.
-            return Ok(WordPart::ArrayRef {
-                name,
-                index,
-                length: true,
+        if let NameSubscript::Split(name, subscript, remaining) = split_name_subscript(&chs, opts)?
+            && remaining.is_empty()
+            && is_length_target(&name)
+        {
+            return Ok(match subscript {
+                // `${#name[@]}` / `${#name[i]}` — element count / element length.
+                Some(index) => WordPart::ArrayRef {
+                    name,
+                    index,
+                    length: true,
+                },
+                None => WordPart::Length(name),
             });
         }
-        // `${#name}` names a parameter, so bytes that are not text are not one.
-        let Some(text) = name_text(after_hash) else {
-            return Ok(WordPart::BadSubst(raw.to_vec()));
-        };
-        return Ok(WordPart::Length(text));
     }
     if let Some(after_bang) = raw.strip_prefix(b"!") {
         // `${!prefix*}` / `${!prefix@}` — names of set variables beginning with
@@ -3359,6 +3375,18 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: LexOpts) -> Result<WordPar
     let NameSubscript::Split(name, subscript, rest) = split_name_subscript(&chs, opts)? else {
         return Ok(WordPart::BadSubst(raw.to_vec()));
     };
+    // `$#`, `$?` and `$-` are the three specials that `${#…}` also spells as a
+    // length, and bash lets only an operator follow one — anything else is a bad
+    // substitution, so `${#^}` and `${?[0]}` are refused where `${@^}` and
+    // `${v^}` are fine. The stop-set is exactly the characters that open an
+    // operator; a subscript cannot appear here, since none of the three is an
+    // identifier.
+    if matches!(name.as_str(), "#" | "?" | "-")
+        && !rest.is_empty()
+        && !matches!(syn_at(&rest, 0), '#' | '%' | ':' | '-' | '=' | '?' | '+' | '/' | '@')
+    {
+        return Ok(WordPart::BadSubst(raw.to_vec()));
+    }
     // A subscript may be combined with an operator: `${a[i]:-def}`, `${a[i]#pat}`,
     // etc. Only a specific `[expr]` index is allowed with an operator — `[@]`/`[*]`
     // + operator (bulk transform) is not supported.

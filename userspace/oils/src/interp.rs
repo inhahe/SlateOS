@@ -37371,6 +37371,104 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn length_wants_a_whole_parameter() {
+        // A complete parameter reference after the `#` is a length: a name, a
+        // name with a subscript, a positional number, or one of the specials
+        // that can stand alone.
+        assert_eq!(run("set -- a bb; echo ${#@} ${#*}").0, "2 2\n");
+        assert_eq!(run("set -- a bb; echo ${#1} ${#2} ${#9}").0, "1 2 0\n");
+        assert_eq!(run("set -- a bb; echo ${##}").0, "1\n");
+        assert_eq!(run("false; echo ${#?}").0, "1\n");
+        assert_eq!(
+            run("a=(x yy); echo ${#a[0]} ${#a[1]} ${#a[@]} ${#a[*]}").0,
+            "1 2 2 2\n"
+        );
+        assert_eq!(run("echo ${#nosuch} ${#nosuch[@]}").0, "0 0\n");
+        // Anything left over after that reference means the `#` was never a
+        // length operator at all: it is the parameter `$#`, and the remainder is
+        // an operator applied to it. bash reads these exactly so.
+        assert_eq!(run("set -- a b c; echo [${#+x}] [${#:+x}]").0, "[x] [x]\n");
+        assert_eq!(
+            run("set -- a b c; echo [${#-x}] [${#:-x}] [${#=x}]").0,
+            "[3] [3] [3]\n"
+        );
+        assert_eq!(
+            run("set -- a b c; echo [${##3}] [${###}] [${##*}] [${#%3}]").0,
+            // `${###}` and `${##*}` both strip a *shortest* prefix — of the
+            // empty pattern and of `*` respectively — so both strip nothing.
+            "[] [3] [3] []\n"
+        );
+        assert_eq!(run("set -- a b c; echo [${#:0:1}] [${#:1}]").0, "[3] []\n");
+        assert_eq!(run("set -- a b c; echo [${#/3/z}] [${#//3/z}]").0, "[z] [z]\n");
+        assert_eq!(run("set -- a b c; echo [${#@Q}]").0, "['3']\n");
+        // …and when the remainder opens no operator either, neither reading
+        // works and bash refuses the word.
+        for body in [
+            "${#^}",
+            "${#,,}",
+            "${#[0]}",
+            "${#v@Q}",
+            "${#v:1}",
+            "${#v#a}",
+            "${#v/a/b}",
+            "${#v-x}",
+            "${#1v}",
+            "${#v w}",
+            "${# v}",
+            "${#$v}",
+            "${#a[1]@Q}",
+        ] {
+            let (out, _) = run(&format!("v=abcde; a=(x yy); {{ echo \"[{body}]\"; }} 2>&1"));
+            assert_eq!(
+                out,
+                format!("osh: [{body}]: bad substitution\n"),
+                "for {body}"
+            );
+        }
+        // `run_script`, not `run`: the `!` here does not directly follow the
+        // `${`, so history expansion would still read it as an event designator.
+        assert_eq!(
+            run_script("v=abcde; { echo \"[${#!v}]\"; } 2>&1").0,
+            "osh: line 1: [${#!v}]: bad substitution\n"
+        );
+    }
+
+    #[test]
+    fn length_specials_take_only_an_operator() {
+        // `$#`, `$?` and `$-` are the three specials that `${#…}` also spells as
+        // a length, and bash's parser reads them through that same path — so
+        // what may follow one of them is exactly the set of characters that open
+        // an operator, and nothing else. The other specials are unrestricted.
+        for name in ["#", "?", "-"] {
+            for op in ["^", "^^", ",", ",,", "[0]", "[@]"] {
+                let body = format!("${{{name}{op}}}");
+                let (out, _) = run(&format!("set -- a b; {{ echo \"[{body}]\"; }} 2>&1"));
+                assert_eq!(
+                    out,
+                    format!("osh: [{body}]: bad substitution\n"),
+                    "for {body}"
+                );
+            }
+            // An operator, though, is fine.
+            let (out, _) = run(&format!("set -- a b; echo [${{{name}:+y}}]"));
+            assert_eq!(out, "[y]\n", "for {name}");
+        }
+        assert_eq!(run("set -- ab cd; echo [${@^}] [${*^}] [${1^}]").0, "[Ab Cd] [Ab Cd] [Ab]\n");
+        // A subscript belongs to an identifier and to nothing else, so it is a
+        // bad substitution on every special and on a positional too.
+        for name in ["@", "*", "$", "0", "1"] {
+            let body = format!("${{{name}[0]}}");
+            let (out, _) = run(&format!("set -- a b; {{ echo \"[{body}]\"; }} 2>&1"));
+            assert_eq!(
+                out,
+                format!("osh: [{body}]: bad substitution\n"),
+                "for {body}"
+            );
+        }
+        assert_eq!(run("v=abcde; echo [${v[0]}]").0, "[abcde]\n");
+    }
+
+    #[test]
     fn negated_pipeline_status() {
         let (_, s) = run("! true");
         assert_eq!(s, 1);

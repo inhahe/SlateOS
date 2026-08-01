@@ -38,6 +38,14 @@ Usage
 Exit status: 0 if every case matched (or diverged exactly as waived), 1 if any
 case diverged unexpectedly or a waived case unexpectedly matched, 2 on a setup
 error (no osh binary, no reference bash).
+
+Load
+----
+A full sweep is minutes of two shells starting thousands of children, so the
+host can run out of room for one. Both a timeout and a failure to *start* a
+child (Windows `ERROR_COMMITMENT_LIMIT`, POSIX `EAGAIN`) are treated as a
+failed measurement rather than an answer, and the case is measured once more;
+only the second failure is reported, and it says which kind it was.
 """
 
 from __future__ import annotations
@@ -198,18 +206,39 @@ def run_case(shell: Path, case: Case) -> Run:
     )
 
 
-def measure(shell: Path, case: Case) -> Run:
-    """Run one case, retrying once if it times out.
+# Windows `ERROR_COMMITMENT_LIMIT` (1455): the system could not reserve backing
+# store for a new process. It is a host limit, not an answer — see `starved`.
+_STARVED = (
+    "os error 1455",
+    "The paging file is too small",
+    "Resource temporarily unavailable",  # POSIX EAGAIN from fork(2)
+)
 
-    A timeout is not an answer to compare against — it says the measurement
+
+def starved(run: Run) -> bool:
+    """Whether this run failed to *start* a child rather than answering.
+
+    The cases that keep several children alive at once are the first to be
+    refused a process when the host is out of commit charge or process slots,
+    and the refusal reaches us as an ordinary error message from the shell —
+    so without this check it reads as a divergence from the other shell, whose
+    children were started at a different moment and survived.
+    """
+    return any(m in run.stdout or m in run.stderr for m in _STARVED)
+
+
+def measure(shell: Path, case: Case) -> Run:
+    """Run one case, retrying once if it times out or could not spawn a child.
+
+    Neither outcome is an answer to compare against — both say the measurement
     itself failed to complete, and the usual cause is the machine being busy
     (both shells run every case, and a full sweep is minutes of load) rather
     than anything wrong with the shell. So retry once: that costs nothing on a
-    healthy run, and a case that exceeds its budget twice in a row is a real
-    hang rather than a slow moment.
+    healthy run, and a case that exceeds its budget — or is refused a process —
+    twice in a row is a real hang or a real shell bug rather than a bad moment.
     """
     run = run_case(shell, case)
-    if run.timed_out:
+    if run.timed_out or starved(run):
         run = run_case(shell, case)
     return run
 
@@ -297,6 +326,12 @@ def main() -> int:
         if diffs:
             failures += 1
             print(f"X {case.name}")
+            # A retry has already been spent, so this one is being reported —
+            # but say so, since "the host would not start a process" is a very
+            # different thing to chase than a shell divergence.
+            if starved(bash_run) or starved(osh_run):
+                print("    (a child could not be started, twice — the host is")
+                print("     out of commit charge or process slots, not the shell)")
             print("\n".join(diffs))
             continue
         print(f". {case.name}")

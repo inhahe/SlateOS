@@ -290,10 +290,12 @@ enum Expr {
     BitNot(Box<Expr>),
     /// A binary operation; the operator is one of the [`apply`]/short-circuit
     /// tokens (`+`, `-`, `*`, `/`, `%`, `**`, `<<`, `>>`, comparisons, `&`,
-    /// `^`, `|`, `&&`, `||`). The final field is the RHS's source text (from
-    /// the right operand's start to the end of the expression) — used as bash's
-    /// "error token" for an eval-time failure such as division by zero; `None`
-    /// for operators that cannot fail at evaluation.
+    /// `^`, `|`, `&&`, `||`). The final field is bash's "error token" for an
+    /// eval-time failure — a slice of the source running to the end of the
+    /// expression, whose start bash picks differently per operator (see
+    /// `parse_binary`): the right operand's for `/` and `%`, the token
+    /// *following* the exponent for `**`. `None` for operators that cannot fail
+    /// at evaluation.
     Bin(String, Box<Expr>, Box<Expr>, Option<Box<[u8]>>),
     /// `cond ? then : else`.
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
@@ -397,14 +399,23 @@ const RECURSION_LIMIT: u32 = 128;
 /// way bash does: `b="a"` with `a=5` yields `5`, `x="2+3"` yields `5`, and an
 /// unset/empty value yields `0`. `depth` guards against reference cycles.
 fn str_to_val(s: BStr<'_>, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
-    let t = bytes::trim(s);
-    if t.is_empty() {
+    // Only the *front* is trimmed. bash's lexer skips leading whitespace as a
+    // matter of course, and its diagnostic skips it again when echoing the
+    // failing value — but trailing whitespace is simply part of the string
+    // being lexed, so an error token that runs to the end of the value carries
+    // it: `x='1 + '; $(( x ))` reports `1 + : … (error token is "+ ")`, with
+    // both the echoed expression and the token keeping the final space.
+    let t = bytes::trim_start(s);
+    // The fast paths ask about the value's *content*, so they look past the
+    // trailing whitespace that only the diagnostics care about.
+    let core = bytes::trim_end(t);
+    if core.is_empty() {
         return Ok(0);
     }
     // Fast path: a plain decimal literal (the overwhelmingly common case — loop
     // counters, sizes) needs no re-parse. A leading zero means octal, so defer
     // those (and hex / `base#n` / sub-expressions) to the full parser below.
-    if let Some(n) = plain_decimal(t) {
+    if let Some(n) = plain_decimal(core) {
         return Ok(n);
     }
     if depth >= RECURSION_LIMIT {
@@ -759,11 +770,30 @@ impl AParser<'_> {
             self.pos += op.len();
             let next_min = if right { bp } else { bp + 1 };
             self.skip_ws();
-            // Capture the RHS source (from here to end of input) for the
-            // operators that can fail at evaluation — bash reports it as the
-            // "error token" of a division-by-zero / negative-exponent failure.
-            let rhs_tok = matches!(op, "/" | "%" | "**").then(|| self.rest_from(self.pos));
+            // `/` and `%` report a division by zero against the right operand:
+            // bash's `exp2` saves the cursor just before reading it and points
+            // the diagnostic back there, so `1/0/0` names `0/0`, not the `0`
+            // that was actually zero. Capture the same cursor.
+            let rhs_tok = matches!(op, "/" | "%").then(|| self.rest_from(self.pos));
             let rhs = self.parse_binary(next_min)?;
+            // `**` saves no such cursor — `exp_power` just calls `evalerror` —
+            // so a negative exponent is reported against whatever token the
+            // lexer happens to be holding. bash reads one token ahead, so that
+            // is the token *following* the exponent: `2**-1+9` names `+9` and
+            // `2**-1*8` names `*8`, neither of which is part of the exponent at
+            // all. At end of input the lexer reads no further token and keeps
+            // the previous one, so the exponent's own last token is named
+            // instead (`2**-1` names `1`, and `2**(-1)` names the `)`).
+            let rhs_tok = if op == "**" {
+                self.skip_ws();
+                Some(if self.pos == self.src.len() {
+                    self.rest_from(self.last_tok_start)
+                } else {
+                    self.rest_from(self.pos)
+                })
+            } else {
+                rhs_tok
+            };
             lhs = Expr::Bin(
                 op.to_string(),
                 Box::new(lhs),
@@ -1345,6 +1375,27 @@ fn store_rlv(loc: &ResolvedLv, v: i64, vars: &mut dyn VarLookup) -> Result<(), A
     }
 }
 
+/// `base ** exp` the way bash computes it: binary exponentiation over the full
+/// 64-bit exponent, every multiplication wrapping.
+///
+/// `exp` is a whole `intmax_t` in bash, not a narrow count — there is no
+/// "exponent too large", because the squaring loop simply runs out of bits.
+/// The result is the same as the mathematical power reduced modulo 2⁶⁴, so
+/// `$(( 3**4294967296 ))` is a perfectly ordinary (if meaningless) number
+/// rather than an error. `exp` is non-negative at every call site, so the
+/// arithmetic right shift terminates.
+fn ipow(base: i64, exp: i64) -> i64 {
+    let (mut base, mut exp, mut result) = (base, exp, 1i64);
+    while exp != 0 {
+        if exp & 1 != 0 {
+            result = result.wrapping_mul(base);
+        }
+        exp >>= 1;
+        base = base.wrapping_mul(base);
+    }
+    result
+}
+
 fn apply(op: &str, a: i64, b: i64) -> Result<i64, ArithError> {
     Ok(match op {
         "+" => a.wrapping_add(b),
@@ -1354,8 +1405,7 @@ fn apply(op: &str, a: i64, b: i64) -> Result<i64, ArithError> {
             if b < 0 {
                 return Err(ArithError::new("exponent less than 0"));
             }
-            let exp = u32::try_from(b).map_err(|_| ArithError::new("exponent too large"))?;
-            a.wrapping_pow(exp)
+            ipow(a, b)
         }
         "/" => {
             if b == 0 {
@@ -1667,6 +1717,39 @@ mod tests {
     }
 
     #[test]
+    fn a_values_trailing_whitespace_survives_into_the_diagnostic() {
+        // bash lexes a variable's value exactly as stored. Its lexer skips
+        // leading whitespace, and `evalerror` skips it again when echoing the
+        // value — but trailing whitespace is simply part of the string, so an
+        // error token running to the end of the value carries it. Trimming the
+        // tail (as trimming the head would suggest) loses a space bash prints:
+        // `x='1 + '; $(( x ))` reports `1 + : … (error token is "+ ")`.
+        let mut m = StrMap::default();
+        m.0.insert("x".into(), "  1 +  ".into());
+        let e = eval(b"x", &mut m).unwrap_err();
+        assert_eq!(e.expr_override.as_deref(), Some(&b"1 +  "[..]));
+        assert_eq!(e.body(), b"syntax error: operand expected (error token is \"+  \")");
+        // Same for a failure raised during evaluation rather than parsing.
+        m.0.insert("d".into(), " 1/0 ".into());
+        let e = eval(b"d", &mut m).unwrap_err();
+        assert_eq!(e.expr_override.as_deref(), Some(&b"1/0 "[..]));
+        assert_eq!(e.body(), b"division by 0 (error token is \"0 \")");
+        // …and for the recursion guard, whose token is the value itself.
+        m.0.insert("r".into(), " r ".into());
+        let e = eval(b"r", &mut m).unwrap_err();
+        assert_eq!(e.expr_override.as_deref(), Some(&b"r "[..]));
+        assert_eq!(e.token.as_deref(), Some(&b"r "[..]));
+        // The whitespace is cosmetic only: a value that evaluates still does,
+        // including through the octal and plain-decimal fast paths.
+        m.0.insert("w".into(), " 010 ".into());
+        assert_eq!(eval(b"w", &mut m).unwrap(), 8);
+        m.0.insert("p".into(), " 5 ".into());
+        assert_eq!(eval(b"p", &mut m).unwrap(), 5);
+        m.0.insert("b".into(), "   ".into());
+        assert_eq!(eval(b"b", &mut m).unwrap(), 0);
+    }
+
+    #[test]
     fn recursive_variable_cycle_is_bounded() {
         let mut m = StrMap::default();
         m.0.insert("x".into(), "x".into()); // self-reference
@@ -1755,6 +1838,29 @@ mod tests {
         assert_eq!(ev("2 ** 2 * 3"), 12);
         // Negative exponent is an error.
         assert!(eval(b"2 ** -1", &mut Map::default()).is_err());
+    }
+
+    #[test]
+    fn an_exponent_is_never_too_large() {
+        // bash's `ipow` squares its way through the *whole* 64-bit exponent, so
+        // an exponent past 2³² is arithmetic, not an error: the result is the
+        // mathematical power reduced modulo 2⁶⁴. (Narrowing the exponent to a
+        // `u32` first, as `i64::wrapping_pow` requires, would have to invent a
+        // refusal bash does not have.) Values checked against bash 5.2.37.
+        assert_eq!(ev("2**4294967296"), 0);
+        assert_eq!(ev("3**4294967296"), 2_491_309_678_558_969_857);
+        assert_eq!(ev("7**4294967297"), -5_799_782_102_597_631_993);
+        assert_eq!(ev("1**4294967296"), 1);
+        assert_eq!(ev("0**4294967296"), 0);
+        assert_eq!(ev("(-1)**4294967297"), -1);
+        assert_eq!(ev("2**9223372036854775807"), 0);
+        // …and the ordinary cases keep the sign and wrapping they always had.
+        assert_eq!(ev("2**63"), i64::MIN);
+        assert_eq!(ev("2**64"), 0);
+        assert_eq!(ev("0**0"), 1);
+        assert_eq!(ev("(-3)**3"), -27);
+        assert_eq!(ev("(-3)**4"), 81);
+        assert_eq!(ev("10**19"), -8_446_744_073_709_551_616);
     }
 
     #[test]
@@ -1904,6 +2010,24 @@ mod tests {
             ("1%0", "division by 0 (error token is \"0\")"),
             ("1/(0)", "division by 0 (error token is \"(0)\")"),
             ("1/0/0", "division by 0 (error token is \"0/0\")"),
+            ("1/0+5", "division by 0 (error token is \"0+5\")"),
+            // `**` is the one eval-time failure bash does *not* report against
+            // its right operand: `exp_power` saves no cursor, so the token is
+            // whichever one the lexer is holding — and it reads one ahead, so
+            // that is the token *following* the exponent.
+            ("2**-1+9", "exponent less than 0 (error token is \"+9\")"),
+            ("2**-1*8", "exponent less than 0 (error token is \"*8\")"),
+            ("1+2**-3+4", "exponent less than 0 (error token is \"+4\")"),
+            ("2**-1==0", "exponent less than 0 (error token is \"==0\")"),
+            ("1?2**-1:0", "exponent less than 0 (error token is \":0\")"),
+            // …and at end of input there is no next token, so the lexer keeps
+            // holding the exponent's own last one.
+            ("2**-1", "exponent less than 0 (error token is \"1\")"),
+            ("5 ** -1 ", "exponent less than 0 (error token is \"1 \")"),
+            ("2**(-1)", "exponent less than 0 (error token is \")\")"),
+            ("2**-(1)", "exponent less than 0 (error token is \")\")"),
+            // Right-associative, so the inner `**` fails first and names its own.
+            ("2**2**-1", "exponent less than 0 (error token is \"1\")"),
             ("5 +", "syntax error: operand expected (error token is \"+\")"),
             ("3 * ", "syntax error: operand expected (error token is \"* \")"),
             ("* 3", "syntax error: operand expected (error token is \"* 3\")"),

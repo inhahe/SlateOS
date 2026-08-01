@@ -4086,7 +4086,15 @@ impl Shell {
             self.vars
                 .entry(name.clone())
                 .or_insert_with(|| bytes::os_to_bytes(&v));
-            self.exported.insert(name);
+            // `_` comes in without its exported mark. The parent put it in the
+            // environment to name the program it was running, and bash keeps it
+            // as a plain variable that every command rebinds — exporting it
+            // would leak this shell's `$_` into every child, where the value
+            // belongs to the child's own program (see
+            // [`Self::child_underscore`]).
+            if name != "_" {
+                self.exported.insert(name);
+            }
         }
         // bash increments $SHLVL for each nested shell invocation: an unset or
         // non-numeric value becomes 1, otherwise the inherited level + 1. The
@@ -5669,7 +5677,7 @@ impl Shell {
             // The child inherits *this* shell's directory, which is not the
             // process's once we are inside a subshell clone.
             pc.current_dir(bytes::bytes_to_path(&self.cwd));
-            self.apply_child_env(&mut pc, &assigns);
+            self.apply_child_env(&mut pc, &assigns, Some(program));
 
             // stdin: the first stage takes the pipeline's own input; later
             // stages read the previous pipe (or a closed/null stream if the
@@ -7873,7 +7881,7 @@ impl Shell {
         // `set -a` (allexport): any assigned variable is given the export
         // attribute automatically.
         if self.allexport {
-            self.exported.insert(base.clone());
+            self.mark_exported(base.clone());
         }
         // A bad `-i` expression stores nothing; the abort it armed ends the
         // command, so `false` here needs no diagnostic of its own.
@@ -8203,7 +8211,7 @@ impl Shell {
         // `set -a` (allexport): any assigned variable is given the export
         // attribute automatically.
         if self.allexport {
-            self.exported.insert(a.name.clone());
+            self.mark_exported(a.name.clone());
         }
         let is_assoc = self.assoc.contains_key(&a.name);
         // A failing expansion in the value arms an abort (`discard_error`); what
@@ -12248,7 +12256,9 @@ impl Shell {
         if xopts.is_some_and(|x| x.clear_env) {
             cmd.env_clear();
         } else {
-            self.apply_child_env(&mut cmd, assigns);
+            // An `exec` replaces the shell rather than forking a child, and bash
+            // adds no `_` to that environment — hence the `None` for it.
+            self.apply_child_env(&mut cmd, assigns, xopts.is_none().then_some(&*argv[0]));
         }
 
         // stdin — a here-doc/here-string body takes precedence, then a file
@@ -12843,7 +12853,7 @@ impl Shell {
             // with an empty cursor.) Nothing that *is* redirected reaches here:
             // a command with redirections declines the shortcut.
             cmd.stdin(Stdio::null());
-            self.apply_child_env(&mut cmd, &[]);
+            self.apply_child_env(&mut cmd, &[], Some(&argv[0]));
             let id = self.next_job_id();
             let (pid, child, status) = match cmd.spawn() {
                 Ok(child) => (child.id(), Some(JobBody::Process(child)), None),
@@ -17194,7 +17204,19 @@ impl Shell {
     /// Values go across as `OsString`, never as text: an exported variable may
     /// hold any byte sequence, and re-encoding it would hand the child a
     /// different value than the shell holds (TD-OILS-BYTE-STRINGS).
-    fn apply_child_env(&self, pc: &mut PCommand, assigns: &[(String, Str)]) {
+    /// `program`, when given, is the command word about to be run: it puts a `_`
+    /// in the child's environment naming the program (see
+    /// [`Self::child_underscore`]). `None` suppresses that, for the one caller
+    /// that is not forking a child — `exec`.
+    fn apply_child_env(
+        &mut self,
+        pc: &mut PCommand,
+        assigns: &[(String, Str)],
+        program: Option<BStr<'_>>,
+    ) {
+        // Resolved up front: the `$PATH` search behind it may hash the command
+        // it finds, and nothing below may be borrowing the shell when it does.
+        let underscore = program.map(|w| self.child_underscore(w));
         // When the shell owns its environment (imported at startup), spawn from
         // a cleared base so an `unset`/non-exported variable does not leak in
         // via the parent process's inherited environment.
@@ -17226,6 +17248,45 @@ impl Shell {
         for (k, v) in assigns {
             pc.env(k, bytes::bytes_to_os(v));
         }
+        // Last, so it beats both an exported `_` and an `_=…` written as a
+        // prefix — bash lets neither of those reach the child.
+        if let Some(u) = &underscore {
+            pc.env("_", bytes::bytes_to_os(u));
+        }
+    }
+
+    /// Give `name` the export attribute.
+    ///
+    /// Every way of asking for one — `export`, `declare -x`, `set -a` — comes
+    /// through here, because they all share the one exception: bash never marks
+    /// `_` exported. `export _` is accepted and quietly does nothing, and an
+    /// inherited `_` arrives unmarked, so the name never reaches `export -p`
+    /// and this shell's `$_` never leaks into a child. What the child does see
+    /// under that name is its own program (see [`Self::child_underscore`]).
+    fn mark_exported(&mut self, name: String) {
+        if name != "_" {
+            self.exported.insert(name);
+        }
+    }
+
+    /// The `_` bash puts in an executed command's environment: the program that
+    /// command is about to run.
+    ///
+    /// A word that already spells a path is handed over exactly as written (so
+    /// `./env` stays `./env`) — no `$PATH` search happened, and there is nothing
+    /// to resolve it to. A bare name becomes the path the search found, or, when
+    /// the search found nothing, itself: the OS is about to be asked to locate
+    /// it, and bash names it the same way it will report failing to run it.
+    ///
+    /// This entry exists only in the child. `_` is never an exported shell
+    /// variable in bash — `export _` does not make it one — which is also why an
+    /// imported `_` must be stripped of its exported mark at startup.
+    fn child_underscore(&mut self, word: BStr<'_>) -> Str {
+        if word.contains(&b'/') || word.contains(&b'\\') {
+            return word.to_vec();
+        }
+        self.resolve_external(word)
+            .map_or_else(|| word.to_vec(), |p| shell_path(&p))
     }
 
     /// [`Shell::resolve`] plus the host device-name mapping
@@ -21827,7 +21888,7 @@ impl Shell {
                     if unexport {
                         self.exported.remove(&k);
                     } else {
-                        self.exported.insert(k);
+                        self.mark_exported(k);
                     }
                     status = 1;
                     continue;
@@ -21843,7 +21904,7 @@ impl Shell {
                     if unexport {
                         self.exported.remove(&k);
                     } else {
-                        self.exported.insert(k);
+                        self.mark_exported(k);
                     }
                     continue;
                 }
@@ -21861,7 +21922,7 @@ impl Shell {
                 if unexport {
                     self.exported.remove(&k);
                 } else {
-                    self.exported.insert(k);
+                    self.mark_exported(k);
                 }
             } else if unexport {
                 self.exported.remove(&k);
@@ -21877,7 +21938,7 @@ impl Shell {
                     // still unset, but reportable. See [`Shell::declared`].
                     self.declared.insert(k.clone());
                 }
-                self.exported.insert(k);
+                self.mark_exported(k);
             }
         }
         status
@@ -23530,7 +23591,7 @@ impl Shell {
                 if unset_export {
                     self.exported.remove(base_name);
                 } else if export {
-                    self.exported.insert(base_name.to_string());
+                    self.mark_exported(base_name.to_string());
                 }
                 if readonly && !unset_readonly {
                     self.readonly.insert(base_name.to_string());
@@ -23649,7 +23710,7 @@ impl Shell {
             if unset_export {
                 self.exported.remove(name);
             } else if export {
-                self.exported.insert(name.to_string());
+                self.mark_exported(name.to_string());
             }
             // Mark readonly *after* the (initial) value is bound so the value is
             // accepted; subsequent assignments then hit the guard above.
@@ -24673,7 +24734,7 @@ impl Shell {
             if unset_export {
                 self.exported.remove(target);
             } else if export {
-                self.exported.insert(target.clone());
+                self.mark_exported(target.clone());
             }
             if readonly && !unset_readonly {
                 self.readonly.insert(target.clone());
@@ -41737,6 +41798,23 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn underscore_is_never_an_exported_variable() {
+        // Every way of asking is accepted and quietly does nothing: the name is
+        // still plain afterwards, and never appears in `export -p`. bash keeps
+        // `_` out of the export set because the `_` a child sees names the
+        // child's own program, not this shell's last word.
+        for req in ["export _", "export _=v", "declare -x _", "typeset -x _", "set -a"] {
+            let script = format!("{req}; declare -p _; export -p");
+            let (out, code) = run_script(&script);
+            assert_eq!(code, 0, "{req}");
+            assert!(out.starts_with("declare -- _="), "{req}: {out}");
+            assert!(!out.contains("declare -x _"), "{req}: {out}");
+        }
+        // `set -a` still exports every *other* assignment made under it.
+        assert_eq!(run("set -a; _=x; v=1; declare -p v").0, "declare -x v=\"1\"\n");
+    }
+
+    #[test]
     fn special_var_bash_command() {
         // $BASH_COMMAND holds the *unexpanded* source of the running command.
         assert_eq!(run("echo $BASH_COMMAND").0, "echo $BASH_COMMAND\n");
@@ -52934,7 +53012,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.exported.insert("SPELLABLE".to_string());
 
         let mut pc = PCommand::new("true");
-        sh.apply_child_env(&mut pc, &[("PREFIX".to_string(), b"set".to_vec())]);
+        sh.apply_child_env(&mut pc, &[("PREFIX".to_string(), b"set".to_vec())], None);
 
         let envs: Vec<(OsString, Option<OsString>)> = pc
             .get_envs()
@@ -52955,6 +53033,45 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             at(&OsString::from("PREFIX")),
             Some(Some(OsString::from("set"))),
         );
+        // No program named, so no `_` — this stands in for `exec`, the one
+        // caller that is not forking a child.
+        assert_eq!(at(&OsString::from("_")), None, "{envs:?}");
+    }
+
+    #[test]
+    fn a_child_gets_an_underscore_naming_its_own_program() {
+        let mut sh = Shell::new();
+        // A word that already spells a path is handed over exactly as written:
+        // no `$PATH` search happened, so there is nothing to resolve it to.
+        for word in ["./env", "/usr/bin/env", "d/x"] {
+            let mut pc = PCommand::new("true");
+            sh.apply_child_env(&mut pc, &[], Some(word.as_bytes()));
+            let got = pc
+                .get_envs()
+                .find(|(k, _)| *k == OsStr::new("_"))
+                .and_then(|(_, v)| v.map(std::ffi::OsStr::to_os_string));
+            assert_eq!(got, Some(OsString::from(word)));
+        }
+        // A bare name the `$PATH` search cannot place names itself: the OS is
+        // about to be asked to find it, and bash reports failure the same way.
+        let mut pc = PCommand::new("true");
+        sh.apply_child_env(&mut pc, &[], Some(b"no-such-program-anywhere"));
+        let got = pc
+            .get_envs()
+            .find(|(k, _)| *k == OsStr::new("_"))
+            .and_then(|(_, v)| v.map(std::ffi::OsStr::to_os_string));
+        assert_eq!(got, Some(OsString::from("no-such-program-anywhere")));
+        // The entry is the child's alone, and beats anything the shell might
+        // have put under that name — an exported `_` is impossible, but an
+        // `_=…` written as a prefix is not.
+        let mut pc = PCommand::new("true");
+        sh.apply_child_env(&mut pc, &[("_".to_string(), b"custom".to_vec())], Some(b"./env"));
+        let unders: Vec<Option<OsString>> = pc
+            .get_envs()
+            .filter(|(k, _)| *k == OsStr::new("_"))
+            .map(|(_, v)| v.map(std::ffi::OsStr::to_os_string))
+            .collect();
+        assert_eq!(unders, vec![Some(OsString::from("./env"))]);
     }
 
     #[test]

@@ -40,4 +40,15 @@ printf 'after unset  |%s|\n' "$_"
 printf 'after _=      |%s|\n' "$_"
 : A; _=custom :
 printf 'prefix _=     |%s|\n' "$_"
+
+# The `_` a child sees is its own program, not the shell's `$_`; and `_` is
+# never an exported shell variable, so neither an `export _` nor an `_=…`
+# written as a prefix can put anything else there. (The value is a pathname,
+# so only its last component is portable between hosts.)
+prog() { env | sed -n 's|^_=.*[/\]||p' | sed 's/\.exe$//'; }
+: A; prog
+export _; : A; prog
+_=custom env | sed -n 's|^_=.*[/\]||p' | sed 's/\.exe$//'
+_=custom env | grep -c '^_=custom$'
+printf 'exported?    |%s|\n' "$(export -p | grep -c '^declare -x _=')"
 echo "=== done"

@@ -9555,7 +9555,7 @@ impl Shell {
         if index.is_none() && matches!(refname, "@" | "*") && self.positional.is_empty() {
             return Ok(None);
         }
-        if index.is_some() && !self.var_is_set(refname) {
+        if index.is_some() && !self.ref_name_exists(refname) {
             let src = Self::indirect_ref_src(refname, index);
             self.berrln(&bfmt![
                 self.err_prefix(),
@@ -9723,7 +9723,7 @@ impl Shell {
         if index.is_none() && self.nameref_attr.contains(refname) {
             return None;
         }
-        if index.is_some() && !self.var_is_set(refname) {
+        if index.is_some() && !self.ref_name_exists(refname) {
             return None;
         }
         let ElemValue::Value(target) = self.param_elem_lookup(refname, index) else {
@@ -15497,11 +15497,55 @@ impl Shell {
         }
     }
 
-    /// Whether a variable is "set" for `-v` / `test -v`. Accepts a plain scalar
-    /// name, an array/associative name (set if the array exists), or an explicit
-    /// element reference `name[subscript]` (set if that element exists). Special
-    /// parameters (`$?`, `$#`, positional `$1`, …) count as set when they have a
-    /// value.
+    /// Whether an array or associative array holds an element 0 — the element a
+    /// bare name addresses when it is asked about as a reference.
+    ///
+    /// An associative array's subscripts are strings, so what counts there is a
+    /// literal `0` key rather than a position.
+    fn element_zero_exists(&self, name: &str) -> bool {
+        if let Some(map) = self.assoc.get(name) {
+            return map.iter().any(|(k, _)| k.as_slice() == b"0");
+        }
+        self.arrays.get(name).is_some_and(|a| a.contains_key(&0))
+    }
+
+    /// Whether a parameter the shell answers for by *name* has a value.
+    ///
+    /// A positional parameter counts, `$0` included, and so does an identifier
+    /// backed by something other than the variable tables. The shell's
+    /// *punctuation* parameters do not: the lookup behind `-v` only ever answers
+    /// about something it can name, so `-v @`, `-v *`, `-v #`, `-v ?`, `-v $`,
+    /// `-v !` and `-v -` are all false however much of a value the parameter
+    /// has. (`_` is not among them — it is a perfectly ordinary identifier, and
+    /// `-v _` says yes.)
+    fn named_param_is_set(&self, name: &str) -> bool {
+        if !name.bytes().all(|b| b.is_ascii_digit()) && !lexer::is_valid_name(name.as_bytes()) {
+            return false;
+        }
+        self.param_value(name).is_some()
+    }
+
+    /// Whether `name` names a variable at all — what an indirection's pointer
+    /// has to be for there to be anything to indirect through.
+    ///
+    /// Deliberately not [`Shell::var_is_set`]: `-v` asks about a *reference* and
+    /// reads a bare array name as that array's element 0, whereas indirecting
+    /// through an array whose element 0 is missing is still a valid indirection
+    /// — bash's `q=(); echo "${!q[0]}"` is empty rather than an error.
+    fn ref_name_exists(&self, name: &str) -> bool {
+        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
+            return false;
+        };
+        self.vars.contains_key(name)
+            || self.arrays.contains_key(name)
+            || self.assoc.contains_key(name)
+            || self.named_param_is_set(name)
+    }
+
+    /// Whether a reference is "set" for `-v` / `test -v`. Accepts a plain scalar
+    /// name, an array/associative name (which addresses that array's element 0),
+    /// or an explicit element reference `name[subscript]`. Special parameters
+    /// (`$?`, `$#`, positional `$1`, …) count as set when they have a value.
     fn var_is_set(&self, name: &str) -> bool {
         // Explicit element reference `name[subscript]`.
         if let Some(open) = name.find('[')
@@ -15531,22 +15575,20 @@ impl Shell {
         let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             return false;
         };
-        if self.vars.contains_key(name)
-            || self.arrays.contains_key(name)
-            || self.assoc.contains_key(name)
-        {
+        if self.vars.contains_key(name) {
             return true;
         }
-        // A positional parameter is set iff it resolves to a value, `$0`
-        // included. The shell's *punctuation* parameters are a different matter:
-        // bash's `-v` only ever answers about something it can look up by name,
-        // so `-v @`, `-v *`, `-v #`, `-v ?`, `-v $`, `-v !` and `-v -` are all
-        // false however much of a value the parameter has. (`_` is not among
-        // them — it is a perfectly ordinary identifier, and `-v _` says yes.)
-        if !name.bytes().all(|b| b.is_ascii_digit()) && !lexer::is_valid_name(name.as_bytes()) {
-            return false;
+        // An unsubscripted array name is not asking whether the *array* exists:
+        // bash reads `name` as `name[0]`, so an array whose element 0 is missing
+        // answers no however many other elements it holds. That covers the empty
+        // `a=()`, the bare `declare -a q`, one built from `[1]=` upwards, one
+        // whose element 0 was unset, and an associative array without a literal
+        // `0` key — `-v BASH_ALIASES` is false for exactly this reason, while
+        // `-v BASH_SOURCE` is true because its element 0 is the script.
+        if self.arrays.contains_key(name) || self.assoc.contains_key(name) {
+            return self.element_zero_exists(name);
         }
-        self.param_value(name).is_some()
+        self.named_param_is_set(name)
     }
 
     /// Resolve a variable name through any nameref chain (`declare -n`),

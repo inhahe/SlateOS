@@ -26682,6 +26682,50 @@ be `BadFd` and can pass its own. Fold in
 `TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING` at the same time, since the same
 `fd`-versus-default test applies here.
 
+### TD-OILS-WAIT-NOARGS-LEAVES-A-JOB-FOR-WAIT-N. an argument-less `wait` sometimes does not consume the job it waited for — OPEN (rare race) — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — the `wait` builtin's no-job-spec path
+and the bookkeeping (`Job::notified` / the reaped-status memory) that decides
+whether `wait -n` still considers a job pending.
+
+**Reproduce:** intermittent; seen once in a full corpus run (`corpus19.log`),
+not in 16 targeted attempts including eight concurrent runs under six spinning
+CPU hogs. `tests/corpus/jobs-wait.sh`:
+
+```sh
+VAR=stale; ( exit 3 ) & wait -p VAR; echo "p-noargs=$? [${VAR-unset}]"
+VAR=stale; wait -n -p VAR;           echo "p-nothing=$? [${VAR-unset}]"
+```
+
+| | bash | osh (failing run) |
+|---|---|---|
+| `p-noargs` | `0 [unset]` | `0 [unset]` |
+| `p-nothing` | `127 [unset]` | `3 [900008]` |
+
+**Diagnosis.** `900008` is the synthetic pid of the job started on the *first*
+of those two lines — the ninth thread-backed background job in the file, counting
+from 900000. So the argument-less `wait` on line 1 returned 0 without marking
+that job consumed, and the `wait -n` on line 2 then reported it instead of
+answering "no unwaited-for children". Both lines agreed with bash on the run's
+other 60-odd checks, so the divergence is confined to the purge.
+
+The intermittency points at *which* path the `wait` took: when the body has
+already finished and been reaped by a sweep, `wait` answers from the remembered
+status and purges; when it is still running, `wait` blocks on it, and it is that
+branch that appears not to mark the job. A busy machine makes the second branch
+likely, which is why only the full corpus run has hit it.
+
+**Impact.** `wait; wait -n` reports a stale job's status where bash reports 127.
+Narrow, but it is exactly the shape a script uses to drain a job pool and then
+ask whether anything is left.
+
+**Proper fix.** Make the blocking branch of the no-args `wait` mark every job it
+waited for as reported, the same way the already-reaped branch does — ideally by
+funnelling both branches through one "consume this job" helper rather than
+duplicating the bookkeeping. Then add the two lines above to a corpus case in a
+form that forces the blocking branch (a body that sleeps briefly), so the fix is
+covered rather than merely believed.
+
 ### TD-OILS-ARITH-FOR-LOOP-IS-SLOW. a `for ((…))` loop costs ~9× what bash charges — OPEN — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — the arithmetic-`for` execution path

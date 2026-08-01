@@ -10726,6 +10726,30 @@ impl Shell {
         names
     }
 
+    /// Whether `name` is an array or associative array that exists to be asked
+    /// about — bash's "is this variable an array, and is it visible?".
+    ///
+    /// A declaration is not an assignment, so `declare -a q` leaves the name
+    /// unset and shapeless (bash calls it invisible) while the empty `q=()`
+    /// gives it a shape. [`Shell::array_valued`] is exactly that distinction
+    /// for a name the script assigned; the shell's *own* arrays (`FUNCNAME`,
+    /// `BASH_VERSINFO`, `PIPESTATUS`, …) are materialised into the tables
+    /// without going through an assignment, so they are recognised by having a
+    /// table entry that no bare declaration accounts for.
+    fn array_shape_exists(&self, name: &str) -> bool {
+        // `BASH_ARGC`/`BASH_ARGV` are arrays in bash from startup on, whereas
+        // osh materialises them only from a live `extdebug` frame (a deliberate
+        // deviation — see known-issues.md TD-OILS-MISSING-SPECIAL-ARRAYS). They
+        // are shaped either way; the divergence is in what they hold, and must
+        // not be turned into a fatal one by this question.
+        if matches!(name, "BASH_ARGC" | "BASH_ARGV") {
+            return true;
+        }
+        self.array_valued.contains(name)
+            || ((self.arrays.contains_key(name) || self.assoc.contains_key(name))
+                && !self.declared.contains(name))
+    }
+
     fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> Str {
         // A nounset complaint quotes the reference the writer typed, so it is
         // made about `written` rather than about whatever nameref chain the
@@ -10737,6 +10761,18 @@ impl Shell {
             // `${a[@]}` is empty, `${#a[@]}` is 0.
             return if length { b"0".to_vec() } else { Str::new() };
         };
+        // A subscripted *length* asks about the variable's shape, and under
+        // `set -u` bash faults when there is no shape to ask about: `${#x[0]}`
+        // on a scalar, on a name only declared (`declare -a q`, `export E`), or
+        // on nothing at all reports the base name alone — the subscript is
+        // neither evaluated nor quoted, and the answer comes before any
+        // complaint the subscript would have earned. An array that exists but
+        // is empty (`x=()`, or one whose last element was `unset`) has a shape,
+        // so what counts is the table entry rather than the element.
+        if length && self.unbound_is_error(written) && !self.array_shape_exists(name) {
+            self.raise_unbound(written.as_bytes());
+            return b"0".to_vec();
+        }
         match index {
             ArrayIndex::All | ArrayIndex::Star => {
                 let elems = self.array_elements(name);

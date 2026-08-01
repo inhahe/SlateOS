@@ -25961,10 +25961,10 @@ a single command's status is the pipeline's already, so skipping
 
 Covered by `tests/corpus/pipestatus-is-not-written-by-a-compound-command.sh`.
 
-### TD-OILS-COPROC-IS-NOT-A-JOB. A coproc cannot be waited for, and its endpoints are not real descriptors — OPEN — 2026-08-01
+### TD-OILS-COPROC-IS-NOT-A-JOB. A coproc cannot be waited for, and its endpoints are not real descriptors — half fixed 2026-08-01, endpoint half still OPEN
 
-**Where:** `userspace/oils/src/interp.rs` — `exec_coproc`. It spawns the body on
-a thread and publishes `NAME[0]`/`NAME[1]`/`NAME_PID`, but registers no entry in
+**Where:** `userspace/oils/src/interp.rs` — `exec_coproc`. It spawned the body on
+a thread and published `NAME[0]`/`NAME[1]`/`NAME_PID`, but registered no entry in
 `self.jobs`, and the two array elements are osh-internal fd numbers rather than
 descriptors the rest of the shell can dup.
 
@@ -25977,7 +25977,7 @@ coproc D { sleep 0; }
 exec {w}<&"${D[0]}"
 ```
 
-bash: `wait=0`, and the `exec` is silent. osh:
+bash: `wait=0`, and the `exec` is silent. osh, before the fix:
 
 ```
 wait: pid 900000 is not a child of this shell
@@ -25985,15 +25985,29 @@ wait=127
 12: Bad file descriptor
 ```
 
-**Proper fix.** Register the coproc's thread in the job table under its
-synthetic pid the way `exec_background` does, so `wait`, `jobs` and `kill` all
-find it; and make the published endpoints ordinary entries in the shell's fd
-table so `<&`, `>&` and `exec {v}<&` resolve them like any other number.
+**✅ The job half is fixed.** The body now goes into the job table under the
+synthetic pid that `NAME_PID` publishes, carrying the `coproc …` command text
+that `jobs` prints, so `wait "$NAME_PID"` reaps it and answers its status, a
+bare `wait` waits for it, `jobs` lists it while it runs, and `kill` finds it.
+The thread returns `last_status` (and fires the body's EXIT trap first) the way
+a `&` job's does, and the write-only `coproc_jobs` handle list it used to be
+parked in is gone. Covered by `tests/corpus/coproc-is-a-job.sh`, which prints no
+raw fd number — bash allocates the endpoints near the process's fd limit (63,
+62, …) and osh from 10 up, so the numbers are a property of the host.
 
-**Impact.** `coproc` is usable for the common `echo … >&"${C[1]}"` /
-`read … <&"${C[0]}"` shape and not much beyond it. Found while measuring which
-commands write `${PIPESTATUS[@]}` (a coproc writes none), not by a corpus case
-— nothing in the corpus waits for a coproc yet.
+**Still OPEN — the endpoints.** `${NAME[0]}` lives in `coproc_read_fds`, which
+the `read`/`<&` *input* path consults but the `exec` builtin's fd-alias path
+does not, so `exec {v}<&"${NAME[0]}"` is still "Bad file descriptor". The write
+end is already an ordinary `open_write_fds` entry and needs nothing.
+
+**Proper fix (remaining).** Teach the `exec` builtin's input-alias handling
+about `coproc_read_fds` — an alias of a coproc read end has to share the one
+live pipe, not snapshot bytes the way an `exec 3<file` alias may, so it is a
+`try_clone` of the same handle rather than a copy.
+
+**Impact.** `coproc` now behaves as a job; what remains is aliasing its read end
+onto another descriptor, which a script does to keep the coproc readable after
+`NAME` is unset or to hand it to a redirect that takes a fixed number.
 
 ### TD-OILS-SIGNAL-DEATH-EXIT-STATUS. A child killed by a signal reported the raw Windows exit code, not `128 + sig` — ✅ **RESOLVED 2026-08-01**
 
@@ -26227,3 +26241,41 @@ mean a *genuine* oils bug whose symptom is one of those three strings would be
 measured twice before being reported. None of them is a message oils produces
 itself — they all come from the OS through a spawn failure — so this is safe,
 but a new spawn-related diagnostic should not be worded to collide with them.
+
+### TD-OILS-JOBS-INVISIBLE-IN-A-FORKED-CHILD. `jobs` sees an empty table inside a pipeline stage or a command substitution — OPEN — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — the clone used for a pipeline stage
+and the one used for a command substitution do not carry `self.jobs` across,
+where `clone_for_subshell` (the `( … )` path) does.
+
+**Reproduce:**
+
+```sh
+sleep 2 &
+echo "--- plain";    jobs
+echo "--- piped";    jobs | cat
+echo "--- subshell"; ( jobs )
+echo "--- cmdsub";   echo "[$(jobs)]"
+wait
+```
+
+bash lists the job in all four; osh lists it for the first and the subshell,
+and prints nothing for `jobs | cat` and `$(jobs)`.
+
+**Why.** bash forks for all three, and a forked child inherits the parent's job
+list — it is ordinary process memory. osh's stage/cmdsub clones are built for
+*speed* on the hot path and copy only what a stage was thought to need, so the
+job table was left out; the `( … )` clone, which is not on that path, copies it.
+
+**Proper fix.** Carry the job table into the stage and command-substitution
+clones the way `clone_for_subshell` already does. It must be a **snapshot, not
+a share** — a forked child's `jobs` is a copy, so anything the child does to it
+(waiting, disowning) must not reach the parent. The `child: Option<JobBody>`
+handles cannot be cloned, so the copy has to be handle-less: enough to *list*
+a job (`id`, `pid`, `cmd`, `status`, `signal`, markers) and nothing more, which
+matches bash — a child cannot `wait` for its parent's jobs either.
+
+**Impact.** `jobs` is only wrong when read through a pipe or a substitution,
+which is exactly how a script reads it (`jobs | wc -l`, `n=$(jobs -p)`). Found
+while making a coproc a real job: the probe piped `jobs` through `sed` to blank
+out pids and so saw nothing at all.

@@ -180,6 +180,14 @@ pub fn and_or_src(ao: &AndOr) -> Str {
     flush_here_docs(&and_or_inline(ao))
 }
 
+/// A single command rendered inline, the way `jobs` shows the command a job was
+/// started from. `and_or_src` is the usual entry point — this one exists for the
+/// forms that are a bare [`Command`] with no list around them, such as `coproc`.
+#[must_use]
+pub fn command_src(cmd: &Command) -> Str {
+    flush_here_docs(&command_inline(cmd))
+}
+
 /// And-or list rendered strictly inline (for conditions / command subs). Any
 /// here-document body stays parked for the caller to flush.
 fn and_or_inline(ao: &AndOr) -> Str {

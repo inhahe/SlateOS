@@ -2597,12 +2597,6 @@ pub struct Shell {
     /// *write* endpoint (`NAME[1]`) is stored in [`Shell::open_write_fds`]
     /// instead, so `>&"${NAME[1]}"` needs no write-path changes.
     coproc_read_fds: std::collections::HashMap<i32, RefCell<io::BufReader<std::fs::File>>>,
-    /// Join handles for the background threads running each `coproc` body. Kept
-    /// so the threads are not orphaned bookkeeping-wise; they finish when the
-    /// coproc's stdin reaches EOF (its `NAME[1]` write end drops) and its body
-    /// returns. A subshell clone starts with none (it cannot join the parent's
-    /// threads).
-    coproc_jobs: Vec<std::thread::JoinHandle<()>>,
     /// Temp files backing *input* process substitutions `<(cmd)` created while
     /// expanding the current command's words. Each holds `cmd`'s captured output;
     /// the enclosing command reads it, then it is deleted once the command
@@ -3452,7 +3446,6 @@ impl Shell {
             open_fds: std::collections::HashMap::new(),
             open_write_fds: std::collections::HashMap::new(),
             coproc_read_fds: std::collections::HashMap::new(),
-            coproc_jobs: Vec::new(),
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
             getopts_col: 0,
@@ -6120,7 +6113,7 @@ impl Shell {
             Command::Cond(e) => self.exec_cond(e, out, stdin),
             Command::Arith(raw) => self.exec_arith(raw, out, stdin),
             Command::BraceGroup(p) => self.exec_program(p, out, stdin),
-            Command::Coproc { name, body } => self.exec_coproc(name.as_deref(), body),
+            Command::Coproc { name, body } => self.exec_coproc(name.as_deref(), body, cmd),
             Command::Redirected { inner, redirects } => {
                 self.exec_redirected(inner, redirects, out, stdin)
             }
@@ -7899,7 +7892,6 @@ impl Shell {
                 })
                 .collect(),
             // The subshell cannot join the parent's coproc threads.
-            coproc_jobs: Vec::new(),
             // A subshell manages its own process-substitution lifetimes.
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
@@ -13651,7 +13643,13 @@ impl Shell {
     /// stdin/stdout wired to two OS pipes, and expose the parent-side endpoints
     /// as `NAME[0]` (read the coproc's stdout), `NAME[1]` (write its stdin) plus
     /// the scalar `NAME_PID`. `NAME` defaults to `COPROC`.
-    fn exec_coproc(&mut self, name: Option<&str>, body: &Command) -> Flow {
+    ///
+    /// The body is a background job like any other: it goes into the job table
+    /// under its synthetic pid, so `wait "$NAME_PID"` reaps it and answers its
+    /// status, `wait` with no arguments waits for it, and `jobs` lists it while
+    /// it runs. `whole` is the `coproc …` command as written, which is what
+    /// `jobs` prints.
+    fn exec_coproc(&mut self, name: Option<&str>, body: &Command, whole: &Command) -> Flow {
         let name = name.unwrap_or("COPROC").to_string();
         // Pipe A carries the parent's writes to the coproc's stdin; pipe B
         // carries the coproc's stdout back to the parent.
@@ -13684,10 +13682,13 @@ impl Shell {
             let mut out = Out::Pipe(child_stdout_w);
             let sin = StdinSrc::pipe(child_stdin_r);
             let _ = sub.exec_command(&body_owned, &mut out, &sin);
+            // Fire the body's EXIT trap before reporting, exactly as a `&` job
+            // does — a coproc body is a subshell too.
+            sub.run_exit_trap_out(&mut out, &sin);
+            sub.last_status
             // Dropping `out` (its `PipeWriter`) at scope end closes the coproc's
             // stdout, delivering EOF to the parent's `NAME[0]` reader.
         });
-        self.coproc_jobs.push(handle);
 
         // Parent-side endpoints get fresh descriptors ≥ 10 (never colliding with
         // exec/varfd fds). Read end → the live coproc-read table; write end →
@@ -13703,8 +13704,22 @@ impl Shell {
 
         // Publish `NAME=(read_fd write_fd)` and `NAME_PID`. The body runs as a
         // thread, not an OS process, so `NAME_PID` is a synthetic monotonic id
-        // (best-effort, like other in-process background bodies).
+        // (best-effort, like other in-process background bodies) — the same one
+        // the job table files it under, so `wait "$NAME_PID"` finds it.
         let synth_pid = SYNTH_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self.next_job_id();
+        self.jobs.push(Job {
+            id,
+            pid: synth_pid,
+            child: Some(JobBody::Thread(handle)),
+            cmd: crate::unparse::command_src(whole),
+            status: None,
+            signal: None,
+            no_hup: false,
+            notified: false,
+            exit_seen: false,
+        });
+        self.note_new_job(id);
         let mut elems = BTreeMap::new();
         elems.insert(0usize, read_fd.to_string().into_bytes());
         elems.insert(1usize, write_fd.to_string().into_bytes());

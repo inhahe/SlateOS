@@ -24,11 +24,11 @@
 # same description a third name, and a `3<&-` or a `3> file` in between leaves
 # nothing readable for the `4<&3` to copy.
 #
-# Deliberately absent: `3<&1` / `3<&2`, and `3> out 4<&3` — a dup of a
-# descriptor that is open but has no read half. bash makes the dup and lets
-# the *read* through it fail (`read: read error: 0: …`, naming the fd `read`
-# was pointed at); osh refuses the redirect instead, naming the source. See
-# TD-OILS-TRANSIENT-DUP-SOURCE-IS-NOT-THE-LIST-SO-FAR.
+# Elsewhere: `3<&1` / `3<&2`, and `3> out 4<&3` — a dup of a descriptor that
+# is open but has no read half, where the dup is made and it is the *read*
+# through it that fails. That is the same `dup2` this case is about, asked of
+# a source with the other access mode, and it lives in
+# `dup-copies-the-descriptor-not-the-arrow.sh`.
 #
 # Every persistent probe runs in a subshell so an `exec` cannot reach the next
 # one. Stderr is collected and replayed at the end so it can be compared in a

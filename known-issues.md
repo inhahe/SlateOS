@@ -55,7 +55,7 @@ match bash, so only `read` had the shape.
 Covered by `tests/corpus/read-stops-scanning-options-at-the-first-name.sh`
 plus `read_stops_scanning_options_at_the_first_name`.
 
-### TD-OILS-TRANSIENT-DUP-SOURCE-IS-NOT-THE-LIST-SO-FAR. A transient `N<&M` cannot copy a descriptor that is open but has no read half — 2026-08-01 — OPEN (low priority; the list-local half was resolved 2026-08-01)
+### TD-OILS-TRANSIENT-DUP-SOURCE-IS-NOT-THE-LIST-SO-FAR. A transient `N<&M` cannot copy a descriptor that is open but has no read half — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_dup_in`, the
 `fd >= 3` arms, and `Shell::plan_input_fd`.
@@ -70,24 +70,114 @@ plus `read_stops_scanning_options_at_the_first_name`.
 bash *makes* both dups — fd 1 and a `3> out` are open descriptors, so
 `dup2` succeeds — and lets the failure surface at the read through them:
 `read: read error: 0: Bad file descriptor`, naming fd 0 because that is what
-`read` was pointed at. osh refuses the redirect instead, so the body never
-runs and the message names the source.
+`read` was pointed at. osh refused the redirect instead, so the body never
+ran and the message named the source.
 
-**Proper fix.** An `InputSrc` shape for a descriptor that exists but has no
-read half, so the dup can succeed and the read fail. `InputSrc::Closed` is
-not it — that is *no* descriptor, and the difference shows in whether a
-further `4<&3` may copy it (it may) and in which of the two errors is
-reported. `plan_input_fd`'s `_ => None` arm and the `n == 1` / `n == 2`
-gap in `resolve_dup_in` are the two places that would then answer with it.
+**What it really was.** Measuring the shape turned up a bigger truth than the
+entry was written for: `N<&M` and `N>&M` are *one* operation, `dup2(M, N)`.
+The arrow the dup is written with picks nothing — the copy carries whatever
+access mode fd M had. So `3<&1` gives fd 3 stdout's *write* end (and
+`echo W >&3` through it works), and `4>&3` after a `3< file` gives fd 4 the
+file's *read* end, cursor shared. osh's fd table was input-xor-output, so it
+was wrong in both directions, not just the one the entry described.
 
-**Why not now.** The other half of this entry — a `N<&M` whose fd M was made
-by an earlier entry in the *same* list — was fixed in `a transient N<&M may
-copy a descriptor the same list just made`. What is left is a read through a
-descriptor that was never readable, which scripts write by accident more
-than on purpose, and osh's answer is a clean error rather than a wrong
-result. The corpus case
-`tests/corpus/dup-of-stdin-onto-a-high-descriptor.sh` names it in its header
-as deliberately absent.
+That splits into three separate questions, and the fix keeps them apart:
+
+* **open** decides whether the redirect is made at all — `4<&3` after `3<&-`
+  is refused, `4<&3` after `3> out` is not;
+* a **read half** decides whether `read <&N` finds bytes or `EBADF`;
+* a **write half** decides whether `echo >&N` writes or reports
+  `echo: write error: Bad file descriptor`.
+
+**Fixed** by giving every fd ≥ 3 binding *both* halves. A new
+`InputSrc::WriteOnly` is the mirror of the existing `WriteFd::ReadOnly`: a
+descriptor that is open but has nothing to read. `ExtraFdOp::AliasFd(i32)`
+became `AliasFd(i32, InputFd)` so one plan entry can carry both halves
+(`install_extra_fds` keys on the fd, so two entries would have dropped one);
+`ExtraFdOp::Input` now also records `WriteFd::ReadOnly` and
+`ExtraFdOp::OutputFile` a `write_only_input()`. `plan_input_fd` answers
+`WriteOnly` where it used to answer `None`, and a new `dup_read_half` gives
+both `resolve_dup_in` and `resolve_dup_out` the same answer — because the
+arrow does not enter into it.
+
+The `exec` path is a separate walker over raw redirects
+(`apply_persistent_dup_in` / `apply_persistent_dup_out`, not the `RedirPlan`
+resolvers) and got the same treatment, plus a new `exec_dup_read_half`;
+`apply_persistent_dup_in` had to take `out: &Out` to reach
+`exec_dup_source`. `exec 3< file` and here-docs now record
+`WriteFd::ReadOnly` rather than removing the write entry, and `exec 3> file`
+records a `write_only_input()`.
+
+Covered by `tests/corpus/dup-copies-the-descriptor-not-the-arrow.sh` and the
+unit tests `a_dup_copies_the_descriptor_and_not_the_arrow` and
+`reading_a_standard_write_descriptor_is_an_error_not_end_of_input`. Two
+shapes are deliberately left out and tracked separately:
+TD-OILS-DUP-ONTO-A-STD-FD-IGNORES-THE-SOURCE-MODE and
+TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR.
+
+### TD-OILS-DUP-ONTO-A-STD-FD-IGNORES-THE-SOURCE-MODE. `1<&0` / `2<&0` keeps the standard descriptor's write half instead of the read-only source's — 2026-08-01 — OPEN (low priority)
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_dup_in`, the
+comment at the end that reads "`1<&N` / `2<&N` …", and the `fd <= 2` arm of
+`Shell::apply_persistent_dup_in`.
+
+**Reproduce** (`target/dvscratch/t3/pc.sh`):
+
+```sh
+printf 'one\n' > in
+( exec 0<in; { echo W >&2; } 2<&0 )   # bash: echo: write error: Bad file descriptor
+                                      # osh:  W, on the real stderr
+( exec 0<in; { read -r l <&2; } 2<&0; echo "l=[$l]" )   # bash: l=[one]  osh: EBADF
+```
+
+A dup *onto* fd 1 or fd 2 from a read-only source should leave that fd with
+the source's access mode — readable, and not writable. osh models fds 0, 1
+and 2 as the shell's own streams rather than as entries in `open_fds` /
+`open_write_fds`, so a dup onto one of them has nowhere to put the source's
+mode: the write half stays whatever the standard stream was, and the read
+half is not installed at all.
+
+**Proper fix.** Give the plan a way to say "fd 1 is now this input source and
+has no write half" — the `WriteFd::ReadOnly` / `InputSrc::WriteOnly` pair
+already exists (see TD-OILS-TRANSIENT-DUP-SOURCE-IS-NOT-THE-LIST-SO-FAR),
+but `RedirPlan` has no slot for a read half on fd 1 or fd 2, nor a
+write-suppression flag for them. That slot is the work.
+
+**Why not now.** `1<&0` and `2<&0` are written by accident far more than on
+purpose, and the fix is a `RedirPlan` shape change that is worth doing on its
+own rather than folded into the dup-mode work. The corpus case
+`tests/corpus/dup-copies-the-descriptor-not-the-arrow.sh` names it in its
+header as deliberately absent.
+
+### TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR. `>out 3>&1` copies the ambient fd 1, not the sink the same list just installed — 2026-08-01 — OPEN (low priority)
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::alias_write_fd`, which
+snapshots the *live* fd 1 at apply time instead of consulting the
+`RedirPlan`'s own `stdout`.
+
+**Reproduce** (`target/dvscratch/t3/pf.sh`):
+
+```sh
+( { echo W >&3; } >o1 3>&1; )   # bash: o1=[W]   osh: o1=[] and W on the terminal
+( { echo W >&3; } >o3 3<&1; )   # same both arrows — it is the sink, not the arrow
+```
+
+A redirect list is resolved left to right and each entry sees the fds the
+ones before it left, which osh already gets right on the *read* side
+(`<in 3<&0` copies the file). The write side does not: `alias_write_fd` looks
+at the shell's current stdout rather than at what `>o1` staged, so fd 3 ends
+up naming the ambient sink.
+
+**Proper fix.** `alias_write_fd` should ask the plan first — the same way
+`plan_input_fd` walks `plan.extra_fds` in reverse and only then falls back to
+the live table — so that a `>o1` earlier in the list is what a later `3>&1`
+copies. The plan's `stdout`/`stderr` slots are the ones to consult for
+`n == 1` / `n == 2`.
+
+**Why not now.** Pre-existing on both arrows and independent of the
+dup-access-mode work that turned it up; it deserves its own change and its
+own corpus case. Named as deliberately absent in the header of
+`tests/corpus/dup-copies-the-descriptor-not-the-arrow.sh`.
 
 ### BUG-OILS-XTRACE-TRAP-LEVEL. A trap handler's body traces at the caller's `PS4` depth instead of one level deeper — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 

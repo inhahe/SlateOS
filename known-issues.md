@@ -25450,3 +25450,36 @@ walks each component and follows links (bounded by a symlink-depth limit to
 avoid loops, returning `ELOOP`).  The kernel already has
 `resolve_path_no_follow` and symlink-following metadata, so a canonicalize
 syscall is the clean approach.
+
+### TD-OILS-TRANSFORM-SUBSCRIPT-TWICE. `${a[$(cmd)]@a}` under `set -u` evaluates its subscript twice — 2026-08-01
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::param_transform`, the
+nounset pre-check in front of the `@a` / `@A` branch, and
+`Shell::transform_assign`, which resolves the element again.
+
+**What.** bash faults on `${x@a}` and `${x@A}` for an unset parameter under
+`set -u`, a variable declared without a value (`declare -i d`) included. Unlike
+every other transform, those two answer from the *variable* rather than from
+its value, so they never fetch it — the check therefore has to fetch it itself,
+and fetching evaluates the subscript. `transform_assign` then evaluates the
+subscript a second time to render the element:
+
+```
+$ bash -uc 'declare -A m; m[k]=v; echo "${m[$(echo k >&2; echo k)]@A}"'
+k            # subscript evaluated once
+```
+
+osh writes `k` twice. It happens only with `set -u` on, only for `@a`/`@A`, and
+only when the subscript has a side effect.
+
+**Proper fix.** Thread the fetched element through: give `transform_assign` the
+value the check already resolved instead of re-resolving it. The obstacle is
+that the two fetches ask about different names — the check is about the
+reference as written (`name`), while `transform_assign` reports on the nameref
+target `attr_report_target` resolved to — so reuse is only valid when the two
+coincide, and the signature needs to carry the element rather than the
+subscript word for that to be expressible.
+
+**Impact.** A side-effecting array subscript inside `${…@a}` / `${…@A}` under
+`set -u`. No effect on the expansion's value, only on how many times the
+subscript's side effect happens.

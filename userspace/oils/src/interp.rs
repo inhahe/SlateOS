@@ -2677,6 +2677,12 @@ pub struct Shell {
     /// `a"b${x@Z}"c` reports `b${x@Z}`. Saved/restored around every entry so
     /// nesting (command substitution, `${y:-${x@Z}}`) resolves innermost-first.
     bad_sub_word: Option<Str>,
+    /// Source text of the indirect reference (`!r`, `!a[$n]`) whose modifier is
+    /// being expanded. A complaint the modifier makes is about the reference
+    /// the writer typed, not about the variable it happened to reach: `${!r^^}`
+    /// on an unset target reports `!r`. Saved/restored around the nested
+    /// expansion, like [`Shell::bad_sub_word`].
+    ref_label: Option<Str>,
     /// Set when a `[[ … =~ RHS ]]` match fails because the RHS could not be
     /// compiled as a regex. bash reports such a `[[` command as status 2 (not 1
     /// "no match") and prints nothing to stderr. `exec_cond` checks this flag
@@ -3349,6 +3355,7 @@ impl Shell {
             discard_error: None,
             pending_abort: false,
             bad_sub_word: None,
+            ref_label: None,
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
@@ -7517,6 +7524,7 @@ impl Shell {
             discard_error: None,
             pending_abort: false,
             bad_sub_word: None,
+            ref_label: None,
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
@@ -9620,7 +9628,19 @@ impl Shell {
             self.discard_error = Some(1);
             return Str::new();
         };
-        self.indirect_target_value(name).unwrap_or_default()
+        match self.indirect_target_value(name) {
+            Some(v) => v,
+            None => {
+                // The reference resolved, but to nothing. Under `set -u` that
+                // is a fault, named after the reference the writer typed —
+                // `${!r}` reports `!r`, never the target it reached.
+                if self.unbound_is_error(name) {
+                    let shown = bfmt![b"!", Self::indirect_ref_src(refname, index)];
+                    self.note_unbound(name, &shown);
+                }
+                Str::new()
+            }
+        }
     }
 
     /// The value a resolved indirect *target* holds: a plain variable's, an
@@ -9809,6 +9829,46 @@ impl Shell {
         }
     }
 
+    /// The value a modifier works on, faulting under `set -u` when the
+    /// parameter is unset.
+    ///
+    /// bash does not let a modifier stand in for a value the way a default does:
+    /// `${x^^}`, `${x#p}`, `${x:0:1}`, `${x/a/b}` and `${x@Q}` all report
+    /// `x: unbound variable` when `x` is unset. Only the operators that
+    /// *supply* something for the unset case — `:-`, `:=`, `:+`, `:?` — are
+    /// exempt, and those are [`Shell::expand_param_op`]'s, which does not come
+    /// here.
+    fn modifier_operand(
+        &mut self,
+        operand: Operand,
+        name: &str,
+        index: &Option<Box<Word>>,
+    ) -> Str {
+        match self.op_operand(operand, name, index) {
+            Some(v) => v,
+            None => {
+                self.note_unbound_modifier(name, index);
+                Str::new()
+            }
+        }
+    }
+
+    /// [`Shell::note_unbound`] for the parameter a modifier was reading.
+    ///
+    /// The complaint names the reference as the source wrote it, subscript and
+    /// all — and for a modifier reached through an indirection, as the `!ref`
+    /// the writer typed rather than the variable it landed on.
+    fn note_unbound_modifier(&mut self, name: &str, index: &Option<Box<Word>>) {
+        if !self.unbound_is_error(name) {
+            return;
+        }
+        let shown = self
+            .ref_label
+            .clone()
+            .unwrap_or_else(|| crate::unparse::name_sub(name, index));
+        self.note_unbound(name, &shown);
+    }
+
     fn param_transform(
         &mut self,
         name: &str,
@@ -9821,6 +9881,20 @@ impl Shell {
         // none of their business — `${!r@a}` reports what `r` points at — and a
         // nameref is resolved to the variable it names first. See
         // [`Self::attr_report_target`].
+        //
+        // Asking about the variable is still no excuse for an unset one: bash
+        // faults on `${x@a}` under `set -u` even for a name that was declared
+        // but never assigned (`declare -i d`). The question is about the
+        // reference as written, so it is asked here rather than of the target —
+        // and only when `set -u` could act on the answer, since asking
+        // evaluates the subscript (see TD-OILS-TRANSFORM-SUBSCRIPT-TWICE).
+        if (op == 'a' || op == 'A')
+            && self.unbound_is_error(name)
+            && self.op_operand(operand, name, index).is_none()
+        {
+            self.note_unbound_modifier(name, index);
+            return Str::new();
+        }
         if op == 'a' || op == 'A' {
             let Some(target) = self.attr_report_target(name) else {
                 return Str::new();
@@ -9836,8 +9910,11 @@ impl Shell {
         }
         // An unset variable yields the empty string for every transform (bash):
         // `${x@Q}` on unset is empty, whereas a set-but-empty variable is still
-        // quoted (`${x@Q}` → `''`). Distinguish the two by the Option itself.
+        // quoted (`${x@Q}` → `''`). Distinguish the two by the Option itself —
+        // which is also where a nounset reference is caught, since a transform
+        // is a modifier like any other and does not excuse one.
         let Some(value) = self.op_operand(operand, name, index) else {
+            self.note_unbound_modifier(name, index);
             return Str::new();
         };
         if op == 'P' {
@@ -14685,7 +14762,7 @@ impl Shell {
             WordPart::Param { name, braced } => match self.param_value(name) {
                 Some(v) => v,
                 None => {
-                    self.note_unbound(name, *braced);
+                    self.note_unbound_spelled(name, *braced);
                     Str::new()
                 }
             },
@@ -14701,7 +14778,7 @@ impl Shell {
                 None => {
                     // `${#name}` has no unbraced spelling, so it names the
                     // parameter without a `$` whatever the parameter is.
-                    self.note_unbound(name, true);
+                    self.note_unbound(name, name.as_bytes());
                     b"0".to_vec()
                 }
             },
@@ -14730,7 +14807,7 @@ impl Shell {
                 longest,
                 pattern,
             } => {
-                let value = self.op_operand(operand, name, index).unwrap_or_default();
+                let value = self.modifier_operand(operand, name, index);
                 let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_trim(&value, &pat, *suffix, *longest, extglob)
@@ -14741,7 +14818,7 @@ impl Shell {
                 offset,
                 length,
             } => {
-                let value = self.op_operand(operand, name, index).unwrap_or_default();
+                let value = self.modifier_operand(operand, name, index);
                 // `${x:off:len}` — a malformed offset/length is fatal (bash), and
                 // a negative length that puts the end before the start is a fatal
                 // "substring expression < 0" word-expansion error (discards the
@@ -14770,7 +14847,7 @@ impl Shell {
                 pattern,
                 replacement,
             } => {
-                let value = self.op_operand(operand, name, index).unwrap_or_default();
+                let value = self.modifier_operand(operand, name, index);
                 let pat = self.expand_word_pattern(pattern);
                 // bash's `patsub_replacement` (default on) makes an unquoted `&`
                 // in the replacement stand for the matched text. Expand the
@@ -14789,7 +14866,7 @@ impl Shell {
                 all,
                 pattern,
             } => {
-                let value = self.op_operand(operand, name, index).unwrap_or_default();
+                let value = self.modifier_operand(operand, name, index);
                 let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_case(&value, &pat, *mode, *all, extglob)
@@ -14937,7 +15014,12 @@ impl Shell {
                 } else {
                     self.indirect_target_value(&tname)
                 };
-                self.expand_dynamic_with(&renamed, Operand::Value(operand.as_deref()))
+                // For the length of the modifier's expansion, a complaint about
+                // an unset parameter is a complaint about *this* reference.
+                let saved_label = self.ref_label.replace(label);
+                let out = self.expand_dynamic_with(&renamed, Operand::Value(operand.as_deref()));
+                self.ref_label = saved_label;
+                out
             }
             WordPart::VarNames { prefix, .. } => {
                 self.var_names_with_prefix(prefix).join(" ").into_bytes()
@@ -15255,21 +15337,39 @@ impl Shell {
     /// flags an error (checked by the simple-command driver, which aborts) and
     /// prints a diagnostic; special parameters (`$@`, `$*`, `$?`, `$!`, etc.)
     /// are always considered set and never trigger it.
-    /// `braced` is whether the reference was written `${name}` rather than
-    /// `$name`: bash names the parameter in the diagnostic exactly as the source
-    /// spelled it, so `$1` is reported as `$1` while `${1}` is reported as `1`.
-    /// The two read alike for an identifier — only a positional or special
-    /// parameter has an unbraced spelling that carries the `$` along.
-    fn note_unbound(&mut self, name: &str, braced: bool) {
-        if self.nounset && !is_special_param(name) {
+    /// `shown` is how the reference was written, which is what the diagnostic
+    /// names — bash quotes the source, not the variable it resolved to. It is
+    /// bytes because a subscript is a word and may hold any of them.
+    fn note_unbound(&mut self, name: &str, shown: BStr<'_>) {
+        if self.unbound_is_error(name) {
             // bash aborts a non-interactive shell with status 127 on a nounset
             // unset-variable reference.
             self.unbound_error = Some(127);
-            if braced || lexer::is_valid_name(name.as_bytes()) {
-                self.perrln(&format!("{name}: unbound variable"));
-            } else {
-                self.perrln(&format!("${name}: unbound variable"));
-            }
+            self.perrln(&bfmt![shown, b": unbound variable"]);
+        }
+    }
+
+    /// Whether a reference to unset `name` is an error at all. Checking this
+    /// before composing the diagnostic's text keeps the ordinary unset read —
+    /// which happens constantly with `set -u` off — free of that work.
+    fn unbound_is_error(&self, name: &str) -> bool {
+        self.nounset && !is_special_param(name)
+    }
+
+    /// [`Shell::note_unbound`] for a plain `$name` / `${name}` reference.
+    ///
+    /// bash names the parameter exactly as the source spelled it, so `$1` is
+    /// reported as `$1` while `${1}` is reported as `1`. The two read alike for
+    /// an identifier — only a positional or special parameter has an unbraced
+    /// spelling that carries the `$` along.
+    fn note_unbound_spelled(&mut self, name: &str, braced: bool) {
+        if !self.unbound_is_error(name) {
+            return;
+        }
+        if braced || lexer::is_valid_name(name.as_bytes()) {
+            self.note_unbound(name, name.as_bytes());
+        } else {
+            self.note_unbound(name, &bfmt![b"$", name]);
         }
     }
 

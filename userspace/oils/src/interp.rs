@@ -29564,7 +29564,10 @@ fn glob_or_literal(
         // and `..` entries (bash ignores them whenever GLOBIGNORE is non-null,
         // even for a leading-dot pattern like `.*`).
         matches.retain(|m| {
-            let base = m.rsplit(|&b| b == b'/').next().unwrap_or(m.as_slice());
+            // A directory-only pattern (`*/`) reports its matches with the
+            // trailing slash, which is not part of the name being ignored.
+            let name = m.strip_suffix(b"/".as_slice()).unwrap_or(m.as_slice());
+            let base = name.rsplit(|&b| b == b'/').next().unwrap_or(name);
             base != b".".as_slice()
                 && base != b"..".as_slice()
                 && !globignore.iter().any(|p| p.matches_path(m))
@@ -29935,44 +29938,102 @@ fn glob_expand_field(
     extglob: bool,
     globstar: bool,
 ) -> Vec<Str> {
-    let absolute = field.first().is_some_and(|e| e.c == '/');
-    // Split into non-empty components on '/'.
-    let mut comps: Vec<Vec<EChar>> = Vec::new();
+    // Split on `/` keeping the *empty* pieces. bash matches each component
+    // against the entries of the text that precedes it and then pastes the two
+    // back together, so the pattern's own separators survive verbatim:
+    // `d1//x.txt` expands to `d1//x.txt`, not a tidied `d1/x.txt`.
+    let mut segs: Vec<Vec<EChar>> = Vec::new();
     let mut cur: Vec<EChar> = Vec::new();
     for &e in field {
         if e.c == '/' {
-            if !cur.is_empty() {
-                comps.push(std::mem::take(&mut cur));
-            }
+            segs.push(std::mem::take(&mut cur));
         } else {
             cur.push(e);
         }
     }
-    if !cur.is_empty() {
-        comps.push(cur);
+    segs.push(cur);
+    // A trailing slash is not a component of its own: it asks that only
+    // directories match, and however many slashes were written the match keeps
+    // exactly one. So `*/` is the directories of the current directory, spelled
+    // with the slash the pattern asked for, and `*///` is the same list.
+    let mut dir_only = false;
+    while segs.len() > 1 && segs.last().is_some_and(Vec::is_empty) {
+        segs.pop();
+        dir_only = true;
     }
-    if comps.is_empty() {
+    // `(component, the separator text that follows it)`. An empty segment in
+    // the middle is not a level either — it only makes the separator longer.
+    let mut items: Vec<(Vec<EChar>, Str)> = Vec::new();
+    // The slashes in front of the first component (an absolute pattern).
+    let mut lead = Str::new();
+    let mut pending = Str::new();
+    for seg in segs {
+        if seg.is_empty() {
+            pending.push(b'/');
+            continue;
+        }
+        match items.last_mut() {
+            Some(prev) => prev.1 = std::mem::take(&mut pending),
+            None => lead = std::mem::take(&mut pending),
+        }
+        items.push((seg, Str::new()));
+        pending = b"/".to_vec();
+    }
+    let Some(last) = items.len().checked_sub(1) else {
         return Vec::new();
-    }
-    let last = comps.len().saturating_sub(1);
-    let mut cands: Vec<Str> = vec![if absolute { b"/".to_vec() } else { Str::new() }];
-    for (ci, comp) in comps.iter().enumerate() {
+    };
+    // Every candidate already carries the separator that follows it, so a base
+    // is always ready for the next component to be appended directly.
+    let mut cands: Vec<Str> = vec![lead];
+    // bash only expands the directory part of a pattern when it contains a
+    // metacharacter; a plain one is used verbatim, trailing slash and all.
+    // That is the whole difference between `d1/**`, which yields `d1/` for the
+    // zero-directories match, and `[d]1/**`, which yields `d1`.
+    let mut literal_prefix = true;
+    for (ci, (comp, sep)) in items.iter().enumerate() {
+        let terminal = ci == last;
         // `**` with `globstar` matches across directory levels: as an
         // intermediate component it stands for the base plus every descendant
         // directory (zero-or-more levels), and as the final component it stands
         // for every descendant file *and* directory.
+        let has_meta = field_has_glob_meta(comp, extglob);
+        // Once any part of the directory prefix has been expanded, bash pastes
+        // the expansion back together with a single slash — the run of slashes
+        // in `d*//d2` survives only as one. A prefix that was never expanded is
+        // used verbatim instead, which is why `d1//*` keeps its two.
+        let still_literal = literal_prefix && !has_meta;
+        let sep: BStr<'_> = if sep.is_empty() || still_literal { sep.as_slice() } else { b"/" };
         if globstar && is_globstar_comp(comp) {
-            let terminal = ci == last;
             let mut next: Vec<Str> = Vec::new();
             for base in &cands {
-                globstar_walk(cwd, base, dotglob, terminal, &mut next);
+                // The zero-directories match is the base itself. As a final
+                // component it is reported as a path — with the separator when
+                // the prefix was literal, without it when the prefix was itself
+                // expanded — and an empty base has no path to report at all.
+                // As an intermediate component it also swallows the following
+                // slash, which is how `**/x` matches a plain `x`.
+                if !glob_is_dir(cwd, base) {
+                    continue;
+                }
+                if terminal {
+                    if !base.is_empty() {
+                        let mut zero = base.clone();
+                        if !literal_prefix {
+                            zero.pop();
+                        }
+                        next.push(zero);
+                    }
+                } else {
+                    next.push(base.clone());
+                }
+                globstar_descend(cwd, base, sep, dotglob, terminal, &mut next);
             }
             next.sort();
             next.dedup();
             cands = next;
+            literal_prefix = false;
             continue;
         }
-        let has_meta = field_has_glob_meta(comp, extglob);
         let comp_literal = echars_text(comp);
         let mut next: Vec<Str> = Vec::new();
         for base in &cands {
@@ -30032,18 +30093,42 @@ fn glob_expand_field(
                 }
                 names.sort();
                 for name in names {
-                    next.push(join_glob(base, &name));
+                    next.push(bfmt![base, &name, sep]);
                 }
             } else {
-                let joined = join_glob(base, &comp_literal);
-                if bytes::bytes_to_path(&resolve_against(cwd, &joined)).exists() {
-                    next.push(joined);
+                let joined = bfmt![base, &comp_literal];
+                // A literal component can only be there if the text in front of
+                // it names a real directory. Asking that separately is not
+                // redundant: Windows drops a trailing `\.` while parsing a path,
+                // so it would otherwise answer that `a.txt/.` exists.
+                if glob_is_dir(cwd, base)
+                    && bytes::bytes_to_path(&resolve_against(cwd, &joined)).exists()
+                {
+                    next.push(bfmt![&joined, sep]);
                 }
             }
         }
         cands = next;
+        literal_prefix = still_literal;
+    }
+    if dir_only {
+        // Only directories survive the trailing slash, and each keeps exactly
+        // one — a globstar's zero-directories match already ends in one.
+        cands.retain(|c| bytes::bytes_to_path(&resolve_against(cwd, c)).is_dir());
+        for c in &mut cands {
+            if c.last() != Some(&b'/') {
+                c.push(b'/');
+            }
+        }
     }
     cands
+}
+
+/// Whether `path` — a glob base, which is either empty (the shell's own
+/// directory) or a path ending in `/` — names a directory. Symbolic links are
+/// followed, so `sl*/` matches a link that points at one.
+fn glob_is_dir(cwd: BStr<'_>, path: BStr<'_>) -> bool {
+    path.is_empty() || bytes::bytes_to_path(&resolve_against(cwd, path)).is_dir()
 }
 
 /// Whether a path component is the globstar token `**` (both characters
@@ -30053,27 +30138,19 @@ fn is_globstar_comp(comp: &[EChar]) -> bool {
 }
 
 
-/// Expand a `**` (globstar) component under `base`. When `terminal` (the last
-/// path component), appends every descendant file and directory of `base`;
-/// otherwise appends `base` itself (the zero-levels case) plus every descendant
-/// directory — the candidate directories for the following component. Dotfiles
-/// are skipped unless `dotglob`. Symlinked directories are not recursed into
-/// (matching bash ≥ 4.3), which also prevents symlink-loop infinite recursion.
-fn globstar_walk(cwd: BStr<'_>, base: BStr<'_>, dotglob: bool, terminal: bool, out: &mut Vec<Str>) {
-    if !terminal
-        && (base.is_empty() || bytes::bytes_to_path(&resolve_against(cwd, base)).is_dir())
-    {
-        out.push(base.to_vec());
-    }
-    globstar_descend(cwd, base, dotglob, terminal, out);
-}
-
-/// Recursive worker for [`globstar_walk`]: descends `base`, pushing matching
-/// descendants. In terminal mode every entry is pushed; otherwise only
-/// directories (which are also the ones recursed into).
+/// Descend `base` — a glob base, so empty or ending in `/` — pushing every
+/// descendant a `**` component stands for. In terminal mode every entry is
+/// pushed; otherwise only directories, which are also the only ones recursed
+/// into. `sep` is the separator the pattern wrote after the `**`, appended to
+/// each candidate so the following component can be pasted straight on.
+///
+/// Dotfiles are skipped unless `dotglob`. Symlinked directories are not
+/// recursed into (matching bash ≥ 4.3), which also stops a symlink loop from
+/// recursing forever.
 fn globstar_descend(
     cwd: BStr<'_>,
     base: BStr<'_>,
+    sep: BStr<'_>,
     dotglob: bool,
     terminal: bool,
     out: &mut Vec<Str>,
@@ -30092,25 +30169,13 @@ fn globstar_descend(
         entries.push((name, is_dir));
     }
     for (name, is_dir) in entries {
-        let path = join_glob(base, &name);
+        let path = bfmt![base, &name];
         if terminal || is_dir {
-            out.push(path.clone());
+            out.push(bfmt![&path, sep]);
         }
         if is_dir {
-            globstar_descend(cwd, &path, dotglob, terminal, out);
+            globstar_descend(cwd, &bfmt![&path, b"/"], sep, dotglob, terminal, out);
         }
-    }
-}
-
-/// Join a base path and a component with a single `/` separator, preserving a
-/// leading-`/` (absolute) base and cwd-relative (empty) base.
-fn join_glob(base: BStr<'_>, name: BStr<'_>) -> Str {
-    if base.is_empty() {
-        name.to_vec()
-    } else if base.last() == Some(&b'/') {
-        bfmt![base, name]
-    } else {
-        bfmt![base, b"/", name]
     }
 }
 
@@ -45906,7 +45971,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         assert_eq!(one, vec![format!("{uniq}/sub/b.rs").into_bytes()]);
 
-        // Terminal `**` lists every descendant file and directory.
+        // Terminal `**` lists every descendant file and directory, and also the
+        // prefix itself — the zero-directories match — spelled with the slash
+        // the pattern wrote, because the prefix here is plain text.
         let mut all = glob_expand_field(
             b"",
             &field_lit(&format!("{uniq}/**")),
@@ -45919,6 +45986,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             all,
             vec![
+                format!("{uniq}/").into_bytes(),
                 format!("{uniq}/a.rs").into_bytes(),
                 format!("{uniq}/sub").into_bytes(),
                 format!("{uniq}/sub/b.rs").into_bytes(),
@@ -45926,6 +45994,39 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 format!("{uniq}/sub/deep/c.rs").into_bytes(),
             ]
         );
+
+        // A trailing slash asks for directories only, and each match keeps
+        // exactly one — including the zero-directories match, which already
+        // ends in one.
+        let mut dirs = glob_expand_field(
+            b"",
+            &field_lit(&format!("{uniq}/**/")),
+            false,
+            false,
+            false,
+            true,
+        );
+        dirs.sort();
+        assert_eq!(
+            dirs,
+            vec![
+                format!("{uniq}/").into_bytes(),
+                format!("{uniq}/sub/").into_bytes(),
+                format!("{uniq}/sub/deep/").into_bytes(),
+            ]
+        );
+
+        // The separators the pattern wrote survive a plain-text prefix, so a
+        // doubled slash is reported doubled.
+        let dbl = glob_expand_field(
+            b"",
+            &field_lit(&format!("{uniq}//*.rs")),
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(dbl, vec![format!("{uniq}//a.rs").into_bytes()]);
 
         std::fs::remove_dir_all(root).ok();
     }

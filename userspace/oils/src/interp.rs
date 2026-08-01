@@ -28546,7 +28546,15 @@ impl Shell {
                     j += 1;
                 }
             } else {
-                names.push(a.clone());
+                // The first word that is not an option ends the option scan, and
+                // everything from there is a name — a later `-r`, `-u 3` or `--`
+                // included. bash's own getopt stops here too, so `read a -u 3`
+                // assigns `a` and then refuses `-u` as a name rather than
+                // reading fd 3; only a `--` reached while options are still
+                // being scanned is consumed as a terminator, which the arm
+                // above handles.
+                names.extend(args[i..].iter().cloned());
+                break;
             }
             i += 1;
         }
@@ -51854,6 +51862,42 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("{ read -a 1bad; read r; } <<< 'p q' 2>/dev/null; echo \"r=[$r]\"").0,
             "r=[]\n"
+        );
+    }
+
+    #[test]
+    fn read_stops_scanning_options_at_the_first_name() {
+        // A word that is not an option ends the option scan, so everything from
+        // there is a name however it is spelled. Regression: osh kept looking
+        // for options to the end of the argument list, so `read a -u 3` read
+        // fd 3 — a wrong answer where bash gives a refused one.
+        assert_eq!(
+            run("read a -u 3 <<< 'one two' 2>&1; echo rc=$?").0,
+            "osh: read: `-u': not a valid identifier\nrc=1\n"
+        );
+        // The names before the bad one are still assigned: they are judged as
+        // the assignment reaches them, by which point the record is read.
+        assert_eq!(
+            run("read a -r <<< 'one two' 2>/dev/null; echo \"a=[$a]\"").0,
+            "a=[one]\n"
+        );
+        // Options *before* the first name are options as ever.
+        assert_eq!(
+            run("read -r -N 3 a <<< 'one two'; echo \"a=[$a]\"").0,
+            "a=[one]\n"
+        );
+        // `--` ends the options without becoming a name — but only while they
+        // are still being scanned. After a name it is a name, and a bad one.
+        assert_eq!(run("read -- a <<< 'one two'; echo \"a=[$a]\"").0, "a=[one two]\n");
+        assert_eq!(
+            run("read a -- b <<< 'one two' 2>&1; echo rc=$?").0,
+            "osh: read: `--': not a valid identifier\nrc=1\n"
+        );
+        // A lone `-` is not an option at all, so it ends the scan by being the
+        // first name — and is not a valid one.
+        assert_eq!(
+            run("read - a <<< 'one two' 2>&1; echo rc=$?").0,
+            "osh: read: `-': not a valid identifier\nrc=1\n"
         );
     }
 

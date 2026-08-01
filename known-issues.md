@@ -14,7 +14,7 @@ work that should be done now."
 
 ## Active Bugs
 
-### TD-OILS-READ-PARSES-OPTIONS-AFTER-THE-FIRST-NAME. `read` keeps scanning for options past its first operand, where bash stops — 2026-08-01 — OPEN (low priority)
+### TD-OILS-READ-PARSES-OPTIONS-AFTER-THE-FIRST-NAME. `read` keeps scanning for options past its first operand, where bash stops — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 
 **Where:** `userspace/oils/src/interp.rs` — the `read` builtin's argument
 loop, which walks every argument looking for a leading `-` instead of
@@ -36,18 +36,24 @@ bash: read: `-u': not a valid identifier
 osh reads a line from fd 3 into `a` instead. The same holds for any option
 letter written after a name.
 
-**Proper fix.** Break the option scan at the first argument that is not a
-`-`-prefixed word (bash's `getopts`-style loop does), and treat everything
-from there on as names — including a later `-x`, which then has to go
-through the same "not a valid identifier" check every other name does.
-Worth checking the other operand-taking builtins for the same shape while
-in there; `mapfile`/`readarray` share the argument loop's structure.
+**Fix.** The option loop's non-option arm pushed one name and went on
+scanning; it now takes the rest of the argument list as names and breaks.
+Everything after the first operand is therefore a name, and a bad one is
+refused by the identifier check that was already there — the *first* name
+before the record is read, a later one only as the assignment reaches it,
+which is why `read a -r` still leaves `a` holding the first field.
 
-**Why not now.** Found while measuring a redirect fix and kept out of that
-commit, which was already one logical change. The divergence only shows when
-a script writes an option after an operand, which is a typo more than a
-usage — and osh's answer is more permissive, so nothing that works in bash
-breaks under osh.
+A `--` is consumed as a terminator only when the scan is still running; the
+arm above the change handles that, and after a name it falls through to the
+names like any other word. A lone `-` was never taken as an option (the arm
+tests `len > 1`), so it already ended the scan by being a name.
+
+Measured the same question of `mapfile`, `unset`, `export`, `printf`,
+`pwd`, `type` and `local` (`target/dvscratch/t3/pt.sh`): all seven already
+match bash, so only `read` had the shape.
+
+Covered by `tests/corpus/read-stops-scanning-options-at-the-first-name.sh`
+plus `read_stops_scanning_options_at_the_first_name`.
 
 ### TD-OILS-TRANSIENT-DUP-SOURCE-IS-NOT-THE-LIST-SO-FAR. A transient `N<&M` cannot copy a descriptor that is open but has no read half — 2026-08-01 — OPEN (low priority; the list-local half was resolved 2026-08-01)
 

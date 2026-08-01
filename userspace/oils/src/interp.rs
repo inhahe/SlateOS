@@ -11866,19 +11866,37 @@ impl Shell {
         // outcome is recorded in `trap_exit` and returned only after the
         // unwinding, never via an early `return`.
         let mut trap_exit: Option<i32> = None;
-        if trace_this
-            && !self.in_trap
-            && self.traps.contains_key("DEBUG")
-            && let Flow::Exit(code) = self.fire_trap_flow("DEBUG", out, stdin)
-        {
-            trap_exit = Some(code);
+        // Under extdebug the entry firing can be refused, and refusing it takes
+        // the body *and* the RETURN trap — the call is stepped over whole.
+        let mut entry_refused = false;
+        if trace_this && !self.in_trap && self.traps.contains_key("DEBUG") {
+            match self.fire_debug_trap(out, stdin) {
+                DebugVerdict::Run => {}
+                // Unlike a refusal at the call site — which leaves 0 behind, as
+                // if the call had happened and succeeded — a refusal on *entry*
+                // leaves the handler's own status: this frame's result is
+                // whatever the trap left in it, and nothing overwrites it.
+                DebugVerdict::Skip(status) => {
+                    entry_refused = true;
+                    self.last_status = status;
+                }
+                // The frame this announcement belongs to is already pushed, so
+                // "leave the function being entered" and "do not enter it" are
+                // the same thing here, and 2 is the status either way.
+                DebugVerdict::Return => {
+                    entry_refused = true;
+                    self.last_status = 2;
+                }
+                DebugVerdict::Exit(code) => trap_exit = Some(code),
+            }
         }
         // Redirections attached to the function definition (`f() { …; } >log`)
         // wrap the whole body on every invocation. Resolve and install them
         // exactly like compound-command redirects; on a resolution error bash
         // reports it and skips the body with status 1.
-        // An entry-DEBUG handler that exited skips the body entirely.
-        let flow = if trap_exit.is_some() {
+        // An entry-DEBUG handler that exited, or that refused the entry, skips
+        // the body entirely.
+        let flow = if trap_exit.is_some() || entry_refused {
             Flow::Next
         } else if let Some(rs) = self.func_redirects.get(name).cloned() {
             match self.resolve_redirects(&rs, out) {
@@ -11901,6 +11919,7 @@ impl Shell {
         // inherited-but-masked RETURN stays suppressed. It is skipped entirely
         // if an earlier handler already asked to exit the shell.
         if trap_exit.is_none()
+            && !entry_refused
             && self.traps.contains_key("RETURN")
             && !self.trap_suppressed("RETURN")
         {
@@ -11908,14 +11927,24 @@ impl Shell {
             // RETURN trap action, with `$BASH_COMMAND` still the last body
             // command. (This extra firing only appears when a RETURN trap is
             // actually present.)
-            if trace_this
-                && !self.in_trap
-                && self.traps.contains_key("DEBUG")
-                && let Flow::Exit(code) = self.fire_trap_flow("DEBUG", out, stdin)
-            {
-                trap_exit = Some(code);
+            let mut action_refused = false;
+            if trace_this && !self.in_trap && self.traps.contains_key("DEBUG") {
+                match self.fire_debug_trap(out, stdin) {
+                    DebugVerdict::Run => {}
+                    // Refusing this one takes the RETURN action away and nothing
+                    // else: the function has already run and its status stands.
+                    DebugVerdict::Skip(_) => action_refused = true,
+                    // A `return` verdict has nowhere left to go — the function
+                    // is already returning — so the action runs regardless.
+                    // bash instead retries the announcement, unboundedly: a
+                    // handler that answers 2 every time livelocks bash 5.2, so
+                    // the retry is deliberately not reproduced.
+                    DebugVerdict::Return => {}
+                    DebugVerdict::Exit(code) => trap_exit = Some(code),
+                }
             }
             if trap_exit.is_none()
+                && !action_refused
                 && let Flow::Exit(code) = self.fire_trap_flow("RETURN", out, stdin)
             {
                 trap_exit = Some(code);
@@ -28192,6 +28221,11 @@ impl Shell {
                 } else {
                     None
                 };
+                // The `. script` word itself, kept for the RETURN announcement
+                // below: bash restores `$BASH_COMMAND` around the sourced body,
+                // so the extra DEBUG firing that precedes a RETURN action sees
+                // the source command again, not the script's last command.
+                let source_word = self.vars.get("BASH_COMMAND").cloned();
                 // Push a source frame: this makes a `return` in the script legal
                 // (unwinding just this source, like bash) *and* puts the file on
                 // the same frame stack as function calls, so `FUNCNAME`/
@@ -28249,16 +28283,28 @@ impl Shell {
                     && !self.trap_suppressed("RETURN")
                 {
                     // Under tracing bash fires one extra DEBUG immediately
-                    // before the RETURN action, with `$BASH_COMMAND` still the
-                    // `. script` word — mirroring the function case.
-                    if trace_this
-                        && !self.in_trap
-                        && self.traps.contains_key("DEBUG")
-                        && let Flow::Exit(n) = self.fire_trap_flow("DEBUG", out, stdin)
-                    {
-                        self.pending_builtin_exit = Some(n);
+                    // before the RETURN action, with `$BASH_COMMAND` back to the
+                    // `. script` word: what the sourced body announced is undone
+                    // with the frame, where a *function* body's last
+                    // announcement stands (bash restores the variable around
+                    // `parse_and_execute`, and a function body is not one).
+                    //
+                    // Refusing that firing takes the RETURN action away and
+                    // nothing else, exactly as in the function case; a `return`
+                    // verdict has nowhere left to go and the action still runs.
+                    if let Some(word) = source_word {
+                        self.put_var("BASH_COMMAND", word);
+                    }
+                    let mut action_refused = false;
+                    if trace_this && !self.in_trap && self.traps.contains_key("DEBUG") {
+                        match self.fire_debug_trap(out, stdin) {
+                            DebugVerdict::Run | DebugVerdict::Return => {}
+                            DebugVerdict::Skip(_) => action_refused = true,
+                            DebugVerdict::Exit(n) => self.pending_builtin_exit = Some(n),
+                        }
                     }
                     if self.pending_builtin_exit.is_none()
+                        && !action_refused
                         && let Flow::Exit(n) = self.fire_trap_flow("RETURN", out, stdin)
                     {
                         self.pending_builtin_exit = Some(n);

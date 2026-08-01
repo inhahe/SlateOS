@@ -63,12 +63,15 @@ done
 ( : $LINENO;  LINENO=3+4;  declare -p | g LINENO )
 
 echo "=== += appends to the cell, or adds to it under the -i"
-( SECONDS=100; SECONDS+=5; declare -p | g SECONDS; echo "read=$SECONDS" )
-# Once `SECONDS` has been read it is a live counter again, so this one reads
-# back a *number* counting up from 105 rather than the stored text. Exactly
-# which number depends on how long the `declare -p` pipeline took — printing it
-# made this case fail whenever a second happened to tick — so answer with a
-# window instead. The un-looked-up form above reads 1005 and would print 0.
+# The `declare -p` is itself a read, so by the time `$SECONDS` is expanded the
+# counter is live again and answers with 1005 *plus* however long the pipeline
+# took — printing it made this case fail whenever a second happened to tick, so
+# answer with a window. The point is that it counts from the appended 1005 and
+# not from 0.
+( SECONDS=100; SECONDS+=5; declare -p | g SECONDS
+  echo "read=$(( SECONDS >= 1005 && SECONDS < 1015 ))" )
+# Looking it up *first* makes no difference to the append, which is textual
+# either way — but it does start the count from 105 rather than 1005.
 ( : $SECONDS; SECONDS=100; SECONDS+=5; declare -p | g SECONDS; echo "live=$(( SECONDS >= 105 && SECONDS < 115 ))" )
 ( RANDOM=100;  RANDOM+=5;  declare -p | g RANDOM )
 ( LINENO=100;  LINENO+=5;  declare -p | g LINENO )
@@ -110,7 +113,10 @@ echo "=== the value function is still there afterwards"
 # where in the current second the assignment landed, and the two shells start a
 # few milliseconds apart. Which second it lands on is not the point; that a
 # negative base counts *up* is.
-( SECONDS=-3; a=$SECONDS; echo "$a"; sleep 1; b=$SECONDS
+# `$a` is read rather than printed for the same reason: the base is negative,
+# which is the point, but -3 itself would become -2 the moment a second ticks
+# between the assignment and the read.
+( SECONDS=-3; a=$SECONDS; echo "neg=$(( a < 0 ))"; sleep 1; b=$SECONDS
   [ "$b" -gt "$a" ] && echo climbing || echo "stuck [$b]" )
 
 echo "=== so the named form and the listing disagree, and go on disagreeing"

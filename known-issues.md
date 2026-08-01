@@ -26565,10 +26565,9 @@ fall off the end of the chain silently. The bad-fd message names the raw source
 word, the ambiguous one the expansion. Corpus case:
 `tests/corpus/dup-word-that-is-not-a-descriptor.sh`.
 
-**Still open — one piece**, tracked below as its own entry:
-`TD-OILS-EXEC-DUP-WORD-MISCLASSIFIES` (the `exec` path, which still tests
-"parses as a number"). The other,
-`TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING`, is resolved.
+**Fixed** for `exec` too, in `TD-OILS-EXEC-DUP-WORD-MISCLASSIFIES` below — both
+follow-ups (that one and `TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING`) are now
+resolved, so the whole `<&WORD`/`>&WORD` classification is one shared model.
 
 ### TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING. a bad-fd dup on a non-default redirector names the word, not the redirector — ✅ RESOLVED — 2026-08-01
 
@@ -26699,6 +26698,15 @@ and that the binding dies with the scope, the same alias made to persist by
 `exec`, and two names for one input sharing a cursor. The naming case gained the
 `7<&"9"` / `7<&9` rows its header used to exclude.
 
+**Follow-up.** The `n != fd` guard skipped the source *check* as well as the
+dup's effect, unconditionally — and `resolve_special_redirect` funnels
+`/dev/fd/N` through the same resolvers, so `8>/dev/fd/8` with fd 8 closed
+started succeeding silently. Fixed under `TD-OILS-EXEC-DUP-WORD-MISCLASSIFIES`
+by separating the two: the effect is always skipped (a descriptor duplicated
+onto itself is unchanged), while the check is skipped only for a *word*
+(`Shell::dup_needs_no_source` / `DupOrigin`), since a special filename is an
+`open` that can fail where a dup bash never makes cannot.
+
 ### TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP. `>&-` / `<&-` on fd 0, 1 or 2 of a *command* closes nothing — OPEN — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — `resolve_dup_out` / `resolve_dup_in`,
@@ -26735,7 +26743,7 @@ matching `read: read error: N: …` shape. Then extend
 `tests/corpus/dup-word-that-is-not-a-descriptor.sh`, which deliberately avoids
 `-` today for exactly this reason.
 
-### TD-OILS-EXEC-DUP-WORD-MISCLASSIFIES. `exec M>&WORD` still splits on "parses as a number" — OPEN — 2026-08-01
+### TD-OILS-EXEC-DUP-WORD-MISCLASSIFIES. `exec M>&WORD` still splits on "parses as a number" — ✅ RESOLVED — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — `apply_persistent_dup_out` (~14112)
 and `apply_persistent_dup_in` (~14163), which still do
@@ -26770,6 +26778,41 @@ passed in; `persistent_special_dup` synthesises an all-digit word that can never
 be `BadFd` and can pass its own. Fold in
 `TD-OILS-DUP-BADFD-NAMES-THE-WRONG-THING` at the same time, since the same
 `fd`-versus-default test applies here.
+
+**Fixed.** Both helpers now `match Shell::classify_dup_word(target)`, so the
+`exec` path and the command path answer the same question, and both name a bad
+descriptor through `Shell::dup_error_subject`. What the helpers needed was not
+the word but the *redirect*, so they take a `DupOrigin<'_>`:
+
+* `DupOrigin::Word(&Redirect)` — a real `M>&WORD`, which carries the source text
+  the message may want and is a `dup2`;
+* `DupOrigin::SpecialPath` — a `> /dev/fd/N` filename, which has no word (its
+  caller rewrites the message into `PATH: No such file or directory`) and is an
+  `open`, not a `dup2`.
+
+That second distinction turned out to matter for more than the message, and
+caught a regression from `TD-OILS-DUP-ONTO-A-NON-STD-FD-IS-WRONG`: the self-dup
+skip added there (`n != fd`, because bash makes no `dup2` call when a descriptor
+is duplicated onto itself) had been applied unconditionally, and
+`resolve_special_redirect` funnels `/dev/fd/N` through the same resolvers. So
+`echo B 8>/dev/fd/8` with fd 8 closed had started succeeding silently where bash
+says `/dev/fd/8: No such file or directory`.
+
+The skip is now split in two, which is what it always should have been. A
+descriptor duplicated onto itself changes nothing whichever spelling asked, so
+the *effect* is skipped unconditionally; what differs is whether the attempt can
+*fail*, and that is `Shell::dup_needs_no_source` — true only for a `Word`, since
+a dup bash never makes cannot fail while an `open` of `/dev/fd/8` can. Applying
+the effect too had also been wrong in its own right: `> /dev/stdout` inside a
+capture is fd 1 onto fd 1, and setting `plan.stdout_to_fd = Some(1)` lost the
+capture (caught by the in-process test
+`dev_stdout_duplicates_fd1_rather_than_naming_a_file`).
+
+Corpus case: `tests/corpus/exec-dup-word-classification.sh`, matching bash
+byte-for-byte on stdout and stderr across all three ways a word can be a bad
+descriptor, both self-dup forms, and both spellings of a `/dev/fd/N` that is not
+there. `clone_input_fd` now returns `Option` rather than a pre-formatted
+message, since the caller owns the subject.
 
 ### TD-OILS-WAIT-NOARGS-LEAVES-A-JOB-FOR-WAIT-N. an argument-less `wait` sometimes does not consume the job it waited for — ✅ RESOLVED — 2026-08-01
 

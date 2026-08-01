@@ -1949,6 +1949,26 @@ enum DupWord {
     NotAFd,
 }
 
+/// How a dup was spelled — which the descriptor numbers alone cannot say, and
+/// which the resolvers on both the transient and the `exec` path need for two
+/// things:
+///
+/// * a real `M>&WORD` / `M<&WORD` is a `dup2`, and bash makes no call at all
+///   when source and target are the same descriptor, so `7>&7` succeeds with
+///   fd 7 closed and nothing to duplicate. Its bad-descriptor diagnostic names
+///   the word or the redirector, per [`Shell::dup_error_subject`];
+/// * a special redirection *filename* (`> /dev/fd/N`) is an `open` of a path
+///   the host only provides for descriptors that exist, so `8> /dev/fd/8` does
+///   fail where `8>&8` does not. It has no word to name either; both callers
+///   rewrite the message into `PATH: No such file or directory` regardless.
+///
+/// What the dup *does* is the same for both: duplicating a descriptor onto
+/// itself leaves it exactly as it was.
+enum DupOrigin<'a> {
+    Word(&'a Redirect),
+    SpecialPath,
+}
+
 /// The one coproc a shell keeps track of (see [`Shell::coproc_tracked`]).
 ///
 /// The two descriptors are recorded here rather than read back out of `NAME`
@@ -14145,11 +14165,11 @@ impl Shell {
             }
             RedirectOp::DupOut => {
                 let target = self.expand_to_string(&r.target);
-                self.apply_persistent_dup_out(fd, &target, out)?;
+                self.apply_persistent_dup_out(&DupOrigin::Word(r), fd, &target, out)?;
             }
             RedirectOp::DupIn => {
                 let target = self.expand_to_string(&r.target);
-                self.apply_persistent_dup_in(fd, &target)?;
+                self.apply_persistent_dup_in(&DupOrigin::Word(r), fd, &target)?;
             }
         }
         Ok(())
@@ -14171,134 +14191,213 @@ impl Shell {
     ) -> Result<(), Str> {
         let n = n.to_string().into_bytes();
         let res = if read {
-            self.apply_persistent_dup_in(fd, &n)
+            self.apply_persistent_dup_in(&DupOrigin::SpecialPath, fd, &n)
         } else {
-            self.apply_persistent_dup_out(fd, &n, out)
+            self.apply_persistent_dup_out(&DupOrigin::SpecialPath, fd, &n, out)
         };
         res.map_err(|_| bfmt![path, b": No such file or directory"])
     }
 
     /// Point persistent fd `fd` at output descriptor `target` (`exec M>&N`,
     /// `exec M>&-`, and the special filenames that mean the same thing).
-    fn apply_persistent_dup_out(&mut self, fd: i32, target: BStr<'_>, out: &Out) -> Result<(), Str> {
-        if target == b"-" {
-            // `N>&-` / `N<&-`: close the descriptor.
-            match fd {
-                1 => self.exec_stdout = None,
-                2 => self.exec_stderr = None,
-                _ => {
-                    self.open_write_fds.remove(&fd);
-                    self.open_fds.remove(&fd);
-                    self.coproc_read_fds.remove(&fd);
+    ///
+    /// The classification is [`Shell::classify_dup_word`]'s, exactly as on the
+    /// transient path: bash asks whether every byte is a *digit*, not whether
+    /// the word parses as a number, so `exec 7>&""` is a bad descriptor rather
+    /// than an ambiguous one and `exec 7>&"+5"` is ambiguous rather than a dup
+    /// of fd 5.
+    fn apply_persistent_dup_out(
+        &mut self,
+        origin: &DupOrigin<'_>,
+        fd: i32,
+        target: BStr<'_>,
+        out: &Out,
+    ) -> Result<(), Str> {
+        match Self::classify_dup_word(target) {
+            DupWord::Close => {
+                // `N>&-` / `N<&-`: close the descriptor.
+                match fd {
+                    1 => self.exec_stdout = None,
+                    2 => self.exec_stderr = None,
+                    _ => {
+                        self.open_write_fds.remove(&fd);
+                        self.open_fds.remove(&fd);
+                        self.coproc_read_fds.remove(&fd);
+                    }
                 }
             }
-        } else if let Some(n) = bytes::as_str(target).and_then(|t| t.parse::<i32>().ok()) {
-            // `M>&N`: fd M becomes a dup of fd N's *current* sink.
-            let src = self
-                .exec_dup_source(n, out)
-                .map_err(|bad| bfmt![bad, b": Bad file descriptor"])?;
-            match fd {
-                1 => self.exec_stdout = src,
-                2 => self.exec_stderr = src,
-                _ => {
-                    // A user-space write fd needs a concrete handle: reuse the
-                    // source handle, or (when the source is a std fd still on
-                    // the terminal) dup the terminal.
-                    let handle = match src {
-                        Some(h) => h,
-                        None => WriteFd::File(std::sync::Arc::new(
-                            dup_std_handle(n == 1)
-                                .map_err(|e| bfmt![fd, b": ", io_error_message(&e)])?,
-                        )),
-                    };
-                    self.open_write_fds.insert(fd, handle);
-                    self.open_fds.remove(&fd);
-                    self.coproc_read_fds.remove(&fd);
+            DupWord::BadFd => {
+                return Err(bfmt![
+                    Self::dup_subject(origin, fd, 1, target),
+                    b": Bad file descriptor"
+                ]);
+            }
+            // `exec 7>&7`: nothing to do, and nothing that can fail.
+            DupWord::Fd(n) if Self::dup_needs_no_source(origin, fd, n) => {}
+            // `exec 8> /dev/fd/8`: fd 8 must be there to be opened, even though
+            // duplicating it onto itself would leave it exactly as it was.
+            DupWord::Fd(n) if n == fd => {
+                self.exec_dup_source(n, out).map_err(|_| {
+                    bfmt![
+                        Self::dup_subject(origin, fd, 1, target),
+                        b": Bad file descriptor"
+                    ]
+                })?;
+            }
+            DupWord::Fd(n) => {
+                // `M>&N`: fd M becomes a dup of fd N's *current* sink.
+                let src = self.exec_dup_source(n, out).map_err(|_| {
+                    bfmt![
+                        Self::dup_subject(origin, fd, 1, target),
+                        b": Bad file descriptor"
+                    ]
+                })?;
+                match fd {
+                    1 => self.exec_stdout = src,
+                    2 => self.exec_stderr = src,
+                    _ => {
+                        // A user-space write fd needs a concrete handle: reuse
+                        // the source handle, or (when the source is a std fd
+                        // still on the terminal) dup the terminal.
+                        let handle = match src {
+                            Some(h) => h,
+                            None => WriteFd::File(std::sync::Arc::new(
+                                dup_std_handle(n == 1)
+                                    .map_err(|e| bfmt![fd, b": ", io_error_message(&e)])?,
+                            )),
+                        };
+                        self.open_write_fds.insert(fd, handle);
+                        self.open_fds.remove(&fd);
+                        self.coproc_read_fds.remove(&fd);
+                    }
                 }
             }
-        } else if fd == 1 {
-            // `1>&$f` (non-numeric expansion): both streams to the file.
-            let f = open_out(&self.cwd, target, false)
-                .map_err(|e| bfmt![target, b": ", e.to_string()])?;
-            let a = WriteFd::File(std::sync::Arc::new(f));
-            self.exec_stdout = Some(a.clone());
-            self.exec_stderr = Some(a);
-        } else {
-            return Err(bfmt![target, b": ambiguous redirect"]);
+            DupWord::NotAFd if fd == 1 => {
+                // `1>&$f` (non-numeric expansion): both streams to the file.
+                let f = open_out(&self.cwd, target, false)
+                    .map_err(|e| bfmt![target, b": ", e.to_string()])?;
+                let a = WriteFd::File(std::sync::Arc::new(f));
+                self.exec_stdout = Some(a.clone());
+                self.exec_stderr = Some(a);
+            }
+            // Any other redirector has no `>&file` fallback. bash names the
+            // *expansion* here, not the word as written.
+            DupWord::NotAFd => return Err(bfmt![target, b": ambiguous redirect"]),
         }
         Ok(())
     }
 
     /// Point persistent fd `fd` at input descriptor `target` (`exec M<&N`,
     /// `exec M<&-`, and the special filenames that mean the same thing).
-    fn apply_persistent_dup_in(&mut self, fd: i32, target: BStr<'_>) -> Result<(), Str> {
-        if target == b"-" {
-            // `N<&-`: close the input descriptor.
-            if fd == 0 {
-                self.exec_stdin = None;
-                self.exec_stdin_write = None;
-            } else {
-                self.open_fds.remove(&fd);
-                self.open_write_fds.remove(&fd);
-                self.coproc_read_fds.remove(&fd);
+    ///
+    /// Classified by [`Shell::classify_dup_word`], as on the transient path —
+    /// `exec 7<&""` is a bad descriptor, `exec 7<&"+3"` is ambiguous, and
+    /// `exec 7<&7` is the `dup2` bash never makes.
+    fn apply_persistent_dup_in(
+        &mut self,
+        origin: &DupOrigin<'_>,
+        fd: i32,
+        target: BStr<'_>,
+    ) -> Result<(), Str> {
+        match Self::classify_dup_word(target) {
+            DupWord::Close => {
+                // `N<&-`: close the input descriptor.
+                if fd == 0 {
+                    self.exec_stdin = None;
+                    self.exec_stdin_write = None;
+                } else {
+                    self.open_fds.remove(&fd);
+                    self.open_write_fds.remove(&fd);
+                    self.coproc_read_fds.remove(&fd);
+                }
             }
-        } else if let Some(n) = bytes::as_str(target).and_then(|t| t.parse::<i32>().ok()) {
-            // `exec {v}<&"${NAME[0]}"`: a coproc's read end is a live pipe kept
-            // in its own table, and a dup of it must name the *same* reader —
-            // sharing the buffer, not just the descriptor, or a byte already
-            // pulled off the pipe for one number would be invisible to the
-            // other. fd 0 is left out: `exec_stdin` holds an `InputFd`, which
-            // cannot alias a coproc reader (see known-issues).
-            if fd != 0
-                && let Some(rd) = self.coproc_read_fds.get(&n)
-            {
-                let shared = Arc::clone(rd);
-                self.coproc_read_fds.insert(fd, shared);
-                self.open_fds.remove(&fd);
-                self.open_write_fds.remove(&fd);
-                return Ok(());
+            DupWord::BadFd => {
+                return Err(bfmt![
+                    Self::dup_subject(origin, fd, 0, target),
+                    b": Bad file descriptor"
+                ]);
             }
-            // `M<&N`: fd M becomes a dup of input fd N's *current* source —
-            // literally the same descriptor, sharing one position, as `dup2`
-            // gives. `exec 4<&3; read -u3 a; read -u4 b` therefore reads two
-            // successive lines.
-            let cloned = self.clone_input_fd(n)?;
-            if fd == 0 {
-                self.exec_stdin = Some(cloned);
-                // The dup copies the *input* table only, so fd 0 comes out
-                // read-only even when fd N was opened `<>`. Carrying the write
-                // half across would need the two tables joined; see
-                // known-issues TD-OILS-FD0-WRITE.
-                self.exec_stdin_write = None;
-            } else {
-                self.open_fds.insert(fd, cloned);
-                self.open_write_fds.remove(&fd);
-                self.coproc_read_fds.remove(&fd);
+            // `exec 3<&3` is not a dup but a no-op: it neither needs fd 3 to be
+            // open nor disturbs its cursor when it is.
+            DupWord::Fd(n) if Self::dup_needs_no_source(origin, fd, n) => {}
+            // `exec 8< /dev/fd/8` is an open, so fd 8 must be there — but the
+            // dup it stands for would still leave fd 8 exactly as it was.
+            DupWord::Fd(n) if n == fd => {
+                if !self.coproc_read_fds.contains_key(&n) && self.clone_input_fd(n).is_none() {
+                    return Err(bfmt![
+                        Self::dup_subject(origin, fd, 0, target),
+                        b": Bad file descriptor"
+                    ]);
+                }
             }
-        } else {
-            return Err(bfmt![target, b": ambiguous redirect"]);
+            DupWord::Fd(n) => {
+                // `exec {v}<&"${NAME[0]}"`: a coproc's read end is a live pipe
+                // kept in its own table, and a dup of it must name the *same*
+                // reader — sharing the buffer, not just the descriptor, or a
+                // byte already pulled off the pipe for one number would be
+                // invisible to the other. fd 0 is left out: `exec_stdin` holds
+                // an `InputFd`, which cannot alias a coproc reader (see
+                // known-issues).
+                if fd != 0
+                    && let Some(rd) = self.coproc_read_fds.get(&n)
+                {
+                    let shared = Arc::clone(rd);
+                    self.coproc_read_fds.insert(fd, shared);
+                    self.open_fds.remove(&fd);
+                    self.open_write_fds.remove(&fd);
+                    return Ok(());
+                }
+                // `M<&N`: fd M becomes a dup of input fd N's *current* source —
+                // literally the same descriptor, sharing one position, as
+                // `dup2` gives. `exec 4<&3; read -u3 a; read -u4 b` therefore
+                // reads two successive lines.
+                let cloned = self.clone_input_fd(n).ok_or_else(|| {
+                    bfmt![
+                        Self::dup_subject(origin, fd, 0, target),
+                        b": Bad file descriptor"
+                    ]
+                })?;
+                if fd == 0 {
+                    self.exec_stdin = Some(cloned);
+                    // The dup copies the *input* table only, so fd 0 comes out
+                    // read-only even when fd N was opened `<>`. Carrying the
+                    // write half across would need the two tables joined; see
+                    // known-issues TD-OILS-FD0-WRITE.
+                    self.exec_stdin_write = None;
+                } else {
+                    self.open_fds.insert(fd, cloned);
+                    self.open_write_fds.remove(&fd);
+                    self.coproc_read_fds.remove(&fd);
+                }
+            }
+            // There is no `<&file` fallback on the input side at any
+            // redirector, so a non-numeric target is always ambiguous — and
+            // bash names the expansion, not the word as written.
+            DupWord::NotAFd => return Err(bfmt![target, b": ambiguous redirect"]),
         }
         Ok(())
     }
 
     /// Resolve input fd `n`'s current source for an input dup (`M<&N`). fd 0
     /// resolves to `exec_stdin` (falling back to an empty stream), fds ≥ 3 to
-    /// the `open_fds` table. An unbound descriptor is a "Bad file descriptor".
+    /// the `open_fds` table. `None` for an unbound descriptor — the caller owns
+    /// the diagnostic, because what a bad descriptor is *named* after depends on
+    /// the redirect that asked, not on `n`.
     ///
     /// The source is *shared*, not copied: a dup names one open file
     /// description, so reading through either descriptor advances both.
-    fn clone_input_fd(&self, n: i32) -> Result<InputFd, Str> {
+    fn clone_input_fd(&self, n: i32) -> Option<InputFd> {
         let cur = if n == 0 {
             self.exec_stdin.as_ref()
         } else {
             self.open_fds.get(&n)
         };
         match cur {
-            Some(c) => Ok(Arc::clone(c)),
+            Some(c) => Some(Arc::clone(c)),
             // fd 0 with no bound stdin: treat as an empty input stream so a dup
             // of it does not error (bash's stdin would be the terminal).
-            None if n == 0 => Ok(bytes_input(Vec::new())),
-            None => Err(bfmt![n, b": Bad file descriptor"]),
+            None if n == 0 => Some(bytes_input(Vec::new())),
+            None => None,
         }
     }
 
@@ -14384,6 +14483,34 @@ impl Shell {
             return fd.to_string().into_bytes();
         }
         src
+    }
+
+    /// The text a dup's "Bad file descriptor" names, for either origin. A word
+    /// follows bash's word-or-redirector rule ([`Shell::dup_error_subject`]); a
+    /// special filename has no word to name, and its caller rewrites the message
+    /// into `PATH: No such file or directory` anyway.
+    fn dup_subject(
+        origin: &DupOrigin<'_>,
+        fd: i32,
+        operator_default_fd: i32,
+        target: BStr<'_>,
+    ) -> Str {
+        match origin {
+            DupOrigin::Word(r) => Self::dup_error_subject(r, fd, operator_default_fd),
+            DupOrigin::SpecialPath => target.to_vec(),
+        }
+    }
+
+    /// Whether a dup may skip checking that its source is open.
+    ///
+    /// A descriptor duplicated onto *itself* changes nothing either way, so the
+    /// question is only whether the attempt can fail. Written as a dup (`7>&7`)
+    /// it cannot: bash makes no `dup2` call at all, so the redirect succeeds
+    /// with fd 7 closed and nothing to duplicate. Written as a special filename
+    /// (`7> /dev/fd/7`) it can, because that is an `open` of a path the host
+    /// only provides for descriptors that exist.
+    fn dup_needs_no_source(origin: &DupOrigin<'_>, fd: i32, n: i32) -> bool {
+        n == fd && matches!(origin, DupOrigin::Word(_))
     }
 
     fn expand_redirect_target(&mut self, w: &Word) -> Result<Str, Str> {
@@ -14605,7 +14732,7 @@ impl Shell {
                     if fd == 0 || fd >= 3 {
                         let path = self.expand_redirect_target(&r.target)?;
                         // `< /dev/stdin`, `< /dev/fd/N`: a dup, not an open.
-                        if self.resolve_special_redirect(r, fd, &path, true, plan)? {
+                        if self.resolve_special_redirect(fd, &path, true, plan)? {
                             return Ok(());
                         }
                         // bash opens the redirect *before* the command runs and
@@ -14634,7 +14761,7 @@ impl Shell {
                     let path = self.expand_redirect_target(&r.target)?;
                     // `<> /dev/stdout` and friends dup the named descriptor; the
                     // side that matters is the one the fd is read or written on.
-                    if self.resolve_special_redirect(r, fd, &path, fd == 0, plan)? {
+                    if self.resolve_special_redirect(fd, &path, fd == 0, plan)? {
                         return Ok(());
                     }
                     let (rd, wr) = open_rw_pair(&self.cwd, &path)
@@ -14702,7 +14829,7 @@ impl Shell {
                     // `&> /dev/stderr` is `> /dev/stderr 2>&1`: fd 1 dups fd 2,
                     // which the output-dup resolver already expresses (fd 2 is
                     // where it was, so nothing further is needed for it).
-                    if self.resolve_special_redirect(r, fd, &target, false, plan)? {
+                    if self.resolve_special_redirect(fd, &target, false, plan)? {
                         return Ok(());
                     }
                     open_output_target(&self.cwd, &target, append)?;
@@ -14725,7 +14852,7 @@ impl Shell {
                     // is not a file for noclobber to protect either (`set -C;
                     // echo hi > /dev/stdout` succeeds in bash). Checked first for
                     // that reason.
-                    if self.resolve_special_redirect(r, fd, &target, false, plan)? {
+                    if self.resolve_special_redirect(fd, &target, false, plan)? {
                         return Ok(());
                     }
                     // With `set -C` (noclobber), a plain `>` refuses to truncate an
@@ -14769,11 +14896,11 @@ impl Shell {
                 }
                 RedirectOp::DupOut => {
                     let target = self.expand_redirect_target(&r.target)?;
-                    self.resolve_dup_out(r, fd, &target, plan)?;
+                    self.resolve_dup_out(&DupOrigin::Word(r), fd, &target, plan)?;
                 }
                 RedirectOp::DupIn => {
                     let target = self.expand_redirect_target(&r.target)?;
-                    self.resolve_dup_in(r, fd, &target, plan)?;
+                    self.resolve_dup_in(&DupOrigin::Word(r), fd, &target, plan)?;
                 }
             }
         }
@@ -14782,10 +14909,12 @@ impl Shell {
 
     /// Resolve an output dup (`M>&N`, `M>&-`, and the special filenames that
     /// mean the same thing) into `plan`. `target` is the already-expanded dup
-    /// word; `r` is kept for diagnostics, which echo the word as written.
+    /// word; `origin` says which of the two spellings asked, which decides both
+    /// the diagnostic's subject and whether a self-dup is a no-op — see
+    /// [`DupOrigin`].
     fn resolve_dup_out(
         &mut self,
-        r: &Redirect,
+        origin: &DupOrigin<'_>,
         fd: i32,
         target: BStr<'_>,
         plan: &mut RedirPlan,
@@ -14809,7 +14938,10 @@ impl Shell {
             // An all-digit word that is no descriptor. Never the expansion it
             // just failed on — see [`Shell::dup_error_subject`] for which of
             // the word and the redirector gets named.
-            return Err(bfmt![Self::dup_error_subject(r, fd, 1), b": Bad file descriptor"]);
+            return Err(bfmt![
+                Self::dup_subject(origin, fd, 1, target),
+                b": Bad file descriptor"
+            ]);
         }
         let target_num = match dup {
             DupWord::Fd(n) => Some(n),
@@ -14862,13 +14994,13 @@ impl Shell {
             // `exec 3<&-` / `exec 3>&-`: close descriptor 3.
             plan.extra_fds.push((fd, ExtraFdOp::Close));
         } else if let Some(n) = target_num
-            && n != fd
+            && !Self::dup_needs_no_source(origin, fd, n)
         {
             // `M>&N`: fd M becomes a second name for fd N's sink. bash reaches
-            // this by `dup2`, and skips the call outright when the two are the
-            // same descriptor — which is why `7>&7` succeeds even with fd 7
-            // closed, and why the `n != fd` guard above is not an optimisation
-            // but the rule.
+            // this by `dup2` and skips the call outright when the two are the
+            // same descriptor, so `7>&7` never even looks for a source — see
+            // [`Shell::dup_needs_no_source`], which is the rule rather than an
+            // optimisation.
             //
             // bash validates the source when setting up the redirect and, on
             // failure, never echoes the expansion — it names either the word as
@@ -14883,7 +15015,16 @@ impl Shell {
                 *f == n && matches!(op, ExtraFdOp::OutputFile(..) | ExtraFdOp::AliasFd(_))
             });
             if n >= 3 && !self.open_write_fds.contains_key(&n) && !staged_write {
-                return Err(bfmt![Self::dup_error_subject(r, fd, 1), b": Bad file descriptor"]);
+                return Err(bfmt![
+                    Self::dup_subject(origin, fd, 1, target),
+                    b": Bad file descriptor"
+                ]);
+            }
+            if n == fd {
+                // A `> /dev/fd/M` on fd M — validated just above, since the
+                // open can fail, but a descriptor duplicated onto itself is
+                // left exactly as it was.
+                return Ok(());
             }
             match fd {
                 2 => {
@@ -14915,12 +15056,12 @@ impl Shell {
 
     /// Resolve an input dup (`M<&N`, `M<&-`, and the special filenames that mean
     /// the same thing) into `plan`. `target` is the already-expanded dup word;
-    /// `r` is kept for diagnostics, which echo the word as written.
+    /// `origin` says which of the two spellings asked — see [`DupOrigin`].
     ///
     /// See [`classify_dup_word`] for how the word decides which of those it is.
     fn resolve_dup_in(
         &mut self,
-        r: &Redirect,
+        origin: &DupOrigin<'_>,
         fd: i32,
         target: BStr<'_>,
         plan: &mut RedirPlan,
@@ -14934,7 +15075,10 @@ impl Shell {
             // All digits but no descriptor — the empty word included. The
             // subject is the word or the redirector, never the expansion; see
             // [`Shell::dup_error_subject`].
-            return Err(bfmt![Self::dup_error_subject(r, fd, 0), b": Bad file descriptor"]);
+            return Err(bfmt![
+                Self::dup_subject(origin, fd, 0, target),
+                b": Bad file descriptor"
+            ]);
         }
         if dup == DupWord::Close {
             if fd >= 3 {
@@ -14944,11 +15088,11 @@ impl Shell {
             // `0<&-` (close stdin) on a non-exec command is a rare corner not
             // modelled here (documented limitation).
         } else if let DupWord::Fd(n) = dup
-            && n != fd
+            && !Self::dup_needs_no_source(origin, fd, n)
         {
             // `M<&N`. As on the output side, bash reaches this by `dup2` and
             // skips the call when the two descriptors are the same, so `7<&7`
-            // succeeds whatever fd 7 is — hence the `n != fd` guard.
+            // succeeds whatever fd 7 is — see [`Shell::dup_needs_no_source`].
             //
             // A source of 3 or more is an input descriptor a `read -u`/`exec 3<`
             // opened, or a `coproc` read end; an unbound one fails the whole
@@ -14959,7 +15103,15 @@ impl Shell {
             if n >= 3 && !self.open_fds.contains_key(&n) && !self.coproc_read_fds.contains_key(&n) {
                 // Never the expansion: `<&$r` names `$r`, and a bare `<&007`
                 // names `7`. See [`Shell::dup_error_subject`].
-                return Err(bfmt![Self::dup_error_subject(r, fd, 0), b": Bad file descriptor"]);
+                return Err(bfmt![
+                    Self::dup_subject(origin, fd, 0, target),
+                    b": Bad file descriptor"
+                ]);
+            }
+            if n == fd {
+                // A `< /dev/fd/M` on fd M — validated just above, since the
+                // open can fail, but the dup it stands for changes nothing.
+                return Ok(());
             }
             if fd == 0 && n >= 3 {
                 // fd 0 reads from input descriptor N's shared cursor.
@@ -15005,9 +15157,12 @@ impl Shell {
     /// resolvers below phrase the same failure as "Bad file descriptor" (right
     /// for a `>&9`, wrong for a filename), so their error is replaced here — the
     /// only failure they can produce for an all-digits target.
+    ///
+    /// The resolvers are told this is a filename ([`DupOrigin::SpecialPath`]),
+    /// which is what keeps `7> /dev/fd/7` failing where `7>&7` succeeds: an
+    /// `open` has no self-dup to skip.
     fn resolve_special_redirect(
         &mut self,
-        r: &Redirect,
         fd: i32,
         path: BStr<'_>,
         read: bool,
@@ -15018,9 +15173,9 @@ impl Shell {
         };
         let n = n.to_string().into_bytes();
         let res = if read {
-            self.resolve_dup_in(r, fd, &n, plan)
+            self.resolve_dup_in(&DupOrigin::SpecialPath, fd, &n, plan)
         } else {
-            self.resolve_dup_out(r, fd, &n, plan)
+            self.resolve_dup_out(&DupOrigin::SpecialPath, fd, &n, plan)
         };
         match res {
             Ok(()) => Ok(true),

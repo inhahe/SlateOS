@@ -14,6 +14,61 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-CORPUS-BG-DEBUG-TRACE-RACE. `debug-trap-announces-a-background-command.sh` interleaves a background job's traces with the parent's about 1 run in 6 — 2026-08-01 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — whatever orders a `cmd &` job's
+first output against the parent's next command. The corpus case is
+`tests/corpus/debug-trap-announces-a-background-command.sh`; the one section
+that races is
+
+```sh
+set -T; f() { echo in >o.txt; }; trap b DEBUG; f & wait; cat o.txt
+```
+
+**Reproduce.** Run the case in a loop; it failed 1 of 6 and 1 of ~250 in the
+two runs measured on 2026-08-01:
+
+```
+for i in 1 2 3 4 5 6; do python scripts/osh-bash-diff.py -k debug-trap-announces-a-background-command; done
+```
+
+bash always gives
+
+```
+B:<f>            <- the parent announcing the job
+B:<f>            <- the job re-announcing the call at function entry (-T)
+B:<echo in > o.txt>
+B:<wait>         <- the parent's next command
+```
+
+osh usually gives the same and sometimes gives
+
+```
+B:<f>
+B:<wait>
+B:<f>
+B:<echo in > o.txt>
+```
+
+— the parent reaching `wait`'s DEBUG trap before the job thread has emitted
+its own two traces. Nothing else in the case differs, and no other section
+races.
+
+**Not caused by** the `<>` work of the same day: the case contains no `<>`
+redirect at all, and that change only alters behaviour where
+`RedirPlan::stdout_write` / `stderr_write` is set, which only
+`RedirectOp::ReadWrite` on fd 1 / fd 2 does.
+
+**Worth understanding before fixing.** In bash this is a genuine fork race and
+yet it is stable, which suggests the ordering is not luck: most likely the
+parent's stdout is block-buffered onto the harness's file while the child
+flushes at exit, so the child's bytes land first by construction. If that is
+it, the honest fix is not a sleep or a handshake but making osh's job threads
+and the parent share one write ordering discipline — the same question
+`signal_stage_started` answers for pipeline stages, asked for background jobs.
+Until then the case is a known intermittent failure of the differential
+harness, not a shell bug that a script would see.
+
 ### TD-OILS-READ-PARSES-OPTIONS-AFTER-THE-FIRST-NAME. `read` keeps scanning for options past its first operand, where bash stops — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 
 **Where:** `userspace/oils/src/interp.rs` — the `read` builtin's argument
@@ -196,12 +251,12 @@ tests `a_std_fd_bound_to_a_read_only_source_keeps_only_its_read_half`,
   fd 0 is — the ordering residue of
   TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR, recorded there.
 
-A third, found while closing this one, is
-TD-OILS-RW-ON-A-STD-WRITE-FD-APPENDS below: `1<> file` now installs a read
-half, but the *write* half is still a reopened path, so the two do not share
-an offset.
+A third, found while closing this one, was
+TD-OILS-RW-ON-A-STD-WRITE-FD-APPENDS below (since resolved): `1<> file` gained
+a read half, but the *write* half was still a reopened path, so the two did not
+share an offset.
 
-### TD-OILS-RW-ON-A-STD-WRITE-FD-APPENDS. `1<> file` / `2<> file` write at the end instead of at offset 0, and the read half does not see it — 2026-08-01 — OPEN
+### TD-OILS-RW-ON-A-STD-WRITE-FD-APPENDS. `1<> file` / `2<> file` write at the end instead of at offset 0, and the read half does not see it — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 
 **Where:** `userspace/oils/src/interp.rs` — the `RedirectOp::ReadWrite` arm of
 `Shell::resolve_one_redirect`, the `fd == 2` / `else` branches, which record
@@ -226,16 +281,70 @@ EOF rather than at offset 0 (so `1<> file` behaves as `>> file`), and — since
 at all — the read half is a different open file description from the write
 half, so neither sees the other's position.
 
-**Proper fix.** Give `RedirPlan` `stdout_write` / `stderr_write:
+**Fixed** as proposed: `RedirPlan` gained `stdout_write` / `stderr_write:
 Option<Arc<File>>` beside the existing path slots, exactly as `stdin_write`
-sits beside `stdin`, and have the handle win where it is set. The consumers
-are `Shell::exec_with_redirects` (which opens `plan.stdout` with `open_out`
-and `plan.stderr` likewise), `Shell::write_bytes`'s `redir.stdout` branch and
-`Shell::push_builtin_stderr`. `open_rw_pair` already produces the shared pair,
-so nothing new has to be opened.
+sits beside `stdin`, set by the `RedirectOp::ReadWrite` arm from the `wr` half
+`open_rw_pair` already produced. Nothing new is opened; the handle is
+*duplicated* where it is set, which is the whole point — a reopen is a second
+open file description with an offset of its own.
 
-Named as deliberately absent in the header of
-`tests/corpus/a-std-fd-bound-to-a-read-only-source.sh`.
+One helper, `open_std_sink(cwd, handle, path, append)`, expresses "the handle
+wins where it is set" once, and every place that turned a plan's fd-1 / fd-2
+sink into a `File` now goes through it:
+
+| site | shape it serves |
+|---|---|
+| `Shell::exec_with_redirects` (stdout, and stderr's non-shared branch) | `{ …; } 1<>f`, every compound body |
+| `Shell::run_external`'s `redir.stdout` / `redir.stderr` arms | `sh -c 'echo W' 1<>f` |
+| `Shell::run_builtin_body` → `BuiltinStdout::rw` → `Shell::write_redirected` | `echo W 1<>f`, a builtin writing in pieces |
+| `Shell::push_builtin_stderr`, `Shell::push_partial_stderr` | `cd /nosuchdir 2<>f` |
+| the `exec` builtin's plan path | `command exec 1<>f` |
+
+The path slot is kept beside the handle rather than replaced, because it is
+what the rest of the plan is asked about: whether fd 1 is writable at all
+(`stdout_is_read_only`), and whether a same-path `2>&1` beside it is a dup
+(`stderr_shares_stdout`). The two `2>&1` / `1>&2` branches of
+`Shell::resolve_dup_out` copy the handle and the read half across with the
+path, so `1<>f 2>&1` gives fd 2 the same description rather than a second open.
+
+`exec 1<> file` already worked: `apply_persistent_redirect` has its own
+`ReadWrite` arm that installs both halves as handles, and only the *scoped*
+path was wrong.
+
+**Test.** `tests/corpus/a-read-write-source-on-a-std-fd-keeps-one-offset.sh`
+(33 shapes: offset-0 writes, no truncation, creation, the shared cursor in both
+orders, dups, list ordering, external children, `exec`, and every body that
+carries its own redirect list) and the unit test
+`read_write_on_a_std_write_fd_writes_at_the_shared_offset`.
+
+**One deliberate divergence** came out of the measurement, recorded as
+TD-OILS-CMDSUB-RW-ON-STDOUT-DROPPED below.
+
+### TD-OILS-CMDSUB-RW-ON-STDOUT-DROPPED. bash opens a `1<> file` inside `$( … )` and then does not install it — 2026-08-01 — WONTFIX (bash bug, not replicated)
+
+**Where:** nowhere in osh — this is a divergence osh chooses, not a defect.
+
+**Reproduce** (bash 5.2.37, `target/dvscratch/t3/qc`):
+
+```sh
+printf 'one\ntwo\nthree\n' > c
+r=$( { echo W; } 1<>c ); echo "r=[$r]"   # bash: r=[W], c unchanged
+r=`{ echo W; } 1<>c`;    echo "r=[$r]"   # bash: r=[],  c = "W\ne\ntwo\nthree\n"
+{ echo W; } 1<>c | cat                   # bash:        c = "W\ne\ntwo\nthree\n"
+```
+
+Inside `$( … )` — and only there — bash performs the open (an unopenable path
+still reports `No such file or directory` at redirection time and fails the
+command) but leaves fd 1 pointing at the capture pipe. `{ read -r l <&1; }
+1<>c` inside `$( … )` confirms it: `read: read error: 0: Bad file descriptor`,
+which is what a dup of the *write-only* pipe answers. The same body in
+backticks, in a pipeline stage, or at top level installs the descriptor
+normally, and `3<>c 1>&3` works inside `$( … )` too — so this is an
+inconsistency within bash rather than a rule about command substitution.
+
+osh installs the descriptor in all four, which is the behaviour bash itself
+gives in three of them. Named as deliberately absent in the header of
+`tests/corpus/a-read-write-source-on-a-std-fd-keeps-one-offset.sh`.
 
 ### TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR. `>out 3>&1` copies the ambient fd 1, not the sink the same list just installed — 2026-08-01 — ✅ **RESOLVED 2026-08-01** for every shape but a *second* std-fd redirect after the dup (below)
 

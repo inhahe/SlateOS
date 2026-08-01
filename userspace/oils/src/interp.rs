@@ -923,6 +923,11 @@ struct BuiltinStdout {
     /// itself.
     path: Str,
     append: bool,
+    /// The already-open write half of a `1<> file`, carried over from
+    /// [`RedirPlan::stdout_write`]. Where it is set the handle is *duplicated*
+    /// rather than the path reopened, so the builtin's output lands at the
+    /// offset the read half shares — see [`open_std_sink`].
+    rw: Option<Arc<std::fs::File>>,
     /// Opened at the first write rather than on entry: a builtin that produces
     /// no output must not report a failure to open a file it never used. (The
     /// target has already been created and truncated by `resolve_redirects`, so
@@ -7299,7 +7304,7 @@ impl Shell {
         // is the faithful model of bash dup'ing fd 1 around the group's body.
         let mut stdout_file: Option<Arc<File>> = None;
         if let Some((path, append)) = &plan.stdout {
-            match open_out(&self.cwd, path, *append) {
+            match open_std_sink(&self.cwd, plan.stdout_write.as_ref(), path, *append) {
                 Ok(f) => stdout_file = Some(Arc::new(f)),
                 Err(e) => {
                     let line = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
@@ -7350,7 +7355,7 @@ impl Shell {
                 && plan.stdout.as_ref().is_some_and(|(sp, _)| sp == path);
             let opened: io::Result<File> = match (share_stdout, &stdout_file) {
                 (true, Some(f)) => f.try_clone(),
-                _ => open_out(&self.cwd, path, *append),
+                _ => open_std_sink(&self.cwd, plan.stderr_write.as_ref(), path, *append),
             };
             match opened {
                 Ok(f) => {
@@ -13488,7 +13493,12 @@ impl Shell {
         // through fd 3 while fd 1 goes elsewhere).
         let mut stdout_capture_fd: Option<CaptureSink> = None;
         match &redir.stdout {
-            Some((path, append)) => match open_out(&self.cwd, path, *append) {
+            Some((path, append)) => match open_std_sink(
+                &self.cwd,
+                redir.stdout_write.as_ref(),
+                path,
+                *append,
+            ) {
                 Ok(f) => {
                     if redir.stderr_shares_stdout
                         && redir.stderr.as_ref().is_some_and(|(sp, _)| sp == path)
@@ -13702,7 +13712,7 @@ impl Shell {
             // otherwise open the target independently (`2>file` clobbers on its own).
             let opened = match stdout_file_for_stderr.take() {
                 Some(f) => Ok(f),
-                None => open_out(&self.cwd, path, *append),
+                None => open_std_sink(&self.cwd, redir.stderr_write.as_ref(), path, *append),
             };
             match opened {
                 Ok(f) => {
@@ -15182,7 +15192,7 @@ impl Shell {
             return true;
         }
         if let Some((path, append)) = &redir.stderr {
-            if let Ok(f) = open_out(&self.cwd, path, *append) {
+            if let Ok(f) = open_std_sink(&self.cwd, redir.stderr_write.as_ref(), path, *append) {
                 self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
                 return true;
             }
@@ -15249,7 +15259,7 @@ impl Shell {
             // Append even for a `2>file`: the file was already truncated when
             // that redirect was resolved, and re-truncating would drop anything
             // an earlier command in the same plan wrote.
-            if let Ok(f) = open_out(&self.cwd, path, *append) {
+            if let Ok(f) = open_std_sink(&self.cwd, p.stderr_write.as_ref(), path, *append) {
                 self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
                 return true;
             }
@@ -15265,7 +15275,7 @@ impl Shell {
             // fd 2 follows fd 1 as of that moment: an already-resolved `>file`
             // target if there is one, else the caller's live stdout sink.
             if let Some((path, append)) = &p.stdout {
-                if let Ok(f) = open_out(&self.cwd, path, *append) {
+                if let Ok(f) = open_std_sink(&self.cwd, p.stdout_write.as_ref(), path, *append) {
                     self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
                     return true;
                 }
@@ -15389,21 +15399,25 @@ impl Shell {
                         // the binding and any duplicate of it share one position.
                         plan.extra_fds.push((fd, ExtraFdOp::ReadWrite(rd, wr)));
                     } else if fd == 2 {
-                        // `2<> file`: fd 2 writes to the file without truncating
-                        // it. osh models the write side as a no-truncate (append)
-                        // sink — the offset-0 write position of a real `O_RDWR`
-                        // fd is not modelled (documented limitation). The read
-                        // half is kept beside it, since `<>` is the one shape
-                        // that leaves a standard write descriptor with *both*:
+                        // `2<> file`: fd 2 gets *both* halves of the one open —
+                        // `<>` is the shape that leaves a standard write
+                        // descriptor readable as well as writable, so
                         // `{ read -r l <&2; } 2<> file` finds the file's bytes.
+                        // The two are duplicates of one descriptor and so share
+                        // one offset: the write lands at the position the read
+                        // left, starting at 0. The path is recorded beside the
+                        // handle (as non-truncating) only as a description of
+                        // the target; it is the handle that is written through.
                         plan.clear_stderr();
                         plan.stderr = Some((path, true));
                         plan.stderr_read = Some(rd);
+                        plan.stderr_write = Some(wr);
                     } else {
                         // `1<> file` (or a bare `>`-side fd): as above for fd 1.
                         plan.clear_stdout();
                         plan.stdout = Some((path, true));
                         plan.stdout_read = Some(rd);
+                        plan.stdout_write = Some(wr);
                     }
                 }
                 RedirectOp::HereDoc => {
@@ -15595,6 +15609,11 @@ impl Shell {
                 // `>file 2>&1`: fd 2 dup's fd 1's file — shared offset.
                 plan.stderr = plan.stdout.clone();
                 plan.stderr_shares_stdout = true;
+                // `1<>file 2>&1`: a dup carries both halves of the description
+                // it copies, so fd 2 gets the `<>` handle and the read half
+                // beside it rather than a second open of the same path.
+                plan.stderr_write = plan.stdout_write.clone();
+                plan.stderr_read = plan.stdout_read.clone();
             } else if fd1_read_only {
                 // `1<in 2>&1`: fd 1 has no write half to follow, so fd 2 has
                 // none either — and the diagnostic saying so is itself dropped,
@@ -15612,6 +15631,9 @@ impl Shell {
                 // `2>file 1>&2`: fd 1 dup's fd 2's file — shared offset.
                 plan.stdout = plan.stderr.clone();
                 plan.stderr_shares_stdout = true;
+                // `2<>file 1>&2`: the fd-2 mirror of the case above.
+                plan.stdout_write = plan.stderr_write.clone();
+                plan.stdout_read = plan.stderr_read.clone();
             } else if fd2_read_only {
                 // `2<in 1>&2`: the fd-2 mirror of the case just above.
                 plan.stdout_read = fd2_read;
@@ -18891,6 +18913,7 @@ impl Shell {
         self.builtin_stdout = redir.stdout.as_ref().map(|(path, append)| BuiltinStdout {
             path: path.clone(),
             append: *append,
+            rw: redir.stdout_write.clone(),
             file: None,
         });
         let saved_arith_cmd = self.arith_cmd.take();
@@ -19103,7 +19126,7 @@ impl Shell {
                     // the shared handle, so later commands accumulate into it at
                     // one OS offset (bash dups the fd, it does not reopen).
                     if let Some((path, append)) = &redir.stdout {
-                        match open_out(&self.cwd, path, *append) {
+                        match open_std_sink(&self.cwd, redir.stdout_write.as_ref(), path, *append) {
                             Ok(f) => {
                                 self.exec_stdout = Some(WriteFd::File(std::sync::Arc::new(f)));
                             }
@@ -19117,7 +19140,7 @@ impl Shell {
                     }
                     // fd 2 (`2> file` / `2>> file`).
                     if rc == 0 && let Some((path, append)) = &redir.stderr {
-                        match open_out(&self.cwd, path, *append) {
+                        match open_std_sink(&self.cwd, redir.stderr_write.as_ref(), path, *append) {
                             Ok(f) => {
                                 self.set_exec_stderr(Some(WriteFd::File(std::sync::Arc::new(f))));
                             }
@@ -31121,7 +31144,7 @@ impl Shell {
         let fresh = match held.as_mut() {
             Some(h) if h.path == path && h.append == append => {
                 if h.file.is_none() {
-                    match open_out(&self.cwd, path, append) {
+                    match open_std_sink(&self.cwd, h.rw.as_ref(), path, append) {
                         Ok(f) => h.file = Some(f),
                         Err(e) => {
                             self.builtin_stdout = held;
@@ -32486,7 +32509,20 @@ struct RedirPlan {
     /// so `{ cd /nosuchdir; } 2<in` exits 1 in silence.
     stderr_read: Option<InputFd>,
     stdout: Option<(Str, bool)>,
+    /// The *write* half of a `1<> file` — a duplicate of the very descriptor in
+    /// [`RedirPlan::stdout_read`], so the two share one offset, as
+    /// [`RedirPlan::stdin_write`] is for fd 0.
+    ///
+    /// Set only for `<>`. Where it is set it wins over the `stdout` path beside
+    /// it (see [`open_std_sink`]): reopening the path would give a second open
+    /// file description with an offset of its own, so the write would land at
+    /// the end rather than where the read half stands. The path is kept anyway,
+    /// since it is what the rest of the plan is asked about — whether fd 1 is
+    /// writable at all, and whether a same-path `2>&1` beside it is a dup.
+    stdout_write: Option<Arc<File>>,
     stderr: Option<(Str, bool)>,
+    /// [`RedirPlan::stdout_write`] for fd 2.
+    stderr_write: Option<Arc<File>>,
     /// True when `stderr`'s file target is a *dup* of `stdout`'s (from `&>file`,
     /// `>file 2>&1`, `2>file 1>&2`, or `1>&file`) — the two fds share one open
     /// file description and therefore one offset, so their writes interleave.
@@ -32563,6 +32599,7 @@ impl RedirPlan {
         self.stdout_to_fd = None;
         self.stdout_closed = false;
         self.stdout_read = None;
+        self.stdout_write = None;
     }
 
     /// [`RedirPlan::clear_stdout`] for fd 2.
@@ -32577,6 +32614,7 @@ impl RedirPlan {
         self.stderr_to_fd = None;
         self.stderr_closed = false;
         self.stderr_read = None;
+        self.stderr_write = None;
     }
 
     /// [`RedirPlan::clear_stdout`] for fd 0.
@@ -35532,6 +35570,27 @@ fn open_rw_pair(cwd: BStr<'_>, path: BStr<'_>) -> io::Result<(InputFd, Arc<File>
     let w = open_rw(cwd, path)?;
     let r = w.try_clone()?;
     Ok((rw_input(r), Arc::new(w)))
+}
+
+/// Open the sink a [`RedirPlan`] bound fd 1's or fd 2's *write* half to.
+///
+/// A `> file` / `>> file` records a **path**, opened here so that installing the
+/// plan creates and truncates (or appends) exactly as bash's redirect does. A
+/// `1<> file` instead records the very **handle** [`open_rw_pair`] cloned from
+/// the read half, and *duplicating* that handle rather than reopening the path
+/// is the whole point: a reopen is a second open file description with an offset
+/// of its own, so the write would land at the end of the file (and be invisible
+/// to the read half) where bash overwrites from offset 0.
+fn open_std_sink(
+    cwd: BStr<'_>,
+    handle: Option<&Arc<File>>,
+    path: BStr<'_>,
+    append: bool,
+) -> io::Result<File> {
+    match handle {
+        Some(f) => f.try_clone(),
+        None => open_out(cwd, path, append),
+    }
 }
 
 /// Is this redirect a descriptor *close* (`N>&-` / `N<&-`)? For a varfd
@@ -57723,6 +57782,35 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         assert_eq!(out, "st=1 z=[]\n");
         assert_eq!(disk, "new\n");
+    }
+
+    #[test]
+    fn read_write_on_a_std_write_fd_writes_at_the_shared_offset() {
+        // `1<> file` is one `O_RDWR` open like `3<> file`, so the write half
+        // lands where the read half stands rather than at the end. Regression:
+        // fd 1 and fd 2 were the two descriptors whose `<>` write half osh
+        // modelled as the *path* reopened in append mode, so the bytes went
+        // after the file's contents and the read half never saw them
+        // (TD-OILS-RW-ON-A-STD-WRITE-FD-APPENDS).
+        let (_, disk) = run_over_seeded_file("aaa\nbbb\nccc\n", "{ echo XXX; } 1<> {FILE}");
+        assert_eq!(disk, "XXX\nbbb\nccc\n");
+        // The two halves share a cursor, so a read first moves where the write
+        // goes — and the read after it continues past what was written.
+        let (out, disk) = run_over_seeded_file(
+            "aaa\nbbb\nccc\n",
+            "{ read -r a <&1; echo XXX; read -r b <&1; } 1<> {FILE}; echo \"a=[$a] b=[$b]\"",
+        );
+        assert_eq!(out, "a=[aaa] b=[ccc]\n");
+        assert_eq!(disk, "aaa\nXXX\nccc\n");
+        // fd 2 is the same descriptor asked the same question, and a `2>&1`
+        // beside a `1<>` is a dup of it rather than a second open of the path.
+        let (_, disk) = run_over_seeded_file("aaa\nbbb\nccc\n", "{ echo XXX >&2; } 2<> {FILE}");
+        assert_eq!(disk, "XXX\nbbb\nccc\n");
+        let (_, disk) = run_over_seeded_file(
+            "aaa\nbbb\nccc\n",
+            "{ echo AAA; echo BBB >&2; } 1<> {FILE} 2>&1",
+        );
+        assert_eq!(disk, "AAA\nBBB\nccc\n");
     }
 
     #[test]

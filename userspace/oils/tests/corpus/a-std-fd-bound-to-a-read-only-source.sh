@@ -39,12 +39,11 @@
 #     than against the point in the list the dup sat at, so it copies the `<>`
 #     and the close rather than the ambient fd 0 both shells started with. See
 #     TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR.
-#   * reading back what a `1<> file` wrote. fd 1 and fd 2 are the two
-#     descriptors whose `<>` write half osh still models as a *path* reopened
-#     in append mode rather than as the handle the read half was cloned from,
-#     so the write lands at the end instead of at offset 0 and the read does
-#     not see it. See TD-OILS-RW-ON-A-STD-WRITE-FD-APPENDS. (`3<>` shares one
-#     offset properly, and is exercised above.)
+#   * `<>` beyond the two shapes below that show it keeps both halves. It is
+#     the source with a write half as well as a read one, so the questions it
+#     raises are about the *offset* the two share rather than about a missing
+#     half; they have a case of their own,
+#     `a-read-write-source-on-a-std-fd-keeps-one-offset.sh`.
 #
 # Every persistent probe runs in a subshell so an `exec` cannot reach the next
 # one. Stderr is collected and replayed at the end so it can be compared in a

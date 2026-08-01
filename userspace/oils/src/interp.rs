@@ -5673,7 +5673,7 @@ impl Shell {
             };
 
             let mut pc = PCommand::new(bytes::bytes_to_os(&self.resolve_program(program)));
-            pc.args(argv[1..].iter().map(|a| bytes::bytes_to_os(a)));
+            self.push_child_args(&mut pc, &argv[1..]);
             // The child inherits *this* shell's directory, which is not the
             // process's once we are inside a subshell clone.
             pc.current_dir(bytes::bytes_to_path(&self.cwd));
@@ -12287,10 +12287,7 @@ impl Shell {
             }
             None => PCommand::new(bytes::bytes_to_os(&self.resolve_program(&argv[0]))),
         };
-        // Every argument crosses the OS boundary as bytes: an argument that is
-        // not UTF-8 must reach the child unchanged, so it goes through
-        // `bytes_to_os` rather than any lossy conversion.
-        cmd.args(argv[1..].iter().map(|a| bytes::bytes_to_os(a)));
+        self.push_child_args(&mut cmd, &argv[1..]);
         cmd.current_dir(bytes::bytes_to_path(&self.cwd));
 
         // Environment: exported shell vars + this command's temp assignments —
@@ -12890,7 +12887,7 @@ impl Shell {
             // as typed, exactly as the synchronous path does.
             #[cfg(unix)]
             std::os::unix::process::CommandExt::arg0(&mut cmd, bytes::bytes_to_os(&argv[0]));
-            cmd.args(argv[1..].iter().map(|a| bytes::bytes_to_os(a)));
+            self.push_child_args(&mut cmd, &argv[1..]);
             cmd.current_dir(bytes::bytes_to_path(&self.cwd));
             // A `&` job that carries no redirection of its own reads /dev/null,
             // not the shell's stdin — otherwise it would race the shell for the
@@ -17241,6 +17238,15 @@ impl Shell {
         } else {
             name.to_vec()
         }
+    }
+
+    /// Hand a child every argument after the command word.
+    ///
+    /// Every argument crosses the OS boundary as bytes: one that is not UTF-8
+    /// must reach the child unchanged, so it goes through [`bytes::bytes_to_os`]
+    /// rather than any lossy conversion (TD-OILS-BYTE-STRINGS).
+    fn push_child_args(&self, pc: &mut PCommand, args: &[Str]) {
+        pc.args(args.iter().map(|a| bytes::bytes_to_os(a)));
     }
 
     /// Apply the shell's exported variables and a command's assignment prefix

@@ -15854,6 +15854,13 @@ impl Shell {
             "#" => Some(self.positional.len().to_string().into_bytes()),
             "$" => Some(self.pid.to_string().into_bytes()),
             "!" => self.last_bg_pid.map(|p| p.to_string().into_bytes()),
+            // With no positionals at all, `$@` and `$*` are *unset* rather than
+            // empty: `${@-U}` is `U`, `${@+s}` is nothing and `${@?msg}` faults,
+            // and `[[ -v @ ]]` is false. One empty positional (`set -- ""`) is
+            // set-but-empty, so what counts is having none rather than joining
+            // to nothing. (`set -u` is a separate question — both are exempt
+            // from it, so a plain `"$@"` is still safe in a shell with none.)
+            "@" | "*" if self.positional.is_empty() => None,
             // `$@` in a single-string context joins with a space; `$*` joins
             // with the first character of `$IFS` (unset ⇒ space, empty ⇒ none).
             "@" => Some(self.positional.join(b" ".as_slice())),

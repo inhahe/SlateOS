@@ -237,20 +237,28 @@ fn parse_int(s: &str) -> Option<i64> {
     s.parse::<i64>().ok()
 }
 
-/// Determine the zero-pad width for a numeric sequence: if either endpoint is
-/// written with a leading zero (e.g. `01`, `-05`), pad every value to the width
-/// of the widest endpoint's digit count.
+/// Determine the zero-pad width for a numeric sequence.
+///
+/// An endpoint asks for padding when it is *written* with a leading zero —
+/// `01`, or `-01` where the zero follows the sign — and the width it asks for
+/// is the length of the endpoint **as written, sign included**, because bash
+/// renders the sequence with `printf`'s `%0*d`, whose field width covers the
+/// sign. So `{-01..01}` is width 3 and counts `-01 000 001`, not `-01 00 01`:
+/// the `-` occupies one of the three columns for the negative value and a zero
+/// takes that column for the positive ones. An endpoint that merely *is*
+/// negative asks for nothing — `{-1..01}` takes its width 2 from the `01`
+/// alone and counts `-1 00 01`.
+///
+/// The two endpoints are considered in order and the wider wins, which only
+/// matters when both ask: `{01..0001}` is width 4.
 fn pad_width(a: &str, b: &str) -> usize {
-    let has_pad = |s: &str| {
-        let digits = s.strip_prefix('-').unwrap_or(s);
-        digits.len() > 1 && digits.starts_with('0')
+    // `-0` needs a digit after it to be a padded *number* rather than just a
+    // signed zero, which is why the signed form wants one more character.
+    let asks = |s: &str| {
+        let n = s.len();
+        if (n > 1 && s.starts_with('0')) || (n > 2 && s.starts_with("-0")) { n } else { 0 }
     };
-    if has_pad(a) || has_pad(b) {
-        let digits = |s: &str| s.strip_prefix('-').unwrap_or(s).len();
-        digits(a).max(digits(b))
-    } else {
-        0
-    }
+    asks(a).max(asks(b))
 }
 
 /// Build an inclusive integer range from `start` toward `end` stepping by
@@ -304,17 +312,14 @@ fn char_range(start: u32, end: u32, step: u32) -> Vec<u32> {
     out
 }
 
-/// Format an integer, zero-padded to `width` digits (0 = no padding), keeping a
-/// leading `-` outside the padding.
+/// Format an integer to a zero-padded field of `width` columns (0 = no
+/// padding), sign-aware the way `printf`'s `%0*d` is: the `-` goes in front of
+/// the zeros and counts toward the width, so a width of 3 renders `-1` as
+/// `-01` and `1` as `001`. Rust's `{:0N}` has exactly those semantics; a
+/// fill-and-align spelling such as `{:0>N}` would not (it would pad *before*
+/// the sign, giving `0-1`).
 fn format_int(n: i64, width: usize) -> String {
-    if width == 0 {
-        return n.to_string();
-    }
-    if n < 0 {
-        format!("-{:0>width$}", n.unsigned_abs(), width = width)
-    } else {
-        format!("{n:0>width$}")
-    }
+    if width == 0 { n.to_string() } else { format!("{n:0width$}") }
 }
 
 fn str_to_atoms(s: &str) -> Vec<Atom> {
@@ -360,6 +365,41 @@ mod tests {
     fn padded_sequence() {
         assert_eq!(expand("{01..03}"), vec!["01", "02", "03"]);
         assert_eq!(expand("{08..10}"), vec!["08", "09", "10"]);
+    }
+
+    #[test]
+    fn the_pad_width_counts_the_sign() {
+        // bash renders a padded sequence with `%0*d`, whose field width covers
+        // the `-`. So a width asked for by `-01` is three *columns*, not three
+        // digits: the negative values spend one on the sign and the positive
+        // ones fill it with a zero. Every case here is measured against bash
+        // 5.2.37.
+        assert_eq!(expand("{-01..01}"), vec!["-01", "000", "001"]);
+        assert_eq!(expand("{-001..1}"), vec!["-001", "0000", "0001"]);
+        assert_eq!(expand("{01..-1}"), vec!["01", "00", "-1"]);
+        assert_eq!(expand("{0..-05}"), vec![
+            "000", "-01", "-02", "-03", "-04", "-05"
+        ]);
+        assert_eq!(expand("{-05..05..2}"), vec![
+            "-05", "-03", "-01", "001", "003", "005"
+        ]);
+        assert_eq!(expand("{010..-010..5}"), vec![
+            "0010", "0005", "0000", "-005", "-010"
+        ]);
+        // Being negative is not itself a request for padding: `-1` asks for
+        // nothing, so the width comes from `01` alone and `-1` stays two wide.
+        assert_eq!(expand("{-1..01}"), vec!["-1", "00", "01"]);
+        // `-0` is a signed zero rather than a padded number — it needs a digit
+        // after the zero before it asks for a width.
+        assert_eq!(expand("{-0..0}"), vec!["0"]);
+        assert_eq!(expand("{-0..-0}"), vec!["0"]);
+        assert_eq!(expand("{-00..1}"), vec!["000", "001"]);
+        // When both endpoints ask, the wider one wins, in either position.
+        assert_eq!(expand("{01..0001}"), vec!["0001"]);
+        assert_eq!(expand("{0001..01}"), vec!["0001"]);
+        assert_eq!(expand("{-0001..-01}"), vec!["-0001"]);
+        // An unpadded range is untouched, sign or no sign.
+        assert_eq!(expand("{-2..2..2}"), vec!["-2", "0", "2"]);
     }
 
     #[test]

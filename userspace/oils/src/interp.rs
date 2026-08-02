@@ -2890,19 +2890,18 @@ pub struct Shell {
     /// status of the command before the enclosing one — not the enclosing
     /// command's own status, which does not exist yet at that point.
     procsub_out_jobs: Vec<(String, Program, i32)>,
-    /// Descriptors opened by a `{v}>file` varfd redirect while
-    /// `shopt -s varredir_close` was on, waiting to be closed when the command
-    /// they were written on finishes.
+    /// What a `{v}>file` varfd redirect must give back when the command it was
+    /// written on finishes.
     ///
-    /// A varfd is a *persistent* descriptor — with the option off (the default)
-    /// it outlives its command exactly as `exec {v}>file` does — so the option
-    /// cannot be modelled by scoping the open. Instead the number is remembered
-    /// here and closed on the way out of [`Shell::exec_command`], which is the
-    /// one place every command shape passes through. Nesting works by mark and
-    /// release, like `procsub_out_jobs`: each command records the length on
-    /// entry and closes everything above it on exit, so an inner command's
-    /// descriptor goes before the outer command's.
-    varredir_fds: Vec<i32>,
+    /// A varfd is a *persistent* descriptor — by default it outlives its command
+    /// exactly as `exec {v}>file` does — so neither `shopt -s varredir_close`
+    /// nor a subshell's scoping can be modelled by narrowing the open. What they
+    /// need undoing instead is remembered here and applied on the way out of
+    /// [`Shell::exec_command`], the one place every command shape passes
+    /// through. Nesting works by mark and release, like `procsub_out_jobs`: each
+    /// command records the length on entry and undoes everything above it on
+    /// exit, so an inner command's descriptor goes before the outer command's.
+    varfd_undo: Vec<VarfdUndo>,
     /// `getopts` cursor within the current argument (0 = at the start of a new
     /// argument, i.e. examine the leading `-`). Tracks position inside a bundled
     /// flag group like `-abc` across successive `getopts` calls.
@@ -3742,7 +3741,7 @@ impl Shell {
             item_seq: 0,
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
-            varredir_fds: Vec::new(),
+            varfd_undo: Vec::new(),
             getopts_col: 0,
             getopts_optind: 1,
             seconds_anchor: std::time::Instant::now(),
@@ -6362,10 +6361,10 @@ impl Shell {
             }
         }
         // Every command shape passes through here, which makes this the one
-        // place a `shopt -s varredir_close` descriptor can be closed "when the
-        // command finishes" for all of them at once. Mark and release, so a
-        // nested command's descriptor goes before its parent's.
-        let varfd_mark = self.varredir_fds.len();
+        // place a varfd's undo can be applied "when the command finishes" for
+        // all of them at once. Mark and release, so a nested command's
+        // descriptor goes before its parent's.
+        let varfd_mark = self.varfd_undo.len();
         let flow = match cmd {
             Command::Simple(sc) => self.exec_simple(sc, out, stdin),
             Command::If(c) => self.exec_if(c, out, stdin),
@@ -6444,24 +6443,29 @@ impl Shell {
                 Flow::Next
             }
         };
-        self.close_varredir_fds(varfd_mark);
+        self.undo_varfds(varfd_mark);
         flow
     }
 
-    /// Close the `shopt -s varredir_close` descriptors this command opened,
-    /// down to the mark its caller recorded on entry.
+    /// Give back what this command's varfd redirects took, down to the mark its
+    /// caller recorded on entry.
     ///
-    /// Only the descriptor goes: bash leaves the *variable* holding the number
-    /// it had, so `shopt -s varredir_close; { :; } {v}>f; echo $v` still prints
-    /// 10 — and, because the number is free again, the next varfd redirect gets
-    /// 10 back rather than 11.
-    fn close_varredir_fds(&mut self, mark: usize) {
-        if self.varredir_fds.len() <= mark {
+    /// Under `shopt -s varredir_close` only the descriptor goes: bash leaves the
+    /// *variable* holding the number it had, so `shopt -s varredir_close;
+    /// { :; } {v}>f; echo $v` still prints 10 — and, because the number is free
+    /// again, the next varfd redirect gets 10 back rather than 11. A subshell's
+    /// own list additionally puts the variable back, since bash never made that
+    /// assignment in this shell at all; see [`VarfdScope::Subshell`].
+    fn undo_varfds(&mut self, mark: usize) {
+        if self.varfd_undo.len() <= mark {
             return;
         }
-        for fd in self.varredir_fds.split_off(mark) {
-            self.open_fds.remove(&fd);
-            self.open_write_fds.remove(&fd);
+        for u in self.varfd_undo.split_off(mark) {
+            self.open_fds.remove(&u.fd);
+            self.open_write_fds.remove(&u.fd);
+            if let Some((name, snap)) = u.var {
+                self.restore_var(&name, snap);
+            }
         }
     }
 
@@ -7290,7 +7294,15 @@ impl Shell {
         let saved_stdin_redirected = self.stdin_redirected;
         self.stdin_redirected = redirects_rebind_stdin(redirects)
             || std::mem::take(&mut self.pipe_stage_redirect_root);
-        let plan = match self.resolve_redirects(redirects, out) {
+        // `( … ) {v}>f` is the one shape bash applies the list *after* forking,
+        // so the assignment it makes belongs to the body and not to us — see
+        // [`VarfdScope::Subshell`].
+        let scope = if matches!(inner, Command::Subshell(_)) {
+            VarfdScope::Subshell
+        } else {
+            VarfdScope::Command
+        };
+        let plan = match self.resolve_redirect_list(redirects, out, scope) {
             Ok(p) => p,
             Err(fail) => {
                 self.last_status = self.report_redirect_failure(&fail, out);
@@ -8356,9 +8368,9 @@ impl Shell {
             // A subshell manages its own process-substitution lifetimes.
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
-            // A varfd's close is scoped to the command it was written on, and no
+            // A varfd's undo is scoped to the command it was written on, and no
             // such command spans the fork.
-            varredir_fds: Vec::new(),
+            varfd_undo: Vec::new(),
             getopts_col: self.getopts_col,
             getopts_optind: self.getopts_optind,
             seconds_anchor: self.seconds_anchor,
@@ -15410,17 +15422,27 @@ impl Shell {
                 if scope == VarfdScope::NullCommand {
                     // Opened, and then thrown away without ever being named —
                     // see [`VarfdScope::NullCommand`].
-                    self.varredir_fds.push(fd);
+                    self.varfd_undo.push(VarfdUndo { fd, var: None });
                     return Ok(());
                 }
+                // A subshell's list belongs to the fork, so what it writes has
+                // to be put back afterwards; snapshot before the store, not
+                // after — and snapshot whatever the store will actually reach,
+                // which through a nameref is its target rather than the name the
+                // redirect spelled. See [`VarfdScope::Subshell`].
+                let restore = (scope == VarfdScope::Subshell).then(|| {
+                    let t = self.resolve_ref_name(name).map_or_else(|| name.clone(), |t| t.base);
+                    let snap = self.snapshot_var(&t);
+                    (t, snap)
+                });
                 // Only now is the number the variable's to hold — see
                 // [`Shell::commit_varfd`] for why the order is observable.
                 self.commit_varfd(name, fd)?;
                 // `shopt -s varredir_close` takes the descriptor away again when
                 // the command finishes; the variable keeps the number either
-                // way. See [`Shell::varredir_fds`].
-                if self.shopt.get("varredir_close").copied().unwrap_or(false) {
-                    self.varredir_fds.push(fd);
+                // way. See [`Shell::varfd_undo`].
+                if restore.is_some() || self.shopt.get("varredir_close").copied().unwrap_or(false) {
+                    self.varfd_undo.push(VarfdUndo { fd, var: restore });
                 }
                 return Ok(());
             }
@@ -32566,6 +32588,13 @@ enum VarfdScope {
     /// variable, and both outlive the command — unless `shopt -s
     /// varredir_close` is on, which takes the descriptor (not the number) back.
     Command,
+    /// A `( … )` subshell's own list. bash forks *before* applying it, so the
+    /// body sees `$v` bound to the descriptor and the shell that wrote the
+    /// redirect never does: `v=pre; ( echo "$v" ) {v}>f` prints 10 and leaves
+    /// `v` as `pre`. osh clones for a subshell after the list is resolved, so
+    /// the assignment is made where the clone will inherit it and undone again
+    /// once the body is done — which is the same thing from outside.
+    Subshell,
     /// A *null* command: a redirect list with no command word (`{v}>f`, and
     /// `x=1 {v}>f`, which still performs the assignment). bash does the
     /// redirection — the file is created and truncated, and an unopenable path
@@ -32574,6 +32603,16 @@ enum VarfdScope {
     /// unset (`declare -p v` says not found), and the next varfd redirect gets
     /// the same descriptor number back.
     NullCommand,
+}
+
+/// One `{v}>file` redirect's pending undo — see [`Shell::varfd_undo`].
+struct VarfdUndo {
+    /// The descriptor to close when the command ends.
+    fd: i32,
+    /// The variable to put back, and what it held before. Present only for a
+    /// subshell's own list, whose assignment bash makes in the forked child and
+    /// so never in the shell that wrote the redirect.
+    var: Option<(String, VarSnapshot)>,
 }
 
 /// Per-command redirection plan (expanded targets).
@@ -56900,6 +56939,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(s, 0);
         // A failing open is still reported, and still leaves the variable alone.
         let (o, s) = run("v=pre; { {v}>/nosuch/dir/f; } 2>/dev/null; echo \"rc=$? v=[$v]\"");
+        assert_eq!(o, "rc=1 v=[pre]\n");
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn a_subshells_varfd_is_named_inside_the_subshell_only() {
+        // bash forks before applying a `( … )`'s own redirect list, so the body
+        // sees `$v` bound to the descriptor and the shell that wrote the
+        // redirect never does. Regression: osh assigned in the parent, so
+        // `outer` came back as 10.
+        let (o, s) = run("v=pre; ( echo \"inner=[$v]\" ) {v}>/dev/null; echo \"outer=[$v]\"");
+        assert_eq!(o, "inner=[10]\nouter=[pre]\n");
+        assert_eq!(s, 0);
+        // An unset variable is left unset rather than becoming an empty one.
+        assert_eq!(run("( : ) {v}>/dev/null; echo \"[${v-UNSET}]\"").0, "[UNSET]\n");
+        // The descriptor goes back with the number, so the next varfd gets 10
+        // rather than 11 — which is how the release is visible from outside.
+        assert_eq!(run("( : ) {v}>/dev/null; { :; } {w}>/dev/null; echo \"w=$w\"").0, "w=10\n");
+        // A brace group is *not* a subshell, so its varfd is the parent's.
+        assert_eq!(run("v=pre; { :; } {v}>/dev/null; echo \"v=[$v]\"").0, "v=[10]\n");
+        // A failing open reports and assigns nothing, here as anywhere.
+        let (o, s) = run("v=pre; ( : ) {v}>/nosuch/dir/f 2>/dev/null; echo \"rc=$? v=[$v]\"");
         assert_eq!(o, "rc=1 v=[pre]\n");
         assert_eq!(s, 0);
     }

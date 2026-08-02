@@ -25835,6 +25835,16 @@ impl Shell {
                 status = 1;
                 continue;
             };
+            // Declaring a name is a change to it even when no value is bound:
+            // bash ends every operand of `declare_internal` with
+            // `stupidly_hack_special_variables`, so a bare `declare PATH` (or
+            // `typeset`/`local`, or one carrying only attribute letters, or
+            // even one whose attributes go on to be refused) forgets the
+            // command hash table just as an assignment does. `declare -p` is
+            // a listing rather than a declaration and does not.
+            if !print_mode {
+                self.note_var_change(base_name);
+            }
             // A reference is a name, and an element of an array is not one, so
             // a `-n` operand may not carry a subscript. The refusal names the
             // operand as written and binds nothing, whatever the name held
@@ -57104,11 +57114,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // So does an assignment made as a command prefix, or inside a function.
         assert_eq!(run("hash -p /bin/foo foo; PATH=/nowhere true; hash").0, empty);
         assert_eq!(run("hash -p /bin/foo foo; f() { PATH=/nowhere; }; f; hash").0, empty);
+        // Declaring the name is itself a change to it, so `declare` and its
+        // spellings flush even when they bind no value at all — with or
+        // without attribute letters, and whether or not the attribute is
+        // one the name can actually take.
+        assert_eq!(run("hash -p /bin/foo foo; declare PATH; hash").0, empty);
+        assert_eq!(run("hash -p /bin/foo foo; typeset PATH; hash").0, empty);
+        assert_eq!(run("hash -p /bin/foo foo; declare -x PATH; hash").0, empty);
+        assert_eq!(run("hash -p /bin/foo foo; declare -r PATH; hash").0, empty);
+        assert_eq!(run("hash -p /bin/foo foo; f() { local PATH; }; f; hash").0, empty);
         // `export` and `readonly` name no value, so they are not assignments;
-        // nor is assigning some other variable.
+        // nor is assigning some other variable, nor *listing* `$PATH` with
+        // `declare -p`, which declares nothing.
         assert_eq!(run("hash -p /bin/foo foo; export PATH; hash").0, kept);
         assert_eq!(run("hash -p /bin/foo foo; readonly PATH; hash").0, kept);
         assert_eq!(run("hash -p /bin/foo foo; HOME=/nowhere; hash").0, kept);
+        assert_eq!(run("hash -p /bin/foo foo; declare NOTPATH; hash").0, kept);
+        assert_eq!(
+            run("PATH=/x; hash -p /bin/foo foo; declare -p PATH >/dev/null; hash").0,
+            kept
+        );
     }
 
     #[test]

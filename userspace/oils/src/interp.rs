@@ -23598,14 +23598,39 @@ impl Shell {
     fn builtin_umask(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let mut symbolic = false;
         let mut reusable = false;
-        let mut mode: Option<BStr<'_>> = None;
-        for a in args {
-            match a.as_slice() {
-                b"-S" => symbolic = true,
-                b"-p" => reusable = true,
-                s => mode = Some(s),
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            if a.as_slice() == b"--" {
+                i += 1;
+                break;
             }
+            // `-` alone is not an option: bash's option scan stops on it, so it
+            // becomes the mode operand — and a lone `-` is a symbolic clause
+            // with no `who` and no permissions, i.e. a valid no-op.
+            let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
+                break;
+            };
+            // `-p` and `-S` are the only letters; everything else is a usage
+            // error, reported on the first offending letter wherever it sits in
+            // a bundle (`-rwx` is `-r`, `-Sw` is `-w`). A mode that begins with
+            // `-` therefore has to be introduced with `--`.
+            for c in flags {
+                match c {
+                    b'S' => symbolic = true,
+                    b'p' => reusable = true,
+                    _ => {
+                        return self.builtin_invalid_option(
+                            "umask",
+                            &[b'-', *c],
+                            "umask [-p] [-S] [mode]",
+                        );
+                    }
+                }
+            }
+            i += 1;
         }
+        // Only the first operand is the mode; bash ignores any that follow.
+        let mode: Option<BStr<'_>> = args.get(i).map(Vec::as_slice);
 
         if let Some(m) = mode {
             // Set the mask from an octal number or a symbolic clause list. bash
@@ -23635,9 +23660,13 @@ impl Shell {
                         // bash quotes the offending character and distinguishes a
                         // missing/invalid operator from a bad permission letter.
                         let msg = match e {
+                            // The operator is quoted back as the character
+                            // standing where it should have been — and at the
+                            // end of the spec that is the string terminator
+                            // itself, which bash quotes as the NUL byte it is.
                             SymUmaskErr::Operator(c) => bfmt![
                                 b"`",
-                                c.map(bytes::Ch::to_str).unwrap_or_default(),
+                                c.map_or_else(|| vec![0u8], bytes::Ch::to_str),
                                 b"': invalid symbolic mode operator"
                             ],
                             SymUmaskErr::Character(c) => {
@@ -23650,6 +23679,13 @@ impl Shell {
                 }
             };
             self.umask_val = new;
+            // Setting also *reports* — but only under `-S`, and only the bare
+            // symbolic body. `-p`'s re-inputtable `umask ` prefix belongs to
+            // the no-operand form, and is simply ignored here.
+            if symbolic {
+                let line = format!("{}\n", symbolic_umask_string(self.umask_val));
+                return self.write_bytes(out, redir, line.as_bytes());
+            }
             return 0;
         }
 
@@ -37968,13 +38004,15 @@ enum SymUmaskErr {
 fn parse_symbolic_umask(current: u32, spec: BStr<'_>) -> Result<u32, SymUmaskErr> {
     // Work in "allowed permission" space, then invert back to a mask at the end.
     let mut allowed = !current & 0o777;
-    for clause in spec.split(|b| *b == b',') {
-        if clause.is_empty() {
-            continue;
-        }
-        // Walked as *characters*, not bytes: the diagnostics quote back the
-        // offending character, and a multi-byte one has to be quoted whole.
-        let mut chars = bytes::chars(clause).peekable();
+    // Walked as *characters*, not bytes: the diagnostics quote back the
+    // offending character, and a multi-byte one has to be quoted whole. The
+    // whole spec is one stream rather than a list of comma-separated clauses,
+    // because an *empty* clause is not skipped — it is a clause whose operator
+    // is missing, and which character bash names for it depends on what stands
+    // where the operator should be: `u=rwx,,g=rx` faults on the second comma,
+    // while `u=rwx,` faults on the string terminator.
+    let mut chars = bytes::chars(spec).peekable();
+    loop {
         // `who` set: any of u/g/o/a; empty defaults to `a` (all).
         let mut who_mask = 0u32; // bit per who: u=0o700, g=0o070, o=0o007
         while let Some(&c) = chars.peek() {
@@ -37996,13 +38034,15 @@ fn parse_symbolic_umask(current: u32, spec: BStr<'_>) -> Result<u32, SymUmaskErr
         };
         // Permission letters → a 3-bit value replicated into every selected who.
         let mut pbits = 0u32;
-        for c in chars {
+        while let Some(&c) = chars.peek() {
             match c {
                 bytes::Ch::U('r') => pbits |= 0o4,
                 bytes::Ch::U('w') => pbits |= 0o2,
                 bytes::Ch::U('x') => pbits |= 0o1,
+                bytes::Ch::U(',') => break,
                 _ => return Err(SymUmaskErr::Character(c)),
             }
+            chars.next();
         }
         let full = (pbits * 0o111) & who_mask; // spread rwx into u/g/o, then select
         match op {
@@ -38014,6 +38054,10 @@ fn parse_symbolic_umask(current: u32, spec: BStr<'_>) -> Result<u32, SymUmaskErr
                 allowed |= full;
             }
             _ => unreachable!(),
+        }
+        // A comma starts another clause; anything else here is the end.
+        if chars.next().is_none() {
+            break;
         }
     }
     Ok(!allowed & 0o777)
@@ -55857,6 +55901,74 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // A valid octal above 0o777 is masked to the low nine bits.
         assert_eq!(run("umask 7777; umask").0, "0777\n");
+    }
+
+    #[test]
+    fn umask_takes_only_p_and_s_as_options() {
+        // Both letters, in either order and bundled either way.
+        assert_eq!(run("umask -pS").0, "umask -S u=rwx,g=rx,o=rx\n");
+        assert_eq!(run("umask -Sp").0, "umask -S u=rwx,g=rx,o=rx\n");
+        // `--` ends the options and is not itself a mode: alone it prints.
+        assert_eq!(run("umask --").0, "0022\n");
+        assert_eq!(run("umask -S --").0, "u=rwx,g=rx,o=rx\n");
+        // ...but after it, a word beginning with `-` is a symbolic mode.
+        assert_eq!(run("umask -- -w; umask").0, "0222\n");
+        // Every other letter is a usage error at status 2, reported on the
+        // first offending one wherever it sits in a bundle.
+        assert_eq!(
+            run("umask -w 2>&1").0,
+            "osh: umask: -w: invalid option\numask: usage: umask [-p] [-S] [mode]\n"
+        );
+        assert_eq!(run("umask -w").1, 2);
+        assert_eq!(
+            run("umask -rwx 2>&1").0,
+            "osh: umask: -r: invalid option\numask: usage: umask [-p] [-S] [mode]\n"
+        );
+        assert_eq!(
+            run("umask -Sw 2>&1").0,
+            "osh: umask: -w: invalid option\numask: usage: umask [-p] [-S] [mode]\n"
+        );
+        // A lone `-` is not an option at all: it is a symbolic clause with no
+        // `who` and no permissions, so it parses and changes nothing.
+        assert_eq!(run("umask -; umask").0, "0022\n");
+        // Only the first operand is the mode; the rest are ignored.
+        assert_eq!(run("umask 022 077; umask").0, "0022\n");
+    }
+
+    #[test]
+    fn umask_setting_reports_only_under_s() {
+        // Setting also prints under `-S` — the bare symbolic body, with no
+        // re-inputtable prefix even when `-p` asked for one.
+        assert_eq!(run("umask -S 077").0, "u=rwx,g=,o=\n");
+        assert_eq!(run("umask -pS 077").0, "u=rwx,g=,o=\n");
+        assert_eq!(run("umask -p 077").0, "");
+        assert_eq!(run("umask 077").0, "");
+    }
+
+    #[test]
+    fn umask_does_not_skip_an_empty_symbolic_clause() {
+        // An empty clause is a clause whose operator is missing, and bash names
+        // the character standing where the operator should be — the next comma,
+        // or the string terminator, which it quotes as the NUL byte it is.
+        assert_eq!(
+            run("umask '' 2>&1").0,
+            "osh: umask: `\0': invalid symbolic mode operator\n"
+        );
+        assert_eq!(run("umask ''").1, 1);
+        assert_eq!(
+            run("umask 'u=rwx,' 2>&1").0,
+            "osh: umask: `\0': invalid symbolic mode operator\n"
+        );
+        assert_eq!(
+            run("umask 'u=rwx,,g=rx' 2>&1").0,
+            "osh: umask: `,': invalid symbolic mode operator\n"
+        );
+        assert_eq!(
+            run("umask ',u=rwx' 2>&1").0,
+            "osh: umask: `,': invalid symbolic mode operator\n"
+        );
+        // A failed parse leaves the mask alone.
+        assert_eq!(run("umask 'u=rwx,' 2>/dev/null; umask").0, "0022\n");
     }
 
     #[test]

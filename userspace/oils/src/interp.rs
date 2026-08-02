@@ -19834,16 +19834,50 @@ impl Shell {
             Some(p) => (p.to_vec(), CdEcho::Silent),
         };
 
-        // An empty *target* — an empty operand, an empty `$HOME` with no
-        // operand, or an empty `$OLDPWD` via `cd -` — is a *logical* no-op:
-        // bash short-circuits on an empty dirname before the `CDPATH` search
-        // and before it ever calls chdir, so the cwd and `$PWD` are left alone.
-        // The move still "happened" in every other respect: `$OLDPWD` becomes
-        // the directory that was not left, and `cd -` still echoes — an empty
-        // line, since that is the directory it names. Under `-P` bash does call
-        // chdir(""), which fails — with ENOENT, not whatever the host says (the
-        // Windows CRT reports "invalid syntax" for an empty path), and then
-        // `$OLDPWD` is not touched at all.
+        // `CDPATH` search: a non-explicit relative *operand* is looked up under
+        // each `CDPATH` entry. Only an operand — bash reaches the search from
+        // the branch that took the directory from the command line, so neither
+        // `cd` (which uses `$HOME`) nor `cd -` (which uses `$OLDPWD`) consults
+        // `CDPATH`, however relative the name it found there turns out to be.
+        if !is_dash
+            && !rest.is_empty()
+            && !cd_is_explicit(&target)
+            && let Some(cdpath) = self.param_value("CDPATH")
+        {
+            // `$CDPATH` holds directory names, so it is split on `:` as bytes —
+            // an entry that is not text still names a directory to search.
+            for entry in cdpath.split(|&b| b == b':') {
+                let candidate = cd_join(entry, &target);
+                if bytes::bytes_to_path(&self.host_path(&candidate)).is_dir() {
+                    // POSIX: a match found through a *non-empty* `CDPATH` entry
+                    // announces the destination, because the name the user
+                    // typed says nothing about which entry answered it. An
+                    // empty entry means "here", so it says nothing new — and
+                    // `.` is not empty, so `CDPATH=.` does announce. Under `-P`
+                    // bash prints the joined name rather than where it landed.
+                    if !entry.is_empty() {
+                        echo = if physical {
+                            CdEcho::Given(candidate.clone())
+                        } else {
+                            CdEcho::Arrived
+                        };
+                    }
+                    target = candidate;
+                    break;
+                }
+            }
+        }
+
+        // An empty *target* — an empty operand no `CDPATH` entry answered, an
+        // empty `$HOME` with no operand, or an empty `$OLDPWD` via `cd -` — is
+        // a *logical* no-op: bash resolves the empty name against the current
+        // directory, arriving back where it started, so the cwd and `$PWD` are
+        // left alone. The move still "happened" in every other respect:
+        // `$OLDPWD` becomes the directory that was not left, and `cd -` still
+        // echoes — an empty line, since that is the directory it names. Under
+        // `-P` the empty name goes to the OS unresolved and fails with ENOENT,
+        // not with whatever the host says (the Windows CRT reports "invalid
+        // syntax" for an empty path), and then `$OLDPWD` is not touched at all.
         if target.is_empty() {
             if physical {
                 self.perrln("cd: : No such file or directory");
@@ -19857,28 +19891,6 @@ impl Shell {
                 return self.bwrite_line(out, redir, given);
             }
             return 0;
-        }
-
-        // `CDPATH` search: a non-explicit relative target is looked up under
-        // each `CDPATH` entry; a match through a non-`.` entry echoes the
-        // destination path (bash), like `cd -`.
-        if !is_dash
-            && !cd_is_explicit(&target)
-            && let Some(cdpath) = self.param_value("CDPATH")
-        {
-            // `$CDPATH` holds directory names, so it is split on `:` as bytes —
-            // an entry that is not text still names a directory to search.
-            for entry in cdpath.split(|&b| b == b':') {
-                let base: BStr<'_> = if entry.is_empty() { b"." } else { entry };
-                let candidate = bfmt![base, b"/", &target];
-                if bytes::bytes_to_path(&self.host_path(&candidate)).is_dir() {
-                    if base != b"." {
-                        echo = CdEcho::Arrived;
-                    }
-                    target = candidate;
-                    break;
-                }
-            }
         }
 
         match self.change_dir(&target) {
@@ -38025,6 +38037,20 @@ enum CdEcho {
     Arrived,
 }
 
+/// Join a `CDPATH` entry to a `cd` target the way bash's `sh_makepath` does:
+/// an empty entry means the current directory, and an entry that already ends
+/// in `/` does not get a second one — `CDPATH=/` finding `tmp` must produce
+/// `/tmp`, since `//tmp` is a different path to the OS (a UNC root on Windows,
+/// an implementation-defined prefix in POSIX). The target may itself be empty,
+/// in which case the entry with a trailing `/` is the whole answer.
+fn cd_join(entry: BStr<'_>, target: BStr<'_>) -> Str {
+    let base: BStr<'_> = if entry.is_empty() { b"." } else { entry };
+    if base.ends_with(b"/") {
+        return bfmt![base, target];
+    }
+    bfmt![base, b"/", target]
+}
+
 /// Whether a `cd` target is an *explicit* path (absolute or `.`/`..`-anchored)
 /// for which `CDPATH` is not consulted — matching bash, which searches `CDPATH`
 /// only for a bare relative name like `cd subdir`.
@@ -50373,6 +50399,46 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         assert_eq!(st, 0, "cd -P should succeed; output {o:?}");
         assert!(o.contains(&uniq), "expected cwd under {uniq}, got {o:?}");
+    }
+
+    #[test]
+    fn cd_join_does_not_double_a_trailing_slash() {
+        // `CDPATH=/` finding `tmp` must be `/tmp`: `//tmp` is a different path.
+        assert_eq!(cd_join(b"/", b"tmp"), b"/tmp".to_vec());
+        assert_eq!(cd_join(b"/usr", b"bin"), b"/usr/bin".to_vec());
+        // An empty entry means the current directory.
+        assert_eq!(cd_join(b"", b"bin"), b"./bin".to_vec());
+        // An empty target leaves the entry with a separator, as bash does.
+        assert_eq!(cd_join(b"/tmp", b""), b"/tmp/".to_vec());
+        assert_eq!(cd_join(b"/tmp/", b""), b"/tmp/".to_vec());
+    }
+
+    #[test]
+    fn cd_without_an_operand_does_not_search_cdpath() {
+        let _cwd = cwd_guard();
+        let orig = std::env::current_dir().expect("cwd");
+        let uniq = uniq_name("cdnooperand");
+        let dir = ScratchDir::at(std::env::temp_dir().join(&uniq));
+        std::fs::create_dir_all(dir.join("proj")).expect("mkdir");
+        std::fs::create_dir_all(dir.join("here")).expect("mkdir");
+        let pdir = dir.slashed();
+
+        // bash reaches the `CDPATH` search only from the branch that took the
+        // directory from the command line, so a relative `$HOME` is used as-is
+        // and fails, while the same name as an *operand* resolves through the
+        // very same `CDPATH`.
+        let script = format!(
+            "cd {pdir}/here\n\
+             CDPATH=..\n\
+             HOME=proj\n\
+             cd 2>/dev/null; echo \"home rc=$? tail=${{PWD##*/}}\"\n\
+             cd proj >/dev/null; echo \"operand rc=$? tail=${{PWD##*/}}\"\n"
+        );
+        let (o, st) = run(&script);
+        std::env::set_current_dir(&orig).expect("restore cwd");
+
+        assert_eq!(st, 0, "the trailing echo succeeds; output {o:?}");
+        assert_eq!(o, "home rc=1 tail=here\noperand rc=0 tail=proj\n");
     }
 
     #[test]

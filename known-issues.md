@@ -345,50 +345,66 @@ osh installs the descriptor in all four, which is the behaviour bash itself
 gives in three of them. Named as deliberately absent in the header of
 `tests/corpus/a-read-write-source-on-a-std-fd-keeps-one-offset.sh`.
 
-### TD-OILS-NO-BIND-BUILTIN. osh has 60 builtins where bash has 61 — 2026-08-01 — 🔧 **OPEN**
+### TD-OILS-NO-BIND-BUILTIN. `bind` has no default keymaps, so four of its listings are empty — 2026-08-01 — 🔧 **OPEN**
 
-**Where:** `userspace/oils/src/interp.rs` — `BUILTIN_NAMES`.
+**Where:** `userspace/oils/src/interp.rs` — `builtin_bind`;
+`userspace/oils/src/bind_tables.rs`.
 
-`enable -a` lists every builtin the shell knows. bash names 61; osh names 60.
-Sorting both listings and diffing them, the one bash has and osh does not is
-`bind`.
+**Narrowed 2026-08-02.** The builtin-count gap that opened this entry is closed:
+`bind` exists, `BUILTIN_NAMES` is 61 like bash's, and the option parsing, the
+`bind: warning: line editing not enabled` warning, the phase order, every
+diagnostic, `bind -l`, and the three empty listings (`-s`, `-S`, `-X`, which a
+pristine readline really does print nothing for) are byte-exact against bash
+5.2.37 — pinned by `tests/corpus/a-bind-warns-then-works-in-phases.sh` and
+`bind_warns_then_works_in_phase_order`.
 
-**`bind`** is readline's key-binding interface. osh has readline's history
-*expansion* (`src/histexpand.rs`) but no line editor, so there is nothing for a
-key binding to bind to. The non-interactive halves are still meaningful and are
-what a script would actually call: `bind -l` (list function names),
-`bind -v`/`-s`/`-p` (dump variables / macros / bindings in re-inputtable form),
-`bind -q NAME`, and `bind -X`. The proper fix is a binding table with readline's
-default emacs and vi maps in it, which the line editor then reads when there is
-one.
+**What is left** is the part that needs readline's *default keymaps*, not just
+its function-name list:
 
-Until then `enable -a`'s count is the only place the gap shows, and the corpus
-has no case that counts builtins.
+* **`-p` (488 lines) and `-P` (175)** — every key sequence and what it is bound
+  to, in re-inputtable and prose form. osh prints nothing.
+* **`-v` (46) and `-V` (46)** — the readline variables and their defaults, in
+  the same two forms. osh prints nothing.
+* **`-q NAME` for a name that exists** — bash prints
+  `NAME can be invoked via "\C-y".`; osh is silent and returns 0. (`-q` for an
+  *unknown* name is already exact.) Note the wording differs from `-P`'s
+  `NAME can be found on …` for the same data.
 
-**Sizing and two findings from probing the reference bash** (5.2.37, readline
-8.2), 2026-08-02 — both change how the work should be done:
+These are mechanical enough to be *generated* from the reference output into
+`bind_tables.rs` alongside `FUNCTION_NAMES`, which is how the function list got
+there. The complication is that they are **mutable state**: in real bash `-u`,
+`-r` and `-x` change the tables, and a later `-p`/`-P`/`-X` in the same shell
+shows the change. (The corpus case already has to run its `-x` probes in
+subshells for exactly this reason — a successful `bind -x '"x": echo hi'` makes
+the next `bind -X` print a line.) So the honest fix is a *live* binding table
+seeded from the defaults, not four static blobs. Until then osh diverges by
+being silent, and by not remembering a mutation.
+
+**Reading inputrc files (`-f`)** is a separate, later piece of work. Today `-f`
+always reports `cannot read: No such file or directory`, which is exact for a
+file that is not there and wrong for one that is.
+
+**Two findings from probing the reference bash** (5.2.37, readline 8.2) that
+shaped the above and still apply:
 
 * **A non-interactive bash still answers every listing**, but prefixes it on
   stderr with `bind: warning: line editing not enabled`. That is exactly and
-  permanently osh's condition, so osh should emit the same warning and the same
-  listing — which makes the whole builtin corpus-testable, since the corpus runs
-  both shells non-interactively. This is the cheapest fidelity win here and
-  should come first.
+  permanently osh's condition, so osh emits the same warning and the same
+  listing — which is what makes the whole builtin corpus-testable, since the
+  corpus runs both shells non-interactively.
 * **`/etc/inputrc` pollutes the tables, so a naive capture is not the default
-  keymap.** With it loaded `bind -p` is 493 lines; with `INPUTRC=/dev/null` it
-  is 488, and `bind -v` differs too. Any table transcribed from a plain
-  `bind -p` on this machine would be that machine's config baked in as if it
-  were readline's compiled-in default. Two consequences: (a) the embedded table
-  must be captured under `INPUTRC=/dev/null`, and (b) a corpus case must set
-  `INPUTRC=/dev/null` itself, or bash reads `/etc/inputrc` while osh does not
-  and the two diverge for a reason that has nothing to do with osh. Reading
-  inputrc files is the real fix and is a separate, later piece of work.
+  keymap.** With it loaded `bind -p` is 493 lines and `bind -s` is 10; with
+  `INPUTRC=/dev/null` they are 488 and 0, and `bind -v` differs too. Any table
+  transcribed from a plain `bind -p` on this machine would be that machine's
+  config baked in as if it were readline's compiled-in default. Two
+  consequences: (a) the embedded table must be captured under
+  `INPUTRC=/dev/null`, and (b) a corpus case must export `INPUTRC=/dev/null`
+  itself, or bash reads `/etc/inputrc` while osh does not and the two diverge
+  for a reason that has nothing to do with osh.
 
 Surface to reproduce (pristine, `INPUTRC=/dev/null`): `-l` 174 function names,
-`-p` 488 binding lines, `-v` 46 variables, `-s` 10 macros, `-P` 175 lines,
-`-S`/`-V` mirroring `-s`/`-v`, `-X` empty. These are mechanical enough to be
-*generated* from the reference output into a checked-in table module rather than
-hand-transcribed.
+`-p` 488 binding lines, `-P` 175, `-v` 46 variables, `-V` 46, `-s`/`-S`/`-X`
+empty.
 
 **`suspend` was the other half of this gap and is now closed** (2026-08-02).
 It is implemented as the refusal, because every path through it is one: osh has

@@ -23,6 +23,7 @@
 
 pub mod arith;
 pub mod ast;
+pub mod bind_tables;
 pub mod brace;
 pub mod bytes;
 pub mod ere;

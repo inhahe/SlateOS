@@ -19191,6 +19191,7 @@ impl Shell {
             "bg" => self.builtin_bg(args, out, redir),
             "caller" => self.builtin_caller(args, out, redir),
             "times" => self.builtin_times(out, redir),
+            "bind" => self.builtin_bind(args, out, redir),
             "suspend" => self.builtin_suspend(args, &mut flow),
             "enable" => self.builtin_enable(args, out, redir),
             "alias" => self.builtin_alias(args, out, redir),
@@ -22364,6 +22365,250 @@ impl Shell {
         let zero = "0m0.000s";
         let text = format!("{zero} {zero}\n{zero} {zero}\n");
         self.write_bytes(out, redir, text.as_bytes())
+    }
+
+    /// `bind [-lpsvPSVX] [-m keymap] [-f filename] [-q name] [-u name]
+    /// [-r keyseq] [-x keyseq:shell-command] [keyseq:readline-function]` —
+    /// readline's key-binding interface.
+    ///
+    /// osh has readline's history *expansion* (`histexpand`) but no line editor,
+    /// so there is nothing for a key binding to bind to. That is not a reason to
+    /// refuse the builtin: a *non-interactive* bash is in exactly the same
+    /// position, and it still answers every listing — it just warns first, on
+    /// stderr, that line editing is not enabled. osh is permanently in that
+    /// state, so it warns every time and then answers what it can from
+    /// readline's compiled-in tables (`bind_tables`).
+    ///
+    /// Exact here: `-l`, the option and usage diagnostics, the keymap-name
+    /// check, and the options whose whole effect is to *change* a binding —
+    /// `-u`, `-r`, `-x` and the `-X` listing of `-x` bindings — which have
+    /// nothing to change and so correctly do nothing. An operand is not an error
+    /// either; readline reports it itself, unprefixed, and the status stays 0.
+    ///
+    /// Not yet: the dump listings (`-p`/`-v`/`-P`/`-V` — `-s`/`-S`/`-X` are
+    /// empty in a pristine readline and so are already exact) and `-q` for a
+    /// name that *does* exist. Those need the default keymaps themselves, not
+    /// just the function list. See known-issues TD-OILS-NO-BIND-BUILTIN.
+    fn builtin_bind(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
+        const USAGE: &str = "bind: usage: bind [-lpsvPSVX] [-m keymap] \
+             [-f filename] [-q name] [-u name] [-r keyseq] \
+             [-x keyseq:shell-command] [keyseq:readline-function or readline-command]";
+
+        // bash warns before it prints anything else, once per invocation.
+        self.perrln("bind: warning: line editing not enabled");
+
+        let mut list_functions = false;
+        // Each option that takes an argument gets *one* slot, because bash keeps
+        // one variable apiece: a repeated option silently replaces the earlier
+        // one rather than acting twice, so `bind -q a -q b` only ever complains
+        // about `b`.
+        let (mut keymap, mut fname, mut qname, mut uname, mut xspec) =
+            (None::<Str>, None::<Str>, None::<Str>, None::<Str>, None::<Str>);
+        let mut removing = false;
+        let mut i = 0usize;
+        while i < args.len() {
+            if args[i].as_slice() == b"--" {
+                i += 1;
+                break;
+            }
+            // A lone `-`, or a non-option word, ends the options and is an
+            // operand (a key sequence) rather than an empty bundle.
+            let Some(flags) = args[i].strip_prefix(b"-").filter(|f| !f.is_empty()) else {
+                break;
+            };
+            let flags = flags.to_vec();
+            let mut j = 0usize;
+            while j < flags.len() {
+                let c = flags[j];
+                j += 1;
+                match c {
+                    b'l' => list_functions = true,
+                    // The dump listings parse but have nothing to dump yet.
+                    b'p' | b'v' | b's' | b'P' | b'V' | b'S' | b'X' => {}
+                    b'f' | b'q' | b'u' | b'm' | b'r' | b'x' => {
+                        // The argument is the rest of this word if there is
+                        // one, otherwise the next word entirely.
+                        let arg = if j < flags.len() {
+                            flags[j..].to_vec()
+                        } else {
+                            i += 1;
+                            match args.get(i) {
+                                Some(v) => v.clone(),
+                                None => {
+                                    self.perrln(&format!(
+                                        "bind: -{}: option requires an argument",
+                                        c as char
+                                    ));
+                                    self.errln(USAGE);
+                                    return 2;
+                                }
+                            }
+                        };
+                        j = flags.len();
+                        match c {
+                            b'm' => keymap = Some(arg),
+                            b'f' => fname = Some(arg),
+                            b'q' => qname = Some(arg),
+                            b'u' => uname = Some(arg),
+                            b'x' => xspec = Some(arg),
+                            // `-r` removes a binding; with no line editor there
+                            // is nothing to remove, and bash does not check the
+                            // key sequence, so only the fact of it matters.
+                            _ => removing = true,
+                        }
+                    }
+                    _ => {
+                        self.perrln(&format!("bind: -{}: invalid option", c as char));
+                        self.errln(USAGE);
+                        return 2;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        // The rest runs in bash's fixed phase order, not the order the options
+        // were written. The keymap is checked *before* any listing — `bind -l -m
+        // nosuchmap` prints not one function name — while `-f` and the name
+        // queries come *after* it, so `bind -f /nosuch -l` still prints all 174.
+        //
+        // `-m`, `-f` and `-u` return the moment they fail. `-q` and `-x` do not:
+        // they assign the status rather than or-ing into it, so a later phase
+        // that succeeds *clears* an earlier one's failure and `bind -q nosuchfn
+        // -x '"x": echo'` comes out 0.
+        let mut status = 0;
+        if let Some(k) = &keymap
+            && !crate::bind_tables::KEYMAP_NAMES
+                .iter()
+                .any(|n| n.as_bytes() == k.as_slice())
+        {
+            self.perrln(&bfmt![b"bind: `", k.as_slice(), b"': invalid keymap name"]);
+            return 1;
+        }
+
+        if list_functions {
+            let mut text = Vec::new();
+            for name in crate::bind_tables::FUNCTION_NAMES {
+                text.extend_from_slice(name.as_bytes());
+                text.push(b'\n');
+            }
+            let rc = self.write_bytes(out, redir, &text);
+            if rc != 0 {
+                return rc;
+            }
+        }
+
+        if let Some(f) = &fname {
+            // Reading an inputrc is not implemented; there is no line editor to
+            // apply one to. A file that is not there fails identically in bash,
+            // and that is the only outcome osh can honestly produce.
+            self.perrln(&bfmt![
+                b"bind: ",
+                f.as_slice(),
+                b": cannot read: No such file or directory"
+            ]);
+            return 1;
+        }
+
+        // `-u` is checked before `-q`, and both reject a name readline does not
+        // know with the same wording. `-u` then has nothing left to unbind.
+        let known = |n: &Str| {
+            crate::bind_tables::FUNCTION_NAMES
+                .iter()
+                .any(|f| f.as_bytes() == n.as_slice())
+        };
+        if let Some(u) = &uname
+            && !known(u)
+        {
+            self.perrln(&bfmt![b"bind: `", u.as_slice(), b"': unknown function name"]);
+            return 1;
+        }
+        if let Some(q) = &qname {
+            if known(q) {
+                // Reporting *where* a known function is bound needs the default
+                // keymaps, which osh does not carry yet — so this is silent
+                // where bash prints `NAME can be invoked via "…".`. See
+                // known-issues TD-OILS-NO-BIND-BUILTIN.
+                status = 0;
+            } else {
+                self.perrln(&bfmt![b"bind: `", q.as_slice(), b"': unknown function name"]);
+                status = 1;
+            }
+        }
+
+        // `-r` cannot fail — bash does not even look at the key sequence — but
+        // it is still a phase, so it clears a `-q` failure ahead of it.
+        if removing {
+            status = 0;
+        }
+
+        // `-x` is the one option whose argument bash parses itself, before ever
+        // handing it to readline: a quoted key sequence, then a colon, then the
+        // command. All three diagnostics are reachable with no line editor.
+        if let Some(x) = &xspec {
+            status = match Self::bind_x_spec_error(x) {
+                None => 0,
+                Some(msg) => {
+                    self.perrln(&msg);
+                    1
+                }
+            };
+        }
+
+        // Anything left is a key sequence. readline parses it and complains in
+        // its own voice — no shell prefix — and does not touch the status.
+        for spec in &args[i..] {
+            if !spec.contains(&b':') {
+                self.berrln(&bfmt![
+                    b"readline: ",
+                    spec.as_slice(),
+                    b": no key sequence terminator"
+                ]);
+            }
+        }
+        status
+    }
+
+    /// Validate a `bind -x` spec the way bash does before readline sees it, and
+    /// return the diagnostic if it is malformed.
+    ///
+    /// The shape is `"KEYSEQ": COMMAND`: optional whitespace, a double-quoted
+    /// key sequence in which a backslash escapes the next byte (so `"a\"b"` is
+    /// one sequence, not two), optional whitespace, then a colon. The command
+    /// after the colon may be empty. Each of the three ways to get this wrong
+    /// has its own wording, and only one of them puts the spec last.
+    fn bind_x_spec_error(spec: &[u8]) -> Option<Str> {
+        let ws = |b: u8| b == b' ' || b == b'\t';
+        let mut k = 0usize;
+        while spec.get(k).is_some_and(|b| ws(*b)) {
+            k += 1;
+        }
+        if spec.get(k) != Some(&b'"') {
+            return Some(bfmt![
+                b"bind: ",
+                spec,
+                b": first non-whitespace character is not `\"'"
+            ]);
+        }
+        k += 1;
+        loop {
+            match spec.get(k) {
+                None => return Some(bfmt![b"bind: no closing `\"' in ", spec]),
+                // A backslash escapes whatever follows, including the quote
+                // that would otherwise end the sequence.
+                Some(b'\\') => k += 2,
+                Some(b'"') => break,
+                Some(_) => k += 1,
+            }
+        }
+        k += 1;
+        while spec.get(k).is_some_and(|b| ws(*b)) {
+            k += 1;
+        }
+        if spec.get(k) != Some(&b':') {
+            return Some(bfmt![b"bind: ", spec, b": missing colon separator"]);
+        }
+        None
     }
 
     /// `suspend [-f]` — stop the shell until something starts it again.
@@ -35393,6 +35638,11 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
     ("caller", "caller [expr]", "Return the context of the current subroutine call."),
     ("times", "times", "Display process times."),
     ("suspend", "suspend [-f]", "Suspend shell execution."),
+    (
+        "bind",
+        "bind [-lpsvPSVX] [-m keymap] [-f filename] [-q name] [-u name] [-r keyseq] [-x keyseq:shell-command] [keyseq:readline-function or readline-command]",
+        "Set Readline key bindings and variables.",
+    ),
     ("hash", "hash [-lr] [-p pathname] [-dt] [name ...]", "Remember or display program locations."),
     ("history", "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]", "Display or manipulate the history list."),
     ("fc", "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]", "Display or execute commands from the history list."),
@@ -35432,7 +35682,7 @@ const BUILTIN_NAMES: &[&str] = &[
     "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
     "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
     ".", "type", "trap", "jobs", "kill", "wait", "disown", "fg", "bg", "caller", "times", "suspend",
-    "hash",
+    "bind", "hash",
     "history", "fc", "umask",
     "ulimit", "exec",
     "exit", "logout", "return", "break", "continue", "enable", "alias", "unalias", "help",
@@ -54888,6 +55138,104 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("type -t suspend").0, "builtin\n");
         assert_eq!(run("command -v suspend").0, "suspend\n");
         assert_eq!(run("help -s suspend").0, "suspend: suspend [-f]\n");
+    }
+
+    /// `bind` warns first and then does its work in bash's *phase* order rather
+    /// than the order the options were written — which is the only way to see
+    /// that `-m` is checked before a listing while `-f` and the name queries
+    /// come after it.
+    #[test]
+    fn bind_warns_then_works_in_phase_order() {
+        // Every invocation warns, once, prefixed like any builtin error.
+        let (out, code) = run("bind -l 2>&1 >/dev/null");
+        assert_eq!(code, 0);
+        assert_eq!(out, "osh: bind: warning: line editing not enabled\n");
+        // `-l` is readline's function list: 174 names, sorted, one per line.
+        let (out, code) = run("bind -l 2>/dev/null");
+        assert_eq!(code, 0);
+        let names: Vec<&str> = out.lines().collect();
+        assert_eq!(names.len(), 174);
+        assert_eq!(names.first(), Some(&"abort"));
+        assert_eq!(names.last(), Some(&"yank-pop"));
+        // An unknown letter names itself, then the synopsis *unprefixed* —
+        // bash's `builtin_usage()` does not go through `builtin_error`.
+        let (out, code) = run("bind -z 2>&1 >/dev/null");
+        assert_eq!(code, 2);
+        assert!(out.contains("osh: bind: -z: invalid option"), "got {out:?}");
+        assert!(out.contains("\nbind: usage: bind [-lpsvPSVX]"), "got {out:?}");
+        // Letters are read as a bundle, so `-lz` never reaches the listing.
+        let (out, code) = run("bind -lz 2>/dev/null");
+        assert_eq!(code, 2);
+        assert_eq!(out, "");
+        // A missing argument is the ordinary usage error, with the synopsis.
+        let (out, code) = run("bind -m 2>&1 >/dev/null");
+        assert_eq!(code, 2);
+        assert!(out.contains("bind: -m: option requires an argument"), "got {out:?}");
+        // The keymap is checked before anything is listed.
+        let (out, code) = run("bind -l -m nosuchmap 2>/dev/null");
+        assert_eq!(code, 1);
+        assert_eq!(out, "", "the listing must not run: {out:?}");
+        let (out, _) = run("bind -m nosuchmap 2>&1 >/dev/null");
+        assert!(out.contains("bind: `nosuchmap': invalid keymap name"), "got {out:?}");
+        // A known keymap is accepted, attached to the letter or not.
+        assert_eq!(run("bind -m vi -l 2>/dev/null").0.lines().count(), 174);
+        assert_eq!(run("bind -mvi -l 2>/dev/null").0.lines().count(), 174);
+        // `-f` runs *after* the listing, so both happen.
+        let (out, code) = run("bind -f /nosuch/file -l 2>/dev/null");
+        assert_eq!(code, 1);
+        assert_eq!(out.lines().count(), 174);
+        let (out, _) = run("bind -f /nosuch/file 2>&1 >/dev/null");
+        assert!(out.contains("bind: /nosuch/file: cannot read: No such file"), "got {out:?}");
+        // `-u` and `-q` reject an unknown name identically, `-u` first, and
+        // each option keeps only its *last* argument.
+        for cmd in ["bind -u nosuchfn", "bind -q nosuchfn", "bind -q other -q nosuchfn"] {
+            let (out, code) = run(&format!("{cmd} 2>&1 >/dev/null"));
+            assert_eq!(code, 1, "{cmd}: got {out:?}");
+            assert!(out.contains("bind: `nosuchfn': unknown function name"), "{cmd}: {out:?}");
+        }
+        // `-r`, a well-formed `-x`, `-X` and `--` have nothing to change or
+        // show in a pristine readline, and say nothing.
+        for cmd in ["bind -r '\\C-t'", "bind -x '\"x\": echo hi'", "bind -X", "bind --"] {
+            let (out, code) = run(&format!("{cmd} 2>/dev/null"));
+            assert_eq!(code, 0, "{cmd}");
+            assert_eq!(out, "", "{cmd}");
+        }
+        // `-x` is the one argument bash parses itself, and each way to get it
+        // wrong has its own wording — only the unclosed quote puts the spec
+        // last. A backslash inside the quotes escapes the next byte.
+        assert_eq!(run("bind -x '\"a\\\"b\": echo' 2>/dev/null").1, 0);
+        for (spec, want) in [
+            ("x:echo hi", "bind: x:echo hi: first non-whitespace character is not `\"'"),
+            ("\"x\"", "bind: \"x\": missing colon separator"),
+            ("\"x\" echo", "bind: \"x\" echo: missing colon separator"),
+            ("\"unterminated: echo", "bind: no closing `\"' in \"unterminated: echo"),
+        ] {
+            let (out, code) = run(&format!("bind -x '{spec}' 2>&1 >/dev/null"));
+            assert_eq!(code, 1, "{spec}: {out:?}");
+            assert!(out.contains(want), "{spec}: got {out:?}");
+        }
+        // `-q`, `-r` and `-x` *assign* the status rather than or-ing into it,
+        // so a later phase that succeeds clears an earlier one's failure.
+        assert_eq!(run("bind -q nosuchfn -x '\"x\": echo' 2>/dev/null").1, 0);
+        assert_eq!(run("bind -q nosuchfn -r x 2>/dev/null").1, 0);
+        assert_eq!(run("bind -x bad -q nosuchfn 2>/dev/null").1, 1);
+        // An operand runs after all of them and leaves the status alone.
+        assert_eq!(run("bind -x bad ccc 2>/dev/null").1, 1);
+        // An operand is readline's to complain about: its own voice, no shell
+        // prefix, one line each, and the status stays 0.
+        let (out, code) = run("bind aaa bbb 2>&1 >/dev/null");
+        assert_eq!(code, 0);
+        assert!(out.contains("\nreadline: aaa: no key sequence terminator\n"), "got {out:?}");
+        assert!(out.contains("\nreadline: bbb: no key sequence terminator\n"), "got {out:?}");
+        // A lone `-` is an operand too, not an empty option bundle.
+        let (out, _) = run("bind - 2>&1 >/dev/null");
+        assert!(out.contains("readline: -: no key sequence terminator"), "got {out:?}");
+        // One with a terminator is accepted silently.
+        assert_eq!(run("bind '\"\\C-t\": yank' 2>/dev/null").0, "");
+        // It is a builtin like any other, so the describing builtins know it.
+        assert_eq!(run("type -t bind").0, "builtin\n");
+        assert_eq!(run("command -v bind").0, "bind\n");
+        assert!(run("help -s bind").0.starts_with("bind: bind [-lpsvPSVX]"));
     }
 
     #[test]

@@ -16,20 +16,25 @@
 # Letters are scanned left to right across words and within bundles, so `-nf`
 # is refused for `f` and `-sz` for `z`, each on the first letter that objects.
 #
-# Deliberately absent:
-#
-#   * the *full* listing — `enable`, `enable -a`, `enable --`. bash lists 61
-#     builtins where osh has 60: osh has no `bind`, because there is no line
-#     editor to bind keys for. (`suspend` was the other name missing here; it
-#     exists now, as the refusal bash itself gives without job control.)
-#     See known-issues TD-OILS-NO-BIND-BUILTIN. Everything
-#     here therefore asks about named builtins or about the *disabled* subset,
-#     which this case controls completely.
+# The *full* listing is here too, and it is the count that matters: both shells
+# name the same 61 builtins in the same order. It was excluded until 2026-08-02,
+# when the last two names osh was missing — `suspend` and then `bind` — landed
+# as the refusal and the warning that bash itself gives when there is no job
+# control and no line editor. See known-issues TD-OILS-NO-BIND-BUILTIN for the
+# parts of `bind` that are still hollow; none of them is a *name*, so none of
+# them shows here.
 #
 # Every probe runs in a subshell so a disabled builtin cannot reach the next
 # one. Stderr is collected and replayed at the end so it can be compared in a
 # fixed place; nothing here prints a pid, so it is replayed unfiltered.
 exec 4>&2 2>err
+
+echo "=== the full listing names every builtin, in the shell's own order"
+( enable | wc -l; echo "  plain     rc=$?" )
+( enable -a; echo "  -a        rc=$?" )
+( enable -- | wc -l; echo "  --        rc=$?" )
+( enable -p | wc -l; echo "  -p        rc=$?" )
+( enable -s | wc -l; echo "  -s        rc=$?" )
 
 echo "=== -n turns a builtin off, and lists the ones that are off"
 ( enable -n; echo "  none      rc=$?" )

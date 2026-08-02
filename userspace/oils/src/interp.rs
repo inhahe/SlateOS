@@ -22437,15 +22437,21 @@ impl Shell {
         is_builtin(name) && !self.disabled_builtins.contains(name)
     }
 
-    /// `enable [-a] [-n] [name ...]` — enable or disable shell builtins. With
+    /// `enable [-a] [-nps] [name ...]` — enable or disable shell builtins. With
     /// `name`s and no `-n`, re-enable them; with `-n`, disable them (so a
     /// same-named external runs instead). With no `name`s: `-a` lists every
     /// builtin with its state, `-n` lists only the disabled ones, and bare
     /// `enable` lists the enabled ones — all in re-inputtable `enable NAME` /
     /// `enable -n NAME` form. An unknown name is a status-1 error.
+    ///
+    /// `-s` narrows any of those listings to the POSIX special builtins, and is
+    /// a listing filter only: `enable -s echo` still enables `echo`, and
+    /// `enable -s nosuch` still fails at status 1. `-p` asks for the
+    /// re-inputtable form the listings already use, so it adds nothing.
     fn builtin_enable(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let mut disable = false;
         let mut list_all = false;
+        let mut specials_only = false;
         let mut names: Vec<Str> = Vec::new();
         let mut i = 0;
         while let Some(a) = args.get(i) {
@@ -22466,8 +22472,9 @@ impl Shell {
                     match c {
                         b'n' => disable = true,
                         b'a' => list_all = true,
-                        // d/p/s/f: accepted; osh does not distinguish special vs
-                        // regular vs dynamically-loaded builtin classes.
+                        b's' => specials_only = true,
+                        // d/p/f: accepted; osh does not distinguish
+                        // dynamically-loaded builtins.
                         _ => {}
                     }
                 }
@@ -22480,7 +22487,8 @@ impl Shell {
 
         if names.is_empty() {
             // Listing mode. Sort for deterministic output.
-            let mut all: Vec<&str> = BUILTIN_NAMES.to_vec();
+            let mut all: Vec<&str> =
+                if specials_only { SPECIAL_BUILTIN_NAMES } else { BUILTIN_NAMES }.to_vec();
             all.sort_unstable();
             let mut buf = String::new();
             for name in all {
@@ -35205,6 +35213,17 @@ const BUILTIN_NAMES: &[&str] = &[
     "exit", "logout", "return", "break", "continue", "enable", "alias", "unalias", "help",
     "compgen",
     "complete", "compopt",
+];
+
+/// The POSIX *special* builtins, which `enable -s` restricts its listing to.
+///
+/// POSIX names fifteen of these; bash adds `source`, its synonym for `.`, and
+/// lists all sixteen. The class is otherwise unobserved here — osh does not give
+/// a special builtin POSIX's "a failure in it exits the shell" treatment — so
+/// this list exists for `enable -s` alone.
+const SPECIAL_BUILTIN_NAMES: &[&str] = &[
+    ".", ":", "break", "continue", "eval", "exec", "exit", "export", "readonly", "return", "set",
+    "shift", "source", "times", "trap", "unset",
 ];
 
 fn is_builtin(name: &str) -> bool {
@@ -54520,6 +54539,27 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn enable_unknown_name_errors() {
         assert_eq!(run("enable nosuchbuiltin").1, 1);
+    }
+
+    #[test]
+    fn enable_s_lists_only_the_special_builtins() {
+        // `-s` narrows a listing to the sixteen POSIX special builtins (fifteen
+        // plus bash's `source`). Regression: osh accepted `-s` and ignored it,
+        // so `enable -s` listed every builtin there is.
+        let (o, s) = run("enable -s");
+        assert_eq!(s, 0);
+        assert_eq!(o.lines().count(), 16, "enable -s: {o:?}");
+        assert!(o.contains("enable export\n"), "enable -s: {o:?}");
+        assert!(!o.contains("enable echo\n"), "echo is not special: {o:?}");
+        // `-a` is still "with their state", just over the narrowed list.
+        assert_eq!(run("enable -s -a").0.lines().count(), 16);
+        // …and `-n` still selects the disabled half of it.
+        assert_eq!(run("enable -n :; enable -s -n").0, "enable -n :\n");
+        assert_eq!(run("enable -n :; enable -s").0.lines().count(), 15);
+        // `-s` filters listings only: a name beside it is enabled as usual, and
+        // an unknown one still fails.
+        assert_eq!(run("enable -n echo; enable -s echo; enable -n").0, "");
+        assert_eq!(run("enable -s nosuchbuiltin").1, 1);
     }
 
     #[test]

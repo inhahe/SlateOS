@@ -11982,7 +11982,7 @@ impl Shell {
             // effects and error status match bash. A redirect failure overrides
             // the assignment's status but does not undo the assignment itself.
             if !sc.redirects.is_empty() {
-                match self.resolve_redirects(&sc.redirects, out) {
+                match self.resolve_null_redirects(&sc.redirects, out) {
                     // Resolution itself created/truncated every output target,
                     // so a null command needs nothing further here.
                     Ok(_) => {}
@@ -15173,10 +15173,29 @@ impl Shell {
         redirs: &[Redirect],
         out: &Out,
     ) -> Result<RedirPlan, Box<RedirFailure>> {
+        self.resolve_redirect_list(redirs, out, VarfdScope::Command)
+    }
+
+    /// [`Shell::resolve_redirects`] for a *null* command — a redirect list with
+    /// no command word. See [`VarfdScope::NullCommand`] for what that changes.
+    fn resolve_null_redirects(
+        &mut self,
+        redirs: &[Redirect],
+        out: &Out,
+    ) -> Result<RedirPlan, Box<RedirFailure>> {
+        self.resolve_redirect_list(redirs, out, VarfdScope::NullCommand)
+    }
+
+    fn resolve_redirect_list(
+        &mut self,
+        redirs: &[Redirect],
+        out: &Out,
+        scope: VarfdScope,
+    ) -> Result<RedirPlan, Box<RedirFailure>> {
         let mut plan = RedirPlan::default();
         let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
-            if let Err(msg) = self.resolve_one_redirect(r, &mut plan, &mut reserved, out) {
+            if let Err(msg) = self.resolve_one_redirect(r, &mut plan, &mut reserved, out, scope) {
                 // Hand the caller the plan built from the redirects *before* this
                 // one: bash applies redirections left to right against the real fd
                 // table, so the diagnostic for a failure goes to fd 2 as it stood
@@ -15376,6 +15395,7 @@ impl Shell {
         plan: &mut RedirPlan,
         reserved: &mut Vec<i32>,
         out: &Out,
+        scope: VarfdScope,
     ) -> Result<(), Str> {
         {
             let fd = self.redir_effective_fd(r, reserved)?;
@@ -15387,6 +15407,12 @@ impl Shell {
             // like a numeric `N>&-`, so it flows through the plan below.
             if let Some(name) = r.varfd.as_ref().filter(|_| !redir_is_close(r)) {
                 self.apply_persistent_redirect(r, fd, out)?;
+                if scope == VarfdScope::NullCommand {
+                    // Opened, and then thrown away without ever being named —
+                    // see [`VarfdScope::NullCommand`].
+                    self.varredir_fds.push(fd);
+                    return Ok(());
+                }
                 // Only now is the number the variable's to hold — see
                 // [`Shell::commit_varfd`] for why the order is observable.
                 self.commit_varfd(name, fd)?;
@@ -32530,6 +32556,24 @@ impl ScalarDest {
             ScalarDest::Var(n) | ScalarDest::Elem(n, _) => n,
         }
     }
+}
+
+/// Whether a redirect list belongs to a command bash actually runs, which is
+/// what decides where a `{v}>file` in it leaves its descriptor and its number.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VarfdScope {
+    /// An ordinary command. The descriptor is bound, its number stored in the
+    /// variable, and both outlive the command — unless `shopt -s
+    /// varredir_close` is on, which takes the descriptor (not the number) back.
+    Command,
+    /// A *null* command: a redirect list with no command word (`{v}>f`, and
+    /// `x=1 {v}>f`, which still performs the assignment). bash does the
+    /// redirection — the file is created and truncated, and an unopenable path
+    /// is still reported at status 1 — and then undoes it without ever writing
+    /// the variable. `v=pre; {v}>f` leaves `v` as `pre`, an unset `v` stays
+    /// unset (`declare -p v` says not found), and the next varfd redirect gets
+    /// the same descriptor number back.
+    NullCommand,
 }
 
 /// Per-command redirection plan (expanded targets).
@@ -56832,6 +56876,32 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "osh: v: readonly variable\nosh: v: cannot assign fd to variable\n"
         );
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn a_null_commands_varfd_opens_without_naming_itself() {
+        // A redirect list with no command word still redirects — the file is
+        // created and truncated, an unopenable path is still status 1 — but bash
+        // undoes the whole list afterwards without ever writing the variable.
+        // Regression: osh assigned it, so `v=pre; {v}>f` came back as 10.
+        let (o, s) = run("v=pre; {v}>/dev/null; echo \"v=[$v] rc=$?\"");
+        assert_eq!(o, "v=[pre] rc=0\n");
+        assert_eq!(s, 0);
+        // An unset variable stays unset, rather than becoming an empty one.
+        let (o, s) = run("{v}>/dev/null; declare -p v 2>&1");
+        assert_eq!(o, "osh: declare: v: not found\n");
+        assert_eq!(s, 1, "`declare -p` of a name that does not exist fails");
+        // The prefix assignment beside it is still performed, so this is not a
+        // subshell — only the varfd's two effects are undone.
+        assert_eq!(run("x=1 {v}>/dev/null; echo \"x=$x v=[$v]\"").0, "x=1 v=[]\n");
+        // …and the descriptor goes with the number, so the next one gets 10.
+        let (o, s) = run("{v}>/dev/null; {u}>/dev/null; { :; } {w}>/dev/null; echo \"w=$w\"");
+        assert_eq!(o, "w=10\n");
+        assert_eq!(s, 0);
+        // A failing open is still reported, and still leaves the variable alone.
+        let (o, s) = run("v=pre; { {v}>/nosuch/dir/f; } 2>/dev/null; echo \"rc=$? v=[$v]\"");
+        assert_eq!(o, "rc=1 v=[pre]\n");
+        assert_eq!(s, 0);
     }
 
     #[test]

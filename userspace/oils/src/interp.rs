@@ -22449,6 +22449,8 @@ impl Shell {
     /// `enable -s nosuch` still fails at status 1. `-p` asks for the
     /// re-inputtable form the listings already use, so it adds nothing.
     fn builtin_enable(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
+        const ENABLE_USAGE: &str = "enable [-a] [-dnps] [-f filename] [name ...]";
+        let usage_line = format!("enable: usage: {ENABLE_USAGE}\n");
         let mut disable = false;
         let mut list_all = false;
         let mut specials_only = false;
@@ -22460,22 +22462,43 @@ impl Shell {
                 break;
             }
             if let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) {
-                if let Some(c) = flags.iter().find(|c| !matches!(c, b'a' | b'd' | b'n' | b'p' | b's' | b'f'))
-                {
-                    return self.builtin_invalid_option(
-                        "enable",
-                        &[b'-', *c],
-                        "enable [-a] [-dnps] [-f filename] [name ...]",
-                    );
-                }
-                for c in flags {
+                for (j, c) in flags.iter().enumerate() {
                     match c {
                         b'n' => disable = true,
                         b'a' => list_all = true,
                         b's' => specials_only = true,
-                        // d/p/f: accepted; osh does not distinguish
-                        // dynamically-loaded builtins.
-                        _ => {}
+                        // `-p` asks for the re-inputtable form every listing
+                        // already uses, so there is nothing to record.
+                        b'p' => {}
+                        // `-f FILE` loads a builtin from a shared object. osh has
+                        // no way to, and neither has a bash built without
+                        // `dlopen`, which is what this follows: the refusal is
+                        // the option's whole implementation, and it is a bare
+                        // message with no usage line after it. A *missing*
+                        // argument is caught before that, by the option parser,
+                        // and does print one.
+                        b'f' => {
+                            if j + 1 == flags.len() && i + 1 == args.len() {
+                                self.perrln("enable: -f: option requires an argument");
+                                self.emit_stderr(usage_line.as_bytes());
+                            } else {
+                                self.perrln("enable: dynamic loading not available");
+                            }
+                            return 2;
+                        }
+                        // `-d` unloads one. Where there is no dynamic loading it
+                        // is not a recognised option at all, and bash answers
+                        // with its usage line and nothing else — not with the
+                        // `invalid option` an unlisted letter gets, since `-d`
+                        // is still in the synopsis that line would print.
+                        b'd' => {
+                            self.emit_stderr(usage_line.as_bytes());
+                            return 2;
+                        }
+                        _ => {
+                            return self
+                                .builtin_invalid_option("enable", &[b'-', *c], ENABLE_USAGE);
+                        }
                     }
                 }
                 i += 1;
@@ -54539,6 +54562,40 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn enable_unknown_name_errors() {
         assert_eq!(run("enable nosuchbuiltin").1, 1);
+    }
+
+    #[test]
+    fn enable_refuses_the_dynamic_loading_options() {
+        // `-f` and `-d` load and unload a builtin from a shared object. osh has
+        // no way to, and answers as a bash built without `dlopen` does.
+        // Regression: osh accepted both silently and took their arguments as
+        // builtin names, so `enable -f /x foo` said `/x: not a shell builtin`.
+        let (o, s) = run("enable -f /nosuch/so foo 2>&1");
+        assert_eq!(o, "osh: enable: dynamic loading not available\n");
+        assert_eq!(s, 2);
+        // The refusal comes with no usage line — but a *missing* argument is
+        // caught by the option parser first, and does print one.
+        let (o, s) = run("enable -f 2>&1");
+        assert_eq!(
+            o,
+            "osh: enable: -f: option requires an argument\n\
+             enable: usage: enable [-a] [-dnps] [-f filename] [name ...]\n"
+        );
+        assert_eq!(s, 2);
+        // `-d` is not a recognised option at all where there is no dynamic
+        // loading: the usage line alone, not the `invalid option` an unlisted
+        // letter gets.
+        let (o, s) = run("enable -d echo 2>&1");
+        assert_eq!(o, "enable: usage: enable [-a] [-dnps] [-f filename] [name ...]\n");
+        assert_eq!(s, 2);
+        // Both are found inside a bundle, and the letters before them still run.
+        assert_eq!(run("enable -nd echo 2>&1").1, 2);
+        assert_eq!(run("enable -nf /x 2>&1").0, "osh: enable: dynamic loading not available\n");
+        // An unlisted letter is unaffected, and wins when it comes first.
+        let (o, s) = run("enable -Z echo 2>&1");
+        assert!(o.starts_with("osh: enable: -Z: invalid option\n"), "got {o:?}");
+        assert_eq!(s, 2);
+        assert_eq!(run("enable -Zd 2>&1").0.lines().count(), 2);
     }
 
     #[test]

@@ -19191,6 +19191,7 @@ impl Shell {
             "bg" => self.builtin_bg(args, out, redir),
             "caller" => self.builtin_caller(args, out, redir),
             "times" => self.builtin_times(out, redir),
+            "suspend" => self.builtin_suspend(args, &mut flow),
             "enable" => self.builtin_enable(args, out, redir),
             "alias" => self.builtin_alias(args, out, redir),
             "unalias" => self.builtin_unalias(args),
@@ -22363,6 +22364,58 @@ impl Shell {
         let zero = "0m0.000s";
         let text = format!("{zero} {zero}\n{zero} {zero}\n");
         self.write_bytes(out, redir, text.as_bytes())
+    }
+
+    /// `suspend [-f]` — stop the shell until something starts it again.
+    ///
+    /// The three refusals in front of the stop are what a script can actually
+    /// reach, and they are not alike. An unknown option is an ordinary usage
+    /// error: the letter is named, the synopsis follows, and the status is 2.
+    /// An *operand* is not — bash refuses it with `no_args`, which reports
+    /// `too many arguments` and then unwinds to the outermost read-eval loop
+    /// rather than returning, so the rest of the line goes with it (the same
+    /// abort `exit`'s second operand raises). And a shell that has no job
+    /// control cannot stop, which is a plain status-1 failure.
+    ///
+    /// osh never reaches the stop itself. `-f` forces past the job-control
+    /// check in bash and stops regardless; osh has no way to stop and no way
+    /// to be started again — there is no terminal job control here (see
+    /// known-issues TD-OILS13), and on SlateOS stopping a process is an IPC
+    /// message that does not exist yet, since the design forbids Unix signals
+    /// for process control. So the refusal stands for `-f` too, with bash's
+    /// own wording for the condition that is genuinely true of osh.
+    fn builtin_suspend(&mut self, args: &[Str], flow: &mut Flow) -> i32 {
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            if a.as_slice() == b"--" {
+                i += 1;
+                break;
+            }
+            // A lone `-` is an operand, not an empty bundle.
+            let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
+                break;
+            };
+            for c in flags {
+                if *c != b'f' {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"suspend: -",
+                        &[*c][..],
+                        b": invalid option"
+                    ]);
+                    self.perrln("suspend: usage: suspend [-f]");
+                    return 2;
+                }
+            }
+            i += 1;
+        }
+        if i < args.len() {
+            self.perrln("suspend: too many arguments");
+            *flow = Flow::Abort;
+            return 1;
+        }
+        self.perrln("suspend: cannot suspend: no job control");
+        1
     }
 
     /// `help [-dms] [pattern ...]` — display information about shell builtins.
@@ -35335,6 +35388,7 @@ const HELP_TABLE: &[(&str, &str, &str)] = &[
     ("bg", "bg [job_spec ...]", "Move jobs to the background."),
     ("caller", "caller [expr]", "Return the context of the current subroutine call."),
     ("times", "times", "Display process times."),
+    ("suspend", "suspend [-f]", "Suspend shell execution."),
     ("hash", "hash [-lr] [-p pathname] [-dt] [name ...]", "Remember or display program locations."),
     ("history", "history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]", "Display or manipulate the history list."),
     ("fc", "fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]", "Display or execute commands from the history list."),
@@ -35373,7 +35427,8 @@ const BUILTIN_NAMES: &[&str] = &[
     ":", "true", "false", "cd", "pwd", "pushd", "popd", "dirs", "echo", "printf", "export",
     "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
     "mapfile", "readarray", "command", "builtin", "read", "test", "[", "let", "eval", "source",
-    ".", "type", "trap", "jobs", "kill", "wait", "disown", "fg", "bg", "caller", "times", "hash",
+    ".", "type", "trap", "jobs", "kill", "wait", "disown", "fg", "bg", "caller", "times", "suspend",
+    "hash",
     "history", "fc", "umask",
     "ulimit", "exec",
     "exit", "logout", "return", "break", "continue", "enable", "alias", "unalias", "help",
@@ -54791,6 +54846,44 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // instead reports the empty job table.
         let (out, _) = run_cmd_mode("set -m; fg 2>&1");
         assert!(out.contains("no such job"), "fg output: {out:?}");
+    }
+
+    /// `suspend` never gets as far as stopping anything here, so what it is is
+    /// its three refusals — and they differ in kind: an unknown option is an
+    /// ordinary usage error, an operand unwinds the rest of the line, and a
+    /// shell with no job control simply fails.
+    #[test]
+    fn suspend_refuses_before_it_can_stop_anything() {
+        let (out, code) = run("suspend 2>&1");
+        assert_eq!(code, 1);
+        assert!(out.contains("suspend: cannot suspend: no job control"), "got {out:?}");
+        // `-f` forces past that check in bash and stops the shell; osh has no
+        // way to stop, so the refusal stands (see `builtin_suspend`).
+        let (out, code) = run("suspend -f 2>&1");
+        assert_eq!(code, 1);
+        assert!(out.contains("cannot suspend"), "got {out:?}");
+        // `--` ends the options rather than being one.
+        let (out, code) = run("suspend -- 2>&1");
+        assert_eq!(code, 1);
+        assert!(out.contains("cannot suspend"), "got {out:?}");
+        // An unknown letter names itself and the synopsis, at status 2.
+        let (out, code) = run("suspend -z 2>&1");
+        assert_eq!(code, 2);
+        assert!(out.contains("suspend: -z: invalid option"), "got {out:?}");
+        assert!(out.contains("suspend: usage: suspend [-f]"), "got {out:?}");
+        // An operand is refused by bash's `no_args`, which unwinds instead of
+        // returning: the rest of the line goes with it.
+        let (out, code) = run("suspend extra 2>&1; echo after");
+        assert_eq!(code, 1);
+        assert!(out.contains("suspend: too many arguments"), "got {out:?}");
+        assert!(!out.contains("after"), "the rest of the line should be gone: {out:?}");
+        // A lone `-` is an operand, not an empty option bundle.
+        let (out, _) = run("suspend - 2>&1");
+        assert!(out.contains("too many arguments"), "got {out:?}");
+        // It is a builtin like any other, so the describing builtins know it.
+        assert_eq!(run("type -t suspend").0, "builtin\n");
+        assert_eq!(run("command -v suspend").0, "suspend\n");
+        assert_eq!(run("help -s suspend").0, "suspend: suspend [-f]\n");
     }
 
     #[test]

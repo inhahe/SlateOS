@@ -14299,13 +14299,13 @@ impl Shell {
     /// Resolve a redirect's effective fd, honouring `{name}>…` varfd syntax.
     ///
     /// For an *open* form (`{name}>file`, `{name}<file`, `{name}>&N`, …) bash
-    /// allocates the lowest free descriptor ≥ 10, stores its number in the
-    /// shell variable `name`, and binds it. For the *close* form
+    /// allocates the lowest free descriptor ≥ 10 and binds it; the *store* into
+    /// the shell variable `name` happens afterwards, once the bind has
+    /// succeeded, and is [`Shell::commit_varfd`]'s job. For the *close* form
     /// (`{name}>&-` / `{name}<&-`) bash does **not** allocate: `name`'s current
     /// value names the descriptor to close, and the variable is left unchanged.
-    /// `Err` on assignment to a readonly variable, or a close form whose
-    /// variable is unset / non-numeric. For a plain redirect this returns
-    /// `r.fd`.
+    /// `Err` only for a close form whose variable is unset / non-numeric. For a
+    /// plain redirect this returns `r.fd`.
     fn redir_effective_fd(&mut self, r: &Redirect, reserved: &mut Vec<i32>) -> Result<i32, Str> {
         match &r.varfd {
             Some(name) => {
@@ -14320,41 +14320,60 @@ impl Shell {
                         None => Err(bfmt![name, b": ambiguous redirect"]),
                     };
                 }
-                // Pre-check readonly so `set_scalar_checked` (which reports its
-                // own error) can't double-print with the caller's report. A
-                // circular nameref is not readonly and is reported by the store
-                // itself, so it stands in for its own name here.
-                // As above, the readonly attribute belongs to the variable, so
-                // an element target is checked through its array.
-                let target = self.resolve_ref_name(name).map_or_else(|| name.clone(), |t| t.base);
-                if self.readonly.contains(&target) {
-                    // bash emits *two* diagnostics for a readonly varfd target:
-                    // the generic readonly-variable error, then a
-                    // redirect-specific "cannot assign fd to variable" line. The
-                    // caller prefixes the first line via `err_prefix()`; bake the
-                    // prefixed second line into the message so it carries bash's
-                    // `line N:` prefix too (TD-OILS-VARFD-RO-MSG).
-                    return Err(bfmt![
-                        &target,
-                        b": readonly variable\n",
-                        self.err_prefix(),
-                        &target,
-                        b": cannot assign fd to variable"
-                    ]);
-                }
                 let n = self.alloc_varfd(reserved);
                 reserved.push(n);
-                if self.set_scalar_checked(name, n.to_string().into_bytes()) {
-                    Ok(n)
-                } else {
-                    // Readonly was pre-checked above, so the only remaining
-                    // failure is a circular nameref — already reported by the
-                    // store; report the redirect's own half of it too.
-                    Err(bfmt![name, b": cannot assign fd to variable"])
-                }
+                Ok(n)
             }
             None => Ok(r.fd),
         }
+    }
+
+    /// Store an open-form varfd's descriptor number in its variable, *after* the
+    /// descriptor has been bound.
+    ///
+    /// bash does these two in that order, and the order is visible: a redirect
+    /// that fails to open leaves the variable exactly as it was — unset if it
+    /// was unset — so `exec {v}>/nosuch/dir/f` reports the missing directory and
+    /// never touches `$v`. The converse is visible too: a *readonly* variable is
+    /// refused only once the file has been opened, so `readonly v; { echo W; }
+    /// {v}>f` still creates and truncates `f` before saying so. Expansion of the
+    /// redirect's own target therefore sees the variable's old value as well
+    /// (`{v}>out$v`).
+    ///
+    /// A refusal here must not leave the descriptor behind: bash hands fd 10
+    /// straight back to the next varfd redirect, so the bind is undone. The
+    /// descriptor is always ≥ 10, so undoing it is just dropping both halves.
+    fn commit_varfd(&mut self, name: &str, n: i32) -> Result<(), Str> {
+        // The readonly attribute belongs to the variable, so an element target
+        // is checked through its array; a circular nameref is not readonly and
+        // is reported by the store itself, so it stands in for its own name.
+        // Pre-checking readonly keeps `set_scalar_checked`'s own report from
+        // double-printing with the caller's.
+        let target = self.resolve_ref_name(name).map_or_else(|| name.to_owned(), |t| t.base);
+        let err = if self.readonly.contains(&target) {
+            // bash emits *two* diagnostics for a readonly varfd target: the
+            // generic readonly-variable error, then a redirect-specific "cannot
+            // assign fd to variable" line. The caller prefixes the first line
+            // via `err_prefix()`; bake the prefixed second line into the message
+            // so it carries bash's `line N:` prefix too (TD-OILS-VARFD-RO-MSG).
+            bfmt![
+                &target,
+                b": readonly variable\n",
+                self.err_prefix(),
+                &target,
+                b": cannot assign fd to variable"
+            ]
+        } else if self.set_scalar_checked(name, n.to_string().into_bytes()) {
+            return Ok(());
+        } else {
+            // Readonly was pre-checked above, so the only remaining failure is a
+            // circular nameref — already reported by the store; report the
+            // redirect's own half of it too.
+            bfmt![name, b": cannot assign fd to variable"]
+        };
+        self.open_fds.remove(&n);
+        self.open_write_fds.remove(&n);
+        Err(err)
     }
 
     /// Apply a single redirect to the shell's *persistent* fd table (the same
@@ -15325,8 +15344,11 @@ impl Shell {
             // here and left out of the transient `RedirPlan`. The close form
             // (`{name}>&-`) instead reuses `$name`'s current fd and is scoped
             // like a numeric `N>&-`, so it flows through the plan below.
-            if r.varfd.is_some() && !redir_is_close(r) {
+            if let Some(name) = r.varfd.as_ref().filter(|_| !redir_is_close(r)) {
                 self.apply_persistent_redirect(r, fd, out)?;
+                // Only now is the number the variable's to hold — see
+                // [`Shell::commit_varfd`] for why the order is observable.
+                self.commit_varfd(name, fd)?;
                 return Ok(());
             }
             match r.op {
@@ -15983,9 +16005,8 @@ impl Shell {
         let mut rc = 0;
         let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
-            // Resolve `{name}>…` varfd redirects: allocate a free fd ≥ 10 and
-            // store its number in the named variable (or, for `{name}>&-`, read
-            // it back). A readonly target aborts this redirect (like bash).
+            // Resolve `{name}>…` varfd redirects: allocate a free fd ≥ 10 (or,
+            // for `{name}>&-`, read the number back out of the variable).
             let fd = match self.redir_effective_fd(r, &mut reserved) {
                 Ok(n) => n,
                 Err(e) => {
@@ -15995,7 +16016,15 @@ impl Shell {
                     continue;
                 }
             };
-            if let Err(e) = self.apply_persistent_redirect(r, fd, out) {
+            let mut res = self.apply_persistent_redirect(r, fd, out);
+            // The store into the variable comes after the bind, and only if it
+            // succeeded — see [`Shell::commit_varfd`].
+            if res.is_ok()
+                && let Some(name) = r.varfd.as_ref().filter(|_| !redir_is_close(r))
+            {
+                res = self.commit_varfd(name, fd);
+            }
+            if let Err(e) = res {
                 let line = bfmt![self.err_prefix(), &e];
                 self.berrln(&line);
                 rc = 1;
@@ -56756,6 +56785,32 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "osh: v: readonly variable\nosh: v: cannot assign fd to variable\n"
         );
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn varfd_stores_its_number_only_once_the_open_has_succeeded() {
+        // bash binds the descriptor first and stores its number second, so a
+        // redirect that cannot open leaves the variable exactly as it was —
+        // unset if it was unset. Regression: osh stored the number up front, so
+        // `$v` came back as 10 from a redirect that never bound anything.
+        let (o, s) = run("v=pre; { echo W; } {v}>/nosuch/dir/f 2>/dev/null; echo \"rc=$? v=[$v]\"");
+        assert_eq!(o, "rc=1 v=[pre]\n");
+        assert_eq!(s, 0);
+        let (o, s) = run("{ exec {u}>/nosuch/dir/f; } 2>/dev/null; echo \"u=[${u-UNSET}]\"");
+        assert_eq!(o, "u=[UNSET]\n");
+        assert_eq!(s, 0);
+        // The descriptor it would have used is free for the next redirect…
+        let (o, s) =
+            run("{ exec {u}>/nosuch/dir/f; } 2>/dev/null; exec {w}>/dev/null; echo \"w=$w\"");
+        assert_eq!(o, "w=10\n");
+        assert_eq!(s, 0);
+        // …and so is the one a *refused assignment* opened, which is undone.
+        let (o, s) = run(
+            "readonly v=x; { { echo W; } {v}>/dev/null; } 2>/dev/null; \
+             exec {w}>/dev/null; echo \"w=$w\"",
+        );
+        assert_eq!(o, "w=10\n");
+        assert_eq!(s, 0);
     }
 
     #[test]

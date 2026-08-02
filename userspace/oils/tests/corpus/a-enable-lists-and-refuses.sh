@@ -19,9 +19,10 @@
 # Deliberately absent:
 #
 #   * the *full* listing — `enable`, `enable -a`, `enable --`. bash lists 61
-#     builtins where osh has 59: osh has no `bind` (there is no line editor to
-#     bind keys for) and no `suspend` (there is no job control to suspend
-#     into). See known-issues TD-OILS-NO-BIND-OR-SUSPEND-BUILTIN. Everything
+#     builtins where osh has 60: osh has no `bind`, because there is no line
+#     editor to bind keys for. (`suspend` was the other name missing here; it
+#     exists now, as the refusal bash itself gives without job control.)
+#     See known-issues TD-OILS-NO-BIND-BUILTIN. Everything
 #     here therefore asks about named builtins or about the *disabled* subset,
 #     which this case controls completely.
 #

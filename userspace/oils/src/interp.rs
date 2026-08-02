@@ -22403,7 +22403,11 @@ impl Shell {
                         &[*c][..],
                         b": invalid option"
                     ]);
-                    self.perrln("suspend: usage: suspend [-f]");
+                    // bash's `builtin_usage()` prints `<builtin>: usage: …`
+                    // straight to stderr, with no `<name>: line N:` prefix —
+                    // unlike the `invalid option` line just above it, which
+                    // goes through `builtin_error` and carries one.
+                    self.emit_stderr(b"suspend: usage: suspend [-f]\n");
                     return 2;
                 }
             }

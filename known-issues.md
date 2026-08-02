@@ -345,37 +345,41 @@ osh installs the descriptor in all four, which is the behaviour bash itself
 gives in three of them. Named as deliberately absent in the header of
 `tests/corpus/a-read-write-source-on-a-std-fd-keeps-one-offset.sh`.
 
-### TD-OILS-NO-BIND-OR-SUSPEND-BUILTIN. osh has 59 builtins where bash has 61 — 2026-08-01 — 🔧 **OPEN**
+### TD-OILS-NO-BIND-BUILTIN. osh has 60 builtins where bash has 61 — 2026-08-01 — 🔧 **OPEN**
 
 **Where:** `userspace/oils/src/interp.rs` — `BUILTIN_NAMES`.
 
-`enable -a` lists every builtin the shell knows. bash names 61; osh names 59.
-Sorting both listings and diffing them, the two bash has and osh does not are
-`bind` and `suspend`. Both are absent for the same reason — they are about the
-*interactive* shell, which osh does not yet have — but they are absent in
-different degrees:
+`enable -a` lists every builtin the shell knows. bash names 61; osh names 60.
+Sorting both listings and diffing them, the one bash has and osh does not is
+`bind`.
 
-* **`bind`** is readline's key-binding interface. osh has readline's history
-  *expansion* (`src/histexpand.rs`) but no line editor, so there is nothing for
-  a key binding to bind to. The non-interactive halves are still meaningful and
-  are what a script would actually call: `bind -l` (list function names),
-  `bind -v`/`-s`/`-p` (dump variables / macros / bindings in re-inputtable
-  form), `bind -q NAME`, and `bind -X`. The proper fix is a binding table with
-  readline's default emacs and vi maps in it, which the line editor then reads
-  when there is one.
-* **`suspend`** stops the shell with `SIGSTOP`. Without job control bash
-  answers `suspend: cannot suspend: no job control` at status 1, which is what
-  osh should say on Windows, where it has no job control at all. On SlateOS it
-  needs whatever the process-control IPC message for "stop" turns out to be —
-  the design forbids Unix signals for process control, so this cannot simply be
-  `kill(SIGSTOP)`.
-
-  ⚠️ **Do not probe `suspend -f` against real bash.** It forces the suspend even
-  for a login shell, and the probe shell stops for good; a `run-timeout.py`
-  wrapper or a task that can be killed by pid is the only safe way to run it.
+**`bind`** is readline's key-binding interface. osh has readline's history
+*expansion* (`src/histexpand.rs`) but no line editor, so there is nothing for a
+key binding to bind to. The non-interactive halves are still meaningful and are
+what a script would actually call: `bind -l` (list function names),
+`bind -v`/`-s`/`-p` (dump variables / macros / bindings in re-inputtable form),
+`bind -q NAME`, and `bind -X`. The proper fix is a binding table with readline's
+default emacs and vi maps in it, which the line editor then reads when there is
+one.
 
 Until then `enable -a`'s count is the only place the gap shows, and the corpus
 has no case that counts builtins.
+
+**`suspend` was the other half of this gap and is now closed** (2026-08-02).
+It is implemented as the refusal, because every path through it is one: osh has
+no job control (TD-OILS13), so it answers bash's own
+`suspend: cannot suspend: no job control` at status 1. The refusal stands for
+`-f` too — in bash `-f` forces past *both* the job-control and the login-shell
+check and stops regardless, but osh has no way to stop and no way to be started
+again, and on SlateOS "stop" would be a process-control IPC message that does
+not exist yet, since the design forbids Unix signals for process control. If
+that message ever arrives, this is the builtin that should send it.
+
+⚠️ **Do not probe `suspend -f` against real bash.** It forces the suspend even
+for a login shell, and the probe shell stops for good (confirmed: the probe hung
+until the pid was killed). A `run-timeout.py` wrapper or a task that can be
+killed by pid is the only safe way to run it — and it is why the corpus case
+below deliberately omits `-f`.
 
 ### TD-OILS-VARFD-CLOSE-OF-A-NON-NUMBER-CLOSES-STDIN. bash's `{v}>&-` closes fd 0 when `$v` is not a number at all — 2026-08-01 — ⛔ **WONTFIX** (a bash bug, deliberately not replicated)
 

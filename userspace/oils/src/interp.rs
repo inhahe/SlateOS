@@ -13031,22 +13031,43 @@ impl Shell {
         redir: &RedirPlan,
     ) -> Flow {
         let mut i = 1;
-        let mut terse = false;
-        let mut verbose = false;
-        while i < argv.len() && argv[i].starts_with(b"-") && argv[i].len() > 1 {
-            match argv[i].as_slice() {
-                b"-v" => terse = true,
-                b"-V" => verbose = true,
-                b"-p" => {} // "default PATH" — we use the current PATH.
-                b"--" => {
-                    i += 1;
-                    break;
-                }
-                other => {
-                    self.bemit_cmd_stderr(out, redir, &bfmt![self.err_prefix(), b"command: ", other, b": invalid option"]);
-                    self.emit_cmd_stderr(out, redir, "command: usage: command [-pVv] command [arg ...]");
-                    self.last_status = 2;
-                    return Flow::Next;
+        // bash's `command` has one describe *mode*, not two independent flags:
+        // `-v` and `-V` assign to the same variable, so whichever comes last
+        // wins — `-vV` describes verbosely and `-Vv` tersely — and the letters
+        // are scanned within a bundle, so `-pv` is `-p` and `-v`.
+        let mut describe: Option<bool> = None;
+        while let Some(a) = argv.get(i) {
+            if a.as_slice() == b"--" {
+                i += 1;
+                break;
+            }
+            let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
+                break;
+            };
+            for c in flags {
+                match c {
+                    b'v' => describe = Some(false),
+                    b'V' => describe = Some(true),
+                    b'p' => {} // "default PATH" — we use the current PATH.
+                    _ => {
+                        self.bemit_cmd_stderr(
+                            out,
+                            redir,
+                            &bfmt![
+                                self.err_prefix(),
+                                b"command: -",
+                                &[*c][..],
+                                b": invalid option"
+                            ],
+                        );
+                        self.emit_cmd_stderr(
+                            out,
+                            redir,
+                            "command: usage: command [-pVv] command [arg ...]",
+                        );
+                        self.last_status = 2;
+                        return Flow::Next;
+                    }
                 }
             }
             i += 1;
@@ -13056,8 +13077,16 @@ impl Shell {
             self.last_status = 0;
             return Flow::Next;
         };
-        if terse || verbose {
-            return self.command_describe(target, verbose, out, redir);
+        if let Some(verbose) = describe {
+            // Every operand is described, not just the first, and a name that
+            // is not found does not stop the ones after it: the status reports
+            // whether *any* name was described, not whether all were.
+            let mut any = false;
+            for name in rest {
+                any |= self.command_describe(name, verbose, out, redir);
+            }
+            self.last_status = i32::from(!any);
+            return Flow::Next;
         }
         // Run `target` bypassing functions. A disabled builtin (via `enable -n`)
         // runs the same-named external instead. A name that is not text cannot
@@ -13161,14 +13190,16 @@ impl Shell {
     /// function > builtin > `$PATH` file**. `-v` prints the terse form (the name
     /// itself for everything but a file, whose path is printed; an alias prints
     /// a re-usable `alias name='value'` line) and `-V` the sentence form.
-    /// Nothing found is status 1, with a diagnostic only under `-V`.
+    /// Nothing found prints a diagnostic only under `-V`. Returns whether the
+    /// name was described; the caller turns that into the exit status, since
+    /// with several operands it is *any* of them being found that counts.
     fn command_describe(
         &mut self,
         target: BStr<'_>,
         verbose: bool,
         out: &mut Out,
         redir: &RedirPlan,
-    ) -> Flow {
+    ) -> bool {
         // A command *name* that is not text can only be a `$PATH` file: no
         // alias, keyword, function or builtin can be spelled with it.
         let Some(text) = bytes::as_str(target).map(str::to_owned) else {
@@ -13184,7 +13215,6 @@ impl Shell {
                 bfmt![b"alias ", target, b"=", single_quote_bytes(val)]
             };
             let _ = self.bwrite_line(out, redir, &line);
-            self.last_status = 0;
         } else if SHELL_KEYWORDS.contains(&target) {
             // A reserved word is never on `$PATH`, but it *is* what the name
             // resolves to, so bash reports it and exits 0.
@@ -13194,14 +13224,12 @@ impl Shell {
                 target.to_string()
             };
             let _ = self.write_line(out, redir, &line);
-            self.last_status = 0;
         } else if self.funcs.contains_key(target.as_bytes()) {
             if verbose {
                 self.write_function_description(target.as_bytes(), out, redir);
             } else {
                 let _ = self.write_line(out, redir, target);
             }
-            self.last_status = 0;
         } else if self.builtin_enabled(target) {
             let line = if verbose {
                 format!("{target} is a shell builtin")
@@ -13209,11 +13237,10 @@ impl Shell {
                 target.to_string()
             };
             let _ = self.write_line(out, redir, &line);
-            self.last_status = 0;
         } else {
             return self.command_describe_file(target.as_bytes(), verbose, out, redir);
         }
-        Flow::Next
+        true
     }
 
     /// The `$PATH`-file arm of [`Shell::command_describe`], split out because it
@@ -13224,7 +13251,7 @@ impl Shell {
         verbose: bool,
         out: &mut Out,
         redir: &RedirPlan,
-    ) -> Flow {
+    ) -> bool {
         if let Some(path) = self.find_in_path(target) {
             let ps = bytes::path_to_bytes(&path);
             let line = if verbose {
@@ -13233,19 +13260,17 @@ impl Shell {
                 ps
             };
             let _ = self.bwrite_line(out, redir, &line);
-            self.last_status = 0;
-        } else {
-            if verbose {
-                self.berrln(&bfmt![
-                    self.err_prefix(),
-                    b"command: ",
-                    target,
-                    b": not found"
-                ]);
-            }
-            self.last_status = 1;
+            return true;
         }
-        Flow::Next
+        if verbose {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"command: ",
+                target,
+                b": not found"
+            ]);
+        }
+        false
     }
 
     /// Search `$PATH` for an executable named `name`. A name containing a slash
@@ -31118,6 +31143,29 @@ impl Shell {
             }
 
             if mode_t {
+                // `-a` chooses how many meanings are described and `-t` only
+                // changes what each description *says*, so the two compose:
+                // `type -at` names the kind of every meaning, in the same
+                // precedence order the verbose form lists them in, and one
+                // `file` per `$PATH` match rather than one for all of them.
+                if mode_a {
+                    if alias.is_some() {
+                        let _ = self.write_line(out, redir, "alias");
+                    }
+                    if is_kw {
+                        let _ = self.write_line(out, redir, "keyword");
+                    }
+                    if is_fn {
+                        let _ = self.write_line(out, redir, "function");
+                    }
+                    if is_bi {
+                        let _ = self.write_line(out, redir, "builtin");
+                    }
+                    for _ in &files {
+                        let _ = self.write_line(out, redir, "file");
+                    }
+                    continue;
+                }
                 // Single type word (highest precedence): alias > keyword >
                 // function > builtin > file.
                 let word = if alias.is_some() {
@@ -41887,6 +41935,55 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("type while").0, "while is a shell keyword\n");
         // `type g` now prints the reconstructed function body after the header.
         assert_eq!(run("g() { :; }; type g").0, "g is a function\ng () \n{ \n    :\n}\n");
+    }
+
+    /// `-a` chooses how many meanings are described and `-t` only changes what
+    /// each description says, so `type -at` names the kind of *every* meaning —
+    /// it is not a synonym for `type -t`.
+    #[test]
+    fn type_at_names_the_kind_of_every_meaning() {
+        // The function is defined *before* the alias: an alias in command
+        // position would otherwise be expanded out of the definition itself.
+        let src = "shopt -s expand_aliases\ncd() { :; }\nalias cd='echo x'\ntype -at cd";
+        assert_eq!(run_script(src).0, "alias\nfunction\nbuiltin\n");
+        // The letters compose in either order and in either spelling.
+        assert_eq!(run_script(&src.replace("-at", "-ta")).0, "alias\nfunction\nbuiltin\n");
+        assert_eq!(run_script(&src.replace("-at", "-t -a")).0, "alias\nfunction\nbuiltin\n");
+        // A keyword outranks nothing here: it is simply one more meaning.
+        assert_eq!(
+            run_script("shopt -s expand_aliases\nalias if='echo x'\ntype -at if").0,
+            "alias\nkeyword\n"
+        );
+        // Without `-a` only the highest-precedence meaning is named.
+        assert_eq!(run_script(&src.replace("-at", "-t")).0, "alias\n");
+    }
+
+    /// bash's `command` has one describe *mode*, not two flags: `-v` and `-V`
+    /// assign to the same variable, so the last of them wins, and the letters
+    /// are scanned within a bundle rather than matched as whole words.
+    #[test]
+    fn command_describe_options_bundle_and_the_last_one_wins() {
+        assert_eq!(run("f() { :; }; command -vV f").0, "f is a function\nf () \n{ \n    :\n}\n");
+        assert_eq!(run("f() { :; }; command -Vv f").0, "f\n");
+        // `-p` is not a describe option, so it only rides along.
+        assert_eq!(run("f() { :; }; command -pv f").0, "f\n");
+        assert_eq!(run("f() { :; }; command -vp f").0, "f\n");
+        // The first letter that is neither is the one named in the diagnostic.
+        assert_eq!(run("command -pz f; echo $?").0, "2\n");
+    }
+
+    /// `command -v`/`-V` describe every operand, and one that is not found does
+    /// not stop the ones after it: the status is whether *any* name was found.
+    #[test]
+    fn command_describes_every_operand_and_keeps_going_past_a_miss() {
+        assert_eq!(run("f() { :; }; command -v f while").0, "f\nwhile\n");
+        assert_eq!(run("f() { :; }; command -v osh_no_such_xyz f; echo $?").0, "f\n0\n");
+        assert_eq!(run("f() { :; }; command -v f osh_no_such_xyz; echo $?").0, "f\n0\n");
+        assert_eq!(run("command -v osh_no_such_xyz osh_no_other_xyz; echo $?").0, "1\n");
+        // With no operand at all there is nothing to describe, and that is not
+        // a failure.
+        assert_eq!(run("command -v; echo $?").0, "0\n");
+        assert_eq!(run("command -V; echo $?").0, "0\n");
     }
 
     #[test]

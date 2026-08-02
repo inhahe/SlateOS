@@ -4450,7 +4450,25 @@ impl Shell {
     /// `impl Into<Str>` lets the many call sites that build a value from a
     /// literal or a `format!` keep reading naturally.
     fn put_var(&mut self, name: impl Into<String>, value: impl Into<Str>) {
-        self.vars.insert(name.into(), value.into());
+        let name = name.into();
+        self.note_var_change(&name);
+        self.vars.insert(name, value.into());
+    }
+
+    /// React to `name` gaining or losing a value. bash routes such changes
+    /// through per-variable hooks installed in its variable table (`sv_path`
+    /// and friends); this is that mechanism, with the one hook we need.
+    ///
+    /// Assigning or unsetting `$PATH` forgets every remembered command
+    /// location. The hash table maps a name to a path that was found under the
+    /// *old* `$PATH`, and bash throws the whole table away rather than work out
+    /// which entries a new `$PATH` would still reach — even for `PATH=$PATH`,
+    /// whose value it never compares. `export PATH` and `readonly PATH` name no
+    /// value, so they are not assignments and leave the table alone.
+    fn note_var_change(&mut self, name: &str) {
+        if name == "PATH" {
+            self.cmd_hash.clear();
+        }
     }
 
     /// Record the command string the shell was invoked with under `-c`, exposed
@@ -28233,6 +28251,7 @@ impl Shell {
         // Decided before anything is removed, because the reveal at the end
         // takes the prefix's away.
         let shadowed = self.is_ordinary_shadowed(name);
+        self.note_var_change(name);
         self.vars.remove(name);
         self.arrays.remove(name);
         self.assoc.remove(name);
@@ -57063,6 +57082,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("hash -p /bin/foo foo; type foo");
         assert_eq!(s, 0);
         assert_eq!(o, "foo is hashed (/bin/foo)\n");
+    }
+
+    /// Every remembered location was found under some particular `$PATH`, so
+    /// bash throws the whole table away whenever `$PATH` is assigned or unset
+    /// — it never tries to work out which entries a new one would still reach.
+    #[test]
+    fn assigning_path_forgets_the_hash_table() {
+        let empty = "hash: hash table empty\n";
+        let kept = "hits\tcommand\n   0\t/bin/foo\n";
+        // A plain assignment, an append, an `unset`, a `declare`, and even a
+        // value identical to the old one all flush it.
+        assert_eq!(run("hash -p /bin/foo foo; PATH=/nowhere; hash").0, empty);
+        assert_eq!(run("hash -p /bin/foo foo; PATH=$PATH; hash").0, empty);
+        assert_eq!(run("hash -p /bin/foo foo; PATH+=:/nowhere; hash").0, empty);
+        // `unset` needs a `$PATH` to unset: with no environment imported the
+        // unit-test shell has none, and `unset` on a name that is not a
+        // variable looks for a *function* instead.
+        assert_eq!(run("PATH=/x; hash -p /bin/foo foo; unset PATH; hash").0, empty);
+        assert_eq!(run("hash -p /bin/foo foo; declare PATH=/nowhere; hash").0, empty);
+        // So does an assignment made as a command prefix, or inside a function.
+        assert_eq!(run("hash -p /bin/foo foo; PATH=/nowhere true; hash").0, empty);
+        assert_eq!(run("hash -p /bin/foo foo; f() { PATH=/nowhere; }; f; hash").0, empty);
+        // `export` and `readonly` name no value, so they are not assignments;
+        // nor is assigning some other variable.
+        assert_eq!(run("hash -p /bin/foo foo; export PATH; hash").0, kept);
+        assert_eq!(run("hash -p /bin/foo foo; readonly PATH; hash").0, kept);
+        assert_eq!(run("hash -p /bin/foo foo; HOME=/nowhere; hash").0, kept);
     }
 
     #[test]

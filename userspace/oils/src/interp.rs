@@ -2890,6 +2890,19 @@ pub struct Shell {
     /// status of the command before the enclosing one — not the enclosing
     /// command's own status, which does not exist yet at that point.
     procsub_out_jobs: Vec<(String, Program, i32)>,
+    /// Descriptors opened by a `{v}>file` varfd redirect while
+    /// `shopt -s varredir_close` was on, waiting to be closed when the command
+    /// they were written on finishes.
+    ///
+    /// A varfd is a *persistent* descriptor — with the option off (the default)
+    /// it outlives its command exactly as `exec {v}>file` does — so the option
+    /// cannot be modelled by scoping the open. Instead the number is remembered
+    /// here and closed on the way out of [`Shell::exec_command`], which is the
+    /// one place every command shape passes through. Nesting works by mark and
+    /// release, like `procsub_out_jobs`: each command records the length on
+    /// entry and closes everything above it on exit, so an inner command's
+    /// descriptor goes before the outer command's.
+    varredir_fds: Vec<i32>,
     /// `getopts` cursor within the current argument (0 = at the start of a new
     /// argument, i.e. examine the leading `-`). Tracks position inside a bundled
     /// flag group like `-abc` across successive `getopts` calls.
@@ -3729,6 +3742,7 @@ impl Shell {
             item_seq: 0,
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
+            varredir_fds: Vec::new(),
             getopts_col: 0,
             getopts_optind: 1,
             seconds_anchor: std::time::Instant::now(),
@@ -6347,7 +6361,12 @@ impl Shell {
                 _ => self.enter_stage_subshell(),
             }
         }
-        match cmd {
+        // Every command shape passes through here, which makes this the one
+        // place a `shopt -s varredir_close` descriptor can be closed "when the
+        // command finishes" for all of them at once. Mark and release, so a
+        // nested command's descriptor goes before its parent's.
+        let varfd_mark = self.varredir_fds.len();
+        let flow = match cmd {
             Command::Simple(sc) => self.exec_simple(sc, out, stdin),
             Command::If(c) => self.exec_if(c, out, stdin),
             // `break`/`continue` are only meaningful inside a loop body, so we
@@ -6424,6 +6443,25 @@ impl Shell {
                 self.last_status = sub.last_status;
                 Flow::Next
             }
+        };
+        self.close_varredir_fds(varfd_mark);
+        flow
+    }
+
+    /// Close the `shopt -s varredir_close` descriptors this command opened,
+    /// down to the mark its caller recorded on entry.
+    ///
+    /// Only the descriptor goes: bash leaves the *variable* holding the number
+    /// it had, so `shopt -s varredir_close; { :; } {v}>f; echo $v` still prints
+    /// 10 — and, because the number is free again, the next varfd redirect gets
+    /// 10 back rather than 11.
+    fn close_varredir_fds(&mut self, mark: usize) {
+        if self.varredir_fds.len() <= mark {
+            return;
+        }
+        for fd in self.varredir_fds.split_off(mark) {
+            self.open_fds.remove(&fd);
+            self.open_write_fds.remove(&fd);
         }
     }
 
@@ -8318,6 +8356,9 @@ impl Shell {
             // A subshell manages its own process-substitution lifetimes.
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
+            // A varfd's close is scoped to the command it was written on, and no
+            // such command spans the fork.
+            varredir_fds: Vec::new(),
             getopts_col: self.getopts_col,
             getopts_optind: self.getopts_optind,
             seconds_anchor: self.seconds_anchor,
@@ -15349,6 +15390,12 @@ impl Shell {
                 // Only now is the number the variable's to hold — see
                 // [`Shell::commit_varfd`] for why the order is observable.
                 self.commit_varfd(name, fd)?;
+                // `shopt -s varredir_close` takes the descriptor away again when
+                // the command finishes; the variable keeps the number either
+                // way. See [`Shell::varredir_fds`].
+                if self.shopt.get("varredir_close").copied().unwrap_or(false) {
+                    self.varredir_fds.push(fd);
+                }
                 return Ok(());
             }
             match r.op {
@@ -56785,6 +56832,40 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "osh: v: readonly variable\nosh: v: cannot assign fd to variable\n"
         );
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn varredir_close_takes_the_descriptor_back_at_the_end_of_the_command() {
+        // A varfd is persistent by default — `{v}>f` outlives its command just
+        // as `exec {v}>f` does — and `shopt -s varredir_close` is what closes it
+        // again when the command finishes. The *variable* keeps its number
+        // either way; only the descriptor goes.
+        let keep =
+            "{ :; } {v}>/dev/null; echo \"v=$v\"; { echo X >&$v; } 2>/dev/null; echo \"rc=$?\"";
+        assert_eq!(run(keep).0, "v=10\nrc=0\n");
+        assert_eq!(run(&format!("shopt -s varredir_close; {keep}")).0, "v=10\nrc=1\n");
+        // With the number free again, the next redirect gets 10 back.
+        let two = "{ :; } {a}>/dev/null; { :; } {b}>/dev/null; echo \"$a $b\"";
+        assert_eq!(run(two).0, "10 11\n");
+        assert_eq!(run(&format!("shopt -s varredir_close; {two}")).0, "10 10\n");
+        // `exec` is not a command whose end could close anything, so its
+        // descriptor persists with the option on.
+        let (o, s) = run(
+            "shopt -s varredir_close; exec {v}>/dev/null; \
+             { echo X >&$v; } 2>/dev/null; echo \"rc=$?\"",
+        );
+        assert_eq!(o, "rc=0\n");
+        assert_eq!(s, 0);
+        // Nested: the inner command's descriptor goes when *it* ends, the
+        // outer's only when the outer does.
+        let (o, s) = run(
+            "shopt -s varredir_close\n\
+             { { :; } {p}>/dev/null; { echo X >&$p; } 2>/dev/null; echo \"inner=$?\"\n\
+               { echo Y >&$q; } 2>/dev/null; echo \"outer=$?\"; } {q}>/dev/null\n\
+             { echo Z >&$q; } 2>/dev/null; echo \"after=$?\"",
+        );
+        assert_eq!(o, "inner=1\nouter=0\nafter=1\n");
+        assert_eq!(s, 0);
     }
 
     #[test]

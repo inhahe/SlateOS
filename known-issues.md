@@ -365,6 +365,31 @@ one.
 Until then `enable -a`'s count is the only place the gap shows, and the corpus
 has no case that counts builtins.
 
+**Sizing and two findings from probing the reference bash** (5.2.37, readline
+8.2), 2026-08-02 — both change how the work should be done:
+
+* **A non-interactive bash still answers every listing**, but prefixes it on
+  stderr with `bind: warning: line editing not enabled`. That is exactly and
+  permanently osh's condition, so osh should emit the same warning and the same
+  listing — which makes the whole builtin corpus-testable, since the corpus runs
+  both shells non-interactively. This is the cheapest fidelity win here and
+  should come first.
+* **`/etc/inputrc` pollutes the tables, so a naive capture is not the default
+  keymap.** With it loaded `bind -p` is 493 lines; with `INPUTRC=/dev/null` it
+  is 488, and `bind -v` differs too. Any table transcribed from a plain
+  `bind -p` on this machine would be that machine's config baked in as if it
+  were readline's compiled-in default. Two consequences: (a) the embedded table
+  must be captured under `INPUTRC=/dev/null`, and (b) a corpus case must set
+  `INPUTRC=/dev/null` itself, or bash reads `/etc/inputrc` while osh does not
+  and the two diverge for a reason that has nothing to do with osh. Reading
+  inputrc files is the real fix and is a separate, later piece of work.
+
+Surface to reproduce (pristine, `INPUTRC=/dev/null`): `-l` 174 function names,
+`-p` 488 binding lines, `-v` 46 variables, `-s` 10 macros, `-P` 175 lines,
+`-S`/`-V` mirroring `-s`/`-v`, `-X` empty. These are mechanical enough to be
+*generated* from the reference output into a checked-in table module rather than
+hand-transcribed.
+
 **`suspend` was the other half of this gap and is now closed** (2026-08-02).
 It is implemented as the refusal, because every path through it is one: osh has
 no job control (TD-OILS13), so it answers bash's own

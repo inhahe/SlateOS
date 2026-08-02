@@ -19812,35 +19812,52 @@ impl Shell {
             self.perrln("cd: too many arguments");
             return 1;
         }
-        // An empty operand is a *logical* no-op in bash: `cd ""` succeeds and
-        // leaves `$PWD`/`$OLDPWD` untouched, because bash short-circuits on an
-        // empty dirname before it ever calls chdir. Under `-P` it does call
-        // chdir(""), which fails — with ENOENT, not whatever the host says (the
-        // Windows CRT reports "invalid syntax" for an empty path).
-        if rest.first().is_some_and(|d| d.is_empty()) {
-            if physical {
-                self.perrln("cd: : No such file or directory");
-                return 1;
-            }
-            return 0;
-        }
-
         // `cd -` returns to `$OLDPWD` and echoes the new directory (bash).
         let is_dash = rest.first().map(Vec::as_slice) == Some(b"-".as_slice());
         let (mut target, mut echo) = match rest.first().map(Vec::as_slice) {
-            None => (
-                self.param_value("HOME").unwrap_or_else(|| b"/".to_vec()),
-                false,
-            ),
+            // No operand means `$HOME`, and an *unset* `$HOME` is an error
+            // rather than a fallback: bash never invents a default directory.
+            None => match self.param_value("HOME") {
+                Some(p) => (p, CdEcho::Silent),
+                None => {
+                    self.perrln("cd: HOME not set");
+                    return 1;
+                }
+            },
             Some(b"-") => match self.param_value("OLDPWD") {
-                Some(p) => (p, true),
+                Some(p) => (p.clone(), CdEcho::Given(p)),
                 None => {
                     self.perrln("cd: OLDPWD not set");
                     return 1;
                 }
             },
-            Some(p) => (p.to_vec(), false),
+            Some(p) => (p.to_vec(), CdEcho::Silent),
         };
+
+        // An empty *target* — an empty operand, an empty `$HOME` with no
+        // operand, or an empty `$OLDPWD` via `cd -` — is a *logical* no-op:
+        // bash short-circuits on an empty dirname before the `CDPATH` search
+        // and before it ever calls chdir, so the cwd and `$PWD` are left alone.
+        // The move still "happened" in every other respect: `$OLDPWD` becomes
+        // the directory that was not left, and `cd -` still echoes — an empty
+        // line, since that is the directory it names. Under `-P` bash does call
+        // chdir(""), which fails — with ENOENT, not whatever the host says (the
+        // Windows CRT reports "invalid syntax" for an empty path), and then
+        // `$OLDPWD` is not touched at all.
+        if target.is_empty() {
+            if physical {
+                self.perrln("cd: : No such file or directory");
+                return 1;
+            }
+            let here = self.cwd.clone();
+            if !here.is_empty() {
+                self.put_var("OLDPWD".to_string(), here);
+            }
+            if let CdEcho::Given(given) = &echo {
+                return self.bwrite_line(out, redir, given);
+            }
+            return 0;
+        }
 
         // `CDPATH` search: a non-explicit relative target is looked up under
         // each `CDPATH` entry; a match through a non-`.` entry echoes the
@@ -19856,7 +19873,7 @@ impl Shell {
                 let candidate = bfmt![base, b"/", &target];
                 if bytes::bytes_to_path(&self.host_path(&candidate)).is_dir() {
                     if base != b"." {
-                        echo = true;
+                        echo = CdEcho::Arrived;
                     }
                     target = candidate;
                     break;
@@ -19875,10 +19892,11 @@ impl Shell {
                 }
                 // The echo is ordinary builtin stdout, so it must honour any
                 // redirection on the `cd` itself (`cd - >/dev/null`).
-                if echo {
-                    return self.bwrite_line(out, redir, &cwd);
+                match echo {
+                    CdEcho::Silent => 0,
+                    CdEcho::Given(given) => self.bwrite_line(out, redir, &given),
+                    CdEcho::Arrived => self.bwrite_line(out, redir, &cwd),
                 }
-                0
             }
             Err(e) => {
                 let msg = bfmt![self.err_prefix(), b"cd: ", &target, b": ", e];
@@ -37989,6 +38007,24 @@ fn parse_symbolic_umask(current: u32, spec: BStr<'_>) -> Result<u32, SymUmaskErr
     Ok(!allowed & 0o777)
 }
 
+/// What a successful `cd` prints — the two reasons bash has for announcing a
+/// destination the user did not type in full, which name *different* strings.
+///
+/// `cd -` echoes [`Given`](CdEcho::Given): the value of `$OLDPWD` exactly as it
+/// was stored, unresolved — `OLDPWD=/tmp/. cd -` prints `/tmp/.`, and an empty
+/// `$OLDPWD` prints an empty line. A `CDPATH` match echoes
+/// [`Arrived`](CdEcho::Arrived): the directory the shell ended up in, which is
+/// the whole point of the message, since the name the user typed says nothing
+/// about which `CDPATH` entry answered it.
+enum CdEcho {
+    /// Print nothing: the user named the directory they got.
+    Silent,
+    /// Print this string verbatim — the name `cd` was handed.
+    Given(Str),
+    /// Print the directory the shell arrived in.
+    Arrived,
+}
+
 /// Whether a `cd` target is an *explicit* path (absolute or `.`/`..`-anchored)
 /// for which `CDPATH` is not consulted — matching bash, which searches `CDPATH`
 /// only for a bare relative name like `cd subdir`.
@@ -50337,6 +50373,41 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         assert_eq!(st, 0, "cd -P should succeed; output {o:?}");
         assert!(o.contains(&uniq), "expected cwd under {uniq}, got {o:?}");
+    }
+
+    #[test]
+    fn cd_with_an_empty_target_stays_put_but_still_moves_oldpwd() {
+        let _cwd = cwd_guard();
+        let orig = std::env::current_dir().expect("cwd");
+        let uniq = uniq_name("cdempty");
+        let dir = ScratchDir::at(std::env::temp_dir().join(&uniq));
+        std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
+        let pdir = dir.slashed();
+
+        // An empty target — an empty operand or an empty `$HOME` — resolves to
+        // the current directory, so the cwd and `$PWD` are untouched; but the
+        // move still happened, so `$OLDPWD` becomes the directory not left.
+        // Under `-P` the empty name reaches the OS and fails, leaving `$OLDPWD`
+        // alone. (An *unset* `$HOME` is `cd: HOME not set`, but that cannot be
+        // shown here: with no environment import these tests keep a `std::env`
+        // fallback for `$HOME`, so the corpus case covers it instead.)
+        let script = format!(
+            "cd {pdir}/sub\n\
+             cd ''; echo \"empty rc=$? pwd=${{PWD##*/}} old=${{OLDPWD##*/}}\"\n\
+             HOME=; cd; echo \"home rc=$? pwd=${{PWD##*/}} old=${{OLDPWD##*/}}\"\n\
+             OLDPWD=/nowhere; cd -P '' 2>/dev/null\n\
+             echo \"phys rc=$? pwd=${{PWD##*/}} old=$OLDPWD\"\n"
+        );
+        let (o, st) = run(&script);
+        std::env::set_current_dir(&orig).expect("restore cwd");
+
+        assert_eq!(st, 0, "the trailing echo succeeds; output {o:?}");
+        assert_eq!(
+            o,
+            "empty rc=0 pwd=sub old=sub\n\
+             home rc=0 pwd=sub old=sub\n\
+             phys rc=1 pwd=sub old=/nowhere\n"
+        );
     }
 
     #[test]

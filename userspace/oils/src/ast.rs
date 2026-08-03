@@ -1024,8 +1024,14 @@ pub enum RedirectOp {
     Clobber,
     /// `>> file` — append.
     Append,
-    /// `&> file` / `>& file` (non-numeric target) — redirect both stdout and
-    /// stderr to the file, truncating/creating it.
+    /// `&> file` — redirect both stdout and stderr to the file,
+    /// truncating/creating it.
+    ///
+    /// Not `>& file`: that stays a [`RedirectOp::DupOut`] whose target turns out
+    /// to name a file, which is the shape bash keeps it in too
+    /// (`r_duplicating_output_word`, converted to `r_err_and_out` only at
+    /// redirection time). The two behave alike but do not *print* alike, and in
+    /// posix mode they do not expand alike either.
     WriteBoth,
     /// `&>> file` — redirect both stdout and stderr to the file, appending.
     AppendBoth,
@@ -1048,6 +1054,41 @@ pub enum RedirectOp {
     /// `<<< word` — here-string. The `target` word is expanded and fed to stdin
     /// with a trailing newline.
     HereStr,
+}
+
+/// How the word after a `<&`/`>&` was *written* — the sort bash's parser does
+/// before it knows what the word expands to.
+///
+/// bash turns one operator into three redirect instructions here, and the
+/// distinction outlives parsing: it decides how the redirect prints back
+/// ([`crate::unparse`]), and in posix mode whether the word is globbed. What it
+/// does *not* decide is the meaning of a [`DupSpelling::Word`] target, which is
+/// settled at redirection time by what it expands to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DupSpelling {
+    /// A bare `-` — bash's `r_close_this`: close the descriptor.
+    Close,
+    /// A bare run of digits — bash's `r_duplicating_input`/`_output`.
+    Number,
+    /// Anything else: a filename, a *quoted* number, an expansion — bash's
+    /// `r_duplicating_input_word`/`_output_word`. The classification is the
+    /// parser's, so it never sees through quotes: `>&"2"` is a word.
+    Word,
+}
+
+/// Sort a `<&`/`>&` target the way bash's parser does. See [`DupSpelling`].
+#[must_use]
+pub fn dup_spelling(target: &Word) -> DupSpelling {
+    let [WordPart::Literal(s)] = target.parts.as_slice() else {
+        return DupSpelling::Word;
+    };
+    if s.as_slice() == b"-" {
+        DupSpelling::Close
+    } else if !s.is_empty() && s.iter().all(u8::is_ascii_digit) {
+        DupSpelling::Number
+    } else {
+        DupSpelling::Word
+    }
 }
 
 #[cfg(test)]

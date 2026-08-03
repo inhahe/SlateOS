@@ -1980,6 +1980,18 @@ fn job_holds_sink(ao: &AndOr, stderr_is_sink: bool) -> bool {
             // `n>&m` / `n<&m`: fd n becomes whatever fd m is — the sink if m is
             // one of its descriptors, something else otherwise (`n>&-` closes).
             RedirectOp::DupOut | RedirectOp::DupIn => {
+                // `>&file` on fd 1 is the `&>file` of the previous arm wearing
+                // dup clothes — both descriptors end up on the file, so neither
+                // is left holding the sink. Only the literal spelling can be
+                // read here; `>&$v` falls through to the give-up below.
+                if r.op == RedirectOp::DupOut
+                    && r.fd == 1
+                    && crate::ast::dup_spelling(&r.target) == crate::ast::DupSpelling::Word
+                    && literal_word(&r.target).is_some()
+                {
+                    fds.retain(|&f| f != 1 && f != 2);
+                    continue;
+                }
                 let Some(src) = literal_word(&r.target)
                     .and_then(bytes::as_str)
                     .and_then(|t| t.parse::<i32>().ok())
@@ -16019,12 +16031,21 @@ impl Shell {
                 }
             }
             DupWord::NotAFd if fd == 1 => {
-                // `1>&$f` (non-numeric expansion): both streams to the file.
+                // `exec >&file` (and `1>&$f`): both streams to the file. bash
+                // gets here by rewriting the instruction to `r_err_and_out`
+                // once the word is expanded, so from this point on it *is* the
+                // `&>` arm above — including the special filenames, which are
+                // dups rather than opens (`exec >& /dev/stderr`).
+                if let Some(n) = special_redirect_fd(target) {
+                    return self.persistent_special_dup(fd, target, n, false, out);
+                }
                 let f = open_out(&self.cwd, target, false)
-                    .map_err(|e| bfmt![target, b": ", e.to_string()])?;
+                    .map_err(|e| bfmt![target, b": ", io_error_message(&e)])?;
                 let a = WriteFd::File(std::sync::Arc::new(f));
                 self.exec_stdout = Some(a.clone());
                 self.set_exec_stderr(Some(a));
+                self.set_std_read_half(1, None);
+                self.set_std_read_half(2, None);
             }
             // Any other redirector has no `>&file` fallback. bash names the
             // *expansion* here, not the word as written.
@@ -17045,6 +17066,16 @@ impl Shell {
         };
         if dup == DupWord::NotAFd {
             if fd == 1 {
+                // `>&file` on fd 1 *is* `&>file`, and bash reaches it by the
+                // same route — `do_redirection_internal` rewrites the
+                // instruction to `r_err_and_out` here, after the expansion. So
+                // it gets the special-filename check `&>` gets: `>& /dev/stderr`
+                // is a dup of fd 2, not an open of a path the host may not have.
+                // (No recursion: the resolver is re-entered with an all-digit
+                // target, which never reaches this branch.)
+                if self.resolve_special_redirect(fd, target, false, plan)? {
+                    return Ok(());
+                }
                 let target = target.to_vec();
                 open_output_target(&self.cwd, &target, false)?;
                 plan.clear_stdout();

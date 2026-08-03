@@ -14,8 +14,7 @@
 # is a single empty field that gets as far as the open.
 #
 # (Names like `[ab]` stand in for the more obvious `g*` because a `*` cannot be
-# a filename on every host this runs on. The `>&file` spelling is left out for a
-# different reason — see known-issues.md.)
+# a filename on every host this runs on.)
 
 mkdir d && cd d || exit 1
 : > 1
@@ -46,6 +45,14 @@ echo "  2>& [1] finds fd 1, so this lands on stdout:"
 nosuchcommand 2>& [1]; echo "  rc=$?"
 echo "  while [ab] globs to two names, which is ambiguous:"
 echo hi 2>& [ab]; echo "  rc=$?"
+# The two ways to spell "send both streams to a file" part company right here.
+# They end up meaning the same thing, but they are different instructions until
+# the word has been expanded: `&>` is a filename word, `>&` is a dup one.
+echo "  and the two spellings of 'both streams to a file' disagree:"
+echo amp &> [ab]; echo "  rc=$? (&> takes the name literally)"
+echo "  the file named [ab] now holds: $(cat '[ab]')"
+echo gta >& [ab]; echo "  rc=$? (>& globbed it, to two names)"
+echo "  a and b are still empty: [$(cat a)] [$(cat b)]"
 
 echo "=== a dup word does not split, though"
 echo "  so it is one field, and the ambiguity names the expansion, not the word:"

@@ -2652,11 +2652,6 @@ impl Parser {
         } else {
             None
         };
-        // `>&` (GreatAnd) is `RedirectOp::DupOut` when its target is a numeric fd
-        // (`>&1`) or `-` (`>&-`), but redirects *both* stdout and stderr to a
-        // file when the target is a filename (`>&file`). We resolve that after
-        // parsing the target below.
-        let mut was_great_and = false;
         // `<<-` strips leading tabs; only the operator token records which
         // spelling was used, so capture it before the token is left behind.
         let mut here_strip = false;
@@ -2665,10 +2660,7 @@ impl Parser {
             Some(Tok::Op(Op::Great)) => RedirectOp::Write,
             Some(Tok::Op(Op::GreatPipe)) => RedirectOp::Clobber,
             Some(Tok::Op(Op::DGreat)) => RedirectOp::Append,
-            Some(Tok::Op(Op::GreatAnd)) => {
-                was_great_and = true;
-                RedirectOp::DupOut
-            }
+            Some(Tok::Op(Op::GreatAnd)) => RedirectOp::DupOut,
             Some(Tok::Op(Op::LessAnd)) => RedirectOp::DupIn,
             Some(Tok::Op(Op::LessGreat)) => RedirectOp::ReadWrite,
             Some(Tok::Op(Op::AmpGreat)) => RedirectOp::WriteBoth,
@@ -2717,27 +2709,16 @@ impl Parser {
             }
             _ => return Err(self.unexpected_here()),
         };
-        // `>&file` (non-numeric *literal* target, no explicit/var fd) means
-        // "both fds to file". A `{v}>&…` form keeps its dup semantics (varfd is
-        // not "both"). When the target contains expansions (`>&$v`) we cannot
-        // classify it at parse time — it must be resolved at runtime: a numeric
-        // expansion is a dup, a non-numeric one is an ambiguous redirect (or
-        // "both to file" for the `1>&` corner). So keep it as `DupOut` and let
-        // `resolve_redirects` decide.
-        let target_is_literal = target
-            .parts
-            .iter()
-            .all(|p| matches!(p, WordPart::Literal(_)));
-        let op = if was_great_and
-            && explicit_fd.is_none()
-            && varfd.is_none()
-            && target_is_literal
-            && !dup_target_is_fd(&target)
-        {
-            RedirectOp::WriteBoth
-        } else {
-            op
-        };
+        // `>&file` is deliberately *not* rewritten to `WriteBoth` here, even
+        // though that is what it ends up meaning. bash keeps it as its own
+        // instruction (`r_duplicating_output_word`) and converts it at
+        // redirection time, in `do_redirection_internal`, once the word has been
+        // expanded — which is the only point at which `>&$v` can be told apart
+        // from `>&2` anyway. Deciding it here as well would work, but it would
+        // erase how the redirect was *written*, and three things downstream need
+        // that: printing it back (`declare -f` writes `>&out`, not `&> out`),
+        // posix mode's redirection-word expansion (a dup word is still globbed,
+        // a filename is not), and the fd accounting in `job_holds_sink`.
         Ok(Redirect {
             fd,
             op,
@@ -3952,17 +3933,6 @@ fn is_indirect_referent(name: &str) -> bool {
     is_valid_name(name.as_bytes())
         || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
         || matches!(name, "#" | "?" | "@" | "*")
-}
-
-/// True when a `>&`/`<&` target denotes an fd duplication (a bare number or
-/// `-`) rather than a filename. Only a single unquoted literal qualifies, so
-/// `>&$var` or `>&"file"` are treated as filenames (redirect both).
-fn dup_target_is_fd(target: &Word) -> bool {
-    if let [WordPart::Literal(s)] = target.parts.as_slice() {
-        s.as_slice() == b"-" || (!s.is_empty() && s.iter().all(u8::is_ascii_digit))
-    } else {
-        false
-    }
 }
 
 /// Map a `[[ … ]]` unary operator string to its [`CondUnary`], keeping the

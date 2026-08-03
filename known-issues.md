@@ -560,9 +560,6 @@ split, glob)` and `expand_word_joined(word)`, with a new
 lib test (the interactivity exemption is lib-only — the corpus differ runs
 scripts).
 
-The corpus case leaves out the `>&file` spelling, for the reason in
-TD-OILS-GREAT-AND-FILE-LOSES-ITS-SPELLING.
-
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
 and a 42-case probe of them against osh leaves these real gaps, roughly in
@@ -589,7 +586,7 @@ increasing order of size:
   an option-looking word follows and looks for an external `time` instead. This
   is a *parser* change, not a builtin one.)
 
-### TD-OILS-GREAT-AND-FILE-LOSES-ITS-SPELLING. The parser rewrites `>&file` into `&>file`, so nothing downstream can tell the two apart — 2026-08-03 — ⚠️ **OPEN**
+### TD-OILS-GREAT-AND-FILE-LOSES-ITS-SPELLING. The parser rewrites `>&file` into `&>file`, so nothing downstream can tell the two apart — 2026-08-03 — ✅ **FIXED 2026-08-03**
 
 **Where:** `userspace/oils/src/parser.rs`, the `was_great_and` rewrite at the end
 of the redirection parser; `userspace/oils/src/interp.rs`,
@@ -629,24 +626,72 @@ g*: ambiguous redirect
 >&: 1        # globbed onto two names
 ```
 
-osh says 0 for both, because both are `WriteBoth`, which
-`resolve_redirect_list` classifies as `RedirWord::Filename`. This is why
-`posix-mode-stops-splitting-a-redirection-word-but-still-globs-a-dup.sh`
-demonstrates the dup half with `2>&`/`<&` only.
+osh said 0 for both, because both were `WriteBoth`, which
+`resolve_redirect_list` classifies as `RedirWord::Filename`.
 
 **A third thing the shortcut hides,** found while probing: the runtime path that
 handles the forms the parser *cannot* rewrite (`1>&file`, `>&$v`) does not do the
 special-filename check the `WriteBoth` arm does, so `1>& /dev/stderr` fails where
 `>& /dev/stderr` works. bash treats them alike.
 
-**Proper fix.** Drop the parse-time rewrite and follow bash: leave the node
-`RedirectOp::DupOut` and let `resolve_dup_out` make the call at redirection time,
-which is already where `1>&file` and `>&$v` are decided. That needs
-`resolve_dup_out`'s `NotAFd`/fd-1 branch to gain what the `WriteBoth` arm has —
-the `resolve_special_redirect` check — after which the `WriteBoth` arm serves
-`&>`/`&>>` alone and the unparser can print `>&` from the op again. Expect the
-`declare -f` spacing (`>&out` vs `&> out`) to need a matching tweak in
-`unparse.rs`.
+**Fix.** The parse-time rewrite is gone; the node stays `RedirectOp::DupOut` and
+the call is made at redirection time, where `1>&file` and `>&$v` were already
+being decided. `WriteBoth`/`AppendBoth` now mean `&>`/`&>>` and nothing else.
+
+Both runtime `NotAFd`/fd-1 branches — `Shell::resolve_dup_out` for the transient
+path and `Shell::apply_persistent_dup_out` for `exec` — gained the
+special-filename check the `WriteBoth` arms already had, which is what fixes the
+third finding above; the persistent one also gained the two `set_std_read_half`
+clears, since a `>& file` takes the whole descriptor just as `&> file` does.
+`job_holds_sink` gained a matching guard so a `>& file` on fd 1 still counts as
+giving up both descriptors — the `&>` arm below it was doing that for the
+rewritten node, and without it `x=$(cmd >& f &)` would have started blocking.
+
+The printer needed a model of bash's *three* dup instructions rather than one,
+so `ast.rs` grew `DupSpelling` + `dup_spelling()` (the classification is the
+parser's, so it never looks through quotes: `>&"2"` is a word, `>&'-'` is a word)
+and `unparse.rs` a `dup_src` helper. bash's rules, pinned against all three
+forms: a close always prints as an *output* dup with its fd shown (`cat <&-`
+prints `cat 0>&-`), a number always shows its fd (`>&2` prints `1>&2`), and only
+a dup word may leave the operator's default fd off (`>& out` → `>&out`,
+`2>& out` → `2>&out`, `<& in` → `<&in`).
+
+Covered by `a-dup-redirect-keeps-the-spelling-it-was-written-with.sh`, by the
+`>&`-versus-`&>` glob asymmetry now included in
+`posix-mode-stops-splitting-a-redirection-word-but-still-globs-a-dup.sh`, and by
+a lib test in `unparse.rs`.
+
+**Found while fixing, and still open:** `set -C` does not protect a `&> file`
+(or a `>& file`) target. bash refuses both with `cannot overwrite existing file`;
+osh checks noclobber only in the `Write`/`Clobber`/`Append` arms. See
+TD-OILS-NOCLOBBER-IGNORES-THE-AMPERSAND-FORMS.
+
+### TD-OILS-NOCLOBBER-IGNORES-THE-AMPERSAND-FORMS. `set -C` does not protect a `&> file` target — 2026-08-03 — ⚠️ **OPEN**
+
+**Where:** `userspace/oils/src/interp.rs` — the `RedirectOp::WriteBoth |
+RedirectOp::AppendBoth` arms of the transient redirect planner and of the
+persistent (`exec`) applier, and `Shell::resolve_dup_out` /
+`Shell::apply_persistent_dup_out`'s `DupWord::NotAFd if fd == 1` branches. Each
+opens the file without the `self.noclobber` test its `Write` neighbour makes.
+
+**Reproduce:**
+
+```
+$ bash --norc -c 'set -C; : > c; echo x &> c; echo "rc=$?"'
+bash: line 1: c: cannot overwrite existing file
+rc=1
+$ osh -c 'set -C; : > c; echo x &> c; echo "rc=$?"'
+rc=0
+```
+
+Same for `>& c`, `1>& c` and `exec &> c` / `exec >& c`. `&>>` is an append and is
+correctly exempt in both shells.
+
+**Proper fix.** `&>` is a `>` on two descriptors, so it wants the same guard.
+The check is four lines repeated in four places already (`Write` transient,
+`Write` persistent, and now these) — lift it into one helper that takes the
+target and whether the open is an append, and call it from all of them rather
+than adding a fifth copy.
 
 ### TD-OILS-COMPLETE-TABLE-AND-OPERANDS. `complete`/`compopt` got ten things wrong at once, all downstream of two facts about bash they did not model — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

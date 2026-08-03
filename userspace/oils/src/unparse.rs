@@ -21,7 +21,7 @@
 
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseMode, CmdSubBody,
-    Command,
+    Command, DupSpelling, dup_spelling,
     CondExpr, Item, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor,
     SimpleCommand, Word, WordPart,
 };
@@ -718,14 +718,33 @@ fn redirect_src_plain(r: &Redirect) -> Str {
         // source fd only for fd 1 (`1<> f` → `<> f`), showing it otherwise
         // (`<> f` → `0<> f`, `3<> f` stays `3<> f`). Match that with default 1.
         RedirectOp::ReadWrite => fd_prefixed(r.fd, 1, "<>", " ", &word_src(&r.target)),
-        // bash always shows the explicit source fd on an output dup, including
-        // the default (`>&2` → `1>&2`), so pass a default that never elides it.
-        RedirectOp::DupOut => fd_prefixed(r.fd, -1, ">&", "", &word_src(&r.target)),
-        // Likewise an input dup renders with its explicit source fd
-        // (`0<&3`, never `<&3`).
-        RedirectOp::DupIn => fd_prefixed(r.fd, -1, "<&", "", &word_src(&r.target)),
+        RedirectOp::DupOut => dup_src(r, 1, ">&"),
+        RedirectOp::DupIn => dup_src(r, 0, "<&"),
         RedirectOp::HereStr => bfmt![b"<<< ", &word_src(&r.target)],
         RedirectOp::HereDoc => here_doc_src(r),
+    }
+}
+
+/// A `<&`/`>&` redirect, printed the way bash's `print_redirection` does — which
+/// turns on the *parse-time* shape of the target word, not on what it expands
+/// to, because bash's parser has already sorted the word into one of three
+/// redirect instructions by then and the printer has a case for each:
+///
+/// * a bare `-` is `r_close_this`, printed `N>&-` with the fd always shown and
+///   the operator always `>&` — so `<&-` comes back out as `0>&-`, direction
+///   and all;
+/// * a bare run of digits is `r_duplicating_input`/`r_duplicating_output`, whose
+///   printer likewise always shows the fd (`>&2` → `1>&2`);
+/// * anything else — a filename, a *quoted* number, an expansion — is the
+///   `…_word` form, and only that form elides the fd when it is the operator's
+///   default (`>& out` → `>&out` and `<& in` → `<&in`, but `2>& out` stays
+///   `2>&out` and `>& "2"` stays `>&"2"`).
+fn dup_src(r: &Redirect, default_fd: i32, op: &str) -> Str {
+    let target = word_src(&r.target);
+    match dup_spelling(&r.target) {
+        DupSpelling::Close => bfmt![r.fd, b">&-"],
+        DupSpelling::Number => bfmt![r.fd, op, &target],
+        DupSpelling::Word => fd_prefixed(r.fd, default_fd, op, "", &target),
     }
 }
 
@@ -1336,6 +1355,41 @@ mod tests {
         assert!(d.contains("read x 0<&3"), "dump: {d:?}");
         assert!(d.contains("cat 0<&4"), "dump: {d:?}");
         assert!(!d.contains(">&3"), "input dup rendered as output dup: {d:?}");
+    }
+
+    /// The *other* two shapes a `<&`/`>&` target can have, which bash's parser
+    /// sorts into different redirect instructions and its printer prints
+    /// differently from the plain-number form above. All values measured
+    /// against bash 5.2.
+    #[test]
+    fn a_dup_word_elides_the_default_fd_and_a_close_is_always_an_output_dup() {
+        // A target that is not a bare number is the `…_word` form, and only it
+        // elides the operator's default fd. A *quoted* number is one of these:
+        // the classification is the parser's, so it never sees through quotes.
+        let d = dump_fn(
+            "r() { echo x >& out; echo x 1>& out; echo x 2>& out; echo x >& \"2\"; cat <& in; cat 3<& in; }",
+            "r",
+        );
+        assert!(d.contains("echo x >&out"), "dump: {d:?}");
+        assert!(d.contains("echo x 2>&out"), "dump: {d:?}");
+        assert!(d.contains("echo x >&\"2\""), "dump: {d:?}");
+        assert!(d.contains("cat <&in"), "dump: {d:?}");
+        assert!(d.contains("cat 3<&in"), "dump: {d:?}");
+        // `1>& out` and `>& out` are the same instruction, so they print alike.
+        assert_eq!(d.matches("echo x >&out").count(), 2, "dump: {d:?}");
+
+        // A bare `-` is `r_close_this`, which bash prints as an *output* dup
+        // whichever way it was written, and always with the fd.
+        let d = dump_fn("r() { cat <&-; cat 3<&-; echo x >&-; echo x 2>&-; }", "r");
+        assert!(d.contains("cat 0>&-"), "dump: {d:?}");
+        assert!(d.contains("cat 3>&-"), "dump: {d:?}");
+        assert!(d.contains("echo x 1>&-"), "dump: {d:?}");
+        assert!(d.contains("echo x 2>&-"), "dump: {d:?}");
+        assert!(!d.contains("<&-"), "a close printed as an input dup: {d:?}");
+
+        // A quoted `-` is not a close, so it keeps its direction and elides.
+        let d = dump_fn("r() { echo x >& '-'; }", "r");
+        assert!(d.contains("echo x >&'-'"), "dump: {d:?}");
     }
 
     #[test]

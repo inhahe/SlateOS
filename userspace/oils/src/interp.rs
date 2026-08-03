@@ -39605,17 +39605,11 @@ mod tests {
             .map(|v| String::from_utf8(v).expect("test value is not text"))
     }
 
-    /// Serializes tests that read or mutate the process-global current
-    /// working directory. Tests that call `set_current_dir` (the directory-
-    /// stack test) and tests that create/glob cwd-relative paths must all
-    /// hold this lock so a cwd change in one never races another.
-    fn cwd_guard() -> std::sync::MutexGuard<'static, ()> {
-        static CWD_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        CWD_LOCK
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    // There is no cwd lock here, and there is nothing for one to guard: a
+    // working directory belongs to a `Shell` (`change_dir` moves `self.cwd`
+    // and nothing else), and the tests give every shell one of its own
+    // ([`test_cwd`]). Nothing in this crate calls `set_current_dir`, so the
+    // process's own directory never moves and no test can race another over it.
 
     /// A collision-free basename for a test's scratch file or directory.
     ///
@@ -39652,12 +39646,26 @@ mod tests {
             Self::at(std::env::temp_dir().join(uniq_name(tag)))
         }
 
-        /// A new directory *relative to the process cwd*, for the glob tests whose
-        /// patterns have to stay relative. Those hold [`cwd_guard`] — and must
-        /// take it *before* this, so that the guard outlives the `Drop` that
-        /// resolves this relative path one last time.
+        /// A new directory *inside this test's scratch cwd* ([`test_cwd`]), for
+        /// the glob tests whose patterns have to stay relative — a relative
+        /// pattern is resolved by different code than an absolute one, so those
+        /// tests would not be testing what they mean to if the path were rooted.
+        ///
+        /// They spell it by its [`base`](Self::base) and pass [`test_cwd`] as
+        /// the glob's cwd, which keeps the pattern relative while resolving it
+        /// somewhere that is not the source tree. The process cwd is not
+        /// involved, so no [`cwd_guard`] is needed either.
         fn relative(tag: &str) -> Self {
-            Self::at(std::path::PathBuf::from(uniq_name(tag)))
+            Self::at(bytes::bytes_to_path(&test_cwd()).join(uniq_name(tag)))
+        }
+
+        /// The directory's own name with nothing leading to it — what a relative
+        /// pattern spells (see [`relative`](Self::relative)).
+        fn base(&self) -> String {
+            self.path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
         }
 
         /// A new directory at exactly `path`, for the few tests that have to name
@@ -39693,6 +39701,74 @@ mod tests {
         }
     }
 
+    /// The working directory every [`Shell`] these tests build starts in: a
+    /// scratch directory of this test's own, under the system temp dir.
+    ///
+    /// Without one a test's shell runs in the crate's *source* directory, which
+    /// is both a hazard and a source of mystery failures — a spawn that goes
+    /// wrong creates files there, git does not track empty directories so
+    /// `git status` stays clean, and any later test whose expectation depends on
+    /// what a glob finds in the cwd then fails for an invisible reason
+    /// (TD-OILS-TESTS-RUN-IN-THE-CRATE-DIRECTORY). It also lets a glob test say
+    /// what it means instead of depending on the source tree being tidy.
+    ///
+    /// One directory per *thread* rather than per shell, for two reasons: the
+    /// harness runs each test on a thread of its own, so a thread is a test; and
+    /// the several shells one test builds must be able to see each other's
+    /// files, which a directory per shell would prevent. The directory goes away
+    /// when the thread ends — including the unwinding a failed assertion does,
+    /// which is why it is a `Drop` and not a call at the end of a test body.
+    fn test_cwd() -> Str {
+        thread_local! {
+            static DIR: ScratchDir = ScratchDir::new("cwd");
+        }
+        DIR.with(|d| shell_path(d.path()))
+    }
+
+    /// A [`Shell`] rooted in this test's scratch directory — what every test
+    /// here builds instead of a bare `Shell::new()`, which would leave the shell
+    /// standing in the crate's source directory (see [`test_cwd`]).
+    ///
+    /// `$PWD` is bound alongside `cwd` so the two agree, as they do in a real
+    /// shell: `Shell::new` leaves `$PWD` to `seed_startup_dirs`, which runs only
+    /// when an environment is imported, and an inherited `$PWD` naming the
+    /// *harness's* directory would otherwise contradict `pwd`.
+    fn new_shell() -> Shell {
+        let mut sh = Shell::new();
+        sh.cwd = test_cwd();
+        sh.put_var("PWD".to_string(), sh.cwd.clone());
+        sh.refresh_dirstack();
+        sh
+    }
+
+    /// The harness's own contract: a test's shell stands somewhere of its own,
+    /// and that somewhere is not the crate's source directory
+    /// (TD-OILS-TESTS-RUN-IN-THE-CRATE-DIRECTORY).
+    ///
+    /// This is worth a test because the failure it prevents is silent. A shell
+    /// standing in the source tree globs it — `[${1^}]` is a pattern, and a
+    /// stray directory named `b` once made three unrelated tests fail — and
+    /// anything a spawn creates there is untracked junk that `git status` will
+    /// not mention when it is a directory.
+    #[test]
+    fn a_test_shell_stands_in_a_scratch_directory_of_its_own() {
+        // The crate directory has a `Cargo.toml`; a shell standing in it would
+        // match the pattern rather than leave it alone.
+        let (out, _) = run("echo Cargo.tom*");
+        assert_eq!(out, "Cargo.tom*\n", "the shell is standing in the crate: {out:?}");
+
+        let (out, _) = run("printf '%s\\n' \"$PWD\" \"$(pwd)\"");
+        let seen: Vec<&str> = out.lines().collect();
+        assert_eq!(seen.len(), 2, "expected $PWD and pwd: {out:?}");
+        assert_eq!(seen[0], seen[1], "$PWD and `pwd` must agree: {out:?}");
+        assert_ne!(seen[0], env!("CARGO_MANIFEST_DIR").replace('\\', "/"));
+
+        // It is one directory for the whole test, not one per shell: the several
+        // shells a test builds have to be able to see each other's files.
+        assert_eq!(run("> made-by-an-earlier-shell").0, "");
+        assert_eq!(run("echo made-by-an-earlier-shel*").0, "made-by-an-earlier-shell\n");
+    }
+
     /// Run `src` through the *real* top-level driver ([`Shell::run_source_out`])
     /// with stdout captured, returning `(stdout, $?)`.
     ///
@@ -39704,7 +39780,7 @@ mod tests {
     /// A syntax error therefore surfaces as status 2 and a stderr diagnostic,
     /// not a panic.
     fn run(src: &str) -> (String, i32) {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let buf = capture_sink();
         let status = {
             let mut out = Out::Capture(buf.clone());
@@ -39721,7 +39797,7 @@ mod tests {
     /// '\xff'` emitted *one* byte cannot ask a `String` about it, because the
     /// lossy decode would have already replaced that byte with U+FFFD.
     fn run_raw(src: &str) -> (Str, i32) {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let buf = capture_sink();
         let status = {
             let mut out = Out::Capture(buf.clone());
@@ -39745,7 +39821,7 @@ mod tests {
     ///   top-level lines, which shifts what `history` and `fc` see;
     /// - diagnostics drop bash's `line N:` token interactively.
     fn run_script(src: &str) -> (String, i32) {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_interactive_shell(false);
         let buf = capture_sink();
         let status = {
@@ -39764,7 +39840,7 @@ mod tests {
     /// coverage for the multi-line REPL grow-phase feature.
     #[test]
     fn parse_incomplete_classifies_repl_continuation() {
-        let sh = Shell::new();
+        let sh = new_shell();
         // --- incomplete: unfinished compound commands (keep reading) ---
         for src in [
             "if true",
@@ -39838,7 +39914,7 @@ mod tests {
     /// must not leak into ordinary execution.
     #[test]
     fn unterminated_heredoc_lenient_in_run_source() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let buf = capture_sink();
         {
             let mut out = Out::Capture(buf.clone());
@@ -39869,7 +39945,7 @@ mod tests {
         // (1) A pre-set shell var is never overridden by import/synthesis.
         {
             let _g = env_guard();
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.vars.insert("HOSTNAME".to_string(), b"preset.local".to_vec());
             sh.import_environment();
             assert_eq!(sh.vars.get("HOSTNAME").map(as_text), Some("preset.local"));
@@ -39881,7 +39957,7 @@ mod tests {
             unsafe {
                 std::env::set_var("HOSTNAME", "env.example.com");
             }
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.import_environment();
             let got = sh.vars.get("HOSTNAME").map(as_text);
             // SAFETY: serialised by `env_guard`; restore before releasing the lock.
@@ -39899,7 +39975,7 @@ mod tests {
             unsafe {
                 std::env::remove_var("HOSTNAME");
             }
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.import_environment();
             assert_eq!(
                 sh.vars.get("HOSTNAME").cloned(),
@@ -39913,7 +39989,7 @@ mod tests {
     /// which matters for fatal-abort exit codes: bash's nounset/`:?` abort is
     /// 127 only under `-c`, and 1 for a script file / stdin / interactive shell.
     fn run_cmd_mode(src: &str) -> (String, i32) {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_command_mode();
         sh.set_interactive_shell(false);
         let buf = capture_sink();
@@ -39953,7 +40029,7 @@ mod tests {
         // offending token's line (one past EOF for an end-of-file error), and
         // echoes the offending source line on a second diagnostic line for the
         // `near unexpected token` family. osh mirrors all three with its `$0`.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_command_mode();
         sh.set_interactive_shell(false);
 
@@ -40017,7 +40093,7 @@ mod tests {
         // These assertions go through `format_parse_error`/`err_prefix` directly
         // rather than the text-decoding `parse_error` adapter, which would hide
         // the very byte under test.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_command_mode();
         sh.set_interactive_shell(false);
 
@@ -40034,7 +40110,7 @@ mod tests {
 
         // The prefix carries `$0`, so a script path that is not text names the
         // script it actually is.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_name(b"/tmp/a\xffb.sh");
         sh.set_script_mode();
         sh.set_interactive_shell(false);
@@ -40080,7 +40156,7 @@ mod tests {
         // it is genuinely "stop after the first line" rather than "drop the source
         // echo" — the lines lost below include a follow-on message and a trailing
         // `unexpected end of file`, neither of which is an echo.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_command_mode();
         sh.set_interactive_shell(false);
 
@@ -40120,7 +40196,7 @@ mod tests {
         // TD-OILS-COND-ERRTEXT: malformed `[[ … ]]` expressions produce bash's
         // two-line, token-naming diagnostics (verified byte-for-byte against bash
         // 5.2). Each case: the parser message + the echoed source line.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_command_mode();
         sh.set_interactive_shell(false);
         let check = |sh: &Shell, src: &str, want: &str| {
@@ -40198,7 +40274,7 @@ mod tests {
         // the construct *opened* on, which is what bash reports — not the line
         // the lexer happened to stop on, and not a fallback of 1. It also gains
         // bash's input-source token from the prefix.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_command_mode();
         sh.set_interactive_shell(false);
         let src = "a=(1 2";
@@ -40387,7 +40463,7 @@ mod tests {
         // like (no command/script mode), so it sees the bare `<name>: ` form;
         // here we exercise the command-mode path explicitly.
         fn run_cmd(src: &str) -> String {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
@@ -40440,7 +40516,7 @@ mod tests {
         // each command executes, so a multi-line pipeline or and-or list
         // reports the failing stage's own line, matching bash exactly.
         fn run_cmd(src: &str) -> String {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
@@ -40484,7 +40560,7 @@ mod tests {
         // `$0` name): the `<expr>:` prefix, bash's body wording, the error
         // token, and the builtin tag (`(( `/`let`/`declare`) where bash uses one.
         fn run_cmd(src: &str) -> String {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
@@ -40567,7 +40643,7 @@ mod tests {
         // `((`/`let`/`[[`, and the failure is fatal to the rest of the parse unit
         // the way an expansion error is — not merely a non-zero status.
         fn run_cmd(src: &str) -> (String, i32) {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
@@ -40670,7 +40746,7 @@ mod tests {
         // expands them no further, so a `$` that survived quoting reaches the
         // evaluator, which has no rule for it.
         fn run_cmd(src: &str) -> (String, i32) {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
@@ -40738,7 +40814,7 @@ mod tests {
         // the `((` tag the enclosing command would have added, and fatal to the
         // parse unit rather than merely failing the command.
         fn run_cmd(src: &str) -> (String, i32) {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
@@ -40792,7 +40868,7 @@ mod tests {
         // Each probe reads the variable on a *following line*: the failure is
         // fatal to the list it is in, so an `echo` after a `;` would never run.
         fn run_cmd(src: &str) -> String {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
@@ -40844,7 +40920,7 @@ mod tests {
         // a non-append *associative* literal, which bash builds off to the side
         // and swaps in, making that one shape all-or-nothing.
         fn run_cmd(src: &str) -> String {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
@@ -40917,7 +40993,7 @@ echo \"[${i[a]}] [${i[x]-absent}]\""
         // bash expands it here, where a direct `${a[$n]}` would already have
         // been expanded by the word parser.
         fn run_cmd(src: &str) -> (String, i32) {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
@@ -41095,7 +41171,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// expanded over the token stream — mirroring bash's rule that aliases apply
     /// to input read *after* the alias definition, not within the same parse.
     fn run_with_aliases(setup: &str, src: &str) -> (String, i32) {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source(setup.as_bytes());
         let buf = capture_sink();
         let prog = parse_with_aliases(src.as_bytes(), &sh.aliases, sh.lex_opts()).expect("parse");
@@ -41146,7 +41222,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // an alias defined in a prior parse unit is NOT expanded unless the shell
         // opts in — matching bash. A default (interactive-mode) shell keeps
         // expanding, which is what `run_with_aliases` exercises elsewhere.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_command_mode();
         sh.set_interactive_shell(false);
         sh.run_source("alias g='echo hi'".as_bytes());
@@ -41173,7 +41249,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // is non-interactive in bash, so `expand_aliases` defaults OFF there —
         // just like `-c`/script mode, and unlike a tty REPL. Simulate the
         // piped-stdin case with `set_interactive_shell(false)` (no `-c`/script).
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         // Default (tty-like) REPL: interactive, aliases on.
         assert!(sh.is_interactive(), "default REPL should be interactive");
         assert!(sh.aliases_enabled(), "interactive REPL expands aliases by default");
@@ -41196,19 +41272,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `bash -i -c 'echo $-'` reports `hiBHc`. Deriving interactivity from the
         // mode instead is the bug TD-OILS-INTERACTIVE-SHELL-VS-INTERACTIVE
         // records; these assertions are what stops it coming back.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_command_mode();
         sh.set_interactive_shell(true);
         assert!(sh.is_interactive(), "`-i -c` is an interactive shell");
         assert!(sh.aliases_enabled(), "…so aliases expand by default");
-        let mut sh2 = Shell::new();
+        let mut sh2 = new_shell();
         sh2.set_script_mode();
         sh2.set_interactive_shell(true);
         assert!(sh2.is_interactive(), "`-i script` is an interactive shell too");
 
         // Without `-i` the binary computes `false` for both, which is the case
         // every ordinary `-c`/script invocation takes.
-        let mut sh3 = Shell::new();
+        let mut sh3 = new_shell();
         sh3.set_command_mode();
         sh3.set_interactive_shell(false);
         assert!(!sh3.is_interactive());
@@ -41222,7 +41298,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // readonly-reassignment error is a convenient trigger; `2>&1` routes the
         // stderr diagnostic into the captured stdout buffer.
         fn run_repl(interactive: bool, src: &str) -> String {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_interactive_shell(interactive);
             let buf = capture_sink();
             let prog = parse(src.as_bytes()).expect("parse");
@@ -42838,10 +42914,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn command_not_found_handle_skipped_for_path_names() {
         // A name containing a slash bypasses the handler (bash: a slash path that
         // does not exist is a spawn error, not a "command not found" lookup).
-        // Use an *absolute* non-existent path: a `./`-relative path would resolve
-        // against the process cwd, which a parallel test's `cd` can retarget to a
-        // directory holding a non-executable entry (yielding 126 instead of 127)
-        // — a test-isolation flake, since `cd` mutates the process-global cwd.
+        // Use an *absolute* non-existent path, so that what the name means does
+        // not depend on where the shell happens to be standing: a `./`-relative
+        // one resolving into a directory that holds a non-executable entry of
+        // the same name would yield 126 instead of 127.
         let src = "command_not_found_handle() { echo caught; }; \
                    /no_such_dir_osh_xyz123/no_such_cmd; echo $?";
         assert_eq!(run(src).0, "127\n");
@@ -44635,7 +44711,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// options, capturing stdout. Mirrors [`run`] but lets the caller poke the
     /// command-line option methods (`apply_short_options`, …) first.
     fn run_with(setup: impl FnOnce(&mut Shell), src: &str) -> (String, i32) {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         setup(&mut sh);
         let buf = capture_sink();
         // As in [`run`]: the real driver, so the unit-at-a-time reading a
@@ -44676,7 +44752,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(out, "extglob        \ton\n");
 
         // Invalid names are rejected (so the binary can exit 2).
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert!(!sh.apply_named_option("bogus", true));
         assert!(!sh.apply_shopt_option("bogus", true));
         assert_eq!(sh.apply_short_options("eZx", true), Err('Z'));
@@ -44688,7 +44764,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     // trap tests. (Whether a trap's *output* is captured by an enclosing command
     // substitution is a separate, subtler behaviour — see known-issues.)
     fn trap_var(src: &str, var: &str) -> Option<String> {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source(src.as_bytes());
         sh.vars.get(var).map(|v| as_text(v).to_string())
     }
@@ -44736,7 +44812,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // (bash): it stays in `self.traps` and fires for subsequent top-level
         // commands. `f` installs DEBUG; after `f` returns the two top-level
         // `:`/`echo` commands each fire it. `trap -p` output confirms persistence.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("f(){ trap 'D=$((D+1))' DEBUG; }\nf\n:\n:".as_bytes());
         // Two top-level simple commands after the definition fire the persisted
         // DEBUG trap. (The `f` call itself fired it once before the body ran, but
@@ -45163,7 +45239,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // In script-file mode (bash `osh SCRIPT`), the call-stack arrays gain a
         // bottom `main` pseudo-frame; `-c`/interactive (the plain harness) do not.
         let script_run = |src: &str| {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_name(b"scr.sh");
             sh.set_script_mode();
             sh.set_interactive_shell(false);
@@ -45302,7 +45378,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn bash_execution_string_set_for_dash_c() {
         // `set_execution_string` seeds $BASH_EXECUTION_STRING; the value is an
         // ordinary reassignable variable and appears under `${!BASH*}`.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_command_mode();
         sh.set_interactive_shell(false);
         sh.set_execution_string(b"echo hi");
@@ -46033,7 +46109,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `$0`, `${BASH_SOURCE[0]}` read from inside a function (which reports
         // where the function was *defined*), and `caller`'s source field all
         // agree, and none of them goes through a decode.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_name(b"/tmp/a\xffb.sh");
         sh.set_script_mode();
         sh.set_interactive_shell(false);
@@ -46559,7 +46635,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn special_var_dash_command_mode() {
         // A `-c` invocation appends `c` last (bash: `hBc`, `ehBc`, `hBCc`).
         let cmd_dash = |src: &str| {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
@@ -46658,7 +46734,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let _ = f.write_all(b"{}");
         }
 
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(dir.path()));
         let cmds = sh.compgen_path_commands(b"");
         // The executable is offered by its bare name; the `.json` is not (in
@@ -46694,7 +46770,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
         }
 
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(dir.path()));
         assert!(sh.find_in_path(b"mytool", None).is_some(), "executable not found in PATH");
 
@@ -46723,7 +46799,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// the shell's own (TD-OILS-PREFIX-PATH-LOOKUP).
     #[test]
     fn the_search_path_is_the_shell_s_own_and_a_prefix_outranks_it() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.cwd = b"/here".to_vec();
         let dirs = |sh: &Shell, over: Option<&[u8]>| {
             sh.search_dirs(over).iter().map(|d| String::from_utf8_lossy(d).into_owned()).collect::<Vec<_>>()
@@ -46784,7 +46860,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// (TD-OILS-PREFIX-PATH-LOOKUP).
     #[test]
     fn a_forked_stage_reads_the_hash_table_but_cannot_change_it() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let p = std::path::PathBuf::from("/somewhere/tool");
         sh.hash_remember(b"tool".to_vec(), p.clone(), 3);
 
@@ -46959,13 +47035,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Path completion treats a leading dot as an ordinary character, so a
         // hidden name is offered to an empty word like any other; `.` and `..`
         // are the only entries an empty word does not see.
-        let _cwd = cwd_guard();
         let dir = ScratchDir::new("compgen_p");
         std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
         std::fs::write(dir.join("a1"), b"").expect("a1");
         std::fs::write(dir.join(".ahid"), b"").expect("hidden");
         let base = dir.slashed();
-        let orig = std::env::current_dir().expect("cwd");
         // Compare as sets: the order is the directory's own, which is the
         // filesystem's business rather than the shell's.
         let g = |rest: &str| {
@@ -46986,7 +47060,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The rule follows the word's directory component, not the cwd.
         assert_eq!(g("-f adir/."), ["adir/.", "adir/.."]);
 
-        std::env::set_current_dir(&orig).expect("restore cwd");
     }
 
     #[test]
@@ -46994,13 +47067,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `-o plusdirs`/`dirnames`/`default` are readline's own completions
         // rather than compspec sources, so the compspec's -X, -P and -S do not
         // reach them.
-        let _cwd = cwd_guard();
         let dir = ScratchDir::new("compgen_o");
         std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
         std::fs::create_dir_all(dir.join("bdir")).expect("mkdir");
         std::fs::write(dir.join("a1"), b"").expect("a1");
         let base = dir.slashed();
-        let orig = std::env::current_dir().expect("cwd");
         let g = |rest: &str| run(&format!("cd {base}\ncompgen {rest}"));
 
         // plusdirs adds directories to whatever the compspec found, after the
@@ -47025,7 +47096,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // so it gets the empty-answer status rather than the silent success.
         assert_eq!(g("-o nosort a"), (String::new(), 1));
 
-        std::env::set_current_dir(&orig).expect("restore cwd");
     }
 
     #[test]
@@ -47033,13 +47103,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `-G` is the one source the word does not narrow: the pattern is
         // expanded as a pathname and the whole expansion is handed back, in
         // reverse. Give it a directory of its own so nothing else can match.
-        let _cwd = cwd_guard();
         let dir = ScratchDir::new("compgen_g");
         std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
         std::fs::write(dir.join("a1"), b"").expect("a1");
         std::fs::write(dir.join("b1"), b"").expect("b1");
         let base = dir.slashed();
-        let orig = std::env::current_dir().expect("cwd");
         let g = |rest: &str| run(&format!("cd {base}\ncompgen {rest}")).0;
 
         // Reverse order, and a word operand leaves the list alone.
@@ -47056,7 +47124,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Sources are emitted in bash's fixed order: actions, then -G, then -W.
         assert_eq!(g("-k -G 'a*' -W 'iq' i"), "if\nin\nadir\na1\niq\n");
 
-        std::env::set_current_dir(&orig).expect("restore cwd");
     }
 
     #[test]
@@ -47221,7 +47288,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         std::fs::write(dir.join("b"), "2.2.2.2 beta\n").expect("b");
         let base = dir.slashed();
 
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         run_in(&mut sh, &format!("HOSTFILE={base}/a"));
         assert_eq!(run_in(&mut sh, "compgen -A hostname").0, "alpha\nalpha.example\n");
         // The word narrows the answer, as for every other action.
@@ -47853,7 +47920,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             (String::from_utf8_lossy(&take_capture(&buf)).into_owned(), status)
         };
 
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_login_shell();
         assert_eq!(out(&mut sh, "shopt login_shell"), ("login_shell    \ton\n".to_string(), 0));
         assert_eq!(out(&mut sh, "shopt -p login_shell").0, "shopt -s login_shell\n");
@@ -47863,10 +47930,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(out(&mut sh, "shopt -u login_shell; shopt login_shell").0, "login_shell    \ton\n");
         // And `logout` is now `exit` — the refusal is gone, and the status is
         // the operand's.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_login_shell();
         assert_eq!(out(&mut sh, "logout 7; echo not-reached").1, 7);
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.set_login_shell();
         assert_eq!(out(&mut sh, "logout 7; echo not-reached").0, "");
     }
@@ -49260,7 +49327,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// (as the binary does at startup). Reads process env — no mutation — so
     /// it is safe under the parallel test harness.
     fn run_imported(src: &str) -> (String, i32) {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.import_environment();
         let buf = capture_sink();
         let prog = parse(src.as_bytes()).expect("parse");
@@ -49853,11 +49920,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn glob_filesystem_expansion() {
-        let _cwd = cwd_guard();
-        // Use a uniquely-named cwd-relative dir to avoid the process-wide-cwd
-        // race between parallel tests (no `set_current_dir`).
+        // A *relative* pattern, resolved against the shell's cwd rather than
+        // against the process's — the path a real glob takes, and a different
+        // one from the rooted patterns elsewhere in these tests.
+        let cwd = test_cwd();
         let dir = ScratchDir::relative("globtest");
-        let uniq = dir.slashed();
+        let uniq = dir.base();
         for n in ["a.txt", "b.txt", "c.log", ".hidden"] {
             std::fs::File::create(dir.join(n)).expect("touch");
         }
@@ -49866,7 +49934,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // `*.txt` matches the two text files (sorted), not the log or hidden.
         let mut txt: Vec<Str> =
-            glob_expand_field(b"", &field_lit(&format!("{uniq}/*.txt")), false, false, false, false)
+            glob_expand_field(&cwd, &field_lit(&format!("{uniq}/*.txt")), false, false, false, false)
                 .iter()
                 .map(&basename)
                 .collect();
@@ -49874,12 +49942,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(txt, vec![b"a.txt".to_vec(), b"b.txt".to_vec()]);
 
         // `*` honors the leading-dot rule (no `.hidden`).
-        let all = glob_expand_field(b"", &field_lit(&format!("{uniq}/*")), false, false, false, false);
+        let all = glob_expand_field(&cwd, &field_lit(&format!("{uniq}/*")), false, false, false, false);
         assert!(all.iter().all(|p| !p.ends_with(b".hidden")));
         assert_eq!(all.len(), 3);
 
         // An explicit leading `.` matches hidden files.
-        let dot = glob_expand_field(b"", &field_lit(&format!("{uniq}/.*")), false, false, false, false);
+        let dot = glob_expand_field(&cwd, &field_lit(&format!("{uniq}/.*")), false, false, false, false);
         assert!(dot.iter().any(|p| p.ends_with(b".hidden")));
     }
 
@@ -49889,11 +49957,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // idiom depends on it. On the Windows dev host `current_dir()` and
         // `canonicalize()` hand back `C:\a\b` and `\\?\C:\a\b`; neither form may
         // reach `$PWD`, `pwd`, `$OLDPWD` or `$DIRSTACK`.
-        let _cwd = cwd_guard();
         let dir = ScratchDir::new("slash");
         std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
         let base = dir.slashed();
-        let orig = std::env::current_dir().expect("cwd");
         // `cd`, `cd -P`, `pwd`, `pwd -P` and the directory stack must all agree
         // and all be free of `\` and of the extended-length `\\?\` prefix.
         let (o, _) = run(&format!(
@@ -49903,7 +49969,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
              cd -P {base}/sub\n\
              echo \"P=[$PWD] pP=[$(pwd -P)]\"\n"
         ));
-        std::env::set_current_dir(&orig).expect("restore cwd");
         assert!(!o.contains('\\'), "no backslash may appear in reported paths: {o:?}");
         assert!(!o.contains("//?/"), "the \\\\?\\ prefix must be stripped: {o:?}");
         assert!(o.contains("base=sub\n"), "${{PWD##*/}} must yield the basename: {o:?}");
@@ -49918,7 +49983,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn dirstack_reflects_pushd_popd() {
-        let _cwd = cwd_guard();
         // Initially DIRSTACK holds exactly the current directory (DIRSTACK[0]
         // tracks the live cwd, like `pwd`), matching bash's dynamic array.
         // (Compare against `$(pwd)`, not `$PWD`: osh does not yet re-derive the
@@ -49942,7 +50006,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn dirstack_writes_back_into_the_directory_stack() {
-        let _cwd = cwd_guard();
         let t = std::env::temp_dir().to_string_lossy().replace('\\', "/");
         // A write to a saved entry reaches the stack itself, so `dirs +1` and a
         // later `popd` both see it — the assign function bash gives the name.
@@ -51377,9 +51440,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn globignore_filesystem_filtering() {
-        let _cwd = cwd_guard();
+        let cwd = test_cwd();
         let dir = ScratchDir::relative("globignore");
-        let uniq = dir.slashed();
+        let uniq = dir.base();
         for n in ["a.txt", "b.txt", "c.log", ".hidden"] {
             std::fs::File::create(dir.join(n)).expect("touch");
         }
@@ -51391,7 +51454,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut out = Vec::new();
         let mut failed = None;
         glob_or_literal(
-            b"",
+            &cwd,
             &field_lit(&format!("{uniq}/*")),
             &mut out,
             false,
@@ -51415,7 +51478,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut out = Vec::new();
         let mut failed = None;
         glob_or_literal(
-            b"",
+            &cwd,
             &field_lit(&format!("{uniq}/.*")),
             &mut out,
             false,
@@ -51435,10 +51498,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn glob_globstar_recursive() {
-        let _cwd = cwd_guard();
+        let cwd = test_cwd();
         // Build a small tree:  root/{a.rs, sub/{b.rs, deep/c.rs}}
         let root = ScratchDir::relative("gstar");
-        let uniq = root.slashed();
+        let uniq = root.base();
         std::fs::create_dir_all(root.join("sub").join("deep")).expect("mkdir");
         std::fs::File::create(root.join("a.rs")).expect("touch");
         std::fs::File::create(root.join("sub").join("b.rs")).expect("touch");
@@ -51446,7 +51509,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // `root/**/*.rs` with globstar finds every .rs at any depth.
         let mut rs = glob_expand_field(
-            b"",
+            &cwd,
             &field_lit(&format!("{uniq}/**/*.rs")),
             false,
             false,
@@ -51465,7 +51528,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // Without globstar, `**` behaves like `*` (single level only).
         let one = glob_expand_field(
-            b"",
+            &cwd,
             &field_lit(&format!("{uniq}/**/*.rs")),
             false,
             false,
@@ -51478,7 +51541,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // prefix itself — the zero-directories match — spelled with the slash
         // the pattern wrote, because the prefix here is plain text.
         let mut all = glob_expand_field(
-            b"",
+            &cwd,
             &field_lit(&format!("{uniq}/**")),
             false,
             false,
@@ -51502,7 +51565,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // exactly one — including the zero-directories match, which already
         // ends in one.
         let mut dirs = glob_expand_field(
-            b"",
+            &cwd,
             &field_lit(&format!("{uniq}/**/")),
             false,
             false,
@@ -51522,7 +51585,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The separators the pattern wrote survive a plain-text prefix, so a
         // doubled slash is reported doubled.
         let dbl = glob_expand_field(
-            b"",
+            &cwd,
             &field_lit(&format!("{uniq}//*.rs")),
             false,
             false,
@@ -51534,19 +51597,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn shopt_nocaseglob_matches_case_insensitively() {
-        let _cwd = cwd_guard();
+        let cwd = test_cwd();
         let dir = ScratchDir::relative("nocaseglob_test");
-        let uniq = dir.slashed();
+        let uniq = dir.base();
         for n in ["README.md", "Notes.TXT"] {
             std::fs::File::create(dir.join(n)).expect("touch");
         }
 
         // Case-sensitive: lowercase pattern misses the uppercase-extension file.
         let field = field_lit(&format!("{uniq}/*.txt"));
-        let cs = glob_expand_field(b"", &field, false, false, false, false);
+        let cs = glob_expand_field(&cwd, &field, false, false, false, false);
         assert!(cs.is_empty());
         // With nocaseglob, `*.txt` matches `Notes.TXT`.
-        let ci = glob_expand_field(b"", &field, false, true, false, false);
+        let ci = glob_expand_field(&cwd, &field, false, true, false, false);
         assert_eq!(ci.len(), 1);
         assert!(ci[0].ends_with(b"Notes.TXT"));
     }
@@ -51681,9 +51744,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn shopt_dotglob_includes_hidden() {
-        let _cwd = cwd_guard();
+        let cwd = test_cwd();
         let dir = ScratchDir::relative("dotglob_test");
-        let uniq = dir.slashed();
+        let uniq = dir.base();
         for n in ["a.txt", ".hidden"] {
             std::fs::File::create(dir.join(n)).expect("touch");
         }
@@ -51691,9 +51754,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Without dotglob, `*` skips the dotfile; with it, the dotfile is
         // included (but never `.`/`..`).
         let field = field_lit(&format!("{uniq}/*"));
-        let plain = glob_expand_field(b"", &field, false, false, false, false);
+        let plain = glob_expand_field(&cwd, &field, false, false, false, false);
         assert!(plain.iter().all(|p| !p.ends_with(b".hidden")));
-        let with_dot = glob_expand_field(b"", &field, true, false, false, false);
+        let with_dot = glob_expand_field(&cwd, &field, true, false, false, false);
         assert!(with_dot.iter().any(|p| p.ends_with(b".hidden")));
         assert!(with_dot.iter().all(|p| {
             let b = p.rsplit(|&b| b == b'/').next().unwrap_or(p);
@@ -51703,10 +51766,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn dir_stack_pushd_popd_dirs() {
-        // Mutates the process-global cwd, so serialize against the cwd-relative
-        // glob tests.
-        let _cwd = cwd_guard();
-        let orig = std::env::current_dir().expect("cwd");
         let uniq = uniq_name("dirstack");
         let da = ScratchDir::at(std::env::temp_dir().join(format!("{uniq}_a")));
         let db = ScratchDir::at(std::env::temp_dir().join(format!("{uniq}_b")));
@@ -51722,7 +51781,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, _) = run(&script);
 
         // Restore the process cwd before asserting (run() moved it).
-        std::env::set_current_dir(&orig).expect("restore cwd");
 
         let lines: Vec<&str> = o.lines().collect();
         let dash = lines.iter().position(|l| *l == "---").expect("--- marker");
@@ -51748,9 +51806,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn cd_uses_cdpath_and_echoes() {
-        // Mutates the process-global cwd; serialize with the other cwd tests.
-        let _cwd = cwd_guard();
-        let orig = std::env::current_dir().expect("cwd");
         let uniq = uniq_name("cdpath");
         let tmp = std::env::temp_dir();
         let base = ScratchDir::at(tmp.join(&uniq));
@@ -51763,7 +51818,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // the temp dir (an explicit absolute path, so CDPATH is not consulted),
         // then `cd proj` resolves through CDPATH=<uniq> to <uniq>/proj.
         let (o, st) = run(&format!("cd {ptmp}\nCDPATH={uniq}\ncd proj\npwd"));
-        std::env::set_current_dir(&orig).expect("restore cwd");
 
         assert_eq!(st, 0, "cd via CDPATH should succeed; output {o:?}");
         // `pwd` (captured) confirms the relative name resolved under CDPATH.
@@ -51775,15 +51829,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn cd_physical_flag_changes_directory() {
-        let _cwd = cwd_guard();
-        let orig = std::env::current_dir().expect("cwd");
         let uniq = uniq_name("cdp");
         let dir = ScratchDir::at(std::env::temp_dir().join(&uniq));
         let pdir = dir.slashed();
 
         // `cd -P dir` accepts the flag and changes directory (canonical PWD).
         let (o, st) = run(&format!("cd -P {pdir}\npwd"));
-        std::env::set_current_dir(&orig).expect("restore cwd");
 
         assert_eq!(st, 0, "cd -P should succeed; output {o:?}");
         assert!(o.contains(&uniq), "expected cwd under {uniq}, got {o:?}");
@@ -51803,8 +51854,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn cd_without_an_operand_does_not_search_cdpath() {
-        let _cwd = cwd_guard();
-        let orig = std::env::current_dir().expect("cwd");
         let uniq = uniq_name("cdnooperand");
         let dir = ScratchDir::at(std::env::temp_dir().join(&uniq));
         std::fs::create_dir_all(dir.join("proj")).expect("mkdir");
@@ -51823,7 +51872,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
              cd proj >/dev/null; echo \"operand rc=$? tail=${{PWD##*/}}\"\n"
         );
         let (o, st) = run(&script);
-        std::env::set_current_dir(&orig).expect("restore cwd");
 
         assert_eq!(st, 0, "the trailing echo succeeds; output {o:?}");
         assert_eq!(o, "home rc=1 tail=here\noperand rc=0 tail=proj\n");
@@ -51831,8 +51879,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn cd_with_an_empty_target_stays_put_but_still_moves_oldpwd() {
-        let _cwd = cwd_guard();
-        let orig = std::env::current_dir().expect("cwd");
         let uniq = uniq_name("cdempty");
         let dir = ScratchDir::at(std::env::temp_dir().join(&uniq));
         std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
@@ -51853,7 +51899,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
              echo \"phys rc=$? pwd=${{PWD##*/}} old=$OLDPWD\"\n"
         );
         let (o, st) = run(&script);
-        std::env::set_current_dir(&orig).expect("restore cwd");
 
         assert_eq!(st, 0, "the trailing echo succeeds; output {o:?}");
         assert_eq!(
@@ -52352,7 +52397,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn trap_exit_fires_once() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("trap 'TRAP_MARK=1' EXIT".as_bytes());
         // The handler has not run yet — only stored.
         assert!(!sh.vars.contains_key("TRAP_MARK"));
@@ -52410,7 +52455,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // The parent EXIT trap is reset (not fired) inside a subshell that does
         // not set its own — only the parent's fires, once, at real exit.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let buf = capture_sink();
         {
             let mut out = Out::Capture(buf.clone());
@@ -52439,24 +52484,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn trap_err_fires_on_failure() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("trap 'ERR_HIT=1' ERR\nfalse".as_bytes());
         assert_eq!(sh.vars.get("ERR_HIT").map(as_text), Some("1"));
 
         // ERR does not fire for a successful command...
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("trap 'ERR_HIT=1' ERR\ntrue".as_bytes());
         assert!(!sh.vars.contains_key("ERR_HIT"));
 
         // ...nor for a failure inside an `if` condition (exempt context).
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("trap 'ERR_HIT=1' ERR\nif false; then :; fi".as_bytes());
         assert!(!sh.vars.contains_key("ERR_HIT"));
     }
 
     #[test]
     fn trap_debug_fires_before_each_command() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("trap 'DBG=$((DBG+1))' DEBUG\n:\n:\n:".as_bytes());
         assert_eq!(sh.vars.get("DBG").map(as_text), Some("3"));
     }
@@ -52468,7 +52513,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // trace attribute, or when the trap is installed inside the function.
         // Without any of those it does NOT fire (bash's default); see the
         // `return_trap_*` tests for the full matrix.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("set -T\ntrap 'RET=1' RETURN\nf() { :; }\nf".as_bytes());
         assert_eq!(sh.vars.get("RET").map(as_text), Some("1"));
     }
@@ -52514,7 +52559,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// keeps these cases independent of where each handler's output is routed
     /// (see `trap_output_goes_to_the_callers_sink` for that half).
     fn run_marker(src: &str, var: &str) -> String {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source(src.as_bytes());
         sh.vars.get(var).map(|v| as_text(v).to_string()).unwrap_or_default()
     }
@@ -52654,13 +52699,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn exit_inside_exit_trap_overrides_status() {
         // bash: an `exit N` inside the EXIT trap replaces the shell's exit
         // status with N. Without one, the pre-trap status is preserved.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("trap 'exit 9' EXIT".as_bytes());
         sh.last_status = 2;
         sh.run_exit_trap();
         assert_eq!(sh.last_status, 9);
 
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("trap 'MARK=1' EXIT".as_bytes());
         sh.last_status = 3;
         sh.run_exit_trap();
@@ -52721,18 +52766,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// for an unreadable script file.
     #[test]
     fn exit_trap_reports_its_own_exit_to_the_driver() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("trap 'exit 9' EXIT".as_bytes());
         sh.last_status = 2;
         assert_eq!(sh.run_exit_trap(), Some(9));
 
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("trap 'echo bye > /dev/null' EXIT".as_bytes());
         sh.last_status = 2;
         assert_eq!(sh.run_exit_trap(), None, "a normal handler leaves the status alone");
 
         // Fired at most once, and a shell with no EXIT trap reports nothing.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(sh.run_exit_trap(), None);
     }
 
@@ -52754,14 +52799,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// must NOT latch it — the parent shell keeps running.
     #[test]
     fn top_level_exit_latches_exit_requested() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("echo hi > /dev/null".as_bytes());
         assert!(!sh.exit_requested(), "an ordinary command does not request exit");
 
         assert_eq!(sh.run_source("exit 3".as_bytes()), 3);
         assert!(sh.exit_requested());
 
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("( exit 4 )".as_bytes());
         assert!(!sh.exit_requested(), "a subshell exit stays inside the subshell");
         assert_eq!(sh.last_status, 4);
@@ -52773,7 +52818,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn mapfile_callback_exit_unwinds_shell() {
         let path = scratch_script("mapfile_cb_exit", "a\nb\nc\n");
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let code = sh.run_source(format!(
             "cb() {{ CB=\"$CB $1\"; exit 5; }}\nmapfile -C cb -c 1 arr < {path}\nAFTER=1"
         ).as_bytes());
@@ -54986,7 +55031,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn pipeline_classifier_routes_external_vs_builtin() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.funcs.insert(b"myfn".to_vec(), parse("echo hi".as_bytes()).unwrap());
         let classify = |sh: &Shell, src: &str| -> bool {
             let prog = parse(src.as_bytes()).unwrap();
@@ -55133,7 +55178,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn pipefail_buffered_path_folds_status() {
         // The buffered path (builtin stages) also honours pipefail + PIPESTATUS.
         // `false | true` — last stage true, but pipefail surfaces the failure.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(sh.run_source("set -o pipefail; false | true".as_bytes()), 1);
         let (o, _) = run(r#"false | true; echo "${PIPESTATUS[@]}""#);
         assert_eq!(o, "1 0\n");
@@ -55145,13 +55190,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `-o` selector consuming the following word `pipefail`). Regression:
         // osh previously treated the clustered `o` as an ignored flag and left
         // `pipefail` to become a positional, so pipefail stayed off.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(sh.run_source("set -eo pipefail; shopt -oq pipefail && shopt -oq errexit".as_bytes()), 0);
         // The `o` may appear anywhere in the cluster; remaining letters stay
         // flags, and successive `o`s consume successive following words.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(sh.run_source("set -oe pipefail; shopt -oq pipefail && shopt -oq errexit".as_bytes()), 0);
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(
             sh.run_source("set -oo pipefail xtrace; shopt -oq pipefail && shopt -oq xtrace".as_bytes()),
             0
@@ -55159,7 +55204,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Words left after the consumed option name become positionals.
         assert_eq!(run(r#"set -eo pipefail extra; echo "$1""#).0, "extra\n");
         // `+eo` disables both.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("set -e -o pipefail".as_bytes());
         sh.run_source("set +eo pipefail".as_bytes());
         assert_eq!(sh.run_source("shopt -oq pipefail || shopt -oq errexit".as_bytes()), 1);
@@ -55172,7 +55217,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn wait_reaps_background_job_status() {
         // A `&` command is tracked as a job and sets `$!`; `wait $!` blocks
         // until it finishes and yields its exit status.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(sh.run_source("cmd /c exit 7 &".as_bytes()), 0);
         assert!(sh.last_bg_pid.is_some());
         assert_eq!(sh.jobs.len(), 1);
@@ -55200,7 +55245,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("{ exit 5; } &", 5),   // compound (brace group)
             ("( exit 9 ) &", 9),    // subshell
         ] {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             assert_eq!(sh.run_source(src.as_bytes()), 0, "backgrounding {src:?} succeeds");
             assert!(sh.last_bg_pid.is_some(), "$! set for {src:?}");
             assert_eq!(sh.jobs.len(), 1, "one job registered for {src:?}");
@@ -55213,7 +55258,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
 
         // `$!` survives after a fast job finishes (bash keeps the last bg pid).
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(sh.run_source("true &\np=$!\nwait\n[ -n \"$p\" ] && echo saved".as_bytes()), 0);
     }
 
@@ -55227,7 +55272,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let dir = ScratchDir::new("bg");
         let cd = dir.slashed();
 
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(sh.run_source(format!("cd '{cd}'").as_bytes()), 0);
 
         // A redirection applies to the job, rather than being dropped.
@@ -55263,7 +55308,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // the asynchronous case returns before reaching that — so a `!` written
         // on the backgrounded pipeline itself is simply not applied, and `! X &`
         // comes out the opposite way round from a foreground `! X`.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(sh.run_source("! true".as_bytes()), 1, "foreground negation still applies");
         for (src, want) in [
             ("! true &", 0),
@@ -55316,7 +55361,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // shell's own read position is untouched by the job.
         let dir = ScratchDir::new("bgstdin");
         std::fs::write(dir.join("two.txt"), "l1\nl2\n").expect("write two.txt");
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let cap = capture_sink();
         {
             let mut out = Out::Capture(cap.clone());
@@ -55341,7 +55386,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `wait PID` and `wait %n` both target a specific job. The row outlives
         // the `wait` that read it (it is the *next* sweep that drops it), and
         // creating the next job is one such sweep — so numbering restarts.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("cmd /c exit 3 &".as_bytes());
         let pid = sh.last_bg_pid.expect("bg pid");
         assert_eq!(sh.run_source(format!("wait {pid}").as_bytes()), 3);
@@ -55426,7 +55471,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // An operand-less `wait` reports no particular job's status, so bash
         // returns 0 however the jobs ended — and clears `-p VAR` rather than
         // leaving it holding a pid it is not reporting on.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         for src in ["( exit 3 ) &", "( exit 3 ) & ( exit 0 ) &", "false &"] {
             assert_eq!(sh.run_source(src.as_bytes()), 0);
             assert_eq!(sh.run_source("wait".as_bytes()), 0, "operand-less wait after {src:?}");
@@ -55456,7 +55501,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // already been announced is not a candidate — even though its row can
         // still be sitting in the table unswept (bash's `J_NOTIFIED`, which a
         // `jobs`/`wait %1` may read once more before it goes).
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         // An operand-less `wait` spares the `$!` job from being marked reported
         // when it had already finished, so the status is still `-n`-answerable…
         sh.run_source("( exit 3 ) & sleep 0.2".as_bytes());
@@ -55498,7 +55543,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // its death, so they are not a function of what is still running: the
         // newest job is `+`, and the newest job that was still running when it
         // started is `-`.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
 
         // Two jobs alive at once: the newer is `+`, the older `-`.
         sh.run_source("sleep 0.4 & sleep 1 &".as_bytes());
@@ -55552,7 +55597,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // bash forgets a finished job after listing it — but only the ones the
         // listing actually reported, so a `-r` that filtered it out leaves it
         // for the next `jobs`, as does a jobspec that named someone else.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("sleep 0.2 &".as_bytes());
         std::thread::sleep(std::time::Duration::from_millis(700));
         assert_eq!(listing(&mut sh, "jobs -r"), "", "-r filters the finished job out");
@@ -55577,7 +55622,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `Done` is only for a *clean* exit; a dirty one is spelled out, and a
         // job that was signalled is named by the signal rather than by the
         // 128+n status it happens to share with `exit 143`.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         for (src, want) in [
             ("( exit 0 ) &", "Done                    ( exit 0 )"),
             ("( exit 1 ) &", "Exit 1                  ( exit 1 )"),
@@ -55620,7 +55665,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The corpus can only watch what the announcement *does* — the message
         // carries a pid the two shells cannot agree on — so its text is checked
         // here, where the pid is knowable.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("sleep 5 &".as_bytes());
         let pid = sh.jobs[0].pid;
         // The news arrives *between* commands, so the group's `2>&1` has to
@@ -55652,7 +55697,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // on the parent's stderr in the middle of a value being collected; the
         // job stays in the substitution's own table instead. A `( … )` group
         // *inside* the substitution is a fresh subshell and announces again.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let (o, _) = run_in(&mut sh, "x=$( sleep 5 & kill -HUP %1; jobs ); echo \"[$x]\"");
         assert_eq!(o, "[[1]+  Hangup                  sleep 5]\n");
         let (o, _) =
@@ -55668,13 +55713,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Each operand is resolved against the table as it stands *after* the
         // previous one was acted on, so `%2 %+` disowns two jobs (dropping job 2
         // hands the `+` to job 1) and `%2 %2` fails the second time.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("sleep 5 &".as_bytes());
         sh.run_source("sleep 6 &".as_bytes());
         assert_eq!(sh.run_source("disown %2 %+".as_bytes()), 0);
         assert!(sh.jobs.is_empty(), "both jobs should be gone");
 
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("sleep 5 &".as_bytes());
         sh.run_source("sleep 6 &".as_bytes());
         let (o, s) = run_in(&mut sh, "disown %2 %2 2>&1");
@@ -55704,7 +55749,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The corpus cannot check the substituted value — reference bash
         // answers with a process group, which osh has no notion of — so it is
         // checked here instead.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("sleep 5 &".as_bytes());
         sh.run_source("sleep 6 &".as_bytes());
         let pid1 = sh.jobs[0].pid.to_string();
@@ -55727,7 +55772,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn job_specs_name_by_number_prefix_and_substring() {
         // Only the first character after the `%` decides what kind of spec it
         // is, so a suffix on `%+`/`%-` is ignored while `%1x` is a *name*.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("sleep 5 &".as_bytes());
         sh.run_source("( sleep 6 ) &".as_bytes());
         for (spec, want) in [
@@ -55809,7 +55854,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // does. The two `jobs` forms sweep at opposite ends, so a bare listing
         // leaves the job nameable for one more command while a jobspec listing
         // does not.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         let (o, _) = run_in(&mut sh, "jobs");
@@ -55819,7 +55864,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(o, "", "the second listing swept it away first");
         assert!(sh.jobs.is_empty());
 
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         let (o, s) = run_in(&mut sh, "jobs %1");
@@ -55830,13 +55875,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Naming a job in `kill` puts its fate back on the books, so a listing
         // that already announced it announces it again — but only while the row
         // is still there, which is to say only within the one line.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         let (o, _) = run_in(&mut sh, "jobs; kill -0 %1; jobs");
         assert_eq!(o.lines().filter(|l| l.starts_with("[1]+  Done")).count(), 2, "{o}");
         // On the next line the row is gone, so `%1` names nothing.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         run_in(&mut sh, "jobs");
@@ -55851,7 +55896,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // table, so an `eval` body — which has a loop of its own — sweeps
         // between its lines, while a function body — one parsed unit — does not.
         let one = |src: &str| {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             sh.run_source("true &".as_bytes());
             settle_job(&mut sh, 1);
             run_in(&mut sh, src).0
@@ -55881,7 +55926,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `wait PID` keeps answering after the job itself is gone — bash's
         // `delete_job`/`bgp_add`. The `jobs` listing here is what marks the job
         // reported; the next line's sweep is what drops it.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("( exit 5 ) & p=$!".as_bytes());
         settle_job(&mut sh, 1);
         run_in(&mut sh, "jobs");
@@ -55899,7 +55944,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `disown` drops the row through the same door, so bash answers a later
         // `wait PID` from the remembered table rather than calling it a
         // stranger. A finished job answers with its own status.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("( exit 5 ) & p=$!".as_bytes());
         settle_job(&mut sh, 1);
         run_in(&mut sh, "disown %1");
@@ -55909,7 +55954,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A job disowned while still running answers 0, and answers at once:
         // the shell has let go of the child, so there is nothing left to wait
         // on and no status to have learnt.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("( sleep 5; exit 6 ) & q=$!".as_bytes());
         run_in(&mut sh, "disown %1");
         let t = std::time::Instant::now();
@@ -55917,7 +55962,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(t.elapsed() < std::time::Duration::from_secs(3), "it did not wait");
 
         // `-h` keeps the row, so the job is waited on for real.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("( exit 4 ) & r=$!".as_bytes());
         run_in(&mut sh, "disown -h %1");
         assert_eq!(sh.jobs.len(), 1);
@@ -55929,7 +55974,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The sweep happens before the job is marked reported, so the row
         // outlives the `wait` that read it: a second `wait` on the same line
         // answers with the status again and is the one that drops the row.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("( exit 7 ) &".as_bytes());
         let (o, _) = run_in(
             &mut sh,
@@ -55940,7 +55985,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // Across a line boundary there is no second answer: the boundary is
         // itself a sweep, so the row the first `wait` reported is already gone.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("( exit 7 ) &".as_bytes());
         assert_eq!(run_in(&mut sh, "wait %1").1, 7);
         assert_eq!(sh.jobs.len(), 1, "the reporting line does not sweep on its way out");
@@ -55958,7 +56003,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn an_operand_less_wait_spares_the_job_that_holds_the_last_bg_pid() {
         // A job that had already finished is not one the `wait` waited for, so
         // it is discarded only if some later job took `$!` away from it.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         assert_eq!(run_in(&mut sh, "wait").1, 0);
@@ -55967,7 +56012,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // Job 2 is still running, so the `wait` really waits for it and it is
         // discarded despite holding `$!`; job 1, no longer holding it, goes too.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
         sh.run_source("sleep 0.3 &".as_bytes());
@@ -55984,7 +56029,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Job 1 has to still be running when job 2 arrives, or it would never
         // have been the `-` job in the first place: a new job takes both
         // markers when there is nothing running to hand the `-` to.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("sleep 0.2 &".as_bytes());
         sh.run_source("true &".as_bytes());
         assert_eq!((sh.current_job, sh.previous_job), (Some(2), Some(1)));
@@ -55995,7 +56040,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!((sh.current_job, sh.previous_job), (None, None));
 
         // With something still running, that running job takes both markers.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("sleep 5 &".as_bytes());
         sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 2);
@@ -56009,7 +56054,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn wait_n_returns_next_completed() {
         // `wait -n` returns as soon as one job finishes; a second `wait -n`
         // reaps the other. `-p VAR` records the returned job's pid.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("cmd /c exit 5 &".as_bytes());
         sh.run_source("cmd /c exit 6 &".as_bytes());
         assert_eq!(sh.jobs.len(), 2);
@@ -56034,7 +56079,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn jobs_lists_background_job() {
         // `jobs` reports the tracked job with its job number and command line.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("cmd /c exit 0 &".as_bytes());
         let buf = capture_sink();
         {
@@ -56055,7 +56100,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn fg_echoes_command_and_waits_for_status() {
         // `fg` (no spec) foregrounds the current job: it prints the command line
         // and blocks until the job finishes, returning its exit status.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("cmd /c exit 7 &".as_bytes());
         assert_eq!(sh.jobs.len(), 1);
         let buf = capture_sink();
@@ -56076,7 +56121,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn fg_by_job_spec_targets_named_job() {
         // `fg %n` targets a specific job by its job number.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("cmd /c exit 3 &".as_bytes());
         assert_eq!(sh.run_source("fg %1".as_bytes()), 3);
         assert!(sh.jobs.is_empty());
@@ -56085,7 +56130,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn fg_no_jobs_errors() {
         // With no jobs, `fg` reports an error and returns 1.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(sh.run_source("fg".as_bytes()), 1);
         // A non-existent job spec is also an error.
         assert_eq!(sh.run_source("fg %9".as_bytes()), 1);
@@ -56098,7 +56143,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // background — so `bg` on a resolvable target matches bash's "already
         // running" case: `bg: job N already in background` on stderr, exit 0.
         // (The stdout capture stays empty; the message goes to real stderr.)
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("cmd /c exit 0 &".as_bytes());
         let buf = capture_sink();
         {
@@ -56350,7 +56395,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn bg_no_jobs_errors() {
         // With no jobs, `bg` reports an error and returns 1.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(sh.run_source("bg".as_bytes()), 1);
         assert_eq!(sh.run_source("bg %5".as_bytes()), 1);
     }
@@ -56359,7 +56404,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn disown_removes_job_from_table() {
         // `disown %1` drops the job so `jobs` no longer reports it.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("cmd /c exit 0 &".as_bytes());
         assert_eq!(sh.jobs.len(), 1);
         assert_eq!(sh.run_source("disown %1".as_bytes()), 0);
@@ -56369,7 +56414,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[cfg(windows)]
     #[test]
     fn disown_all_and_running_flags() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("cmd /c exit 0 &".as_bytes());
         sh.run_source("cmd /c exit 0 &".as_bytes());
         assert_eq!(sh.jobs.len(), 2);
@@ -56382,7 +56427,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn disown_h_marks_without_removing() {
         // `disown -h` keeps the job but flags it no-SIGHUP.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.run_source("cmd /c exit 0 &".as_bytes());
         assert_eq!(sh.run_source("disown -h %1".as_bytes()), 0);
         assert_eq!(sh.jobs.len(), 1, "disown -h keeps the job in the table");
@@ -56393,7 +56438,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[cfg(windows)]
     #[test]
     fn disown_bad_spec_errors() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         assert_eq!(sh.run_source("disown %9".as_bytes()), 1);
     }
 
@@ -58377,7 +58422,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// off, which silently dropped the request: the element stayed.
     #[test]
     fn unset_element_addresses_a_subscript_that_is_not_text() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let mut src: Str = b"declare -A m\nm[".to_vec();
         src.push(0xff);
         src.extend_from_slice(b"]=gone\nm[keep]=kept\n");
@@ -58403,7 +58448,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // was text before looking at its shape, so a subscript's bytes
         // disqualified a base name that was a perfectly good identifier and the
         // assignment was refused outright.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let mut src: Str = b"declare -A m\nk='".to_vec();
         src.push(0xff);
         src.extend_from_slice(
@@ -58425,7 +58470,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // those bytes back out on every read and write through it. The value
         // used to be judged as text in one piece, which refused the declaration
         // outright.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let mut src: Str = b"declare -A m\nk='".to_vec();
         src.push(0xff);
         src.extend_from_slice(
@@ -58503,7 +58548,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // filter: `osh -c 'exec real-program'` has to hand the child the
         // environment it would have had without the shell in between
         // (TD-OILS-NONUTF8-ENV-NAME).
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         // `env_imported` is what makes `apply_child_env` clear the inherited
         // base, which is precisely the step that used to drop these entries.
         sh.env_imported = true;
@@ -58541,7 +58586,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn a_child_gets_an_underscore_naming_its_own_program() {
-        let sh = Shell::new();
+        let sh = new_shell();
         let underscore = |pc: &PCommand| {
             pc.get_envs()
                 .find(|(k, _)| *k == OsStr::new("_"))
@@ -58594,7 +58639,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// bash 5.2.37 via `printenv 'BASH_FUNC_f%%'`.
     #[test]
     fn export_f_puts_the_function_in_the_child_environment() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let mut out = Out::Capture(capture_sink());
         sh.run_source_out(b"f() { echo hi; }\ng() { :; }\nexport -f f\n", &mut out, 0);
 
@@ -58622,7 +58667,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn unexporting_a_function_stops_it_reaching_a_child() {
         let has_f = |src: &str| {
-            let mut sh = Shell::new();
+            let mut sh = new_shell();
             let mut out = Out::Capture(capture_sink());
             sh.run_source_out(src.as_bytes(), &mut out, 0);
             let mut pc = PCommand::new("true");
@@ -58640,7 +58685,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// at line 0, which is what `declare -F` reports under `extdebug`.
     #[test]
     fn a_function_arriving_in_the_environment_is_bound_and_stays_exported() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.import_env_function(b"f", b"() {  echo hi\n}");
         assert!(sh.funcs.contains_key(b"f".as_slice()), "function not bound");
         assert_eq!(sh.func_sources.get(b"f".as_slice()).map(Vec::as_slice), Some(&b"environment"[..]));
@@ -58686,7 +58731,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// then failed to parse earns the two-part diagnostic.
     #[test]
     fn a_malformed_environment_function_is_reported_not_bound() {
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.import_env_function(b"f", b"not a function at all");
         assert!(!sh.funcs.contains_key(b"f".as_slice()));
         assert!(!sh.exported_funcs.contains(b"f".as_slice()));
@@ -58695,14 +58740,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // shell carries on rather than failing to start. (The two-part
         // diagnostic it prints goes to the real fd 2, which these in-process
         // tests do not capture.)
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.import_env_function(b"g", b"() { if true; }");
         assert!(!sh.funcs.contains_key(b"g".as_slice()));
         assert!(!sh.exported_funcs.contains(b"g".as_slice()));
 
         // A body with a *redirect* on the definition is a definition all the
         // same, and round-trips with the redirect intact.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         sh.import_env_function(b"r", b"() {  echo z\n} > /dev/null");
         assert!(sh.funcs.contains_key(b"r".as_slice()));
         assert_eq!(sh.func_redirects.get(b"r".as_slice()).map(Vec::len), Some(1));
@@ -58947,7 +58992,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         ));
         let p = path.to_string_lossy().replace('\\', "/");
         let src = src_tmpl.replace("{FILE}", &p);
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let prog = parse(src.as_bytes()).expect("parse");
         {
             let mut out = Out::Inherit;
@@ -59373,7 +59418,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         std::fs::write(&path, input).expect("write input");
         let p = path.to_string_lossy().replace('\\', "/");
         let src = src_tmpl.replace("{FILE}", &p);
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let buf = capture_sink();
         let prog = parse(src.as_bytes()).expect("parse");
         {
@@ -61116,7 +61161,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn exec_replaces_shell_and_stops() {
         // `exec cmd` runs the command and the shell does not continue past it.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let st = sh.run_source("exec cmd /c exit 5\nAFTER=1".as_bytes());
         assert_eq!(st, 5);
         assert!(!sh.vars.contains_key("AFTER"));
@@ -61126,7 +61171,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn exec_missing_command_exits_127() {
         // A failed `exec` of a missing command exits the shell with 127.
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         let st = sh.run_source("exec no_such_command_xyz_123\nAFTER=1".as_bytes());
         assert_eq!(st, 127);
         assert!(!sh.vars.contains_key("AFTER"));
@@ -61152,7 +61197,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let dir = std::env::temp_dir().join(format!("osh_startup_{tag}_{}_{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let home = dir.to_string_lossy().replace('\\', "/");
-        let mut sh = Shell::new();
+        let mut sh = new_shell();
         // Assigning through the shell keeps `HOME` an ordinary shell variable,
         // which is all `tilde_expand` looks at.
         sh.run_source(format!("HOME='{home}'").as_bytes());

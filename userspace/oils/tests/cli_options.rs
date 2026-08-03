@@ -49,6 +49,20 @@ impl Drop for TempHome {
     }
 }
 
+/// What `$0` — and so every diagnostic prefix that is not emitted by the option
+/// parser itself — reads as for these runs.
+///
+/// bash seeds `$0` from `argv[0]`, so a shell with no script and no `-c` *name*
+/// operand names itself by the path it was invoked as, not by the string `bash`
+/// (`echo 'nosuch' | bash` reports `/usr/bin/bash: line 1: …`). osh does the
+/// same, and here `argv[0]` is whatever cargo built the binary as
+/// (TD-OILS-DOLLAR-ZERO-ARGV0). Diagnostics printed *before* the shell starts —
+/// `osh: -z: invalid option` and friends — are literals in `main.rs` and are not
+/// affected.
+fn shell_name() -> &'static str {
+    env!("CARGO_BIN_EXE_osh")
+}
+
 /// Run the built `osh` binary with `args`, feeding `stdin_data` to its stdin,
 /// and return `(stdout, stderr, exit_code)`. `$HOME` is an empty throwaway
 /// directory, so no startup file exists unless the test makes one.
@@ -278,8 +292,9 @@ fn stdin_repl_numbers_lines_across_the_whole_stream() {
 
     // Runtime diagnostics carry the same number.
     let (_out, err, _code) = run_osh(&["-s"], "echo one\nnosuchcmd_xyz_123\n");
+    let sh = shell_name();
     assert!(
-        err.starts_with("osh: line 2: nosuchcmd_xyz_123:"),
+        err.starts_with(&format!("{sh}: line 2: nosuchcmd_xyz_123:")),
         "diagnostic should name line 2: {err:?}"
     );
 
@@ -287,17 +302,14 @@ fn stdin_repl_numbers_lines_across_the_whole_stream() {
     let (_out, err, _code) = run_osh(&["-s"], "echo one\necho two )\n");
     assert_eq!(
         err,
-        "osh: line 2: syntax error near unexpected token `)'\nosh: line 2: `echo two )'\n"
+        format!("{sh}: line 2: syntax error near unexpected token `)'\n{sh}: line 2: `echo two )'\n")
     );
 
     // An unterminated quote is reported on the stream line it opened on, after
     // the complete lines before it have run.
     let (out, err, _code) = run_osh(&["-s"], "echo one\necho two\nv='abc\n");
     assert_eq!(out, "one\ntwo\n");
-    assert_eq!(
-        err,
-        "osh: line 3: unexpected EOF while looking for matching `''\n"
-    );
+    assert_eq!(err, format!("{sh}: line 3: unexpected EOF while looking for matching `''\n"));
 }
 
 /// A `\<newline>` typed at a REPL prompt must reach the *lexer* intact. The
@@ -757,7 +769,8 @@ fn interactivity_reaches_aliases_and_diagnostics() {
     assert_eq!(out, "");
     assert_eq!(code, 127);
     // …and the diagnostic carries the line number.
-    assert_eq!(err, "osh: line 2: g: command not found\n");
+    let sh = shell_name();
+    assert_eq!(err, format!("{sh}: line 2: g: command not found\n"));
 
     // Interactive: the alias expands, so nothing is reported at all.
     let (out, err, code) = run_osh_in(&home, &["--norc", "-i", "-c", src], "");
@@ -769,7 +782,7 @@ fn interactivity_reaches_aliases_and_diagnostics() {
     // alias: an interactive shell reports a missing command without it.
     let (_out, err, code) = run_osh_in(&home, &["--norc", "-i", "-c", "nosuchcmd_zz"], "");
     assert_eq!(code, 127);
-    assert_eq!(err, "osh: nosuchcmd_zz: command not found\n");
+    assert_eq!(err, format!("{sh}: nosuchcmd_zz: command not found\n"));
 
     // `shopt`/`$SHELLOPTS` agree with the behaviour: `expand_aliases`,
     // `histexpand` and `history` are all on for an interactive shell. (bash also

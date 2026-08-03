@@ -12,9 +12,11 @@
 #     variable; a second `in` is a word;
 #   * no `in` at all iterates `"$@"`, which is distinct from an empty list.
 #
-# The syntax-error lines name the shell, whose spelling differs per host, so
-# they are folded to stdout with the leading "<shell>: " stripped.
-sq() { sed 's/^[^:]*: -c: /SH: -c: /' "$1"; }
+# The syntax-error lines name the shell — `$0`, which under `-c` is the path the
+# shell was invoked as (TD-OILS-DOLLAR-ZERO-ARGV0) and so differs per host. They
+# are folded to stdout with that leading "<shell>: " stripped. The pattern must
+# not be `[^:]*`: a Windows path carries a drive-letter colon of its own.
+sq() { sed 's/^.*: -c: /SH: -c: /' "$1"; }
 bad() { "$BASH" -c "$1" >o.txt 2>&1; echo "rc=$?"; sq o.txt; }
 
 echo "=== reserved words are ordinary words in the list"

@@ -14,7 +14,7 @@ work that should be done now."
 
 ## Active Bugs
 
-### TD-OILS-DOLLAR-ZERO-ARGV0. `$0` under `-c` (and the bare REPL) is the literal `osh`, where bash uses the path it was invoked as — 2026-08-02 — OPEN
+### TD-OILS-DOLLAR-ZERO-ARGV0. `$0` under `-c` (and the bare REPL) is the literal `osh`, where bash uses the path it was invoked as — 2026-08-02 — ✅ **RESOLVED 2026-08-02**
 
 **Where:** `userspace/oils/src/interp.rs` line ~3719 seeds `name: b"osh".to_vec()`,
 and `userspace/oils/src/main.rs` (`InvokeMode::Command` ~line 501,
@@ -54,6 +54,28 @@ differently from bash, and a script that keys off `$0` to re-exec itself
 (`exec "$0" …`) breaks under `osh -c`. Normalised away in
 `tests/corpus/export-f-exported-functions.sh`, which is the only corpus case
 that currently trips over it. Found while writing that case.
+
+**RESOLVED 2026-08-02** — `main.rs`'s `run` now seeds `$0` from `argv[0]`
+before `import_environment()`, and the existing `set_name` calls for the `-c`
+*name* operand and for a script path still override it.
+
+Two consumers were asserting the old, *wrong* behaviour and were corrected
+rather than accommodated — real bash was checked in each case:
+
+- `tests/cli_options.rs` expected `osh: line 2: g: command not found` from a
+  `-c` run with no name operand. bash prints the invocation path there
+  (`echo nosuch | bash` → `C:/Program Files/Git/usr/bin/bash: line 1: …`), so
+  the expectations now build the prefix from a documented `shell_name()`
+  helper (`env!("CARGO_BIN_EXE_osh")`). The diagnostics emitted *before* the
+  shell starts — `osh: -z: invalid option` and the rest of the option parser —
+  are literals in `main.rs` and are correctly unaffected.
+- `tests/corpus/for-in-list-words.sh` folded the shell name with
+  `sed 's/^[^:]*: -c: /SH: -c: /'`. `[^:]*` cannot span a Windows path, whose
+  drive letter carries a colon of its own, so the fold silently stopped
+  working once `$0` became a path. Widened to `^.*: -c: `.
+
+Full suite green (1147 + 4 + 39 + 7 + doctests), clippy clean, corpus sweep
+261 matched / 0 failed.
 
 ### TD-OILS-EXEC-SHEBANGLESS-SCRIPT. osh will not run a shebang-less, non-executable file as a shell script the way bash does — 2026-08-02 — OPEN
 

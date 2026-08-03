@@ -269,6 +269,15 @@ fn positional_args(args: Option<&[Str]>) -> Vec<Str> {
 
 fn run(args: &[Str]) -> i32 {
     let mut sh = Shell::new();
+    // `$0` is `argv[0]` until something more specific replaces it (the `-c`
+    // *name* operand, or a script path — both settled below). Seeded here,
+    // ahead of `import_environment`, because that step can already diagnose: a
+    // malformed exported function is reported prefixed with `$0`, and bash
+    // shows the invocation path there. `Shell::new`'s literal `osh` remains the
+    // fallback for the case where the platform gives no `argv[0]` at all.
+    if let Some(argv0) = args.first().filter(|a| !a.is_empty()) {
+        sh.set_name(argv0);
+    }
     // Take ownership of the inherited process environment: environment
     // variables become ordinary (exported) shell variables, so `unset`,
     // prefix matching (`${!P*}`), and `set` listings behave like bash.

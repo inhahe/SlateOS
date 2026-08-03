@@ -536,6 +536,18 @@ impl Maps {
         keymap_name(self.var("keymap")).unwrap_or("emacs")
     }
 
+    /// Move the keymap `bind` reads and writes, as readline's `rl_set_keymap`
+    /// does for `bind -m`.
+    ///
+    /// The name is one [`Maps::keymap`] or [`keymap_name`] gave back, so it is
+    /// already canonical and there is nothing here to reject — which is why
+    /// this is not [`Maps::set_var`] with a `Result` nobody could act on.
+    pub fn set_keymap(&mut self, name: &'static str) {
+        if let Some(slot) = self.vars.iter_mut().find(|(n, _)| *n == "keymap") {
+            slot.1 = name.as_bytes().to_vec();
+        }
+    }
+
     /// How `bind -p`, `-P` and `-q` spell an escape that prefixes a longer
     /// sequence.
     ///
@@ -621,10 +633,11 @@ pub fn keymap_name(name: &[u8]) -> Option<&'static str> {
 
 /// What one `bind` operand asks for, once readline has read it.
 pub enum Operand {
-    /// Nothing to do: the line was blank, a comment, or a `$if`-family
-    /// directive. osh reads no inputrc, so there is no file for a conditional
-    /// to include or exclude part of, and readline itself does nothing visible
-    /// for one either (measured: status 0, no output).
+    /// Nothing to do: the line was blank, a comment, or a `$`-directive. The
+    /// directives mean something only inside a *file*, where there are further
+    /// lines for one to include or exclude — [`Maps::read_inputrc`] reads them
+    /// before it gets here. A lone `bind '$if Bash'` has no such file and does
+    /// nothing at all (measured: status 0, no output).
     Nothing,
     /// `set NAME VALUE`, for [`Maps::set_var`].
     Set(Vec<u8>, Vec<u8>),
@@ -782,6 +795,256 @@ pub fn parse_operand(spec: &[u8]) -> Operand {
         vec![glean_key(keyname)]
     };
     Operand::Bind(seq, bound)
+}
+
+/// Where an inputrc reader gets the bytes of a file.
+///
+/// A trait rather than a path, because this module does no I/O: an `$include`
+/// names a file that the *shell* has to resolve — relative to its own working
+/// directory, not to the including file's (measured), and with `~` expanded, as
+/// readline's `_rl_read_init_file` does before it opens anything.
+pub trait Files {
+    /// The bytes of `path`, or `None` when it cannot be read. An inputrc that
+    /// is not there is not an error: readline says nothing and carries on
+    /// (measured — `$include /nosuch/file` leaves status 0 and no output).
+    fn read(&mut self, path: &[u8]) -> Option<Vec<u8>>;
+}
+
+/// The readline these tables were captured from, as `$if version` compares it:
+/// major × 10 + minor. bash 5.2.37 links readline 8.2, and the version an
+/// inputrc tests has to be the version whose defaults `bind_tables` holds —
+/// answering 8.2 while carrying some other release's bindings would let a file
+/// enable exactly the wrong half of itself.
+const READLINE_VERSION: u32 = 82;
+
+/// How deep `$include` may nest before the reader stops.
+///
+/// readline has no limit and a file that includes itself hangs it. A shell that
+/// can be hung by a config file is not one this can ship, and no real inputrc
+/// nests anywhere near this far, so the recursion is bounded and the overflow
+/// is silent — the same nothing readline says for an include it cannot read.
+const INCLUDE_DEPTH: u32 = 8;
+
+/// One `$`-directive line, once the leading `$` has been taken off.
+enum Directive<'a> {
+    If(&'a [u8]),
+    Else,
+    Endif,
+    Include(&'a [u8]),
+    /// The word after the `$`, which readline does not recognise.
+    Unknown(&'a [u8]),
+}
+
+/// Split a `$` line into its directive word and the rest.
+fn directive(line: &[u8]) -> Directive<'_> {
+    let end = line.iter().position(|&b| ws(b)).unwrap_or(line.len());
+    let word = line.get(..end).unwrap_or(&[]);
+    let rest = line.get(end..).unwrap_or(&[]);
+    let start = rest.iter().position(|&b| !ws(b)).unwrap_or(rest.len());
+    let args = rest.get(start..).unwrap_or(&[]);
+    if word.eq_ignore_ascii_case(b"if") {
+        Directive::If(args)
+    } else if word.eq_ignore_ascii_case(b"else") {
+        Directive::Else
+    } else if word.eq_ignore_ascii_case(b"endif") {
+        Directive::Endif
+    } else if word.eq_ignore_ascii_case(b"include") {
+        Directive::Include(args)
+    } else {
+        Directive::Unknown(word)
+    }
+}
+
+/// `major[.minor]` as `$if version` counts it: 8.2 is 82, and a bare `4` is 40.
+fn version_arg(s: &[u8]) -> u32 {
+    let num = |b: &[u8]| -> u32 {
+        b.iter()
+            .take_while(|c| c.is_ascii_digit())
+            .fold(0u32, |a, c| a.saturating_mul(10).saturating_add(u32::from(c - b'0')))
+    };
+    let (major, minor) = match s.iter().position(|&b| b == b'.') {
+        Some(i) => (s.get(..i).unwrap_or(&[]), s.get(i.saturating_add(1)..).unwrap_or(&[])),
+        None => (s, &[][..]),
+    };
+    num(major).saturating_mul(10).saturating_add(num(minor))
+}
+
+/// Evaluate `$if version OP N` — the one condition with an operator.
+fn version_test(args: &[u8]) -> bool {
+    let rest = args.get(7..).unwrap_or(&[]);
+    let start = rest.iter().position(|&b| !ws(b)).unwrap_or(rest.len());
+    let rest = rest.get(start..).unwrap_or(&[]);
+    // Two-byte operators are tried first, so `>=` is not read as `>` with a
+    // stray `=` in front of the number.
+    let (op, tail): (&[u8], &[u8]) = match rest.get(..2) {
+        Some(o @ (b"==" | b"!=" | b"<=" | b">=")) => (o, rest.get(2..).unwrap_or(&[])),
+        _ => match rest.first() {
+            Some(b'=') => (b"==", rest.get(1..).unwrap_or(&[])),
+            Some(b'<') => (b"<", rest.get(1..).unwrap_or(&[])),
+            Some(b'>') => (b">", rest.get(1..).unwrap_or(&[])),
+            _ => return false,
+        },
+    };
+    let start = tail.iter().position(|&b| !ws(b)).unwrap_or(tail.len());
+    let want = version_arg(tail.get(start..).unwrap_or(&[]));
+    let have = READLINE_VERSION;
+    match op {
+        b"==" => have == want,
+        b"!=" => have != want,
+        b"<=" => have <= want,
+        b">=" => have >= want,
+        b"<" => have < want,
+        _ => have > want,
+    }
+}
+
+impl Maps {
+    /// Is `$if ARGS` true?
+    ///
+    /// Four forms, in readline's own order: `mode=`, `term=`, `version`, and —
+    /// anything else — the application name, compared case-insensitively, which
+    /// is why `$if Bash` is true and `$if application=bash` is not (measured:
+    /// readline has no `application=` form, so that string is simply a name
+    /// that is not `bash`).
+    fn if_test(&self, args: &[u8], term: &[u8]) -> bool {
+        if let Some(mode) = args.strip_prefix(b"mode=") {
+            // The mode is `editing-mode`, not the current keymap: a file that
+            // says `set keymap vi-insert` has not changed which editor this is.
+            return mode == self.var("editing-mode");
+        }
+        if let Some(want) = args.strip_prefix(b"term=") {
+            // readline matches the full name and the part before the first `-`,
+            // so `$if term=xterm` fires on an `xterm-256color`.
+            let short = term.split(|&b| b == b'-').next().unwrap_or(term);
+            return want == term || want == short;
+        }
+        if args.get(..7).is_some_and(|w| w.eq_ignore_ascii_case(b"version")) {
+            return version_test(args);
+        }
+        args.eq_ignore_ascii_case(b"bash")
+    }
+
+    /// Apply an inputrc — readline's `_rl_read_init_file`.
+    ///
+    /// `name` is what a complaint calls the file; each one is pushed onto `errs`
+    /// already carrying its `FILE: line N: ` prefix and needing only the
+    /// `readline: ` its caller prints. Nothing here is a failure: readline
+    /// reports a line it cannot read and goes on to the next, and the builtin's
+    /// status does not move (measured — a file of five bad lines still leaves
+    /// `bind -f` at 0).
+    pub fn read_inputrc(
+        &mut self,
+        text: &[u8],
+        name: &[u8],
+        term: &[u8],
+        files: &mut dyn Files,
+        errs: &mut Vec<Vec<u8>>,
+    ) {
+        self.read_inputrc_at(text, name, term, files, errs, 0);
+    }
+
+    fn read_inputrc_at(
+        &mut self,
+        text: &[u8],
+        name: &[u8],
+        term: &[u8],
+        files: &mut dyn Files,
+        errs: &mut Vec<Vec<u8>>,
+        depth: u32,
+    ) {
+        // `off` is readline's `_rl_parsing_conditionalized_out`; `stack` holds
+        // what it was outside each open `$if`, so a nested one restores rather
+        // than clears. A `$if` inside a region already switched off is pushed
+        // but never evaluated — nothing can turn parsing back on except the
+        // matching `$endif`.
+        let mut off = false;
+        let mut stack: Vec<bool> = Vec::new();
+        for (n, raw) in text.split(|&b| b == b'\n').enumerate() {
+            let line_no = n.saturating_add(1);
+            let at = |msg: &[u8]| {
+                let mut e = name.to_vec();
+                e.extend_from_slice(format!(": line {line_no}: ").as_bytes());
+                e.extend_from_slice(msg);
+                e
+            };
+            let start = raw.iter().position(|&b| !ws(b)).unwrap_or(raw.len());
+            let line = raw.get(start..).unwrap_or(&[]);
+            match line.first() {
+                None | Some(b'#') => continue,
+                // A directive is handled even inside a switched-off region —
+                // that is how the matching `$endif` is ever found, and it is
+                // also why an unknown one is reported there too.
+                Some(b'$') => {
+                    match directive(line.get(1..).unwrap_or(&[])) {
+                        Directive::If(args) => {
+                            stack.push(off);
+                            if !off {
+                                off = !self.if_test(args, term);
+                            }
+                        }
+                        Directive::Else => match stack.last() {
+                            None => errs.push(at(b"$else found without matching $if")),
+                            // Enclosed by a region that is already off: the
+                            // `$else` half is off too, whatever the `$if` said.
+                            Some(&outer) => {
+                                if !outer {
+                                    off = !off;
+                                }
+                            }
+                        },
+                        Directive::Endif => match stack.pop() {
+                            Some(outer) => off = outer,
+                            None => errs.push(at(b"$endif without matching $if")),
+                        },
+                        Directive::Include(path) => {
+                            if !off
+                                && depth < INCLUDE_DEPTH
+                                && let Some(text) = files.read(path)
+                            {
+                                self.read_inputrc_at(
+                                    &text,
+                                    path,
+                                    term,
+                                    files,
+                                    errs,
+                                    depth.saturating_add(1),
+                                );
+                            }
+                        }
+                        Directive::Unknown(word) => {
+                            let mut m = word.to_vec();
+                            m.extend_from_slice(b": unknown parser directive");
+                            errs.push(at(&m));
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            if off {
+                continue;
+            }
+            match parse_operand(line) {
+                Operand::Nothing => {}
+                Operand::Error(msg) => errs.push(at(&msg)),
+                Operand::Set(n, v) => {
+                    if let Err(msg) = self.set_var(&n, &v) {
+                        errs.push(at(&msg));
+                    }
+                }
+                // A file's bindings go into whatever `set keymap` last named,
+                // which is why a `set keymap vi-insert` halfway down one scopes
+                // everything after it (measured).
+                Operand::Bind(seq, target) => {
+                    let km = self.keymap();
+                    match target {
+                        Some(t) => self.bind(km, &seq, t),
+                        None => self.unbind_seq(km, &seq),
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// One name per readline *function*, so two names for the same function
@@ -1202,5 +1465,179 @@ mod tests {
         assert_eq!(kind("set bell-style visible"), "set bell-style visible");
         assert_eq!(kind("set comment-begin ;;"), "set comment-begin ;;");
         assert_eq!(kind("set"), "set  ");
+    }
+
+    /// No `$include` resolves to anything, which is every inputrc test below
+    /// except the one about including.
+    struct NoFiles;
+    impl super::Files for NoFiles {
+        fn read(&mut self, _path: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    /// Read `text` as an inputrc and report the sequences `yank` ends up on in
+    /// the emacs map, plus whatever readline complained about.
+    fn read(text: &str, files: &mut dyn super::Files) -> (Vec<String>, Vec<String>) {
+        let mut maps = super::Maps::seeded();
+        let mut errs: Vec<Vec<u8>> = Vec::new();
+        maps.read_inputrc(text.as_bytes(), b"rc", b"xterm-256color", files, &mut errs);
+        let seqs = maps
+            .entries("emacs")
+            .iter()
+            .filter(|e| matches!(e.target, Target::Function("yank")))
+            .map(|e| String::from_utf8_lossy(&encode(e.seq, e.is_prefix, Meta::Prefix)).into_owned())
+            .collect();
+        let errs = errs
+            .iter()
+            .map(|e| String::from_utf8_lossy(e).into_owned())
+            .collect();
+        (seqs, errs)
+    }
+
+    /// The keys `yank` gains over its one default, `\C-y`.
+    fn added(text: &str) -> Vec<String> {
+        let (mut seqs, errs) = read(text, &mut NoFiles);
+        assert!(errs.is_empty(), "{errs:?}");
+        seqs.retain(|s| s != "\\C-y");
+        seqs
+    }
+
+    /// A `$if` that is false takes its whole body with it, including any `$if`
+    /// nested inside — nothing but the matching `$endif` turns parsing back on.
+    #[test]
+    fn a_false_conditional_hides_everything_down_to_its_own_endif() {
+        assert_eq!(added("$if Bash\n\"\\C-t\": yank\n$endif\n"), ["\\C-t"]);
+        assert_eq!(added("$if nosuchapp\n\"\\C-t\": yank\n$endif\n"), [] as [&str; 0]);
+        // The inner `$if` is true on its own and still contributes nothing.
+        assert_eq!(
+            added("$if nosuchapp\n$if Bash\n\"\\C-t\": yank\n$endif\n\"\\C-e\": yank\n$endif\n"),
+            [] as [&str; 0]
+        );
+        // ... and the `$else` half of an outer false one is the half that runs.
+        assert_eq!(
+            added("$if nosuchapp\n\"\\C-t\": yank\n$else\n\"\\C-e\": yank\n$endif\n"),
+            ["\\C-e"]
+        );
+        // An `$else` inside a region already switched off stays switched off,
+        // rather than flipping the region back on.
+        assert_eq!(
+            added("$if nosuchapp\n$if Bash\n$else\n\"\\C-t\": yank\n$endif\n$endif\n"),
+            [] as [&str; 0]
+        );
+        // A `$if` left open simply ends with the file (measured: no complaint).
+        assert_eq!(added("$if Bash\n\"\\C-t\": yank\n"), ["\\C-t"]);
+    }
+
+    /// The four things a `$if` can ask about, as readline answers them.
+    #[test]
+    fn a_conditional_tests_the_application_the_mode_the_terminal_or_the_version() {
+        // The bare form is the application name, case-insensitively — and there
+        // is no `application=` form, so that whole string is just a name that
+        // is not `bash` (measured).
+        assert_eq!(added("$if BaSh\n\"\\C-t\": yank\n$endif\n"), ["\\C-t"]);
+        assert_eq!(added("$if application=bash\n\"\\C-t\": yank\n$endif\n"), [] as [&str; 0]);
+        assert_eq!(added("$if mode=emacs\n\"\\C-t\": yank\n$endif\n"), ["\\C-t"]);
+        assert_eq!(added("$if mode=vi\n\"\\C-t\": yank\n$endif\n"), [] as [&str; 0]);
+        // The terminal matches in full and up to the first `-`.
+        assert_eq!(added("$if term=xterm-256color\n\"\\C-t\": yank\n$endif\n"), ["\\C-t"]);
+        assert_eq!(added("$if term=xterm\n\"\\C-t\": yank\n$endif\n"), ["\\C-t"]);
+        assert_eq!(added("$if term=xter\n\"\\C-t\": yank\n$endif\n"), [] as [&str; 0]);
+        // 8.2, against every operator. A bare major number is `major.0`.
+        for (test, want) in [
+            ("version >= 4.0", true),
+            ("version < 4.0", false),
+            ("version == 8.2", true),
+            ("version = 8.2", true),
+            ("version != 8.2", false),
+            ("version > 8.2", false),
+            ("version <= 8.2", true),
+            ("version > 8", true),
+            ("version", false),
+        ] {
+            let got = !added(&format!("$if {test}\n\"\\C-t\": yank\n$endif\n")).is_empty();
+            assert_eq!(got, want, "$if {test}");
+        }
+    }
+
+    /// Everything a file can get wrong, worded as readline words it — and none
+    /// of it stops the lines that follow.
+    #[test]
+    fn a_bad_line_is_reported_against_its_own_line_number_and_read_past() {
+        let (seqs, errs) = read(
+            "set nosuchvariable on\n$else\n$endif\n$nonsense arg\n\"\\C-t\": yank\n",
+            &mut NoFiles,
+        );
+        assert_eq!(
+            errs,
+            [
+                "rc: line 1: nosuchvariable: unknown variable name",
+                "rc: line 2: $else found without matching $if",
+                "rc: line 3: $endif without matching $if",
+                "rc: line 4: nonsense: unknown parser directive",
+            ]
+        );
+        assert!(seqs.contains(&"\\C-t".to_string()));
+    }
+
+    /// A file's bindings go into the keymap `set keymap` last named, and the
+    /// naming outlives the file (measured).
+    #[test]
+    fn set_keymap_inside_a_file_steers_the_lines_after_it() {
+        let mut maps = super::Maps::seeded();
+        let mut errs: Vec<Vec<u8>> = Vec::new();
+        maps.read_inputrc(
+            b"set keymap vi-insert\n\"\\C-t\": yank\nset keymap vi-command\n\"\\C-e\": yank\n",
+            b"rc",
+            b"dumb",
+            &mut NoFiles,
+            &mut errs,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(maps.keymap(), "vi");
+        let on = |map: &str| -> Vec<Vec<u8>> {
+            maps.entries(map)
+                .iter()
+                .filter(|e| matches!(e.target, Target::Function("yank")))
+                .map(|e| e.seq.to_vec())
+                .collect()
+        };
+        assert!(on("vi-insert").contains(&vec![0x14]));
+        assert!(!on("vi-insert").contains(&vec![0x05]));
+        assert!(on("vi").contains(&vec![0x05]));
+    }
+
+    /// An `$include` is read; one that cannot be is silently nothing; and a
+    /// file that includes itself stops rather than hanging the shell.
+    #[test]
+    fn an_include_is_read_once_and_cannot_recurse_forever() {
+        struct Canned(&'static str, std::cell::Cell<u32>);
+        impl super::Files for Canned {
+            fn read(&mut self, _path: &[u8]) -> Option<Vec<u8>> {
+                self.1.set(self.1.get().saturating_add(1));
+                Some(self.0.as_bytes().to_vec())
+            }
+        }
+        let mut files = Canned("\"\\C-t\": yank\n", std::cell::Cell::new(0));
+        let (seqs, errs) = read("$include other\n", &mut files);
+        assert!(errs.is_empty(), "{errs:?}");
+        assert!(seqs.contains(&"\\C-t".to_string()));
+        assert_eq!(files.1.get(), 1);
+
+        // Nothing to read is not an error: readline says nothing (measured).
+        let (_, errs) = read("$include /nosuch/file\n", &mut NoFiles);
+        assert!(errs.is_empty(), "{errs:?}");
+
+        // A self-including file reaches the depth cap instead of the stack.
+        let mut files = Canned("$include self\n", std::cell::Cell::new(0));
+        let (_, errs) = read("$include self\n", &mut files);
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(files.1.get(), super::INCLUDE_DEPTH);
+
+        // An include inside a false conditional is not even opened.
+        let mut files = Canned("\"\\C-t\": yank\n", std::cell::Cell::new(0));
+        let (_, errs) = read("$if nosuchapp\n$include other\n$endif\n", &mut files);
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(files.1.get(), 0);
     }
 }

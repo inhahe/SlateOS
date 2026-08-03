@@ -44,10 +44,9 @@
 # a binding runs, then the listings are taken again. A shell that answered from
 # constants would pass the first half and fail the second.
 #
-# Deliberately absent: `-f`, which reads an inputrc. osh reads none, so the only
-# outcome it can produce honestly is the one bash produces for a file that is
-# not there — which is what the `-f /nosuch/file` probes below check. See
-# known-issues TD-OILS-NO-BIND-BUILTIN.
+# `-f` appears here only as a phase — where it sits in the order, and that a
+# file it cannot open stops every phase after it. Reading one is a grammar of
+# its own and has its own case, `a-bind-reads-an-inputrc.sh`.
 #
 # Stderr is collected and replayed at the end so the warning — which would
 # otherwise interleave unpredictably with the listings — can be compared in one

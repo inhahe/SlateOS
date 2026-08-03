@@ -875,11 +875,17 @@ osh installs the descriptor in all four, which is the behaviour bash itself
 gives in three of them. Named as deliberately absent in the header of
 `tests/corpus/a-read-write-source-on-a-std-fd-keeps-one-offset.sh`.
 
-### TD-OILS-NO-BIND-BUILTIN. `bind` cannot read an inputrc file — 2026-08-01 — 🔧 **OPEN**
+### TD-OILS-NO-BIND-BUILTIN. `bind` was missing, then answered from constants, then could not read an inputrc — 2026-08-01 — ✅ **RESOLVED 2026-08-03**
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_bind`;
 `userspace/oils/src/bind_keys.rs`; `userspace/oils/src/bind_tables.rs`;
 `scripts/gen-oils-bind-tables.py`.
+
+**Resolution:** closed in three passes — the builtin and its listings
+(2026-08-02), live mutable tables (2026-08-03), and the inputrc reader
+(2026-08-03). The record of each is kept below, because most of what it holds is
+measured readline behaviour that the code depends on and no document else
+states.
 
 **Narrowed 2026-08-02, twice, and again 2026-08-03.** The builtin-count gap that opened this entry is
 closed, and so are all of the listings. `bind` exists, `BUILTIN_NAMES` is 61
@@ -928,14 +934,37 @@ pinned by a unit test in `bind_keys.rs`:
 * **`editing-mode` moves `keymap`.** `set editing-mode vi` also sets
   `keymap` to `vi-insert`, and `bind -v` shows both.
 
-**What is left is reading an inputrc file.** `bind -f` always reports
-`cannot read: No such file or directory`, which is exact for a file that is not
-there and wrong for one that is; osh reads no startup inputrc either. The
-grammar a file needs beyond what `parse_operand` already handles is the
-`$if`/`$else`/`$endif`/`$include` directive set, which `parse_operand` currently
-folds into `Operand::Nothing` along with comments and blank lines. Doing it
-properly means a line-oriented reader with `$if mode=`/`term=`/`application`
-conditions and an include stack.
+**Reading an inputrc closed the last gap** (2026-08-03). `Maps::read_inputrc` is
+readline's `_rl_read_init_file`: a line-oriented reader over `parse_operand`'s
+grammar plus the `$` directives — `$if` on `mode=`, `term=`, `version OP N` or
+the application name, with `$else`, `$endif` and `$include`. It does no I/O
+itself; an `$include` names a file the *shell* resolves, through the
+`bind_keys::Files` trait, because readline resolves it against the shell's
+working directory rather than the including file's. `bind -f` uses it, and so
+does the startup read: a non-interactive bash folds `$INPUTRC` (or `~/.inputrc`,
+then `/etc/inputrc`) into the tables lazily, at the first `bind` that touches a
+keymap, so osh seeds the same way in `Shell::seed_bind_maps`. Pinned by
+`tests/corpus/a-bind-reads-an-inputrc.sh` and five unit tests in `bind_keys.rs`.
+
+Four more measured surprises, on top of the three above:
+
+* **`$if application=bash` is false.** readline has no `application=` form, so
+  the whole string is read as an application *name*, and it is not `bash`.
+  `$if Bash` (any case) is the true one.
+* **A false `$if` hides a nested `$if` entirely** — nothing turns parsing back
+  on but the matching `$endif`, so an `$else` inside a switched-off region stays
+  switched off. An `$if` left unclosed simply ends with the file, in silence,
+  while a stray `$else`/`$endif` is reported *and* the lines around it still
+  apply.
+* **The keymap is one live variable, and `-m` is a save-and-restore around it.**
+  `set keymap` — as an operand or as a line of a file — steers every binding
+  after it in the same call and outlives the call; `-m` steers each phase, shows
+  through `bind -v`, and is then put back, so even a `set keymap` reached
+  through a `-m -f` does not survive. This is why `builtin_bind` reads the
+  keymap afresh at each phase instead of capturing it once.
+* **A directory is not a failure.** `bind -f` on one is status 0 and silence:
+  POSIX opens it and reads nothing. Windows refuses the open, so
+  `read_inputrc_file` supplies the emptiness for the two hosts to agree.
 
 **Two findings from probing the reference bash** (5.2.37, readline 8.2) that
 shaped the above and still apply:

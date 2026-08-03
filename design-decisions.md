@@ -6547,12 +6547,14 @@ the mitigation.
 - *Print nothing and document the gap.* What osh did for a day. It is a wrong
   answer that the corpus can see, and the exclusion list was growing.
 
-**The cost, and the part left open.** The tables are `const`, so `-u`, `-r` and
-`-x` — which in bash mutate readline's live tables even with no line editor —
-are accepted, reported exactly as bash reports them, and then forgotten. Two
-probes in the corpus case must run in subshells because of it. The fix is a
-copy-on-write live table on `Shell` seeded from these; see known-issues
-TD-OILS-NO-BIND-BUILTIN.
+**The cost, and the part since closed.** As first written the tables were
+`const`, so `-u`, `-r` and `-x` — which in bash mutate readline's live tables
+even with no line editor — were accepted, reported exactly as bash reports them,
+and then forgotten. That was closed on 2026-08-03: `bind_keys::Maps` holds an
+owned, mutable copy on `Shell`, seeded from these constants on first use, and
+`bind -f` and the startup `$INPUTRC` read fold an inputrc into it. See
+known-issues TD-OILS-NO-BIND-BUILTIN. The constants remain the *seed*, which is
+the whole reason they must be captured under `INPUTRC=/dev/null`.
 
 **How to reverse.** Delete `bind_tables.rs` and the generator, and cut the
 `list_p`/`list_pp`/`list_v`/`list_vv` blocks and the `-q`-known path out of

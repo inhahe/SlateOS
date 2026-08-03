@@ -13458,16 +13458,6 @@ impl Shell {
             return self.exec_declare_with_arrays(&argv, &sc.decl_arrays, &words, out, &redir);
         }
 
-        // `command …` (bypass shell functions) and `builtin …` (force builtin
-        // lookup) re-dispatch a sub-command, so they are handled before the
-        // normal function/builtin/external resolution below.
-        if name == b"command" {
-            return self.exec_command_builtin(&argv, &assigns, out, stdin, &redir);
-        }
-        if name == b"builtin" {
-            return self.exec_builtin_builtin(&argv, &assigns, out, stdin, &redir);
-        }
-
         // Function? A function invocation's own redirects (`myfunc > file`,
         // `myfunc 2> err`, `myfunc < in`) apply to the whole function body, so
         // run it inside a redirect scope when any are present. Without redirects,
@@ -13496,6 +13486,20 @@ impl Shell {
         // Builtin? (unless disabled via `enable -n`, in which case fall through
         // to the same-named external.)
         if let Some(name) = name_str.as_deref().filter(|n| self.builtin_enabled(n)) {
+            // `command …` (bypass shell functions) and `builtin …` (force a
+            // builtin lookup) re-dispatch a sub-command, so they need this
+            // command's assignment prefix, stdin and redirect plan rather than
+            // the builtin runner's view of them — but they are otherwise
+            // ordinary *regular* builtins, resolved exactly here: after a
+            // function of the same name (which shadows either of them, in posix
+            // mode too, since neither is special) and only while `enable -n` has
+            // not turned them off (after which the shell looks for an external
+            // `command`, and normally finds none).
+            match name {
+                "command" => return self.exec_command_builtin(&argv, &assigns, out, stdin, &redir),
+                "builtin" => return self.exec_builtin_builtin(&argv, &assigns, out, stdin, &redir),
+                _ => {}
+            }
             let call = BuiltinCall {
                 name,
                 argv: &argv,
@@ -14434,20 +14438,32 @@ impl Shell {
         if let Some(name) = bytes::as_str(target).map(str::to_owned)
             && self.builtin_enabled(&name)
         {
-            // `command` strips the POSIX special class off whatever it runs, so
-            // an assignment prefix on it never persists — not even in posix
-            // mode, and not even for `command eval`.
-            let call = BuiltinCall {
-                name: &name,
-                argv: rest,
-                assigns,
-                via: BuiltinVia::Command,
-            };
             // `.`/`source` asks whether a `command` is *running*, not whether it
             // was reached through one, so the mark covers the whole sub-command.
             // See [`Shell::command_builtin_depth`].
             self.command_builtin_depth = self.command_builtin_depth.saturating_add(1);
-            let flow = self.run_builtin(call, out, stdin, redir);
+            let flow = match name.as_str() {
+                // The two wrappers are dispatched at exec level rather than run
+                // as builtins — they need this command's assignment prefix,
+                // stdin and redirect plan to hand on — so a *nested* one has to
+                // be reached the same way. `command command echo`,
+                // `command builtin echo` and their `builtin`-first spellings are
+                // ordinary bash, and nest to any depth.
+                "command" => self.exec_command_builtin(rest, assigns, out, stdin, redir),
+                "builtin" => self.exec_builtin_builtin(rest, assigns, out, stdin, redir),
+                // `command` strips the POSIX special class off whatever it runs,
+                // so an assignment prefix on it never persists — not even in
+                // posix mode, and not even for `command eval`.
+                _ => {
+                    let call = BuiltinCall {
+                        name: &name,
+                        argv: rest,
+                        assigns,
+                        via: BuiltinVia::Command,
+                    };
+                    self.run_builtin(call, out, stdin, redir)
+                }
+            };
             self.command_builtin_depth = self.command_builtin_depth.saturating_sub(1);
             return flow;
         }
@@ -14492,18 +14508,32 @@ impl Shell {
             self.last_status = 0;
             return Flow::Next;
         };
+        // A builtin turned off with `enable -n` is not one `builtin` can reach:
+        // bash looks the name up in the same table `enable` clears the flag in,
+        // and an entry without `BUILTIN_ENABLED` is reported as though it were
+        // not there at all. (`command` differs — it falls through to the
+        // same-named external instead.)
         if let Some(name) = bytes::as_str(sub).map(str::to_owned)
-            && is_builtin(&name)
+            && self.builtin_enabled(&name)
         {
-            // `builtin`, unlike `command`, leaves the special class intact:
-            // `A=1 builtin eval :` keeps `A` in posix mode.
-            let call = BuiltinCall {
-                name: &name,
-                argv: &argv[i..],
-                assigns,
-                via: BuiltinVia::Builtin,
+            let rest = argv.get(i..).unwrap_or_default();
+            return match name.as_str() {
+                // Nested wrappers re-dispatch at exec level; see
+                // [`Shell::exec_command_builtin`].
+                "command" => self.exec_command_builtin(rest, assigns, out, stdin, redir),
+                "builtin" => self.exec_builtin_builtin(rest, assigns, out, stdin, redir),
+                // `builtin`, unlike `command`, leaves the special class intact:
+                // `A=1 builtin eval :` keeps `A` in posix mode.
+                _ => {
+                    let call = BuiltinCall {
+                        name: &name,
+                        argv: rest,
+                        assigns,
+                        via: BuiltinVia::Builtin,
+                    };
+                    self.run_builtin(call, out, stdin, redir)
+                }
             };
-            return self.run_builtin(call, out, stdin, redir);
         }
         self.bemit_cmd_stderr(
             out,
@@ -50196,6 +50226,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let body = "greet is a function\ngreet () \n{ \n    :\n}\n";
         assert_eq!(run("greet() { :; }; command -V greet").0, body);
         assert_eq!(run("greet() { :; }; type greet").0, body);
+    }
+
+    /// Both wrappers are themselves builtins, so either can wrap the other —
+    /// and itself — to any depth. They are dispatched at exec level (they need
+    /// the command's assignment prefix, stdin and redirect plan to hand on), so
+    /// a nested one has to be reached that way rather than through the ordinary
+    /// builtin runner, which knows nothing about them.
+    #[test]
+    fn the_two_wrappers_nest_in_either_order() {
+        assert_eq!(run("command command echo A").0, "A\n");
+        assert_eq!(run("builtin builtin echo B").0, "B\n");
+        assert_eq!(run("command builtin echo C").0, "C\n");
+        assert_eq!(run("builtin command echo D").0, "D\n");
+        assert_eq!(run("command command command command echo E").0, "E\n");
+        // The status is the innermost command's, and the outermost redirect is
+        // still what the innermost writes through.
+        assert_eq!(run("builtin command false; echo $?").0, "1\n");
+        assert_eq!(run("x=$(command builtin echo F); echo \"[$x]\"").0, "[F]\n");
+        // A function of the same name is still bypassed at every level.
+        assert_eq!(run("echo() { printf OVER; }; command builtin echo G").0, "G\n");
+    }
+
+    /// `enable -n` takes a builtin out of the table `builtin` looks in, so the
+    /// name is reported as though it were never a builtin at all. `command`
+    /// differs: it falls through to the same-named external instead.
+    #[test]
+    fn builtin_cannot_reach_a_disabled_builtin() {
+        assert_eq!(
+            run("enable -n echo; { builtin echo hi; } 2>&1; echo rc=$?").0,
+            "osh: builtin: echo: not a shell builtin\nrc=1\n"
+        );
+        // Re-enabling brings it back.
+        assert_eq!(run("enable -n echo; enable echo; builtin echo hi").0, "hi\n");
+        // The wrapper's own name is no more special than any other: disabling
+        // it takes the *outer* one away too, and the shell then goes looking for
+        // an external of that name — which is not there.
+        assert_eq!(
+            run("enable -n builtin; { builtin echo hi; } 2>&1; echo rc=$?").0,
+            "osh: builtin: command not found\nrc=127\n"
+        );
+        assert_eq!(
+            run("enable -n command; { command echo hi; } 2>&1; echo rc=$?").0,
+            "osh: command: command not found\nrc=127\n"
+        );
+    }
+
+    /// Neither wrapper is a POSIX *special* builtin, so a function of the same
+    /// name shadows it — in posix mode as much as out of it. They are resolved
+    /// where every other regular builtin is: after the function table.
+    #[test]
+    fn a_function_shadows_either_wrapper() {
+        assert_eq!(run("command() { echo \"F $*\"; }; command echo hi").0, "F echo hi\n");
+        assert_eq!(run("builtin() { echo \"F $*\"; }; builtin echo hi").0, "F echo hi\n");
+        assert_eq!(
+            run("set -o posix; command() { echo \"F $*\"; }; command echo hi").0,
+            "F echo hi\n"
+        );
+        // …and `builtin` is how the real one is reached past the function.
+        assert_eq!(run("command() { echo F; }; builtin command echo hi").0, "hi\n");
     }
 
     #[test]

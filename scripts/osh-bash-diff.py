@@ -42,12 +42,18 @@ error (no osh binary, no reference bash).
 Failure reports
 ---------------
 Every failing case is also written in full to
-`target/dvscratch/corpus-failures/<case>.txt` (the directory is emptied at the
-start of each run). The stdout report is easy to lose — it is usually piped
-through `tail`, and a *flaky* case that fails one run in four then passes on
-demand leaves nothing to work from. The report file survives that: it holds
-both shells' complete stdout, stderr and status, so the next occurrence of an
-intermittent divergence is captured whether or not anyone was watching.
+`target/dvscratch/corpus-failures/<timestamp>/<case>.txt`. The stdout report is
+easy to lose — it is usually piped through `tail`, and a *flaky* case that fails
+one run in four then passes on demand leaves nothing to work from. The report
+file survives that: it holds both shells' complete stdout, stderr and status, so
+the next occurrence of an intermittent divergence is captured whether or not
+anyone was watching.
+
+Each run gets its own timestamped directory, and a run with no failures creates
+none. That matters precisely for the flaky case: the reflex on seeing `1 failed`
+is to run the harness again, and a shared directory emptied at the start of each
+run would have the re-run — the one that passes — delete the evidence. The
+newest twenty runs are kept; older ones are retired.
 
 Load
 ----
@@ -66,6 +72,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +80,9 @@ REPO = Path(__file__).resolve().parent.parent
 CORPUS = REPO / "userspace" / "oils" / "tests" / "corpus"
 # Where a failing case's full report is left behind; see the module docstring.
 REPORTS = REPO / "target" / "dvscratch" / "corpus-failures"
+# This run's own subdirectory of it, created lazily by `run_report_dir` so a
+# run with nothing to report leaves nothing behind.
+_RUN_REPORTS: Path | None = None
 
 # Where the host build puts osh. The *newest* existing one wins: a stale
 # `release/` build silently testing week-old behaviour is the easiest way to
@@ -296,13 +306,44 @@ def compare(case: Case, bash_run: Run, osh_run: Run) -> list[str]:
     return diffs
 
 
+def run_report_dir() -> Path:
+    """This run's own report directory, created on first use.
+
+    Every run gets a fresh timestamped directory rather than sharing one, so
+    that re-running the harness can never destroy the evidence the previous run
+    captured — which is the whole point of the reports when the failure being
+    chased is intermittent and the obvious next move is "run it again".
+    """
+    global _RUN_REPORTS
+    if _RUN_REPORTS is None:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        _RUN_REPORTS = REPORTS / stamp
+        # A second run inside the same second would otherwise write into the
+        # first one's directory and mix the two.
+        n = 1
+        while _RUN_REPORTS.exists():
+            _RUN_REPORTS = REPORTS / f"{stamp}-{n}"
+            n += 1
+    return _RUN_REPORTS
+
+
+def prune_reports(keep: int = 20) -> None:
+    """Drop all but the newest `keep` run directories, so history stays bounded."""
+    try:
+        dirs = sorted((p for p in REPORTS.iterdir() if p.is_dir()), key=lambda p: p.name)
+    except OSError:
+        return
+    for stale in dirs[: max(0, len(dirs) - keep)]:
+        shutil.rmtree(stale, ignore_errors=True)
+
+
 def write_report(case: Case, bash_run: Run, osh_run: Run, diffs: list[str]) -> Path | None:
     """Leave a failing case's full measurement on disk, and say where.
 
     Returns None if the report could not be written — a harness that cannot
     save its notes must still report the failure it found.
     """
-    path = REPORTS / f"{case.name}.txt"
+    path = run_report_dir() / f"{case.name}.txt"
     body = [f"case: {case.path}", "", "differences:", *diffs, ""]
     for label, run in (("bash", bash_run), ("osh", osh_run)):
         body += [
@@ -314,7 +355,7 @@ def write_report(case: Case, bash_run: Run, osh_run: Run, diffs: list[str]) -> P
             run.stderr,
         ]
     try:
-        REPORTS.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(body), encoding="utf-8", errors="replace")
     except OSError:
         return None
@@ -345,10 +386,9 @@ def main() -> int:
     print(f"bash: {bash}")
     print(f"{len(cases)} case(s)\n")
 
-    # Start from an empty report directory so what is left in it afterwards is
-    # exactly this run's failures, not a mix with some earlier run's.
-    if REPORTS.exists():
-        shutil.rmtree(REPORTS, ignore_errors=True)
+    # Older runs' reports are kept (see `run_report_dir`); only the oldest are
+    # retired, so the directory cannot grow without bound.
+    prune_reports()
 
     failures = 0
     waived = 0

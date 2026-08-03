@@ -27489,11 +27489,10 @@ measured twice before being reported. None of them is a message oils produces
 itself — they all come from the OS through a spawn failure — so this is safe,
 but a new spawn-related diagnostic should not be worded to collide with them.
 
-### TD-OILS-JOBS-INVISIBLE-IN-A-FORKED-CHILD. `jobs` sees an empty table inside a pipeline stage or a command substitution — OPEN — 2026-08-01
+### TD-OILS-JOBS-INVISIBLE-IN-A-FORKED-CHILD. `jobs` sees an empty table inside a pipeline stage or a command substitution — ✅ RESOLVED — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — the clone used for a pipeline stage
-and the one used for a command substitution do not carry `self.jobs` across,
-where `clone_for_subshell` (the `( … )` path) does.
+and the one used for a command substitution did not carry `self.jobs` across.
 
 **Reproduce:**
 
@@ -27506,26 +27505,171 @@ echo "--- cmdsub";   echo "[$(jobs)]"
 wait
 ```
 
-bash lists the job in all four; osh lists it for the first and the subshell,
-and prints nothing for `jobs | cat` and `$(jobs)`.
+bash lists the job for the first, the pipe and the substitution, and prints
+nothing for `( jobs )`; osh listed it only for the first. (The original write-up
+of this entry had the subshell line wrong on both sides — see "the boundary"
+below, which is what settles it.)
 
-**Why.** bash forks for all three, and a forked child inherits the parent's job
-list — it is ordinary process memory. osh's stage/cmdsub clones are built for
-*speed* on the hot path and copy only what a stage was thought to need, so the
-job table was left out; the `( … )` clone, which is not on that path, copies it.
+**Why.** bash forks for all of these, and a forked child inherits the parent's
+job list — it is ordinary process memory. osh's stage/cmdsub clones are built
+for *speed* on the hot path and copy only what a stage was thought to need, so
+the job table was left out.
 
-**Proper fix.** Carry the job table into the stage and command-substitution
-clones the way `clone_for_subshell` already does. It must be a **snapshot, not
-a share** — a forked child's `jobs` is a copy, so anything the child does to it
-(waiting, disowning) must not reach the parent. The `child: Option<JobBody>`
-handles cannot be cloned, so the copy has to be handle-less: enough to *list*
-a job (`id`, `pid`, `cmd`, `status`, `signal`, markers) and nothing more, which
-matches bash — a child cannot `wait` for its parent's jobs either.
+**The boundary.** Not every fork keeps its jobs. bash's `execute_in_subshell`
+calls `without_job_control`, which empties the table, and that is the very same
+boundary `$BASH_SUBSHELL` counts: a `( … )`, an `&` job, a coproc, and a
+pipeline stage that is a compound command / function call / `eval`·`.`·`source`
+all start with none, while a stage that is a plain command — and a `$( … )` —
+keep the table. osh already encoded that distinction for `$BASH_SUBSHELL`
+(`stage_pending_level` / `enter_stage_subshell`), so the fix needed no new
+classification, only to hang the job table off the existing one.
 
-**Impact.** `jobs` is only wrong when read through a pipe or a substitution,
-which is exactly how a script reads it (`jobs | wc -l`, `n=$(jobs -p)`). Found
-while making a coproc a real job: the probe piped `jobs` through `sed` to blank
-out pids and so saw nothing at all.
+**Fixed** by `Shell::inherit_jobs`, called from `clone_for_pipeline_stage` and
+`new_comsub_shell`, with `enter_stage_subshell` clearing the table again for a
+stage that turns out to be a subshell. The copy is a **snapshot, not a share**:
+`Job::inherited_copy` carries everything a listing reads and marks the row
+`inherited`, and the `child: Option<JobBody>` handle deliberately does not come
+across — a process cannot wait for its parent's children, and that absence is
+what shapes the rest.
+
+Because it cannot wait, the first `wait` of any kind in such a child is where it
+finds out: bash's `waitpid` answers `ECHILD` and bash responds with
+`mark_all_jobs_as_dead`, so the whole inherited table is written off as finished
+and a later `jobs` in that same child shows `Done` for jobs still running
+perfectly well (`Shell::mark_inherited_dead`). Each `wait` form then answers its
+own way — an operand-less one returns 0 without blocking, `wait -n` answers 0 and
+takes a row away, and a targeted one hands back the -1 `wait_for` failed with.
+`$?` is signed and prints that as written, while the *substitution's* own status
+is an exit status and so eight bits wide, hence 255 (`forked_child_status`).
+
+Covered by `userspace/oils/tests/corpus/jobs-in-a-forked-child.sh` (byte-exact
+against bash 5.2) and four unit tests in `interp.rs`.
+
+**Impact (before the fix).** `jobs` was wrong exactly where a script reads it
+(`jobs | wc -l`, `n=$(jobs -p)`). Found while making a coproc a real job: the
+probe piped `jobs` through `sed` to blank out pids and so saw nothing at all.
+
+**Known deviations left.** Four, each measured and deliberately not emulated —
+see TD-OILS-FORKED-CHILD-WAIT-N-CAPS-AT-TWO, TD-OILS-KILL-IN-A-FORK-DOES-NOT-
+REACH-THE-PARENTS-JOB, TD-OILS-FORKED-CHILD-KEEPS-ITS-OWN-JOBS-ALIVE and
+TD-OILS-KILL-THEN-JOBS-REPORTS-TERMINATED-NOT-RUNNING below.
+
+### TD-OILS-FORKED-CHILD-WAIT-N-CAPS-AT-TWO. bash's repeated `wait -n` in a forked child succeeds at most twice, whatever the job count — OPEN (bash bug; not emulated) — 2026-08-03
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::wait_next`, the
+`mark_inherited_dead` path.
+
+**Reproduce** (`n` background `sleep`s, then a substitution that asks `n+1`
+times):
+
+```sh
+for i in 1 2 3; do sleep 30 >/dev/null 2>&1 & done
+echo "$( wait -n; echo "a=$?"; wait -n; echo "b=$?"; wait -n; echo "c=$?" )"
+```
+
+bash answers `a=0 b=0 c=127` with two jobs and `a=0 b=127` with one — i.e. it
+succeeds `min(n, 2)` times regardless of how many rows the child actually
+inherited. osh answers 0 for every row it has and 127 thereafter.
+
+**Why not emulated.** There is no model that produces "at most two" from bash's
+own data structures; probing n = 1…4 gives 1, 2, 2, 2. It reads as an accounting
+slip in bash's `wait_for_any_job` bookkeeping after `mark_all_jobs_as_dead`, and
+reproducing a number with no meaning would make osh's own code unexplainable.
+The first `wait -n` — the one a script actually writes — agrees.
+
+**Impact.** Only a script that calls `wait -n` in a loop *inside a fork*, over
+jobs it inherited rather than started. The corpus case documents the first two
+answers and stops there.
+
+### TD-OILS-KILL-IN-A-FORK-DOES-NOT-REACH-THE-PARENTS-JOB. `kill %1` inside `$( … )` names an inherited row but signals nothing — OPEN — 2026-08-03
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_kill`. An inherited row has
+`child: None` by construction, and osh refuses to signal a pid it did not spawn.
+
+**Reproduce:**
+
+```sh
+sleep 30 >/dev/null 2>&1 &
+echo "$( kill %1; echo "rc=$?" )"
+sleep 0.3
+jobs
+```
+
+Both shells report `rc=0`. Under bash the job is gone by the `jobs`; under osh
+it is still `Running`.
+
+**Why.** bash's fork is a real process, so `kill` reaches a pid the kernel knows
+is alive whoever asks. osh's `$( … )` is an in-process clone: the inherited row
+carries no `JobBody`, and signalling a bare pid would need a process-control
+layer osh does not have on the host (the same gap as
+TD-OILS-KILL-BY-PID-NEEDS-PROCESS-CONTROL). The *status* matches; only the
+effect is missing.
+
+**Proper fix.** Signal by pid through the host's process-control API, which
+would also let `kill` reach a pid the shell never spawned. Until then a fork
+cannot kill its parent's jobs.
+
+**Impact.** A script that kills a job from inside a substitution or a pipeline
+stage rather than from the shell itself. Rare, but silent when it bites.
+
+### TD-OILS-FORKED-CHILD-KEEPS-ITS-OWN-JOBS-ALIVE. bash's `mark_all_jobs_as_dead` also writes off the child's *own* running jobs; osh tells the truth — OPEN (deliberate) — 2026-08-03
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::mark_inherited_dead`, which
+is restricted to rows marked `inherited`.
+
+**Reproduce:**
+
+```sh
+sleep 30 >/dev/null 2>&1 &
+echo "$( sleep 30 >/dev/null 2>&1 & wait %1 >/dev/null; jobs )"
+```
+
+bash lists *both* rows `Done` — including job 2, which the substitution started
+itself moments earlier and which is plainly still running. osh lists the
+inherited row `Done` and its own row `Running`.
+
+**Why not emulated.** bash's `mark_all_jobs_as_dead` is exactly what its name
+says: it walks the whole table on `ECHILD` rather than the rows the `ECHILD` was
+about. For an inherited row that is right by accident — the child really will
+never hear the end of it — but for a job of the child's own it is a lie the
+child can immediately disprove, and a later `wait` on that job then blocks and
+answers correctly anyway. Copying it would mean deliberately misreporting live
+state.
+
+**Impact.** A fork that starts a job of its own, waits on an inherited one, and
+then lists. The corpus case exercises the inherited half and stays clear of this.
+
+### TD-OILS-KILL-THEN-JOBS-REPORTS-TERMINATED-NOT-RUNNING. `kill %n; jobs` on the same line shows the kill under osh and not yet under bash — OPEN — 2026-08-03
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_kill` records
+`128 + signum` and clears the handle as part of the kill.
+
+**Reproduce:**
+
+```sh
+sleep 30 >/dev/null 2>&1 &
+kill %1
+jobs
+```
+
+bash prints `[1]+  Running` (it has not yet taken delivery of the `SIGCHLD`, and
+`jobs` reports what the job table says); the next `jobs` prints `Terminated`.
+osh prints `Terminated` at once.
+
+**Why.** bash's kill and its *notice* of the death are two separate events, and
+a listing on the same line falls between them. osh's `kill` terminates the child
+synchronously and writes the status down itself, so there is no gap to fall
+into. Pre-existing and unrelated to the forked-child work — confirmed by probing
+it on its own.
+
+**Proper fix.** Defer the status write to the next reap (`poll_jobs`), so a
+listing on the same line still sees `Running`. That means `kill` recording only
+an *expected* signal on the row and letting the reap turn it into a status —
+a change to how a signalled job's status is settled, worth doing with the
+`kill`-by-pid work above rather than alone.
+
+**Impact.** Cosmetic and one line wide: any script that kills and lists in the
+same breath. Every subsequent listing agrees.
 
 ### TD-OILS-COPROC-SECOND-IS-NOT-WARNED. bash warns when a coproc is started while another is still alive; osh started it silently — ✅ RESOLVED — 2026-08-01
 

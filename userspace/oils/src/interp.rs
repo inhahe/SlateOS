@@ -2297,6 +2297,20 @@ fn child_exit_status(status: &std::process::ExitStatus) -> i32 {
     }
 }
 
+/// The status a forked child hands back to the shell that forked it.
+///
+/// A child ends by *exiting*, and an exit status is eight bits wide: bash's
+/// `wait_for` can fail with -1, and what the shell that forked it reads out of
+/// `waitpid` is 255. osh's children are clones inside this one process, so
+/// nothing on the way back truncates anything unless this does.
+///
+/// Every status either shell produces deliberately is already in range, so this
+/// only bites where bash's own truncation does — today, a `wait` for a job the
+/// child only inherited (see [`Shell::mark_inherited_dead`]).
+fn forked_child_status(status: i32) -> i32 {
+    status & 0xff
+}
+
 impl JobBody {
     /// Block until the job body finishes and return its exit status. A thread
     /// that panicked is reported as status 1 (the shell keeps running).
@@ -2370,6 +2384,39 @@ struct Job {
     /// collected as soon as it is available, so `jobs` and `wait` report it
     /// without delay. What waits is the shell's claim to have *heard* about it.
     born_at: std::time::Instant,
+    /// True for a row this shell did not start: a copy of the parent's, taken
+    /// when the shell was forked. See [`Shell::inherit_jobs`].
+    ///
+    /// `child` is `None` for one of these, but so it is for a job of one's own
+    /// that has been reaped, and the two are not the same job at all — one has
+    /// a status because it ended, the other has none because its end is not
+    /// this shell's to hear. Only an explicit mark tells them apart.
+    inherited: bool,
+}
+
+impl Job {
+    /// The copy of this job a forked child inherits.
+    ///
+    /// Handle-less, necessarily: the body is the *parent's* child, and a
+    /// process cannot wait for its parent's children — which is exactly what
+    /// makes the copy behave the way bash's does. Everything a listing reads is
+    /// carried across, so the child sees the job the parent saw, frozen at the
+    /// moment of the fork.
+    fn inherited_copy(&self) -> Job {
+        Job {
+            id: self.id,
+            pid: self.pid,
+            child: None,
+            cmd: self.cmd.clone(),
+            status: self.status,
+            signal: self.signal,
+            no_hup: self.no_hup,
+            notified: self.notified,
+            exit_seen: self.exit_seen,
+            born_at: self.born_at,
+            inherited: true,
+        }
+    }
 }
 
 /// How long a background job's death goes unnoticed after it was started — the
@@ -6513,7 +6560,7 @@ impl Shell {
                     // a stage that is already over.
                     sub.signal_stage_started();
                     // `o` drops here, closing the write end → EOF downstream.
-                    sub.last_status
+                    forked_child_status(sub.last_status)
                 });
                 handles.push((i, handle));
             }
@@ -6573,7 +6620,7 @@ impl Shell {
                 sub.exec_command(&cmds[last], out, &stdin);
                 // The last stage is a subshell too: fire its own EXIT trap.
                 sub.run_exit_trap_out(out, &stdin);
-                statuses[last] = sub.last_status;
+                statuses[last] = forked_child_status(sub.last_status);
             }
             // Close this stage's read end NOW (before joining) so an upstream
             // producer that outlives the consumer sees EOF/EPIPE and stops —
@@ -9036,9 +9083,12 @@ impl Shell {
             // A subshell's own `exit` unwinds only the subshell; the flag is a
             // top-level-input concern, so it never carries into a clone.
             exit_requested: false,
-            // A subshell does not inherit the parent's job table — nor, for the
-            // same reason, its memory of already-reaped jobs: those were the
-            // parent's children, not the subshell's.
+            // A clone starts with no job table. Whether it keeps it that way is
+            // the caller's business: a fork *does* carry the parent's table
+            // across (see [`Shell::inherit_jobs`]), but the two clones that go
+            // on to call `without_job_control` — a `( … )` and a `&` — do not,
+            // and neither does the memory of already-reaped jobs that goes with
+            // it.
             jobs: Vec::new(),
             current_job: None,
             previous_job: None,
@@ -9076,7 +9126,41 @@ impl Shell {
         let mut sub = self.clone_for_subshell();
         sub.subshell_level = self.subshell_level;
         sub.stage_pending_level = true;
+        sub.inherit_jobs(self);
         sub
+    }
+
+    /// Carry the job table into a forked child — bash's fork, which copies the
+    /// parent's memory and so its jobs along with it.
+    ///
+    /// A child that inherits jobs can *list* them (`jobs`, `jobs -p`), *name*
+    /// them (`kill %1`, `%+`, `%string`) and numbers its own jobs after them, so
+    /// `jobs | cat` and `$(jobs)` say what the shell itself would say — which is
+    /// the whole point, since a listing is nearly always read through one or the
+    /// other.
+    ///
+    /// It is a **snapshot, not a share**: the copy is frozen at the fork, and
+    /// what the child does to it (waiting, disowning, reporting) never reaches
+    /// the parent. The handles cannot come across even in principle — a process
+    /// cannot wait for its parent's children — and that absence is not an
+    /// approximation but the very thing that shapes the semantics; see
+    /// [`Shell::mark_inherited_dead`].
+    ///
+    /// The memory of already-reaped jobs comes too: `p=$!` reaped in the parent
+    /// is still answerable by `$(wait $p)` afterwards (measured).
+    ///
+    /// Not every clone is a fork that keeps its jobs. bash's `execute_in_subshell`
+    /// calls `without_job_control`, which empties the table, and that covers a
+    /// `( … )`, an `&` job, a coproc, and a pipeline stage that is a compound
+    /// command / function call / `eval`·`.`·`source` — so those start empty
+    /// ([`Shell::clone_for_subshell`], [`Shell::enter_stage_subshell`]). What is
+    /// left is a plain pipeline stage and a command substitution, and those are
+    /// exactly the two callers here.
+    fn inherit_jobs(&mut self, from: &Shell) {
+        self.jobs = from.jobs.iter().map(Job::inherited_copy).collect();
+        self.current_job = from.current_job;
+        self.previous_job = from.previous_job;
+        self.reaped_status = from.reaped_status.clone();
     }
 
     /// Claim [`Shell::stage_pending_level`] for a stage's outermost command:
@@ -9088,9 +9172,18 @@ impl Shell {
 
     /// Enter the subshell a pipeline stage was forked for, if this is the
     /// command that makes it one. See [`Shell::clone_for_pipeline_stage`].
+    ///
+    /// This is bash's `execute_in_subshell`, and it does two things, not one:
+    /// besides counting towards `$BASH_SUBSHELL` it calls `without_job_control`,
+    /// which empties the job table. So the same distinction that makes
+    /// `echo "[$BASH_SUBSHELL]" | cat` print 0 also makes `jobs | cat` list the
+    /// shell's jobs while `{ jobs; } | cat` lists none — measured.
     fn enter_stage_subshell(&mut self) {
         if self.take_stage_level() {
             self.subshell_level = self.subshell_level.saturating_add(1);
+            self.jobs.clear();
+            self.current_job = None;
+            self.previous_job = None;
         }
     }
 
@@ -14731,6 +14824,7 @@ impl Shell {
                 signal: None,
                 no_hup: false,
                 notified: false,
+                inherited: false,
             });
             self.note_new_job(id);
             self.last_bg_pid = Some(pid);
@@ -14792,6 +14886,7 @@ impl Shell {
             notified: false,
             exit_seen: false,
             born_at: std::time::Instant::now(),
+            inherited: false,
         });
         self.note_new_job(id);
         self.last_bg_pid = Some(pid);
@@ -14933,6 +15028,7 @@ impl Shell {
             notified: false,
             exit_seen: false,
             born_at: std::time::Instant::now(),
+            inherited: false,
         });
         self.note_new_job(id);
         self.coproc_tracked = Some(TrackedCoproc {
@@ -18782,8 +18878,10 @@ impl Shell {
         // Inside `$( … )` a job's death is not announced (see `in_comsub`): the
         // message would land on the parent's stderr, unrelated to the value
         // being collected, so bash leaves the job for the substitution's own
-        // `jobs` to report.
+        // `jobs` to report — and that `jobs` has something to report because a
+        // substitution is a plain fork, which carries the table across.
         sub.in_comsub = true;
+        sub.inherit_jobs(self);
         // The DEBUG/RETURN/ERR traps follow the ordinary subshell rules set by
         // `clone_for_subshell`: inherited only under `functrace`/`errtrace`. A
         // trap that does fire inside `$( … )` writes into the capture buffer
@@ -18824,7 +18922,7 @@ impl Shell {
         // (`x=$(sleep 2 >/dev/null &)` returns at once, as in bash). The job's
         // status is discarded, not propagated: `x=$(false &); echo $?` is 0.
         cap.wait_for_writers();
-        self.last_status = sub.last_status;
+        self.last_status = forked_child_status(sub.last_status);
         let mut buf = take_capture(cap);
         self.strip_capture_nuls(&mut buf);
         // The captured output substitutes as the bytes the command wrote: a
@@ -21751,6 +21849,28 @@ impl Shell {
         self.dispose_reaped_coproc();
     }
 
+    /// Give up on every job this shell only inherited — bash's
+    /// `mark_all_jobs_as_dead`, which it reaches when a `wait` asks the kernel
+    /// about a process that is not its child and is told `ECHILD`.
+    ///
+    /// A forked child holds rows for jobs it cannot reap, and the first `wait`
+    /// that tries is where it finds that out. It does not find out *nothing*: a
+    /// job it cannot wait for is a job it will never hear the end of, so bash
+    /// writes the whole inherited table off as finished — status 0, whatever
+    /// the jobs are really doing — and a later listing in the same child shows
+    /// them `Done`. Only after that does the `wait` answer, each form in its
+    /// own way ([`Shell::builtin_wait`], [`Shell::wait_next`],
+    /// [`Shell::drain_jobs`]).
+    ///
+    fn mark_inherited_dead(&mut self) {
+        for job in &mut self.jobs {
+            if job.inherited && job.status.is_none() {
+                job.status = Some(0);
+                job.exit_seen = true;
+            }
+        }
+    }
+
     /// Dispose of the tracked coproc if its body has been reaped — the moment
     /// bash closes a coproc's descriptors and unsets its variables.
     ///
@@ -22365,8 +22485,20 @@ impl Shell {
             self.jobs.iter().filter(|j| j.exit_seen).map(|j| j.id).collect();
         // Reap anyway, so a job whose body is over does not block below.
         self.poll_jobs();
+        // Every job of this shell's own has now been waited for, so what is left
+        // is only what it inherited — and asking after that is what tells it the
+        // jobs are not its to wait for.
+        self.mark_inherited_dead();
         let mut waited: Vec<usize> = Vec::new();
         for job in &mut self.jobs {
+            // An inherited row is dead now, but it is not a job this `wait`
+            // waited *for*: nothing was ever blocked on. Leaving it out is what
+            // hands it to the caller's own discard pass, which spares `$!` — so
+            // the last job the parent backgrounded is still there to be listed
+            // `Done` afterwards, exactly as in the shell that started it.
+            if job.inherited {
+                continue;
+            }
             if let Some(body) = job.child.take() {
                 job.status = Some(body.wait_blocking());
                 job.exit_seen = true;
@@ -22542,6 +22674,26 @@ impl Shell {
                 }
             };
             let pid = self.jobs[idx].pid;
+            // A row this shell only inherited names a process that is not its
+            // child, so the kernel answers `ECHILD` at once — no status to
+            // report, and bash hands back the -1 its `wait_for` failed with
+            // rather than any job's exit code. `$?` is signed and prints it as
+            // written: `echo "$( sleep 5 & : ; wait %1; echo $? )"` is `-1`.
+            //
+            // The row is reported but not swept. Sweeping is part of a reap
+            // that here never happened, so the row outlives every `wait` naming
+            // it — three in a row all answer -1 — and goes only at the next
+            // command that sweeps for its own reasons, a `jobs` among them.
+            if self.jobs[idx].inherited {
+                self.mark_inherited_dead();
+                self.jobs[idx].notified = true;
+                self.reaped_status.insert(pid, -1);
+                last = -1;
+                if let Some(var) = &pid_var {
+                    self.put_var(var.clone(), pid.to_string());
+                }
+                continue;
+            }
             let job = &mut self.jobs[idx];
             if let Some(body) = job.child.take() {
                 last = body.wait_blocking();
@@ -22650,11 +22802,23 @@ impl Shell {
         // Poll the candidates until one reports termination. A job already
         // reaped (child == None, status set) completes immediately.
         loop {
+            // `-n` is `waitpid(-1)`: it asks for *any* child, so a real one
+            // still running is what it blocks on, and only a shell with none
+            // left is told `ECHILD` and falls back on the rows it merely
+            // inherited. So `{ sleep 1; } & wait -n` inside `$( … )` answers
+            // with the sleep, not instantly with a parent's job — measured.
+            let own_alive = self.jobs.iter().any(|j| j.child.is_some());
+            if !own_alive {
+                self.mark_inherited_dead();
+            }
             for &id in &candidates {
                 let Some(idx) = self.jobs.iter().position(|j| j.id == id) else {
                     continue;
                 };
                 let job = &mut self.jobs[idx];
+                if job.inherited && own_alive {
+                    continue;
+                }
                 let finished = match &mut job.child {
                     Some(body) => body.is_finished(),
                     None => true,
@@ -56418,6 +56582,93 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         run_in(&mut sh, "jobs %2");
         assert_eq!((sh.current_job, sh.previous_job), (Some(1), Some(1)));
         sh.run_source("kill %1".as_bytes());
+    }
+
+    #[test]
+    fn a_fork_reads_the_job_table_it_was_forked_with() {
+        // A `$( … )` is a fork and nothing more, so it lists what the shell
+        // itself would list, markers and all. That is the whole point: a
+        // listing is nearly always read through one of these.
+        let mut sh = new_shell();
+        sh.run_source("sleep 5 &".as_bytes());
+        sh.run_source("sleep 6 &".as_bytes());
+        let (o, _) = run_in(&mut sh, r#"echo "$( jobs )""#);
+        assert!(o.contains("[1]-") && o.contains("[2]+"), "{o:?}");
+
+        // The copy is a snapshot: what the fork does to it never reaches the
+        // shell that forked it.
+        let (o, _) = run_in(&mut sh, r#"echo "$( disown %1; jobs )""#);
+        assert!(!o.contains("[1]") && o.contains("[2]"), "{o:?}");
+        assert_eq!(sh.jobs.len(), 2, "the shell's own table is untouched");
+
+        // A job of the child's own is numbered after the ones it inherited.
+        let (o, _) = run_in(&mut sh, r#"echo "$( true & jobs )""#);
+        assert!(o.contains("[3]"), "{o:?}");
+        assert_eq!(sh.jobs.len(), 2, "and it is the child's, not the shell's");
+        sh.run_source("kill %1 %2".as_bytes());
+    }
+
+    #[test]
+    fn entering_a_subshell_is_what_empties_the_inherited_table() {
+        // bash's `execute_in_subshell` calls `without_job_control`, and that is
+        // the same boundary `$BASH_SUBSHELL` counts — so a `( … )` starts with
+        // no jobs, and so does a pipeline stage that is a compound command or a
+        // function call, while a stage that is a plain command does not.
+        let mut sh = new_shell();
+        sh.run_source("sleep 5 &".as_bytes());
+        assert_eq!(run_in(&mut sh, r#"echo "[$( ( jobs ) )]""#).0, "[]\n");
+        assert_eq!(run_in(&mut sh, r#"( echo "[$( jobs )]" )"#).0, "[]\n");
+
+        let (o, _) = run_in(&mut sh, "jobs | cat");
+        assert!(o.contains("[1]"), "a plain stage is a fork and nothing more: {o:?}");
+        assert_eq!(run_in(&mut sh, "{ jobs; } | cat").0, "");
+        assert_eq!(run_in(&mut sh, "f() { jobs; }; f | cat").0, "");
+        assert_eq!(run_in(&mut sh, "{ jobs; } & wait $!").0, "");
+        sh.run_source("kill %1".as_bytes());
+    }
+
+    #[test]
+    fn a_fork_cannot_wait_for_its_parents_children() {
+        // A child holds rows for jobs it can never reap, and each `wait` says so
+        // its own way. Nothing here blocks: the `sleep`s outlive the test.
+        let mut sh = new_shell();
+        sh.run_source("sleep 5 &".as_bytes());
+        sh.run_source("sleep 6 &".as_bytes());
+        assert_eq!(run_in(&mut sh, r#"echo "$( wait; echo rc=$? )""#).0, "rc=0\n");
+        assert_eq!(run_in(&mut sh, r#"echo "$( wait -n; echo rc=$? )""#).0, "rc=0\n");
+        // A targeted `wait` hands back the -1 its failure returned, and `$?` is
+        // signed, so it prints as written.
+        assert_eq!(run_in(&mut sh, r#"echo "$( wait %1; echo rc=$? )""#).0, "rc=-1\n");
+        // Reporting a row is not sweeping it — the sweep belongs to a reap that
+        // never happened — so three `wait`s in a row all answer.
+        assert_eq!(
+            run_in(&mut sh, r#"echo "$( wait %2; wait %2; wait %2; echo rc=$? )""#).0,
+            "rc=-1\n"
+        );
+        // The substitution's own status is that same -1 as an *exit* status,
+        // which is eight bits wide.
+        assert_eq!(run_in(&mut sh, r#"x=$( wait %1 ); echo "sub=$?""#).0, "sub=255\n");
+
+        // Asking once writes the whole inherited table off, so a later listing
+        // in that same child shows `Done` for jobs that are running perfectly
+        // well — and the shell itself is none the wiser.
+        let (o, _) = run_in(&mut sh, r#"echo "$( wait %1 >/dev/null; jobs )""#);
+        assert!(o.contains("Done"), "{o:?}");
+        let (o, _) = run_in(&mut sh, "jobs");
+        assert!(o.contains("Running") && !o.contains("Done"), "{o:?}");
+        sh.run_source("kill %1 %2".as_bytes());
+    }
+
+    #[test]
+    fn a_forked_childs_status_is_eight_bits_wide() {
+        // A child ends by *exiting*, and what the shell that forked it reads out
+        // of `waitpid` is one byte — which is why a `wait` that failed with -1
+        // inside a `$( … )` is 255 outside it.
+        assert_eq!(forked_child_status(0), 0);
+        assert_eq!(forked_child_status(7), 7);
+        assert_eq!(forked_child_status(-1), 255);
+        assert_eq!(forked_child_status(128 + 9), 137);
+        assert_eq!(forked_child_status(256), 0);
     }
 
     #[cfg(windows)]

@@ -14478,9 +14478,14 @@ impl Shell {
     /// reported: it is what `hash` and `type` print and what `$_` carries into
     /// the child, and bash puts a `/`-separated path in all three.
     ///
-    /// An unset `$PATH` means no search at all — *unless* the shell has not yet
-    /// taken ownership of its environment, when the process's own `$PATH` is
-    /// still the authority (bash).
+    /// An unset or **empty** `$PATH` is not "no search": it is one empty entry,
+    /// so it searches the current directory and nothing else. bash reads the
+    /// variable with `get_string_value` and treats a missing value as `""`,
+    /// which its splitter turns into a single empty element — hence
+    /// `unset PATH; ./x`-free invocations still find a program sitting in the
+    /// cwd, while `unset PATH; ls` is `command not found`. Before the shell has
+    /// taken ownership of its environment the process's own `$PATH` is still the
+    /// authority (bash), so that is consulted first.
     ///
     /// `temp_path` is a `PATH=` written as a command's assignment prefix, which
     /// outranks the shell's own: bash reads every variable through the
@@ -14489,21 +14494,35 @@ impl Shell {
         let path = match (temp_path, self.param_value("PATH")) {
             (Some(p), _) => p.to_vec(),
             (None, Some(p)) => p,
-            (None, None) if !self.env_imported => match std::env::var_os("PATH") {
-                Some(p) => bytes::os_to_bytes(&p),
-                None => return Vec::new(),
-            },
-            (None, None) => return Vec::new(),
+            (None, None) if !self.env_imported => {
+                std::env::var_os("PATH").map(|p| bytes::os_to_bytes(&p)).unwrap_or_default()
+            }
+            (None, None) => Str::new(),
         };
+        // Spelled out because the host splitter does not agree: it yields *no*
+        // elements for an empty string where the shell wants one empty one.
+        if path.is_empty() {
+            return vec![self.search_dir_here()];
+        }
         std::env::split_paths(&bytes::bytes_to_os(&path))
             .map(|d| {
                 let d = bytes::path_to_bytes(&d);
                 if d.is_empty() {
-                    return if self.cwd.is_empty() { b".".to_vec() } else { self.cwd.clone() };
+                    return self.search_dir_here();
                 }
                 shell_path(&bytes::bytes_to_path(&self.resolve_str(&d)))
             })
             .collect()
+    }
+
+    /// The directory an *empty* `$PATH` entry names: the shell's own, or `.`
+    /// when it has none to give.
+    fn search_dir_here(&self) -> Str {
+        if self.cwd.is_empty() {
+            b".".to_vec()
+        } else {
+            self.cwd.clone()
+        }
     }
 
     /// The file `name` would name in the `$PATH` directory `dir`, spelled the
@@ -14549,6 +14568,24 @@ impl Shell {
             }
         }
         None
+    }
+
+    /// Search `$PATH` for a *readable* file named `name`, which is the lookup
+    /// `.`/`source` runs — not the executable one [`Shell::find_in_path`] runs.
+    ///
+    /// bash keeps the two apart (`find_path_file` asks `find_file_in_path` for
+    /// `FS_READABLE`, where a command lookup asks for `FS_EXEC_ONLY`) and the
+    /// difference shows: a `chmod -x` data file is sourceable, and there is no
+    /// host-extension probe, so `. foo` never finds `foo.exe`. A directory
+    /// named on the way is skipped rather than ending the search, so a later
+    /// entry can still win.
+    ///
+    /// A name containing a separator is not a search at all; callers check that
+    /// before coming here.
+    fn find_source_in_path(&self, name: BStr<'_>) -> Option<Str> {
+        self.search_dirs(None).into_iter().find(|dir| {
+            Self::path_candidate(dir, name).is_file()
+        }).map(|dir| join_under(&dir, name))
     }
 
     /// Remember `name` as resolving to `path`, with `hits` prior uses.
@@ -32705,6 +32742,41 @@ impl Shell {
             self.emit_stderr(format!("{tag}: usage: {tag} filename [arguments]\n").as_bytes());
             return self.note_builtin_usage_error();
         };
+        // A bare name is looked up on `$PATH` first, and only then taken as a
+        // name in the current directory. Both halves matter: the search means
+        // `PATH=/lib; . helpers.sh` finds `/lib/helpers.sh` even with a
+        // `./helpers.sh` beside the caller, and the fallback is what makes the
+        // usual `. helpers.sh` work with no `$PATH` entry for it at all.
+        //
+        // posix mode takes the *fallback* away — bash spells it
+        // `source_searches_cwd = !posixly_correct` — so there a bare name that
+        // is not on `$PATH` is "file not found" rather than an open of the
+        // current directory. Unlike the fatality below, the refusal itself is
+        // not conditioned on the shell being non-interactive.
+        //
+        // A name with a separator was never a search, in either mode.
+        let resolved: Str = if path.contains(&b'/') || path.contains(&b'\\') {
+            path.clone()
+        } else if let Some(hit) = self.find_source_in_path(path) {
+            // The hit, not the operand: `$BASH_SOURCE` and `caller` report the
+            // file that was actually read, and bash puts the joined path there.
+            hit
+        } else if self.shell_option_enabled("posix") {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                tag,
+                b": ",
+                path.as_slice(),
+                b": file not found"
+            ]);
+            // Fatal in a non-interactive posix shell, exactly as a failed open
+            // is — bash reaches the same `jump_to_top_level` from both.
+            self.builtin_failure = Some(BuiltinFailure::Open);
+            return 1;
+        } else {
+            path.clone()
+        };
+        let path = &resolved;
         // The path is opened from its own bytes, so a script whose *name* is
         // not text still opens — and its contents are parsed as the bytes they
         // are, so a script may carry any byte a shell word may.
@@ -33498,17 +33570,12 @@ impl Shell {
     /// (`.exe`/`.cmd`/`.bat`/`.com`) qualify, and that extension is stripped so
     /// the bare command name is offered.
     fn compgen_path_commands(&self, _word: BStr<'_>) -> Vec<Str> {
-        let path: Str = match self.param_value("PATH") {
-            Some(p) => p,
-            None if !self.env_imported => {
-                std::env::var_os("PATH").map(|p| bytes::os_to_bytes(&p)).unwrap_or_default()
-            }
-            None => return Vec::new(),
-        };
         let mut out: Vec<Str> = Vec::new();
-        for dir in std::env::split_paths(&bytes::bytes_to_os(&path)) {
-            // A relative `$PATH` entry is relative to *this shell's* cwd.
-            let Ok(rd) = std::fs::read_dir(self.resolve(&bytes::path_to_bytes(&dir))) else {
+        // The same directory list a real lookup walks — including the empty
+        // entry that means the cwd — so what `compgen -c` offers cannot drift
+        // from what running the name would actually find.
+        for dir in self.search_dirs(None) {
+            let Ok(rd) = std::fs::read_dir(bytes::bytes_to_path(&dir)) else {
                 continue;
             };
             for ent in rd.flatten() {
@@ -50112,6 +50179,47 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
     }
 
+    /// What `.`/`source` look for on `$PATH` is a *readable* file, not an
+    /// executable one, and a directory sharing the name is stepped past rather
+    /// than ending the search — so a later entry can still win.
+    ///
+    /// This cannot be a corpus case: showing it needs a `$PATH` with more than
+    /// one entry, and the two shells do not agree on the separator on this host
+    /// (TD-OILS-PATH-IS-SPLIT-ON-THE-HOSTS-SEPARATOR). The host's own separator
+    /// is used here, which is what osh currently splits on.
+    #[test]
+    fn source_steps_past_a_directory_to_a_later_path_entry() {
+        let dir = ScratchDir::new("source_path_test");
+        let p1 = dir.join("p1");
+        let p2 = dir.join("p2");
+        // A *directory* named `lib.sh` in the first entry, and the real file in
+        // the second. A search that stopped at the first name-match would find
+        // the directory and fail.
+        std::fs::create_dir_all(p1.join("lib.sh")).expect("create p1/lib.sh dir");
+        std::fs::create_dir_all(&p2).expect("create p2");
+        std::fs::write(p2.join("lib.sh"), b"echo from-p2\n").expect("write p2/lib.sh");
+        // Only in the *first* entry, so the walk must not stop at the second.
+        std::fs::write(p1.join("only1.sh"), b"echo from-p1\n").expect("write p1/only1.sh");
+
+        let mut sh = new_shell();
+        let sep = if cfg!(windows) { b";".as_slice() } else { b":" };
+        sh.vars.insert(
+            "PATH".to_string(),
+            bfmt![bytes::path_to_bytes(&p1), sep, bytes::path_to_bytes(&p2)],
+        );
+        assert_eq!(
+            sh.find_source_in_path(b"lib.sh").map(|p| bytes::bytes_to_path(&p).is_file()),
+            Some(true),
+            "the directory in the first entry was taken for the file"
+        );
+        assert!(sh.find_source_in_path(b"only1.sh").is_some());
+        assert!(sh.find_source_in_path(b"nosuch.sh").is_none());
+        // A command lookup asks a different question of the same directories:
+        // these are readable, not executable, so it turns nothing up.
+        #[cfg(not(windows))]
+        assert!(sh.find_in_path(b"only1.sh", None).is_none());
+    }
+
     /// The directories a `$PATH` search visits: resolved against the *shell's*
     /// directory, spelled the way the shell spells paths, with an empty entry
     /// meaning the current one — and a command's own `PATH=` prefix outranking
@@ -50143,12 +50251,18 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // being stored: the shell's own `$PATH` is untouched by the lookup.
         assert_eq!(dirs(&sh, Some(b"/only")), vec!["/only"]);
         assert_eq!(dirs(&sh, None), vec!["/abs", "/here/rel", "/here", "/tail/"]);
-        // No `$PATH` at all and an environment the shell already owns: nothing
-        // is searched, rather than the process's leftover `$PATH`.
+        // No `$PATH` at all and an environment the shell already owns: the
+        // process's leftover `$PATH` is not consulted — but "no `$PATH`" is not
+        // "no search". bash reads a missing value as `""`, which is one empty
+        // entry, so the shell's own directory is searched and nothing else.
         sh.vars.remove("PATH");
         sh.env_imported = true;
-        assert!(dirs(&sh, None).is_empty());
+        assert_eq!(dirs(&sh, None), vec!["/here"]);
+        // An explicitly empty one says the same thing.
+        sh.vars.insert("PATH".to_string(), Str::new());
+        assert_eq!(dirs(&sh, None), vec!["/here"]);
         assert_eq!(dirs(&sh, Some(b"/only")), vec!["/only"]);
+        assert_eq!(dirs(&sh, Some(b"")), vec!["/here"]);
     }
 
     /// The `PATH=` a lookup honours is the *last* one written, and the shell

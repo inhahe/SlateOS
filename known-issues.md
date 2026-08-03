@@ -560,12 +560,41 @@ split, glob)` and `expand_word_joined(word)`, with a new
 lib test (the interactivity exemption is lib-only — the corpus differ runs
 scripts).
 
+**Also done since — `.`/`source` search `$PATH`, and posix mode takes the `$PWD`
+fallback away.** The manual's item is the second half, but probing it turned up
+the first: osh's `.` did not consult `$PATH` *at all*. It read the operand as a
+name in the current directory, so a script only on `$PATH` was "No such file or
+directory" and one in both places always resolved to the wrong one — bash
+searches `$PATH` first and falls back to the cwd only after. `Shell::builtin_source`
+now resolves the operand before opening it, through a new
+`Shell::find_source_in_path`. That is deliberately *not* `find_in_path`: bash's
+`find_path_file` asks for `FS_READABLE` where a command lookup asks for
+`FS_EXEC_ONLY`, so a `chmod -x` file is sourceable, there is no host-extension
+probe (`. foo` never finds `foo.exe`), and a directory on the way is skipped
+rather than ending the search. A hit becomes `$BASH_SOURCE`/`caller`'s answer;
+the operand as written stays the answer when the fallback is what found it.
+
+posix mode drops the fallback (bash: `source_searches_cwd = !posixly_correct`)
+and reports `.: NAME: file not found` instead — which, `.` being a special
+builtin, ends a non-interactive shell through the machinery already there. The
+refusal itself is *not* gated on non-interactivity, only the fatality is.
+
+Probing that also fixed **an unset or empty `$PATH`**, which osh read as "no
+search". bash reads a missing value as `""`, which is one empty element, so it
+searches the current directory and nothing else: `unset PATH; ls` is
+`command not found`, but a program sitting in the current directory is still
+found by a bare name with no `./` on it. `Shell::search_dirs` now says that, and
+`compgen_path_commands` was folded onto it rather than keeping a second copy of
+the `$PATH` walk that had already drifted.
+
+Covered by `dot-searches-path-before-the-current-directory.sh` and a lib test
+for the parts a single-entry `$PATH` cannot show.
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
 and a 42-case probe of them against osh leaves these real gaps, roughly in
 increasing order of size:
 
-* `.`/`source` does not search `$PWD` when the name is not found on `$PATH`.
 * `cd` in logical mode validates the resulting path and falls back to physical.
   (Probed and **not reproducible** on the reference bash: with `lnk -> a/b` and
   `a/c` present, `cd lnk; cd ../c` fails identically in both modes rather than
@@ -585,6 +614,47 @@ increasing order of size:
   found` with status 127 — bash stops treating `time` as the reserved word when
   an option-looking word follows and looks for an external `time` instead. This
   is a *parser* change, not a builtin one.)
+
+### TD-OILS-PATH-IS-SPLIT-ON-THE-HOSTS-SEPARATOR, so a `:`-separated `$PATH` is one entry — 2026-08-03 — ⚠️ **OPEN (needs a decision — see open-questions.md Q36)**
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::search_dirs` — the
+`std::env::split_paths` call, which on the Windows development host splits on
+`;`, not `:`.
+
+**Reproduce:**
+
+```
+$ mkdir -p d1 d2; printf '#!/bin/sh\necho d1\n' > d1/prog; chmod +x d1/prog
+$ bash --norc -c 'PATH=$PWD/d1:$PWD/d2; prog'
+d1
+$ osh -c 'PATH=$PWD/d1:$PWD/d2; prog'
+osh: prog: command not found
+```
+
+Any `$PATH` a *script* builds is `:`-separated — it is the only spelling POSIX
+has, and the only one the SlateOS target will have — so on this host every
+multi-directory `$PATH` a script sets is a single nonexistent directory. Nothing
+in the corpus notices because no case sets a list.
+
+**Why it is not a one-line fix.** osh imports the host's `$PATH` verbatim, so
+inside the shell it currently reads `C:\Users\x\bin;C:\Program Files\Git\usr\bin`
+— `;`-separated, with `\`, and with drive-letter *colons* in it. Splitting that
+on `:` would cut every entry in two. The reference bash (msys) does not have the
+problem because it converts the whole variable at startup to `/c/Users/x/bin:…`,
+POSIX paths joined by `:`. osh does not: `shell_path` normalises `\` to `/` but
+keeps `C:` drive letters, which is deliberate (see its doc) and is what `$PWD`,
+`hash` and `type` show.
+
+So the choice is between adopting an msys-style drive mapping for *all* paths,
+mapping only at the `$PATH` boundary, or leaving the host separator in place on
+Windows and accepting the divergence as scaffolding. That is a fork with no
+obviously-correct answer, so it is Q36 in `open-questions.md` rather than a
+decision taken here.
+
+**Blast radius while it stands:** `Shell::search_dirs` and everything built on it
+— command lookup, `hash`, `type`, `command -v`, `compgen -c`, and (since
+2026-08-03) `.`/`source`. Single-entry `$PATH` values, which is what every corpus
+case uses, behave correctly.
 
 ### TD-OILS-GREAT-AND-FILE-LOSES-ITS-SPELLING. The parser rewrites `>&file` into `&>file`, so nothing downstream can tell the two apart — 2026-08-03 — ✅ **FIXED 2026-08-03**
 

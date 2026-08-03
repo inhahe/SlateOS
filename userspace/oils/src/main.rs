@@ -31,15 +31,11 @@ use osh::{Shell, StartupFiles};
 
 const VERSION: &str = concat!("osh (Oils for SlateOS) ", env!("CARGO_PKG_VERSION"));
 
-/// Stack reserved for the interpreter thread. A tree-walking shell recurses
-/// natively once per nested function call / compound command, so the ~1 MiB
-/// default main-thread stack overflows (and aborts the process) after only a
-/// few hundred nested calls — far short of the several thousand bash tolerates.
-/// A 64 MiB reserved stack gives comparable head-room (~thousands of levels)
-/// while `FUNCNEST` still provides the graceful, bash-compatible ceiling. The
-/// range is reserved virtual address space, grown on demand via guard pages —
-/// not eagerly committed — so this is cheap on the host and on SlateOS alike.
-const INTERP_STACK_SIZE: usize = 64 * 1024 * 1024;
+/// Stack reserved for the interpreter thread — the same size every other thread
+/// that runs shell code takes, so the nesting ceiling does not depend on which
+/// one a command happens to be running on. See `osh::interp::SHELL_STACK_SIZE`
+/// for why it is this big.
+const INTERP_STACK_SIZE: usize = osh::interp::SHELL_STACK_SIZE;
 
 /// What the stack is assumed to be when the interpreter thread could not be
 /// started and the shell runs on the main thread instead. Deliberately
@@ -47,13 +43,6 @@ const INTERP_STACK_SIZE: usize = 64 * 1024 * 1024;
 /// Unixes, and the only cost of guessing low is a shallower nesting ceiling on
 /// a path that is already degraded.
 const FALLBACK_STACK_SIZE: usize = 1024 * 1024;
-
-/// The share of the thread's stack the evaluator may descend into before it
-/// starts refusing to nest (see `Shell::set_stack_budget`). The remaining
-/// quarter is what unwinding and the diagnostic itself run in.
-fn stack_budget(stack_size: usize) -> usize {
-    stack_size / 4 * 3
-}
 
 /// Single-letter `set` options accepted as leading command-line flags (`bash
 /// -e`, `-x`, `-eu`, …). Mirrors `Shell::apply_short_options` / the `set`
@@ -300,7 +289,7 @@ fn run(args: &[Str], stack_size: usize) -> i32 {
     // Built here, on the thread that will run it, so the stack origin it
     // records is this thread's.
     let mut sh = Shell::new();
-    sh.set_stack_budget(stack_budget(stack_size));
+    sh.set_stack_budget(osh::interp::stack_budget(stack_size));
     // `$0` is `argv[0]` until something more specific replaces it (the `-c`
     // *name* operand, or a script path — both settled below). Seeded here,
     // ahead of `import_environment`, because that step can already diagnose: a

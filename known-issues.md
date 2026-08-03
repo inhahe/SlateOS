@@ -1446,7 +1446,7 @@ On Windows this is broader than on Unix, because a shebang alone does not make
 a file executable there — so essentially *every* `./script.sh` invocation goes
 through this path. Found while trying to make a corpus case re-exec itself.
 
-### TD-OILS-CORPUS-INTERMITTENT-FAILURE-UNIDENTIFIED. some corpus case — not always the same one — fails about 1 run in 4 and has never been caught in the act — 2026-08-03 — ⚠️ **OPEN** (instrumented; waiting for the next occurrence)
+### TD-OILS-CORPUS-INTERMITTENT-FAILURE-UNIDENTIFIED. some corpus case — not always the same one — fails about 1 run in 4 and has never been caught in the act — 2026-08-03 — ✅ **RESOLVED 2026-08-03** (osh's stack guard, anchored on the wrong thread)
 
 **Symptom.** A full `scripts/osh-bash-diff.py` sweep occasionally reports
 `299 matched, 0 waived, 1 failed`. Both times it has been seen, the very next
@@ -1496,9 +1496,46 @@ takes whichever case is running" reading and retires the `true & wait` theory
 above. It also happened in a *ten*-case run, so it does not need a full sweep's
 load either.
 
-**Next step:** on the next `1 failed`, read the newest directory under
-`target/dvscratch/corpus-failures/` — re-running is safe now — and continue
-from an actual diff.
+**Fourth occurrence, 2026-08-03 — caught, and it was osh.** The next full sweep
+reported `301 matched, 0 waived, 1 failed` and this time the report survived:
+`target/dvscratch/corpus-failures/20260803-184518/bang-parameter.txt`. osh had
+written seventeen copies of
+
+```
+case.sh: line 34: maximum nesting level exceeded (out of stack)
+```
+
+to stderr and silently dropped the output of every line that produced one. Line
+34 is `( eval "echo \"[$b]\"" ) 2>&1 | sed …` — a subshell in a *pipeline*.
+
+**Root cause.** The depth guard measures how far execution has descended from an
+origin (`stack_base`) recorded by `Shell::new` on the thread it was built on.
+Every pipeline stage but the last, every `&` job and every coproc body runs a
+*subshell clone* on a freshly spawned thread — and the clone copied the parent
+thread's `stack_base`. Two unrelated stack allocations were then being
+subtracted from one another, so `stack_base - stack_mark()` was not a depth at
+all. Which way it read depended only on where the OS happened to place the new
+thread's stack: above the parent's origin (the common case) and the difference
+saturated to zero, leaving the stage *unguarded*; more than the 48 MiB budget
+below it and every single command in the stage was refused. Thread stacks are
+placed by ASLR, so the same script failed roughly one run in four — and always
+a case that pipes a subshell or a shell function, which is why it moved from
+case to case.
+
+The unguarded direction was the worse of the two: a deep recursion inside a
+pipeline stage had no ceiling at all *and* only the platform-default ~1 MiB
+stack to overflow, which aborts the process outright.
+
+**Fix** (commit "oils: anchor the stack guard on the thread that is running"):
+`Shell::rebase_stack` re-records the origin on the running thread, and the three
+spawn sites (pipeline stage, `&` job, coproc body) now go through
+`spawn_shell_thread`, which reserves the same 64 MiB `SHELL_STACK_SIZE` the
+binary's interpreter thread gets and calls `rebase_stack` with it before
+evaluating anything. `INTERP_STACK_SIZE`/`stack_budget` moved out of `main.rs`
+into the library so there is one figure. A spawn failure is now reported and the
+stage/job/coproc is skipped, where the old `thread::spawn` would have panicked.
+Regression test: `a_spawned_shell_thread_anchors_the_guard_on_its_own_stack`.
+`bang-parameter` ran 12/12 clean afterwards.
 
 ### TD-OILS-CORPUS-BG-DEBUG-TRACE-RACE. `debug-trap-announces-a-background-command.sh` interleaves a background job's traces with the parent's about 1 run in 6 — 2026-08-01 — ✅ **RESOLVED 2026-08-01** (the *case* raced, not osh)
 

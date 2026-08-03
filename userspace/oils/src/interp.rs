@@ -651,6 +651,51 @@ fn stack_mark() -> usize {
     std::ptr::from_ref(std::hint::black_box(&probe)) as usize
 }
 
+/// Stack reserved for a thread that runs shell code. A tree-walking shell
+/// recurses natively once per nested function call / compound command, so the
+/// ~1 MiB default main-thread stack overflows (and aborts the process) after only
+/// a few hundred nested calls — far short of the several thousand bash tolerates.
+/// A 64 MiB reserved stack gives comparable head-room (~thousands of levels)
+/// while `FUNCNEST` still provides the graceful, bash-compatible ceiling. The
+/// range is reserved virtual address space, grown on demand via guard pages — not
+/// eagerly committed — so this is cheap on the host and on SlateOS alike.
+///
+/// Every thread the shell runs *shell code* on takes this size, not just the
+/// binary's interpreter thread: a pipeline stage, a `&` job and a coproc body all
+/// evaluate arbitrarily deep shell, and each anchors its own guard against it
+/// ([`Shell::rebase_stack`]).
+pub const SHELL_STACK_SIZE: usize = 64 * 1024 * 1024;
+
+/// The share of a thread's stack the evaluator may descend into before it starts
+/// refusing to nest (see [`Shell::rebase_stack`]). The remaining quarter is what
+/// unwinding and the diagnostic itself run in.
+#[must_use]
+pub fn stack_budget(stack_size: usize) -> usize {
+    stack_size / 4 * 3
+}
+
+/// Spawn a thread that will run shell code, with [`SHELL_STACK_SIZE`] reserved.
+///
+/// The closure is expected to call [`Shell::rebase_stack`] with that same size
+/// before it evaluates anything: the stack guard measures how far execution has
+/// descended from an origin, and an origin recorded on a *different* thread is
+/// not a distance at all. Left un-rebased, a clone carried onto a new thread
+/// compares two unrelated stacks and — depending on which way the allocator
+/// happened to place them — either loses its guard entirely or refuses the very
+/// first command, which is the intermittent
+/// `maximum nesting level exceeded (out of stack)` this exists to prevent.
+///
+/// The reservation is address space, not committed memory, so it is cheap; the
+/// error is propagated rather than swallowed because a stage that cannot start
+/// has to be reported, not silently skipped.
+fn spawn_shell_thread<F, T>(f: F) -> std::io::Result<std::thread::JoinHandle<T>>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new().stack_size(SHELL_STACK_SIZE).spawn(f)
+}
+
 /// The current working directory as a shell-facing path (see [`shell_path`]),
 /// or an empty string if the host cannot report it (e.g. the directory was
 /// removed out from under us).
@@ -4808,6 +4853,23 @@ impl Shell {
         self.stack_budget = Some(bytes);
     }
 
+    /// Re-anchor the stack guard on the thread that is running *now*, with
+    /// `stack_size` as that thread's stack.
+    ///
+    /// [`Shell::new`] records the origin of the thread it is built on, and a
+    /// subshell clone copies it — which is right for a clone that keeps running
+    /// on the same stack, and meaningless for one carried onto a new thread. The
+    /// two stacks are unrelated allocations, so the guard's
+    /// `origin - current_frame` is a difference between arbitrary addresses: it
+    /// reads as either zero (no guard at all) or as gigabytes (every command
+    /// refused with `maximum nesting level exceeded`), depending only on where
+    /// the allocator happened to put them. Every thread that evaluates shell
+    /// code therefore calls this first — see [`spawn_shell_thread`].
+    pub fn rebase_stack(&mut self, stack_size: usize) {
+        self.stack_base = stack_mark();
+        self.stack_budget = Some(stack_budget(stack_size));
+    }
+
     /// Whether the evaluator has descended as far as its budget allows.
     ///
     /// Cheap enough to ask once per command: two loads and a subtraction.
@@ -7334,36 +7396,55 @@ impl Shell {
                     .and_then(|k| start_rx.get_mut(k))
                     .and_then(Option::take);
                 sub.stage_started = start_tx.get_mut(i).and_then(Option::take);
-                let handle = scope.spawn(move || {
-                    if let Some(rx) = wait {
-                        // `Err` is fine and expected, hence discarded:
-                        // `Disconnected` means the predecessor finished (or
-                        // died) without ever reaching a command, `Timeout` that
-                        // it is stuck before one. Either way, go.
-                        let _ = rx.recv_timeout(start_wait);
+                // A stage evaluates arbitrarily deep shell, so it gets the same
+                // reserved stack the interpreter thread has — and, because that
+                // is a *different* stack, it must re-anchor the depth guard on it
+                // (see `spawn_shell_thread`).
+                let spawned = std::thread::Builder::new()
+                    .stack_size(SHELL_STACK_SIZE)
+                    .spawn_scoped(scope, move || {
+                        sub.rebase_stack(SHELL_STACK_SIZE);
+                        if let Some(rx) = wait {
+                            // `Err` is fine and expected, hence discarded:
+                            // `Disconnected` means the predecessor finished (or
+                            // died) without ever reaching a command, `Timeout`
+                            // that it is stuck before one. Either way, go.
+                            let _ = rx.recv_timeout(start_wait);
+                        }
+                        let stdin = match reader.map(HeadIn::Pipe).or(head) {
+                            Some(h) => h.into_src(),
+                            None => StdinSrc::Inherit,
+                        };
+                        // The stage's pipe *is* its fd 1, replacing any
+                        // persistent `exec > file` the shell had bound — so a
+                        // later `exec >` inside the stage is what rebinds it.
+                        sub.exec_stdout = None;
+                        let mut o = Out::Pipe(writer);
+                        sub.exec_command(cmd, &mut o, &stdin);
+                        // A pipeline stage runs in its own subshell: fire its
+                        // EXIT trap (if it set one) before its state is dropped.
+                        sub.run_exit_trap_out(&mut o, &stdin);
+                        // Unconditional backstop: a stage that ran no simple
+                        // command at all (`x=1 | cat`, an empty group) has
+                        // signalled nothing yet, and the next stage must not wait
+                        // out its timeout for a stage that is already over.
+                        sub.signal_stage_started();
+                        // `o` drops here, closing the write end → EOF downstream.
+                        forked_child_status(sub.last_status)
+                    });
+                match spawned {
+                    Ok(handle) => handles.push((i, handle)),
+                    Err(e) => {
+                        // The stage never ran, which is the shape a failed
+                        // `fork()` gives bash: report it, leave this stage a
+                        // failure, and let the ones that did start carry on. Its
+                        // pipe endpoints were moved into the closure and are
+                        // dropped with it, so the neighbouring stages see EOF
+                        // rather than hanging on a writer that will never write.
+                        self.perrln(&format!("cannot start pipeline stage: {e}"));
+                        statuses[i] = 1;
                     }
-                    let stdin = match reader.map(HeadIn::Pipe).or(head) {
-                        Some(h) => h.into_src(),
-                        None => StdinSrc::Inherit,
-                    };
-                    // The stage's pipe *is* its fd 1, replacing any persistent
-                    // `exec > file` the shell had bound — so a later `exec >`
-                    // inside the stage is what rebinds it again.
-                    sub.exec_stdout = None;
-                    let mut o = Out::Pipe(writer);
-                    sub.exec_command(cmd, &mut o, &stdin);
-                    // A pipeline stage runs in its own subshell: fire its EXIT
-                    // trap (if it set one) before the stage's state is dropped.
-                    sub.run_exit_trap_out(&mut o, &stdin);
-                    // Unconditional backstop: a stage that ran no simple command
-                    // at all (`x=1 | cat`, an empty group) has signalled nothing
-                    // yet, and the next stage must not wait out its timeout for
-                    // a stage that is already over.
-                    sub.signal_stage_started();
-                    // `o` drops here, closing the write end → EOF downstream.
-                    forked_child_status(sub.last_status)
-                });
-                handles.push((i, handle));
+                }
             }
 
             // Last stage: run on this thread (writing to `out`). It is the tail
@@ -16068,7 +16149,8 @@ impl Shell {
         if ao_owned.rest.is_empty() {
             ao_owned.first.negated = false;
         }
-        let handle = std::thread::spawn(move || {
+        let handle = match spawn_shell_thread(move || {
+            sub.rebase_stack(SHELL_STACK_SIZE);
             let mut out = job_out;
             // Nothing redirected fd 0 ⇒ /dev/null (bash disconnects an async
             // command's input so it cannot steal the terminal): an empty cursor
@@ -16079,7 +16161,16 @@ impl Shell {
             // Fire the subshell's EXIT trap, then report its final status.
             sub.run_exit_trap_out(&mut out, &sin);
             sub.last_status
-        });
+        }) {
+            Ok(h) => h,
+            Err(e) => {
+                // No job was started, so none is registered and `$!` keeps
+                // whatever it had — the shape bash's `fork: …` failure has.
+                self.perrln(&format!("cannot start background job: {e}"));
+                self.last_status = 1;
+                return;
+            }
+        };
         let pid = SYNTH_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let id = self.next_job_id();
         self.jobs.push(Job {
@@ -16192,7 +16283,8 @@ impl Shell {
         // Like a `&` job, the coproc body outlives this call.
         sub.share_write_fds();
         let body_owned = body.clone();
-        let handle = std::thread::spawn(move || {
+        let handle = match spawn_shell_thread(move || {
+            sub.rebase_stack(SHELL_STACK_SIZE);
             // The coproc's pipe is its fd 1 (see the pipeline stage above).
             sub.exec_stdout = None;
             let mut out = Out::Pipe(child_stdout_w);
@@ -16204,7 +16296,16 @@ impl Shell {
             sub.last_status
             // Dropping `out` (its `PipeWriter`) at scope end closes the coproc's
             // stdout, delivering EOF to the parent's `NAME[0]` reader.
-        });
+        }) {
+            Ok(h) => h,
+            Err(e) => {
+                // Both pipes are dropped with the closure, so nothing is left
+                // half-wired; the coproc simply does not exist.
+                self.perrln(&format!("coproc: {e}"));
+                self.last_status = 1;
+                return Flow::Next;
+            }
+        };
 
         // Parent-side endpoints get fresh descriptors ≥ 10 (never colliding with
         // exec/varfd fds). Read end → the live coproc-read table; write end →
@@ -49783,6 +49884,41 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("f(){ local n=$1; ((n<=0)) && return; f $((n-1)); }; f 20; echo ok").0,
             "ok\n"
         );
+    }
+
+    /// Every thread the shell spawns to run shell code — a pipeline stage, a `&`
+    /// job, a coproc body — runs on a *different stack* from the one whose origin
+    /// the clone carries, so the guard has to be re-anchored there.
+    #[test]
+    fn a_spawned_shell_thread_anchors_the_guard_on_its_own_stack() {
+        // Straight at the invariant. A clone whose recorded origin belongs to
+        // some other stack reads the gap between two unrelated allocations as
+        // depth already spent — which way round it reads depends only on where
+        // the allocator put them, so the same shell either refuses its very first
+        // command or loses its guard entirely.
+        let mut sh = new_shell();
+        sh.set_stack_budget(stack_budget(SHELL_STACK_SIZE));
+        assert!(!sh.stack_exhausted());
+        sh.stack_base = sh.stack_base.saturating_add(SHELL_STACK_SIZE);
+        assert!(sh.stack_exhausted(), "a stale origin is what has to trip it");
+        sh.rebase_stack(SHELL_STACK_SIZE);
+        assert!(!sh.stack_exhausted(), "re-anchoring makes it a real depth again");
+
+        // End to end: with a budget in force, a pipeline stage — which runs on a
+        // spawned thread — still executes its commands. Un-rebased this failed
+        // only when the allocator happened to place the stage's stack far enough
+        // below the parent's, which is why it surfaced as an intermittent corpus
+        // failure (`maximum nesting level exceeded` from a stage that had barely
+        // started) rather than as a reproducible one.
+        let mut sh = new_shell();
+        sh.set_stack_budget(stack_budget(SHELL_STACK_SIZE));
+        let buf = capture_sink();
+        let status = {
+            let mut out = Out::Capture(buf.clone());
+            sh.run_source_out(b"( echo one ) | cat", &mut out, 0)
+        };
+        assert_eq!(status, 0);
+        assert_eq!(String::from_utf8_lossy(&take_capture(&buf)), "one\n");
     }
 
     #[test]

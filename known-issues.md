@@ -1989,6 +1989,38 @@ reproduce an off-by-one. The corpus therefore has no case whose expected
 output contains a redirect-failure line number for a nested group or loop;
 existing cases either use simple commands or filter the prefix off.
 
+### TD-OILS-TIME-REPORT-ERROR-LINE-IS-THE-COMPOUND-COMMANDS. bash reports a bad `$TIMEFORMAT` against the enclosing compound command's line — 2026-08-03 — ⛔ **WONTFIX** (the same bash parser artifact as above, deliberately not replicated)
+
+**Where:** nothing in osh implements it. `userspace/oils/src/interp.rs` —
+`Shell::render_time_report` prefixes `err_prefix()`, which names
+`current_line`, the line the `time` pipeline was actually written on.
+
+An unrecognised directive is reported as `case.sh: line N: TIMEFORMAT: `z':
+invalid format character`. As with the redirect entry above, bash's `N` is a
+parser artifact whenever the `time` sits inside a compound command: the
+report is printed by the executor long after the parser has moved the line
+counter on, so it names the compound's own line — usually the *closing*
+token's. Measured across six contexts (`target/dvscratch/t5/ln2.sh`), with the
+`time` on the second line of each:
+
+| context | true `time` line (osh) | bash says |
+|---|---|---|
+| `for … done` | 6 | 5 (the `for`) |
+| `while … done` | 9 | 11 (the `done`) |
+| `if … fi` | 13 | 14 (the `fi`) |
+| `{ …; }` | 16 | 17 (the `}`) |
+| function body | 19 | 18 (the `f() {`) |
+| `( … )` | 23 | 24 (the `)`) |
+
+At top level both shells agree. A `shift` error in the identical position
+reports the same line (3) under both, which confirms this is specific to how
+the *report* is emitted rather than a general divergence in `current_line`.
+
+osh names the line the `time` was written on. The corpus case
+`the-time-report-is-rendered-from-timeformat.sh` filters the prefix off with a
+`nol()` helper in the section that provokes the diagnostic from inside a loop;
+its two top-level provocations keep the prefix and match exactly.
+
 ### TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR. `>out 3>&1` copies the ambient fd 1, not the sink the same list just installed — 2026-08-01 — ✅ **RESOLVED 2026-08-01** for every shape but a *second* std-fd redirect after the dup (below)
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::alias_write_fd`, which
@@ -12087,7 +12119,30 @@ stages, sample a per-thread CPU clock around the stage. Deferred: real time is
 the field scripts most commonly want, and it is exact; user/sys reported as
 zero is clearly documented and does not affect the pipeline's stdout/status.
 
-### TD-OILS-TIMEFORMAT-IS-UNIMPLEMENTED, so `time`'s report has only its two built-in shapes — 2026-08-03 — ⚠️ **OPEN**
+### TD-OILS-TIMEFORMAT-IS-UNIMPLEMENTED, so `time`'s report has only its two built-in shapes — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
+
+**Resolved:** `Shell::format_time_report` is gone, replaced by
+`Shell::time_format` (which picks the format string: `-p`'s POSIX one, else a
+set `$TIMEFORMAT`, else the posix shell-times or the default form) and
+`Shell::render_time_report` + `Shell::mkfmt` (which render it). Everything
+described below is implemented, including the empty-format case, the
+`builtin_error` (not `report_error`) severity of a bad directive, and the
+posix-mode bare `time` reporting the shell's *lifetime* through a `%R` — for
+which `Shell` gained a `birth` instant that, unlike `seconds_anchor`,
+`SECONDS=0` cannot rebase. Covered by `time_report_formatting`,
+`timeformat_directives_and_their_modifiers`,
+`timeformat_is_read_after_the_command_and_never_fatal`,
+`posix_mode_bare_time_reports_the_shell` and the corpus case
+`the-time-report-is-rendered-from-timeformat.sh`. **`%U`, `%S` and `%P` still
+read zero** — that is TD-OILS10, not this entry; the directives themselves are
+correct and start reporting real numbers the moment per-child CPU accounting
+lands.
+
+Two details the probing added to the description below: only **one** precision
+digit is ever read (so `%99R` fails on its second `9`), and `%P` is matched
+*before* the precision/`l` scan, so it accepts neither (`%0P` is an error, not
+a two-place `%P`). The named character in the diagnostic is whatever bash's
+cursor found, so a format that runs out mid-directive names the NUL.
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::format_time_report` and its
 caller in `exec_pipeline`.

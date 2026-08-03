@@ -22114,41 +22114,64 @@ impl Shell {
         status
     }
 
-    /// Print the currently-set traps in re-inputtable form (`trap -- 'act' SIG`),
-    /// sorted by signal number. When `specs` is non-empty, only those are shown.
+    /// Print the currently-set traps in re-inputtable form (`trap -- 'act' SIG`).
+    ///
+    /// The two shapes are not the same walk. With no operands the whole trap
+    /// table is listed, in the order bash's own signal table has it. With
+    /// operands bash walks the *operand list* instead, so the lines come out in
+    /// the order they were asked for rather than in signal order, a signal named
+    /// twice is printed twice, and a word that names no signal is an error
+    /// rather than a silent skip.
     fn trap_print(&mut self, specs: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
-        let filter: Option<Vec<String>> = if specs.is_empty() {
-            None
+        let mut buf = Str::new();
+        let mut status = 0;
+        // The worst status any of the writes below reported: a listing is a
+        // batch, so a write that failed part-way through must not be lost.
+        let mut wr = 0;
+        if specs.is_empty() {
+            let mut entries: Vec<(&String, &Str)> = self.traps.iter().collect();
+            // Merge in display-only shadow traps (inherited into a subshell,
+            // reset for firing but still listable) for any signal not already
+            // active.
+            for (k, v) in &self.trap_shadow {
+                if !self.traps.contains_key(k) {
+                    entries.push((k, v));
+                }
+            }
+            entries.sort_by_key(|(k, _)| sigspec_order(k));
+            for (sig, action) in entries {
+                buf.extend_from_slice(&trap_display_line(sig, action));
+            }
         } else {
-            Some(specs.iter().filter_map(|s| normalize_sigspec(s)).collect())
-        };
-        let mut entries: Vec<(&String, &Str)> = self
-            .traps
-            .iter()
-            .filter(|(k, _)| filter.as_ref().is_none_or(|f| f.contains(k)))
-            .collect();
-        // Merge in display-only shadow traps (inherited into a subshell, reset
-        // for firing but still listable) for any signal not already active.
-        for (k, v) in &self.trap_shadow {
-            if !self.traps.contains_key(k) && filter.as_ref().is_none_or(|f| f.contains(k)) {
-                entries.push((k, v));
+            for spec in specs {
+                // The line is built before anything else touches `self`, so the
+                // borrow the lookup takes ends here rather than spanning the
+                // reporting below.
+                let line = normalize_sigspec(spec).map(|norm| {
+                    let action = self.traps.get(&norm).or_else(|| self.trap_shadow.get(&norm));
+                    action.map(|a| trap_display_line(&norm, a))
+                });
+                match line {
+                    Some(line) => buf.extend(line.into_iter().flatten()),
+                    None => {
+                        // Flush what has been listed so far, so the complaint
+                        // lands between the lines it was written between the way
+                        // bash's does rather than ahead of all of them.
+                        wr = wr.max(self.write_bytes(out, redir, &buf));
+                        buf.clear();
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"trap: ",
+                            spec,
+                            b": invalid signal specification"
+                        ]);
+                        status = 1;
+                    }
+                }
             }
         }
-        entries.sort_by_key(|(k, _)| sigspec_order(k));
-        let mut buf = Str::new();
-        for (sig, action) in entries {
-            // A handler is the user's own source text, so the line is assembled
-            // as bytes: a handler holding a byte that is not text is printed
-            // back exactly as it was given, and stays re-inputtable.
-            buf.extend_from_slice(&bfmt![
-                b"trap -- ",
-                &single_quote_bytes(action),
-                b" ",
-                sigspec_display(sig),
-                b"\n"
-            ]);
-        }
-        self.write_bytes(out, redir, &buf)
+        wr = wr.max(self.write_bytes(out, redir, &buf));
+        if status == 0 { wr } else { status }
     }
 
     /// `trap -l` — list the known signal names, five per line, numbered.
@@ -37277,6 +37300,15 @@ fn sigspec_display(spec: &str) -> String {
         "EXIT" | "ERR" | "DEBUG" | "RETURN" => spec.to_string(),
         _ => format!("SIG{spec}"),
     }
+}
+
+/// One line of `trap -p` output for a normalized spec and its handler.
+///
+/// A handler is the user's own source text, so the line is assembled as bytes:
+/// a handler holding a byte that is not text is printed back exactly as it was
+/// given, and stays re-inputtable.
+fn trap_display_line(spec: &str, action: BStr<'_>) -> Str {
+    bfmt![b"trap -- ", &single_quote_bytes(action), b" ", sigspec_display(spec), b"\n"]
 }
 
 /// The sentence bash's `describe_command()` prints for an alias, shared by
@@ -55626,6 +55658,40 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("trap 'echo A' USR1; trap 'echo B' USR2; trap USR2; trap -p").0,
             "trap -- 'echo A' SIGUSR1\n"
+        );
+    }
+
+    /// `trap -p` with operands walks the *operand list*, where `trap -p` without
+    /// them walks the trap table — so the two orders differ, a signal named
+    /// twice is printed twice, and a word that names no signal is an error.
+    #[test]
+    fn trap_p_walks_its_operands_rather_than_filtering_the_table() {
+        const SET: &str = "trap 'echo U' USR1; trap 'echo I' INT; trap 'echo E' EXIT; ";
+        // No operands: signal-table order, whatever order they were set in.
+        assert_eq!(
+            run(&format!("{SET}trap -p")).0,
+            "trap -- 'echo E' EXIT\ntrap -- 'echo I' SIGINT\ntrap -- 'echo U' SIGUSR1\n"
+        );
+        // With operands: the order they were asked for.
+        assert_eq!(
+            run(&format!("{SET}trap -p USR1 INT EXIT")).0,
+            "trap -- 'echo U' SIGUSR1\ntrap -- 'echo I' SIGINT\ntrap -- 'echo E' EXIT\n"
+        );
+        // A signal named twice is printed twice.
+        assert_eq!(
+            run(&format!("{SET}trap -p INT INT")).0,
+            "trap -- 'echo I' SIGINT\ntrap -- 'echo I' SIGINT\n"
+        );
+        // A word that names no signal fails the command, and the rest still
+        // print.
+        let (out, st) = run(&format!("{SET}trap -p INT BOGUS USR1"));
+        assert_eq!(out, "trap -- 'echo I' SIGINT\ntrap -- 'echo U' SIGUSR1\n");
+        assert_eq!(st, 1);
+        // An operand with no trap set contributes nothing at all.
+        assert_eq!(run(&format!("{SET}trap -p QUIT; echo done")).0, "done\n");
+        assert_eq!(
+            run(&format!("{SET}trap -p QUIT INT QUIT")).0,
+            "trap -- 'echo I' SIGINT\n"
         );
     }
 

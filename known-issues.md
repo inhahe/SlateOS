@@ -12631,6 +12631,44 @@ printer that are deliberately not reproduced. Regression tests:
 `declare_small_f_prints_body`, `type_function_prints_body`,
 `bare_set_lists_functions`, and the `unparse::tests` round-trip suite.
 
+### TD-OILS-UNBOUNDED-SHELL-RECURSION-OVERFLOWS-THE-RUST-STACK. `f() { f; }; f` aborts the process instead of unwinding — 2026-08-03
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::call_function` and the
+compound-command evaluators it re-enters (`exec_command`, `exec_pipeline`, …).
+`FUNCNEST` is honoured (`Shell::funcnest_limit`, verified byte-for-byte against
+the reference bash), but it is only consulted when the variable is *set*.
+
+**What:** with `FUNCNEST` unset — the default — a runaway recursion has no depth
+guard at all. The evaluator is a recursive tree-walker, so each shell-level call
+costs several Rust frames, and `f() { f; }; f` runs until the thread's stack is
+exhausted:
+
+```
+$ osh -c 'f() { f; }; f'
+
+thread '<unknown>' (66612) has overflowed its stack
+$ echo $?
+127
+```
+
+The reference bash is no better behaved here — it segfaults, status 139 — so
+this is not a *differential* failure and the corpus cannot cover it (neither
+shell produces usable output). It is a robustness problem: a Rust stack
+overflow is an immediate `abort()`, so no `trap`, no `EXIT` handler and no
+partial output survives it, and the shell cannot be embedded in a process that
+must stay up.
+
+**Proper fix:** carry an evaluator-depth counter on `Shell`, incremented in
+`call_function` and in every compound-command evaluator that re-enters, and fail
+the *command* — not the process — past a ceiling chosen to sit comfortably below
+the real stack (bash's own `-DEVALNEST` guard reports `maximum eval nesting
+level exceeded` and unwinds to the top level; the same shape works here, and the
+existing `FUNCNEST` message is the model for the wording). The counter should be
+the one `FUNCNEST` already consults, so the explicit limit becomes a *lower*
+ceiling on the same guard rather than a second mechanism. Deferred only because
+it wants the whole re-entrant surface enumerated first — missing one evaluator
+leaves the hole open on that path.
+
 ### TD-OILS19. `osh` alias expansion applies across `run_source` calls (input reads), not within a single parsed unit — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 
 **Resolved on both counts, and a third found on the way.** The unit-at-a-time

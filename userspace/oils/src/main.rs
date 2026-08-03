@@ -96,6 +96,14 @@ fn ediag(parts: &[BStr<'_>]) {
     let _ = io::stderr().write_all(&buf);
 }
 
+/// The prefix of a script file the binary-file gate is allowed to look at —
+/// bash's `char sample[80]`, filled by one `read`. A shorter file gives what it
+/// has.
+fn head_sample(src: BStr<'_>) -> BStr<'_> {
+    let n = src.len().min(osh::interp::SCRIPT_BINARY_SAMPLE);
+    src.get(..n).unwrap_or(src)
+}
+
 /// One recognised GNU-style long option, after its leading dashes are stripped.
 /// Mirrors bash's `long_args[]` table in `shell.c`, restricted to the options
 /// osh can honour truthfully — bash's `--posix`, `--restricted`, `--debugger`,
@@ -569,6 +577,21 @@ fn run(args: &[Str]) -> i32 {
             // The path is opened as *bytes*, so a script whose name is not text
             // is still found (the diagnostic below quotes it verbatim too).
             Plan::Script(path) => match std::fs::read(bytes::bytes_to_path(path)) {
+                // A file the shell will not read *as source at all*: bash's
+                // `open_shell_script` samples the first 80 bytes and refuses a
+                // binary one before parsing a byte of it (`EX_BINARY_FILE`,
+                // 126). The line names the shell twice over, because `$0` is by
+                // now the script itself — `./x.sh: ./x.sh: …` — which is what
+                // bash's `internal_error` produces here.
+                //
+                // Only this reader refuses. A `source ./x.sh` of the same file
+                // reads it happily, NULs and all (they are dropped by the lexer's
+                // reader), and so does a piped REPL: bash applies the gate to the
+                // script it was *invoked* on and nowhere else.
+                Ok(src) if osh::interp::head_is_binary(head_sample(&src)) => {
+                    ediag(&[path, b": ", path, b": cannot execute binary file"]);
+                    126
+                }
                 Ok(src) => sh.run_source(&src),
                 Err(e) => {
                     ediag(&[b"osh: ", path, b": ", e.to_string().as_bytes()]);

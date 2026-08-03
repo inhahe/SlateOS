@@ -799,6 +799,31 @@ fn own_binary() -> Option<Str> {
     std::env::current_exe().ok().map(|p| bytes::path_to_bytes(&p))
 }
 
+/// bash's `check_binary_file`, applied to the first bytes of a file: is this
+/// something the shell must refuse to read as source?
+///
+/// An ELF image is a binary outright, and so is anything carrying a NUL before
+/// the first newline — the second rule being what makes an arbitrary data file
+/// binary without needing to know its format. Everything else is text, however
+/// strange it looks: a NUL *past* the first newline does not count, which is why
+/// this stops at the newline rather than scanning the whole sample.
+///
+/// The caller chooses how much to sample, and bash's two callers disagree:
+/// `open_shell_script` (`osh FILE`) reads 80 bytes, `shell_execve` (a command
+/// about to be spawned) reads 128. A NUL beyond whichever window is in force
+/// goes unnoticed, so the size is observable and is not this function's to pick.
+#[must_use]
+pub fn head_is_binary(head: BStr<'_>) -> bool {
+    if head.starts_with(b"\x7fELF") {
+        return true;
+    }
+    head.iter().take_while(|&&c| c != b'\n').any(|&c| c == 0)
+}
+
+/// How much of a file `osh FILE` looks at to decide whether it is source at all
+/// — bash's `char sample[80]` in `open_shell_script`. See [`head_is_binary`].
+pub const SCRIPT_BINARY_SAMPLE: usize = 80;
+
 /// Whether a resolved command file has to be handed to *this* shell rather than
 /// to the OS — the answer being `Some(shell)`, the program to run in its place.
 ///
@@ -811,9 +836,15 @@ fn own_binary() -> Option<Str> {
 /// on every external spawn, which is noise beside the milliseconds a process
 /// launch costs.
 ///
-/// The classification is bash's `check_binary_file`: an ELF (or, on the Windows
-/// host, a PE) image is a binary, and so is anything with a NUL byte before the
-/// first newline. Everything else is text.
+/// The classification is [`head_is_binary`], bash's `check_binary_file`, plus a
+/// PE image for the Windows host — which that rule would catch anyway (a PE
+/// header is NULs long before any newline) but which is worth naming.
+///
+/// The 128-byte sample is `shell_execve`'s own `READ_SAMPLE_BUF`, and is not the
+/// 80 bytes `osh FILE` uses: bash's two callers really do disagree, and the
+/// difference shows — a NUL at byte 100 of the first line makes a file binary to
+/// the spawn path and text to the script reader.
+///
 ///
 /// Two kinds of text are still left to the OS:
 ///   * a file beginning `#!`, which names its own interpreter. Where the OS
@@ -833,16 +864,8 @@ fn shell_script_indirection(path: &std::path::Path) -> Option<Str> {
     let mut head = [0u8; 128];
     let n = File::open(path).and_then(|mut f| f.read(&mut head)).ok()?;
     let head = head.get(..n)?;
-    if head.starts_with(b"#!") || head.starts_with(b"\x7fELF") || head.starts_with(b"MZ") {
+    if head.starts_with(b"#!") || head.starts_with(b"MZ") || head_is_binary(head) {
         return None;
-    }
-    for &c in head {
-        if c == b'\n' {
-            break;
-        }
-        if c == 0 {
-            return None;
-        }
     }
     own_binary()
 }
@@ -52057,6 +52080,36 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let p = write("go.CMD", b"@echo off\r\necho hi\r\n");
             assert_eq!(shell_script_indirection(&p), None);
         }
+    }
+
+    /// bash's `check_binary_file` scans only as far as the first newline, and
+    /// only as far as the sample its caller read — which is why the two callers'
+    /// different sample sizes are observable (TD-OILS-NUL-IN-SOURCE).
+    #[test]
+    fn a_file_is_binary_only_for_a_nul_in_the_part_that_was_sampled() {
+        assert!(!head_is_binary(b""));
+        assert!(!head_is_binary(b"echo hi\n"));
+        // A NUL before the first newline, and one after it.
+        assert!(head_is_binary(b"echo a\0b\nmore\n"));
+        assert!(!head_is_binary(b"echo hi\n\0\0\0"));
+        // No newline at all: the whole sample is the first line.
+        assert!(head_is_binary(b"echo a\0b"));
+        // An ELF image is binary on its magic alone — it need not reach a NUL.
+        assert!(head_is_binary(b"\x7fELF"));
+        assert!(!head_is_binary(b"\x7fELG hello\n"));
+
+        // The window: `osh FILE` samples 80 bytes, so a NUL at index 79 of the
+        // first line is seen and one at index 80 is not. The function is handed
+        // the sample rather than the file, so this is the caller's slice.
+        let sample = |nul_at: usize| {
+            let mut v = vec![b'#'; nul_at];
+            v.push(0);
+            v.extend_from_slice(b"\necho ran\n");
+            let n = v.len().min(SCRIPT_BINARY_SAMPLE);
+            head_is_binary(&v[..n])
+        };
+        assert!(sample(SCRIPT_BINARY_SAMPLE - 1));
+        assert!(!sample(SCRIPT_BINARY_SAMPLE));
     }
 
     #[test]

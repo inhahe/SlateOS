@@ -204,7 +204,11 @@ pub fn parse(src: BStr<'_>) -> Result<Program, ParseError> {
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error.
 pub fn parse_opts(src: BStr<'_>, opts: LexOpts) -> Result<Program, ParseError> {
-    let (toks, lines) = tokenize_spanned(src, opts).map_err(ParseError::from)?;
+    // The reader's NUL removal happens ahead of the lexer here too, so that the
+    // REPL's "is this line complete yet?" probes judge the same text the run
+    // will parse (see [`crate::lexer::strip_nuls`]).
+    let (toks, lines) =
+        tokenize_spanned(&crate::lexer::strip_nuls(src), opts).map_err(ParseError::from)?;
     parse_tokens(toks, lines, opts)
 }
 
@@ -460,6 +464,13 @@ impl IncrementalParser {
     /// and [`LineMap::CmdSub`] for a `$( … )` body re-read at expansion time.
     #[must_use]
     pub fn new(src: BStr<'_>, line_map: impl Into<LineMap>, opts: LexOpts) -> Self {
+        // What the reader hands the lexer, not what the caller read: bash drops
+        // a NUL in `shell_getc`, before anything downstream can see it. Done
+        // here rather than at each of this parser's callers because the byte
+        // offsets kept below index the text that was tokenized, and this is that
+        // text (see [`strip_nuls`]).
+        let src = crate::lexer::strip_nuls(src);
+        let src: BStr<'_> = &src;
         let line_map = line_map.into();
         let Tokenized {
             toks: mut orig,
@@ -4092,6 +4103,36 @@ mod tests {
         bytes::as_str(s)
             .unwrap_or_else(|| panic!("expected UTF-8, got {s:?}"))
             .to_owned()
+    }
+
+    /// A NUL never reaches a token: the reader drops it, as bash's `shell_getc`
+    /// does, so it can neither split a word nor end up inside one
+    /// (TD-OILS-NUL-IN-SOURCE).
+    #[test]
+    fn the_reader_drops_a_nul_before_the_lexer_sees_it() {
+        assert_eq!(&*crate::lexer::strip_nuls(b"echo hi"), b"echo hi");
+        assert_eq!(&*crate::lexer::strip_nuls(b"a\0b\0"), b"ab");
+
+        // Inside a word, the two halves join rather than becoming two words.
+        let prog = super::parse(b"echo a\0b").unwrap();
+        let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected a simple command");
+        };
+        assert_eq!(sc.words.len(), 2);
+        let [WordPart::Literal(w)] = sc.words[1].parts.as_slice() else {
+            panic!("expected one literal part, got {:?}", sc.words[1].parts);
+        };
+        assert_eq!(text(w), "ab");
+
+        // A line that is nothing but a NUL is a blank line, so the units either
+        // side of it are still two commands on lines 1 and 3.
+        let mut ip = IncrementalParser::new(b"echo one\n\0\necho two\n", 0, LexOpts::default());
+        let opts = LexOpts::default();
+        let mut lines = Vec::new();
+        while let Some(u) = ip.next_unit(None, opts) {
+            lines.push(u.expect("parses").items[0].line);
+        }
+        assert_eq!(lines, vec![1, 3]);
     }
 
     #[test]

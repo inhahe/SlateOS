@@ -748,6 +748,28 @@ impl Lexer {
     }
 }
 
+/// Shell source with its NUL bytes removed — what bash's reader hands the lexer.
+///
+/// `shell_getc` throws a NUL away as it reads it, so one never reaches a token:
+/// `echo a<NUL>b` prints `ab`, and a line that is nothing but a NUL is a blank
+/// line. Because it is the *reader* that does this, it holds for every way
+/// source arrives — a script file, `-c`, `eval`, `.`/`source`, a trap body, a
+/// piped REPL, a `$( … )` re-read — which is why this is one function rather
+/// than a rule each of those has to remember.
+///
+/// Source with no NUL, which is all real source, is borrowed through untouched.
+/// A caller that keeps byte offsets into the text must tokenize *this* text
+/// rather than the original, or the two will disagree about where a token
+/// starts.
+#[must_use]
+pub fn strip_nuls(src: BStr<'_>) -> std::borrow::Cow<'_, [u8]> {
+    if src.contains(&0) {
+        std::borrow::Cow::Owned(src.iter().copied().filter(|&b| b != 0).collect())
+    } else {
+        std::borrow::Cow::Borrowed(src)
+    }
+}
+
 /// Tokenize `src` into a token stream.
 ///
 /// # Errors

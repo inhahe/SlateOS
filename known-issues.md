@@ -138,7 +138,46 @@ rather than accommodated — real bash was checked in each case:
 Full suite green (1147 + 4 + 39 + 7 + doctests), clippy clean, corpus sweep
 261 matched / 0 failed.
 
-### TD-OILS-NUL-IN-SOURCE. osh keeps NUL bytes read from shell source; bash drops them, and refuses a script whose first line has one — 2026-08-02 — OPEN
+### TD-OILS-NUL-IN-SOURCE. osh keeps NUL bytes read from shell source; bash drops them, and refuses a script whose first line has one — 2026-08-02 — ✅ **RESOLVED 2026-08-02**
+
+**Resolution.** Both halves are now bash's, and each lives in exactly one place.
+
+* `lexer::strip_nuls` is the reader's NUL removal — bash's `shell_getc` throwing a
+  NUL away as it reads it. It is called from `IncrementalParser::new` and
+  `parse_opts`, which are the *only* two doors into the lexer, so every way source
+  arrives goes through it: a script file, `-c`, `eval`, `.`/`source`, a trap body,
+  a piped REPL, a `$( … )` re-read. Putting it at the parser rather than at each
+  reader also keeps the byte offsets honest — the spans kept alongside the tokens
+  index the text that was tokenized, and that is the stripped text. Source with no
+  NUL (all real source) is borrowed through untouched.
+* `interp::head_is_binary` is bash's `check_binary_file`: an ELF magic, or a NUL
+  before the first newline. `main.rs`'s `Plan::Script` arm applies it before parsing
+  a byte and exits 126 with `FILE: FILE: cannot execute binary file` — named twice
+  because `$0` is by then the script itself, which is what bash's `internal_error`
+  produces. `shell_script_indirection` (the shebangless-exec path) now shares the
+  same classifier instead of open-coding it.
+
+Two things about bash here were **measured, not assumed**:
+
+* the sample sizes differ per caller and are therefore observable. `open_shell_script`
+  (`bash FILE`) reads **80** bytes — a NUL at byte 79 of line 1 is refused, one at
+  byte 80 is not — while `shell_execve` reads **128**. `head_is_binary` takes the
+  sample and does not pick its size; `interp::SCRIPT_BINARY_SAMPLE` is the 80 and
+  the exec path keeps its own 128.
+* only that reader refuses. `source`ing the very same file reads it happily, NULs
+  and all, and so does a piped REPL: the gate is on the script the shell was
+  *invoked* on and nowhere else.
+
+Covered by `tests/corpus/nul-bytes-in-shell-source.sh` (byte-identical to bash
+5.2.37 on the first run) plus
+`a_file_is_binary_only_for_a_nul_in_the_part_that_was_sampled` in `interp.rs` and
+`the_reader_drops_a_nul_before_the_lexer_sees_it` in `parser.rs`. The
+`latenul.sh` case this issue had blocked is restored to
+`tests/corpus/exec-shebangless-script.sh`, so "a NUL past the first newline is
+still text" is now *run* rather than only unit-tested. Full suite green (1155 lib
+tests), clippy clean, corpus sweep 264 matched / 0 failed.
+
+**What it was, below.**
 
 **Where:** every place osh reads shell source — `userspace/oils/src/main.rs`
 (`Plan::Script`, the stdin REPL) and the `source`/`.` builtin in
@@ -325,9 +364,10 @@ Covered by `tests/corpus/exec-shebangless-script.sh` (byte-identical to bash
 green (1149 + 4 + 39 + 7 + doctests), clippy clean, corpus sweep 262 matched /
 0 failed.
 
-Two divergences the corpus case ran into on the way out are tracked separately:
-TD-OILS-NUL-IN-SOURCE and TD-OILS-PREFIX-PATH-LOOKUP. `#!` files remain the OS's
-business — TD-OILS-SHEBANG-INTERPRETER.
+Two divergences the corpus case ran into on the way out were tracked separately
+and have since been fixed: TD-OILS-NUL-IN-SOURCE and TD-OILS-PREFIX-PATH-LOOKUP.
+The first of those restored this case's `latenul.sh` section. `#!` files remain
+the OS's business — TD-OILS-SHEBANG-INTERPRETER.
 
 **Where:** `userspace/oils/src/interp.rs` — the external-command spawn path.
 The OS is asked to execute the file directly and its refusal is reported

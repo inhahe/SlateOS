@@ -8,11 +8,9 @@
 #     shell that reads it, not `/bin/sh`;
 #   * `$0` is the file as the shell named it to itself: the word as typed when
 #     the word spelled a path, the `$PATH` hit otherwise;
-#   * the degenerate texts count as text — an empty file, and a single line with
-#     no terminator. (A file whose only NUL bytes are past the first newline is
-#     text too, and the classifier is tested on one, but it cannot be *run* here
-#     until osh drops NULs while reading source the way bash does —
-#     TD-OILS-NUL-IN-SOURCE.)
+#   * the degenerate texts count as text — an empty file, a single line with no
+#     terminator, and a file whose NULs are all past the first newline (the
+#     reader drops those, so they never reach a word);
 #   * a binary is refused, with a line worded against the file rather than
 #     against the errno, and status 126. `exec` adds a second line of its own;
 #   * this holds wherever an external command is started: on its own, as a
@@ -32,6 +30,7 @@ sq() { sed -e 's/^.*: line [0-9]*: /SH: /' -e "s|$here|DIR|g"; }
 printf 'echo "0=$0 n=$# args=$*"\n' > tell.sh
 printf '' > empty.sh
 printf 'echo no-trailing-newline' > nonl.sh
+printf 'echo late\necho x\000y\n' > latenul.sh
 printf '\177ELF\002\001\001\000padding\n' > elf.bin
 printf 'abc\000def\nghi\n' > nul.bin
 chmod +x ./*.sh ./*.bin
@@ -40,6 +39,7 @@ echo "=== a shebangless text file is run by the shell itself"
 ./tell.sh a "b c"; echo "rc=$?"
 ./empty.sh; echo "rc=$?"
 ./nonl.sh; echo "rc=$?"
+./latenul.sh; echo "rc=$?"
 
 echo "=== and it is the same shell, not /bin/sh"
 export PV="$BASH_VERSION"

@@ -41,6 +41,20 @@ const VERSION: &str = concat!("osh (Oils for SlateOS) ", env!("CARGO_PKG_VERSION
 /// not eagerly committed — so this is cheap on the host and on SlateOS alike.
 const INTERP_STACK_SIZE: usize = 64 * 1024 * 1024;
 
+/// What the stack is assumed to be when the interpreter thread could not be
+/// started and the shell runs on the main thread instead. Deliberately
+/// pessimistic: the platform default is 1 MiB on Windows and 8 MiB on most
+/// Unixes, and the only cost of guessing low is a shallower nesting ceiling on
+/// a path that is already degraded.
+const FALLBACK_STACK_SIZE: usize = 1024 * 1024;
+
+/// The share of the thread's stack the evaluator may descend into before it
+/// starts refusing to nest (see `Shell::set_stack_budget`). The remaining
+/// quarter is what unwinding and the diagnostic itself run in.
+fn stack_budget(stack_size: usize) -> usize {
+    stack_size / 4 * 3
+}
+
 /// Single-letter `set` options accepted as leading command-line flags (`bash
 /// -e`, `-x`, `-eu`, …). Mirrors `Shell::apply_short_options` / the `set`
 /// builtin's letter set: the modelled options plus the ones bash accepts as
@@ -258,7 +272,7 @@ fn main() {
     // main thread — a smaller stack, but still functional for shallow use.
     let code = match std::thread::Builder::new()
         .stack_size(INTERP_STACK_SIZE)
-        .spawn(move || run(&args))
+        .spawn(move || run(&args, INTERP_STACK_SIZE))
     {
         Ok(handle) => handle.join().unwrap_or_else(|_| {
             eprintln!("osh: fatal: shell thread terminated abnormally");
@@ -266,7 +280,7 @@ fn main() {
         }),
         Err(e) => {
             eprintln!("osh: warning: could not allocate interpreter stack ({e}); running with default stack");
-            run(&os_argv())
+            run(&os_argv(), FALLBACK_STACK_SIZE)
         }
     };
     process::exit(code);
@@ -278,8 +292,15 @@ fn positional_args(args: Option<&[Str]>) -> Vec<Str> {
     args.unwrap_or_default().to_vec()
 }
 
-fn run(args: &[Str]) -> i32 {
+/// Run the shell. `stack_size` is the stack of the thread this is running on:
+/// the shell needs it to know how deep it may recurse before refusing, since a
+/// tree-walking evaluator turns shell recursion into native recursion and an
+/// overflow would abort the process outright.
+fn run(args: &[Str], stack_size: usize) -> i32 {
+    // Built here, on the thread that will run it, so the stack origin it
+    // records is this thread's.
     let mut sh = Shell::new();
+    sh.set_stack_budget(stack_budget(stack_size));
     // `$0` is `argv[0]` until something more specific replaces it (the `-c`
     // *name* operand, or a script path — both settled below). Seeded here,
     // ahead of `import_environment`, because that step can already diagnose: a

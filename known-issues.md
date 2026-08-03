@@ -12631,7 +12631,37 @@ printer that are deliberately not reproduced. Regression tests:
 `declare_small_f_prints_body`, `type_function_prints_body`,
 `bare_set_lists_functions`, and the `unparse::tests` round-trip suite.
 
-### TD-OILS-UNBOUNDED-SHELL-RECURSION-OVERFLOWS-THE-RUST-STACK. `f() { f; }; f` aborts the process instead of unwinding — 2026-08-03
+### TD-OILS-UNBOUNDED-SHELL-RECURSION-OVERFLOWS-THE-RUST-STACK. `f() { f; }; f` aborts the process instead of unwinding — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
+
+**Fixed by a stack-headroom guard rather than a depth count.** The binary
+already runs the shell on a thread whose stack *it* sizes (`INTERP_STACK_SIZE`,
+64 MiB), so it can tell the shell how much of it to use:
+`Shell::set_stack_budget` takes three quarters of that, `Shell::new` records the
+stack origin, and `Shell::exec_command` — the one point every nested construct
+descends through, so function bodies, `eval`, sourced files, loop bodies and
+subshells alike — refuses to go deeper once the origin is that far above the
+current frame. The command fails with `maximum nesting level exceeded (out of
+stack)` and status 1, and the recursion unwinds normally, so the `EXIT` trap
+still runs and output is still flushed.
+
+A *measured* budget rather than a frame count because the two are not
+proportional: a shell level costs a different number of Rust frames through a
+function call than through an `eval` or a nested compound command, so any single
+depth number would be both too low for one path and too high for another. The
+measured ceiling lands at ~4400 nested function calls in a debug build (the
+overflow was at ~5900), and rises on its own in a release build and on a bigger
+stack. `FUNCNEST` is unchanged and still the lower, explicit, bash-compatible
+ceiling. The budget defaults to `None` — unguarded — so an embedder that never
+says how big its stack is gets exactly the old behaviour.
+
+Covered by the `a_runaway_recursion_stops_instead_of_overflowing_the_stack` lib
+test, which sets a small budget so the ceiling is reached in a few frames. No
+corpus case is possible: bash segfaults on the same input, so there is nothing
+to diff. The original text follows.
+
+---
+
+
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::call_function` and the
 compound-command evaluators it re-enters (`exec_command`, `exec_pipeline`, …).

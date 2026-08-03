@@ -639,6 +639,18 @@ fn host_program(p: BStr<'_>) -> Str {
     }
 }
 
+/// The address of a local in the calling frame — a measure of how far down the
+/// stack execution currently is.
+///
+/// Compared against the origin [`Shell::new`] recorded to decide whether the
+/// evaluator may recurse again ([`Shell::stack_exhausted`]). `black_box` keeps
+/// the probe from being optimised into a register or shared with an unrelated
+/// frame's slot, which would make the reading meaningless.
+fn stack_mark() -> usize {
+    let probe = 0u8;
+    std::ptr::from_ref(std::hint::black_box(&probe)) as usize
+}
+
 /// The current working directory as a shell-facing path (see [`shell_path`]),
 /// or an empty string if the host cannot report it (e.g. the directory was
 /// removed out from under us).
@@ -3619,6 +3631,22 @@ pub struct Shell {
     /// (`<name>: eval: line N: …`) instead of the outer `-c`/script token.
     /// Incremented around the `eval` builtin's parse+execute.
     eval_depth: u32,
+    /// Where the stack stood when this shell was built, as an address, together
+    /// with how far below it the evaluator may descend before it refuses to go
+    /// on ([`Shell::set_stack_budget`]).
+    ///
+    /// The evaluator is a recursive tree-walker, so shell-level recursion is
+    /// native recursion and a runaway one (`f() { f; }`) exhausts the thread's
+    /// stack — which on this target is an immediate `abort()`, killing the
+    /// process with no `trap`, no `EXIT` handler and no flushed output. Only the
+    /// caller knows how much stack the thread it started the shell on actually
+    /// has, so the budget is `None` (unguarded) until one is set.
+    ///
+    /// Recorded rather than sampled per-call because the base must be the
+    /// *shallowest* point, and a subshell clone taken part-way down the stack
+    /// must keep measuring from the same origin.
+    stack_base: usize,
+    stack_budget: Option<usize>,
     /// Nesting depth of errexit-exempt contexts (if/while/until conditions and
     /// negated commands). While `> 0`, a failing command does not trigger
     /// errexit. Incremented around condition evaluation; reset in subshells.
@@ -4437,6 +4465,8 @@ impl Shell {
             interactive_shell: true,
             reads_stdin: false,
             eval_depth: 0,
+            stack_base: stack_mark(),
+            stack_budget: None,
             errexit_suppress: 0,
             unbound_error: None,
             discard_error: None,
@@ -4757,6 +4787,33 @@ impl Shell {
         // `expand_aliases` defaults off non-interactively, so BASHOPTS (seeded
         // in `Shell::new` before the mode was known) must be recomputed.
         self.refresh_bashopts();
+    }
+
+    /// Tell the shell how much stack it may use before it refuses to nest any
+    /// deeper, in bytes below the point [`Shell::new`] was called.
+    ///
+    /// Called once by the binary, which is the only party that knows how big
+    /// the thread's stack is. Leave a real margin: the budget is the point at
+    /// which the evaluator *starts* refusing, and it still has to unwind and
+    /// report from there — three quarters of the thread's stack is the figure
+    /// the binary uses.
+    pub fn set_stack_budget(&mut self, bytes: usize) {
+        self.stack_budget = Some(bytes);
+    }
+
+    /// Whether the evaluator has descended as far as its budget allows.
+    ///
+    /// Cheap enough to ask once per command: two loads and a subtraction.
+    fn stack_exhausted(&self) -> bool {
+        let Some(budget) = self.stack_budget else {
+            return false;
+        };
+        // Every target this builds for grows the stack downwards, so the
+        // current frame sits *below* the base. `saturating_sub` covers the
+        // other direction rather than asserting the platform: a shell whose
+        // frames appear to be *above* the origin has simply not used any of the
+        // budget by this measure, and stays unguarded.
+        self.stack_base.saturating_sub(stack_mark()) > budget
     }
 
     /// Enable noexec (`set -n`) from the command line (`osh -n …`): parse the
@@ -7441,6 +7498,19 @@ impl Shell {
     }
 
     fn exec_command(&mut self, cmd: &Command, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // Every nested construct — a function body, an `eval`, a sourced file, a
+        // loop body, a subshell — descends through here, so this is the one
+        // place a depth guard has to sit to cover all of them. Without it a
+        // runaway recursion (`f() { f; }`) exhausts the thread's stack, and a
+        // stack overflow is an immediate `abort()`: no `trap`, no `EXIT`
+        // handler, no flushed output, and nothing an embedder could survive.
+        // Refusing the command instead leaves the recursion to unwind normally,
+        // which is what `FUNCNEST` does with its own (lower, explicit) ceiling.
+        if self.stack_exhausted() {
+            self.perrln("maximum nesting level exceeded (out of stack)");
+            self.last_status = 1;
+            return Flow::Next;
+        }
         // A pipeline stage was forked before anything was known about it; this
         // is where it becomes clear whether bash would have called that fork a
         // subshell. See [`Shell::clone_for_pipeline_stage`].
@@ -9567,6 +9637,10 @@ impl Shell {
             interactive_shell: self.interactive_shell,
             reads_stdin: self.reads_stdin,
             eval_depth: self.eval_depth,
+            // The origin, not a fresh mark: a subshell runs further down the
+            // same stack, and what is left of it is what it has to work with.
+            stack_base: self.stack_base,
+            stack_budget: self.stack_budget,
             // A subshell inherits the parent's errexit-ignore depth: per POSIX a
             // compound command (including `( … )`) executed where `set -e` is
             // being ignored — an if/while/until condition, a non-final `&&`/`||`
@@ -49071,6 +49145,70 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("FUNCNEST=0; f(){ local n=$1; ((n<=0)) && return; f $((n-1)); }; f 20; echo ok").0,
             "ok\n"
         );
+        assert_eq!(
+            run("f(){ local n=$1; ((n<=0)) && return; f $((n-1)); }; f 20; echo ok").0,
+            "ok\n"
+        );
+    }
+
+    /// The last-resort ceiling under `FUNCNEST`: with no explicit limit set, a
+    /// runaway recursion must still stop rather than exhaust the native stack,
+    /// because a stack overflow aborts the *process* — no `trap`, no `EXIT`
+    /// handler, nothing flushed. The budget stands in for the thread's stack, so
+    /// the test can set a small one and reach it in a handful of frames.
+    #[test]
+    fn a_runaway_recursion_stops_instead_of_overflowing_the_stack() {
+        fn run_budgeted(src: &str, budget: usize) -> (String, i32) {
+            let mut sh = new_shell();
+            sh.set_stack_budget(budget);
+            let buf = capture_sink();
+            let status = {
+                let mut out = Out::Capture(buf.clone());
+                sh.run_source_out(src.as_bytes(), &mut out, 0)
+            };
+            let buf = take_capture(&buf);
+            (String::from_utf8_lossy(&buf).into_owned(), status)
+        }
+        // 128 KiB is far more than the shallow commands below need and far less
+        // than the recursion wants, so the guard is what ends it.
+        const BUDGET: usize = 128 * 1024;
+        // It ends, it says why, and the shell carries on afterwards.
+        let (out, st) = run_budgeted(
+            "f() { c=$((c+1)); f; }\nc=0\n{ f; } 2>&1\necho \"after rc=$?\"",
+            BUDGET,
+        );
+        assert_eq!(st, 0);
+        assert!(out.contains("maximum nesting level exceeded"), "got {out:?}");
+        assert!(out.ends_with("after rc=1\n"), "got {out:?}");
+        // The depth reached is a real depth, not zero: ordinary shallow work is
+        // nowhere near the ceiling.
+        let depth: u32 = run_budgeted("f() { c=$((c+1)); f; }\nc=0\nf 2>/dev/null\necho $c", BUDGET)
+            .0
+            .trim()
+            .parse()
+            .expect("a depth");
+        assert!(depth > 3, "tripped almost immediately: {depth}");
+        // An `eval` recursion is native recursion too, and is caught the same
+        // way — the guard sits where every nested construct passes, not on the
+        // function-call path alone.
+        let (out, _) = run_budgeted("e() { eval e; }\n{ e; } 2>&1\necho \"after rc=$?\"", BUDGET);
+        assert!(out.contains("maximum nesting level exceeded"), "got {out:?}");
+        assert!(out.ends_with("after rc=1\n"), "got {out:?}");
+        // The shell is still usable afterwards — the recursion unwound rather
+        // than taking the process with it, which is what lets the binary go on
+        // to run the `EXIT` trap and flush its output. (`run_source_out` is
+        // below the level traps fire at, so that last step is the binary's.)
+        {
+            let mut sh = new_shell();
+            sh.set_stack_budget(BUDGET);
+            let buf = capture_sink();
+            let mut out = Out::Capture(buf.clone());
+            sh.run_source_out(b"f() { f; }\nf 2>/dev/null", &mut out, 0);
+            sh.run_source_out(b"echo STILL-HERE", &mut out, 0);
+            assert_eq!(String::from_utf8_lossy(&take_capture(&buf)), "STILL-HERE\n");
+        }
+        // …and a shell with no budget set is unguarded, as before: the default
+        // must not start refusing work in an embedder that never asked.
         assert_eq!(
             run("f(){ local n=$1; ((n<=0)) && return; f $((n-1)); }; f 20; echo ok").0,
             "ok\n"

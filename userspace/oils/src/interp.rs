@@ -10975,10 +10975,17 @@ impl Shell {
                 // osh previously rejected *every* unsubscripted element, which
                 // made the common `m=(k1 v1 k2 v2)` idiom fail outright.
                 if matches!(items.first(), Some(ArrayElem::Positional(_))) {
-                    // Pair mode. Flatten to words first: expansion here splits
-                    // like a command word, so `m=($pairs)` contributes one
-                    // element per field, and the pairing runs over the fields —
-                    // not over the pre-expansion elements.
+                    // Pair mode. One source element yields exactly one word: an
+                    // *associative* literal's elements are expanded in
+                    // assignment context — tilde only, and neither split, globbed
+                    // nor brace-expanded — so `s='x y'; m=(a $s b)` pairs `a`
+                    // with the whole `x y` and leaves `b` empty, where the
+                    // command-word expansion an indexed literal gets would have
+                    // made four elements of it. (Measured: `m=({a,b} 1)` keys
+                    // `{a,b}`, `m=(*.zzq 1)` keys `*.zzq` with the files right
+                    // there, and `a=(p q); m=("${a[@]}")` keys the single
+                    // `p q`.) The keyed branch below already expands this way,
+                    // which is the same rule seen from the other side.
                     let mut words: Vec<Str> = Vec::new();
                     // An associative literal is bound element by element, so a
                     // failed expansion stops the flattening where it happened
@@ -10987,13 +10994,18 @@ impl Shell {
                     // leaves `m[pk]` set to `pv` in bash), the failing word and
                     // everything after it do not, and the assignment fails.
                     let mut failed = false;
+                    // Each word's source text, kept alongside it for the refusal
+                    // of an empty key below — a bare literal names the element as
+                    // written. One element yields one word, so the two stay in
+                    // step.
+                    let mut srcs: Vec<Str> = Vec::new();
                     for e in items {
                         let before = words.len();
+                        srcs.push(elem_src(e));
                         match e {
                             ArrayElem::Positional(w) => {
-                                for bw in self.expand_braces_opt(w) {
-                                    words.extend(self.expand_word(&bw, true));
-                                }
+                                let word = self.expand_to_string(w);
+                                words.push(word);
                             }
                             ArrayElem::Keyed { index, value } => {
                                 // Reassemble the `[idx]=val` source shape. The
@@ -11008,6 +11020,7 @@ impl Shell {
                         }
                         if armed.is_none() && self.discard_error.is_some() {
                             words.truncate(before);
+                            srcs.truncate(before);
                             failed = true;
                             break;
                         }
@@ -11031,9 +11044,27 @@ impl Shell {
                         // where the bare `d+=(…)` below keeps `d[pk]=pv`.
                         return false;
                     }
-                    let mut it = words.into_iter();
-                    while let Some(key) = it.next() {
-                        let val = it.next().unwrap_or_default();
+                    let mut it = words.into_iter().enumerate();
+                    while let Some((at, key)) = it.next() {
+                        let val = it.next().map(|(_, v)| v).unwrap_or_default();
+                        // An empty key has nowhere to live, so bash refuses the
+                        // pair and carries on with the next one — naming the key
+                        // requoted from its expanded text for a `declare` operand
+                        // and as written for a bare literal, the same split the
+                        // unsubscripted-element refusal makes.
+                        if key.is_empty() {
+                            let shown = if self.decl_builtin_ctx {
+                                xtrace_compound_quote(&key)
+                            } else {
+                                srcs.get(at).cloned().unwrap_or_default()
+                            };
+                            self.berrln(&bfmt![
+                                self.err_prefix(),
+                                &shown,
+                                b": bad array subscript"
+                            ]);
+                            continue;
+                        }
                         let Some(val) = self.apply_value_attrs(&a.name, val) else {
                             return false;
                         };
@@ -11058,7 +11089,7 @@ impl Shell {
                     // leaves `d` untouched and reports only the division, where the
                     // interleaved shape below would have bound `[a]` and named
                     // `loose`.
-                    let mut elems: Vec<(Option<Str>, Str)> = Vec::new();
+                    let mut elems: Vec<(Option<Str>, Str, Str)> = Vec::new();
                     for e in items {
                         match e {
                             ArrayElem::Keyed { index, value } => {
@@ -11066,13 +11097,16 @@ impl Shell {
                                 let val = self.expand_to_string(value);
                                 bail_if_expansion_failed!();
                                 self.xtrace_compound_elem(Some(&key), &val);
-                                elems.push((Some(key), val));
+                                let src = elem_src(e);
+                                elems.push((Some(key), val, src));
                             }
                             ArrayElem::Positional(w) => {
-                                let word = self.expand_to_string(w);
-                                bail_if_expansion_failed!();
+                                // Never expanded: see the note on the bare branch
+                                // below. The raw source is what the refusal names
+                                // and what the trace shows.
+                                let word = crate::unparse::word_src(w);
                                 self.xtrace_compound_elem(None, &word);
-                                elems.push((None, word));
+                                elems.push((None, word.clone(), word));
                             }
                         }
                     }
@@ -11080,8 +11114,8 @@ impl Shell {
                     // here — before the processing pass, whose diagnostics bash
                     // likewise reports after it.
                     self.compound_expansion_done(a);
-                    for (key, val) in elems {
-                        if !self.assoc_keyed_element(a, &mut pending, key, val) {
+                    for (key, val, src) in elems {
+                        if !self.assoc_keyed_element(a, &mut pending, key, val, &src) {
                             return false;
                         }
                     }
@@ -11097,10 +11131,17 @@ impl Shell {
                                 let val = self.expand_to_string(value);
                                 (Some(key), val)
                             }
-                            ArrayElem::Positional(w) => (None, self.expand_to_string(w)),
+                            // An unsubscripted element in subscript mode is
+                            // refused, and bash refuses it *before* expanding it:
+                            // the diagnostic names the word as written (`m: $s:
+                            // must use subscript …`, not the `x y` it holds) and
+                            // a `$(…)` in it never runs. Only a `[k]=v` element
+                            // is expanded here, because only that one is going
+                            // to be bound.
+                            ArrayElem::Positional(w) => (None, crate::unparse::word_src(w)),
                         };
                         bail_if_expansion_failed!();
-                        if !self.assoc_keyed_element(a, &mut pending, key, val) {
+                        if !self.assoc_keyed_element(a, &mut pending, key, val, &elem_src(e)) {
                             return false;
                         }
                     }
@@ -11228,6 +11269,9 @@ impl Shell {
     /// A non-append literal accumulates into `pending` so the table can be swapped
     /// in whole; an append binds in place.
     ///
+    /// `src` is the element's *source* text, which both refusals below name when
+    /// the literal is a bare `m=(…)`.
+    ///
     /// Returns `false` when a bad `-i` value abandons the assignment.
     fn assoc_keyed_element(
         &mut self,
@@ -11235,15 +11279,16 @@ impl Shell {
         pending: &mut Vec<(Str, Str)>,
         key: Option<Str>,
         val: Str,
+        src: &Str,
     ) -> bool {
         let Some(key) = key else {
             // bash quotes the offending word only when the literal came from a
             // `declare`/`local` operand (which the builtin re-parses); a bare
             // `m=(…)` compound assignment names it unquoted.
             let shown = if self.decl_builtin_ctx {
-                bfmt![b"'", &val, b"'"]
+                bfmt![b"'", src, b"'"]
             } else {
-                val
+                src.clone()
             };
             let line = bfmt![
                 self.err_prefix(),
@@ -11256,6 +11301,25 @@ impl Shell {
             // Not fatal: bash skips the element, binds the rest and reports 0.
             return true;
         };
+        // An empty key has no representation in an associative array, so bash
+        // refuses the element — naming it the way the layer that read it saw it:
+        // requoted from the expanded halves (`['']='v'`) for a `declare` operand,
+        // as written (`[$e]=v`) for a bare literal. Like the refusal above it
+        // skips just this element and reports success.
+        if key.is_empty() {
+            let shown = if self.decl_builtin_ctx {
+                bfmt![
+                    b"[",
+                    &xtrace_compound_quote(&key),
+                    b"]=",
+                    &xtrace_compound_quote(&val)
+                ]
+            } else {
+                src.clone()
+            };
+            self.berrln(&bfmt![self.err_prefix(), &shown, b": bad array subscript"]);
+            return true;
+        }
         let Some(val) = self.apply_value_attrs(&a.name, val) else {
             return false;
         };
@@ -38940,6 +39004,23 @@ fn xtrace_compound_quote(s: BStr<'_>) -> Str {
     out
 }
 
+/// Source text for one element of a compound assignment, keyed or not.
+///
+/// A bare `m=(…)` names an element it refuses by the text it was *written* with
+/// — `m=([$e]=v)` reports `[$e]=v` and not the `[]=v` it expanded to — so the
+/// brackets and `=` have to be put back around the two halves' own source.
+fn elem_src(e: &ArrayElem) -> Str {
+    match e {
+        ArrayElem::Positional(w) => crate::unparse::word_src(w),
+        ArrayElem::Keyed { index, value } => bfmt![
+            b"[",
+            &crate::unparse::word_src(index),
+            b"]=",
+            &crate::unparse::word_src(value)
+        ],
+    }
+}
+
 /// `$'…'` ANSI-C quoting, bash's `ansic_quote`: the eight escapes it spells with
 /// a letter — `\a \b \E \f \n \r \t \v`, note `\E` and not `\033` for escape —
 /// then `\'` and `\\`, then three-digit **octal** for any other unprintable
@@ -58686,6 +58767,74 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "declare -A c=([one]=1 [two]=2); c+=([three]=3 [one]=uno); echo \"n=${#c[@]} one=${c[one]}\"; c=([only]=x); echo \"n=${#c[@]}\"",
         );
         assert_eq!(o4, "n=3 one=uno\nn=1\n");
+    }
+
+    #[test]
+    fn assoc_subscript_mode_never_expands_the_element_it_refuses() {
+        // Subscript mode refuses an unsubscripted element *before* expanding it,
+        // so the diagnostic names the word as written and any `$(…)` in it never
+        // runs. bash quotes it for a `declare` operand and not for a bare literal.
+        let (o, _) = run("s='x y'\n{ declare -A k=([a]=1 $s); } 2>&1\necho \"a=${k[a]}\"");
+        assert_eq!(
+            o,
+            "osh: k: '$s': must use subscript when assigning associative array\na=1\n"
+        );
+        let (o2, _) = run("s='x y'\ndeclare -A k2\n{ k2=([a]=1 $s); } 2>&1\necho \"a=${k2[a]}\"");
+        assert_eq!(
+            o2,
+            "osh: k2: $s: must use subscript when assigning associative array\na=1\n"
+        );
+        // Nothing in a refused element is expanded, so an assigning expansion in
+        // it leaves the variable unset.
+        let (o3, _) = run("{ declare -A k3=([a]=1 ${x=set}); } 2>&1\necho \"x=[$x]\"");
+        assert_eq!(
+            o3,
+            "osh: k3: '${x=set}': must use subscript when assigning associative array\nx=[]\n"
+        );
+    }
+
+    #[test]
+    fn assoc_literal_refuses_an_empty_key() {
+        // An empty key has nowhere to live: the element is skipped, the rest of
+        // the literal still binds and the status stays 0. The refusal names the
+        // element requoted from its expanded halves for a `declare` operand, and
+        // as written for a bare literal.
+        let (o, _) = run("{ declare -A m=([a]=1 [\"\"]=v [b]=2); } 2>&1\necho \"s=$? n=${#m[@]}\"");
+        assert_eq!(o, "osh: ['']='v': bad array subscript\ns=0 n=2\n");
+        let (o2, _) = run("declare -A m2\ne=\n{ m2=([$e]=v); } 2>&1\necho \"s=$? n=${#m2[@]}\"");
+        assert_eq!(o2, "osh: [$e]=v: bad array subscript\ns=0 n=0\n");
+        // …and the same in pair mode, where the key is a bare element.
+        let (o3, _) = run("{ declare -A p=(k1 v1 \"\" x k2 v2); } 2>&1\necho \"n=${#p[@]} k2=${p[k2]}\"");
+        assert_eq!(o3, "osh: '': bad array subscript\nn=2 k2=v2\n");
+        let (o4, _) = run("declare -A p2\n{ p2=(\"\" v); } 2>&1\necho \"n=${#p2[@]}\"");
+        assert_eq!(o4, "osh: \"\": bad array subscript\nn=0\n");
+    }
+
+    #[test]
+    fn assoc_literal_elements_are_not_split_or_brace_expanded() {
+        // An *associative* literal's elements are expanded in assignment
+        // context: one source element yields exactly one element, tilde-expanded
+        // but neither word-split, globbed nor brace-expanded. So a variable
+        // holding a space is one key, not two — the opposite of what an indexed
+        // literal, which expands its elements like command words, does with the
+        // same text.
+        let (o, _) = run("s='x y'; declare -A m=(a $s b); declare -p m");
+        assert_eq!(o, "declare -A m=([a]=\"x y\" [b]=\"\" )\n");
+        let (o2, _) = run("s='x y'; declare -a n=(a $s b); declare -p n");
+        assert_eq!(o2, "declare -a n=([0]=\"a\" [1]=\"x\" [2]=\"y\" [3]=\"b\")\n");
+        // Brace expansion does not run either, so the braces are part of the key.
+        assert_eq!(
+            run("declare -A m=({a,b} 1); declare -p m").0,
+            "declare -A m=([\"{a,b}\"]=\"1\" )\n"
+        );
+        // …and `\"${a[@]}\"` joins rather than contributing one element each.
+        assert_eq!(
+            run("a=(p q); declare -A m=(\"${a[@]}\"); declare -p m").0,
+            "declare -A m=([\"p q\"]=\"\" )\n"
+        );
+        // The same rule through the bare compound-assignment path.
+        let (o3, _) = run("declare -A m; s='x y'; m=($s v); declare -p m");
+        assert_eq!(o3, "declare -A m=([\"x y\"]=\"v\" )\n");
     }
 
     #[test]

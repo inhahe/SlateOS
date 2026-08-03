@@ -9113,7 +9113,7 @@ and `userspace/oils/tests/corpus/declare-nameref-array-refusal.sh`.
 **Low priority:** every shape here is one bash prints an error for, so a
 script that hits it is already broken.
 
-### TD-OILS-DECL-REFUSAL-ORDER. A refused *compound* operand's diagnostic is printed after a refused scalar one, whatever order they were written in — 2026-07-31 — OPEN
+### TD-OILS-DECL-REFUSAL-ORDER. A refused *compound* operand's diagnostic is printed after a refused scalar one, whatever order they were written in — 2026-07-31 — ✅ RESOLVED 2026-08-03
 
 **Where:** `userspace/oils/src/interp.rs` —
 `exec_declare_with_arrays_scoped`. bash has one loop over all of a
@@ -9154,6 +9154,34 @@ TD-OILS-DECL-COMPOUND-HIDES-FLAG-ORDER below) is exactly the list this
 fix wants: `argv` with each compound operand's bare name put back at its
 source position. It is already threaded from `exec_simple_inner` down
 through `exec_declare_with_arrays` to `exec_declare_with_arrays_scoped`.
+
+**Fixed 2026-08-03, as the proper fix above.** Phase 1 now records what it
+leaves for the builtin in a `BoundCompound` per operand — where the
+binding landed, and the two refusals only it can decide (a `noassign`/
+readonly-global local, and `-n` against a name that is not already a
+reference) — each stamped with the position the operand held in `argv`.
+`builtin_declare_scoped` takes that list alongside its own words, merges
+the two into one operand sequence in source order, and calls the new
+`Shell::apply_bound_compound` when it reaches a compound one, so a
+compound and a scalar refusal interleave exactly as bash's single loop
+prints them. The phase-3 loop is gone for the `declare` family; what is
+left of it applies the attributes for `readonly`/`export` only, whose
+scalar operands went to entry points of their own — and none of the three
+refusals can fire there (neither builtin makes locals, reads `-n` as the
+nameref letter, or reads a `+` word as a flag at all, and the array-kind
+conflict is the `declare` family's alone).
+
+Two side-effects worth noting. The held local refusal is now spoken *by
+the builtin*, i.e. only when the builtin actually reaches the operand, so
+`local -Z ro=(1)` — an invalid option, which bash's getopt turns away
+before it looks at any operand — no longer prints the builtin's half and
+now returns 2 rather than 1, which is what bash does. And `declare -p`,
+which returns before any operand is applied, keeps printing that half on
+its own, since a printing command still *reaches* the builtin.
+
+Covered by `declaration_refusals_come_out_in_operand_order` and
+`userspace/oils/tests/corpus/a-declarations-refusals-come-out-in-operand-order.sh`,
+which was confirmed to fail on the parent commit and pass on this one.
 
 ### TD-OILS-DECL-COMPOUND-HIDES-FLAG-ORDER. A flag word written *after* a compound operand is still read as a flag — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

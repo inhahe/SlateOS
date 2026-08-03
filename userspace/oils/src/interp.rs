@@ -2933,14 +2933,80 @@ struct DeclWords<'a> {
     /// (`+ declare -x SC=1 arr SD=2`); under `-p` it is the operand list the
     /// builtin is *asked about*, so that `declare -p q r=(1)` reports both.
     spliced: &'a [Str],
+    /// Where each compound operand sat in `argv`: the index of the word it
+    /// would have been, in `decl_arrays` order. This is what lets the operand
+    /// order be reconstructed once the builtin is reached, so its diagnostics
+    /// come out in the order the operands were written.
+    positions: &'a [usize],
     /// How many leading entries of `argv` may still be read as flag words.
     /// bash parses flags with getopt, which stops at the first non-option word;
     /// a compound operand is one, so everything behind the earliest of them is
     /// an operand however it is spelled. `argv.len()` when nothing forces an
-    /// early stop.
+    /// early stop — it is simply the smallest of `positions`.
     flag_limit: usize,
     /// Whether `set -x` is on, so the builtin's own trace line is wanted.
     xtrace: bool,
+}
+
+/// A compound `name=(…)` operand of a declaration builtin, after
+/// [`Shell::exec_declare_with_arrays_scoped`]'s first phase has bound it.
+///
+/// bash performs a compound assignment during the word-expansion pass, so by
+/// the time the builtin runs there is nothing left to assign — only the
+/// builtin's own refusals to raise and its own attributes to apply. Handing
+/// these to [`Shell::builtin_declare_scoped`] rather than walking them in a
+/// pass of their own is what keeps the diagnostics in operand order: bash has
+/// one loop over every operand, compound and scalar alike.
+struct BoundCompound {
+    /// Where the operand sat among the builtin's own words (`args`, i.e.
+    /// `argv[1..]`), so it takes its turn at the position it was written.
+    at: usize,
+    /// The operand as it was written, which the builtin's diagnostics name —
+    /// not `target`, which a nameref operand resolves to.
+    name: String,
+    /// Where phase 1's binding actually landed, which is what the builtin's
+    /// attributes are applied to.
+    target: String,
+    /// The builtin's half of a refusal phase 1 already reported once (a
+    /// `noassign` name or a readonly global, both refused twice over). Present
+    /// means the operand was abandoned whole: bash applies none of the
+    /// builtin's attributes to it.
+    refused_local: Option<Str>,
+    /// Phase 1 found `-n` asked of a name that is not already a reference, so
+    /// the builtin refuses to make a reference out of the array it just bound.
+    /// Decided there because the attribute has since been applied.
+    refused_nameref: bool,
+}
+
+/// One operand of a declaration builtin, in the order it was written: either a
+/// word the expanded `argv` still holds, or a compound operand that was lifted
+/// out of it. See [`BoundCompound`].
+enum DeclOperand<'a> {
+    Word(&'a Str),
+    Bound(&'a BoundCompound),
+}
+
+/// The flag letters [`Shell::apply_bound_compound`] acts on, gathered so the
+/// eleven of them travel as one argument.
+#[derive(Clone, Copy)]
+struct BoundCompoundFlags {
+    /// Both `-a` and `-A` were named in the `-` direction, which the builtin
+    /// refuses against the (associative) array the literal has already bound.
+    /// Decided by the caller rather than from `-a`/`-A` here, because only the
+    /// `declare` family makes the check at all: `readonly -aA q=(1)` and
+    /// `export -aA q=(1)` are separate entry points that never do, and `-p`
+    /// short-circuits into print mode before reaching it.
+    kind_conflict: bool,
+    unset_assoc: bool,
+    unset_indexed: bool,
+    nameref: bool,
+    unset_nameref: bool,
+    export: bool,
+    unset_export: bool,
+    readonly: bool,
+    unset_readonly: bool,
+    trace: bool,
+    unset_trace: bool,
 }
 
 /// One `complete`/`compopt` completion specification. osh's line-oriented REPL
@@ -13338,14 +13404,19 @@ impl Shell {
             // is spelled (`declare q=(1) -x` refuses `-x` as a name). The words
             // that would say so were lifted out of `argv`, so the boundary has to
             // be carried separately.
-            let flag_limit = sc
+            //
+            // …and a fourth: which operand came before which, so the builtin's
+            // per-operand diagnostics can come out in the order they were
+            // written rather than compound-last.
+            let positions: Vec<usize> = sc
                 .decl_arrays
                 .iter()
                 .map(|d| word_starts.get(d.word_index).copied().unwrap_or(argv.len()))
-                .min()
-                .unwrap_or(argv.len());
+                .collect();
+            let flag_limit = positions.iter().copied().min().unwrap_or(argv.len());
             let words = DeclWords {
                 spliced: &spliced,
+                positions: &positions,
                 flag_limit,
                 xtrace: self.xtrace,
             };
@@ -28321,12 +28392,81 @@ impl Shell {
     fn builtin_declare(&mut self, args: &[Str], is_local: bool, tag: &str, flag_limit: usize) -> i32 {
         // `local` is never global, whatever flags it is given.
         if is_local || !Self::declare_global_flag(args) {
-            return self.builtin_declare_scoped(args, is_local, tag, flag_limit);
+            return self.builtin_declare_scoped(args, is_local, tag, flag_limit, &[]);
         }
         let saved = self.enter_global_scope(&Self::declare_operand_names(args));
-        let status = self.builtin_declare_scoped(args, is_local, tag, flag_limit);
+        let status = self.builtin_declare_scoped(args, is_local, tag, flag_limit, &[]);
         self.leave_global_scope(saved);
         status
+    }
+
+    /// The builtin's half of a compound `name=(…)` operand: the refusals it
+    /// raises against the array phase 1 already bound, and the attributes only
+    /// it applies. Returns whether the operand was refused, which fails the
+    /// command.
+    ///
+    /// Each refusal abandons the operand where bash's builtin would have gone on
+    /// to the attributes, so none of them is applied afterwards — that is what
+    /// leaves `declare -x +a q=(1 2)` an unexported array. The order of the
+    /// three is bash's: a `-n` breach outranks the destroy refusal, which
+    /// outranks the `-a`/`-A` self-conflict (`declare -a q=(1); declare -aA +a q`
+    /// reports "cannot destroy" because both come from the same lookup and the
+    /// destroy check is first).
+    fn apply_bound_compound(
+        &mut self,
+        c: &BoundCompound,
+        tag: &str,
+        f: BoundCompoundFlags,
+    ) -> bool {
+        // Refused as a local in phase 1, which reported the compound-assignment
+        // machinery's half of the diagnostic; this is the builtin's. bash
+        // abandons such an operand whole, so nothing below runs for it.
+        if let Some(msg) = &c.refused_local {
+            self.berrln(msg);
+            return true;
+        }
+        if c.refused_nameref {
+            self.perrln(&format!("{tag}: {}: reference variable cannot be an array", c.name));
+            return true;
+        }
+        if (f.unset_indexed && self.arrays.contains_key(&c.target))
+            || (f.unset_assoc && self.assoc.contains_key(&c.target))
+        {
+            self.perrln(&format!(
+                "{tag}: {}: cannot destroy array variables in this way",
+                c.name
+            ));
+            return true;
+        }
+        if f.kind_conflict {
+            self.perrln(&format!(
+                "{tag}: {}: cannot convert associative to indexed array",
+                c.name
+            ));
+            return true;
+        }
+        // The nameref attribute is the one that goes on the operand as written
+        // rather than on the name the binding landed under: `+n` is about the
+        // reference itself.
+        if f.unset_nameref {
+            self.nameref_attr.remove(&c.name);
+        } else if f.nameref {
+            self.nameref_attr.insert(c.name.clone());
+        }
+        if f.unset_trace {
+            self.trace_attr.remove(&c.target);
+        } else if f.trace {
+            self.trace_attr.insert(c.target.clone());
+        }
+        if f.unset_export {
+            self.exported.remove(&c.target);
+        } else if f.export {
+            self.mark_exported(c.target.clone());
+        }
+        if f.readonly && !f.unset_readonly {
+            self.readonly.insert(c.target.clone());
+        }
+        false
     }
 
     /// The declaration proper, run with the bindings it is to act on already
@@ -28337,12 +28477,17 @@ impl Shell {
     /// words — `args.len()` for an ordinary call. It is smaller only when a
     /// compound `name=(…)` operand ended option parsing at a word that is not in
     /// `args` at all; see [`DeclWords::flag_limit`].
+    ///
+    /// `compounds` are those same operands, already bound and in source order,
+    /// so that they take their turn in the operand loop below at the position
+    /// they were written; empty for an ordinary call. See [`BoundCompound`].
     fn builtin_declare_scoped(
         &mut self,
         args: &[Str],
         is_local: bool,
         tag: &str,
         flag_limit: usize,
+        compounds: &[BoundCompound],
     ) -> i32 {
         if is_local && self.local_frames.is_empty() {
             self.perrln("local: can only be used in a function");
@@ -28548,7 +28693,60 @@ impl Shell {
             || trace
             || unset_trace;
         let mut status = 0;
-        for name_val in &args[i..] {
+        // The operands in the order they were *written*: the words `args` still
+        // holds, with the compound `name=(…)` ones — lifted out of it before the
+        // builtin was ever reached — put back where they sat. bash has one loop
+        // over all of them, so its per-operand diagnostics come out in operand
+        // order; walking the compounds in a pass of their own afterwards
+        // transposed the two kinds (`declare -aA m11=(1) m12=zz` reported `m12`
+        // first). Every compound sits at or behind the flag boundary, since a
+        // compound operand is itself what ends the flag scan.
+        let mut ops: Vec<DeclOperand<'_>> = Vec::with_capacity(args.len() + compounds.len());
+        let mut next = 0;
+        for (j, w) in args.iter().enumerate().skip(i) {
+            while let Some(c) = compounds.get(next).filter(|c| c.at <= j) {
+                ops.push(DeclOperand::Bound(c));
+                next += 1;
+            }
+            ops.push(DeclOperand::Word(w));
+        }
+        for c in compounds.get(next..).unwrap_or_default() {
+            ops.push(DeclOperand::Bound(c));
+        }
+        for op in &ops {
+            let name_val = match op {
+                DeclOperand::Word(w) => *w,
+                // A compound operand: phase 1 bound it, so all that is left is
+                // what the *builtin* would have done to it — the refusals it
+                // raises and the attributes only it applies. Everything else in
+                // this loop (identifier validation, the local shadow, the
+                // assignment, the kind and value attributes) already happened
+                // there, before the literal bound.
+                DeclOperand::Bound(c) => {
+                    if self.apply_bound_compound(
+                        c,
+                        tag,
+                        BoundCompoundFlags {
+                            // This loop is the `declare` family's, which is the
+                            // only one that makes the check; see the field.
+                            kind_conflict: assoc && indexed && !print_mode,
+                            unset_assoc,
+                            unset_indexed,
+                            nameref,
+                            unset_nameref,
+                            export,
+                            unset_export,
+                            readonly,
+                            unset_readonly,
+                            trace,
+                            unset_trace,
+                        },
+                    ) {
+                        status = 1;
+                    }
+                    continue;
+                }
+            };
             // `local -`: make the shell's `set` options local to this function.
             // The first `local -` in a call captures the current option state;
             // it is restored on return (`call_function`), so any `set` changes
@@ -29738,10 +29936,6 @@ impl Shell {
         // instead of refusing, and `readonly`/`export` do not read `-n` as the
         // nameref letter at all (see above), so `nameref` is already false there.
         let nameref_array_refusal = nameref && !print_mode;
-        // Whether *this* operand is the one being refused: a name that is already
-        // a reference is not being made one — the literal binds through it into
-        // the target, which is an ordinary array assignment bash accepts.
-        let mut refused_nameref: HashSet<String> = HashSet::new();
         // Phase 1 — the *compound* operands, in operand order, before the builtin
         // runs at all.
         //
@@ -29773,24 +29967,16 @@ impl Shell {
         // those have to be in force before the literal binds, and bash likewise
         // shows them on a survivor of a failed later operand
         // (`declare -ail g=(2+3) r=(1)` → `declare -ail g=([0]="5")`, no `x`).
-        // The compound operands a variable the shell maintains refused *as a
-        // local*; phase 3 skips them, since bash applies none of the builtin's
-        // attributes to an operand it turned away that way. See the refusal in
-        // the loop below.
-        let mut refused_local: HashSet<String> = HashSet::new();
-        let mut refused_status = 0;
-        // The *builtin's* half of the two refusals that are reported twice over
-        // (see `func_tag` in the loop below). bash raises these from the builtin,
-        // which runs only once the whole word list has expanded, so they come
-        // after every machinery half rather than interleaved with them — and
-        // they speak through the command's own `2>`, which the machinery halves
-        // do not. Both follow from holding them until phase 2.
-        let mut builtin_refusals: Vec<Str> = Vec::new();
-        // Where each operand's binding actually lands, in operand order, so that
-        // phase 3 can apply the builtin's attributes to the same name phase 1
-        // bound. See the resolution at the head of the loop.
-        let mut targets: Vec<String> = Vec::with_capacity(decl_arrays.len());
-        for d in decl_arrays {
+        //
+        // What each operand leaves for the builtin — where its binding landed,
+        // and the two refusals only phase 1 can decide — travels in `bound`,
+        // which the builtin then walks *interleaved with its own words* so that
+        // the diagnostics come out in operand order. See [`BoundCompound`]. It
+        // is filled in operand order, one entry per operand that got as far as
+        // resolving a target; an operand that aborts the command leaves the
+        // vector unused, since the builtin never runs.
+        let mut bound: Vec<BoundCompound> = Vec::with_capacity(decl_arrays.len());
+        for (k, d) in decl_arrays.iter().enumerate() {
             let a = &d.assign;
             // bash resolves a nameref before it does anything with a compound
             // operand. `apply_assignment` already follows the reference to store
@@ -29837,7 +30023,17 @@ impl Shell {
                 }
                 None => a.name.clone(),
             };
-            targets.push(target.clone());
+            // `positions` is in `argv` space, where index 0 is the command word;
+            // the builtin's operand loop walks `argv[1..]`, so the position is
+            // one less. A compound written after every word sits past the end,
+            // and the loop appends it.
+            bound.push(BoundCompound {
+                at: words.positions.get(k).copied().unwrap_or(argv.len()).saturating_sub(1),
+                name: a.name.clone(),
+                target: target.clone(),
+                refused_local: None,
+                refused_nameref: false,
+            });
             // A variable the shell maintains refuses a compound literal with the
             // same split the scalar path has (see [`Shell::noassign`] and the
             // refusal in `builtin_declare_scoped`), and the split is by *where the
@@ -29863,10 +30059,11 @@ impl Shell {
             // loses the first tag: the refusal is raised from the resolution,
             // which has no source word to name the function from.
             //
-            // Only the machinery's half is spoken here. The builtin's waits for
-            // phase 2 — see `builtin_refusals` — because that is when bash's
-            // runs: `local ra=(1) rb=(2)` with both readonly reports both
-            // machinery halves and only then both builtin ones.
+            // Only the machinery's half is spoken here. The builtin's is stored
+            // on the operand (`BoundCompound::refused_local`) and spoken when the
+            // builtin reaches it, because that is when bash's runs: `local
+            // ra=(1) rb=(2)` with both readonly reports both machinery halves
+            // and only then both builtin ones.
             let func_tag: Str = if follow {
                 Vec::new()
             } else {
@@ -29875,9 +30072,10 @@ impl Shell {
             if make_local && self.noassign.contains(&target) {
                 let msg: Str = bfmt![&target, b": variable may not be assigned value"];
                 self.berrln(&bfmt![self.err_prefix(), &func_tag, &msg]);
-                builtin_refusals.push(bfmt![self.err_prefix(), cmd, b": ", &msg]);
-                refused_local.insert(target);
-                refused_status = 1;
+                let held = bfmt![self.err_prefix(), cmd, b": ", &msg];
+                if let Some(e) = bound.last_mut() {
+                    e.refused_local = Some(held);
+                }
                 continue;
             }
             // A local cannot shadow a readonly *global* — `make_local_variable`
@@ -29902,9 +30100,10 @@ impl Shell {
             if make_local && !held_here && !held_outer && self.readonly.contains(&target) {
                 let msg: Str = bfmt![&target, b": readonly variable"];
                 self.berrln(&bfmt![self.err_prefix(), &func_tag, &msg]);
-                builtin_refusals.push(bfmt![self.err_prefix(), cmd, b": ", &msg]);
-                refused_local.insert(target);
-                refused_status = 1;
+                let held = bfmt![self.err_prefix(), cmd, b": ", &msg];
+                if let Some(e) = bound.last_mut() {
+                    e.refused_local = Some(held);
+                }
                 continue;
             }
             // A function-local array declaration shadows the name in the current
@@ -30032,7 +30231,9 @@ impl Shell {
             // stored and nothing moves.
             let claimed = kind_or_scope_flag || first_value_letter_on == Some(true);
             let operand_refused = if nameref_array_refusal && !self.nameref_attr.contains(&a.name) {
-                refused_nameref.insert(a.name.clone());
+                if let Some(e) = bound.last_mut() {
+                    e.refused_nameref = true;
+                }
                 true
             } else {
                 self_kind_conflict
@@ -30221,11 +30422,6 @@ impl Shell {
             self.last_status = 1;
             return Flow::Next;
         }
-        // The refusals phase 1 raised on the builtin's behalf, now that it is
-        // the builtin speaking. See `builtin_refusals`.
-        for msg in &builtin_refusals {
-            self.berrln(msg);
-        }
         // `-p` asks the builtin about its operands rather than telling it about
         // them, so the compound ones — which phase 2 never sees, since they live
         // in `decl_arrays` rather than `argv` — have to be asked about here, from
@@ -30236,6 +30432,16 @@ impl Shell {
         // `readonly -p`/`export -p` are not this: they take `-p` as "print in a
         // form that can be re-read", still mark, and print nothing extra here.
         if print_mode && !matches!(cmd, "readonly" | "export") {
+            // A printing command still reaches the builtin with the operand it
+            // was refused, so the builtin's half of a phase-1 local refusal is
+            // still spoken — it is only the *attributes* a printing command
+            // applies none of, which is why the rest of `apply_bound_compound`
+            // is skipped here rather than the whole of it.
+            for c in &bound {
+                if let Some(msg) = &c.refused_local {
+                    self.berrln(msg);
+                }
+            }
             let asked = words.spliced.get(1..).unwrap_or_default();
             self.last_status = if is_local {
                 self.local_print(asked, out, redir)
@@ -30268,92 +30474,56 @@ impl Shell {
             }
             global_builtin || !a.starts_with(b"+")
         });
-        let status = match cmd {
+        let mut status = match cmd {
             "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir, limit),
             "export" if has_scalar_operand => self.builtin_export(&argv[1..], out, redir, limit),
             "readonly" | "export" => 0,
             // `_scoped`: any `-g` swap is already in force for the whole
             // command (see the wrapper below), and re-entering it here would
             // pair the inner restore with the outer's saved binding.
-            _ => self.builtin_declare_scoped(&argv[1..], is_local, cmd, limit),
+            // The compound operands go with them: `builtin_declare_scoped`
+            // walks them interleaved with its own words, so its diagnostics
+            // come out in the order the operands were written, as bash's
+            // single loop over all of them does.
+            _ => self.builtin_declare_scoped(&argv[1..], is_local, cmd, limit, &bound),
         };
-        // A compound operand the builtin never saw (it lives in `decl_arrays`, not
-        // `argv`) still failed the command when it was refused as a local above.
-        let mut status = if refused_status == 0 { status } else { refused_status };
-        // Phase 3 — the attributes the *builtin* applies, which it can only apply
-        // to the scalar operands it was given: the array names live in
-        // `decl_arrays`, so they are marked here instead. `readonly` in particular
-        // has to come after the value is bound, since a readonly guard in
-        // `apply_assignment` would otherwise reject the initializer — and an
-        // array-literal-only `readonly arr=(1 2)` has no builtin call at all to
-        // rely on.
+        // Phase 3 — the compound operands of `readonly`/`export`, which are the
+        // two builtins whose scalar operands went to an entry point of their own
+        // (`builtin_readonly`/`builtin_export`) that knows nothing of
+        // `decl_arrays`. The `declare` family's compounds took their turn inside
+        // `builtin_declare_scoped`'s operand loop instead, at the position they
+        // were written. `readonly` in particular has to come after the value is
+        // bound, since a readonly guard in `apply_assignment` would otherwise
+        // reject the initializer — and an array-literal-only `readonly arr=(1 2)`
+        // has no builtin call at all to rely on.
         //
-        // Each operand is paired with the name phase 1 actually bound, which a
-        // nameref operand's own name is not: `t=1; declare -n r=t; declare -x
-        // r=(z)` exports `t`, leaving `r` a plain reference. The *diagnostics*
-        // below still name the operand as it was written, which is what bash
-        // reports for the refusals its builtin raises.
-        for (d, target) in decl_arrays.iter().zip(&targets) {
-            let a = &d.assign;
-            // An operand refused as a local above took none of the attributes in
-            // phase 1 and takes none of these either — bash abandons it whole.
-            if refused_local.contains(target) {
-                continue;
-            }
-            // See `nameref_array_refusal`: the literal has bound, and the `-n`
-            // is refused against the array it made. This outranks both refusals
-            // below.
-            if refused_nameref.contains(&a.name) {
-                self.perrln(&format!(
-                    "{cmd}: {}: reference variable cannot be an array",
-                    a.name
-                ));
-                status = 1;
-                continue;
-            }
-            // `+a`/`+A` cannot un-make the array the literal just bound, so they
-            // refuse — and the operand takes none of the attributes below, not
-            // even the export of a `declare -x +a q=(1 2)`.
-            if (unset_indexed && self.arrays.contains_key(target))
-                || (unset_assoc && self.assoc.contains_key(target))
-            {
-                self.perrln(&format!(
-                    "{cmd}: {}: cannot destroy array variables in this way",
-                    a.name
-                ));
-                status = 1;
-                continue;
-            }
-            // See `self_kind_conflict`: the literal has already bound as an
-            // associative array, and the `-a` is refused against it. The
-            // destroy refusal above outranks this one — `declare -a q=(1 2);
-            // declare -aA +a q` reports "cannot destroy" — because both come
-            // from the same lookup and bash checks the destroy first.
-            if self_kind_conflict {
-                self.perrln(&format!(
-                    "{cmd}: {}: cannot convert associative to indexed array",
-                    a.name
-                ));
-                status = 1;
-                continue;
-            }
-            if unset_nameref {
-                self.nameref_attr.remove(&a.name);
-            } else if nameref {
-                self.nameref_attr.insert(a.name.clone());
-            }
-            if unset_trace {
-                self.trace_attr.remove(target);
-            } else if trace {
-                self.trace_attr.insert(target.clone());
-            }
-            if unset_export {
-                self.exported.remove(target);
-            } else if export {
-                self.mark_exported(target.clone());
-            }
-            if readonly && !unset_readonly {
-                self.readonly.insert(target.clone());
+        // Ordering costs nothing here: neither builtin has a diagnostic left to
+        // interleave. None of `apply_bound_compound`'s three refusals can fire —
+        // neither makes locals (so `refused_local` is unreachable), neither reads
+        // `-n` as the nameref letter (so `refused_nameref` is), neither reads a
+        // `+` word as a flag at all (so `unset_assoc`/`unset_indexed` are), and
+        // the kind conflict is the `declare` family's alone.
+        if global_builtin {
+            for c in &bound {
+                if self.apply_bound_compound(
+                    c,
+                    cmd,
+                    BoundCompoundFlags {
+                        kind_conflict: self_kind_conflict,
+                        unset_assoc,
+                        unset_indexed,
+                        nameref,
+                        unset_nameref,
+                        export,
+                        unset_export,
+                        readonly,
+                        unset_readonly,
+                        trace,
+                        unset_trace,
+                    },
+                ) {
+                    status = 1;
+                }
             }
         }
         if pushed_stderr {
@@ -57036,6 +57206,47 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "osh: declare: x: cannot destroy array variables in this way\nrc=1\n"
         );
         assert_eq!(run("declare -x y=1; declare +x y; declare -p y").0, "declare -- y=\"1\"\n");
+    }
+
+    /// bash has one loop over a declaration builtin's operands, so the refusals
+    /// it raises against them come out in the order they were *written* — a
+    /// compound `name=(…)` operand taking its turn like any other, though the
+    /// literal itself bound earlier, back during word expansion. osh walked the
+    /// compounds in a pass of their own after the builtin had finished, which
+    /// transposed the two kinds of operand.
+    #[test]
+    fn declaration_refusals_come_out_in_operand_order() {
+        let conv =
+            |n: &str| format!("osh: declare: {n}: cannot convert associative to indexed array\n");
+        assert_eq!(run("declare -aA m1=(1) m2=zz 2>&1").0, conv("m1") + &conv("m2"));
+        assert_eq!(run("declare -aA m1=zz m2=(1) 2>&1").0, conv("m1") + &conv("m2"));
+        assert_eq!(
+            run("declare -aA a=(1) b=zz c=(2) d=ww 2>&1").0,
+            conv("a") + &conv("b") + &conv("c") + &conv("d")
+        );
+        // The destroy refusal interleaves the same way…
+        assert_eq!(
+            run("declare -a p=(1) q=(2); declare +a q p=(9) 2>&1").0,
+            "osh: declare: q: cannot destroy array variables in this way\n\
+             osh: declare: p: cannot destroy array variables in this way\n"
+        );
+        // …and so does the nameref one.
+        assert_eq!(
+            run("declare -a p=(1); declare -n p r=(5) 2>&1").0,
+            "osh: declare: p: reference variable cannot be an array\n\
+             osh: declare: r: reference variable cannot be an array\n"
+        );
+        // A local refusal is reported twice over, and only the *builtin's* half
+        // is in operand order: the compound-assignment machinery's halves all
+        // come first, since they are raised as the words expand.
+        assert_eq!(
+            run("readonly ro=1 rw=2; f() { local rw=zz ro=(1); }; f 2>&1").0,
+            // The prefix is the running source's name, which is `main` once a
+            // function body is what is executing.
+            "main: f: ro: readonly variable\n\
+             main: local: rw: readonly variable\n\
+             main: local: ro: readonly variable\n"
+        );
     }
 
     #[test]

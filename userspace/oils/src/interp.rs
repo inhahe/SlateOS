@@ -3514,6 +3514,12 @@ pub struct Shell {
     getopts_optind: usize,
     /// Anchor instant for `$SECONDS` (reset when `SECONDS` is assigned).
     seconds_anchor: std::time::Instant,
+    /// When this shell started. Unlike `seconds_anchor` this is never
+    /// rebased, because it answers a different question: posix mode's bare
+    /// `time` reports the *shell's* elapsed lifetime, not any command's, and
+    /// an `SECONDS=0` in between must not move that figure. Inherited by a
+    /// subshell, which bash also times from the parent's birth.
+    birth: std::time::Instant,
     /// Base value added to elapsed seconds for `$SECONDS` (set by assignment).
     /// Signed, because bash counts on from whatever number it was given:
     /// `SECONDS=-3` reads `-3`, then `-2` a second later.
@@ -4441,6 +4447,7 @@ impl Shell {
             getopts_col: 0,
             getopts_optind: 1,
             seconds_anchor: std::time::Instant::now(),
+            birth: std::time::Instant::now(),
             seconds_base: 0,
             // Seed `$RANDOM` from the wall clock so successive runs differ.
             rng: std::cell::Cell::new(initial_rng_seed()),
@@ -6890,15 +6897,28 @@ impl Shell {
             self.last_status = i32::from(self.last_status == 0);
         }
         if let Some(start) = start {
-            let real = start.elapsed().as_secs_f64();
             // A `time` prefix with no command at all is a report about the
             // *shell* in posix mode rather than about the null command it
-            // otherwise times; see [`Shell::format_time_report`].
+            // otherwise times; see [`Shell::time_format`]. Every figure in it
+            // is the shell's own, so the elapsed one is measured from the
+            // shell's birth and not from the (instantaneous) null command —
+            // which is visible whenever a `$TIMEFORMAT` puts a `%R` back into
+            // that report.
             let shell_times = self.shell_option_enabled("posix")
                 && matches!(pipe.commands.as_slice(), [Command::Simple(sc)] if Self::is_null_command(sc));
-            self.emit_stderr(
-                Self::format_time_report(real, pipe.time_posix, shell_times).as_bytes(),
-            );
+            let real = if shell_times {
+                self.birth.elapsed().as_secs_f64()
+            } else {
+                start.elapsed().as_secs_f64()
+            };
+            // `$TIMEFORMAT` is read *after* the command, so one the command set
+            // itself is the one used. User and system CPU are still zero
+            // throughout (TD-OILS10).
+            if let Some(fmt) = self.time_format(pipe.time_posix, shell_times)
+                && let Some(report) = self.render_time_report(&fmt, real, 0.0, 0.0)
+            {
+                self.emit_stderr(&report);
+            }
         }
         flow
     }
@@ -6919,37 +6939,172 @@ impl Shell {
             && sc.decl_arrays.is_empty()
     }
 
-    /// Render a `time`/`time -p` report. `real` is wall-clock seconds; user and
-    /// system CPU times are reported as zero because the host does not expose
-    /// per-child CPU accounting through `std::process` (see known-issues
-    /// TD-OILS10). The default (bash) form is `\nreal\tNmS.SSSs\n…`; the POSIX
-    /// `-p` form is `real S.SS\n…` with two decimals and no leading newline.
+    /// The format string a `time` report is to be rendered from, or `None` when
+    /// there is to be no report at all.
     ///
-    /// `shell_times` is the third form: a posix-mode `time` prefixing *no
-    /// command*, which POSIX says reports the shell's own cumulative user and
-    /// system times. There is no elapsed span to report for it — it is not
-    /// timing anything — so bash drops the `real` line entirely and prints the
-    /// other two to two decimals. (`-p` cannot reach it: posix mode is exactly
-    /// the mode in which `time` stops reading its own options, since the word
-    /// after it begins with `-`.)
-    fn format_time_report(real: f64, posix: bool, shell_times: bool) -> String {
-        let fmt = |s: f64, places: usize| {
-            let mins = (s / 60.0).floor() as u64;
-            let secs = s - (mins as f64) * 60.0;
-            format!("{mins}m{secs:.places$}s")
-        };
-        if shell_times {
-            format!("user\t{}\nsys\t{}\n", fmt(0.0, 2), fmt(0.0, 2))
-        } else if posix {
-            format!("real {real:.2}\nuser {:.2}\nsys {:.2}\n", 0.0, 0.0)
+    /// bash's `time_command` picks between four sources, in this order:
+    ///
+    /// * `time -p` uses the POSIX form and ignores `$TIMEFORMAT` completely;
+    /// * otherwise a **set** `$TIMEFORMAT` wins — including over the shell-times
+    ///   form below, which is how a posix-mode bare `time` can be made to print
+    ///   an elapsed figure after all;
+    /// * with none set, a posix-mode `time` prefixing *no command* reports the
+    ///   shell's own cumulative CPU times, and the reason no `real` line appears
+    ///   is simply that this format has no `%R` in it;
+    /// * and everything else takes bash's default.
+    ///
+    /// An **empty** format prints nothing whatever — not even the newline every
+    /// other report ends with — which is the one way to turn the report off.
+    fn time_format(&self, posix: bool, shell_times: bool) -> Option<Str> {
+        let fmt = if posix {
+            Str::from(&b"real %2R\nuser %2U\nsys %2S"[..])
+        } else if let Some(v) = self.vars.get("TIMEFORMAT") {
+            v.clone()
+        } else if shell_times {
+            Str::from(&b"user\t%2lU\nsys\t%2lS"[..])
         } else {
-            format!(
-                "\nreal\t{}\nuser\t{}\nsys\t{}\n",
-                fmt(real, 3),
-                fmt(0.0, 3),
-                fmt(0.0, 3)
-            )
+            Str::from(&b"\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS"[..])
+        };
+        (!fmt.is_empty()).then_some(fmt)
+    }
+
+    /// Split a duration in seconds into bash's `(whole seconds, milliseconds)`
+    /// pair, truncating rather than rounding — bash reads a `timeval` and takes
+    /// `tv_usec / 1000`, so `0.0879` is 87 ms and never 88.
+    fn time_parts(v: f64) -> (u64, u32) {
+        if v.is_nan() || v <= 0.0 {
+            return (0, 0);
         }
+        // `as` truncates toward zero, which is the same direction, and saturates
+        // at `u64::MAX` for a value no wall clock will produce.
+        let total_ms = (v * 1000.0) as u64;
+        (total_ms / 1000, (total_ms % 1000) as u32)
+    }
+
+    /// bash's `mkfmt`: `SECS[.FFF]` at `prec` places, or `NmSECS.FFFs` when the
+    /// `l` (length-extender) modifier asked for minutes.
+    ///
+    /// The fraction is emitted a digit at a time off the *top* of the
+    /// millisecond count, so a precision below 3 truncates: 140 ms at `%2R` is
+    /// `0.14` and at `%1R` is `0.1`. A precision of 0 drops the point entirely.
+    fn mkfmt(prec: usize, lng: bool, mut sec: u64, mut frac_ms: u32) -> Str {
+        let mut s = Str::new();
+        if lng {
+            let min = sec / 60;
+            sec %= 60;
+            s.extend_from_slice(min.to_string().as_bytes());
+            s.push(b'm');
+        }
+        s.extend_from_slice(sec.to_string().as_bytes());
+        if prec != 0 {
+            s.push(b'.');
+            for _ in 0..prec {
+                // `frac_ms` starts in 0..=999, so the leading digit is always a
+                // single one and the shift keeps it that way.
+                s.push(b'0' + u8::try_from(frac_ms / 100).unwrap_or(0));
+                frac_ms = (frac_ms % 100) * 10;
+            }
+        }
+        if lng {
+            s.push(b's');
+        }
+        s
+    }
+
+    /// Render a `time` report from a `$TIMEFORMAT`-style format string, exactly
+    /// as bash's `print_formatted_time` does.
+    ///
+    /// `%%` is a literal `%`, a `%` at the very end of the string is itself, and
+    /// anything else outside a directive is copied through — newlines and tabs
+    /// included. A trailing newline is always added.
+    ///
+    /// The directives are `%R` (elapsed), `%U` (user CPU) and `%S` (system CPU),
+    /// each taking an optional one-digit precision (`0`–`3`, clamped, default 3)
+    /// and then an optional `l` — in that order, so `%3lR` is a directive and
+    /// `%l3R` is not. `%P` is the CPU percentage and is special-cased *before*
+    /// the modifier scan in bash, so it accepts neither: `%0P` is an error, not
+    /// a two-place `%P`.
+    ///
+    /// An unrecognised directive character is reported and suppresses the whole
+    /// report — including the part already rendered — but is otherwise harmless:
+    /// `$?` is untouched and neither errexit nor posix mode makes it fatal (it
+    /// is a `builtin_error`, not a `report_error`). The character reported is
+    /// whatever `*s` was, so a format ending mid-directive names the NUL.
+    ///
+    /// User and system CPU times are still always zero here, because the host
+    /// does not expose per-child CPU accounting through `std::process` — see
+    /// known-issues TD-OILS10. That makes `%P` zero as well; the percentage is
+    /// nevertheless computed the way bash computes it, so it will follow along
+    /// when the accounting arrives.
+    fn render_time_report(&mut self, fmt: BStr<'_>, real: f64, user: f64, sys: f64) -> Option<Str> {
+        let (rs, rsf) = Self::time_parts(real);
+        let (us, usf) = Self::time_parts(user);
+        let (ss, ssf) = Self::time_parts(sys);
+        // Hundredths of a percent of the wall-clock span spent on the CPU,
+        // capped at 100% the way bash caps it.
+        let cpu = if rs == 0 && rsf == 0 {
+            0
+        } else {
+            let cpu_ms = (us + ss) * 1000 + u64::from(usf + ssf);
+            let real_ms = rs * 1000 + u64::from(rsf);
+            (cpu_ms * 10000 / real_ms).min(10000)
+        };
+
+        let mut out = Str::new();
+        let mut i = 0usize;
+        while let Some(&c) = fmt.get(i) {
+            let next = fmt.get(i + 1).copied();
+            match next {
+                // A trailing `%` is a literal one: there is no directive left to
+                // read, so bash copies the character through.
+                _ if c != b'%' || next.is_none() => {
+                    out.push(c);
+                    i += 1;
+                }
+                Some(b'%') => {
+                    out.push(b'%');
+                    i += 2;
+                }
+                Some(b'P') => {
+                    out.extend_from_slice(&Self::mkfmt(2, false, cpu / 100, (cpu % 100) as u32 * 10));
+                    i += 2;
+                }
+                _ => {
+                    let mut j = i + 1;
+                    let mut prec = 3usize;
+                    if let Some(d) = fmt.get(j).filter(|d| d.is_ascii_digit()) {
+                        prec = usize::from(d - b'0').min(3);
+                        j += 1;
+                    }
+                    let lng = fmt.get(j) == Some(&b'l');
+                    if lng {
+                        j += 1;
+                    }
+                    // Past the end reads as the NUL bash's `*s` would find, and
+                    // that is the character its diagnostic names.
+                    let d = fmt.get(j).copied().unwrap_or(0);
+                    let (sec, frac) = match d {
+                        b'R' => (rs, rsf),
+                        b'U' => (us, usf),
+                        b'S' => (ss, ssf),
+                        _ => {
+                            let msg = bfmt![
+                                self.err_prefix(),
+                                b"TIMEFORMAT: `",
+                                &[d][..],
+                                b"': invalid format character"
+                            ];
+                            self.berrln(&msg);
+                            return None;
+                        }
+                    };
+                    out.extend_from_slice(&Self::mkfmt(prec, lng, sec, frac));
+                    i = j + 1;
+                }
+            }
+        }
+        out.push(b'\n');
+        Some(out)
     }
 
     /// Store the per-stage exit codes in `${PIPESTATUS[@]}` and set `$?`.
@@ -9605,6 +9760,7 @@ impl Shell {
             getopts_col: self.getopts_col,
             getopts_optind: self.getopts_optind,
             seconds_anchor: self.seconds_anchor,
+            birth: self.birth,
             seconds_base: self.seconds_base,
             rng: std::cell::Cell::new(self.rng.get()),
             // `$SRANDOM`'s fallback state is perturbed rather than copied, and
@@ -56148,22 +56304,107 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn time_report_formatting() {
+        // The three built-in formats, rendered through the same `$TIMEFORMAT`
+        // machinery bash renders them through.
+        let report = |src: &str, real: f64, posix: bool, shell_times: bool| {
+            let mut sh = new_shell();
+            sh.run_source(src.as_bytes());
+            let fmt = sh.time_format(posix, shell_times)?;
+            let r = sh.render_time_report(&fmt, real, 0.0, 0.0)?;
+            Some(String::from_utf8_lossy(&r).into_owned())
+        };
         // POSIX `-p` form: two decimals, space-separated, no leading newline.
-        let p = Shell::format_time_report(1.5, true, false);
-        assert_eq!(p, "real 1.50\nuser 0.00\nsys 0.00\n");
+        assert_eq!(report("", 1.5, true, false).as_deref(), Some("real 1.50\nuser 0.00\nsys 0.00\n"));
         // Default (bash) form: leading newline, tab-separated, NmS.SSSs.
-        let d = Shell::format_time_report(62.25, false, false);
-        assert_eq!(d, "\nreal\t1m2.250s\nuser\t0m0.000s\nsys\t0m0.000s\n");
-        let z = Shell::format_time_report(0.0, false, false);
-        assert_eq!(z, "\nreal\t0m0.000s\nuser\t0m0.000s\nsys\t0m0.000s\n");
+        assert_eq!(
+            report("", 62.25, false, false).as_deref(),
+            Some("\nreal\t1m2.250s\nuser\t0m0.000s\nsys\t0m0.000s\n")
+        );
+        assert_eq!(
+            report("", 0.0, false, false).as_deref(),
+            Some("\nreal\t0m0.000s\nuser\t0m0.000s\nsys\t0m0.000s\n")
+        );
         // The shell's own times: no `real` line — there is no span to report —
         // and two decimals rather than three. (`-p` cannot reach this: the
         // mode that asks for the shell's times is the mode that takes `-p`
         // away, so the two are never both in force.)
         assert_eq!(
-            Shell::format_time_report(1.5, false, true),
-            "user\t0m0.00s\nsys\t0m0.00s\n"
+            report("", 1.5, false, true).as_deref(),
+            Some("user\t0m0.00s\nsys\t0m0.00s\n")
         );
+        // A set `$TIMEFORMAT` displaces both the default and the shell-times
+        // form — which is how a posix-mode bare `time` can be made to print an
+        // elapsed figure after all — but never `-p`'s.
+        assert_eq!(report("TIMEFORMAT='R=%R'", 1.5, false, false).as_deref(), Some("R=1.500\n"));
+        assert_eq!(report("TIMEFORMAT='R=%R'", 1.5, false, true).as_deref(), Some("R=1.500\n"));
+        assert_eq!(
+            report("TIMEFORMAT='R=%R'", 1.5, true, false).as_deref(),
+            Some("real 1.50\nuser 0.00\nsys 0.00\n")
+        );
+        // An empty one prints nothing at all, not even the trailing newline.
+        assert_eq!(report("TIMEFORMAT=", 1.5, false, false), None);
+    }
+
+    #[test]
+    fn timeformat_directives_and_their_modifiers() {
+        let render = |fmt: &str, real: f64| {
+            let mut sh = new_shell();
+            sh.render_time_report(fmt.as_bytes(), real, 0.0, 0.0)
+                .map(|r| String::from_utf8_lossy(&r).into_owned())
+        };
+        // A precision of 0..=3, then an optional `l` for the minutes form. The
+        // fraction truncates rather than rounds: 140 ms at two places is 0.14.
+        assert_eq!(render("%R|%2R|%1R|%0R", 0.1409).as_deref(), Some("0.140|0.14|0.1|0\n"));
+        assert_eq!(render("%lR|%2lR|%0lR", 62.25).as_deref(), Some("1m2.250s|1m2.25s|1m2s\n"));
+        // A precision above 3 clamps, but only one digit is ever read — so the
+        // second digit of `%99R` is what the directive test then rejects.
+        assert_eq!(render("%4R|%9R", 0.5).as_deref(), Some("0.500|0.500\n"));
+        assert_eq!(render("%99R", 0.5), None);
+        // The modifiers come in that order and no other.
+        assert_eq!(render("%l3R", 0.5), None);
+        // `%P` is matched before the modifier scan, so it takes none of them.
+        assert_eq!(render("%P", 0.5).as_deref(), Some("0.00\n"));
+        assert_eq!(render("%0P", 0.5), None);
+        assert_eq!(render("%lP", 0.5), None);
+        // Literals, `%%`, and a `%` with nothing after it.
+        assert_eq!(render("a%%b\tc", 0.5).as_deref(), Some("a%b\tc\n"));
+        assert_eq!(render("%", 0.5).as_deref(), Some("%\n"));
+        assert_eq!(render("", 0.5).as_deref(), Some("\n"));
+        // User and system are zero until TD-OILS10; `%P` follows them.
+        assert_eq!(render("%0U %0S %2U", 0.5).as_deref(), Some("0 0 0.00\n"));
+
+        // A bad directive suppresses the whole report, including the part
+        // already rendered.
+        assert_eq!(render("ok %R then %z", 0.5), None);
+        // The character named is whatever bash's `*s` would find, so a format
+        // that ran out mid-directive names the NUL.
+        assert_eq!(
+            run("TIMEFORMAT='ok %R then %z'; { time :; } 2>&1").0,
+            "osh: TIMEFORMAT: `z': invalid format character\n"
+        );
+        assert_eq!(
+            run("TIMEFORMAT='%l'; { time :; } 2>&1").0,
+            "osh: TIMEFORMAT: `\0': invalid format character\n"
+        );
+        assert_eq!(
+            run("TIMEFORMAT='%5'; { time :; } 2>&1").0,
+            "osh: TIMEFORMAT: `\0': invalid format character\n"
+        );
+    }
+
+    #[test]
+    fn timeformat_is_read_after_the_command_and_never_fatal() {
+        // Read when the report is printed, so a `$TIMEFORMAT` the timed command
+        // set itself is the one used.
+        let (o, _) = run("TIMEFORMAT='A=%0U'; { time { TIMEFORMAT='B=%0U'; :; } ; } 2>&1");
+        assert_eq!(o, "B=0\n");
+        // A bad format is a `builtin_error`, not a `report_error`: neither
+        // errexit nor posix mode ends the shell on it, and `$?` is untouched.
+        let (o2, s2) = run("set -e; TIMEFORMAT='%z'; { time :; } 2>&1; echo after rc=$?");
+        assert_eq!(o2, "osh: TIMEFORMAT: `z': invalid format character\nafter rc=0\n");
+        assert_eq!(s2, 0);
+        let (o3, _) = run("set -o posix; TIMEFORMAT='%z'; { time :; } 2>&1; echo after");
+        assert_eq!(o3, "osh: TIMEFORMAT: `z': invalid format character\nafter\n");
     }
 
     #[test]
@@ -56221,6 +56462,17 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 .contains("\nreal\t"),
             "a redirect is a command"
         );
+        // A `$TIMEFORMAT` displaces that form, which is the only way to get an
+        // elapsed figure out of a posix bare `time` — and the figure is the
+        // *shell's* lifetime, not the null command's zero span, so it does not
+        // shrink as the script goes on.
+        let (o, _) = run(
+            "set -o posix\nTIMEFORMAT='%3R'\n{ time ; } 2>&1\n\
+             for i in 1 2 3; do for j in 1 2 3 4 5 6 7 8 9; do :; done; done\n{ time ; } 2>&1",
+        );
+        let mut it = o.lines().map(|l| l.parse::<f64>().expect("elapsed"));
+        let (first, second) = (it.next().expect("first"), it.next().expect("second"));
+        assert!(second >= first, "lifetime went backwards: {o:?}");
         // Outside the mode a bare `time` times the null command as usual.
         assert!(run("{ time ; } 2>&1").0.contains("\nreal\t"));
     }

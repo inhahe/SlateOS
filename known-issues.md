@@ -12631,7 +12631,43 @@ printer that are deliberately not reproduced. Regression tests:
 `declare_small_f_prints_body`, `type_function_prints_body`,
 `bare_set_lists_functions`, and the `unparse::tests` round-trip suite.
 
-### TD-OILS19. `osh` alias expansion applies across `run_source` calls (input reads), not within a single parsed unit — OPEN (minor fidelity gap; interactive/REPL use unaffected)
+### TD-OILS19. `osh` alias expansion applies across `run_source` calls (input reads), not within a single parsed unit — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
+
+**Resolved on both counts, and a third found on the way.** The unit-at-a-time
+half went away with `IncrementalParser` (built for `shopt -s extglob`, which has
+the same "an option set by unit N governs unit N+1" shape): an alias defined on
+one line now takes effect for the next, inside a sourced file, inside a function
+body, and inside a `$( … )` body, while `alias x=…; x` on *one* line still does
+not — all verified against the reference bash.
+
+What was left was **where** an alias may be expanded. osh tested only the
+previous token, which is not bash's rule: bash's `command_token_position` is a
+*parser* question, so the answer depends on state the previous token alone does
+not carry. Six divergences fell out of the difference, all now fixed by
+`lexer.rs`'s `AliasOut`/`Prev` state (the running half of the test) beside
+`CMD_INTRODUCERS` (the token half):
+
+* A `)` ends a `case` arm's pattern, so the arm's **body** begins there —
+  `case x in x) c;; esac` never expanded `c`.
+* `;;`, `;&` and `;;&` end an arm, and what follows one is the next arm's
+  **pattern**. osh expanded it; bash does not, which is exactly why bash's
+  `command_token_position` excludes the three from an otherwise shared list.
+* `time` puts a command after it, and so do the `-p`/`--` that belong to it
+  (bash's `TIMEOPT`/`TIMEIGN`).
+* An **assignment word** precedes the command word, so `x=1 c` expands `c`.
+* A **leading redirection** does too, for as long as the command has been
+  nothing but redirections (bash's `PST_REDIRLIST`): `>f c`, `2>&1 c`,
+  `{v}>f c` and a leading here-document all expand, but `x=1 >f c` does not,
+  because reading the assignment word ended the run.
+* A reserved word only introduces a command where a reserved word was
+  *acceptable*. osh had `echo if c` expanding `c` — `if` there is an ordinary
+  argument, and bash prints `if c`.
+
+Covered by `alias-expansion-happens-only-where-a-command-word-can-begin.sh` and
+a lib test. The original text follows.
+
+---
+
 
 **Where:** `userspace/oils/src/interp.rs` (`run_source` → `parse_with_aliases`),
 `userspace/oils/src/lexer.rs` (`expand_aliases`), `userspace/oils/src/main.rs`

@@ -43870,6 +43870,55 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn alias_expands_only_where_a_command_word_can_begin() {
+        // bash's `command_token_position`, which is not simply "after a
+        // separator". Each case runs the marker `c`, so `HIT` means the alias
+        // fired and `c` means it did not.
+        let cases: &[(&str, &str)] = &[
+            // A reserved word puts a command after it …
+            ("if :; then c; fi", "HIT\n"),
+            ("while :; do c; break; done", "HIT\n"),
+            ("! c", "HIT\n"),
+            // … but only where a reserved word was acceptable in the first
+            // place: these are `echo` with two arguments.
+            ("echo if c", "if c\n"),
+            ("echo while c", "while c\n"),
+            // `time` counts, and so do the options that belong to it.
+            ("{ time c ; } 2>/dev/null", "HIT\n"),
+            ("{ time -p c ; } 2>/dev/null", "HIT\n"),
+            ("{ time -- c ; } 2>/dev/null", "HIT\n"),
+            // A `)` ends a `case` pattern, so the arm's body begins there.
+            ("case x in x) c;; esac", "HIT\n"),
+            ("case y in x) :;; y) c;; esac", "HIT\n"),
+            ("case x in (x) c;; esac", "HIT\n"),
+            // Assignment words precede the command word …
+            ("x=1 c", "HIT\n"),
+            ("x=1 y=2 c", "HIT\n"),
+            // … but only where an assignment was acceptable.
+            ("echo x=1 c", "x=1 c\n"),
+            // A leading redirection does too, for as long as the command has
+            // been nothing but redirections.
+            ("</dev/null c", "HIT\n"),
+            ("2>/dev/null c", "HIT\n"),
+            ("{v}>/dev/null c", "HIT\n"),
+            ("x=1 </dev/null c 2>/dev/null", ""),
+        ];
+        for (src, want) in cases {
+            assert_eq!(&run_with_aliases("alias c='echo HIT'", src).0, want, "{src}");
+        }
+        // A `;;` ends a `case` arm, and what follows one is the next arm's
+        // *pattern* — never a command, so never expanded.
+        assert_eq!(
+            run_with_aliases(
+                "alias pat=zz",
+                "case zz in a) echo wrong;; pat) echo expanded;; *) echo literal;; esac"
+            )
+            .0,
+            "literal\n"
+        );
+    }
+
+    #[test]
     fn expand_aliases_shopt_is_recognized() {
         // `shopt -s/-u/-q expand_aliases` is a valid bash option name and must
         // not error with "invalid shell option name" (regression).

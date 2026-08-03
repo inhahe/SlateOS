@@ -1050,14 +1050,160 @@ pub fn lex_replacement_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
     lx.read_word_verbatim(true)
 }
 
-/// Reserved words after which a new simple command begins — so a following
-/// word is in "command position" and eligible for alias expansion.
+/// Reserved words after which a new command begins, so a word following one of
+/// them is in "command position". bash's `reserved_word_acceptable` list, less
+/// `time` (which is [`Prev::Time`], because its own `-p`/`--` extend it) and
+/// less the punctuation, which is matched as operators.
+///
+/// `}`, `done`, `esac` and `fi` are in the list even though the grammar always
+/// wants a separator after them; bash lists them, and a word can never actually
+/// follow one without a syntax error, so they cost nothing either way.
 const CMD_INTRODUCERS: &[&[u8]] = &[
-    b"if", b"then", b"elif", b"else", b"while", b"until", b"do", b"{", b"!",
+    b"if", b"then", b"elif", b"else", b"fi", b"while", b"until", b"do", b"done", b"esac", b"{",
+    b"}", b"!",
 ];
 
-/// True when a word following `prev` (the previous kept token) starts a simple
-/// command. Bash only alias-expands the command word of a simple command.
+/// What the previously kept token was, to the precision the command-position
+/// test needs. This is osh's reading of bash's `last_read_token`, which is a
+/// *parser* token — so a word's classification depends on where it sat, and the
+/// state has to be carried rather than read back off the output stream.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Prev {
+    /// Nothing yet, or a separator: a command begins here.
+    Start,
+    /// `;;`, `;&` or `;;&`. A reserved word would be accepted here, but what
+    /// actually follows is the *next `case` arm's pattern* — which is why bash
+    /// excludes these three from `command_token_position` alone.
+    CaseArmEnd,
+    /// A reserved word from [`CMD_INTRODUCERS`].
+    Introducer,
+    /// The `time` reserved word, or one of the `-p`/`--` that belong to it.
+    Time,
+    /// An assignment word (`n=v`, `n+=v`, `n=(…)`) in a position where one was
+    /// accepted. A command word may still follow it.
+    Assignment,
+    /// A redirection operator: what follows is its target, never a command.
+    RedirOp,
+    /// The word that was a redirection's target.
+    RedirTarget,
+    /// An ordinary word, or anything else after which no command begins.
+    Other,
+}
+
+/// The output of an alias pass, plus the running state its command-position
+/// test needs. The three vectors are parallel and always pushed together.
+struct AliasOut {
+    toks: Vec<Tok>,
+    lines: Vec<u32>,
+    /// For each output token, the index of the input token it came from, or
+    /// `None` when an alias's replacement text spliced it in.
+    origin: Vec<Option<usize>>,
+    prev: Prev,
+    /// bash's `PST_REDIRLIST`: everything read of the simple command so far has
+    /// been a redirection, so the word after one is still the *command* word.
+    /// Reading any other word clears it, which is why `>f c` alias-expands `c`
+    /// but `x=1 >f c` does not.
+    redir_list: bool,
+}
+
+impl AliasOut {
+    fn new() -> Self {
+        Self {
+            toks: Vec::new(),
+            lines: Vec::new(),
+            origin: Vec::new(),
+            prev: Prev::Start,
+            redir_list: true,
+        }
+    }
+
+    /// True when a reserved word would be recognised here — bash's
+    /// `reserved_word_acceptable`. It is *not* the same question as command
+    /// position: `x=1 if` is a command named `if`, and `case x in y) …` accepts
+    /// a pattern rather than a reserved word after `;;`.
+    fn reserved_ok(&self) -> bool {
+        matches!(
+            self.prev,
+            Prev::Start | Prev::CaseArmEnd | Prev::Introducer | Prev::Time
+        )
+    }
+
+    /// True when a word here is the command word of a simple command, and so is
+    /// a candidate for alias expansion — bash's `command_token_position`.
+    fn at_command(&self) -> bool {
+        match self.prev {
+            // A reserved word is accepted after `;;`, but a *command* is not.
+            Prev::CaseArmEnd => false,
+            // Assignments precede the command word: `x=1 c` expands `c`.
+            Prev::Assignment => true,
+            // Only while nothing but redirections has been read.
+            Prev::RedirTarget => self.redir_list,
+            _ => self.reserved_ok(),
+        }
+    }
+
+    /// Record `tok`, which has just been pushed, as the new previous token.
+    /// `was_cmd` is what [`Self::at_command`] said about it before the push —
+    /// a word is only a reserved word, or an assignment, where one was allowed.
+    fn advance(&mut self, tok: &Tok, was_cmd: bool) {
+        let reserved_ok = self.reserved_ok();
+        self.prev = match tok {
+            Tok::Newline => Prev::Start,
+            Tok::Op(
+                Op::Pipe
+                | Op::PipeAmp
+                | Op::AndIf
+                | Op::OrIf
+                | Op::Amp
+                | Op::Semi
+                | Op::LParen
+                // A `)` closes a `case` pattern, so the arm's body starts here.
+                | Op::RParen,
+            ) => Prev::Start,
+            Tok::Op(Op::DSemi | Op::SemiAmp | Op::DSemiAmp) => Prev::CaseArmEnd,
+            // A redirection, or one of the two prefixes that introduce one: an
+            // io number (`2>&1`) or a varfd (`{v}>f`). The prefixes are part of
+            // the redirection, so they must not end a run of them — `2>&1 c`
+            // alias-expands `c` exactly as `>f c` does.
+            Tok::Op(_) | Tok::Io(_) | Tok::VarFd(_) => Prev::RedirOp,
+            Tok::ArrayAssign { .. } if was_cmd => Prev::Assignment,
+            Tok::Word(_) if self.prev == Prev::RedirOp => Prev::RedirTarget,
+            Tok::Word(segs) => match segs.as_slice() {
+                [Seg::Lit(w)] if reserved_ok && w.as_slice() == b"time" => Prev::Time,
+                // `time`'s own options, which bash lexes as TIMEOPT/TIMEIGN and
+                // accepts a command after just as it does after `time` itself.
+                [Seg::Lit(w)]
+                    if self.prev == Prev::Time && matches!(w.as_slice(), b"-p" | b"--") =>
+                {
+                    Prev::Time
+                }
+                [Seg::Lit(w)] if reserved_ok && CMD_INTRODUCERS.contains(&w.as_slice()) => {
+                    Prev::Introducer
+                }
+                _ if was_cmd && word_is_assignment(segs) => Prev::Assignment,
+                _ => Prev::Other,
+            },
+            // The body arrives after the delimiter word, and is the tail of the
+            // same redirection — so it leaves the run of them running.
+            Tok::HereDoc(..) => Prev::RedirTarget,
+            // An arithmetic command, an array assignment out of position, …
+            _ => Prev::Other,
+        };
+        // A new command can begin here, so its redirections start over; reading
+        // an actual word of one ends the run.
+        self.redir_list = match self.prev {
+            Prev::Start | Prev::CaseArmEnd | Prev::Introducer | Prev::Time => true,
+            Prev::RedirOp | Prev::RedirTarget => self.redir_list,
+            Prev::Assignment | Prev::Other => false,
+        };
+    }
+}
+
+/// A coarse "does a command begin after `prev`?" test, from the previous token
+/// alone. The *lexer* needs one while tokenizing, where none of the parser state
+/// [`AliasOut`] carries exists yet, and its one caller only wants to know
+/// whether to slurp an unquoted-space array subscript. The alias pass uses
+/// [`AliasOut::at_command`] instead, which is bash's real test.
 fn starts_command(prev: Option<&Tok>) -> bool {
     match prev {
         None | Some(Tok::Newline) => true,
@@ -1114,36 +1260,18 @@ pub fn expand_aliases_tracked(
     opts: ParseOpts,
 ) -> (Vec<Tok>, Vec<u32>, Vec<Option<usize>>) {
     let mut active = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
-    let mut out_lines = Vec::new();
-    let mut out_origin = Vec::new();
-    expand_aliases_inner(
-        toks,
-        lines,
-        aliases,
-        opts,
-        &mut active,
-        &mut out,
-        &mut out_lines,
-        &mut out_origin,
-        true,
-    );
-    (out, out_lines, out_origin)
+    let mut out = AliasOut::new();
+    expand_aliases_inner(toks, lines, aliases, opts, &mut active, &mut out, true);
+    (out.toks, out.lines, out.origin)
 }
 
-// Three parallel output vectors plus the recursion's bookkeeping. Bundling them
-// into a struct would only move the same fields behind another indirection, and
-// this is a private helper with exactly one caller pair.
-#[allow(clippy::too_many_arguments)]
 fn expand_aliases_inner(
     toks: &[Tok],
     lines: &[u32],
     aliases: &std::collections::BTreeMap<Str, Str>,
     opts: ParseOpts,
     active: &mut std::collections::BTreeSet<Str>,
-    out: &mut Vec<Tok>,
-    out_lines: &mut Vec<u32>,
-    out_origin: &mut Vec<Option<usize>>,
+    out: &mut AliasOut,
     // False inside an alias's replacement text: those tokens have no counterpart
     // in the caller's stream, so they record origin `None`.
     from_input: bool,
@@ -1155,7 +1283,7 @@ fn expand_aliases_inner(
         // The source line of this token; expanded replacement tokens inherit it
         // so post-alias line numbers stay anchored to the alias's call site.
         let tok_line = lines.get(i).copied().unwrap_or(1);
-        let at_cmd = force || starts_command(out.last());
+        let at_cmd = force || out.at_command();
         force = false;
         if at_cmd
             && let Tok::Word(segs) = tok
@@ -1171,19 +1299,9 @@ fn expand_aliases_inner(
             }
             // Replacement tokens all inherit the alias word's source line.
             let repl_lines = vec![tok_line; repl.len()];
-            let mark = out.len();
+            let mark = out.toks.len();
             active.insert(name.clone());
-            expand_aliases_inner(
-                &repl,
-                &repl_lines,
-                aliases,
-                opts,
-                active,
-                out,
-                out_lines,
-                out_origin,
-                false,
-            );
+            expand_aliases_inner(&repl, &repl_lines, aliases, opts, active, out, false);
             active.remove(name);
             // The *first* token of the replacement stands in for the alias word
             // itself, so it keeps the alias word's origin; only the tokens after
@@ -1193,16 +1311,17 @@ fn expand_aliases_inner(
             // command. An empty replacement contributes no token and needs no
             // mark: resuming past it is correct, since it expands to nothing.
             if from_input
-                && let Some(slot) = out_origin.get_mut(mark)
+                && let Some(slot) = out.origin.get_mut(mark)
             {
                 *slot = Some(i);
             }
             force = val.ends_with(b" ") || val.ends_with(b"\t");
             continue;
         }
-        out.push(tok.clone());
-        out_lines.push(tok_line);
-        out_origin.push(if from_input { Some(i) } else { None });
+        out.toks.push(tok.clone());
+        out.lines.push(tok_line);
+        out.origin.push(if from_input { Some(i) } else { None });
+        out.advance(tok, at_cmd);
     }
 }
 

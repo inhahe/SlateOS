@@ -22056,22 +22056,31 @@ impl Shell {
         if list {
             return self.trap_list(out, redir);
         }
-        // With no action operands (or `-p`), print the current traps.
-        let first_is_spec = rest.first().is_some_and(|s| normalize_sigspec(s).is_some());
-        if print || rest.is_empty() || first_is_spec {
+        // `-p`, or nothing to act on at all, prints the current traps.
+        if print || rest.is_empty() {
             return self.trap_print(rest, out, redir);
         }
 
-        // Otherwise the first operand is the action; the rest are sigspecs.
-        let action = &rest[0];
-        let specs = &rest[1..];
+        // A *lone* operand is not an action but a signal to reset: bash's "if
+        // arg is absent and a single signal_spec is supplied, the trap for that
+        // signal is reset to its original disposition". So `trap EXIT` takes an
+        // EXIT trap away rather than showing it, and only a second operand makes
+        // the first one an action — which is why `trap ":" USR1 INT` traps both
+        // signals but `trap USR1 INT` traps `INT` with the *command* `USR1`.
+        //
+        // A lone operand that names no signal has no reading left, so it falls
+        // through to the same usage error an action with no signals gets: that
+        // is what `trap -`, `trap ""` and `trap BOGUS` all are.
+        let lone_spec = rest.len() == 1 && normalize_sigspec(&rest[0]).is_some();
+        let (action, specs): (&[u8], &[Str]) =
+            if lone_spec { (b"-", rest) } else { (rest[0].as_slice(), &rest[1..]) };
         if specs.is_empty() {
             // A pure builtin usage message: bash's `builtin_usage()` prints
             // `<builtin>: usage: …` with no `<name>: line N:` shell prefix.
             self.emit_stderr(b"trap: usage: trap [-lp] [[arg] signal_spec ...]\n");
             return 2;
         }
-        let reset = action.as_slice() == b"-";
+        let reset = action == b"-";
         let mut status = 0;
         for spec in specs {
             match normalize_sigspec(spec) {
@@ -22088,7 +22097,7 @@ impl Shell {
                     if reset {
                         self.traps.remove(&norm);
                     } else {
-                        self.traps.insert(norm, action.clone());
+                        self.traps.insert(norm, action.to_vec());
                     }
                 }
                 None => {
@@ -55590,6 +55599,34 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // subshell (no `functrace`), yet its string is still listable there.
         let (o6, _) = run("trap 'echo dbg' DEBUG; (trap -p DEBUG)");
         assert_eq!(o6, "trap -- 'echo dbg' DEBUG\n");
+    }
+
+    /// `trap` reads its operands by *count*, not by shape: a lone operand is a
+    /// signal to reset, and only a second operand makes the first an action.
+    #[test]
+    fn trap_with_a_lone_signal_resets_it_rather_than_showing_it() {
+        // A lone signal name takes the trap away — it does not print it.
+        assert_eq!(run("trap 'echo T' USR1; trap USR1; trap -p USR1; echo done").0, "done\n");
+        // …including EXIT, which would otherwise fire.
+        assert_eq!(run("(trap 'echo E' EXIT; trap EXIT; echo in)").0, "in\n");
+        assert_eq!(run("(trap 'echo E' EXIT; echo in)").0, "in\nE\n");
+        // A number names the same signal, so a lone `0` is EXIT.
+        assert_eq!(run("(trap 'echo E' EXIT; trap 0; echo in)").0, "in\n");
+        // A *second* operand makes the first one the action, even when it is
+        // itself the name of a signal.
+        assert_eq!(run("trap USR1 INT; trap -p INT").0, "trap -- 'USR1' SIGINT\n");
+        // The option terminator does not change the count.
+        assert_eq!(run("trap 'echo T' INT; trap -- INT; trap -p INT; echo done").0, "done\n");
+        // A lone operand that names no signal has no reading left, so it is the
+        // usage error an action with no signals would be.
+        for a in ["BOGUS", "-", "", ":", "echo hi"] {
+            assert_eq!(run(&format!("trap '{a}'")).1, 2, "{a}");
+        }
+        // Resetting one of several leaves the others alone.
+        assert_eq!(
+            run("trap 'echo A' USR1; trap 'echo B' USR2; trap USR2; trap -p").0,
+            "trap -- 'echo A' SIGUSR1\n"
+        );
     }
 
     #[test]

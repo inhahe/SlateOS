@@ -5834,6 +5834,17 @@ impl Shell {
             }
             let prog = match unit {
                 Ok(p) => p,
+                // A failure that costs only its own unit is reported and stepped
+                // over: the reader carries on with the next unit, and `$?` is 1
+                // rather than a syntax error's 2. Only a malformed array literal
+                // reaches this, because only there has bash's reader already
+                // collected a balanced `( … )` it can resume past. See
+                // [`crate::parser::ParseError::recoverable`].
+                Err(e) if e.recoverable => {
+                    self.berrln(&self.format_parse_error(&e, src, map));
+                    self.last_status = 1;
+                    continue;
+                }
                 Err(e) => {
                     self.berrln(&self.format_parse_error(&e, src, map));
                     return self.parse_error_flow(&e);
@@ -50608,6 +50619,74 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("{ declare -i \"a[x y]=v\"; } 2>&1; echo after");
         assert_eq!(o, "osh: x y: syntax error in expression (error token is \"y\")\n");
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn a_malformed_array_literal_costs_only_its_own_unit() {
+        // An operator where an array element belongs is a syntax error that
+        // bash's *reader* catches, not its grammar: the reader has already
+        // collected the balanced `( … )`, so it has somewhere to resume. The
+        // unit holding the literal is dropped, `$?` becomes 1, and reading goes
+        // on — where an ordinary syntax error abandons the whole input with 2.
+        // osh used to report a bespoke message and exit 2, losing every later
+        // line (TD-OILS-BAD-ARRAY-LITERAL-IS-FATAL).
+        let (o, s) = run("exec 2>&1\na=(x; y)\necho after=$?");
+        assert_eq!(o, "osh: syntax error near unexpected token `;'\nosh: `a=(x; y)'\nafter=1\n");
+        assert_eq!(s, 0);
+        // The *unit* dies, not the line: `;` chains `echo one` into the same
+        // unit, so it never runs either.
+        let (o, s) = run("exec 2>&1\necho one; a=(x; y); echo mid\necho next=$?");
+        assert_eq!(
+            o,
+            "osh: syntax error near unexpected token `;'\n\
+             osh: `echo one; a=(x; y); echo mid'\nnext=1\n"
+        );
+        assert_eq!(s, 0);
+        // Recovery resumes past the literal's closing `)`, so a literal spanning
+        // lines is blamed where the operator is and only its own unit is lost.
+        let (o, s) = run("exec 2>&1\na=(x\ny; z)\necho after=$?");
+        assert_eq!(o, "osh: syntax error near unexpected token `;'\nosh: `y; z)'\nafter=1\n");
+        assert_eq!(s, 0);
+        // bash names the longest operator it finds.
+        for (src, tok) in [
+            ("a=(x;; y)", ";;"),
+            ("a=(x&& y)", "&&"),
+            ("a=(x|& y)", "|&"),
+            ("a=(x<<< y)", "<<<"),
+            ("a=(x<& y)", "<&"),
+            ("a=(x( y)", "("),
+        ] {
+            let (o, _) = run(&format!("exec 2>&1\n{src}\necho after=$?"));
+            assert_eq!(
+                o,
+                format!("osh: syntax error near unexpected token `{tok}'\nosh: `{src}'\nafter=1\n"),
+                "for {src}"
+            );
+        }
+        // An *unterminated* literal is the same class — status 1, not a syntax
+        // error's 2 — which is why every other unterminated construct still
+        // ends the shell with 2 and this one does not. So is anything else that
+        // goes wrong while the literal is being collected: an unterminated
+        // quote inside one is worth 1 where the same quote outside is worth 2.
+        let (o, s) = run("exec 2>&1\na=(x");
+        assert_eq!(o, "osh: unexpected EOF while looking for matching `)'\n");
+        assert_eq!(s, 1);
+        let (o, s) = run("exec 2>&1\na=(x 'unterm");
+        assert_eq!(o, "osh: unexpected EOF while looking for matching `''\n");
+        assert_eq!(s, 1);
+        // A bad element outranks the missing `)`, and recovery then resumes just
+        // past the element rather than swallowing the rest: `a=(x <<EOF` names
+        // `<<` and leaves the following lines to be read as ordinary commands
+        // instead of taking them as a here-document body.
+        let (o, s) = run("exec 2>&1\na=(x; y\necho after");
+        assert_eq!(o, "osh: syntax error near unexpected token `;'\nosh: `a=(x; y'\nafter\n");
+        assert_eq!(s, 0);
+        let (o, _) = run("exec 2>&1\na=(x <<EOF\necho body\nEOF");
+        assert_eq!(
+            o,
+            "osh: syntax error near unexpected token `<<'\n\
+             osh: `a=(x <<EOF'\nbody\nosh: EOF: command not found\n"
+        );
     }
 
     #[test]

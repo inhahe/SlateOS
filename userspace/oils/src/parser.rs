@@ -120,13 +120,37 @@ pub struct ParseError {
     /// the substitution empty and the command running (see
     /// TD-OILS-CMDSUB-ERR-FATALITY item 1, still open).
     pub fatal: bool,
+    /// True when the failure costs only the parse unit that holds it: the shell
+    /// reports it, scores `$?` **1**, and goes on reading the next unit — where
+    /// an ordinary syntax error scores 2 and abandons the rest of the input.
+    ///
+    /// This is bash's *reader* speaking rather than its grammar. Only a malformed
+    /// array literal (`a=(x; y)`, or an unterminated `a=(x`) reaches it: bash's
+    /// reader collects the balanced `( … )` before anything looks inside, so a
+    /// failure there has a natural place to resume — just past the literal —
+    /// which a grammar error does not.
+    ///
+    /// ```sh
+    /// a=(x; y); echo after=$?   # nothing on this unit runs …
+    /// echo next=$?              # … but this one does, and sees 1
+    /// ```
+    ///
+    /// The *unit* is what dies, not the line: `echo one; a=(x; y)` never prints
+    /// `one`, because `;` chains it into the same unit.
+    pub recoverable: bool,
 }
 
 impl ParseError {
     /// A parse error with no known line (the common construction site inside
     /// the grammar; [`parse_tokens`] stamps the line afterwards).
     pub fn new(msg: &(impl bytes::PushBytes + ?Sized)) -> Self {
-        Self { msg: bfmt![msg], line: None, fatal: false }
+        Self { msg: bfmt![msg], line: None, fatal: false, recoverable: false }
+    }
+
+    /// Mark this error as costing only its own parse unit. See [`Self::recoverable`].
+    fn only_this_unit(mut self) -> Self {
+        self.recoverable = true;
+        self
     }
 
     /// Mark this error as raised from inside a `$( … )`/`<( … )` body, so the
@@ -180,6 +204,7 @@ impl From<crate::lexer::LexError> for ParseError {
             msg: e.msg,
             line: e.line,
             fatal: false,
+            recoverable: e.recoverable,
         }
     }
 }
@@ -884,6 +909,28 @@ impl IncrementalParser {
                 self.split_unit_lines(next_orig);
                 Some(Ok(Program { items }))
             }
+            // Only this unit dies, so resync past the newline that ends it and
+            // let the next call parse the unit after — where the arm below
+            // abandons everything left. See [`ParseError::recoverable`].
+            Err(e) if e.recoverable => {
+                let mut i = self.wpos;
+                while i < self.work.len() && !matches!(self.work.get(i), Some(Tok::Newline)) {
+                    i = i.saturating_add(1);
+                }
+                self.wpos = self.work.len().min(i.saturating_add(1));
+                let resume = self
+                    .work_origin
+                    .get(self.wpos..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .flatten()
+                    .next()
+                    .copied()
+                    .unwrap_or(self.orig.len());
+                self.split_unit_lines(resume);
+                self.pos = resume;
+                Some(Err(e))
+            }
             Err(e) => {
                 // bash has already *read* the line it could not parse, so it is
                 // in the history before the diagnostic is printed.
@@ -1442,6 +1489,9 @@ impl Parser {
             // TD-OILS-ANSIC-ERROR-SPELLING in known-issues.md.)
             Some(Tok::Word(segs)) => word_from_segs(segs, self.opts)
                 .map_or_else(|_| b"word".to_vec(), |w| crate::unparse::word_src(&w)),
+            // A construct the lexer refused already carries the spelling to
+            // blame — the operator that stood where an array element belonged.
+            Some(Tok::Invalid(op)) => op.clone(),
             // Anything else (a newline, a here-doc body) has no word spelling.
             _ => b"word".to_vec(),
         }
@@ -1455,11 +1505,18 @@ impl Parser {
         if self.peek().is_none() {
             ParseError::new("syntax error: unexpected end of file")
         } else {
-            ParseError::new(&bfmt![
+            let e = ParseError::new(&bfmt![
                 b"syntax error near unexpected token `",
                 self.token_display(),
                 b"'"
-            ])
+            ]);
+            // A refused construct costs only its own unit, where a grammar error
+            // costs the rest of the input. See [`ParseError::recoverable`].
+            if matches!(self.peek(), Some(Tok::Invalid(_))) {
+                e.only_this_unit()
+            } else {
+                e
+            }
         }
     }
 

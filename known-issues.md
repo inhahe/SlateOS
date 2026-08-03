@@ -30037,7 +30037,7 @@ delay blew through `osh-bash-diff.py`'s 20 s per-case timeout and failed the
 whole corpus run. Cases wanting a busy-wait should still keep the count small or
 use `sleep`.
 
-### TD-OILS-BAD-ARRAY-LITERAL-IS-FATAL. an operator inside `name=( … )` aborts the script instead of discarding one unit — OPEN — 2026-08-03
+### TD-OILS-BAD-ARRAY-LITERAL-IS-FATAL. an operator inside `name=( … )` aborts the script instead of discarding one unit — ✅ **RESOLVED 2026-08-03** — 2026-08-03
 
 **Where:** `userspace/oils/src/lexer.rs` — `Lexer::try_array_assign`, the
 `segs.is_empty()` arm that returns
@@ -30109,3 +30109,42 @@ the failure mode is the bad kind: a script with one bad literal loses every
 command after it *and* every command before it on other lines, where bash loses
 only the one unit. It also makes osh's diagnostic unrecognisable to anyone
 grepping for bash's wording.
+
+**Fixed 2026-08-03**, exactly as the three parts above describe.
+
+* `lexer.rs`: `Tok::Invalid(Str)` carries the spelling to blame.
+  `try_array_assign` no longer returns `Err` on a bad element — it records the
+  first offending operator and keeps consuming to the literal's closing `)`,
+  reusing the loop that already knows the literal's extent rather than adding a
+  second paren scanner. `take_operator` names the token (longest-first against
+  `OPERATOR_SPELLINGS`) and always consumes at least one character, so the loop
+  cannot spin on something that is not an operator.
+
+  Probing widened the bug past what was first logged: *every* reader error
+  inside a literal is worth 1, not just a bad operator. So the unterminated
+  `eof_matching(')')` is marked `.recoverable()` (making `a=(x` worth 1), and so
+  is anything `read_array_elem_word` raises — an unterminated `'`, `"`, `${`,
+  backquote or `$(` inside a literal, each worth 1 where the identical construct
+  *outside* one is still worth 2.
+
+  A recorded element also outranks a missing `)`, and then recovery rewinds to
+  just past that element instead of consuming to end of input: `a=(x <<EOF` /
+  `echo body` / `EOF` blames `<<` and runs `echo body` as an ordinary command
+  rather than swallowing it as a here-document body, exactly as bash does. The
+  rewind only moves the cursor, which is safe because `Lexer::cur_line` derives
+  the line from it.
+* `parser.rs`: `ParseError::recoverable`, carried across from `LexError`.
+  `token_display` spells a `Tok::Invalid`, so `unexpected_here` builds bash's
+  wording with no special case, and flags the error recoverable. `next_unit`
+  gained an arm ahead of the general `Err` one that resyncs past the unit's
+  closing newline instead of abandoning the input.
+* `interp.rs`: `run_source_flow_units` answers a recoverable error with
+  `last_status = 1` and `continue`, leaving `parse_error_flow` (status 2 /
+  abandon) for everything else.
+
+Verified against bash 5.2.37 on all 14 operator spellings, the multi-line
+literal, every unterminated construct that can sit inside a literal, and every
+context a literal appears in (`declare -a`, `+=`, inside `if`/a function/a
+pipeline/`&&`). Lib test
+`a_malformed_array_literal_costs_only_its_own_unit`; corpus case
+`a-malformed-array-literal-costs-only-its-own-unit.sh`.

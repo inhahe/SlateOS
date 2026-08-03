@@ -76,18 +76,28 @@ pub struct LexError {
     /// so the innermost unclosed construct — the one that failed first — is the
     /// one whose delimiter survives, which is the one wanted.
     pub looking_for: Option<char>,
+    /// True when the failure costs only the parse unit that holds it, leaving the
+    /// shell to read on. See [`crate::parser::ParseError::recoverable`], which
+    /// this becomes.
+    pub recoverable: bool,
 }
 
 impl LexError {
     /// A lexer error with no line preference; the caller's fallback applies.
     pub(crate) fn new(msg: &(impl bytes::PushBytes + ?Sized)) -> Self {
-        Self { msg: bfmt![msg], line: None, looking_for: None }
+        Self { msg: bfmt![msg], line: None, looking_for: None, recoverable: false }
     }
 
     /// Fill in the reporting line if the raise site did not already choose one.
     /// Never overwrites: an outer construct must not claim an inner one's line.
     pub(crate) fn at(mut self, line: u32) -> Self {
         self.line.get_or_insert(line);
+        self
+    }
+
+    /// Mark this error as costing only its own parse unit. See [`Self::recoverable`].
+    pub(crate) fn recoverable(mut self) -> Self {
+        self.recoverable = true;
         self
     }
 }
@@ -111,8 +121,20 @@ fn eof_matching(close: char) -> LexError {
         msg: bfmt![b"unexpected EOF while looking for matching `", close, b"'"],
         line: None,
         looking_for: Some(close),
+        recoverable: false,
     }
 }
+
+/// The shell operators, longest first, as bash spells them when it names one in
+/// `syntax error near unexpected token \`…'`.
+///
+/// Longest-first order is what makes the scan pick `;;&` over `;;` over `;`, the
+/// way the main token loop's nested lookahead does. Only used to name a token in
+/// a diagnostic — the loop itself still recognises operators structurally.
+const OPERATOR_SPELLINGS: [&str; 21] = [
+    ";;&", "<<<", "<<-", "&&", "||", ";;", ";&", "|&", "<<", ">>", "<&", ">&", "<>", ">|", ";",
+    "&", "|", "<", ">", "(", ")",
+];
 
 /// Shell operators recognised outside of words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +263,17 @@ pub enum Tok {
         append: bool,
         elems: Vec<Vec<Seg>>,
     },
+    /// A construct the lexer refused, standing in for it so that tokenizing can
+    /// carry on past it. Holds the spelling of the token to blame.
+    ///
+    /// Only an array literal produces one today (`a=(x; y)` — an operator where
+    /// an element belongs). bash reaches such a literal with its reader, which
+    /// has already collected the balanced `( … )`, so a failure *inside* it costs
+    /// only the parse unit that holds it: the shell reports the usual `syntax
+    /// error near unexpected token` line, scores `$?` 1, and goes on reading.
+    /// Returning `Err` here instead would end the whole token stream and take
+    /// every later line with it. See [`crate::parser::ParseError::recoverable`].
+    Invalid(Str),
 }
 
 /// The words after which a reserved word — and so an arithmetic command — is
@@ -1941,6 +1974,12 @@ impl Lexer {
         self.pos = eq_at + 2;
         let open = self.cur_line();
         let mut elems: Vec<Vec<Seg>> = Vec::new();
+        // The first operator found where an element belongs, and the offset just
+        // past it. Recorded rather than returned so the loop still runs to the
+        // literal's closing `)`: bash's reader collects the balanced `( … )`
+        // before looking inside it, so everything after the literal must still
+        // tokenize. See [`Tok::Invalid`].
+        let mut bad: Option<(Str, usize)> = None;
         loop {
             while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r')) {
                 self.pos += 1;
@@ -1951,7 +1990,17 @@ impl Lexer {
                     break;
                 }
                 None => {
-                    return Err(eof_matching(')').at(open));
+                    // A literal that never closes still blames the bad element
+                    // ahead of the missing `)`, and resumes right after it —
+                    // `a=(x <<EOF` / `body` / `EOF` names `<<` and then runs
+                    // `body` and `EOF` as commands, rather than swallowing them
+                    // as a here-document. Rewinding is safe because the line
+                    // counter is derived from the cursor (see [`Self::cur_line`]).
+                    if let Some((op, resume)) = bad {
+                        self.pos = resume;
+                        return Ok(Some(Tok::Invalid(op)));
+                    }
+                    return Err(eof_matching(')').at(open).recoverable());
                 }
                 Some('#') => {
                     while !matches!(self.peek(), None | Some('\n')) {
@@ -1959,13 +2008,27 @@ impl Lexer {
                     }
                 }
                 _ => {
-                    let segs = self.read_array_elem_word()?;
+                    // Whatever goes wrong while the literal is being collected
+                    // costs only this unit, not the input — an unterminated
+                    // quote, `${`, backquote or `$(` inside a literal is worth 1
+                    // under bash where the same thing outside one is worth 2.
+                    let segs = self.read_array_elem_word().map_err(LexError::recoverable)?;
                     if segs.is_empty() {
-                        return Err(LexError::new("unexpected operator in array assignment"));
+                        // An operator (or, defensively, anything else the word
+                        // reader could not start on). Step over it either way, so
+                        // the loop cannot spin.
+                        let op = self.take_operator();
+                        if bad.is_none() {
+                            bad = Some((op, self.pos));
+                        }
+                    } else if bad.is_none() {
+                        elems.push(segs);
                     }
-                    elems.push(segs);
                 }
             }
+        }
+        if let Some((op, _)) = bad {
+            return Ok(Some(Tok::Invalid(op)));
         }
         Ok(Some(Tok::ArrayAssign {
             name,
@@ -2172,6 +2235,29 @@ impl Lexer {
     /// array-literal tokenization (`declare -A m=([ x ]=v)` keys on ` x `).
     fn read_array_elem_word(&mut self) -> Result<Vec<Seg>, LexError> {
         self.read_word_inner(false, true, false)
+    }
+
+    /// Consume the shell operator at the current position and return its
+    /// spelling, for a diagnostic that has to name it.
+    ///
+    /// Always consumes at least one character, so a caller looping until it makes
+    /// progress cannot spin on something that is not an operator at all. Such a
+    /// character can only reach here through a word reader that declined to start
+    /// on it, and naming it verbatim is still the most useful thing to say.
+    fn take_operator(&mut self) -> Str {
+        for op in OPERATOR_SPELLINGS {
+            if op.chars().enumerate().all(|(i, c)| self.at(self.pos.saturating_add(i)) == Some(c)) {
+                self.pos = self.pos.saturating_add(op.chars().count());
+                return op.as_bytes().to_vec();
+            }
+        }
+        let mut one = Str::new();
+        if let Some(c) = self.peek() {
+            self.pos = self.pos.saturating_add(1);
+            let mut buf = [0u8; 4];
+            one.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+        one
     }
 
     /// Read one word; when `assign_ok`, an array-subscript at the head of the

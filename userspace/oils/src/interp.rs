@@ -529,6 +529,21 @@ fn strip_end_of_options(args: &[Str]) -> &[Str] {
     }
 }
 
+/// bash's `no_options()` — the option scan of a builtin that accepts none
+/// (`eval`, `times`). Returns the offending option letter when the first word is
+/// one, which is `internal_getopt` with an empty option string: a word starting
+/// with `-` is an option attempt unless it is a bare `-` or the `--`
+/// end-of-options marker, and only its *first* letter is reported (`eval -qz`
+/// complains about `-q`). A word with no leading `-` ends the scan, so
+/// `eval echo -q` and `times x` are fine.
+fn no_options_error(args: &[Str]) -> Option<u8> {
+    let first = args.first()?;
+    if !first.starts_with(b"-") || first.as_slice() == b"-" || first.as_slice() == b"--" {
+        return None;
+    }
+    first.get(1).copied()
+}
+
 /// Render an `io::Error` the way bash renders `strerror(errno)` — e.g.
 /// "No such file or directory" rather than the host `std::io::Error` Display,
 /// which on Windows reads "The system cannot find the file specified. (os error
@@ -4055,7 +4070,54 @@ pub struct Shell {
     ///   * `source`/`.` — an `exit` in the sourced script, or in the `RETURN`
     ///     trap that fires when the script finishes;
     ///   * a `mapfile`/`readarray` `-C` callback that ran an `exit`.
+    ///   * a POSIX special builtin whose failure ends a non-interactive
+    ///     posix-mode shell (see [`Shell::posix_special_builtin_abort`]).
     pending_builtin_exit: Option<i32>,
+    /// The failure class the builtin now running reported, when it is one bash
+    /// makes fatal in posix mode. Set by the builtin body, consumed by
+    /// [`Shell::run_builtin_body`]'s teardown — which is the first place that
+    /// knows both the builtin's name and how it was reached. See
+    /// [`BuiltinFailure`].
+    builtin_failure: Option<BuiltinFailure>,
+    /// How many `command` builtins are running right now — bash's
+    /// `executing_command_builtin`, which `.`/`source` consults to decide
+    /// whether a failed open should end a posix-mode shell. It is a *duration*
+    /// and not a property of the call, so `command eval '. /nope'` and a
+    /// `. /nope` inside a script `command .` sourced are spared too, not just
+    /// `command . /nope` itself. Counted rather than flagged so a nested
+    /// `command` restores the outer one's state on the way out.
+    command_builtin_depth: u32,
+    /// bash's `special_builtin_failed`: the simple command that just ran was a
+    /// POSIX special builtin and it failed with a *usage* error
+    /// ([`BuiltinFailure::Usage`]).
+    ///
+    /// Unlike the other three fatal classes this one is not decided inside the
+    /// builtin, because bash checks it at the *node* that ran the command, after
+    /// the ERR trap and only when that node is not return-ignoring. Modelled by
+    /// arming the flag here and testing it in [`Shell::exec_and_or`]:
+    ///
+    /// * every simple command clears it on entry, which is what makes an ERR
+    ///   trap that actually *runs* disarm the abort (`trap ':' ERR` spares
+    ///   `unset -q`; `trap '' ERR` and `trap - ERR`, which run nothing, do not)
+    ///   and what makes `unset -q || true` survive — the `true` clears it;
+    /// * the check only fires for a lone simple command, so a failure whose
+    ///   node is a subshell, a group or a multi-stage pipeline is never
+    ///   re-examined by the enclosing list;
+    /// * [`Shell::usage_suppress`] carries bash's `CMD_IGNORE_RETURN`, and the
+    ///   pipeline's own `!` carries `CMD_INVERT_RETURN`.
+    special_builtin_failed: bool,
+    /// bash's `CMD_IGNORE_RETURN`, as it applies to the usage class only: the
+    /// non-final operands of an `&&`/`||` list and the condition of an
+    /// `if`/`while`/`until`, propagated dynamically into whatever function or
+    /// compound command they invoke.
+    ///
+    /// Deliberately *not* [`Shell::errexit_suppress`], which differs in two
+    /// ways. It also counts `!`, which bash keeps node-local — `! unset -q` is
+    /// spared but `! { unset -q; }` and `! f` are not. And it is a property of
+    /// the running shell, where bash's is a property of the parsed node, so it
+    /// must be dropped wherever bash builds fresh nodes: `eval 'unset -q'||true`
+    /// is fatal, while `eval 'unset -q || true'` is not.
+    usage_suppress: u32,
     /// Set once top-level input asked the shell to terminate (an `exit`, or any
     /// other unwind that reached [`Shell::run_source`]). The read-eval loop polls
     /// it via [`Shell::exit_requested`] and stops reading, so `exit` in a REPL or
@@ -4307,6 +4369,10 @@ impl Shell {
             exit_trap_done: false,
             in_trap: false,
             pending_builtin_exit: None,
+            builtin_failure: None,
+            command_builtin_depth: 0,
+            special_builtin_failed: false,
+            usage_suppress: 0,
             exit_requested: false,
             jobs: Vec::new(),
             current_job: None,
@@ -5359,6 +5425,28 @@ impl Shell {
         map: &LineMap,
         hist: HistRead,
     ) -> Flow {
+        // This is bash's `parse_and_execute` — every `eval`, `.`/`source`, trap
+        // handler and top-level read comes through it — and the commands it
+        // builds are *new nodes*, so the `CMD_IGNORE_RETURN` of whatever is
+        // running outside does not reach them. That is observable on the
+        // POSIX special-builtin usage rule: `eval 'unset -q' || true` ends the
+        // shell, `eval 'unset -q || true'` does not. See
+        // [`Shell::usage_suppress`].
+        let outer_usage_suppress = std::mem::take(&mut self.usage_suppress);
+        let flow = self.run_source_flow_units(src, out, stdin, map, hist);
+        self.usage_suppress = outer_usage_suppress;
+        flow
+    }
+
+    /// The read-parse-execute loop itself; see [`Shell::run_source_flow_out`].
+    fn run_source_flow_units(
+        &mut self,
+        src: BStr<'_>,
+        out: &mut Out,
+        stdin: &StdinSrc,
+        map: &LineMap,
+        hist: HistRead,
+    ) -> Flow {
         // Parse and execute one unit (one logical line) at a time rather than
         // parsing the whole input up front, because bash's read-parse-execute
         // order is observable: a `shopt -s expand_aliases` or `alias foo=…` run
@@ -5979,6 +6067,14 @@ impl Shell {
     /// carry 127 or 1. errexit also drops the echoed source line from the
     /// diagnostic; see [`Shell::format_parse_error`] for why that is consistent.
     fn parse_error_flow(&mut self, e: &crate::parser::ParseError) -> Flow {
+        // bash's `parse_and_execute` scores a syntax error `EX_BADUSAGE` — the
+        // very status a builtin's *usage* error carries — so a syntax error read
+        // by `eval` or by `.`/`source` ends a non-interactive posix-mode shell
+        // exactly as `unset -q` does. Only there: the top-level reader is nobody's
+        // builtin, so no `run_builtin_body` teardown is waiting to observe it.
+        if !self.at_outermost_read_eval() {
+            self.builtin_failure = Some(BuiltinFailure::Usage);
+        }
         // A backtick body's own read-eval loop scores differently, because there
         // is no reader to unwind to and no invocation mode to key off: bash
         // abandons the rest of the body, substitutes what it has captured so
@@ -6082,6 +6178,60 @@ impl Shell {
         // is now redundant and would outlive the abort at the one boundary that
         // catches an `Exit` — a subshell — so take it away with the promotion.
         self.discard_error = None;
+    }
+
+    /// Whether a failure *in a POSIX special builtin* should end the shell.
+    ///
+    /// POSIX says a failure in a special builtin ends a non-interactive shell,
+    /// and bash obeys that only in posix mode. It does not apply the rule to
+    /// every non-zero status — `eval '(exit 2)'`, `shift 99` and
+    /// `trap x NOSUCHSIG` all fail without ending anything — but to a handful of
+    /// specific failure *classes*, which is why the class has to be carried
+    /// explicitly rather than inferred from the status. The classes that reach
+    /// this gate all report status 1; the shell exits with that, in a script and
+    /// under `-c` alike (unlike a word-expansion abort, whose status varies with
+    /// the invocation — see [`Shell::fatal_abort_status`]).
+    ///
+    /// An interactive shell is exempt: it reports the failure and reads on.
+    fn posix_special_builtin_fatal(&self) -> bool {
+        !self.interactive_shell && self.shell_option_enabled("posix")
+    }
+
+    /// The gate above, for a failure a builtin reported through
+    /// [`Shell::builtin_failure`]. The two classes differ in which prefix takes
+    /// the rule away — see [`BuiltinVia`].
+    fn posix_special_builtin_abort(
+        &self,
+        name: &str,
+        via: BuiltinVia,
+        failure: BuiltinFailure,
+    ) -> bool {
+        if !self.posix_special_builtin_fatal() {
+            return false;
+        }
+        match failure {
+            BuiltinFailure::Assignment | BuiltinFailure::Usage => {
+                via == BuiltinVia::Word && Self::is_special_builtin(name)
+            }
+            // `.`/`source` is a special builtin by construction, so the only
+            // question is bash's dynamic `executing_command_builtin` flag.
+            BuiltinFailure::Open => self.command_builtin_depth == 0,
+        }
+    }
+
+    /// The same gate for a failure the *simple-command driver* raises before or
+    /// around the builtin — a redirection that could not be opened, or an
+    /// assignment prefix refused for naming a readonly variable. bash decides
+    /// both from the command word as written, so `command eval` and
+    /// `builtin eval` alike are outside the rule: neither `command` nor
+    /// `builtin` is itself a special builtin.
+    fn posix_special_builtin_word_fatal(&self, word: &Str) -> bool {
+        self.posix_special_builtin_fatal()
+            && bytes::as_str(word).is_some_and(Self::is_special_builtin)
+    }
+
+    fn is_special_builtin(name: &str) -> bool {
+        SPECIAL_BUILTIN_NAMES.contains(&name)
     }
 
     /// Execute a nested block's items (loop/if/case body, brace group, function
@@ -6233,8 +6383,7 @@ impl Shell {
         // with errexit off even if f contains a bare failing command). The
         // structurally-final pipeline is `ao.first` only when the list has no
         // `&&`/`||` continuation; otherwise it is the last element of `ao.rest`.
-        let first_exempt = n_rest > 0 || ao.first.negated;
-        let flow = self.exec_and_or_pipeline(&ao.first, first_exempt, out, stdin);
+        let flow = self.exec_and_or_pipeline(&ao.first, n_rest > 0, out, stdin);
         if !matches!(flow, Flow::Next) {
             return flow;
         }
@@ -6253,8 +6402,7 @@ impl Shell {
                 // here rather than waiting for the end of the whole list.
                 self.notify_signalled_jobs();
                 errexit_before_last = self.errexit;
-                let exempt = idx + 1 != n_rest || pipe.negated;
-                let flow = self.exec_and_or_pipeline(pipe, exempt, out, stdin);
+                let flow = self.exec_and_or_pipeline(pipe, idx + 1 != n_rest, out, stdin);
                 if !matches!(flow, Flow::Next) {
                     return flow;
                 }
@@ -6285,6 +6433,27 @@ impl Shell {
                 return Flow::Exit(code);
             }
         }
+        // The usage-error class of the POSIX special-builtin rule, decided here
+        // because bash decides it at the node that ran the command — after the
+        // ERR trap above, whose handler clears the flag by running a simple
+        // command of its own. `ran_final` and the lone-simple-command test are
+        // what confine the check to that node: a failure whose node was a
+        // subshell, a group, a multi-stage pipeline or a skipped `&&` operand is
+        // never re-examined here. See [`Shell::special_builtin_failed`].
+        if self.special_builtin_failed
+            && ran_final
+            && self.usage_suppress == 0
+            // `!` is bash's `CMD_INVERT_RETURN`, which lives on this pipeline
+            // node alone — hence `! unset -q` survives while `! { unset -q; }`
+            // and `! f` do not, their `unset` sitting under a node of its own.
+            && !final_pipe.negated
+            && final_pipe.commands.len() == 1
+            && matches!(final_pipe.commands.first(), Some(Command::Simple(_)))
+        {
+            self.special_builtin_failed = false;
+            self.last_status = 2;
+            return Flow::Exit(2);
+        }
         if errexit_before_last && failed_unexempt {
             return Flow::Exit(self.last_status);
         }
@@ -6296,30 +6465,43 @@ impl Shell {
     /// shell under `set -e`.
     fn exec_condition(&mut self, p: &Program, out: &mut Out, stdin: &StdinSrc) -> Flow {
         self.errexit_suppress += 1;
+        self.usage_suppress += 1;
         let flow = self.exec_program(p, out, stdin);
         self.errexit_suppress = self.errexit_suppress.saturating_sub(1);
+        self.usage_suppress = self.usage_suppress.saturating_sub(1);
         flow
     }
 
-    /// Execute one pipeline of an AND-OR list. When `exempt` is set the pipeline
-    /// occupies an errexit-exempt position (any command other than the one after
-    /// the final `&&`/`||`, or a `!`-negated pipeline), so errexit is suppressed
-    /// for the pipeline's whole dynamic extent — including any function or
-    /// compound command it calls — matching bash/POSIX. The suppression counter
-    /// is restored afterwards, leaving the surrounding context unchanged.
+    /// Execute one pipeline of an AND-OR list. `ignore_return` marks the
+    /// return-value-ignoring positions — any command other than the one after
+    /// the final `&&`/`||` — which is bash's `CMD_IGNORE_RETURN`; a `!`-negated
+    /// pipeline is exempt from errexit too, but not in the same way, so the two
+    /// counters part company here (see [`Shell::usage_suppress`]).
+    ///
+    /// Either exemption lasts for the pipeline's whole dynamic extent —
+    /// including any function or compound command it calls — matching
+    /// bash/POSIX. Both counters are restored afterwards, leaving the
+    /// surrounding context unchanged.
     fn exec_and_or_pipeline(
         &mut self,
         pipe: &Pipeline,
-        exempt: bool,
+        ignore_return: bool,
         out: &mut Out,
         stdin: &StdinSrc,
     ) -> Flow {
+        let exempt = ignore_return || pipe.negated;
         if !exempt {
             return self.exec_pipeline(pipe, out, stdin);
         }
         self.errexit_suppress += 1;
+        if ignore_return {
+            self.usage_suppress += 1;
+        }
         let flow = self.exec_pipeline(pipe, out, stdin);
         self.errexit_suppress = self.errexit_suppress.saturating_sub(1);
+        if ignore_return {
+            self.usage_suppress = self.usage_suppress.saturating_sub(1);
+        }
         flow
     }
 
@@ -9233,6 +9415,16 @@ impl Shell {
             exit_trap_done: false,
             in_trap: false,
             pending_builtin_exit: None,
+            builtin_failure: None,
+            // A `command` running in the parent is still running around the
+            // subshell it forked, so its exemption carries across (bash's flag
+            // is an ordinary global, inherited by the forked process).
+            command_builtin_depth: self.command_builtin_depth,
+            // bash's `special_builtin_failed` is only ever read by the node that
+            // set it, so a fork starts clean; the suppression counter restarts
+            // too, because the subshell's commands are their own nodes.
+            special_builtin_failed: false,
+            usage_suppress: 0,
             // A subshell's own `exit` unwinds only the subshell; the flag is a
             // top-level-input concern, so it never carries into a clone.
             exit_requested: false,
@@ -10684,6 +10876,12 @@ impl Shell {
                     && self.shell_option_enabled("posix")
                 {
                     self.discard_error = Some(1);
+                    // …and when the command it prefixes is a POSIX *special*
+                    // builtin the refusal is fatal rather than merely
+                    // discarding: `r=x eval :` and `r=x :` end the shell where
+                    // `r=x true` runs on. The caller applies the rule, since
+                    // only it knows the command word.
+                    self.builtin_failure = Some(BuiltinFailure::Assignment);
                 }
                 if self.discard_error.is_some() || self.unbound_error.is_some() {
                     return assigns;
@@ -12556,6 +12754,12 @@ impl Shell {
     }
 
     fn exec_simple_inner(&mut self, sc: &SimpleCommand, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // bash clears `special_builtin_failed` at the top of every simple
+        // command, which is what disarms the usage-error abort whenever any
+        // other command gets to run in between — the right-hand side of a
+        // `||`, or the body of an ERR trap that actually fires. See
+        // [`Shell::special_builtin_failed`].
+        self.special_builtin_failed = false;
         // Advance `$LINENO` to this command's own source line before anything
         // observes it (the DEBUG trap, `$LINENO` in the argv, an error message).
         // bash tracks the line per simple command, so a multi-line pipeline or
@@ -12790,6 +12994,20 @@ impl Shell {
         // the shell (matching the bare-assignment and command-word cases above;
         // a following line still runs).
         if let Some(code) = self.discard_error.take() {
+            // …with one exception: a prefix refused for naming a readonly
+            // variable is an *assignment error on a special builtin* when that
+            // is what it prefixes, and in posix mode that ends the shell. bash
+            // ends it through the same variable-assignment abort a *bare*
+            // readonly assignment takes, so it carries that abort's status —
+            // 127 under `-c`, 1 in a script — and not the flat 1 the other
+            // special-builtin failure classes report.
+            if self.builtin_failure.take() == Some(BuiltinFailure::Assignment)
+                && self.posix_special_builtin_word_fatal(&argv[0])
+            {
+                let status = self.fatal_abort_status(127);
+                self.last_status = status;
+                return Flow::Exit(status);
+            }
             self.last_status = code;
             return Flow::Discard;
         }
@@ -12847,6 +13065,12 @@ impl Shell {
         if argv.len() == 1 && argv[0] == b"exec" && !sc.redirects.is_empty() {
             let rc = self.apply_exec_redirects(&sc.redirects, out);
             self.last_status = rc;
+            // A redirection failure on a POSIX special builtin ends a
+            // non-interactive posix-mode shell, and `exec` is one.
+            if rc != 0 && self.posix_special_builtin_word_fatal(&argv[0]) {
+                self.last_status = 1;
+                return Flow::Exit(1);
+            }
             return Flow::Next;
         }
 
@@ -12855,6 +13079,13 @@ impl Shell {
             Ok(r) => r,
             Err(fail) => {
                 self.last_status = self.report_redirect_failure(&fail, out);
+                // bash decides this one from the command word as written, so a
+                // `command`/`builtin` prefix takes it out of the rule (neither
+                // is itself special) while `eval`, `:`, `export`, … are in it.
+                if self.posix_special_builtin_word_fatal(&argv[0]) {
+                    self.last_status = 1;
+                    return Flow::Exit(1);
+                }
                 return Flow::Next;
             }
         };
@@ -12954,7 +13185,7 @@ impl Shell {
                 name,
                 argv: &argv,
                 assigns: &assigns,
-                special: true,
+                via: BuiltinVia::Word,
             };
             return self.run_builtin(call, out, stdin, &redir);
         }
@@ -13895,9 +14126,15 @@ impl Shell {
                 name: &name,
                 argv: rest,
                 assigns,
-                special: false,
+                via: BuiltinVia::Command,
             };
-            return self.run_builtin(call, out, stdin, redir);
+            // `.`/`source` asks whether a `command` is *running*, not whether it
+            // was reached through one, so the mark covers the whole sub-command.
+            // See [`Shell::command_builtin_depth`].
+            self.command_builtin_depth = self.command_builtin_depth.saturating_add(1);
+            let flow = self.run_builtin(call, out, stdin, redir);
+            self.command_builtin_depth = self.command_builtin_depth.saturating_sub(1);
+            return flow;
         }
         self.run_external(rest, assigns, out, stdin, redir, None);
         Flow::Next
@@ -13949,7 +14186,7 @@ impl Shell {
                 name: &name,
                 argv: &argv[i..],
                 assigns,
-                special: true,
+                via: BuiltinVia::Builtin,
             };
             return self.run_builtin(call, out, stdin, redir);
         }
@@ -19934,7 +20171,7 @@ impl Shell {
             name,
             argv,
             assigns,
-            special,
+            via,
         } = call;
         // Apply temporary assignments for the duration of the builtin, in a
         // scope of their own (see [`Shell::temp_shadow`]), so a computed name
@@ -20010,6 +20247,10 @@ impl Shell {
             "readonly" => Some(Cow::Borrowed(b"readonly")),
             _ => None,
         };
+        // Only this builtin's own failure class may reach the check after the
+        // dispatch; a nested one (`eval 'export r=x'`) is consumed by its own
+        // frame, which knows the right name and [`BuiltinVia`] for it.
+        self.builtin_failure = None;
         let status = match name {
             ":" | "true" => 0,
             "false" => 1,
@@ -20099,9 +20340,15 @@ impl Shell {
             "eval" => {
                 // `eval` takes no options, but still honours the end-of-options
                 // marker: `eval -- 'echo hi'` prints `hi` rather than looking
-                // for a command named `--`.
-                let joined = strip_end_of_options(args).join(b" ".as_slice());
-                self.eval_string(&joined, out, stdin)
+                // for a command named `--`. Anything else that looks like one is
+                // refused before the string is joined, so `eval -q echo hi`
+                // never runs the `echo`.
+                if let Some(opt) = no_options_error(args) {
+                    self.builtin_invalid_option("eval", &[b'-', opt], "eval [arg ...]")
+                } else {
+                    let joined = strip_end_of_options(args).join(b" ".as_slice());
+                    self.eval_string(&joined, out, stdin)
+                }
             }
             "source" | "." => self.builtin_source(args, name, out, stdin),
             "type" => self.builtin_type(args, out, redir),
@@ -20116,7 +20363,11 @@ impl Shell {
             "fg" => self.builtin_fg(args, out, redir),
             "bg" => self.builtin_bg(args, out, redir),
             "caller" => self.builtin_caller(args, out, redir),
-            "times" => self.builtin_times(out, redir),
+            // `times` takes no options either, and ignores any operands.
+            "times" => match no_options_error(args) {
+                Some(opt) => self.builtin_invalid_option("times", &[b'-', opt], "times"),
+                None => self.builtin_times(out, redir),
+            },
             "bind" => self.builtin_bind(args, out, redir),
             "suspend" => self.builtin_suspend(args, &mut flow),
             "enable" => self.builtin_enable(args, out, redir),
@@ -20429,7 +20680,10 @@ impl Shell {
                     }
                     Some(_) if self.fn_stack.is_empty() && self.source_stack.is_empty() => {
                         self.perrln("return: can only `return' from a function or sourced script");
-                        2
+                        // A misplaced `return` is one of bash's usage errors, so
+                        // in posix mode it ends a non-interactive shell — even
+                        // the bare `return` that says nothing else wrong.
+                        self.note_builtin_usage_error()
                     }
                     Some(code) => {
                         flow = Flow::Return;
@@ -20457,8 +20711,17 @@ impl Shell {
                 // returns status 0, and continues executing the next command
                 // rather than unwinding. The operand is not even looked at —
                 // `break abc` outside a loop is only the warning.
+                //
+                // …and in posix mode there is not even the warning: POSIX makes
+                // `break`/`continue` outside a loop unspecified, and bash's
+                // `break_builtin` keeps quiet about it there. Still status 0,
+                // still not an unwind.
                 if self.loop_depth == 0 {
-                    self.perrln(&format!("{name}: only meaningful in a `for', `while', or `until' loop"));
+                    if !self.shell_option_enabled("posix") {
+                        self.perrln(&format!(
+                            "{name}: only meaningful in a `for', `while', or `until' loop"
+                        ));
+                    }
                     0
                 } else {
                     match self.loop_count_arg(name, args) {
@@ -20503,10 +20766,32 @@ impl Shell {
         // `POSIXLY_CORRECT=1 eval :` keeps itself: the prefix is what turns
         // posix mode on, and the rule then makes it permanent.
         let persist =
-            special && SPECIAL_BUILTIN_NAMES.contains(&name) && self.shell_option_enabled("posix");
+            via.special() && Self::is_special_builtin(name) && self.shell_option_enabled("posix");
         self.pop_temp_shadow(temp_pushed, persist);
 
         self.last_status = status;
+        // A failure *class* bash makes fatal to a non-interactive posix-mode
+        // shell (an `export`/`readonly` assignment refusal, a `.`/`source` that
+        // could not open its file, a usage error). The builtin body can only
+        // return an `i32`, so it reports the class through `builtin_failure` and
+        // the rule is applied here, where the name and the [`BuiltinVia`] are
+        // known.
+        //
+        // The first two unwind at once, through the same `pending_builtin_exit`
+        // channel as any other whole-shell exit from a builtin (just below). The
+        // usage class does not: bash decides it back at the *node* that ran the
+        // command, after the ERR trap and only when the node does not ignore the
+        // return value, so all that happens here is arming the flag
+        // [`Shell::exec_and_or`] reads. See [`Shell::special_builtin_failed`].
+        if let Some(failure) = self.builtin_failure.take()
+            && self.posix_special_builtin_abort(name, via, failure)
+        {
+            if failure == BuiltinFailure::Usage {
+                self.special_builtin_failed = true;
+            } else {
+                self.pending_builtin_exit = Some(1);
+            }
+        }
         // A builtin that must unwind the whole shell (`kill -TERM $$` with a
         // terminating default disposition, an `exit` inside a sourced script or
         // its RETURN trap) signals it through `pending_builtin_exit`, because a
@@ -26446,7 +26731,7 @@ impl Shell {
                             self.emit_stderr(
                                 b"export: usage: export [-fn] [name[=value] ...] or export -p\n",
                             );
-                            return 2;
+                            return self.note_builtin_usage_error();
                         }
                     }
                 }
@@ -26494,6 +26779,10 @@ impl Shell {
                 // so does the `noassign` refusal below, which reports 0.)
                 if self.readonly.contains(&k) {
                     self.perrln(&format!("{}{k}: readonly variable", Self::attr_tag(assoc, indexed, "export")));
+                    // In posix mode this refusal ends a non-interactive shell:
+                    // `export` is a special builtin, and an assignment error in
+                    // one is fatal. See [`Shell::posix_special_builtin_abort`].
+                    self.builtin_failure = Some(BuiltinFailure::Assignment);
                     if unexport {
                         self.exported.remove(&k);
                     } else {
@@ -27307,11 +27596,26 @@ impl Shell {
     /// exactly bash's `builtin_usage`/`sh_invalidopt` pair. `opt` is the offending
     /// flag as bash reports it (e.g. `-Z` or `+Z`); `usage` is the synopsis body
     /// after `usage:`.
-    fn builtin_invalid_option(&self, builtin: &str, opt: BStr<'_>, usage: &str) -> i32 {
+    fn builtin_invalid_option(&mut self, builtin: &str, opt: BStr<'_>, usage: &str) -> i32 {
         // `opt` is echoed from the command line, so it is bytes: an invalid
         // option is reported as the bytes the user actually typed.
         self.berrln(&bfmt![self.err_prefix(), builtin, b": ", opt, b": invalid option"]);
         self.emit_stderr(format!("{builtin}: usage: {usage}\n").as_bytes());
+        self.note_builtin_usage_error()
+    }
+
+    /// Record that the builtin now running failed with a *usage* error, and
+    /// return the status that goes with it (2).
+    ///
+    /// In posix mode a usage error in a POSIX special builtin ends a
+    /// non-interactive shell, and the class cannot be read off the status —
+    /// `eval '(exit 2)'` also answers 2 and is harmless — so every site that
+    /// reports one says so here. The rule is applied much later (and only for a
+    /// special builtin reached as the command word); see
+    /// [`Shell::posix_special_builtin_abort`] and
+    /// [`Shell::special_builtin_failed`].
+    fn note_builtin_usage_error(&mut self) -> i32 {
+        self.builtin_failure = Some(BuiltinFailure::Usage);
         2
     }
 
@@ -29537,7 +29841,7 @@ impl Shell {
                             self.emit_stderr(
                                 b"readonly: usage: readonly [-aAf] [name[=value] ...] or readonly -p\n",
                             );
-                            return 2;
+                            return self.note_builtin_usage_error();
                         }
                     }
                 }
@@ -29618,6 +29922,9 @@ impl Shell {
                     "{}{name}: readonly variable",
                     Self::attr_tag(assoc, indexed, "readonly")
                 ));
+                // Fatal in posix mode, as for `export` — see
+                // [`Shell::posix_special_builtin_abort`].
+                self.builtin_failure = Some(BuiltinFailure::Assignment);
                 status = 1;
                 continue;
             }
@@ -30008,6 +30315,18 @@ impl Shell {
             } else {
                 break;
             }
+        }
+        // `-f` and `-v` name two different namespaces, so asking for both is
+        // meaningless. bash checks this once, after the whole option scan, so
+        // `-f -v`, `-v -f` and `-fv` all report it. Measured, this is *not* the
+        // usage class: it reports status 1, not 2, and it does not end a posix
+        // mode shell — so it must not go through `note_builtin_usage_error`.
+        if funcs_only && vars_only {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"unset: cannot simultaneously unset a function and a variable"
+            ]);
+            return 1;
         }
         // bash does not abort on the first failing name: it records the failure
         // and keeps unsetting the rest, returning 1 at the end. `unset 'a[-99]'
@@ -30435,7 +30754,7 @@ impl Shell {
                                 opt,
                                 b": invalid option name"
                             ]);
-                            return 2;
+                            return self.note_builtin_usage_error();
                         }
                         i += 2;
                     } else {
@@ -30471,7 +30790,7 @@ impl Shell {
                                             opt,
                                             b": invalid option name"
                                         ]);
-                                        return 2;
+                                        return self.note_builtin_usage_error();
                                     }
                                     extra_words += 1;
                                 }
@@ -30494,7 +30813,7 @@ impl Shell {
                             self.emit_stderr(
                                 b"set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]\n",
                             );
-                            return 2;
+                            return self.note_builtin_usage_error();
                         }
                     }
                     i += 1 + extra_words;
@@ -30770,6 +31089,11 @@ impl Shell {
         // `shift [n]`: default 1. A non-numeric count is a hard error, as is a
         // negative count ("out of range"); a count larger than `$#` silently
         // returns 1 (bash). More than one operand is "too many arguments".
+        //
+        // The out-of-range diagnostic below names the first argument *as
+        // written*, before `--` is stripped, because that is the word bash
+        // reports: `shift -- 3` past the end says `shift: --: …`.
+        let written = args.first().cloned();
         let args = strip_end_of_options(args);
         let n = match args.first() {
             None => 1i64,
@@ -30808,6 +31132,25 @@ impl Shell {
             self.positional.drain(..n);
             0
         } else {
+            // A count larger than `$#` is silently status 1 — except in posix
+            // mode, where bash reports it with the same "out of range" wording a
+            // negative count gets (its `print_shift_error`). A bare `shift` past
+            // the end has no word to name, so the message drops that field
+            // entirely rather than printing the implied 1. The status is 1
+            // either way, and this is *not* one of the failure classes that end
+            // a posix-mode shell.
+            if self.shell_option_enabled("posix") {
+                let named: Str = match &written {
+                    Some(w) => bfmt![w.as_slice(), b": "],
+                    None => Vec::new(),
+                };
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"shift: ",
+                    &named,
+                    b"shift count out of range"
+                ]);
+            }
             1
         }
     }
@@ -31871,7 +32214,7 @@ impl Shell {
         let Some(path) = args.first() else {
             self.perrln(&format!("{tag}: filename argument required"));
             self.emit_stderr(format!("{tag}: usage: {tag} filename [arguments]\n").as_bytes());
-            return 2;
+            return self.note_builtin_usage_error();
         };
         // The path is opened from its own bytes, so a script whose *name* is
         // not text still opens — and its contents are parsed as the bytes they
@@ -31996,6 +32339,12 @@ impl Shell {
                         io_error_message(&e)
                     ]);
                 }
+                // In posix mode a `.`/`source` that cannot open its file ends a
+                // non-interactive shell. bash tests `executing_command_builtin`
+                // here rather than the special class, so a `command` prefix
+                // spares the shell but a `builtin` one does not — see
+                // [`Shell::posix_special_builtin_abort`].
+                self.builtin_failure = Some(BuiltinFailure::Open);
                 1
             }
         }
@@ -37655,20 +38004,72 @@ struct BuiltinCall<'a> {
     argv: &'a [Str],
     /// The assignment prefix written in front of the command.
     assigns: &'a [(String, Str)],
-    /// Whether the name still counts as a POSIX *special* builtin here, which
-    /// decides whether the assignment prefix outlives the command in posix mode
-    /// (see [`Shell::pop_temp_shadow`]). `false` only under `command`, whose
-    /// whole job is to strip the special class off: `A=1 command eval :` does
-    /// not keep `A`, where `A=1 builtin eval :` does.
-    special: bool,
+    /// How the builtin was reached, which is what decides the two POSIX
+    /// special-builtin rules that a prefix can take away (see [`BuiltinVia`]).
+    via: BuiltinVia,
 }
 
-/// The POSIX *special* builtins, which `enable -s` restricts its listing to.
+/// How a builtin invocation was reached. `command` and `builtin` do *not* strip
+/// the same things, so "was there a prefix" is not enough — which one it was
+/// matters:
+///
+/// * The assignment prefix outliving the command in posix mode
+///   ([`Shell::pop_temp_shadow`]) and the fatal-assignment-error rule are both
+///   taken away by `command` and kept by `builtin`: `A=1 command eval :` does
+///   not keep `A`, where `A=1 builtin eval :` does; `readonly r=1; export r=x`
+///   ends a posix-mode shell, and so does `builtin export r=x`, but
+///   `command export r=x` does not.
+/// * `.`/`source`'s fatal open failure is not decided from here at all — bash
+///   tests `executing_command_builtin`, a flag that stays set for the whole
+///   *duration* of the `command` builtin, so `builtin . /nope` ends the shell
+///   while both `command . /nope` and a `. /nope` reached from anywhere inside a
+///   `command` survive. See [`Shell::command_builtin_depth`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BuiltinVia {
+    /// Named directly as the command word.
+    Word,
+    /// Reached through `command`, whose whole job is to strip the special class.
+    Command,
+    /// Reached through `builtin`, which leaves the special class intact.
+    Builtin,
+}
+
+impl BuiltinVia {
+    /// Whether the name still counts as a POSIX *special* builtin here.
+    fn special(self) -> bool {
+        self != BuiltinVia::Command
+    }
+}
+
+/// A failure inside a builtin of the kind bash makes *fatal* to a
+/// non-interactive shell in posix mode, reported by the builtin so the
+/// dispatcher can apply the rule (which needs the name and the [`BuiltinVia`],
+/// neither of which the builtin body has). See
+/// [`Shell::posix_special_builtin_abort`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BuiltinFailure {
+    /// An assignment was refused — `export`/`readonly` naming a readonly
+    /// variable. Fatal for a special builtin unless `command` or `builtin`
+    /// stripped the rule off.
+    Assignment,
+    /// `.`/`source` could not open its file. Fatal unless a `command` builtin is
+    /// running somewhere up the stack; `builtin` does not spare it.
+    Open,
+    /// The builtin was called wrongly — an invalid option, a missing operand, a
+    /// `return` outside a function, a parse error in `eval`'s string. Status 2,
+    /// and the one class that is *context*-sensitive: see
+    /// [`Shell::special_builtin_failed`] for how it is armed and disarmed.
+    Usage,
+}
+
+/// The POSIX *special* builtins.
 ///
 /// POSIX names fifteen of these; bash adds `source`, its synonym for `.`, and
-/// lists all sixteen. The class is otherwise unobserved here — osh does not give
-/// a special builtin POSIX's "a failure in it exits the shell" treatment — so
-/// this list exists for `enable -s` alone.
+/// lists all sixteen. `enable -s` restricts its listing to them, an assignment
+/// prefix on one of them outlives the command in posix mode
+/// ([`Shell::pop_temp_shadow`]), and several kinds of failure in one of them end
+/// a non-interactive posix-mode shell outright
+/// ([`Shell::posix_special_builtin_abort`]).
 const SPECIAL_BUILTIN_NAMES: &[&str] = &[
     ".", ":", "break", "continue", "eval", "exec", "exit", "export", "readonly", "return", "set",
     "shift", "source", "times", "trap", "unset",
@@ -46867,6 +47268,247 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run_cmd_mode("set -o posix; set -u; echo $nope").1, 127);
     }
 
+    /// POSIX's other "the shell exits" rule: a failure in a *special* builtin.
+    /// bash applies it only in posix mode, only to a non-interactive shell, and
+    /// only to a few specific failure classes — never to a plain non-zero
+    /// status.
+    #[test]
+    fn posix_mode_makes_a_special_builtin_failure_end_the_shell() {
+        for src in [
+            // A redirection that cannot be opened, on any special builtin.
+            "set -o posix; : > /nope/f\necho tail",
+            "set -o posix; exec 9< /nope/f\necho tail",
+            "set -o posix; eval : > /nope/f\necho tail",
+            "set -o posix; unset X > /nope/f\necho tail",
+            "set -o posix; shift 0 > /nope/f\necho tail",
+            "set -o posix; exit 2> /nope/f\necho tail",
+            // An assignment refused for naming a readonly variable, made by a
+            // special builtin or written as a prefix to one.
+            "set -o posix; readonly R=1; export R=x\necho tail",
+            "set -o posix; readonly R=1; readonly R=x\necho tail",
+            "set -o posix; readonly R=1; R=x eval :\necho tail",
+            "set -o posix; readonly R=1; R=x :\necho tail",
+            // `.`/`source` that could not open its file — which `builtin` does
+            // not spare, unlike the two classes above.
+            "set -o posix; . /nope\necho tail",
+            "set -o posix; source /nope\necho tail",
+            "set -o posix; builtin . /nope\necho tail",
+        ] {
+            assert_eq!(run_script(src), (String::new(), 1), "{src:?}");
+        }
+        for src in [
+            // Not a special builtin, so none of the three classes applies…
+            "set -o posix; true > /nope/f\necho tail",
+            "set -o posix; { :; } > /nope/f\necho tail",
+            "set -o posix; readonly R=1; R=x true\necho tail",
+            "set -o posix; readonly R=1; declare R=x\necho tail",
+            // …and `command`/`builtin` take the class off the ones that are.
+            "set -o posix; command : > /nope/f\necho tail",
+            "set -o posix; builtin : > /nope/f\necho tail",
+            "set -o posix; readonly R=1; command export R=x\necho tail",
+            "set -o posix; readonly R=1; builtin export R=x\necho tail",
+            "set -o posix; command . /nope\necho tail",
+            // Without posix mode none of it is fatal.
+            ": > /nope/f\necho tail",
+            ". /nope\necho tail",
+            "readonly R=1; export R=x\necho tail",
+            // Nor is an ordinary non-zero return from a special builtin — which
+            // is why the failure *class* has to be carried explicitly rather
+            // than inferred from the status.
+            "set -o posix; readonly R=1; unset R\necho tail",
+            "set -o posix; shift 99\necho tail",
+            "set -o posix; trap 'x' NOSUCHSIG\necho tail",
+            "set -o posix; eval '(exit 2)'\necho tail",
+        ] {
+            assert_eq!(run_script(src), ("tail\n".to_string(), 0), "{src:?}");
+        }
+        // A subshell loses only itself, as with the expansion rules.
+        assert_eq!(
+            run_script("set -o posix; ( . /nope ); echo s=$?\necho tail"),
+            ("s=1\ntail\n".to_string(), 0)
+        );
+        // `.`/`source` asks whether a `command` is *running*, not whether it was
+        // reached through one, so a `command` anywhere up the stack spares it.
+        assert_eq!(
+            run_script("set -o posix; command eval '. /nope'; echo alive\necho tail"),
+            ("alive\ntail\n".to_string(), 0)
+        );
+        // No suppression context spares any of the three: bash's check is made
+        // where the failure happens, not where the status is consumed.
+        for src in [
+            "set -o posix; . /nope || true\necho tail",
+            "set -o posix; ! . /nope\necho tail",
+            "set -o posix; if . /nope; then :; fi\necho tail",
+            "set -o posix; f(){ . /nope; }; f\necho tail",
+            "set -o posix; readonly R=1; export R=x || true\necho tail",
+        ] {
+            assert_eq!(run_script(src), (String::new(), 1), "{src:?}");
+        }
+        // These classes report a flat 1 whatever the invocation — unlike a
+        // word-expansion abort, which is 127 under `-c`. The one exception is
+        // the assignment *prefix*, which bash ends through that very abort.
+        assert_eq!(run_cmd_mode("set -o posix; . /nope").1, 1);
+        assert_eq!(run_cmd_mode("set -o posix; : > /nope/f").1, 1);
+        assert_eq!(run_cmd_mode("set -o posix; readonly R=1; export R=x").1, 1);
+        assert_eq!(run_cmd_mode("set -o posix; readonly R=1; R=x :").1, 127);
+    }
+
+    /// The fourth class: calling a special builtin *wrongly* — an invalid
+    /// option, a `return` outside a function, a parse error in `eval`'s string.
+    /// It reports status 2 rather than 1, and unlike the other three it is
+    /// context-sensitive: bash checks a flag at the simple-command node, after
+    /// the ERR trap, and only when that node's status is going to be used.
+    #[test]
+    fn posix_mode_makes_a_special_builtin_usage_error_end_the_shell() {
+        for src in [
+            "set -o posix; unset -q\necho tail",
+            "set -o posix; export -q\necho tail",
+            "set -o posix; readonly -q\necho tail",
+            "set -o posix; set -q\necho tail",
+            "set -o posix; set -o nosuchopt\necho tail",
+            "set -o posix; set +o nosuchopt\necho tail",
+            "set -o posix; trap -q\necho tail",
+            "set -o posix; times -q\necho tail",
+            "set -o posix; eval -q\necho tail",
+            "set -o posix; exec -q\necho tail",
+            "set -o posix; exit -q\necho tail",
+            "set -o posix; . -q\necho tail",
+            "set -o posix; source -q\necho tail",
+            // `.` with no filename at all is the same class…
+            "set -o posix; .\necho tail",
+            // …as is a `return` that has no function to return from, and a
+            // parse error inside `eval`'s string.
+            "set -o posix; return -q\necho tail",
+            "set -o posix; return\necho tail",
+            "set -o posix; eval 'syntax ( error'\necho tail",
+        ] {
+            assert_eq!(run_script(src), (String::new(), 2), "{src:?}");
+        }
+        for src in [
+            // Not special builtins, so a usage error in them is ordinary…
+            "set -o posix; declare -Q\necho tail",
+            "set -o posix; read -Q\necho tail",
+            "set -o posix; cd -Q\necho tail",
+            "set -o posix; let -q\necho tail",
+            "set -o posix; local -q\necho tail",
+            // …and `shift`/`break`/`continue`/`:` take `-q` as an operand
+            // rather than an option, so there is no usage error to promote.
+            "set -o posix; shift -q\necho tail",
+            "set -o posix; break -q\necho tail",
+            "set -o posix; : -q\necho tail",
+            // Outside posix mode nothing is fatal, and both prefixes take the
+            // class off — the gate is the command word as written.
+            "unset -q\necho tail",
+            "set -o posix; command unset -q\necho tail",
+            "set -o posix; builtin unset -q\necho tail",
+            // A subshell only ever loses itself.
+            "set -o posix; ( unset -q )\necho tail",
+            "set -o posix; unset -q | cat\necho tail",
+            "set -o posix; x=$(unset -q)\necho tail",
+        ] {
+            assert_eq!(run_script(src), ("tail\n".to_string(), 0), "{src:?}");
+        }
+        // Unlike the other three classes, this one *is* suppressed wherever the
+        // status is going to be inspected rather than used: a non-final operand
+        // of `&&`/`||`, a compound-command condition, or a `!` on the very node
+        // that failed. The suppression is dynamic, so it reaches into a function
+        // body — but `!` is node-local, so `! { unset -q; }` and `! f` do not
+        // spare the inner simple command.
+        for src in [
+            "set -o posix; unset -q || true\necho tail",
+            "set -o posix; unset -q && true\necho tail",
+            "set -o posix; ! unset -q\necho tail",
+            "set -o posix; if unset -q; then :; fi\necho tail",
+            "set -o posix; while unset -q; do break; done\necho tail",
+            "set -o posix; until unset -q; do break; done\necho tail",
+            "set -o posix; f(){ unset -q; }; f || true\necho tail",
+            "set -o posix; f(){ unset -q; }; if f; then :; fi\necho tail",
+            "set -o posix; f(){ g(){ unset -q; }; g || true; }; f\necho tail",
+            // An ERR trap that actually runs disarms it: the handler's own
+            // simple command clears the flag before the check is reached.
+            "set -o posix; trap ':' ERR; unset -q\necho tail",
+        ] {
+            assert_eq!(run_script(src), ("tail\n".to_string(), 0), "{src:?}");
+        }
+        for src in [
+            "set -o posix; true && unset -q\necho tail",
+            "set -o posix; ! { unset -q; }\necho tail",
+            "set -o posix; f(){ unset -q; }; ! f\necho tail",
+            "set -o posix; { unset -q; }\necho tail",
+            "set -o posix; f(){ unset -q; }; f\necho tail",
+            // `eval` and `.` parse a fresh command list, so an enclosing
+            // suppression does not reach the commands inside them.
+            "set -o posix; eval 'unset -q' || true\necho tail",
+            // An ERR trap that is ignored or reset never runs, so nothing
+            // clears the flag.
+            "set -o posix; trap '' ERR; unset -q\necho tail",
+            "set -o posix; trap ':' DEBUG; unset -q\necho tail",
+        ] {
+            assert_eq!(run_script(src), (String::new(), 2), "{src:?}");
+        }
+        // …but a suppression written *inside* the eval does apply.
+        assert_eq!(
+            run_script("set -o posix; eval 'unset -q || true'\necho tail"),
+            ("tail\n".to_string(), 0)
+        );
+        // The class carries 2 under `-c` as well.
+        assert_eq!(run_cmd_mode("set -o posix; unset -q").1, 2);
+    }
+
+    /// `-f` and `-v` name two different namespaces, so `unset` refuses both at
+    /// once. It is a plain status-1 diagnostic, not the usage class — so it
+    /// survives posix mode.
+    #[test]
+    fn unset_refuses_a_function_and_a_variable_at_once() {
+        assert_eq!(
+            run("unset -f -v x 2>&1; echo s=$?").0,
+            "osh: unset: cannot simultaneously unset a function and a variable\ns=1\n"
+        );
+        // Whatever order, and clustered too — bash checks once, after the whole
+        // option scan.
+        assert_eq!(run("unset -v -f x 2>&1; echo s=$?").0.lines().count(), 2);
+        assert_eq!(run("unset -fv x 2>&1; echo s=$?").0.lines().count(), 2);
+        assert_eq!(run("unset -f x; echo s=$?").0, "s=0\n");
+        assert_eq!(
+            run_script("set -o posix; unset -f -v x 2>/dev/null\necho tail"),
+            ("tail\n".to_string(), 0)
+        );
+    }
+
+    /// `shift` past the end of `$@` is silent outside posix mode and reported
+    /// inside it (bash's `print_shift_error`). Status is 1 either way, and it is
+    /// *not* one of the failures that end a posix-mode shell.
+    #[test]
+    fn posix_mode_reports_a_shift_past_the_end() {
+        assert_eq!(run("shift 9 2>&1; echo s=$?").0, "s=1\n");
+        assert_eq!(
+            run("set -o posix; shift 9 2>&1; echo s=$?").0,
+            "osh: shift: 9: shift count out of range\ns=1\n"
+        );
+        // A bare `shift` has no word to name, so the message drops that field
+        // rather than printing the implied 1…
+        assert_eq!(
+            run("set -o posix; shift 2>&1; echo s=$?").0,
+            "osh: shift: shift count out of range\ns=1\n"
+        );
+        // …and the word is the first argument *as written*, before `--`.
+        assert_eq!(
+            run("set -o posix; shift -- 3 2>&1; echo s=$?").0,
+            "osh: shift: --: shift count out of range\ns=1\n"
+        );
+        // A shift that fits stays silent and succeeds.
+        assert_eq!(run("set -o posix; set -- a b; shift 2 2>&1; echo s=$? $#").0, "s=0 0\n");
+        // The other two complaints are not posix-gated.
+        assert_eq!(
+            run("shift abc 2>&1; echo s=$?").0,
+            "osh: shift: abc: numeric argument required\ns=1\n"
+        );
+        assert_eq!(
+            run("shift -1 2>&1; echo s=$?").0,
+            "osh: shift: -1: shift count out of range\ns=1\n"
+        );
+    }
+
     #[test]
     fn local_shadows_global() {
         // A local variable does not leak out of the function.
@@ -55720,6 +56362,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             o3,
             "osh: continue: only meaningful in a `for', `while', or `until' loop\ns=0\n"
         );
+        // …but posix mode drops the warning: POSIX leaves `break` outside a loop
+        // unspecified, so bash says nothing there. Still status 0, still not an
+        // unwind, and the operand is still not looked at.
+        for src in [
+            "set -o posix; { break; } 2>&1; echo \"s=$?\"",
+            "set -o posix; { break 2; } 2>&1; echo \"s=$?\"",
+            "set -o posix; { break abc; } 2>&1; echo \"s=$?\"",
+            "set -o posix; { continue; } 2>&1; echo \"s=$?\"",
+        ] {
+            assert_eq!(run(src).0, "s=0\n", "{src:?}");
+        }
+        assert_eq!(run("set -o posix; echo before; break; echo after").0, "before\nafter\n");
+        // Inside a loop posix mode changes nothing: an out-of-range count is
+        // still reported and still fails.
+        let (o5, _) = run("set -o posix; for i in 1; do { break 0; } 2>&1; done; echo s=$?");
+        assert_eq!(o5, "osh: break: 0: loop count out of range\ns=1\n");
         // Inside a loop, `break` still works normally.
         assert_eq!(run("for i in 1 2 3; do echo $i; break; done; echo done").0, "1\ndone\n");
         // A `break` inside a function called from a loop must NOT break the

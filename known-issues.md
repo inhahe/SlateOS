@@ -245,41 +245,73 @@ error in `$(( … ))` is posix-only.
 readonly-`SHELLOPTS` check inside posix mode again (in a subshell, so the script
 survives to report it).
 
-**Still open — the special-builtin half.** POSIX also terminates a
-non-interactive shell when a *special builtin* fails, and none of that is
-modelled: `set -o posix; unset -q 2>/dev/null; echo reached` still reaches.
-Measured against bash 5.2.37:
+**Also done since — all four special-builtin failure classes.** POSIX
+also terminates a non-interactive shell when a *special builtin* fails. bash
+does not apply that to every non-zero status (`eval '(exit 2)'`, `shift 99`,
+`trap x NOSUCHSIG` all fail harmlessly) but to four specific failure *classes*,
+each with its own gate. All four are implemented, via a `BuiltinFailure` side
+channel consumed in `run_builtin_body`'s teardown plus two checks in
+`exec_simple_inner` and one in `exec_and_or`, covered by
+`a-failure-in-a-special-builtin-can-end-a-posix-mode-shell.sh` and two lib tests:
 
-* Fatal for `eval exec exit export readonly return set times trap unset .
-  source`; **not** for `break continue shift : true command let local`.
-* The failure classes that count: a usage / invalid-option error (status 2), an
-  assignment error (1), a redirection error (1), and for `.`/`source` a
-  file-open failure (1). The status is the builtin's own, not the expansion
-  abort status.
-* Suppressed by the errexit-exempt contexts (`!`, `&&`/`||` operands,
-  `if`/`while`/`until` conditions), which propagate into function bodies but
-  **not** into `eval`.
-* Also suppressed when an ERR trap is set *and runs* — `trap ':' ERR`
-  suppresses, `trap '' ERR` and `trap - ERR` do not — and then only for the
-  usage class. Theory: the handler clobbers `last_command_exit_value`, and only
-  the `> EX_SHERRBASE` test consults it, which is why an ERR trap spares
-  `unset -q` but not `. /nope` or a readonly `export R=x`.
-* `command X` and `builtin X` both strip the fatality.
-* Unrelated but found alongside: `shift 1 2` ("too many arguments") is fatal
-  with status 1 **without** posix mode and cannot be suppressed at all — bash's
-  `get_numeric_arg` calls `throw_to_top_level()`.
+* **Redirection failure** (status 1) — on any of the sixteen special builtins.
+  Decided from the command word as written, so `command`/`builtin` both take it
+  off (neither is itself special) and a brace group, function call or null
+  command is never in it.
+* **Assignment error** (status 1) — `export`/`readonly` refusing a readonly
+  name, or an assignment *prefix* on a special builtin (`R=x eval :`, `R=x :`).
+  Same word-based gate. The prefix form is the one exception to the flat status:
+  bash ends it through the same variable-assignment abort a *bare* assignment
+  takes, so it is 127 under `-c`.
+* **`.`/`source` open failure** (status 1) — gated on bash's
+  `executing_command_builtin` instead, which is a *duration*: `builtin . /nope`
+  is fatal, while `command . /nope` and any `. /nope` reached from inside a
+  running `command` are not (modelled as `Shell::command_builtin_depth`).
 
-**Proper fix for the rest:** the builtin dispatch boundary returns a bare
-`i32`, so a builtin cannot currently say *why* it failed. Give it an
-error-class side channel alongside `pending_builtin_exit` (usage / assignment /
-redirection / open), have the special-builtin dispatch consult it under posix
-mode, and gate it on the same suppression set `errexit_suppress` already
-tracks. Then survey the rest of bash's posix-mode list (`man bash`, "POSIX
-Mode") and pin each one with a probe before implementing it; several are
-already osh's behaviour by accident and need only a corpus case.
+* **Usage/invalid-option** (status 2) — reported by `unset export readonly set
+  trap times eval exec return exit . source` (plus `eval 'syntax ( error'`, a
+  bare `return` outside a function and a `.` with no filename); never by
+  `shift break continue : true command let local`, and never by a regular
+  builtin (`declare -Q`, `read -Q`, `cd -Q`). Both prefixes strip it.
 
-**Also still open, found while probing:** `set -o posix; unset -f -v x` → bash
-exits 1, osh returns 0.
+None of the *first three* is suppressible — not by `|| true`, `!`, an
+`if`/`while` condition, a function body, `eval`, or an ERR trap. A subshell
+contains them like any other abort.
+
+The fourth is different, and modelling it was the bulk of the work. bash keeps a
+global `special_builtin_failed` flag, cleared at the top of every
+`execute_simple_command`, set when a special builtin returns `EX_BADUSAGE`, and
+checked at the `cm_simple` node **after** the ERR trap, guarded by
+`ignore_return == 0 && invert == 0`. osh reproduces that with a second counter
+`usage_suppress` (distinct from `errexit_suppress`, which folds in `!` and is
+therefore wrong here) plus a node-local negation test, and the check placed in
+`exec_and_or` right after the ERR-trap block, narrowed to a single-`Simple`
+un-negated pipeline so it lands on exactly the node bash checks. Consequences,
+all pinned by the corpus case:
+
+* Suppressed by a non-final `&&`/`||` operand and by `if`/`while`/`until`
+  conditions, and that propagates *dynamically* into function bodies
+  (`f || true`, `if f`, `f(){ g || true; }`) but **not** into `eval`/`.`, which
+  parse fresh nodes (`eval 'unset -q' || true` is fatal; `eval 'unset -q || true'`
+  is not) — hence `usage_suppress` is zeroed across `run_source_flow_out`.
+* `!` is **node-local**: `! unset -q` is suppressed, but `! { unset -q; }` and
+  `! f` are fatal.
+* An ERR trap that actually *runs* disarms it (`trap ':' ERR` suppresses;
+  `trap '' ERR` and `trap - ERR` do not), because the handler's own simple
+  command clears the flag before the check is reached.
+
+**Also fixed while probing:** `unset -f -v x` now reports
+`cannot simultaneously unset a function and a variable` and returns 1 (it is
+*not* the usage class — status 1, and it survives posix mode), and `times`/`eval`
+now scan for an invalid option instead of ignoring one.
+
+**Still open:** survey the rest of bash's posix-mode list (`man bash`, "POSIX
+Mode") and pin each one with a probe before implementing it; several are already
+osh's behaviour by accident and need only a corpus case. One concrete
+divergence found while probing: in posix mode bash prints `export -p` /
+`readonly -p` as `export NAME="v"` / `readonly NAME="v"` rather than
+`declare -x NAME="v"` (`declare -p` is unaffected); osh always uses the
+`declare` spelling.
 
 ### TD-OILS-COMPLETE-TABLE-AND-OPERANDS. `complete`/`compopt` got ten things wrong at once, all downstream of two facts about bash they did not model — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

@@ -22,6 +22,7 @@
 //! file. [`bytes`] defines that type and the operations `bstr` lacks.
 
 pub mod arith;
+pub mod assoc;
 pub mod ast;
 pub mod bind_tables;
 pub mod brace;

@@ -108,6 +108,7 @@ use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 
 use crate::arith::{self, VarLookup};
+use crate::assoc::AssocArray;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str, StrBuf};
 use crate::ast::{
@@ -1849,7 +1850,7 @@ fn child_out_from_write_fd(w: &WriteFd, what: &str) -> Result<ChildOut, String> 
 struct VarSnapshot {
     scalar: Option<Str>,
     indexed: Option<BTreeMap<usize, Str>>,
-    assoc: Option<Vec<(Str, Str)>>,
+    assoc: Option<AssocArray>,
     exported: bool,
     // Attribute flags, so `local -i`/`-l`/`-u`/`-n` scope to the function call
     // and are restored on return (bash: attributes set on a local are local).
@@ -2493,9 +2494,10 @@ pub struct Shell {
     /// order, matching bash's `${a[@]}`/`${!a[@]}` traversal.
     arrays: HashMap<String, BTreeMap<usize, Str>>,
     /// Associative arrays (`declare -A m; m[key]=v`). Insertion-ordered
-    /// key/value pairs for deterministic iteration. A name present here is
-    /// associative: subscripts are string keys, not arithmetic indices.
-    assoc: HashMap<String, Vec<(Str, Str)>>,
+    /// key/value pairs for deterministic iteration, with a hash index beside
+    /// them so a lookup is not a scan — see [`AssocArray`]. A name present here
+    /// is associative: subscripts are string keys, not arithmetic indices.
+    assoc: HashMap<String, AssocArray>,
     exported: HashSet<String>,
     /// True once the real process environment has been imported into `vars`
     /// (via [`Shell::import_environment`], called by the binary at startup).
@@ -4037,11 +4039,8 @@ impl Shell {
     /// out in `self.aliases` (BTreeMap) sorted order — bash uses its internal
     /// hash order, an unspecified/cosmetic difference; sorted is deterministic.
     fn sync_bash_aliases(&mut self) {
-        let v: Vec<(Str, Str)> = self
-            .aliases
-            .iter()
-            .map(|(k, val)| (k.clone(), val.clone()))
-            .collect();
+        let v: AssocArray =
+            self.aliases.iter().map(|(k, val)| (k.clone(), val.clone())).collect();
         self.assoc.insert("BASH_ALIASES".to_string(), v);
         // Mark has-a-value so `declare -p` renders `=()` even when empty.
         self.array_valued.insert("BASH_ALIASES".to_string());
@@ -4060,7 +4059,7 @@ impl Shell {
             .map(|(k, (p, _))| (k.clone(), bytes::path_to_bytes(p)))
             .collect();
         v.sort_by(|a, b| a.0.cmp(&b.0));
-        self.assoc.insert("BASH_CMDS".to_string(), v);
+        self.assoc.insert("BASH_CMDS".to_string(), v.into_iter().collect());
         self.array_valued.insert("BASH_CMDS".to_string());
     }
 
@@ -9658,7 +9657,7 @@ impl Shell {
                 // by a failed expansion leaves an unvalued array unvalued.
                 self.array_valued.insert(a.name.clone());
                 if !a.append {
-                    self.assoc.insert(a.name.clone(), Vec::new());
+                    self.assoc.insert(a.name.clone(), AssocArray::new());
                     for (key, val) in pending {
                         self.assoc_set(&a.name, key, val, false);
                     }
@@ -9846,14 +9845,10 @@ impl Shell {
         // so an emptied assoc still shows `=()` under `declare -p`.
         self.array_valued.insert(name.to_string());
         let map = self.assoc.entry(name.to_string()).or_default();
-        if let Some(slot) = map.iter_mut().find(|(k, _)| *k == key) {
-            if append {
-                slot.1.extend_from_slice(&val);
-            } else {
-                slot.1 = val;
-            }
+        if append {
+            map.append(key, &val);
         } else {
-            map.push((key, val));
+            map.set(key, val);
         }
     }
 
@@ -10307,11 +10302,7 @@ impl Shell {
 
     /// An associative-array value by string key.
     fn assoc_element(&self, name: &str, key: BStr<'_>) -> Option<Str> {
-        self.assoc
-            .get(name)?
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.clone())
+        self.assoc.get(name)?.get(key).cloned()
     }
 
     /// Resolve the base value for a parameter expansion operator, honoring an
@@ -17470,7 +17461,7 @@ impl Shell {
     /// literal `0` key rather than a position.
     fn element_zero_exists(&self, name: &str) -> bool {
         if let Some(map) = self.assoc.get(name) {
-            return map.iter().any(|(k, _)| k.as_slice() == b"0");
+            return map.contains_key(b"0");
         }
         self.arrays.get(name).is_some_and(|a| a.contains_key(&0))
     }
@@ -18001,10 +17992,7 @@ impl Shell {
                 // A plain array reference (`$arr` / `${arr}`) reads element 0
                 // (indexed) or the value at key "0" (associative).
                 if let Some(m) = self.assoc.get(name) {
-                    return m
-                        .iter()
-                        .find(|(k, _)| k.as_slice() == b"0")
-                        .map(|(_, v)| v.clone());
+                    return m.get(b"0").cloned();
                 }
                 if let Some(arr) = self.arrays.get(name) {
                     return arr.get(&0).cloned();
@@ -28786,7 +28774,7 @@ impl Shell {
                 return false;
             }
             if let Some(map) = self.assoc.get_mut(name) {
-                map.retain(|(k, _)| k != &key);
+                map.remove(&key);
             }
             return true;
         }
@@ -57542,14 +57530,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         src.push(0xff);
         src.extend_from_slice(b"]=gone\nm[keep]=kept\n");
         assert_eq!(sh.run_source(&src), 0);
-        assert_eq!(sh.assoc.get("m").map(Vec::len), Some(2), "both keys stored");
+        assert_eq!(sh.assoc.get("m").map(AssocArray::len), Some(2), "both keys stored");
         let mut unset: Str = b"unset 'm[".to_vec();
         unset.push(0xff);
         unset.extend_from_slice(b"]'\n");
         assert_eq!(sh.run_source(&unset), 0);
         let m = sh.assoc.get("m").expect("m is still declared");
         assert_eq!(m.len(), 1, "the non-text key was removed");
-        assert_eq!(m[0].0, b"keep");
+        assert_eq!(m.keys().next().map(Vec::as_slice), Some(&b"keep"[..]));
     }
 
     #[test]

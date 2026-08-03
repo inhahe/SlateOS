@@ -420,6 +420,21 @@ fn path_is_executable(p: &std::path::Path) -> bool {
     }
 }
 
+/// An external command about to be started: the word the shell was given, and
+/// the file its `$PATH` (and `hash`) lookup made of it — `None` when the lookup
+/// found nothing and the OS is to be handed the word to locate for itself.
+///
+/// The pair travels together because a command word is used *twice* on the way
+/// to a child — once to decide what to spawn, once to name the program in the
+/// child's `_` — and the lookup behind it is not free of side effects: it bumps
+/// the `hash` hit count. Resolving once and passing the answer along is what
+/// keeps a single command from being counted twice.
+#[derive(Clone, Copy)]
+struct ChildProgram<'a> {
+    word: BStr<'a>,
+    resolved: Option<&'a std::path::Path>,
+}
+
 /// Format one `shopt` listing line. In re-inputtable mode (`shopt -p`) the line
 /// is `shopt -s NAME` / `shopt -u NAME` (which can be fed back to the shell);
 /// otherwise it is bash's `NAME<pad-to-15>\ton|off` status form.
@@ -561,6 +576,32 @@ fn shell_path(p: &std::path::Path) -> Str {
         s
     };
     s.replace(b"\\", b"/")
+}
+
+/// A program path in the spelling the *host* wants to launch it by.
+///
+/// The inverse of [`shell_path`], and needed because the two spellings are not
+/// interchangeable. The shell shows paths with `/` everywhere — it is what
+/// `hash`, `type` and `$_` print, and it is what bash prints — and the Windows
+/// host is perfectly happy to *open* such a path. But a program image is not
+/// merely opened: its path is also the first word of the child's command line,
+/// and a program that re-parses that line reads a leading `/` as the start of
+/// an option. `cmd.exe` is exactly such a program: handed
+/// `C:/WINDOWS/system32/cmd.exe` it takes `/WINDOWS` and `/system32` for
+/// switches and fails with `Error occurred while processing: .exe`. So the
+/// separator goes back for the spawn, and only for the spawn.
+///
+/// A bare name — the word handed to the OS to look up for itself — carries no
+/// separator and so passes through untouched.
+fn host_program(p: BStr<'_>) -> Str {
+    #[cfg(windows)]
+    {
+        p.replace(b"/", b"\\")
+    }
+    #[cfg(not(windows))]
+    {
+        p.to_vec()
+    }
 }
 
 /// The current working directory as a shell-facing path (see [`shell_path`]),
@@ -882,6 +923,32 @@ fn spawn_error_message(word: BStr<'_>, e: &std::io::Error, as_exec: bool) -> (Ve
         return (lines, 126);
     }
     (vec![bfmt![word, b": ", &text]], 126)
+}
+
+/// Start `pc`, unless the `$PATH` lookup that chose it already found nothing.
+///
+/// bash never asks the OS to *find* a command. `search_for_command` resolves a
+/// bare word against the shell's `$PATH` and then `execve`s the full path it
+/// produced, so a word that resolved to nothing is `command not found` and no
+/// process is started at all. Handing the bare word to the host instead — which
+/// is what a plain `PCommand::new(word).spawn()` does — lets the host run a
+/// search of its own, and that search is not the shell's: Windows
+/// `CreateProcess` looks along the *parent process's* `PATH` environment
+/// variable, so `PATH=/nowhere sed …` would still find a `sed` and run it.
+///
+/// A word that spelled a *path* is handed over unresolved on purpose. There the
+/// word already said which file, and only the OS can say why that file will not
+/// run — `No such file or directory`, `Permission denied`, `Is a directory` —
+/// which is exactly the distinction [`spawn_error_message`] then reports.
+fn spawn_resolved(
+    pc: &mut PCommand,
+    word: BStr<'_>,
+    resolved: Option<&std::path::Path>,
+) -> std::io::Result<std::process::Child> {
+    if resolved.is_none() && !word.contains(&b'/') && !word.contains(&b'\\') {
+        return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+    }
+    pc.spawn()
 }
 
 /// The way `exec` asks for a command to be started differently from an
@@ -4570,9 +4637,14 @@ impl Shell {
     /// which entries a new `$PATH` would still reach — even for `PATH=$PATH`,
     /// whose value it never compares. `export PATH` and `readonly PATH` name no
     /// value, so they are not assignments and leave the table alone.
+    ///
+    /// `BASH_CMDS` is that same table seen as an associative array, so it has
+    /// to be rebuilt here too — otherwise `PATH=x; declare -p BASH_CMDS` would
+    /// still show entries the table no longer holds.
     fn note_var_change(&mut self, name: &str) {
         if name == "PATH" {
             self.cmd_hash.clear();
+            self.sync_bash_cmds();
         }
     }
 
@@ -6484,13 +6556,19 @@ impl Shell {
             // Resolved through the shell's own `$PATH` and `hash` cache — as
             // bash resolves every pipeline stage, and as the non-pipeline path
             // already did — so that a stage naming a script the OS will not run
-            // is interposed the same way it would be anywhere else.
-            let resolved = self.resolve_external(program);
+            // is interposed the same way it would be anywhere else. Read-only,
+            // though: bash forks the stage first, so nothing the lookup learns
+            // comes back (see [`Shell::resolve_external_forked`]).
+            let resolved = self.resolve_external_forked(program, &assigns);
             let mut pc = self.external_command(program, resolved.as_deref(), program, &argv[1..]);
             // The child inherits *this* shell's directory, which is not the
             // process's once we are inside a subshell clone.
             pc.current_dir(bytes::bytes_to_path(&self.cwd));
-            self.apply_child_env(&mut pc, &assigns, Some(program));
+            self.apply_child_env(
+                &mut pc,
+                &assigns,
+                Some(ChildProgram { word: program, resolved: resolved.as_deref() }),
+            );
 
             // stdin: the first stage takes the pipeline's own input; later
             // stages read the previous pipe (or a closed/null stream if the
@@ -6514,7 +6592,7 @@ impl Shell {
                 pc.stdout(Stdio::piped());
             }
 
-            match pc.spawn() {
+            match spawn_resolved(&mut pc, program, resolved.as_deref()) {
                 Ok(mut child) => {
                     if i != last {
                         prev_stdout = child.stdout.take();
@@ -12221,6 +12299,18 @@ impl Shell {
         // also where a subscripted or readonly name is refused and dropped (see
         // [`Shell::prefix_assignments`]).
         let assigns = self.prefix_assignments(&sc.assignments);
+        // A `PATH=` among them empties the `hash` table, exactly as a real
+        // assignment does: the entries in it were found under the old `$PATH`.
+        // bash reaches this through the same `sv_path` hook, from the code that
+        // binds the temporary environment — so it follows the *assignment* and
+        // not the lookup, and `PATH=d echo hi` and `PATH=d a-function` flush
+        // just as `PATH=d a-command` does. It belongs here rather than inside
+        // [`Shell::prefix_assignments`] because a *forked* command's prefix
+        // never touches this shell's table: `hash -p da/w.sh w.sh;
+        // PATH=db w.sh | cat; hash` still shows da's copy in bash.
+        if Self::temp_path(&assigns).is_some() {
+            self.note_var_change("PATH");
+        }
 
         // A non-fatal word-expansion error while expanding a prefix assignment
         // value (`x=$((1/0)) cmd`, `x=${!nonexist} cmd`) discards the command
@@ -12401,7 +12491,9 @@ impl Shell {
         if !name.contains(&b'/')
             && !name.contains(&b'\\')
             && self.funcs.contains_key(b"command_not_found_handle".as_slice())
-            && self.find_in_path(&name).is_none()
+            // Against the same `$PATH` the run itself will use, prefix included:
+            // `PATH=dir cmd` must not reach the handler when `dir` holds `cmd`.
+            && self.find_in_path(&name, Self::temp_path(&assigns)).is_none()
         {
             return self.call_function(
                 b"command_not_found_handle",
@@ -13293,7 +13385,11 @@ impl Shell {
             // whether *any* name was described, not whether all were.
             let mut any = false;
             for name in rest {
-                any |= self.command_describe(name, verbose, out, redir);
+                // `command` re-dispatches, so it is resolved before the prefix
+                // assignments are bound as shell variables (unlike an ordinary
+                // builtin) — its own `$PATH` search therefore has to be handed
+                // a `PATH=` from the prefix explicitly.
+                any |= self.command_describe(name, verbose, out, redir, Self::temp_path(assigns));
             }
             self.last_status = i32::from(!any);
             return Flow::Next;
@@ -13409,11 +13505,12 @@ impl Shell {
         verbose: bool,
         out: &mut Out,
         redir: &RedirPlan,
+        temp_path: Option<BStr<'_>>,
     ) -> bool {
         // A command *name* that is not text can only be a `$PATH` file: no
         // alias, keyword, function or builtin can be spelled with it.
         let Some(text) = bytes::as_str(target).map(str::to_owned) else {
-            return self.command_describe_file(target, verbose, out, redir);
+            return self.command_describe_file(target, verbose, out, redir, temp_path);
         };
         let target = text.as_str();
         if let Some(val) = self.describe_alias(target.as_bytes()) {
@@ -13448,7 +13545,7 @@ impl Shell {
             };
             let _ = self.write_line(out, redir, &line);
         } else {
-            return self.command_describe_file(target.as_bytes(), verbose, out, redir);
+            return self.command_describe_file(target.as_bytes(), verbose, out, redir, temp_path);
         }
         true
     }
@@ -13461,8 +13558,9 @@ impl Shell {
         verbose: bool,
         out: &mut Out,
         redir: &RedirPlan,
+        temp_path: Option<BStr<'_>>,
     ) -> bool {
-        if let Some(path) = self.find_in_path(target) {
+        if let Some(path) = self.find_in_path(target, temp_path) {
             let ps = bytes::path_to_bytes(&path);
             let line = if verbose {
                 bfmt![target, b" is ", &ps]
@@ -13483,25 +13581,67 @@ impl Shell {
         false
     }
 
+    /// The directories a bare-name lookup searches, in `$PATH` order.
+    ///
+    /// Each is resolved against *this* shell's directory rather than the
+    /// process's, so a relative entry (`.`, `bin`) means what the shell means by
+    /// it — and an **empty** entry is the current directory, which is POSIX's
+    /// reading and bash's (`PATH=:/bin` searches here first). Each is spelled
+    /// the way the shell spells paths, because a hit is not only spawned but
+    /// reported: it is what `hash` and `type` print and what `$_` carries into
+    /// the child, and bash puts a `/`-separated path in all three.
+    ///
+    /// An unset `$PATH` means no search at all — *unless* the shell has not yet
+    /// taken ownership of its environment, when the process's own `$PATH` is
+    /// still the authority (bash).
+    ///
+    /// `temp_path` is a `PATH=` written as a command's assignment prefix, which
+    /// outranks the shell's own: bash reads every variable through the
+    /// temporary environment first, and its `$PATH` search is no exception.
+    fn search_dirs(&self, temp_path: Option<BStr<'_>>) -> Vec<Str> {
+        let path = match (temp_path, self.param_value("PATH")) {
+            (Some(p), _) => p.to_vec(),
+            (None, Some(p)) => p,
+            (None, None) if !self.env_imported => match std::env::var_os("PATH") {
+                Some(p) => bytes::os_to_bytes(&p),
+                None => return Vec::new(),
+            },
+            (None, None) => return Vec::new(),
+        };
+        std::env::split_paths(&bytes::bytes_to_os(&path))
+            .map(|d| {
+                let d = bytes::path_to_bytes(&d);
+                if d.is_empty() {
+                    return if self.cwd.is_empty() { b".".to_vec() } else { self.cwd.clone() };
+                }
+                shell_path(&bytes::bytes_to_path(&self.resolve_str(&d)))
+            })
+            .collect()
+    }
+
+    /// The file `name` would name in the `$PATH` directory `dir`, spelled the
+    /// way [`Shell::search_dirs`] spells the directory — one `/` between the
+    /// two, and no host separator introduced by the join.
+    fn path_candidate(dir: BStr<'_>, name: BStr<'_>) -> std::path::PathBuf {
+        bytes::bytes_to_path(&join_under(dir, name))
+    }
+
     /// Search `$PATH` for an executable named `name`. A name containing a slash
     /// is checked directly. Returns the first matching regular file.
-    fn find_in_path(&self, name: BStr<'_>) -> Option<std::path::PathBuf> {
+    ///
+    /// `temp_path` is a `PATH=` from the command's assignment prefix; see
+    /// [`Shell::search_dirs`].
+    fn find_in_path(
+        &self,
+        name: BStr<'_>,
+        temp_path: Option<BStr<'_>>,
+    ) -> Option<std::path::PathBuf> {
         if name.contains(&b'/') || name.contains(&b'\\') {
             let p = self.resolve(name);
             return p.is_file().then_some(p);
         }
-        let path = match self.param_value("PATH") {
-            Some(p) => p,
-            // Only consult the real process PATH when the shell has not taken
-            // ownership of its environment; once imported, an unset PATH means
-            // no path search (bash).
-            None if !self.env_imported => bytes::os_to_bytes(&std::env::var_os("PATH")?),
-            None => return None,
-        };
-        for dir in std::env::split_paths(&bytes::bytes_to_os(&path)) {
-            // A relative `$PATH` entry (`.`, `bin`) is relative to *this*
-            // shell's directory, not the process's.
-            let cand = self.resolve(&bytes::path_to_bytes(&dir)).join(bytes::bytes_to_os(name));
+        for dir in self.search_dirs(temp_path) {
+            let cand = Self::path_candidate(&dir, name);
             // bash's PATH search skips files it cannot execute (it probes with
             // `access(X_OK)`), so a non-executable data file (e.g. a `*.json`
             // config) sharing a name with a real command in an earlier PATH dir
@@ -13542,13 +13682,13 @@ impl Shell {
     /// back to letting the OS attempt the spawn (preserving prior behavior).
     fn resolve_external(&mut self, name: BStr<'_>) -> Option<std::path::PathBuf> {
         if name.contains(&b'/') || name.contains(&b'\\') {
-            return self.find_in_path(name);
+            return self.find_in_path(name, None);
         }
         if let Some((path, hits)) = self.cmd_hash.get_mut(name) {
             *hits += 1;
             return Some(path.clone());
         }
-        let path = self.find_in_path(name)?;
+        let path = self.find_in_path(name, None)?;
         self.hash_remember(name.to_vec(), path.clone(), 1);
         // Refresh the BASH_CMDS mirror only when a *new* command is hashed (rare,
         // once per distinct command). The cache-hit branch above mutates only the
@@ -13557,9 +13697,75 @@ impl Shell {
         Some(path)
     }
 
+    /// The `PATH=` among a command's assignment prefix, if it has one.
+    fn temp_path(assigns: &[(String, Str)]) -> Option<BStr<'_>> {
+        assigns.iter().rev().find(|(k, _)| k == "PATH").map(|(_, v)| v.as_slice())
+    }
+
+    /// [`Shell::resolve_external`] for a command that carries an assignment
+    /// prefix — the form every external-command site uses.
+    ///
+    /// Without a `PATH=` in the prefix this is exactly `resolve_external`. With
+    /// one, the search runs against *that* `$PATH`, and the `hash` table is out
+    /// of the picture entirely: it is neither consulted nor added to. bash does
+    /// all three, and the third follows from the first two — a table keyed by
+    /// name would otherwise answer for a `$PATH` that was in force for one
+    /// command only. Measured against bash 5.2.37:
+    ///
+    /// ```sh
+    /// hash -p da/w.sh w.sh   # w.sh hashed to da's copy
+    /// PATH=db w.sh           # runs *db's* copy, not the hashed one
+    /// hash                   # "hash table empty" — see prefix_assignments
+    /// ```
+    fn resolve_external_with(
+        &mut self,
+        name: BStr<'_>,
+        assigns: &[(String, Str)],
+    ) -> Option<std::path::PathBuf> {
+        match Self::temp_path(assigns) {
+            None => self.resolve_external(name),
+            Some(p) => {
+                // Cloned because the search borrows the shell, and the prefix
+                // it came from is the caller's.
+                let p = p.to_vec();
+                self.find_in_path(name, Some(&p))
+            }
+        }
+    }
+
+    /// [`Shell::resolve_external_with`] for a command that runs in a *fork* —
+    /// a pipeline stage — and so cannot change this shell's `hash` table.
+    ///
+    /// bash forks each stage before it looks the command up, so everything the
+    /// lookup would do to the table happens in a copy that dies with the stage.
+    /// The table is still *read*, because the fork inherited it; it is only the
+    /// writing back — a new entry, a bumped hit count — that never returns.
+    /// Measured against bash 5.2.37: `hash -r; cmd | cat; hash` reports an
+    /// empty table, where `cmd` on its own hashes it.
+    fn resolve_external_forked(
+        &self,
+        name: BStr<'_>,
+        assigns: &[(String, Str)],
+    ) -> Option<std::path::PathBuf> {
+        if let Some(p) = Self::temp_path(assigns) {
+            return self.find_in_path(name, Some(p));
+        }
+        if !name.contains(&b'/')
+            && !name.contains(&b'\\')
+            && let Some((path, _)) = self.cmd_hash.get(name)
+        {
+            return Some(path.clone());
+        }
+        self.find_in_path(name, None)
+    }
+
     /// Like `find_in_path`, but returns *every* matching executable across all
     /// `$PATH` directories in order (used by `type -a`). Duplicate paths are
     /// suppressed while preserving first-seen order.
+    ///
+    /// The same directories and the same executability test as the single-hit
+    /// search: `type -a` must agree with what would actually run, so the first
+    /// entry it prints is by construction what [`Shell::find_in_path`] returns.
     fn find_all_in_path(&self, name: BStr<'_>) -> Vec<std::path::PathBuf> {
         let mut out: Vec<std::path::PathBuf> = Vec::new();
         if name.contains(&b'/') || name.contains(&b'\\') {
@@ -13569,17 +13775,9 @@ impl Shell {
             }
             return out;
         }
-        let path = match self.param_value("PATH") {
-            Some(p) => p,
-            None if !self.env_imported => match std::env::var_os("PATH") {
-                Some(p) => bytes::os_to_bytes(&p),
-                None => return out,
-            },
-            None => return out,
-        };
-        for dir in std::env::split_paths(&bytes::bytes_to_os(&path)) {
-            let cand = self.resolve(&bytes::path_to_bytes(&dir)).join(bytes::bytes_to_os(name));
-            if cand.is_file() && !out.contains(&cand) {
+        for dir in self.search_dirs(None) {
+            let cand = Self::path_candidate(&dir, name);
+            if path_is_executable(&cand) && !out.contains(&cand) {
                 out.push(cand.clone());
             }
             #[cfg(windows)]
@@ -13606,8 +13804,11 @@ impl Shell {
         // name; everything else hands over the word as typed.
         let arg0 = xopts.map_or_else(|| argv[0].clone(), |x| x.arg0_for(&argv[0]));
         // Resolve via the shell's `$PATH` (and the `hash` cache) when possible;
-        // fall back to the bare name so the OS can still try to locate it.
-        let resolved = self.resolve_external(&argv[0]);
+        // fall back to the bare name so the OS can still try to locate it. A
+        // `PATH=` in this command's own prefix outranks the shell's — including
+        // for an `exec`, whose prefix assignments are the shell's *and* still
+        // reach the search that finds what to become.
+        let resolved = self.resolve_external_with(&argv[0], assigns);
         // The word a failure is reported against. `exec` names the *file* it
         // tried to become — an absolute path, because it has to have one to go
         // on being the shell if the exec fails.
@@ -13640,7 +13841,14 @@ impl Shell {
         } else {
             // An `exec` replaces the shell rather than forking a child, and bash
             // adds no `_` to that environment — hence the `None` for it.
-            self.apply_child_env(&mut cmd, assigns, xopts.is_none().then_some(&*argv[0]));
+            self.apply_child_env(
+                &mut cmd,
+                assigns,
+                xopts.is_none().then(|| ChildProgram {
+                    word: &argv[0],
+                    resolved: resolved.as_deref(),
+                }),
+            );
         }
 
         // stdin — a here-doc/here-string body takes precedence, then a file
@@ -14102,7 +14310,7 @@ impl Shell {
             }
         }
 
-        let mut child = match cmd.spawn() {
+        let mut child = match spawn_resolved(&mut cmd, &argv[0], resolved.as_deref()) {
             Ok(c) => c,
             Err(e) => {
                 let (msgs, status) = spawn_error_message(&reported, &e, xopts.is_some());
@@ -14294,7 +14502,11 @@ impl Shell {
             // with an empty cursor.) Nothing that *is* redirected reaches here:
             // a command with redirections declines the shortcut.
             cmd.stdin(Stdio::null());
-            self.apply_child_env(&mut cmd, &[], Some(&argv[0]));
+            self.apply_child_env(
+                &mut cmd,
+                &[],
+                Some(ChildProgram { word: &argv[0], resolved: Some(&path) }),
+            );
             let id = self.next_job_id();
             let (pid, child, status) = match cmd.spawn() {
                 Ok(child) => (child.id(), Some(JobBody::Process(child)), None),
@@ -19865,8 +20077,11 @@ impl Shell {
                 args.to_vec(),
             ),
         };
+        // The lookup answers in the shell's spelling, because its answer is also
+        // what `hash`/`type`/`$_` report; the OS gets the host's (see
+        // [`host_program`]).
         #[cfg_attr(not(unix), allow(unused_mut))]
-        let mut pc = PCommand::new(bytes::bytes_to_os(&program));
+        let mut pc = PCommand::new(bytes::bytes_to_os(&host_program(&program)));
         // bash execs the resolved file but hands the child the command word as
         // typed (`cat`, not `/usr/bin/cat`), so a program reports its own name
         // the way the user invoked it. A script running under an interposed
@@ -19905,7 +20120,7 @@ impl Shell {
             // Resolved without the `hash` cache: this is a question about a
             // file on disk, and answering it must not disturb what the shell
             // reports about which commands it has run.
-            if wincmd::is_cygwin_program(&key, || self.find_in_path(&program)) {
+            if wincmd::is_cygwin_program(&key, || self.find_in_path(&program, None)) {
                 for a in args {
                     std::os::windows::process::CommandExt::raw_arg(
                         pc,
@@ -19924,19 +20139,17 @@ impl Shell {
     /// Values go across as `OsString`, never as text: an exported variable may
     /// hold any byte sequence, and re-encoding it would hand the child a
     /// different value than the shell holds (TD-OILS-BYTE-STRINGS).
-    /// `program`, when given, is the command word about to be run: it puts a `_`
+    /// `program`, when given, is the command about to be run: it puts a `_`
     /// in the child's environment naming the program (see
     /// [`Self::child_underscore`]). `None` suppresses that, for the one caller
     /// that is not forking a child — `exec`.
     fn apply_child_env(
-        &mut self,
+        &self,
         pc: &mut PCommand,
         assigns: &[(String, Str)],
-        program: Option<BStr<'_>>,
+        program: Option<ChildProgram<'_>>,
     ) {
-        // Resolved up front: the `$PATH` search behind it may hash the command
-        // it finds, and nothing below may be borrowing the shell when it does.
-        let underscore = program.map(|w| self.child_underscore(w));
+        let underscore = program.map(Self::child_underscore);
         // When the shell owns its environment (imported at startup), spawn from
         // a cleared base so an `unset`/non-exported variable does not leak in
         // via the parent process's inherited environment.
@@ -20015,15 +20228,19 @@ impl Shell {
     /// the search found nothing, itself: the OS is about to be asked to locate
     /// it, and bash names it the same way it will report failing to run it.
     ///
+    /// The search is *not* repeated here — the caller already ran it to decide
+    /// what to spawn, and running it again would count a second `hash` hit for
+    /// a command used once. That is why the answer arrives as a
+    /// [`ChildProgram`] rather than as a bare word.
+    ///
     /// This entry exists only in the child. `_` is never an exported shell
     /// variable in bash — `export _` does not make it one — which is also why an
     /// imported `_` must be stripped of its exported mark at startup.
-    fn child_underscore(&mut self, word: BStr<'_>) -> Str {
-        if word.contains(&b'/') || word.contains(&b'\\') {
-            return word.to_vec();
+    fn child_underscore(prog: ChildProgram<'_>) -> Str {
+        if prog.word.contains(&b'/') || prog.word.contains(&b'\\') {
+            return prog.word.to_vec();
         }
-        self.resolve_external(word)
-            .map_or_else(|| word.to_vec(), |p| shell_path(&p))
+        prog.resolved.map_or_else(|| prog.word.to_vec(), shell_path)
     }
 
     /// [`Shell::resolve`] plus the host device-name mapping
@@ -23629,7 +23846,7 @@ impl Shell {
             }
             // Bare name: forget any old entry and force a fresh `$PATH` search.
             self.cmd_hash.remove(name.as_slice());
-            match self.find_in_path(name) {
+            match self.find_in_path(name, None) {
                 Some(path) => self.hash_remember(name.clone(), path, 0),
                 None => {
                     self.berrln(&bfmt![self.err_prefix(), b"hash: ", name, b": not found"]);
@@ -46456,7 +46673,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         let mut sh = Shell::new();
         sh.vars.insert("PATH".to_string(), bytes::path_to_bytes(dir.path()));
-        assert!(sh.find_in_path(b"mytool").is_some(), "executable not found in PATH");
+        assert!(sh.find_in_path(b"mytool", None).is_some(), "executable not found in PATH");
 
         // A non-executable, plain-named data file. On Unix the missing exec bit
         // must make the search skip it (returning None); on Windows executability
@@ -46471,10 +46688,125 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o644));
             assert!(
-                sh.find_in_path("mydata").is_none(),
+                sh.find_in_path(b"mydata", None).is_none(),
                 "non-executable file was resolved as a command"
             );
         }
+    }
+
+    /// The directories a `$PATH` search visits: resolved against the *shell's*
+    /// directory, spelled the way the shell spells paths, with an empty entry
+    /// meaning the current one — and a command's own `PATH=` prefix outranking
+    /// the shell's own (TD-OILS-PREFIX-PATH-LOOKUP).
+    #[test]
+    fn the_search_path_is_the_shell_s_own_and_a_prefix_outranks_it() {
+        let mut sh = Shell::new();
+        sh.cwd = b"/here".to_vec();
+        let dirs = |sh: &Shell, over: Option<&[u8]>| {
+            sh.search_dirs(over).iter().map(|d| String::from_utf8_lossy(d).into_owned()).collect::<Vec<_>>()
+        };
+        // One entry per host separator, so the test speaks the host's `$PATH`
+        // the way a shell running on it would.
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        sh.vars.insert("PATH".to_string(), format!("/abs{sep}rel{sep}{sep}/tail/").into_bytes());
+        assert_eq!(
+            dirs(&sh, None),
+            // `/abs` is already rooted; `rel` and the empty entry are resolved
+            // against the shell's directory (the empty one *is* that directory);
+            // the trailing separator on `/tail/` is not doubled by the join
+            // below, which is why the spelling matters.
+            vec!["/abs", "/here/rel", "/here", "/tail/"]
+        );
+        assert_eq!(
+            bytes::path_to_bytes(&Shell::path_candidate(b"/tail/", b"cmd")),
+            b"/tail/cmd".to_vec()
+        );
+        // A `PATH=` written as a command prefix is searched instead, without
+        // being stored: the shell's own `$PATH` is untouched by the lookup.
+        assert_eq!(dirs(&sh, Some(b"/only")), vec!["/only"]);
+        assert_eq!(dirs(&sh, None), vec!["/abs", "/here/rel", "/here", "/tail/"]);
+        // No `$PATH` at all and an environment the shell already owns: nothing
+        // is searched, rather than the process's leftover `$PATH`.
+        sh.vars.remove("PATH");
+        sh.env_imported = true;
+        assert!(dirs(&sh, None).is_empty());
+        assert_eq!(dirs(&sh, Some(b"/only")), vec!["/only"]);
+    }
+
+    /// The `PATH=` a lookup honours is the *last* one written, and the shell
+    /// spelling a path uses is not the one the host is handed to launch it by.
+    #[test]
+    fn a_program_is_spawned_by_the_host_s_spelling_of_its_path() {
+        assert_eq!(Shell::temp_path(&[]), None);
+        let assigns = [
+            ("PATH".to_string(), b"first".to_vec()),
+            ("V".to_string(), b"x".to_vec()),
+            ("PATH".to_string(), b"last".to_vec()),
+        ];
+        assert_eq!(Shell::temp_path(&assigns), Some(&b"last"[..]));
+        assert_eq!(Shell::temp_path(&assigns[1..2]), None);
+
+        // A bare name — what the OS is asked to look up itself — is untouched;
+        // a path is handed over in the host's separator, because it becomes the
+        // child's `argv[0]` and `cmd.exe` reads `/WINDOWS` there as switches.
+        assert_eq!(host_program(b"cat"), b"cat".to_vec());
+        #[cfg(windows)]
+        assert_eq!(host_program(b"C:/WINDOWS/system32/cmd.exe"), br"C:\WINDOWS\system32\cmd.exe".to_vec());
+        #[cfg(not(windows))]
+        assert_eq!(host_program(b"/usr/bin/cat"), b"/usr/bin/cat".to_vec());
+    }
+
+    /// A pipeline stage is a *fork* in bash, so what its `$PATH` search learns
+    /// never comes back to this shell: the `hash` table is read but not written
+    /// (TD-OILS-PREFIX-PATH-LOOKUP).
+    #[test]
+    fn a_forked_stage_reads_the_hash_table_but_cannot_change_it() {
+        let mut sh = Shell::new();
+        let p = std::path::PathBuf::from("/somewhere/tool");
+        sh.hash_remember(b"tool".to_vec(), p.clone(), 3);
+
+        // Read: the stage sees the entry, exactly as a fork of this shell would.
+        assert_eq!(sh.resolve_external_forked(b"tool", &[]), Some(p.clone()));
+        // …but the hit count it would have bumped stays where it was.
+        assert_eq!(sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h), Some(3));
+        // The non-forked path is the one that counts the use.
+        assert_eq!(sh.resolve_external(b"tool"), Some(p));
+        assert_eq!(sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h), Some(4));
+
+        // A `PATH=` prefix takes the table out of the picture altogether: the
+        // search runs against that `$PATH` and finds nothing there.
+        let prefix = [("PATH".to_string(), b"/nowhere".to_vec())];
+        assert_eq!(sh.resolve_external_forked(b"tool", &prefix), None);
+        assert_eq!(sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h), Some(4));
+        // The same for a command run in *this* shell: bash neither consults the
+        // table nor adds to it for a lookup made under a prefix `$PATH`.
+        assert_eq!(sh.resolve_external_with(b"tool", &prefix), None);
+        assert_eq!(sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h), Some(4));
+    }
+
+    /// A bare word the shell's `$PATH` could not place is `command not found`
+    /// and nothing is started — the OS is never asked to search on the shell's
+    /// behalf, because the `$PATH` it would search is its own and not the
+    /// shell's (TD-OILS-PREFIX-PATH-LOOKUP).
+    #[test]
+    fn an_unresolved_bare_word_is_not_handed_to_the_os_to_find() {
+        // A name the *host* would certainly find: on Windows `CreateProcess`
+        // searches the parent's `PATH`, so a plain spawn of this would succeed.
+        let host_name = if cfg!(windows) { "cmd" } else { "sh" };
+        let mut pc = PCommand::new(host_name);
+        pc.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let Err(e) = spawn_resolved(&mut pc, host_name.as_bytes(), None) else {
+            panic!("an unresolved bare word must not spawn");
+        };
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+        // …which is what makes it `command not found` rather than an errno.
+        assert_eq!(spawn_error_message(host_name.as_bytes(), &e, false).1, 127);
+
+        // A word that spelled a path is handed over unresolved on purpose: only
+        // the OS can say why that particular file will not run. Here it does not
+        // exist, so the OS's own answer is the one that comes back.
+        let mut pc = PCommand::new("./no-such-program-zq");
+        assert!(spawn_resolved(&mut pc, b"./no-such-program-zq", None).is_err());
     }
 
     #[test]
@@ -58156,32 +58488,45 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn a_child_gets_an_underscore_naming_its_own_program() {
-        let mut sh = Shell::new();
+        let sh = Shell::new();
+        let underscore = |pc: &PCommand| {
+            pc.get_envs()
+                .find(|(k, _)| *k == OsStr::new("_"))
+                .and_then(|(_, v)| v.map(std::ffi::OsStr::to_os_string))
+        };
         // A word that already spells a path is handed over exactly as written:
-        // no `$PATH` search happened, so there is nothing to resolve it to.
+        // no `$PATH` search happened, so there is nothing to resolve it to. It
+        // stays the word even if a resolution is offered alongside it.
         for word in ["./env", "/usr/bin/env", "d/x"] {
             let mut pc = PCommand::new("true");
-            sh.apply_child_env(&mut pc, &[], Some(word.as_bytes()));
-            let got = pc
-                .get_envs()
-                .find(|(k, _)| *k == OsStr::new("_"))
-                .and_then(|(_, v)| v.map(std::ffi::OsStr::to_os_string));
-            assert_eq!(got, Some(OsString::from(word)));
+            let prog = ChildProgram {
+                word: word.as_bytes(),
+                resolved: Some(std::path::Path::new("/elsewhere/env")),
+            };
+            sh.apply_child_env(&mut pc, &[], Some(prog));
+            assert_eq!(underscore(&pc), Some(OsString::from(word)));
         }
+        // A bare name is the file the caller's search found, spelled the way
+        // the shell spells paths.
+        let mut pc = PCommand::new("true");
+        let prog = ChildProgram {
+            word: b"env",
+            resolved: Some(std::path::Path::new("/usr/bin/env")),
+        };
+        sh.apply_child_env(&mut pc, &[], Some(prog));
+        assert_eq!(underscore(&pc), Some(OsString::from("/usr/bin/env")));
         // A bare name the `$PATH` search cannot place names itself: the OS is
         // about to be asked to find it, and bash reports failure the same way.
         let mut pc = PCommand::new("true");
-        sh.apply_child_env(&mut pc, &[], Some(b"no-such-program-anywhere"));
-        let got = pc
-            .get_envs()
-            .find(|(k, _)| *k == OsStr::new("_"))
-            .and_then(|(_, v)| v.map(std::ffi::OsStr::to_os_string));
-        assert_eq!(got, Some(OsString::from("no-such-program-anywhere")));
+        let prog = ChildProgram { word: b"no-such-program-anywhere", resolved: None };
+        sh.apply_child_env(&mut pc, &[], Some(prog));
+        assert_eq!(underscore(&pc), Some(OsString::from("no-such-program-anywhere")));
         // The entry is the child's alone, and beats anything the shell might
         // have put under that name — an exported `_` is impossible, but an
         // `_=…` written as a prefix is not.
         let mut pc = PCommand::new("true");
-        sh.apply_child_env(&mut pc, &[("_".to_string(), b"custom".to_vec())], Some(b"./env"));
+        let prog = ChildProgram { word: b"./env", resolved: None };
+        sh.apply_child_env(&mut pc, &[("_".to_string(), b"custom".to_vec())], Some(prog));
         let unders: Vec<Option<OsString>> = pc
             .get_envs()
             .filter(|(k, _)| *k == OsStr::new("_"))

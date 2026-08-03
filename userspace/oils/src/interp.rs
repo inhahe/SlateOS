@@ -40153,12 +40153,24 @@ mod tests {
 
     /// A collision-free basename for a test's scratch file or directory.
     ///
-    /// The pid keeps concurrent `cargo test` runs apart and the nanosecond stamp
-    /// keeps the tests within one run apart, so no two of them can pick the same
-    /// name however the harness happens to schedule them.
+    /// The pid keeps concurrent `cargo test` runs apart; the counter keeps the
+    /// tests *within* one run apart. The counter is what makes the name unique
+    /// by construction rather than by luck: a clock stamp is not enough, because
+    /// `SystemTime::now` advances in steps (~150 ns here, and far coarser on
+    /// other hosts), so two threads calling inside one step get the same name —
+    /// and then the same directory. That is not a cosmetic clash. Two tests
+    /// sharing a scratch cwd run fine until the first one *ends*, at which point
+    /// its `ScratchDir::drop` removes the tree the other one is still standing
+    /// in; the other then fails somewhere unrelated and unrepeatable, e.g.
+    /// `osh: sh: Not a directory` from a spawn whose `current_dir` has just been
+    /// deleted. That was a real ~1-in-3 flake across arbitrary tests
+    /// (TD-OILS-TEST-SCRATCH-NAME-COLLISION); the stamp is kept only because it
+    /// makes a leftover directory's age readable.
     fn uniq_name(tag: &str) -> String {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         format!(
-            "osh_{tag}_{}_{}",
+            "osh_{tag}_{}_{}_{seq}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -40183,7 +40195,7 @@ mod tests {
         /// A new directory under the system temp dir. Prefer this: an absolute
         /// path needs no cwd lock, so the test never races the cwd-mutating ones.
         fn new(tag: &str) -> Self {
-            Self::at(std::env::temp_dir().join(uniq_name(tag)))
+            Self::fresh(std::env::temp_dir().join(uniq_name(tag)))
         }
 
         /// A new directory *inside this test's scratch cwd* ([`test_cwd`]), for
@@ -40196,7 +40208,7 @@ mod tests {
         /// somewhere that is not the source tree. The process cwd is not
         /// involved, so no [`cwd_guard`] is needed either.
         fn relative(tag: &str) -> Self {
-            Self::at(bytes::bytes_to_path(&test_cwd()).join(uniq_name(tag)))
+            Self::fresh(bytes::bytes_to_path(&test_cwd()).join(uniq_name(tag)))
         }
 
         /// The directory's own name with nothing leading to it — what a relative
@@ -40213,6 +40225,22 @@ mod tests {
         /// out in turn.
         fn at(path: std::path::PathBuf) -> Self {
             std::fs::create_dir_all(&path).expect("create scratch dir");
+            Self { path }
+        }
+
+        /// [`at`](Self::at) for a path that [`uniq_name`] built, which must not
+        /// exist yet: `create_dir` fails on one that does, so a name two tests
+        /// somehow both chose stops the run *here* — where the cause is legible
+        /// — instead of surfacing later as one test deleting another's cwd out
+        /// from under it. `create_dir_all` would accept the collision silently,
+        /// which is how the flake that prompted this went unexplained for so
+        /// long.
+        fn fresh(path: std::path::PathBuf) -> Self {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create scratch parent");
+            }
+            std::fs::create_dir(&path)
+                .unwrap_or_else(|e| panic!("create scratch dir {}: {e}", path.display()));
             Self { path }
         }
 

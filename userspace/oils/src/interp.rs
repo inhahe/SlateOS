@@ -20290,24 +20290,45 @@ impl Shell {
                 } else if lead.contains(&b'F') || lead.contains(&b'f') {
                     // `declare -F`/`-f` operate on functions (name listing).
                     self.declare_functions(args, lead.contains(&b'F'), out, redir)
-                } else if lead.contains(&b'p') {
+                } else if args
+                    .iter()
+                    .take_while(|a| a.starts_with(b"-") || a.starts_with(b"+"))
+                    .any(|a| a.contains(&b'p'))
+                {
+                    // Unlike `-f`/`-F`, `p` is honoured whichever sign carries
+                    // it: `declare +rp` is a listing, not a declaration. The
+                    // sign still decides what it *filters* by, though — see
+                    // `Shell::listing_minus_words` — so `+rp` lists everything.
                     self.declare_print(args, name, out, redir)
                 } else {
                     // An attribute flag with NO name operands is a *listing*
                     // filtered by those attributes (bash), not a declaration.
-                    // With names, or with no attribute flag at all, fall through
-                    // to declare/assign. The same parse decides which flags a
-                    // listing then filters *by*, so both use `listing_flags` —
-                    // a second copy of the letter list here is how `-c` came to
-                    // route to a declaration that declared nothing.
+                    // With names, fall through to declare/assign. The same parse
+                    // decides which flags a listing then filters *by*, so both
+                    // use `listing_flags` — a second copy of the letter list
+                    // here is how `-c` came to route to a declaration that
+                    // declared nothing. Only the minus-signed words count: an
+                    // attribute being taken *off* selects nothing, so
+                    // `declare +r` lists like a bare `declare`.
                     let start = Self::declare_flag_end(args);
+                    let flags = args.get(..start).unwrap_or_default();
                     let has_names = args.get(start).is_some();
-                    let has_attr =
-                        !Self::listing_flags(args.get(..start).unwrap_or_default()).is_empty();
-                    if !has_names && has_attr {
-                        self.declare_list_filtered(args, out, redir)
-                    } else {
+                    let want = Self::listing_flags(Self::listing_minus_words(flags));
+                    if has_names {
                         self.builtin_declare(args, false, name, args.len())
+                    } else if want.is_empty() {
+                        // The flag words still have to be *valid*: `declare -Q`
+                        // is an invalid option, not a listing. `builtin_declare`
+                        // holds the one copy of the letter table and, with no
+                        // name operands, declares nothing — so running it first
+                        // is exactly the option-validation pass bash makes
+                        // before it decides to list.
+                        match self.builtin_declare(args, false, name, args.len()) {
+                            0 => self.declare_list_setline(out, redir),
+                            bad => bad,
+                        }
+                    } else {
+                        self.declare_list_filtered(args, out, redir)
                     }
                 }
             }
@@ -27296,7 +27317,11 @@ impl Shell {
 
     /// The attribute letters a listing call's leading flag words select, in
     /// first-seen order and without duplicates.
-    fn listing_flags(args: &[Str]) -> Vec<char> {
+    ///
+    /// Takes any sequence of words rather than a slice, so a caller that must
+    /// first drop the plus-signed words (see [`Shell::listing_minus_words`]) can
+    /// hand over the filtered iterator directly.
+    fn listing_flags<'a>(args: impl IntoIterator<Item = &'a Str>) -> Vec<char> {
         let mut want: Vec<char> = Vec::new();
         for a in args {
             // Read a byte at a time; every attribute letter is ASCII, so a byte
@@ -27320,11 +27345,33 @@ impl Shell {
     /// not modelled, so they simply don't appear.
     fn declare_list_filtered(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         let start = Self::declare_flag_end(args);
-        let want = Self::listing_flags(args.get(..start).unwrap_or_default());
+        let want = Self::listing_flags(Self::listing_minus_words(args.get(..start).unwrap_or_default()));
         let names = self.listing_names(&want);
         let mut listing = Str::new();
         for name in &names {
             if let Some(def) = self.format_declare_def_listed(name) {
+                listing.extend_from_slice(&def);
+                listing.push(b'\n');
+            }
+        }
+        self.write_bytes(out, redir, &listing)
+    }
+
+    /// A `declare` that selects no attribute and names nothing — a bare
+    /// `declare`, or one whose only flags take an attribute *off* (`declare
+    /// +r`) — lists every variable that has a value, in the `name=value` form a
+    /// bare `set` uses rather than in `declare -FLAGS` form.
+    ///
+    /// The names are `declare -p`'s, minus the ones with nothing to print:
+    /// [`Shell::format_var_setline`] answers `None` for a merely-declared name
+    /// and for a dynamic special whose value cell is empty, which is what keeps
+    /// `RANDOM` and `LINENO` out of this listing though `declare -p` shows them.
+    /// Unlike a bare `set`, no function definitions follow.
+    fn declare_list_setline(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
+        let names = self.declare_p_names();
+        let mut listing = Str::new();
+        for name in &names {
+            if let Some(def) = self.format_var_setline(name) {
                 listing.extend_from_slice(&def);
                 listing.push(b'\n');
             }
@@ -27418,14 +27465,32 @@ impl Shell {
             .collect()
     }
 
+    /// The leading flag words that were spelled with a **minus**, which are the
+    /// only ones a listing filters by.
+    ///
+    /// A plus-signed word still counts as a flag word — it is scanned past, and
+    /// its `p` still selects listing mode — but it *asks for an attribute to be
+    /// taken off*, and bash's listing filter reads only the on-set. So
+    /// `declare +rp` lists the whole table, exactly like a bare `declare -p`,
+    /// while `declare -rp` lists just the readonly names.
+    fn listing_minus_words(args: &[Str]) -> impl Iterator<Item = &Str> {
+        args.iter()
+            .take_while(|a| a.starts_with(b"-") || a.starts_with(b"+"))
+            .filter(|a| a.starts_with(b"-"))
+    }
+
     fn declare_print(&mut self, args: &[Str], tag: &str, out: &mut Out, redir: &RedirPlan) -> i32 {
         let names = Self::print_operand_names(args);
         let mut status = 0;
         let mut write_status = 0;
         if names.is_empty() {
-            // Nothing here can fail, so the whole table is one write.
+            // With no operands, the attribute letters alongside the `p` are a
+            // *filter* on the table, combining exactly as they do for a listing
+            // without `-p` — see [`Shell::listing_names`]. Nothing here can
+            // fail, so the whole table is one write.
+            let want = Self::listing_flags(Self::listing_minus_words(args));
             let mut listing = Str::new();
-            for name in self.declare_p_names() {
+            for name in self.listing_names(&want) {
                 if let Some(def) = self.format_declare_def_listed(&name) {
                     listing.extend_from_slice(&def);
                     listing.push(b'\n');
@@ -47506,6 +47571,55 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // The class carries 2 under `-c` as well.
         assert_eq!(run_cmd_mode("set -o posix; unset -q").1, 2);
+    }
+
+    /// A `declare -p` with attribute letters lists only the names those letters
+    /// select, the same way a listing without `-p` does — and only the
+    /// minus-signed letters count.
+    #[test]
+    fn declare_p_filters_its_listing_by_the_minus_signed_attribute_letters() {
+        // The listing walks the whole environment, so every case is narrowed to
+        // the names the setup makes.
+        const SETUP: &str = "ZZA=1; export ZZX=2; readonly ZZR=3; declare -i ZZI=4; \
+             declare -a ZZAR=(1); declare -A ZZAS=([k]=v); declare -rx ZZRX=5; \
+             declare -ai ZZAI=(7); ";
+        let mine = |src: &str| {
+            run(&format!("{SETUP}{src}"))
+                .0
+                .lines()
+                // `_` holds the last word of the previous command, so it too
+                // mentions a `ZZ` name — but it is not one of them.
+                .filter(|l| l.contains("ZZ") && !l.starts_with("_="))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        // One letter selects the names carrying it…
+        assert_eq!(mine("declare -rp"), r#"declare -r ZZR="3"|declare -rx ZZRX="5""#);
+        assert_eq!(mine("declare -xp"), r#"declare -rx ZZRX="5"|declare -x ZZX="2""#);
+        // …and several union among themselves, rather than intersecting.
+        assert_eq!(
+            mine("declare -rxp"),
+            r#"declare -r ZZR="3"|declare -rx ZZRX="5"|declare -x ZZX="2""#
+        );
+        // `-a`/`-A` are not attributes but *restrictions* on the source list, so
+        // they intersect with the rest: the indexed arrays that are integer.
+        assert_eq!(mine("declare -ap"), r#"declare -ai ZZAI=([0]="7")|declare -a ZZAR=([0]="1")"#);
+        assert_eq!(mine("declare -aip"), r#"declare -ai ZZAI=([0]="7")"#);
+        // Nothing is both kinds at once, and no name is `-t`.
+        assert_eq!(mine("declare -aAp"), "");
+        assert_eq!(mine("declare -tp"), "");
+        // A plus-signed word takes an attribute *off*, so it selects nothing —
+        // but its `p` still makes this a listing rather than a declaration.
+        assert_eq!(mine("declare +rp"), mine("declare -p"));
+        assert!(mine("declare -p").contains(r#"declare -- ZZA="1""#));
+        // With no letters left to select by, a listing that names nothing prints
+        // `set`-style lines instead, and passes over the merely declared.
+        assert_eq!(mine("declare ZZQ; declare"), mine("declare +r"));
+        assert!(mine("declare").starts_with(r#"ZZA=1|ZZAI=([0]="7")"#));
+        assert!(!mine("declare ZZQ; declare").contains("ZZQ"));
+        // A name operand turns the flags back into a declaration.
+        assert_eq!(mine("declare -r ZZA; declare -p ZZA"), r#"declare -r ZZA="1""#);
     }
 
     /// In posix mode `export -p` and `readonly -p` print in their own spelling

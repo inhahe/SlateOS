@@ -317,6 +317,22 @@ Implemented as one line-rewriting helper (`Shell::posix_attr_line`) at the four
 listing sites, covered by
 `posix-mode-makes-export-and-readonly-list-in-their-own-spelling.sh`.
 
+**Also fixed while writing that corpus case — `declare`'s listing flags now
+select which names are listed.** `declare -rp` and friends ignored their
+attribute letters entirely and printed the whole table; `declare +rp` filtered
+where bash does not; and a bare `declare` printed nothing at all. bash's rule,
+measured across a 110-case matrix: `-a`/`-A` *restrict* the source list to that
+array kind (both together select nothing); of the **remaining** minus-signed
+letters a name needs at least one (they union, they do not intersect); with no
+letters left, everything in the source list passes. A plus-signed word takes an
+attribute *off*, so it selects nothing — but its `p` still makes the command a
+listing. And a listing that selects no attribute and names nothing prints
+`set`-style `name=value` lines rather than `declare -FLAGS` ones, passing over
+the merely-declared names. `declare -p`'s filtering now goes through the one
+`Shell::listing_names` helper, and the no-letter case routes through
+`builtin_declare` first so `declare -Q` is still an invalid option rather than a
+listing.
+
 **Still open:** survey the rest of bash's posix-mode list (`man bash`, "POSIX
 Mode") and pin each one with a probe before implementing it; several are already
 osh's behaviour by accident and need only a corpus case.

@@ -4787,10 +4787,12 @@ impl Shell {
     /// sampled immediately before each parse. `shopt -s extglob` on one line
     /// therefore governs the next line, never its own — which is exactly what
     /// [`crate::parser::IncrementalParser::next_unit`] reproduces by re-lexing
-    /// the unread tail when this changes.
+    /// the unread tail when this changes. `set -o posix` rides the same channel
+    /// for the same reason.
     pub(crate) fn parse_opts(&self) -> crate::lexer::ParseOpts {
         crate::lexer::ParseOpts {
             extglob: self.shopt.get("extglob").copied().unwrap_or(false),
+            posix: self.shell_option_enabled("posix"),
         }
     }
 
@@ -6832,9 +6834,32 @@ impl Shell {
         }
         if let Some(start) = start {
             let real = start.elapsed().as_secs_f64();
-            self.emit_stderr(Self::format_time_report(real, pipe.time_posix).as_bytes());
+            // A `time` prefix with no command at all is a report about the
+            // *shell* in posix mode rather than about the null command it
+            // otherwise times; see [`Shell::format_time_report`].
+            let shell_times = self.shell_option_enabled("posix")
+                && matches!(pipe.commands.as_slice(), [Command::Simple(sc)] if Self::is_null_command(sc));
+            self.emit_stderr(
+                Self::format_time_report(real, pipe.time_posix, shell_times).as_bytes(),
+            );
         }
         flow
+    }
+
+    /// Whether a simple command is bash's `nullcmd`: no words, no assignments
+    /// and no redirections, i.e. nothing at all.
+    ///
+    /// Only a `time`/`!` prefix standing alone can parse to one, and only the
+    /// posix-mode `time` report reads it. bash's test is on the command's word
+    /// list and its redirections, and an assignment is *in* its word list —
+    /// which is why `time x=1` reports the ordinary way while `time ;` does not
+    /// (`decl_arrays` goes with the assignments for the same reason: it holds
+    /// operands lifted out of the word list).
+    fn is_null_command(sc: &SimpleCommand) -> bool {
+        sc.words.is_empty()
+            && sc.assignments.is_empty()
+            && sc.redirects.is_empty()
+            && sc.decl_arrays.is_empty()
     }
 
     /// Render a `time`/`time -p` report. `real` is wall-clock seconds; user and
@@ -6842,20 +6867,30 @@ impl Shell {
     /// per-child CPU accounting through `std::process` (see known-issues
     /// TD-OILS10). The default (bash) form is `\nreal\tNmS.SSSs\n…`; the POSIX
     /// `-p` form is `real S.SS\n…` with two decimals and no leading newline.
-    fn format_time_report(real: f64, posix: bool) -> String {
-        if posix {
+    ///
+    /// `shell_times` is the third form: a posix-mode `time` prefixing *no
+    /// command*, which POSIX says reports the shell's own cumulative user and
+    /// system times. There is no elapsed span to report for it — it is not
+    /// timing anything — so bash drops the `real` line entirely and prints the
+    /// other two to two decimals. (`-p` cannot reach it: posix mode is exactly
+    /// the mode in which `time` stops reading its own options, since the word
+    /// after it begins with `-`.)
+    fn format_time_report(real: f64, posix: bool, shell_times: bool) -> String {
+        let fmt = |s: f64, places: usize| {
+            let mins = (s / 60.0).floor() as u64;
+            let secs = s - (mins as f64) * 60.0;
+            format!("{mins}m{secs:.places$}s")
+        };
+        if shell_times {
+            format!("user\t{}\nsys\t{}\n", fmt(0.0, 2), fmt(0.0, 2))
+        } else if posix {
             format!("real {real:.2}\nuser {:.2}\nsys {:.2}\n", 0.0, 0.0)
         } else {
-            let fmt = |s: f64| {
-                let mins = (s / 60.0).floor() as u64;
-                let secs = s - (mins as f64) * 60.0;
-                format!("{mins}m{secs:.3}s")
-            };
             format!(
                 "\nreal\t{}\nuser\t{}\nsys\t{}\n",
-                fmt(real),
-                fmt(0.0),
-                fmt(0.0)
+                fmt(real, 3),
+                fmt(0.0, 3),
+                fmt(0.0, 3)
             )
         }
     }
@@ -55737,13 +55772,80 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn time_report_formatting() {
         // POSIX `-p` form: two decimals, space-separated, no leading newline.
-        let p = Shell::format_time_report(1.5, true);
+        let p = Shell::format_time_report(1.5, true, false);
         assert_eq!(p, "real 1.50\nuser 0.00\nsys 0.00\n");
         // Default (bash) form: leading newline, tab-separated, NmS.SSSs.
-        let d = Shell::format_time_report(62.25, false);
+        let d = Shell::format_time_report(62.25, false, false);
         assert_eq!(d, "\nreal\t1m2.250s\nuser\t0m0.000s\nsys\t0m0.000s\n");
-        let z = Shell::format_time_report(0.0, false);
+        let z = Shell::format_time_report(0.0, false, false);
         assert_eq!(z, "\nreal\t0m0.000s\nuser\t0m0.000s\nsys\t0m0.000s\n");
+        // The shell's own times: no `real` line — there is no span to report —
+        // and two decimals rather than three. (`-p` cannot reach this: the
+        // mode that asks for the shell's times is the mode that takes `-p`
+        // away, so the two are never both in force.)
+        assert_eq!(
+            Shell::format_time_report(1.5, false, true),
+            "user\t0m0.00s\nsys\t0m0.00s\n"
+        );
+    }
+
+    #[test]
+    fn posix_mode_time_loses_its_options() {
+        // In posix mode `time` is the reserved word only when the word after
+        // it does not look like an option, so bash goes looking for an
+        // external `time` instead — which is what takes `-p`/`--` away, since
+        // they are only ever read in that one position. The mode has to be
+        // entered by a command of its own: a `( set -o posix; … )` is parsed
+        // whole before any of it runs.
+        // (Every capture wraps the whole thing in a group: the report goes to
+        // the *shell's* stderr, not the timed command's.)
+        for w in ["-p echo hi", "-- echo hi", "-x echo hi", "-"] {
+            let (o, rc) = run(&format!("set -o posix\n{{ time {w} ; }} 2>&1"));
+            assert_eq!(rc, 127, "time {w}: {o:?}");
+            assert!(o.contains("time: command not found"), "time {w}: {o:?}");
+        }
+        // The test is on the word *as written*: quoted, escaped and expanded
+        // forms keep the reserved word and time a command named `-p`.
+        for w in ["\"-p\"", "\\-p", "$D"] {
+            let (o, rc) = run(&format!("set -o posix\nD=-p\n{{ time {w} echo hi ; }} 2>&1"));
+            assert_eq!(rc, 127, "time {w}: {o:?}");
+            assert!(o.contains("-p: command not found"), "time {w}: {o:?}");
+            assert!(o.contains("\nreal\t"), "time {w} was not timed: {o:?}");
+        }
+        // A word that does not look like an option is untouched, and the mode
+        // going away brings `-p` back.
+        assert_eq!(run("set -o posix\ntime echo hi").0, "hi\n");
+        let (o, rc) = run("set -o posix\nset +o posix\n{ time -p echo hi ; } 2>&1 >/dev/null");
+        assert_eq!(rc, 0);
+        assert!(o.starts_with("real 0."), "got {o:?}");
+    }
+
+    #[test]
+    fn posix_mode_bare_time_reports_the_shell() {
+        // POSIX says a bare `time` writes the shell's own cumulative times, so
+        // there is no span to report and the `real` line goes away.
+        assert_eq!(
+            run("set -o posix\n{ time ; } 2>&1").0,
+            "user\t0m0.00s\nsys\t0m0.00s\n"
+        );
+        // A negation still leaves no command, but a redirect or an assignment
+        // is one — bash's test is the word list and the redirections.
+        assert_eq!(
+            run("set -o posix\n{ ! time ; } 2>&1").0,
+            "user\t0m0.00s\nsys\t0m0.00s\n"
+        );
+        assert!(
+            run("set -o posix\n{ time x=1 ; } 2>&1").0.contains("\nreal\t"),
+            "an assignment is a command"
+        );
+        assert!(
+            run("set -o posix\n{ time >/dev/null ; } 2>&1")
+                .0
+                .contains("\nreal\t"),
+            "a redirect is a command"
+        );
+        // Outside the mode a bare `time` times the null command as usual.
+        assert!(run("{ time ; } 2>&1").0.contains("\nreal\t"));
     }
 
     #[test]

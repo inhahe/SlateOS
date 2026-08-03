@@ -290,13 +290,16 @@ fn arith_cmd_position(prev: Option<&Tok>) -> bool {
     }
 }
 
-/// Shell options that change how source text is *read* — whether while lexing
-/// it or while parsing it — so they must be known before a unit is tokenized
-/// rather than when it runs.
+/// Shell options that change how source text is *read* — tokenized or parsed —
+/// so they must be known before a unit is read rather than when it runs.
 ///
-/// bash reads, parses and executes one unit at a time, so a `shopt` run by unit
+/// bash reads, parses and executes one unit at a time, so an option set by unit
 /// N is in force for the reading of unit N+1 — and only from there. The default
 /// is bash's own for a non-interactive shell.
+///
+/// They travel together because they are sampled at the same moment and by the
+/// same caller ([`Shell::parse_opts`](crate::interp::Shell::parse_opts)), even
+/// though one is consulted by the lexer and the other by the grammar.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ParseOpts {
     /// `shopt -s extglob`: read `?(`, `*(`, `+(`, `@(` and `!(` as the opener of
@@ -305,6 +308,12 @@ pub struct ParseOpts {
     /// metacharacter — which is why `!(cmd)` is a *negated subshell* by default,
     /// and why `echo @(a)` is a syntax error.
     pub extglob: bool,
+    /// `set -o posix`: the grammar reads `time` as the reserved word only when
+    /// what follows it does not look like an option. bash gives up on the
+    /// reserved word and searches for an external `time` instead, so in posix
+    /// mode `time -p echo hi` is `time: command not found` — and with it goes
+    /// `time`'s own `-p`/`--`, which are only ever read in that position.
+    pub posix: bool,
 }
 
 struct Lexer {
@@ -3422,7 +3431,7 @@ mod tests {
                 ],
                 "extglob off: {src}"
             );
-            let mut with = super::tokenize(src.as_bytes(), ParseOpts { extglob: true }).unwrap();
+            let mut with = super::tokenize(src.as_bytes(), ParseOpts { extglob: true, posix: false }).unwrap();
             with.pop();
             assert_eq!(
                 with,
@@ -4047,7 +4056,7 @@ mod tests {
             ("cat <(case b in b) echo B;; esac)", "case b in b) echo B;; esac"),
         ];
         // `@(a|b)` is only a pattern with `extglob` on.
-        let opts = ParseOpts { extglob: true };
+        let opts = ParseOpts { extglob: true, posix: false };
         for (src, want) in bodies {
             let tk = tokenize_deferred(src.as_bytes(), opts);
             assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);

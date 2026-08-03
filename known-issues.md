@@ -600,6 +600,37 @@ keep printing definitions in both. One gate on the function loop in
 `Shell::builtin_set`; covered by
 `posix-mode-leaves-functions-out-of-a-bare-set.sh` and a lib test.
 
+**Also done since — posix mode changes the `time` reserved word twice over.**
+Two unrelated rules, both sharper than the manual's wording and both probed
+against the reference bash. *It takes `time`'s own options away:* bash stops
+treating `time` as the reserved word as soon as the word after it looks like an
+option, and goes looking for an external `time` instead — so `time -p echo hi`,
+`time -- echo hi`, `time -x echo hi` and a bare `time -` are all `time: command
+not found` with status 127. Since `-p`/`--` are only ever read in that one
+position, taking the position away is what takes the options away; and the test
+is on the word *as written*, so `time "-p" x`, `time \-p x` and `time $D x` keep
+the reserved word and time a command named `-p`. *And a `time` with no command
+reports the shell:* POSIX says a bare `time` writes the shell's own cumulative
+user and system times, so bash drops the `real` line entirely — there is no span
+to report — and prints the other two to two decimals, where outside the mode a
+bare `time` times the null command and prints all three to three decimals after
+a leading blank line. bash's test for "no command" is the word list *and* the
+redirections, so `time x=1` and `time >f` report the ordinary way while `time ;`
+and `! time` do not.
+
+The first is a *parser* change, so `posix` joined `extglob` in `ParseOpts` (the
+struct renamed from `LexOpts` for the occasion) and `Parser::parse_pipeline`'s
+`time` arm breaks out when `Parser::bare_word_at(pos + 1)` starts with `-`.
+Being parse-time, it needs the mode entered by a command of its own: a `( set -o
+posix; time -p x )` is parsed whole before any of it runs and reads `-p` as
+`time`'s option in either shell. The second is decided where the report is
+printed — `Shell::is_null_command` gates a third argument to
+`Shell::format_time_report`. Covered by
+`posix-mode-changes-the-time-reserved-word-twice-over.sh` and two lib tests.
+(osh still reports the CPU figures as zero throughout, per TD-OILS10, and
+`$TIMEFORMAT` is still unimplemented, per TD-OILS-TIMEFORMAT-IS-UNIMPLEMENTED —
+the case therefore counts lines and matches rather than showing them.)
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
 and a 42-case probe of them against osh leaves these real gaps, roughly in
@@ -612,16 +643,8 @@ increasing order of size:
   behaves the posix way, or the fallback needs a trigger the probe missed —
   there is nothing to make match until a case that *does* differ is found.)
 * `kill -l` prints one line with no `SIG` prefixes, and `kill` rejects a
-  `SIG`-prefixed signal name.
-* `time` alone reports the shell's own cumulative times, and `time` followed by
-  any word starting with `-` stops being the reserved word. (Probed, and both
-  halves are sharper than the manual's wording. `time` + newline in posix mode
-  prints just `user`/`sys` with **no `real` line**, where outside the mode it
-  times the null command and prints all three. And `time -p echo hi`, `time --
-  echo hi`, `time -x echo hi` and even `time -` all give `time: command not
-  found` with status 127 — bash stops treating `time` as the reserved word when
-  an option-looking word follows and looks for an external `time` instead. This
-  is a *parser* change, not a builtin one.)
+  `SIG`-prefixed signal name. (Blocked by
+  TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS.)
 
 ### TD-OILS-PATH-IS-SPLIT-ON-THE-HOSTS-SEPARATOR, so a `:`-separated `$PATH` is one entry — 2026-08-03 — ⚠️ **OPEN (needs a decision — see open-questions.md Q36)**
 

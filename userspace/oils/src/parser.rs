@@ -1377,6 +1377,23 @@ impl Parser {
             if matches!(segs.as_slice(), [Seg::Lit(s)] if s.as_slice() == w))
     }
 
+    /// The text of the word at `pos`, when it is a single unquoted literal
+    /// segment — the same shape [`Parser::at_bare_word`] tests for, but read
+    /// rather than compared, and at an arbitrary position so a lookahead can
+    /// use it. A quoted, escaped or expanded word is `None` however it would
+    /// expand (`"-p"`, `\-p` and `$D` all are), which is what bash's own
+    /// lookaheads see: they run over the token as it was written, before any
+    /// expansion.
+    fn bare_word_at(&self, pos: usize) -> Option<BStr<'_>> {
+        match self.toks.get(pos) {
+            Some(Tok::Word(segs)) => match segs.as_slice() {
+                [Seg::Lit(s)] => Some(s.as_slice()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// A short human-readable name for the current token, for syntax-error
     /// messages (mirrors bash's `near unexpected token '…'`).
     fn token_display(&self) -> Str {
@@ -1594,6 +1611,23 @@ impl Parser {
                 continue;
             }
             if self.at_bare_word(b"time") {
+                // In posix mode `time` is the reserved word only when the word
+                // after it does not look like an option: bash gives the
+                // reserved word up there and searches for an external `time`
+                // instead, so `time -p echo hi`, `time -- echo hi`,
+                // `time -x echo hi` and even a bare `time -` are all
+                // `time: command not found`. The test is on the word *as
+                // written* — `time "-p" x`, `time \-p x` and `time $D x` keep
+                // the reserved word and run a command named `-p` — which is the
+                // same literal-word test `-p` itself is read under below, and
+                // is what takes `time`'s own options away in that mode: they
+                // are only ever read in this position. `time` with nothing
+                // after it is untouched; that is the null-command form.
+                if self.opts.posix
+                    && self.bare_word_at(self.pos + 1).is_some_and(|w| w.starts_with(b"-"))
+                {
+                    break;
+                }
                 timed = true;
                 prefixed = true;
                 self.pos += 1;

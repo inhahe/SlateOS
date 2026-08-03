@@ -116,7 +116,8 @@ use crate::ast::{
     CmdSubBody, Command,
     CondBinOp, CondBinary, CondUnary,
     CondExpr, DeclArray,
-    ForArithClause, ForClause, IfClause, LineMap, LoopClause, ParamOp, Pipeline, Program, Redirect,
+    ForArithClause, ForClause, FunctionDef, IfClause, LineMap, LoopClause, ParamOp, Pipeline,
+    Program, Redirect,
     RedirectOp,
     ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
 };
@@ -7237,45 +7238,7 @@ impl Shell {
             Command::For(c) => self.in_loop(|s| s.exec_for(c, out, stdin)),
             Command::ForArith(c) => self.in_loop(|s| s.exec_for_arith(c, out, stdin)),
             Command::Select(c) => self.in_loop(|s| s.exec_select(c, out, stdin)),
-            Command::Function(f) => {
-                // bash's parser takes any word as a function name and checks it
-                // here, where the definition *runs*: a quoted or expanded name is
-                // reported — quoted back as it was written, backslash and all —
-                // the definition is skipped, and the script carries on with
-                // status 1. The check is on the spelling, not the expansion, so
-                // `"f"()` fails even though `f` would be a fine name.
-                if !f.definable {
-                    self.perrln(&bfmt![b"`", &f.name, b"': not a valid identifier"]);
-                    self.last_status = 1;
-                }
-                // A `readonly -f` function cannot be redefined (bash reports the
-                // attempt and fails the command, leaving the definition intact).
-                else if self.readonly_funcs.contains(&f.name) {
-                    self.perrln(&bfmt![&f.name, b": readonly function"]);
-                    self.last_status = 1;
-                } else {
-                    self.funcs.insert(f.name.clone(), f.body.clone());
-                    // Remember which file the definition was read from: bash's
-                    // `BASH_SOURCE` for a call frame names where the function was
-                    // *defined*, so a function defined by a sourced script keeps
-                    // naming that script for the rest of the shell's life.
-                    let src = self.current_source();
-                    self.func_sources.insert(f.name.clone(), src);
-                    // …and which line of it the definition began on, the other
-                    // half of what `declare -F NAME` reports under extdebug.
-                    self.func_lines.insert(f.name.clone(), self.current_line);
-                    // Redirections attached to the definition apply on every
-                    // invocation (bash semantics). Store them, or clear a
-                    // prior set when the function is redefined without any.
-                    if f.redirects.is_empty() {
-                        self.func_redirects.remove(&f.name);
-                    } else {
-                        self.func_redirects.insert(f.name.clone(), f.redirects.clone());
-                    }
-                    self.last_status = 0;
-                }
-                Flow::Next
-            }
+            Command::Function(f) => self.exec_function_def(f),
             Command::Case(c) => self.exec_case(c, out, stdin),
             Command::Cond(e) => self.exec_cond(e, out, stdin),
             Command::Arith(raw) => self.exec_arith(raw, out, stdin),
@@ -7307,6 +7270,96 @@ impl Shell {
         };
         self.undo_varfds(varfd_mark);
         flow
+    }
+
+    /// Run a `NAME() { … }` / `function NAME { … }` definition.
+    ///
+    /// The name is only checked here, where the definition *runs*: bash's
+    /// grammar accepts any word before the `()`, so `my-func`, `a.b` and `1f`
+    /// all parse, and it is `execute_intern_function` that decides which of them
+    /// may become a function.
+    fn exec_function_def(&mut self, f: &FunctionDef) -> Flow {
+        // POSIX allows only an identifier as a function name and reserves the
+        // special builtins' names outright, and in posix mode bash enforces both
+        // — see [`Shell::posix_function_name_error`]. The breach ends a
+        // non-interactive shell, so nothing below it runs.
+        if let Some(complaint) = self.posix_function_name_error(f) {
+            self.perrln(&bfmt![b"`", &f.name, b"': ", complaint.as_bytes()]);
+            // bash sets `EX_BADUSAGE` and then reaches `jump_to_top_level
+            // (ERREXIT)`: an unconditional unwind, so nothing spares it — not
+            // `!`, not an `if` condition, not an ERR trap — though a subshell
+            // contains it like any other exit, and the EXIT trap still runs.
+            self.last_status = 2;
+            return Flow::Exit(2);
+        }
+        // Outside posix mode the only bad name is one bash's parser could tell
+        // was not written as a bare word: a quoted or expanded name is reported —
+        // quoted back as it was written, backslash and all — the definition is
+        // skipped, and the script carries on with status 1. The check is on the
+        // spelling, not the expansion, so `"f"()` fails even though `f` would be
+        // a fine name.
+        if !f.definable {
+            self.perrln(&bfmt![b"`", &f.name, b"': not a valid identifier"]);
+            self.last_status = 1;
+        }
+        // A `readonly -f` function cannot be redefined (bash reports the
+        // attempt and fails the command, leaving the definition intact).
+        else if self.readonly_funcs.contains(&f.name) {
+            self.perrln(&bfmt![&f.name, b": readonly function"]);
+            self.last_status = 1;
+        } else {
+            self.funcs.insert(f.name.clone(), f.body.clone());
+            // Remember which file the definition was read from: bash's
+            // `BASH_SOURCE` for a call frame names where the function was
+            // *defined*, so a function defined by a sourced script keeps
+            // naming that script for the rest of the shell's life.
+            let src = self.current_source();
+            self.func_sources.insert(f.name.clone(), src);
+            // …and which line of it the definition began on, the other
+            // half of what `declare -F NAME` reports under extdebug.
+            self.func_lines.insert(f.name.clone(), self.current_line);
+            // Redirections attached to the definition apply on every
+            // invocation (bash semantics). Store them, or clear a
+            // prior set when the function is redefined without any.
+            if f.redirects.is_empty() {
+                self.func_redirects.remove(&f.name);
+            } else {
+                self.func_redirects.insert(f.name.clone(), f.redirects.clone());
+            }
+            self.last_status = 0;
+        }
+        Flow::Next
+    }
+
+    /// Why posix mode refuses to make `f` a function, as the tail of the
+    /// diagnostic — or `None` when it does not refuse.
+    ///
+    /// POSIX narrows what a function may be called in two ways bash otherwise
+    /// does not, and both are fatal (see the caller):
+    ///
+    /// * the name must be a plain identifier, so `a-b`, `a.b`, `1f`, `@` and the
+    ///   quoted and expanded spellings bash already rejects are all out;
+    /// * it may not be one of the sixteen special builtins, since those are
+    ///   found before functions (`unset` must stay `unset`).
+    ///
+    /// The identifier test comes first, which is why `:` and `.` — special
+    /// builtins that are also not identifiers — are reported as bad *names*, and
+    /// only `source` among the punctuation-spelled ones reaches the second
+    /// message. A non-special builtin is free game: `cd() { … }` is fine in
+    /// posix mode and does shadow the builtin.
+    ///
+    /// An interactive shell is exempt, as it is from the other posix
+    /// fatalities — bash reports these two only when it is about to end the
+    /// shell over them.
+    fn posix_function_name_error(&self, f: &FunctionDef) -> Option<&'static str> {
+        if self.interactive_shell || !self.shell_option_enabled("posix") {
+            return None;
+        }
+        if !f.definable || !crate::parser::is_valid_name(&f.name) {
+            return Some("not a valid identifier");
+        }
+        let name = bytes::as_str(&f.name)?;
+        Self::is_special_builtin(name).then_some("is a special builtin")
     }
 
     /// Give back what this command's varfd redirects took, down to the mark its
@@ -47676,6 +47729,72 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // The class carries 2 under `-c` as well.
         assert_eq!(run_cmd_mode("set -o posix; unset -q").1, 2);
+    }
+
+    #[test]
+    fn posix_mode_narrows_what_a_function_may_be_called() {
+        // Outside posix mode bash's grammar takes almost any word as a function
+        // name, and only a quoted or expanded one is refused — mildly.
+        for name in ["a-b", "a.b", "1f", "@", "%f", "a[1]", "f?", "a/b", "unset", "set"] {
+            assert_eq!(
+                run_script(&format!("eval '{name}() {{ :; }}'\necho tail")),
+                ("tail\n".to_string(), 0),
+                "{name}"
+            );
+        }
+        // In posix mode the name must be a plain identifier *and* must not be a
+        // special builtin, and either breach ends the shell with status 2.
+        for name in [
+            "a-b", "a.b", "1f", "@", "%f", "a[1]", "f?", "a/b", ":", ".", "source", "break",
+            "continue", "eval", "exec", "exit", "export", "readonly", "return", "set", "shift",
+            "times", "trap", "unset",
+        ] {
+            assert_eq!(
+                run_script(&format!("set -o posix; eval '{name}() {{ :; }}'\necho tail")),
+                (String::new(), 2),
+                "{name}"
+            );
+        }
+        // The identifier test runs first, so the two special builtins that are
+        // also not identifiers are reported as bad *names*.
+        let (o, _) = run_script("set -o posix; eval ': () { :; }' 2>&1");
+        assert!(o.contains("`:': not a valid identifier"), "{o:?}");
+        let (o, _) = run_script("set -o posix; eval 'source() { :; }' 2>&1");
+        assert!(o.contains("`source': is a special builtin"), "{o:?}");
+        // A plain identifier is fine, and so is a *non*-special builtin's name —
+        // which does shadow the builtin.
+        assert_eq!(
+            run_script("set -o posix; _f() { echo ok; }; _f\ncd() { echo FN; }; cd /\necho tail"),
+            ("ok\nFN\ntail\n".to_string(), 0)
+        );
+        // Nothing spares the abort — not `!`, an `if` condition, `|| true`, a
+        // function body or an ERR trap — but a subshell contains it.
+        for src in [
+            "set -o posix; ! a-b() { :; }\necho tail",
+            "set -o posix; if a-b() { :; }; then :; fi\necho tail",
+            "set -o posix; { a-b() { :; }; } || true\necho tail",
+            "set -o posix; trap ':' ERR; a-b() { :; }\necho tail",
+            "set -o posix; f() { a-b() { :; }; }; f\necho tail",
+            "set -o posix; function a-b { :; }\necho tail",
+        ] {
+            assert_eq!(run_script(src), (String::new(), 2), "{src:?}");
+        }
+        assert_eq!(
+            run_script("set -o posix; ( a-b() { :; } )\necho \"tail=$?\""),
+            ("tail=2\n".to_string(), 0)
+        );
+        // `$POSIXLY_CORRECT` is the same switch, and leaving the mode gives the
+        // names back.
+        assert_eq!(run_script("POSIXLY_CORRECT=1; a-b() { :; }\necho tail"), (String::new(), 2));
+        assert_eq!(
+            run_script("POSIXLY_CORRECT=1; unset POSIXLY_CORRECT; a-b() { echo ok; }; a-b"),
+            ("ok\n".to_string(), 0)
+        );
+        // A function made before the mode was entered is not taken away again.
+        assert_eq!(
+            run_script("unset() { :; }; set -o posix\ndeclare -F unset"),
+            ("unset\n".to_string(), 0)
+        );
     }
 
     /// A `declare -p` with attribute letters lists only the names those letters

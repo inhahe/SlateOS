@@ -351,16 +351,31 @@ gated on `shift_verbose`, which is what makes
 `set -o posix; shopt -u shift_verbose; shift 5` silent as bash is. Covered by
 `posix-mode-turns-two-shopts-on-as-it-is-entered.sh` and two lib tests.
 
+**Also done since — posix mode narrows what a function may be called.** bash's
+grammar takes *any* word before the `()`, and outside posix mode almost any of
+them may become a function (`a-b`, `a.b`, `1f`, `@`, `%f`, and even `unset`);
+only a name the parser could see was not written as a bare word is refused, and
+that refusal is mild (status 1, script continues). POSIX narrows it to a plain
+identifier that is not one of the sixteen special builtins, and bash makes both
+fatal: the identifier test runs first — so `:` and `.` are reported as bad
+*names* and only `source` reaches `` `NAME': is a special builtin `` — and the
+breach ends a non-interactive shell with status 2 through
+`jump_to_top_level (ERREXIT)`, which nothing spares (not `!`, an `if` condition,
+`|| true`, a function body or an ERR trap), though a subshell contains it and the
+EXIT trap still runs. A non-special builtin's name is still free game
+(`cd() { … }` shadows the builtin in posix mode too). The 40-line match arm moved
+to `Shell::exec_function_def`, with the rule in
+`Shell::posix_function_name_error`; covered by
+`posix-mode-narrows-what-a-function-may-be-called.sh` and a lib test.
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
 and a 42-case probe of them against osh leaves these real gaps, roughly in
 increasing order of size:
 
-* Function names: may not be a special builtin (`set() { :; }`), and must be
-  valid identifiers (`a/b() { :; }` is rejected, where outside posix mode bash
-  allows the slash).
 * Special builtins are found *before* shell functions, so a function named
-  `unset` does not shadow the builtin.
+  `unset` that was defined before the mode was entered does not shadow the
+  builtin once it is.
 * `.`/`source` does not search `$PWD` when the name is not found on `$PATH`.
 * A bare `alias` listing drops the `alias ` prefix from each line.
 * `cd` in logical mode validates the resulting path and falls back to physical.

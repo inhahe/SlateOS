@@ -3904,6 +3904,17 @@ pub struct Shell {
     /// `-w` and `history -c` leave it alone entirely. So a `-n` on a shorter
     /// file than the last one read starts past its end and sees nothing.
     hist_saved: usize,
+    /// Whether the entry the *reader* appended for the line now running is still
+    /// the newest one — bash's `hist_last_line_added`.
+    ///
+    /// `history -s`, `history -p` and a non-listing `fc` all un-record the line
+    /// they were written on, and this is the guard on that. It is raised by the
+    /// reader and lowered by `history -s` *appending* — not by the drop — so
+    /// `history -s a; history -s b` on one line takes the line out once and
+    /// keeps both `a` and `b`, while `history -p a; history -p b` (which leaves
+    /// nothing on top) takes out the line *and* the entry before it. See
+    /// [`Shell::hist_drop_own_entry`].
+    hist_own_entry: bool,
     /// `set -o history`: whether the *top-level* input stream's lines are
     /// recorded. A `source`d file, an `eval` string and a function body are
     /// never recorded whatever this says — only the call that reached them is.
@@ -4240,6 +4251,7 @@ impl Shell {
             hist_file_seen: None,
             hist_session: 0,
             hist_saved: 0,
+            hist_own_entry: false,
             hist_on: None,
             histexpand: None,
             hist_state: crate::histexpand::HistState::default(),
@@ -5477,7 +5489,7 @@ impl Shell {
                     // expansion the line never reaches the parser, so it does
                     // not count towards the source line numbering either.
                     self.berrln(&text);
-                    self.hist_record(text);
+                    self.hist_record_read(text);
                     ip.drop_raw_line(opts);
                 }
                 Expansion::NotFound(msg) => {
@@ -5563,7 +5575,7 @@ impl Shell {
                 UnitLineKind::Blank => continue,
                 UnitLineKind::Comment => {
                     if entry.is_empty() {
-                        self.hist_record(line.text.clone());
+                        self.hist_record_read(line.text.clone());
                     } else {
                         sep = b"\n";
                     }
@@ -5590,7 +5602,7 @@ impl Shell {
             };
         }
         if !entry.is_empty() {
-            self.hist_record(entry);
+            self.hist_record_read(entry);
         }
     }
 
@@ -5690,11 +5702,38 @@ impl Shell {
     /// builtin ran, so `-s`'s new entry takes its number and `-p` leaves nothing
     /// behind. With the `history` option off the line was never recorded and
     /// there is nothing to drop.
+    ///
+    /// The guard is [`Shell::hist_own_entry`] — bash's `hist_last_line_added` —
+    /// and dropping does *not* lower it: what lowers it is `-s` putting an entry
+    /// of its own on top, since only then is the newest entry no longer the
+    /// reader's. That is measurably the rule, however odd the pair looks:
+    /// `history -p a; history -p b` on one line eats its own line *and* the
+    /// entry before it, while `history -s a; history -s b` eats only its own
+    /// line and keeps both `a` and `b`.
     fn hist_drop_own_entry(&mut self) {
-        if !self.hist_on() || self.history.pop().is_none() {
+        if !self.hist_on() || !self.hist_own_entry {
+            return;
+        }
+        if self.history.pop().is_none() {
             return;
         }
         self.hist_session = self.hist_session.saturating_sub(1);
+    }
+
+    /// Record a line the *reader* just read, marking it as this line's own entry
+    /// so a `history -s`/`-p`/`fc` on it can take it back out again.
+    fn hist_record_read(&mut self, entry: Str) {
+        self.hist_record(entry);
+        self.hist_own_entry = true;
+    }
+
+    /// Record an entry that is *not* the reader's line — `history -s`'s
+    /// replacement. It sits on top of whatever the reader left, so the line is
+    /// no longer the newest entry and a later `-s` or `-p` beside it on the same
+    /// line must leave what is there alone.
+    fn hist_record_stored(&mut self, entry: Str) {
+        self.hist_record(entry);
+        self.hist_own_entry = false;
     }
 
     /// The file `history -a/-n/-r/-w` acts on: the operand, else `$HISTFILE`,
@@ -5760,11 +5799,17 @@ impl Shell {
                 self.hist_session = 0;
                 0
             }
-            // `-a`. bash appends only when the session count is sane; when it is
-            // not (a `-r` grew the list past it) it silently does nothing at all,
-            // *including* not resetting the count.
+            // `-a` appends the last N entries, where N is the session count
+            // *clamped to the list* — a `HISTSIZE` that trimmed the list, or a
+            // `-r` that renumbered it, can leave the count larger than there is
+            // history to append, and bash then appends all of what is left
+            // rather than failing (measured: with the list stifled to 2 and a
+            // count of 4, `history -a` appends exactly those 2). A count of
+            // zero is the one case that touches the file not at all, so a `-a`
+            // right after another one cannot even fail to create it.
             _ => {
-                if self.hist_session == 0 || self.hist_session > self.history.len() {
+                let n = self.hist_session.min(self.history.len());
+                if n == 0 {
                     return 0;
                 }
                 if !host.exists()
@@ -5779,7 +5824,7 @@ impl Shell {
                     ]);
                     return 1;
                 }
-                let from = self.history.len().saturating_sub(self.hist_session);
+                let from = self.history.len().saturating_sub(n);
                 let mut s = Str::new();
                 for e in self.history.get(from..).unwrap_or(&[]) {
                     s.extend_from_slice(e);
@@ -5792,7 +5837,7 @@ impl Shell {
                 if appended.is_err() {
                     return 1;
                 }
-                self.hist_saved = self.hist_saved.saturating_add(self.hist_session);
+                self.hist_saved = self.hist_saved.saturating_add(n);
                 self.hist_session = 0;
                 0
             }
@@ -9039,6 +9084,7 @@ impl Shell {
             hist_file_seen: self.hist_file_seen.clone(),
             hist_session: self.hist_session,
             hist_saved: self.hist_saved,
+            hist_own_entry: self.hist_own_entry,
             hist_on: self.hist_on,
             histexpand: self.histexpand,
             hist_state: self.hist_state.clone(),
@@ -18916,6 +18962,13 @@ impl Shell {
         // emits repeats `PS4`'s first character once more: `v=$(echo a)` traces
         // `++ echo a` before `+ v=a` (bash's `indirection_level`).
         sub.xtrace_level = sub.xtrace_level.saturating_add(1);
+        // bash clears `remember_on_history` for the body, so the caller's line is
+        // no longer "the entry the reader just added" as far as the substitution
+        // is concerned: a `history -s` inside `x=$(history -s a)` appends beside
+        // the `x=$(…)` entry instead of replacing it. A plain `( … )` subshell
+        // does *not* do this — there the line is still the reader's and `-s`
+        // takes it back out.
+        sub.hist_own_entry = false;
         sub
     }
 
@@ -24574,7 +24627,7 @@ impl Shell {
             // number. With the option off there is no such entry to drop.
             let entry = rest.join(b" ".as_slice());
             self.hist_drop_own_entry();
-            self.hist_record(entry);
+            self.hist_record_stored(entry);
             return 0;
         }
         if store || print {
@@ -24990,6 +25043,13 @@ impl Shell {
         // all there was.
         if !listing && self.hist_on() {
             self.hist_drop_own_entry();
+            // Unlike `history -p`, this really does consume the line: bash never
+            // removes it here at all (it offsets `last_hist` by
+            // `hist_last_line_added` instead) and then lets `fc_replhist` take
+            // the newest entry unconditionally. Taking it here instead means the
+            // reader's line is gone, so a `history -s` later on the same line
+            // must not reach past it for another one.
+            self.hist_own_entry = false;
             let new_last = isize::try_from(self.history.len()).unwrap_or(isize::MAX) - 1;
             if end >= new_last {
                 end = new_last;
@@ -58969,6 +59029,40 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // `-c` returns before `-s` is looked at, so a clustered `-cs` clears and
         // stores nothing — but the `-cs` line's own entry went with the clear.
         assert_eq!(run_script("set -o history\n: a\nhistory -cs stored\nhistory").0, "    1  history\n");
+    }
+
+    #[test]
+    fn only_the_first_store_on_a_line_drops_that_line() {
+        // The line is taken back out once, not once per builtin: `-s`'s own
+        // entry lands on top of the reader's, and everything after it on the
+        // same line appends beside it.
+        assert_eq!(
+            run_script("set -o history\nhistory -s a; history -s b; history -s c\nhistory").0,
+            "    1  a\n    2  b\n    3  c\n    4  history\n"
+        );
+        // `-p` leaves nothing of its own behind, so the entry before the line is
+        // still the newest one the reader added and a second `-p` eats that too.
+        assert_eq!(
+            run_script("set -o history\n: a\nhistory -p one; history -p two\nhistory").0,
+            "one\ntwo\n    1  history\n"
+        );
+        // Mixed, the same rule read both ways: a `-s` after a `-p` still finds
+        // the reader's entry, a `-p` after an `-s` does not.
+        assert_eq!(
+            run_script("set -o history\n: a\nhistory -p one; history -s kept\nhistory").0,
+            "one\n    1  kept\n    2  history\n"
+        );
+        assert_eq!(
+            run_script("set -o history\n: a\nhistory -s kept; history -p one\nhistory").0,
+            "one\n    1  : a\n    2  kept\n    3  history\n"
+        );
+        // A command substitution's body is not the reader's line, so a `-s`
+        // inside one appends rather than replacing the line it is written on.
+        // (The substitution is a subshell, so only its own `history` sees it.)
+        assert_eq!(
+            run_script("set -o history\n: a\nx=$(history -s inner; history)\necho \"$x\"").0,
+            "    1  : a\n    2  x=$(history -s inner; history)\n    3  inner\n"
+        );
     }
 
     #[test]

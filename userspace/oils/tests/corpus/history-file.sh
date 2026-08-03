@@ -74,6 +74,29 @@ history -n nope.txt; echo "  n rc=$?"
 history -w missing/x; echo "  w rc=$?"
 history -a missing/x; echo "  a rc=$?"
 
+echo "=== -a appends the session count clamped to the list, not more"
+# A HISTSIZE that trims the list can leave the session count larger than there
+# is history to append. bash appends what is left rather than giving up, so the
+# append still happens -- and a path it cannot create still fails.
+history -c
+unset HISTSIZE
+printf '%s\n' keep > clamp.txt
+HISTSIZE=2
+history -s c1; history -s c2; history -s c3; history -s c4
+history
+history -a clamp.txt; echo "  rc=$?"
+echo "  --"; cat clamp.txt
+history -a missing/x; echo "  clamped rc=$?"
+unset HISTSIZE
+
+echo "=== ... and a zero count touches the file not at all"
+history -c
+printf '%s\n' z > zero.txt
+history -r zero.txt
+history -a zero.txt; echo "  rc=$?"
+echo "  --"; cat zero.txt
+history -a missing/y; echo "  zero rc=$?"
+
 echo "=== two different file options are an error, the same one twice is not"
 history -a -w f; echo "  rc=$?"
 history -aw f; echo "  rc=$?"
@@ -126,6 +149,33 @@ history
 history -c
 : a
 history -d 1 -s foo
+history
+
+echo "=== the line is taken back out once, not once per builtin"
+# `-s` puts its own entry on top of the reader's, so what follows it on the same
+# line appends beside it -- while `-p` leaves nothing behind, and a second `-p`
+# reaches the entry before the line.
+history -c
+history -s a; history -s b; history -s c
+history
+history -c
+: seed
+history -p one; history -p two
+history
+history -c
+: seed
+history -p one; history -s kept
+history
+history -c
+: seed
+history -s kept; history -p one
+history
+
+echo "=== ... and a command substitution's body is not that line at all"
+history -c
+: seed
+x=$(history -s inner; history -s inner2; history)
+echo "$x"
 history
 
 echo "=== -p and -s with no arguments keep their own line"

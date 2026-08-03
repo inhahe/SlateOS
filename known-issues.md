@@ -11215,7 +11215,22 @@ bash's rule is simply *"handler output goes to the shell's current stdout"*, and
 the `DEBUG`-to-the-terminal lines that seemed to contradict it were the DEBUG
 traps firing in the **parent** for the commands outside the substitution.
 
-### TD-OILS-BUILTINS. `osh` is missing the interactive-only bash builtins — OPEN (gated on interactive-shell support)
+### TD-OILS-BUILTINS. `osh` is missing the interactive-only bash builtins — ✅ **RESOLVED 2026-08-03**
+
+**Resolution 2026-08-03.** Every builtin this entry listed now exists as a real
+builtin: `history` and `fc` (see TD-OILS-MISSING-INTERACTIVE-BUILTINS), `logout`,
+`suspend`, and finally `bind` including its inputrc reader (see
+TD-OILS-NO-BIND-BUILTIN). `type -t` reports `builtin` for all of them and each
+has differential-corpus coverage. Nothing here is gated on an interactive line
+editor any more.
+
+**What the entry got wrong:** "interactive-only" was the wrong frame. bash
+answers all of these in a *non-interactive* shell — `bind -p` prints the whole
+keymap, `history -s` edits a list a script can read back, `fc -s` re-runs an
+entry — so each was implementable against measured bash output long before there
+is a line editor. The lesson generalises: check what bash actually does in a
+script before writing a builtin off as needing a terminal. (`suspend`'s actual
+stop still waits on TD-OILS11 signal delivery; that is tracked there, not here.)
 
 **Status correction 2026-07-27.** This entry used to head the list with `kill`,
 `ulimit`, `complete` and `compopt` as unimplemented. They have all since landed
@@ -15325,16 +15340,23 @@ a second `=` in the value, every working subscript spelling as a control
 subscript as command and as a `declare` operand, and the empty *expansion* that
 must still index. Full differential corpus: 108 matched, 0 failed.
 
-### TD-OILS-MISSING-INTERACTIVE-BUILTINS. `history`, `fc` and `logout` now exist; `bind` and `suspend` still do not — PARTIAL 2026-07-29
+### TD-OILS-MISSING-INTERACTIVE-BUILTINS. `history`, `fc`, `logout`, `suspend` and `bind` all exist — ✅ **RESOLVED 2026-08-03**
 
 **Where:** `userspace/oils/src/interp.rs` — `BUILTIN_NAMES`, `HELP_TABLE`, the
 dispatch in `run_builtin`,
-`Shell::{history,hist_base,hist_max,hist_seen,hist_file_seen,hist_session,hist_saved,hist_on}`
+`Shell::{history,hist_base,hist_max,hist_seen,hist_file_seen,hist_session,hist_saved,hist_own_entry,hist_on}`
 and the `hist_*` methods around `record_history` (`hist_record`,
-`hist_drop_own_entry`, `hist_file`, `hist_file_op`, `hist_truncate_file`,
-`hist_sync`); `src/parser.rs`
+`hist_record_read`, `hist_record_stored`, `hist_drop_own_entry`, `hist_file`,
+`hist_file_op`, `hist_truncate_file`, `hist_sync`); `src/parser.rs`
 (`IncrementalParser::{unit_lines,split_unit_lines,classify_line,line_text}`);
 `src/lexer.rs` (`Tokenized::conts`).
+
+**Resolution 2026-08-03.** All five are in. `history`, `fc` and `logout` landed
+2026-07-29 (below); `suspend` and `bind` followed, `bind`'s inputrc reader last
+(TD-OILS-NO-BIND-BUILTIN). `compgen -b` now agrees with bash's count. The two
+`history` fidelity bugs found by a later audit — `-a` bailing instead of clamping
+its count, and the line being un-recorded once *per builtin* rather than once per
+line — are fixed and documented in place below.
 
 **What.** The five builtins bash provides for an *interactive* session were all
 absent, which is invisible until something enumerates the builtin set:
@@ -15409,6 +15431,19 @@ why osh keeps `hist_max` and `hist_seen` rather than re-parsing the variable).
 * `history -p` prints its arguments and, like `-s`, **un-records its own line**.
   Both only do so when they were actually given operands: a bare `history -p` or
   `history -s` keeps its entry.
+* **The line comes out once, not once per builtin** (corrected 2026-08-03 — osh
+  used to drop on every call, so `history -s a; history -s b` lost `a`). The
+  guard is bash's `hist_last_line_added`, modelled as `Shell::hist_own_entry`:
+  the reader raises it, and what lowers it is **`-s` putting its own entry on
+  top** — *not* the drop. So the pair behaves asymmetrically, and measurably so:
+  `history -s a; history -s b; history -s c` on one line keeps all three, while
+  `history -p a; history -p b` eats its own line *and* the entry before it. Mixed
+  the same rule reads both ways: a `-s` after a `-p` still finds the reader's
+  entry, a `-p` after an `-s` does not. A `$( … )` body clears the flag (bash's
+  `remember_on_history = 0`), so a `-s` inside one appends beside the `x=$(…)`
+  entry — a plain `( … )` subshell does **not**, and there `-s` takes the line
+  back out as usual. A non-listing `fc` consumes the flag outright, since osh
+  physically drops the line where bash instead offsets `last_hist` by it.
 * Options cluster getopt-style (`-cs`, `-aw`, `-cw f`) and `-d` takes its offset
   attached (`-d1`) or following (`-d 1`).
 * `history -d` takes an offset, a negative offset (counting back from the
@@ -15433,10 +15468,16 @@ whitespace-only line is an entry. Only `-a` reports a failure (`history: FILE:
 cannot create: <strerror>`, rc 1, after trying to create a missing file);
 `-r`/`-n`/`-w` fail **silently** with rc 1.
 
-*The two counters.* `-a` appends the last `hist_session` entries, where
-`hist_session` counts everything recorded since the last `-a`/`-w`/`-c`; the
-guard is `0 < session <= len`, and when it fails `-a` does nothing at all —
-*including* not resetting the counter. `hist_saved` (bash's
+*The two counters.* `-a` appends the last `min(hist_session, len)` entries, where
+`hist_session` counts everything recorded since the last `-a`/`-w`/`-c`. The
+count is **clamped to the list, not checked against it** (corrected 2026-08-03 —
+osh used to bail when `session > len`): a `HISTSIZE` that trimmed the list can
+leave the count larger than there is history to append, and bash then appends all
+of what is left. Measured: with the list stifled to 2 and a session count of 4,
+`history -a f` appends exactly those 2 — and a path it cannot create still fails
+with `cannot create`, rc 1, where osh silently returned 0. Only a count of
+**zero** touches the file not at all (so a `-a` straight after another one cannot
+even fail to create it). `hist_saved` (bash's
 `history_lines_in_file`) is where the next `-n` starts, and its update rule is
 the one thing here that no amount of reading the source predicts correctly:
 * `-r`/`-n` set it to **the file's line count** — not the list length, not the

@@ -37422,6 +37422,62 @@ fn parent_pid() -> u32 {
     0
 }
 
+/// Stop the shell's *own* standard descriptors from reaching every child it
+/// starts. Called once, before the shell runs anything.
+///
+/// Windows has no per-descriptor close-on-exec. `CreateProcess` takes one
+/// `bInheritHandles` for the whole call, and `std::process` asks for `TRUE`
+/// whenever a child needs any handle at all — so the child is handed *every*
+/// handle currently marked inheritable, whatever its own stdio was set to. A
+/// shell is started with fd 0/1/2 already marked that way, because that is how
+/// its parent handed them over, and the mark is what gets inherited along with
+/// the handle.
+///
+/// The consequence is observable and is what this fixes: `sleep 30 >/dev/null
+/// 2>&1 &` gives the job no descriptor of the shell's, yet the job would hold a
+/// copy of the shell's stdout and stderr for as long as it ran — so `osh
+/// script.sh | cat` would not finish when the *shell* did, but when the last
+/// such job did, minutes later. bash's children get only what they are given.
+///
+/// Clearing the flag does not stop a child from being handed one of these on
+/// purpose: `Stdio::inherit()` duplicates the descriptor inheritably for the one
+/// spawn that asked for it. That is exactly the distinction Windows otherwise
+/// lacks — "this child's stdout" rather than "every child from now on".
+#[cfg(windows)]
+pub fn seal_std_handles() {
+    use core::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    // SAFETY: the standard kernel32 signature. The call takes a handle and two
+    // flag words and returns a BOOL; it borrows nothing and frees nothing.
+    unsafe extern "system" {
+        fn SetHandleInformation(h_object: *mut c_void, dw_mask: u32, dw_flags: u32) -> i32;
+    }
+    for h in [
+        io::stdin().as_raw_handle(),
+        io::stdout().as_raw_handle(),
+        io::stderr().as_raw_handle(),
+    ] {
+        // SAFETY: each handle is the live standard handle of this process,
+        // borrowed for the duration of the call. Clearing an inheritance flag
+        // mutates only the handle's own bookkeeping — it does not close it or
+        // affect any I/O in flight.
+        //
+        // A failure is ignored deliberately: it means the descriptor is not a
+        // real handle at all (a shell started with fd 1 closed), and there is
+        // then nothing for a child to inherit and nothing to report.
+        unsafe {
+            SetHandleInformation(h.cast::<c_void>(), HANDLE_FLAG_INHERIT, 0);
+        }
+    }
+}
+
+/// No-op counterpart for every other target. A descriptor is inherited across an
+/// exec only when it is *not* close-on-exec, which is per-descriptor and decided
+/// by whoever opens it — so there is no process-wide leak to seal off.
+#[cfg(not(windows))]
+pub fn seal_std_handles() {}
+
 /// Monotonic synthetic pid source for in-process background bodies (`coproc`
 /// and thread-backed background jobs) which run as threads, not OS processes.
 /// Starts high to avoid colliding with real OS pids; shared so every synthetic

@@ -249,6 +249,9 @@ fn os_argv() -> Vec<Str> {
 }
 
 fn main() {
+    // Before anything can start a child: a shell's own fd 0/1/2 must not be
+    // handed to every process it spawns (see [`osh::interp::seal_std_handles`]).
+    osh::interp::seal_std_handles();
     let args = os_argv();
     // Run the shell on a dedicated large-stack thread (see `INTERP_STACK_SIZE`).
     // If the thread cannot be spawned, fall back to running directly on the

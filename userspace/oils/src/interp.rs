@@ -33635,19 +33635,45 @@ fn echars_text(field: &[EChar]) -> Str {
 /// literal field, if it has no unquoted metacharacter or matches nothing) into
 /// `out`. This implements bash's default (no-`nullglob`) behavior: an
 /// unmatched pattern is left as the literal word.
-/// Whether an annotated field contains an unquoted glob metacharacter (`*`,
-/// `?`, `[`), or — when `extglob` is set — an unquoted `X(` extended-pattern
-/// operator (`X ∈ ?*+@!`). A field with no metacharacter is a literal word.
+/// Whether an annotated field is a *pattern* rather than a literal word —
+/// bash's `unquoted_glob_pattern_p`.
+///
+/// `*` and `?` make one on sight. A `[` does **not**: bash only calls the word
+/// a pattern once a `]` arrives with a `[` still open, so `[`, `[abc` and `a]b`
+/// are all literals. That is worth getting right twice over. It is visible —
+/// under `nullglob`, `echo [` prints a bracket rather than nothing — and it is
+/// the difference between recognising `[ 1 -lt 2 ]`'s first word as the literal
+/// it is and reading the whole current directory to discover that it matches
+/// nothing, once per loop iteration.
+///
+/// A bracket expression cannot span a `/` either — a path component is the
+/// largest thing a pattern is ever matched against — so `[a/b]` is a literal
+/// word where `[a]b/c]` is a pattern.
+///
+/// When `extglob` is set, an unquoted `X(` extended-pattern operator
+/// (`X ∈ ?*+@!`) also makes a pattern.
 fn field_has_glob_meta(field: &[EChar], extglob: bool) -> bool {
-    field.iter().enumerate().any(|(i, e)| {
+    let mut open = 0u32;
+    for (i, e) in field.iter().enumerate() {
+        // A quoted character is not a metacharacter, and cannot close a bracket
+        // expression an unquoted `[` opened either.
         if e.quoted {
-            return false;
+            continue;
         }
-        matches!(e.c.as_ascii(), Some('*' | '?' | '['))
-            || (extglob
-                && matches!(e.c.as_ascii(), Some('?' | '*' | '+' | '@' | '!'))
-                && matches!(field.get(i + 1), Some(n) if !n.quoted && n.c == '('))
-    })
+        match e.c.as_ascii() {
+            Some('*' | '?') => return true,
+            Some('/') => open = 0,
+            Some('[') => open = open.saturating_add(1),
+            Some(']') if open > 0 => return true,
+            Some('+' | '@' | '!')
+                if extglob && matches!(field.get(i + 1), Some(n) if !n.quoted && n.c == '(') =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -50821,6 +50847,42 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
     }
 
+    /// A `[` only begins a pattern once a `]` arrives to close it. `nullglob`
+    /// is what makes the difference visible: a word that is a pattern and
+    /// matches nothing disappears, while a literal word stays.
+    #[test]
+    fn an_unclosed_bracket_is_a_literal_word_not_a_pattern() {
+        // `[` with no `]`, and `]` with no `[`, are ordinary characters — so is
+        // the whole word they sit in. None of these is even looked up on disk.
+        for word in ["[", "]", "[abc", "a]b", "]x[", "[[", "]]"] {
+            assert_eq!(
+                run(&format!("shopt -s nullglob; echo '<'{word}'>'")).0,
+                format!("<{word}>\n"),
+                "{word} should be a literal word"
+            );
+        }
+        // Nor can one span a `/`: a pattern is only ever matched against a
+        // single path component, so the `[` is forgotten at the separator.
+        for word in ["[a/b]", "[a/b]c]", "[a/b/c]", "x[a/b]"] {
+            assert_eq!(
+                run(&format!("shopt -s nullglob; echo {word}")).0,
+                format!("{word}\n"),
+                "{word} should be a literal word"
+            );
+        }
+        // A closed one *is* a pattern, and vanishes under `nullglob` when it
+        // matches nothing — in whichever component it closes.
+        for word in ["[abc]", "[q]osh_no_such_glob_zzz", "[a]b/c]", "osh_no_such_dir_zzz/[ab]"] {
+            assert_eq!(
+                run(&format!("shopt -s nullglob; echo x {word} y")).0,
+                "x y\n",
+                "{word} should be a pattern"
+            );
+        }
+        // A quoted `]` cannot close an unquoted `[`, so this stays literal too.
+        assert_eq!(run("shopt -s nullglob; echo [a\\]").0, "[a]\n");
+    }
+
     #[test]
     fn shopt_failglob_aborts_on_no_match() {
         // With `failglob`, an unmatched command-word glob is a DISCARD-class
@@ -54597,7 +54659,6 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // newest job is `+`, and the newest job that was still running when it
         // started is `-`.
         let mut sh = Shell::new();
-        let settle = || std::thread::sleep(std::time::Duration::from_millis(700));
 
         // Two jobs alive at once: the newer is `+`, the older `-`.
         sh.run_source("sleep 0.4 & sleep 1 &".as_bytes());
@@ -54611,7 +54672,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The older one keeps its `-` after finishing — and loses its `&`,
         // because there is no longer anything running in the background.
         sh.run_source("sleep 0.2 & sleep 1 &".as_bytes());
-        settle();
+        // Wait for the shell to *admit* job 1 is over rather than for a fixed
+        // stretch of wall clock: on a loaded machine spawning `sleep` can eat
+        // more slack than any constant leaves.
+        settle_job(&mut sh, 1);
         assert_eq!(
             listing(&mut sh, "jobs"),
             "[1]-  Done                    sleep 0.2\n\
@@ -54623,7 +54687,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // gets the `-` at all: with no older job running, previous falls back
         // to current, and only one marker shows.
         sh.run_source("sleep 0.2 &".as_bytes());
-        settle();
+        settle_job(&mut sh, 1);
         sh.run_source("sleep 1 &".as_bytes());
         assert_eq!(
             listing(&mut sh, "jobs"),

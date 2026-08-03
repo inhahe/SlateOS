@@ -27769,11 +27769,54 @@ which pins both sides of the grace, the `$!`-sparing rule and the re-announcemen
 rule, and was byte-identical to bash on both streams over three consecutive runs
 of each shell.
 
+### TD-OILS-UNCLOSED-BRACKET-GLOBBED. a lone `[` was a glob pattern, so `[ 1 -lt 2 ]` read the whole directory — ✅ **FIXED** — 2026-08-02
+
+**Where:** `userspace/oils/src/interp.rs` — `field_has_glob_meta`.
+
+`field_has_glob_meta` called any unquoted `[` a metacharacter. bash's
+`unquoted_glob_pattern_p` does not: a `[` only makes a word a pattern once a `]`
+arrives with one still open, and the `[` is forgotten at every `/`, because a
+pattern is only ever matched against one path component. So `[`, `[abc`, `a]b`
+and `[a/b]` are literal words in bash and were patterns in osh.
+
+**It was a correctness bug and a performance bug at once.**
+
+* *Correctness:* under `nullglob` a pattern that matches nothing is deleted,
+  so `echo [` and `echo [abc` printed nothing where bash prints the word.
+* *Performance:* `[` is the name of a builtin, so every `[ … ]` test in every
+  loop in every script began by reading the entire current directory to
+  discover that `[` matched nothing. The directory's size leaked into the
+  shell's speed.
+
+Measured on the release build, 50 000 iterations of `[ 1 -lt 2 ]`:
+
+| | before | after | bash 5.2.37 |
+|---|---|---|---|
+| in this repo's root (many entries) | 10 996 ms | 679 ms | 387 ms |
+| in an empty directory | 3 798 ms | — | — |
+| `while [ $i -lt 300000 ]; do i=$((i+1)); done` | 65 797 ms | 4 493 ms | 2 602 ms |
+
+That is 16× on the loop body and 14.6× on the whole loop, and it takes osh from
+26× bash to 1.7×. Pinned by
+`tests/corpus/an-unclosed-bracket-is-a-word-not-a-pattern.sh` and
+`an_unclosed_bracket_is_a_literal_word_not_a_pattern`.
+
 ### TD-OILS-ARITH-FOR-LOOP-IS-SLOW. a `for ((…))` loop costs ~9× what bash charges — OPEN — 2026-08-01
 
 **Where:** `userspace/oils/src/interp.rs` — the arithmetic-`for` execution path
 and the per-item work it does each time round (`notify_signalled_jobs`, line
 bookkeeping, arithmetic evaluation).
+
+**Re-measured on a release build, 2026-08-02.** The 9× was a debug artefact, as
+the caveat below suspected. `for ((i=0;i<300000;i++)); do :; done` is 2 483 ms
+in osh release against 1 388 ms in bash — **1.8×**, not 9×. Other loop shapes
+sit in the same band: `while ((i<N)); do ((i++)); done` 1 856 vs 1 000 ms, and
+`for i in $(seq 1 300000)` 1 386 vs 886 ms. So the entry stands, but as "osh
+loops cost about twice what bash's do", which is a tuning problem rather than an
+emergency. The per-item suspects named below are still the place to look. The
+one genuinely pathological figure found while measuring was *not* the loop at
+all — it was a lone `[` being globbed; see TD-OILS-UNCLOSED-BRACKET-GLOBBED,
+now fixed.
 
 **Reproduce:**
 
@@ -27789,7 +27832,8 @@ for ((i = 0; i < 300000; i++)); do :; done
 **Caveat on the measurement.** That is a *debug* Rust build, which is routinely
 10–30× slower than release, so the release figure is probably well under bash's.
 The number to act on is the release one; this entry exists because nobody has
-measured it yet, not because osh is known to be slow.
+measured it yet, not because osh is known to be slow. (Since measured: 1.8×,
+not 9×, and not "under bash's" either — see the re-measurement above.)
 
 **Impact.** Real, and already felt: a corpus case that spun 300 000 times as a
 builtin-only delay blew through `osh-bash-diff.py`'s 20 s per-case timeout and

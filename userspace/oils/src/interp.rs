@@ -2433,7 +2433,7 @@ impl JobBody {
     /// that panicked is reported as status 1 (the shell keeps running).
     fn wait_blocking(self) -> i32 {
         match self {
-            JobBody::Process(mut c) => c.wait().as_ref().map_or(1, child_exit_status),
+            JobBody::Process(mut c) => reap_child(&mut c).as_ref().map_or(1, child_exit_status),
             JobBody::Thread(h) => h.join().unwrap_or(1),
         }
     }
@@ -6849,8 +6849,11 @@ impl Shell {
             // a refused lone command.
             abandoned = skipped.last().copied().unwrap_or(false);
         }
+        // Wall time and CPU are both measured as a *span*: bash's `time` reads
+        // `times()` on either side of the command and reports the difference, so
+        // the figures cover this pipeline rather than the whole shell.
         let start = if pipe.timed {
-            Some(std::time::Instant::now())
+            Some((std::time::Instant::now(), Self::cpu_used()))
         } else {
             None
         };
@@ -6896,26 +6899,30 @@ impl Shell {
         if pipe.negated {
             self.last_status = i32::from(self.last_status == 0);
         }
-        if let Some(start) = start {
+        if let Some((start, (user0, sys0))) = start {
             // A `time` prefix with no command at all is a report about the
             // *shell* in posix mode rather than about the null command it
             // otherwise times; see [`Shell::time_format`]. Every figure in it
-            // is the shell's own, so the elapsed one is measured from the
-            // shell's birth and not from the (instantaneous) null command —
-            // which is visible whenever a `$TIMEFORMAT` puts a `%R` back into
-            // that report.
+            // is the shell's own cumulative one, so the elapsed one is measured
+            // from the shell's birth and not from the (instantaneous) null
+            // command — which is visible whenever a `$TIMEFORMAT` puts a `%R`
+            // back into that report.
             let shell_times = self.shell_option_enabled("posix")
                 && matches!(pipe.commands.as_slice(), [Command::Simple(sc)] if Self::is_null_command(sc));
-            let real = if shell_times {
-                self.birth.elapsed().as_secs_f64()
+            let (user1, sys1) = Self::cpu_used();
+            let (real, user, sys) = if shell_times {
+                (self.birth.elapsed().as_secs_f64(), user1, sys1)
             } else {
-                start.elapsed().as_secs_f64()
+                (
+                    start.elapsed().as_secs_f64(),
+                    (user1 - user0).max(0.0),
+                    (sys1 - sys0).max(0.0),
+                )
             };
             // `$TIMEFORMAT` is read *after* the command, so one the command set
-            // itself is the one used. User and system CPU are still zero
-            // throughout (TD-OILS10).
+            // itself is the one used.
             if let Some(fmt) = self.time_format(pipe.time_posix, shell_times)
-                && let Some(report) = self.render_time_report(&fmt, real, 0.0, 0.0)
+                && let Some(report) = self.render_time_report(&fmt, real, user, sys)
             {
                 self.emit_stderr(&report);
             }
@@ -6937,6 +6944,20 @@ impl Shell {
             && sc.assignments.is_empty()
             && sc.redirects.is_empty()
             && sc.decl_arrays.is_empty()
+    }
+
+    /// CPU consumed so far by this shell **and** the children it has reaped,
+    /// `(user, system)` in seconds — POSIX `times`'s `tms_utime + tms_cutime`
+    /// and `tms_stime + tms_cstime`.
+    ///
+    /// That sum is what a `time` report is a span of, and it is why `time`
+    /// charges for a builtin as readily as for an external: bash's
+    /// `time_command` differences the same four fields, so a shell function
+    /// that spins shows up in `%U` with no child involved at all.
+    fn cpu_used() -> (f64, f64) {
+        let (self_user, self_sys) = self_cpu_secs();
+        let (child_user, child_sys) = children_cpu_secs();
+        (self_user + child_user, self_sys + child_sys)
     }
 
     /// The format string a `time` report is to be rendered from, or `None` when
@@ -7644,7 +7665,7 @@ impl Shell {
 
         // Wait for every child and record its exit code at its pipeline position.
         for (pos, mut child) in children.into_iter().enumerate() {
-            let code = child.wait().as_ref().map_or(1, child_exit_status);
+            let code = reap_child(&mut child).as_ref().map_or(1, child_exit_status);
             if let Some(&cmd_i) = child_cmd_idx.get(pos) {
                 stage_status[cmd_i] = code;
             }
@@ -15722,7 +15743,7 @@ impl Shell {
             }
         }
 
-        match child.wait() {
+        match reap_child(&mut child) {
             Ok(status) => {
                 self.last_status = child_exit_status(&status);
             }
@@ -23080,8 +23101,11 @@ impl Shell {
                 // Terminate the spawned child (platform-native process kill).
                 Some(JobBody::Process(child)) => match child.kill() {
                     Ok(()) => {
-                        // Record the terminated status so `wait`/`jobs` reflect it.
-                        let _ = child.wait();
+                        // Record the terminated status so `wait`/`jobs` reflect
+                        // it. A killed job's CPU still counts towards `times`,
+                        // as it does in bash — it is reaped here and nowhere
+                        // else, since the job's body is dropped just below.
+                        let _ = reap_child(child);
                         self.jobs[idx].status = Some(128 + i32::from(signum));
                         self.jobs[idx].signal = Some(signum);
                         self.jobs[idx].child = None;
@@ -24595,10 +24619,24 @@ impl Shell {
     /// (see known-issues TD-OILS10), so the reported times are zero; the format
     /// and line structure match bash so scripts that parse the output still work.
     fn builtin_times(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
-        // Each pair is "user sys"; both lines currently report 0m0.000s.
-        let zero = "0m0.000s";
-        let text = format!("{zero} {zero}\n{zero} {zero}\n");
-        self.write_bytes(out, redir, text.as_bytes())
+        // Two lines of "user sys": the shell's own times, then its reaped
+        // children's. Unlike `time`'s report these are cumulative and are not
+        // configurable — bash renders them with a fixed `%dm%d.%03ds`, which is
+        // exactly `mkfmt` at precision 3 in its long form.
+        let (self_user, self_sys) = self_cpu_secs();
+        let (child_user, child_sys) = children_cpu_secs();
+        let mut text = Str::new();
+        for (user, sys) in [(self_user, self_sys), (child_user, child_sys)] {
+            for (i, v) in [user, sys].into_iter().enumerate() {
+                if i == 1 {
+                    text.push(b' ');
+                }
+                let (secs, frac) = Self::time_parts(v);
+                text.extend_from_slice(&Self::mkfmt(3, true, secs, frac));
+            }
+            text.push(b'\n');
+        }
+        self.write_bytes(out, redir, &text)
     }
 
     /// `bind [-lpsvPSVX] [-m keymap] [-f filename] [-q name] [-u name]
@@ -40050,6 +40088,155 @@ fn parent_pid() -> u32 {
 #[cfg(not(any(windows, unix)))]
 fn parent_pid() -> u32 {
     0
+}
+
+/// The CPU time reaped children have consumed since the shell started, as
+/// `(user, system)` nanoseconds — the equivalent of POSIX `times`'s `tms_cutime`
+/// and `tms_cstime`.
+///
+/// Process-global rather than per-[`Shell`] because osh's subshells are threads
+/// inside one process: a child started by one of them is a child of the whole
+/// process, and whichever thread reaps it is the only one that can read its
+/// times before the handle closes. That also means a `( … )` sees the totals its
+/// parent had accumulated, where a forked bash's subshell would start from zero
+/// — the same approximation osh already makes for `$SECONDS` and for wall time.
+static CHILD_USER_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CHILD_SYS_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Add one just-exited child's CPU consumption to the running totals.
+///
+/// Must be called after the child has exited but *before* its handle is
+/// dropped: on Windows the kernel keeps the accounting alive only as long as
+/// some handle to the process does. Call it exactly once per child — every
+/// reaping site funnels through [`reap_child`] for that reason.
+fn account_child(child: &std::process::Child) {
+    let (user, sys) = child_cpu_times(child);
+    CHILD_USER_NS.fetch_add(user, std::sync::atomic::Ordering::Relaxed);
+    CHILD_SYS_NS.fetch_add(sys, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Wait for a child, account for its CPU time, and return its exit status.
+///
+/// The single place children are reaped, so the totals above cannot
+/// double-count one child or miss another.
+fn reap_child(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    let status = child.wait();
+    if status.is_ok() {
+        account_child(child);
+    }
+    status
+}
+
+/// Reaped children's CPU totals, `(user, system)` in seconds.
+fn children_cpu_secs() -> (f64, f64) {
+    let ns = |a: &std::sync::atomic::AtomicU64| {
+        // Precision is not at issue: 2^53 ns is over three months of CPU.
+        #[allow(clippy::cast_precision_loss)]
+        {
+            a.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9
+        }
+    };
+    (ns(&CHILD_USER_NS), ns(&CHILD_SYS_NS))
+}
+
+/// A Windows `FILETIME` pair as nanoseconds. `FILETIME` counts 100 ns ticks, and
+/// `GetProcessTimes`/`GetThreadTimes` return the two CPU fields in that unit
+/// (the other two — creation and exit — are wall-clock and unused here).
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct FileTime {
+    low: u32,
+    high: u32,
+}
+
+#[cfg(windows)]
+impl FileTime {
+    fn nanos(self) -> u64 {
+        ((u64::from(self.high) << 32) | u64::from(self.low)).saturating_mul(100)
+    }
+}
+
+#[cfg(windows)]
+// SAFETY: the standard kernel32 signature. The call writes four `FILETIME`s
+// through the pointers given and returns zero on failure, touching nothing else.
+unsafe extern "system" {
+    fn GetProcessTimes(
+        process: *mut core::ffi::c_void,
+        creation: *mut FileTime,
+        exit: *mut FileTime,
+        kernel: *mut FileTime,
+        user: *mut FileTime,
+    ) -> i32;
+}
+
+/// `(user, system)` nanoseconds charged to the process behind `handle`, or
+/// `(0, 0)` if the query fails (a handle already closed, say — a missing figure
+/// is reported as zero rather than being allowed to fail a `time`).
+#[cfg(windows)]
+fn process_cpu_times(handle: *mut core::ffi::c_void) -> (u64, u64) {
+    let mut creation = FileTime::default();
+    let mut exit = FileTime::default();
+    let mut kernel = FileTime::default();
+    let mut user = FileTime::default();
+    // SAFETY: all four out-pointers are live, correctly-typed locals; the call
+    // only writes into them. A zero return means it wrote nothing, and the
+    // zero-initialised locals are then what we report.
+    let ok = unsafe {
+        GetProcessTimes(
+            handle,
+            &raw mut creation,
+            &raw mut exit,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    if ok == 0 {
+        return (0, 0);
+    }
+    (user.nanos(), kernel.nanos())
+}
+
+/// The shell process's own CPU consumption, `(user, system)` in seconds —
+/// POSIX `times`'s `tms_utime`/`tms_stime`. Every osh thread (a subshell, a
+/// pipeline stage running a builtin) is part of this one process, so this
+/// covers all of them.
+#[cfg(windows)]
+fn self_cpu_secs() -> (f64, f64) {
+    use core::ffi::c_void;
+    // SAFETY: nullary kernel32 call returning the current-process pseudo-handle
+    // (-1), which needs no closing and is always valid.
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+    }
+    // SAFETY: as above — the pseudo-handle is valid for the life of the process.
+    let (user, sys) = process_cpu_times(unsafe { GetCurrentProcess() });
+    #[allow(clippy::cast_precision_loss)]
+    {
+        (user as f64 / 1e9, sys as f64 / 1e9)
+    }
+}
+
+/// One child's CPU consumption, `(user, system)` in nanoseconds.
+#[cfg(windows)]
+fn child_cpu_times(child: &std::process::Child) -> (u64, u64) {
+    use std::os::windows::io::AsRawHandle;
+    process_cpu_times(child.as_raw_handle().cast())
+}
+
+/// Unix / SlateOS shell CPU query. `getrusage(RUSAGE_SELF)` is the portable
+/// answer and osh does not link libc's `rusage` bindings yet, so this reports
+/// zero until the SlateOS process-accounting syscall it should use exists.
+/// See TD-OILS10.
+#[cfg(not(windows))]
+fn self_cpu_secs() -> (f64, f64) {
+    (0.0, 0.0)
+}
+
+/// Per-child CPU accounting on non-Windows hosts — see [`self_cpu_secs`].
+#[cfg(not(windows))]
+fn child_cpu_times(_child: &std::process::Child) -> (u64, u64) {
+    (0, 0)
 }
 
 /// An inputrc's `$include` names a file for the shell to find, so the shell is
@@ -56441,17 +56628,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn posix_mode_bare_time_reports_the_shell() {
         // POSIX says a bare `time` writes the shell's own cumulative times, so
-        // there is no span to report and the `real` line goes away.
-        assert_eq!(
-            run("set -o posix\n{ time ; } 2>&1").0,
-            "user\t0m0.00s\nsys\t0m0.00s\n"
-        );
+        // there is no span to report and the `real` line goes away. Those times
+        // are real figures — this process may well have burned a tick or two
+        // already — so it is the *shape* that is asserted.
+        let shell_report = |src: &str| {
+            let o = run(src).0;
+            let shape: String = o
+                .chars()
+                .map(|c| if c.is_ascii_digit() { 'N' } else { c })
+                .collect();
+            assert_eq!(shape, "user\tNmN.NNs\nsys\tNmN.NNs\n", "got {o:?}");
+        };
+        shell_report("set -o posix\n{ time ; } 2>&1");
         // A negation still leaves no command, but a redirect or an assignment
         // is one — bash's test is the word list and the redirections.
-        assert_eq!(
-            run("set -o posix\n{ ! time ; } 2>&1").0,
-            "user\t0m0.00s\nsys\t0m0.00s\n"
-        );
+        shell_report("set -o posix\n{ ! time ; } 2>&1");
         assert!(
             run("set -o posix\n{ time x=1 ; } 2>&1").0.contains("\nreal\t"),
             "an assignment is a command"
@@ -62531,10 +62722,46 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn times_prints_two_cpu_lines() {
-        // `times` prints two "user sys" lines in bash's %dm%d.%03ds form.
+        // `times` prints two "user sys" lines — the shell's own times, then its
+        // reaped children's — in bash's fixed `%dm%d.%03ds` form. The numbers
+        // are real, so only their shape can be asserted: the child totals are
+        // per *process* (osh's subshells are threads), which in this test
+        // binary means every other test's children are in them too.
         let (o, s) = run("times");
         assert_eq!(s, 0);
-        assert_eq!(o, "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n");
+        let lines: Vec<&str> = o.lines().collect();
+        assert_eq!(lines.len(), 2, "{o:?}");
+        for line in &lines {
+            let fields: Vec<&str> = line.split(' ').collect();
+            assert_eq!(fields.len(), 2, "{o:?}");
+            for f in fields {
+                let (min, rest) = f.split_once('m').expect("minutes");
+                let secs = rest.strip_suffix('s').expect("trailing s");
+                let (whole, frac) = secs.split_once('.').expect("fraction");
+                assert!(min.bytes().all(|b| b.is_ascii_digit()), "{o:?}");
+                assert!(whole.bytes().all(|b| b.is_ascii_digit()), "{o:?}");
+                assert_eq!(frac.len(), 3, "{o:?}");
+                assert!(frac.bytes().all(|b| b.is_ascii_digit()), "{o:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn time_charges_cpu_to_the_command_that_used_it() {
+        // The CPU figures are a *span*, so a shell that has been running for a
+        // while still reports only what the timed command itself burned. A
+        // busy-loop in the shell's own process is enough to show up: it is
+        // seconds of user time, which cannot round to `0.00` unless the
+        // accounting is not wired up at all.
+        let busy = "i=0; while [ $i -lt 4000 ]; do i=$((i+1)); done";
+        let (o, _) = run(&format!(
+            "TIMEFORMAT='%2U'\n{busy}\n{{ time :; }} 2>&1\n{{ time {{ {busy}; }} ; }} 2>&1"
+        ));
+        let mut it = o.lines().map(|l| l.parse::<f64>().expect("user cpu"));
+        let idle = it.next().expect("idle");
+        let busy_cpu = it.next().expect("busy");
+        assert_eq!(idle, 0.0, "a null command charged for the shell's past: {o:?}");
+        assert!(busy_cpu > 0.0, "a busy loop was charged nothing: {o:?}");
     }
 
     #[test]

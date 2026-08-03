@@ -31285,11 +31285,17 @@ impl Shell {
                     listing.push(b'\n');
                 }
             }
-            let mut fns: Vec<&Str> = self.funcs.keys().collect();
-            fns.sort();
-            for name in fns {
-                if let Some(body) = self.funcs.get(name) {
-                    listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+            // …but not in posix mode, where the listing is variables only. POSIX
+            // says `set` writes the *variables*, so bash leaves functions out
+            // altogether — not their names either, which is what makes the
+            // listing re-inputtable as the standard describes.
+            if !self.shell_option_enabled("posix") {
+                let mut fns: Vec<&Str> = self.funcs.keys().collect();
+                fns.sort();
+                for name in fns {
+                    if let Some(body) = self.funcs.get(name) {
+                        listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+                    }
                 }
             }
             return self.write_bytes(out, redir, &listing);
@@ -48575,6 +48581,37 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("f(){ :; }; export -f f; readonly -f f; readonly -pf").0,
             "f () \n{ \n    :\n}\ndeclare -frx f\n"
         );
+    }
+
+    /// POSIX says a bare `set` writes the shell's *variables*, so bash leaves
+    /// out the function definitions it otherwise appends — not their bodies and
+    /// not their names either, which is what keeps the listing re-inputtable the
+    /// way the standard describes. `declare -f`/`-F` are bash's own spelling and
+    /// are unmoved.
+    #[test]
+    fn posix_mode_leaves_functions_out_of_a_bare_set() {
+        // A bare `set` prints the whole environment, so each check asks a `case`
+        // about one distinctive name rather than comparing the text. The listing
+        // goes into `s` first because a listing taken while a *variable* holds
+        // one would find the name in that variable's value.
+        let listed = |prefix: &str| {
+            run(&format!(
+                "zqfunc(){{ :; }}; zqvar=zzz; {prefix}s=$(set); \
+                 case $s in *zqfunc*) echo name;; esac; \
+                 case $s in *zqvar=zzz*) echo var;; esac"
+            ))
+            .0
+        };
+        assert_eq!(listed(""), "name\nvar\n");
+        assert_eq!(listed("set -o posix; "), "var\n");
+        // The mode going away brings them back.
+        assert_eq!(listed("set -o posix; set +o posix; "), "name\nvar\n");
+        // `declare -f` and `-F` never lost them, by name or in bulk.
+        assert_eq!(
+            run("zqfunc(){ :; }; set -o posix; declare -f zqfunc").0,
+            "zqfunc () \n{ \n    :\n}\n"
+        );
+        assert_eq!(run("zqfunc(){ :; }; set -o posix; declare -F").0, "declare -f zqfunc\n");
     }
 
     /// `-f` and `-v` name two different namespaces, so `unset` refuses both at

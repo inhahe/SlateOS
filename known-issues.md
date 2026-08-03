@@ -590,6 +590,16 @@ the `$PATH` walk that had already drifted.
 Covered by `dot-searches-path-before-the-current-directory.sh` and a lib test
 for the parts a single-entry `$PATH` cannot show.
 
+**Also done since — posix mode leaves the functions out of a bare `set`.** POSIX
+says `set` with no operands writes the shell's *variables*, so bash drops the
+function definitions it otherwise appends. Probing showed the names do not appear
+at all — not as `f ()` blocks, not as `f=` lines — which is what keeps the
+listing re-inputtable the way the standard describes. Nothing else about the
+listing moves with the mode, and `declare -f`/`-F` are bash's own spelling and
+keep printing definitions in both. One gate on the function loop in
+`Shell::builtin_set`; covered by
+`posix-mode-leaves-functions-out-of-a-bare-set.sh` and a lib test.
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
 and a 42-case probe of them against osh leaves these real gaps, roughly in
@@ -603,8 +613,6 @@ increasing order of size:
   there is nothing to make match until a case that *does* differ is found.)
 * `kill -l` prints one line with no `SIG` prefixes, and `kill` rejects a
   `SIG`-prefixed signal name.
-* A bare `set` omits the function definitions it otherwise prints. (Probed: the
-  names do not appear *at all* — not as `f ()` blocks, not as `f=` lines.)
 * `time` alone reports the shell's own cumulative times, and `time` followed by
   any word starting with `-` stops being the reserved word. (Probed, and both
   halves are sharper than the manual's wording. `time` + newline in posix mode

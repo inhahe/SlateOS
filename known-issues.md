@@ -1446,6 +1446,40 @@ On Windows this is broader than on Unix, because a shebang alone does not make
 a file executable there — so essentially *every* `./script.sh` invocation goes
 through this path. Found while trying to make a corpus case re-exec itself.
 
+### TD-OILS-CORPUS-INTERMITTENT-FAILURE-UNIDENTIFIED. one corpus case fails about 1 full run in 4 and has never been caught in the act — 2026-08-03 — ⚠️ **OPEN** (instrumented; waiting for the next occurrence)
+
+**Symptom.** A full `scripts/osh-bash-diff.py` sweep occasionally reports
+`299 matched, 0 waived, 1 failed`. Both times it has been seen, the very next
+sweep was clean. The failing case's *name* was captured once —
+`nounset-last-bg-pid` — and lost the second time, because the run's stdout was
+piped through `tail -6` and the `X <case>` line with its diff had already
+scrolled past.
+
+**What has been ruled out for `nounset-last-bg-pid`:**
+
+* 8 runs of that case alone through the harness: all matched.
+* 40 direct invocations of the script under *each* shell in a scratch cwd,
+  comparing stdout hashes: one hash, both shells, byte-identical.
+* 60 more osh invocations comparing status, stdout hash and stderr length: all
+  identical.
+* 2 concurrent full sweeps (600 case measurements under real load): both clean.
+
+So either the failure needs a form of load these did not reproduce, or the
+second occurrence was a *different* case and the one identification is a
+coincidence. The `true & wait` lines (49–52, 56) are the obvious suspect in
+that case — they are the only ones that start a child — but nothing has been
+shown to misbehave there.
+
+**What was done instead of guessing:** the harness now writes every failing
+case's full measurement — both shells' stdout, stderr and status — to
+`target/dvscratch/corpus-failures/<case>.txt`, emptied at the start of each
+run (commit "scripts: keep a failing corpus case's full measurement on disk").
+The next occurrence therefore captures itself whether or not anyone is
+watching and whether or not the summary was truncated.
+
+**Next step:** on the next `1 failed`, read that directory *before* re-running
+anything, and continue from an actual diff.
+
 ### TD-OILS-CORPUS-BG-DEBUG-TRACE-RACE. `debug-trap-announces-a-background-command.sh` interleaves a background job's traces with the parent's about 1 run in 6 — 2026-08-01 — ✅ **RESOLVED 2026-08-01** (the *case* raced, not osh)
 
 **Where:** `tests/corpus/debug-trap-announces-a-background-command.sh`. The one

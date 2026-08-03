@@ -526,6 +526,43 @@ interactivity (checked under `bash -i`). One `reusable` flag on `alias_line`,
 computed once in `builtin_alias`; covered by
 `posix-mode-lists-aliases-without-the-alias-word.sh` and a lib test.
 
+**Also done since — posix mode stops splitting a redirection word, but still
+globs a dup one.** The manual gives this as one rule ("words in a redirection get
+neither globbing nor word splitting"), and it is really two, applied to two
+different halves of the redirection grammar. bash's `redirection_expand` sets
+`W_NOSPLIT2` on the word and then hands it to `expand_words_no_vars`, which
+*globs*; only the filename forms take the earlier `posixly_correct` branch that
+skips the glob. So:
+
+* a **filename** word (`<`, `>`, `>>`, `<>`, `&>`, `&>>`, `M>`) loses both, and
+* a **dup** word (`<&`, `M>&`, `M<&`) loses splitting only, and is still globbed.
+
+The decisive probe, in a directory holding a file named `1`: `2>& [1]` in posix
+mode duplicates stdout, so `[1]` *was* globbed, while `< [1]` reports "No such
+file". Corroborated the other way by `&> g*` creating a file literally named `g*`
+where `>& g*` is an ambiguous redirect (two matches). Both are gated on
+**non-interactivity** as well as the mode — bash tests
+`posixly_correct && interactive_shell == 0` — which is now the shared
+`Shell::posix_noninteractive` that the two other posix fatality gates were
+already spelling out by hand.
+
+Null-word removal survives in both, and is what made this more than a flag flip:
+an *unquoted* expansion that produced nothing must still leave the word with zero
+fields (so `> $unset` stays "ambiguous"), while a *quoted* empty one is a single
+empty field that gets as far as the `open`. `expand_word(w, false)` could not be
+reused because it returns one *empty* field for the unquoted case. So
+`expand_word_annotated` gained the `split` flag itself — the honest home for
+`W_NOSPLIT2` — and `expand_word_inner` split into `expand_word_fields(word,
+split, glob)` and `expand_word_joined(word)`, with a new
+`Shell::expand_redirect_word` choosing the two flags from the mode and a new
+`RedirWord` operand on `expand_redirect_target`. Covered by
+`posix-mode-stops-splitting-a-redirection-word-but-still-globs-a-dup.sh` and a
+lib test (the interactivity exemption is lib-only — the corpus differ runs
+scripts).
+
+The corpus case leaves out the `>&file` spelling, for the reason in
+TD-OILS-GREAT-AND-FILE-LOSES-ITS-SPELLING.
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
 and a 42-case probe of them against osh leaves these real gaps, roughly in
@@ -551,19 +588,65 @@ increasing order of size:
   found` with status 127 — bash stops treating `time` as the reserved word when
   an option-looking word follows and looks for an external `time` instead. This
   is a *parser* change, not a builtin one.)
-* Words in a redirection get neither globbing nor word splitting — so `> only*`
-  makes a file literally named `only*` and `> $w` with `w='a b'` makes one named
-  `a b` instead of failing "ambiguous redirect". (Probed: gated on
-  **non-interactivity** as well as the mode — bash's `redirection_expand` tests
-  `posixly_correct && interactive_shell == 0`, and `bash -i` confirms the glob
-  still happens. An *unquoted* empty expansion is still ambiguous in both modes,
-  so null-word removal survives the loss of splitting; a *quoted* empty is one
-  empty field in both, and fails at the `open`. Tilde, parameter, command and
-  process substitution are all untouched. In osh the site is
-  `Shell::expand_redirect_target`, which today always calls
-  `expand_word(w, true)`; the posix path needs a non-splitting, non-globbing
-  expansion that *still* drops an unquoted empty, which `expand_word(w, false)`
-  does not do — it returns one empty field.)
+
+### TD-OILS-GREAT-AND-FILE-LOSES-ITS-SPELLING. The parser rewrites `>&file` into `&>file`, so nothing downstream can tell the two apart — 2026-08-03 — ⚠️ **OPEN**
+
+**Where:** `userspace/oils/src/parser.rs`, the `was_great_and` rewrite at the end
+of the redirection parser; `userspace/oils/src/interp.rs`,
+`Shell::resolve_dup_out`'s `DupWord::NotAFd` branch and the
+`RedirectOp::WriteBoth` arm of `resolve_redirect_list`.
+
+**What.** bash's parser keeps `>&word` as `r_duplicating_output_word` and only
+`do_redirection_internal` converts it to `r_err_and_out`, at redirection time,
+when the redirector is fd 1 and the expanded word is not a number. osh takes the
+shortcut of deciding at *parse* time: a `>&` with a literal, non-numeric target
+and no explicit fd is rewritten to `RedirectOp::WriteBoth`, the same node `&>`
+produces. The shortcut gives the right *effect*, but the spelling is gone, and
+two things need it.
+
+**Reproduce (1) — `declare -f` prints the wrong operator:**
+
+```
+$ osh -c 'f() { echo hi >& out; }; declare -f f'
+f ()
+{
+    echo hi &> out
+}
+```
+
+bash prints `echo hi >&out` (and note it writes no space after `>&`, where it
+writes one after `&>`).
+
+**Reproduce (2) — posix mode globs the two differently.** Per
+TD-OILS-POSIX-MODE-BEHAVIOURS-ARE-NOT-IMPLEMENTED, a posix non-interactive shell
+globs a *dup* word but not a *filename* one, and `>&` is a dup word:
+
+```
+$ bash --norc -c 'set -o posix; cd /tmp/d; echo hi &> g*; echo "&>: $?"
+                  echo hi >& g*; echo ">&: $?"'
+&>: 0        # created a file literally named g*
+g*: ambiguous redirect
+>&: 1        # globbed onto two names
+```
+
+osh says 0 for both, because both are `WriteBoth`, which
+`resolve_redirect_list` classifies as `RedirWord::Filename`. This is why
+`posix-mode-stops-splitting-a-redirection-word-but-still-globs-a-dup.sh`
+demonstrates the dup half with `2>&`/`<&` only.
+
+**A third thing the shortcut hides,** found while probing: the runtime path that
+handles the forms the parser *cannot* rewrite (`1>&file`, `>&$v`) does not do the
+special-filename check the `WriteBoth` arm does, so `1>& /dev/stderr` fails where
+`>& /dev/stderr` works. bash treats them alike.
+
+**Proper fix.** Drop the parse-time rewrite and follow bash: leave the node
+`RedirectOp::DupOut` and let `resolve_dup_out` make the call at redirection time,
+which is already where `1>&file` and `>&$v` are decided. That needs
+`resolve_dup_out`'s `NotAFd`/fd-1 branch to gain what the `WriteBoth` arm has —
+the `resolve_special_redirect` check — after which the `WriteBoth` arm serves
+`&>`/`&>>` alone and the unparser can print `>&` from the op again. Expect the
+`declare -f` spacing (`>&out` vs `&> out`) to need a matching tweak in
+`unparse.rs`.
 
 ### TD-OILS-COMPLETE-TABLE-AND-OPERANDS. `complete`/`compopt` got ten things wrong at once, all downstream of two facts about bash they did not model — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

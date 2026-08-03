@@ -2484,6 +2484,19 @@ impl Job {
 /// shortest delay bash was seen to notice within.
 const JOB_EXIT_NOTICE_GRACE: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// Which of bash's two redirection-word shapes a target word is.
+///
+/// The two are expanded alike everywhere except posix mode, where bash's
+/// `redirection_expand` splits them — see [`Shell::expand_redirect_word`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RedirWord {
+    /// The word after a `<`, `>`, `>>`, `<>`, `&>`, `&>>` — a filename.
+    Filename,
+    /// The word after a `<&` or `>&`, which usually names a descriptor rather
+    /// than a file (though a `>&` that does not may still be one).
+    Dup,
+}
+
 /// What the word after a `<&`/`>&` names — see [`Shell::classify_dup_word`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DupWord {
@@ -6187,6 +6200,17 @@ impl Shell {
         self.discard_error = None;
     }
 
+    /// Whether posix mode is on *and* this is not an interactive shell.
+    ///
+    /// Several of bash's posix behaviours carry this second condition — the
+    /// fatalities below, and the unsplit/unglobbed redirection word — because
+    /// they would make an interactive session unpleasant to type at: a slip of
+    /// the finger should not end the shell, and a filename completion should
+    /// still glob. bash spells it `posixly_correct && interactive_shell == 0`.
+    fn posix_noninteractive(&self) -> bool {
+        !self.interactive_shell && self.shell_option_enabled("posix")
+    }
+
     /// Whether a failure *in a POSIX special builtin* should end the shell.
     ///
     /// POSIX says a failure in a special builtin ends a non-interactive shell,
@@ -6201,7 +6225,7 @@ impl Shell {
     ///
     /// An interactive shell is exempt: it reports the failure and reads on.
     fn posix_special_builtin_fatal(&self) -> bool {
-        !self.interactive_shell && self.shell_option_enabled("posix")
+        self.posix_noninteractive()
     }
 
     /// Whether a command word should reach the *special builtin* of that name
@@ -7391,7 +7415,7 @@ impl Shell {
     /// fatalities — bash reports these two only when it is about to end the
     /// shell over them.
     fn posix_function_name_error(&self, f: &FunctionDef) -> Option<&'static str> {
-        if self.interactive_shell || !self.shell_option_enabled("posix") {
+        if !self.posix_noninteractive() {
             return None;
         }
         if !f.definable || !crate::parser::is_valid_name(&f.name) {
@@ -16347,16 +16371,6 @@ impl Shell {
         plan.extra_fds.iter().any(|(f, _)| *f == n)
     }
 
-    /// Expand a redirection target word the way bash does for a `>`/`<`/`>>`/
-    /// `>&`/`<&` (and `&>`) target: parameter/command/arithmetic expansion,
-    /// tilde expansion, then **field splitting and pathname (glob) expansion**,
-    /// exactly like a command argument. bash requires the result to be a single
-    /// word: zero fields (an unset/empty *unquoted* expansion) or more than one
-    /// (word splitting, or a glob matching several names) is an "ambiguous
-    /// redirect" — the redirect fails (status 1, command not run) and bash
-    /// echoes the word **as written** (`>$r` → "$r: ambiguous redirect"), not
-    /// the expansion. Here-documents and here-strings are exempt and never routed
-    /// through here. On success returns the single expanded field.
     /// What the word after a `<&`/`>&` turns out to name.
     ///
     /// bash splits on `all_digits`, *not* on "parses as a number", and the two
@@ -16459,8 +16473,54 @@ impl Shell {
         n == fd && matches!(origin, DupOrigin::Word(_))
     }
 
-    fn expand_redirect_target(&mut self, w: &Word) -> Result<Str, Str> {
-        let mut fields = self.expand_word(w, true);
+    /// Expand a redirection target word, with the two post-expansion steps set
+    /// by the mode and by which shape of word it is.
+    ///
+    /// Outside posix mode a redirection word is expanded exactly like a command
+    /// argument: parameter/command/arithmetic expansion, tilde expansion, then
+    /// **field splitting and pathname (glob) expansion**. POSIX says a
+    /// redirection word gets neither of those last two, and bash obeys that in
+    /// posix mode — but only in a non-interactive shell (see
+    /// [`Shell::posix_noninteractive`]), and, as it turns out, **only
+    /// symmetrically for a filename**.
+    ///
+    /// bash's `redirection_expand` sets `W_NOSPLIT2` on the word and then calls
+    /// `expand_words_no_vars`, which globs. Splitting therefore goes away for
+    /// both shapes, but globbing goes away only for the filename forms, which
+    /// take the earlier `posixly_correct` branch. The decisive probe, in a
+    /// directory holding a file named `1`:
+    ///
+    /// ```text
+    /// $ set -o posix
+    /// $ 2>& [1] …    # duplicates stdout: `[1]` *was* globbed to `1`
+    /// $ < [1]        # [1]: No such file or directory: not globbed
+    /// ```
+    ///
+    /// Null-word removal survives in both modes, and is what makes the unsplit
+    /// path different from a plain join: an *unquoted* expansion that produced
+    /// nothing leaves the word with zero fields and so stays "ambiguous", while
+    /// a *quoted* empty one is a single empty field that fails at the `open`.
+    fn expand_redirect_word(&mut self, w: &Word, kind: RedirWord) -> Vec<Str> {
+        let (split, glob) = if self.posix_noninteractive() {
+            (false, kind == RedirWord::Dup)
+        } else {
+            (true, true)
+        };
+        let saved = self.bad_sub_word.replace(crate::unparse::word_src(w));
+        let fields = self.expand_word_fields(w, split, glob);
+        self.bad_sub_word = saved;
+        fields
+    }
+
+    /// [`Shell::expand_redirect_word`] reduced to the single word bash requires.
+    ///
+    /// Zero fields (an unset/empty *unquoted* expansion) or more than one (word
+    /// splitting, or a glob matching several names) is an "ambiguous redirect" —
+    /// the redirect fails (status 1, command not run) and bash echoes the word
+    /// **as written** (`>$r` → "$r: ambiguous redirect"), not the expansion.
+    /// Here-documents and here-strings are exempt and never routed through here.
+    fn expand_redirect_target(&mut self, w: &Word, kind: RedirWord) -> Result<Str, Str> {
+        let mut fields = self.expand_redirect_word(w, kind);
         if fields.len() == 1 {
             Ok(fields.pop().unwrap_or_default())
         } else {
@@ -16736,7 +16796,7 @@ impl Shell {
             }
             match r.op {
                 RedirectOp::Read => {
-                    let path = self.expand_redirect_target(&r.target)?;
+                    let path = self.expand_redirect_target(&r.target, RedirWord::Filename)?;
                     // `< /dev/stdin`, `< /dev/fd/N`: a dup, not an open.
                     if self.resolve_special_redirect(fd, &path, true, plan)? {
                         return Ok(());
@@ -16777,7 +16837,7 @@ impl Shell {
                     // absent (and never errors on a missing file). Validate the
                     // open now so a genuinely unopenable path (e.g. a directory,
                     // or a permission error) surfaces at redirection time.
-                    let path = self.expand_redirect_target(&r.target)?;
+                    let path = self.expand_redirect_target(&r.target, RedirWord::Filename)?;
                     // `<> /dev/stdout` and friends dup the named descriptor; the
                     // side that matters is the one the fd is read or written on.
                     if self.resolve_special_redirect(fd, &path, fd == 0, plan)? {
@@ -16836,7 +16896,7 @@ impl Shell {
                     // `&>file` / `&>>file` / `>&file` → both stdout and stderr to
                     // the file (bash: equivalent to `>file 2>&1`). noclobber does
                     // not apply to `&>` (bash treats it like `>|`).
-                    let target = self.expand_redirect_target(&r.target)?;
+                    let target = self.expand_redirect_target(&r.target, RedirWord::Filename)?;
                     let append = matches!(r.op, RedirectOp::AppendBoth);
                     // `&> /dev/stderr` is `> /dev/stderr 2>&1`: fd 1 dups fd 2,
                     // which the output-dup resolver already expresses (fd 2 is
@@ -16856,7 +16916,7 @@ impl Shell {
                     plan.stderr_shares_stdout = true;
                 }
                 RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
-                    let target = self.expand_redirect_target(&r.target)?;
+                    let target = self.expand_redirect_target(&r.target, RedirWord::Filename)?;
                     let append = matches!(r.op, RedirectOp::Append);
                     // `> /dev/stdout`, `> /dev/fd/N`: a dup, not an open — so it
                     // is not a file for noclobber to protect either (`set -C;
@@ -16903,11 +16963,11 @@ impl Shell {
                     }
                 }
                 RedirectOp::DupOut => {
-                    let target = self.expand_redirect_target(&r.target)?;
+                    let target = self.expand_redirect_target(&r.target, RedirWord::Dup)?;
                     self.resolve_dup_out(&DupOrigin::Word(r), fd, &target, plan)?;
                 }
                 RedirectOp::DupIn => {
-                    let target = self.expand_redirect_target(&r.target)?;
+                    let target = self.expand_redirect_target(&r.target, RedirWord::Dup)?;
                     self.resolve_dup_in(&DupOrigin::Word(r), fd, &target, plan)?;
                 }
             }
@@ -17492,57 +17552,80 @@ impl Shell {
         if split {
             // Command-argument context: field-split unquoted expansions, then
             // apply pathname (glob) expansion to each resulting field.
-            let fields = self.expand_word_annotated(word);
-            if self.noglob {
-                // `set -f`: pathname expansion is disabled; each field keeps its
-                // literal (quote-removed) text without glob matching.
-                return fields.iter().map(|f| echars_text(f)).collect();
-            }
-            let nullglob = self.shopt.get("nullglob").copied().unwrap_or(false);
-            let failglob = self.shopt.get("failglob").copied().unwrap_or(false);
-            let dotglob = self.shopt.get("dotglob").copied().unwrap_or(false);
-            let nocaseglob = self.shopt.get("nocaseglob").copied().unwrap_or(false);
-            let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
-            let globstar = self.shopt.get("globstar").copied().unwrap_or(false);
-            // GLOBIGNORE: a `:`-separated list of patterns. When set to a
-            // non-empty value, bash (a) removes any glob-generated name that
-            // matches one of the patterns and (b) enables a dotglob-like effect
-            // so leading-`.` names are matched (`.` and `..` stay excluded). The
-            // patterns match the whole generated pathname with pathname-style
-            // semantics (`*`/`?`/`[]` do not cross `/`). See the bash manual.
-            let globignore_val = self.vars.get("GLOBIGNORE").filter(|v| !v.is_empty());
-            let globignore_active = globignore_val.is_some();
-            let globignore: Vec<GlobIgnorePat> = globignore_val
-                .map(|v| build_globignore(v, extglob))
-                .unwrap_or_default();
-            let mut out: Vec<Str> = Vec::new();
-            let mut failed: Option<Str> = None;
-            for f in fields {
-                glob_or_literal(
-                    &self.cwd,
-                    &f,
-                    &mut out,
-                    nullglob,
-                    failglob,
-                    dotglob,
-                    nocaseglob,
-                    extglob,
-                    globstar,
-                    globignore_active,
-                    &globignore,
-                    &mut failed,
-                );
-            }
-            // `failglob`: a pattern that matched nothing is a fatal expansion
-            // error. Record it for the simple-command driver, which reports it
-            // and aborts the command list (like a non-interactive bash).
-            if let Some(pat) = failed {
-                self.glob_error = Some(pat);
-            }
-            return out;
+            return self.expand_word_fields(word, true, true);
         }
-        // Non-splitting context (assignment values, redirect targets, `[[ ]]`
-        // operands): concatenate everything into one field, no splitting/glob.
+        // Non-splitting context (assignment values, `[[ ]]` operands): join
+        // everything into one field, with no splitting and no glob.
+        self.expand_word_joined(word)
+    }
+
+    /// The field-producing half of [`Shell::expand_word_inner`], with the two
+    /// steps that follow the expansion proper each under their own switch.
+    ///
+    /// A command argument gets both (`split`, `glob`). A redirection word in
+    /// posix mode gets neither for a filename and only `glob` for a `<&`/`>&`
+    /// dup word — see [`Shell::expand_redirect_word`], which is the only caller
+    /// that asks for anything other than both.
+    fn expand_word_fields(&mut self, word: &Word, split: bool, glob: bool) -> Vec<Str> {
+        let fields = self.expand_word_annotated(word, split);
+        if !glob || self.noglob {
+            // `set -f`, or a context that never globs: each field keeps its
+            // literal (quote-removed) text without glob matching.
+            return fields.iter().map(|f| echars_text(f)).collect();
+        }
+        let nullglob = self.shopt.get("nullglob").copied().unwrap_or(false);
+        let failglob = self.shopt.get("failglob").copied().unwrap_or(false);
+        let dotglob = self.shopt.get("dotglob").copied().unwrap_or(false);
+        let nocaseglob = self.shopt.get("nocaseglob").copied().unwrap_or(false);
+        let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
+        let globstar = self.shopt.get("globstar").copied().unwrap_or(false);
+        // GLOBIGNORE: a `:`-separated list of patterns. When set to a
+        // non-empty value, bash (a) removes any glob-generated name that
+        // matches one of the patterns and (b) enables a dotglob-like effect
+        // so leading-`.` names are matched (`.` and `..` stay excluded). The
+        // patterns match the whole generated pathname with pathname-style
+        // semantics (`*`/`?`/`[]` do not cross `/`). See the bash manual.
+        let globignore_val = self.vars.get("GLOBIGNORE").filter(|v| !v.is_empty());
+        let globignore_active = globignore_val.is_some();
+        let globignore: Vec<GlobIgnorePat> = globignore_val
+            .map(|v| build_globignore(v, extglob))
+            .unwrap_or_default();
+        let mut out: Vec<Str> = Vec::new();
+        let mut failed: Option<Str> = None;
+        for f in fields {
+            glob_or_literal(
+                &self.cwd,
+                &f,
+                &mut out,
+                nullglob,
+                failglob,
+                dotglob,
+                nocaseglob,
+                extglob,
+                globstar,
+                globignore_active,
+                &globignore,
+                &mut failed,
+            );
+        }
+        // `failglob`: a pattern that matched nothing is a fatal expansion
+        // error. Record it for the simple-command driver, which reports it
+        // and aborts the command list (like a non-interactive bash).
+        if let Some(pat) = failed {
+            self.glob_error = Some(pat);
+        }
+        out
+    }
+
+    /// Concatenate a word into a single field, with no splitting and no glob —
+    /// the assignment-value and `[[ ]]`-operand context.
+    ///
+    /// Unlike [`Shell::expand_word_annotated`] with `split` off, an expansion
+    /// that produced nothing still *starts* the field here, so the result is one
+    /// (possibly empty) field for any word with parts. That is what an
+    /// assignment wants (`v=$unset` assigns the empty string) and what a
+    /// redirection target does not.
+    fn expand_word_joined(&mut self, word: &Word) -> Vec<Str> {
         let mut cur = Str::new();
         let mut started = false;
         for (idx, part) in word.parts.iter().enumerate() {
@@ -17581,7 +17664,16 @@ impl Shell {
     /// Expand a word into fields of quote-annotated characters (splitting
     /// unquoted expansions on IFS). The quoting flag lets a later glob step
     /// treat quoted metacharacters as literals.
-    fn expand_word_annotated(&mut self, word: &Word) -> Vec<Vec<EChar>> {
+    ///
+    /// `split` off is bash's `W_NOSPLIT2`: an unquoted expansion contributes its
+    /// characters whole instead of being scanned for IFS delimiters, so the word
+    /// yields at most one field. It is *not* the same as joining unconditionally
+    /// — an unquoted expansion that produced nothing still leaves the field
+    /// unopened, so a word made only of such expansions yields **zero** fields.
+    /// That is bash's null-word removal, and it is why posix mode's unsplit
+    /// redirection still calls `> $unset` ambiguous while `> "$unset"` is a
+    /// one-field word that fails at the `open` instead.
+    fn expand_word_annotated(&mut self, word: &Word, split: bool) -> Vec<Vec<EChar>> {
         let mut fields: Vec<Vec<EChar>> = Vec::new();
         let mut cur: Vec<EChar> = Vec::new();
         // `open` == the current field `cur` holds/began real content and must be
@@ -17686,6 +17778,19 @@ impl Shell {
                 }
                 other => {
                     let val = self.expand_dynamic(other);
+                    if !split {
+                        // `W_NOSPLIT2`: the expansion is one run of characters,
+                        // unquoted so a glob metacharacter it produced still
+                        // counts. An empty one contributes nothing and leaves
+                        // the field unopened, exactly as the splitting path
+                        // below does — that is the null-word removal a redirect
+                        // target still depends on.
+                        if !val.is_empty() {
+                            push_chars(&mut cur, &val, false);
+                            open = true;
+                        }
+                        continue;
+                    }
                     // Field-split the unquoted expansion against IFS while keeping
                     // the *boundary* delimiters relative to adjacent literal/quoted
                     // text. Only the characters produced by this expansion are split
@@ -43573,6 +43678,53 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // the mode goes.
         assert_eq!(run(&format!("{SET}set -o posix; alias z=1")).0, "");
         assert_eq!(run(&format!("{SET}set -o posix; set +o posix; alias ll")).0, "alias ll='ls -l'\n");
+    }
+
+    /// The half of posix mode's redirection-word rule the corpus cannot reach:
+    /// it is off in an *interactive* shell. The corpus differ only ever runs
+    /// scripts, and `run` here is the interactive harness to `run_script`'s
+    /// non-interactive one — so the two together pin the gate that
+    /// [`Shell::posix_noninteractive`] is.
+    ///
+    /// The splitting and globbing rules themselves are covered by
+    /// posix-mode-stops-splitting-a-redirection-word-but-still-globs-a-dup.sh.
+    #[test]
+    fn posix_mode_leaves_an_interactive_shells_redirection_words_alone() {
+        // The assertions turn on exactly which names a glob can find, so each
+        // stage gets a directory of its own — the three shells here share one
+        // scratch cwd (see [`test_cwd`]), and a second `mkdir rw` would fail.
+        let setup = |d: &str| format!("mkdir {d} && cd {d} && : > a && : > b && r='two words'; ");
+
+        // Non-interactive, posix: the filename word neither splits nor globs, so
+        // both of these are ordinary creates rather than ambiguous redirects.
+        let (out, _) = run_script(&format!(
+            "{}set -o posix\n\
+             echo hi > $r; echo \"one=$?\"\n\
+             echo hi > [ab]; echo \"two=$?\"\n\
+             echo *\n",
+            setup("script-posix")
+        ));
+        assert_eq!(out, "one=0\ntwo=0\n[ab] a b two words\n");
+
+        // Interactive, posix: the rule is off, so `$r` splits into two fields
+        // and `[ab]` globs onto two names — both ambiguous, and neither name
+        // gets created.
+        let (out, _) = run(&format!(
+            "{}set -o posix\n\
+             echo hi > $r 2>/dev/null; echo \"one=$?\"\n\
+             echo hi > [ab] 2>/dev/null; echo \"two=$?\"\n\
+             echo *\n",
+            setup("interactive-posix")
+        ));
+        assert_eq!(out, "one=1\ntwo=1\na b\n");
+
+        // And with the mode off it makes no difference which shell it is.
+        let (out, _) = run_script(&format!(
+            "{}echo hi > $r 2>/dev/null; echo \"one=$?\"\n\
+             echo hi > [ab] 2>/dev/null; echo \"two=$?\"\n",
+            setup("script-no-posix")
+        ));
+        assert_eq!(out, "one=1\ntwo=1\n");
     }
 
     #[test]

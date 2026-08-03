@@ -24196,13 +24196,29 @@ impl Shell {
         status
     }
 
-    /// `alias [-p] [name[=value] ...]` — define, print, or list aliases. With no
-    /// operands (or `-p`), print every alias in re-inputtable `alias NAME='VAL'`
-    /// form. `name=value` defines an alias; a bare `name` prints that one alias
-    /// (status 1 if undefined). Aliases are expanded over the token stream before
-    /// parsing (see `parse_with_aliases`).
+    /// `alias [-p] [name[=value] ...]` — define, print, or list aliases.
+    ///
+    /// An operand splits at its *first* `=`, and is a *definition* only when
+    /// that split leaves a name in front of it — so `a[0]=v` defines an alias
+    /// called `a[0]` (nothing about the name has to look like a variable) and
+    /// `a=b=c` gives `a` the value `b=c`, while `=v` and `==v` are queries for
+    /// aliases called `=v` and `==v`. A definition's name is checked
+    /// against [`legal_alias_name`] and refused if it holds a character that
+    /// could not be part of one command word; a query's is not checked at all,
+    /// because looking a name up cannot go wrong beyond not finding it.
+    ///
+    /// `-p` is not "print instead of list": it prints the whole table *and*
+    /// then goes on to handle the operands, so `alias -p b=2` lists what was
+    /// there before defining `b`. The one thing that stops it — and the
+    /// operands with it — is an empty table, which bash answers with a bare
+    /// success before it looks at anything else.
+    ///
+    /// Each alias prints as a line that would re-enter it, which is why a name
+    /// beginning with `-` is preceded by `--`. Aliases are expanded over the
+    /// token stream before parsing (see `parse_with_aliases`).
     fn builtin_alias(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Consume leading `-p` / `--`; other operands begin the name list.
+        let mut pflag = false;
         let mut i = 0;
         while let Some(a) = args.get(i) {
             if a.as_slice() == b"--" {
@@ -24217,38 +24233,50 @@ impl Shell {
                         "alias [-p] [name[=value] ... ]",
                     );
                 }
+                pflag = true;
                 i += 1;
             } else {
                 break;
             }
         }
-        let operands = &args[i..];
-        if operands.is_empty() {
+        let operands = args.get(i..).unwrap_or_default().to_vec();
+        if operands.is_empty() || pflag {
+            // An empty table ends the call then and there, operands included:
+            // `alias -p nope` with nothing defined succeeds silently.
+            if self.aliases.is_empty() {
+                return 0;
+            }
             let mut buf = Str::new();
             for (name, val) in &self.aliases {
-                buf.extend_from_slice(&bfmt![
-                    b"alias ",
-                    name,
-                    b"=",
-                    single_quote_bytes(val),
-                    b"\n"
-                ]);
+                buf.extend_from_slice(&alias_line(name, val));
             }
-            return self.write_bytes(out, redir, &buf);
+            let rc = self.write_bytes(out, redir, &buf);
+            if operands.is_empty() {
+                return rc;
+            }
         }
         let mut status = 0;
-        for op in operands {
-            if let Some(eq) = op.iter().position(|b| *b == b'=') {
+        for op in &operands {
+            // The word splits at its *first* `=`, and is a definition only if
+            // that `=` leaves a name in front of it. `==v` therefore is not a
+            // definition of `=`: the split would be at the front, so the word
+            // is a query for the whole of `==v`.
+            if let Some(eq) = op.iter().position(|b| *b == b'=').filter(|p| *p > 0) {
                 let (name, val) = op.split_at(eq);
-                if name.is_empty() {
-                    self.berrln(&bfmt![self.err_prefix(), b"alias: `", op, b"': invalid alias name"]);
+                if !legal_alias_name(name) {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"alias: `",
+                        name,
+                        b"': invalid alias name"
+                    ]);
                     status = 1;
                     continue;
                 }
                 // `split_at` leaves the `=` on the front of the value.
                 self.aliases.insert(name.to_vec(), val.get(1..).unwrap_or_default().to_vec());
             } else if let Some(val) = self.aliases.get(op.as_slice()).cloned() {
-                let line = bfmt![b"alias ", op, b"=", single_quote_bytes(&val), b"\n"];
+                let line = alias_line(op, &val);
                 self.write_bytes(out, redir, &line);
             } else {
                 self.berrln(&bfmt![self.err_prefix(), b"alias: ", op, b": not found"]);
@@ -36384,6 +36412,39 @@ fn alias_description(name: BStr<'_>, value: BStr<'_>) -> Str {
     bfmt![name, b" is aliased to `", value, b"'"]
 }
 
+/// Whether `name` may be given to `alias` as the name of a definition — bash's
+/// `legal_alias_name`, which refuses `shellbreak || shellxquote || shellexp`
+/// and `/`. Everything else passes, including bytes that could never begin a
+/// variable name: `alias 1a=v`, `alias a-b=v` and `alias 'a[0]=v'` all define
+/// an alias under exactly that name, and `alias '!=v'` does too. An empty name
+/// cannot occur here (a word whose only `=` is at the front is read as a query,
+/// not a definition), but it is refused for good measure.
+///
+/// A refused name costs the whole call a status of 1 and prints
+/// ``alias: `NAME': invalid alias name``, but does *not* stop it: the operands
+/// after it are still defined.
+fn legal_alias_name(name: BStr<'_>) -> bool {
+    !name.is_empty()
+        && !name.iter().any(|b| {
+            matches!(
+                b,
+                b'`' | b'\'' | b'"' | b'\\' | b'$' | b'(' | b')' | b'<' | b'>' | b';' | b'&'
+                    | b'|' | b' ' | b'\t' | b'\n' | b'/'
+            )
+        })
+}
+
+/// One line of `alias` output: a command that would re-enter the alias.
+///
+/// A name beginning with `-` would be read back as an option, so bash writes
+/// `--` before it — `alias -- -x=1; alias` prints ``alias -- -x='1'``, and a
+/// query for that one name prints the same line. The value is always quoted,
+/// even when it needs nothing.
+fn alias_line(name: BStr<'_>, val: BStr<'_>) -> Str {
+    let dashes: &[u8] = if name.first() == Some(&b'-') { b"-- " } else { b"" };
+    bfmt![b"alias ", dashes, name, b"=", &single_quote_bytes(val), b"\n"]
+}
+
 /// Wrap `s` in single quotes for `trap -p` output, escaping embedded quotes the
 /// POSIX way (`'\''`). Always quotes (even simple words), matching bash.
 ///
@@ -42311,6 +42372,73 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn alias_missing_lookup_errors() {
         let (_, s) = run("alias nope");
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn an_alias_name_is_not_a_variable_name() {
+        // The name only has to survive being one command word, so a digit, a
+        // dash and a subscript-looking tail are all fine. Measured in bash 5.2.
+        let (o, s) = run("alias 1a=v 'a-b=v' 'a[0]=v' 'x!'=v; alias");
+        assert_eq!(s, 0);
+        assert_eq!(o, "alias 1a='v'\nalias a-b='v'\nalias a[0]='v'\nalias x!='v'\n");
+    }
+
+    #[test]
+    fn an_alias_name_may_not_hold_a_word_breaking_byte() {
+        // `legal_alias_name` refuses the shell's break and quoting characters,
+        // `$` and `/` — and refusing one costs the call a 1 without stopping
+        // the operands after it.
+        // Spelled as hex so the byte under test never reaches the parser as
+        // itself — several of them would end the word otherwise.
+        for bad in [
+            0x60_u8, b'\'', b'"', b'\\', b'$', b'(', b')', b'<', b'>', b';', b'&', b'|', b' ',
+            b'\t', b'\n', b'/',
+        ] {
+            let (_, s) = run(&format!("alias $'a\\x{bad:02x}b=v' 2>/dev/null"));
+            assert_eq!(s, 1, "expected a name holding {:?} to be refused", bad as char);
+        }
+        let (o, s) = run("alias f1=1 'a b=2' f2=3 2>/dev/null; alias");
+        assert_eq!(s, 0, "the listing that follows succeeds on its own");
+        assert_eq!(o, "alias f1='1'\nalias f2='3'\n");
+        let (o, s) = run("alias f1=1 'a b=2' f2=3 2>&1 >/dev/null");
+        assert_eq!(s, 1);
+        assert!(o.ends_with("alias: `a b': invalid alias name\n"), "got {o:?}");
+    }
+
+    #[test]
+    fn an_alias_operand_splits_at_its_first_equals() {
+        // `a=b=c` gives `a` the value `b=c`…
+        let (o, s) = run("alias 'a=b=c'; alias a");
+        assert_eq!(s, 0);
+        assert_eq!(o, "alias a='b=c'\n");
+        // …and an `=` at the front leaves no name, so the word is a *query*
+        // for a name that no definition could have made.
+        let (o, s) = run("alias '==v' 2>&1");
+        assert_eq!(s, 1);
+        assert!(o.ends_with("alias: ==v: not found\n"), "got {o:?}");
+    }
+
+    #[test]
+    fn an_alias_name_starting_with_a_dash_prints_behind_a_double_dash() {
+        // The line has to be one that would re-enter the alias, and `-x=1`
+        // alone would be read as options.
+        let (o, s) = run("alias -- -x=1 y=2; alias");
+        assert_eq!(s, 0);
+        assert_eq!(o, "alias -- -x='1'\nalias y='2'\n");
+        assert_eq!(run("alias -- -x=1; alias -- -x").0, "alias -- -x='1'\n");
+    }
+
+    #[test]
+    fn alias_p_prints_the_table_and_then_still_defines() {
+        // `-p` is not "print instead of define".
+        let (o, s) = run("alias a=1; alias -p b=2; alias");
+        assert_eq!(s, 0);
+        assert_eq!(o, "alias a='1'\nalias a='1'\nalias b='2'\n");
+        // But an empty table answers success before it looks at an operand,
+        // so the missing name is never reported.
+        let (o, s) = run("alias -p nope");
+        assert_eq!(s, 0);
+        assert_eq!(o, "");
     }
 
     #[test]

@@ -32018,7 +32018,8 @@ impl Shell {
     fn builtin_shift(&mut self, args: &[Str]) -> i32 {
         // `shift [n]`: default 1. A non-numeric count is a hard error, as is a
         // negative count ("out of range"); a count larger than `$#` silently
-        // returns 1 (bash). More than one operand is "too many arguments".
+        // returns 1 (bash). More than one operand is "too many arguments" — and
+        // that one is not a mere non-zero status but an *abort*, see below.
         //
         // The out-of-range diagnostic below names the first argument *as
         // written*, before `--` is stripped, because that is the word bash
@@ -32042,7 +32043,24 @@ impl Shell {
                     return 1;
                 };
                 if args.len() > 1 {
+                    // A second operand is one of the few builtin errors bash
+                    // does not merely fail: its `no_args` ends with
+                    // `jump_to_top_level(DISCARD)`, the same abort a non-fatal
+                    // word-expansion error takes. So the rest of the current
+                    // top-level command is abandoned — `shift 1 2; echo hi`
+                    // never reaches the `echo`, and neither does the `&&`/`||`
+                    // arm, the enclosing loop or the calling function — while
+                    // `$?` becomes 1 and the *next* command still runs. A
+                    // subshell is where it stops: it exits with 1 and the parent
+                    // carries on.
+                    //
+                    // Note the ordering: the count is parsed *first*, so
+                    // `shift x 2` is the ordinary "numeric argument required"
+                    // failure above and the line continues (bash's
+                    // `get_numeric_arg` reaches `no_args` only after
+                    // `legal_number` succeeds).
                     self.perrln("shift: too many arguments");
+                    self.discard_error = Some(1);
                     return 1;
                 }
                 if v < 0 {
@@ -48286,6 +48304,39 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Posix mode reaches the message only *through* the option, so opting
         // back out inside the mode is silent again.
         assert_eq!(run("set -o posix; shopt -u shift_verbose; shift 5 2>&1; echo rc=$?").0, "rc=1\n");
+    }
+
+    #[test]
+    fn a_second_operand_to_shift_abandons_the_rest_of_the_command() {
+        // bash's `no_args` ends in `jump_to_top_level(DISCARD)`, so a second
+        // operand does not merely fail the builtin — it abandons the rest of the
+        // current top-level command. The `echo` on the same line never runs, and
+        // the next one sees `$?` of 1.
+        let (o, s) = run("set -- a b c; shift 1 2 2>&1; echo no\necho rc=$? args=[$*]");
+        assert_eq!(o, "osh: shift: too many arguments\nrc=1 args=[a b c]\n");
+        assert_eq!(s, 0);
+        // It unwinds past an `&&`/`||` arm, out of a loop and out of a function
+        // body — none of those is a boundary for it.
+        assert_eq!(run("shift 1 2 2>&1 && echo and; echo no").0, "osh: shift: too many arguments\n");
+        assert_eq!(
+            run("for i in 1 2; do echo $i; shift 9 9 2>&1; done; echo no\necho done").0,
+            "1\nosh: shift: too many arguments\ndone\n"
+        );
+        assert_eq!(
+            run("f() { shift 1 2 2>&1; echo no; }; f; echo no2\necho after").0,
+            "main: shift: too many arguments\nafter\n"
+        );
+        // A subshell *is* one: it ends with status 1 and the parent's line
+        // carries on. So does a command substitution.
+        assert_eq!(
+            run("( shift 1 2 2>&1; echo no ); echo rc=$?").0,
+            "osh: shift: too many arguments\nrc=1\n"
+        );
+        let (o2, _) = run("v=$(shift 1 2 2>&1; echo no); echo \"[$v] rc=$?\"");
+        assert_eq!(o2, "[osh: shift: too many arguments] rc=1\n");
+        // The count is parsed first, so a bad one is the ordinary failure and
+        // the line continues.
+        assert_eq!(run("shift x 2 2>&1; echo rc=$?").0, "osh: shift: x: numeric argument required\nrc=1\n");
     }
 
     #[test]

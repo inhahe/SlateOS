@@ -41,9 +41,47 @@ fn case_op_src(mode: CaseMode, all: bool) -> &'static str {
     }
 }
 
-/// One indentation level (bash uses 4 spaces in `declare -f` output).
-fn ind(level: usize) -> Str {
-    b"    ".repeat(level)
+/// How deep a body is nested, *and* the shape its indentation takes: level `n`
+/// is indented `base + step * n` spaces.
+///
+/// bash has two function printers with two different shapes. `declare -f` (and
+/// `type`) indents four spaces per nesting level — [`Indent::DECLARE`]. The one
+/// that encodes an exported function into `BASH_FUNC_<name>%%` puts exactly one
+/// space at every depth, however deep — [`Indent::EXPORTED`]. The difference
+/// cannot be applied as a post-pass over the finished text, because a newline
+/// inside a string literal is emitted verbatim at column 0 in *both* forms and
+/// a line-based re-indent would corrupt it. So the shape travels with the depth
+/// through the printer, rather than sitting in a global the printer consults.
+#[derive(Clone, Copy)]
+struct Indent {
+    /// Spaces every level carries, however shallow.
+    base: usize,
+    /// Further spaces per nesting level.
+    step: usize,
+    /// The current nesting depth.
+    level: usize,
+}
+
+impl Indent {
+    /// `declare -f` / `type` / `set` output: four spaces per nesting level.
+    const DECLARE: Self = Self { base: 0, step: 4, level: 0 };
+    /// The exported-function encoding: one space at every depth.
+    const EXPORTED: Self = Self { base: 1, step: 0, level: 0 };
+
+    /// The leading whitespace a line at this depth carries.
+    fn spaces(self) -> Str {
+        b" ".repeat(self.base.saturating_add(self.step.saturating_mul(self.level)))
+    }
+}
+
+/// Descend `n` nesting levels, keeping the shape — so the printer's recursive
+/// calls read as the plain `level + 1` they were before the shape existed.
+impl std::ops::Add<usize> for Indent {
+    type Output = Self;
+
+    fn add(self, n: usize) -> Self {
+        Self { level: self.level.saturating_add(n), ..self }
+    }
 }
 
 /// Render a function definition in bash's `declare -f` form:
@@ -61,10 +99,11 @@ pub fn unparse_function(name: BStr<'_>, body: &Program, redirects: &[Redirect]) 
     // bash prints the opening brace on its own line with a trailing space
     // (`{ \n`), matching `declare -f` / `type` output byte-for-byte.
     s.push_str(" () \n{ \n");
-    let inner = program_block(body, 1, false);
+    let shape = Indent::DECLARE;
+    let inner = program_block(body, shape + 1, false);
     if inner.is_empty() {
         // An empty body still needs a no-op so it re-parses.
-        s.push_str(&ind(1));
+        s.push_str(&(shape + 1).spaces());
         s.push(b':');
         s.push(b'\n');
     } else {
@@ -86,6 +125,38 @@ pub fn unparse_function(name: BStr<'_>, body: &Program, redirects: &[Redirect]) 
     flush_here_docs(&s)
 }
 
+/// Render a function body in the form bash puts into the environment for an
+/// exported function — the value side of `BASH_FUNC_<name>%%`.
+///
+/// This is bash's `named_function_string(NULL, cmd, 0)`, which differs from the
+/// `declare -f` form ([`unparse_function`]) in exactly two ways: the name and
+/// the newline before `{` are dropped (`() { ` instead of `NAME () \n{ \n`),
+/// and every nesting level is indented one space rather than four-per-level.
+/// So `f() { echo hi; }` encodes as `() {  echo hi\n}` — two spaces, one from
+/// the header and one from the body's indent.
+#[must_use]
+pub fn unparse_function_exported(body: &Program, redirects: &[Redirect]) -> Str {
+    let shape = Indent::EXPORTED;
+    let mut s = b"() { ".to_vec();
+    let inner = program_block(body, shape + 1, false);
+    if inner.is_empty() {
+        s.push_str(&(shape + 1).spaces());
+        s.push(b':');
+        s.push(b'\n');
+    } else {
+        s.push_str(&inner);
+        if !inner.ends_with(b"\n") {
+            s.push(b'\n');
+        }
+    }
+    s.push(b'}');
+    for r in redirects {
+        s.push(b' ');
+        s.push_str(&redirect_src(r));
+    }
+    flush_here_docs(&s)
+}
+
 /// Render a whole program as an indented block: one item per line at `level`.
 ///
 /// `terminate_last` controls the trailing separator on the final statement, to
@@ -94,8 +165,7 @@ pub fn unparse_function(name: BStr<'_>, body: &Program, redirects: &[Redirect]) 
 /// group body (`{ … }`, a subshell, the function body itself, and `case`
 /// clauses) leaves the last statement unterminated. Non-final statements always
 /// take a `;` separator (a backgrounded statement's ` &` is its own separator).
-#[must_use]
-pub fn program_block(prog: &Program, level: usize, terminate_last: bool) -> Str {
+fn program_block(prog: &Program, level: Indent, terminate_last: bool) -> Str {
     let mut out = Str::new();
     let n = prog.items.len();
     for (i, item) in prog.items.iter().enumerate() {
@@ -105,7 +175,7 @@ pub fn program_block(prog: &Program, level: usize, terminate_last: bool) -> Str 
         // predecessor was not backgrounded. (TD-OILS-DECLAREF-QUIRKS item 3.)
         let mut stmt = Str::new();
         if i == 0 || !prog.items[i - 1].background {
-            stmt.push_str(&ind(level));
+            stmt.push_str(&level.spaces());
         }
         stmt.push_str(&item_stmt(item, level));
         // A here-document parked on the statement's *last* line replaces the
@@ -152,7 +222,7 @@ pub fn program_inline(prog: &Program) -> Str {
 /// One statement (and-or list, plus a trailing ` &` when backgrounded). The
 /// first line carries no leading indent (the caller supplies it); nested lines
 /// are indented to `level`.
-fn item_stmt(item: &Item, level: usize) -> Str {
+fn item_stmt(item: &Item, level: Indent) -> Str {
     let mut s = and_or_block(&item.list, level);
     if item.background {
         s.push_str(" &");
@@ -161,7 +231,7 @@ fn item_stmt(item: &Item, level: usize) -> Str {
 }
 
 /// And-or list where the first pipeline may be a multi-line compound command.
-fn and_or_block(ao: &AndOr, level: usize) -> Str {
+fn and_or_block(ao: &AndOr, level: Indent) -> Str {
     let mut s = pipeline_block(&ao.first, level);
     for (op, pl) in &ao.rest {
         s.push_str(match op {
@@ -214,7 +284,7 @@ fn pipeline_prefix(pl: &Pipeline) -> Str {
 }
 
 /// Pipeline where each command may be a multi-line compound command.
-fn pipeline_block(pl: &Pipeline, level: usize) -> Str {
+fn pipeline_block(pl: &Pipeline, level: Indent) -> Str {
     let mut s = pipeline_prefix(pl);
     let cmds: Vec<Str> = pl.commands.iter().map(|c| command_block(c, level)).collect();
     s.push_str(&bytes::join(&cmds, b" | "));
@@ -241,7 +311,7 @@ fn render_if(
     body: &Program,
     elifs: &[(Program, Program)],
     else_body: Option<&Program>,
-    level: usize,
+    level: Indent,
 ) -> Str {
     let mut s = b"if ".to_vec();
     s.push_str(&program_inline(cond));
@@ -249,21 +319,21 @@ fn render_if(
     s.push_str(&program_block(body, level + 1, true));
     if let Some(((econd, ebody), rest)) = elifs.split_first() {
         // `elif …` becomes `else\n  if … fi;` one indent level deeper.
-        s.push_str(&ind(level));
+        s.push_str(&level.spaces());
         s.push_str("else\n");
-        s.push_str(&ind(level + 1));
+        s.push_str(&(level + 1).spaces());
         s.push_str(&render_if(econd, ebody, rest, else_body, level + 1));
         s.push_str(";\n");
-        s.push_str(&ind(level));
+        s.push_str(&level.spaces());
         s.push_str("fi");
     } else if let Some(eb) = else_body {
-        s.push_str(&ind(level));
+        s.push_str(&level.spaces());
         s.push_str("else\n");
         s.push_str(&program_block(eb, level + 1, true));
-        s.push_str(&ind(level));
+        s.push_str(&level.spaces());
         s.push_str("fi");
     } else {
-        s.push_str(&ind(level));
+        s.push_str(&level.spaces());
         s.push_str("fi");
     }
     s
@@ -272,7 +342,7 @@ fn render_if(
 /// Render a command as a (possibly multi-line) block. The first line has no
 /// leading indent; continuation lines are indented at `level`, bodies at
 /// `level + 1`.
-fn command_block(cmd: &Command, level: usize) -> Str {
+fn command_block(cmd: &Command, level: Indent) -> Str {
     match cmd {
         Command::Simple(sc) => simple_inline(sc),
         Command::If(c) => render_if(&c.cond, &c.body, &c.elifs, c.else_body.as_ref(), level),
@@ -283,7 +353,7 @@ fn command_block(cmd: &Command, level: usize) -> Str {
             s.push_str(&program_inline(&c.cond));
             s.push_str("; do\n");
             s.push_str(&program_block(&c.body, level + 1, true));
-            s.push_str(&ind(level));
+            s.push_str(&level.spaces());
             s.push_str("done");
             s
         }
@@ -299,10 +369,10 @@ fn command_block(cmd: &Command, level: usize) -> Str {
                 }
             }
             s.push_str(";\n");
-            s.push_str(&ind(level));
+            s.push_str(&level.spaces());
             s.push_str("do\n");
             s.push_str(&program_block(&c.body, level + 1, true));
-            s.push_str(&ind(level));
+            s.push_str(&level.spaces());
             s.push_str("done");
             s
         }
@@ -310,10 +380,10 @@ fn command_block(cmd: &Command, level: usize) -> Str {
             // `for ((init; cond; upd))` with no inner-paren padding and `do` on
             // its own line, matching bash.
             let mut s = bfmt![b"for ((", &c.init, b"; ", &c.cond, b"; ", &c.update, b"))\n"];
-            s.push_str(&ind(level));
+            s.push_str(&level.spaces());
             s.push_str("do\n");
             s.push_str(&program_block(&c.body, level + 1, true));
-            s.push_str(&ind(level));
+            s.push_str(&level.spaces());
             s.push_str("done");
             s
         }
@@ -327,10 +397,10 @@ fn command_block(cmd: &Command, level: usize) -> Str {
                 }
             }
             s.push_str(";\n");
-            s.push_str(&ind(level));
+            s.push_str(&level.spaces());
             s.push_str("do\n");
             s.push_str(&program_block(&c.body, level + 1, true));
-            s.push_str(&ind(level));
+            s.push_str(&level.spaces());
             s.push_str("done");
             s
         }
@@ -342,10 +412,10 @@ fn command_block(cmd: &Command, level: usize) -> Str {
             // syntax — while top-level defs omit it. See known-issues.md
             // TD-OILS-DECLAREF-QUIRKS item 4.
             let mut s = bfmt![b"function ", &f.name, b" () \n"];
-            s.push_str(&ind(level));
+            s.push_str(&level.spaces());
             s.push_str("{ \n");
             s.push_str(&program_block(&f.body, level + 1, false));
-            s.push_str(&ind(level));
+            s.push_str(&level.spaces());
             s.push(b'}');
             for r in &f.redirects {
                 s.push(b' ');
@@ -359,11 +429,11 @@ fn command_block(cmd: &Command, level: usize) -> Str {
             let mut s = bfmt![b"case ", &word_src(&c.word), b" in \n"];
             for item in &c.items {
                 let pats: Vec<Str> = item.patterns.iter().map(word_src).collect();
-                s.push_str(&ind(level + 1));
+                s.push_str(&(level + 1).spaces());
                 s.push_str(&bytes::join(&pats, b"|"));
                 s.push_str(")\n");
                 s.push_str(&program_block(&item.body, level + 2, false));
-                s.push_str(&ind(level + 1));
+                s.push_str(&(level + 1).spaces());
                 s.push_str(match item.term {
                     crate::ast::CaseTerm::Break => ";;",
                     crate::ast::CaseTerm::FallThrough => ";&",
@@ -371,7 +441,7 @@ fn command_block(cmd: &Command, level: usize) -> Str {
                 });
                 s.push(b'\n');
             }
-            s.push_str(&ind(level));
+            s.push_str(&level.spaces());
             s.push_str("esac");
             s
         }
@@ -379,7 +449,7 @@ fn command_block(cmd: &Command, level: usize) -> Str {
             // bash prints the opening brace with a trailing space (`{ `).
             let mut s = b"{ \n".to_vec();
             s.push_str(&program_block(prog, level + 1, false));
-            s.push_str(&ind(level));
+            s.push_str(&level.spaces());
             s.push(b'}');
             s
         }
@@ -394,7 +464,7 @@ fn command_block(cmd: &Command, level: usize) -> Str {
             if body.is_empty() {
                 return b"( )".to_vec();
             }
-            let indent = ind(level);
+            let indent = level.spaces();
             let trimmed = body.strip_prefix(indent.as_slice()).unwrap_or(body.as_slice());
             let trimmed = trimmed.strip_suffix(b"\n").unwrap_or(trimmed);
             bfmt![b"( ", trimmed, b" )"]
@@ -1289,5 +1359,103 @@ mod tests {
         let d = dump_fn("e() { :; }", "e");
         assert!(d.contains(":"), "dump: {d:?}");
         assert_roundtrip("e() { :; }", "e");
+    }
+
+    /// Parse `src`, expect the named function, and render its *exported* form.
+    fn dump_exported(src: &str, name: &str) -> String {
+        let prog = parse(src.as_bytes()).expect("parse");
+        for item in &prog.items {
+            for cmd in &item.list.first.commands {
+                if let Command::Function(f) = cmd
+                    && f.name == name.as_bytes()
+                {
+                    return text(unparse_function_exported(&f.body, &f.redirects));
+                }
+            }
+        }
+        panic!("function {name} not found");
+    }
+
+    /// The `BASH_FUNC_<name>%%` value side, byte-for-byte as bash 5.2.37 writes
+    /// it. These expectations were *measured*: each was read back out of a real
+    /// bash child with `printenv 'BASH_FUNC_<name>%%'`, so they pin the exact
+    /// one-space-per-level shape (as opposed to `declare -f`'s four-per-level)
+    /// that bash's `named_function_string(NULL, cmd, 0)` produces.
+    #[test]
+    fn exported_form_matches_bash() {
+        // Simple body: two spaces before `echo` — one from the `() { ` header,
+        // one from the body's own single-space indent.
+        assert_eq!(dump_exported("f() { echo hi; }", "f"), "() {  echo hi\n}");
+
+        // Every statement after the first starts at column 1, not column 4.
+        assert_eq!(dump_exported("f() { echo a; echo b; }", "f"), "() {  echo a;\n echo b\n}");
+
+        // Nesting does *not* deepen the indent: the brace group and the subshell
+        // sit at the same one space as the statements around them.
+        assert_eq!(
+            dump_exported("f() { { echo x; }; ( echo y ); }", "f"),
+            "() {  { \n echo x\n };\n ( echo y )\n}"
+        );
+
+        // A redirect on the definition rides the closing-brace line, as in
+        // `declare -f` — but with no trailing newline after it.
+        assert_eq!(dump_exported("f() { echo z; } > /dev/null", "f"), "() {  echo z\n} > /dev/null");
+
+        // A newline *inside a string literal* is emitted verbatim at column 0.
+        // This is why the exported shape has to be threaded through the printer
+        // rather than applied as a post-hoc line-based re-indent: such a re-indent
+        // would corrupt the literal.
+        assert_eq!(
+            dump_exported("f() { echo \"line1\nline2\"; }", "f"),
+            "() {  echo \"line1\nline2\"\n}"
+        );
+
+        // Compound commands: every keyword line is flush at one space.
+        assert_eq!(
+            dump_exported(
+                "f() { if true; then for i in 1 2; do echo $i; done; \
+                 else case $x in a) echo A;; esac; fi; }",
+                "f"
+            ),
+            "() {  if true; then\n for i in 1 2;\n do\n echo $i;\n done;\n else\n \
+             case $x in \n a)\n echo A\n ;;\n esac;\n fi\n}"
+        );
+    }
+
+    /// The exported form must re-parse to the same function, since that is
+    /// exactly what the importing shell does with `NAME` + the value.
+    #[test]
+    fn exported_form_reparses() {
+        for src in [
+            "f() { echo hi; }",
+            "f() { echo a; echo b; }",
+            "f() { { echo x; }; ( echo y ); }",
+            "f() { echo z; } > /dev/null",
+            "f() { if true; then echo a; else echo b; fi; }",
+            "f() { :; }",
+        ] {
+            let value = dump_exported(src, "f");
+            let reparsed = format!("f {value}");
+            let prog = parse(reparsed.as_bytes())
+                .unwrap_or_else(|e| panic!("re-parse {reparsed:?}: {}", String::from_utf8_lossy(&e.msg)));
+            let f = prog
+                .items
+                .iter()
+                .flat_map(|i| &i.list.first.commands)
+                .find_map(|c| match c {
+                    Command::Function(f) if f.name == b"f" => Some(f),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no function in {reparsed:?}"));
+            // Unparsing the re-parsed definition reproduces the same value: the
+            // encoding is a fixed point, so a chain of exec'd shells cannot drift.
+            assert_eq!(text(unparse_function_exported(&f.body, &f.redirects)), value);
+        }
+    }
+
+    /// An empty body still needs a no-op so the importing shell can parse it.
+    #[test]
+    fn exported_empty_body_uses_noop() {
+        assert_eq!(dump_exported("e() { :; }", "e"), "() {  :\n}");
     }
 }

@@ -14,6 +14,80 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-DOLLAR-ZERO-ARGV0. `$0` under `-c` (and the bare REPL) is the literal `osh`, where bash uses the path it was invoked as — 2026-08-02 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` line ~3719 seeds `name: b"osh".to_vec()`,
+and `userspace/oils/src/main.rs` (`InvokeMode::Command` ~line 501,
+`InvokeMode::Repl` ~line 523) only calls `sh.set_name()` when there is an
+explicit operand — the `-c` *name* argument, or a script path. With neither,
+`$0` keeps that seeded default and never sees `argv[0]`.
+
+**What:** bash sets `$0` from `argv[0]` at startup, so `-c` without a name
+operand reports the invocation path, and every diagnostic prefixed with `$0`
+carries it too.
+
+```
+$ bash -c 'echo $0'      $ osh -c 'echo $0'
+C:/Program Files/Git/usr/bin/bash        osh
+```
+
+The prefix divergence is visible on any `-c` diagnostic, and specifically on
+the exported-function import error, which is emitted *before* `-c` has settled
+`$0`, so even passing the name operand does not align the two:
+
+```
+$ env 'BASH_FUNC_w%%=() { if true; }' bash -c 'declare -F w' myname
+C:/Program Files/Git/usr/bin/bash: w: line 0: syntax error near unexpected token `}'
+…
+$ env 'BASH_FUNC_w%%=() { if true; }' osh -c 'declare -F w' myname
+osh: w: line 0: syntax error near unexpected token `}'
+…
+```
+
+**Proper fix.** Seed `Shell::name` from `argv[0]` in `main.rs` before anything
+that can diagnose (the environment import included), and let the existing
+`set_name` calls override it when `-c name` or a script path is given. The
+seeded `b"osh"` becomes the fallback for the case where `argv[0]` is absent.
+
+**Impact.** Cosmetic but pervasive: every `-c`-mode diagnostic is prefixed
+differently from bash, and a script that keys off `$0` to re-exec itself
+(`exec "$0" …`) breaks under `osh -c`. Normalised away in
+`tests/corpus/export-f-exported-functions.sh`, which is the only corpus case
+that currently trips over it. Found while writing that case.
+
+### TD-OILS-EXEC-SHEBANGLESS-SCRIPT. osh will not run a shebang-less, non-executable file as a shell script the way bash does — 2026-08-02 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the external-command spawn path.
+The OS is asked to execute the file directly and its refusal is reported
+verbatim; there is no fallback that re-reads the file as shell source.
+
+**What:** when execution of a command file fails because it is not a valid
+executable format, bash falls back to interpreting it as a shell script (POSIX
+`execvp` ENOEXEC handling — bash's `execute_disk_command` retries via
+`shell_execve`'s script check). osh reports the OS error instead.
+
+```
+$ cat >c.sh <<'EOF'
+echo hi
+EOF
+$ bash -c './c.sh'    →  hi                                (rc 0)
+$ osh  -c './c.sh'    →  osh: ./c.sh: %1 is not a valid Win32 application. (os error 193)
+                                                            (rc 126)
+```
+
+**Proper fix.** On a spawn failure whose OS error means "not an executable
+image" (Windows `ERROR_BAD_EXE_FORMAT` = 193; POSIX `ENOEXEC`), re-run the file
+as shell source in a child of this shell — bash's rule is to check the first
+line: a `#!` line is the kernel's business (and on Windows osh must honour it
+itself), anything else means "feed it to the shell". Data that is plainly not a
+script (a leading NUL / an ELF or PE magic) must still fail with the original
+error rather than be parsed.
+
+**Impact.** Any script invoked by path without a shebang fails under osh.
+On Windows this is broader than on Unix, because a shebang alone does not make
+a file executable there — so essentially *every* `./script.sh` invocation goes
+through this path. Found while trying to make a corpus case re-exec itself.
+
 ### TD-OILS-CORPUS-BG-DEBUG-TRACE-RACE. `debug-trap-announces-a-background-command.sh` interleaves a background job's traces with the parent's about 1 run in 6 — 2026-08-01 — ✅ **RESOLVED 2026-08-01** (the *case* raced, not osh)
 
 **Where:** `tests/corpus/debug-trap-announces-a-background-command.sh`. The one
@@ -26329,7 +26403,7 @@ locale), so the MSYS byte-wise result is a host-locale artifact rather than an
 osh divergence. `tests/corpus/read-processes-backslashes-as-it-reads.sh` keeps
 to ASCII for exactly this reason. No action needed.
 
-### TD-OILS-EXPORT-F. `export -f` is rejected: a function cannot be passed to a child shell — OPEN — 2026-08-01
+### TD-OILS-EXPORT-F. `export -f` is rejected: a function cannot be passed to a child shell — 2026-08-01 — ✅ **RESOLVED 2026-08-02**
 
 **Where:** `userspace/oils/src/interp.rs` — the `export` builtin's flag loop
 accepts only `-n` and `-p`, so `-f` comes back as `invalid option`.
@@ -26365,6 +26439,70 @@ source as `environment` and its line as 0 so `declare -F` under extdebug agrees.
 `find -exec bash -c`, `xargs bash -c`, `parallel`) fails outright rather than
 silently misbehaving, so it is visible rather than dangerous. Also blocks
 `declare -F`'s `0 environment` form, which is otherwise implemented.
+
+**RESOLVED 2026-08-02** — implemented as specified above, and verified
+byte-identical to bash 5.2.37 for every behaviour probed.
+
+The encoding turned out *not* to be what `declare -f` reconstructs. bash has
+two function printers, and the environment uses the other one:
+`named_function_string(NULL, cmd, 0)` rather than `print_function_def`. It
+drops the name and the newline before `{` (`() { ` instead of `NAME () \n{ \n`)
+**and indents every nesting level by one space** rather than four-per-level. So
+`f() { echo hi; }` encodes as `() {  echo hi\n}` — two spaces, one from the
+header, one from the body's indent — and a nested brace group stays at that
+same one space rather than deepening.
+
+That second difference forced a change in the printer's shape rather than a
+post-hoc reformat: a newline *inside a string literal* is emitted verbatim at
+column 0 in both forms, so a line-based re-indent of `declare -f` output would
+corrupt the literal. `userspace/oils/src/unparse.rs` therefore replaced the
+hard-coded `fn ind(level: usize)` with an `Indent` newtype (`base`, `step`,
+`level`) threaded through the printer, with `Indent::DECLARE` = 4-per-level and
+`Indent::EXPORTED` = 1-at-every-level; `impl Add<usize> for Indent` keeps the
+recursive call sites reading as the plain `level + 1` they were before. The new
+`unparse_function_exported` is the only user of the second shape.
+
+The rest, in `interp.rs`: a `Shell::exported_funcs` set (cloned into subshells,
+since only the *export attribute* crosses the environment — an unexported
+function does not); `apply_child_env` serialising each into
+`BASH_FUNC_<name>%%`; `env_function_name` + `import_env_function` recognising
+and binding the shape in `import_environment` — placed *ahead* of the
+identifier gate, which would otherwise park the entry in `opaque_env` and pass
+stale text to grandchildren; `export -f`/`-nf`/`-pf` in `builtin_export`;
+`declare`'s sign-aware flag scan so `declare +x -f f` reaches the function path
+while `declare +f` still does not; and `unset -f` dropping the attribute.
+
+Measured details worth recording, each confirmed against real bash:
+
+- The attribute letters list in a fixed order `f`, `r`, `t`, `x` — `declare -F`
+  prints `declare -frtx f` whatever order they were set in. `declare -F NAME`
+  (with an operand) prints only the name, never the attribute line.
+- `declare -Fx` filters to the exported functions; `-Fxr` is a *union*, not an
+  intersection, like the variable-side attribute filters.
+- `unset -f` takes the export attribute with the definition: a redefinition
+  afterwards is **not** exported again.
+- A value that does not begin `() {` is skipped in silence (it is an ordinary
+  variable that happens to be named like the encoding, and stays invisible —
+  the name is unspellable). Only a value that *did* look like a definition and
+  then failed to parse earns the three-line diagnostic, whose middle line
+  echoes the reconstructed source.
+- `export -f nosuch` reports `export: nosuch: not a function` and returns 1 but
+  keeps processing later names; `declare -fx nosuch` is silent and returns 1.
+  `-f` also stops `h=1` being an assignment, so it is reported the same way.
+
+Not modelled: bash's `-p` (privileged) mode skips function import entirely.
+osh accepts `privileged` as an inert `set` option and has no real privileged
+mode, so there is nothing to gate on.
+
+**Tests.** `unparse::tests::exported_form_matches_bash` /
+`exported_form_reparses` / `exported_empty_body_uses_noop` pin the encoding for
+seven shapes and prove it is a fixed point (so a chain of exec'd shells cannot
+drift); `interp::tests::export_f_puts_the_function_in_the_child_environment`
+and six siblings cover the child environment, the import, the attribute
+letters, the listings and the errors; and
+`userspace/oils/tests/corpus/export-f-exported-functions.sh` runs the whole
+thing — including a real parent→child→grandchild round trip via `$BASH`, which
+names the running shell in both — against real bash.
 
 ### TD-OILS-EVAL-SWALLOWS-RETURN. `return` inside `eval` does not return from the enclosing function — 2026-08-01 — ✅ **RESOLVED 2026-08-01**
 

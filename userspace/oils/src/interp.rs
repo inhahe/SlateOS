@@ -3286,6 +3286,16 @@ pub struct Shell {
     /// cannot be redefined or `unset -f`. Distinct from `readonly` (which tracks
     /// variables); copied into subshell clones so the attribute is inherited.
     readonly_funcs: HashSet<Str>,
+    /// Function names marked `export -f` (`declare -fx`). Each is serialised
+    /// into a child's environment as `BASH_FUNC_<name>%%=() { … }`, which a
+    /// child bash/osh re-imports as a function ([`Shell::import_environment`]).
+    ///
+    /// Only the *export* attribute crosses the environment: measured, a
+    /// function that is `readonly -f` and `declare -ft` in the parent arrives in
+    /// the child as plain `declare -fx`, because the encoding carries the body
+    /// and nothing else. Copied into subshell clones like the other attribute
+    /// sets, and dropped by `unset -f`.
+    exported_funcs: HashSet<Str>,
     /// `shopt` option toggles (e.g. `nullglob`, `dotglob`, `nocaseglob`). Only
     /// options present with `true` are enabled; absent/`false` = default off.
     /// Inherited by subshell clones.
@@ -3800,6 +3810,7 @@ impl Shell {
             readonly: HashSet::new(),
             noassign: NOASSIGN_VARS.iter().map(|n| (*n).to_string()).collect(),
             readonly_funcs: HashSet::new(),
+            exported_funcs: HashSet::new(),
             shopt: HashMap::new(),
             comp_specs: Vec::new(),
             integer_attr: HashSet::new(),
@@ -4492,6 +4503,86 @@ impl Shell {
             .map(str::to_owned)
     }
 
+    /// The function name inside an exported-function environment entry, or
+    /// `None` for an ordinary variable.
+    ///
+    /// bash encodes an exported function under `BASH_FUNC_<name>%%`. The `%%` is
+    /// deliberate: it makes the entry unnameable by any shell word, so it cannot
+    /// collide with a variable and is invisible to `set`, `declare -p` and
+    /// `compgen -v` in the child. The name between the fixtures is *not*
+    /// required to be an identifier — bash lets `f-1(){ …; }` be defined and
+    /// exported — so nothing is checked beyond the two fixtures being present
+    /// with at least one byte between them.
+    fn env_function_name(key: BStr<'_>) -> Option<BStr<'_>> {
+        key.strip_prefix(b"BASH_FUNC_")?.strip_suffix(b"%%").filter(|n| !n.is_empty())
+    }
+
+    /// Bind a function that arrived in the environment (see
+    /// [`Shell::env_function_name`]), keeping it exported so it reaches this
+    /// shell's own children in turn.
+    ///
+    /// bash re-spells the definition as `NAME + ' ' + value` and feeds that to
+    /// the parser, which is why the value begins `() {` — and why a value that
+    /// does not is skipped in silence rather than reported: only a *parse*
+    /// failure of something that did look like a definition is worth a
+    /// diagnostic. Neither case is fatal; the shell carries on either way.
+    ///
+    /// The definition's recorded source is `environment` at line 0, which is
+    /// what `declare -F NAME` reports for it under `shopt -s extdebug`.
+    fn import_env_function(&mut self, name: BStr<'_>, value: BStr<'_>) {
+        if !value.starts_with(b"() {") {
+            return;
+        }
+        let src = bfmt![name, b" ", value];
+        let def = match crate::parser::parse(&src) {
+            Ok(prog) => match prog.items.as_slice() {
+                [item] if item.list.rest.is_empty() && !item.background => {
+                    match item.list.first.commands.as_slice() {
+                        [Command::Function(f)] => Some(f.clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            Err(e) => {
+                // bash's three-line report: the parse diagnostic, the offending
+                // text echoed back, then the summary — all tagged with the
+                // function's name and `line 0`, the environment having no lines.
+                let prefix = bfmt![self.name.as_slice(), b": ", name, b": line 0: "];
+                let mut msg = Str::new();
+                for (i, msg_line) in e.msg.split(|&b| b == b'\n').enumerate() {
+                    if i > 0 {
+                        msg.push(b'\n');
+                    }
+                    msg.push_str(&wrap_parse_message(msg_line, &prefix));
+                }
+                if bytes::contains(&e.msg, b"syntax error near ")
+                    && let Some(text) = nth_source_line(&src, e.line.unwrap_or(1))
+                {
+                    msg.push_str(&bfmt![b"\n", &prefix, b"`", text, b"'"]);
+                }
+                self.berrln(&msg);
+                self.berrln(&bfmt![
+                    self.name.as_slice(),
+                    b": error importing function definition for `",
+                    name,
+                    b"'"
+                ]);
+                None
+            }
+        };
+        let Some(f) = def else { return };
+        self.funcs.insert(name.to_vec(), f.body);
+        self.func_sources.insert(name.to_vec(), b"environment".to_vec());
+        self.func_lines.insert(name.to_vec(), 0);
+        if f.redirects.is_empty() {
+            self.func_redirects.remove(name);
+        } else {
+            self.func_redirects.insert(name.to_vec(), f.redirects);
+        }
+        self.exported_funcs.insert(name.to_vec());
+    }
+
     /// Import the real process environment into the shell variable namespace,
     /// marking every imported name exported (bash: environment variables *are*
     /// shell variables). Called once by the binary at startup. After this, the
@@ -4529,6 +4620,16 @@ impl Shell {
         // osh used to do) both listed names the script cannot expand and let a
         // later `unset`-like operation silently fail to reach them.
         for (k, v) in std::env::vars_os() {
+            // An exported function arrives under a name no shell word can
+            // spell — `BASH_FUNC_<name>%%` — and becomes a *function*, not a
+            // variable. Handled ahead of the identifier gate below, which would
+            // otherwise park it in `opaque_env` and pass the stale text on to
+            // grandchildren even after the function was redefined or unset.
+            let raw = bytes::os_to_bytes(&k);
+            if let Some(fname) = Self::env_function_name(&raw) {
+                self.import_env_function(fname, &bytes::os_to_bytes(&v));
+                continue;
+            }
             let Some(name) = Self::env_shell_name(&k) else {
                 self.opaque_env.push((k, v));
                 continue;
@@ -8486,6 +8587,7 @@ impl Shell {
             readonly: self.readonly.clone(),
             noassign: self.noassign.clone(),
             readonly_funcs: self.readonly_funcs.clone(),
+            exported_funcs: self.exported_funcs.clone(),
             shopt: self.shopt.clone(),
             // Completion specs are not propagated to subshells (bash parity).
             comp_specs: Vec::new(),
@@ -19095,9 +19197,18 @@ impl Shell {
             "declare" | "typeset" => {
                 // The leading flag cluster, as its raw bytes: every flag
                 // letter is ASCII, so a byte that is not one is simply not a
-                // flag and the `contains` tests below reject it.
-                let lead: Str =
-                    args.iter().take_while(|a| a.starts_with(b"-")).flatten().copied().collect();
+                // flag and the `contains` tests below reject it. Plus-signed
+                // words are scanned past but contribute no letters, since
+                // function mode is entered ONLY by a minus-signed `-f`/`-F` —
+                // that is what lets `declare +x -f f` reach the function path
+                // (to un-export it) while `declare +f` still does not.
+                let lead: Str = args
+                    .iter()
+                    .take_while(|a| a.starts_with(b"-") || a.starts_with(b"+"))
+                    .filter(|a| a.starts_with(b"-"))
+                    .flatten()
+                    .copied()
+                    .collect();
                 // `declare -ft name` / `+ft name` toggles a function's trace
                 // attribute (so it inherits DEBUG/RETURN traps); it is a
                 // mutation, not a listing, and accepts a `+` sign.
@@ -19711,6 +19822,23 @@ impl Shell {
             {
                 pc.env(k, bytes::bytes_to_os(&v));
             }
+        }
+        // Exported *functions* (`export -f`) travel as `BASH_FUNC_<name>%%`,
+        // holding the body in bash's `named_function_string` form. The name is
+        // not a shell identifier, which is the point: nothing in the child can
+        // name it, so it is invisible to `set`, `declare -p` and `compgen -v`
+        // there, and only the function importer reads it back.
+        for name in &self.exported_funcs {
+            let Some(body) = self.funcs.get(name.as_slice()) else { continue };
+            let redirects = self.func_redirects.get(name.as_slice());
+            let value = crate::unparse::unparse_function_exported(
+                body,
+                redirects.map_or(&[][..], Vec::as_slice),
+            );
+            pc.env(
+                bytes::bytes_to_os(&bfmt![b"BASH_FUNC_", name.as_slice(), b"%%"]),
+                bytes::bytes_to_os(&value),
+            );
         }
         for (k, v) in assigns {
             pc.env(k, bytes::bytes_to_os(v));
@@ -25008,13 +25136,14 @@ impl Shell {
         flag_limit: usize,
     ) -> i32 {
         // Parse leading flags: `-p` (list exported vars), `-n` (remove the export
-        // attribute), `-a`/`-A` (declare the operand an array, as `readonly`
-        // does), `--` ends option processing. (`-f`, exporting functions, is not
-        // modelled.) bash's usage synopsis still reads `[-fn]` and omits the
-        // array flags even though it accepts them, so the line below matches it
-        // as written rather than as documented.
+        // attribute), `-f` (operate on the *function* namespace), `-a`/`-A`
+        // (declare the operand an array, as `readonly` does), `--` ends option
+        // processing. bash's usage synopsis reads `[-fn]` and omits the array
+        // flags even though it accepts them, so the line below matches it as
+        // written rather than as documented.
         let mut print = false;
         let mut unexport = false;
+        let mut funcs = false;
         let mut assoc = false;
         let mut indexed = false;
         let mut i = 0;
@@ -25031,6 +25160,7 @@ impl Shell {
                     match c {
                         b'p' => print = true,
                         b'n' => unexport = true,
+                        b'f' => funcs = true,
                         b'A' => assoc = true,
                         b'a' => indexed = true,
                         _ => {
@@ -25053,6 +25183,9 @@ impl Shell {
             }
         }
         let operands = &args[i..];
+        if funcs {
+            return self.export_funcs(operands, unexport, out, redir);
+        }
         if operands.is_empty() {
             // `-n` with no names is a no-op; `-p` or a bare `export` lists.
             if unexport {
@@ -25142,6 +25275,81 @@ impl Shell {
                     self.declared.insert(k.clone());
                 }
                 self.mark_exported(k);
+            }
+        }
+        status
+    }
+
+    /// The attribute line a function carries in a `declare -F` / `export -pf`
+    /// listing: `-f` plus `r` (readonly), `t` (traced) and `x` (exported), in
+    /// that order — bash prints `declare -frtx f`.
+    fn func_attr_flags(&self, name: BStr<'_>) -> Str {
+        let mut flags = b"-f".to_vec();
+        if self.readonly_funcs.contains(name) {
+            flags.push(b'r');
+        }
+        if self.fn_trace_attr.contains(name) {
+            flags.push(b't');
+        }
+        if self.exported_funcs.contains(name) {
+            flags.push(b'x');
+        }
+        flags
+    }
+
+    /// `export -f NAME…` / `export -nf NAME…` / `export -f` — the function
+    /// namespace.
+    ///
+    /// With operands, each name must already be a defined function: bash reports
+    /// `export: NAME: not a function` and status 1 otherwise, and it does so for
+    /// `-n` too (the removal still validates the name). With no operands the
+    /// flag is a *listing* of the exported functions, in `export -pf` form —
+    /// body first, then the attribute line — and `-n` does not change that.
+    fn export_funcs(
+        &mut self,
+        operands: &[Str],
+        unexport: bool,
+        out: &mut Out,
+        redir: &RedirPlan,
+    ) -> i32 {
+        if operands.is_empty() {
+            let mut names: Vec<Str> = self.exported_funcs.iter().cloned().collect();
+            names.sort();
+            let mut listing = Str::new();
+            for name in &names {
+                let Some(body) = self.funcs.get(name.as_slice()) else { continue };
+                let redirects = self.func_redirects.get(name.as_slice());
+                listing.extend_from_slice(&crate::unparse::unparse_function(
+                    name,
+                    body,
+                    redirects.map_or(&[][..], Vec::as_slice),
+                ));
+                listing.extend_from_slice(&bfmt![
+                    b"declare ",
+                    &self.func_attr_flags(name),
+                    b" ",
+                    name.as_slice(),
+                    b"\n"
+                ]);
+            }
+            return self.write_bytes(out, redir, &listing);
+        }
+        let mut status = 0;
+        for a in operands {
+            if !self.funcs.contains_key(a.as_slice()) {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"export: ",
+                    a.as_slice(),
+                    b": not a function"
+                ]);
+                status = 1;
+                continue;
+            }
+            if unexport {
+                self.exported_funcs.remove(a.as_slice());
+            } else {
+                self.exported_funcs.insert(a.clone());
             }
         }
         status
@@ -25271,20 +25479,58 @@ impl Shell {
         out: &mut Out,
         redir: &RedirPlan,
     ) -> i32 {
-        // `declare -fr NAME…` / `declare -Fr NAME…`: mark each named function
-        // readonly. Unlike `readonly -f`, a nonexistent function fails *silently*
-        // (status 1, no diagnostic) — matching bash's `declare` semantics.
-        let readonly = args
-            .iter()
-            .take_while(|a| a.starts_with(b"-"))
-            .flat_map(|a| a.iter())
-            .any(|c| *c == b'r');
-        let names: Vec<&Str> = args.iter().skip_while(|a| a.starts_with(b"-")).collect();
-        if readonly && !names.is_empty() {
+        // The leading flag words, sign-aware. Only a *minus*-signed letter
+        // filters a listing or sets an attribute; `+x` is the one plus form with
+        // an effect (it removes the export attribute), since bash cannot un-make
+        // a readonly function and `+t` reaches [`Shell::func_trace_op`] instead.
+        let mut readonly = false;
+        let mut trace = false;
+        let mut export = false;
+        let mut unexport = false;
+        let mut nflags = 0;
+        for a in args {
+            if a.as_slice() == b"--" {
+                nflags += 1;
+                break;
+            }
+            let Some(flags) =
+                a.strip_prefix(b"-").or_else(|| a.strip_prefix(b"+")).filter(|f| !f.is_empty())
+            else {
+                break;
+            };
+            let enable = a.starts_with(b"-");
+            for c in flags {
+                match (c, enable) {
+                    (b'r', true) => readonly = true,
+                    (b't', true) => trace = true,
+                    (b'x', true) => export = true,
+                    (b'x', false) => unexport = true,
+                    _ => {}
+                }
+            }
+            nflags += 1;
+        }
+        let names: Vec<&Str> = args.get(nflags..).unwrap_or_default().iter().collect();
+        // `declare -fr NAME…` / `declare -fx NAME…` (and the `-F` spellings):
+        // apply the attribute to each named function. Unlike `readonly -f` and
+        // `export -f`, a nonexistent function fails *silently* — status 1 and no
+        // diagnostic — matching bash's `declare` semantics.
+        if (readonly || export || unexport) && !names.is_empty() {
             let mut status = 0;
             for name in &names {
                 if self.funcs.contains_key(name.as_slice()) {
-                    self.readonly_funcs.insert((*name).clone());
+                    if readonly {
+                        self.readonly_funcs.insert((*name).clone());
+                    }
+                    if export {
+                        self.exported_funcs.insert((*name).clone());
+                    }
+                    // "off" is applied last, so `declare -fx +x g` leaves the
+                    // function unexported whichever order the letters came in —
+                    // the same rule the variable path follows for `-x +x`.
+                    if unexport {
+                        self.exported_funcs.remove(name.as_slice());
+                    }
                 } else {
                     status = 1;
                 }
@@ -25292,39 +25538,28 @@ impl Shell {
             return status;
         }
         if names.is_empty() {
-            // `-r`/`-t` in a *nameless* listing are filters, not mutations, and
-            // they union exactly as the variable listing's attribute letters do
-            // (`declare -Frt` lists the readonly functions *or* the traced
+            // `-r`/`-t`/`-x` in a *nameless* listing are filters, not mutations,
+            // and they union exactly as the variable listing's attribute letters
+            // do (`declare -Frt` lists the readonly functions *or* the traced
             // ones). No filter letter keeps everything.
-            let trace = args
-                .iter()
-                .take_while(|a| a.starts_with(b"-"))
-                .flat_map(|a| a.iter())
-                .any(|c| *c == b't');
             let mut all: Vec<&Str> = self
                 .funcs
                 .keys()
                 .filter(|n| {
-                    (!readonly && !trace)
+                    (!readonly && !trace && !export)
                         || (readonly && self.readonly_funcs.contains(*n))
                         || (trace && self.fn_trace_attr.contains(*n))
+                        || (export && self.exported_funcs.contains(*n))
                 })
                 .collect();
             all.sort();
             let mut listing = Str::new();
             for name in all {
-                // The attribute line each function carries: `declare -f` plus
-                // `r` (readonly) and `t` (traced), in that order — bash prints
-                // `declare -frt f`. `-F` renders this *instead of* the body;
-                // plain `-f` prints the body and then this line, but only when
-                // there is an attribute to report.
-                let mut flags = b"-f".to_vec();
-                if self.readonly_funcs.contains(name) {
-                    flags.push(b'r');
-                }
-                if self.fn_trace_attr.contains(name) {
-                    flags.push(b't');
-                }
+                // The attribute line each function carries (see
+                // [`Shell::func_attr_flags`]). `-F` renders this *instead of*
+                // the body; plain `-f` prints the body and then this line, but
+                // only when there is an attribute to report.
+                let flags = self.func_attr_flags(name);
                 if name_only {
                     listing.extend_from_slice(&bfmt![b"declare ", &flags, b" ", name, b"\n"]);
                     continue;
@@ -28524,6 +28759,10 @@ impl Shell {
                 self.func_sources.remove(a.as_slice());
                 self.func_lines.remove(a.as_slice());
                 self.fn_trace_attr.remove(a.as_slice());
+                // The export attribute goes with the definition: measured, a
+                // redefinition after `unset -f` is *not* exported again, so a
+                // child of the redefining shell never sees it.
+                self.exported_funcs.remove(a.as_slice());
                 continue;
             }
             // `unset -n ref` removes the nameref binding itself. Those tables
@@ -57721,6 +57960,171 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             .map(|(_, v)| v.map(std::ffi::OsStr::to_os_string))
             .collect();
         assert_eq!(unders, vec![Some(OsString::from("./env"))]);
+    }
+
+    /// `export -f` marks a function, and the mark is what puts a
+    /// `BASH_FUNC_<name>%%` entry into a child's environment
+    /// (TD-OILS-EXPORT-F). The value is bash's own encoding, measured against
+    /// bash 5.2.37 via `printenv 'BASH_FUNC_f%%'`.
+    #[test]
+    fn export_f_puts_the_function_in_the_child_environment() {
+        let mut sh = Shell::new();
+        let mut out = Out::Capture(capture_sink());
+        sh.run_source_out(b"f() { echo hi; }\ng() { :; }\nexport -f f\n", &mut out, 0);
+
+        let mut pc = PCommand::new("true");
+        sh.apply_child_env(&mut pc, &[], None);
+        let at = |pc: &PCommand, want: &str| {
+            pc.get_envs()
+                .find(|(k, _)| *k == OsStr::new(want))
+                .and_then(|(_, v)| v.map(std::ffi::OsStr::to_os_string))
+        };
+        assert_eq!(
+            at(&pc, "BASH_FUNC_f%%"),
+            Some(OsString::from("() {  echo hi\n}")),
+            "exported function missing or misencoded",
+        );
+        // An *unexported* function stays in this shell: only the export
+        // attribute crosses the environment.
+        assert_eq!(at(&pc, "BASH_FUNC_g%%"), None);
+    }
+
+    /// `export -nf` and `unset -f` both drop the mark, so the entry stops
+    /// reaching children. For `unset -f` the attribute goes with the
+    /// definition: measured against bash, a *redefinition* afterwards is not
+    /// exported again.
+    #[test]
+    fn unexporting_a_function_stops_it_reaching_a_child() {
+        let has_f = |src: &str| {
+            let mut sh = Shell::new();
+            let mut out = Out::Capture(capture_sink());
+            sh.run_source_out(src.as_bytes(), &mut out, 0);
+            let mut pc = PCommand::new("true");
+            sh.apply_child_env(&mut pc, &[], None);
+            pc.get_envs().any(|(k, _)| k == OsStr::new("BASH_FUNC_f%%"))
+        };
+        assert!(has_f("f() { echo hi; }; export -f f"));
+        assert!(!has_f("f() { echo hi; }; export -f f; export -nf f"));
+        assert!(!has_f("f() { echo hi; }; export -f f; declare +x -f f"));
+        assert!(!has_f("f() { echo hi; }; export -f f; unset -f f; f() { echo hi; }"));
+    }
+
+    /// The `BASH_FUNC_<name>%%` shape is recognised on the way *in*, so a
+    /// function survives a chain of shells. The definition records `environment`
+    /// at line 0, which is what `declare -F` reports under `extdebug`.
+    #[test]
+    fn a_function_arriving_in_the_environment_is_bound_and_stays_exported() {
+        let mut sh = Shell::new();
+        sh.import_env_function(b"f", b"() {  echo hi\n}");
+        assert!(sh.funcs.contains_key(b"f".as_slice()), "function not bound");
+        assert_eq!(sh.func_sources.get(b"f".as_slice()).map(Vec::as_slice), Some(&b"environment"[..]));
+        assert_eq!(sh.func_lines.get(b"f".as_slice()).copied(), Some(0));
+        assert!(sh.exported_funcs.contains(b"f".as_slice()), "import dropped the export mark");
+
+        // Still exported means a *grandchild* gets it too, re-encoded from the
+        // parsed body rather than passed through as inherited text.
+        let mut pc = PCommand::new("true");
+        sh.apply_child_env(&mut pc, &[], None);
+        let got = pc
+            .get_envs()
+            .find(|(k, _)| *k == OsStr::new("BASH_FUNC_f%%"))
+            .and_then(|(_, v)| v.map(std::ffi::OsStr::to_os_string));
+        assert_eq!(got, Some(OsString::from("() {  echo hi\n}")));
+    }
+
+    /// The key shape: both fixtures, with at least one byte between them. The
+    /// name need not be an identifier — bash lets `f-1(){ …; }` be exported.
+    #[test]
+    fn env_function_name_needs_both_fixtures() {
+        assert_eq!(Shell::env_function_name(b"BASH_FUNC_f%%"), Some(&b"f"[..]));
+        assert_eq!(Shell::env_function_name(b"BASH_FUNC_f-1%%"), Some(&b"f-1"[..]));
+        for key in [
+            &b"BASH_FUNC_f"[..],     // no suffix
+            &b"f%%"[..],             // no prefix
+            &b"BASH_FUNC_%%"[..],    // empty name
+            &b"PATH"[..],
+            &b"BASH_FUNCX_f%%"[..],
+        ] {
+            assert_eq!(
+                Shell::env_function_name(key),
+                None,
+                "key: {}",
+                String::from_utf8_lossy(key)
+            );
+        }
+    }
+
+    /// A value that does not look like a function definition is skipped in
+    /// silence (bash does the same — it is an ordinary variable that happens to
+    /// be named like the encoding); only a value that *did* look like one and
+    /// then failed to parse earns the two-part diagnostic.
+    #[test]
+    fn a_malformed_environment_function_is_reported_not_bound() {
+        let mut sh = Shell::new();
+        sh.import_env_function(b"f", b"not a function at all");
+        assert!(!sh.funcs.contains_key(b"f".as_slice()));
+        assert!(!sh.exported_funcs.contains(b"f".as_slice()));
+
+        // Looks like a definition, does not parse: nothing is bound, and the
+        // shell carries on rather than failing to start. (The two-part
+        // diagnostic it prints goes to the real fd 2, which these in-process
+        // tests do not capture.)
+        let mut sh = Shell::new();
+        sh.import_env_function(b"g", b"() { if true; }");
+        assert!(!sh.funcs.contains_key(b"g".as_slice()));
+        assert!(!sh.exported_funcs.contains(b"g".as_slice()));
+
+        // A body with a *redirect* on the definition is a definition all the
+        // same, and round-trips with the redirect intact.
+        let mut sh = Shell::new();
+        sh.import_env_function(b"r", b"() {  echo z\n} > /dev/null");
+        assert!(sh.funcs.contains_key(b"r".as_slice()));
+        assert_eq!(sh.func_redirects.get(b"r".as_slice()).map(Vec::len), Some(1));
+    }
+
+    /// `declare -F` spells a function's attributes in bash's fixed letter
+    /// order — `f`, then `r`, `t`, `x` — whatever order they were set in.
+    #[test]
+    fn function_attribute_letters_are_ordered() {
+        // Set in the order x, t, r; listed in the order f, r, t, x.
+        let (o, s) = run("f() { :; }; export -f f; declare -ft f; readonly -f f; declare -F");
+        assert_eq!(s, 0);
+        assert_eq!(o, "declare -frtx f\n");
+        // `declare -F name` names the function and nothing else, attributes or
+        // not — the attribute line is the *listing* form only.
+        let (o, s) = run("f() { :; }; export -f f; declare -F f");
+        assert_eq!(s, 0);
+        assert_eq!(o, "f\n");
+    }
+
+    /// `declare -Fx` lists only the exported functions, and `export -f` with no
+    /// operands lists each definition followed by its attribute line.
+    #[test]
+    fn export_f_listings_filter_by_the_export_attribute() {
+        let (o, s) = run("a() { :; }; b() { :; }; export -f b; declare -Fx");
+        assert_eq!(s, 0);
+        assert_eq!(o, "declare -fx b\n");
+
+        let (o, s) = run("b() { echo hi; }; export -f b; export -f");
+        assert_eq!(s, 0);
+        assert_eq!(o, "b () \n{ \n    echo hi\n}\ndeclare -fx b\n");
+    }
+
+    /// `export -f` on something that is not a function fails per name and keeps
+    /// going, exactly as bash does — including for a `name=value` word, which
+    /// `-f` stops being an assignment.
+    #[test]
+    fn export_f_rejects_a_non_function() {
+        let (o, s) = run("f() { :; }; export -f nosuch f 2>&1; echo rc=$?; declare -Fx");
+        assert_eq!(s, 0);
+        assert_eq!(o, "osh: export: nosuch: not a function\nrc=1\ndeclare -fx f\n");
+
+        let (o, _) = run("export -f h=1 2>&1; echo rc=$?");
+        assert_eq!(o, "osh: export: h=1: not a function\nrc=1\n");
+
+        // `declare -fx` on a missing function is silent, but still fails.
+        let (o, _) = run("declare -fx nosuch 2>&1; echo rc=$?");
+        assert_eq!(o, "rc=1\n");
     }
 
     #[test]

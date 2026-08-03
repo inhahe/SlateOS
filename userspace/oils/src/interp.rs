@@ -14627,12 +14627,13 @@ impl Shell {
             return true;
         }
         if verbose {
-            self.berrln(&bfmt![
-                self.err_prefix(),
-                b"command: ",
-                target,
-                b": not found"
-            ]);
+            // `command` never pushes its own scoped stderr — it is a wrapper
+            // that re-dispatches — so this has to route through the command's
+            // plan explicitly, or `command -V nosuch 2>/dev/null` leaks the
+            // diagnostic to the shell's fd 2 and `$(command -V nosuch 2>&1)`
+            // captures nothing. See [`Shell::bemit_cmd_stderr`].
+            let msg = bfmt![self.err_prefix(), b"command: ", target, b": not found"];
+            self.bemit_cmd_stderr(out, redir, &msg);
         }
         false
     }
@@ -46144,6 +46145,27 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // a failure.
         assert_eq!(run("command -v; echo $?").0, "0\n");
         assert_eq!(run("command -V; echo $?").0, "0\n");
+    }
+
+    /// `command -V nosuch` is a diagnostic from the *command*, not the shell, so
+    /// it goes to the fd 2 this command redirected — `2>/dev/null` silences it
+    /// and `2>&1` inside a substitution captures it. `command` is a wrapper that
+    /// re-dispatches and so never installs a scoped stderr of its own, which is
+    /// why the message has to consult the plan explicitly.
+    #[test]
+    fn command_describe_miss_follows_the_commands_own_stderr() {
+        assert_eq!(run("x=$(command -V osh_no_such_xyz 2>&1); echo \"[$x] $?\"").0,
+            "[osh: command: osh_no_such_xyz: not found] 1\n");
+        assert_eq!(run("command -V osh_no_such_xyz 2>/dev/null; echo $?").0, "1\n");
+        // A closed fd 2 has nowhere to be told, and the status still stands.
+        assert_eq!(run("command -V osh_no_such_xyz 2>&-; echo $?").0, "1\n");
+        // Every operand is described, so a later one still reports.
+        assert_eq!(
+            run("x=$(command -V osh_a_xyz osh_b_xyz 2>&1); echo \"[$x]\"").0,
+            "[osh: command: osh_a_xyz: not found\nosh: command: osh_b_xyz: not found]\n"
+        );
+        // `-v` never reports a miss at all, redirected or not.
+        assert_eq!(run("x=$(command -v osh_no_such_xyz 2>&1); echo \"[$x] $?\"").0, "[] 1\n");
     }
 
     #[test]

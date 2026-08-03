@@ -32021,9 +32021,11 @@ impl Shell {
         // returns 1 (bash). More than one operand is "too many arguments" — and
         // that one is not a mere non-zero status but an *abort*, see below.
         //
-        // The out-of-range diagnostic below names the first argument *as
+        // Both out-of-range diagnostics below name the first argument *as
         // written*, before `--` is stripped, because that is the word bash
-        // reports: `shift -- 3` past the end says `shift: --: …`.
+        // reports: `shift -- 3` past the end says `shift: --: …`, and so does
+        // `shift -- -2`. (The "numeric argument required" one does not — see
+        // there.)
         let written = args.first().cloned();
         let args = strip_end_of_options(args);
         let n = match args.first() {
@@ -32064,10 +32066,18 @@ impl Shell {
                     return 1;
                 }
                 if v < 0 {
+                    // As-written, like the past-the-end message below and
+                    // unlike the "numeric argument required" one above: bash
+                    // raises this from `shift_builtin` itself, which still holds
+                    // the unadvanced word list, whereas the numeric complaint
+                    // comes from inside `get_numeric_arg` after it has stepped
+                    // over the `--`. So `shift -- -2` says `shift: --: …` while
+                    // `shift -- zz` says `shift: zz: …`.
+                    let named = written.as_deref().unwrap_or(s.as_slice());
                     self.berrln(&bfmt![
                         self.err_prefix(),
                         b"shift: ",
-                        s.as_slice(),
+                        named,
                         b": shift count out of range"
                     ]);
                     return 1;
@@ -48304,6 +48314,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Posix mode reaches the message only *through* the option, so opting
         // back out inside the mode is silent again.
         assert_eq!(run("set -o posix; shopt -u shift_verbose; shift 5 2>&1; echo rc=$?").0, "rc=1\n");
+    }
+
+    #[test]
+    fn shifts_out_of_range_message_names_the_word_as_written() {
+        // bash raises the out-of-range complaint from `shift_builtin`, which
+        // still holds the word list `get_numeric_arg` has not stepped over yet,
+        // so it names `--` rather than the count behind it. The "numeric
+        // argument required" complaint comes from *inside* `get_numeric_arg`,
+        // past the `--`, and names the count.
+        assert_eq!(run("shift -- -2 2>&1").0, "osh: shift: --: shift count out of range\n");
+        assert_eq!(run("shift -2 2>&1").0, "osh: shift: -2: shift count out of range\n");
+        assert_eq!(run("shift -- zz 2>&1").0, "osh: shift: zz: numeric argument required\n");
+        // The same as-written rule on the past-the-end path, which only speaks
+        // at all with `shift_verbose` on.
+        assert_eq!(
+            run("shopt -s shift_verbose; set -- a; shift -- 5 2>&1").0,
+            "osh: shift: --: shift count out of range\n"
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@
 pub mod arith;
 pub mod assoc;
 pub mod ast;
+pub mod bind_keys;
 pub mod bind_tables;
 pub mod brace;
 pub mod bytes;

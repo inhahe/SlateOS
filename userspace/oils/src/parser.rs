@@ -40,7 +40,7 @@ use crate::ast::{
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
-    LexOpts, Op, ReaderWarning, Seg, Tok, Tokenized, expand_aliases, expand_aliases_tracked,
+    ParseOpts, Op, ReaderWarning, Seg, Tok, Tokenized, expand_aliases, expand_aliases_tracked,
     tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
@@ -189,7 +189,7 @@ impl From<crate::lexer::LexError> for ParseError {
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error.
 pub fn parse(src: BStr<'_>) -> Result<Program, ParseError> {
-    parse_opts(src, LexOpts::default())
+    parse_opts(src, ParseOpts::default())
 }
 
 /// Parse shell source under explicit lexing options.
@@ -203,7 +203,7 @@ pub fn parse(src: BStr<'_>) -> Result<Program, ParseError> {
 ///
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error.
-pub fn parse_opts(src: BStr<'_>, opts: LexOpts) -> Result<Program, ParseError> {
+pub fn parse_opts(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError> {
     // The reader's NUL removal happens ahead of the lexer here too, so that the
     // REPL's "is this line complete yet?" probes judge the same text the run
     // will parse (see [`crate::lexer::strip_nuls`]).
@@ -231,7 +231,7 @@ pub fn parse_opts(src: BStr<'_>, opts: LexOpts) -> Result<Program, ParseError> {
 pub fn parse_procsub_body(
     src: BStr<'_>,
     open_line: u32,
-    opts: LexOpts,
+    opts: ParseOpts,
 ) -> Result<Program, ParseError> {
     let (mut toks, mut lines) = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
@@ -248,7 +248,7 @@ pub fn parse_procsub_body(
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error (including an
 /// unterminated here-document).
-pub fn parse_strict_heredoc(src: BStr<'_>, opts: LexOpts) -> Result<Program, ParseError> {
+pub fn parse_strict_heredoc(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError> {
     let (toks, lines) =
         crate::lexer::tokenize_spanned_strict(src, opts).map_err(ParseError::from)?;
     parse_tokens(toks, lines, opts)
@@ -261,7 +261,7 @@ pub fn parse_strict_heredoc(src: BStr<'_>, opts: LexOpts) -> Result<Program, Par
 pub fn parse_with_aliases(
     src: BStr<'_>,
     aliases: &BTreeMap<Str, Str>,
-    opts: LexOpts,
+    opts: ParseOpts,
 ) -> Result<Program, ParseError> {
     let (toks, lines) = tokenize_spanned(src, opts).map_err(ParseError::from)?;
     let (toks, lines) = if aliases.is_empty() {
@@ -368,7 +368,7 @@ pub struct RawLine {
 }
 
 pub struct IncrementalParser {
-    /// The source, kept for re-lexing the tail when [`LexOpts`] change. Held as
+    /// The source, kept for re-lexing the tail when [`ParseOpts`] change. Held as
     /// characters because the offsets recorded by the lexer are char indices —
     /// [`Ch`], so a byte that is not part of any character still counts as one
     /// position and survives a round trip.
@@ -377,7 +377,7 @@ pub struct IncrementalParser {
     /// still names the lines of the input it came from.
     line_map: LineMap,
     /// The options `orig` was lexed under.
-    opts: LexOpts,
+    opts: ParseOpts,
     /// The tokenized source exactly as lexed — never alias-expanded, so it can
     /// be re-expanded from any point under new alias state.
     orig: Vec<Tok>,
@@ -463,7 +463,7 @@ impl IncrementalParser {
     /// lines already consumed for a REPL reading stdin one command at a time,
     /// and [`LineMap::CmdSub`] for a `$( … )` body re-read at expansion time.
     #[must_use]
-    pub fn new(src: BStr<'_>, line_map: impl Into<LineMap>, opts: LexOpts) -> Self {
+    pub fn new(src: BStr<'_>, line_map: impl Into<LineMap>, opts: ParseOpts) -> Self {
         // What the reader hands the lexer, not what the caller read: bash drops
         // a NUL in `shell_getc`, before anything downstream can see it. Done
         // here rather than at each of this parser's callers because the byte
@@ -522,7 +522,7 @@ impl IncrementalParser {
     /// [`LineMap::shifted`]. Alias-spliced tokens
     /// sitting in `work` are untouched and are carried over by the following
     /// [`Self::rebuild`], which is why `last_aliases` is cleared to force one.
-    fn relex(&mut self, opts: LexOpts) {
+    fn relex(&mut self, opts: ParseOpts) {
         let off = self
             .orig_offsets
             .get(self.pos)
@@ -537,7 +537,7 @@ impl IncrementalParser {
     /// [`Self::hist_cursor`] rather than from that token, because the text it
     /// rewrote can lie *before* the token (a `!`-reference on a line the lexer
     /// produced no token for, such as one that is entirely a comment).
-    fn relex_from(&mut self, off: usize, opts: LexOpts) {
+    fn relex_from(&mut self, off: usize, opts: ParseOpts) {
         let off = off.min(self.src.len());
         let head = self.src.get(..off).unwrap_or(&[]);
         let newlines =
@@ -693,7 +693,7 @@ impl IncrementalParser {
     /// `Some(text)` splices `text` in and re-lexes the unparsed remainder, so the
     /// parser goes on to see the expanded line and nothing else — which is also
     /// what puts the *expanded* form into the command history, as bash does.
-    pub fn commit_raw_line(&mut self, expanded: Option<BStr<'_>>, opts: LexOpts) {
+    pub fn commit_raw_line(&mut self, expanded: Option<BStr<'_>>, opts: ParseOpts) {
         let start = self.expand_frontier();
         if start >= self.src.len() {
             return;
@@ -727,7 +727,7 @@ impl IncrementalParser {
     /// every later diagnostic — and `$LINENO` — is one lower. Cutting the line
     /// out of `src` reproduces that exactly, since line numbers here are likewise
     /// counted from the newlines in `src`.
-    pub fn drop_raw_line(&mut self, opts: LexOpts) {
+    pub fn drop_raw_line(&mut self, opts: ParseOpts) {
         let start = self.expand_frontier();
         if start >= self.src.len() {
             return;
@@ -752,7 +752,7 @@ impl IncrementalParser {
     pub fn next_unit(
         &mut self,
         aliases: Option<&BTreeMap<Str, Str>>,
-        opts: LexOpts,
+        opts: ParseOpts,
     ) -> Option<Result<Program, ParseError>> {
         // A lexing option must be applied before aliases, since re-lexing
         // replaces the very tokens the alias pass works from.
@@ -1130,7 +1130,7 @@ impl IncrementalParser {
 pub fn parse_cmdsub_body(
     src: BStr<'_>,
     close_line: u32,
-    opts: LexOpts,
+    opts: ParseOpts,
 ) -> Result<(Program, LineMap), ParseError> {
     // The body is lexed with the substitution's own `)` standing where the
     // implicit trailing newline would otherwise go, because that is the token
@@ -1246,7 +1246,7 @@ fn map_segs(segs: &mut [Seg], map: &LineMap) {
     }
 }
 
-fn parse_tokens(toks: Vec<Tok>, lines: Vec<u32>, opts: LexOpts) -> Result<Program, ParseError> {
+fn parse_tokens(toks: Vec<Tok>, lines: Vec<u32>, opts: ParseOpts) -> Result<Program, ParseError> {
     parse_tokens_ending(toks, lines, opts, false)
 }
 
@@ -1258,7 +1258,7 @@ fn parse_tokens(toks: Vec<Tok>, lines: Vec<u32>, opts: LexOpts) -> Result<Progra
 fn parse_tokens_ending(
     toks: Vec<Tok>,
     lines: Vec<u32>,
-    opts: LexOpts,
+    opts: ParseOpts,
     ends_at_paren: bool,
 ) -> Result<Program, ParseError> {
     let mut p = Parser {
@@ -1304,7 +1304,7 @@ struct Parser {
     pos: usize,
     /// The options the tokens were lexed under, carried so that a nested body
     /// re-lexed during parsing (`$( … )`, `<( … )`) is read the same way.
-    opts: LexOpts,
+    opts: ParseOpts,
 }
 
 /// Reserved words that terminate a command list or introduce a compound.
@@ -2890,7 +2890,7 @@ impl Parser {
 /// literal that starts with `[` and contains `]=` (so the subscript is literal
 /// text — an expanded key like `[$k]=v` inside a literal falls back to
 /// positional; use element assignment `m[$k]=v` for that).
-fn parse_array_elem(segs: &[Seg], opts: LexOpts) -> Result<ArrayElem, ParseError> {
+fn parse_array_elem(segs: &[Seg], opts: ParseOpts) -> Result<ArrayElem, ParseError> {
     if let Some(Seg::Lit(first)) = segs.first()
         && first.first() == Some(&b'[')
         && let Some(close_eq) = bytes::find(first, b"]=")
@@ -3017,7 +3017,7 @@ fn cond_error_near(tok: BStr<'_>) -> Str {
 }
 
 /// Lower lexer segments into an [`ast::Word`] (stateless).
-fn word_from_segs(segs: &[Seg], opts: LexOpts) -> Result<Word, ParseError> {
+fn word_from_segs(segs: &[Seg], opts: ParseOpts) -> Result<Word, ParseError> {
     let mut parts = Vec::with_capacity(segs.len());
     for s in segs {
         parts.push(seg_to_part(s, opts)?);
@@ -3025,7 +3025,7 @@ fn word_from_segs(segs: &[Seg], opts: LexOpts) -> Result<Word, ParseError> {
     Ok(Word { parts })
 }
 
-fn seg_to_part(seg: &Seg, opts: LexOpts) -> Result<WordPart, ParseError> {
+fn seg_to_part(seg: &Seg, opts: ParseOpts) -> Result<WordPart, ParseError> {
     Ok(match seg {
         Seg::Lit(s) => WordPart::Literal(s.clone()),
         Seg::Sq(s, escaped) => WordPart::SingleQuoted {
@@ -3151,7 +3151,7 @@ enum NameSubscript {
     Deferred,
 }
 
-fn split_name_subscript(chs: &[Ch], opts: LexOpts) -> Result<NameSubscript, ParseError> {
+fn split_name_subscript(chs: &[Ch], opts: ParseOpts) -> Result<NameSubscript, ParseError> {
     if chs.is_empty() {
         return Err(ParseError::new("empty '${}' expansion"));
     }
@@ -3210,7 +3210,7 @@ fn split_name_subscript(chs: &[Ch], opts: LexOpts) -> Result<NameSubscript, Pars
 /// arithmetic words. Splits on the *first* unescaped `:` only.
 fn parse_slice_bounds(
     rest: &[Ch],
-    opts: LexOpts,
+    opts: ParseOpts,
 ) -> Result<(Box<Word>, Option<Box<Word>>), ParseError> {
     let (off, len) = match rest.iter().position(|&c| syn(c) == ':') {
         Some(idx) => (
@@ -3242,7 +3242,7 @@ fn is_length_target(name: &str) -> bool {
         || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
 }
 
-pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: LexOpts) -> Result<WordPart, ParseError> {
+pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: ParseOpts) -> Result<WordPart, ParseError> {
     if let Some(after_hash) = raw.strip_prefix(b"#") {
         if after_hash.is_empty() {
             // `${#}` is the positional-parameter count — treat as `$#`.
@@ -3641,7 +3641,7 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: LexOpts) -> Result<WordPar
 #[allow(clippy::type_complexity)]
 fn parse_replace_pieces(
     body: &[Ch],
-    opts: LexOpts,
+    opts: ParseOpts,
 ) -> Result<(bool, ReplaceAnchor, Box<Word>, Box<Word>), ParseError> {
     let mut i = 0;
     let mut all = false;
@@ -3695,7 +3695,7 @@ fn parse_param_replace(
     name: String,
     index: Option<Box<Word>>,
     body: &[Ch],
-    opts: LexOpts,
+    opts: ParseOpts,
 ) -> Result<WordPart, ParseError> {
     let (all, anchor, pattern, replacement) = parse_replace_pieces(body, opts)?;
     Ok(WordPart::ParamReplace {
@@ -3711,7 +3711,7 @@ fn parse_param_replace(
 /// Parse the operator portion of a bulk array expansion (`${a[@]OP}`) into a
 /// [`BulkOp`], or `None` when `rest` is not a recognized element-wise operator
 /// (e.g. the `:-`/`:=` default operators, which do not apply to `[@]`).
-fn parse_bulk_op(rest: &[Ch], opts: LexOpts) -> Result<Option<BulkOp>, ParseError> {
+fn parse_bulk_op(rest: &[Ch], opts: ParseOpts) -> Result<Option<BulkOp>, ParseError> {
     if rest.is_empty() {
         return Ok(None);
     }
@@ -3779,7 +3779,7 @@ fn is_valid_transform_op(op: char) -> bool {
 /// Parse `s` as a single word preserving literal whitespace (no word-splitting
 /// or operator tokenization) — for the pattern and replacement of
 /// `${var/pat/repl}`, where bash applies only expansion and quote removal.
-pub(crate) fn word_verbatim_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word, ParseError> {
+pub(crate) fn word_verbatim_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
@@ -3798,7 +3798,7 @@ pub(crate) fn word_verbatim_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Wo
 ///
 /// # Errors
 /// Returns [`ParseError`] on an unterminated substitution inside `s`.
-pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word, ParseError> {
+pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
@@ -3814,7 +3814,7 @@ pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word
 /// `${var/pat/repl}`: a literal `\&`/`\\` is preserved (not consumed at lex
 /// time) so the runtime `&`-substitution can distinguish an escaped ampersand
 /// from an active one. See [`crate::lexer::lex_replacement_verbatim`].
-fn word_replacement_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word, ParseError> {
+fn word_replacement_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
@@ -3826,7 +3826,7 @@ fn word_replacement_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word, Pars
     Ok(Word { parts })
 }
 
-fn word_from_source(s: BStr<'_>, opts: LexOpts) -> Result<Word, ParseError> {
+fn word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
@@ -4096,8 +4096,8 @@ mod tests {
 
         // A line that is nothing but a NUL is a blank line, so the units either
         // side of it are still two commands on lines 1 and 3.
-        let mut ip = IncrementalParser::new(b"echo one\n\0\necho two\n", 0, LexOpts::default());
-        let opts = LexOpts::default();
+        let mut ip = IncrementalParser::new(b"echo one\n\0\necho two\n", 0, ParseOpts::default());
+        let opts = ParseOpts::default();
         let mut lines = Vec::new();
         while let Some(u) = ip.next_unit(None, opts) {
             lines.push(u.expect("parses").items[0].line);
@@ -4810,7 +4810,7 @@ mod tests {
     /// time: as an input of its own, numbered from `close_line - 1`, one unit
     /// at a time.
     fn backtick_unit(src: &str, close_line: u32) -> Result<Program, ParseError> {
-        let opts = LexOpts::default();
+        let opts = ParseOpts::default();
         IncrementalParser::new(src.as_bytes(), LineMap::Offset(close_line.saturating_sub(1)), opts)
             .next_unit(None, opts)
             .unwrap_or_else(|| Ok(Program { items: Vec::new() }))

@@ -4781,15 +4781,15 @@ impl Shell {
         Ok(())
     }
 
-    /// The shell options that change how source text is *lexed*, as of now.
+    /// The shell options that change how source text is *read*, as of now.
     ///
     /// bash decides these while reading, not while running, so the value must be
     /// sampled immediately before each parse. `shopt -s extglob` on one line
     /// therefore governs the next line, never its own — which is exactly what
     /// [`crate::parser::IncrementalParser::next_unit`] reproduces by re-lexing
     /// the unread tail when this changes.
-    pub(crate) fn lex_opts(&self) -> crate::lexer::LexOpts {
-        crate::lexer::LexOpts {
+    pub(crate) fn parse_opts(&self) -> crate::lexer::ParseOpts {
+        crate::lexer::ParseOpts {
             extglob: self.shopt.get("extglob").copied().unwrap_or(false),
         }
     }
@@ -5072,7 +5072,7 @@ impl Shell {
             quoted.push(b);
         }
         quoted.push(b'"');
-        let Ok(word) = crate::parser::word_verbatim_from_source(&quoted, self.lex_opts()) else {
+        let Ok(word) = crate::parser::word_verbatim_from_source(&quoted, self.parse_opts()) else {
             return Ok(false);
         };
         let path = self.expand_to_string(&word);
@@ -5476,7 +5476,7 @@ impl Shell {
         // quotes/substitutions and unfinished compound commands / trailing
         // operators (all surfaced as bash's "unexpected end of file" / "unexpected
         // EOF while looking for …" diagnostics).
-        let opts = self.lex_opts();
+        let opts = self.parse_opts();
         let parsed = if self.aliases_enabled() {
             parse_with_aliases(src, &self.aliases, opts)
         } else {
@@ -5499,7 +5499,7 @@ impl Shell {
         if src.last() != Some(&b'\n') {
             strict_src.push(b'\n');
         }
-        matches!(crate::parser::parse_strict_heredoc(&strict_src, self.lex_opts()), Err(e) if e.is_incomplete())
+        matches!(crate::parser::parse_strict_heredoc(&strict_src, self.parse_opts()), Err(e) if e.is_incomplete())
     }
 
     /// [`Shell::run_source`] with an explicit stdout sink, so a caller that
@@ -5612,7 +5612,7 @@ impl Shell {
         // order is observable: a `shopt -s expand_aliases` or `alias foo=…` run
         // by unit N must affect how unit N+1 parses, and commands before a
         // syntax error must still have run. See [`IncrementalParser`].
-        let mut ip = IncrementalParser::new(src, map.clone(), self.lex_opts());
+        let mut ip = IncrementalParser::new(src, map.clone(), self.parse_opts());
         loop {
             // Expand command-word aliases only when `expand_aliases` is in
             // effect; otherwise the raw tokens are parsed so a non-interactive
@@ -5620,7 +5620,7 @@ impl Shell {
             // unit so a mid-script change is picked up.
             // Same for the lexing options: `shopt -s extglob` run by one unit
             // changes how the *next* one is read, so re-sample it here.
-            let opts = self.lex_opts();
+            let opts = self.parse_opts();
             // `!`-style history expansion happens as each *physical line* is
             // read, before the lexer sees it — so it runs here, ahead of the
             // unit, and only for the top-level reader (`record`), which is the
@@ -5740,7 +5740,7 @@ impl Shell {
     /// not run one through history expansion). That falls out of stopping at the
     /// line introducing it, which is already a complete command: the parser then
     /// swallows the body whole and the frontier resumes past it.
-    fn expand_history_lines(&mut self, ip: &mut IncrementalParser, opts: crate::lexer::LexOpts) {
+    fn expand_history_lines(&mut self, ip: &mut IncrementalParser, opts: crate::lexer::ParseOpts) {
         let mut accum = Str::new();
         loop {
             let Some(raw) = ip.peek_raw_line() else { return };
@@ -5839,7 +5839,7 @@ impl Shell {
     /// separately, of the lexer rather than of the text, so the two agree on
     /// which backslashes are continuations at all.
     fn needs_more_lines(&self, src: BStr<'_>) -> bool {
-        let opts = self.lex_opts();
+        let opts = self.parse_opts();
         if crate::lexer::ends_in_continuation(src, opts) {
             return true;
         }
@@ -12183,7 +12183,7 @@ impl Shell {
         // A substitution that cannot even be lexed expands to nothing in bash
         // (it reports a syntax error to stderr; we take the empty string, which
         // is what the failed expansion contributes to the prompt either way).
-        let Ok(word) = crate::parser::dquote_word_from_source(&decoded, self.lex_opts()) else {
+        let Ok(word) = crate::parser::dquote_word_from_source(&decoded, self.parse_opts()) else {
             return decoded;
         };
         let saved = std::mem::replace(&mut self.xtrace, false);
@@ -19130,7 +19130,7 @@ impl Shell {
             return false;
         };
         let Ok(word) =
-            crate::parser::word_verbatim_from_source(sub_src.as_bytes(), self.lex_opts())
+            crate::parser::word_verbatim_from_source(sub_src.as_bytes(), self.parse_opts())
         else {
             return false;
         };
@@ -19712,7 +19712,7 @@ impl Shell {
     /// [`Shell::comsub_read_file`] accepts has no command word for an alias to
     /// replace, so expansion cannot change the answer.
     fn comsub_text_read_file(&mut self, src: BStr<'_>, map: &LineMap) -> Option<Str> {
-        let opts = self.lex_opts();
+        let opts = self.parse_opts();
         let mut ip = IncrementalParser::new(src, map.clone(), opts);
         let prog = ip.next_unit(None, opts)?.ok()?;
         if !ip.exhausted() {
@@ -20266,7 +20266,7 @@ impl Shell {
                     if i < chars.len() {
                         i += 1; // consume the closing '}'
                     }
-                    let val = match crate::parser::parse_braced_param(&inner, self.lex_opts()) {
+                    let val = match crate::parser::parse_braced_param(&inner, self.parse_opts()) {
                         Ok(part) => {
                             let word = Word { parts: vec![part] };
                             self.expand_to_string(&word)
@@ -31348,7 +31348,7 @@ impl Shell {
         // text so that `unset 'm[$k]'` and `unset 'a[$(f)]'` behave like the
         // same subscript written in an assignment. An unbalanced quote makes it
         // unparseable; bash silently matches nothing in that case.
-        let Ok(word) = crate::parser::word_verbatim_from_source(sub_src, self.lex_opts()) else {
+        let Ok(word) = crate::parser::word_verbatim_from_source(sub_src, self.parse_opts()) else {
             return true;
         };
         if is_assoc {
@@ -42946,10 +42946,10 @@ mod tests {
         // quote on a later line does not suppress the lines before it. The
         // incremental parser must therefore hand back every complete unit first
         // and only then report the lexer error.
-        let mut ip = crate::parser::IncrementalParser::new("echo one\necho two\nv='abc\n".as_bytes(), 0, crate::lexer::LexOpts::default());
+        let mut ip = crate::parser::IncrementalParser::new("echo one\necho two\nv='abc\n".as_bytes(), 0, crate::lexer::ParseOpts::default());
         let mut units = 0;
         loop {
-            match ip.next_unit(None, crate::lexer::LexOpts::default()) {
+            match ip.next_unit(None, crate::lexer::ParseOpts::default()) {
                 Some(Ok(_)) => units += 1,
                 Some(Err(e)) => {
                     assert_eq!(units, 2, "both complete lines are handed out first");
@@ -42961,7 +42961,7 @@ mod tests {
             }
         }
         // The error also ends the iteration.
-        assert!(ip.next_unit(None, crate::lexer::LexOpts::default()).is_none());
+        assert!(ip.next_unit(None, crate::lexer::ParseOpts::default()).is_none());
     }
 
     /// An unterminated-here-document warning comes from bash's *reader*, so its
@@ -42971,7 +42971,7 @@ mod tests {
     /// bash never reads that far.
     #[test]
     fn heredoc_eof_warning_is_released_with_its_own_unit() {
-        let opts = crate::lexer::LexOpts::default();
+        let opts = crate::lexer::ParseOpts::default();
         let unit = |ip: &mut crate::parser::IncrementalParser| {
             let u = ip.next_unit(None, opts);
             let warned: Vec<String> = ip
@@ -43805,7 +43805,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = new_shell();
         sh.run_source(setup.as_bytes());
         let buf = capture_sink();
-        let prog = parse_with_aliases(src.as_bytes(), &sh.aliases, sh.lex_opts()).expect("parse");
+        let prog = parse_with_aliases(src.as_bytes(), &sh.aliases, sh.parse_opts()).expect("parse");
         {
             let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -43860,7 +43860,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let buf = capture_sink();
         {
             let mut out = Out::Capture(buf.clone());
-            sh.exec_program(&parse_with_aliases("g".as_bytes(), &sh.aliases, sh.lex_opts()).expect("parse"), &mut out, &StdinSrc::Inherit);
+            sh.exec_program(&parse_with_aliases("g".as_bytes(), &sh.aliases, sh.parse_opts()).expect("parse"), &mut out, &StdinSrc::Inherit);
         }
         // `parse_with_aliases` applies the table unconditionally — it is the
         // *caller* (`run_source`) that consults the gate — so the body did run.

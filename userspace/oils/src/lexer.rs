@@ -290,14 +290,15 @@ fn arith_cmd_position(prev: Option<&Tok>) -> bool {
     }
 }
 
-/// Shell options that change how source text is *lexed*, so they must be known
-/// before a unit is tokenized rather than when it runs.
+/// Shell options that change how source text is *read* — whether while lexing
+/// it or while parsing it — so they must be known before a unit is tokenized
+/// rather than when it runs.
 ///
 /// bash reads, parses and executes one unit at a time, so a `shopt` run by unit
-/// N is in force for the lexing of unit N+1 — and only from there. The default
+/// N is in force for the reading of unit N+1 — and only from there. The default
 /// is bash's own for a non-interactive shell.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LexOpts {
+pub struct ParseOpts {
     /// `shopt -s extglob`: read `?(`, `*(`, `+(`, `@(` and `!(` as the opener of
     /// an extended-pattern group, swallowing the balanced `( … )` into the word.
     /// With it off those are ordinary characters and the `(` is a
@@ -332,7 +333,7 @@ struct Lexer {
     /// word is read in regex mode.
     regex_next: bool,
     /// Options that change lexing (currently just `extglob`).
-    opts: LexOpts,
+    opts: ParseOpts,
     /// Set immediately after emitting a `==`, `!=` or `=` word inside `[[ … ]]`;
     /// the next word is that operator's *pattern* operand. bash enables extglob
     /// for exactly that word regardless of the `extglob` option, so
@@ -714,7 +715,7 @@ impl CaseScan {
 }
 
 impl Lexer {
-    fn new(src: BStr<'_>, opts: LexOpts) -> Self {
+    fn new(src: BStr<'_>, opts: ParseOpts) -> Self {
         Self {
             chars: bytes::chars(src).collect(),
             pos: 0,
@@ -736,14 +737,14 @@ impl Lexer {
 
     /// As [`Lexer::new`], but an unterminated here-document is an error rather
     /// than leniently accepted. See [`tokenize_spanned_strict`].
-    fn strict_heredoc(src: BStr<'_>, opts: LexOpts) -> Self {
+    fn strict_heredoc(src: BStr<'_>, opts: ParseOpts) -> Self {
         Self { strict_heredoc_eof: true, ..Self::new(src, opts) }
     }
 
     /// As [`Lexer::new`], but the stream is closed with the `)` that ends the
     /// enclosing substitution rather than with an implicit newline. See
     /// [`tokenize_paren_body`].
-    fn paren_body(src: BStr<'_>, opts: LexOpts) -> Self {
+    fn paren_body(src: BStr<'_>, opts: ParseOpts) -> Self {
         Self { paren_body: true, ..Self::new(src, opts) }
     }
 }
@@ -774,7 +775,7 @@ pub fn strip_nuls(src: BStr<'_>) -> std::borrow::Cow<'_, [u8]> {
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize(src: BStr<'_>, opts: LexOpts) -> Result<Vec<Tok>, LexError> {
+pub fn tokenize(src: BStr<'_>, opts: ParseOpts) -> Result<Vec<Tok>, LexError> {
     tokenize_spanned(src, opts).map(|(toks, _lines)| toks)
 }
 
@@ -786,7 +787,7 @@ pub fn tokenize(src: BStr<'_>, opts: LexOpts) -> Result<Vec<Tok>, LexError> {
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize_spanned(src: BStr<'_>, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+pub fn tokenize_spanned(src: BStr<'_>, opts: ParseOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
     let mut lx = Lexer::new(src, opts);
     lx.run()
 }
@@ -810,7 +811,7 @@ pub fn tokenize_spanned(src: BStr<'_>, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize_paren_body(src: BStr<'_>, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+pub fn tokenize_paren_body(src: BStr<'_>, opts: ParseOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
     let mut lx = Lexer::paren_body(src, opts);
     lx.run()
 }
@@ -863,7 +864,7 @@ pub struct Tokenized {
 /// them. [`crate::parser::IncrementalParser`] uses this and surfaces the error
 /// once the good prefix is exhausted.
 #[must_use]
-pub fn tokenize_deferred(src: BStr<'_>, opts: LexOpts) -> Tokenized {
+pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
     let mut lx = Lexer::new(src, opts);
     let mut toks = Vec::new();
     let mut lines = Vec::new();
@@ -936,7 +937,7 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: LexOpts) -> Tokenized {
 /// reporting only the innermost unclosed delimiter reproduces both, since the
 /// backtick scan never descends into the quote to begin with.
 #[must_use]
-pub fn open_quote(src: BStr<'_>, opts: LexOpts) -> Option<char> {
+pub fn open_quote(src: BStr<'_>, opts: ParseOpts) -> Option<char> {
     let (err, _line) = tokenize_deferred(src, opts).err?;
     match err.looking_for {
         Some(q @ ('\'' | '"')) => Some(q),
@@ -962,7 +963,7 @@ pub fn open_quote(src: BStr<'_>, opts: LexOpts) -> Option<char> {
 /// `conts` records the offset of every such backslash — rather than
 /// re-deriving the rule and risking the two drifting apart.
 #[must_use]
-pub fn ends_in_continuation(src: BStr<'_>, opts: LexOpts) -> bool {
+pub fn ends_in_continuation(src: BStr<'_>, opts: ParseOpts) -> bool {
     let chars: Vec<Ch> = bytes::chars(src).collect();
     // The `\` must be the last character before the final newline.
     let Some(nl) = chars.len().checked_sub(1) else {
@@ -994,7 +995,7 @@ pub fn ends_in_continuation(src: BStr<'_>, opts: LexOpts) -> bool {
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote, substitution, or here-document.
-pub fn tokenize_spanned_strict(src: BStr<'_>, opts: LexOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+pub fn tokenize_spanned_strict(src: BStr<'_>, opts: ParseOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
     let mut lx = Lexer::strict_heredoc(src, opts);
     lx.run()
 }
@@ -1009,7 +1010,7 @@ pub fn tokenize_spanned_strict(src: BStr<'_>, opts: LexOpts) -> Result<(Vec<Tok>
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
 pub fn lex_word_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
-    let mut lx = Lexer::new(src, LexOpts::default());
+    let mut lx = Lexer::new(src, ParseOpts::default());
     lx.read_word_verbatim(false)
 }
 
@@ -1022,7 +1023,7 @@ pub fn lex_word_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
 /// # Errors
 /// Returns [`LexError`] on an unterminated substitution.
 pub fn lex_dquote_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
-    let mut lx = Lexer::new(src, LexOpts::default());
+    let mut lx = Lexer::new(src, ParseOpts::default());
     lx.read_double_quote_until(false)
 }
 
@@ -1036,7 +1037,7 @@ pub fn lex_dquote_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
 pub fn lex_replacement_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
-    let mut lx = Lexer::new(src, LexOpts::default());
+    let mut lx = Lexer::new(src, ParseOpts::default());
     lx.read_word_verbatim(true)
 }
 
@@ -1083,7 +1084,7 @@ pub fn expand_aliases(
     toks: &[Tok],
     lines: &[u32],
     aliases: &std::collections::BTreeMap<Str, Str>,
-    opts: LexOpts,
+    opts: ParseOpts,
 ) -> (Vec<Tok>, Vec<u32>) {
     let (out, out_lines, _) = expand_aliases_tracked(toks, lines, aliases, opts);
     (out, out_lines)
@@ -1101,7 +1102,7 @@ pub fn expand_aliases_tracked(
     toks: &[Tok],
     lines: &[u32],
     aliases: &std::collections::BTreeMap<Str, Str>,
-    opts: LexOpts,
+    opts: ParseOpts,
 ) -> (Vec<Tok>, Vec<u32>, Vec<Option<usize>>) {
     let mut active = std::collections::BTreeSet::new();
     let mut out = Vec::new();
@@ -1129,7 +1130,7 @@ fn expand_aliases_inner(
     toks: &[Tok],
     lines: &[u32],
     aliases: &std::collections::BTreeMap<Str, Str>,
-    opts: LexOpts,
+    opts: ParseOpts,
     active: &mut std::collections::BTreeSet<Str>,
     out: &mut Vec<Tok>,
     out_lines: &mut Vec<u32>,
@@ -3268,7 +3269,7 @@ fn scan_heredoc_segs(body: BStr<'_>, expand: bool) -> Result<Vec<Seg>, LexError>
     if !expand {
         return Ok(vec![Seg::Lit(body.to_vec())]);
     }
-    let mut lx = Lexer::new(body, LexOpts::default());
+    let mut lx = Lexer::new(body, ParseOpts::default());
     let mut segs: Vec<Seg> = Vec::new();
     let mut lit = Str::new();
     while let Some(c) = lx.peek() {
@@ -3324,12 +3325,12 @@ mod tests {
     /// option-specific tests want. Shadows [`super::tokenize`] so the option
     /// argument does not have to be spelled out 30 times.
     fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
-        super::tokenize(src.as_bytes(), LexOpts::default())
+        super::tokenize(src.as_bytes(), ParseOpts::default())
     }
 
     /// As [`tokenize`], with per-token line numbers.
     fn tokenize_spanned(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
-        super::tokenize_spanned(src.as_bytes(), LexOpts::default())
+        super::tokenize_spanned(src.as_bytes(), ParseOpts::default())
     }
 
     /// Tokenize and drop the terminating `Newline`, so a test that counts words
@@ -3349,7 +3350,7 @@ mod tests {
     /// *innermost* unclosed delimiter (see the function's docs).
     #[test]
     fn open_quote_reports_the_innermost_unclosed_quote() {
-        let q = |src: &str| super::open_quote(src.as_bytes(), LexOpts::default());
+        let q = |src: &str| super::open_quote(src.as_bytes(), ParseOpts::default());
         assert_eq!(q("echo 'x\n"), Some('\''));
         assert_eq!(q("echo \"x\n"), Some('"'));
         // A quote inside `$( … )` is the reader's state; one inside a backquote
@@ -3377,7 +3378,7 @@ mod tests {
     /// the lexer *keeps* is not a continuation, so the reader must not wait.
     #[test]
     fn ends_in_continuation_asks_which_backslashes_were_deleted() {
-        let c = |src: &str| super::ends_in_continuation(src.as_bytes(), LexOpts::default());
+        let c = |src: &str| super::ends_in_continuation(src.as_bytes(), ParseOpts::default());
         assert!(c("echo x \\\n"));
         // `\<CR><LF>` is not one: the `\` escapes the CR. Measured — a CRLF
         // script's `echo x \` prints `x \r` in bash too, joined to nothing.
@@ -3421,7 +3422,7 @@ mod tests {
                 ],
                 "extglob off: {src}"
             );
-            let mut with = super::tokenize(src.as_bytes(), LexOpts { extglob: true }).unwrap();
+            let mut with = super::tokenize(src.as_bytes(), ParseOpts { extglob: true }).unwrap();
             with.pop();
             assert_eq!(
                 with,
@@ -3792,7 +3793,7 @@ mod tests {
             ("cat <<EOF\nbody\nEOF\n", &[]),
         ];
         for (src, want) in cases {
-            let tk = tokenize_deferred(src.as_bytes(), LexOpts::default());
+            let tk = tokenize_deferred(src.as_bytes(), ParseOpts::default());
             let got: Vec<Want<'_>> = heredoc_eofs(&tk);
             assert_eq!(got, *want, "{src:?}");
         }
@@ -3834,7 +3835,7 @@ mod tests {
             ("cat <(cat <<EOF\n)\nEOF\n)", "cat <<EOF\n)\nEOF\n"),
         ];
         for (src, want) in bodies {
-            let tk = tokenize_deferred(src.as_bytes(), LexOpts::default());
+            let tk = tokenize_deferred(src.as_bytes(), ParseOpts::default());
             assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);
             let raw = tk
                 .toks
@@ -3854,7 +3855,7 @@ mod tests {
         // every unterminated `$( … )`. The here-document warning is recorded too,
         // in the *enclosing* line numbers, and comes out first.
         for src in ["x=$(cat <<EOF\nbody\n); echo hi", "cat <(cat <<EOF\nbody\n); echo hi"] {
-            let tk = tokenize_deferred(src.as_bytes(), LexOpts::default());
+            let tk = tokenize_deferred(src.as_bytes(), ParseOpts::default());
             let (e, line) = tk.err.as_ref().unwrap_or_else(|| panic!("{src:?} must fail"));
             assert_eq!(e.msg, b"unexpected EOF while looking for matching `)'");
             assert_eq!(*line, 4, "{src:?}");
@@ -3905,7 +3906,7 @@ mod tests {
             ),
         ];
         for (src, (raws, warned)) in cases {
-            let tk = tokenize_deferred(src.as_bytes(), LexOpts::default());
+            let tk = tokenize_deferred(src.as_bytes(), ParseOpts::default());
             assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);
             let got: Vec<crate::bytes::Str> = tk
                 .toks
@@ -3947,7 +3948,7 @@ mod tests {
         // is stamped with the body's last line, and the next line follows from
         // there. (`$LINENO` reports 3 and 4 for this input, measured.)
         let src = "x=$(cat <<EOF); echo hi\nbody\nEOF\necho ho\n";
-        let tk = tokenize_deferred(src.as_bytes(), LexOpts::default());
+        let tk = tokenize_deferred(src.as_bytes(), ParseOpts::default());
         let after: Vec<u32> = tk
             .toks
             .iter()
@@ -4046,7 +4047,7 @@ mod tests {
             ("cat <(case b in b) echo B;; esac)", "case b in b) echo B;; esac"),
         ];
         // `@(a|b)` is only a pattern with `extglob` on.
-        let opts = LexOpts { extglob: true };
+        let opts = ParseOpts { extglob: true };
         for (src, want) in bodies {
             let tk = tokenize_deferred(src.as_bytes(), opts);
             assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);
@@ -4067,7 +4068,7 @@ mod tests {
         // bash's parser wanted `;;` or `esac`, so it goes *into* the body for the
         // body parse to name — which also makes the failure the substitution's
         // (exit 1) rather than the enclosing input's (exit 2).
-        let tk = tokenize_deferred("x=$(case b in b) echo B); echo hi".as_bytes(), LexOpts::default());
+        let tk = tokenize_deferred("x=$(case b in b) echo B); echo hi".as_bytes(), ParseOpts::default());
         assert!(tk.err.is_none(), "{:?}", tk.err);
         let raw = tk
             .toks

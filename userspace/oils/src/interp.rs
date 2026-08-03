@@ -11288,7 +11288,7 @@ impl Shell {
                 // straight into the array instead of accumulating.
                 // Phase 1 — expand. `None` is a positional element, which takes
                 // whatever the running index is when it is bound.
-                let mut expanded: Vec<(Option<i64>, Str, bool)> = Vec::new();
+                let mut expanded: Vec<IndexedElem> = Vec::new();
                 for e in items {
                     match e {
                         ArrayElem::Positional(w) => {
@@ -11298,19 +11298,24 @@ impl Shell {
                             for bw in self.expand_braces_opt(w) {
                                 for v in self.expand_word(&bw, true) {
                                     self.xtrace_compound_elem(None, &v, false);
-                                    expanded.push((None, v, false));
+                                    expanded.push(IndexedElem { sub: None, val: v, append: false });
                                 }
                             }
                         }
                         ArrayElem::Keyed { index, value, append } => {
                             // The subscript's expanded *text* is kept alongside
                             // the number it evaluates to, because that is what
-                            // `set -x` traces (`['1+1']`, `[' 1 ']`).
+                            // `set -x` traces (`['1+1']`, `[' 1 ']`) and what a
+                            // refusal in phase 2 names.
                             let text = self.expand_to_arith_string(index);
                             let idx = self.eval_arith_index_text(&text);
                             let val = self.expand_to_string(value);
                             self.xtrace_compound_elem(Some(&text), &val, *append);
-                            expanded.push((Some(idx), val, *append));
+                            expanded.push(IndexedElem {
+                                sub: Some((idx, text)),
+                                val,
+                                append: *append,
+                            });
                         }
                     }
                 }
@@ -11343,17 +11348,46 @@ impl Shell {
                     .get(&a.name)
                     .and_then(|elems| elems.keys().next_back().copied())
                     .map_or(0, |k| k.saturating_add(1));
-                for (idx, val, elem_append) in expanded {
+                for IndexedElem { sub, val, append: elem_append } in expanded {
                     // The subscript is settled first because bash settles it
-                    // first: an out-of-range one skips the element without ever
-                    // looking at its value, so `declare -ai n=([-5]=1/0)` reports
-                    // the subscript and never the division.
-                    let at = match idx {
+                    // first: a subscript the array cannot hold skips the element
+                    // without its value ever being looked at, so `declare -ai
+                    // n=([-5]=1/0)` reports the subscript and never the division.
+                    let at = match sub {
                         None => next,
-                        Some(idx) => match usize::try_from(idx) {
-                            Ok(idx) => idx,
-                            Err(_) => {
-                                self.perrln(&format!("{}: bad array subscript", a.name));
+                        // An *empty* subscript is not zero — bash refuses it,
+                        // where whitespace (`[ ]=v`) and a name arithmetic reads
+                        // as unset (`[a]=v`) are both index 0.
+                        //
+                        // A negative one counts back from one past the highest
+                        // index the array holds *at this moment*, exactly as it
+                        // does outside a literal — so in `b=(x y [-1]=Z)` it is
+                        // `y` that gets overwritten, and in a sparse array it
+                        // counts from the highest index rather than from the
+                        // element count. Only reaching back past the start has
+                        // nowhere to live.
+                        Some((idx, text)) => match Self::resolve_index(
+                            idx,
+                            self.highest_index_bound(&a.name),
+                        ) {
+                            Some(i) if !text.is_empty() => i,
+                            _ => {
+                                // Named by its *expanded* halves, unquoted, and
+                                // the same way whether the literal is a `declare`
+                                // operand or bare — where an associative literal
+                                // requotes for the one and quotes the raw source
+                                // for the other. Not fatal: the element is
+                                // skipped (without consuming the running index),
+                                // the rest binds, and the status stays 0.
+                                let eq: &[u8] = if elem_append { b"]+=" } else { b"]=" };
+                                self.berrln(&bfmt![
+                                    self.err_prefix(),
+                                    b"[",
+                                    &text,
+                                    eq,
+                                    &val,
+                                    b": bad array subscript"
+                                ]);
                                 continue;
                             }
                         },
@@ -39160,6 +39194,20 @@ fn xtrace_compound_quote(s: BStr<'_>) -> Str {
     out
 }
 
+/// One fully expanded element of an *indexed* literal, held until the whole
+/// operand has been expanded.
+///
+/// bash expands a literal in full before binding any of it, so `a=(9 ${a[0]})`
+/// still reads the old `a`; phase 2 then binds these. `sub` is `None` for a
+/// positional element, which takes the running index when it is bound, and
+/// otherwise carries both the number the subscript evaluated to and the text it
+/// evaluated *from* — the text is what `set -x` traces and what a refusal names.
+struct IndexedElem {
+    sub: Option<(i64, Str)>,
+    val: Str,
+    append: bool,
+}
+
 /// One fully expanded element of an associative literal in *subscript* mode, held
 /// until the whole operand has been expanded.
 ///
@@ -59114,7 +59162,56 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // ever being looked at, so the `-i` evaluation below never runs and its
         // division is never reported.
         let (o, _) = run("declare -ai n\n{ n=([-5]=1/0); } 2>&1\ndeclare -p n; echo \"s=$?\"");
-        assert_eq!(o, "osh: n: bad array subscript\ndeclare -ai n=()\ns=0\n");
+        assert_eq!(o, "osh: [-5]=1/0: bad array subscript\ndeclare -ai n=()\ns=0\n");
+    }
+
+    #[test]
+    fn an_indexed_literal_refuses_a_subscript_that_names_nowhere() {
+        // An *empty* subscript is not index 0 — where whitespace and a name
+        // arithmetic reads as unset both are. The complaint names the element's
+        // *expanded* halves, unquoted, and keeps the `+=` spelling.
+        let (o, _) = run("{ declare -a n=([]=v); } 2>&1\ndeclare -p n");
+        assert_eq!(o, "osh: []=v: bad array subscript\ndeclare -a n=()\n");
+        let (o, _) = run("e=; v=VV\n{ declare -a n=([$e]=$v); } 2>&1");
+        assert_eq!(o, "osh: []=VV: bad array subscript\n");
+        let (o, _) = run("e=\n{ declare -a n=([$e]+=v); } 2>&1");
+        assert_eq!(o, "osh: []+=v: bad array subscript\n");
+        let (o, _) = run("declare -a n=([ ]=v [a]=w); declare -p n");
+        assert_eq!(o, "declare -a n=([0]=\"w\")\n");
+        // Not fatal, and the running index is not consumed by the element that
+        // was skipped: `q` still lands at 1.
+        let (o, _) = run("{ declare -a n=(p [-5]=y q); } 2>&1\ndeclare -p n; echo \"s=$?\"");
+        assert_eq!(
+            o,
+            "osh: [-5]=y: bad array subscript\ndeclare -a n=([0]=\"p\" [1]=\"q\")\ns=0\n"
+        );
+        // A bare literal names the element exactly as a `declare` operand does —
+        // where an associative literal distinguishes the two.
+        let (o, _) = run("declare -a n\n{ n+=([]=v); } 2>&1");
+        assert_eq!(o, "osh: []=v: bad array subscript\n");
+    }
+
+    #[test]
+    fn an_indexed_literals_negative_subscript_counts_from_the_end() {
+        // Resolved against the array as it stands at *that* element, so the
+        // clear a non-append literal does first and the elements before it both
+        // count: `y` is what `[-1]` overwrites here.
+        let (o, _) = run("declare -a b=(p q r); b=(x y [-1]=Z); declare -p b");
+        assert_eq!(o, "declare -a b=([0]=\"x\" [1]=\"Z\")\n");
+        let (o, _) = run("declare -a a=(p q r); a+=([-1]=Z); declare -p a");
+        assert_eq!(o, "declare -a a=([0]=\"p\" [1]=\"q\" [2]=\"Z\")\n");
+        // It counts back from the highest *index*, not from the element count.
+        let (o, _) = run("declare -a e=([0]=p [9]=q); e+=([-2]=Z); declare -p e");
+        assert_eq!(o, "declare -a e=([0]=\"p\" [8]=\"Z\" [9]=\"q\")\n");
+        // `+=` on a slot a negative subscript resolved to appends to that slot.
+        let (o, _) = run("declare -a h=(p q); h+=([-1]+=Z); declare -p h");
+        assert_eq!(o, "declare -a h=([0]=\"p\" [1]=\"qZ\")\n");
+        // Only reaching back past the start has nowhere to live — and an empty
+        // array has no end to count from at all.
+        let (o, _) = run("declare -a c=(p q)\n{ c+=([-3]=Z); } 2>&1\ndeclare -p c");
+        assert_eq!(o, "osh: [-3]=Z: bad array subscript\ndeclare -a c=([0]=\"p\" [1]=\"q\")\n");
+        let (o, _) = run("declare -a g=()\n{ g+=([-1]=Z); } 2>&1\ndeclare -p g");
+        assert_eq!(o, "osh: [-1]=Z: bad array subscript\ndeclare -a g=()\n");
     }
 
     #[test]

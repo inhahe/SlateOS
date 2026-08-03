@@ -29580,7 +29580,17 @@ impl Shell {
         // `flag_limit` is where the *source* words stopped offering flags, which
         // `argv` cannot show: a compound operand written before a flag-shaped
         // word ended option parsing there. See [`DeclWords::flag_limit`].
+        // Only the `declare` family reads the `+` direction at all: to
+        // `readonly` and `export` a `+x` word is an *operand*, which is both
+        // what their own diagnostic says (`` `+x': not a valid identifier ``)
+        // and what stops the scan, since getopt ends at the first non-option
+        // word. The scalar path already had this — neither builtin's own loop
+        // strips a `+` — so it is only this loop that read one.
+        let global_builtin = cmd == "export" || cmd == "readonly";
         for arg in argv.get(1..words.flag_limit.max(1)).unwrap_or_default() {
+            if global_builtin && arg.starts_with(b"+") {
+                break;
+            }
             let enable = arg.starts_with(b"-");
             let Some(flags) = arg.strip_prefix(b"-").or_else(|| arg.strip_prefix(b"+")) else {
                 break; // first non-flag operand — flags are done
@@ -29660,8 +29670,8 @@ impl Shell {
         // in bash rather than `declare` under a flag. The scalar path gets this
         // right by routing through `builtin_export`/`builtin_readonly`, which
         // never make locals at all; this loop binds the literal itself, so it has
-        // to know.
-        let global_builtin = cmd == "export" || cmd == "readonly";
+        // to know. (`global_builtin` is computed above the flag scan, which needs
+        // it too.)
         // `-n` is not the nameref letter for `readonly`/`export`: each reads it
         // as "do not apply my own attribute", so `readonly -n q=(1)` binds a
         // writable array and `export -n q=(1)` an unexported one, and neither
@@ -30245,9 +30255,18 @@ impl Shell {
         // A word past `flag_limit` is an operand however it is spelled, so it
         // counts here too — `readonly q=(1) -x` really does reach the operand
         // loop, which is what refuses `-x` as a name.
+        // And a `+x` word is an operand to `readonly`/`export`, which have no `+`
+        // options — so `readonly +a q=(1)` reaches the operand loop too, and gets
+        // the same `` `+a': not a valid identifier `` the scalar spelling gives.
         let limit = words.flag_limit.max(1).saturating_sub(1);
         let has_scalar_operand = argv[1..].iter().enumerate().any(|(i, a)| {
-            i >= limit || (a.as_slice() != b"--" && !a.starts_with(b"-") && !a.starts_with(b"+"))
+            if i >= limit {
+                return true;
+            }
+            if a.as_slice() == b"--" || a.starts_with(b"-") {
+                return false;
+            }
+            global_builtin || !a.starts_with(b"+")
         });
         let status = match cmd {
             "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir, limit),
@@ -56981,6 +57000,42 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("w=hi; declare -n n=w; declare -p n").0,
             "declare -n n=\"w\"\n"
         );
+    }
+
+    /// `readonly` and `export` have no `+` options at all: a `+x` word is an
+    /// *operand* to them, so it draws `not a valid identifier`, fails the
+    /// command, and — being a non-option word — ends the option scan. The
+    /// compound path read one as a flag, which took the builtin's own attribute
+    /// back off (`export +x e=(1)` exported nothing) and turned `+a` into a
+    /// spurious "cannot destroy array variables" refusal.
+    #[test]
+    fn readonly_and_export_have_no_plus_options() {
+        assert_eq!(
+            run("readonly +a q=(1) 2>&1; echo rc=$?; declare -p q").0,
+            "osh: readonly: `+a': not a valid identifier\nrc=1\ndeclare -ar q=([0]=\"1\")\n"
+        );
+        assert_eq!(
+            run("export +x e=(1) 2>&1; echo rc=$?; declare -p e").0,
+            "osh: export: `+x': not a valid identifier\nrc=1\ndeclare -ax e=([0]=\"1\")\n"
+        );
+        // A `+` word ends the scan, so a flag written behind it is an operand
+        // too — and one written *before* it still counted.
+        assert_eq!(
+            run("readonly +x -a s=(1) 2>&1 >/dev/null; declare -p s").0,
+            "osh: readonly: `+x': not a valid identifier\n\
+             osh: readonly: `-a': not a valid identifier\n\
+             declare -ar s=([0]=\"1\")\n"
+        );
+        assert_eq!(
+            run("readonly -a +x t=(1) 2>/dev/null; declare -p t").0,
+            "declare -ar t=([0]=\"1\")\n"
+        );
+        // The `declare` family reads it as ever.
+        assert_eq!(
+            run("declare -a x=(1); declare +a x 2>&1; echo rc=$?").0,
+            "osh: declare: x: cannot destroy array variables in this way\nrc=1\n"
+        );
+        assert_eq!(run("declare -x y=1; declare +x y; declare -p y").0, "declare -- y=\"1\"\n");
     }
 
     #[test]

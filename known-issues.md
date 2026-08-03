@@ -1446,7 +1446,7 @@ On Windows this is broader than on Unix, because a shebang alone does not make
 a file executable there — so essentially *every* `./script.sh` invocation goes
 through this path. Found while trying to make a corpus case re-exec itself.
 
-### TD-OILS-CORPUS-INTERMITTENT-FAILURE-UNIDENTIFIED. one corpus case fails about 1 full run in 4 and has never been caught in the act — 2026-08-03 — ⚠️ **OPEN** (instrumented; waiting for the next occurrence)
+### TD-OILS-CORPUS-INTERMITTENT-FAILURE-UNIDENTIFIED. some corpus case — not always the same one — fails about 1 run in 4 and has never been caught in the act — 2026-08-03 — ⚠️ **OPEN** (instrumented; waiting for the next occurrence)
 
 **Symptom.** A full `scripts/osh-bash-diff.py` sweep occasionally reports
 `299 matched, 0 waived, 1 failed`. Both times it has been seen, the very next
@@ -1472,13 +1472,33 @@ shown to misbehave there.
 
 **What was done instead of guessing:** the harness now writes every failing
 case's full measurement — both shells' stdout, stderr and status — to
-`target/dvscratch/corpus-failures/<case>.txt`, emptied at the start of each
-run (commit "scripts: keep a failing corpus case's full measurement on disk").
-The next occurrence therefore captures itself whether or not anyone is
-watching and whether or not the summary was truncated.
+`target/dvscratch/corpus-failures/<timestamp>/<case>.txt` (commits "scripts:
+keep a failing corpus case's full measurement on disk" and "scripts: give each
+corpus run its own failure-report directory"). The next occurrence therefore
+captures itself whether or not anyone is watching and whether or not the
+summary was truncated.
 
-**Next step:** on the next `1 failed`, read that directory *before* re-running
-anything, and continue from an actual diff.
+**Third occurrence, 2026-08-03, and a harness bug it exposed.** A `-k array`
+run (10 cases) reported `9 matched, 0 waived, 1 failed`; the immediate re-run
+was clean, as always. The report file *had* been written — but the first
+version of the mechanism emptied the report directory at the start of every
+run, so the re-run deleted it. The reflex on seeing `1 failed` is to run it
+again, which was precisely the command that destroyed the evidence. Each run
+now gets its own timestamped directory and a clean run creates none.
+
+The occurrence still says something. The failing case was one of the first
+seven of `array-literal-partial`, `arrays`, `assoc-arrays`,
+`declare-array-kind-conflict`, `declare-nameref-array-refusal`,
+`dynamic-var-array`, `nounset-array-element` — so it was **not**
+`nounset-last-bg-pid`, and that one identification really was a coincidence.
+Whatever this is, it is not tied to a single case, which fits the "needs load,
+takes whichever case is running" reading and retires the `true & wait` theory
+above. It also happened in a *ten*-case run, so it does not need a full sweep's
+load either.
+
+**Next step:** on the next `1 failed`, read the newest directory under
+`target/dvscratch/corpus-failures/` — re-running is safe now — and continue
+from an actual diff.
 
 ### TD-OILS-CORPUS-BG-DEBUG-TRACE-RACE. `debug-trap-announces-a-background-command.sh` interleaves a background job's traces with the parent's about 1 run in 6 — 2026-08-01 — ✅ **RESOLVED 2026-08-01** (the *case* raced, not osh)
 

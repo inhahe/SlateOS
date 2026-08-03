@@ -568,6 +568,25 @@ fn io_error_message(e: &std::io::Error) -> String {
     }
 }
 
+/// An open failure, with the host's answer corrected where it cannot say what
+/// POSIX would have said.
+///
+/// Win32 answers `CreateFile` on a *directory* with `ERROR_ACCESS_DENIED`,
+/// which Rust reports as `PermissionDenied` — so on the development host the
+/// errno alone cannot tell "you may not open this" from "this is a directory",
+/// and bash's message for the second is `Is a directory`. A POSIX host raises
+/// `EISDIR` itself and the extra `is_dir` never changes the answer, so this
+/// corrects a host limitation rather than imposing a policy.
+///
+/// Only a failure is interrogated, and only the one ambiguous kind, so a real
+/// permission error keeps its own message and a successful open pays nothing.
+fn open_error(path: &std::path::Path, e: io::Error) -> io::Error {
+    if e.kind() == io::ErrorKind::PermissionDenied && path.is_dir() {
+        return io::Error::from(io::ErrorKind::IsADirectory);
+    }
+    e
+}
+
 /// Render a host filesystem path the way the *shell* talks about paths: `/`
 /// separated, with no Windows extended-length (`\\?\`) prefix.
 ///
@@ -15846,8 +15865,7 @@ impl Shell {
                 if let Some(n) = special_redirect_fd(&path) {
                     return self.persistent_special_dup(fd, &path, n, true, out);
                 }
-                let f = std::fs::File::open(bytes::bytes_to_path(&self.host_path(&path)))
-                    .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
+                let f = self.open_in_target(&path)?;
                 if fd == 0 {
                     self.exec_stdin = Some(file_input(f));
                     // `exec 0< f` reopens fd 0 read-only, dropping any write
@@ -16930,8 +16948,7 @@ impl Shell {
                     // diagnostic and gives every later reader of the descriptor
                     // the *same* open file description, which is what makes a
                     // child's consumption visible to the shell afterwards.
-                    let f = std::fs::File::open(bytes::bytes_to_path(&self.host_path(&path)))
-                        .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
+                    let f = self.open_in_target(&path)?;
                     match fd {
                         0 => {
                             plan.clear_stdin();
@@ -21463,6 +21480,17 @@ impl Shell {
     /// alone and the mapping still fires.
     fn host_path(&self, path: BStr<'_>) -> Str {
         map_device_path(&self.resolve_str(path)).to_vec()
+    }
+
+    /// Open an input redirect's target, reporting a failure the way bash does:
+    /// the path as the *user* wrote it, and a message that says `Is a directory`
+    /// where the host could only manage `Permission denied` (see
+    /// [`open_error`]).
+    fn open_in_target(&self, path: BStr<'_>) -> Result<std::fs::File, Str> {
+        let resolved = self.host_path(path);
+        let host = bytes::bytes_to_path(&resolved);
+        std::fs::File::open(&host)
+            .map_err(|e| bfmt![path, b": ", io_error_message(&open_error(&host, e))])
     }
 
     /// [`Shell::resolve`] as a string, for the callers that need to keep
@@ -32827,6 +32855,18 @@ impl Shell {
             path.clone()
         };
         let path = &resolved;
+        // A directory is refused before the read, with a message of its own —
+        // labelled with the builtin and spelled with a lower-case "is", unlike
+        // the `Is a directory` an open failure elsewhere reports. bash checks
+        // for it (`file_isdir`) rather than letting the read fail, and the
+        // refusal is an ordinary failure: it is not the failed *open* that ends
+        // a non-interactive posix shell below. (A `$PATH` hit can never be one —
+        // the search steps past directories — so this only ever catches the
+        // operand as written.)
+        if bytes::bytes_to_path(&self.host_path(path)).is_dir() {
+            self.berrln(&bfmt![self.err_prefix(), tag, b": ", path.as_slice(), b": is a directory"]);
+            return 1;
+        }
         // The path is opened from its own bytes, so a script whose *name* is
         // not text still opens — and its contents are parsed as the bytes they
         // are, so a script may carry any byte a shell word may.
@@ -39205,7 +39245,9 @@ fn open_out(cwd: BStr<'_>, path: BStr<'_>, append: bool) -> io::Result<std::fs::
     } else {
         opts.truncate(true);
     }
-    opts.open(bytes::bytes_to_path(map_device_path(&resolve_against(cwd, path))))
+    let resolved = resolve_against(cwd, path);
+    let host = bytes::bytes_to_path(map_device_path(&resolved));
+    opts.open(&host).map_err(|e| open_error(&host, e))
 }
 
 /// Open `path` for both reading and writing (`<>` redirect): create it if it is
@@ -39214,14 +39256,16 @@ fn open_out(cwd: BStr<'_>, path: BStr<'_>, append: bool) -> io::Result<std::fs::
 /// (which errors on a missing file): `<>` guarantees the file exists afterward
 /// while preserving any current contents.
 fn open_rw(cwd: BStr<'_>, path: BStr<'_>) -> io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .read(true)
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true)
         .write(true)
         .create(true)
         // `<>` never truncates: existing contents are preserved (writes land at
         // offset 0 and overwrite in place). Spelled out for clippy and clarity.
-        .truncate(false)
-        .open(bytes::bytes_to_path(map_device_path(&resolve_against(cwd, path))))
+        .truncate(false);
+    let resolved = resolve_against(cwd, path);
+    let host = bytes::bytes_to_path(map_device_path(&resolved));
+    opts.open(&host).map_err(|e| open_error(&host, e))
 }
 
 /// Open `path` for `<>` and split it into the read and write halves of the

@@ -775,10 +775,10 @@ stays away from the combination.)
 
 Covered by `noclobber-guards-every-form-that-truncates.sh`.
 
-### TD-OILS-A-DIRECTORY-AS-A-REDIRECT-TARGET-REPORTS-THE-WRONG-ERROR-AND-FAILS-A-READ — 2026-08-03 — ⚠️ **OPEN**
+### TD-OILS-A-DIRECTORY-AS-A-REDIRECT-TARGET-REPORTS-THE-WRONG-ERROR-AND-FAILS-A-READ — 2026-08-03 — ⚠️ **OPEN (the message half is fixed; the read half remains)**
 
-**Where:** `userspace/oils/src/interp.rs`, `io_error_message` and the input-open
-path (`open_output_target`'s `open_out`, and the `RedirectOp::Read` planner).
+**Where:** `userspace/oils/src/interp.rs`, `open_error` and the input-open path
+(`Shell::open_in_target`, and the `RedirectOp::Read` planner).
 
 **What.** Two divergences, one cosmetic and one real, both from opening a
 directory:
@@ -798,12 +798,31 @@ a message: bash's `< ad` *succeeds* — a directory opens for reading, and it is
 the reading command that then fails — where osh fails the redirection itself,
 which is a different exit status and a different stream for the diagnostic.
 
-**Proper fix.** Before mapping an open failure, `stat` the path: if it is a
-directory, report `Is a directory` regardless of the errno the host gave. For
-the read side, opening a directory must succeed as a descriptor that yields
-`EISDIR` on the first read — `FILE_FLAG_BACKUP_SEMANTICS` gets the handle; the
-read half needs an `InputSrc` variant that fails that way. Also affects `&> dir`
-and `exec > dir`.
+**Fixed 2026-08-03 — the message.** `open_error` sits on the failure path of
+every open (`open_out`, `open_rw`, `Shell::open_in_target`) and turns the one
+ambiguous kind — `PermissionDenied` on a path that `is_dir()` — into
+`IsADirectory`, so `>`, `>>`, `>|`, `&>`, `>&`, `2>`, `<>` and all of their
+`exec` forms now report `Is a directory` exactly as bash does. A real permission
+error is untouched, and on a POSIX host the correction never fires because the
+kernel already said `EISDIR`.
+
+`.`/`source` needed its own check rather than the corrected message: bash calls
+`file_isdir` before reading and prints a *different* string for it — labelled
+with the builtin and with a lower-case "is" (`.: ad: is a directory`) — and that
+refusal is an ordinary failure, not the failed open that ends a non-interactive
+posix shell. Covered by `a-directory-is-not-a-file-a-redirect-can-open.sh`.
+
+**Still open — the read.** `< ad` must *open*, and fail at the first read.
+`FILE_FLAG_BACKUP_SEMANTICS` (via `OpenOptionsExt::custom_flags`) gets the
+handle on Windows, but the reads through it fail `ERROR_ACCESS_DENIED` too, so
+the read half also needs an `InputSrc` variant that knows it is a directory and
+answers `EISDIR` — that is what would give `exec < ad` its status 0 and `read <
+ad` its `read error: 0: Is a directory`. An **external** command reading the
+descriptor cannot be matched even then (bash's `cat < ad` fails inside `cat`,
+with whatever the host's `cat` makes of a directory handle), so the corpus case
+deliberately stays away from the reading forms. On the SlateOS target none of
+this applies: a directory opens for reading and reads answer `EISDIR` without
+any of the scaffolding, which is why this is filed rather than built now.
 
 ### TD-OILS-COMPLETE-TABLE-AND-OPERANDS. `complete`/`compopt` got ten things wrong at once, all downstream of two facts about bash they did not model — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

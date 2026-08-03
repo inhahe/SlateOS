@@ -26877,9 +26877,16 @@ impl Shell {
         if operands.is_empty() {
             let mut names: Vec<Str> = self.exported_funcs.iter().cloned().collect();
             names.sort();
+            let posix = self.shell_option_enabled("posix");
             let mut listing = Str::new();
             for name in &names {
                 let Some(body) = self.funcs.get(name.as_slice()) else { continue };
+                // posix mode drops the body entirely and prints the one line
+                // that would re-export the function: `export -f NAME`.
+                if posix {
+                    listing.extend_from_slice(&bfmt![b"export -f ", name.as_slice(), b"\n"]);
+                    continue;
+                }
                 let redirects = self.func_redirects.get(name.as_slice());
                 listing.extend_from_slice(&crate::unparse::unparse_function(
                     name,
@@ -26935,18 +26942,54 @@ impl Shell {
             .collect();
         names.sort();
         names.dedup();
+        let posix = self.shell_option_enabled("posix");
         let mut listing = Str::new();
         for name in &names {
-            if let Some(def) = self.format_declare_def_listed(name) {
+            let line = match self.format_declare_def_listed(name) {
                 // `format_declare_def_listed` already folds in the `x` (and any
                 // other) attribute flags for a set variable.
-                listing.extend_from_slice(&def);
-                listing.push(b'\n');
-            } else {
-                listing.extend_from_slice(format!("declare -x {name}\n").as_bytes());
-            }
+                Some(def) => def,
+                None => format!("declare -x {name}").into_bytes(),
+            };
+            listing.extend_from_slice(&Self::posix_attr_line(posix, b"export", &line));
+            listing.push(b'\n');
         }
         self.write_bytes(out, redir, &listing)
+    }
+
+    /// Rewrite one `declare -FLAGS NAME[=VALUE]` listing line into the spelling
+    /// bash's posix mode gives `export -p` and `readonly -p`: the builtin's own
+    /// keyword in place of `declare`, and of the attribute letters only the
+    /// array kind survives. Outside posix mode the line is handed back as it
+    /// came.
+    ///
+    /// Measured: `declare -rx RX="1"` lists as `export RX="1"` under `export -p`
+    /// and as `readonly RX="1"` under `readonly -p`; `declare -air N=(…)` lists
+    /// as `readonly -a N=(…)`; a name with no value keeps its bare form
+    /// (`readonly R`). `declare -p` and the `typeset` spelling of either builtin
+    /// are unaffected — bash decides this from the word it dispatched on, not
+    /// from the variable.
+    fn posix_attr_line(posix: bool, keyword: &[u8], line: &[u8]) -> Str {
+        if !posix {
+            return line.to_vec();
+        }
+        let Some(rest) = line.strip_prefix(b"declare " as &[u8]) else {
+            return line.to_vec();
+        };
+        // A listing line always leads with its flag word, so the first space
+        // after `declare ` ends it and `tail` starts at the name's own space.
+        let Some(sp) = rest.iter().position(|&c| c == b' ') else {
+            return line.to_vec();
+        };
+        let (flags, tail) = rest.split_at(sp);
+        let mut out = keyword.to_vec();
+        if flags.contains(&b'A') {
+            out.extend_from_slice(b" -A");
+        } else if flags.contains(&b'a') {
+            out.extend_from_slice(b" -a");
+        }
+        out.extend_from_slice(tail);
+        out
     }
 
     /// `declare`/`typeset`/`local`: create typed variables. Supports `-A`
@@ -29882,26 +29925,19 @@ impl Shell {
                 .collect();
             ro.sort();
             ro.dedup();
+            let posix = self.shell_option_enabled("posix");
             let mut listing = Str::new();
             for name in &ro {
                 // bash's `readonly -p` reuses `declare -p` formatting: scalars
                 // as `declare -r name="value"`, arrays as `declare -ar name=(…)`,
-                // and a valueless readonly as a bare `declare -r name`.
-                match self.format_declare_def_listed(name) {
-                    Some(def) => {
-                        listing.extend_from_slice(&def);
-                        listing.push(b'\n');
-                    }
-                    None => {
-                        listing.extend_from_slice(&bfmt![
-                            b"declare ",
-                            self.declare_attr_flags(name),
-                            b" ",
-                            name,
-                            b"\n"
-                        ]);
-                    }
-                }
+                // and a valueless readonly as a bare `declare -r name` — except
+                // in posix mode, where it prints in its own spelling instead.
+                let line = match self.format_declare_def_listed(name) {
+                    Some(def) => def,
+                    None => bfmt![b"declare ", self.declare_attr_flags(name), b" ", name],
+                };
+                listing.extend_from_slice(&Self::posix_attr_line(posix, b"readonly", &line));
+                listing.push(b'\n');
             }
             return self.write_bytes(out, redir, listing.as_bytes());
         }
@@ -29978,11 +30014,28 @@ impl Shell {
         if names.is_empty() {
             let mut ro: Vec<&Str> = self.readonly_funcs.iter().collect();
             ro.sort();
+            let posix = self.shell_option_enabled("posix");
             let mut listing = Str::new();
             for name in ro {
                 if let Some(body) = self.funcs.get(name) {
+                    // As with `export -pf`, posix mode prints only the line that
+                    // would re-apply the attribute, not the definition.
+                    if posix {
+                        listing.extend_from_slice(&bfmt![b"readonly -f ", name, b"\n"]);
+                        continue;
+                    }
                     listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
-                    listing.extend_from_slice(&bfmt![b"declare -fr ", name, b"\n"]);
+                    // The attribute line carries *every* flag the function has,
+                    // not just this builtin's: a function that is both readonly
+                    // and exported lists as `declare -frx NAME` from either
+                    // `readonly -pf` or `export -pf`.
+                    listing.extend_from_slice(&bfmt![
+                        b"declare ",
+                        &self.func_attr_flags(name),
+                        b" ",
+                        name,
+                        b"\n"
+                    ]);
                 }
             }
             return self.write_bytes(out, redir, &listing);
@@ -47453,6 +47506,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // The class carries 2 under `-c` as well.
         assert_eq!(run_cmd_mode("set -o posix; unset -q").1, 2);
+    }
+
+    /// In posix mode `export -p` and `readonly -p` print in their own spelling
+    /// rather than borrowing `declare -p`'s, keeping only the array-kind letter.
+    #[test]
+    fn posix_mode_lists_export_and_readonly_in_their_own_spelling() {
+        let rewrite = |kw: &[u8], line: &str| {
+            String::from_utf8(Shell::posix_attr_line(true, kw, line.as_bytes())).unwrap()
+        };
+        // Every other attribute letter is dropped — including the *other*
+        // builtin's, so neither listing ever shows the attribute it is not about.
+        assert_eq!(rewrite(b"export", r#"declare -rx RX="1""#), r#"export RX="1""#);
+        assert_eq!(rewrite(b"readonly", r#"declare -rx RX="1""#), r#"readonly RX="1""#);
+        assert_eq!(rewrite(b"readonly", r#"declare -ir N="5""#), r#"readonly N="5""#);
+        // …except `-a`/`-A`, which survive.
+        assert_eq!(
+            rewrite(b"readonly", r#"declare -air N=([0]="1")"#),
+            r#"readonly -a N=([0]="1")"#
+        );
+        assert_eq!(
+            rewrite(b"export", r#"declare -Ax A=([k]="v" )"#),
+            r#"export -A A=([k]="v" )"#
+        );
+        // A name with no value keeps its bare form.
+        assert_eq!(rewrite(b"export", "declare -x A"), "export A");
+        // Outside posix mode, and for anything that is not a listing line, the
+        // line is handed back untouched.
+        assert_eq!(
+            String::from_utf8(Shell::posix_attr_line(false, b"export", b"declare -x A")).unwrap(),
+            "declare -x A"
+        );
+        assert_eq!(rewrite(b"export", "declare -x"), "declare -x");
+        // End to end, where the listing is small enough to be deterministic:
+        // the `-f` form drops the body entirely.
+        assert_eq!(run("f(){ :; }; export -f f; set -o posix; export -pf").0, "export -f f\n");
+        assert_eq!(
+            run("f(){ :; }; readonly -f f; set -o posix; readonly -pf").0,
+            "readonly -f f\n"
+        );
+        // Outside posix mode it is the definition plus an attribute line that
+        // carries *every* flag the function has, not just this builtin's.
+        assert_eq!(
+            run("f(){ :; }; export -f f; readonly -f f; readonly -pf").0,
+            "f () \n{ \n    :\n}\ndeclare -frx f\n"
+        );
     }
 
     /// `-f` and `-v` name two different namespaces, so `unset` refuses both at

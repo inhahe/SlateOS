@@ -305,13 +305,21 @@ all pinned by the corpus case:
 *not* the usage class — status 1, and it survives posix mode), and `times`/`eval`
 now scan for an invalid option instead of ignoring one.
 
+**Also done since — the posix-mode spelling of `export -p`/`readonly -p`.**
+Outside posix mode both borrow `declare -p`'s output form; inside it they print
+in their *own* spelling — the builtin's keyword in place of `declare`, and of
+the attribute letters only the array kind surviving, so `declare -rx RX="1"`
+lists as `export RX="1"` under one and `readonly RX="1"` under the other. `-pf`
+drops the reconstructed body and prints just `export -f NAME` /
+`readonly -f NAME`. `declare -p` and the `typeset` spelling are untouched, and
+the mode is read when the listing *runs*, not when the name was made.
+Implemented as one line-rewriting helper (`Shell::posix_attr_line`) at the four
+listing sites, covered by
+`posix-mode-makes-export-and-readonly-list-in-their-own-spelling.sh`.
+
 **Still open:** survey the rest of bash's posix-mode list (`man bash`, "POSIX
 Mode") and pin each one with a probe before implementing it; several are already
-osh's behaviour by accident and need only a corpus case. One concrete
-divergence found while probing: in posix mode bash prints `export -p` /
-`readonly -p` as `export NAME="v"` / `readonly NAME="v"` rather than
-`declare -x NAME="v"` (`declare -p` is unaffected); osh always uses the
-`declare` spelling.
+osh's behaviour by accident and need only a corpus case.
 
 ### TD-OILS-COMPLETE-TABLE-AND-OPERANDS. `complete`/`compopt` got ten things wrong at once, all downstream of two facts about bash they did not model — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

@@ -333,9 +333,43 @@ the merely-declared names. `declare -p`'s filtering now goes through the one
 `builtin_declare` first so `declare -Q` is still an invalid option rather than a
 listing.
 
-**Still open:** survey the rest of bash's posix-mode list (`man bash`, "POSIX
-Mode") and pin each one with a probe before implementing it; several are already
-osh's behaviour by accident and need only a corpus case.
+**Also done since — posix mode now turns on the two `shopt` options it implies.**
+bash's `posix_initialize` sets `inherit_errexit` *and* `shift_verbose` when the
+mode goes on, and clears only `shift_verbose` when it goes off — so
+`inherit_errexit` survives a `set +o posix`, and a `shift_verbose` the script had
+set by hand does not. Probing showed it is a **transition**, not a value derived
+from the mode: while posix stays on, a `shopt -u shift_verbose` sticks, and only
+leaving and re-entering turns it back on. osh has no posix *field* (the mode is
+`$POSIXLY_CORRECT` existing), so the hook is `Shell::sync_posix_shopts`, called
+from the end of `refresh_shellopts` — the one function every route into and out
+of the mode already funnels through, including an assignment prefix, an `unset`,
+and a `local POSIXLY_CORRECT` going out of scope — with a `posix_shopts_applied`
+shadow flag to make it edge-triggered (and carried across a subshell clone, so
+the child does not re-fire the edge). `inherit_errexit` was already honoured;
+`shift`'s out-of-range message was gated on posix mode *directly* and is now
+gated on `shift_verbose`, which is what makes
+`set -o posix; shopt -u shift_verbose; shift 5` silent as bash is. Covered by
+`posix-mode-turns-two-shopts-on-as-it-is-entered.sh` and two lib tests.
+
+**Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
+rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
+and a 42-case probe of them against osh leaves these real gaps, roughly in
+increasing order of size:
+
+* Function names: may not be a special builtin (`set() { :; }`), and must be
+  valid identifiers (`a/b() { :; }` is rejected, where outside posix mode bash
+  allows the slash).
+* Special builtins are found *before* shell functions, so a function named
+  `unset` does not shadow the builtin.
+* `.`/`source` does not search `$PWD` when the name is not found on `$PATH`.
+* A bare `alias` listing drops the `alias ` prefix from each line.
+* `cd` in logical mode validates the resulting path and falls back to physical.
+* `kill -l` prints one line with no `SIG` prefixes, and `kill` rejects a
+  `SIG`-prefixed signal name.
+* A bare `set` omits the function definitions it otherwise prints.
+* `trap -p` prints signal names without the `SIG` prefix and lists every signal.
+* `time` alone is a syntax error, and `time -p` is not special-cased.
+* Words in a redirection get neither globbing nor word splitting.
 
 ### TD-OILS-COMPLETE-TABLE-AND-OPERANDS. `complete`/`compopt` got ten things wrong at once, all downstream of two facts about bash they did not model — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

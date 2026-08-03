@@ -4008,6 +4008,11 @@ pub struct Shell {
     /// much as the script itself. `fc`'s editing mode turns it on for the
     /// commands it re-runs, which is bash's `echo_input_at_read`.
     verbose: bool,
+    /// Whether posix mode was on the last time [`Shell::refresh_shellopts`] ran,
+    /// so the two `shopt` options the mode implies can be turned on and off on
+    /// the *transition* rather than derived from it. See
+    /// [`Shell::sync_posix_shopts`].
+    posix_shopts_applied: bool,
     /// Whether this shell was started as a **login** shell — `-l`/`--login`, or
     /// an `argv[0]` beginning with `-`, which is how `login(1)` marks it. It
     /// says how the shell was *started*, so nothing can change it afterwards:
@@ -4360,6 +4365,7 @@ impl Shell {
             histexpand: None,
             hist_state: crate::histexpand::HistState::default(),
             verbose: false,
+            posix_shopts_applied: false,
             login_shell: false,
             logout_pending: None,
             disabled_builtins: HashSet::new(),
@@ -9368,6 +9374,11 @@ impl Shell {
             histexpand: self.histexpand,
             hist_state: self.hist_state.clone(),
             verbose: self.verbose,
+            // The two implied `shopt`s are already in the cloned `shopt` map, so
+            // the shadow flag must come across too — otherwise the subshell's
+            // first `refresh_shellopts` would see a false→true edge and turn
+            // `shift_verbose` back on under a shell that had turned it off.
+            posix_shopts_applied: self.posix_shopts_applied,
             login_shell: self.login_shell,
             // A subshell's `exit` does not read `~/.bash_logout`: bash's
             // `bash_logout()` runs only when `subshell_environment == 0`, so
@@ -31129,11 +31140,37 @@ impl Shell {
         // Posix mode is `$POSIXLY_CORRECT`, and bash lists it here however the
         // variable came to have a value — a bare `POSIXLY_CORRECT=1` puts
         // `posix` in `$SHELLOPTS` just as `set -o posix` does.
-        if self.shell_option_enabled("posix") {
+        let posix = self.shell_option_enabled("posix");
+        if posix {
             opts.push("posix");
         }
         opts.sort_unstable();
         self.put_var("SHELLOPTS".to_string(), opts.join(":"));
+        self.sync_posix_shopts(posix);
+    }
+
+    /// Turn the two `shopt` options that posix mode implies on and off with it.
+    ///
+    /// bash's `posix_initialize` sets `inherit_errexit` *and* `shift_verbose`
+    /// when the mode goes on, and clears only `shift_verbose` when it goes off —
+    /// so `inherit_errexit` survives a `set +o posix`, and a `shift_verbose` the
+    /// script had set by hand does not.
+    ///
+    /// It is a **transition**, not a derived value: while the mode stays on, a
+    /// `shopt -u shift_verbose` sticks, and only leaving and re-entering the
+    /// mode turns it back on. Hence the shadow flag — the mode itself is
+    /// `$POSIXLY_CORRECT`, which many paths can change (an assignment, an
+    /// `unset`, a `local` going out of scope, an assignment prefix), and this
+    /// runs from the one function all of them already funnel through.
+    fn sync_posix_shopts(&mut self, posix: bool) {
+        if posix == self.posix_shopts_applied {
+            return;
+        }
+        self.posix_shopts_applied = posix;
+        self.shopt.insert("shift_verbose".to_string(), posix);
+        if posix {
+            self.shopt.insert("inherit_errexit".to_string(), true);
+        }
     }
 
     /// Render the `set -o` / `set +o` option listing. With `reinput` false
@@ -31250,14 +31287,23 @@ impl Shell {
             self.positional.drain(..n);
             0
         } else {
-            // A count larger than `$#` is silently status 1 — except in posix
-            // mode, where bash reports it with the same "out of range" wording a
-            // negative count gets (its `print_shift_error`). A bare `shift` past
-            // the end has no word to name, so the message drops that field
-            // entirely rather than printing the implied 1. The status is 1
-            // either way, and this is *not* one of the failure classes that end
-            // a posix-mode shell.
-            if self.shell_option_enabled("posix") {
+            // A count larger than `$#` is silently status 1 — unless
+            // `shift_verbose` is on, when bash reports it with the same "out of
+            // range" wording a negative count gets (its `print_shift_error`).
+            // Posix mode reaches this *through* that option rather than
+            // directly: entering the mode turns `shift_verbose` on (see
+            // [`Shell::sync_posix_shopts`]), so a script that turns it back off
+            // while still in posix mode gets the silent form again. A bare
+            // `shift` past the end has no word to name, so the message drops
+            // that field entirely rather than printing the implied 1. The status
+            // is 1 either way, and this is *not* one of the failure classes that
+            // end a posix-mode shell.
+            if self
+                .shopt
+                .get("shift_verbose")
+                .copied()
+                .unwrap_or_else(|| self.shopt_default("shift_verbose"))
+            {
                 let named: Str = match &written {
                     Some(w) => bfmt![w.as_slice(), b": "],
                     None => Vec::new(),
@@ -47167,6 +47213,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run(r#"shopt -s inherit_errexit; set -e; x=$(false; echo A); echo "[$x]""#);
         assert_eq!(o, "");
         assert_eq!(s, 1);
+    }
+
+    #[test]
+    fn posix_mode_turns_inherit_errexit_and_shift_verbose_on_as_a_transition() {
+        // Entering posix mode sets both options (bash's `posix_initialize`).
+        assert_eq!(
+            run("set -o posix; shopt -p inherit_errexit shift_verbose").0,
+            "shopt -s inherit_errexit\nshopt -s shift_verbose\n"
+        );
+        // Leaving clears only `shift_verbose`; `inherit_errexit` is sticky.
+        assert_eq!(
+            run("set -o posix; set +o posix; shopt -p inherit_errexit shift_verbose").0,
+            "shopt -s inherit_errexit\nshopt -u shift_verbose\n"
+        );
+        // …and it clears one the script had set by hand just the same, because
+        // nothing records who set it.
+        assert_eq!(
+            run("shopt -s shift_verbose; set -o posix; set +o posix; shopt -p shift_verbose").0,
+            "shopt -u shift_verbose\n"
+        );
+        // It is a transition, not a value derived from the mode: turning an
+        // option back off while the mode stays on sticks…
+        assert_eq!(
+            run("set -o posix; shopt -u shift_verbose; shopt -p shift_verbose").0,
+            "shopt -u shift_verbose\n"
+        );
+        // …and only leaving and re-entering turns it on again.
+        assert_eq!(
+            run("set -o posix; shopt -u shift_verbose; set +o posix; set -o posix; shopt -p shift_verbose").0,
+            "shopt -s shift_verbose\n"
+        );
+        // Every route into the mode counts, including the variable spellings and
+        // a `local` copy of it going out of scope.
+        assert_eq!(run("POSIXLY_CORRECT=1; shopt -p shift_verbose").0, "shopt -s shift_verbose\n");
+        assert_eq!(
+            run("POSIXLY_CORRECT=1; unset POSIXLY_CORRECT; shopt -p shift_verbose").0,
+            "shopt -u shift_verbose\n"
+        );
+        assert_eq!(
+            run("f() { local POSIXLY_CORRECT=1; shopt -p shift_verbose; }; f; shopt -p shift_verbose").0,
+            "shopt -s shift_verbose\nshopt -u shift_verbose\n"
+        );
+    }
+
+    #[test]
+    fn shift_past_the_end_reports_only_when_shift_verbose_is_on() {
+        // Silent status 1 by default…
+        let (o, s) = run("shift 5; echo rc=$?");
+        assert_eq!(o, "rc=1\n");
+        assert_eq!(s, 0);
+        // …and the same status with a message once the option is on. A bare
+        // `shift` has no word to name, so the message drops that field rather
+        // than printing the implied 1.
+        let (o, _) = run("shopt -s shift_verbose; shift 5 2>&1; shift 2>&1");
+        assert!(o.contains("shift: 5: shift count out of range"), "{o:?}");
+        assert!(o.contains("shift: shift count out of range"), "{o:?}");
+        // Posix mode reaches the message only *through* the option, so opting
+        // back out inside the mode is silent again.
+        assert_eq!(run("set -o posix; shopt -u shift_verbose; shift 5 2>&1; echo rc=$?").0, "rc=1\n");
     }
 
     #[test]

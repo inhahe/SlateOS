@@ -345,40 +345,40 @@ osh installs the descriptor in all four, which is the behaviour bash itself
 gives in three of them. Named as deliberately absent in the header of
 `tests/corpus/a-read-write-source-on-a-std-fd-keeps-one-offset.sh`.
 
-### TD-OILS-NO-BIND-BUILTIN. `bind` has no default keymaps, so four of its listings are empty — 2026-08-01 — 🔧 **OPEN**
+### TD-OILS-NO-BIND-BUILTIN. `bind`'s tables are read-only, so a mutation is never remembered — 2026-08-01 — 🔧 **OPEN**
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_bind`;
-`userspace/oils/src/bind_tables.rs`.
+`userspace/oils/src/bind_tables.rs`; `scripts/gen-oils-bind-tables.py`.
 
-**Narrowed 2026-08-02.** The builtin-count gap that opened this entry is closed:
-`bind` exists, `BUILTIN_NAMES` is 61 like bash's, and the option parsing, the
-`bind: warning: line editing not enabled` warning, the phase order, every
-diagnostic, `bind -l`, and the three empty listings (`-s`, `-S`, `-X`, which a
-pristine readline really does print nothing for) are byte-exact against bash
-5.2.37 — pinned by `tests/corpus/a-bind-warns-then-works-in-phases.sh` and
-`bind_warns_then_works_in_phase_order`.
+**Narrowed 2026-08-02, twice.** The builtin-count gap that opened this entry is
+closed, and so are all of the listings. `bind` exists, `BUILTIN_NAMES` is 61
+like bash's, and the option parsing, the `bind: warning: line editing not
+enabled` warning, the phase order, every diagnostic, and **every listing** —
+`-l`, `-p`, `-P`, `-v`, `-V`, `-q` for a known name as well as an unknown one,
+and the three that a pristine readline really does print nothing for (`-s`,
+`-S`, `-X`) — are byte-exact against bash 5.2.37 in all eight keymaps. Pinned by
+`tests/corpus/a-bind-warns-then-works-in-phases.sh`,
+`bind_warns_then_works_in_phase_order` and
+`bind_listings_come_from_readlines_tables`, and verified exhaustively across all
+8 keymap names × 8 listing letters plus all 174 `-q` names.
 
-**What is left** is the part that needs readline's *default keymaps*, not just
-its function-name list:
+readline's compiled-in defaults now live in `bind_tables.rs`, captured by
+`scripts/gen-oils-bind-tables.py` from a reference bash under
+`INPUTRC=/dev/null` rather than transcribed — so the provenance is a command
+instead of a claim, and the generator *checks* the keymap aliases rather than
+assuming them.
 
-* **`-p` (488 lines) and `-P` (175)** — every key sequence and what it is bound
-  to, in re-inputtable and prose form. osh prints nothing.
-* **`-v` (46) and `-V` (46)** — the readline variables and their defaults, in
-  the same two forms. osh prints nothing.
-* **`-q NAME` for a name that exists** — bash prints
-  `NAME can be invoked via "\C-y".`; osh is silent and returns 0. (`-q` for an
-  *unknown* name is already exact.) Note the wording differs from `-P`'s
-  `NAME can be found on …` for the same data.
-
-These are mechanical enough to be *generated* from the reference output into
-`bind_tables.rs` alongside `FUNCTION_NAMES`, which is how the function list got
-there. The complication is that they are **mutable state**: in real bash `-u`,
-`-r` and `-x` change the tables, and a later `-p`/`-P`/`-X` in the same shell
-shows the change. (The corpus case already has to run its `-x` probes in
-subshells for exactly this reason — a successful `bind -x '"x": echo hi'` makes
-the next `bind -X` print a line.) So the honest fix is a *live* binding table
-seeded from the defaults, not four static blobs. Until then osh diverges by
-being silent, and by not remembering a mutation.
+**What is left is that those tables are `const`.** In real bash `-u`, `-r` and
+`-x` change readline's live tables even with no line editor, and a later
+`-p`/`-P`/`-X`/`-q` in the same shell shows the change; osh accepts all three,
+reports exactly what bash reports, and then forgets. Two places in the corpus
+case have to work around this by running the mutating probe in a subshell: the
+`-x` block (a successful `bind -x '"x": echo hi'` makes the next `bind -X`
+print a line) and `bind -u yank` (which really removes `"\C-y": yank` from
+bash's emacs keymap, so every later `-p`, `-P` and `-q yank` disagrees). The
+honest fix is a *live* binding table on `Shell`, seeded from `bind_tables` on
+first mutation — copy-on-write, so the common read-only case still costs
+nothing. Until then those probes must stay isolated.
 
 **Reading inputrc files (`-f`)** is a separate, later piece of work. Today `-f`
 always reports `cannot read: No such file or directory`, which is exact for a
@@ -404,7 +404,11 @@ shaped the above and still apply:
 
 Surface to reproduce (pristine, `INPUTRC=/dev/null`): `-l` 174 function names,
 `-p` 488 binding lines, `-P` 175, `-v` 46 variables, `-V` 46, `-s`/`-S`/`-X`
-empty.
+empty; `bind -lpvsPVSX` 929. Per-keymap `-p`: emacs/emacs-standard 488,
+emacs-meta 225, emacs-ctlx 200, vi/vi-move/vi-command 221, vi-insert 422. And
+one readline quirk that only shows on a busy function: `-P` and `-q` list at
+most five key sequences, closing with a full stop — but a sixth turns the tail
+into `"a", "b", "c", "d", "e", ...` with no full stop at all.
 
 **`suspend` was the other half of this gap and is now closed** (2026-08-02).
 It is implemented as the refusal, because every path through it is one: osh has

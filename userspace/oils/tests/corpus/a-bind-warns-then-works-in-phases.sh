@@ -87,7 +87,36 @@ bind -u nosuchfn >/dev/null; echo "  -u        rc=$?"
 bind -q nosuchfn >/dev/null; echo "  -q        rc=$?"
 bind -q other -q nosuchfn >/dev/null; echo "  -q -q     rc=$?"
 bind -u nosuchfn -f /nosuch/file >/dev/null; echo "  -u -f     rc=$?"
-bind -u yank >/dev/null; echo "  -u known  rc=$?"
+# A `-u` that names a function readline knows really does unbind it in bash —
+# every later `-p`, `-P` and `-q yank` in this script would then disagree with
+# osh, whose tables are read-only — so this one probe runs in a subshell, for
+# the same reason the `-x` probes below do.
+( bind -u yank >/dev/null; echo "  -u known  rc=$?" )
+
+echo "=== the listings, and the fixed order the sections come out in"
+bind -p
+bind -P
+bind -v
+bind -V
+echo "  -pv == -vp $( [ "$(bind -pv 2>/dev/null)" = "$(bind -vp 2>/dev/null)" ] && echo yes || echo no )"
+echo "  combined  lines=$(bind -lpvsPVSX 2>/dev/null | wc -l)"
+
+echo "=== every keymap, and the aliases among them"
+for m in emacs emacs-standard emacs-meta emacs-ctlx vi vi-move vi-command vi-insert; do
+  echo "  $m p=$(bind -m $m -p 2>/dev/null | wc -l) P=$(bind -m $m -P 2>/dev/null | wc -l)"
+done
+echo "=== -m shows through the keymap variable, under its canonical name"
+for m in emacs-standard vi-command vi-move vi-insert; do
+  bind -m $m -v 2>/dev/null | grep '^set keymap '
+done
+
+echo "=== -q answers a known name on stdout, and readline gives up after five"
+bind -q accept-line
+bind -q digit-argument
+bind -q self-insert
+bind -m vi -q yank
+bind -q alias-expand-line; echo "  unbound   rc=$?"
+bind -q yank >/dev/null; echo "  bound     rc=$?"
 
 echo "=== a pristine readline has no macros and no -x bindings"
 echo "  -X        lines=$(bind -X 2>/dev/null | wc -l)"

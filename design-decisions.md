@@ -6494,3 +6494,67 @@ in `Shell::poll_jobs`, and drop the `known` snapshot at the top of
 `Shell::drain_jobs`. `tests/corpus/wait-with-no-operands-and-a-job-that-just-ended.sh`
 pins the behaviour; the `settle_job` helper in `interp.rs`'s tests sleeps past the
 grace and would no longer need to.
+
+## §99 — osh carries readline's compiled-in keymaps as a generated table, not a runtime library
+
+**Date:** 2026-08-02
+**Decided by:** Claude (autonomous)
+
+osh has no line editor and never will have readline. Yet `bind`'s listings are
+not optional decoration: a *non-interactive* bash answers every one of them,
+prefixing only a `bind: warning: line editing not enabled` on stderr, and that
+is exactly and permanently osh's condition — so the whole builtin is
+corpus-testable, and "print nothing" is a visible wrong answer rather than an
+honest silence. Answering `-p`, `-P`, `-v`, `-V` and `-q NAME` requires
+readline's *default keymaps*: 174 function names, five keymaps totalling 928
+bindings, and 46 variables.
+
+**The decision.** Embed them as `const` tables in
+`userspace/oils/src/bind_tables.rs`, captured from a reference bash by
+`scripts/gen-oils-bind-tables.py`.
+
+**Why generated rather than transcribed.** 928 `(key sequence, function)` pairs
+transcribed by hand would be wrong somewhere and there would be no way to tell
+where. A script makes the provenance a command instead of a claim: rerun it
+against any bash and the diff is the answer. It also *checks* what a
+transcription would assume — that `emacs-standard` really is `emacs` and that
+`vi`, `vi-move` and `vi-command` really are one map — by capturing all of them
+and refusing to proceed if they differ.
+
+**`INPUTRC=/dev/null` is load-bearing, and was the trap.** A plain `bind -p` on
+this host gives 493 lines, not 488, and `bind -s` gives 10, not 0, because
+`/etc/inputrc` is loaded. A naive capture would have baked one machine's
+configuration into osh as though it were readline's compiled-in default. The
+generator exports it, the module doc records the two numbers, and the corpus
+case exports it too — otherwise bash reads `/etc/inputrc` while osh does not and
+the two diverge for a reason that has nothing to do with osh.
+
+**Why its own module.** `interp.rs` is already large enough that adding ~1200
+lines of table to it ran rustc out of memory under `--test`
+(`STATUS_STACK_BUFFER_OVERRUN`). That is recorded in known-issues; the split is
+the mitigation.
+
+**Alternatives considered.**
+
+- *Link real readline.* Correct by construction and would bring `-f` inputrc
+  parsing and mutation for free. Rejected: it is a C dependency on a shell that
+  is meant to build for a `no_std`-adjacent target, for a feature whose only
+  consumer is a listing. The tables are 40 KB of `const`; the library is not.
+- *Reimplement readline's initialisation.* The tables are what
+  `rl_initialize()` builds from static C arrays; transcribing the *arrays*
+  rather than their output is the same data with more code between it and the
+  answer.
+- *Print nothing and document the gap.* What osh did for a day. It is a wrong
+  answer that the corpus can see, and the exclusion list was growing.
+
+**The cost, and the part left open.** The tables are `const`, so `-u`, `-r` and
+`-x` — which in bash mutate readline's live tables even with no line editor —
+are accepted, reported exactly as bash reports them, and then forgotten. Two
+probes in the corpus case must run in subshells because of it. The fix is a
+copy-on-write live table on `Shell` seeded from these; see known-issues
+TD-OILS-NO-BIND-BUILTIN.
+
+**How to reverse.** Delete `bind_tables.rs` and the generator, and cut the
+`list_p`/`list_pp`/`list_v`/`list_vv` blocks and the `-q`-known path out of
+`builtin_bind`. `bind_listings_come_from_readlines_tables` and
+`tests/corpus/a-bind-warns-then-works-in-phases.sh` pin the behaviour.

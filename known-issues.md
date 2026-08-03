@@ -224,29 +224,62 @@ persistence of an assignment prefix on a special builtin. bash changes several
 dozen other things in posix mode; none of the rest are modelled, so a script
 that sets the flag and then relies on posix *semantics* will not get them.
 
-The one confirmed by probe so far, and the most user-visible:
+**Done since:** the *expansion and variable-assignment* half of the fatality
+rule, implemented as `Shell::note_shell_error` + the `FatalWhen` enum and
+covered by `a-shell-diagnostic-can-end-the-shell-under-errexit-or-posix-mode.sh`
+plus three lib tests. Probing it turned up that this is really **two**
+independent rules with overlapping-but-different error sets:
 
-* **A variable-assignment error is fatal to a non-interactive shell.**
-  `readonly R=1; R=x` reports and returns 1 normally, but under
-  `set -o posix` bash reports and **exits**. Reproduce:
-  `bash --norc -c 'readonly R=1; set -o posix; R=y; echo unreached'` → status 1,
-  nothing printed. osh reports and carries on.
-  This is the POSIX rule that an error in a *special builtin* or a variable
-  assignment terminates a non-interactive shell; the special-builtin half is
-  equally unimplemented (`set -o posix; unset -q 2>/dev/null; echo reached`).
+* `set -o posix` — the POSIX rule. No errexit needed; carries the
+  word-expansion abort status (1 in a script, 127 under `-c`).
+* `set -e` — bash's `report_error()` ends with
+  `if (exit_immediately_on_error) exit_shell (…)`, so for these diagnostics the
+  *report itself* is fatal, ahead of the usual failed-command check. None of
+  errexit's exemptions spare it (`|| true`, an `if` condition, `!`, a function
+  body), and the status is always 1.
 
-**Proper fix:** thread a "fatal in posix mode" outcome through the assignment
-and special-builtin error paths — the same `Flow::Exit` channel
-`pending_builtin_exit` already uses — rather than special-casing each report
-site. Then survey the rest of bash's posix-mode list (`man bash`, "POSIX Mode")
-and pin each one with a probe before implementing it; several are already osh's
-behaviour by accident and need only a corpus case.
+They do not cover the same errors: a bad subscript on the *read* side and a
+readonly rejection of an assignment *prefix* are errexit-only; an arithmetic
+error in `$(( … ))` is posix-only.
+`posix-mode-is-the-posixly-correct-variable.sh` now does its
+readonly-`SHELLOPTS` check inside posix mode again (in a subshell, so the script
+survives to report it).
 
-**Why deferred:** the switch itself was the task, and the fatal-error path
-touches every assignment diagnostic in the interpreter. The corpus case
-`posix-mode-is-the-posixly-correct-variable.sh` deliberately does its
-readonly-`SHELLOPTS` check *outside* posix mode for this reason; put it back in
-when this is fixed.
+**Still open — the special-builtin half.** POSIX also terminates a
+non-interactive shell when a *special builtin* fails, and none of that is
+modelled: `set -o posix; unset -q 2>/dev/null; echo reached` still reaches.
+Measured against bash 5.2.37:
+
+* Fatal for `eval exec exit export readonly return set times trap unset .
+  source`; **not** for `break continue shift : true command let local`.
+* The failure classes that count: a usage / invalid-option error (status 2), an
+  assignment error (1), a redirection error (1), and for `.`/`source` a
+  file-open failure (1). The status is the builtin's own, not the expansion
+  abort status.
+* Suppressed by the errexit-exempt contexts (`!`, `&&`/`||` operands,
+  `if`/`while`/`until` conditions), which propagate into function bodies but
+  **not** into `eval`.
+* Also suppressed when an ERR trap is set *and runs* — `trap ':' ERR`
+  suppresses, `trap '' ERR` and `trap - ERR` do not — and then only for the
+  usage class. Theory: the handler clobbers `last_command_exit_value`, and only
+  the `> EX_SHERRBASE` test consults it, which is why an ERR trap spares
+  `unset -q` but not `. /nope` or a readonly `export R=x`.
+* `command X` and `builtin X` both strip the fatality.
+* Unrelated but found alongside: `shift 1 2` ("too many arguments") is fatal
+  with status 1 **without** posix mode and cannot be suppressed at all — bash's
+  `get_numeric_arg` calls `throw_to_top_level()`.
+
+**Proper fix for the rest:** the builtin dispatch boundary returns a bare
+`i32`, so a builtin cannot currently say *why* it failed. Give it an
+error-class side channel alongside `pending_builtin_exit` (usage / assignment /
+redirection / open), have the special-builtin dispatch consult it under posix
+mode, and gate it on the same suppression set `errexit_suppress` already
+tracks. Then survey the rest of bash's posix-mode list (`man bash`, "POSIX
+Mode") and pin each one with a probe before implementing it; several are
+already osh's behaviour by accident and need only a corpus case.
+
+**Also still open, found while probing:** `set -o posix; unset -f -v x` → bash
+exits 1, osh returns 0.
 
 ### TD-OILS-COMPLETE-TABLE-AND-OPERANDS. `complete`/`compopt` got ten things wrong at once, all downstream of two facts about bash they did not model — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

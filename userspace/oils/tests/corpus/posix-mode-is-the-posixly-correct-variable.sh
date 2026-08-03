@@ -192,3 +192,11 @@ unset POSIXLY_CORRECT
 echo "=== SHELLOPTS is still readonly"
 SHELLOPTS=x
 echo "  rc=$?"
+# In posix mode the rejection is fatal — a variable-assignment error ends a
+# non-interactive shell — so a subshell is what keeps this script alive to
+# report it. See
+# a-shell-diagnostic-can-end-the-shell-under-errexit-or-posix-mode.sh.
+set -o posix
+( SHELLOPTS=x; echo "  UNREACHABLE" )
+echo "  posix rc=$?"
+set +o posix

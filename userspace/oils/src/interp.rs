@@ -1212,6 +1212,45 @@ enum Flow {
     Abort,
 }
 
+/// Which of bash's two "a diagnostic can end the shell" rules reach a given
+/// error site.
+///
+/// Most of what goes wrong during expansion or assignment is merely a
+/// [`Flow::Discard`]: the command is abandoned, `$?` becomes 1, and the *next*
+/// parse unit still runs. Two options promote some of those into a whole-shell
+/// abort, and they do **not** cover the same set — measured against bash 5.2.37
+/// with a two-line script, so "the second line still ran" distinguishes a
+/// discard from an exit:
+///
+/// * **`set -e`.** bash reports these through `report_error()`, which ends with
+///   `if (exit_immediately_on_error) exit_shell (…)`. That fires at the
+///   *diagnostic*, not at the usual failed-command check, so none of errexit's
+///   exemptions apply — `set -e; readonly r=1; r=x || true` still exits, as does
+///   the same inside `if`, `!` or a function body. The status is always 1.
+/// * **`set -o posix`.** POSIX requires a non-interactive shell to exit on an
+///   expansion or variable-assignment error. This one needs no errexit and
+///   carries the word-expansion abort status — 127 under `-c`, 1 in a script or
+///   stdin shell (see [`Shell::fatal_abort_status`]).
+///
+/// A subshell only ever loses itself either way: `set -e; readonly r=1; ( r=x )`
+/// leaves the parent running with `$?` of 1.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FatalWhen {
+    /// Both rules reach it: a readonly rejection of a *bare* assignment, a bad
+    /// array subscript in an assignment target, an invalid indirect expansion,
+    /// an invalid parameter name, a `${…}` bad substitution.
+    ErrexitOrPosix,
+    /// Only errexit reaches it. Two sites: a bad array subscript on the *read*
+    /// side (`${a[-9]}`, `${#a[-9]}`), and a readonly rejection of an assignment
+    /// *prefix* (`readonly r=1; r=x true`) — posix mode downgrades that one to a
+    /// plain discard, where without either option the command still runs.
+    ErrexitOnly,
+    /// Only posix mode reaches it: an arithmetic error in `$(( … ))`, which bash
+    /// reports through a path errexit does not hook, so `set -e; echo $((1/0))`
+    /// discards the line and carries on while `set -o posix` ends the shell.
+    PosixOnly,
+}
+
 /// What the DEBUG trap left behind for the command it just announced.
 ///
 /// Under `shopt -s extdebug` the handler's exit status is an instruction rather
@@ -5994,19 +6033,55 @@ impl Shell {
     /// correctly inherit the enclosing shell's status.
     fn fatal_abort_status(&self, code: i32) -> i32 {
         if self.subshell_depth == 0 && self.command_mode {
-            // With errexit enabled, a fatal expansion error (nounset / `:?`) is
-            // treated as a failed command and exits 1 — not the 127 that a bare
-            // `-c` nounset abort uses. bash keys this purely on the `-e` option
-            // being set, regardless of whether errexit would actually fire in
-            // this context (`set -eu; echo $UNDEF || true` still exits 1).
-            if self.errexit && code == 127 {
-                1
-            } else {
-                code
-            }
+            code
         } else {
             1
         }
+    }
+
+    /// Arm the fatal abort for a `nounset` reference or a `${var:?word}`.
+    ///
+    /// Both carry 127, *except* under errexit, where bash treats the failure as
+    /// an ordinary failed command and exits 1 instead. It keys that purely on
+    /// `-e` being set, regardless of whether errexit would actually fire in this
+    /// context — `set -eu; echo $UNDEF || true` still exits 1.
+    ///
+    /// The demotion lives here rather than in [`Shell::fatal_abort_status`]
+    /// because it belongs to *these* two error classes and not to the flag they
+    /// travel on: a posix-mode promotion ([`Shell::note_shell_error`]) rides the
+    /// same flag with the same 127 and is **not** demoted, so
+    /// `set -eo posix; echo $((1+))` exits 127 where `set -eu; echo $UNDEF`
+    /// exits 1.
+    fn arm_unbound_abort(&mut self) {
+        self.unbound_error = Some(if self.errexit { 1 } else { 127 });
+    }
+
+    /// Note that a shell diagnostic just went to stderr, and arm a whole-shell
+    /// abort if `set -e` or `set -o posix` makes this particular one fatal —
+    /// see [`FatalWhen`] for which rule covers what, and why they differ.
+    ///
+    /// Arming is all this does: it sets [`Shell::unbound_error`], the flag every
+    /// caller of an expansion or assignment already consults *before*
+    /// [`Shell::discard_error`], so a site that used to leave a discard behind
+    /// now leaves an abort behind and the existing plumbing carries it out. Call
+    /// it right after the `perrln`/`emit_stderr` for the error; when neither
+    /// option is set it does nothing and the site's own discard stands.
+    fn note_shell_error(&mut self, when: FatalWhen) {
+        // errexit is checked first because it wins when both apply: bash's
+        // `report_error` exits at the diagnostic, before the posix rule further
+        // down would have got the chance to pick the higher status. Hence
+        // `set -eo posix; readonly r=1; r=x` exits 1 rather than 127.
+        if self.errexit && when != FatalWhen::PosixOnly {
+            self.unbound_error = Some(1);
+        } else if when != FatalWhen::ErrexitOnly && self.shell_option_enabled("posix") {
+            self.unbound_error = Some(127);
+        } else {
+            return;
+        }
+        // The site's own discard (armed just before this call, at most of them)
+        // is now redundant and would outlive the abort at the one boundary that
+        // catches an `Exit` — a subshell — so take it away with the promotion.
+        self.discard_error = None;
     }
 
     /// Execute a nested block's items (loop/if/case body, brace group, function
@@ -7333,6 +7408,12 @@ impl Shell {
             if self.readonly.contains(&c.var) {
                 self.perrln(&format!("{}: readonly variable", c.var));
                 self.last_status = 1;
+                self.note_shell_error(FatalWhen::ErrexitOrPosix);
+                if let Some(code) = self.unbound_error.take() {
+                    let status = self.fatal_abort_status(code);
+                    self.last_status = status;
+                    return Flow::Exit(status);
+                }
                 return Flow::Next;
             }
             // A variable the shell maintains (`for GROUPS in a b`) is abandoned
@@ -9742,6 +9823,7 @@ impl Shell {
         // A readonly variable cannot be reassigned; report and leave it intact.
         if self.readonly.contains(&a.name) {
             self.perrln(&format!("{}: readonly variable", a.name));
+            self.note_shell_error(FatalWhen::ErrexitOrPosix);
             return false;
         }
         // A variable the shell maintains (`GROUPS`, `FUNCNAME`, …) refuses the
@@ -9932,6 +10014,7 @@ impl Shell {
                         self.perrln(&format!("{}[]: bad array subscript", a.name));
                         if !self.decl_builtin_ctx {
                             self.discard_error = Some(1);
+                            self.note_shell_error(FatalWhen::ErrexitOrPosix);
                         }
                         return false;
                     }
@@ -9950,6 +10033,9 @@ impl Shell {
                                 crate::unparse::word_src(idx_word),
                                 b"]: bad array subscript"
                             ]);
+                            if !self.decl_builtin_ctx {
+                                self.note_shell_error(FatalWhen::ErrexitOrPosix);
+                            }
                             return false;
                         }
                         let stored = if is_int {
@@ -10030,6 +10116,7 @@ impl Shell {
                             self.berrln(&line);
                             if !self.decl_builtin_ctx {
                                 self.discard_error = Some(1);
+                                self.note_shell_error(FatalWhen::ErrexitOrPosix);
                             }
                             return false;
                         };
@@ -10577,12 +10664,30 @@ impl Shell {
                 .resolve_ref_name(&name)
                 .map_or_else(|| name.clone(), |t| t.base);
             if self.readonly.contains(&target) {
-                // bash (non-POSIX) reports this but STILL runs the command: the
-                // assignment is simply dropped from the temporary environment
-                // and the command's own exit status stands, so a succeeding
-                // command yields 0, not 1. Dropping it here also means no
-                // dispatch path downstream can mutate the readonly variable.
+                // bash (with neither `-e` nor posix mode) reports this but STILL
+                // runs the command: the assignment is simply dropped from the
+                // temporary environment and the command's own exit status
+                // stands, so a succeeding command yields 0, not 1. Dropping it
+                // here also means no dispatch path downstream can mutate the
+                // readonly variable.
                 self.perrln(&format!("{name}: readonly variable"));
+                // Under `set -e` the diagnostic itself ends the shell
+                // (`FatalWhen::ErrexitOnly`). Posix mode is milder *here* than
+                // at a bare assignment, which it makes fatal: the prefix case
+                // only loses the command and the rest of the parse unit, so
+                // `set -o posix; readonly r=1; r=x true` on its own line still
+                // lets the next line run. Arm the discard directly rather than
+                // through `note_shell_error`, which knows only about aborts.
+                self.note_shell_error(FatalWhen::ErrexitOnly);
+                if self.discard_error.is_none()
+                    && self.unbound_error.is_none()
+                    && self.shell_option_enabled("posix")
+                {
+                    self.discard_error = Some(1);
+                }
+                if self.discard_error.is_some() || self.unbound_error.is_some() {
+                    return assigns;
+                }
                 continue;
             }
             let val = self.prefix_assignment_value(a);
@@ -10954,6 +11059,12 @@ impl Shell {
             ElemValue::Absent => None,
             ElemValue::BadSubscript(base) => {
                 self.perrln(&format!("{base}: bad array subscript"));
+                // Reading through a bad subscript is not even a discard on its
+                // own — `a=1; echo ${a[-9]}` still echoes an empty line — but
+                // `set -e` ends the shell over the diagnostic all the same.
+                // Posix mode, which is fatal for the *assignment* side of the
+                // same error, leaves this one alone.
+                self.note_shell_error(FatalWhen::ErrexitOnly);
                 None
             }
         }
@@ -11173,8 +11284,10 @@ impl Shell {
         let Some(name) = bytes::as_str(&target).filter(|t| is_valid_indirect_target(t)) else {
             let line = bfmt![self.err_prefix(), &target, b": invalid variable name\n"];
             self.emit_stderr(&line);
-            // Non-fatal, like the unset-pointer case above.
+            // Non-fatal, like the unset-pointer case above — until `set -e` or
+            // posix mode promotes it to a whole-shell abort.
             self.discard_error = Some(1);
+            self.note_shell_error(FatalWhen::ErrexitOrPosix);
             return Str::new();
         };
         match self.indirect_target_value(name) {
@@ -12343,9 +12456,11 @@ impl Shell {
                                 b"]: bad array subscript"
                             ]);
                             self.discard_error = Some(1);
+                            self.note_shell_error(FatalWhen::ErrexitOnly);
                             return b"0".to_vec();
                         }
                         self.perrln(&format!("{name}: bad array subscript"));
+                        self.note_shell_error(FatalWhen::ErrexitOnly);
                         None
                     } else {
                         self.assoc_element(name, &key)
@@ -12368,9 +12483,11 @@ impl Shell {
                                 bfmt![self.err_prefix(), &src, b"]: bad array subscript\n"];
                             self.emit_stderr(&line);
                             self.discard_error = Some(1);
+                            self.note_shell_error(FatalWhen::ErrexitOnly);
                             return b"0".to_vec();
                         }
                         self.perrln(&format!("{name}: bad array subscript"));
+                        self.note_shell_error(FatalWhen::ErrexitOnly);
                         // It named nothing, so there is nothing to expand to —
                         // not even the scalar that `a[-1]` would otherwise have
                         // been allowed to reach through index 0.
@@ -17909,6 +18026,9 @@ impl Shell {
             self.unbound_error = Some(1);
         } else {
             self.discard_error = Some(1);
+            // …unless `set -e` or posix mode promotes the DISCARD to an abort
+            // anyway, which for this diagnostic both do.
+            self.note_shell_error(FatalWhen::ErrexitOrPosix);
         }
         Str::new()
     }
@@ -18041,7 +18161,7 @@ impl Shell {
                     // message and, in a non-interactive shell, exits with status
                     // 127. Reuse the nounset abort path so the simple-command
                     // driver terminates the (sub)shell before running the command.
-                    self.unbound_error = Some(127);
+                    self.arm_unbound_abort();
                     Str::new()
                 }
             }
@@ -18152,7 +18272,7 @@ impl Shell {
                     ];
                     self.emit_stderr(&line);
                     // `${a[@]:?}` on an unset/null array exits 127, like scalar `:?`.
-                    self.unbound_error = Some(127);
+                    self.arm_unbound_abort();
                     Vec::new()
                 }
             }
@@ -18216,7 +18336,7 @@ impl Shell {
     fn raise_unbound(&mut self, shown: BStr<'_>) {
         // bash aborts a non-interactive shell with status 127 on a nounset
         // unset-variable reference.
-        self.unbound_error = Some(127);
+        self.arm_unbound_abort();
         self.perrln(&bfmt![shown, b": unbound variable"]);
     }
 
@@ -19330,6 +19450,12 @@ impl Shell {
                 // makes the whole simple command abort (bash) rather than run
                 // with a fabricated value; the driver consumes this flag.
                 self.discard_error = Some(1);
+                // Posix mode goes further and ends the shell. errexit
+                // deliberately does not: bash reports arithmetic errors through
+                // a path its `report_error` exit hook never sees, so
+                // `set -e; echo $((1/0))` really does carry on with the next
+                // line where every other expansion diagnostic would not.
+                self.note_shell_error(FatalWhen::PosixOnly);
                 b"0".to_vec()
             }
         }
@@ -46605,6 +46731,140 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run_cmd_mode("set -e; echo ${undef:?bye}").1, 1);
         // Without `-e`, a bare `:?` abort under `-c` is 127.
         assert_eq!(run_cmd_mode("echo ${undef:?bye}").1, 127);
+    }
+
+    /// Every case below is two parse units — the error, then `echo tail` on its
+    /// own line — because that is the only thing that tells a *discard* (the
+    /// unit is abandoned, the next one runs, so `tail` prints) apart from an
+    /// *exit* (nothing more runs). All of them were measured against bash
+    /// 5.2.37 before being written down here.
+    #[test]
+    fn errexit_makes_an_expansion_diagnostic_end_the_shell() {
+        // bash reports these through `report_error()`, whose tail is
+        // `if (exit_immediately_on_error) exit_shell (…)`. The *diagnostic* is
+        // what ends the shell, not the failed-command check further on, and the
+        // status is always 1 — never the 127 a word-expansion abort carries.
+        for src in [
+            "set -e; readonly R=1; R=x\necho tail",
+            "set -e; a=1; echo ${a[-9]}\necho tail",
+            "set -e; a=(1); echo ${#a[-9]}\necho tail",
+            "set -e; a=(1); a[-9]=v\necho tail",
+            "set -e; declare -A m; m[\"\"]=v\necho tail",
+            "set -e; echo ${!1x}\necho tail",
+            "set -e; echo ${1x}\necho tail",
+            "set -e; echo \"${x!y}\"\necho tail",
+            "set -e; readonly R=1; R=x true\necho tail",
+            "set -e; readonly R=1; for R in a; do :; done\necho tail",
+        ] {
+            assert_eq!(run_script(src), (String::new(), 1), "{src:?}");
+        }
+        // Because the exit happens at the diagnostic, none of errexit's own
+        // exemptions spare it: `|| true`, an `if` condition, `!`, and a function
+        // body all still end the shell.
+        for src in [
+            "set -e; readonly R=1; R=x || true\necho tail",
+            "set -e; if readonly R=1; R=x; then :; fi\necho tail",
+            "set -e; ! { readonly R=1; R=x; }\necho tail",
+            "set -e; f(){ readonly R=1; R=x; }; f\necho tail",
+        ] {
+            assert_eq!(run_script(src), (String::new(), 1), "{src:?}");
+        }
+        // The rule reaches a specific set of diagnostics, not "any error during
+        // expansion". Arithmetic errors, a substring range, and an assignment
+        // through `${a[@]:=}` are reported by paths bash's exit hook never sees,
+        // so they stay plain discards and the next unit runs.
+        for src in [
+            "set -e; echo $((1+))\necho tail",
+            "set -e; echo $((1/0))\necho tail",
+            "set -e; a=abc; echo ${a:0:-5}\necho tail",
+            "set -e; declare -i n; n=1+\necho tail",
+        ] {
+            assert_eq!(run_script(src), ("tail\n".to_string(), 0), "{src:?}");
+        }
+        assert_eq!(
+            run_script("set -e; a=(1 2); echo ${a[@]:=v}\necho tail"),
+            ("1 2\ntail\n".to_string(), 0)
+        );
+        // A subshell only ever loses itself. Here the parent then exits anyway,
+        // but by the *ordinary* errexit route — the failed `( … )` command.
+        assert_eq!(
+            run_script("set -e; readonly R=1; ( R=x ); echo s=$?\necho tail"),
+            (String::new(), 1)
+        );
+        // Without `-e` the same assignment is a diagnostic and nothing more:
+        // even the current unit survives, since bash simply leaves the readonly
+        // variable alone and carries on.
+        assert_eq!(
+            run_script("readonly R=1; R=x\necho tail"),
+            ("tail\n".to_string(), 0)
+        );
+    }
+
+    /// Posix mode's version of the same rule — see
+    /// [`errexit_makes_an_expansion_diagnostic_end_the_shell`] for why every
+    /// case is two parse units.
+    #[test]
+    fn posix_mode_makes_an_expansion_error_end_the_shell() {
+        // POSIX requires a non-interactive shell to exit on an expansion or
+        // variable-assignment error. No errexit is involved, and the status is
+        // the word-expansion abort status — 1 for a script, 127 under `-c`.
+        for src in [
+            "set -o posix; readonly R=1; R=x\necho tail",
+            "set -o posix; echo $((1+))\necho tail",
+            "set -o posix; echo $((1/0))\necho tail",
+            "set -o posix; echo ${1x}\necho tail",
+            "set -o posix; echo ${!1x}\necho tail",
+            "set -o posix; echo \"${x!y}\"\necho tail",
+            "set -o posix; a=(1); a[-9]=v\necho tail",
+            "set -o posix; declare -A m; m[\"\"]=v\necho tail",
+            "set -o posix; readonly R=1; for R in a; do :; done\necho tail",
+        ] {
+            assert_eq!(run_script(src), (String::new(), 1), "{src:?}");
+        }
+        // The two rules do not cover the same errors, which is why they are
+        // modelled separately. Posix mode leaves alone: a bad subscript on the
+        // *read* side (fatal under errexit), an integer-attribute assignment, a
+        // substring range, and a readonly rejection of an assignment *prefix* —
+        // the last of which errexit does kill.
+        assert_eq!(
+            run_script("set -o posix; a=1; echo ${a[-9]}\necho tail"),
+            ("\ntail\n".to_string(), 0)
+        );
+        for src in [
+            "set -o posix; a=(1); echo ${#a[-9]}\necho tail",
+            "set -o posix; declare -i n; n=1+\necho tail",
+            "set -o posix; a=abc; echo ${a:0:-5}\necho tail",
+            "set -o posix; readonly R=1; R=x true\necho tail",
+        ] {
+            assert_eq!(run_script(src), ("tail\n".to_string(), 0), "{src:?}");
+        }
+        // A subshell loses only itself: `$?` is 1 in the parent, which keeps
+        // running and reaches the next unit.
+        assert_eq!(
+            run_script("set -o posix; ( echo $((1+)) ); echo s=$?\necho tail"),
+            ("s=1\ntail\n".to_string(), 0)
+        );
+    }
+
+    /// The status a promoted abort carries, and which rule wins when both apply.
+    #[test]
+    fn posix_and_errexit_fatality_statuses_under_command_mode() {
+        // Posix mode carries the word-expansion abort status, so under `-c` it
+        // is 127 — the same 127 a nounset abort uses.
+        assert_eq!(run_cmd_mode("set -o posix; echo $((1+))").1, 127);
+        assert_eq!(run_cmd_mode("set -o posix; readonly R=1; R=x").1, 127);
+        assert_eq!(run_cmd_mode("set -o posix; echo \"${x!y}\"").1, 127);
+        // errexit's exit is always 1, and it wins where both rules reach the
+        // same diagnostic: bash exits at `report_error` before the posix rule
+        // downstream could have picked the higher status.
+        assert_eq!(run_cmd_mode("set -eo posix; readonly R=1; R=x").1, 1);
+        assert_eq!(run_cmd_mode("set -e; readonly R=1; R=x").1, 1);
+        assert_eq!(run_cmd_mode("set -e; a=1; echo ${a[-9]}").1, 1);
+        // Arithmetic is posix-only, so `-e` does not demote it: this is 127 even
+        // with errexit on, unlike the nounset abort right below it.
+        assert_eq!(run_cmd_mode("set -eo posix; echo $((1+))").1, 127);
+        assert_eq!(run_cmd_mode("set -eu; echo $nope").1, 1);
+        assert_eq!(run_cmd_mode("set -o posix; set -u; echo $nope").1, 127);
     }
 
     #[test]

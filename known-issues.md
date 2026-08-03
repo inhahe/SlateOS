@@ -624,12 +624,12 @@ struct renamed from `LexOpts` for the occasion) and `Parser::parse_pipeline`'s
 Being parse-time, it needs the mode entered by a command of its own: a `( set -o
 posix; time -p x )` is parsed whole before any of it runs and reads `-p` as
 `time`'s option in either shell. The second is decided where the report is
-printed — `Shell::is_null_command` gates a third argument to
-`Shell::format_time_report`. Covered by
+printed — `Shell::is_null_command` gates a `shell_times` argument to
+`Shell::time_format`. Covered by
 `posix-mode-changes-the-time-reserved-word-twice-over.sh` and two lib tests.
-(osh still reports the CPU figures as zero throughout, per TD-OILS10, and
-`$TIMEFORMAT` is still unimplemented, per TD-OILS-TIMEFORMAT-IS-UNIMPLEMENTED —
-the case therefore counts lines and matches rather than showing them.)
+(Every figure in the report is a real measurement — `$TIMEFORMAT` landed with
+TD-OILS-TIMEFORMAT-IS-UNIMPLEMENTED and the CPU accounting with TD-OILS10 — so
+the case counts lines and matches rather than showing them.)
 
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
@@ -12195,10 +12195,9 @@ which `Shell` gained a `birth` instant that, unlike `seconds_anchor`,
 `timeformat_directives_and_their_modifiers`,
 `timeformat_is_read_after_the_command_and_never_fatal`,
 `posix_mode_bare_time_reports_the_shell` and the corpus case
-`the-time-report-is-rendered-from-timeformat.sh`. **`%U`, `%S` and `%P` still
-read zero** — that is TD-OILS10, not this entry; the directives themselves are
-correct and start reporting real numbers the moment per-child CPU accounting
-lands.
+`the-time-report-is-rendered-from-timeformat.sh`. `%U`, `%S` and `%P` read zero
+no longer either: TD-OILS10 was resolved immediately afterwards and they now
+carry real CPU figures on a Windows host.
 
 Two details the probing added to the description below: only **one** precision
 digit is ever read (so `%99R` fails on its second `9`), and `%P` is matched

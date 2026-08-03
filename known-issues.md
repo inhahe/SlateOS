@@ -77,7 +77,133 @@ rather than accommodated — real bash was checked in each case:
 Full suite green (1147 + 4 + 39 + 7 + doctests), clippy clean, corpus sweep
 261 matched / 0 failed.
 
-### TD-OILS-EXEC-SHEBANGLESS-SCRIPT. osh will not run a shebang-less, non-executable file as a shell script the way bash does — 2026-08-02 — OPEN
+### TD-OILS-NUL-IN-SOURCE. osh keeps NUL bytes read from shell source; bash drops them, and refuses a script whose first line has one — 2026-08-02 — OPEN
+
+**Where:** every place osh reads shell source — `userspace/oils/src/main.rs`
+(`Plan::Script`, the stdin REPL) and the `source`/`.` builtin in
+`userspace/oils/src/interp.rs`. The bytes reach the lexer exactly as read.
+
+**What:** two separate bash behaviours, neither of which osh has.
+
+1. bash's `shell_getc` **discards NUL bytes** from the input stream, so a NUL
+   never reaches a word. osh keeps them, and a word carrying one blows up much
+   later — when the word is handed to `Command`, which cannot put a NUL in an
+   argument.
+2. bash's `open_shell_script` applies `check_binary_file` to the script it was
+   asked to *read* and refuses a binary one outright.
+
+```
+$ printf 'echo one\n\000\necho two\n' > n.sh
+$ bash n.sh   →  one / two                                        (rc 0)
+$ osh  n.sh   →  one / n.sh: line 2: ^@: nul byte found in provided data / two
+
+$ printf 'echo a\000b\n' > m.sh
+$ bash m.sh   →  bash: m.sh: cannot execute binary file
+$ osh  m.sh   →  a^@b
+```
+
+**Proper fix.** Strip NUL bytes where source bytes enter the lexer — one place
+for all three readers, not three — and add the `check_binary_file` gate (already
+written, as `shell_script_indirection`'s classifier) to the script reader, so a
+binary handed to `osh FILE` is refused rather than parsed.
+
+**Impact.** Found while writing `tests/corpus/exec-shebangless-script.sh`, whose
+"a NUL past the first newline is still text" case cannot be *run* until this is
+fixed. The classifier is unit-tested there instead, and the corpus case names
+this issue where the run belongs.
+
+### TD-OILS-PREFIX-PATH-LOOKUP. A `PATH=… cmd` prefix assignment does not reach osh's own `$PATH` search — 2026-08-02 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::prefix_assignments` returns
+the temporary environment as a plain `Vec`, which only ever reaches the child
+through `apply_child_env`. `Shell::find_in_path` reads `self.param_value("PATH")`
+and so never sees it.
+
+**What:** bash keeps the prefix assignments in `temporary_env`, which
+`get_string_value` consults *first* — so `find_user_command` searches the new
+`$PATH`. osh searches the old one, fails to resolve, and hands the bare word to
+the OS, which then searches the *child's* `$PATH` and gets a different answer —
+and, for a script, one osh never got the chance to classify.
+
+```
+$ PATH=/dir cmd      # bash: runs /dir/cmd
+                     # osh:  the shell's search misses; the OS finds it via the
+                     #       child environment, so the shell never sees the file
+```
+
+**Proper fix.** Thread the temporary environment into the lookup: give the
+external-command paths a `$PATH` that prefers a `PATH=` among the prefix
+assignments. A hit found that way must **not** be entered into the `hash`
+table — bash does not hash it (`PATH=dir cmd; hash` reports an empty table,
+where a real `PATH=dir; cmd` does hash the hit).
+
+**Impact.** `PATH=… cmd` finds the wrong command, or the right one by accident.
+Found while writing `tests/corpus/exec-shebangless-script.sh`, which uses a real
+assignment inside a subshell to work around it.
+
+### TD-OILS-SHEBANG-INTERPRETER. osh does not interpret a `#!` line itself where the OS will not — 2026-08-02 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `shell_script_indirection`, which
+deliberately returns `None` for a file beginning `#!` and leaves it to the OS.
+
+**What:** bash carries the `#if !defined (HAVE_HASH_BANG_EXEC)` half of
+`execute_shell_script`: where the kernel does not honour `#!`, bash reads the
+line itself, splits it into an interpreter and at most one argument, and execs
+that with the script appended. osh leaves the file to the OS, which on the
+Windows *development* host refuses it — so a `#!/bin/sh` script that runs fine
+under host bash (the MSYS runtime emulates `#!`) reports
+`cannot execute binary file: Exec format error` under osh.
+
+**Proper fix.** Parse the `#!` line and spawn the interpreter. Note the
+diagnostics that come with it: a missing interpreter is
+`SCRIPT: cannot execute: required file not found` with status **127** (not 126),
+and an interpreter that is itself unrunnable keeps its own error.
+
+**Interacts with:** on the Windows host the interpreter named is almost always a
+POSIX path (`/bin/sh`, `/usr/bin/env`) that does not exist there, and osh has no
+MSYS-root translation — `osh -c '/bin/echo hi'` fails the same way from *any*
+context. So implementing this fixes the SlateOS target and a Unix host but
+cannot be diffed against host bash, and the corpus case therefore excludes `#!`
+files. Do not paper over it with a basename `$PATH` fallback: bash does not do
+that, and a `#!python3` file run as *shell* source would be worse than failing.
+
+### TD-OILS-EXEC-SHEBANGLESS-SCRIPT. osh will not run a shebang-less, non-executable file as a shell script the way bash does — 2026-08-02 — ✅ **RESOLVED 2026-08-02**
+
+**Resolution.** osh now decides *before* the spawn rather than after: every
+external command whose word the shell resolved to a real file has its first 128
+bytes classified by bash's `check_binary_file` rule
+(`shell_script_indirection`), and a shebang-less text file is run as an argument
+of a fresh copy of this shell — `own_binary()`, i.e. `current_exe`, because bash
+re-execs *itself* here and a script picked up this way reports the running
+`$BASH_VERSION`.
+
+The decision has to be made before the spawn because `std::process::Command`
+cannot be re-aimed at a different program once built, and its stdio plan cannot
+be recovered from a failed one. A 128-byte read is noise beside the milliseconds
+a process launch costs.
+
+All three external-spawn sites were unified onto one builder,
+`Shell::external_command`, so a pipeline stage, a plain command and a `&` job
+cannot disagree about what runs. The pipeline stage now resolves through the
+shell's own `$PATH` and `hash` cache like the others (it previously handed the
+bare word to the OS), and gained the `argv[0]`-as-typed override the others had.
+
+A file the OS *does* refuse now reports bash's wording rather than the host
+errno — `WORD: cannot execute binary file: Exec format error`, status 126, with
+`exec` adding its own `exec: WORD: cannot execute: Permission denied` second line
+(bash overwrites `errno` with EACCES before returning its verdict). `exec`'s
+reported path also stopped keeping the `./` of a relative word, which bash's
+`sh_makepath (…, MP_RMDOT)` drops.
+
+Covered by `tests/corpus/exec-shebangless-script.sh` (byte-identical to bash
+5.2.37) plus `only_a_shebangless_text_file_is_run_by_this_shell` and
+`a_file_the_os_will_not_run_is_reported_as_a_binary` in `interp.rs`. Full suite
+green (1149 + 4 + 39 + 7 + doctests), clippy clean, corpus sweep 262 matched /
+0 failed.
+
+Two divergences the corpus case ran into on the way out are tracked separately:
+TD-OILS-NUL-IN-SOURCE and TD-OILS-PREFIX-PATH-LOOKUP. `#!` files remain the OS's
+business — TD-OILS-SHEBANG-INTERPRETER.
 
 **Where:** `userspace/oils/src/interp.rs` — the external-command spawn path.
 The OS is asked to execute the file directly and its refusal is reported

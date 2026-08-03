@@ -743,6 +743,84 @@ const STANDARD_SET_O_OPTIONS: &[&str] = &[
     "xtrace",
 ];
 
+/// This shell's own binary, to be put in front of a script the OS will not run.
+///
+/// `None` when the platform will not say where the running program lives, in
+/// which case the caller leaves the command alone and the OS reports it.
+///
+/// bash re-execs *itself* here rather than `/bin/sh` — a script picked up this
+/// way reports the running `$BASH_VERSION` — so the running program is the
+/// right answer and not merely the convenient one. Note that under a test
+/// harness the running program is the harness, not `osh`: the end-to-end
+/// coverage for the interposition is therefore the corpus case, which runs the
+/// real binary.
+fn own_binary() -> Option<Str> {
+    std::env::current_exe().ok().map(|p| bytes::path_to_bytes(&p))
+}
+
+/// Whether a resolved command file has to be handed to *this* shell rather than
+/// to the OS — the answer being `Some(shell)`, the program to run in its place.
+///
+/// bash's rule lives in `shell_execve`: when `execve` refuses a file with
+/// `ENOEXEC` it looks at the beginning of the file and either reports a binary
+/// it cannot run or feeds the file to a shell. osh has to decide *before*
+/// spawning instead of after, because `std::process::Command` cannot be
+/// re-aimed at a different program once built and its stdio plan cannot be
+/// recovered from a failed one — so the check is a read of the first 128 bytes
+/// on every external spawn, which is noise beside the milliseconds a process
+/// launch costs.
+///
+/// The classification is bash's `check_binary_file`: an ELF (or, on the Windows
+/// host, a PE) image is a binary, and so is anything with a NUL byte before the
+/// first newline. Everything else is text.
+///
+/// Two kinds of text are still left to the OS:
+///   * a file beginning `#!`, which names its own interpreter. Where the OS
+///     honours that — every Unix — it already has; where it does not, running
+///     the file as *shell* source would be actively wrong, so it is left to
+///     fail (TD-OILS-SHEBANG-INTERPRETER).
+///   * a `.bat`/`.cmd` file on the Windows host, which is text the OS does run.
+fn shell_script_indirection(path: &std::path::Path) -> Option<Str> {
+    #[cfg(windows)]
+    if path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd"))
+    {
+        return None;
+    }
+    let mut head = [0u8; 128];
+    let n = File::open(path).and_then(|mut f| f.read(&mut head)).ok()?;
+    let head = head.get(..n)?;
+    if head.starts_with(b"#!") || head.starts_with(b"\x7fELF") || head.starts_with(b"MZ") {
+        return None;
+    }
+    for &c in head {
+        if c == b'\n' {
+            break;
+        }
+        if c == 0 {
+            return None;
+        }
+    }
+    own_binary()
+}
+
+/// Whether a spawn failed because the file is not something the OS can execute
+/// — `ENOEXEC`, which the Windows host spells as `ERROR_BAD_EXE_FORMAT` (193)
+/// or, for an image built for another machine, `ERROR_EXE_MACHINE_TYPE_MISMATCH`
+/// (216).
+///
+/// `std::io::ErrorKind` has no variant for this (`ExecutableFileBusy` is a
+/// different thing), so the raw code is the only way to recognise it.
+fn is_exec_format_error(e: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    let codes = [193, 216];
+    #[cfg(not(windows))]
+    let codes = [8];
+    e.raw_os_error().is_some_and(|c| codes.contains(&c))
+}
+
 /// Diagnostic + exit status for a failed `PCommand::spawn` of a command word.
 ///
 /// bash distinguishes two cases:
@@ -776,6 +854,23 @@ fn spawn_error_message(word: BStr<'_>, e: &std::io::Error, as_exec: bool) -> (Ve
             bfmt![word, b": command not found"]
         };
         return (vec![msg], 127);
+    }
+    // A file the OS refuses to run as a program image. Reaching here means the
+    // file is *binary*: text would have been handed to this shell instead of
+    // the OS in the first place (see [`shell_script_indirection`]), which is
+    // the same split bash makes in `shell_execve` — except that bash makes it
+    // after the failed `execve` and osh before the spawn. bash words the line
+    // against the file rather than against the errno the OS actually gave.
+    //
+    // An `exec` adds its own second line, and does so with EACCES: bash
+    // overwrites `errno` before returning its "binary file" verdict, so that
+    // line reads "Permission denied" and says nothing about the format.
+    if is_exec_format_error(e) {
+        let mut lines = vec![bfmt![word, b": cannot execute binary file: Exec format error"]];
+        if as_exec {
+            lines.push(bfmt![b"exec: ", word, b": cannot execute: Permission denied"]);
+        }
+        return (lines, 126);
     }
     let text = io_error_message(e);
     if as_exec {
@@ -6386,8 +6481,12 @@ impl Shell {
                 continue;
             };
 
-            let mut pc = PCommand::new(bytes::bytes_to_os(&self.resolve_program(program)));
-            self.push_child_args(&mut pc, &argv[1..]);
+            // Resolved through the shell's own `$PATH` and `hash` cache — as
+            // bash resolves every pipeline stage, and as the non-pipeline path
+            // already did — so that a stage naming a script the OS will not run
+            // is interposed the same way it would be anywhere else.
+            let resolved = self.resolve_external(program);
+            let mut pc = self.external_command(program, resolved.as_deref(), program, &argv[1..]);
             // The child inherits *this* shell's directory, which is not the
             // process's once we are inside a subshell clone.
             pc.current_dir(bytes::bytes_to_path(&self.cwd));
@@ -13505,41 +13604,30 @@ impl Shell {
     ) {
         // `exec -a name` / `exec -l` choose what the command sees as its own
         // name; everything else hands over the word as typed.
-        #[cfg_attr(not(unix), allow(unused_variables))]
         let arg0 = xopts.map_or_else(|| argv[0].clone(), |x| x.arg0_for(&argv[0]));
         // Resolve via the shell's `$PATH` (and the `hash` cache) when possible;
         // fall back to the bare name so the OS can still try to locate it.
         let resolved = self.resolve_external(&argv[0]);
         // The word a failure is reported against. `exec` names the *file* it
         // tried to become — an absolute path, because it has to have one to go
-        // on being the shell if the exec fails — so a word that resolved is
-        // quoted as the resolved path and one that only looks like a path is
-        // made absolute against the shell's directory. A word that resolved to
-        // nothing and has no slash was never a path, and keeps its spelling.
+        // on being the shell if the exec fails.
+        //
+        // A word that spelled a path is that word made absolute, whether or not
+        // it resolved: the word already said which file, and making it absolute
+        // is the only edit (which is where a leading `./` goes). Reporting the
+        // *resolved* path instead would keep that `./` — resolution joins the
+        // word onto the directory rather than tidying it — where bash's
+        // `sh_makepath (…, MP_RMDOT)` drops it. A bare word is reported as the
+        // file `$PATH` found, and one that found nothing was never a path at
+        // all, so it keeps its spelling.
         let reported: Str = match (&resolved, xopts) {
-            (Some(p), Some(_)) => exec_path_name(&self.cwd, &shell_path(p)),
-            (None, Some(_)) if argv[0].contains(&b'/') || argv[0].contains(&b'\\') => {
+            (_, Some(_)) if argv[0].contains(&b'/') || argv[0].contains(&b'\\') => {
                 exec_path_name(&self.cwd, &argv[0])
             }
+            (Some(p), Some(_)) => exec_path_name(&self.cwd, &shell_path(p)),
             _ => argv[0].clone(),
         };
-        let mut cmd = match resolved {
-            Some(path) => {
-                #[cfg_attr(not(unix), allow(unused_mut))]
-                let mut c = PCommand::new(path);
-                // Bash execs the resolved binary but sets argv[0] to the command
-                // word exactly as typed (`cat`, not `/usr/bin/cat`), so programs
-                // report their own name the way the user invoked them. Mirror
-                // that: run the resolved path, but hand the child the typed name
-                // as arg0. (Unix-only — Windows has no argv[0] override in std,
-                // and on the host the MSYS runtime reconstructs argv[0] itself.)
-                #[cfg(unix)]
-                std::os::unix::process::CommandExt::arg0(&mut c, bytes::bytes_to_os(&arg0));
-                c
-            }
-            None => PCommand::new(bytes::bytes_to_os(&self.resolve_program(&argv[0]))),
-        };
-        self.push_child_args(&mut cmd, &argv[1..]);
+        let mut cmd = self.external_command(&argv[0], resolved.as_deref(), &arg0, &argv[1..]);
         cmd.current_dir(bytes::bytes_to_path(&self.cwd));
 
         // Environment: exported shell vars + this command's temp assignments —
@@ -14198,12 +14286,7 @@ impl Shell {
             for w in &sc.words[1..] {
                 argv.extend(self.expand_word(w, true));
             }
-            let mut cmd = PCommand::new(path);
-            // bash execs the resolved binary but hands the child the command word
-            // as typed, exactly as the synchronous path does.
-            #[cfg(unix)]
-            std::os::unix::process::CommandExt::arg0(&mut cmd, bytes::bytes_to_os(&argv[0]));
-            self.push_child_args(&mut cmd, &argv[1..]);
+            let mut cmd = self.external_command(&argv[0], Some(&path), &argv[0], &argv[1..]);
             cmd.current_dir(bytes::bytes_to_path(&self.cwd));
             // A `&` job that carries no redirection of its own reads /dev/null,
             // not the shell's stdin — otherwise it would race the shell for the
@@ -19737,6 +19820,65 @@ impl Shell {
         } else {
             name.to_vec()
         }
+    }
+
+    /// Build the child process for an external command word — everywhere one is
+    /// started, so that a pipeline stage, a plain command and a `&` job all
+    /// agree about what actually runs.
+    ///
+    /// `resolved` is the file the shell's `$PATH` (and `hash` cache) produced
+    /// for `word`, or `None` when nothing was found and the OS is to be handed
+    /// the word to look up for itself. `arg0` is the name the child should
+    /// believe it was called as: the word as typed for an ordinary command,
+    /// whatever `exec -a`/`-l` chose otherwise.
+    ///
+    /// The one thing decided here and nowhere else is the interposition of this
+    /// shell in front of a script the OS will not execute (see
+    /// [`shell_script_indirection`]). That mirrors bash's `shell_execve`: the
+    /// shell binary runs with the script in front of the original arguments,
+    /// under the shell's own `argv[0]`. bash names the script there the way it
+    /// named it to itself — the word as typed when the word spelled a path, the
+    /// `$PATH` hit otherwise — and that name is what becomes the child's `$0`.
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    fn external_command(
+        &self,
+        word: BStr<'_>,
+        resolved: Option<&std::path::Path>,
+        arg0: BStr<'_>,
+        args: &[Str],
+    ) -> PCommand {
+        let indirect = resolved.and_then(shell_script_indirection);
+        let (program, args) = match (&indirect, resolved) {
+            (Some(shell), Some(path)) => {
+                let script = if word.contains(&b'/') || word.contains(&b'\\') {
+                    word.to_vec()
+                } else {
+                    shell_path(path)
+                };
+                let mut a = Vec::with_capacity(args.len().saturating_add(1));
+                a.push(script);
+                a.extend_from_slice(args);
+                (shell.clone(), a)
+            }
+            _ => (
+                resolved.map_or_else(|| self.resolve_program(word), bytes::path_to_bytes),
+                args.to_vec(),
+            ),
+        };
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut pc = PCommand::new(bytes::bytes_to_os(&program));
+        // bash execs the resolved file but hands the child the command word as
+        // typed (`cat`, not `/usr/bin/cat`), so a program reports its own name
+        // the way the user invoked it. A script running under an interposed
+        // shell keeps the *shell* there instead, exactly as bash's re-exec does.
+        // (Unix-only — Windows has no `argv[0]` override in std, and on the host
+        // the MSYS runtime reconstructs `argv[0]` itself.)
+        #[cfg(unix)]
+        if indirect.is_none() {
+            std::os::unix::process::CommandExt::arg0(&mut pc, bytes::bytes_to_os(arg0));
+        }
+        self.push_child_args(&mut pc, &args);
+        pc
     }
 
     /// Hand a child every argument after the command word.
@@ -51497,6 +51639,92 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ["/a/d: Is a directory", "exec: /a/d: cannot execute: Is a directory"]
         );
         assert_eq!(ex.1, 126);
+    }
+
+    #[test]
+    fn a_file_the_os_will_not_run_is_reported_as_a_binary() {
+        // Reaching `spawn_error_message` with ENOEXEC means the file is binary:
+        // text is handed to this shell before the spawn instead. bash words the
+        // line against the file, not the errno the OS gave, and `exec` adds a
+        // second line about EACCES — see the doc comment for why.
+        let e = std::io::Error::from_raw_os_error(if cfg!(windows) { 193 } else { 8 });
+        let text = |m: &(Vec<Str>, i32)| {
+            m.0.iter()
+                .map(|l| String::from_utf8_lossy(l).into_owned())
+                .collect::<Vec<_>>()
+        };
+        let plain = spawn_error_message(b"./bin.elf", &e, false);
+        assert_eq!(
+            text(&plain),
+            ["./bin.elf: cannot execute binary file: Exec format error"]
+        );
+        assert_eq!(plain.1, 126);
+        let ex = spawn_error_message(b"/a/bin.elf", &e, true);
+        assert_eq!(
+            text(&ex),
+            [
+                "/a/bin.elf: cannot execute binary file: Exec format error",
+                "exec: /a/bin.elf: cannot execute: Permission denied",
+            ]
+        );
+        assert_eq!(ex.1, 126);
+        // The alien-machine-image code is the same answer on the Windows host.
+        #[cfg(windows)]
+        {
+            let e = std::io::Error::from_raw_os_error(216);
+            assert!(is_exec_format_error(&e));
+        }
+        // Nothing else is: an errno the OS uses for something quite different
+        // must keep its own wording.
+        assert!(!is_exec_format_error(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[test]
+    fn only_a_shebangless_text_file_is_run_by_this_shell() {
+        // bash's `check_binary_file`: an executable image is binary, and so is
+        // anything with a NUL before the first newline; everything else is text
+        // and gets fed to a shell. A `#!` file names its own interpreter and is
+        // left to the OS (TD-OILS-SHEBANG-INTERPRETER).
+        let d = ScratchDir::new("osh_shbang");
+        let write = |name: &str, body: &[u8]| {
+            let p = d.join(name);
+            std::fs::write(&p, body).expect("write probe file");
+            p
+        };
+        let me = own_binary().expect("current_exe");
+        // Text, including the degenerate shapes: empty, and a single line with
+        // no terminator at all.
+        for (name, body) in [
+            ("plain.sh", b"echo hi\n".as_slice()),
+            ("empty.sh", b""),
+            ("nonl.sh", b"echo hi"),
+            ("late-nul.sh", b"echo hi\n\0\0\0"),
+            ("hash.sh", b"# a comment, not a shebang\n"),
+        ] {
+            let p = write(name, body);
+            assert_eq!(shell_script_indirection(&p).as_deref(), Some(&*me), "{name}");
+        }
+        // Left to the OS.
+        for (name, body) in [
+            ("sh.sh", b"#!/bin/sh\necho hi\n".as_slice()),
+            ("elf.bin", b"\x7fELF\x02\x01\x01\0rest\n"),
+            ("pe.bin", b"MZ\x90\0\x03\0\0\0\n"),
+            ("nul.bin", b"abc\0def\nghi"),
+        ] {
+            let p = write(name, body);
+            assert_eq!(shell_script_indirection(&p), None, "{name}");
+        }
+        // A file that is not there at all is nobody's script; the caller lets
+        // the OS report it.
+        assert_eq!(shell_script_indirection(&d.join("nosuch")), None);
+        // On the Windows host a batch file is text the OS itself runs.
+        #[cfg(windows)]
+        {
+            let p = write("go.CMD", b"@echo off\r\necho hi\r\n");
+            assert_eq!(shell_script_indirection(&p), None);
+        }
     }
 
     #[test]

@@ -3707,10 +3707,13 @@ pub struct Shell {
     shopt: HashMap<String, bool>,
     /// Programmable-completion specifications registered by `complete` (and
     /// mutated by `compopt`), keyed by target command. Stored in insertion
-    /// order; `complete -p` reproduces each definition verbatim. osh has no
-    /// interactive completion, so these are never invoked — they exist so that
-    /// scripts sourcing bash completion files run without error. Not inherited
-    /// by subshell clones (bash does not propagate compspecs to subshells).
+    /// order; `complete -p` reproduces each definition verbatim, but *lists*
+    /// them in bash's hash-table order — see [`Shell::comp_print_order`]. osh
+    /// has no interactive completion, so these are never invoked — they exist so
+    /// that scripts sourcing bash completion files run without error. Inherited
+    /// by subshell clones: a subshell forks the shell wholesale, so
+    /// `complete -W 1 c8; complete -p | tr '\n' ' '` lists `c8` even though the
+    /// pipeline stage that runs `complete -p` is a child.
     comp_specs: Vec<(CompKey, CompSpec)>,
     /// Names with the integer attribute (`declare -i`). Assignments to these are
     /// evaluated as arithmetic before storing (`x=5+3` stores `8`, `x+=2` adds).
@@ -9057,8 +9060,10 @@ impl Shell {
             readonly_funcs: self.readonly_funcs.clone(),
             exported_funcs: self.exported_funcs.clone(),
             shopt: self.shopt.clone(),
-            // Completion specs are not propagated to subshells (bash parity).
-            comp_specs: Vec::new(),
+            // A subshell forks the whole shell, completion table included:
+            // `complete -W 1 c8; complete -p | tr '\n' ' '` lists `c8`, which is
+            // only possible if the forked pipeline stage sees the parent's table.
+            comp_specs: self.comp_specs.clone(),
             integer_attr: self.integer_attr.clone(),
             array_valued: self.array_valued.clone(),
             lower_attr: self.lower_attr.clone(),
@@ -19928,7 +19933,7 @@ impl Shell {
             "type" => self.builtin_type(args, out, redir),
             "compgen" => self.builtin_compgen(args, out, redir),
             "complete" => self.builtin_complete(args, out, redir),
-            "compopt" => self.builtin_compopt(args),
+            "compopt" => self.builtin_compopt(args, out, redir),
             "trap" => self.builtin_trap(args, out, redir),
             "jobs" => self.builtin_jobs(args, out, stdin, redir),
             "kill" => self.builtin_kill(args, out, stdin, redir),
@@ -32453,9 +32458,28 @@ impl Shell {
         }
     }
 
-    /// Remove the completion spec for `key` (no-op if absent).
-    fn comp_remove(&mut self, key: &CompKey) {
+    /// Remove the completion spec for `key`. A `key` with no spec is an error
+    /// bash reports and fails on, so this answers whether it removed anything.
+    fn comp_remove(&mut self, key: &CompKey) -> bool {
+        let before = self.comp_specs.len();
         self.comp_specs.retain(|(k, _)| k != key);
+        self.comp_specs.len() != before
+    }
+
+    /// The order a whole-table `complete -p` prints its specs in: bash walks its
+    /// hash table bucket by bucket, and each bucket's chain newest-first, since
+    /// an insert links the new item at the head. A redefinition reuses the item
+    /// already there, so it does *not* move — which is why [`Shell::comp_set`]
+    /// replaces in place. See [`comp_hash_bucket`].
+    fn comp_print_order(&self) -> Vec<usize> {
+        let mut order: Vec<(u32, usize)> = self
+            .comp_specs
+            .iter()
+            .enumerate()
+            .map(|(i, (k, _))| (comp_hash_bucket(&comp_key_label(k)), i))
+            .collect();
+        order.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        order.into_iter().map(|(_, i)| i).collect()
     }
 
     /// `complete [-abcdefgjksuv] [-pr] [-DEI] [-o option] [-A action]
@@ -32467,13 +32491,20 @@ impl Shell {
     /// registered spec is never used to generate matches. The builtin exists so
     /// that scripts sourcing bash completion files (which call `complete`
     /// hundreds of times) run without error, and so `complete -p` round-trips a
-    /// definition byte-for-byte. `-D`/`-E`/`-I` target the special
-    /// default/empty/initial-word specs. Returns 2 on a usage error, 1 when
-    /// `-p` names an unknown spec, else 0.
+    /// definition byte-for-byte, listing order included (see
+    /// [`Shell::comp_print_order`]).
     ///
-    /// Note: with multiple specs, `complete -p` (list all) emits them in
-    /// insertion order; bash uses its internal hash-table order, which is not
-    /// reproducible. Each individual definition still matches bash exactly.
+    /// `-D`/`-E`/`-I` target the special default/empty/initial-word specs; only
+    /// the first of the three *in that order* takes effect, whatever order they
+    /// were written in, and it replaces the name operands rather than joining
+    /// them — `complete -W 1 -D kk` defines the default spec and never mentions
+    /// `kk` again. Returns 2 on a usage error, 1 when `-p`/`-r` names a spec
+    /// that does not exist, else 0.
+    ///
+    /// Options are parsed with getopt's rule — the first word that is not an
+    /// option ends them — so a flag written after a name is a *name*:
+    /// `complete -W 1 aa -o nospace` registers three specs (`aa`, `-o` and
+    /// `nospace`), none of which carries the `nospace` option.
     fn builtin_complete(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         // Option letters that take an argument (the rest of the cluster, or the
         // next word). Everything else is a no-argument flag.
@@ -32482,20 +32513,25 @@ impl Shell {
 
         let mut spec = CompSpec::default();
         let mut names: Vec<Str> = Vec::new();
-        let mut targets: Vec<CompKey> = Vec::new();
+        // The three specials are flags rather than operands, so more than one
+        // can be named at once; bash keeps a bit per flag and then consults them
+        // in a fixed order, which is why `complete -W 1 -I -E -D` defines the
+        // *default* spec.
+        let mut want_default = false;
+        let mut want_empty = false;
+        let mut want_initial = false;
         let mut do_print = false;
         let mut do_remove = false;
         let mut has_def = false; // any spec-defining option seen
 
+        // Options stop at the first word that is not one — getopt's rule, and
+        // the reason a `-D` written after a name is a name. `--` ends them too,
+        // and a lone `-` is an operand like any other word.
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
             if a.as_slice() == b"--" {
                 i += 1;
-                while i < args.len() {
-                    names.push(args[i].clone());
-                    i += 1;
-                }
                 break;
             }
             if a.len() > 1 && a.starts_with(b"-") {
@@ -32553,7 +32589,42 @@ impl Shell {
                             }
                             'G' => spec.globpat = Some(val),
                             'W' => spec.wordlist = Some(val),
-                            'F' => spec.function = Some(val),
+                            // The only option argument bash inspects at all: a
+                            // function name that could not be *written* as one
+                            // word of a command is refused on the spot, before
+                            // any later option is even looked at (measured:
+                            // `complete -F 'f x' -Z nm` reports the function,
+                            // not the bad letter). The set it tests against is
+                            // bash's `shell_break_chars` — everything that ends
+                            // a word — so a `$` or a `/` is quite acceptable,
+                            // and so is a name no identifier could be
+                            // (`complete -F 1bad nm` is fine) despite what the
+                            // wording says.
+                            'F' => {
+                                if val.iter().any(|b| {
+                                    matches!(
+                                        b,
+                                        b'(' | b')'
+                                            | b'<'
+                                            | b'>'
+                                            | b';'
+                                            | b'&'
+                                            | b'|'
+                                            | b' '
+                                            | b'\t'
+                                            | b'\n'
+                                    )
+                                }) {
+                                    self.berrln(&bfmt![
+                                        self.err_prefix(),
+                                        b"complete: `",
+                                        &val,
+                                        b"': not a valid identifier"
+                                    ]);
+                                    return 2;
+                                }
+                                spec.function = Some(val);
+                            }
                             'C' => spec.command = Some(val),
                             'X' => spec.filterpat = Some(val),
                             'P' => spec.prefix = Some(val),
@@ -32572,9 +32643,9 @@ impl Shell {
                             match c {
                                 'p' => do_print = true,
                                 'r' => do_remove = true,
-                                'D' => targets.push(CompKey::Default),
-                                'E' => targets.push(CompKey::Empty),
-                                'I' => targets.push(CompKey::Initial),
+                                'D' => want_default = true,
+                                'E' => want_empty = true,
+                                'I' => want_initial = true,
                                 _ => {
                                     self.perrln(&format!("complete: -{c}: invalid option"));
                                     self.emit_stderr(USAGE);
@@ -32587,38 +32658,66 @@ impl Shell {
                 }
                 i += 1;
             } else {
-                names.push(a.clone());
-                i += 1;
+                break;
             }
         }
+        names.extend(args.get(i..).unwrap_or_default().iter().cloned());
+
+        // The one target the specials name, if any: bash asks its three flags in
+        // this order and takes the first, so `-I -E -D` is `-D`. A special
+        // stands in for the whole operand list — the names are simply not
+        // consulted again.
+        let special = if want_default {
+            Some(CompKey::Default)
+        } else if want_empty {
+            Some(CompKey::Empty)
+        } else if want_initial {
+            Some(CompKey::Initial)
+        } else {
+            None
+        };
+
+        // Every target this call is about, in the order bash visits them.
+        let keys: Vec<CompKey> = match &special {
+            Some(k) => vec![k.clone()],
+            None => names.iter().map(|n| CompKey::Name(n.clone())).collect(),
+        };
 
         // ---- remove mode (`-r`) ----
         if do_remove {
-            if names.is_empty() && targets.is_empty() {
+            // A bare `complete -r` empties the table and cannot fail, even when
+            // there was nothing in it. Named, it is an error per target that has
+            // no spec — reported for each, and the command fails once.
+            if keys.is_empty() {
                 self.comp_specs.clear();
-            } else {
-                for n in &names {
-                    self.comp_remove(&CompKey::Name(n.clone()));
-                }
-                for t in &targets {
-                    self.comp_remove(t);
+                return 0;
+            }
+            let mut status = 0;
+            for k in keys {
+                if !self.comp_remove(&k) {
+                    self.berrln(&bfmt![
+                        self.err_prefix(),
+                        b"complete: ",
+                        comp_key_label(&k),
+                        b": no completion specification"
+                    ]);
+                    status = 1;
                 }
             }
-            return 0;
+            return status;
         }
 
         // ---- print mode (`-p`, and bare `complete`) ----
-        if do_print || (!has_def && names.is_empty() && targets.is_empty()) {
-            if names.is_empty() && targets.is_empty() {
+        if do_print || (!has_def && keys.is_empty()) {
+            if keys.is_empty() {
                 let mut s = Str::new();
-                for (k, sp) in &self.comp_specs {
-                    s.extend_from_slice(&format_compspec(k, sp));
+                for i in self.comp_print_order() {
+                    if let Some((k, sp)) = self.comp_specs.get(i) {
+                        s.extend_from_slice(&format_compspec(k, sp));
+                    }
                 }
                 return self.write_bytes(out, redir, &s);
             }
-            let mut keys: Vec<CompKey> = Vec::new();
-            keys.extend(targets.iter().cloned());
-            keys.extend(names.iter().map(|n| CompKey::Name(n.clone())));
             let mut status = 0;
             for k in keys {
                 match self.comp_get(&k).map(|sp| format_compspec(&k, sp)) {
@@ -32640,92 +32739,130 @@ impl Shell {
         }
 
         // ---- define mode ----
-        if names.is_empty() && targets.is_empty() {
+        if keys.is_empty() {
             // Defining options given but nowhere to attach them.
             self.emit_stderr(USAGE);
             return 2;
         }
-        // With -D/-E/-I present, bash ignores any command names.
-        if targets.is_empty() {
-            for n in &names {
-                self.comp_set(CompKey::Name(n.clone()), spec.clone());
-            }
-        } else {
-            for t in &targets {
-                self.comp_set(t.clone(), spec.clone());
-            }
+        for k in keys {
+            self.comp_set(k, spec.clone());
         }
         0
     }
 
-    /// `compopt [-o|+o option] [-DEI] [name ...]` — modify the `-o` options of an
-    /// existing completion spec (`-o` adds, `+o` removes). With no name, bash
-    /// errors unless invoked from within a running completion function; osh has
-    /// no such context, so a nameless `compopt` always reports that error.
-    /// Returns 2 on a usage error, 1 when a named spec does not exist, else 0.
-    fn builtin_compopt(&mut self, args: &[Str]) -> i32 {
+    /// `compopt [-o|+o option] [-DEI] [name ...]` — read or modify the `-o`
+    /// options of an existing completion spec (`-o` adds, `+o` removes).
+    ///
+    /// Asked with *neither* `-o` nor `+o`, it is a query rather than an edit: it
+    /// writes one `compopt` line per target giving every option's state, `-o`
+    /// for on and `+o` for off, in the same canonical order `complete -p` uses.
+    /// That line is a command that would restore the state, which is why it
+    /// spells out the options that are *off* as well.
+    ///
+    /// The option scan is the same clustered getopt `complete`'s is — `-onospace`
+    /// and `-Do nospace` both work, and a word that is not an option ends the
+    /// options, so `compopt zz -D` asks about a spec named `-D`. The one
+    /// difference is that `+` opens an option word too, and only `o` reads which
+    /// sign it was given with: `+D` sets the same flag `-D` does. As in
+    /// `complete`, only the first of `-D`/`-E`/`-I` *in that order* takes effect
+    /// and it replaces the name operands.
+    ///
+    /// With no target at all bash errors unless invoked from within a running
+    /// completion function; osh has no such context, so a nameless `compopt`
+    /// always reports that error. Returns 2 on a usage error, 1 when a named
+    /// spec does not exist, else 0.
+    fn builtin_compopt(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         const USAGE: &[u8] = b"compopt: usage: compopt [-o|+o option] [-DEI] [name ...]\n";
         let mut add: Vec<Str> = Vec::new();
         let mut del: Vec<Str> = Vec::new();
-        let mut targets: Vec<CompKey> = Vec::new();
+        let mut want_default = false;
+        let mut want_empty = false;
+        let mut want_initial = false;
         let mut names: Vec<Str> = Vec::new();
 
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            match a.as_slice() {
-                b"--" => {
-                    i += 1;
-                    while i < args.len() {
-                        names.push(args[i].clone());
-                        i += 1;
-                    }
-                    break;
-                }
-                b"-o" | b"+o" => {
-                    i += 1;
-                    let Some(v) = args.get(i) else {
-                        self.berrln(&bfmt![
-                            self.err_prefix(),
-                            b"compopt: ",
-                            a.as_slice(),
-                            b": option requires an argument"
-                        ]);
-                        self.emit_stderr(USAGE);
-                        return 2;
-                    };
-                    if !COMP_O_ORDER.iter().any(|n| n.as_bytes() == v.as_slice()) {
-                        self.berrln(&bfmt![
-                            self.err_prefix(),
-                            b"compopt: ",
-                            v.as_slice(),
-                            b": invalid option name"
-                        ]);
-                        return 2;
-                    }
-                    if a.as_slice() == b"-o" {
-                        add.push(v.clone());
-                    } else {
-                        del.push(v.clone());
-                    }
-                }
-                b"-D" => targets.push(CompKey::Default),
-                b"-E" => targets.push(CompKey::Empty),
-                b"-I" => targets.push(CompKey::Initial),
-                other if other.len() > 1 && other.starts_with(b"-") => {
-                    let c = char::from(other.get(1).copied().unwrap_or(b'?'));
-                    self.perrln(&format!("compopt: -{c}: invalid option"));
-                    self.emit_stderr(USAGE);
-                    return 2;
-                }
-                _ => names.push(a.clone()),
+            if a.as_slice() == b"--" {
+                i += 1;
+                break;
             }
-            i += 1;
+            // A lone `-` or `+` is a word, not an empty option cluster.
+            if a.len() > 1 && (a.starts_with(b"-") || a.starts_with(b"+")) {
+                let plus = a.starts_with(b"+");
+                let cluster = a.get(1..).unwrap_or_default();
+                let sign = if plus { '+' } else { '-' };
+                let mut ci = 0;
+                while ci < cluster.len() {
+                    let c = char::from(cluster[ci]);
+                    match c {
+                        'o' => {
+                            let val: Str = if ci + 1 < cluster.len() {
+                                cluster.get(ci + 1..).unwrap_or_default().to_vec()
+                            } else {
+                                i += 1;
+                                match args.get(i) {
+                                    Some(v) => v.clone(),
+                                    None => {
+                                        self.perrln(&format!(
+                                            "compopt: {sign}o: option requires an argument"
+                                        ));
+                                        self.emit_stderr(USAGE);
+                                        return 2;
+                                    }
+                                }
+                            };
+                            if !COMP_O_ORDER.iter().any(|n| n.as_bytes() == val) {
+                                self.berrln(&bfmt![
+                                    self.err_prefix(),
+                                    b"compopt: ",
+                                    &val,
+                                    b": invalid option name"
+                                ]);
+                                return 2;
+                            }
+                            if plus { del.push(val) } else { add.push(val) }
+                            ci = cluster.len();
+                        }
+                        'D' => {
+                            want_default = true;
+                            ci += 1;
+                        }
+                        'E' => {
+                            want_empty = true;
+                            ci += 1;
+                        }
+                        'I' => {
+                            want_initial = true;
+                            ci += 1;
+                        }
+                        _ => {
+                            self.perrln(&format!("compopt: {sign}{c}: invalid option"));
+                            self.emit_stderr(USAGE);
+                            return 2;
+                        }
+                    }
+                }
+                i += 1;
+            } else {
+                break;
+            }
         }
+        names.extend(args.get(i..).unwrap_or_default().iter().cloned());
 
-        let mut keys: Vec<CompKey> = Vec::new();
-        keys.extend(targets.iter().cloned());
-        keys.extend(names.iter().map(|n| CompKey::Name(n.clone())));
+        let special = if want_default {
+            Some(CompKey::Default)
+        } else if want_empty {
+            Some(CompKey::Empty)
+        } else if want_initial {
+            Some(CompKey::Initial)
+        } else {
+            None
+        };
+        let keys: Vec<CompKey> = match &special {
+            Some(k) => vec![k.clone()],
+            None => names.iter().map(|n| CompKey::Name(n.clone())).collect(),
+        };
 
         if keys.is_empty() {
             // osh is never inside a completion function.
@@ -32733,6 +32870,9 @@ impl Shell {
             return 1;
         }
 
+        // Targets are visited in the order they were written — a name repeated
+        // is answered twice — so a diagnostic lands between the lines around it.
+        let query = add.is_empty() && del.is_empty();
         let mut status = 0;
         for k in keys {
             if self.comp_get(&k).is_none() {
@@ -32743,6 +32883,31 @@ impl Shell {
                     b": no completion specification"
                 ]);
                 status = 1;
+                continue;
+            }
+            if query {
+                let mut s = Str::from(b"compopt".as_slice());
+                let on: Vec<Str> =
+                    self.comp_get(&k).map(|sp| sp.o_opts.clone()).unwrap_or_default();
+                for o in COMP_O_ORDER {
+                    let set = on.iter().any(|v| v.as_slice() == o.as_bytes());
+                    s.extend_from_slice(if set { b" -o " } else { b" +o " });
+                    s.extend_from_slice(o.as_bytes());
+                }
+                match &k {
+                    CompKey::Name(n) => {
+                        s.push(b' ');
+                        s.extend_from_slice(&comp_quote_name(n));
+                    }
+                    CompKey::Default => s.extend_from_slice(b" -D"),
+                    CompKey::Empty => s.extend_from_slice(b" -E"),
+                    CompKey::Initial => s.extend_from_slice(b" -I"),
+                }
+                s.push(b'\n');
+                let rc = self.write_bytes(out, redir, &s);
+                if rc != 0 {
+                    return rc;
+                }
                 continue;
             }
             if let Some(sp) = self.comp_get_mut(&k) {
@@ -36529,15 +36694,61 @@ fn str_bytes<I: IntoIterator<Item = &'static str>>(names: I) -> Vec<Str> {
     names.into_iter().map(|n| n.as_bytes().to_vec()).collect()
 }
 
-/// The label used for a completion target in diagnostics (`complete -p foo`
-/// error → `foo`; the specials print as their flag).
+/// The name a completion target is stored under, which is also the name its
+/// diagnostics use. bash keeps the three specials in the same hash table as
+/// ordinary commands, under reserved names no command word could ever be, and
+/// makes no attempt to translate them back: `complete -p -D` with nothing
+/// registered really does answer `complete: _DefaultCmD_: no completion
+/// specification`.
 fn comp_key_label(k: &CompKey) -> Str {
     match k {
         CompKey::Name(n) => n.clone(),
-        CompKey::Default => b"-D".to_vec(),
-        CompKey::Empty => b"-E".to_vec(),
-        CompKey::Initial => b"-I".to_vec(),
+        CompKey::Default => b"_DefaultCmD_".to_vec(),
+        CompKey::Empty => b"_EmptycmD_".to_vec(),
+        CompKey::Initial => b"_InitialWorD_".to_vec(),
     }
+}
+
+/// Which bucket of bash's programmable-completion hash table `name` lands in.
+///
+/// A bare `complete`/`complete -p` walks that table rather than any list the
+/// shell kept in order, so the printout is neither insertion order nor sorted —
+/// it is bucket order, and reproducing it means reproducing the hash. The
+/// function is bash's `hash_string` (`hashlib.c`): 32-bit FNV-1, offset basis
+/// and prime as published, over a table `pcomplib.c` creates with 512 buckets.
+///
+/// The one subtlety is the byte type. bash dereferences a `char *`, which is
+/// *signed* on x86, so a byte at or above 0x80 is sign-extended before the xor
+/// and flips bits the mask would otherwise never see. That is measurable: a
+/// spec named `\x80` prints before one named `aa`, which only the signed
+/// reading predicts.
+fn comp_hash_bucket(name: BStr<'_>) -> u32 {
+    let mut h: u32 = 2_166_136_261;
+    for &b in name {
+        h = h.wrapping_mul(16_777_619);
+        h ^= b as i8 as i32 as u32;
+    }
+    h & 511
+}
+
+/// The completion target as `complete -p` writes it: single-quoted when the
+/// name holds a shell metacharacter (or is empty), bare otherwise.
+///
+/// This is bash's `sh_contains_shell_metas` test — the same one `set -x` uses,
+/// hence [`xtrace_meta`] — but *only* that test: a name holding an unprintable
+/// byte is not ANSI-C quoted the way a traced word would be, it goes out raw
+/// (`complete -p` on a spec named `a\x01b` prints `a\x01b`, unquoted).
+fn comp_quote_name(name: BStr<'_>) -> Str {
+    if name.is_empty() {
+        return b"''".to_vec();
+    }
+    let mut prev: Option<Ch> = None;
+    let quote = bytes::chars(name).any(|c| {
+        let meta = c.as_ascii().is_some_and(|a| xtrace_meta(a, prev));
+        prev = Some(c);
+        meta
+    });
+    if quote { single_quote_bytes(name) } else { name.to_vec() }
 }
 
 /// Render a completion spec as a re-executable `complete …` line (matching
@@ -36597,7 +36808,7 @@ fn format_compspec(key: &CompKey, sp: &CompSpec) -> Str {
     match key {
         CompKey::Name(n) => {
             s.push(b' ');
-            s.extend_from_slice(n);
+            s.extend_from_slice(&comp_quote_name(n));
         }
         CompKey::Default => s.extend_from_slice(b" -D"),
         CompKey::Empty => s.extend_from_slice(b" -E"),
@@ -48535,9 +48746,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("complete -o nospace; echo rc=$?").0, "rc=2\n");
         // A missing required argument is a usage error.
         assert_eq!(run("complete -F; echo rc=$?").0, "rc=2\n");
-        // Bare `complete` and `complete -r nope` succeed.
+        // Bare `complete` succeeds, and so does `-r` with nothing to remove —
+        // but `-r NAME` answers for the name, so an absent one is status 1.
         assert_eq!(run("complete; echo rc=$?").0, "rc=0\n");
-        assert_eq!(run("complete -r nope; echo rc=$?").0, "rc=0\n");
+        assert_eq!(run("complete -r; echo rc=$?").0, "rc=0\n");
+        assert_eq!(run("complete -r nope; echo rc=$?").0, "rc=1\n");
     }
 
     #[test]
@@ -48555,8 +48768,66 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("compopt -o nospace; echo rc=$?").0, "rc=1\n");
         // compopt on an unknown spec is status 1.
         assert_eq!(run("compopt -o nospace nope; echo rc=$?").0, "rc=1\n");
-        // An invalid compopt option is a usage error (status 2).
+        // An invalid compopt option is a usage error (status 2), whichever sign
+        // opened the word — `+` opens an option cluster here as readily as `-`.
         assert_eq!(run("compopt -Z; echo rc=$?").0, "rc=2\n");
+        assert_eq!(run("compopt +Z; echo rc=$?").0, "rc=2\n");
+    }
+
+    /// Asked with neither `-o` nor `+o`, `compopt` reports instead of editing:
+    /// one line per target naming *every* option, `-o` for on and `+o` for off,
+    /// so the line is a command that would restore the state.
+    #[test]
+    fn compopt_without_an_option_reports_the_whole_state() {
+        const ALL_OFF: &str = "+o bashdefault +o default +o dirnames +o filenames \
+                               +o noquote +o nosort +o nospace +o plusdirs";
+        assert_eq!(run("complete -W a cmd; compopt cmd").0, format!("compopt {ALL_OFF} cmd\n"));
+        assert_eq!(
+            run("complete -o dirnames -o nospace -W a cmd; compopt cmd").0,
+            "compopt +o bashdefault +o default -o dirnames +o filenames \
+             +o noquote +o nosort -o nospace +o plusdirs cmd\n"
+        );
+        // A special reports under the flag it was defined with...
+        assert_eq!(run("complete -W a -D; compopt -D").0, format!("compopt {ALL_OFF} -D\n"));
+        // ...and a name that needs quoting is quoted, as in `complete -p`.
+        assert_eq!(run("complete -W a 'x y'; compopt 'x y'").0, format!("compopt {ALL_OFF} 'x y'\n"));
+        // Targets are answered in the order written, and not deduplicated.
+        assert_eq!(
+            run("complete -W a c1; complete -W a c2; compopt c2 c1 c2").0,
+            format!("compopt {ALL_OFF} c2\ncompopt {ALL_OFF} c1\ncompopt {ALL_OFF} c2\n")
+        );
+    }
+
+    /// `compopt`'s option scan is `complete`'s clustered getopt: a word that is
+    /// not an option ends the options, `-o` takes the rest of its cluster or the
+    /// next word, and only the first of `-D`/`-E`/`-I` counts — replacing the
+    /// name operands rather than joining them.
+    #[test]
+    fn compopt_reads_its_options_the_way_complete_does() {
+        // Clustered, and `+onospace` is `+o nospace`.
+        assert_eq!(
+            run("complete -W a cmd; compopt -onospace cmd; complete -p cmd").0,
+            "complete -o nospace -W 'a' cmd\n"
+        );
+        assert_eq!(
+            run("complete -o nospace -W a cmd; compopt +onospace cmd; complete -p cmd").0,
+            "complete -W 'a' cmd\n"
+        );
+        // `-Do nospace` is `-D` and then `-o`, whose value is the next word.
+        assert_eq!(
+            run("complete -W a -D; compopt -Do nospace; complete -pD").0,
+            "complete -o nospace -W 'a' -D\n"
+        );
+        // `+D` sets the same flag `-D` does: only `o` reads the sign.
+        assert_eq!(run("complete -W a -D; compopt +D; echo rc=$?").0.lines().last(), Some("rc=0"));
+        // Only the first of the three, in D-E-I order, and it drops the names.
+        assert_eq!(run("complete -W a -D; compopt -I -E -D; echo rc=$?").0.lines().last(), Some("rc=0"));
+        assert_eq!(run("complete -W a nm; compopt -D nm; echo rc=$?").0, "rc=1\n");
+        // A name written first ends the options, so `-D` after it is a name.
+        assert_eq!(run("complete -W a nm; compopt nm -D 2>/dev/null; echo rc=$?").0.lines().last(), Some("rc=1"));
+        // A lone `-` or `+` is a word, not an empty cluster.
+        assert_eq!(run("compopt - ; echo rc=$?").0, "rc=1\n");
+        assert_eq!(run("compopt + ; echo rc=$?").0, "rc=1\n");
     }
 
     #[test]
@@ -62387,5 +62658,111 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.set_login_shell();
         let files = StartupFiles { interactive: true, ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&files), None);
+    }
+
+    /// The completion table is a hash table, and `complete -p` dumps it in the
+    /// table's order rather than the script's. The bucket index is bash's
+    /// `hash_string` — 32-bit FNV-1 over a 512-bucket table — and the bytes are
+    /// read through a *signed* `char`, which is what puts `\x80` (bucket 159)
+    /// ahead of `aa` (bucket 315) instead of far behind it.
+    #[test]
+    fn a_completion_name_lands_in_bashs_own_hash_bucket() {
+        assert_eq!(comp_hash_bucket(b"aa"), 315);
+        assert_eq!(comp_hash_bucket(b"zz"), 389);
+        assert_eq!(comp_hash_bucket(b"\x80"), 159);
+        assert_eq!(comp_hash_bucket(b"\xffA"), 225);
+        assert_eq!(comp_hash_bucket(b"\xc3\xa9x"), 319);
+
+        // The empty name still has one, because the offset basis is not zero.
+        assert_eq!(comp_hash_bucket(b""), 2_166_136_261 & 511);
+
+        // A collision measured against bash: these two share a bucket, which is
+        // what makes the within-bucket tie-break observable at all.
+        assert_eq!(comp_hash_bucket(b"c8"), comp_hash_bucket(b"c174"));
+
+        // The specials hash under their reserved names, not their flag letters.
+        assert_eq!(
+            comp_hash_bucket(&comp_key_label(&CompKey::Default)),
+            comp_hash_bucket(b"_DefaultCmD_")
+        );
+    }
+
+    /// Within one bucket the newest spec prints first, because `hash_insert`
+    /// links at the head of the chain — but a *redefinition* reuses the item
+    /// already in the chain, so it keeps the place it first took.
+    #[test]
+    fn a_bucket_prints_newest_first_and_a_redefinition_does_not_move() {
+        let names = |sh: &Shell| -> Vec<Str> {
+            sh.comp_print_order()
+                .into_iter()
+                .filter_map(|i| sh.comp_specs.get(i).map(|(k, _)| comp_key_label(k)))
+                .collect()
+        };
+
+        let mut sh = new_shell();
+        sh.comp_set(CompKey::Name(b"c8".to_vec()), CompSpec::default());
+        sh.comp_set(CompKey::Name(b"c174".to_vec()), CompSpec::default());
+        assert_eq!(names(&sh), vec![b"c174".to_vec(), b"c8".to_vec()]);
+
+        // The other insertion order reverses it: this is a chain, not a sort.
+        let mut sh = new_shell();
+        sh.comp_set(CompKey::Name(b"c174".to_vec()), CompSpec::default());
+        sh.comp_set(CompKey::Name(b"c8".to_vec()), CompSpec::default());
+        assert_eq!(names(&sh), vec![b"c8".to_vec(), b"c174".to_vec()]);
+
+        // Redefining c174 does not lift it back over c8.
+        sh.comp_set(CompKey::Name(b"c174".to_vec()), CompSpec::default());
+        assert_eq!(names(&sh), vec![b"c8".to_vec(), b"c174".to_vec()]);
+
+        // Across buckets the order is the bucket's, whatever the script did:
+        // ddd=123, ccc=150, bbb=221, aaa=384, so both insertion orders print
+        // `ddd ccc bbb aaa` — which is exactly what bash prints for both.
+        for order in [["aaa", "bbb", "ccc", "ddd"], ["ddd", "ccc", "bbb", "aaa"]] {
+            let mut sh = new_shell();
+            for n in order {
+                sh.comp_set(CompKey::Name(n.as_bytes().to_vec()), CompSpec::default());
+            }
+            assert_eq!(
+                names(&sh),
+                vec![b"ddd".to_vec(), b"ccc".to_vec(), b"bbb".to_vec(), b"aaa".to_vec()]
+            );
+        }
+    }
+
+    /// A printed name is quoted for exactly one reason: it holds a shell
+    /// metacharacter (or is empty). That is a narrower test than a word's, and
+    /// notably it has no ANSI-C fallback — an unprintable byte goes out raw.
+    #[test]
+    fn a_printed_completion_name_is_quoted_only_for_a_metacharacter() {
+        for plain in ["aa", "a-b", "a_b", "a=b", "a:b", "a,b", "a.b", "a/b", "a+b", "a%b", "a@b"] {
+            assert_eq!(comp_quote_name(plain.as_bytes()), plain.as_bytes(), "{plain}");
+        }
+        for meta in ["a b", "a|b", "a&b", "a;b", "a(b", "a<b", "a!b", "a*b", "a$b", "a`b"] {
+            assert_eq!(
+                comp_quote_name(meta.as_bytes()),
+                single_quote_bytes(meta.as_bytes()),
+                "{meta}"
+            );
+        }
+        // `~` and `#` only start a word, so their position decides.
+        assert_eq!(comp_quote_name(b"a~b"), b"a~b");
+        assert_eq!(comp_quote_name(b"~ab"), b"'~ab'");
+        assert_eq!(comp_quote_name(b"a#b"), b"a#b");
+        assert_eq!(comp_quote_name(b"#ab"), b"'#ab'");
+        // Empty is quoted so the operand does not vanish...
+        assert_eq!(comp_quote_name(b""), b"''");
+        // ...but a control byte is not, because bash asks only the meta test.
+        assert_eq!(comp_quote_name(b"a\x01b"), b"a\x01b");
+    }
+
+    /// bash keeps the three specials in the ordinary table under reserved names,
+    /// and makes no attempt to translate them back — so a diagnostic about a
+    /// missing default spec really does say `_DefaultCmD_`.
+    #[test]
+    fn the_special_completion_targets_are_named_by_their_internal_spelling() {
+        assert_eq!(comp_key_label(&CompKey::Default), b"_DefaultCmD_");
+        assert_eq!(comp_key_label(&CompKey::Empty), b"_EmptycmD_");
+        assert_eq!(comp_key_label(&CompKey::Initial), b"_InitialWorD_");
+        assert_eq!(comp_key_label(&CompKey::Name(b"foo".to_vec())), b"foo");
     }
 }

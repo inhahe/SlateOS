@@ -39,6 +39,16 @@ Exit status: 0 if every case matched (or diverged exactly as waived), 1 if any
 case diverged unexpectedly or a waived case unexpectedly matched, 2 on a setup
 error (no osh binary, no reference bash).
 
+Failure reports
+---------------
+Every failing case is also written in full to
+`target/dvscratch/corpus-failures/<case>.txt` (the directory is emptied at the
+start of each run). The stdout report is easy to lose — it is usually piped
+through `tail`, and a *flaky* case that fails one run in four then passes on
+demand leaves nothing to work from. The report file survives that: it holds
+both shells' complete stdout, stderr and status, so the next occurrence of an
+intermittent divergence is captured whether or not anyone was watching.
+
 Load
 ----
 A full sweep is minutes of two shells starting thousands of children, so the
@@ -61,6 +71,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CORPUS = REPO / "userspace" / "oils" / "tests" / "corpus"
+# Where a failing case's full report is left behind; see the module docstring.
+REPORTS = REPO / "target" / "dvscratch" / "corpus-failures"
 
 # Where the host build puts osh. The *newest* existing one wins: a stale
 # `release/` build silently testing week-old behaviour is the easiest way to
@@ -284,6 +296,31 @@ def compare(case: Case, bash_run: Run, osh_run: Run) -> list[str]:
     return diffs
 
 
+def write_report(case: Case, bash_run: Run, osh_run: Run, diffs: list[str]) -> Path | None:
+    """Leave a failing case's full measurement on disk, and say where.
+
+    Returns None if the report could not be written — a harness that cannot
+    save its notes must still report the failure it found.
+    """
+    path = REPORTS / f"{case.name}.txt"
+    body = [f"case: {case.path}", "", "differences:", *diffs, ""]
+    for label, run in (("bash", bash_run), ("osh", osh_run)):
+        body += [
+            f"--- {label} status: {run.status}"
+            + ("  (timed out)" if run.timed_out else ""),
+            f"--- {label} stdout ---",
+            run.stdout,
+            f"--- {label} stderr ---",
+            run.stderr,
+        ]
+    try:
+        REPORTS.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(body), encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return path
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--osh", help="path to the osh binary (default: newest target/ build)")
@@ -307,6 +344,11 @@ def main() -> int:
     print(f"osh : {osh}")
     print(f"bash: {bash}")
     print(f"{len(cases)} case(s)\n")
+
+    # Start from an empty report directory so what is left in it afterwards is
+    # exactly this run's failures, not a mix with some earlier run's.
+    if REPORTS.exists():
+        shutil.rmtree(REPORTS, ignore_errors=True)
 
     failures = 0
     waived = 0
@@ -333,6 +375,8 @@ def main() -> int:
                 print("    (a child could not be started, twice — the host is")
                 print("     out of commit charge or process slots, not the shell)")
             print("\n".join(diffs))
+            report = write_report(case, bash_run, osh_run, diffs)
+            print(f"    (full report: {report})" if report else "    (no report written)")
             continue
         print(f". {case.name}")
         if args.verbose:

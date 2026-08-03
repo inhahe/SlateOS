@@ -313,7 +313,11 @@ pub enum ArrayElem {
     Positional(Word),
     /// `[sub]=value` — an explicit subscript. For an indexed array `sub` is an
     /// arithmetic index; for an associative array it is a string key.
-    Keyed { index: Word, value: Word },
+    ///
+    /// `append` is set by the `[sub]+=value` spelling, which concatenates onto
+    /// whatever the slot holds when the element is bound (or *adds* to it under
+    /// the `-i` attribute) instead of replacing it.
+    Keyed { index: Word, value: Word, append: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

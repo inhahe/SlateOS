@@ -667,9 +667,12 @@ pub(crate) fn assignment_src(a: &Assignment) -> Str {
                 .iter()
                 .map(|e| match e {
                     ArrayElem::Positional(w) => word_src(w),
-                    ArrayElem::Keyed { index, value } => {
-                        bfmt![b"[", &word_src(index), b"]=", &word_src(value)]
-                    }
+                    ArrayElem::Keyed { index, value, append } => bfmt![
+                        b"[",
+                        &word_src(index),
+                        if *append { b"]+=".as_slice() } else { b"]=".as_slice() },
+                        &word_src(value)
+                    ],
                 })
                 .collect();
             s.push_str(&bytes::join(&items, b" "));

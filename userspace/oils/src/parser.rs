@@ -2919,23 +2919,45 @@ impl Parser {
     }
 }
 
-/// Parse one array-literal element: either `[sub]=value` (keyed) or a bare
-/// positional value. A keyed element is recognised when the first segment is a
-/// literal that starts with `[` and contains `]=` (so the subscript is literal
-/// text — an expanded key like `[$k]=v` inside a literal falls back to
-/// positional; use element assignment `m[$k]=v` for that).
+/// Where an array-literal element's subscript ends: the offset of the first `]`
+/// that is immediately followed by `=` or `+=`, whether that `=` was the append
+/// spelling, and the offset just past it where the value text starts.
+///
+/// Scanning for the *first* `]` that closes an assignment (rather than for the
+/// literal two bytes `]=`) is what lets `[a]+=v` be keyed at all, and it keeps
+/// `[a]x]=v` keying on `a]x` the way searching for `]=` did.
+fn elem_subscript_close(s: BStr<'_>) -> Option<(usize, bool, usize)> {
+    let mut from = 0usize;
+    loop {
+        let rel = s.get(from..)?.iter().position(|&b| b == b']')?;
+        let at = from.checked_add(rel)?;
+        let rest = s.get(at.checked_add(1)?..).unwrap_or_default();
+        if rest.starts_with(b"+=") {
+            return Some((at, true, at.checked_add(3)?));
+        }
+        if rest.starts_with(b"=") {
+            return Some((at, false, at.checked_add(2)?));
+        }
+        from = at.checked_add(1)?;
+    }
+}
+
+/// Parse one array-literal element: either `[sub]=value` / `[sub]+=value`
+/// (keyed) or a bare positional value. A keyed element is recognised when the
+/// first segment is a literal that starts with `[` and the subscript closes
+/// with `]=` or `]+=` (so the subscript is literal text — an expanded key like
+/// `[$k]=v` inside a literal is handled by the general branch below).
 fn parse_array_elem(segs: &[Seg], opts: ParseOpts) -> Result<ArrayElem, ParseError> {
     if let Some(Seg::Lit(first)) = segs.first()
         && first.first() == Some(&b'[')
-        && let Some(close_eq) = bytes::find(first, b"]=")
+        && let Some((close, append, val_at)) = elem_subscript_close(first)
     {
         // Verbatim: an associative keyed element `[ x ]=v` keys on the literal
         // ` x ` (bash preserves subscript whitespace); indexed elements
         // arithmetic-evaluate, which ignores it.
-        let index =
-            word_verbatim_from_source(first.get(1..close_eq).unwrap_or_default(), opts)?;
+        let index = word_verbatim_from_source(first.get(1..close).unwrap_or_default(), opts)?;
         let mut value_segs: Vec<Seg> = Vec::new();
-        let after = first.get(close_eq + 2..).unwrap_or_default();
+        let after = first.get(val_at..).unwrap_or_default();
         if !after.is_empty() {
             value_segs.push(Seg::Lit(after.to_vec()));
         }
@@ -2943,6 +2965,7 @@ fn parse_array_elem(segs: &[Seg], opts: ParseOpts) -> Result<ArrayElem, ParseErr
         return Ok(ArrayElem::Keyed {
             index,
             value: word_from_segs(&value_segs, opts)?,
+            append,
         });
     }
     // General keyed element: the subscript spans quoted or expansion segments,
@@ -2953,7 +2976,7 @@ fn parse_array_elem(segs: &[Seg], opts: ParseOpts) -> Result<ArrayElem, ParseErr
     // belong to it and are copied verbatim.
     if let Some(Seg::Lit(first)) = segs.first()
         && first.first() == Some(&b'[')
-        && bytes::find(first, b"]=").is_none()
+        && elem_subscript_close(first).is_none()
     {
         let mut key_segs: Vec<Seg> = Vec::new();
         let head = first.get(1..).unwrap_or_default();
@@ -2962,7 +2985,7 @@ fn parse_array_elem(segs: &[Seg], opts: ParseOpts) -> Result<ArrayElem, ParseErr
         }
         for (i, seg) in segs.iter().enumerate().skip(1) {
             if let Seg::Lit(s) = seg
-                && let Some(pos) = bytes::find(s, b"]=")
+                && let Some((pos, append, val_at)) = elem_subscript_close(s)
             {
                 let before = s.get(..pos).unwrap_or_default();
                 if !before.is_empty() {
@@ -2970,7 +2993,7 @@ fn parse_array_elem(segs: &[Seg], opts: ParseOpts) -> Result<ArrayElem, ParseErr
                 }
                 let index = word_from_segs(&key_segs, opts)?;
                 let mut value_segs: Vec<Seg> = Vec::new();
-                let after = s.get(pos + 2..).unwrap_or_default();
+                let after = s.get(val_at..).unwrap_or_default();
                 if !after.is_empty() {
                     value_segs.push(Seg::Lit(after.to_vec()));
                 }
@@ -2978,6 +3001,7 @@ fn parse_array_elem(segs: &[Seg], opts: ParseOpts) -> Result<ArrayElem, ParseErr
                 return Ok(ArrayElem::Keyed {
                     index,
                     value: word_from_segs(&value_segs, opts)?,
+                    append,
                 });
             }
             key_segs.push(seg.clone());

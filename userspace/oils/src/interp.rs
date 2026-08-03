@@ -10463,14 +10463,21 @@ impl Shell {
 
     /// Record one expanded element of a compound assignment for the `set -x` line,
     /// if one is being collected (see [`Shell::xtrace_compound`]). `index` is the
-    /// subscript's expanded text for a keyed element, `None` for a positional one.
-    fn xtrace_compound_elem(&mut self, index: Option<BStr<'_>>, value: BStr<'_>) {
+    /// subscript's expanded text for a keyed element, `None` for a positional one;
+    /// `append` distinguishes the `[k]+=v` spelling, which bash traces as written
+    /// (`declare -A m=([a]+=x)` traces `m=(['a']+='x')`).
+    fn xtrace_compound_elem(&mut self, index: Option<BStr<'_>>, value: BStr<'_>, append: bool) {
         let Some(buf) = self.xtrace_compound.as_mut() else {
             return;
         };
         let v = xtrace_compound_quote(value);
         buf.push(match index {
-            Some(i) => bfmt![b"[", xtrace_compound_quote(i), b"]=", v],
+            Some(i) => bfmt![
+                b"[",
+                xtrace_compound_quote(i),
+                if append { b"]+=".as_slice() } else { b"]=".as_slice() },
+                v
+            ],
             None => v,
         });
     }
@@ -11007,15 +11014,16 @@ impl Shell {
                                 let word = self.expand_to_string(w);
                                 words.push(word);
                             }
-                            ArrayElem::Keyed { index, value } => {
-                                // Reassemble the `[idx]=val` source shape. The
-                                // brackets and `=` are literal separators, so
-                                // expanding the two halves and rejoining is
-                                // exactly what bash gets from expanding the
-                                // whole word.
+                            ArrayElem::Keyed { index, value, append } => {
+                                // Reassemble the `[idx]=val` source shape (or
+                                // `[idx]+=val`). The brackets and `=` are
+                                // literal separators, so expanding the two
+                                // halves and rejoining is exactly what bash
+                                // gets from expanding the whole word.
                                 let idx = self.expand_to_string(index);
                                 let val = self.expand_to_string(value);
-                                words.push(bfmt![b"[", &idx, b"]=", &val]);
+                                let eq: &[u8] = if *append { b"]+=" } else { b"]=" };
+                                words.push(bfmt![b"[", &idx, eq, &val]);
                             }
                         }
                         if armed.is_none() && self.discard_error.is_some() {
@@ -11089,24 +11097,29 @@ impl Shell {
                     // leaves `d` untouched and reports only the division, where the
                     // interleaved shape below would have bound `[a]` and named
                     // `loose`.
-                    let mut elems: Vec<(Option<Str>, Str, Str)> = Vec::new();
+                    let mut elems: Vec<AssocElem> = Vec::new();
                     for e in items {
                         match e {
-                            ArrayElem::Keyed { index, value } => {
+                            ArrayElem::Keyed { index, value, append } => {
                                 let key = self.expand_to_string(index);
                                 let val = self.expand_to_string(value);
                                 bail_if_expansion_failed!();
-                                self.xtrace_compound_elem(Some(&key), &val);
+                                self.xtrace_compound_elem(Some(&key), &val, *append);
                                 let src = elem_src(e);
-                                elems.push((Some(key), val, src));
+                                elems.push(AssocElem { key: Some(key), val, src, append: *append });
                             }
                             ArrayElem::Positional(w) => {
                                 // Never expanded: see the note on the bare branch
                                 // below. The raw source is what the refusal names
                                 // and what the trace shows.
                                 let word = crate::unparse::word_src(w);
-                                self.xtrace_compound_elem(None, &word);
-                                elems.push((None, word.clone(), word));
+                                self.xtrace_compound_elem(None, &word, false);
+                                elems.push(AssocElem {
+                                    key: None,
+                                    val: word.clone(),
+                                    src: word,
+                                    append: false,
+                                });
                             }
                         }
                     }
@@ -11114,8 +11127,10 @@ impl Shell {
                     // here — before the processing pass, whose diagnostics bash
                     // likewise reports after it.
                     self.compound_expansion_done(a);
-                    for (key, val, src) in elems {
-                        if !self.assoc_keyed_element(a, &mut pending, key, val, &src) {
+                    for e in elems {
+                        if !self
+                            .assoc_keyed_element(a, &mut pending, e.key, e.val, &e.src, e.append)
+                        {
                             return false;
                         }
                     }
@@ -11125,8 +11140,9 @@ impl Shell {
                     // leaves `d[a]` set and reports `loose` *before* the division,
                     // so the interleaving has to be preserved here.
                     for e in items {
+                        let elem_append = matches!(e, ArrayElem::Keyed { append: true, .. });
                         let (key, val) = match e {
-                            ArrayElem::Keyed { index, value } => {
+                            ArrayElem::Keyed { index, value, .. } => {
                                 let key = self.expand_to_string(index);
                                 let val = self.expand_to_string(value);
                                 (Some(key), val)
@@ -11141,7 +11157,14 @@ impl Shell {
                             ArrayElem::Positional(w) => (None, crate::unparse::word_src(w)),
                         };
                         bail_if_expansion_failed!();
-                        if !self.assoc_keyed_element(a, &mut pending, key, val, &elem_src(e)) {
+                        if !self.assoc_keyed_element(
+                            a,
+                            &mut pending,
+                            key,
+                            val,
+                            &elem_src(e),
+                            elem_append,
+                        ) {
                             return false;
                         }
                     }
@@ -11184,7 +11207,7 @@ impl Shell {
                 // straight into the array instead of accumulating.
                 // Phase 1 — expand. `None` is a positional element, which takes
                 // whatever the running index is when it is bound.
-                let mut expanded: Vec<(Option<i64>, Str)> = Vec::new();
+                let mut expanded: Vec<(Option<i64>, Str, bool)> = Vec::new();
                 for e in items {
                     match e {
                         ArrayElem::Positional(w) => {
@@ -11193,20 +11216,20 @@ impl Shell {
                             // words before parameter/other expansion.
                             for bw in self.expand_braces_opt(w) {
                                 for v in self.expand_word(&bw, true) {
-                                    self.xtrace_compound_elem(None, &v);
-                                    expanded.push((None, v));
+                                    self.xtrace_compound_elem(None, &v, false);
+                                    expanded.push((None, v, false));
                                 }
                             }
                         }
-                        ArrayElem::Keyed { index, value } => {
+                        ArrayElem::Keyed { index, value, append } => {
                             // The subscript's expanded *text* is kept alongside
                             // the number it evaluates to, because that is what
                             // `set -x` traces (`['1+1']`, `[' 1 ']`).
                             let text = self.expand_to_arith_string(index);
                             let idx = self.eval_arith_index_text(&text);
                             let val = self.expand_to_string(value);
-                            self.xtrace_compound_elem(Some(&text), &val);
-                            expanded.push((Some(idx), val));
+                            self.xtrace_compound_elem(Some(&text), &val, *append);
+                            expanded.push((Some(idx), val, *append));
                         }
                     }
                 }
@@ -11239,10 +11262,11 @@ impl Shell {
                     .get(&a.name)
                     .and_then(|elems| elems.keys().next_back().copied())
                     .map_or(0, |k| k.saturating_add(1));
-                for (idx, val) in expanded {
-                    let Some(val) = self.apply_value_attrs(&a.name, val) else {
-                        return false;
-                    };
+                for (idx, val, elem_append) in expanded {
+                    // The subscript is settled first because bash settles it
+                    // first: an out-of-range one skips the element without ever
+                    // looking at its value, so `declare -ai n=([-5]=1/0)` reports
+                    // the subscript and never the division.
                     let at = match idx {
                         None => next,
                         Some(idx) => match usize::try_from(idx) {
@@ -11252,6 +11276,21 @@ impl Shell {
                                 continue;
                             }
                         },
+                    };
+                    // `[i]+=v` concatenates onto whatever the slot holds *now*
+                    // (`-i` adds instead), and phase 2 writes straight into the
+                    // array, so "now" already accounts for the clear a non-append
+                    // literal just did and for the elements before this one:
+                    // `n=(A B); n=([0]+=x)` is `x`, `n+=([0]+=x)` is `Ax`, and
+                    // `n=(p q [0]+=Z)` is `pZ`.
+                    let cur = if elem_append {
+                        self.arrays.get(&a.name).and_then(|e| e.get(&at)).cloned()
+                    } else {
+                        None
+                    };
+                    let Some(val) = self.appended_attributed_value(&a.name, cur, val, elem_append)
+                    else {
+                        return false;
                     };
                     self.arrays.entry(a.name.clone()).or_default().insert(at, val);
                     next = at.saturating_add(1);
@@ -11272,6 +11311,9 @@ impl Shell {
     /// `src` is the element's *source* text, which both refusals below name when
     /// the literal is a bare `m=(…)`.
     ///
+    /// `elem_append` is the element's own `[k]+=v` spelling, which is independent
+    /// of `a.append` (the literal's).
+    ///
     /// Returns `false` when a bad `-i` value abandons the assignment.
     fn assoc_keyed_element(
         &mut self,
@@ -11280,6 +11322,7 @@ impl Shell {
         key: Option<Str>,
         val: Str,
         src: &Str,
+        elem_append: bool,
     ) -> bool {
         let Some(key) = key else {
             // bash quotes the offending word only when the literal came from a
@@ -11311,7 +11354,7 @@ impl Shell {
                 bfmt![
                     b"[",
                     &xtrace_compound_quote(&key),
-                    b"]=",
+                    if elem_append { b"]+=".as_slice() } else { b"]=".as_slice() },
                     &xtrace_compound_quote(&val)
                 ]
             } else {
@@ -11320,7 +11363,17 @@ impl Shell {
             self.berrln(&bfmt![self.err_prefix(), &shown, b": bad array subscript"]);
             return true;
         }
-        let Some(val) = self.apply_value_attrs(&a.name, val) else {
+        // `[k]+=v` concatenates onto what the slot holds *at the moment the
+        // element is bound* (`-i` adds instead). Which value that is falls out of
+        // where the literal's bindings go: an append literal writes straight into
+        // the live table, so consecutive elements accumulate — `declare -A
+        // m=([a]=1); m+=([a]+=x [a]+=y)` gives `1xy` — while a non-append literal
+        // builds `pending` off to the side, leaving the *old* table as what is
+        // read: `declare -A m=([a]=Q); m=([a]=1 [a]+=x)` gives `Qx` and not `1x`,
+        // because the pending `[a]=1` is invisible, and the last pending write for
+        // a key is the one that survives the swap.
+        let cur = if elem_append { self.assoc_element(&a.name, &key) } else { None };
+        let Some(val) = self.appended_attributed_value(&a.name, cur, val, elem_append) else {
             return false;
         };
         if a.append {
@@ -37785,10 +37838,12 @@ fn array_literal_word(items: &[ArrayElem]) -> Word {
         }
         match e {
             ArrayElem::Positional(w) => parts.extend(w.parts.iter().cloned()),
-            ArrayElem::Keyed { index, value } => {
+            ArrayElem::Keyed { index, value, append } => {
                 parts.push(WordPart::Literal(b"[".to_vec()));
                 parts.extend(index.parts.iter().cloned());
-                parts.push(WordPart::Literal(b"]=".to_vec()));
+                parts.push(WordPart::Literal(
+                    if *append { b"]+=".to_vec() } else { b"]=".to_vec() },
+                ));
                 parts.extend(value.parts.iter().cloned());
             }
         }
@@ -39004,6 +39059,21 @@ fn xtrace_compound_quote(s: BStr<'_>) -> Str {
     out
 }
 
+/// One fully expanded element of an associative literal in *subscript* mode, held
+/// until the whole operand has been expanded.
+///
+/// A declaration builtin's operand is expanded in one pass and processed in a
+/// second (see the branch that builds these), so each element has to carry
+/// everything the processing pass needs: `key` is `None` for an element written
+/// without a subscript, `src` is the element as written (which the refusals name)
+/// and `append` is its `[k]+=v` spelling.
+struct AssocElem {
+    key: Option<Str>,
+    val: Str,
+    src: Str,
+    append: bool,
+}
+
 /// Source text for one element of a compound assignment, keyed or not.
 ///
 /// A bare `m=(…)` names an element it refuses by the text it was *written* with
@@ -39012,10 +39082,10 @@ fn xtrace_compound_quote(s: BStr<'_>) -> Str {
 fn elem_src(e: &ArrayElem) -> Str {
     match e {
         ArrayElem::Positional(w) => crate::unparse::word_src(w),
-        ArrayElem::Keyed { index, value } => bfmt![
+        ArrayElem::Keyed { index, value, append } => bfmt![
             b"[",
             &crate::unparse::word_src(index),
-            b"]=",
+            if *append { b"]+=".as_slice() } else { b"]=".as_slice() },
             &crate::unparse::word_src(value)
         ],
     }
@@ -58835,6 +58905,80 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The same rule through the bare compound-assignment path.
         let (o3, _) = run("declare -A m; s='x y'; m=($s v); declare -p m");
         assert_eq!(o3, "declare -A m=([\"x y\"]=\"v\" )\n");
+    }
+
+    #[test]
+    fn keyed_literal_element_can_append() {
+        // `[k]+=v` inside a literal concatenates onto whatever the slot holds when
+        // the element is bound. For an *indexed* literal that is the array itself,
+        // which phase 2 writes straight into — so a non-append literal has already
+        // cleared it and an append literal has not, and earlier elements of the
+        // same literal are visible.
+        assert_eq!(
+            run("declare -a n=(A B); n=([0]+=x); declare -p n").0,
+            "declare -a n=([0]=\"x\")\n"
+        );
+        assert_eq!(
+            run("declare -a n=(A B); n+=([0]+=x); declare -p n").0,
+            "declare -a n=([0]=\"Ax\" [1]=\"B\")\n"
+        );
+        assert_eq!(
+            run("declare -a n=([0]=1 [0]+=x [0]+=y); declare -p n").0,
+            "declare -a n=([0]=\"1xy\")\n"
+        );
+        assert_eq!(
+            run("declare -a n; n=(p q [0]+=Z); declare -p n").0,
+            "declare -a n=([0]=\"pZ\" [1]=\"q\")\n"
+        );
+        // An *associative* non-append literal builds its pairs off to the side, so
+        // what `+=` reads is the *old* table: the pending `[a]=1` below is
+        // invisible and the last pending write for the key is what survives.
+        assert_eq!(
+            run("declare -A m=([a]=Q); m=([a]=1 [a]+=x); declare -p m").0,
+            "declare -A m=([a]=\"Qx\" )\n"
+        );
+        assert_eq!(
+            run("declare -A m=([a]=1 [a]+=x [a]+=y); declare -p m").0,
+            "declare -A m=([a]=\"y\" )\n"
+        );
+        // An append literal writes live instead, so its elements do accumulate.
+        assert_eq!(
+            run("declare -A m=([a]=1); m+=([a]+=x [a]+=y); declare -p m").0,
+            "declare -A m=([a]=\"1xy\" )\n"
+        );
+        // `-i` adds rather than concatenating, on either kind.
+        assert_eq!(
+            run("declare -ai n=(1 2); n+=([0]+=3); declare -p n").0,
+            "declare -ai n=([0]=\"4\" [1]=\"2\")\n"
+        );
+        assert_eq!(
+            run("declare -Ai m=([a]=5); m+=([a]+=3); declare -p m").0,
+            "declare -Ai m=([a]=\"8\" )\n"
+        );
+        // Pair mode is chosen by the first element, and there a `[k]+=v` element is
+        // just the literal key `[k]+=v` — the same as `[k]=v` there.
+        assert_eq!(
+            run("declare -A m=(k v [k]+=Z); declare -p m").0,
+            "declare -A m=([k]=\"v\" [\"[k]+=Z\"]=\"\" )\n"
+        );
+        // The trace keeps the `+=` spelling, requoted like any other element.
+        assert_eq!(
+            run("{ set -x; declare -A m=([a]+=x [b]=y); } 2>&1").0,
+            "+ m=(['a']+='x' ['b']='y')\n+ declare -A m\n"
+        );
+        assert_eq!(
+            run("{ set -x; declare -a n=([0]+=x [1]=y); } 2>&1").0,
+            "+ n=(['0']+='x' ['1']='y')\n+ declare -a n\n"
+        );
+    }
+
+    #[test]
+    fn indexed_literal_settles_the_subscript_before_the_value() {
+        // A subscript the array cannot hold skips the element without the value
+        // ever being looked at, so the `-i` evaluation below never runs and its
+        // division is never reported.
+        let (o, _) = run("declare -ai n\n{ n=([-5]=1/0); } 2>&1\ndeclare -p n; echo \"s=$?\"");
+        assert_eq!(o, "osh: n: bad array subscript\ndeclare -ai n=()\ns=0\n");
     }
 
     #[test]

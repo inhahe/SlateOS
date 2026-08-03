@@ -1228,6 +1228,25 @@ enum Flow {
     Abort,
 }
 
+/// What a nested read-eval loop — an `eval`, a `.`/`source`, a trap handler —
+/// yielded: bash's `parse_and_execute` return, which a [`Flow`] alone cannot
+/// carry because it has no room for a status.
+///
+/// The two are not the same thing. The flow says how the loop *ended*; the
+/// status is the value bash's `last_result` local holds when it returns, and
+/// that local starts at success and is only ever written by the loop body. So
+/// an input with no units in it at all — empty, blank, comments only — yields
+/// success no matter what `$?` was on the way in, which is why `false; eval ""`
+/// and `false; . /dev/null` are both 0.
+#[derive(Debug, Clone, Copy)]
+struct SourceRun {
+    /// How the loop ended.
+    flow: Flow,
+    /// The status the loop itself produced: the last unit's, or success when
+    /// there was no unit to run.
+    status: i32,
+}
+
 /// Which of bash's two "a diagnostic can end the shell" rules reach a given
 /// error site.
 ///
@@ -5457,6 +5476,20 @@ impl Shell {
         map: &LineMap,
         hist: HistRead,
     ) -> Flow {
+        self.run_source_flow_result(src, out, stdin, map, hist).flow
+    }
+
+    /// [`Shell::run_source_flow_out`] for the two callers — `eval` and
+    /// `.`/`source` — that report the loop's own status rather than `$?`. See
+    /// [`SourceRun`] for why those differ.
+    fn run_source_flow_result(
+        &mut self,
+        src: BStr<'_>,
+        out: &mut Out,
+        stdin: &StdinSrc,
+        map: &LineMap,
+        hist: HistRead,
+    ) -> SourceRun {
         // This is bash's `parse_and_execute` — every `eval`, `.`/`source`, trap
         // handler and top-level read comes through it — and the commands it
         // builds are *new nodes*, so the `CMD_IGNORE_RETURN` of whatever is
@@ -5465,12 +5498,21 @@ impl Shell {
         // shell, `eval 'unset -q || true'` does not. See
         // [`Shell::usage_suppress`].
         let outer_usage_suppress = std::mem::take(&mut self.usage_suppress);
-        let flow = self.run_source_flow_units(src, out, stdin, map, hist);
+        let mut ran = false;
+        let flow = self.run_source_flow_units(src, out, stdin, map, hist, &mut ran);
         self.usage_suppress = outer_usage_suppress;
-        flow
+        // bash's `last_result` starts at success and is written only inside the
+        // loop, so an input the loop never entered is a success — whatever `$?`
+        // was before it. `$?` itself is left alone, which is what keeps a
+        // comment-only *line* at the top level from clearing the status.
+        SourceRun { flow, status: if ran { self.last_status } else { 0 } }
     }
 
     /// The read-parse-execute loop itself; see [`Shell::run_source_flow_out`].
+    ///
+    /// `ran` is set as soon as the loop takes a unit in hand — whether or not
+    /// that unit parses, since bash's `last_result` is written on both branches
+    /// — and is left alone when the input holds no unit at all.
     fn run_source_flow_units(
         &mut self,
         src: BStr<'_>,
@@ -5478,6 +5520,7 @@ impl Shell {
         stdin: &StdinSrc,
         map: &LineMap,
         hist: HistRead,
+        ran: &mut bool,
     ) -> Flow {
         // Parse and execute one unit (one logical line) at a time rather than
         // parsing the whole input up front, because bash's read-parse-execute
@@ -5504,6 +5547,7 @@ impl Shell {
             let Some(unit) = ip.next_unit(aliases, opts) else {
                 return Flow::Next;
             };
+            *ran = true;
             // A job that has finished *and* been reported leaves the table here,
             // at the boundary *before* a unit — which is where bash sweeps it,
             // because this loop is bash's read-parse-execute loop. The
@@ -20388,8 +20432,8 @@ impl Shell {
         // `+ eval :` and then `++ :`, and the two nest (`eval 'v=$(echo q)'`
         // traces the `echo` at three).
         self.xtrace_level = self.xtrace_level.saturating_add(1);
-        let eval_flow =
-            self.run_source_flow_out(src, out, stdin, &LineMap::Offset(eval_base), HistRead::Off);
+        let eval_run =
+            self.run_source_flow_result(src, out, stdin, &LineMap::Offset(eval_base), HistRead::Off);
         self.xtrace_level = self.xtrace_level.saturating_sub(1);
         self.eval_depth = self.eval_depth.saturating_sub(1);
         // A `return` in the string is the caller's, not `eval`'s: the string
@@ -20398,11 +20442,11 @@ impl Shell {
         // `eval` and `.`/`source` part company — a sourced file *is* what a
         // `return` in it ends — so it is read here rather than in the shared
         // [`Shell::read_eval_builtin_status`].
-        if matches!(eval_flow, Flow::Return) {
-            self.pending_unwind = Some(eval_flow);
-            return self.last_status;
+        if matches!(eval_run.flow, Flow::Return) {
+            self.pending_unwind = Some(eval_run.flow);
+            return eval_run.status;
         }
-        self.read_eval_builtin_status(eval_flow)
+        self.read_eval_builtin_status(eval_run)
     }
 
     /// The status a builtin that ran a nested read-eval loop — `eval`, `.`/
@@ -20429,19 +20473,25 @@ impl Shell {
     /// The re-raise goes through `discard_error` because a builtin handler can
     /// only return an `i32`; the teardown in [`Shell::run_builtin_body`] turns
     /// it back into a `Flow::Discard` once the builtin's scopes are unwound.
-    fn read_eval_builtin_status(&mut self, flow: Flow) -> i32 {
-        match flow {
+    ///
+    /// The status yielded is the *loop's* — [`SourceRun::status`], not `$?` —
+    /// so a body with nothing in it reports success rather than whatever the
+    /// command before it left behind. The two only differ in that case: any
+    /// flow but a plain `Next` means a unit ran, and then they are the same
+    /// value.
+    fn read_eval_builtin_status(&mut self, run: SourceRun) -> i32 {
+        match run.flow {
             Flow::Exit(code) => {
                 self.pending_builtin_exit = Some(code);
                 code
             }
             Flow::Abort => {
                 self.pending_abort = true;
-                self.last_status
+                run.status
             }
             Flow::Discard if self.subshell_depth > 0 => {
-                self.discard_error = Some(self.last_status);
-                self.last_status
+                self.discard_error = Some(run.status);
+                run.status
             }
             // A loop flow belongs to the caller's loop: neither `eval` nor a
             // sourced file is a boundary for one, so `for …; do . lib.sh; done`
@@ -20449,12 +20499,12 @@ impl Shell {
             // boundary, and the `break` builtin has already warned and yielded
             // `Flow::Next` when there was no loop to leave.)
             Flow::Break(_) | Flow::Continue(_) => {
-                self.pending_unwind = Some(flow);
-                self.last_status
+                self.pending_unwind = Some(run.flow);
+                run.status
             }
             // Everything else — including a `return`, which is what ends a
             // *sourced file* rather than its caller — stops here.
-            _ => self.last_status,
+            _ => run.status,
         }
     }
 
@@ -32825,7 +32875,8 @@ impl Shell {
                 // bash, just as `eval`'s string is: `set -x; . f` traces
                 // `+ . f` and then the script's own commands one `+` deeper.
                 self.xtrace_level = self.xtrace_level.saturating_add(1);
-                let flow = self.run_source_flow_out(&src, out, stdin, &LineMap::Offset(0), HistRead::Off);
+                let run =
+                    self.run_source_flow_result(&src, out, stdin, &LineMap::Offset(0), HistRead::Off);
                 self.xtrace_level = self.xtrace_level.saturating_sub(1);
                 self.trap_suppress.pop();
                 self.source_stack.pop();
@@ -32838,7 +32889,7 @@ impl Shell {
                 // shell, and a discard raised inside a subshell takes the
                 // subshell with it — a builtin can only ask for either through
                 // the side channels (see [`Shell::read_eval_builtin_status`]).
-                let code = self.read_eval_builtin_status(flow);
+                let code = self.read_eval_builtin_status(run);
                 // bash fires the RETURN trap when a script run with `.`/`source`
                 // finishes, exactly as it does for a returning function. Unlike
                 // the function case this is not gated on functrace — but it IS

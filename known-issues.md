@@ -167,6 +167,33 @@ under the reference bash and `a\x80b` (raw) under osh; `printf '%q' 'é☃'` is
 **What would change this:** only a decision to give osh a locale/`isprint`
 model. See §101 for how to reverse.
 
+### TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS. osh numbers signals the way Linux does, where the reference bash on this host numbers them the way Cygwin does — 2026-08-03 — ⚠️ **KNOWN DEVIATION, NOT A BUG**
+
+**Where:** `userspace/oils/src/interp.rs` — the `SIGNALS` table.
+
+osh is a shell for SlateOS, whose signal numbering is Linux's: `7` is `BUS`,
+`10` is `USR1`, `12` is `USR2`, and the table ends at 31 with no realtime
+signals (35 specs once `EXIT` and the three pseudo-signals are counted). The
+reference bash used by the corpus differ is Git for Windows' msys/Cygwin build,
+whose table is the **Cygwin** one: `7` is `EMT`, `10` is `BUS`, and 32 realtime
+signals follow, for 68 specs. Neither is wrong; they are simply different
+platforms, and osh must match its own.
+
+**Observable difference:** any *numeric* sigspec outside the handful the two
+agree on (`0`/`EXIT`, `1`/`HUP`, `2`/`INT`, `9`/`KILL`, `15`/`TERM`) names a
+different signal in each — `trap 'x' 10` is `SIGUSR1` here and `SIGBUS` there.
+`kill -l` and `trap -l` list different sets entirely, and posix `trap -p` with
+no operands prints 35 lines here against 68 there.
+
+**Consequence for the corpus:** a differential case must not print a signal
+*number*→*name* mapping beyond the agreed few, must not list the whole signal
+table (`kill -l`, `trap -l`, posix `trap -p` with no operands), and must not use
+a numeric sigspec except `0`. The affected cases say so in their headers, and
+the whole-table listings are covered by lib tests instead.
+
+**What would change this:** running the differ against a Linux bash. Nothing in
+osh should change — its table is correct for its target.
+
 ### TD-OILS-ALIAS-NAME-IS-NOT-AN-ASSIGNMENT. `alias` treated its operand as an assignment word and never checked the name — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_alias`, plus two new free
@@ -460,6 +487,32 @@ places that spelled the phrase out; covered by
 `posix-mode-calls-a-special-builtin-special-when-describing-it.sh` and a lib
 test.
 
+**Also done since — posix mode spells trap listings the POSIX way.** Three
+changes that the manual lists as one item but that are *not* gated alike, as a
+seven-round probe showed:
+
+* The `SIG` prefix goes from **any** listing, a bare `trap` as much as a
+  `trap -p` — POSIX spells a signal without it. The pseudo-signals (`EXIT`,
+  `DEBUG`, `ERR`, `RETURN`) never had one to drop.
+* A signal with *no* trap is shown as `trap -- - NAME` only under an **explicit
+  `-p`**; a bare `trap` in posix mode still lists just what is set. So posix
+  `trap -p` with no operands prints a line for every signal the shell knows, in
+  the signal table's order.
+* The lone-signal **reset form goes away entirely**: POSIX gives `trap` an action
+  or nothing, so `trap EXIT` in posix mode is not a way to take the EXIT trap
+  away but a usage error — and `trap` being a special builtin, that usage error
+  *ends* a non-interactive shell. (The bare `return 2` at that site bypassed
+  `Shell::note_builtin_usage_error`, so it was the one place the fatality gate
+  was not consulted; it now goes through it like every other.)
+
+Implemented as `sigspec_display`/`all_sigspecs` plus a `posix` flag threaded
+through `trap_display_line`, with `trap_print` splitting the mode into two
+independent gates: `posix` (controls the names) and `posix && print` (controls
+whether untrapped signals earn a line). Covered by
+`posix-mode-spells-trap-listings-the-posix-way.sh` and a lib test — the
+no-operand `trap -p` listing can only be checked in the lib test, because the
+signal *set* is the host's (see TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS).
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
 and a 42-case probe of them against osh leaves these real gaps, roughly in
@@ -471,7 +524,6 @@ increasing order of size:
 * `kill -l` prints one line with no `SIG` prefixes, and `kill` rejects a
   `SIG`-prefixed signal name.
 * A bare `set` omits the function definitions it otherwise prints.
-* `trap -p` prints signal names without the `SIG` prefix and lists every signal.
 * `time` alone is a syntax error, and `time -p` is not special-cased.
 * Words in a redirection get neither globbing nor word splitting.
 

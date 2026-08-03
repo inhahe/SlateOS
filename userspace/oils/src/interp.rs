@@ -22058,7 +22058,7 @@ impl Shell {
         }
         // `-p`, or nothing to act on at all, prints the current traps.
         if print || rest.is_empty() {
-            return self.trap_print(rest, out, redir);
+            return self.trap_print(rest, print, out, redir);
         }
 
         // A *lone* operand is not an action but a signal to reset: bash's "if
@@ -22071,14 +22071,23 @@ impl Shell {
         // A lone operand that names no signal has no reading left, so it falls
         // through to the same usage error an action with no signals gets: that
         // is what `trap -`, `trap ""` and `trap BOGUS` all are.
-        let lone_spec = rest.len() == 1 && normalize_sigspec(&rest[0]).is_some();
+        //
+        // Posix mode has no such form at all: POSIX gives `trap` an action or
+        // nothing, so a lone operand there is simply an action with no signals,
+        // and `trap EXIT` is the usage error rather than a reset.
+        let lone_spec = rest.len() == 1
+            && normalize_sigspec(&rest[0]).is_some()
+            && !self.shell_option_enabled("posix");
         let (action, specs): (&[u8], &[Str]) =
             if lone_spec { (b"-", rest) } else { (rest[0].as_slice(), &rest[1..]) };
         if specs.is_empty() {
             // A pure builtin usage message: bash's `builtin_usage()` prints
-            // `<builtin>: usage: …` with no `<name>: line N:` shell prefix.
+            // `<builtin>: usage: …` with no `<name>: line N:` shell prefix. And
+            // `trap` is a POSIX special builtin, so in posix mode the usage
+            // error ends a non-interactive shell like any other — which is what
+            // makes posix `trap EXIT` fatal rather than merely a status of 2.
             self.emit_stderr(b"trap: usage: trap [-lp] [[arg] signal_spec ...]\n");
-            return 2;
+            return self.note_builtin_usage_error();
         }
         let reset = action == b"-";
         let mut status = 0;
@@ -22122,25 +22131,48 @@ impl Shell {
     /// the order they were asked for rather than in signal order, a signal named
     /// twice is printed twice, and a word that names no signal is an error
     /// rather than a silent skip.
-    fn trap_print(&mut self, specs: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
+    ///
+    /// Posix mode changes the listing in two ways that are *not* gated alike.
+    /// Signal names lose their `SIG` prefix in any listing, since POSIX spells a
+    /// signal without it. But a signal with no trap being shown as `- NAME`
+    /// rather than omitted — which for the no-operand form means every signal
+    /// the shell knows gets a line — happens only under an explicit `-p`; a bare
+    /// `trap` still shows just what is set.
+    fn trap_print(
+        &mut self,
+        specs: &[Str],
+        print: bool,
+        out: &mut Out,
+        redir: &RedirPlan,
+    ) -> i32 {
+        let posix = self.shell_option_enabled("posix");
+        // Whether a signal with no trap earns a line of its own.
+        let untrapped = posix && print;
         let mut buf = Str::new();
         let mut status = 0;
         // The worst status any of the writes below reported: a listing is a
         // batch, so a write that failed part-way through must not be lost.
         let mut wr = 0;
         if specs.is_empty() {
-            let mut entries: Vec<(&String, &Str)> = self.traps.iter().collect();
-            // Merge in display-only shadow traps (inherited into a subshell,
-            // reset for firing but still listable) for any signal not already
-            // active.
-            for (k, v) in &self.trap_shadow {
-                if !self.traps.contains_key(k) {
-                    entries.push((k, v));
+            if untrapped {
+                for spec in all_sigspecs() {
+                    let action = self.traps.get(&spec).or_else(|| self.trap_shadow.get(&spec));
+                    buf.extend_from_slice(&trap_display_line(&spec, action.map(Vec::as_slice), posix));
                 }
-            }
-            entries.sort_by_key(|(k, _)| sigspec_order(k));
-            for (sig, action) in entries {
-                buf.extend_from_slice(&trap_display_line(sig, action));
+            } else {
+                let mut entries: Vec<(&String, &Str)> = self.traps.iter().collect();
+                // Merge in display-only shadow traps (inherited into a subshell,
+                // reset for firing but still listable) for any signal not already
+                // active.
+                for (k, v) in &self.trap_shadow {
+                    if !self.traps.contains_key(k) {
+                        entries.push((k, v));
+                    }
+                }
+                entries.sort_by_key(|(k, _)| sigspec_order(k));
+                for (sig, action) in entries {
+                    buf.extend_from_slice(&trap_display_line(sig, Some(action), posix));
+                }
             }
         } else {
             for spec in specs {
@@ -22149,7 +22181,10 @@ impl Shell {
                 // reporting below.
                 let line = normalize_sigspec(spec).map(|norm| {
                     let action = self.traps.get(&norm).or_else(|| self.trap_shadow.get(&norm));
-                    action.map(|a| trap_display_line(&norm, a))
+                    // Outside posix mode a signal with no trap contributes no
+                    // line at all; inside, it is listed as reset.
+                    (action.is_some() || untrapped)
+                        .then(|| trap_display_line(&norm, action.map(Vec::as_slice), posix))
                 });
                 match line {
                     Some(line) => buf.extend(line.into_iter().flatten()),
@@ -37295,20 +37330,39 @@ fn sigspec_order(spec: &str) -> u16 {
 /// Render a normalized trap spec as bash's `trap -p` display name: real signals
 /// carry a `SIG` prefix (`INT` → `SIGINT`), while the pseudo-signals
 /// (`EXIT`/`ERR`/`DEBUG`/`RETURN`) are shown bare.
-fn sigspec_display(spec: &str) -> String {
+///
+/// Posix mode drops the prefix from the real signals too, since POSIX spells a
+/// signal without it. The pseudo-signals are unaffected either way — they never
+/// had one to drop.
+fn sigspec_display(spec: &str, posix: bool) -> String {
     match spec {
         "EXIT" | "ERR" | "DEBUG" | "RETURN" => spec.to_string(),
+        _ if posix => spec.to_string(),
         _ => format!("SIG{spec}"),
     }
 }
 
-/// One line of `trap -p` output for a normalized spec and its handler.
+/// One line of `trap -p` output for a normalized spec and its handler, or for a
+/// signal with *no* handler when `action` is `None` — which posix mode lists as
+/// a bare `-`, the same word that would reset it, where the default listing
+/// omits it entirely.
 ///
 /// A handler is the user's own source text, so the line is assembled as bytes:
 /// a handler holding a byte that is not text is printed back exactly as it was
 /// given, and stays re-inputtable.
-fn trap_display_line(spec: &str, action: BStr<'_>) -> Str {
-    bfmt![b"trap -- ", &single_quote_bytes(action), b" ", sigspec_display(spec), b"\n"]
+fn trap_display_line(spec: &str, action: Option<BStr<'_>>, posix: bool) -> Str {
+    let act = action.map_or_else(|| b"-".to_vec(), single_quote_bytes);
+    bfmt![b"trap -- ", &act, b" ", sigspec_display(spec, posix), b"\n"]
+}
+
+/// Every signal spec the shell knows, in bash's table order: `EXIT`, the real
+/// signals by number, then the pseudo-signals. Posix mode's `trap -p` lists them
+/// all, trapped or not.
+fn all_sigspecs() -> Vec<String> {
+    std::iter::once("EXIT".to_string())
+        .chain(SIGNALS.iter().map(|(_, name)| (*name).to_string()))
+        .chain(PSEUDO_SIGNALS.iter().map(|(_, name)| (*name).to_string()))
+        .collect()
 }
 
 /// The sentence bash's `describe_command()` prints for an alias, shared by
@@ -55692,6 +55746,77 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run(&format!("{SET}trap -p QUIT INT QUIT")).0,
             "trap -- 'echo I' SIGINT\n"
+        );
+    }
+
+    /// Posix mode changes `trap`'s listing in three ways that are not gated
+    /// alike: the `SIG` prefix goes from *any* listing, an untrapped signal is
+    /// shown as reset only under an explicit `-p`, and the lone-signal reset
+    /// form goes away entirely.
+    #[test]
+    fn posix_mode_spells_trap_listings_the_posix_way() {
+        const SET: &str = "trap 'echo U' USR1; trap 'echo E' EXIT; ";
+        // The prefix goes in a bare listing as much as under `-p`.
+        assert_eq!(
+            run(&format!("{SET}set -o posix; trap")).0,
+            "trap -- 'echo E' EXIT\ntrap -- 'echo U' USR1\n"
+        );
+        assert_eq!(run(&format!("{SET}set -o posix; trap -p USR1")).0, "trap -- 'echo U' USR1\n");
+        // …and comes back when posix mode goes.
+        assert_eq!(run(&format!("{SET}trap -p USR1")).0, "trap -- 'echo U' SIGUSR1\n");
+        // The pseudo-signals never had a prefix to drop. (The two `D`s are the
+        // DEBUG trap itself firing before `set` and before `trap`.)
+        assert_eq!(
+            run("trap 'echo D' DEBUG; set -o posix; trap -p DEBUG").0,
+            "D\nD\ntrap -- 'echo D' DEBUG\n"
+        );
+
+        // An untrapped signal is listed as reset — but only under `-p`.
+        assert_eq!(run("set -o posix; trap -p QUIT").0, "trap -- - QUIT\n");
+        assert_eq!(
+            run(&format!("{SET}set -o posix; trap -p USR1 QUIT")).0,
+            "trap -- 'echo U' USR1\ntrap -- - QUIT\n"
+        );
+        assert_eq!(
+            run(&format!("{SET}set -o posix; trap")).0,
+            "trap -- 'echo E' EXIT\ntrap -- 'echo U' USR1\n"
+        );
+        // Outside posix mode it contributes nothing, as ever.
+        assert_eq!(run("trap -p QUIT; echo done").0, "done\n");
+        // An ignored trap is the empty action, not a reset.
+        assert_eq!(run("trap '' INT; set -o posix; trap -p INT").0, "trap -- '' INT\n");
+
+        // With no operands, posix `trap -p` lists every signal the shell knows,
+        // in the table's own order. The signal *set* is the host's, so this can
+        // only be checked here and not against a real bash on another machine.
+        let all = run(&format!("{SET}set -o posix; trap -p")).0;
+        let lines: Vec<&str> = all.lines().collect();
+        assert_eq!(lines.len(), 1 + SIGNALS.len() + PSEUDO_SIGNALS.len());
+        assert_eq!(lines[0], "trap -- 'echo E' EXIT");
+        assert_eq!(lines[1], "trap -- - HUP");
+        assert_eq!(lines[2], "trap -- - INT");
+        assert!(lines.contains(&"trap -- 'echo U' USR1"), "{all}");
+        assert_eq!(lines[lines.len() - 3], "trap -- - DEBUG");
+        assert_eq!(lines[lines.len() - 1], "trap -- - RETURN");
+
+        // The reset form is a usage error there: POSIX gives `trap` an action or
+        // nothing, so a lone operand is an action with no signals to attach it
+        // to. `trap` being a special builtin, that ends a non-interactive shell
+        // — so `run_script`, not `run`, is what shows the abort.
+        assert_eq!(run_script("(set -o posix; trap EXIT; echo reached)").0, "");
+        assert_eq!(run_script("(set -o posix; trap EXIT)").1, 2);
+        assert_eq!(
+            run_script("(trap 'echo E' EXIT; set -o posix; trap EXIT; echo reached)").0,
+            "E\n"
+        );
+        // The two-operand forms still work.
+        assert_eq!(
+            run_script("(set -o posix; trap 'echo E2' EXIT; trap -p EXIT)").0,
+            "trap -- 'echo E2' EXIT\nE2\n"
+        );
+        assert_eq!(
+            run_script("(set -o posix; trap - USR1; trap -p USR1)").0,
+            "trap -- - USR1\n"
         );
     }
 

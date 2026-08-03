@@ -43,6 +43,69 @@ that was already installed by the host.
 corpus as if it were behaviour. There is nothing to assert here: the host cannot
 represent the input the test wants.
 
+### TD-OILS-PRINTF-STAR-AND-QUOTE. `printf` skipped the conversion on its `*` and `%(…)T` arguments, ignored a precision on `%b`/`%q`, dropped `%c`'s NUL, and quoted `%q` by a safe list instead of bash's deny list — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
+
+**Where:** `userspace/oils/src/interp.rs` — `format_conversion` (the `*` width
+and precision, the `%(FORMAT)T` branch, the `b`/`q`/`c` arms) and
+`printf_quote`.
+
+**Five divergences, all measured against bash 5.2.37.**
+
+1. **A `*` width or precision is an argument.** It goes through the same integer
+   conversion `%d`'s operand does, so a word that is not a number is reported as
+   `ARG: invalid number`, costs printf its exit status, and counts as zero.
+   `printf 'A%*sB\n' abc 42` is `A42B` with a diagnostic and status 1; osh
+   printed `A42B` silently with status 0. `%*.*s` reads and complains about
+   *both* stars. A missing argument stays silent — an empty string is a valid 0.
+2. **The seconds of `%(FORMAT)T` are converted the same way.**
+   `printf '%(%Y)T' abc` complains and prints `1970`; osh was silent.
+3. **An empty strftime format is not an empty result.** bash hands `%X` to
+   `strftime`, so `printf '%()T' 0` under `TZ=UTC` is `00:00:00`. osh printed
+   nothing.
+4. **A precision truncates `%b` and `%q`**, counting the bytes of the *rendered*
+   result — the escapes `%b` interpreted and the backslashes `%q` added.
+   `%.3b` on `ab\tcd` is `ab<TAB>`; `%.3q` on `a b c` is `a\ `. osh applied a
+   precision only to `%s`.
+5. **`%c` on an empty *or missing* argument writes a NUL byte**, because C's
+   terminator is a first character like any other. `printf 'A%cB'` is `A\0B` and
+   the field is one wide. osh wrote nothing.
+6. **`%q` quotes by a deny list.** bash's `sh_backslash_quote` names the bytes a
+   re-read would treat specially and lets everything else through; osh had an
+   allow list of "safe" bytes, which is not the same set. Three visible
+   consequences: `,` must be escaped (brace expansion) and was not; `#` is
+   special only at the front of a word, so `a#b` needs nothing and osh escaped
+   it; `~` is special only at the front or just after an assignment's `=` or
+   `:`, so `a~` needs nothing and osh escaped it. Every byte above 127 was also
+   backslashed, which is the subject of the separate entry below.
+
+**Coverage added:** `tests/corpus/printf-converts-its-width-and-quotes-by-a-deny-list.sh`
+(every printable ASCII byte through `%q` in four positions, plus each rule
+above) and four lib tests.
+
+### TD-OILS-PRINTF-Q-HIGH-BYTES. `%q`/`@Q` deliberately disagree with the reference bash about which bytes above 127 are printable — 2026-08-03 — ⚠️ **KNOWN DEVIATION, NOT A BUG**
+
+**Where:** `userspace/oils/src/interp.rs` — `printf_quote`, `shell_quote`.
+Rationale in `design-decisions.md` §101.
+
+bash decides between backslash quoting and the `$'…'` form by asking `isprint`,
+which is a **locale** question. The reference bash on this host (Git for
+Windows / Cygwin) uses a single-byte Latin-1-ish table — identically under
+`LC_ALL=C` — in which `0x80`–`0x9F` and `0xAD` are non-printable and every other
+high byte is printable. glibc in a UTF-8 locale answers differently again
+(anything that does not decode is non-printable). osh has no locale machinery
+and treats every byte from `0x80` up as printable, which agrees with
+glibc-in-UTF-8 for all valid UTF-8 and never mangles a byte the user typed.
+
+**Observable difference:** `printf '%q' "$(printf 'a\200b')"` is `$'a\200b'`
+under the reference bash and `a\x80b` (raw) under osh; `printf '%q' 'é☃'` is
+`$'M-CM-)M-b\230\203'` there and the raw text here.
+
+**Consequence for the corpus:** a differential case must not put a byte above
+127 through `%q` or `@Q`. The `%q` case says so in its header.
+
+**What would change this:** only a decision to give osh a locale/`isprint`
+model. See §101 for how to reverse.
+
 ### TD-OILS-ALIAS-NAME-IS-NOT-AN-ASSIGNMENT. `alias` treated its operand as an assignment word and never checked the name — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_alias`, plus two new free

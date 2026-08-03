@@ -36904,21 +36904,39 @@ fn printf_quote(s: BStr<'_>) -> Str {
     if s.is_empty() {
         return b"''".to_vec();
     }
-    if bytes::chars(s).any(Ch::is_control) {
+    if s.iter().any(|b| b.is_ascii_control()) {
         // Reuse the ANSI-C form (matches bash, which emits `$'…'` here too).
         return shell_quote(s);
     }
-    let mut out = Str::new();
-    for c in bytes::chars(s) {
-        // Backslash-escape anything outside the "safe" reusable set. A byte
-        // that is no character is certainly not in it, so it is escaped —
-        // which is what bash does with a non-ASCII byte in the C locale.
-        if c.as_ascii().is_some_and(|a| a.is_ascii_alphanumeric() || "_./,:+-=@%^".contains(a)) {
-            c.push_to(&mut out);
-        } else {
+    // bash's `sh_backslash_quote` is a *deny* list, not an allow list: it names
+    // the bytes a re-read of the word would treat specially and lets everything
+    // else through untouched. Getting that backwards is visible three ways —
+    // `,` has to be escaped (brace expansion) even though it looks harmless,
+    // while `#` and `~` are only special in a position, and a byte that is not
+    // ASCII at all is not the shell's business and passes through.
+    let mut out = Str::with_capacity(s.len());
+    for (i, &b) in s.iter().enumerate() {
+        let escape = match b {
+            // IFS whitespace, the quoting characters, the shell's
+            // metacharacters and reserved-word punctuation, the globbing
+            // characters, the expansion characters — and `,`, for braces.
+            b' ' | b'\t' | b'\n' | b'\'' | b'"' | b'\\' | b'|' | b'&' | b';' | b'(' | b')'
+            | b'<' | b'>' | b'!' | b'{' | b'}' | b'*' | b'[' | b'?' | b']' | b'^' | b'$'
+            | b'`' | b',' => true,
+            // A tilde only expands at the front of a word or just after the
+            // `=` or `:` of an assignment-looking one, so `a~` needs nothing.
+            b'~' => match i.checked_sub(1).and_then(|p| s.get(p)) {
+                None => true,
+                Some(prev) => matches!(prev, b'=' | b':'),
+            },
+            // A `#` only starts a comment where a word starts.
+            b'#' => i == 0,
+            _ => false,
+        };
+        if escape {
             out.push(b'\\');
-            c.push_to(&mut out);
         }
+        out.push(b);
     }
     out
 }
@@ -38961,15 +38979,32 @@ fn format_conversion(
         spec.push(c);
         chars.next();
     }
+    // A `*` width or precision is an ordinary integer *argument*, so it is
+    // converted like one of `%d`'s: a word that is not a number is reported as
+    // `ARG: invalid number`, costs printf its status, and counts as zero. The
+    // offset is the field's, computed here rather than at `field_off` below
+    // because the directive has not been fully parsed yet — `out` has not
+    // grown, so the two are the same position.
+    let star_off = diags.base + out.len();
+    let star_arg = |args: &[Str], arg_i: &mut usize, diags: &mut PrintfDiags| -> i64 {
+        let raw = args.get(*arg_i).cloned().unwrap_or_default();
+        *arg_i += 1;
+        let n = parse_printf_int_checked(&raw);
+        if let Some(kind) = n.invalid {
+            diags.errors.push((star_off, bfmt![&raw, b": ", kind]));
+        }
+        if n.signed_overflow {
+            diags.warnings.push((star_off, bfmt![&raw, b": Numerical result out of range"]));
+        }
+        n.signed
+    };
     // Width. A `*` takes the width from the next argument (bash: a negative
     // dynamic width means left-justify with the absolute magnitude).
     let mut width = Str::new();
     let mut star_left = false;
     if chars.peek() == Some(&b'*') {
         chars.next();
-        let raw = args.get(*arg_i).cloned().unwrap_or_default();
-        *arg_i += 1;
-        let n = parse_printf_int(&raw);
+        let n = star_arg(args, arg_i, diags);
         if n < 0 {
             star_left = true;
         }
@@ -38994,9 +39029,7 @@ fn format_conversion(
         chars.next();
         if chars.peek() == Some(&b'*') {
             chars.next();
-            let raw = args.get(*arg_i).cloned().unwrap_or_default();
-            *arg_i += 1;
-            let n = parse_printf_int(&raw);
+            let n = star_arg(args, arg_i, diags);
             if n >= 0 {
                 prec = Some(n.to_string().into_bytes());
             }
@@ -39054,9 +39087,10 @@ fn format_conversion(
         let secs: i64 = {
             let has_arg = args.get(*arg_i).is_some();
             if has_arg {
-                let raw = args.get(*arg_i).cloned().unwrap_or_default();
-                *arg_i += 1;
-                let n = parse_printf_int(&raw);
+                // The argument is converted like any other integer operand, so
+                // a word that is not a number is reported and counts as zero:
+                // `printf '%(%Y)T' abc` complains and still prints `1970`.
+                let n = star_arg(args, arg_i, diags);
                 #[allow(clippy::cast_possible_wrap)]
                 if n < 0 { unix_time().0 as i64 } else { n }
             } else {
@@ -39066,7 +39100,10 @@ fn format_conversion(
                 }
             }
         };
-        let rendered = format_strftime(&tfmt, secs);
+        // An empty format is not an empty result: bash passes `%X` to strftime,
+        // which in the C locale is the 24-hour clock time.
+        let tfmt: &[u8] = if tfmt.is_empty() { b"%X" } else { &tfmt };
+        let rendered = format_strftime(tfmt, secs);
         // String-style field-width padding (never zero-padded).
         let len = bytes::char_count(&rendered);
         if len < width_n {
@@ -39158,13 +39195,32 @@ fn format_conversion(
             for (off, msg) in r.bad {
                 diags.notes.push((field_off + off, msg.as_bytes().to_vec()));
             }
-            r.text
+            // A precision truncates `%b` and `%q` the way it truncates `%s`,
+            // and it counts the *rendered* bytes — the escapes `%b` interpreted
+            // and the backslashes `%q` added: `%.3b` on `ab\tcd` keeps
+            // `a`, `b` and the tab, and `%.3q` on `a b c` keeps `a\ `.
+            let mut t = r.text;
+            if let Some(p) = prec_n {
+                t.truncate(p);
+            }
+            t
         }
-        b'q' => printf_quote(&next_arg(arg_i)),
+        b'q' => {
+            let mut q = printf_quote(&next_arg(arg_i));
+            if let Some(p) = prec_n {
+                q.truncate(p);
+            }
+            q
+        }
         // bash's `%c` writes the first *character* of the argument, so a
         // multibyte character is written whole; a byte that is not part of one
-        // is itself the character (see `bytes::char_at`).
-        b'c' => bytes::char_at(&next_arg(arg_i), 0),
+        // is itself the character (see `bytes::char_at`). An argument that is
+        // empty — or missing altogether — still has a first character: C's
+        // terminator, so bash writes a NUL byte and the field is one wide.
+        b'c' => match next_arg(arg_i) {
+            a if a.is_empty() => vec![0],
+            a => bytes::char_at(&a, 0),
+        },
         b'd' | b'i' => {
             let raw = next_arg(arg_i);
             let n = parse_printf_int_checked(&raw);
@@ -39650,10 +39706,6 @@ struct StrftimeCtx {
     wday_abbr: &'static [u8],
     mon_full: &'static [u8],
     mon_abbr: &'static [u8],
-}
-
-fn parse_printf_int(s: &[u8]) -> i64 {
-    parse_printf_int_checked(s).signed
 }
 
 /// Parse an integer `printf` argument with C/bash `strtoimax` semantics and
@@ -45488,6 +45540,54 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("printf '%*d|' -5 42").0, "42   |");
         // `.*` on a string precision truncates.
         assert_eq!(run("printf '%.*s' 2 abcd").0, "ab");
+    }
+
+    #[test]
+    fn a_star_width_is_an_argument_and_is_converted_like_one() {
+        // It goes through the same integer conversion `%d` does, so a word that
+        // is not a number is reported, counts as zero, and costs the status.
+        assert_eq!(run("printf 'A%*sB' abc 42 2>/dev/null"), ("A42B".into(), 1));
+        assert_eq!(run("printf 'A%.*sB' abc zzz 2>/dev/null"), ("AB".into(), 1));
+        // Both stars are read, so both are complained about.
+        assert_eq!(run("printf 'A%*.*sB' p q zzz 2>&1 >/dev/null").0.lines().count(), 2);
+        // A missing argument is an empty one, and an empty one is a valid zero.
+        assert_eq!(run("printf 'A%*sB'"), ("AB".into(), 0));
+        // The seconds of `%(…)T` are converted the same way, and an empty
+        // strftime format means `%X`, not an empty result.
+        assert_eq!(run("TZ=UTC printf 'A%(%Y)TB' abc 2>/dev/null"), ("A1970B".into(), 1));
+        assert_eq!(run("TZ=UTC printf '%()T' 0"), ("00:00:00".into(), 0));
+    }
+
+    #[test]
+    fn a_precision_truncates_the_rendered_b_and_q() {
+        // The count is over the *result*: the escapes `%b` interpreted and the
+        // backslashes `%q` added are inside it.
+        assert_eq!(run("printf '[%.3b]' 'ab\\tcd'").0, "[ab\t]");
+        assert_eq!(run("printf '[%.0b]' abc").0, "[]");
+        assert_eq!(run("printf '[%.3q]' 'a b c'").0, "[a\\ ]");
+        assert_eq!(run("printf '[%.0q]' abc").0, "[]");
+    }
+
+    #[test]
+    fn c_on_an_empty_argument_writes_a_nul() {
+        // C's terminator is a first character like any other, so the field is
+        // one byte wide rather than nothing — missing argument included.
+        assert_eq!(run("printf 'A%cB' '' | cat -v").0, "A^@B");
+        assert_eq!(run("printf 'A%cB' | cat -v").0, "A^@B");
+        assert_eq!(run("printf '[%3c]' '' | cat -v").0, "[  ^@]");
+    }
+
+    #[test]
+    fn q_escapes_by_a_deny_list_not_by_a_safe_list() {
+        // A comma looks harmless and is not: a brace expansion would see it.
+        assert_eq!(run("printf '%q' 'a,b'").0, "a\\,b");
+        // A `#` only starts a comment where a word starts, and a `~` only
+        // expands at the front or just past an assignment's `=` or `:`.
+        assert_eq!(run("printf '%q|%q' 'a#b' '#ab'").0, "a#b|\\#ab");
+        assert_eq!(run("printf '%q|%q|%q|%q' 'a~' '~a' 'x=~a' 'x:~a'").0, "a~|\\~a|x=\\~a|x:\\~a");
+        // Bytes the deny list does not name pass through untouched, including
+        // the ones a safe list would have had to enumerate.
+        assert_eq!(run("printf '%q' 'a.b/c:d+e-f=g@h%i_j'").0, "a.b/c:d+e-f=g@h%i_j");
     }
 
     #[test]

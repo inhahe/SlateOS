@@ -4882,8 +4882,10 @@ impl Shell {
     /// literal or a `format!` keep reading naturally.
     fn put_var(&mut self, name: impl Into<String>, value: impl Into<Str>) {
         let name = name.into();
+        self.vars.insert(name.clone(), value.into());
+        // After the store, not before: a hook that *derives* something from the
+        // name's new state (posix mode, below) has to see the new state.
         self.note_var_change(&name);
-        self.vars.insert(name, value.into());
     }
 
     /// React to `name` gaining or losing a value. bash routes such changes
@@ -4900,10 +4902,19 @@ impl Shell {
     /// `BASH_CMDS` is that same table seen as an associative array, so it has
     /// to be rebuilt here too — otherwise `PATH=x; declare -p BASH_CMDS` would
     /// still show entries the table no longer holds.
+    ///
+    /// `$POSIXLY_CORRECT` *is* the `posix` shell option (see the `"posix"` arm
+    /// of [`Shell::apply_shopt_option`]), so every way the name can gain or
+    /// lose a value — an assignment, an `unset`, a `local` going out of scope —
+    /// has to put `$SHELLOPTS` back in step, exactly as `set -o posix` does.
+    /// The hook runs *after* the store or removal, so it reads the new state.
     fn note_var_change(&mut self, name: &str) {
         if name == "PATH" {
             self.cmd_hash.clear();
             self.sync_bash_cmds();
+        }
+        if name == "POSIXLY_CORRECT" {
+            self.refresh_shellopts();
         }
     }
 
@@ -12822,7 +12833,13 @@ impl Shell {
         // Builtin? (unless disabled via `enable -n`, in which case fall through
         // to the same-named external.)
         if let Some(name) = name_str.as_deref().filter(|n| self.builtin_enabled(n)) {
-            return self.run_builtin(name, &argv, &assigns, out, stdin, &redir);
+            let call = BuiltinCall {
+                name,
+                argv: &argv,
+                assigns: &assigns,
+                special: true,
+            };
+            return self.run_builtin(call, out, stdin, &redir);
         }
 
         // External command. If a bare command name resolves nowhere on `$PATH`
@@ -13098,7 +13115,10 @@ impl Shell {
         }
 
         self.positional = saved_pos;
-        self.pop_temp_shadow(temp_pushed);
+        // Never persisting: bash 5.2 confines POSIX's "the prefix is an
+        // ordinary assignment" rule to special *builtins*. A prefix on a
+        // function call is undone on return even in posix mode.
+        self.pop_temp_shadow(temp_pushed, false);
         // A trap handler's `exit` wins over the body's own flow: bash unwinds
         // the whole shell rather than merely returning from the function.
         if let Some(code) = trap_exit {
@@ -13455,6 +13475,13 @@ impl Shell {
         // A `local n` that was never assigned leaves the name existing-but-unset
         // for the call only; on return it goes back to whatever it was before.
         Self::restore_flag(&mut self.declared, name, snap.declared);
+        // Popping a scope is a value change like any other, so the per-name
+        // hooks have to run: a `local PATH=…` going out of scope invalidates
+        // the command hash again, and a `local POSIXLY_CORRECT=1` going out of
+        // scope has to take posix mode back out of `$SHELLOPTS`. (`put_var`
+        // above already fired it for the scalar case; firing again is harmless,
+        // and the unset case has no other trigger.)
+        self.note_var_change(name);
     }
 
     /// Set-or-clear `name`'s membership in an attribute set to match `present`.
@@ -13744,7 +13771,16 @@ impl Shell {
         if let Some(name) = bytes::as_str(target).map(str::to_owned)
             && self.builtin_enabled(&name)
         {
-            return self.run_builtin(&name, rest, assigns, out, stdin, redir);
+            // `command` strips the POSIX special class off whatever it runs, so
+            // an assignment prefix on it never persists — not even in posix
+            // mode, and not even for `command eval`.
+            let call = BuiltinCall {
+                name: &name,
+                argv: rest,
+                assigns,
+                special: false,
+            };
+            return self.run_builtin(call, out, stdin, redir);
         }
         self.run_external(rest, assigns, out, stdin, redir, None);
         Flow::Next
@@ -13790,7 +13826,15 @@ impl Shell {
         if let Some(name) = bytes::as_str(sub).map(str::to_owned)
             && is_builtin(&name)
         {
-            return self.run_builtin(&name, &argv[i..], assigns, out, stdin, redir);
+            // `builtin`, unlike `command`, leaves the special class intact:
+            // `A=1 builtin eval :` keeps `A` in posix mode.
+            let call = BuiltinCall {
+                name: &name,
+                argv: &argv[i..],
+                assigns,
+                special: true,
+            };
+            return self.run_builtin(call, out, stdin, redir);
         }
         self.bemit_cmd_stderr(
             out,
@@ -19613,15 +19657,15 @@ impl Shell {
     /// installed around the whole body and torn down after it, so
     /// `eval 'echo hi' > f` writes to the file and `eval cat <<< hi` has
     /// something to read.
+    ///
     fn run_builtin(
         &mut self,
-        name: &str,
-        argv: &[Str],
-        assigns: &[(String, Str)],
+        call: BuiltinCall<'_>,
         out: &mut Out,
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) -> Flow {
+        let BuiltinCall { name, argv, .. } = call;
         // A write failure inside the builtin is reported as `{name}: write
         // error: …` (see [`Shell::finish_write`]), and the builtin that runs
         // commands of its own must not lend its name to *their* failures — so
@@ -19643,10 +19687,10 @@ impl Shell {
             // installed for real, and applying it a second time at write time
             // would reopen (and so re-truncate) the very files below.
             self.exec_with_redirects(plan, out, stdin, |sh, o, s| {
-                sh.run_builtin_body(name, argv, assigns, o, s, &RedirPlan::default())
+                sh.run_builtin_body(call, o, s, &RedirPlan::default())
             })
         } else {
-            self.run_builtin_body(name, argv, assigns, out, stdin, redir)
+            self.run_builtin_body(call, out, stdin, redir)
         };
         self.builtin_names.pop();
         flow
@@ -19755,13 +19799,17 @@ impl Shell {
     #[allow(clippy::too_many_lines)]
     fn run_builtin_body(
         &mut self,
-        name: &str,
-        argv: &[Str],
-        assigns: &[(String, Str)],
+        call: BuiltinCall<'_>,
         out: &mut Out,
         stdin: &StdinSrc,
         redir: &RedirPlan,
     ) -> Flow {
+        let BuiltinCall {
+            name,
+            argv,
+            assigns,
+            special,
+        } = call;
         // Apply temporary assignments for the duration of the builtin, in a
         // scope of their own (see [`Shell::temp_shadow`]), so a computed name
         // among them reads the binding rather than going on computing and an
@@ -20322,7 +20370,15 @@ impl Shell {
 
         // Restore temporary assignments (builtins don't persist them, except
         // pure-assignment which never reaches here).
-        self.pop_temp_shadow(temp_pushed);
+        //
+        // …unless posix mode is on and this was a POSIX *special* builtin, for
+        // which the prefix is an ordinary assignment and outlives the command.
+        // The test is made here, with the prefix still in force, so
+        // `POSIXLY_CORRECT=1 eval :` keeps itself: the prefix is what turns
+        // posix mode on, and the rule then makes it permanent.
+        let persist =
+            special && SPECIAL_BUILTIN_NAMES.contains(&name) && self.shell_option_enabled("posix");
+        self.pop_temp_shadow(temp_pushed, persist);
 
         self.last_status = status;
         // A builtin that must unwind the whole shell (`kill -TERM $$` with a
@@ -20999,7 +21055,16 @@ impl Shell {
     ///
     /// A name `unset` already revealed is no longer in the frame, so it is not
     /// restored a second time — see [`Shell::reveal_temp_shadow`].
-    fn pop_temp_shadow(&mut self, pushed: bool) {
+    ///
+    /// With `persist`, the prefix's values *outlive* the command instead: POSIX
+    /// says an assignment prefix on a **special builtin** is an ordinary
+    /// assignment, and bash obeys that in posix mode. The displaced state is
+    /// still restored first and the value then re-stored through the ordinary
+    /// assignment path, because that is what makes the *old* attributes apply
+    /// to it — `declare -i n; n=3+4 eval :` leaves `declare -ix n="7"`, the `-i`
+    /// the prefix itself did not carry. The environment marking the prefix gave
+    /// the name is kept, which is the `-x` in that listing.
+    fn pop_temp_shadow(&mut self, pushed: bool, persist: bool) {
         if !pushed {
             return;
         }
@@ -21007,7 +21072,15 @@ impl Shell {
             return;
         };
         for (name, snap) in scope.binds {
+            // Read the prefix's value before the snapshot overwrites it.
+            let bound = if persist { self.vars.get(&name).cloned() } else { None };
             self.restore_var(&name, snap);
+            if let Some(v) = bound
+                && let Some(v) = self.apply_value_attrs(&name, v)
+            {
+                self.put_var(name.clone(), v);
+                self.exported.insert(name);
+            }
         }
     }
 
@@ -25802,10 +25875,22 @@ impl Shell {
         // (bash: `-n` no newline, `-e` interpret backslash escapes, `-E` disable
         // that; they may be clustered, e.g. `-ne`). Parsing stops at the first
         // word that is not such a flag.
+        //
+        // `shopt -s xpg_echo` moves the *default*: escapes are interpreted
+        // without `-e`, and `-E` is how a caller turns them back off. It does
+        // not otherwise change the builtin — `-n` still works, `\c` still stops
+        // the output, and the escape dialect is the one `-e` uses.
+        //
+        // The two options together are the exception: in posix mode an
+        // `xpg_echo` shell reads *no* options at all, so `echo -n x` writes
+        // `-n x` (with the escapes still interpreted). Posix mode alone changes
+        // nothing.
+        let xpg = self.shopt.get("xpg_echo").copied().unwrap_or(false);
+        let takes_options = !(xpg && self.shell_option_enabled("posix"));
         let mut newline = true;
-        let mut interpret = false;
+        let mut interpret = xpg;
         let mut start = 0;
-        while let Some(a) = args.get(start) {
+        while let Some(a) = args.get(start).filter(|_| takes_options) {
             if a.len() >= 2
                 && a.starts_with(b"-")
                 && a[1..].iter().all(|c| matches!(c, b'n' | b'e' | b'E'))
@@ -29975,7 +30060,6 @@ impl Shell {
         // Decided before anything is removed, because the reveal at the end
         // takes the prefix's away.
         let shadowed = self.is_ordinary_shadowed(name);
-        self.note_var_change(name);
         self.vars.remove(name);
         self.arrays.remove(name);
         self.assoc.remove(name);
@@ -30029,6 +30113,9 @@ impl Shell {
             self.hostname_list.clear();
             self.hostname_source = None;
         }
+        // Last of all, and after `reveal_temp_shadow`, so a hook that derives
+        // state from the name's *final* binding sees what the unset left.
+        self.note_var_change(name);
     }
 
     /// `unset name[sub]` — remove one element (or, for `name[@]`/`name[*]` on an
@@ -30369,9 +30456,35 @@ impl Shell {
             "histexpand" => self.histexpand = Some(enable),
             // `set -o verbose` (`set -v`): echo input as the reader consumes it.
             "verbose" => self.verbose = enable,
+            // `set -o posix` has no state of its own: bash keeps posix mode in
+            // `$POSIXLY_CORRECT`, and the two are the *same* switch seen from
+            // two sides. Setting the variable to anything — including the empty
+            // string, including a `local` — turns the option on, and unsetting
+            // it turns the option off; `set -o posix` writes `y` (leaving a
+            // value the script already chose alone) and `set +o posix` unsets
+            // the variable even when the script set it by hand. Deriving the
+            // option from the variable rather than mirroring it into a field is
+            // what makes `f() { local POSIXLY_CORRECT=1; }` turn the option on
+            // for the call and off again when the local goes out of scope.
+            "posix" => {
+                if enable {
+                    if self.param_value("POSIXLY_CORRECT").is_none() {
+                        self.set_var("POSIXLY_CORRECT", "y");
+                    }
+                } else {
+                    // bash's `set +o posix` reaches `unbind_variable` directly
+                    // rather than going through the `unset` builtin, so it
+                    // takes the variable away even when it is readonly —
+                    // attribute and all. `readonly POSIXLY_CORRECT=1;
+                    // set +o posix` succeeds, leaves posix mode off, and leaves
+                    // an ordinary assignable name behind.
+                    self.readonly.remove("POSIXLY_CORRECT");
+                    self.unbind_var("POSIXLY_CORRECT");
+                }
+            }
             // Standard bash option names osh does not model (line-editing
             // `emacs`/`vi`, job-control `notify`,
-            // `posix`, `privileged`, …). bash accepts them
+            // `privileged`, …). bash accepts them
             // without error; accept them as no-ops so scripts that toggle them
             // don't spuriously fail. Only a name outside the standard set is a
             // "invalid option name".
@@ -30450,6 +30563,12 @@ impl Shell {
         if self.verbose {
             opts.push("verbose");
         }
+        // Posix mode is `$POSIXLY_CORRECT`, and bash lists it here however the
+        // variable came to have a value — a bare `POSIXLY_CORRECT=1` puts
+        // `posix` in `$SHELLOPTS` just as `set -o posix` does.
+        if self.shell_option_enabled("posix") {
+            opts.push("posix");
+        }
         opts.sort_unstable();
         self.put_var("SHELLOPTS".to_string(), opts.join(":"));
     }
@@ -30498,12 +30617,17 @@ impl Shell {
             "history" => self.hist_on(),
             "histexpand" => self.histexpand(),
             "verbose" => self.verbose,
+            // Posix mode *is* `$POSIXLY_CORRECT` — see the `"posix"` arm of
+            // [`Shell::apply_shopt_option`]. Asking the variable rather than a
+            // field is what makes an assignment from anywhere (an inherited
+            // environment, a `local`, an assignment prefix) show up here.
+            "posix" => self.param_value("POSIXLY_CORRECT").is_some(),
             // Always-on defaults for a non-interactive shell, mirroring bash's
             // `-c`/script `set -o` output (these have no osh-tunable state but
             // must report their true default so listings match bash).
             "hashall" | "interactive-comments" => true,
             // Remaining standard options are modeled as off: job control's
-            // `notify`, `posix`, and the rare toggles. They are listed by
+            // `notify` and the rare toggles. They are listed by
             // `set -o` for compatibility but are currently inert; see the
             // STANDARD_SET_O_OPTIONS note.
             //
@@ -37394,6 +37518,25 @@ const BUILTIN_NAMES: &[&str] = &[
     "complete", "compopt",
 ];
 
+/// One builtin invocation as the dispatcher hands it over: the command itself,
+/// separate from the I/O context ([`Out`], [`StdinSrc`], [`RedirPlan`]) it runs
+/// against.
+#[derive(Clone, Copy)]
+struct BuiltinCall<'a> {
+    /// The builtin's name — which is also the name its diagnostics carry.
+    name: &'a str,
+    /// The full argument vector, `argv[0]` included.
+    argv: &'a [Str],
+    /// The assignment prefix written in front of the command.
+    assigns: &'a [(String, Str)],
+    /// Whether the name still counts as a POSIX *special* builtin here, which
+    /// decides whether the assignment prefix outlives the command in posix mode
+    /// (see [`Shell::pop_temp_shadow`]). `false` only under `command`, whose
+    /// whole job is to strip the special class off: `A=1 command eval :` does
+    /// not keep `A`, where `A=1 builtin eval :` does.
+    special: bool,
+}
+
 /// The POSIX *special* builtins, which `enable -s` restricts its listing to.
 ///
 /// POSIX names fifteen of these; bash adds `source`, its synonym for `.`, and
@@ -42695,6 +42838,131 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("echo -ne '\\U0001F600'").0, "\u{1F600}");
         assert_eq!(run("echo -ne '\\u41'").0, "A");
         assert_eq!(run("echo -ne '\\uZ'").0, "\\uZ");
+    }
+
+    #[test]
+    fn xpg_echo_moves_the_default_and_nothing_else() {
+        // `shopt -s xpg_echo` makes escape interpretation the default. `-E`
+        // turns it back off, `-e` is then redundant, and the last of the two
+        // wins — the flag letters keep their ordinary meanings.
+        assert_eq!(run("shopt -s xpg_echo; echo 'a\\tb'").0, "a\tb\n");
+        assert_eq!(run("shopt -s xpg_echo; echo -E 'a\\tb'").0, "a\\tb\n");
+        assert_eq!(run("shopt -s xpg_echo; echo -e 'a\\tb'").0, "a\tb\n");
+        assert_eq!(run("shopt -s xpg_echo; echo -Ee 'a\\tb'").0, "a\tb\n");
+        assert_eq!(run("shopt -s xpg_echo; echo -eE 'a\\tb'").0, "a\\tb\n");
+        // `-n` and `\c` are untouched.
+        assert_eq!(run("shopt -s xpg_echo; echo -n 'a\\tb'").0, "a\tb");
+        assert_eq!(run("shopt -s xpg_echo; echo 'a\\cb'").0, "a");
+        // The dialect is `-e`'s, down to `\0101` needing its leading zero.
+        assert_eq!(run("shopt -s xpg_echo; echo -n '\\0101\\101\\x41'").0, "A\\101A");
+        // A word that is not a flag still ends the scan without being eaten.
+        assert_eq!(run("shopt -s xpg_echo; echo -x 'a\\tb'").0, "-x a\tb\n");
+    }
+
+    #[test]
+    fn posix_and_xpg_echo_together_take_echos_options_away() {
+        // The two options together are the exception: an `xpg_echo` shell in
+        // posix mode reads *no* options from `echo`, so a leading `-n` is an
+        // operand. The escapes are still interpreted — it is the option scan
+        // that is suppressed, not the default.
+        let sh = "shopt -s xpg_echo; set -o posix; ";
+        assert_eq!(run(&format!("{sh}echo -n 'a\\tb'")).0, "-n a\tb\n");
+        assert_eq!(run(&format!("{sh}echo -e x")).0, "-e x\n");
+        assert_eq!(run(&format!("{sh}echo -E 'a\\tb'")).0, "-E a\tb\n");
+        assert_eq!(run(&format!("{sh}echo 'a\\cb'")).0, "a");
+        // Neither option alone does this.
+        assert_eq!(run("set -o posix; echo -n x").0, "x");
+        assert_eq!(run("shopt -s xpg_echo; echo -n x").0, "x");
+        // And the shell goes back to reading options when either is dropped.
+        assert_eq!(run(&format!("{sh}set +o posix; echo -n x")).0, "x");
+        assert_eq!(run(&format!("{sh}shopt -u xpg_echo; echo -n x")).0, "x");
+        // Posix mode is the variable, so a `local` reaches `echo` too.
+        let scoped = "shopt -s xpg_echo
+                      i() { echo -n x; }
+                      f() { local POSIXLY_CORRECT=1; i; }
+                      f; i";
+        // Inside `f` the `-n` is an operand, so the newline comes back too.
+        assert_eq!(run(scoped).0, "-n x\nx");
+    }
+
+    #[test]
+    fn posix_mode_is_the_posixly_correct_variable() {
+        // The option and the variable are one switch. Any value turns it on —
+        // including the empty string — and unsetting turns it off.
+        assert_eq!(run("[[ -o posix ]]").1, 1);
+        assert_eq!(run("POSIXLY_CORRECT=; [[ -o posix ]]").1, 0);
+        assert_eq!(run("POSIXLY_CORRECT=0; [[ -o posix ]]").1, 0);
+        assert_eq!(run("POSIXLY_CORRECT=1; unset POSIXLY_CORRECT; [[ -o posix ]]").1, 1);
+        assert_eq!(run("POSIXLY_CORRECT=1; [ -o posix ]").1, 0);
+        // `set -o posix` writes `y`, but only over an absent value.
+        assert_eq!(run("set -o posix; echo \"[$POSIXLY_CORRECT]\"").0, "[y]\n");
+        assert_eq!(run("POSIXLY_CORRECT=x; set -o posix; echo \"[$POSIXLY_CORRECT]\"").0, "[x]\n");
+        // `set +o posix` unsets it, reaching past a `readonly` that the `unset`
+        // builtin itself would refuse.
+        assert_eq!(
+            run("readonly POSIXLY_CORRECT=1; set +o posix; echo \"[${POSIXLY_CORRECT-unset}]\"").0,
+            "[unset]\n"
+        );
+        // It is scoped like the variable, so a `local` is posix mode for the
+        // call and no longer.
+        let scoped = "f() { local POSIXLY_CORRECT=1; [[ -o posix ]] && echo in; }
+                      f; [[ -o posix ]] || echo out";
+        assert_eq!(run(scoped).0, "in\nout\n");
+        // …and it is listed wherever an option is.
+        assert!(run("set -o posix; echo \"$SHELLOPTS\"").0.contains("posix"));
+        assert!(run("POSIXLY_CORRECT=1; echo \"$SHELLOPTS\"").0.contains("posix"));
+        assert!(!run("echo \"$SHELLOPTS\"").0.contains("posix"));
+        assert_eq!(run("set -o posix; set -o | grep '^posix'").0, "posix          \ton\n");
+        assert_eq!(run("shopt -qo posix").1, 1);
+        assert_eq!(run("shopt -so posix; shopt -qo posix").1, 0);
+        // It has never been one of the `$-` letters.
+        assert_eq!(run("set -o posix; echo \"$-\"").0, run("echo \"$-\"").0);
+    }
+
+    #[test]
+    fn a_prefix_on_a_special_builtin_persists_in_posix_mode() {
+        // POSIX makes an assignment prefix on a *special* builtin an ordinary
+        // assignment; bash obeys that in posix mode only.
+        assert_eq!(run("A=1 eval ':'; echo \"[${A-unset}]\"").0, "[unset]\n");
+        assert_eq!(run("set -o posix; A=1 eval ':'; echo \"[${A-unset}]\"").0, "[1]\n");
+        assert_eq!(run("set -o posix; A=1 :; echo \"[${A-unset}]\"").0, "[1]\n");
+        // A regular builtin, and a function, are unaffected.
+        assert_eq!(run("set -o posix; A=1 true; echo \"[${A-unset}]\"").0, "[unset]\n");
+        assert_eq!(
+            run("set -o posix; f() { :; }; A=1 f; echo \"[${A-unset}]\"").0,
+            "[unset]\n"
+        );
+        // `command` strips the special class off; `builtin` leaves it.
+        assert_eq!(
+            run("set -o posix; A=1 command eval ':'; echo \"[${A-unset}]\"").0,
+            "[unset]\n"
+        );
+        assert_eq!(
+            run("set -o posix; A=1 builtin eval ':'; echo \"[${A-unset}]\"").0,
+            "[1]\n"
+        );
+        // The value lands through the ordinary assignment path, so the
+        // attributes of the name it displaced apply to it — and the prefix's
+        // own export marking stays.
+        assert_eq!(
+            run("set -o posix; declare -i n=9; n=3+4 eval ':'; declare -p n").0,
+            "declare -ix n=\"7\"\n"
+        );
+        // An `unset` inside the command took the binding out of the scope, so
+        // there is nothing left to persist.
+        assert_eq!(
+            run("set -o posix; u=outer; u=inner eval 'unset u'; echo \"[$u]\"").0,
+            "[outer]\n"
+        );
+        // The prefix that turns posix mode on is the one the rule then keeps.
+        assert_eq!(
+            run("POSIXLY_CORRECT=1 eval ':'; echo \"[${POSIXLY_CORRECT-unset}]\"").0,
+            "[1]\n"
+        );
+        assert_eq!(
+            run("POSIXLY_CORRECT=1 true; echo \"[${POSIXLY_CORRECT-unset}]\"").0,
+            "[unset]\n"
+        );
     }
 
     #[test]

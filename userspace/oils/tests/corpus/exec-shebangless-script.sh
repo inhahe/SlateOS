@@ -16,9 +16,11 @@
 #   * this holds wherever an external command is started: on its own, as a
 #     pipeline stage, and as a `&` job.
 #
-# `#!` files are deliberately absent: the OS honours those itself wherever it
-# honours them at all, and where it does not, running the file as *shell*
-# source would be wrong (TD-OILS-SHEBANG-INTERPRETER).
+# `#!` files are deliberately absent: a line naming an interpreter is a
+# different answer, with diagnostics and an argument rule of its own, and it has
+# a case to itself (`shebang-interpreter-line.sh`). The one shape that belongs
+# here is the `#!` that names *no* interpreter, which is not a `#!` file at all
+# — it is text, and lives in that case beside its siblings.
 #
 # Diagnostics name the shell — `$0`, the path it was invoked as
 # (TD-OILS-DOLLAR-ZERO-ARGV0) — and the scratch directory differs per run, so

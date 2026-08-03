@@ -824,8 +824,84 @@ pub fn head_is_binary(head: BStr<'_>) -> bool {
 /// — bash's `char sample[80]` in `open_shell_script`. See [`head_is_binary`].
 pub const SCRIPT_BINARY_SAMPLE: usize = 80;
 
-/// Whether a resolved command file has to be handed to *this* shell rather than
-/// to the OS — the answer being `Some(shell)`, the program to run in its place.
+/// A `#!` line split the way an OS that honours one does: the interpreter, and
+/// the rest of the line as a *single* argument.
+///
+/// Linux's `fs/binfmt_script.c` truncates at the first newline, strips trailing
+/// blanks, takes the first blank-delimited word as the interpreter and hands
+/// whatever follows over as one argument without splitting it further — so
+/// `#!/bin/awk -v x=1` gives awk the one argument `-v x=1`, not two. Every
+/// system osh runs on implements that rule; bash's own fallback
+/// (`execute_shell_script`, compiled only where the kernel has no `#!` support)
+/// splits instead and keeps only the first word, which is the older BSD reading
+/// and is not what anything osh will meet actually does. The kernel's rule is
+/// therefore the one followed here.
+///
+/// Only spaces and tabs are blanks, so a CRLF file's `\r` stays part of the last
+/// word — which is why such a script reports an interpreter that does not exist,
+/// exactly as it does on Linux.
+///
+/// `None` means the line named no interpreter at all — `#!` alone, or nothing
+/// but blanks after it. The kernel answers `ENOEXEC` there, which is not a
+/// refusal but a fall-through: the file is text like any other, and the shell
+/// reads it.
+fn shebang(head: BStr<'_>) -> Option<(Str, Option<Str>)> {
+    fn blank(c: u8) -> bool {
+        c == b' ' || c == b'\t'
+    }
+    let rest = head.strip_prefix(b"#!")?;
+    let line = rest.split(|&c| c == b'\n').next().unwrap_or(rest);
+    // Trimming both ends first is what makes the split below total: after it a
+    // blank in the line has a non-blank somewhere after it, so an argument that
+    // starts is an argument that is not empty.
+    let first = line.iter().position(|&c| !blank(c))?;
+    let last = line.iter().rposition(|&c| !blank(c))?;
+    let line = line.get(first..=last)?;
+    let Some(split) = line.iter().position(|&c| blank(c)) else {
+        return Some((line.to_vec(), None));
+    };
+    let arg = line.get(split..)?;
+    let arg_start = arg.iter().position(|&c| !blank(c))?;
+    Some((line.get(..split)?.to_vec(), Some(arg.get(arg_start..)?.to_vec())))
+}
+
+/// What has to run in a command file's place, because the OS will not run the
+/// file itself. See [`shell_script_indirection`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Interposed {
+    /// A shebang-less text file, run by *this* shell — bash re-execs itself
+    /// here rather than `/bin/sh`, so a script picked up this way reports the
+    /// running `$BASH_VERSION`. The path is [`own_binary`]'s.
+    Shell(Str),
+    /// A `#!` line on a host that does not honour one: the interpreter the line
+    /// names, spelled as the line spelled it, and the single argument it
+    /// carried. See [`shebang`].
+    Interpreter { program: Str, arg: Option<Str> },
+}
+
+impl Interposed {
+    /// The interpreter a failure to start must be blamed on — `None` when the
+    /// program is this shell, which is present by definition. See
+    /// [`spawn_error_message`].
+    fn interpreter(&self) -> Option<&Str> {
+        match self {
+            Self::Shell(_) => None,
+            Self::Interpreter { program, .. } => Some(program),
+        }
+    }
+
+    /// The word that goes in front of the script's own name, if the `#!` line
+    /// carried one.
+    fn prefix_arg(&self) -> Option<&Str> {
+        match self {
+            Self::Shell(_) | Self::Interpreter { arg: None, .. } => None,
+            Self::Interpreter { arg: Some(a), .. } => Some(a),
+        }
+    }
+}
+
+/// Whether a resolved command file has to be run by something other than
+/// itself — the answer being the program to run in its place.
 ///
 /// bash's rule lives in `shell_execve`: when `execve` refuses a file with
 /// `ENOEXEC` it looks at the beginning of the file and either reports a binary
@@ -845,14 +921,16 @@ pub const SCRIPT_BINARY_SAMPLE: usize = 80;
 /// difference shows — a NUL at byte 100 of the first line makes a file binary to
 /// the spawn path and text to the script reader.
 ///
+/// A `#!` line is the OS's business wherever the OS honours one — every Unix,
+/// and the SlateOS target with it (`posix`'s `linux_binfmt` knows `SCRIPT_MAG`).
+/// The interposition below is exactly bash's `#if !defined (HAVE_HASH_BANG_EXEC)`
+/// fallback, and is gated the same way: on a host that would not honour the line
+/// the shell honours it instead, because leaving the file to fail would refuse a
+/// script the same source runs everywhere else. See [`shebang`].
 ///
-/// Two kinds of text are still left to the OS:
-///   * a file beginning `#!`, which names its own interpreter. Where the OS
-///     honours that — every Unix — it already has; where it does not, running
-///     the file as *shell* source would be actively wrong, so it is left to
-///     fail (TD-OILS-SHEBANG-INTERPRETER).
-///   * a `.bat`/`.cmd` file on the Windows host, which is text the OS does run.
-fn shell_script_indirection(path: &std::path::Path) -> Option<Str> {
+/// One kind of text is still left to the OS: a `.bat`/`.cmd` file on the Windows
+/// host, which is text that host does run.
+fn shell_script_indirection(path: &std::path::Path) -> Option<Interposed> {
     #[cfg(windows)]
     if path
         .extension()
@@ -864,10 +942,21 @@ fn shell_script_indirection(path: &std::path::Path) -> Option<Str> {
     let mut head = [0u8; 128];
     let n = File::open(path).and_then(|mut f| f.read(&mut head)).ok()?;
     let head = head.get(..n)?;
-    if head.starts_with(b"#!") || head.starts_with(b"MZ") || head_is_binary(head) {
+    if head.starts_with(b"MZ") || head_is_binary(head) {
         return None;
     }
-    own_binary()
+    if head.starts_with(b"#!") {
+        if cfg!(unix) {
+            return None;
+        }
+        if let Some((program, arg)) = shebang(head) {
+            return Some(Interposed::Interpreter { program, arg });
+        }
+        // A `#!` naming no interpreter is `ENOEXEC` on a kernel that reads the
+        // line, which is the same fall-through as a file with no line at all:
+        // the text goes to the shell.
+    }
+    own_binary().map(Interposed::Shell)
 }
 
 /// Whether a spawn failed because the file is not something the OS can execute
@@ -883,6 +972,24 @@ fn is_exec_format_error(e: &std::io::Error) -> bool {
     #[cfg(not(windows))]
     let codes = [8];
     e.raw_os_error().is_some_and(|c| codes.contains(&c))
+}
+
+/// One line of a spawn failure, and which of bash's two prologues it wears.
+///
+/// bash has two error printers and they do not agree about the prologue.
+/// `report_error` puts the shell name *and* the line number in front —
+/// `bash: line 3: …` on a non-interactive shell — while `sys_error`, which
+/// exists to append `strerror(errno)`, prints only the shell name. Almost every
+/// spawn failure comes from the first; the `bad interpreter` line comes from the
+/// second, and so is the one diagnostic here with no line number in it. The
+/// difference is visible in any script longer than one line, so it has to be
+/// carried rather than smoothed over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SpawnDiag {
+    /// `report_error`: the shell name and the line the command was on.
+    Line(Str),
+    /// `sys_error`: the shell name alone.
+    Bare(Str),
 }
 
 /// Diagnostic + exit status for a failed `PCommand::spawn` of a command word.
@@ -905,10 +1012,56 @@ fn is_exec_format_error(e: &std::io::Error) -> bool {
 ///   * only ENOENT on a pathname keeps the bare `PATH: No such file or
 ///     directory`, the same as an ordinary command.
 ///
-/// The returned lines have no `err_prefix`; the caller prepends it to each.
-fn spawn_error_message(word: BStr<'_>, e: &std::io::Error, as_exec: bool) -> (Vec<Str>, i32) {
+/// A `#!` line that named an interpreter displaces both of those readings: the
+/// word that would not run is the *interpreter*, and the file is only where its
+/// name was found. bash has two forms for it, and they do not carry the same
+/// prologue (see [`SpawnDiag`]):
+///   * an interpreter that is not there at all — `SCRIPT: cannot execute:
+///     required file not found`, 127. The interpreter is not even named: from
+///     the caller's side the script is what would not run.
+///   * an interpreter that is there and will not run — `SCRIPT: INTERP: bad
+///     interpreter: REASON`, 126. An `exec` adds a second line to that one, and
+///     bash's reads `SCRIPT: No error`: it reports `errno` having already
+///     cleared it to print the line above. That is an artifact, and `strerror(0)`
+///     is not the same string everywhere — but this whole reading is only
+///     reached where the OS does *not* honour a `#!` line (see
+///     [`shell_script_indirection`]), which is one host, whose wording is
+///     therefore the only one there is to match.
+///
+/// The returned lines have no prologue; the caller prepends the one each asks
+/// for.
+fn spawn_error_message(
+    word: BStr<'_>,
+    interp: Option<BStr<'_>>,
+    e: &std::io::Error,
+    as_exec: bool,
+) -> (Vec<SpawnDiag>, i32) {
     use std::io::ErrorKind;
     let is_path = word.contains(&b'/') || word.contains(&b'\\');
+    if let Some(interp) = interp {
+        if e.kind() == ErrorKind::NotFound {
+            return (
+                vec![SpawnDiag::Line(bfmt![
+                    word,
+                    b": cannot execute: required file not found"
+                ])],
+                127,
+            );
+        }
+        let mut lines = vec![SpawnDiag::Bare(bfmt![
+            word,
+            b": ",
+            interp,
+            b": bad interpreter: ",
+            &io_error_message(e)
+        ])];
+        if as_exec {
+            // bash's stale `errno`, spelled the way the one host that reaches
+            // here spells `strerror(0)`. See the doc comment.
+            lines.push(SpawnDiag::Line(bfmt![word, b": No error"]));
+        }
+        return (lines, 126);
+    }
     if e.kind() == ErrorKind::NotFound {
         let msg = if !is_path && as_exec {
             bfmt![b"exec: ", word, b": not found"]
@@ -917,7 +1070,7 @@ fn spawn_error_message(word: BStr<'_>, e: &std::io::Error, as_exec: bool) -> (Ve
         } else {
             bfmt![word, b": command not found"]
         };
-        return (vec![msg], 127);
+        return (vec![SpawnDiag::Line(msg)], 127);
     }
     // A file the OS refuses to run as a program image. Reaching here means the
     // file is *binary*: text would have been handed to this shell instead of
@@ -930,9 +1083,16 @@ fn spawn_error_message(word: BStr<'_>, e: &std::io::Error, as_exec: bool) -> (Ve
     // overwrites `errno` before returning its "binary file" verdict, so that
     // line reads "Permission denied" and says nothing about the format.
     if is_exec_format_error(e) {
-        let mut lines = vec![bfmt![word, b": cannot execute binary file: Exec format error"]];
+        let mut lines = vec![SpawnDiag::Line(bfmt![
+            word,
+            b": cannot execute binary file: Exec format error"
+        ])];
         if as_exec {
-            lines.push(bfmt![b"exec: ", word, b": cannot execute: Permission denied"]);
+            lines.push(SpawnDiag::Line(bfmt![
+                b"exec: ",
+                word,
+                b": cannot execute: Permission denied"
+            ]));
         }
         return (lines, 126);
     }
@@ -940,12 +1100,17 @@ fn spawn_error_message(word: BStr<'_>, e: &std::io::Error, as_exec: bool) -> (Ve
     if as_exec {
         let mut lines = Vec::new();
         if e.kind() == ErrorKind::IsADirectory {
-            lines.push(bfmt![word, b": ", &text]);
+            lines.push(SpawnDiag::Line(bfmt![word, b": ", &text]));
         }
-        lines.push(bfmt![b"exec: ", word, b": cannot execute: ", &text]);
+        lines.push(SpawnDiag::Line(bfmt![
+            b"exec: ",
+            word,
+            b": cannot execute: ",
+            &text
+        ]));
         return (lines, 126);
     }
-    (vec![bfmt![word, b": ", &text]], 126)
+    (vec![SpawnDiag::Line(bfmt![word, b": ", &text])], 126)
 }
 
 /// Start `pc`, unless the `$PATH` lookup that chose it already found nothing.
@@ -6583,7 +6748,8 @@ impl Shell {
             // though: bash forks the stage first, so nothing the lookup learns
             // comes back (see [`Shell::resolve_external_forked`]).
             let resolved = self.resolve_external_forked(program, &assigns);
-            let mut pc = self.external_command(program, resolved.as_deref(), program, &argv[1..]);
+            let (mut pc, interp) =
+                self.external_command(program, resolved.as_deref(), program, &argv[1..]);
             // The child inherits *this* shell's directory, which is not the
             // process's once we are inside a subshell clone.
             pc.current_dir(bytes::bytes_to_path(&self.cwd));
@@ -6624,9 +6790,9 @@ impl Shell {
                     children.push(child);
                 }
                 Err(e) => {
-                    let (msgs, status) = spawn_error_message(program, &e, false);
+                    let (msgs, status) = spawn_error_message(program, interp.as_deref(), &e, false);
                     for msg in &msgs {
-                        self.berrln(&bfmt![self.err_prefix(), msg]);
+                        self.berrln(&self.spawn_diag(msg));
                     }
                     prev_stdout = None;
                     stage_status[i] = status;
@@ -13851,7 +14017,8 @@ impl Shell {
             (Some(p), Some(_)) => exec_path_name(&self.cwd, &shell_path(p)),
             _ => argv[0].clone(),
         };
-        let mut cmd = self.external_command(&argv[0], resolved.as_deref(), &arg0, &argv[1..]);
+        let (mut cmd, interp) =
+            self.external_command(&argv[0], resolved.as_deref(), &arg0, &argv[1..]);
         cmd.current_dir(bytes::bytes_to_path(&self.cwd));
 
         // Environment: exported shell vars + this command's temp assignments —
@@ -14336,9 +14503,10 @@ impl Shell {
         let mut child = match spawn_resolved(&mut cmd, &argv[0], resolved.as_deref()) {
             Ok(c) => c,
             Err(e) => {
-                let (msgs, status) = spawn_error_message(&reported, &e, xopts.is_some());
+                let (msgs, status) =
+                    spawn_error_message(&reported, interp.as_deref(), &e, xopts.is_some());
                 for msg in &msgs {
-                    let line = bfmt![self.err_prefix(), msg];
+                    let line = self.spawn_diag(msg);
                     self.bemit_cmd_stderr(out, redir, &line);
                 }
                 self.last_status = status;
@@ -14517,7 +14685,8 @@ impl Shell {
             for w in &sc.words[1..] {
                 argv.extend(self.expand_word(w, true));
             }
-            let mut cmd = self.external_command(&argv[0], Some(&path), &argv[0], &argv[1..]);
+            let (mut cmd, interp) =
+                self.external_command(&argv[0], Some(&path), &argv[0], &argv[1..]);
             cmd.current_dir(bytes::bytes_to_path(&self.cwd));
             // A `&` job that carries no redirection of its own reads /dev/null,
             // not the shell's stdin — otherwise it would race the shell for the
@@ -14538,9 +14707,9 @@ impl Shell {
                     // without execute permission, a bad executable format. bash
                     // reports this from the child it already forked, so the job
                     // exists and has already exited with the failure status.
-                    let (msgs, code) = spawn_error_message(&argv[0], &e, false);
+                    let (msgs, code) = spawn_error_message(&argv[0], interp.as_deref(), &e, false);
                     for msg in &msgs {
-                        self.berrln(&bfmt![self.err_prefix(), msg]);
+                        self.berrln(&self.spawn_diag(msg));
                     }
                     let pid = SYNTH_PID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     (pid, None, Some(code))
@@ -20067,13 +20236,19 @@ impl Shell {
     /// believe it was called as: the word as typed for an ordinary command,
     /// whatever `exec -a`/`-l` chose otherwise.
     ///
-    /// The one thing decided here and nowhere else is the interposition of this
-    /// shell in front of a script the OS will not execute (see
+    /// The one thing decided here and nowhere else is the interposition of
+    /// something else in front of a script the OS will not execute (see
     /// [`shell_script_indirection`]). That mirrors bash's `shell_execve`: the
-    /// shell binary runs with the script in front of the original arguments,
-    /// under the shell's own `argv[0]`. bash names the script there the way it
-    /// named it to itself — the word as typed when the word spelled a path, the
-    /// `$PATH` hit otherwise — and that name is what becomes the child's `$0`.
+    /// interposed program runs with the script in front of the original
+    /// arguments. bash names the script there the way it named it to itself —
+    /// the word as typed when the word spelled a path, the `$PATH` hit
+    /// otherwise — and for a shebang-less file, which runs under this shell,
+    /// that name is what becomes the child's `$0`.
+    ///
+    /// The second half of the answer is the interpreter a `#!` line named, when
+    /// one was interposed. A spawn failure has to be blamed on *it* rather than
+    /// on the script (see [`spawn_error_message`]), and by then the file is no
+    /// longer around to be read again.
     #[cfg_attr(not(unix), allow(unused_variables))]
     fn external_command(
         &self,
@@ -20081,19 +20256,31 @@ impl Shell {
         resolved: Option<&std::path::Path>,
         arg0: BStr<'_>,
         args: &[Str],
-    ) -> PCommand {
+    ) -> (PCommand, Option<Str>) {
         let indirect = resolved.and_then(shell_script_indirection);
         let (program, args) = match (&indirect, resolved) {
-            (Some(shell), Some(path)) => {
+            (Some(via), Some(path)) => {
                 let script = if word.contains(&b'/') || word.contains(&b'\\') {
                     word.to_vec()
                 } else {
                     shell_path(path)
                 };
-                let mut a = Vec::with_capacity(args.len().saturating_add(1));
+                let mut a = Vec::with_capacity(args.len().saturating_add(2));
+                // The `#!` line's tail comes before the script, as the kernel
+                // places it, and is one argument however many blanks it holds.
+                a.extend(via.prefix_arg().cloned());
                 a.push(script);
                 a.extend_from_slice(args);
-                (shell.clone(), a)
+                let program = match via {
+                    // An interpreter is a plain pathname to the kernel —
+                    // resolved against the working directory, never searched
+                    // for on `$PATH` — so a bare `#!interp` means `./interp`,
+                    // not the first `interp` on the path. `resolve_program`
+                    // would search; this does not.
+                    Interposed::Interpreter { program, .. } => self.resolve_str(program),
+                    Interposed::Shell(program) => program.clone(),
+                };
+                (program, a)
             }
             _ => (
                 resolved.map_or_else(|| self.resolve_program(word), bytes::path_to_bytes),
@@ -20116,7 +20303,8 @@ impl Shell {
             std::os::unix::process::CommandExt::arg0(&mut pc, bytes::bytes_to_os(arg0));
         }
         self.push_child_args(&mut pc, &args);
-        pc
+        let interp = indirect.as_ref().and_then(Interposed::interpreter).cloned();
+        (pc, interp)
     }
 
     /// Hand a child every argument after the command word.
@@ -32946,6 +33134,15 @@ impl Shell {
     /// not `bash`) and osh's own name is the more meaningful diagnostic.
     fn err_prefix(&self) -> Str {
         self.err_prefix_at(self.current_line)
+    }
+
+    /// A [`SpawnDiag`] with the prologue it asked for in front of it, ready to
+    /// print. See that type for why a spawn failure gets to choose.
+    fn spawn_diag(&self, d: &SpawnDiag) -> Str {
+        match d {
+            SpawnDiag::Line(text) => bfmt![self.err_prefix(), text],
+            SpawnDiag::Bare(text) => bfmt![self.error_source(), b": ", text],
+        }
     }
 
     /// [`Shell::err_prefix`] with an explicit line instead of the currently
@@ -46899,7 +47096,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         };
         assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
         // …which is what makes it `command not found` rather than an errno.
-        assert_eq!(spawn_error_message(host_name.as_bytes(), &e, false).1, 127);
+        assert_eq!(spawn_error_message(host_name.as_bytes(), None, &e, false).1, 127);
 
         // A word that spelled a path is handed over unresolved on purpose: only
         // the OS can say why that particular file will not run. Here it does not
@@ -52004,41 +52201,137 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(!io_error_message(&Error::from(ErrorKind::NotFound)).contains("os error"));
     }
 
+    /// The text of every line a spawn failure produced, with a `!` in front of
+    /// any that asked for the bare prologue instead of the usual one with a
+    /// line number in it — so an assertion below shows which printer bash used
+    /// as well as what it said. See [`SpawnDiag`].
+    fn diag_text(m: &(Vec<SpawnDiag>, i32)) -> Vec<String> {
+        m.0.iter()
+            .map(|l| match l {
+                SpawnDiag::Line(t) => String::from_utf8_lossy(t).into_owned(),
+                SpawnDiag::Bare(t) => format!("!{}", String::from_utf8_lossy(t)),
+            })
+            .collect()
+    }
+
     #[test]
     fn spawn_error_message_has_execs_own_wording() {
         use std::io::{Error, ErrorKind};
-        let text = |m: &(Vec<Str>, i32)| {
-            m.0.iter()
-                .map(|l| String::from_utf8_lossy(l).into_owned())
-                .collect::<Vec<_>>()
-        };
+        let text = |m: &(Vec<SpawnDiag>, i32)| diag_text(m);
         // A name that resolved to nothing: `exec` names itself and says only
         // "not found", where an ordinary command word says "command not found".
-        let plain = spawn_error_message(b"zz", &Error::from(ErrorKind::NotFound), false);
+        let plain = spawn_error_message(b"zz", None, &Error::from(ErrorKind::NotFound), false);
         assert_eq!(text(&plain), ["zz: command not found"]);
         assert_eq!(plain.1, 127);
-        let ex = spawn_error_message(b"zz", &Error::from(ErrorKind::NotFound), true);
+        let ex = spawn_error_message(b"zz", None, &Error::from(ErrorKind::NotFound), true);
         assert_eq!(text(&ex), ["exec: zz: not found"]);
         assert_eq!(ex.1, 127);
         // ENOENT on something spelled as a path keeps the bare errno wording in
         // both, because the word said where to look and nothing was there.
-        let ex = spawn_error_message(b"/a/zz", &Error::from(ErrorKind::NotFound), true);
+        let ex = spawn_error_message(b"/a/zz", None, &Error::from(ErrorKind::NotFound), true);
         assert_eq!(text(&ex), ["/a/zz: No such file or directory"]);
         assert_eq!(ex.1, 127);
         // A file that exists but will not run is `cannot execute` under `exec`.
-        let ex = spawn_error_message(b"/a/zz", &Error::from(ErrorKind::PermissionDenied), true);
+        let ex = spawn_error_message(b"/a/zz", None, &Error::from(ErrorKind::PermissionDenied), true);
         assert_eq!(text(&ex), ["exec: /a/zz: cannot execute: Permission denied"]);
         assert_eq!(ex.1, 126);
-        let plain = spawn_error_message(b"/a/zz", &Error::from(ErrorKind::PermissionDenied), false);
+        let plain =
+            spawn_error_message(b"/a/zz", None, &Error::from(ErrorKind::PermissionDenied), false);
         assert_eq!(text(&plain), ["/a/zz: Permission denied"]);
         // A directory says so twice: once as the plain error of trying to run
         // it, and once in the `cannot execute` form.
-        let ex = spawn_error_message(b"/a/d", &Error::from(ErrorKind::IsADirectory), true);
+        let ex = spawn_error_message(b"/a/d", None, &Error::from(ErrorKind::IsADirectory), true);
         assert_eq!(
             text(&ex),
             ["/a/d: Is a directory", "exec: /a/d: cannot execute: Is a directory"]
         );
         assert_eq!(ex.1, 126);
+    }
+
+    #[test]
+    fn a_shebang_that_will_not_start_is_blamed_on_the_interpreter() {
+        use std::io::{Error, ErrorKind};
+        // An interpreter that is not there is not even named: from where the
+        // caller stands it is the *script* that would not run, and the status
+        // is 127 as for any other missing program.
+        let miss = spawn_error_message(
+            b"./s.sh",
+            Some(b"/no/such/interp"),
+            &Error::from(ErrorKind::NotFound),
+            false,
+        );
+        assert_eq!(diag_text(&miss), ["./s.sh: cannot execute: required file not found"]);
+        assert_eq!(miss.1, 127);
+        // Anything else names it, and does so through the printer that has no
+        // line number in its prologue — hence the `!`.
+        let bad = spawn_error_message(
+            b"./s.sh",
+            Some(b"/tmp"),
+            &Error::from(ErrorKind::PermissionDenied),
+            false,
+        );
+        assert_eq!(diag_text(&bad), ["!./s.sh: /tmp: bad interpreter: Permission denied"]);
+        assert_eq!(bad.1, 126);
+        // `exec` adds a second line, and it reports an `errno` bash has already
+        // cleared — hence a line that says nothing went wrong, under the
+        // *other* prologue, right after one that says something did.
+        let as_exec = spawn_error_message(
+            b"/a/s.sh",
+            Some(b"/tmp"),
+            &Error::from(ErrorKind::PermissionDenied),
+            true,
+        );
+        assert_eq!(
+            diag_text(&as_exec),
+            ["!/a/s.sh: /tmp: bad interpreter: Permission denied", "/a/s.sh: No error"]
+        );
+        assert_eq!(as_exec.1, 126);
+        // A missing interpreter says the same under `exec` as without it.
+        let miss_exec = spawn_error_message(
+            b"/a/s.sh",
+            Some(b"/no/such"),
+            &Error::from(ErrorKind::NotFound),
+            true,
+        );
+        assert_eq!(diag_text(&miss_exec), ["/a/s.sh: cannot execute: required file not found"]);
+        assert_eq!(miss_exec.1, 127);
+    }
+
+    #[test]
+    fn a_shebang_line_splits_the_way_a_kernel_splits_one() {
+        let s = |b: &[u8]| {
+            shebang(b).map(|(p, a)| {
+                (
+                    String::from_utf8_lossy(&p).into_owned(),
+                    a.map(|a| String::from_utf8_lossy(&a).into_owned()),
+                )
+            })
+        };
+        assert_eq!(s(b"#!/bin/sh\necho hi\n"), Some(("/bin/sh".into(), None)));
+        // Blanks around the line are trimmed at both ends, and the run between
+        // the interpreter and its argument is not part of either.
+        assert_eq!(s(b"#!  \t/bin/sh \t \n"), Some(("/bin/sh".into(), None)));
+        assert_eq!(s(b"#!/bin/sh -x\n"), Some(("/bin/sh".into(), Some("-x".into()))));
+        assert_eq!(s(b"#! /bin/sh \t -x  \n"), Some(("/bin/sh".into(), Some("-x".into()))));
+        // Everything after the interpreter is ONE argument, blanks and all —
+        // the kernel's rule, not bash's own fallback's word split.
+        assert_eq!(
+            s(b"#!/bin/awk -v x=1 -f\nBODY\n"),
+            Some(("/bin/awk".into(), Some("-v x=1 -f".into())))
+        );
+        // A line with no newline after it is still the whole line.
+        assert_eq!(s(b"#!/bin/cat"), Some(("/bin/cat".into(), None)));
+        // A CRLF file's `\r` is not a blank, so it stays on the last word and
+        // the interpreter it names does not exist — as on Linux.
+        assert_eq!(s(b"#!/bin/sh\r\n"), Some(("/bin/sh\r".into(), None)));
+        assert_eq!(s(b"#!/bin/sh -x\r\n"), Some(("/bin/sh".into(), Some("-x\r".into()))));
+        // No interpreter named at all: not a refusal, a fall-through to shell
+        // source. So is a file that never began `#!`.
+        assert_eq!(s(b"#!\necho hi\n"), None);
+        assert_eq!(s(b"#!   \necho hi\n"), None);
+        assert_eq!(s(b"#!"), None);
+        assert_eq!(s(b"echo hi\n"), None);
+        assert_eq!(s(b"#comment\n"), None);
     }
 
     #[test]
@@ -52048,18 +52341,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // line against the file, not the errno the OS gave, and `exec` adds a
         // second line about EACCES — see the doc comment for why.
         let e = std::io::Error::from_raw_os_error(if cfg!(windows) { 193 } else { 8 });
-        let text = |m: &(Vec<Str>, i32)| {
-            m.0.iter()
-                .map(|l| String::from_utf8_lossy(l).into_owned())
-                .collect::<Vec<_>>()
-        };
-        let plain = spawn_error_message(b"./bin.elf", &e, false);
+        let text = |m: &(Vec<SpawnDiag>, i32)| diag_text(m);
+        let plain = spawn_error_message(b"./bin.elf", None, &e, false);
         assert_eq!(
             text(&plain),
             ["./bin.elf: cannot execute binary file: Exec format error"]
         );
         assert_eq!(plain.1, 126);
-        let ex = spawn_error_message(b"/a/bin.elf", &e, true);
+        let ex = spawn_error_message(b"/a/bin.elf", None, &e, true);
         assert_eq!(
             text(&ex),
             [
@@ -52085,8 +52374,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn only_a_shebangless_text_file_is_run_by_this_shell() {
         // bash's `check_binary_file`: an executable image is binary, and so is
         // anything with a NUL before the first newline; everything else is text
-        // and gets fed to a shell. A `#!` file names its own interpreter and is
-        // left to the OS (TD-OILS-SHEBANG-INTERPRETER).
+        // and gets fed to a shell. A `#!` file names its own interpreter, which
+        // is the OS's business wherever the OS honours the line and this
+        // shell's where it does not — see [`shell_script_indirection`].
         let d = ScratchDir::new("osh_shbang");
         let write = |name: &str, body: &[u8]| {
             let p = d.join(name);
@@ -52104,12 +52394,37 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("hash.sh", b"# a comment, not a shebang\n"),
         ] {
             let p = write(name, body);
-            assert_eq!(shell_script_indirection(&p).as_deref(), Some(&*me), "{name}");
+            assert_eq!(
+                shell_script_indirection(&p),
+                Some(Interposed::Shell(me.clone())),
+                "{name}"
+            );
         }
-        // Left to the OS.
+        // A `#!` naming nothing is `ENOEXEC` on a kernel that reads the line,
+        // which is the same fall-through: shell source like any other text.
+        for (name, body) in [("bare.sh", b"#!\necho hi\n".as_slice()), ("blank.sh", b"#!  \nx\n")] {
+            let p = write(name, body);
+            assert_eq!(
+                shell_script_indirection(&p),
+                Some(Interposed::Shell(me.clone())),
+                "{name}"
+            );
+        }
+        // A `#!` that names one is the OS's answer where the OS gives one, and
+        // this shell's where it does not.
+        let p = write("sh.sh", b"#!/bin/sh -x\necho hi\n");
+        let expected = if cfg!(unix) {
+            None
+        } else {
+            Some(Interposed::Interpreter {
+                program: b"/bin/sh".to_vec(),
+                arg: Some(b"-x".to_vec()),
+            })
+        };
+        assert_eq!(shell_script_indirection(&p), expected);
+        // Left to the OS: nothing here is text at all.
         for (name, body) in [
-            ("sh.sh", b"#!/bin/sh\necho hi\n".as_slice()),
-            ("elf.bin", b"\x7fELF\x02\x01\x01\0rest\n"),
+            ("elf.bin", b"\x7fELF\x02\x01\x01\0rest\n".as_slice()),
             ("pe.bin", b"MZ\x90\0\x03\0\0\0\n"),
             ("nul.bin", b"abc\0def\nghi"),
         ] {

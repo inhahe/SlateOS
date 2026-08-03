@@ -15844,6 +15844,7 @@ impl Shell {
                 if let Some(n) = special_redirect_fd(&target) {
                     return self.persistent_special_dup(fd, &target, n, false, out);
                 }
+                self.noclobber_check(&target, !append)?;
                 let f = open_out(&self.cwd, &target, append)
                     .map_err(|e| bfmt![&target, b": ", io_error_message(&e)])?;
                 // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one handle, and
@@ -15861,14 +15862,7 @@ impl Shell {
                 if let Some(n) = special_redirect_fd(&target) {
                     return self.persistent_special_dup(fd, &target, n, false, out);
                 }
-                if self.noclobber
-                    && matches!(r.op, RedirectOp::Write)
-                    && bytes::bytes_to_path(&self.host_path(&target))
-                        .metadata()
-                        .is_ok_and(|m| m.is_file())
-                {
-                    return Err(bfmt![&target, b": cannot overwrite existing file"]);
-                }
+                self.noclobber_check(&target, matches!(r.op, RedirectOp::Write))?;
                 let f = open_out(&self.cwd, &target, append)
                     .map_err(|e| bfmt![&target, b": ", io_error_message(&e)])?;
                 let a = std::sync::Arc::new(f);
@@ -15899,6 +15893,31 @@ impl Shell {
                 let target = self.expand_to_string(&r.target);
                 self.apply_persistent_dup_in(&DupOrigin::Word(r), fd, &target, out)?;
             }
+        }
+        Ok(())
+    }
+
+    /// The `set -C` guard, to run immediately before an output open.
+    ///
+    /// `truncating` says whether this is a redirect noclobber protects against.
+    /// That is every form that opens a file for writing from the start: a plain
+    /// `>`, and both spellings of "send both streams there", `&> file` and the
+    /// `>& file` that becomes it. `>|` overrides the option by definition, and
+    /// the append forms (`>>`, `&>>`) have nothing to truncate, so those pass
+    /// `false`.
+    ///
+    /// Only a *regular* file is protected — `set -C; echo hi > /dev/null`
+    /// succeeds — and callers must resolve the special filenames
+    /// (`/dev/stdout`, `/dev/fd/N`) *before* this, because those are dups rather
+    /// than opens and so have no file for noclobber to guard.
+    fn noclobber_check(&self, target: BStr<'_>, truncating: bool) -> Result<(), Str> {
+        if truncating
+            && self.noclobber
+            && bytes::bytes_to_path(&self.host_path(target))
+                .metadata()
+                .is_ok_and(|m| m.is_file())
+        {
+            return Err(bfmt![target, b": cannot overwrite existing file"]);
         }
         Ok(())
     }
@@ -16039,6 +16058,7 @@ impl Shell {
                 if let Some(n) = special_redirect_fd(target) {
                     return self.persistent_special_dup(fd, target, n, false, out);
                 }
+                self.noclobber_check(target, true)?;
                 let f = open_out(&self.cwd, target, false)
                     .map_err(|e| bfmt![target, b": ", io_error_message(&e)])?;
                 let a = WriteFd::File(std::sync::Arc::new(f));
@@ -16914,9 +16934,10 @@ impl Shell {
                     Self::plan_here_bytes(fd, s, plan);
                 }
                 RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
-                    // `&>file` / `&>>file` / `>&file` → both stdout and stderr to
-                    // the file (bash: equivalent to `>file 2>&1`). noclobber does
-                    // not apply to `&>` (bash treats it like `>|`).
+                    // `&>file` / `&>>file` → both stdout and stderr to the file
+                    // (bash: equivalent to `>file 2>&1`). The `>&file` spelling
+                    // means the same but is a different instruction until it is
+                    // expanded; see [`Shell::resolve_dup_out`].
                     let target = self.expand_redirect_target(&r.target, RedirWord::Filename)?;
                     let append = matches!(r.op, RedirectOp::AppendBoth);
                     // `&> /dev/stderr` is `> /dev/stderr 2>&1`: fd 1 dups fd 2,
@@ -16925,6 +16946,9 @@ impl Shell {
                     if self.resolve_special_redirect(fd, &target, false, plan)? {
                         return Ok(());
                     }
+                    // `&>` truncates, so `set -C` guards it exactly as it guards
+                    // the `>` it stands for; `&>>` appends and is exempt.
+                    self.noclobber_check(&target, !append)?;
                     open_output_target(&self.cwd, &target, append)?;
                     // Both fds now target the file: clear every competing dup so
                     // this (later) redirect wins over earlier `2>&1`/`>&N` forms.
@@ -16946,19 +16970,10 @@ impl Shell {
                     if self.resolve_special_redirect(fd, &target, false, plan)? {
                         return Ok(());
                     }
-                    // With `set -C` (noclobber), a plain `>` refuses to truncate an
-                    // existing regular file; `>|` (Clobber) and `>>` (Append)
-                    // always proceed. Matches bash's noclobber semantics. Checked
+                    // `>|` (Clobber) and `>>` (Append) always proceed. Checked
                     // *before* the open below, which would otherwise truncate the
                     // very file noclobber exists to protect.
-                    if self.noclobber
-                        && matches!(r.op, RedirectOp::Write)
-                        && bytes::bytes_to_path(&self.host_path(&target))
-                            .metadata()
-                            .is_ok_and(|m| m.is_file())
-                    {
-                        return Err(bfmt![&target, b": cannot overwrite existing file"]);
-                    }
+                    self.noclobber_check(&target, matches!(r.op, RedirectOp::Write))?;
                     open_output_target(&self.cwd, &target, append)?;
                     match fd {
                         2 => {
@@ -17042,11 +17057,11 @@ impl Shell {
         // to the live sink (pipe, terminal, or capture), not just to a file path.
         //
         // `M>&word`: after expansion, a dup target must be a descriptor number
-        // or `-` (close). A non-numeric expansion on fd 1 (`>&$f`, `1>&$f`,
-        // `1>&file`) means "both stdout and stderr to that file", exactly like
-        // `>&file` (which the parser already rewrote to `WriteBoth` for the
-        // no-explicit-fd literal form). On any other fd a non-numeric target is
-        // an ambiguous redirect, as bash reports.
+        // or `-` (close). A non-numeric expansion on fd 1 (`>&file`, `>&$f`,
+        // `1>&$f`) means "both stdout and stderr to that file" — the same thing
+        // `&>file` means, which is why bash rewrites the instruction to
+        // `r_err_and_out` at exactly this point. On any other fd a non-numeric
+        // target is an ambiguous redirect, as bash reports.
         // A dup target must be a descriptor number or `-`; anything else takes
         // the non-numeric path below. `all digits` is what decides, not "parses
         // as a number" — see [`Shell::classify_dup_word`].
@@ -17076,6 +17091,7 @@ impl Shell {
                 if self.resolve_special_redirect(fd, target, false, plan)? {
                     return Ok(());
                 }
+                self.noclobber_check(target, true)?;
                 let target = target.to_vec();
                 open_output_target(&self.cwd, &target, false)?;
                 plan.clear_stdout();

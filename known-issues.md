@@ -666,7 +666,7 @@ a lib test in `unparse.rs`.
 osh checks noclobber only in the `Write`/`Clobber`/`Append` arms. See
 TD-OILS-NOCLOBBER-IGNORES-THE-AMPERSAND-FORMS.
 
-### TD-OILS-NOCLOBBER-IGNORES-THE-AMPERSAND-FORMS. `set -C` does not protect a `&> file` target — 2026-08-03 — ⚠️ **OPEN**
+### TD-OILS-NOCLOBBER-IGNORES-THE-AMPERSAND-FORMS. `set -C` does not protect a `&> file` target — 2026-08-03 — ✅ **FIXED 2026-08-03**
 
 **Where:** `userspace/oils/src/interp.rs` — the `RedirectOp::WriteBoth |
 RedirectOp::AppendBoth` arms of the transient redirect planner and of the
@@ -687,11 +687,53 @@ rc=0
 Same for `>& c`, `1>& c` and `exec &> c` / `exec >& c`. `&>>` is an append and is
 correctly exempt in both shells.
 
-**Proper fix.** `&>` is a `>` on two descriptors, so it wants the same guard.
-The check is four lines repeated in four places already (`Write` transient,
-`Write` persistent, and now these) — lift it into one helper that takes the
-target and whether the open is an append, and call it from all of them rather
-than adding a fifth copy.
+**Fix.** `&>` is a `>` on two descriptors, so it takes the same guard. The check
+is now one `Shell::noclobber_check(target, truncating)` called from all six
+output-open sites — `Write`/`Clobber`/`Append` and `WriteBoth`/`AppendBoth` on
+each of the transient and persistent paths, plus the two `>& file` branches —
+rather than the two hand-written copies it was. `truncating` is what decides:
+false for `>|`, `>>` and `&>>`, true for the rest.
+
+The ordering matters and is bash's: the special filenames are resolved *first*,
+because `redir_open` looks them up in `_redir_special_filenames` and returns
+before it ever reaches `noclobber_open`. So `set -C; echo hi > /dev/stdout`
+succeeds — those are dups, with no file to protect. (The reference bash on this
+host disagrees, refusing `> /dev/stderr` and `>& /dev/fd/2` under `set -C`; that
+build appears not to have the special-filename table compiled in, so it opens
+the Cygwin device path for real. osh follows upstream bash, and the corpus case
+stays away from the combination.)
+
+Covered by `noclobber-guards-every-form-that-truncates.sh`.
+
+### TD-OILS-A-DIRECTORY-AS-A-REDIRECT-TARGET-REPORTS-THE-WRONG-ERROR-AND-FAILS-A-READ — 2026-08-03 — ⚠️ **OPEN**
+
+**Where:** `userspace/oils/src/interp.rs`, `io_error_message` and the input-open
+path (`open_output_target`'s `open_out`, and the `RedirectOp::Read` planner).
+
+**What.** Two divergences, one cosmetic and one real, both from opening a
+directory:
+
+```
+$ mkdir ad
+$ bash --norc -c 'echo x > ad'      $ osh -c 'echo x > ad'
+bash: ad: Is a directory            osh: ad: Permission denied
+
+$ bash --norc -c 'cat < ad'         $ osh -c 'cat < ad'
+cat: -: Is a directory              osh: ad: Permission denied
+```
+
+Win32 answers `CreateFile` on a directory with `ERROR_ACCESS_DENIED`, which Rust
+maps to `PermissionDenied`, so the message is wrong. The read case is worse than
+a message: bash's `< ad` *succeeds* — a directory opens for reading, and it is
+the reading command that then fails — where osh fails the redirection itself,
+which is a different exit status and a different stream for the diagnostic.
+
+**Proper fix.** Before mapping an open failure, `stat` the path: if it is a
+directory, report `Is a directory` regardless of the errno the host gave. For
+the read side, opening a directory must succeed as a descriptor that yields
+`EISDIR` on the first read — `FILE_FLAG_BACKUP_SEMANTICS` gets the handle; the
+read half needs an `InputSrc` variant that fails that way. Also affects `&> dir`
+and `exec > dir`.
 
 ### TD-OILS-COMPLETE-TABLE-AND-OPERANDS. `complete`/`compopt` got ten things wrong at once, all downstream of two facts about bash they did not model — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

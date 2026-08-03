@@ -368,14 +368,28 @@ to `Shell::exec_function_def`, with the rule in
 `Shell::posix_function_name_error`; covered by
 `posix-mode-narrows-what-a-function-may-be-called.sh` and a lib test.
 
+**Also done since — posix mode finds a special builtin before a function.** The
+other half of the rule above: POSIX says the sixteen special builtins are found
+*before* shell functions, so in posix mode a function named `unset` stops
+shadowing the builtin — and starts again the moment the mode goes off. It can
+only ever bite a function defined *before* the mode was entered, because the mode
+itself refuses to make one with such a name. Unlike the fatality rules it is not
+gated on interactivity, since it only picks between two definitions rather than
+ending the shell. Three things it does *not* do, all checked: it leaves the
+non-special builtins alone (`cd() { … }` still wins), it does not survive
+`enable -n` taking the builtin away, and it is only *execution* that looks the
+other way round — `type`, `type -t`, `command -v`/`-V`, `declare -f`/`-F` and
+`unset -f` all still find the function. In `Shell::posix_special_builtin_first`,
+consulted from the function-lookup branch of the command dispatcher (the table
+lookup comes first, so the posix test — which reads a variable — is only paid
+when there really is a function to shadow). Covered by
+`posix-mode-finds-a-special-builtin-before-a-function.sh` and a lib test.
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
 and a 42-case probe of them against osh leaves these real gaps, roughly in
 increasing order of size:
 
-* Special builtins are found *before* shell functions, so a function named
-  `unset` that was defined before the mode was entered does not shadow the
-  builtin once it is.
 * `.`/`source` does not search `$PWD` when the name is not found on `$PATH`.
 * A bare `alias` listing drops the `alias ` prefix from each line.
 * `cd` in logical mode validates the resulting path and falls back to physical.

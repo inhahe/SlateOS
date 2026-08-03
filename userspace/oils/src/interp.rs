@@ -6204,6 +6204,29 @@ impl Shell {
         !self.interactive_shell && self.shell_option_enabled("posix")
     }
 
+    /// Whether a command word should reach the *special builtin* of that name
+    /// rather than the shell function that shares it.
+    ///
+    /// POSIX says the special builtins are found before functions, and bash
+    /// obeys that in posix mode — in every shell, interactive or not, since
+    /// unlike the fatality rules this one only changes which of two definitions
+    /// runs. It can only ever bite a function defined *before* the mode went on,
+    /// because the mode itself refuses to make one with such a name (see
+    /// [`Shell::posix_function_name_error`]).
+    ///
+    /// The builtin has to be enabled: `enable -n unset` takes it out of the
+    /// running and the function is reachable again. And it is only *execution*
+    /// that looks the other way round — `type`, `command -v`/`-V` and
+    /// `declare -f` all still report the function, and `unset -f` still removes
+    /// it.
+    fn posix_special_builtin_first(&self, name: Option<&str>) -> bool {
+        name.is_some_and(|n| {
+            Self::is_special_builtin(n)
+                && self.builtin_enabled(n)
+                && self.shell_option_enabled("posix")
+        })
+    }
+
     /// The gate above, for a failure a builtin reported through
     /// [`Shell::builtin_failure`]. The two classes differ in which prefix takes
     /// the rule away — see [`BuiltinVia`].
@@ -13228,7 +13251,14 @@ impl Shell {
         // `myfunc 2> err`, `myfunc < in`) apply to the whole function body, so
         // run it inside a redirect scope when any are present. Without redirects,
         // dispatch directly to avoid the scope-setup overhead.
-        if self.funcs.contains_key(name.as_slice()) {
+        //
+        // …unless posix mode found a special builtin first, in which case the
+        // function is passed over and the builtin dispatch below picks the name
+        // up. The table lookup comes first so the posix test — which reads a
+        // variable — is only paid when there really is a function to shadow.
+        if self.funcs.contains_key(name.as_slice())
+            && !self.posix_special_builtin_first(name_str.as_deref())
+        {
             // A function body re-enters the evaluator, so a pipeline stage that
             // is a function call is one bash counts. See [`Shell::stage_pending_level`].
             self.enter_stage_subshell();
@@ -47795,6 +47825,78 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run_script("unset() { :; }; set -o posix\ndeclare -F unset"),
             ("unset\n".to_string(), 0)
         );
+    }
+
+    /// POSIX says the special builtins are found *before* shell functions, and
+    /// bash obeys that in posix mode: a function named `unset` stops shadowing
+    /// the builtin the moment the mode goes on, and starts again the moment it
+    /// goes off. The only way to have such a function at all is to define it
+    /// before entering the mode, because the mode itself refuses the name.
+    #[test]
+    fn posix_mode_finds_a_special_builtin_before_a_function() {
+        // Hence the shape of every case: define first, switch after — and
+        // switch through `$POSIXLY_CORRECT` rather than `set -o posix`, since a
+        // function named `set` would otherwise eat the switch itself.
+        let posix =
+            |name: &str, body: &str| run_script(&format!("{name}() {{ echo FN; }}\nPOSIXLY_CORRECT=1\n{body}"));
+        // Outside the mode the function wins…
+        assert_eq!(
+            run_script("unset() { echo FN; }; v=1; unset v; echo \"v=${v-gone}\""),
+            ("FN\nv=1\n".to_string(), 0)
+        );
+        // …and inside it the builtin does.
+        assert_eq!(
+            posix("unset", "v=1; unset v; echo \"v=${v-gone}\""),
+            ("v=gone\n".to_string(), 0)
+        );
+        assert_eq!(posix("shift", "set -- a b; shift; echo $#"), ("1\n".to_string(), 0));
+        assert_eq!(posix("eval", "eval 'echo EV'"), ("EV\n".to_string(), 0));
+        assert_eq!(posix("set", "set -- a b c; echo $#"), ("3\n".to_string(), 0));
+        assert_eq!(posix(":", ":; echo rc=$?"), ("rc=0\n".to_string(), 0));
+        assert_eq!(
+            posix("break", "for i in 1 2 3; do break; done; echo i=$i"),
+            ("i=1\n".to_string(), 0)
+        );
+        assert_eq!(
+            posix("return", "f() { return 3; }; f; echo rc=$?"),
+            ("rc=3\n".to_string(), 0)
+        );
+        assert_eq!(posix("exit", "exit 7; echo NO"), (String::new(), 7));
+        // Leaving the mode gives the function back.
+        assert_eq!(
+            posix(
+                "unset",
+                "v=1; unset v; echo \"in=${v-gone}\"\n\
+                 unset POSIXLY_CORRECT; w=1; unset w; echo \"out=${w-gone}\""
+            ),
+            ("in=gone\nFN\nout=1\n".to_string(), 0)
+        );
+        // The rule is only for the *special* builtins; the rest still lose.
+        assert_eq!(posix("cd", "cd /nowhere"), ("FN\n".to_string(), 0));
+        assert_eq!(posix("read", "read x </dev/null"), ("FN\n".to_string(), 0));
+        // `enable -n` takes the builtin out of the running, and the function is
+        // reachable again.
+        assert_eq!(
+            posix("unset", "enable -n unset; v=1; unset v; echo \"v=${v-gone}\""),
+            ("FN\nv=1\n".to_string(), 0)
+        );
+        // Only *execution* looks the other way round: everything that merely
+        // describes a name still finds the function, and `unset -f` removes it.
+        assert_eq!(posix("unset", "type -t unset"), ("function\n".to_string(), 0));
+        assert_eq!(posix("unset", "command -v unset"), ("unset\n".to_string(), 0));
+        assert_eq!(posix("unset", "declare -F unset"), ("unset\n".to_string(), 0));
+        assert_eq!(
+            posix("unset", "unset -f unset; declare -F unset; echo rc=$?"),
+            ("rc=1\n".to_string(), 0)
+        );
+        // The prefixes reach the builtin either way, as they did before.
+        for prefix in ["command", "builtin"] {
+            assert_eq!(
+                posix("unset", &format!("v=1; {prefix} unset v; echo \"v=${{v-gone}}\"")),
+                ("v=gone\n".to_string(), 0),
+                "{prefix}"
+            );
+        }
     }
 
     /// A `declare -p` with attribute letters lists only the names those letters

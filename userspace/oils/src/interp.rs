@@ -6227,6 +6227,22 @@ impl Shell {
         })
     }
 
+    /// What `type`, `type -a` and `command -V` put between "is a" and "shell
+    /// builtin" when describing `name`: `" special"` for one of the sixteen in
+    /// posix mode, and nothing otherwise.
+    ///
+    /// bash draws the distinction only where it *means* something, which is only
+    /// in posix mode — there the special builtins are found before functions
+    /// (see [`Shell::posix_special_builtin_first`]) and their failures end the
+    /// shell, so the description says which kind a name is. `type -t` is
+    /// unaffected: its answer is the machine-readable `builtin` either way, as
+    /// is `command -v`'s bare name.
+    fn builtin_kind_word(&self, name: &[u8]) -> &'static str {
+        let special = bytes::as_str(name).is_some_and(Self::is_special_builtin)
+            && self.shell_option_enabled("posix");
+        if special { " special" } else { "" }
+    }
+
     /// The gate above, for a failure a builtin reported through
     /// [`Shell::builtin_failure`]. The two classes differ in which prefix takes
     /// the rule away — see [`BuiltinVia`].
@@ -14374,7 +14390,7 @@ impl Shell {
             }
         } else if self.builtin_enabled(target) {
             let line = if verbose {
-                format!("{target} is a shell builtin")
+                format!("{target} is a{} shell builtin", self.builtin_kind_word(target.as_bytes()))
             } else {
                 target.to_string()
             };
@@ -33969,7 +33985,9 @@ impl Shell {
                     self.write_function_description(name, out, redir);
                 }
                 if is_bi {
-                    let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell builtin"]);
+                    let kind = self.builtin_kind_word(name);
+                    let _ = self
+                        .bwrite_line(out, redir, &bfmt![name, b" is a", kind, b" shell builtin"]);
                 }
                 for f in &files {
                     let _ =
@@ -33983,7 +34001,9 @@ impl Shell {
                 } else if is_fn {
                     self.write_function_description(name, out, redir);
                 } else if is_bi {
-                    let _ = self.bwrite_line(out, redir, &bfmt![name, b" is a shell builtin"]);
+                    let kind = self.builtin_kind_word(name);
+                    let _ = self
+                        .bwrite_line(out, redir, &bfmt![name, b" is a", kind, b" shell builtin"]);
                 } else if let Some(p) = self
                     .cmd_hash
                     .get(name.as_slice())
@@ -47897,6 +47917,64 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 "{prefix}"
             );
         }
+    }
+
+    /// bash describes every builtin the same way — `NAME is a shell builtin` —
+    /// except in posix mode, where it calls out the sixteen special ones. That
+    /// is the only place the distinction is ever *spoken*, and only there,
+    /// because that is the only mode where being special means anything.
+    #[test]
+    fn posix_mode_calls_a_special_builtin_special_when_describing_it() {
+        // Outside the mode there is no such thing as special…
+        assert_eq!(run("type unset").0, "unset is a shell builtin\n");
+        assert_eq!(run("type -a unset").0, "unset is a shell builtin\n");
+        assert_eq!(run("command -V unset").0, "unset is a shell builtin\n");
+        // …and inside it, all sixteen say so.
+        for n in [
+            "unset", "export", "set", "eval", ":", ".", "source", "readonly", "shift", "trap",
+            "exit", "exec", "break", "continue", "return", "times",
+        ] {
+            assert_eq!(
+                run(&format!("set -o posix; type {n}")).0,
+                format!("{n} is a special shell builtin\n"),
+                "{n}"
+            );
+        }
+        // Only the sixteen: every other builtin keeps the plain wording.
+        for n in ["cd", "read", "echo", "printf", "local", "declare", "command", "builtin"] {
+            assert_eq!(
+                run(&format!("set -o posix; type {n}")).0,
+                format!("{n} is a shell builtin\n"),
+                "{n}"
+            );
+        }
+        // It reaches the three that describe a name in words…
+        assert_eq!(
+            run("set -o posix; type -a unset export cd").0,
+            "unset is a special shell builtin\nexport is a special shell builtin\n\
+             cd is a shell builtin\n"
+        );
+        assert_eq!(run("set -o posix; command -V unset").0, "unset is a special shell builtin\n");
+        // …and none of the ones that answer with a machine-readable word.
+        assert_eq!(run("set -o posix; type -t unset").0, "builtin\n");
+        assert_eq!(run("set -o posix; type -at unset").0, "builtin\n");
+        assert_eq!(run("set -o posix; command -v unset").0, "unset\n");
+        // Leaving the mode takes the word away again.
+        assert_eq!(
+            run("set -o posix; type times; set +o posix; type times").0,
+            "times is a special shell builtin\ntimes is a shell builtin\n"
+        );
+        // A function still shadows the description, even where it no longer
+        // shadows the *execution* — and `type -a` lists it first.
+        assert_eq!(
+            run("unset() { :; }; set -o posix; type -t unset").0,
+            "function\n"
+        );
+        assert!(
+            run("unset() { :; }; set -o posix; type -a unset")
+                .0
+                .ends_with("unset is a special shell builtin\n")
+        );
     }
 
     /// A `declare -p` with attribute letters lists only the names those letters

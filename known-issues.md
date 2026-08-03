@@ -385,6 +385,20 @@ lookup comes first, so the posix test — which reads a variable — is only pai
 when there really is a function to shadow). Covered by
 `posix-mode-finds-a-special-builtin-before-a-function.sh` and a lib test.
 
+**Also done since — posix mode calls a special builtin special when describing
+it.** bash normally words every builtin the same way, `NAME is a shell builtin`,
+but in posix mode the sixteen become `NAME is a special shell builtin`. That is
+the only place the distinction is ever *spoken*, and only in that mode, because
+that is the only mode where being special means anything (the two rules above).
+It reaches the three descriptions that are in words — `type`, `type -a` and
+`command -V` — and none of the ones that answer with a machine-readable word:
+`type -t`/`-at` still say `builtin` and `command -v` still prints the bare name.
+A function still shadows the *description* either way, even where it no longer
+shadows the execution. One helper, `Shell::builtin_kind_word`, at the three
+places that spelled the phrase out; covered by
+`posix-mode-calls-a-special-builtin-special-when-describing-it.sh` and a lib
+test.
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
 and a 42-case probe of them against osh leaves these real gaps, roughly in

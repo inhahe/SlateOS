@@ -24922,6 +24922,13 @@ impl Shell {
             }
         }
         let operands = args.get(i..).unwrap_or_default().to_vec();
+        // Whether a listed line is written as a command that would re-enter the
+        // alias, or as the bare `name=value` POSIX asks for. `-p` says reusably
+        // whatever the mode, and outside posix mode every listing is reusable —
+        // so only a posix-mode listing with no `-p` drops the `alias ` word, and
+        // it drops it from the named-operand queries below just as much as from
+        // the whole-table dump.
+        let reusable = pflag || !self.shell_option_enabled("posix");
         if operands.is_empty() || pflag {
             // An empty table ends the call then and there, operands included:
             // `alias -p nope` with nothing defined succeeds silently.
@@ -24930,7 +24937,7 @@ impl Shell {
             }
             let mut buf = Str::new();
             for (name, val) in &self.aliases {
-                buf.extend_from_slice(&alias_line(name, val));
+                buf.extend_from_slice(&alias_line(name, val, reusable));
             }
             let rc = self.write_bytes(out, redir, &buf);
             if operands.is_empty() {
@@ -24958,7 +24965,7 @@ impl Shell {
                 // `split_at` leaves the `=` on the front of the value.
                 self.aliases.insert(name.to_vec(), val.get(1..).unwrap_or_default().to_vec());
             } else if let Some(val) = self.aliases.get(op.as_slice()).cloned() {
-                let line = alias_line(op, &val);
+                let line = alias_line(op, &val, reusable);
                 self.write_bytes(out, redir, &line);
             } else {
                 self.berrln(&bfmt![self.err_prefix(), b"alias: ", op, b": not found"]);
@@ -37401,7 +37408,16 @@ fn legal_alias_name(name: BStr<'_>) -> bool {
 /// `--` before it — `alias -- -x=1; alias` prints ``alias -- -x='1'``, and a
 /// query for that one name prints the same line. The value is always quoted,
 /// even when it needs nothing.
-fn alias_line(name: BStr<'_>, val: BStr<'_>) -> Str {
+///
+/// `reusable` is what makes the line a *command* rather than a bare
+/// `name=value`: bash's `print_alias` prints the `alias ` word when the listing
+/// was asked for reusably (`-p`) **or** when the shell is not in posix mode,
+/// POSIX specifying the bare form. The `-- ` goes with it, since it exists only
+/// to keep the command re-inputtable and means nothing without one.
+fn alias_line(name: BStr<'_>, val: BStr<'_>, reusable: bool) -> Str {
+    if !reusable {
+        return bfmt![name, b"=", &single_quote_bytes(val), b"\n"];
+    }
     let dashes: &[u8] = if name.first() == Some(&b'-') { b"-- " } else { b"" };
     bfmt![b"alias ", dashes, name, b"=", &single_quote_bytes(val), b"\n"]
 }
@@ -43523,6 +43539,40 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("alias -p nope");
         assert_eq!(s, 0);
         assert_eq!(o, "");
+    }
+
+    /// POSIX spells an alias listing as a bare `name=value`, so posix mode drops
+    /// the `alias ` word — but only from a listing that was not asked for
+    /// reusably, `-p` still meaning "in a form that can be reused as input".
+    #[test]
+    fn posix_mode_lists_aliases_without_the_alias_word() {
+        const SET: &str = "alias ll='ls -l'; alias -- -foo=x; ";
+        // Outside the mode every listing is a command.
+        assert_eq!(
+            run(&format!("{SET}alias")).0,
+            "alias -- -foo='x'\nalias ll='ls -l'\n"
+        );
+        assert_eq!(run(&format!("{SET}alias ll")).0, "alias ll='ls -l'\n");
+        // Inside it, a listing with no `-p` is bare — the whole table, a named
+        // query, and the dash-leading name whose `-- ` goes with the word it
+        // was there to guard.
+        assert_eq!(run(&format!("{SET}set -o posix; alias")).0, "-foo='x'\nll='ls -l'\n");
+        assert_eq!(run(&format!("{SET}set -o posix; alias ll")).0, "ll='ls -l'\n");
+        assert_eq!(run(&format!("{SET}set -o posix; alias -- -foo")).0, "-foo='x'\n");
+        // `-p` is reusable whatever the mode, for the table dump it forces and
+        // for the operands after it alike.
+        assert_eq!(
+            run(&format!("{SET}set -o posix; alias -p")).0,
+            "alias -- -foo='x'\nalias ll='ls -l'\n"
+        );
+        assert_eq!(
+            run(&format!("{SET}set -o posix; alias -p ll")).0,
+            "alias -- -foo='x'\nalias ll='ls -l'\nalias ll='ls -l'\n"
+        );
+        // Defining is not a listing either way, and the word comes back when
+        // the mode goes.
+        assert_eq!(run(&format!("{SET}set -o posix; alias z=1")).0, "");
+        assert_eq!(run(&format!("{SET}set -o posix; set +o posix; alias ll")).0, "alias ll='ls -l'\n");
     }
 
     #[test]

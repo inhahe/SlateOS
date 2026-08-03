@@ -513,19 +513,57 @@ whether untrapped signals earn a line). Covered by
 no-operand `trap -p` listing can only be checked in the lib test, because the
 signal *set* is the host's (see TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS).
 
+**Also done since — posix mode lists aliases without the `alias ` word.** POSIX
+spells an alias listing as a bare `name=value` where bash normally writes a whole
+`alias name=value` command that would re-enter it. The gate is not the mode
+alone: bash's `print_alias` prints the word when the listing was asked for
+*reusably* (`-p`) **or** when the mode is off, so only a posix-mode listing with
+no `-p` goes bare — and it goes bare for a named query (`alias ll`) exactly as
+much as for the whole-table dump, which is the part a mode-only reading would
+miss. The `-- ` that guards a name beginning with `-` goes with the word, since
+it exists only to stop the name being read back as an option. Not gated on
+interactivity (checked under `bash -i`). One `reusable` flag on `alias_line`,
+computed once in `builtin_alias`; covered by
+`posix-mode-lists-aliases-without-the-alias-word.sh` and a lib test.
+
 **Still open:** the rest of bash's posix-mode list. It has now been *surveyed*
 rather than guessed at — the GNU manual's "Bash POSIX Mode" page gives 75 items,
 and a 42-case probe of them against osh leaves these real gaps, roughly in
 increasing order of size:
 
 * `.`/`source` does not search `$PWD` when the name is not found on `$PATH`.
-* A bare `alias` listing drops the `alias ` prefix from each line.
 * `cd` in logical mode validates the resulting path and falls back to physical.
+  (Probed and **not reproducible** on the reference bash: with `lnk -> a/b` and
+  `a/c` present, `cd lnk; cd ../c` fails identically in both modes rather than
+  falling back to the physical `a/b/../c`. Either this Cygwin build already
+  behaves the posix way, or the fallback needs a trigger the probe missed —
+  there is nothing to make match until a case that *does* differ is found.)
 * `kill -l` prints one line with no `SIG` prefixes, and `kill` rejects a
   `SIG`-prefixed signal name.
-* A bare `set` omits the function definitions it otherwise prints.
-* `time` alone is a syntax error, and `time -p` is not special-cased.
-* Words in a redirection get neither globbing nor word splitting.
+* A bare `set` omits the function definitions it otherwise prints. (Probed: the
+  names do not appear *at all* — not as `f ()` blocks, not as `f=` lines.)
+* `time` alone reports the shell's own cumulative times, and `time` followed by
+  any word starting with `-` stops being the reserved word. (Probed, and both
+  halves are sharper than the manual's wording. `time` + newline in posix mode
+  prints just `user`/`sys` with **no `real` line**, where outside the mode it
+  times the null command and prints all three. And `time -p echo hi`, `time --
+  echo hi`, `time -x echo hi` and even `time -` all give `time: command not
+  found` with status 127 — bash stops treating `time` as the reserved word when
+  an option-looking word follows and looks for an external `time` instead. This
+  is a *parser* change, not a builtin one.)
+* Words in a redirection get neither globbing nor word splitting — so `> only*`
+  makes a file literally named `only*` and `> $w` with `w='a b'` makes one named
+  `a b` instead of failing "ambiguous redirect". (Probed: gated on
+  **non-interactivity** as well as the mode — bash's `redirection_expand` tests
+  `posixly_correct && interactive_shell == 0`, and `bash -i` confirms the glob
+  still happens. An *unquoted* empty expansion is still ambiguous in both modes,
+  so null-word removal survives the loss of splitting; a *quoted* empty is one
+  empty field in both, and fails at the `open`. Tilde, parameter, command and
+  process substitution are all untouched. In osh the site is
+  `Shell::expand_redirect_target`, which today always calls
+  `expand_word(w, true)`; the posix path needs a non-splitting, non-globbing
+  expansion that *still* drops an unquoted empty, which `expand_word(w, false)`
+  does not do — it returns one empty field.)
 
 ### TD-OILS-COMPLETE-TABLE-AND-OPERANDS. `complete`/`compopt` got ten things wrong at once, all downstream of two facts about bash they did not model — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

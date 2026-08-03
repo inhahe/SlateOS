@@ -837,12 +837,13 @@ osh installs the descriptor in all four, which is the behaviour bash itself
 gives in three of them. Named as deliberately absent in the header of
 `tests/corpus/a-read-write-source-on-a-std-fd-keeps-one-offset.sh`.
 
-### TD-OILS-NO-BIND-BUILTIN. `bind`'s tables are read-only, so a mutation is never remembered — 2026-08-01 — 🔧 **OPEN**
+### TD-OILS-NO-BIND-BUILTIN. `bind` cannot read an inputrc file — 2026-08-01 — 🔧 **OPEN**
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_bind`;
-`userspace/oils/src/bind_tables.rs`; `scripts/gen-oils-bind-tables.py`.
+`userspace/oils/src/bind_keys.rs`; `userspace/oils/src/bind_tables.rs`;
+`scripts/gen-oils-bind-tables.py`.
 
-**Narrowed 2026-08-02, twice.** The builtin-count gap that opened this entry is
+**Narrowed 2026-08-02, twice, and again 2026-08-03.** The builtin-count gap that opened this entry is
 closed, and so are all of the listings. `bind` exists, `BUILTIN_NAMES` is 61
 like bash's, and the option parsing, the `bind: warning: line editing not
 enabled` warning, the phase order, every diagnostic, and **every listing** —
@@ -860,21 +861,43 @@ readline's compiled-in defaults now live in `bind_tables.rs`, captured by
 instead of a claim, and the generator *checks* the keymap aliases rather than
 assuming them.
 
-**What is left is that those tables are `const`.** In real bash `-u`, `-r` and
-`-x` change readline's live tables even with no line editor, and a later
-`-p`/`-P`/`-X`/`-q` in the same shell shows the change; osh accepts all three,
-reports exactly what bash reports, and then forgets. Two places in the corpus
-case have to work around this by running the mutating probe in a subshell: the
-`-x` block (a successful `bind -x '"x": echo hi'` makes the next `bind -X`
-print a line) and `bind -u yank` (which really removes `"\C-y": yank` from
-bash's emacs keymap, so every later `-p`, `-P` and `-q yank` disagrees). The
-honest fix is a *live* binding table on `Shell`, seeded from `bind_tables` on
-first mutation — copy-on-write, so the common read-only case still costs
-nothing. Until then those probes must stay isolated.
+**The tables are now live** (2026-08-03). `bind_keys.rs` holds readline's three
+real keymap roots and its 46 variables as owned, mutable state, hung off `Shell`
+as `bind_maps: Option<Box<Maps>>` — seeded from `bind_tables` on the first
+command that could read or write a binding, so the overwhelmingly common case
+(a shell that never says `bind`) still costs one `None`. It is cloned into a
+subshell, which is what makes a mutation inside `( … )` correctly invisible to
+the parent. Every mutating path writes through it: `-r`, `-u`, `-x`, the
+`"KEYSEQ": function` / `"KEYSEQ": "macro"` operand form, and `set NAME VALUE`;
+and every listing reads back out of it. The corpus case now dumps every listing
+*before* the mutations and again *after* them, which is the half no shell
+answering from constants can pass.
 
-**Reading inputrc files (`-f`)** is a separate, later piece of work. Today `-f`
-always reports `cannot read: No such file or directory`, which is exact for a
-file that is not there and wrong for one that is.
+Three things in there are not what a reimplementation would guess, and each is
+pinned by a unit test in `bind_keys.rs`:
+
+* **The operand separator is one byte**, a colon or whitespace, whichever comes
+  first — so `"\C-t" : yank` binds `\C-t` to the *target* ` : yank`… which is
+  not a function name, and an unknown target is an **unbind**, silently, at
+  status 0. There is no way to tell a typo from a deliberate removal.
+* **`convert-meta` redirects a bind as it happens.** With it on (the default) a
+  lone high byte is sent into the escape sub-map, so `"\M-t"` and a literal
+  `\xf4` are the *same* binding, `[ESC, 't']`. That also decides the spelling on
+  the way back out: the function dumper writes a prefixed ESC as `\M-` while
+  `convert-meta` is on and `\e` while it is off, and the macro dumper always
+  writes `\e`. Turning the variable off mid-script changes what `-p` and `-q`
+  print for a binding that has not moved.
+* **`editing-mode` moves `keymap`.** `set editing-mode vi` also sets
+  `keymap` to `vi-insert`, and `bind -v` shows both.
+
+**What is left is reading an inputrc file.** `bind -f` always reports
+`cannot read: No such file or directory`, which is exact for a file that is not
+there and wrong for one that is; osh reads no startup inputrc either. The
+grammar a file needs beyond what `parse_operand` already handles is the
+`$if`/`$else`/`$endif`/`$include` directive set, which `parse_operand` currently
+folds into `Operand::Nothing` along with comments and blank lines. Doing it
+properly means a line-oriented reader with `$if mode=`/`term=`/`application`
+conditions and an include stack.
 
 **Two findings from probing the reference bash** (5.2.37, readline 8.2) that
 shaped the above and still apply:

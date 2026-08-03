@@ -39,14 +39,15 @@
 # `INPUTRC=/dev/null` is essential: a system `/etc/inputrc` binds extra keys and
 # would change the listings out from under the comparison.
 #
-# Deliberately absent:
+# The tables are live, so the order of this script is part of what it tests: the
+# listings of the untouched keymaps are taken first, then every way of changing
+# a binding runs, then the listings are taken again. A shell that answered from
+# constants would pass the first half and fail the second.
 #
-#   * the dump listings `-p`, `-v`, `-P`, `-V`. They print readline's *default
-#     keymaps*, which osh does not carry yet — only the function-name list. So
-#     is `-q` for a name that exists, which prints where that function is bound.
-#     `-s`, `-S` and `-X` are here, because a pristine readline has no macros
-#     and no `-x` bindings and so prints nothing, which osh matches exactly.
-#     See known-issues TD-OILS-NO-BIND-BUILTIN.
+# Deliberately absent: `-f`, which reads an inputrc. osh reads none, so the only
+# outcome it can produce honestly is the one bash produces for a file that is
+# not there — which is what the `-f /nosuch/file` probes below check. See
+# known-issues TD-OILS-NO-BIND-BUILTIN.
 #
 # Stderr is collected and replayed at the end so the warning — which would
 # otherwise interleave unpredictably with the listings — can be compared in one
@@ -87,11 +88,10 @@ bind -u nosuchfn >/dev/null; echo "  -u        rc=$?"
 bind -q nosuchfn >/dev/null; echo "  -q        rc=$?"
 bind -q other -q nosuchfn >/dev/null; echo "  -q -q     rc=$?"
 bind -u nosuchfn -f /nosuch/file >/dev/null; echo "  -u -f     rc=$?"
-# A `-u` that names a function readline knows really does unbind it in bash —
-# every later `-p`, `-P` and `-q yank` in this script would then disagree with
-# osh, whose tables are read-only — so this one probe runs in a subshell, for
-# the same reason the `-x` probes below do.
-( bind -u yank >/dev/null; echo "  -u known  rc=$?" )
+# A `-u` that names a function readline knows really does unbind it — every
+# later `-p`, `-P` and `-q yank` would then see a table with no `yank` in it.
+# That is a real effect worth testing, but it would swamp everything else here,
+# so it is held back to the mutation section at the end.
 
 echo "=== the listings, and the fixed order the sections come out in"
 bind -p
@@ -124,9 +124,12 @@ echo "  -s        lines=$(bind -s 2>/dev/null | wc -l)"
 echo "  -S        lines=$(bind -S 2>/dev/null | wc -l)"
 bind -- >/dev/null; echo "  --        rc=$?"
 
-# From here on an accepted `-x` really does install a binding in bash, which a
-# later `bind -X` would then list — so every probe below runs in a subshell,
-# and the listings above were taken before any of them ran.
+# An accepted `-x` really does install a binding, which a later `bind -X` would
+# then list — so each probe below runs in its own subshell, which is what makes
+# every line here answerable on its own rather than on whatever the line above
+# it left behind. That the isolation *works* is itself a claim: the tables are
+# a copy in the child, and the `-X`/`-p` dumps after this section prove none of
+# it leaked back. The parent does its own mutating further down.
 echo "=== -x parses its own spec, and -r validates nothing"
 ( bind -x '"x": echo hi' >/dev/null; echo "  ok        rc=$?" )
 ( bind -x '"\C-t": echo hi' >/dev/null; echo "  keyseq    rc=$?" )
@@ -156,6 +159,76 @@ echo "=== an operand is readline's to refuse, and is not a failure"
 ( bind aaa bbb >/dev/null; echo "  two       rc=$?" )
 ( bind - >/dev/null; echo "  dash      rc=$?" )
 ( bind '"\C-t": yank' >/dev/null; echo "  bound     rc=$?" )
+
+echo "=== none of that escaped the subshell it happened in"
+echo "  -X        lines=$(bind -X | wc -l)"
+echo "  -s        lines=$(bind -s | wc -l)"
+bind -q transpose-chars
+
+# Everything from here changes the tables of *this* shell, and every listing
+# after a change is taken again — which is the half of this file that a shell
+# answering from constants cannot pass.
+echo "=== the parent binds, and the listings follow it"
+bind '"\C-x\C-t": yank'; echo "  bind      rc=$?"
+bind -q yank
+bind -p | grep 'C-x.C-t'
+bind -P | grep '^yank '
+# A second sequence for the same function, and readline reports both.
+bind -m vi-insert '"\C-t": yank'; echo "  -m bind   rc=$?"
+bind -m vi-insert -q yank
+bind -q yank
+
+echo "=== a macro and a command binding show up in their own listings"
+bind '"\C-x\C-m": "hello"'; echo "  macro     rc=$?"
+bind -s
+bind -S
+bind -x '"\C-x\C-v": echo hi'; echo "  -x        rc=$?"
+bind -X
+# A macro is not a function, so the function dumpers skip it and the macro
+# dumpers skip every function — the same key is in exactly one of the two.
+echo "  -p macro  $(bind -p | grep -c 'C-x.C-m')"
+echo "  -s count  $(bind -s | wc -l)"
+
+echo "=== set through an operand, and -v follows that too"
+bind 'set mark-modified-lines on'; echo "  on        rc=$?"
+bind -v | grep 'mark-modified-lines'
+bind 'set mark-modified-lines whatever'; echo "  whatever  rc=$?"
+bind -v | grep 'mark-modified-lines'
+bind 'set comment-begin ;;'; echo "  string    rc=$?"
+bind -v | grep 'comment-begin'
+bind 'set bell-style visible'
+bind -v | grep 'bell-style'
+bind 'set keyseq-timeout 250'
+bind -v | grep 'keyseq-timeout'
+bind 'set nosuchvariable on'; echo "  unknown   rc=$?"
+bind 'set editing-mode vi'; echo "  vi        rc=$?"
+bind -v | grep -E '^set (keymap|editing-mode) '
+bind 'set editing-mode emacs'
+bind -v | grep -E '^set (keymap|editing-mode) '
+
+echo "=== convert-meta decides how a meta key is spelled back"
+bind '"\M-\C-k": yank'; echo "  meta      rc=$?"
+bind -q yank
+bind 'set convert-meta off'
+bind -q yank
+bind 'set convert-meta on'
+bind -q yank
+
+echo "=== every way of taking a binding away again"
+# An operand whose target is not a function readline knows is an unbind, and
+# readline says nothing about it.
+bind '"\C-x\C-t": nosuchfunction'; echo "  operand   rc=$?"
+bind -q yank
+bind -r '\C-x\C-m'; echo "  -r macro  rc=$?"
+echo "  -s count  $(bind -s | wc -l)"
+bind -r '\C-x\C-v'; echo "  -r -x     rc=$?"
+echo "  -X count  $(bind -X | wc -l)"
+bind -u yank; echo "  -u        rc=$?"
+bind -q yank; echo "  gone      rc=$?"
+echo "  -p yank   $(bind -p | grep -c ': yank$')"
+# `-u` is per-keymap: the vi-insert binding made above is untouched by an
+# unbind that ran against emacs.
+bind -m vi-insert -q yank; echo "  vi-insert rc=$?"
 
 echo "=== it is a builtin like any other"
 type -t bind

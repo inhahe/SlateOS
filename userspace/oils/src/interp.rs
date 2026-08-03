@@ -3089,6 +3089,14 @@ pub struct Shell {
     /// that refused it forks the job and never runs any of it — so there the
     /// refusal costs the stage and nothing more.
     debug_stage_skips: Vec<bool>,
+    /// readline's key tables, once `bind` has had to look at them.
+    ///
+    /// `None` is not "empty" but "still exactly what readline compiles in", so
+    /// a shell that never runs `bind` — nearly every one — carries a word and
+    /// decodes nothing. The first `bind` that reads or writes a binding seeds
+    /// it from [`crate::bind_tables`]; a subshell takes a copy, which is what
+    /// makes `( bind -u yank )` invisible to the shell that forked it.
+    bind_maps: Option<Box<crate::bind_keys::Maps>>,
     last_bg_pid: Option<u32>,
     /// `set -o pipefail`: a pipeline's status is the rightmost non-zero stage.
     pipefail: bool,
@@ -4127,6 +4135,7 @@ impl Shell {
             debug_announced: false,
             debug_skipped: false,
             debug_stage_skips: Vec::new(),
+            bind_maps: None,
             last_bg_pid: None,
             pipefail: false,
             pipe_broken: false,
@@ -8813,6 +8822,7 @@ impl Shell {
             debug_announced: false,
             debug_skipped: false,
             debug_stage_skips: Vec::new(),
+            bind_maps: self.bind_maps.clone(),
             last_bg_pid: self.last_bg_pid,
             pipefail: self.pipefail,
             pipe_broken: false,
@@ -23226,22 +23236,24 @@ impl Shell {
     /// refuse the builtin: a *non-interactive* bash is in exactly the same
     /// position, and it still answers every listing — it just warns first, on
     /// stderr, that line editing is not enabled. osh is permanently in that
-    /// state, so it warns every time and then answers what it can from
-    /// readline's compiled-in tables (`bind_tables`).
+    /// state, so it warns every time and then answers from tables of its own,
+    /// seeded on first use from readline's compiled-in ones (`bind_tables`).
     ///
-    /// Every listing is answered from readline's defaults, and the sections
-    /// come out in a fixed order — `-l`, `-p`, `-P`, `-v`, `-V`, `-s`, `-S`,
-    /// `-X` — no matter which order the letters were written in.
+    /// The tables are *live*, which is the whole of why they are kept per
+    /// shell: `-u`, `-r`, `-x` and an operand change them, and every later
+    /// listing shows the change. Not having a line editor decides what a
+    /// binding *does* — nothing, since no key is ever read — but not what the
+    /// shell remembers about it, and bash with no line editor remembers all of
+    /// it too. A subshell gets a copy, so `( bind -u yank )` is invisible to
+    /// the shell that forked it.
     ///
-    /// The options whose whole effect is to *change* a binding — `-u`, `-r`,
-    /// `-x`, and the `-X` listing of `-x` bindings — have nothing to change,
-    /// because there is no line editor to change it for; a pristine readline
-    /// also has no macros, so `-s` and `-S` are legitimately empty. An operand
-    /// is not an error either; readline reports it itself, unprefixed.
+    /// The listing sections come out in a fixed order — `-l`, `-p`, `-P`, `-v`,
+    /// `-V`, `-s`, `-S`, `-X` — no matter which order the letters were written
+    /// in. An operand that readline refuses is not an error; readline reports
+    /// it itself, unprefixed, and the status stays as it was.
     ///
-    /// Not yet: osh's tables are read-only, so a `-u`, `-r` or `-x` that bash
-    /// would remember is forgotten here and a later listing does not show it.
-    /// Nor is an inputrc ever read. See known-issues TD-OILS-NO-BIND-BUILTIN.
+    /// Not yet: an inputrc is never read, so `-f` always fails. See
+    /// known-issues TD-OILS-NO-BIND-BUILTIN.
     fn builtin_bind(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         const USAGE: &str = "bind: usage: bind [-lpsvPSVX] [-m keymap] \
              [-f filename] [-q name] [-u name] [-r keyseq] \
@@ -23255,13 +23267,14 @@ impl Shell {
         let mut list_functions = false;
         let (mut list_p, mut list_pp) = (false, false);
         let (mut list_v, mut list_vv) = (false, false);
+        let (mut list_s, mut list_ss, mut list_x) = (false, false, false);
         // Each option that takes an argument gets *one* slot, because bash keeps
         // one variable apiece: a repeated option silently replaces the earlier
         // one rather than acting twice, so `bind -q a -q b` only ever complains
         // about `b`.
         let (mut keymap, mut fname, mut qname, mut uname, mut xspec) =
             (None::<Str>, None::<Str>, None::<Str>, None::<Str>, None::<Str>);
-        let mut removing = false;
+        let mut rseq = None::<Str>;
         let mut i = 0usize;
         while i < args.len() {
             if args[i].as_slice() == b"--" {
@@ -23284,9 +23297,9 @@ impl Shell {
                     b'P' => list_pp = true,
                     b'v' => list_v = true,
                     b'V' => list_vv = true,
-                    // A pristine readline has no macros and no `-x` bindings,
-                    // and osh can never acquire any, so these are always empty.
-                    b's' | b'S' | b'X' => {}
+                    b's' => list_s = true,
+                    b'S' => list_ss = true,
+                    b'X' => list_x = true,
                     b'f' | b'q' | b'u' | b'm' | b'r' | b'x' => {
                         // The argument is the rest of this word if there is
                         // one, otherwise the next word entirely.
@@ -23313,10 +23326,10 @@ impl Shell {
                             b'q' => qname = Some(arg),
                             b'u' => uname = Some(arg),
                             b'x' => xspec = Some(arg),
-                            // `-r` removes a binding; with no line editor there
-                            // is nothing to remove, and bash does not check the
-                            // key sequence, so only the fact of it matters.
-                            _ => removing = true,
+                            // `-r` removes whatever its key sequence is bound
+                            // to. bash never validates it: an unbound or
+                            // unparsable sequence is a no-op at status 0.
+                            _ => rseq = Some(arg),
                         }
                     }
                     _ => {
@@ -23339,24 +23352,39 @@ impl Shell {
         // that succeeds *clears* an earlier one's failure and `bind -q nosuchfn
         // -x '"x": echo'` comes out 0.
         let mut status = 0;
-        let selected = match &keymap {
-            None => Self::bind_keymap(b"emacs"),
-            Some(k) => match Self::bind_keymap(k) {
-                Some(m) => Some(m),
+        let named_keymap = match &keymap {
+            None => None,
+            Some(k) => match crate::bind_keys::keymap_name(k) {
+                Some(n) => Some(n),
                 None => {
                     self.perrln(&bfmt![b"bind: `", k.as_slice(), b"': invalid keymap name"]);
                     return 1;
                 }
             },
         };
-        // The default keymap is always one of the table's own names, so this
-        // cannot fail; treating it as empty rather than panicking keeps the
-        // builtin total.
-        let map = selected.map_or(&[][..], |m| m.bindings);
-        // `-m` also shows through the `keymap` variable that `-v`/`-V` list,
-        // and always under the map's *canonical* name: `bind -m vi-command -v`
-        // says `set keymap vi`.
-        let current_keymap = selected.and_then(|m| m.names.first()).copied().unwrap_or("emacs");
+        // Every listing but `-l`, and every change, reads the live tables — so
+        // this is where a shell stops carrying readline's constants and starts
+        // carrying its own copy. `-l` alone is about the function list and
+        // touches no keymap, so it is not worth seeding for.
+        let only_functions = list_functions
+            && !(list_p || list_pp || list_v || list_vv || list_s || list_ss || list_x)
+            && qname.is_none()
+            && uname.is_none()
+            && rseq.is_none()
+            && xspec.is_none()
+            && i >= args.len();
+        if !only_functions {
+            self.bind_maps.get_or_insert_with(|| Box::new(crate::bind_keys::Maps::seeded()));
+        }
+        // Which map everything below reads and writes. `-m` names it for this
+        // one call only — it shows through the `keymap` variable that `-v` and
+        // `-V` list, always under the map's *canonical* name (`bind -m
+        // vi-command -v` says `set keymap vi`), but leaves the variable itself
+        // where it was (measured). Without `-m` it is the variable, which
+        // `set keymap` and `set editing-mode` move.
+        let current_keymap = named_keymap
+            .or_else(|| self.bind_maps.as_deref().map(crate::bind_keys::Maps::keymap))
+            .unwrap_or("emacs");
 
         let mut text = Vec::new();
         if list_functions {
@@ -23365,55 +23393,94 @@ impl Shell {
                 text.push(b'\n');
             }
         }
-        // `-p` and `-P` walk the functions in the same order `-l` lists them,
-        // naming the ones with no key sequence as well as the ones with some.
-        // Both open with a blank line, which is readline's, not bash's.
-        if list_p {
-            text.push(b'\n');
-            for name in crate::bind_tables::FUNCTION_NAMES {
-                let mut bound = false;
-                for (seq, _) in map.iter().filter(|(_, f)| *f == name) {
-                    text.extend_from_slice(bfmt![b"\"", seq.as_bytes(), b"\": ", name.as_bytes(), b"\n"].as_slice());
-                    bound = true;
-                }
-                if !bound {
-                    text.extend_from_slice(bfmt![b"# ", name.as_bytes(), b" (not bound)\n"].as_slice());
-                }
-            }
-        }
-        if list_pp {
-            text.push(b'\n');
-            for name in crate::bind_tables::FUNCTION_NAMES {
-                match Self::bind_seqs_for(map, name.as_bytes()) {
-                    None => text.extend_from_slice(
-                        bfmt![b"", name.as_bytes(), b" is not bound to any keys\n"].as_slice(),
-                    ),
-                    Some(seqs) => text.extend_from_slice(
-                        bfmt![b"", name.as_bytes(), b" can be found on ", &seqs, b"\n"].as_slice(),
-                    ),
+        if let Some(maps) = self.bind_maps.as_deref() {
+            let entries = maps.entries(current_keymap);
+            // `-p` and `-P` walk the functions in the same order `-l` lists
+            // them, naming the ones with no key sequence as well as the ones
+            // with some. Both open with a blank line, which is readline's, not
+            // bash's. Neither shows a macro or a `-x` binding: those have no
+            // function to be listed under, and have `-s` and `-X` of their own.
+            if list_p {
+                text.push(b'\n');
+                for name in crate::bind_tables::FUNCTION_NAMES {
+                    let mut bound = false;
+                    for e in Self::bind_running(&entries, name) {
+                        let seq = crate::bind_keys::encode(e.seq, e.is_prefix, maps.meta());
+                        text.extend_from_slice(
+                            bfmt![b"\"", &seq, b"\": ", name.as_bytes(), b"\n"].as_slice(),
+                        );
+                        bound = true;
+                    }
+                    if !bound {
+                        text.extend_from_slice(
+                            bfmt![b"# ", name.as_bytes(), b" (not bound)\n"].as_slice(),
+                        );
+                    }
                 }
             }
-        }
-        // `-v` and `-V` are the same variables in re-inputtable and prose form.
-        // Only one of them is not a constant: `keymap` reports whichever map
-        // `-m` selected for this invocation.
-        let value_of = |name: &str, value: &'static str| {
-            if name == "keymap" { current_keymap } else { value }
-        };
-        if list_v {
-            for (name, value) in crate::bind_tables::VARIABLES {
-                let value = value_of(name, value);
-                text.extend_from_slice(
-                    bfmt![b"set ", name.as_bytes(), b" ", value.as_bytes(), b"\n"].as_slice(),
-                );
+            if list_pp {
+                text.push(b'\n');
+                for name in crate::bind_tables::FUNCTION_NAMES {
+                    match Self::bind_seqs_for(&entries, name, maps.meta()) {
+                        None => text.extend_from_slice(
+                            bfmt![b"", name.as_bytes(), b" is not bound to any keys\n"].as_slice(),
+                        ),
+                        Some(seqs) => text.extend_from_slice(
+                            bfmt![b"", name.as_bytes(), b" can be found on ", &seqs, b"\n"]
+                                .as_slice(),
+                        ),
+                    }
+                }
             }
-        }
-        if list_vv {
-            for (name, value) in crate::bind_tables::VARIABLES {
-                let value = value_of(name, value);
-                text.extend_from_slice(
-                    bfmt![b"", name.as_bytes(), b" is set to `", value.as_bytes(), b"'\n"].as_slice(),
-                );
+            // `-v` and `-V` are the same variables in re-inputtable and prose
+            // form. One of them does not read from the table at all: `keymap`
+            // reports whichever map this invocation is working on, which `-m`
+            // can name without storing.
+            if list_v {
+                for (name, value) in maps.vars() {
+                    let value = if name == "keymap" { current_keymap.as_bytes() } else { value };
+                    text.extend_from_slice(
+                        bfmt![b"set ", name.as_bytes(), b" ", value, b"\n"].as_slice(),
+                    );
+                }
+            }
+            if list_vv {
+                for (name, value) in maps.vars() {
+                    let value = if name == "keymap" { current_keymap.as_bytes() } else { value };
+                    text.extend_from_slice(
+                        bfmt![b"", name.as_bytes(), b" is set to `", value, b"'\n"].as_slice(),
+                    );
+                }
+            }
+            // `-s`, `-S` and `-X` are one dumper on two tables, and it spells a
+            // sequence differently from the one above — `\eQ` where `-p` writes
+            // `\M-Q`. `-S` is the same text as `-s` without the quoting around
+            // it, escapes and all.
+            for (wanted, readable, macros) in
+                [(list_s, true, true), (list_ss, false, true), (list_x, true, false)]
+            {
+                if !wanted {
+                    continue;
+                }
+                for e in &entries {
+                    let body = match (&e.target, macros) {
+                        (crate::bind_keys::Target::Macro(v), true)
+                        | (crate::bind_keys::Target::Command(v), false) => v,
+                        _ => continue,
+                    };
+                    let seq =
+                        crate::bind_keys::encode(e.seq, e.is_prefix, crate::bind_keys::Meta::Literal);
+                    let body =
+                        crate::bind_keys::encode(body, false, crate::bind_keys::Meta::Literal);
+                    text.extend_from_slice(
+                        if readable {
+                            bfmt![b"\"", &seq, b"\": \"", &body, b"\"\n"]
+                        } else {
+                            bfmt![b"", &seq, b" outputs ", &body, b"\n"]
+                        }
+                        .as_slice(),
+                    );
+                }
             }
         }
         if !text.is_empty() {
@@ -23436,46 +23503,58 @@ impl Shell {
         }
 
         // `-u` is checked before `-q`, and both reject a name readline does not
-        // know with the same wording. `-u` then has nothing left to unbind.
-        let known = |n: &Str| {
-            crate::bind_tables::FUNCTION_NAMES
-                .iter()
-                .any(|f| f.as_bytes() == n.as_slice())
-        };
-        if let Some(u) = &uname
-            && !known(u)
-        {
-            self.perrln(&bfmt![b"bind: `", u.as_slice(), b"': unknown function name"]);
-            return 1;
+        // know with the same wording. Either of an aliased function's names is
+        // known, and names the same function: `-u insert-last-argument` takes
+        // away the keys `bind -p` lists under `yank-last-arg`.
+        if let Some(u) = &uname {
+            let Some(rep) = crate::bind_keys::function(u) else {
+                self.perrln(&bfmt![b"bind: `", u.as_slice(), b"': unknown function name"]);
+                return 1;
+            };
+            if let Some(maps) = self.bind_maps.as_deref_mut() {
+                maps.unbind_function(current_keymap, rep);
+            }
         }
         if let Some(q) = &qname {
-            if !known(q) {
-                self.perrln(&bfmt![b"bind: `", q.as_slice(), b"': unknown function name"]);
-                status = 1;
-            } else {
+            match crate::bind_keys::function(q) {
+                None => {
+                    self.perrln(&bfmt![b"bind: `", q.as_slice(), b"': unknown function name"]);
+                    status = 1;
+                }
                 // A known name is answered on *stdout* — and a known name that
                 // is bound nowhere is still a failure, unlike the same fact
                 // reported by `-P`, which also spells it without a full stop.
-                let line = match Self::bind_seqs_for(map, q) {
-                    Some(seqs) => {
-                        status = 0;
-                        bfmt![b"", q.as_slice(), b" can be invoked via ", &seqs, b"\n"]
+                Some(rep) => {
+                    let seqs = self.bind_maps.as_deref().and_then(|m| {
+                        Self::bind_seqs_for(&m.entries(current_keymap), rep, m.meta())
+                    });
+                    let line = match seqs {
+                        Some(seqs) => {
+                            status = 0;
+                            bfmt![b"", q.as_slice(), b" can be invoked via ", &seqs, b"\n"]
+                        }
+                        None => {
+                            status = 1;
+                            bfmt![b"", q.as_slice(), b" is not bound to any keys.\n"]
+                        }
+                    };
+                    let rc = self.write_bytes(out, redir, &line);
+                    if rc != 0 {
+                        return rc;
                     }
-                    None => {
-                        status = 1;
-                        bfmt![b"", q.as_slice(), b" is not bound to any keys.\n"]
-                    }
-                };
-                let rc = self.write_bytes(out, redir, &line);
-                if rc != 0 {
-                    return rc;
                 }
             }
         }
 
-        // `-r` cannot fail — bash does not even look at the key sequence — but
-        // it is still a phase, so it clears a `-q` failure ahead of it.
-        if removing {
+        // `-r` cannot fail — bash does not look at the key sequence at all, so
+        // one that is bound nowhere, or that spells nothing, is a no-op at
+        // status 0 — but it is still a phase, so it clears a `-q` failure ahead
+        // of it.
+        if let Some(r) = &rseq {
+            let seq = crate::bind_keys::decode(r);
+            if let Some(maps) = self.bind_maps.as_deref_mut() {
+                maps.unbind_seq(current_keymap, &seq);
+            }
             status = 0;
         }
 
@@ -23483,55 +23562,88 @@ impl Shell {
         // handing it to readline: a quoted key sequence, then a colon, then the
         // command. All three diagnostics are reachable with no line editor.
         if let Some(x) = &xspec {
-            status = match Self::bind_x_spec_error(x) {
-                None => 0,
-                Some(msg) => {
+            status = match Self::bind_x_spec(x) {
+                Ok((seq, cmd)) => {
+                    if let Some(maps) = self.bind_maps.as_deref_mut() {
+                        maps.bind(current_keymap, &seq, crate::bind_keys::Target::Command(cmd));
+                    }
+                    0
+                }
+                Err(msg) => {
                     self.perrln(&msg);
                     1
                 }
             };
         }
 
-        // Anything left is a key sequence. readline parses it and complains in
-        // its own voice — no shell prefix — and does not touch the status.
-        for spec in &args[i..] {
-            if !spec.contains(&b':') {
-                self.berrln(&bfmt![
-                    b"readline: ",
-                    spec.as_slice(),
-                    b": no key sequence terminator"
-                ]);
+        // Anything left is a binding for readline to read. It complains in its
+        // own voice — no shell prefix — and never touches the status, not even
+        // for a line it refused outright.
+        for spec in args.get(i..).unwrap_or(&[]) {
+            match crate::bind_keys::parse_operand(spec) {
+                crate::bind_keys::Operand::Nothing => {}
+                crate::bind_keys::Operand::Error(msg) => {
+                    self.berrln(&bfmt![b"readline: ", &msg]);
+                }
+                crate::bind_keys::Operand::Set(name, value) => {
+                    let failed = self
+                        .bind_maps
+                        .as_deref_mut()
+                        .and_then(|maps| maps.set_var(&name, &value).err());
+                    if let Some(msg) = failed {
+                        self.berrln(&bfmt![b"readline: ", &msg]);
+                    }
+                }
+                crate::bind_keys::Operand::Bind(seq, target) => {
+                    if let Some(maps) = self.bind_maps.as_deref_mut() {
+                        match target {
+                            Some(t) => maps.bind(current_keymap, &seq, t),
+                            None => maps.unbind_seq(current_keymap, &seq),
+                        }
+                    }
+                }
             }
         }
         status
     }
 
-    /// Look up one of readline's keymaps by any of the names `bind -m` accepts
-    /// for it. Several are aliases: `emacs-standard` is `emacs`, and `vi-move`
-    /// and `vi-command` are both `vi`.
-    fn bind_keymap(name: &[u8]) -> Option<&'static crate::bind_tables::Keymap> {
-        crate::bind_tables::KEYMAPS
-            .iter()
-            .find(|m| m.names.iter().any(|n| n.as_bytes() == name))
+    /// The live bindings that run readline's function `name`.
+    ///
+    /// The name is resolved to its group's representative first, so a listing
+    /// walking readline's *names* finds the same bindings under each of an
+    /// aliased function's two names — which is what bash prints.
+    fn bind_running<'a>(
+        entries: &'a [crate::bind_keys::Entry<'a>],
+        name: &str,
+    ) -> impl Iterator<Item = &'a crate::bind_keys::Entry<'a>> + use<'a> {
+        let rep = crate::bind_keys::function(name.as_bytes());
+        entries.iter().filter(move |e| match e.target {
+            crate::bind_keys::Target::Function(f) => Some(*f) == rep,
+            _ => false,
+        })
     }
 
-    /// The key sequences bound to `name` in `map`, formatted as the tail of a
-    /// `bind -P` or `bind -q` line — or `None` if the function is bound
-    /// nowhere.
+    /// The key sequences bound to `name`, formatted as the tail of a `bind -P`
+    /// or `bind -q` line — or `None` if the function is bound nowhere.
     ///
     /// readline shows at most five and then gives up: five or fewer are
     /// comma-separated and closed with a full stop, but a sixth turns the whole
     /// tail into `"a", "b", "c", "d", "e", ...` with no full stop at all. The
     /// terminator is part of what this returns because it is not the same in
     /// the two cases.
-    fn bind_seqs_for(map: &[(&str, &str)], name: &[u8]) -> Option<Str> {
+    fn bind_seqs_for(
+        entries: &[crate::bind_keys::Entry<'_>],
+        name: &str,
+        meta: crate::bind_keys::Meta,
+    ) -> Option<Str> {
         const SHOWN: usize = 5;
-        let mut seqs = map.iter().filter(|(_, f)| f.as_bytes() == name).peekable();
+        let mut seqs = Self::bind_running(entries, name).peekable();
         seqs.peek()?;
         let mut out: Str = Vec::new();
         let mut n = 0usize;
-        while let Some((seq, _)) = seqs.next() {
-            out.extend_from_slice(bfmt![b"\"", seq.as_bytes(), b"\""].as_slice());
+        while let Some(e) = seqs.next() {
+            let seq = crate::bind_keys::encode(e.seq, e.is_prefix, meta);
+            out.extend_from_slice(bfmt![b"\"", &seq, b"\""].as_slice());
             n += 1;
             if n == SHOWN {
                 out.extend_from_slice(if seqs.peek().is_some() { b", ..." } else { b"." });
@@ -23542,7 +23654,7 @@ impl Shell {
         Some(out)
     }
 
-    /// Validate a `bind -x` spec the way bash does before readline sees it, and
+    /// Split a `bind -x` spec the way bash does before readline sees it, or
     /// return the diagnostic if it is malformed.
     ///
     /// The shape is `"KEYSEQ": COMMAND`: optional whitespace, a double-quoted
@@ -23550,23 +23662,29 @@ impl Shell {
     /// one sequence, not two), optional whitespace, then a colon. The command
     /// after the colon may be empty. Each of the three ways to get this wrong
     /// has its own wording, and only one of them puts the spec last.
-    fn bind_x_spec_error(spec: &[u8]) -> Option<Str> {
+    ///
+    /// This is bash's own parse and not readline's, which is why it is stricter
+    /// than an ordinary operand: the quotes are required, and the colon cannot
+    /// be a space. The key sequence comes back decoded and the command with the
+    /// whitespace in front of it removed, which is where bash starts it.
+    fn bind_x_spec(spec: &[u8]) -> Result<(Str, Str), Str> {
         let ws = |b: u8| b == b' ' || b == b'\t';
         let mut k = 0usize;
         while spec.get(k).is_some_and(|b| ws(*b)) {
             k += 1;
         }
         if spec.get(k) != Some(&b'"') {
-            return Some(bfmt![
+            return Err(bfmt![
                 b"bind: ",
                 spec,
                 b": first non-whitespace character is not `\"'"
             ]);
         }
+        let open = k;
         k += 1;
         loop {
             match spec.get(k) {
-                None => return Some(bfmt![b"bind: no closing `\"' in ", spec]),
+                None => return Err(bfmt![b"bind: no closing `\"' in ", spec]),
                 // A backslash escapes whatever follows, including the quote
                 // that would otherwise end the sequence.
                 Some(b'\\') => k += 2,
@@ -23574,14 +23692,19 @@ impl Shell {
                 Some(_) => k += 1,
             }
         }
+        let seq = crate::bind_keys::decode(spec.get(open + 1..k).unwrap_or(&[]));
         k += 1;
         while spec.get(k).is_some_and(|b| ws(*b)) {
             k += 1;
         }
         if spec.get(k) != Some(&b':') {
-            return Some(bfmt![b"bind: ", spec, b": missing colon separator"]);
+            return Err(bfmt![b"bind: ", spec, b": missing colon separator"]);
         }
-        None
+        k += 1;
+        while spec.get(k).is_some_and(|b| ws(*b)) {
+            k += 1;
+        }
+        Ok((seq, spec.get(k..).unwrap_or(&[]).to_vec()))
     }
 
     /// `suspend [-f]` — stop the shell until something starts it again.

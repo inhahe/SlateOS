@@ -226,7 +226,12 @@ pub fn encode(seq: &[u8], is_prefix: bool, meta: Meta) -> Vec<u8> {
             }
             // A byte with the top bit set has no name, so it is printed in
             // octal — always three digits, so it cannot run into a digit of
-            // the sequence behind it.
+            // the sequence behind it. `\M-` is *not* what readline writes here,
+            // even though that is how such a key is spelled on the way in: the
+            // emacs map binds all of `\200`–`\377` to `self-insert` and lists
+            // them that way (captured). Only the escape sub-map prints `\M-`,
+            // which is where `convert-meta` sends a meta key as it is bound —
+            // see [`Maps::landing`].
             0x80..=0xff => out.extend_from_slice(format!("\\{b:03o}").as_bytes()),
             // The listing quotes the whole sequence, so these two have to be
             // escaped inside it.
@@ -310,6 +315,12 @@ pub struct Maps {
     emacs: Vec<(Vec<u8>, Target)>,
     vi: Vec<(Vec<u8>, Target)>,
     vi_insert: Vec<(Vec<u8>, Target)>,
+    /// readline's variables, in the order `bind -v` lists them, which is the
+    /// order they are captured in. `keymap` is one of them: readline computes
+    /// that row from whichever map is current rather than storing it, but the
+    /// two are the same thing, so it is kept here and read back by
+    /// [`Maps::keymap`].
+    vars: Vec<(&'static str, Vec<u8>)>,
 }
 
 /// One of the three roots [`Maps`] keeps.
@@ -382,7 +393,15 @@ impl Maps {
             v.dedup_by(|a, b| a.0 == b.0);
             v
         };
-        Self { emacs: of("emacs"), vi: of("vi"), vi_insert: of("vi-insert") }
+        Self {
+            emacs: of("emacs"),
+            vi: of("vi"),
+            vi_insert: of("vi-insert"),
+            vars: crate::bind_tables::VARIABLES
+                .iter()
+                .map(|(n, v)| (*n, v.as_bytes().to_vec()))
+                .collect(),
+        }
     }
 
     fn root(&self, r: Root) -> &Vec<(Vec<u8>, Target)> {
@@ -427,11 +446,26 @@ impl Maps {
         out
     }
 
+    /// Where a key sequence really lands.
+    ///
+    /// A lone key with the top bit set is not stored as itself while
+    /// `convert-meta` is on: readline sends it into the escape sub-map as it
+    /// binds it (`rl_bind_key_in_map`), which is why `Meta-t` and `"\M-t"` are
+    /// one binding and both list as `\M-t` (measured). Longer sequences are
+    /// already spelled with the escape by then, so only the one-byte case can
+    /// be redirected.
+    fn landing(&self, seq: &[u8]) -> Vec<u8> {
+        match *seq {
+            [b] if b >= 0x80 && self.var_on("convert-meta") => vec![ESC, b & 0x7f],
+            _ => seq.to_vec(),
+        }
+    }
+
     /// Bind `seq` — as `keymap` spells it — replacing whatever was there.
     pub fn bind(&mut self, keymap: &str, seq: &[u8], target: Target) {
         let (root, prefix) = view(keymap);
         let mut full = prefix.to_vec();
-        full.extend_from_slice(seq);
+        full.extend_from_slice(&self.landing(seq));
         let all = self.root_mut(root);
         match all.binary_search_by(|(s, _)| cmp_seq(s, &full)) {
             Ok(i) => {
@@ -447,7 +481,7 @@ impl Maps {
     pub fn unbind_seq(&mut self, keymap: &str, seq: &[u8]) {
         let (root, prefix) = view(keymap);
         let mut full = prefix.to_vec();
-        full.extend_from_slice(seq);
+        full.extend_from_slice(&self.landing(seq));
         let all = self.root_mut(root);
         if let Ok(i) = all.binary_search_by(|(s, _)| cmp_seq(s, &full)) {
             all.remove(i);
@@ -470,6 +504,284 @@ impl Maps {
                 && matches!(target, Target::Function(f) if *f == func))
         });
     }
+
+    /// Every readline variable and its current value, in the order `bind -v`
+    /// and `bind -V` list them.
+    pub fn vars(&self) -> impl Iterator<Item = (&'static str, &[u8])> {
+        self.vars.iter().map(|(n, v)| (*n, v.as_slice()))
+    }
+
+    /// The value of one variable, or the empty string if readline has no such
+    /// variable — which no caller here can ask for, since the only way to name
+    /// one is through [`Maps::set_var`], which rejects the unknown.
+    fn var(&self, name: &str) -> &[u8] {
+        self.vars.iter().find(|(n, _)| *n == name).map_or(&[][..], |(_, v)| v.as_slice())
+    }
+
+    /// Whether a boolean variable is on.
+    fn var_on(&self, name: &str) -> bool {
+        self.var(name) == b"on"
+    }
+
+    /// The keymap `bind` reads and writes when `-m` did not name one — the
+    /// `keymap` variable, which `set keymap` and `set editing-mode` both move.
+    ///
+    /// The stored value is always a name [`keymap_name`] returned, so looking
+    /// it up again gives back the same `'static` name and cannot fail; the
+    /// fallback is unreachable rather than a guess. Not borrowing from `self`
+    /// is what lets a caller hold the answer while it goes on to *change* the
+    /// tables, which every mutating phase of `bind` does.
+    #[must_use]
+    pub fn keymap(&self) -> &'static str {
+        keymap_name(self.var("keymap")).unwrap_or("emacs")
+    }
+
+    /// How `bind -p`, `-P` and `-q` spell an escape that prefixes a longer
+    /// sequence.
+    ///
+    /// readline names the escape sub-map after the modifier it stands for only
+    /// while it is *converting* meta characters into it; with `convert-meta
+    /// off` nothing is redirected there and the byte is written as itself
+    /// (measured: with it off, `bind -p` shows `"\e\C-t"` where it otherwise
+    /// shows `"\M-\C-t"`).
+    #[must_use]
+    pub fn meta(&self) -> Meta {
+        if self.var_on("convert-meta") { Meta::Prefix } else { Meta::Literal }
+    }
+
+    /// Apply a `set NAME VALUE`, as readline's `rl_variable_bind` does.
+    ///
+    /// `Err` is readline's own complaint about it, worded as readline words it
+    /// and without the `readline: ` its caller prints. Neither failure is fatal
+    /// — bash returns 0 from a `bind` whose operand readline refused (measured)
+    /// — so the error is text to print and not a status.
+    ///
+    /// A boolean takes its value from readline's `bool_to_int`: on for an empty
+    /// value, `1`, or `on` in any case, and off for everything else, including
+    /// a word that means nothing (`set expand-tilde whatever` turns it *off*).
+    /// Everything else is stored as written, except the two that name a keymap
+    /// and are checked for it.
+    pub fn set_var(&mut self, name: &[u8], value: &[u8]) -> Result<(), Vec<u8>> {
+        let refused = || {
+            let mut e = name.to_vec();
+            e.extend_from_slice(b": could not set value to `");
+            e.extend_from_slice(value);
+            e.push(b'\'');
+            e
+        };
+        let Some(i) = self.vars.iter().position(|(n, _)| n.as_bytes() == name) else {
+            let mut e = name.to_vec();
+            e.extend_from_slice(b": unknown variable name");
+            return Err(e);
+        };
+        // A variable is a boolean exactly when readline's compiled-in value for
+        // it is one, which is what the capture holds: no boolean is ever
+        // anything but `on` or `off`, and no other variable is either.
+        let boolean = matches!(
+            crate::bind_tables::VARIABLES.iter().find(|(n, _)| n.as_bytes() == name),
+            Some((_, "on" | "off"))
+        );
+        let new: Vec<u8> = match name {
+            b"keymap" => keymap_name(value).ok_or_else(refused)?.as_bytes().to_vec(),
+            // `editing-mode` is stored in its own right and *also* moves the
+            // keymap, because in readline it is the keymap: choosing vi selects
+            // the insert map, which is where a vi line starts.
+            b"editing-mode" => {
+                let starts_in = match value {
+                    b"emacs" => "emacs",
+                    b"vi" => "vi-insert",
+                    _ => return Err(refused()),
+                };
+                self.set_var(b"keymap", starts_in.as_bytes())?;
+                value.to_vec()
+            }
+            _ if boolean => {
+                let on = value.is_empty() || value == b"1" || value.eq_ignore_ascii_case(b"on");
+                if on { b"on".to_vec() } else { b"off".to_vec() }
+            }
+            _ => value.to_vec(),
+        };
+        if let Some(slot) = self.vars.get_mut(i) {
+            slot.1 = new;
+        }
+        Ok(())
+    }
+}
+
+/// The canonical name of the keymap readline knows by `name` — the first of
+/// the aliases [`crate::bind_tables::KEYMAPS`] lists for it, so `vi-move` and
+/// `vi-command` both come back as `vi`.
+#[must_use]
+pub fn keymap_name(name: &[u8]) -> Option<&'static str> {
+    crate::bind_tables::KEYMAPS
+        .iter()
+        .find(|m| m.names.iter().any(|n| n.as_bytes() == name))
+        .and_then(|m| m.names.first().copied())
+}
+
+/// What one `bind` operand asks for, once readline has read it.
+pub enum Operand {
+    /// Nothing to do: the line was blank, a comment, or a `$if`-family
+    /// directive. osh reads no inputrc, so there is no file for a conditional
+    /// to include or exclude part of, and readline itself does nothing visible
+    /// for one either (measured: status 0, no output).
+    Nothing,
+    /// `set NAME VALUE`, for [`Maps::set_var`].
+    Set(Vec<u8>, Vec<u8>),
+    /// A key sequence and what to put at it. `None` is an *unbinding*: readline
+    /// looks the target up and binds whatever it finds without checking, so a
+    /// name it does not know — or no name at all, as in `"\C-t": ` — takes the
+    /// key's binding away instead of failing (measured).
+    Bind(Vec<u8>, Option<Target>),
+    /// readline refused the line. The text is its complaint, without the
+    /// `readline: ` its caller prints; the status stays 0 regardless.
+    Error(Vec<u8>),
+}
+
+/// True for the bytes readline's parser treats as separating whitespace.
+fn ws(b: u8) -> bool {
+    b == b' ' || b == b'\t'
+}
+
+/// Find the closing quote of a quoted run starting at `open`, honouring the
+/// backslash that escapes one. `None` if the run never closes.
+fn closing_quote(s: &[u8], open: usize) -> Option<usize> {
+    let quote = *s.get(open)?;
+    let mut j = open.checked_add(1)?;
+    loop {
+        match s.get(j) {
+            None => return None,
+            // The escaped byte is skipped whatever it is — that is how `"a\"b"`
+            // stays one run — and a trailing backslash runs off the end, which
+            // is the unterminated case.
+            Some(b'\\') => j = j.checked_add(2)?,
+            Some(&b) if b == quote => return Some(j),
+            Some(_) => j = j.checked_add(1)?,
+        }
+    }
+}
+
+/// The single key an unquoted key name stands for — readline's
+/// `glean_key_from_name`, plus the modifier bits its caller adds.
+///
+/// The name proper is whatever follows the last `-`, so `Control-x` gleans `x`;
+/// the modifiers are then read from the *whole* name as case-insensitive
+/// substrings, which is why `ESC-w` is a control binding and not a meta one:
+/// it contains `C-`, and readline's meta prefixes are only `Meta` and `M-`
+/// (measured — it binds `\C-w`).
+fn glean_key(name: &[u8]) -> u8 {
+    let tail = match name.iter().rposition(|&b| b == b'-') {
+        Some(i) if i + 1 < name.len() => name.get(i + 1..).unwrap_or(name),
+        _ => name,
+    };
+    let named = |want: &str| tail.eq_ignore_ascii_case(want.as_bytes());
+    let mut key = if named("rubout") || named("del") {
+        RUBOUT
+    } else if named("esc") || named("escape") {
+        ESC
+    } else if named("lfd") || named("newline") {
+        b'\n'
+    } else if named("ret") || named("return") {
+        b'\r'
+    } else if named("spc") || named("space") {
+        b' '
+    } else if named("tab") {
+        b'\t'
+    } else {
+        tail.first().copied().unwrap_or(0)
+    };
+    let has = |what: &str| {
+        let w = what.as_bytes();
+        name.windows(w.len()).any(|s| s.eq_ignore_ascii_case(w))
+    };
+    if has("Control-") || has("C-") || has("CTRL-") {
+        key = ctrl(key);
+    }
+    if has("Meta") || has("M-") {
+        key |= 0x80;
+    }
+    key
+}
+
+/// Read one `bind` operand — readline's `rl_parse_and_bind`.
+///
+/// The shape is a key sequence, a separator, and a target. The separator is a
+/// colon *or* whitespace, whichever comes first, and only the one byte: a
+/// colon that follows a space has already missed its turn and is read as the
+/// target instead, so `"\C-t" : yank` unbinds `\C-t` rather than binding it
+/// (measured). A quoted key sequence is skipped over whole while looking for
+/// that separator, so a colon or a space inside it is part of the key.
+#[must_use]
+pub fn parse_operand(spec: &[u8]) -> Operand {
+    let start = spec.iter().position(|&b| !ws(b)).unwrap_or(spec.len());
+    let s = spec.get(start..).unwrap_or(&[]);
+    match s.first() {
+        None | Some(b'#' | b'$') => return Operand::Nothing,
+        _ => {}
+    }
+    // `set` is recognised before anything else and takes the rest of the line
+    // as a name and a value, so neither needs a separator and the value may
+    // hold anything at all.
+    if s.len() >= 3
+        && s.get(..3).is_some_and(|w| w.eq_ignore_ascii_case(b"set"))
+        && s.get(3).is_none_or(|&b| ws(b))
+    {
+        let rest = s.get(3..).unwrap_or(&[]);
+        let a = rest.iter().position(|&b| !ws(b)).unwrap_or(rest.len());
+        let named = rest.get(a..).unwrap_or(&[]);
+        let b = named.iter().position(|&c| ws(c)).unwrap_or(named.len());
+        let (name, after) = named.split_at(b);
+        let c = after.iter().position(|&b| !ws(b)).unwrap_or(after.len());
+        return Operand::Set(name.to_vec(), after.get(c..).unwrap_or(&[]).to_vec());
+    }
+
+    let mut i = 0usize;
+    while let Some(&c) = s.get(i) {
+        if c == b'"' {
+            let Some(close) = closing_quote(s, i) else {
+                let mut e = b"".to_vec();
+                e.extend_from_slice(spec);
+                e.extend_from_slice(b": no closing `\"' in key binding");
+                return Operand::Error(e);
+            };
+            i = close;
+        } else if c == b':' || ws(c) {
+            break;
+        }
+        i += 1;
+    }
+    if i >= s.len() {
+        let mut e = spec.to_vec();
+        e.extend_from_slice(b": no key sequence terminator");
+        return Operand::Error(e);
+    }
+    let keyname = s.get(..i).unwrap_or(&[]);
+    // Exactly one byte of separator is consumed, then whitespace — never a
+    // second colon.
+    let after = s.get(i.saturating_add(1)..).unwrap_or(&[]);
+    let t = after.iter().position(|&b| !ws(b)).unwrap_or(after.len());
+    let target = after.get(t..).unwrap_or(&[]);
+
+    let bound = match target.first() {
+        // A quoted target is a macro — the text readline pushes back as if it
+        // had been typed, so it is decoded like a key sequence. An unterminated
+        // one is not an error here: readline takes what there is.
+        Some(b'"' | b'\'') => {
+            let end = closing_quote(target, 0).unwrap_or(target.len());
+            Some(Target::Macro(decode(target.get(1..end).unwrap_or(&[]))))
+        }
+        _ => {
+            let end = target.iter().position(|&b| ws(b)).unwrap_or(target.len());
+            function(target.get(..end).unwrap_or(&[])).map(Target::Function)
+        }
+    };
+    let seq = if keyname.first() == Some(&b'"') {
+        let end = closing_quote(keyname, 0).unwrap_or(keyname.len());
+        decode(keyname.get(1..end).unwrap_or(&[]))
+    } else {
+        vec![glean_key(keyname)]
+    };
+    Operand::Bind(seq, bound)
 }
 
 /// One name per readline *function*, so two names for the same function
@@ -747,5 +1059,148 @@ mod tests {
         // Binding over a sequence replaces whatever kind was there.
         maps.bind("emacs", &[0x14], Target::Command(b"echo".to_vec()));
         assert!(printed(&maps).is_empty());
+    }
+
+    /// The separator is one byte and readline takes the first one it meets, so
+    /// a colon that has already been preceded by a space is not a separator at
+    /// all — it is the target, and an unrecognised target *unbinds*. Every line
+    /// here is measured against bash 5.2.
+    #[test]
+    fn the_separator_is_the_first_of_a_colon_or_a_space_and_only_one_byte() {
+        let bound = |spec: &str| match super::parse_operand(spec.as_bytes()) {
+            super::Operand::Bind(seq, target) => (
+                String::from_utf8_lossy(&encode(&seq, false, Meta::Prefix)).into_owned(),
+                match target {
+                    Some(Target::Function(f)) => f.to_string(),
+                    Some(Target::Macro(m)) => format!("macro {}", String::from_utf8_lossy(&m)),
+                    Some(Target::Command(c)) => format!("cmd {}", String::from_utf8_lossy(&c)),
+                    None => "(unbind)".to_string(),
+                },
+            ),
+            _ => panic!("{spec}: not a binding"),
+        };
+        assert_eq!(bound(r#""\C-t": yank"#), ("\\C-t".into(), "yank".into()));
+        // Whitespace separates as well as a colon does, and any run of it.
+        assert_eq!(bound(r#""\C-t"   yank"#), ("\\C-t".into(), "yank".into()));
+        assert_eq!(bound("Control-w: yank"), ("\\C-w".into(), "yank".into()));
+        // The space came first, so the colon is what the target starts with.
+        assert_eq!(bound(r#""\C-t" : yank"#), ("\\C-t".into(), "(unbind)".into()));
+        // So is nothing at all, and so is a name readline does not know.
+        assert_eq!(bound(r#""\C-t": "#), ("\\C-t".into(), "(unbind)".into()));
+        assert_eq!(bound(r#""\C-t": nosuchfunc"#), ("\\C-t".into(), "(unbind)".into()));
+        // The target ends at the first whitespace, so trailing space is not
+        // part of the name.
+        assert_eq!(bound(r#""\C-t": yank   "#), ("\\C-t".into(), "yank".into()));
+        // Either quote makes a macro, and its text is decoded like a sequence.
+        assert_eq!(bound(r#""\C-j": "hi""#), ("\\C-j".into(), "macro hi".into()));
+        assert_eq!(bound(r#""\C-j": 'hi'"#), ("\\C-j".into(), "macro hi".into()));
+        // An alias resolves to the one function it names — to that group's
+        // representative, whichever of the names that is, so that binding
+        // through either name is a binding a listing finds under both.
+        assert_eq!(
+            bound(r#""\C-t": insert-last-argument"#).1,
+            bound(r#""\C-t": yank-last-arg"#).1
+        );
+    }
+
+    /// An unquoted key name is a single key plus modifier bits read off the
+    /// whole name — and `ESC-w` is a *control* binding, because readline's
+    /// meta prefixes are only `Meta` and `M-` while `ESC-w` does contain `C-`.
+    #[test]
+    fn an_unquoted_key_name_gleans_one_key_and_its_modifiers() {
+        let key = |spec: &str| match super::parse_operand(format!("{spec}: yank").as_bytes()) {
+            super::Operand::Bind(seq, _) => seq,
+            _ => panic!("{spec}: not a binding"),
+        };
+        assert_eq!(key("q"), vec![b'q']);
+        assert_eq!(key("Control-w"), vec![0x17]);
+        assert_eq!(key("C-w"), vec![0x17]);
+        assert_eq!(key("ESC-w"), vec![0x17]);
+        assert_eq!(key("Meta-t"), vec![0xf4]);
+        assert_eq!(key("Control-Meta-t"), vec![0x94]);
+        assert_eq!(key("space"), vec![b' ']);
+        assert_eq!(key("rubout"), vec![super::RUBOUT]);
+        assert_eq!(key("escape"), vec![super::ESC]);
+    }
+
+    /// A meta key is not stored as the byte it gleans: `convert-meta` sends it
+    /// into the escape sub-map as it is bound, which is why `Meta-t` and
+    /// `"\M-t"` are one binding and both list as `\M-t` (measured).
+    #[test]
+    fn a_meta_key_lands_in_the_escape_map_while_convert_meta_is_on() {
+        let listed = |maps: &super::Maps| -> Vec<String> {
+            maps.entries("emacs")
+                .iter()
+                .filter(|e| matches!(e.target, Target::Function("yank")))
+                .map(|e| String::from_utf8_lossy(&encode(e.seq, e.is_prefix, maps.meta())).into_owned())
+                .collect()
+        };
+        let mut maps = super::Maps::seeded();
+        maps.unbind_function("emacs", "yank");
+        maps.bind("emacs", &[0xf4], Target::Function("yank"));
+        assert_eq!(listed(&maps), vec!["\\M-t"]);
+        // The two spellings are the same slot, so binding the other one over it
+        // leaves one entry and not two.
+        maps.bind("emacs", &[super::ESC, b't'], Target::Function("yank"));
+        assert_eq!(listed(&maps), vec!["\\M-t"]);
+        // With the conversion off the byte stays a byte — and is printed in
+        // octal, the escape sub-map being the only thing that prints `\M-`.
+        maps.set_var(b"convert-meta", b"off").expect("convert-meta is a variable");
+        maps.unbind_function("emacs", "yank");
+        maps.bind("emacs", &[0xf4], Target::Function("yank"));
+        assert_eq!(listed(&maps), vec!["\\364"]);
+    }
+
+    /// `set` normalises a boolean by readline's rule — on for an empty value,
+    /// `1`, or `on` in any case, and off for *everything* else, a word that
+    /// means nothing included — and stores everything else as written.
+    #[test]
+    fn a_variable_takes_the_value_readline_would_have_stored() {
+        let mut maps = super::Maps::seeded();
+        let get = |m: &super::Maps, n: &str| String::from_utf8_lossy(m.var(n)).into_owned();
+        for (given, want) in [("1", "on"), ("On", "on"), ("", "on"), ("whatever", "off"), ("0", "off")] {
+            maps.set_var(b"expand-tilde", given.as_bytes()).expect("a boolean");
+            assert_eq!(get(&maps, "expand-tilde"), want, "set expand-tilde {given}");
+        }
+        maps.set_var(b"comment-begin", b";;").expect("a string variable");
+        assert_eq!(get(&maps, "comment-begin"), ";;");
+        // A keymap name is canonicalised, and an impossible one is refused
+        // without disturbing what was there.
+        maps.set_var(b"keymap", b"vi-move").expect("a keymap name");
+        assert_eq!(maps.keymap(), "vi");
+        assert!(maps.set_var(b"keymap", b"nosuchmap").is_err());
+        assert_eq!(maps.keymap(), "vi");
+        // `editing-mode` is the keymap under another name: vi starts insert.
+        maps.set_var(b"editing-mode", b"vi").expect("an editing mode");
+        assert_eq!(maps.keymap(), "vi-insert");
+        maps.set_var(b"editing-mode", b"emacs").expect("an editing mode");
+        assert_eq!(maps.keymap(), "emacs");
+        assert!(maps.set_var(b"editing-mode", b"sideways").is_err());
+        assert_eq!(maps.keymap(), "emacs");
+        assert!(maps.set_var(b"nosuchvar", b"x").is_err());
+    }
+
+    /// The lines readline does nothing with, and the two it refuses.
+    #[test]
+    fn a_line_that_binds_nothing_is_read_as_nothing() {
+        let kind = |spec: &str| match super::parse_operand(spec.as_bytes()) {
+            super::Operand::Nothing => "nothing".to_string(),
+            super::Operand::Error(e) => String::from_utf8_lossy(&e).into_owned(),
+            super::Operand::Set(n, v) => {
+                format!("set {} {}", String::from_utf8_lossy(&n), String::from_utf8_lossy(&v))
+            }
+            super::Operand::Bind(..) => "bind".to_string(),
+        };
+        assert_eq!(kind(""), "nothing");
+        assert_eq!(kind("   # a comment"), "nothing");
+        assert_eq!(kind("$if Bash"), "nothing");
+        assert_eq!(kind("yank"), "yank: no key sequence terminator");
+        assert_eq!(kind(r#""\C-t""#), "\"\\C-t\": no key sequence terminator");
+        assert_eq!(kind(r#""\C-t"#), "\"\\C-t: no closing `\"' in key binding");
+        // `set` is read before any of that, so its value needs no separator and
+        // may hold anything — including nothing.
+        assert_eq!(kind("set bell-style visible"), "set bell-style visible");
+        assert_eq!(kind("set comment-begin ;;"), "set comment-begin ;;");
+        assert_eq!(kind("set"), "set  ");
     }
 }

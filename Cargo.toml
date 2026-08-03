@@ -354,3 +354,23 @@ panic = "abort"
 opt-level = 3
 codegen-units = 1
 strip = "none"
+
+# The shell is the one userspace binary whose *speed* is worth more than its
+# size. `opt-level = "s"` is right for sixty coreutils that each run once and
+# are all embedded in the kernel image; osh is a single binary that interprets
+# every line of every script, so the size is paid once and the speed is paid
+# per loop iteration. Measured over twelve constructs (300k-iteration loops of
+# `for (( ))`, `while [ ]`, `+=`, `${v#h}`, `[[ =~ ]]`, function calls, array
+# and associative-array fills, `case`, `printf`), `-O3` is 1.10x–1.37x faster
+# than `-Os`, geometric mean ~1.27x, with no construct slower. That moves osh
+# from ~1.5-1.8x bash 5.2 to ~1.0-1.4x.
+#
+# `codegen-units = 1` comes along because here it is free twice over: it is as
+# fast as 16 units and produces a *smaller* binary (3.22 MB against 3.68 MB),
+# since one unit lets LLVM share code instead of duplicating inlined copies
+# across units. Net cost against `-Os`: +884 KB (2.33 -> 3.22 MB) and ~20 s of
+# build time. See design-decisions.md 100.
+[profile.release.package.oils]
+opt-level = 3
+codegen-units = 1
+

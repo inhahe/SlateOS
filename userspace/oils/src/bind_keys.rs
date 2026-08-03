@@ -15,6 +15,15 @@
 //! (out). The round-trip is pinned against readline's own compiled-in tables:
 //! every binding in [`crate::bind_tables`] decodes and prints back to exactly
 //! the text it was captured as — see the tests at the foot of this file.
+//!
+//! [`Maps`] is the table itself, seeded from those constants and mutable
+//! thereafter. Readline's keymaps are a *tree* — the emacs map's escape and
+//! `\C-x` slots hold whole keymaps of their own, which `bind -m` names
+//! `emacs-meta` and `emacs-ctlx` — and the names are two views of one thing:
+//! binding `Q` in `emacs-meta` is binding `\M-Q` in `emacs`, and either name
+//! shows the other's work (measured). Storing whole byte sequences in the three
+//! *root* maps and treating the sub-keymaps as prefixed slices of them gets
+//! that for free, and is the only arrangement in which it cannot drift.
 
 /// Escape, which readline uses for two unrelated things: a key in its own
 /// right, and the prefix that stands in for a meta modifier.
@@ -162,6 +171,22 @@ pub fn decode(spec: &[u8]) -> Vec<u8> {
     out
 }
 
+/// How a listing spells an escape byte that has something after it.
+///
+/// readline has two dumpers and they do not agree. The one behind `bind -p`,
+/// `-P` and `-q` walks the keymap tree and names the escape sub-map by the
+/// modifier it stands for; the one behind `-s`, `-S` and `-X` — which bash
+/// also borrows for its `-x` bindings — writes the byte out as itself. So one
+/// and the same binding is `\M-Q` to `bind -q` and `\eQ` to `bind -X`
+/// (measured).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Meta {
+    /// An escape with a key behind it is the meta prefix: `\M-`.
+    Prefix,
+    /// An escape is always `\e`, prefix or not.
+    Literal,
+}
+
 /// Render a key sequence the way readline's listings spell it.
 ///
 /// `is_prefix` says whether a *longer* sequence is also bound in the same
@@ -169,16 +194,23 @@ pub fn decode(spec: &[u8]) -> Vec<u8> {
 /// slot its continuation map reserves for "and nothing further", and prints
 /// that slot as a trailing `\000`: binding `\C-x` alone in the emacs map —
 /// where `\C-x\C-e` and friends live — is listed as `\C-x\000`, and the escape
-/// bound by itself in `vi-insert` is `\M-\000`. The same rule decides the one
-/// place escape is not written `\M-`: it is the prefix spelling everywhere
-/// except at the end of a sequence that is nobody's prefix, where it is `\e`.
+/// bound by itself in `vi-insert` is `\M-\000`. Under [`Meta::Prefix`] the same
+/// rule decides the one place escape is not written `\M-`: it is the prefix
+/// spelling everywhere except at the end of a sequence that is nobody's prefix,
+/// where it is `\e`.
+///
+/// This also spells a *macro's text* and a `-x` binding's command, which are
+/// not key sequences at all but go through the same dumper and so come out
+/// escaped the same way.
 #[must_use]
-pub fn encode(seq: &[u8], is_prefix: bool) -> Vec<u8> {
+pub fn encode(seq: &[u8], is_prefix: bool, meta: Meta) -> Vec<u8> {
     let mut out = Vec::with_capacity(seq.len().saturating_mul(4));
     let last = seq.len().saturating_sub(1);
     for (i, &b) in seq.iter().enumerate() {
         match b {
-            ESC if i < last || is_prefix => out.extend_from_slice(b"\\M-"),
+            ESC if meta == Meta::Prefix && (i < last || is_prefix) => {
+                out.extend_from_slice(b"\\M-");
+            }
             ESC => out.extend_from_slice(b"\\e"),
             RUBOUT => out.extend_from_slice(b"\\C-?"),
             0x00..=0x1f => {
@@ -211,19 +243,305 @@ pub fn encode(seq: &[u8], is_prefix: bool) -> Vec<u8> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{decode, encode};
-    use crate::bind_tables::KEYMAPS;
+/// Read one entry of a captured listing back into the sequence it names.
+///
+/// The trailing `\000` [`encode`] writes for a bound prefix is a property of
+/// the keymap rather than of the binding, so it comes off here and is derived
+/// again on the way out. The flag is returned only so a caller checking the
+/// capture against itself can compare like with like.
+#[must_use]
+pub fn table_entry(text: &str) -> (Vec<u8>, bool) {
+    match text.strip_suffix("\\000") {
+        Some(head) => (decode(head.as_bytes()), true),
+        None => (decode(text.as_bytes()), false),
+    }
+}
 
-    /// A binding printed with a trailing `\000` is the prefix by itself, and
-    /// the marker is not part of the sequence — see [`encode`].
-    fn table_seq(text: &str) -> (Vec<u8>, bool) {
-        match text.strip_suffix("\\000") {
-            Some(head) => (decode(head.as_bytes()), true),
-            None => (decode(text.as_bytes()), false),
+/// Order two key sequences as readline walks a keymap.
+///
+/// Byte order, except that a sequence which is a *prefix* of another comes
+/// **after** it: readline keeps the prefix's own binding in the slot past the
+/// end of the byte range (its `ANYOTHERKEY`), so `bind -q` answers
+/// `"\C-t\000", "\C-y"` when `\C-t`, `\C-tZ` and `\C-y` are all bound — the
+/// prefix sorts after its own continuations but still before the next key
+/// (measured).
+#[must_use]
+pub fn cmp_seq(a: &[u8], b: &[u8]) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    for (x, y) in a.iter().zip(b) {
+        match x.cmp(y) {
+            Ordering::Equal => {}
+            other => return other,
         }
     }
+    // Whichever ran out first is the prefix, and the prefix is the greater.
+    b.len().cmp(&a.len())
+}
+
+/// What a key sequence can be bound to. The three are one namespace: binding
+/// any of them at a sequence replaces whatever was there, and `bind -r` takes
+/// any of them away (measured) — but each is listed by its own option, and by
+/// no other.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Target {
+    /// A readline function, listed by `-p`, `-P` and `-q`. Held as the
+    /// representative of its alias group (see [`function`]) rather than as the
+    /// name that was typed, because what a key is bound to is the *function*,
+    /// and one function can answer to more than one name.
+    Function(&'static str),
+    /// A macro: the bytes readline pushes back as if typed. Listed by `-s` and
+    /// `-S`, and decoded on the way in, so `"\C-y"` is one byte and not four.
+    Macro(Vec<u8>),
+    /// A shell command bound by `bind -x`, listed by `-X`. Kept exactly as
+    /// written — it is a command, not a key sequence, and readline never
+    /// decodes it.
+    Command(Vec<u8>),
+}
+
+/// readline's live key tables.
+///
+/// Three roots, because readline has three keymaps that are not reachable from
+/// each other: the emacs map, the vi movement map, and the vi insert map.
+/// Everything `bind -m` else names is a slice of one of those — see the module
+/// docs. Each root is kept sorted by [`cmp_seq`], which is both the order every
+/// listing wants and a binary search for the mutations.
+#[derive(Clone)]
+pub struct Maps {
+    emacs: Vec<(Vec<u8>, Target)>,
+    vi: Vec<(Vec<u8>, Target)>,
+    vi_insert: Vec<(Vec<u8>, Target)>,
+}
+
+/// One of the three roots [`Maps`] keeps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Root {
+    Emacs,
+    Vi,
+    ViInsert,
+}
+
+/// One live binding, as the keymap that was asked for spells it.
+pub struct Entry<'a> {
+    /// The sequence with the view's own prefix already taken off, so an
+    /// `emacs-meta` entry reads `Q` where the `emacs` one reads `\M-Q`.
+    pub seq: &'a [u8],
+    /// Whether a longer binding extends it — [`encode`]'s `\000`.
+    pub is_prefix: bool,
+    pub target: &'a Target,
+}
+
+/// The escape that begins every `emacs-meta` sequence, as a prefix to match on.
+const ESC_PREFIX: &[u8] = &[ESC];
+/// `\C-x`, likewise for `emacs-ctlx`.
+const CTLX_PREFIX: &[u8] = &[0x18];
+
+/// Which root a keymap name is a view of, and the prefix its own sequences
+/// carry inside that root.
+///
+/// The name is expected to be canonical — the first of the aliases
+/// [`crate::bind_tables::KEYMAPS`] lists — because that is what `bind -m` has
+/// already resolved it to. Anything else is the emacs map, which is readline's
+/// default and so the right answer for the caller that passed no `-m` at all.
+fn view(keymap: &str) -> (Root, &'static [u8]) {
+    match keymap {
+        "emacs-meta" => (Root::Emacs, ESC_PREFIX),
+        "emacs-ctlx" => (Root::Emacs, CTLX_PREFIX),
+        "vi" => (Root::Vi, &[]),
+        "vi-insert" => (Root::ViInsert, &[]),
+        _ => (Root::Emacs, &[]),
+    }
+}
+
+impl Maps {
+    /// The tables as readline compiles them in.
+    ///
+    /// Only the roots are read: the `emacs-meta` and `emacs-ctlx` captures are
+    /// the same bindings written without their prefix (checked in the tests),
+    /// so seeding from them as well would double every one of them.
+    #[must_use]
+    pub fn seeded() -> Self {
+        let of = |canonical: &str| -> Vec<(Vec<u8>, Target)> {
+            let mut v: Vec<(Vec<u8>, Target)> = crate::bind_tables::KEYMAPS
+                .iter()
+                .find(|m| m.names.first() == Some(&canonical))
+                .map(|m| {
+                    m.bindings
+                        .iter()
+                        .map(|(text, func)| {
+                            let name = function(func.as_bytes()).unwrap_or(func);
+                            (table_entry(text).0, Target::Function(name))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // The capture is grouped by function, not by key; the live table is
+            // the other way round.
+            v.sort_by(|(a, _), (b, _)| cmp_seq(a, b));
+            // An aliased function is captured once per name, and those are one
+            // binding — the same key, now the same representative too.
+            v.dedup_by(|a, b| a.0 == b.0);
+            v
+        };
+        Self { emacs: of("emacs"), vi: of("vi"), vi_insert: of("vi-insert") }
+    }
+
+    fn root(&self, r: Root) -> &Vec<(Vec<u8>, Target)> {
+        match r {
+            Root::Emacs => &self.emacs,
+            Root::Vi => &self.vi,
+            Root::ViInsert => &self.vi_insert,
+        }
+    }
+
+    fn root_mut(&mut self, r: Root) -> &mut Vec<(Vec<u8>, Target)> {
+        match r {
+            Root::Emacs => &mut self.emacs,
+            Root::Vi => &mut self.vi,
+            Root::ViInsert => &mut self.vi_insert,
+        }
+    }
+
+    /// Everything bound in `keymap`, in the order its listings come out.
+    ///
+    /// `is_prefix` is read off the neighbour rather than searched for: under
+    /// [`cmp_seq`] every continuation of a sequence sorts immediately before
+    /// it, so the entry in front is the only one that can extend it.
+    #[must_use]
+    pub fn entries(&self, keymap: &str) -> Vec<Entry<'_>> {
+        let (root, prefix) = view(keymap);
+        let all = self.root(root);
+        let mut out = Vec::new();
+        for (i, (seq, target)) in all.iter().enumerate() {
+            let Some(rest) = seq.strip_prefix(prefix) else { continue };
+            // A view is named by a prefix that is itself a key, so the prefix
+            // alone is not one of the view's own bindings.
+            if rest.is_empty() && !prefix.is_empty() {
+                continue;
+            }
+            let is_prefix = i
+                .checked_sub(1)
+                .and_then(|p| all.get(p))
+                .is_some_and(|(before, _)| before.starts_with(seq));
+            out.push(Entry { seq: rest, is_prefix, target });
+        }
+        out
+    }
+
+    /// Bind `seq` — as `keymap` spells it — replacing whatever was there.
+    pub fn bind(&mut self, keymap: &str, seq: &[u8], target: Target) {
+        let (root, prefix) = view(keymap);
+        let mut full = prefix.to_vec();
+        full.extend_from_slice(seq);
+        let all = self.root_mut(root);
+        match all.binary_search_by(|(s, _)| cmp_seq(s, &full)) {
+            Ok(i) => {
+                if let Some(slot) = all.get_mut(i) {
+                    slot.1 = target;
+                }
+            }
+            Err(i) => all.insert(i, (full, target)),
+        }
+    }
+
+    /// Take away whatever `seq` is bound to in `keymap`, of any kind.
+    pub fn unbind_seq(&mut self, keymap: &str, seq: &[u8]) {
+        let (root, prefix) = view(keymap);
+        let mut full = prefix.to_vec();
+        full.extend_from_slice(seq);
+        let all = self.root_mut(root);
+        if let Ok(i) = all.binary_search_by(|(s, _)| cmp_seq(s, &full)) {
+            all.remove(i);
+        }
+    }
+
+    /// Take away every sequence in `keymap` that runs `func`, which is a
+    /// representative from [`function`] — so unbinding by either of an aliased
+    /// function's names takes away all of its keys, as readline's does.
+    ///
+    /// Sub-keymaps go with it: `bind -u yank` in the emacs map unbinds `\M-Q`
+    /// as well as `\C-y` (measured), which falls out of storing whole
+    /// sequences. A view is still only its own slice, so the same `-u` under
+    /// `-m emacs-meta` leaves `\C-y` alone.
+    pub fn unbind_function(&mut self, keymap: &str, func: &str) {
+        let (root, prefix) = view(keymap);
+        self.root_mut(root).retain(|(seq, target)| {
+            !(seq.starts_with(prefix)
+                && seq.len() > prefix.len()
+                && matches!(target, Target::Function(f) if *f == func))
+        });
+    }
+}
+
+/// One name per readline *function*, so two names for the same function
+/// compare equal.
+///
+/// readline's funmap holds some C functions under two names — `\M-.` is listed
+/// by `bind -p` under both `yank-last-arg` and `insert-last-argument` — and a
+/// listing walks names, so an aliased function is printed once for each. A
+/// table keyed by key sequence has one entry there, not two, so the aliases
+/// have to be recognised rather than stored.
+///
+/// The groups are read off the captured tables themselves: two names are the
+/// same function exactly when some key sequence is captured under both. That
+/// cannot see an alias pair that is bound nowhere, but neither can any listing
+/// — both names print as unbound either way.
+fn representatives() -> &'static std::collections::HashMap<&'static str, &'static str> {
+    use std::collections::HashMap;
+    static GROUPS: std::sync::OnceLock<HashMap<&'static str, &'static str>> =
+        std::sync::OnceLock::new();
+    GROUPS.get_or_init(|| {
+        // `name -> the name that stands for its group`, following chains so a
+        // three-way alias lands on one representative however it was linked.
+        let mut of: HashMap<&'static str, &'static str> = HashMap::new();
+        fn root<'a>(of: &HashMap<&'a str, &'a str>, mut n: &'a str) -> &'a str {
+            while let Some(&up) = of.get(n) {
+                if up == n {
+                    break;
+                }
+                n = up;
+            }
+            n
+        }
+        for map in &crate::bind_tables::KEYMAPS {
+            let mut seen: HashMap<Vec<u8>, &'static str> = HashMap::new();
+            for (text, func) in map.bindings {
+                let seq = table_entry(text).0;
+                let Some(&other) = seen.get(&seq) else {
+                    seen.insert(seq, func);
+                    continue;
+                };
+                let (a, b) = (root(&of, func), root(&of, other));
+                if a != b {
+                    // The earlier name in readline's own list stands for the
+                    // group, so the choice does not depend on capture order.
+                    let (keep, drop) = if a < b { (a, b) } else { (b, a) };
+                    of.insert(drop, keep);
+                }
+            }
+        }
+        crate::bind_tables::FUNCTION_NAMES
+            .iter()
+            .map(|&n| (n, root(&of, n)))
+            .collect()
+    })
+}
+
+/// The readline function of that name, if there is one, as the one name every
+/// alias for it resolves to.
+///
+/// A name readline does not know is not an error anywhere a binding is made —
+/// `bind '"\C-t": nosuchfn'` succeeds and binds nothing (measured) — so this
+/// returning `None` is the whole of that check.
+#[must_use]
+pub fn function(name: &[u8]) -> Option<&'static str> {
+    let name = core::str::from_utf8(name).ok()?;
+    representatives().get(name).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Meta, Target, cmp_seq, decode, encode, table_entry as table_seq};
+    use crate::bind_tables::KEYMAPS;
 
     #[test]
     fn every_readline_binding_survives_a_round_trip() {
@@ -231,7 +549,7 @@ mod tests {
             for (text, func) in map.bindings {
                 let (seq, is_prefix) = table_seq(text);
                 assert!(!seq.is_empty(), "{}: {text} decoded to nothing", func);
-                let back = encode(&seq, is_prefix);
+                let back = encode(&seq, is_prefix, Meta::Prefix);
                 assert_eq!(
                     String::from_utf8_lossy(&back),
                     *text,
@@ -256,7 +574,7 @@ mod tests {
                     .iter()
                     .any(|o| o.len() > seq.len() && o.starts_with(seq));
                 assert_eq!(
-                    String::from_utf8_lossy(&encode(seq, derived)),
+                    String::from_utf8_lossy(&encode(seq, derived, Meta::Prefix)),
                     *text,
                     "{}/{func}",
                     map.names.first().copied().unwrap_or("?")
@@ -266,10 +584,10 @@ mod tests {
     }
 
     /// readline lists a function's key sequences in the order its keymap walks
-    /// them, which is by the *bytes* — so a live table kept sorted that way
-    /// lists in readline's order without having to remember the capture order.
+    /// them, which is [`cmp_seq`] — so a live table kept sorted that way lists
+    /// in readline's order without having to remember the capture order.
     #[test]
-    fn the_tables_are_already_in_byte_order_within_each_function() {
+    fn the_tables_are_already_in_keymap_order_within_each_function() {
         for map in &KEYMAPS {
             for (name, _) in map.bindings {
                 let of_func: Vec<Vec<u8>> = map
@@ -279,10 +597,19 @@ mod tests {
                     .map(|(t, _)| table_seq(t).0)
                     .collect();
                 let mut sorted = of_func.clone();
-                sorted.sort();
+                sorted.sort_by(|a, b| cmp_seq(a, b));
                 assert_eq!(of_func, sorted, "{name}");
             }
         }
+    }
+
+    /// A prefix sorts after everything that extends it, and nowhere else —
+    /// which is what puts `\C-t\000` between `\C-tZ` and `\C-y`.
+    #[test]
+    fn a_bound_prefix_sorts_after_its_own_continuations() {
+        let mut seqs: Vec<&[u8]> = vec![b"\x19", b"\x14", b"\x14Z", b"\x14A", b"\x1bb"];
+        seqs.sort_by(|a, b| cmp_seq(a, b));
+        assert_eq!(seqs, vec![&b"\x14A"[..], b"\x14Z", b"\x14", b"\x19", b"\x1bb"]);
     }
 
     #[test]
@@ -314,17 +641,111 @@ mod tests {
 
     #[test]
     fn a_sequence_is_printed_the_way_readline_would_have_written_it() {
-        assert_eq!(encode(&[0x19], false), b"\\C-y");
-        assert_eq!(encode(&[0x1b, b'y'], false), b"\\M-y");
-        assert_eq!(encode(&[0x1b], false), b"\\e");
-        assert_eq!(encode(&[0x1b], true), b"\\M-\\000");
-        assert_eq!(encode(&[0x18], true), b"\\C-x\\000");
-        assert_eq!(encode(&[0x00], false), b"\\C-@");
-        assert_eq!(encode(&[0x1c], false), b"\\C-\\\\");
-        assert_eq!(encode(&[0x7f], false), b"\\C-?");
-        assert_eq!(encode(&[0xe6], false), b"\\346");
-        assert_eq!(encode(b"\"", false), b"\\\"");
-        assert_eq!(encode(b"\\", false), b"\\\\");
-        assert_eq!(encode(b"zq", false), b"zq");
+        let p = |seq: &[u8], pre: bool| encode(seq, pre, Meta::Prefix);
+        assert_eq!(p(&[0x19], false), b"\\C-y");
+        assert_eq!(p(&[0x1b, b'y'], false), b"\\M-y");
+        assert_eq!(p(&[0x1b], false), b"\\e");
+        assert_eq!(p(&[0x1b], true), b"\\M-\\000");
+        assert_eq!(p(&[0x18], true), b"\\C-x\\000");
+        assert_eq!(p(&[0x00], false), b"\\C-@");
+        assert_eq!(p(&[0x1c], false), b"\\C-\\\\");
+        assert_eq!(p(&[0x7f], false), b"\\C-?");
+        assert_eq!(p(&[0xe6], false), b"\\346");
+        assert_eq!(p(b"\"", false), b"\\\"");
+        assert_eq!(p(b"\\", false), b"\\\\");
+        assert_eq!(p(b"zq", false), b"zq");
+    }
+
+    /// The macro and `-x` dumper is the same escaping with one difference, and
+    /// it is the one readline's own listings disagree on.
+    #[test]
+    fn the_macro_dumper_writes_escape_as_itself() {
+        let l = |seq: &[u8]| encode(seq, false, Meta::Literal);
+        assert_eq!(l(&[0x1b, b'Q']), b"\\eQ");
+        assert_eq!(l(&[0x19, 0x1b, b'b']), b"\\C-y\\eb");
+        assert_eq!(encode(&[0x14], true, Meta::Literal), b"\\C-t\\000");
+        // A `-x` command is never decoded, so its backslashes are doubled by
+        // the same pass that would have escaped a key sequence's.
+        assert_eq!(l(br"printf %s\\n hi"), br"printf %s\\\\n hi");
+    }
+
+    /// The sub-keymaps are not tables of their own: `emacs-meta` is exactly the
+    /// escape-prefixed part of `emacs` with the escape taken off, and
+    /// `emacs-ctlx` the same for `\C-x` (checked against real bash, which
+    /// reports 104 of each and no difference). Seeding only the roots and
+    /// slicing for the rest is what keeps a change made through one name
+    /// visible through the other.
+    #[test]
+    fn a_sub_keymap_is_a_slice_of_its_root_and_not_a_table_of_its_own() {
+        let maps = super::Maps::seeded();
+        for name in ["emacs", "emacs-meta", "emacs-ctlx", "vi", "vi-insert"] {
+            let captured = KEYMAPS
+                .iter()
+                .find(|m| m.names.first() == Some(&name))
+                .expect("every keymap is captured");
+            let live: Vec<String> = maps
+                .entries(name)
+                .iter()
+                .map(|e| String::from_utf8_lossy(&encode(e.seq, e.is_prefix, Meta::Prefix)).into_owned())
+                .collect();
+            let mut want: Vec<String> = captured
+                .bindings
+                .iter()
+                .map(|(t, _)| (*t).to_string())
+                .collect();
+            want.sort_by(|a, b| cmp_seq(&table_seq(a).0, &table_seq(b).0));
+            // An aliased function is captured once per name — `\M-.` is listed
+            // as both `yank-last-arg` and `insert-last-argument` — but it is
+            // one key and so one row of the live table.
+            want.dedup();
+            assert_eq!(live, want, "{name}");
+        }
+    }
+
+    /// The two names really are one table underneath: what is bound through
+    /// the child shows through the parent, prefix and all, and the reverse.
+    #[test]
+    fn binding_through_one_name_is_visible_through_the_other() {
+        let mut maps = super::Maps::seeded();
+        let yank = Target::Function(super::function(b"yank").expect("yank is a function"));
+        maps.bind("emacs-meta", b"Q", yank.clone());
+        let seqs: Vec<Vec<u8>> = maps
+            .entries("emacs")
+            .iter()
+            .filter(|e| *e.target == yank)
+            .map(|e| encode(e.seq, e.is_prefix, Meta::Prefix))
+            .collect();
+        assert_eq!(seqs, vec![b"\\C-y".to_vec(), b"\\M-Q".to_vec()]);
+
+        // …and `-u` through the parent reaches into the child, while `-u`
+        // through the child leaves the parent's own bindings alone.
+        let mut child = maps.clone();
+        child.unbind_function("emacs-meta", "yank");
+        assert_eq!(child.entries("emacs").iter().filter(|e| *e.target == yank).count(), 1);
+        maps.unbind_function("emacs", "yank");
+        assert_eq!(maps.entries("emacs").iter().filter(|e| *e.target == yank).count(), 0);
+    }
+
+    /// A prefix that is bound in its own right keeps its binding, and gets the
+    /// marker only for as long as something extends it.
+    #[test]
+    fn the_prefix_marker_comes_and_goes_with_the_continuation() {
+        let mut maps = super::Maps::seeded();
+        let printed = |m: &super::Maps| -> Vec<String> {
+            m.entries("emacs")
+                .iter()
+                .filter(|e| matches!(e.target, Target::Macro(_)))
+                .map(|e| String::from_utf8_lossy(&encode(e.seq, e.is_prefix, Meta::Literal)).into_owned())
+                .collect()
+        };
+        maps.bind("emacs", &[0x14], Target::Macro(b"pfx".to_vec()));
+        assert_eq!(printed(&maps), vec!["\\C-t"]);
+        maps.bind("emacs", &[0x14, b'Z'], Target::Macro(b"m3".to_vec()));
+        assert_eq!(printed(&maps), vec!["\\C-tZ", "\\C-t\\000"]);
+        maps.unbind_seq("emacs", &[0x14, b'Z']);
+        assert_eq!(printed(&maps), vec!["\\C-t"]);
+        // Binding over a sequence replaces whatever kind was there.
+        maps.bind("emacs", &[0x14], Target::Command(b"echo".to_vec()));
+        assert!(printed(&maps).is_empty());
     }
 }

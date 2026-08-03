@@ -7052,11 +7052,8 @@ impl Shell {
     /// is a `builtin_error`, not a `report_error`). The character reported is
     /// whatever `*s` was, so a format ending mid-directive names the NUL.
     ///
-    /// User and system CPU times are still always zero here, because the host
-    /// does not expose per-child CPU accounting through `std::process` — see
-    /// known-issues TD-OILS10. That makes `%P` zero as well; the percentage is
-    /// nevertheless computed the way bash computes it, so it will follow along
-    /// when the accounting arrives.
+    /// The CPU figures come from [`Shell::cpu_used`], which is real on Windows
+    /// and zero elsewhere for want of the host accounting — see TD-OILS10.
     fn render_time_report(&mut self, fmt: BStr<'_>, real: f64, user: f64, sys: f64) -> Option<Str> {
         let (rs, rsf) = Self::time_parts(real);
         let (us, usf) = Self::time_parts(user);
@@ -24615,9 +24612,9 @@ impl Shell {
 
     /// `times` — print the accumulated user and system CPU times for the shell
     /// and its children, one pair per line (shell first, then children), in
-    /// bash's `%dm%d.%03ds` form. We have no per-process CPU accounting yet
-    /// (see known-issues TD-OILS10), so the reported times are zero; the format
-    /// and line structure match bash so scripts that parse the output still work.
+    /// bash's `%dm%d.%03ds` form. Both pairs are real on Windows; on a host
+    /// without the accounting they read zero (TD-OILS10), and the format and
+    /// line structure match bash either way.
     fn builtin_times(&mut self, out: &mut Out, redir: &RedirPlan) -> i32 {
         // Two lines of "user sys": the shell's own times, then its reaped
         // children's. Unlike `time`'s report these are cumulative and are not

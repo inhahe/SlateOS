@@ -25,11 +25,12 @@
 #   * It is read when the report is printed, not when the command starts, so a
 #     `$TIMEFORMAT` the timed command set itself is the one used.
 #
-# The elapsed figure is the one thing that cannot be compared, so everything
-# below either asks for it at precision 0 (whole seconds — 0 for anything here)
-# or passes it through `d`, which blanks digit runs. (osh reports user and
-# system CPU as zero throughout — known-issues TD-OILS10 — which is what `:`
-# costs in bash too, so the CPU directives compare directly.)
+# No figure here can be compared between the two shells — the CPU ones are as
+# real as the elapsed one — so everything below either asks at precision 0
+# (whole seconds, which every span of `:` rounds to in both shells) or passes
+# the report through `d`, which blanks digit runs. The one exception is a
+# *cumulative* figure, which is the shell's whole run and so not even zero
+# reliably; those go through `d` too.
 
 d() { sed 's/[0-9][0-9]*/N/g'; }
 # bash's line number for the report is a parser artifact — inside a compound
@@ -69,7 +70,7 @@ echo "=== but it is not fatal"
 
 echo "=== -p ignores the variable; posix's bare time does not"
 TIMEFORMAT="R=%0R"; { time -p : ; } 2>&1
-( set -o posix; TIMEFORMAT="U=%0U S=%0S"; { time ; } 2>&1 )
+( set -o posix; TIMEFORMAT="U=%0U S=%0S"; { time ; } 2>&1 | d )
 # The `%R` there is the *shell's* elapsed lifetime, not the null command's, so
 # it is however long this script has been running — blank it out.
 ( set -o posix; TIMEFORMAT="R=%0R U=%0U"; { time ; } 2>&1 | d )

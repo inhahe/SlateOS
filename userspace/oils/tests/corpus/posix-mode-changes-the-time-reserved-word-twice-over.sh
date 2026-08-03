@@ -23,9 +23,10 @@
 # decided when the report is printed, so it needs no such care.
 #
 # (Every check below counts lines or matches rather than showing them: the two
-# shells cannot be expected to report the same durations. osh reports the CPU
-# figures as zero throughout — see known-issues TD-OILS10 — so only the shape is
-# compared. `$TIMEFORMAT` is not implemented at all; nothing here sets it.)
+# shells cannot be expected to report the same durations — the CPU figures are
+# as real as the elapsed one — so only the shape is compared. `$TIMEFORMAT`
+# would displace these forms entirely, so nothing here sets it; that is
+# `the-time-report-is-rendered-from-timeformat.sh`.)
 
 echo "=== outside the mode, a bare time times the null command"
 { time ; } 2>t1

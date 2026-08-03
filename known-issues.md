@@ -12128,7 +12128,35 @@ an expansion. The only observable cost is this one blank-vs-`\` cell in the
 astronomically rare case of a range deliberately spanning `\`. No real script
 relies on it; no action needed.
 
-### TD-OILS10. `osh` `time` keyword / `times` builtin: user/sys CPU times are always reported as 0.00 — OPEN (low priority, gated on per-child CPU accounting)
+### TD-OILS10. `osh` `time` keyword / `times` builtin: user/sys CPU times are always reported as 0.00 — 2026-08-03 — ✅ **RESOLVED 2026-08-03 on Windows hosts** (still zero on other hosts, see below)
+
+**Resolved:** the premise — "no per-child CPU accounting exists" — was only true
+of `std`. Windows exposes it: `GetProcessTimes` answers for the current process
+*and* for any child process whose handle is still open, which a
+`std::process::Child` holds until it is dropped. So `interp.rs` gained
+
+* `self_cpu_secs()` — the shell process's own `(user, system)`, which covers
+  every osh thread (a subshell, a builtin pipeline stage) since they are all
+  one process;
+* `child_cpu_times()` + `account_child()` + the `CHILD_USER_NS`/`CHILD_SYS_NS`
+  process-global totals, fed by `reap_child()` — now the single place a child
+  is waited for, so no child is counted twice or missed;
+* `Shell::cpu_used()`, the sum, which `exec_pipeline` samples on either side of
+  a timed pipeline exactly as bash's `time_command` differences `times()`.
+
+`times` prints the two cumulative pairs (shell, then children) it always
+claimed to, and `$TIMEFORMAT`'s `%U`, `%S` and `%P` report real numbers.
+Measured against the reference bash on the same busy loop: bash
+`user 0m0.593s sys 0m0.030s`, osh `user 0m0.515s sys 0m0.062s`, with `times`
+attributing them to the children line in both.
+
+**Two documented approximations.** The child totals are per *process*, not per
+`Shell`, because osh's subshells are threads — so a `( times )` sees the
+totals its parent accumulated, where a forked bash's subshell starts from zero.
+And on non-Windows hosts `self_cpu_secs`/`child_cpu_times` still return zero:
+`getrusage` needs libc bindings osh does not have, and the SlateOS answer is
+the process-accounting syscall described under "Proper fix" below. Both are
+marked in the source.
 
 **Where:** `userspace/oils/src/interp.rs` (`Shell::format_time_report`, called
 from `exec_pipeline` when a pipeline is prefixed with `time`; and

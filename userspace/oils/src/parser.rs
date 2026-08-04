@@ -3652,6 +3652,40 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: ParseOpts) -> Result<WordP
             op: BulkOp::BadTransform { raw: raw.to_vec() },
         });
     }
+    // `${@:-w}` / `${*:+w}` / `${@?msg}` — use/alternate/error on the
+    // positionals. bash answers these with the positional *list* (`set -- p q r;
+    // ${@:-d}` is three fields, not one), exactly as it answers `${a[@]:-w}`
+    // with the array's elements, so the two are one node: `$@` and `a[@]` are
+    // the same case in bash's expander, and the differences that remain — no
+    // variable to assign a default to, and a complaint spelled `@` rather than
+    // `a[@]` — belong to the runtime, not to the shape of the word.
+    if (name == "@" || name == "*") && !rest.is_empty() {
+        let mut it = rest.iter().copied();
+        let mut c = it.next().map_or('\0', syn);
+        let colon = c == ':';
+        if colon {
+            c = it.next().map_or('\0', syn);
+        }
+        // Anything else is one of the forms handled below (or, after them, a
+        // "bad substitution"), so this recognises rather than rejects.
+        let op = match c {
+            '-' => Some(ParamOp::UseDefault),
+            '=' => Some(ParamOp::AssignDefault),
+            '+' => Some(ParamOp::UseAlternate),
+            '?' => Some(ParamOp::ErrorIfUnset),
+            _ => None,
+        };
+        if let Some(op) = op {
+            let arg_str = bytes::from_chars(it);
+            return Ok(WordPart::ArrayOp {
+                star: name == "*",
+                name,
+                op,
+                colon,
+                arg: Box::new(word_verbatim_from_source(&arg_str, opts)?),
+            });
+        }
+    }
     if rest.is_empty() {
         return Ok(WordPart::Param { name, braced: true });
     }

@@ -21016,10 +21016,18 @@ impl Shell {
     /// Bash treats `[@]`/`[*]` like `$@`: when the array is "active" the elements
     /// are the result (one field each); otherwise the operand `word` is used.
     ///
+    /// The positionals take this path too, and it is the same rule rather than an
+    /// analogue of it: `set -- p q r; ${@:-d}` is three fields under every `$IFS`,
+    /// quoted or not, exactly as `${a[@]:-d}` is. Only two things distinguish
+    /// them, and both are about the parameter rather than the operator — there is
+    /// no variable behind `$@` to assign a default to, and a complaint about it is
+    /// spelled `@`/`*` with no subscript.
+    ///
     /// "Active" for the colon forms means the array is non-null — it has at least
     /// one non-empty element; for the colon-less forms it means the array is
     /// merely *set* (exists with at least one element), matching bash's
-    /// unset-vs-null distinction.
+    /// unset-vs-null distinction. The positionals are "set" when there is at
+    /// least one of them; `$0` heads their list for a *slice*, but not here.
     fn array_op_fields(
         &mut self,
         name: &str,
@@ -21028,13 +21036,28 @@ impl Shell {
         colon: bool,
         arg: &Word,
     ) -> Vec<Str> {
+        let positional = name == "@" || name == "*";
         // A circular nameref names nothing: `array_elements` below reports it,
         // so resolve silently here and let `None` make the name non-existent.
-        let resolved = self.resolve_ref_name(name).and_then(RefTarget::into_name);
-        let elements = self.array_elements(name);
-        let exists = resolved.as_ref().is_some_and(|r| {
-            self.arrays.contains_key(r) || self.assoc.contains_key(r) || self.vars.contains_key(r)
-        });
+        let resolved = if positional {
+            None
+        } else {
+            self.resolve_ref_name(name).and_then(RefTarget::into_name)
+        };
+        let elements = if positional {
+            self.positional.clone()
+        } else {
+            self.array_elements(name)
+        };
+        let exists = if positional {
+            !self.positional.is_empty()
+        } else {
+            resolved.as_ref().is_some_and(|r| {
+                self.arrays.contains_key(r)
+                    || self.assoc.contains_key(r)
+                    || self.vars.contains_key(r)
+            })
+        };
         let is_active = if colon {
             // Colon forms test for "null", and the string tested is the one this
             // reference *would* expand to in the context it sits in — which is
@@ -21097,6 +21120,17 @@ impl Shell {
                     elements
                 } else {
                     let sub = if star { "*" } else { "@" };
+                    // `${@:=d}`: the positionals are not a variable, so there is
+                    // nowhere for the default to go and bash refuses outright —
+                    // *before* the operand is expanded, where the array's
+                    // bad-subscript complaint below expands it first (a command
+                    // substitution in `${a[@]:=$(f)}` runs; in `${@:=$(f)}` it
+                    // does not). It is also a status 1 rather than the array's 2.
+                    if positional {
+                        self.perrln(&format!("${name}: cannot assign in this way"));
+                        self.arm_discard(1);
+                        return Vec::new();
+                    }
                     // In an *associative* array a subscript is a string key, and
                     // that applies here too: `${m[@]:=v}` on an empty `declare -A m`
                     // assigns the literal key `@` (bash: `declare -A m=(["@"]="v")`)
@@ -21138,10 +21172,15 @@ impl Shell {
                     // reference as written (`!r`), not the array it landed on —
                     // the same rule `note_unbound_modifier` applies to the
                     // scalar modifiers.
-                    let shown = self
-                        .ref_label
-                        .clone()
-                        .unwrap_or_else(|| bfmt![name, b"[", sub, b"]"]);
+                    // The positionals have no subscript to show: bash spells the
+                    // complaint `@`/`*`, not `@[@]`.
+                    let shown = self.ref_label.clone().unwrap_or_else(|| {
+                        if positional {
+                            name.as_bytes().to_vec()
+                        } else {
+                            bfmt![name, b"[", sub, b"]"]
+                        }
+                    });
                     let line = bfmt![self.err_prefix(), &shown, b": ", text, b"\n"];
                     self.emit_stderr(&line);
                     // `${a[@]:?}` on an unset/null array exits 127, like scalar `:?`.

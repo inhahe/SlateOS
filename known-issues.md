@@ -32539,23 +32539,46 @@ wrong order besides (`sync_bash_aliases` feeds `self.aliases`, a `BTreeMap`, in
 *sorted* order; `sync_bash_cmds` has to sort at all because `self.cmd_hash` is a
 `HashMap` and has no order to feed).
 
-**What is measured so far.** Fitting the same model `src/assoc.rs` implements
-against bash 5.2.37, over two key sets each (four short names and forty
-`al0..al39` / `cm0..cm39`):
+**Measured 2026-08-04.** Both tables were fitted the way `assoc.rs` was: a
+brute force over (initial buckets, load factor, `>` vs `>=`, growth multiplier,
+head/tail insertion, rehash direction, emit direction) required to reproduce
+*every* set at once. Eleven `al0..alN` sets (N up to 600) and ten `cm0..cmN`
+sets (N up to 1030) each leave a **single** surviving shape:
 
-| table | fits |
-|---|---|
-| associative array | 1024 buckets, head insertion (`src/assoc.rs`, fixed and pinned) |
-| alias table | **64** buckets, chains coming out in *insertion* order |
-| hashed commands | **256 or 512** buckets, likewise |
+| table | buckets | grows at | chain comes out in |
+|---|---|---|---|
+| associative array | 1024 | `n >= 2048` | **reverse** of insertion |
+| alias table | **64** | `n >= 128` | **insertion** order |
+| hashed commands | **256** | `n >= 512` | **insertion** order |
 
-The "insertion order" is the interesting part and is probably not a second
-insertion rule: head insertion with the chain *walked from the tail* produces
-exactly the same result for a table that is only ever read at the end, and that
-is the more likely shape given the assoc table demonstrably inserts at the head.
-Two data points per table is thin — this wants the same treatment `assoc.rs` got
-(a growth-crossing set, a deliberately colliding set, a removal) before anything
-is implemented against it.
+Everything else is shared: FNV-1 over signed chars, `hash & (nbuckets - 1)`,
+`nbuckets *= 4` on growth, and a rehash that walks the old buckets in index
+order pushing each entry onto the head of its new chain — so a growth *reverses*
+each chain.
+
+The emit column is the only real difference, and it is now measured rather than
+guessed. The `alN`/`cmN` sets could not show it — not one of them collides — so
+`aft aoo atj bfs`, which share a bucket at 64 *and* at 256, were used instead:
+
+```
+alias aft=: aoo=: atj=: bfs=:   →  aft aoo atj bfs      (insertion order)
+alias bfs=: atj=: aoo=: aft=:   →  bfs atj aoo aft      (so: not sorted)
+… then unalias atj; alias atj=: →  aft aoo bfs atj      (a re-add goes last)
+… then alias aft=x             →  aft aoo atj bfs      (a rewrite does not relink)
+… then 130 more, forcing 64→256 →  bfs atj aoo aft      (a growth reverses)
+```
+
+The assoc array's own colliding set (`aaa fan jfk pkb`) comes out *reversed*
+under the same treatment, so the two really do differ. Head insertion with the
+chain walked from the tail is indistinguishable from tail insertion walked from
+the head, and the growth line above pins which of the two the *rehash* does; the
+table below is written in whichever spelling is clearer.
+
+**This measurement already paid for itself:** the alias fit came back
+`n >= nbuckets * 2` where `assoc.rs` had shipped `>`, and one hashlib cannot have
+two rules. Asking bash for exactly 2049 keys showed `assoc.rs` was the wrong one.
+See the "Corrected 2026-08-04" note under
+`TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED`.
 
 **The fix.** Two parts, and the second is the awkward one:
 

@@ -31888,8 +31888,9 @@ it is a word-expansion entry like `Shell::expand_word`: bash recurses into
 and by the three cases that caught those two corrections —
 `an-inactive-alternate-keeps-a-field-when-the-array-is-there`,
 `a-whole-arrays-null-test-is-the-string-it-would-expand-to` and
-`bad-substitution`. One thing the new case deliberately does not cover: see
-`TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD` below.
+`bad-substitution`. One thing the new case deliberately does not cover, which
+`TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD` below then fixed on its
+own: the field a quoted-empty operand leaves.
 
 ### TD-OILS-ARRAY-ASSIGN-DEFAULT-OPERAND-NOT-EXPANDED. `${a[@]:=w}` complains without expanding `w` — 2026-08-04 — ✅ FIXED 2026-08-04
 
@@ -31925,7 +31926,75 @@ array reads nothing, the positional refusal comes with status 1 where the
 subscript complaint comes with 2, and an associative array assigns a key spelled
 `@` or `*`.
 
-### TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD. `${x:-'' ''}` is one argument, not two — 2026-08-04 — OPEN
+### TD-OILS-A-CASE-DOES-NOT-KEEP-THE-MARK-A-QUOTED-EMPTY-LEFT. `case abc in ${x:-a''bc})` matches where bash does not — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::exec_case`, and the two
+expansions it uses. bash's `case` is the **one** construct that does not do
+quote removal on either side: it expands with `expand_word_leave_quoted` and
+matches the `CTLNUL` bytes as they stand, so the mark that
+`TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD` introduced is a real
+character there. osh loses it twice over, and differently on each side:
+
+* the **pattern** goes through `Shell::expand_cond_pattern`, which does make
+  marks and then drops them in `Shell::operand_chars`;
+* the **subject** goes through `Shell::expand_cond_string`, which reaches
+  `Shell::expand_word_joined` — a path that works in `Str` and never makes an
+  `EChar` at all, so there is no mark to keep.
+
+**Reproduce:**
+
+```sh
+case abc in ${nope:-a''bc}) echo match;; *) echo no;; esac   # bash: no   osh: match
+case abc in ${nope:-''a*})  echo match;; *) echo no;; esac   # bash: no   osh: match
+case ${nope:-a''bc} in abc) echo match;; *) echo no;; esac   # bash: no   osh: match
+```
+
+**The rule** — measured on both sides at once. The mark is the byte `\177`
+(bash's `CTLNUL`), a character like any other:
+
+| subject | pattern | bash |
+|---|---|---|
+| `a`▫`bc` | `abc` | no |
+| `a`▫`bc` | `a?bc` | match — `?` absorbs it |
+| `a`▫`b` | `a*b` | match |
+| `a\177b` (real) | `a`▫`b` | **match** — the mark *is* that byte |
+| `abc` | `abc`▫ | no |
+
+with exactly one exception, on **both** sides: a word that is *nothing but a
+single mark* is the empty string instead. That is bash's `QUOTED_NULL` macro,
+applied to the pattern by `quote_string_for_globbing(…, QGLOB_CVTNULL)` and to
+the subject by the same test.
+
+| subject | pattern | bash |
+|---|---|---|
+| `` (a literal `''`) | ▫ | match |
+| `` | ▫▫ | no |
+| `\177` | ▫ | no |
+| ▫ (from `${x:-''}`) | ▫ | match — both are `""` |
+| ▫ | ▫▫ | no |
+| ▫▫ | `??` | match |
+| ▫▫ | `?` | no |
+
+Every other construct removes it, and osh is already right about those:
+`[[ abc == ${nope:-''a*''} ]]` matches, `${w#${nope:-''a''}}` strips one
+character, `v=${nope:-''x''}` assigns `x`, and `${nope:-''g/a*}` globs `g/a*`.
+
+**The fix.** Give the two `case` sides a quote removal of their own that maps
+`EChar::MARK` to the byte `\177` rather than to nothing, apply the
+`QUOTED_NULL` exception to each side once, and match as usual; the rest of the
+shell keeps `drop_marks`. The pattern side is a one-line swap. The subject side
+needs more: `expand_cond_string` has to reach an annotated expansion for the
+`case` word so that a mark is *made* — the natural shape is a joining
+counterpart to `expand_word_annotated`, which `expand_word_joined` would then
+be the quote-removed view of.
+
+**Found:** while fixing `TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD`;
+it is the same mark seen from the one construct that keeps it.
+
+**Pinned by** nothing yet — `a-quoted-empty-in-an-operand-still-makes-a-field.sh`
+covers the removal side and deliberately stops short of `case`.
+
+### TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD. `${x:-'' ''}` is one argument, not two — 2026-08-04 — ✅ FIXED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — `struct EChar`, which is a character
 plus a quoted flag and therefore cannot represent *a quoted stretch that
@@ -31956,23 +32025,44 @@ are already right (`${nope:-A"${a[@]}"B}` is `<Ap q><rB>`), because those are
 breaks between whole fields, which `SplitItems::Fields` carries. This is a mark
 *inside* one field.
 
-**The fix.** Give `EChar` a way to say "nothing, quoted". The two shapes:
+**Which stretches leave one** — measured, and wider than the two lines above:
+`''`, `""`, `"$unset"`, `"$null"`, `"$(true)"`, `$''` and `$""` each leave a
+mark, and so does every *empty element* of a quoted list (`f=(''); ${x:-"${f[@]}" X}`
+is `<><X>`). An empty list leaves none — `e=(); ${x:-"${e[@]}" X}` is `<X>`,
+because it produced no field to be empty. Nothing unquoted leaves one.
+`${x:=w}` is the exception that proves the rule: that operator answers with the
+variable it just assigned, and the value went through quote removal on the way
+in, so `${t:='' ''}` assigns one space and then splits it away to nothing.
 
-- `struct EChar { c: Option<Ch>, quoted: bool }`, `None` being the mark. Every
-  reader of `.c` has to answer for it, which is the point — the compiler names
-  the places that must decide. ~12 construction sites and the `is_ws`/`is_nonws`
-  pair in `split_run`, plus `echars_text` (skip) and the glob compiler (skip).
-- A sentinel `EChar { c: Ch::B(0), quoted: true }`, which is bash's own trick.
-  Rejected: osh does not otherwise drop NUL bytes, so a real `$'\0'` would be
-  indistinguishable from the mark.
+**The fix.** `struct EChar { c: Option<Ch>, quoted: bool }`, `None` being the
+mark (`EChar::MARK`, always `quoted` so that nothing can make it a delimiter).
+The sentinel `EChar { c: Ch::B(0), quoted: true }` — bash's own trick — was
+rejected: osh does not otherwise drop NUL bytes, so a real `$'\0'` would be
+indistinguishable from the mark. Making the character optional instead means
+every reader has to answer for it, which is the point; the answers are three,
+and only the first is interesting:
 
-Then `expand_word_annotated`'s `SingleQuoted`/`DoubleQuoted` arms push the mark
-when the quoted stretch produced nothing and `mode == SplitMode::Operand`, and
-`split_run` treats it as a non-delimiter that sets `open`.
+* **field splitting** keeps it: `split_run`'s `is_ws`/`is_nonws` ask
+  `EChar::as_char`, which a mark answers `None`, so it delimits nothing while
+  still setting `open`.
+* **quote removal** drops it: `echars_text` filters, and `drop_marks` does the
+  same for the two paths that read a field as something other than text —
+  `expand_word_fields` before globbing and `operand_chars` before a pattern.
+* **the glob compiler** therefore never sees one, and says so where the
+  compiler asks (`compile_glob`, `compile_class`, `cond_trace_pattern`).
 
-**Pinned by** nothing — `tests/corpus/a-substituted-operand-is-the-word-it-was-written-as.sh`
-covers the whole rule *except* this, and the two lines above are the ones to add
-to it when this is fixed.
+The marks are made in `expand_word_annotated`, and only when
+`mode == SplitMode::Operand` — the one context whose result is split again by
+someone else. The `SingleQuoted` arm marks an empty `''`; the `DoubleQuoted` arm
+marks each empty element of a quoted list, and marks the run itself when it
+asked for a field and produced no character (which is what tells `"${e[@]}"`
+from `"${f[@]}"`).
+
+**Pinned by** `userspace/oils/tests/corpus/a-quoted-empty-in-an-operand-still-makes-a-field.sh`.
+
+**Left behind:** the one place quote removal does *not* happen is a `case`, and
+osh drops the mark there too — see
+`TD-OILS-A-CASE-DOES-NOT-KEEP-THE-MARK-A-QUOTED-EMPTY-LEFT` above.
 
 ### TD-OILS-QUOTED-OPERAND-JOINS-A-QUOTED-AT. `"${x:-"${a[@]}"}"` is one field where bash makes two — 2026-08-04 — ✅ FIXED 2026-08-04
 

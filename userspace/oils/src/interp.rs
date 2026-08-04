@@ -16483,7 +16483,7 @@ impl Shell {
         let text: Vec<Ch> = bytes::chars(path).collect();
         value.split(|&b| b == b':').filter(|p| !p.is_empty()).any(|pat| {
             let pat: Vec<EChar> =
-                bytes::chars(pat).map(|c| EChar { c, quoted: false }).collect();
+                bytes::chars(pat).map(|c| EChar { c: Some(c), quoted: false }).collect();
             glob_match_echars_ci(&pat, &text, true, extglob)
         })
     }
@@ -19665,6 +19665,10 @@ impl Shell {
             // literal (quote-removed) text without glob matching.
             return fields.iter().map(|f| echars_text(f)).collect();
         }
+        // Splitting is over, so the marks have said all they had to say and
+        // quote removal drops them — `${x:-''g/a*}` globs `g/a*` and nothing
+        // else. See [`EChar::MARK`].
+        let fields: Vec<Cow<'_, [EChar]>> = fields.iter().map(|f| drop_marks(f)).collect();
         let nullglob = self.shopt.get("nullglob").copied().unwrap_or(false);
         let failglob = self.shopt.get("failglob").copied().unwrap_or(false);
         let dotglob = self.shopt.get("dotglob").copied().unwrap_or(false);
@@ -19684,10 +19688,10 @@ impl Shell {
             .unwrap_or_default();
         let mut out: Vec<Str> = Vec::new();
         let mut failed: Option<Str> = None;
-        for f in fields {
+        for f in &fields {
             glob_or_literal(
                 &self.cwd,
-                &f,
+                f,
                 &mut out,
                 nullglob,
                 failglob,
@@ -20093,6 +20097,12 @@ impl Shell {
         // emitted at the end of the word. Field-splitting in the `other` arm may
         // clear it after a delimiter so a trailing IFS run leaves no empty field.
         let mut open = false;
+        // An **unquoted operand** is the one context whose result is field-split
+        // again *by someone else* — the word the `${x:-w}` sits in — so it is
+        // the one that has to leave a [`EChar::MARK`] where a quoted stretch
+        // produced no character. Every other mode either does its own splitting
+        // (and has `open` to hand) or does none at all.
+        let mark_empties = mode == SplitMode::Operand;
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => {
@@ -20101,6 +20111,13 @@ impl Shell {
                 }
                 WordPart::SingleQuoted { text: s, .. } => {
                     push_chars(&mut cur, s.as_bytes(), true);
+                    // In an operand the emptiness has to outlive the word: this
+                    // word's `open` is gone by the time the *enclosing* word
+                    // splits what it produced, and only a mark can still say
+                    // that `${x:-'' ''}` is two arguments. See [`EChar::MARK`].
+                    if mark_empties && s.is_empty() {
+                        cur.push(EChar::MARK);
+                    }
                     open = true;
                 }
                 WordPart::DoubleQuoted(parts) => {
@@ -20130,6 +20147,16 @@ impl Shell {
                     // [`Shell::dquote`]. Set once here, so the per-part
                     // recogniser is asked in the state it expects.
                     let saved_dquote = std::mem::replace(&mut self.dquote, true);
+                    // In an operand, a run that turns out to have produced no
+                    // character leaves a [`EChar::MARK`] behind, exactly as a
+                    // `''` does — `${x:-"" ""}` is two arguments too. "No
+                    // character" is asked of the run as a whole and only of the
+                    // parts that were asking for a field of their own: a *list*
+                    // answers element by element below, which is what tells
+                    // `"${e[@]}"` (no element, no mark) from `"${f[@]}"` (one
+                    // empty element, one mark).
+                    let before = (fields.len(), cur.len());
+                    let mut run_wants_field = false;
                     // A run with nothing in it is still a word: `""` is one
                     // empty argument. Every other part opens the field itself —
                     // text and scalars unconditionally, a list once it has an
@@ -20137,12 +20164,14 @@ impl Shell {
                     // all, so this is the only case the loop cannot state.
                     if parts.is_empty() {
                         open = true;
+                        run_wants_field = true;
                     }
                     for part in parts {
                         match part {
                             WordPart::Literal(t) | WordPart::SingleQuoted { text: t, .. } => {
                                 push_chars(&mut cur, t.as_bytes(), true);
                                 open = true;
+                                run_wants_field = true;
                             }
                             other => {
                                 let items =
@@ -20156,6 +20185,7 @@ impl Shell {
                                     let s = self.expand_dynamic(other);
                                     push_chars(&mut cur, &s, true);
                                     open = true;
+                                    run_wants_field = true;
                                     continue;
                                 };
                                 let items: Vec<Vec<EChar>> = items
@@ -20163,12 +20193,24 @@ impl Shell {
                                     .map(|el| {
                                         let mut f = Vec::new();
                                         push_chars(&mut f, el, true);
+                                        // An empty element is a field the quotes
+                                        // made; in an operand the mark is what
+                                        // carries that past this word's end.
+                                        if mark_empties && f.is_empty() {
+                                            f.push(EChar::MARK);
+                                        }
                                         f
                                     })
                                     .collect();
                                 lay_out_fields(&items, &mut fields, &mut cur, &mut open);
                             }
                         }
+                    }
+                    if mark_empties
+                        && run_wants_field
+                        && (fields.len(), cur.len()) == before
+                    {
+                        cur.push(EChar::MARK);
                     }
                     self.dquote = saved_dquote;
                     self.bad_sub_word = saved_word;
@@ -22053,11 +22095,15 @@ impl Shell {
                 // The separator is the *caller's*, not the operand's, so it is
                 // unquoted — a pattern built this way still has a live space.
                 out.push(EChar {
-                    c: Ch::U(' '),
+                    c: Some(Ch::U(' ')),
                     quoted: false,
                 });
             }
-            out.extend_from_slice(f);
+            // Nothing downstream of here splits, so quote removal has come and
+            // the marks go with it: `v=${x:-''a''}` assigns `a`, and
+            // `${w#${x:-''a''}}` strips the one-character pattern `a`. See
+            // [`EChar::MARK`].
+            out.extend_from_slice(&drop_marks(f));
         }
         Some(out)
     }
@@ -36710,7 +36756,7 @@ impl Shell {
         // pattern expanded to, and hands it back in reverse.
         if let Some(pat) = &globpat {
             let field: Vec<EChar> =
-                bytes::chars(pat).map(|c| EChar { c, quoted: false }).collect();
+                bytes::chars(pat).map(|c| EChar { c: Some(c), quoted: false }).collect();
             let mut m = glob_expand_field(
                 self.cwd.as_bytes(),
                 &field,
@@ -39898,17 +39944,69 @@ impl StagedStdSinks<'_> {
 /// A single expanded character tagged with whether it came from a quoted
 /// context. Quoted characters are exempt from field splitting (already done)
 /// and pathname (glob) expansion — a quoted `*` matches a literal `*`.
+///
+/// The character is optional because one thing an expansion produces is *not*
+/// a character: the **mark** a quoted stretch that expanded to nothing leaves
+/// behind (bash's `CTLNUL`). `${x:-'' ''}` is two arguments, and the only thing
+/// left to say so once the operand's own text has been handed to the enclosing
+/// word's field splitting is a mark on either side of the space. A mark is not
+/// a delimiter, is not removed before the scan, makes its field exist, and
+/// contributes nothing to the text — see [`EChar::MARK`].
 #[derive(Clone, Copy)]
 struct EChar {
-    c: Ch,
+    c: Option<Ch>,
     quoted: bool,
+}
+
+impl EChar {
+    /// A quoted stretch that produced no character — bash's `CTLNUL`.
+    ///
+    /// It is `quoted` because that is what it is a trace of, and because the
+    /// one thing it must never do is delimit a field. Quote removal drops it
+    /// ([`echars_text`]), so no pattern, glob or command argument ever sees
+    /// one; it lives only from the operand that made it to the field splitting
+    /// that had to know the field was there.
+    const MARK: Self = Self {
+        c: None,
+        quoted: true,
+    };
+
+    /// The character this is, or `None` for a mark.
+    fn as_char(self) -> Option<char> {
+        self.c.and_then(bytes::Ch::as_char)
+    }
+
+    /// The ASCII character this is — `None` for a mark, for a non-ASCII
+    /// character and for an undecodable byte alike, none of which any pattern
+    /// syntax is spelled with.
+    fn as_ascii(self) -> Option<char> {
+        self.c.and_then(bytes::Ch::as_ascii)
+    }
+
+    /// Whether this is the character `c`. A mark is no character and is never
+    /// any of them.
+    fn is(self, c: char) -> bool {
+        matches!(self.c, Some(x) if x == c)
+    }
 }
 
 /// Append the characters of `s` to `buf`, tagging each with `quoted`.
 fn push_chars(buf: &mut Vec<EChar>, s: BStr<'_>, quoted: bool) {
     for c in bytes::chars(s) {
-        buf.push(EChar { c, quoted });
+        buf.push(EChar { c: Some(c), quoted });
     }
+}
+
+/// Quote removal's half of the mark: drop every [`EChar::MARK`] from a field.
+///
+/// Called where a field leaves field splitting for a context that reads it as
+/// text or as a pattern — which is every context there is, so a mark's whole
+/// life is the one scan it was made for. The common case allocates nothing.
+fn drop_marks(field: &[EChar]) -> Cow<'_, [EChar]> {
+    if field.iter().all(|e| e.c.is_some()) {
+        return Cow::Borrowed(field);
+    }
+    Cow::Owned(field.iter().copied().filter(|e| e.c.is_some()).collect())
 }
 
 /// Lay already-formed fields into the word being built: the first joins
@@ -39982,12 +40080,10 @@ fn split_run(
     // multi-byte IFS entry is matched whole rather than by its individual bytes.
     let ifs_has = |c: char| bytes::chars(ifs).any(|i| i.as_char() == Some(c));
     let is_ws = |e: EChar| {
-        !e.quoted
-            && matches!(e.c.as_char(), Some(c) if matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
+        !e.quoted && matches!(e.as_char(), Some(c) if matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
     };
     let is_nonws = |e: EChar| {
-        !e.quoted
-            && matches!(e.c.as_char(), Some(c) if !matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
+        !e.quoted && matches!(e.as_char(), Some(c) if !matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
     };
     let n = run.len();
     let mut i = 0;
@@ -40030,8 +40126,12 @@ fn split_run(
 }
 
 /// The literal text of an annotated field: its characters with quoting dropped.
+///
+/// This is quote removal, so it is also where a [`EChar::MARK`] stops being:
+/// the mark stands for a quoted stretch that produced no character, and the
+/// text it contributes is none.
 fn echars_text(field: &[EChar]) -> Str {
-    bytes::from_chars(field.iter().map(|e| e.c))
+    bytes::from_chars(field.iter().filter_map(|e| e.c))
 }
 
 /// Apply pathname expansion to one annotated field, pushing the results (or the
@@ -40063,13 +40163,13 @@ fn field_has_glob_meta(field: &[EChar], extglob: bool) -> bool {
         if e.quoted {
             continue;
         }
-        match e.c.as_ascii() {
+        match e.as_ascii() {
             Some('*' | '?') => return true,
             Some('/') => open = 0,
             Some('[') => open = open.saturating_add(1),
             Some(']') if open > 0 => return true,
             Some('+' | '@' | '!')
-                if extglob && matches!(field.get(i + 1), Some(n) if !n.quoted && n.c == '(') =>
+                if extglob && matches!(field.get(i + 1), Some(n) if !n.quoted && n.is('(')) =>
             {
                 return true;
             }
@@ -40173,7 +40273,7 @@ fn build_globignore(value: BStr<'_>, extglob: bool) -> Vec<GlobIgnorePat> {
                 .split(|&b| b == b'/')
                 .map(|comp| {
                     let echars: Vec<EChar> =
-                        bytes::chars(comp).map(|c| EChar { c, quoted: false }).collect();
+                        bytes::chars(comp).map(|c| EChar { c: Some(c), quoted: false }).collect();
                     compile_glob(&echars, extglob)
                 })
                 .collect();
@@ -40228,22 +40328,28 @@ fn compile_glob(comp: &[EChar], extglob: bool) -> Vec<PatTok> {
     let mut i = 0;
     while i < comp.len() {
         let e = comp[i];
+        // A pattern is reached through quote removal, which drops every
+        // [`EChar::MARK`], so there is none here to spell a token with.
+        let Some(lit) = e.c else {
+            i += 1;
+            continue;
+        };
         if e.quoted {
-            toks.push(PatTok::Lit(e.c));
+            toks.push(PatTok::Lit(lit));
             i += 1;
             continue;
         }
         // extglob: `X(` where X ∈ ?*+@! and the paren is unquoted.
         if extglob
-            && matches!(e.c.as_ascii(), Some('?' | '*' | '+' | '@' | '!'))
-            && matches!(comp.get(i + 1), Some(n) if !n.quoted && n.c == '(')
+            && matches!(e.as_ascii(), Some('?' | '*' | '+' | '@' | '!'))
+            && matches!(comp.get(i + 1), Some(n) if !n.quoted && n.is('('))
             && let Some((tok, next)) = compile_ext_group(comp, i, extglob)
         {
             toks.push(tok);
             i = next;
             continue;
         }
-        match e.c.as_ascii() {
+        match e.as_ascii() {
             Some('*') => {
                 toks.push(PatTok::Star);
                 i += 1;
@@ -40262,7 +40368,7 @@ fn compile_glob(comp: &[EChar], extglob: bool) -> Vec<PatTok> {
                 }
             }
             _ => {
-                toks.push(PatTok::Lit(e.c));
+                toks.push(PatTok::Lit(lit));
                 i += 1;
             }
         }
@@ -40277,7 +40383,7 @@ fn compile_glob(comp: &[EChar], extglob: bool) -> Vec<PatTok> {
 /// `None` if the group is unterminated (caller then treats the operator char
 /// literally).
 fn compile_ext_group(comp: &[EChar], start: usize, extglob: bool) -> Option<(PatTok, usize)> {
-    let kind = match comp[start].c.as_ascii() {
+    let kind = match comp[start].as_ascii() {
         Some('?') => ExtKind::Optional,
         Some('*') => ExtKind::Star,
         Some('+') => ExtKind::Plus,
@@ -40294,7 +40400,7 @@ fn compile_ext_group(comp: &[EChar], start: usize, extglob: bool) -> Option<(Pat
         if e.quoted {
             cur.push(e);
         } else {
-            match e.c.as_ascii() {
+            match e.as_ascii() {
                 Some('(') => {
                     depth += 1;
                     cur.push(e);
@@ -40324,14 +40430,20 @@ fn compile_ext_group(comp: &[EChar], start: usize, extglob: bool) -> Option<(Pat
 fn compile_class(comp: &[EChar], start: usize) -> Option<(PatTok, usize)> {
     let mut i = start + 1;
     let mut negate = false;
-    if matches!(comp.get(i).and_then(|e| e.c.as_ascii()), Some('!' | '^')) {
+    if matches!(comp.get(i).and_then(|e| e.as_ascii()), Some('!' | '^')) {
         negate = true;
         i += 1;
     }
     let mut items = Vec::new();
     let mut first = true;
     while i < comp.len() {
-        let c = comp[i].c;
+        // As in [`compile_glob`]: quote removal has dropped every
+        // [`EChar::MARK`] before a pattern is compiled, so there is no
+        // character-less character here to make a class item out of.
+        let Some(c) = comp[i].c else {
+            i += 1;
+            continue;
+        };
         if c == ']' && !first {
             return Some((PatTok::Class { negate, items }, i + 1));
         }
@@ -40340,23 +40452,26 @@ fn compile_class(comp: &[EChar], start: usize) -> Option<(PatTok, usize)> {
         // closing `:]`. If no terminator is found, fall through and treat the
         // `[` literally.
         if c == '['
-            && matches!(comp.get(i + 1).and_then(|e| e.c.as_ascii()), Some(':'))
+            && matches!(comp.get(i + 1).and_then(|e| e.as_ascii()), Some(':'))
             && let Some(end) = (i + 2..comp.len()).find(|&k| {
-                comp[k].c == ':'
-                    && matches!(comp.get(k + 1).and_then(|e| e.c.as_ascii()), Some(']'))
+                comp[k].is(':') && matches!(comp.get(k + 1).and_then(|e| e.as_ascii()), Some(']'))
             })
         {
             // A POSIX class name is ASCII; anything else names no class, and
             // `posix_class_matches` then matches nothing — as bash does.
-            let name: String = comp[i + 2..end].iter().filter_map(|e| e.c.as_ascii()).collect();
+            let name: String = comp[i + 2..end].iter().filter_map(|e| e.as_ascii()).collect();
             items.push(ClassItem::Posix(name));
             first = false;
             i = end + 2; // past `:]`
             continue;
         }
         first = false;
-        if i + 2 < comp.len() && comp[i + 1].c == '-' && comp[i + 2].c != ']' {
-            items.push(ClassItem::Range(c, comp[i + 2].c));
+        if i + 2 < comp.len()
+            && comp[i + 1].is('-')
+            && !comp[i + 2].is(']')
+            && let Some(hi) = comp[i + 2].c
+        {
+            items.push(ClassItem::Range(c, hi));
             i += 3;
         } else {
             items.push(ClassItem::Ch(c));
@@ -40491,7 +40606,7 @@ fn glob_expand_field(
     let mut segs: Vec<Vec<EChar>> = Vec::new();
     let mut cur: Vec<EChar> = Vec::new();
     for &e in field {
-        if e.c == '/' {
+        if e.is('/') {
             segs.push(std::mem::take(&mut cur));
         } else {
             cur.push(e);
@@ -40594,7 +40709,7 @@ fn glob_expand_field(
                     let low: Vec<EChar> = comp
                         .iter()
                         .map(|e| EChar {
-                            c: e.c.to_ascii_lowercase(),
+                            c: e.c.map(bytes::Ch::to_ascii_lowercase),
                             quoted: e.quoted,
                         })
                         .collect();
@@ -40680,7 +40795,7 @@ fn glob_is_dir(cwd: BStr<'_>, path: BStr<'_>) -> bool {
 /// Whether a path component is the globstar token `**` (both characters
 /// unquoted). Only meaningful when `shopt -s globstar` is set.
 fn is_globstar_comp(comp: &[EChar]) -> bool {
-    comp.len() == 2 && comp.iter().all(|e| e.c == '*' && !e.quoted)
+    comp.len() == 2 && comp.iter().all(|e| e.is('*') && !e.quoted)
 }
 
 
@@ -40747,9 +40862,14 @@ fn glob_match_echars_ci(pattern: &[EChar], text: &[Ch], ci: bool, extglob: bool)
     if ci {
         let p: Vec<EChar> = pattern
             .iter()
-            .flat_map(|e| {
-                let quoted = e.quoted;
-                e.c.to_lowercase().into_iter().map(move |c| EChar { c, quoted })
+            .flat_map(|&e| match e.c {
+                // A mark has no case, and folds to itself.
+                None => vec![e],
+                Some(c) => c
+                    .to_lowercase()
+                    .into_iter()
+                    .map(|c| EChar { c: Some(c), quoted: e.quoted })
+                    .collect(),
             })
             .collect();
         let t: Vec<Ch> = text.iter().flat_map(|c| c.to_lowercase()).collect();
@@ -40767,7 +40887,7 @@ fn glob_match_echars_ci(pattern: &[EChar], text: &[Ch], ci: bool, extglob: bool)
 fn glob_match(pattern: &[Ch], text: &[Ch], extglob: bool) -> bool {
     let comp: Vec<EChar> = pattern
         .iter()
-        .map(|&c| EChar { c, quoted: false })
+        .map(|&c| EChar { c: Some(c), quoted: false })
         .collect();
     let toks = compile_glob(&comp, extglob);
     match_glob_toks(&toks, text)
@@ -41974,10 +42094,13 @@ fn cond_trace_arg(s: BStr<'_>) -> BStr<'_> {
 fn cond_trace_pattern(pat: &[EChar]) -> Str {
     let mut out = Str::with_capacity(pat.len());
     for e in pat {
+        // A mark is no character, so there is nothing to escape and nothing to
+        // print — quote removal would have dropped it before the match anyway.
+        let Some(c) = e.c else { continue };
         if e.quoted {
             out.push(b'\\');
         }
-        e.c.push_to(&mut out);
+        c.push_to(&mut out);
     }
     out
 }
@@ -42268,7 +42391,7 @@ fn param_replace(
         pattern
             .iter()
             .map(|e| EChar {
-                c: e.c.to_ascii_lowercase(),
+                c: e.c.map(bytes::Ch::to_ascii_lowercase),
                 quoted: e.quoted,
             })
             .collect()
@@ -58792,7 +58915,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     fn field_lit(s: &str) -> Vec<EChar> {
-        bytes::chars(s.as_bytes()).map(|c| EChar { c, quoted: false }).collect()
+        bytes::chars(s.as_bytes()).map(|c| EChar { c: Some(c), quoted: false }).collect()
     }
 
     #[test]
@@ -58816,7 +58939,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn glob_quoted_metachar_is_literal() {
         // A quoted `*` is a literal star, never a pattern.
         let mut field = field_lit("");
-        field.push(EChar { c: Ch::U('*'), quoted: true });
+        field.push(EChar { c: Some(Ch::U('*')), quoted: true });
         let toks = compile_glob(&field, false);
         assert!(match_glob_toks(&toks, &[Ch::U('*')]));
         assert!(!match_glob_toks(&toks, &[Ch::U('a')]));

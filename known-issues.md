@@ -28470,7 +28470,7 @@ subscript word for that to be expressible.
 `set -u`. No effect on the expansion's value, only on how many times the
 subscript's side effect happens.
 
-### TD-OILS-UNSET-FUNCNAME. `unset FUNCNAME` does not stop osh re-materialising it — 2026-08-01
+### TD-OILS-UNSET-FUNCNAME. `unset FUNCNAME` does not stop osh re-materialising it — 2026-08-01 — ✅ **RESOLVED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::refresh_funcname`, which
 rebuilds `FUNCNAME` (and `BASH_SOURCE`/`BASH_LINENO`) into `Shell::arrays` from
@@ -28496,11 +28496,27 @@ and `declare -p FUNCNAME` says `not found` in both. The divergence shows only
 re-materialises that one too, and osh matches); `BASH_SOURCE`/`BASH_LINENO`
 refuse to be unset at all in both.
 
-**Proper fix.** Give the shell a set of dynamic names the script has retired —
-`unset` adds to it, an explicit assignment need not remove it (bash's assignment
-just writes the now-ordinary variable) — and have `refresh_funcname` skip any
-name in it. The same set is what `unset` should consult for the other
-materialised arrays if they ever grow the behaviour.
+**Fixed in `58f03723d`.** The set of retired dynamic names the fix above called
+for already existed under another name — `Shell::dyn_unset`, which the
+`DYNAMIC_SPECIALS` machinery keeps for exactly this purpose and which `unset`
+already writes to. `refresh_funcname` simply was not consulting it, so the fix
+was one condition:
+
+```rust
+// A `FUNCNAME` whose binding `unset` dropped stays dropped, frames or
+// no frames.
+let in_function = !self.fn_stack.is_empty() && !self.dyn_unset.contains("FUNCNAME");
+```
+
+Nothing else had to change: an explicit assignment afterwards is a plain write to
+the now-ordinary name, which is bash's behaviour and was already osh's, and
+`BASH_SOURCE`/`BASH_LINENO` refuse the `unset` in the first place so they never
+enter the set. Covered by the corpus case
+`a-a-funcname-is-present-and-empty-outside-a-function.sh` (the `unset lets
+FUNCNAME go and refuses the other two` section, and the ordinary-variable section
+after it) and by the lib test
+`funcname_is_present_and_empty_outside_a_function`. The report's own reproducer
+is now byte-identical between the two shells.
 
 **Impact.** A script that unsets `FUNCNAME` and then reads it inside a function.
 Rare — `unset FUNCNAME` is nearly always a mistake — and independent of

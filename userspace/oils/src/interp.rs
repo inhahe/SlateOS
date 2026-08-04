@@ -27706,34 +27706,21 @@ impl Shell {
             for (_, msg) in &messages {
                 self.emit_stderr(msg);
             }
-            // `-v` may target an array element: `printf -v 'arr[2]' …`. The
-            // subscript is a shell word, so it reaches `assign_elem` as bytes.
-            let index = sub.map(|s| Box::new(Word::literal(s)));
-            // A readonly target is rejected (status 1), leaving it intact; a
-            // circular nameref names nothing to write to and fails the same way.
-            // The readonly attribute belongs to the variable, so a reference
-            // resolving to an element is checked through its array.
-            let Some(resolved) = self.resolve_ref_use(&base) else {
-                return 1;
-            };
-            if self.readonly.contains(&resolved.base) {
-                self.perrln(&format!("{base}: readonly variable"));
-                return 1;
-            }
-            // A variable the shell maintains is refused too, and silently — see
-            // [`Shell::noassign`]. `printf -v GROUPS x` and
-            // `printf -v 'GROUPS[0]' x` both report 1 and print nothing.
-            if self.noassign.contains(&resolved.base) {
+            // The capture is an ordinary scalar assignment and nothing less, so
+            // it goes through the same store every other one does: it follows a
+            // nameref, obeys the name's `-i`/`-u`/`-l`/`-c` attributes, lands on
+            // element 0 of an existing array, and runs the dynamic write-back
+            // hook. It is refused — status 1, target intact — by a readonly
+            // variable (named as the nameref *reached* it, unless the operand
+            // carried its own subscript), silently by a name the shell maintains
+            // (`printf -v GROUPS x`), by a circular nameref with nothing to
+            // write to, and by a subscript that names nowhere.
+            //
+            // `-v 'arr[2]'` keeps its subscript, which is an ordinary shell word
+            // and stays bytes: it may name a key that is not text.
+            if !self.set_scalar_target_checked(&base, sub.as_deref(), text) {
                 return 1;
             }
-            // A subscript that names nowhere fails the builtin (status 1) with
-            // its own complaint; the line carries on.
-            if !self.assign_elem(&base, &index, text) {
-                return 1;
-            }
-            // `printf -v DIRSTACK …` writes through the dynamic hook like any
-            // other assignment — see [`Shell::after_var_write`].
-            self.after_var_write(&resolved.base);
             num_status
         } else {
             // Interleave stdout and stderr the way bash does (see
@@ -48309,6 +48296,66 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("readonly r=orig; printf -v r '%s' new 2>/dev/null; echo \"$r\"").0,
             "orig\n"
+        );
+    }
+
+    #[test]
+    fn printf_v_captures_through_an_ordinary_assignment() {
+        // The capture is a scalar assignment and nothing less, so everything
+        // that shapes one shapes it: the name's value attributes are applied…
+        assert_eq!(
+            run("declare -i n; printf -v n '%s' '3+4'; declare -p n").0,
+            "declare -i n=\"7\"\n"
+        );
+        assert_eq!(run("declare -u u; printf -v u '%s' abc; echo \"$u\"").0, "ABC\n");
+        assert_eq!(run("declare -l l; printf -v l '%s' ABC; echo \"$l\"").0, "abc\n");
+        assert_eq!(run("declare -c c; printf -v c '%s' abc; echo \"$c\"").0, "Abc\n");
+        // …a nameref is followed, to a variable or to one element…
+        assert_eq!(
+            run("t=orig; declare -n r=t; printf -v r '%s' via; echo \"$t\"").0,
+            "via\n"
+        );
+        assert_eq!(
+            run("a=(x y); declare -n r='a[1]'; printf -v r '%s' via; declare -p a").0,
+            "declare -a a=([0]=\"x\" [1]=\"via\")\n"
+        );
+        // …a bare name naming an array writes element 0 of it, indexed or
+        // associative, rather than replacing the array…
+        assert_eq!(
+            run("declare -a a=(x y); printf -v a '%s' z; declare -p a").0,
+            "declare -a a=([0]=\"z\" [1]=\"y\")\n"
+        );
+        assert_eq!(
+            run("declare -A m; printf -v m '%s' v; declare -p m").0,
+            "declare -A m=([0]=\"v\" )\n"
+        );
+        // …and the refusals are the store's, spelled its way: a bare target is
+        // blamed by the name the nameref chain landed on, a subscripted one by
+        // the name the operand wrote.
+        assert_eq!(
+            run("a=(x); readonly a; declare -n r=a; { printf -v r '%s' z; } 2>&1; echo \"rc=$?\"")
+                .0,
+            "osh: a: readonly variable\nrc=1\n"
+        );
+        assert_eq!(
+            run("a=(x); readonly a; declare -n r=a; \
+                 { printf -v 'r[0]' '%s' z; } 2>&1; echo \"rc=$?\"")
+                .0,
+            "osh: r: readonly variable\nrc=1\n"
+        );
+        // A name the shell maintains refuses silently, and a chain that names
+        // nothing warns and refuses.
+        assert_eq!(run("printf -v GROUPS '%s' x; echo \"rc=$?\"").0, "rc=1\n");
+        assert_eq!(
+            run("declare -n c1=c2; declare -n c2=c1; { printf -v c1 '%s' x; } 2>&1; echo \"rc=$?\"")
+                .0,
+            "osh: warning: c1: circular name reference\nrc=1\n"
+        );
+        // A bad `-i` expression is signed by the builtin that named the target,
+        // and the abort it arms ends the command before anything after it.
+        assert_eq!(
+            run("declare -i n; { printf -v n '%s' 'q+'; echo NOT-REACHED; } 2>&1").0,
+            "osh: printf: q+: syntax error: operand expected (error token is \"+\")\n"
         );
     }
 

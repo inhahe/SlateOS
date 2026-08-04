@@ -30988,7 +30988,7 @@ pipeline/`&&`). Lib test
 `a_malformed_array_literal_costs_only_its_own_unit`; corpus case
 `a-malformed-array-literal-costs-only-its-own-unit.sh`.
 
-### TD-OILS-ARRAY-POINTER-INDIRECTION. `${!a[@]op}` is indirection through the elements in bash, "bad substitution" in osh — 2026-08-04
+### TD-OILS-ARRAY-POINTER-INDIRECTION. `${!a[@]op}` is indirection through the elements in bash, "bad substitution" in osh — 2026-08-04 — ✅ **RESOLVED 2026-08-04**
 
 **Where:** `userspace/oils/src/parser.rs` — `parse_braced_param`'s indirection
 branch (~3446), which refuses any pointer subscript that is not a specific index:
@@ -31062,7 +31062,7 @@ and a discarded command where bash quietly expands. Narrow, but it fails loudly
 and in a way that is hard to read, since the message blames the whole
 expansion rather than the pointer.
 
-**Fixed in `<this commit>`**, as described. The read went into a new
+**Fixed in `f41e16289`**, as described. The read went into a new
 `Shell::pointer_lookup`, which is where the three subscript shapes now meet:
 `None` and `[i]` delegate to `param_elem_lookup` (whose subscript parameter
 became a plain `Option<&Word>` borrow, since a pointer holding an `ArrayIndex`

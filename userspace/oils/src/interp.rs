@@ -24096,7 +24096,7 @@ impl Shell {
                 // (to un-export it) while `declare +f` still does not.
                 let lead: Str = args
                     .iter()
-                    .take_while(|a| a.starts_with(b"-") || a.starts_with(b"+"))
+                    .take_while(|a| Self::is_decl_flag_word(a))
                     .filter(|a| a.starts_with(b"-"))
                     .flatten()
                     .copied()
@@ -24116,7 +24116,7 @@ impl Shell {
                     self.declare_functions(args, lead.contains(&b'F'), out, redir)
                 } else if args
                     .iter()
-                    .take_while(|a| a.starts_with(b"-") || a.starts_with(b"+"))
+                    .take_while(|a| Self::is_decl_flag_word(a))
                     .any(|a| a.contains(&b'p'))
                 {
                     // Unlike `-f`/`-F`, `p` is honoured whichever sign carries
@@ -24161,9 +24161,15 @@ impl Shell {
                 // anything — the same split `declare -p` makes, against a
                 // different table. Outside a function there is no frame to list,
                 // and `local` refuses before reading its flags at all.
-                let lead: Str =
-                    args.iter().take_while(|a| a.starts_with(b"-")).flatten().copied().collect();
-                if !lead.contains(&b'p') {
+                // `p` selects listing mode whichever sign carries it, exactly
+                // as it does for `declare` above: `local +p` lists this frame's
+                // locals and `local +p w` is a listing asked about `w` (so it
+                // reports `local: w: not found` rather than declaring it).
+                // Reading only the minus direction here made both of those
+                // declare nothing and print nothing.
+                let listing =
+                    args.iter().take_while(|a| Self::is_decl_flag_word(a)).any(|a| a.contains(&b'p'));
+                if !listing {
                     self.builtin_declare(args, true, "local", args.len())
                 } else if self.local_frames.is_empty() {
                     self.perrln("local: can only be used in a function");
@@ -31216,6 +31222,39 @@ impl Shell {
         i
     }
 
+    /// Whether `w` is a **flag word** to a declaration builtin: a sign followed
+    /// by at least one letter.
+    ///
+    /// A lone `-` or `+` is *not* one. getopt ends option parsing at a word
+    /// that is only a sign, so it becomes an operand like any other name, and
+    /// since no variable can be called `-` the usual answer is a complaint
+    /// about it. bash 5.2.37:
+    ///
+    /// ```sh
+    /// declare -p -        # declare: -: not found        (not a full listing)
+    /// declare -p +        # declare: +: not found
+    /// declare -p - v      # …the complaint, then declare -- v="V"
+    /// declare -pr -       # the complaint, and no readonly-filtered listing
+    /// declare - -p        # `-': not a valid identifier, then `-p': likewise —
+    ///                     #  the scan stopped at the `-`, so the `-p` never
+    ///                     #  selected listing mode and is an operand too
+    /// ```
+    ///
+    /// `--` *is* a flag word, and the one that ends the scan; the callers that
+    /// care stop at it themselves. One written after an operand is an operand
+    /// (`declare -p v --` complains about `--`), which follows from the scan
+    /// having already stopped.
+    ///
+    /// This is the shape [`Shell::declare_flag_end`] and the flag loop in
+    /// [`Shell::builtin_declare`] already tested for; it is spelled once here
+    /// because the *other* readers of the leading words — the listing-vs-
+    /// declaration routing, the `-p` operand split and the listing filter —
+    /// each had their own `starts_with` test, and a lone sign slipped through
+    /// all of them.
+    fn is_decl_flag_word(w: &[u8]) -> bool {
+        matches!(w.split_first(), Some((b'-' | b'+', rest)) if !rest.is_empty())
+    }
+
     /// The names a flag-filtered listing covers, sorted, given the attribute
     /// letters the caller parsed.
     ///
@@ -31426,9 +31465,7 @@ impl Shell {
     /// -p +a q` asks about `q` alone — and no identifier can begin with either
     /// sign, so the two are told apart by position rather than by shape.
     fn print_operand_names(args: &[Str]) -> Vec<&Str> {
-        args.iter()
-            .skip_while(|a| a.starts_with(b"-") || a.starts_with(b"+"))
-            .collect()
+        args.iter().skip_while(|a| Self::is_decl_flag_word(a)).collect()
     }
 
     /// The leading flag words that were spelled with a **minus**, which are the
@@ -31441,7 +31478,7 @@ impl Shell {
     /// while `declare -rp` lists just the readonly names.
     fn listing_minus_words(args: &[Str]) -> impl Iterator<Item = &Str> {
         args.iter()
-            .take_while(|a| a.starts_with(b"-") || a.starts_with(b"+"))
+            .take_while(|a| Self::is_decl_flag_word(a))
             .filter(|a| a.starts_with(b"-"))
     }
 
@@ -33559,6 +33596,13 @@ impl Shell {
                 break;
             }
             let enable = arg.starts_with(b"-");
+            // A lone `-` or `+` is an operand, not an empty flag word — see
+            // [`Shell::is_decl_flag_word`]. Letting one through here left the
+            // scan running over the words behind it, so `declare - -p` picked
+            // the `-p` up and listed instead of complaining about two operands.
+            if !Self::is_decl_flag_word(arg) {
+                break; // first non-flag operand — flags are done
+            }
             let Some(flags) = arg.strip_prefix(b"-").or_else(|| arg.strip_prefix(b"+")) else {
                 break; // first non-flag operand — flags are done
             };
@@ -54076,6 +54120,48 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(mine("declare -r ZZA; declare -p ZZA"), r#"declare -r ZZA="1""#);
     }
 
+    #[test]
+    fn a_lone_sign_is_an_operand_not_a_flag_word() {
+        // getopt ends option parsing at a word that is only a sign, so it is an
+        // operand — and since no variable can be named `-` or `+`, the answer is
+        // a complaint about it rather than the whole-table listing a `-p` with
+        // no operands gives. Every expectation is bash 5.2.37's; see the corpus
+        // case `a-lone-sign-is-an-operand-not-a-flag-word.sh`.
+        let e = |src: &str| {
+            let (o, st) = run(src);
+            // The listings would be machine-specific, so only their line count
+            // is compared — which is the whole of what the bug changed.
+            format!("{}|{st}", o.lines().count())
+        };
+        // `declare -p -` asked about one name and found none, rather than
+        // listing every variable there is.
+        assert_eq!(e("declare -p -"), "0|1");
+        assert_eq!(e("declare -p +"), "0|1");
+        assert_eq!(e("v=V; declare -p - v"), "1|1");
+        assert_eq!(e("v=V; declare -p v -"), "1|1");
+        // Two of them are two operands, and `--` ends the options so the sign
+        // written behind it is an operand just the same.
+        assert_eq!(e("declare -p - -"), "0|1");
+        assert_eq!(e("declare -p -- -"), "0|1");
+        assert_eq!(e("v=V; declare -p -- v"), "1|0");
+        // The scan stopping means no attribute filter is selected either…
+        assert_eq!(e("declare -pr -"), "0|1");
+        // …and that the words *behind* the sign select nothing: the `-p` here
+        // never makes this a listing, so both words are refused as names.
+        assert_eq!(run("declare - -p").0, "");
+        assert_eq!(
+            run("declare - -p 2>&1").0,
+            "osh: declare: `-': not a valid identifier\n\
+             osh: declare: `-p': not a valid identifier\n"
+        );
+        // `p` selects listing mode whichever sign carries it — for `local` as
+        // well as `declare`, which is what reading only the minus direction in
+        // `local`'s routing got wrong.
+        assert_eq!(run("f() { local w=W; local +p; }; f").0, "declare -- w=\"W\"\n");
+        assert_eq!(run("f() { local w=W; local +rp; }; f").0, "declare -- w=\"W\"\n");
+        assert_eq!(run("f() { local +p w; }; f 2>&1").0, "main: local: w: not found\n");
+    }
+
     /// In posix mode `export -p` and `readonly -p` print in their own spelling
     /// rather than borrowing `declare -p`'s, keeping only the array-kind letter.
     #[test]
@@ -69100,8 +69186,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut it = o.lines().map(|l| l.parse::<f64>().expect("user cpu"));
         let idle = it.next().expect("idle");
         let busy_cpu = it.next().expect("busy");
-        assert_eq!(idle, 0.0, "a null command charged for the shell's past: {o:?}");
         assert!(busy_cpu > 0.0, "a busy loop was charged nothing: {o:?}");
+        // The null command's own span is ~0, but the figure is not asserted to
+        // *be* zero: the OS charges CPU in whole scheduler ticks (~10-15ms on
+        // Windows), so a tick boundary landing between the two samples shows up
+        // as one tick — `0.01` — for a command that did nothing. That was a
+        // 1-in-40 flake here. What the test is actually for is that the figure
+        // is a *span* and not a running total, and that is what is checked: had
+        // the accounting been cumulative, the null command would have been
+        // charged the busy loop that ran before it, so `idle` would be at least
+        // as large as `busy_cpu` rather than a small fraction of it.
+        assert!(
+            idle * 4.0 < busy_cpu,
+            "a null command charged for the shell's past: {o:?}"
+        );
     }
 
     #[test]

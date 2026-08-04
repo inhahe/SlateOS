@@ -28437,7 +28437,7 @@ avoid loops, returning `ELOOP`).  The kernel already has
 `resolve_path_no_follow` and symlink-following metadata, so a canonicalize
 syscall is the clean approach.
 
-### TD-OILS-TRANSFORM-SUBSCRIPT-TWICE. `${a[$(cmd)]@a}` under `set -u` evaluates its subscript twice — 2026-08-01
+### TD-OILS-TRANSFORM-SUBSCRIPT-TWICE. `${a[$(cmd)]@a}` under `set -u` evaluates its subscript twice — 2026-08-01 — ✅ **RESOLVED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::param_transform`, the
 nounset pre-check in front of the `@a` / `@A` branch, and
@@ -28458,17 +28458,106 @@ k            # subscript evaluated once
 osh writes `k` twice. It happens only with `set -u` on, only for `@a`/`@A`, and
 only when the subscript has a side effect.
 
-**Proper fix.** Thread the fetched element through: give `transform_assign` the
-value the check already resolved instead of re-resolving it. The obstacle is
-that the two fetches ask about different names — the check is about the
-reference as written (`name`), while `transform_assign` reports on the nameref
-target `attr_report_target` resolved to — so reuse is only valid when the two
-coincide, and the signature needs to carry the element rather than the
-subscript word for that to be expressible.
+**Fixed in `76f2f1364`,** by threading the element through as the report above
+proposed — `transform_assign` now takes the element rather than the subscript
+word, which is what makes the one read reusable. The nameref obstacle the report
+named turned out to be narrower than it looked: `param_elem_value` resolves the
+nameref itself, so the check's read and the render's read *are* the same value
+whenever the check read the parameter at all. The one case they differ is an
+**indirection**, whose operand the caller already resolved to the *name* a
+nameref holds — reusing that would make `${!r@A}` recreate the target with its
+own name for a value — so reuse is conditional on `Operand::Param`.
 
-**Impact.** A side-effecting array subscript inside `${…@a}` / `${…@A}` under
-`set -u`. No effect on the expansion's value, only on how many times the
-subscript's side effect happens.
+**The rule was wider than the report knew.** Measuring the whole matrix (both
+operators × nounset on/off × element present/absent) showed osh wrong in *four*
+of the combinations, not one, and bash's contract to be:
+
+| first read | count |
+|---|---|
+| finds an element | 1 |
+| finds nothing | 2 — bash asks the whole reference again, for either operator |
+| finds nothing, `set -u` on | 1 — the fault falls between the two asks |
+
+The second ask is a full one, so `${n[-9]@a}` reports `bad array subscript`
+*twice*. No other operator does this: `@Q` on the same missing element reads
+once. osh's two other errors were reading twice for `@A` under `set -u` (the
+reported bug) and reading *zero* times for `@a` with nounset off, because the
+pre-check was guarded by `unbound_is_error` precisely to avoid the double read.
+
+Covered by the corpus case `a-a-variable-transform-reads-its-element-once.sh`
+and the lib test
+`a_variable_transform_asks_again_only_when_the_first_ask_found_nothing`.
+
+Two neighbouring divergences turned up while measuring this and are logged
+separately: TD-OILS-TRANSFORM-SCALAR-IGNORES-SUBSCRIPT and
+TD-OILS-WHOLE-ARRAY-TRANSFORM-IS-ONE-WORD.
+
+### TD-OILS-TRANSFORM-SCALAR-IGNORES-SUBSCRIPT. `${s[5]@A}` recreates the scalar bash calls unset, and `${SECONDS@A}` recreates nothing — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the scalar tail of
+`Shell::transform_assign` (~13218), which answers from `self.vars.get(name)`
+rather than from the `elem` its caller now hands it.
+
+**What.** `@A` on a *scalar* renders the variable's own value and ignores the
+subscript that was written, so two things come out wrong:
+
+```sh
+s=hi
+${s[5]@A}     # bash: (empty)                 osh: s='hi'
+${s[0]@A}     # bash: s='hi'                  osh: s='hi'   ✅
+${SECONDS@A}  # bash: declare -i SECONDS='0'  osh: (empty)
+${RANDOM@A}   # bash: declare -i RANDOM='…'   osh: (empty)
+${LINENO@A}   # bash: LINENO='2'              osh: (empty)
+```
+
+One root cause: `self.vars` is the wrong place to ask. A subscript other than 0
+on a scalar names nothing, and a dynamic special has no `vars` entry at all —
+both of which `param_elem_value` already answers correctly, and its answer is
+exactly what `elem` now carries.
+
+**Proper fix.** Have the scalar branch use `elem` for the value, keeping
+`self.vars`/`self.declared` only for the "declared but never assigned" case that
+renders the bare `declare -x xx`. Then check what attributes the dynamic
+specials render: bash reports `declare -i` for `SECONDS`/`RANDOM` and bare
+`LINENO='2'` for `LINENO`, so `attr_flag_letters` has to agree with
+`DYNAMIC_SPECIALS`' `named_flags` for the value-carrying form and not merely for
+`declare -p`. `${s[5]@a}` already matches (both empty), so only `@A` is wrong.
+
+**Impact.** `${scalar[n]@A}` for `n` other than 0, and `@A` on any dynamic
+special. Neither is common; the dynamic-special half is the more likely to be
+met, since `${SECONDS@A}` is a plausible thing for a state-dumping script to do.
+
+### TD-OILS-WHOLE-ARRAY-TRANSFORM-IS-ONE-WORD. `"${a[@]@A}"` is three words in bash and one in osh — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::bulk_attr_transform`, which
+builds the whole-array `@A` declaration as a single field.
+
+**What.** bash's `${a[@]@A}` is a *word list*, and `[@]` in double quotes keeps
+list elements apart, so the declaration arrives as three words:
+
+```sh
+declare -a n=(x y)
+printf '[%s]\n' "${n[@]@A}"
+# bash: [declare]  [-a]  [n=([0]="x" [1]="y")]
+# osh : [declare -a n=([0]="x" [1]="y")]
+set -- "${n[@]@A}"; echo $#      # bash: 3   osh: 1
+```
+
+The split is structural, not a re-split on spaces: the third word keeps the space
+inside `[0]="x" [1]="y"`. `[*]` joins the three with `IFS`, which is why
+`"${n[*]@A}"` is one word in both shells and already matches — and why the
+existing lib assertions, which all use `echo`, never saw the difference.
+
+**Proper fix.** Have `bulk_attr_transform`'s `A` case return the three pieces —
+the `declare` keyword, the flags word, and the `name=(…)` assignment — as
+separate fields, the way its `a` case already returns one field per element. The
+positional form (`${@@A}` → `set -- 'a' 'b' 'c'`) needs measuring too, since it
+is built the same way and presumably splits into `set`, `--`, and one word per
+parameter.
+
+**Impact.** Anything that counts or iterates `"${a[@]@A}"` rather than echoing
+it. Rare, but it is the shape `set -- "${a[@]@A}"` and `for w in "${a[@]@A}"`
+take, and a script doing either gets one word where bash gives three.
 
 ### TD-OILS-UNSET-FUNCNAME. `unset FUNCNAME` does not stop osh re-materialising it — 2026-08-01 — ✅ **RESOLVED 2026-08-04**
 

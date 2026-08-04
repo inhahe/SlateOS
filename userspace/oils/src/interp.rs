@@ -19375,7 +19375,11 @@ impl Shell {
                     started = true;
                 }
                 other => {
-                    cur.extend_from_slice(&self.expand_dynamic(other));
+                    let val = match self.joined_value(other) {
+                        Some(v) => v,
+                        None => self.expand_dynamic(other),
+                    };
+                    cur.extend_from_slice(&val);
                     started = true;
                 }
             }
@@ -19384,6 +19388,56 @@ impl Shell {
             vec![cur]
         } else {
             Vec::new()
+        }
+    }
+
+    /// The string an *unquoted* list parameter makes in a context that joins
+    /// everything into one field — an assignment's right-hand side, a `[[ ]]`
+    /// or `case` word, a here-string. `None` for every part that needs nothing
+    /// said about it, which the caller expands with [`Shell::expand_dynamic`].
+    ///
+    /// Only the separator is at stake, and only for two parts. Here bash glues
+    /// an `[@]` list with a **space** whatever `$IFS` says, the way it already
+    /// does for `${a[@]}`, `$@`, `${a[@]:-d}` and `${!ref}` (which reach
+    /// [`Shell::join_elements`] on their own):
+    ///
+    /// ```text
+    /// IFS=:   a=${n[@]:0:2}    x y        a="${n[@]:0:2}"   x:y
+    ///         a=${!n[@]}       0 1 2      a="${!n[@]}"      0:1:2
+    /// ```
+    ///
+    /// — so this is not a rule that could be moved into the parts themselves:
+    /// the *quoted* spelling of the same two joins with `$IFS`'s first
+    /// character, and so does the unquoted one in the splitting context (where
+    /// [`Shell::split_items`] calls them lists) and in the `W_NOSPLIT2` one (a
+    /// posix-mode redirection target, which is `${n[@]:0:2}` → `x:y`). Four
+    /// contexts, three answers, all measured against bash 5.2.37.
+    ///
+    /// The `[*]` spellings are `$IFS`'s first character everywhere and need no
+    /// help, and so do `${a[@]@Q}`/`${a[@]#x}` and `${!prefix@}` — those really
+    /// do join with `$IFS` even here.
+    fn joined_value(&mut self, part: &WordPart) -> Option<Str> {
+        // One expansion error ends the whole word — see
+        // [`Self::expansion_failed`], whose guard this path would otherwise skip
+        // by reaching the element helpers directly.
+        if self.expansion_failed() {
+            return None;
+        }
+        match part {
+            WordPart::ArraySlice {
+                name,
+                star: false,
+                offset,
+                length,
+            } => {
+                let elems = self.slice_elements(name, false, offset, length);
+                Some(self.join_elements(&elems, false))
+            }
+            WordPart::ArrayKeys { name, star: false } => {
+                let keys = self.array_keys(name);
+                Some(self.join_elements(&keys, false))
+            }
+            _ => None,
         }
     }
 
@@ -19683,7 +19737,11 @@ impl Shell {
                     at_tilde_pos = false;
                 }
                 other => {
-                    cur.extend_from_slice(&self.expand_dynamic(other));
+                    let val = match self.joined_value(other) {
+                        Some(v) => v,
+                        None => self.expand_dynamic(other),
+                    };
+                    cur.extend_from_slice(&val);
                     at_tilde_pos = false;
                 }
             }
@@ -19742,7 +19800,11 @@ impl Shell {
                     at_tilde_pos = false;
                 }
                 other => {
-                    out.extend_from_slice(&self.expand_dynamic(other));
+                    let val = match self.joined_value(other) {
+                        Some(v) => v,
+                        None => self.expand_dynamic(other),
+                    };
+                    out.extend_from_slice(&val);
                     at_tilde_pos = false;
                 }
             }
@@ -19797,7 +19859,10 @@ impl Shell {
                     push_chars(&mut buf, &s, true);
                 }
                 other => {
-                    let s = self.expand_dynamic(other);
+                    let s = match self.joined_value(other) {
+                        Some(v) => v,
+                        None => self.expand_dynamic(other),
+                    };
                     push_chars(&mut buf, &s, false);
                 }
             }

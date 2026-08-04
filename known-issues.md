@@ -28859,8 +28859,7 @@ elements, and the `!split` contrast). The unit test
 `an_array_subscript_can_point_as_well_as_list_keys` had baked in the old
 `${!h[*]}` answer (`01x`) and was corrected to bash's `0 1x`.
 
-**Still divergent (separate entries):**
-`TD-OILS-INDIRECT-OP-ON-AN-ARRAY-IS-NOT-A-LIST` and
+**Still divergent (separate entry):**
 `TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT`.
 
 ### TD-OILS-NOSPLIT-SLICE-AND-KEYS-JOIN-WITH-IFS. `IFS=:; a=${n[@]:0:2}` is `x:y` in osh and `x y` in bash — 2026-08-04 — ✅ **FIXED 2026-08-04**
@@ -28922,7 +28921,7 @@ here-string, under three `$IFS` settings).
 list under an `$IFS` whose first character is not a space. Narrow, but it was a
 silent wrong value rather than an error.
 
-### TD-OILS-INDIRECT-OP-ON-AN-ARRAY-IS-NOT-A-LIST. `ref='a[@]'; ${!ref:-d}` is one field in osh and three in bash — 2026-08-04
+### TD-OILS-INDIRECT-OP-ON-AN-ARRAY-IS-NOT-A-LIST. `ref='a[@]'; ${!ref:-d}` is one field in osh and three in bash — 2026-08-04 — ✅ **FIXED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — the `IndirectOp` arm of
 `Shell::expand_dynamic_with`. It resolves the pointer to a target *name*, reads
@@ -28948,18 +28947,42 @@ The bare `${!r}` (no modifier) is correct — that is `WordPart::Indirect`, whic
 `split_items` handles through `indirect_array_elems`. Only the
 modifier-carrying `${!r<op>}` spelling loses the list.
 
-**Proper fix.** Split the `IndirectOp` arm's resolution — everything from the
-label through `rename_param_target` and the operand lookup — into a helper that
-hands back `(renamed_part, operand, label)`. `expand_dynamic_with` then joins as
-today, while `split_items` can recurse into the renamed part with the same
-operand and classify it. The renamed part also has to become the *array* node
-(`ArrayBulk`/`ArrayOp`) when the target name carries an `[@]`/`[*]` subscript,
-which is the larger half of the work: today `rename_param_target` only swaps a
-name into the node the parser built, so `${!r#a}` stays a `ParamTrim` whose
-"name" is the string `n[@]`.
+**Fix.** Not a second implementation of the modifier rules but a *translation*.
+A bash-vs-bash diff of the two spellings — `${!r<op>}` against the written-out
+`${n[@]<op>}` — over 15 modifier forms × 3 `$IFS` settings, quoted and not,
+comes back byte-identical, so the honest answer is to hand back the array node
+and let the ordinary array code run:
+
+* `Shell::indirect_whole_array` — the shared silent lookup, `(base, star)` for a
+  referent spelled `base[@]`/`base[*]` and `None` for anything else.
+  `indirect_array_elems` now delegates to it instead of repeating the parse.
+* `array_target_part(target, name, star)` — a free fn beside
+  `rename_param_target` turning the scalar node the parser built into its array
+  twin: `ParamOp`→`ArrayOp`, `ParamTrim`/`ParamReplace`/`ParamCase`/
+  `ParamTransform`/`BadTransform`→`ArrayBulk`, `ParamSubstr`→`ArraySlice`.
+* `Shell::indirect_op_part` — the recogniser both of those compose into,
+  answering the array node a `${!ref<op>}` really is.
+* Four callers ask it: the `IndirectOp` arm of `expand_dynamic_with` (an early
+  array path before the scalar resolution), `split_items`, `joined_value`, and
+  the new `Shell::quoted_per_element` — the `DoubleQuoted` recogniser extracted
+  verbatim out of `expand_word_annotated` so the indirect arm could recurse into
+  it. Each swaps `ref_label` for the duration so a complaint still names `!r`.
+* `array_op_fields`'s `ErrorIfUnset` diagnostic now honours that label, so
+  `r='e[@]'; ${!r:?boom}` reports `!r`, not `e[@]`.
+
+Two combinations do **not** look through, both measured: a **nameref** whose
+modifier is the `${x:-…}` family answers with the name it holds (bash's
+`get_var_and_type` split), and a nameref's look-through never keeps the elements
+apart *inside quotes* — `declare -n g='n[@]'; "${!g#a}"` is one field.
+
+Covered by
+`tests/corpus/an-indirect-reference-to-a-whole-array-carries-its-modifier-to-the-array.sh`
+(4 referent spellings × 3 `$IFS` settings × 27 forms, plus a pointer held in an
+array element, the nameref exceptions, an empty and a missing array, the `:?`
+complaint's naming and the `:=` bad subscript).
 
 **Impact.** Indirection through a reference that spells a whole array, combined
-with a modifier — an exotic corner. Nothing in the corpus depends on it, and the
+with a modifier — an exotic corner. Nothing in the corpus depended on it, and the
 answers agree under the default `$IFS`, which is why it went unnoticed.
 
 ### TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT. `IFS=:; ${e[@]:-"${n[@]}"}` is one field in osh and three in bash — 2026-08-04

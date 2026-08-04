@@ -3954,6 +3954,17 @@ pub struct Shell {
     /// are not part of the word, and their own words are in whatever context
     /// they establish for themselves.
     cond_word: bool,
+    /// Inside a double-quoted run (bash's `Q_DOUBLE_QUOTES`). Only the `[*]`
+    /// spelling of the `:-`/`:+` family asks: the test for "null" is the string
+    /// the reference *would* expand to here, and outside quotes a `[*]` expands
+    /// like a `[@]` — so `IFS=; ${a[*]:+A}` with `a=("" "")` is `A` (the
+    /// elements space-joined are not null) while `"${a[*]:+A}"` is empty (with
+    /// nothing between them they are). See [`Shell::array_op_fields`].
+    ///
+    /// Cleared for the duration of a command substitution, like
+    /// [`Shell::cond_word`]: `"$(f)"` quotes the substitution's *result*, not
+    /// the words `f` runs.
+    dquote: bool,
     /// Set when a `[[ … =~ RHS ]]` match fails because the RHS could not be
     /// compiled as a regex. bash reports such a `[[` command as status 2 (not 1
     /// "no match") and prints nothing to stderr. `exec_cond` checks this flag
@@ -4720,6 +4731,7 @@ impl Shell {
             bad_sub_word: None,
             ref_label: None,
             cond_word: false,
+            dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
@@ -10308,6 +10320,7 @@ impl Shell {
             bad_sub_word: None,
             ref_label: None,
             cond_word: false,
+            dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
@@ -19876,6 +19889,17 @@ impl Shell {
     /// [`Shell::expand_double_quoted`], which is where every complaint about
     /// these parts is made, so answering one here would make it twice.
     fn quoted_per_element(&mut self, parts: &[WordPart]) -> Option<Vec<Str>> {
+        // These parts are inside quotes as much as the ones
+        // [`Shell::expand_double_quoted`] takes are, and the quoting reaches
+        // what they expand *in turn* — the operand of `"${a[@]:-${b[*]:+A}}"`
+        // is a quoted `[*]`. See [`Shell::dquote`].
+        let saved = std::mem::replace(&mut self.dquote, true);
+        let out = self.quoted_per_element_parts(parts);
+        self.dquote = saved;
+        out
+    }
+
+    fn quoted_per_element_parts(&mut self, parts: &[WordPart]) -> Option<Vec<Str>> {
         match parts {
             [
                 WordPart::ArrayRef {
@@ -20362,6 +20386,9 @@ impl Shell {
         // *contents*, so a "bad substitution" inside quotes names the section
         // without its quote characters (`a"b${x@Z}"c` → `b${x@Z}`).
         let saved = self.bad_sub_word.replace(crate::unparse::parts_src(parts));
+        // The quotes are part of the context the parts expand in, not just of
+        // how their results are joined — see [`Shell::dquote`].
+        let saved_dquote = std::mem::replace(&mut self.dquote, true);
         let mut s = Str::new();
         for part in parts {
             match part {
@@ -20371,6 +20398,7 @@ impl Shell {
                 other => s.extend_from_slice(&self.expand_dynamic(other)),
             }
         }
+        self.dquote = saved_dquote;
         self.bad_sub_word = saved;
         s
     }
@@ -21008,10 +21036,24 @@ impl Shell {
             self.arrays.contains_key(r) || self.assoc.contains_key(r) || self.vars.contains_key(r)
         });
         let is_active = if colon {
-            // Colon forms test for "null": bash joins the elements with the first
-            // `$IFS` char (as `${a[*]}` would) and treats an empty result as null.
-            // So `a=("")` is null (`""`), but `a=("" "")` is not (`" "`).
-            !elements.join(self.star_sep().as_slice()).is_empty()
+            // Colon forms test for "null", and the string tested is the one this
+            // reference *would* expand to in the context it sits in — which is
+            // why the answer can depend on `$IFS` and on the quotes around it.
+            // Outside quotes a `[*]` expands like a `[@]` (both are about to be
+            // split), so only a *quoted* `[*]` joins with `$IFS` — and only an
+            // empty `$IFS` makes that visible, since every other separator is a
+            // character the test would see:
+            //
+            // ```text
+            // IFS=    a=("" "")    ${a[*]:+A} → A    "${a[*]:+A}" → (null)
+            //                      ${a[@]:+A} → A    "${a[@]:+A}" → A
+            // ```
+            //
+            // `a=("")` is null under all four (there is nothing to separate),
+            // and `a=("" "")` only where the join has nothing to put between.
+            !self
+                .join_elements(&elements, star && self.dquote)
+                .is_empty()
         } else {
             // Colon-less forms test only for "unset": an array with at least one
             // element is set; an empty/undefined array counts as unset.
@@ -21979,7 +22021,11 @@ impl Shell {
         // commands run in: `[[ $(f) ]]` leaves `f`'s words to establish their
         // own. See [`Shell::cond_word`].
         let saved_cond_word = std::mem::replace(&mut self.cond_word, false);
+        // Nor is the quoting: `"$(f)"` quotes the substitution's result, and
+        // leaves `f`'s own words unquoted. See [`Shell::dquote`].
+        let saved_dquote = std::mem::replace(&mut self.dquote, false);
         let out = self.command_sub_body_inner(body);
+        self.dquote = saved_dquote;
         self.cond_word = saved_cond_word;
         out
     }

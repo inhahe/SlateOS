@@ -12246,7 +12246,60 @@ impl Shell {
     /// loop where it happened — the assignments after it are never expanded, so
     /// `x=$((1/0)) a[0]=Z cmd` reports only the division. The error is left in
     /// its side channel for the caller, which alone knows what to do with it.
+    ///
+    /// Each assignment is *staged* — bound for real — before the next is
+    /// expanded, because bash evaluates them with the ones before them already
+    /// in effect. That is visible every way an in-effect binding is:
+    /// `v=a; v=X v=${v}Z cmd` passes `XZ`, `SECONDS=100 z=$SECONDS cmd` passes
+    /// `100` rather than the live clock, and a command substitution in a later
+    /// value both reads the binding and has it in its own environment.
+    ///
+    /// The staging scope is the ordinary prefix scope, pushed here and taken
+    /// straight back off again before returning: the caller re-applies the
+    /// finished list with [`Shell::push_temp_shadow`] once it knows the command
+    /// is really going to run, and the snapshots come out the same either way
+    /// because only a name's *first* occurrence records what it displaced. It
+    /// has to come back off, because the bindings are **not** in effect for the
+    /// command's own words or redirections — `v=orig; v=NEW cmd > "$v.txt"`
+    /// writes `orig.txt`.
+    ///
+    /// Putting a staged binding back is otherwise just [`Shell::restore_var`],
+    /// because everything [`Shell::note_var_change`] keeps in step with a
+    /// variable is *derived* from it and so is re-derived by the restore. The
+    /// command hash is the exception: `$PATH` changing **empties** it, and an
+    /// emptied table cannot be re-derived. That flush belongs to the real
+    /// binding, which happens wherever the command runs — and bash forks before
+    /// evaluating the prefix of a pipeline stage or a `&` job, so `hash -r;
+    /// w.sh; PATH=dir w.sh | cat; hash` leaves this shell's table intact. So
+    /// the rehearsal saves the table and puts it back, and only the caller's
+    /// `push_temp_shadow` empties it for good.
     fn prefix_assignments(&mut self, assignments: &[Assignment]) -> Vec<(String, Str)> {
+        let depth = self.temp_shadow.len();
+        let mut hashed = None;
+        let assigns = self.prefix_assignments_staged(assignments, &mut hashed);
+        // Unwind whatever was staged, on every path out — including the ones
+        // that abandoned the prefix part-way.
+        while self.temp_shadow.len() > depth {
+            self.pop_temp_shadow(true, false);
+        }
+        if let Some((table, created)) = hashed {
+            self.cmd_hash = table;
+            self.cmd_hash_created = created;
+            // `BASH_CMDS` is the same table seen as an associative array, so it
+            // comes back with it.
+            self.sync_bash_cmds();
+        }
+        assigns
+    }
+
+    /// [`Self::prefix_assignments`]'s loop, leaving what it staged in place for
+    /// its caller to unwind. `hashed` receives the command hash as it stood
+    /// before the first staged `$PATH` emptied it, if any did.
+    fn prefix_assignments_staged(
+        &mut self,
+        assignments: &[Assignment],
+        hashed: &mut Option<(AssocArray<(std::path::PathBuf, u64)>, bool)>,
+    ) -> Vec<(String, Str)> {
         let mut assigns: Vec<(String, Str)> = Vec::with_capacity(assignments.len());
         for a in assignments {
             let Some(name) = self.prefix_assignment_name(a) else {
@@ -12318,9 +12371,41 @@ impl Shell {
             {
                 return assigns;
             }
+            // `+=` appends to what the bound name holds *at this point in the
+            // prefix* — the target's own value for a name's first assignment,
+            // the staged binding for a repeat — by exactly the rule an ordinary
+            // `+=` follows: `-i` adds numerically and the case attributes fold
+            // the new text before it is concatenated. A staged binding carries
+            // no attributes (it is a fresh environment variable), so only the
+            // first append of a name can be arithmetic:
+            // `declare -i n=5; n+=3 n+=4 cmd` passes `84`, not `12`.
+            //
+            // A plain `=` skips all of this, which is why the target's `-i`
+            // does *not* reach it: `declare -i n; n=3+4 cmd` passes `3+4`.
+            let val = if a.append {
+                let cur = self.scalar_store(&target);
+                let Some(val) = self.appended_attributed_value(&target, cur, val, true) else {
+                    // A bad `-i` expression stores nothing and the abort it
+                    // armed ends the command, so the prefix is abandoned here.
+                    return assigns;
+                };
+                val
+            } else {
+                val
+            };
             // The trace shows the assignment as *written*, nameref and all, so
-            // it is the one place the written name survives.
+            // it is the one place the written name survives — but it shows the
+            // value that was actually bound, so an append traces the combined
+            // text under a plain `=` (`y=a; y+=b cmd` traces `+ y=ab`).
             self.xtrace_assignment(&name, &val);
+            // Stage it, so the assignments after it are expanded with it in
+            // effect. See this function's caller for the unwind — and for why
+            // the command hash has to be remembered before a `$PATH` empties it.
+            if target == "PATH" && hashed.is_none() {
+                *hashed = Some((self.cmd_hash.clone(), self.cmd_hash_created));
+            }
+            let staged = [(target.clone(), val.clone())];
+            self.push_temp_shadow(&staged);
             assigns.push((target, val));
         }
         assigns
@@ -71405,6 +71490,70 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // this path's own rule (`((n=5))` on the same nameref says `r`).
         let (o, _) = run("{ declare -n n=r; readonly r=1; n=2 true; } 2>&1");
         assert_eq!(o, "osh: n: readonly variable\n");
+    }
+
+    /// A prefix's assignments are evaluated with the ones before them already
+    /// in effect, and `+=` appends to what the bound name holds at that point.
+    #[test]
+    fn a_prefix_assignment_sees_the_ones_before_it() {
+        let (o, _) = run("v=a; v=X v=${v}Z eval 'echo \"[$v]\"'; echo \"[$v]\"");
+        assert_eq!(o, "[XZ]\n[a]\n");
+        // Visible every way an in-effect binding is: arithmetic, a default
+        // expansion, a command substitution, and a name the shell would
+        // otherwise compute for itself.
+        let (o, _) = run("n=1; n=5 m=$((n+1)) eval 'echo \"[$n][$m]\"'");
+        assert_eq!(o, "[5][6]\n");
+        let (o, _) = run("unset u; u=SET v=${u-nope} eval 'echo \"[$v]\"'");
+        assert_eq!(o, "[SET]\n");
+        let (o, _) = run("v=orig; v=X w=$(echo \"[$v]\") eval 'echo \"$w\"'");
+        assert_eq!(o, "[X]\n");
+        let (o, _) = run("SECONDS=100 z=$SECONDS eval 'echo \"[$z]\"'");
+        assert_eq!(o, "[100]\n");
+        // …but not to the command's own words, which are expanded with the
+        // prefix out of effect.
+        let (o, _) = run("v=orig; v=NEW printf '[%s]\\n' \"$v\"");
+        assert_eq!(o, "[orig]\n");
+
+        // `+=` appends to what the name held before the prefix, and restores.
+        let (o, _) = run("t=orig; t+=V eval 'echo \"[$t]\"'; echo \"[$t]\"");
+        assert_eq!(o, "[origV]\n[orig]\n");
+        let (o, _) = run("u+=V eval 'echo \"[$u]\"'; echo \"[${u-U}]\"");
+        assert_eq!(o, "[V]\n[U]\n");
+        // An `-i` target makes it arithmetic, over the whole value…
+        let (o, _) = run("declare -i n=5; n+=3 eval 'echo \"[$n]\"'; declare -p n");
+        assert_eq!(o, "[8]\ndeclare -i n=\"5\"\n");
+        let (o, _) = run("declare -i m=10; m+=2*3 eval 'echo \"[$m]\"'");
+        assert_eq!(o, "[16]\n");
+        // …and the case attributes fold the new text before concatenating.
+        let (o, _) = run("declare -u p=ab; p+=cd eval 'echo \"[$p]\"'");
+        assert_eq!(o, "[ABCD]\n");
+        // A staged binding carries no attributes, so only a name's *first*
+        // append can be arithmetic.
+        let (o, _) = run("declare -i n=5; n+=3 n+=4 eval 'echo \"[$n]\"'");
+        assert_eq!(o, "[84]\n");
+        let (o, _) = run("declare -u q=ab; q+=cd q+=ef eval 'echo \"[$q]\"'");
+        assert_eq!(o, "[ABCDef]\n");
+        // An array name appends onto its element zero, as a scalar read does,
+        // and comes back an array.
+        let (o, _) = run("declare -a a=(x y); a+=z eval 'echo \"[$a]\"'; declare -p a");
+        assert_eq!(o, "[xz]\ndeclare -a a=([0]=\"x\" [1]=\"y\")\n");
+        // Through a nameref it is the target's value that is appended to, and
+        // the target's `-i` that applies.
+        let (o, _) = run("t=orig; declare -n r=t; r+=V eval 'echo \"[$t]\"'; echo \"[$t]\"");
+        assert_eq!(o, "[origV]\n[orig]\n");
+        let (o, _) = run("declare -i t=5; declare -n r=t; r+=3 eval 'echo \"[$t]\"'");
+        assert_eq!(o, "[8]\n");
+        // A bad `-i` expression is fatal to the command, which never runs. The
+        // abort discards the rest of the parse unit it happened in — so the
+        // name is seen keeping its old value only from the next one.
+        let (o, _) = run("{ declare -i n=5; n+=2+ eval 'echo RAN'; } 2>&1\necho \"[$n]\"");
+        assert_eq!(
+            o,
+            "osh: 2+: syntax error: operand expected (error token is \"+\")\n[5]\n"
+        );
+        // The trace shows what was bound, under a plain `=`.
+        let (o, _) = run("{ y=a; set -x; y+=b true; } 2>&1");
+        assert!(o.ends_with("+ y=ab\n+ true\n"), "got: {o:?}");
     }
 
     /// A name assigned twice in one prefix is *one* binding the later

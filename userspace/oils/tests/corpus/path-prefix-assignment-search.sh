@@ -79,6 +79,19 @@ echo "=== a forked command's prefix cannot reach this shell's table"
 h; PATH="$D/db" w.sh | cat; hash | sq
 h; PATH="$D/db" w.sh & wait; hash | sq
 
+# A prefix's assignments are in effect for the ones after them, so the flush is
+# not merely something the prefixed command is run under: it has already
+# happened by the time a *later value* in the same prefix is expanded. Both
+# halves of that show here — the later value searches the bound `$PATH`, and the
+# table that binding emptied is empty for it too. The two sections above still
+# hold all the same, so what the flush reaches is the shell the prefix is
+# evaluated in, which for a forked command is not this one.
+echo "=== a later value in the same prefix searches the bound \$PATH"
+h; PATH="$D/db" v=$(command -v w.sh) eval 'echo "$v"' | sq
+
+echo "=== …and sees the table that binding emptied"
+h; PATH="$D/db" v=$(hash) eval 'echo "$v"' | sq
+
 echo "=== the child is told which file was found"
 PATH="$D/db" u.sh | sq
 

@@ -32820,15 +32820,34 @@ impl Shell {
         } else {
             self.positional.clone()
         };
-        let mut optind = self
-            .vars
-            .get("OPTIND")
-            .and_then(|s| bytes::as_str(s))
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(1);
-        if optind == 0 {
-            optind = 1;
-        }
+        // bash reads `OPTIND` with `atoi`: leading whitespace, an optional
+        // sign, a run of digits, and any trailing junk ignored — so a stray
+        // `OPTIND=3junk` really does start the scan at the third argument.
+        // (While the variable keeps its integer attribute it can only hold a
+        // canonical decimal, so the loose reading only shows after an `unset`.)
+        let raw: BStr<'_> = self.vars.get("OPTIND").map_or(b"".as_slice(), Vec::as_slice);
+        let t = bytes::trim_start(raw);
+        let (sign, digits) = match t.strip_prefix(b"-".as_slice()) {
+            Some(rest) => (-1_isize, rest),
+            None => (1, t.strip_prefix(b"+".as_slice()).unwrap_or(t)),
+        };
+        // The cursor bash keeps the answer in is a plain C `int`, and the value
+        // is narrowed to one on the way in — so a number too big for 32 bits is
+        // not "past the end" but whatever its low 32 bits say, which for
+        // `OPTIND=4294967297` is the *first* argument all over again.
+        #[allow(clippy::cast_possible_truncation, reason = "bash narrows to `int`")]
+        let narrowed = sign.saturating_mul(atoi(digits)) as i32;
+        // Anything the narrowing leaves at or below zero is no position at all,
+        // and bash starts over from the first argument.
+        let mut optind = usize::try_from(narrowed).unwrap_or(1).max(1);
+        // An `OPTIND` left past the end is pulled back to one past the last
+        // argument there is to scan, so that the call reports where the options
+        // ran out rather than parroting the value back: `OPTIND=99` over two
+        // arguments answers 3. It is a clamp and not a rescan — the next call
+        // finds the end again in the same place — and it counts the arguments
+        // this call was actually given, so an explicit operand list is measured
+        // instead of the positionals.
+        optind = optind.min(pos.len().saturating_add(1));
         // If OPTIND was reset externally (e.g. `OPTIND=1`), restart bundling.
         if optind != self.getopts_optind {
             self.getopts_col = 0;
@@ -47939,6 +47958,62 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A *missing* name is a different thing: a usage error, settled before
         // the scan and worth 2.
         assert_eq!(run("set -- -a; getopts a 2>/dev/null; echo \"rc=$?\"").0, "rc=2\n");
+    }
+
+    #[test]
+    fn getopts_reads_optind_as_a_c_int() {
+        // A position past the last argument is pulled back to one past it, so
+        // the end of the options is reported at the end rather than by handing
+        // the number back. It is a clamp, not a rescan: asking again is the
+        // same answer.
+        assert_eq!(
+            run("OPTIND=99; set -- -a -b; getopts ab o; echo \"rc=$? o=$o ind=$OPTIND\"").0,
+            "rc=1 o=? ind=3\n"
+        );
+        assert_eq!(
+            run("OPTIND=99; set --; getopts ab o; echo \"ind=$OPTIND\"").0,
+            "ind=1\n"
+        );
+        // One past the last is already the end, and is left where it is.
+        assert_eq!(
+            run("OPTIND=3; set -- -a -b; getopts ab o; echo \"ind=$OPTIND\"").0,
+            "ind=3\n"
+        );
+        // The arguments counted are the ones this call was given, not the
+        // positionals it would otherwise have scanned.
+        assert_eq!(
+            run("set -- -a -b -c -d; OPTIND=99; getopts ab o x; echo \"ind=$OPTIND\"").0,
+            "ind=2\n"
+        );
+        // The value is narrowed to a C `int` on the way in, so one too big for
+        // 32 bits is not past the end but whatever its low 32 bits say.
+        assert_eq!(
+            run("set -- -a -b -c; OPTIND=8589934594; getopts abc o; echo \"o=$o ind=$OPTIND\"").0,
+            "o=b ind=3\n"
+        );
+        assert_eq!(
+            run("set -- -a -b -c; OPTIND=4294967297; getopts abc o; echo \"o=$o ind=$OPTIND\"").0,
+            "o=a ind=2\n"
+        );
+        // Narrowed to zero or below is no position at all: start over.
+        assert_eq!(
+            run("set -- -a -b; OPTIND=2147483648; getopts ab o; echo \"o=$o ind=$OPTIND\"").0,
+            "o=a ind=2\n"
+        );
+        assert_eq!(
+            run("set -- -a -b; OPTIND=-9; getopts ab o; echo \"o=$o ind=$OPTIND\"").0,
+            "o=a ind=2\n"
+        );
+        // Read like `atoi`, which only shows once `unset` has taken the integer
+        // attribute away: the digits stop at the junk rather than voiding it.
+        assert_eq!(
+            run("set -- -a -b -c; unset OPTIND; OPTIND=3junk; getopts abc o; echo \"o=$o ind=$OPTIND\"").0,
+            "o=c ind=4\n"
+        );
+        assert_eq!(
+            run("set -- -a -b; unset OPTIND; OPTIND=abc; getopts ab o; echo \"o=$o ind=$OPTIND\"").0,
+            "o=a ind=2\n"
+        );
     }
 
     #[test]

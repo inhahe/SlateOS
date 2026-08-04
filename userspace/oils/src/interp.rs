@@ -12189,9 +12189,10 @@ impl Shell {
     /// `$@`/`$*` have no gaps: their list is `$0` followed by the positional
     /// parameters, positions and subscripts alike. Nor does an associative
     /// array, whose order is its own; see `TD-OILS-ASSOC-SLICE-OFFSET-IS-ONE-BASED`
-    /// in `known-issues.md` for the separate rule bash applies there, and
-    /// `TD-OILS-SCALAR-SLICE-IS-NOT-A-SUBSTRING` for the one it applies to a
-    /// name that is not an array at all.
+    /// in `known-issues.md` for the separate rule bash applies there.
+    ///
+    /// A name that is no array at all is not a list of one either — it is
+    /// bash's substring operator, and goes to [`Shell::scalar_slice`].
     fn slice_elements(
         &mut self,
         name: &str,
@@ -12200,16 +12201,35 @@ impl Shell {
         length: &Option<Box<Word>>,
     ) -> Vec<Str> {
         let positional = name == "@" || name == "*";
-        // A real indexed array answers with its subscripts; everything else is
-        // a gapless list whose position stands in for one.
-        let keyed: Option<Vec<(i64, Str)>> = if positional {
+        // The reference bash tags an offset/length arithmetic error with:
+        // `@`/`*` for the positionals, `a[@]`/`a[*]` for an array.
+        let all = if star { b'*' } else { b'@' };
+        let param_ref: Str = if positional {
+            vec![all]
+        } else {
+            bfmt![name, b"[", all, b"]"]
+        };
+        let target = if positional {
             None
         } else {
-            self.resolve_ref_use(name)
-                .and_then(RefTarget::into_name)
-                .and_then(|t| self.arrays.get(&t))
-                .map(|a| a.iter().map(|(&i, v)| (i as i64, v.clone())).collect())
+            self.resolve_ref_use(name).and_then(RefTarget::into_name)
         };
+        // A name that is no array at all is not a one-element list: bash falls
+        // through to the plain `${v:off:len}` substring operator, so `v=scalar`
+        // answers `${v[@]:1}` with `calar` and `${v[@]: -1}` with `r`.
+        if let Some(t) = &target
+            && !self.arrays.contains_key(t)
+            && !self.assoc.contains_key(t)
+            && let Some(value) = self.vars.get(t).cloned()
+        {
+            return self.scalar_slice(&value, offset, length, &param_ref);
+        }
+        // A real indexed array answers with its subscripts; everything else is
+        // a gapless list whose position stands in for one.
+        let keyed: Option<Vec<(i64, Str)>> = target
+            .as_ref()
+            .and_then(|t| self.arrays.get(t))
+            .map(|a| a.iter().map(|(&i, v)| (i as i64, v.clone())).collect());
         let elems: Vec<(i64, Str)> = match keyed {
             Some(v) => v,
             None => {
@@ -12225,14 +12245,6 @@ impl Shell {
                     .map(|(i, e)| (i as i64, e))
                     .collect()
             }
-        };
-        // The reference bash tags an offset/length arithmetic error with:
-        // `@`/`*` for the positionals, `a[@]`/`a[*]` for an array.
-        let all = if star { b'*' } else { b'@' };
-        let param_ref: Str = if positional {
-            vec![all]
-        } else {
-            bfmt![name, b"[", all, b"]"]
         };
         let mut off = self.eval_arith_substr_bound(offset, &param_ref);
         if off < 0 {
@@ -12289,6 +12301,46 @@ impl Shell {
                     .collect()
             }
             None => from_off,
+        }
+    }
+
+    /// `${v[@]:off:len}` where `v` is no array — bash's plain substring
+    /// operator, wrapped as the one field a slice must answer with.
+    ///
+    /// The offset is measured in *characters* of the value, and it decides
+    /// whether there is a field at all before the length is looked at, exactly
+    /// as an array's does. A start anywhere in `0..=n` is inside, so a start
+    /// exactly at the end yields one **empty** field (`v=scalar`:
+    /// `"${v[@]:6}"` is one empty argument) while a start past the end yields
+    /// **no** field (`"${v[@]:7}"` is no argument at all), and likewise for a
+    /// negative offset once `n` is added — `-6` is inside, `-7` is not.
+    ///
+    /// From inside, everything else is [`param_substr`]'s: a negative length is
+    /// an absolute end position rather than the fatal error an array's slice
+    /// makes of it, so `${v[@]:1:-1}` is `cala`.
+    fn scalar_slice(
+        &mut self,
+        value: BStr<'_>,
+        offset: &Word,
+        length: &Option<Box<Word>>,
+        param_ref: BStr<'_>,
+    ) -> Vec<Str> {
+        let off = self.eval_arith_substr_bound(offset, param_ref);
+        let n = bytes::chars(value).count() as i64;
+        let start = if off < 0 { off.saturating_add(n) } else { off };
+        if start < 0 || start > n {
+            return Vec::new();
+        }
+        let len = length
+            .as_ref()
+            .map(|l| self.eval_arith_substr_bound(l, param_ref));
+        match param_substr(value, off, len) {
+            Ok(s) => vec![s],
+            Err(bad_len) => {
+                self.perrln(&format!("{bad_len}: substring expression < 0"));
+                self.arm_discard(1);
+                Vec::new()
+            }
         }
     }
 

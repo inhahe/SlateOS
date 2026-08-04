@@ -19636,7 +19636,14 @@ impl Shell {
     /// dup word — see [`Shell::expand_redirect_word`], which is the only caller
     /// that asks for anything other than both.
     fn expand_word_fields(&mut self, word: &Word, split: bool, glob: bool) -> Vec<Str> {
-        let fields = self.expand_word_annotated(word, split);
+        let fields = self.expand_word_annotated(
+            word,
+            if split {
+                SplitMode::Fields
+            } else {
+                SplitMode::Text
+            },
+        );
         if !glob || self.noglob {
             // `set -f`, or a context that never globs: each field keeps its
             // literal (quote-removed) text without glob matching.
@@ -19867,7 +19874,7 @@ impl Shell {
         let saved = self.ref_label.replace(label);
         let items = self.split_items(&arr);
         self.ref_label = saved;
-        let (SplitItems::List(items) | SplitItems::Joined(items)) = items?;
+        let items = items?.texts();
         let sep: BStr<'_> = if star && self.star_sep().is_empty() {
             b""
         } else {
@@ -19947,7 +19954,10 @@ impl Shell {
                     colon,
                     arg,
                 },
-            ] => Some(self.array_op_fields(name, false, *op, *colon, arg)),
+            ] => Some(
+                self.array_op_fields(name, false, *op, *colon, arg)
+                    .quoted_fields(),
+            ),
             // `"${!ref}"` where `ref` names a whole array is the array node's
             // answer, asked of the node itself: `ref='n[@]'` yields one field
             // per element, `ref='n[*]'` one joined field (which the node
@@ -20004,7 +20014,7 @@ impl Shell {
     /// That is bash's null-word removal, and it is why posix mode's unsplit
     /// redirection still calls `> $unset` ambiguous while `> "$unset"` is a
     /// one-field word that fails at the `open` instead.
-    fn expand_word_annotated(&mut self, word: &Word, split: bool) -> Vec<Vec<EChar>> {
+    fn expand_word_annotated(&mut self, word: &Word, mode: SplitMode) -> Vec<Vec<EChar>> {
         let mut fields: Vec<Vec<EChar>> = Vec::new();
         let mut cur: Vec<EChar> = Vec::new();
         // `open` == the current field `cur` holds/began real content and must be
@@ -20048,7 +20058,73 @@ impl Shell {
                     }
                 }
                 other => {
-                    if !split {
+                    // An operand splits nothing itself — the word the
+                    // substitution sits in does that, to whatever characters
+                    // this leaves — so a list turns into text here, joined the
+                    // way the *spelling* says: a space for `[@]`, `$IFS` for
+                    // `[*]`. It is [`Shell::join_elements`] rather than
+                    // [`Shell::join_derived`] because bash builds the operand's
+                    // answer out of *words* and glues them with a space,
+                    // whatever produced them: `IFS=:; ${x:-${a[@]:0:2}}` and
+                    // `IFS=:; ${x:-${!a[@]}}` are each one field, where the
+                    // quoted spellings of the same two join with `$IFS`.
+                    //
+                    // Two things stay fields. A break a **quoted** `[@]` inside
+                    // the operand made is one no join can put back, and it
+                    // survives every `$IFS`. And under a *null* `$IFS` a list's
+                    // own boundaries are all that is left that can break a
+                    // field, so they stand too.
+                    if mode == SplitMode::Operand {
+                        let star = part_is_star(other);
+                        let run = match self.split_items(other) {
+                            Some(SplitItems::Fields(items)) => {
+                                for (i, el) in items.iter().enumerate() {
+                                    if i > 0 && open {
+                                        fields.push(std::mem::take(&mut cur));
+                                    }
+                                    // Unlike an element, an *empty* operand
+                                    // field still opens one: `${x:-''}` is one
+                                    // empty argument where `IFS=; ${x:-${e[@]}}`
+                                    // over an array of empty elements is none.
+                                    cur.extend_from_slice(el);
+                                    open = true;
+                                }
+                                continue;
+                            }
+                            Some(SplitItems::List(items)) if self.ifs_is_null() => {
+                                for (i, el) in items.iter().enumerate() {
+                                    if i > 0 && open {
+                                        fields.push(std::mem::take(&mut cur));
+                                        open = false;
+                                    }
+                                    if !el.is_empty() {
+                                        push_chars(&mut cur, el, false);
+                                        open = true;
+                                    }
+                                }
+                                continue;
+                            }
+                            // A `[*]`-derived list under a null `$IFS` is the
+                            // one place the star's own separator is not the
+                            // answer: `IFS=; ${x:-${!a[*]}}` is `0 1`, the
+                            // `[@]` fallback, not the `01` a bare `"${!a[*]}"`
+                            // would give.
+                            Some(SplitItems::Joined(items)) if self.ifs_is_null() => {
+                                items.join(self.at_sep().as_slice())
+                            }
+                            Some(items) => {
+                                let texts = items.texts();
+                                self.join_elements(&texts, star)
+                            }
+                            None => self.expand_dynamic(other),
+                        };
+                        if !run.is_empty() {
+                            push_chars(&mut cur, &run, false);
+                            open = true;
+                        }
+                        continue;
+                    }
+                    if mode == SplitMode::Text {
                         // `W_NOSPLIT2`: the expansion is one run of characters,
                         // unquoted so a glob metacharacter it produced still
                         // counts. An empty one contributes nothing and leaves
@@ -20058,8 +20134,17 @@ impl Shell {
                         //
                         // A list-valued parameter is one run of characters here
                         // too — `a=${n[@]}` is the elements joined by a space
-                        // under every `$IFS` — so this path never asks
-                        // [`Self::split_items`] anything.
+                        // under every `$IFS` — so the only thing this path asks
+                        // [`Self::split_items`] is whether the part carried
+                        // quoting out of an operand, which decides nothing about
+                        // splitting here but everything about globbing.
+                        if let Some(chars) = self.operand_chars(other) {
+                            if !chars.is_empty() {
+                                cur.extend_from_slice(&chars);
+                                open = true;
+                            }
+                            continue;
+                        }
                         let val = self.expand_dynamic(other);
                         if !val.is_empty() {
                             push_chars(&mut cur, &val, false);
@@ -20077,7 +20162,7 @@ impl Shell {
                     // still joins the ends (`A${n[@]}B` → `<Ax><y><zB>`), which
                     // is why this walks the same `cur`/`open` pair the
                     // splitting scan below does.
-                    let val = match self.split_items(other) {
+                    let run = match self.split_items(other) {
                         Some(SplitItems::List(items)) if self.ifs_is_null() => {
                             for (i, el) in items.iter().enumerate() {
                                 if i > 0 && open {
@@ -20087,6 +20172,30 @@ impl Shell {
                                 if !el.is_empty() {
                                     push_chars(&mut cur, el, false);
                                     open = true;
+                                }
+                            }
+                            continue;
+                        }
+                        // The fields a `${x:-w}`/`${x:+w}` **operand** made are
+                        // already fields — that word was expanded where the
+                        // substitution stands — so they are laid out directly
+                        // under every `$IFS`, with the scan run *inside* each:
+                        // `${x:-A"${a[@]}"B}` is `<Ap q><rB>`, where the quoted
+                        // `[@]` broke the two and the space inside `p q` did
+                        // not. An empty one still makes a field, which is the
+                        // one thing no join could carry: `${x:-''}` is one empty
+                        // argument where `${x:-$e}` is none.
+                        Some(SplitItems::Fields(items)) => {
+                            let ifs = self.ifs_chars();
+                            for (i, el) in items.iter().enumerate() {
+                                if i > 0 && open {
+                                    fields.push(std::mem::take(&mut cur));
+                                    open = false;
+                                }
+                                if el.is_empty() {
+                                    open = true;
+                                } else {
+                                    split_run(el, &ifs, &mut fields, &mut cur, &mut open);
                                 }
                             }
                             continue;
@@ -20101,74 +20210,10 @@ impl Shell {
                         }
                         None => self.expand_dynamic(other),
                     };
-                    // Field-split the unquoted expansion against IFS while keeping
-                    // the *boundary* delimiters relative to adjacent literal/quoted
-                    // text. Only the characters produced by this expansion are split
-                    // candidates, so the scan integrates directly with the
-                    // in-progress field `cur` (splitting each expansion in
-                    // isolation would discard the leading/trailing information
-                    // needed to break against neighbouring parts): a
-                    // leading IFS-whitespace run with a preceding open field closes
-                    // that field, an all-whitespace value collapses to a single
-                    // break, a non-whitespace IFS char always delimits (yielding an
-                    // empty field when nothing precedes it), and interior IFS runs
-                    // split as usual. Empty expansions contribute nothing.
-                    let ifs = self
-                        .vars
-                        .get("IFS")
-                        .cloned()
-                        .unwrap_or_else(|| b" \t\n".to_vec());
-                    // An undecodable byte is never an IFS delimiter: IFS holds
-                    // characters, and `Ch::B` equals no character. Membership is
-                    // tested character-wise so a multi-byte IFS entry is matched
-                    // whole rather than by its individual bytes.
-                    let ifs_has = |c: char| bytes::chars(&ifs).any(|i| i.as_char() == Some(c));
-                    let is_ws = |c: Ch| {
-                        matches!(c.as_char(), Some(c) if matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
-                    };
-                    let is_nonws = |c: Ch| {
-                        matches!(c.as_char(), Some(c) if !matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
-                    };
-                    let cv: Vec<Ch> = bytes::chars(&val).collect();
-                    let n = cv.len();
-                    let mut i = 0;
-                    while i < n {
-                        let c = cv[i];
-                        if is_ws(c) {
-                            let had_open = open;
-                            while i < n && is_ws(cv[i]) {
-                                i += 1;
-                            }
-                            if had_open {
-                                // The whitespace run closes the preceding field; an
-                                // immediately following non-whitespace IFS char is
-                                // absorbed into the same delimiter (`ws* nonws ws*` is
-                                // one delimiter *between* fields).
-                                fields.push(std::mem::take(&mut cur));
-                                open = false;
-                                if i < n && is_nonws(cv[i]) {
-                                    i += 1;
-                                    while i < n && is_ws(cv[i]) {
-                                        i += 1;
-                                    }
-                                }
-                            }
-                            // With no preceding field, leading IFS whitespace is
-                            // simply trimmed; a following non-whitespace delimiter is
-                            // handled below as a standalone delimiter (empty field).
-                        } else if is_nonws(c) {
-                            fields.push(std::mem::take(&mut cur));
-                            open = false;
-                            i += 1;
-                            while i < n && is_ws(cv[i]) {
-                                i += 1;
-                            }
-                        } else {
-                            cur.push(EChar { c, quoted: false });
-                            open = true;
-                            i += 1;
-                        }
-                    }
+                    let ifs = self.ifs_chars();
+                    let mut chars: Vec<EChar> = Vec::new();
+                    push_chars(&mut chars, &run, false);
+                    split_run(&chars, &ifs, &mut fields, &mut cur, &mut open);
                 }
             }
         }
@@ -20343,6 +20388,22 @@ impl Shell {
         buf
     }
 
+    /// Expand the operand of a `${x:-w}`/`${x:+w}` as the word it is, keeping
+    /// the quoting written inside it on the characters it produced — see
+    /// [`SplitMode::Operand`] for what that context does and does not decide.
+    ///
+    /// Like [`Shell::expand_word`] it is a word-expansion entry, so it takes
+    /// over the source a "bad substitution" diagnostic names: bash expands the
+    /// operand by recursing into `expand_word_internal`, so the innermost word
+    /// in flight wins and `${y:-pre${x@Z}post}` names `pre${x@Z}post`, not the
+    /// substitution around it.
+    fn expand_operand_fields(&mut self, arg: &Word) -> Vec<Vec<EChar>> {
+        let saved = self.bad_sub_word.replace(crate::unparse::word_src(arg));
+        let fields = self.expand_word_annotated(arg, SplitMode::Operand);
+        self.bad_sub_word = saved;
+        fields
+    }
+
     /// Append one unquoted literal word part to a quote-annotated buffer,
     /// applying tilde expansion when the part is the word's first.
     ///
@@ -20370,6 +20431,14 @@ impl Shell {
                     push_chars(&mut buf, &s, true);
                 }
                 other => {
+                    // A `:-`/`:+` operand's quoting reaches the pattern as
+                    // well: `case ab in ${x:-'*'}` does not match, and
+                    // `${v#${x:-'a*'}}` removes the literal `a*`, because the
+                    // star the operand kept is not pattern syntax.
+                    if let Some(chars) = self.operand_chars(other) {
+                        buf.extend_from_slice(&chars);
+                        continue;
+                    }
                     let s = match self.joined_value(other) {
                         Some(v) => v,
                         None => self.expand_dynamic(other),
@@ -20551,17 +20620,19 @@ impl Shell {
                 colon,
                 arg,
                 label,
-            } => self.expand_param_op(
-                ParamOpNode {
-                    name,
-                    index,
-                    op: *op,
-                    colon: *colon,
-                    arg,
-                    label: label.as_deref(),
-                },
-                operand,
-            ),
+            } => self
+                .expand_param_op(
+                    ParamOpNode {
+                        name,
+                        index,
+                        op: *op,
+                        colon: *colon,
+                        arg,
+                        label: label.as_deref(),
+                    },
+                    operand,
+                )
+                .text(),
             WordPart::ParamTrim {
                 name,
                 index,
@@ -20682,7 +20753,13 @@ impl Shell {
                 colon,
                 arg,
             } => {
-                let fields = self.array_op_fields(name, *star, *op, *colon, arg);
+                // `quoted_fields` rather than `texts`: a string context joins
+                // an operand's own fields with a space under every `$IFS`, so
+                // `IFS=:; v=${a[*]:-'p q' r}` is `p q r`, not `p q:r`. Only the
+                // *elements* of a list answer to the `[*]` separator.
+                let fields = self
+                    .array_op_fields(name, *star, *op, *colon, arg)
+                    .quoted_fields();
                 self.join_elements(&fields, *star)
             }
             WordPart::CommandSub { body } => self.command_sub_body(body),
@@ -20888,7 +20965,16 @@ impl Shell {
         self.bad_substitution_with(raw, true)
     }
 
-    fn expand_param_op(&mut self, node: ParamOpNode<'_>, operand: Operand) -> Str {
+    /// Evaluate a scalar `${x:-w}`-family operator, as
+    /// [`Shell::array_op_fields`] does for the whole-array spellings and for the
+    /// same reason: the operand of `:-`/`:+` is a word expanded where the
+    /// substitution stands, so its quoting has to reach the splitting and
+    /// globbing around it and cannot be flattened to bytes here. Every other
+    /// answer — the parameter's own value, an assigned default, nothing at all
+    /// after a complaint — is a plain [`SplitItems::List`], which is also why
+    /// `${x:='a b'}` splits where `${x:-'a b'}` does not: bash keeps the
+    /// quoting only for the two operators that *substitute* their word.
+    fn expand_param_op(&mut self, node: ParamOpNode<'_>, operand: Operand) -> SplitItems {
         let ParamOpNode {
             name,
             index,
@@ -20910,14 +20996,14 @@ impl Shell {
         match op {
             ParamOp::UseDefault => {
                 if is_active {
-                    cur.unwrap_or_default()
+                    SplitItems::List(vec![cur.unwrap_or_default()])
                 } else {
-                    self.expand_to_string(arg)
+                    SplitItems::Fields(self.expand_operand_fields(arg))
                 }
             }
             ParamOp::AssignDefault => {
                 if is_active {
-                    cur.unwrap_or_default()
+                    SplitItems::List(vec![cur.unwrap_or_default()])
                 } else {
                     // A parameter the shell answers for itself has nowhere to
                     // put a default, and bash refuses before the word is even
@@ -20932,7 +21018,7 @@ impl Shell {
                     {
                         self.perrln(&format!("${name}: cannot assign in this way"));
                         self.arm_discard(1);
-                        return Str::new();
+                        return SplitItems::List(Vec::new());
                     }
                     let v = self.expand_to_string(arg);
                     // Reached through a reference, the default is stored under
@@ -20954,7 +21040,7 @@ impl Shell {
                         };
                         self.perrln(&format!("{name}: {complaint}"));
                         self.arm_discard(1);
-                        return Str::new();
+                        return SplitItems::List(Vec::new());
                     }
                     // The default has to go somewhere, so a subscript that names
                     // nowhere makes the expansion itself impossible: the
@@ -20962,21 +21048,21 @@ impl Shell {
                     // the way a division by zero is.
                     if !self.assign_elem(name, index, v.clone()) {
                         self.arm_discard(1);
-                        return Str::new();
+                        return SplitItems::List(Vec::new());
                     }
-                    v
+                    SplitItems::List(vec![v])
                 }
             }
             ParamOp::UseAlternate => {
                 if is_active {
-                    self.expand_to_string(arg)
+                    SplitItems::Fields(self.expand_operand_fields(arg))
                 } else {
-                    Str::new()
+                    SplitItems::List(Vec::new())
                 }
             }
             ParamOp::ErrorIfUnset => {
                 if is_active {
-                    cur.unwrap_or_default()
+                    SplitItems::List(vec![cur.unwrap_or_default()])
                 } else {
                     let msg = self.expand_to_string(arg);
                     // bash's default diagnostic distinguishes the two forms: the
@@ -21005,7 +21091,7 @@ impl Shell {
                     // 127. Reuse the nounset abort path so the simple-command
                     // driver terminates the (sub)shell before running the command.
                     self.arm_unbound_abort();
-                    Str::new()
+                    SplitItems::List(Vec::new())
                 }
             }
         }
@@ -21028,6 +21114,11 @@ impl Shell {
     /// merely *set* (exists with at least one element), matching bash's
     /// unset-vs-null distinction. The positionals are "set" when there is at
     /// least one of them; `$0` heads their list for a *slice*, but not here.
+    ///
+    /// The answer says which of the two it is: the elements are a plain
+    /// [`SplitItems::List`], while the operand is a [`SplitItems::Fields`],
+    /// because the operand is a word expanded where the substitution stands and
+    /// the quoting inside it survives into the splitting and globbing around it.
     fn array_op_fields(
         &mut self,
         name: &str,
@@ -21035,7 +21126,7 @@ impl Shell {
         op: ParamOp,
         colon: bool,
         arg: &Word,
-    ) -> Vec<Str> {
+    ) -> SplitItems {
         let positional = name == "@" || name == "*";
         // A circular nameref names nothing: `array_elements` below reports it,
         // so resolve silently here and let `None` make the name non-existent.
@@ -21085,14 +21176,14 @@ impl Shell {
         match op {
             ParamOp::UseDefault => {
                 if is_active {
-                    elements
+                    SplitItems::List(elements)
                 } else {
-                    vec![self.expand_to_string(arg)]
+                    SplitItems::Fields(self.expand_operand_fields(arg))
                 }
             }
             ParamOp::UseAlternate => {
                 if is_active {
-                    vec![self.expand_to_string(arg)]
+                    SplitItems::Fields(self.expand_operand_fields(arg))
                 } else {
                     // The only operator whose *own* answer can be null, and the
                     // one place where "no field" and "one empty field" part
@@ -21106,18 +21197,18 @@ impl Shell {
                     // empty field is removed; this is visible only inside
                     // quotes, and only through the `[@]` spelling (a quoted
                     // `[*]` is one field by definition).
-                    if elements.is_empty() {
+                    SplitItems::List(if elements.is_empty() {
                         Vec::new()
                     } else {
                         vec![Str::new()]
-                    }
+                    })
                 }
             }
             ParamOp::AssignDefault => {
                 if is_active {
                     // A non-null array is returned unchanged (no assignment
                     // needed), exactly like `:-` on an active array.
-                    elements
+                    SplitItems::List(elements)
                 } else {
                     let sub = if star { "*" } else { "@" };
                     // `${@:=d}`: the positionals are not a variable, so there is
@@ -21129,7 +21220,7 @@ impl Shell {
                     if positional {
                         self.perrln(&format!("${name}: cannot assign in this way"));
                         self.arm_discard(1);
-                        return Vec::new();
+                        return SplitItems::List(Vec::new());
                     }
                     // In an *associative* array a subscript is a string key, and
                     // that applies here too: `${m[@]:=v}` on an empty `declare -A m`
@@ -21139,7 +21230,7 @@ impl Shell {
                     if let Some(resolved) = resolved.filter(|r| self.assoc.contains_key(r)) {
                         let val = self.expand_to_string(arg);
                         self.assoc_set(&resolved, sub.as_bytes().to_vec(), val.clone(), false);
-                        return vec![val];
+                        return SplitItems::List(vec![val]);
                     }
                     // Assigning the default would require writing to `a[@]`/`a[*]`,
                     // which bash rejects as a "bad array subscript". Report the
@@ -21148,12 +21239,12 @@ impl Shell {
                     // bash discards the command with status **2** here — not
                     // the 1 every other bad-subscript site uses.
                     self.arm_discard(2);
-                    Vec::new()
+                    SplitItems::List(Vec::new())
                 }
             }
             ParamOp::ErrorIfUnset => {
                 if is_active {
-                    elements
+                    SplitItems::List(elements)
                 } else {
                     let sub = if star { "*" } else { "@" };
                     let msg = self.expand_to_string(arg);
@@ -21185,7 +21276,7 @@ impl Shell {
                     self.emit_stderr(&line);
                     // `${a[@]:?}` on an unset/null array exits 127, like scalar `:?`.
                     self.arm_unbound_abort();
-                    Vec::new()
+                    SplitItems::List(Vec::new())
                 }
             }
         }
@@ -21746,6 +21837,66 @@ impl Shell {
         }
     }
 
+    /// The characters `part` contributes to a context that does no splitting of
+    /// its own — an assignment's value, a pattern — with the quoting a
+    /// `${x:-w}`/`${x:+w}` **operand** carried out of it still on them. `None`
+    /// for every part that cannot carry any, which the caller expands as text.
+    ///
+    /// It is a `None` rather than an unquoted answer because the join those
+    /// parts need is not this function's to guess: a `[*]` has its own
+    /// separator and only [`Shell::joined_value`] knows it. The parts named here
+    /// have no such question — several fields join with a space, which is what
+    /// `a=${n[@]}` does under every `$IFS`.
+    fn operand_chars(&mut self, part: &WordPart) -> Option<Vec<EChar>> {
+        // Asked before the expansion runs, because it can only be asked once:
+        // the operand's side effects must not happen twice, so there is no
+        // falling back to the text path after looking.
+        let star = match part {
+            WordPart::ParamOp {
+                op: ParamOp::UseDefault | ParamOp::UseAlternate,
+                ..
+            } => false,
+            WordPart::ArrayOp {
+                op: ParamOp::UseDefault | ParamOp::UseAlternate,
+                star,
+                ..
+            } => *star,
+            _ => return None,
+        };
+        let items = self.split_items(part)?;
+        let SplitItems::Fields(fields) = items else {
+            // The operator answered with the parameter's own value or elements,
+            // which carry no quoting — join them as this context would have.
+            let joined = self.join_elements(&items.texts(), star);
+            let mut out = Vec::new();
+            push_chars(&mut out, &joined, false);
+            return Some(out);
+        };
+        let mut out = Vec::new();
+        for (i, f) in fields.iter().enumerate() {
+            if i > 0 {
+                // The separator is the *caller's*, not the operand's, so it is
+                // unquoted — a pattern built this way still has a live space.
+                out.push(EChar {
+                    c: Ch::U(' '),
+                    quoted: false,
+                });
+            }
+            out.extend_from_slice(f);
+        }
+        Some(out)
+    }
+
+    /// The characters that delimit fields: `$IFS`, or the default ` \t\n` when
+    /// it is unset. Handed over as bytes and decoded by [`split_run`], so a
+    /// multi-byte entry is matched as the character it is.
+    fn ifs_chars(&self) -> Str {
+        self.vars
+            .get("IFS")
+            .cloned()
+            .unwrap_or_else(|| b" \t\n".to_vec())
+    }
+
     /// Whether `$IFS` is set *and empty* — the one setting under which nothing
     /// an expansion produces can break a field, so a list has to stay a list to
     /// survive. An **unset** `IFS` is not this: it means the default ` \t\n`.
@@ -21818,8 +21969,30 @@ impl Shell {
                 op,
                 colon,
                 arg,
-            } => Some(SplitItems::List(
-                self.array_op_fields(name, *star, *op, *colon, arg),
+            } => Some(self.array_op_fields(name, *star, *op, *colon, arg)),
+            // The scalar spelling of the same operators. It is here for the one
+            // thing it can contribute that text cannot: the fields a `:-`/`:+`
+            // operand made, with its quoting still on them. Every other answer
+            // it gives is the single string [`Shell::expand_dynamic`] would have
+            // returned, wrapped as one item, so routing it here changes nothing
+            // else — see [`Shell::expand_param_op`].
+            WordPart::ParamOp {
+                name,
+                index,
+                op,
+                colon,
+                arg,
+                label,
+            } => Some(self.expand_param_op(
+                ParamOpNode {
+                    name,
+                    index,
+                    op: *op,
+                    colon: *colon,
+                    arg,
+                    label: label.as_deref(),
+                },
+                Operand::Param,
             )),
             WordPart::ArrayBulk { name, star: _, op } => {
                 // `true`: `@A` builds its declaration out of several *items*
@@ -38845,6 +39018,28 @@ enum ElemValue {
     BadSubscript(String),
 }
 
+/// Where the fields of a word are decided — the question
+/// [`Shell::expand_word_annotated`] asks of its context.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SplitMode {
+    /// A command argument: every unquoted expansion is a split candidate, so
+    /// this word's own scan against `$IFS` produces the fields.
+    Fields,
+    /// An assignment's value, a redirect target: nothing splits, and a
+    /// list-valued expansion is one run of characters.
+    Text,
+    /// The operand of a `${x:-w}`/`${x:+w}`. Nothing splits *here* — the word
+    /// the substitution sits in does that, to the characters this produces,
+    /// quoting and all — but the field breaks a **list** makes are not this
+    /// context's to swallow: they are the caller's, because the substitution
+    /// stands exactly where they land. Under a null `$IFS` that is the whole
+    /// difference: `IFS=; ${x:-${a[@]}}` is `<p q><r>` where the assignment
+    /// `IFS=; v=${a[@]}` is the one string `p q r`. Under any other `$IFS` the
+    /// join this shares with [`SplitMode::Text`] already puts a delimiter
+    /// between the items, and the caller's scan finds it.
+    Operand,
+}
+
 /// What an *unquoted* expansion of a list-valued parameter contributes to the
 /// fields of its word. See [`Shell::split_items`], which classifies the parts,
 /// and the `other` arm of [`Shell::expand_word_annotated`], which consumes it.
@@ -38859,6 +39054,52 @@ enum SplitItems {
     /// [`Shell::at_sep`] and the result splits like any other expansion, so a
     /// null `$IFS` leaves them as a single (space-joined) field.
     Joined(Vec<Str>),
+    /// Fields a `${x:-word}`/`${x:+word}` **operand** made — the word it is,
+    /// expanded where the substitution stands, so the quoting inside it is still
+    /// on its characters. That is the whole reason this is not a
+    /// [`SplitItems::List`] of plain bytes: `${x:-'a b'}` is one field and
+    /// `${x:-'*'}` a literal star, because a character that came out of a quoted
+    /// stretch is neither a split candidate nor a glob metacharacter.
+    ///
+    /// The items are already-formed fields (a quoted `[@]` inside the operand
+    /// breaks one, so `${x:-A"${a[@]}"B}` is `<Ap q><rB>`), and *within* a field
+    /// the unquoted characters still split: `IFS=:; ${x:-a:b}` is two.
+    Fields(Vec<Vec<EChar>>),
+}
+
+impl SplitItems {
+    /// The text of each item, with any quoting dropped — for the callers that
+    /// only want the strings, and for which the distinction the variants draw
+    /// has already been settled.
+    fn texts(self) -> Vec<Str> {
+        match self {
+            SplitItems::List(items) | SplitItems::Joined(items) => items,
+            SplitItems::Fields(fields) => fields.iter().map(|f| echars_text(f)).collect(),
+        }
+    }
+
+    /// Those texts as the one string a non-splitting context sees. The
+    /// separator is a space under every `$IFS`, which is the same rule
+    /// `a=${n[@]}` follows — see the [`SplitMode::Text`] branch of
+    /// [`Shell::expand_word_annotated`].
+    fn text(self) -> Str {
+        self.texts().join(&b' ')
+    }
+
+    /// The fields a **quoted** `"${a[@]…}"` makes of this answer. The elements
+    /// of a list are each their own, but an operand is one — it is a word, and
+    /// the quotes are around it, so nothing inside it can break a field.
+    ///
+    /// A word that expands to nothing is still one *empty* field, which is the
+    /// whole difference between the two operators there: `"${a[@]:-}"` on an
+    /// empty array is one empty argument, where the inactive `"${a[@]:+A}"`
+    /// substitutes no word at all and is none.
+    fn quoted_fields(self) -> Vec<Str> {
+        match self {
+            items @ SplitItems::Fields(_) => vec![items.text()],
+            items => items.texts(),
+        }
+    }
 }
 
 /// Where a `${…<op>}` modifier reads the text it works on.
@@ -39466,6 +39707,102 @@ struct EChar {
 fn push_chars(buf: &mut Vec<EChar>, s: BStr<'_>, quoted: bool) {
     for c in bytes::chars(s) {
         buf.push(EChar { c, quoted });
+    }
+}
+
+/// Whether `part` is the `[*]`/`$*` spelling of a list — the one whose elements
+/// join with `$IFS` where the `[@]` spelling joins with a space. Every other
+/// part answers `false`, including the ones that are no list at all: the
+/// question is only ever asked of a list, and a space is the `[@]` answer.
+fn part_is_star(part: &WordPart) -> bool {
+    match part {
+        WordPart::ArrayRef {
+            index: ArrayIndex::Star,
+            ..
+        } => true,
+        WordPart::Param { name, .. } => name == "*",
+        WordPart::ArrayKeys { star, .. }
+        | WordPart::VarNames { star, .. }
+        | WordPart::ArraySlice { star, .. }
+        | WordPart::ArrayOp { star, .. }
+        | WordPart::ArrayBulk { star, .. } => *star,
+        _ => false,
+    }
+}
+
+/// Field-split one run of expanded characters against `ifs`, keeping the
+/// *boundary* delimiters relative to the literal and quoted text around it.
+///
+/// Only the characters this run produced are split candidates, so the scan
+/// integrates directly with the in-progress field `cur` (splitting each
+/// expansion in isolation would discard the leading/trailing information needed
+/// to break against neighbouring parts): a leading IFS-whitespace run with a
+/// preceding open field closes that field, an all-whitespace value collapses to
+/// a single break, a non-whitespace IFS char always delimits (yielding an empty
+/// field when nothing precedes it), and interior IFS runs split as usual. An
+/// empty run contributes nothing.
+///
+/// A **quoted** character is never a delimiter, whatever `$IFS` says: it is one
+/// the writer wrote inside quotes somewhere the expansion could carry them out
+/// of — the operand of `${x:-'a b'}`, say — and a quoted space has never
+/// separated fields. `open` is set for it like any other character, so a quoted
+/// delimiter still makes the field exist.
+fn split_run(
+    run: &[EChar],
+    ifs: BStr<'_>,
+    fields: &mut Vec<Vec<EChar>>,
+    cur: &mut Vec<EChar>,
+    open: &mut bool,
+) {
+    // An undecodable byte is never an IFS delimiter: IFS holds characters, and
+    // `Ch::B` equals no character. Membership is tested character-wise so a
+    // multi-byte IFS entry is matched whole rather than by its individual bytes.
+    let ifs_has = |c: char| bytes::chars(ifs).any(|i| i.as_char() == Some(c));
+    let is_ws = |e: EChar| {
+        !e.quoted
+            && matches!(e.c.as_char(), Some(c) if matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
+    };
+    let is_nonws = |e: EChar| {
+        !e.quoted
+            && matches!(e.c.as_char(), Some(c) if !matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
+    };
+    let n = run.len();
+    let mut i = 0;
+    while i < n {
+        let e = run[i];
+        if is_ws(e) {
+            let had_open = *open;
+            while i < n && is_ws(run[i]) {
+                i += 1;
+            }
+            if had_open {
+                // The whitespace run closes the preceding field; an immediately
+                // following non-whitespace IFS char is absorbed into the same
+                // delimiter (`ws* nonws ws*` is one delimiter *between* fields).
+                fields.push(std::mem::take(cur));
+                *open = false;
+                if i < n && is_nonws(run[i]) {
+                    i += 1;
+                    while i < n && is_ws(run[i]) {
+                        i += 1;
+                    }
+                }
+            }
+            // With no preceding field, leading IFS whitespace is simply trimmed;
+            // a following non-whitespace delimiter is handled below as a
+            // standalone delimiter (empty field).
+        } else if is_nonws(e) {
+            fields.push(std::mem::take(cur));
+            *open = false;
+            i += 1;
+            while i < n && is_ws(run[i]) {
+                i += 1;
+            }
+        } else {
+            cur.push(e);
+            *open = true;
+            i += 1;
+        }
     }
 }
 

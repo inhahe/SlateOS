@@ -31765,7 +31765,7 @@ rule for arrays and the positionals.
 which also covers the `[*]` spelling, an empty scalar, an integer, an export, a
 nameref, an explicit `[0]` subscript, and the assignment and glued contexts.
 
-### TD-OILS-OPERAND-QUOTING-IS-LOST. `${x:-'a b'}` splits and `${x:-'*'}` globs — 2026-08-04 — OPEN
+### TD-OILS-OPERAND-QUOTING-IS-LOST. `${x:-'a b'}` splits and `${x:-'*'}` globs — 2026-08-04 — ✅ FIXED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — the whole unquoted-expansion
 pipeline: `Shell::expand_param_op` and `Shell::array_op_fields` hand their
@@ -31849,8 +31849,47 @@ Rejected: a `last_quoted` side-channel on `Shell` (hidden coupling between two
 functions that otherwise only pass values), and re-expanding the operand a
 second time to annotate it (it would run its side effects twice).
 
-**Not yet pinned by a corpus case** — the case wants to be written with the fix,
-since every line of it currently fails.
+**Fixed** essentially as planned, with one correction the plan did not foresee.
+`SplitItems` gained a third variant `Fields(Vec<Vec<EChar>>)` rather than
+converting `List`/`Joined` to annotated bytes: the two kinds of list are *not*
+the same thing, and flattening them together loses the difference (an empty
+*element* opens no field, an empty operand *field* does). `expand_param_op` and
+`array_op_fields` return `SplitItems`, `split_items` grew the `ParamOp` arm, the
+IFS scan moved to a free `split_run` that answers `false` for a quoted
+character, and a new `Shell::operand_chars` is the door the non-splitting
+contexts (`expand_word_annotated`'s text branch, `expand_word_pattern_inner`)
+knock on.
+
+The correction: the operand's own expansion is **not** `split`-mode. It runs in
+a third `SplitMode::Operand`, which splits nothing — the word the substitution
+sits in does that — but keeps a list's field breaks under a null `$IFS`.
+Expanding the operand with splitting on made `IFS=:; ${nope:-${a[@]}}` two
+fields where bash gives one: with a non-null `$IFS` bash joins the operand's
+list into one string (a space for `[@]`, `$IFS` for `[*]`) and lets the *outer*
+scan find the delimiters, and only a null `$IFS` — where no delimiter is left —
+leaves the breaks standing.
+
+Two smaller corrections came out of the sweep, both from routing an answer that
+used to be one string through a variant that can be several. A **quoted**
+`"${a[@]:-w}"` is one field however many the operand made — the quotes are
+around the word — and an operand that expands to nothing is still one *empty*
+field, which is the whole difference between the two operators there
+(`"${a[@]:-}"` is one empty argument, the inactive `"${a[@]:+A}"` is none). That
+is `SplitItems::quoted_fields`, which the quoted per-element arm and the
+string-joining `joined_value` both call; the latter needs it too, so that
+`IFS=:; v=${a[*]:-'p q' r}` is `p q r` — only a list's *elements* answer to the
+`[*]` separator, never an operand's fields. And the operand is expanded through
+a `Shell::expand_operand_fields` that takes over `Shell::bad_sub_word`, because
+it is a word-expansion entry like `Shell::expand_word`: bash recurses into
+`expand_word_internal` for the operand, so `${y:-pre${x@Z}post}` names
+`pre${x@Z}post` and not the substitution around it.
+
+**Pinned by** `tests/corpus/a-substituted-operand-is-the-word-it-was-written-as.sh`,
+and by the three cases that caught those two corrections —
+`an-inactive-alternate-keeps-a-field-when-the-array-is-there`,
+`a-whole-arrays-null-test-is-the-string-it-would-expand-to` and
+`bad-substitution`. One thing the new case deliberately does not cover: see
+`TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD` below.
 
 ### TD-OILS-ARRAY-ASSIGN-DEFAULT-OPERAND-NOT-EXPANDED. `${a[@]:=w}` complains without expanding `w` — 2026-08-04 — OPEN
 
@@ -31880,3 +31919,119 @@ positional branch ahead of it, unexpanded.
 
 **Pinned by** nothing yet; the natural home is a new corpus case about the order
 the assignment forms do their work in.
+
+### TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD. `${x:-'' ''}` is one argument, not two — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `struct EChar`, which is a character
+plus a quoted flag and therefore cannot represent *a quoted stretch that
+produced no character*. `Shell::expand_word_annotated` tracks that today with
+its `open` boolean, which says "this field exists even though it is empty" — but
+`open` lives for the duration of a word and is gone by the time the operand's
+characters are handed to the enclosing word's `split_run`.
+
+**Reproduce** (`show() { printf '  %-10s(%d)' "$1" $(($# - 1)); shift; printf '<%s>' "$@"; printf '\n'; }`):
+
+```sh
+show 'two'  ${nope:-'' ''}      # bash (2)<><>      osh (0)
+show 'mid'  ${nope:-'' x ''}    # bash (3)<><x><>   osh (1)<x>
+IFS=:
+show 'two'  ${nope:-'' ''}      # bash (1)< >       osh (1)< >   (agree)
+```
+
+**The rule.** A `''`/`""` inside a `:-`/`:+` operand leaves a mark that survives
+the field splitting the substitution then undergoes: it is not a delimiter, it
+is not removed before the scan, it makes its field exist, and it contributes
+nothing to the text. Under `IFS=:` the two marks and the literal space end up in
+one field, which is why that line already agrees — the divergence only shows
+when the operand's own unquoted text *is* split. bash spells the mark `CTLNUL`
+and drops it during quote removal.
+
+Note what it is *not*: the field breaks a quoted `[@]` makes inside an operand
+are already right (`${nope:-A"${a[@]}"B}` is `<Ap q><rB>`), because those are
+breaks between whole fields, which `SplitItems::Fields` carries. This is a mark
+*inside* one field.
+
+**The fix.** Give `EChar` a way to say "nothing, quoted". The two shapes:
+
+- `struct EChar { c: Option<Ch>, quoted: bool }`, `None` being the mark. Every
+  reader of `.c` has to answer for it, which is the point — the compiler names
+  the places that must decide. ~12 construction sites and the `is_ws`/`is_nonws`
+  pair in `split_run`, plus `echars_text` (skip) and the glob compiler (skip).
+- A sentinel `EChar { c: Ch::B(0), quoted: true }`, which is bash's own trick.
+  Rejected: osh does not otherwise drop NUL bytes, so a real `$'\0'` would be
+  indistinguishable from the mark.
+
+Then `expand_word_annotated`'s `SingleQuoted`/`DoubleQuoted` arms push the mark
+when the quoted stretch produced nothing and `mode == SplitMode::Operand`, and
+`split_run` treats it as a non-delimiter that sets `open`.
+
+**Pinned by** nothing — `tests/corpus/a-substituted-operand-is-the-word-it-was-written-as.sh`
+covers the whole rule *except* this, and the two lines above are the ones to add
+to it when this is fixed.
+
+### TD-OILS-QUOTED-OPERAND-JOINS-A-QUOTED-AT. `"${x:-"${a[@]}"}"` is one field where bash makes two — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::expand_double_quoted` and
+the `DoubleQuoted` arm of `Shell::expand_word_annotated`. Inside double quotes
+the arm asks `Shell::quoted_per_element` for the per-element answer, and that
+helper recognises `"${a[@]}"` and `"${a[@]:-w}"` but not a `"${x:-…}"` whose
+*operand* holds one — so the operand goes down the scalar `expand_double_quoted`
+path, which returns one string.
+
+**Reproduce:**
+
+```sh
+a=('p q' r)
+printf '  <%s>\n' "${nope:-"${a[@]}"}"   # bash: <p q> then <r>;  osh: <p q r>
+IFS=:
+printf '  <%s>\n' "${nope:-"${a[@]}"}"   # the same, under any $IFS
+x="${nope:-"${a[@]}"}"; echo "[$x]"      # both: [p q r] — a string context still
+                                         #   joins, and the two agree there
+```
+
+**The rule.** A quoted `[@]` inside a `:-`/`:+` operand makes fields even when
+the whole substitution is quoted, because the operand is a word expanded where
+the substitution stands and that is what a quoted `[@]` does there. The
+unquoted spelling of the same thing is already right — see
+TD-OILS-OPERAND-QUOTING-IS-LOST, whose `SplitItems::Fields` carries exactly
+these breaks — so this is the quoted half of a rule whose unquoted half now
+works.
+
+**The fix.** Give `quoted_per_element_parts` an arm for `ParamOp`/`ArrayOp` with
+`UseDefault`/`UseAlternate`: when the operator's answer is a
+`SplitItems::Fields` of more than one field, those fields *are* the per-element
+answer. Careful with the interaction: the same helper is what makes
+`"${a[@]:-w}"` work today, and there the fields come from the array's elements
+rather than from the operand.
+
+**Pinned by** nothing yet; it belongs beside
+`tests/corpus/a-substituted-operand-is-the-word-it-was-written-as.sh`, which
+deliberately stops at the unquoted forms.
+
+### TD-OILS-SINGLE-QUOTES-IN-A-QUOTED-SUBSTITUTION-ARE-EATEN. `"${x:-'a b'}"` drops the quotes bash keeps — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — the `${…}` operand is lexed the same
+way wherever the substitution appears, so the `'` inside it always opens a
+quoted stretch. Inside double quotes it must not: there is no quoting left to
+start, and `'` is an ordinary character.
+
+**Reproduce:**
+
+```sh
+printf '  <%s>\n' "${nope:-'a b'}"    # bash: <'a b'>    osh: <a b>
+printf '  <%s>\n' "${nope:-"a b"}"    # both: <a b>      (a nested `"` does nest)
+printf '  <%s>\n' ${nope:-'a b'}      # both: <a b>      (unquoted, quotes work)
+```
+
+**The rule.** Within `"…"`, a `${…}` operand's `'` is literal — bash's
+`extract_dollar_brace_string` is called with the enclosing quoting state, and a
+single quote inside a double-quoted context does not quote. A nested `"` *does*
+still work (bash re-enters the quoted run as its own word, which is the same
+rule the `bad_sub_word` handling in `expand_word_annotated` already records).
+
+**The fix.** Thread the enclosing quoting state into the operand's parse so the
+lexer treats `'` as a literal character when the substitution is inside double
+quotes. It is a parser change, not an expansion one — the expander already does
+the right thing with whatever parts it is handed.
+
+**Pinned by** nothing yet.

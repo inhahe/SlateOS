@@ -3934,17 +3934,26 @@ pub struct Shell {
     /// on an unset target reports `!r`. Saved/restored around the nested
     /// expansion, like [`Shell::bad_sub_word`].
     ref_label: Option<Str>,
-    /// Inside a `[[ ]]` operand or a `case` word/pattern — bash's `W_NOSPLIT2`.
-    /// It is a *joined* context like an assignment's value, but not the same
-    /// one: an indirect reference to a whole array is flattened with a **space**
-    /// here, whatever the referent's `[@]`/`[*]` and whatever its modifier,
-    /// where the assignment and here-string contexts keep `$IFS`'s answer. See
-    /// [`Shell::nosplit2_indirect`].
+    /// Inside a `[[ ]]` operand or a `case` word/pattern. It is a *joined*
+    /// context like an assignment's value, but not the same one — its `[@]` half
+    /// does not consult `$IFS` at all:
+    ///
+    /// * every list an operator derived joins with a **space**, quoted or not
+    ///   ([`Shell::at_sep`]), where an assignment keeps `$IFS` for the quoted
+    ///   spelling and a here-string keeps it for both;
+    /// * an *indirect* reference to a whole array is flattened with a space too,
+    ///   whatever the referent's `[@]`/`[*]` and whatever its modifier
+    ///   ([`Shell::cond_word_indirect`]).
+    ///
+    /// The `[*]` half is ordinary in both respects. Do not read this as bash's
+    /// `W_NOSPLIT2` flag: bash sets that flag on a posix-mode redirection target
+    /// as well, and *that* word joins a derived `[@]` list with `$IFS` — `IFS=:;
+    /// cat < ${n[@]:0:2}` opens `ax:by`.
     ///
     /// Cleared for the duration of a command substitution: the commands it runs
     /// are not part of the word, and their own words are in whatever context
     /// they establish for themselves.
-    nosplit2: bool,
+    cond_word: bool,
     /// Set when a `[[ … =~ RHS ]]` match fails because the RHS could not be
     /// compiled as a regex. bash reports such a `[[` command as status 2 (not 1
     /// "no match") and prints nothing to stderr. `exec_cond` checks this flag
@@ -4710,7 +4719,7 @@ impl Shell {
             pending_unwind: None,
             bad_sub_word: None,
             ref_label: None,
-            nosplit2: false,
+            cond_word: false,
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
@@ -10276,7 +10285,7 @@ impl Shell {
             pending_unwind: None,
             bad_sub_word: None,
             ref_label: None,
-            nosplit2: false,
+            cond_word: false,
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
@@ -19497,16 +19506,23 @@ impl Shell {
     ///         a=${!n[@]}       0 1 2      a="${!n[@]}"      0:1:2
     /// ```
     ///
-    /// — so this is not a rule that could be moved into the parts themselves:
-    /// the *quoted* spelling of the same two joins with `$IFS`'s first
-    /// character, and so does the unquoted one in the splitting context (where
-    /// [`Shell::split_items`] calls them lists) and in the `W_NOSPLIT2` one (a
-    /// posix-mode redirection target, which is `${n[@]:0:2}` → `x:y`). Four
-    /// contexts, three answers, all measured against bash 5.2.37.
+    /// — so this is not a rule that could be moved into the parts themselves.
+    /// Under `IFS=:` the same `${n[@]:0:2}` answers five different ways, all
+    /// measured against bash 5.2.37:
+    ///
+    /// ```text
+    /// for w in ${n[@]:0:2}        <x> <y>   the splitting context, a list
+    /// a=${n[@]:0:2}               x y       here — a space
+    /// a="${n[@]:0:2}"             x:y       quoting puts $IFS back …
+    /// cat < ${n[@]:0:2}   (posix) x:y       … and a redirection target never lost it
+    /// [[ ${n[@]:0:2} ]]           x y       a space, quoted or not
+    /// ```
     ///
     /// The `[*]` spellings are `$IFS`'s first character everywhere and need no
     /// help, and so do `${a[@]@Q}`/`${a[@]#x}` and `${!prefix@}` — those really
-    /// do join with `$IFS` even here.
+    /// do join with `$IFS` even here. (The `[[ ]]`/`case` line is the one where
+    /// they do not; that context is [`Shell::cond_word`], and it reaches the
+    /// derived lists through [`Shell::at_sep`] rather than through this.)
     fn joined_value(&mut self, part: &WordPart) -> Option<Str> {
         // One expansion error ends the whole word — see
         // [`Self::expansion_failed`], whose guard this path would otherwise skip
@@ -19517,8 +19533,8 @@ impl Shell {
         // The `[[ ]]`/`case` half of this context has one rule of its own, which
         // applies to *any* indirect whole-array reference and so is asked before
         // the parts are looked at at all.
-        if self.nosplit2
-            && let Some(s) = self.nosplit2_indirect(part)
+        if self.cond_word
+            && let Some(s) = self.cond_word_indirect(part)
         {
             return Some(s);
         }
@@ -19556,7 +19572,7 @@ impl Shell {
     }
 
     /// The one string an *unquoted* indirect reference to a whole array makes in
-    /// the `[[ ]]`/`case` context — bash's `W_NOSPLIT2`. `None` for every other
+    /// the `[[ ]]`/`case` context ([`Shell::cond_word`]). `None` for every other
     /// part, and for a reference that names no whole array; both are the
     /// ordinary [`Shell::joined_value`] answer.
     ///
@@ -19578,7 +19594,7 @@ impl Shell {
     /// is built exactly as the splitting context builds it and only then glued.
     /// An assignment's value and a here-string keep `$IFS`'s answer, which is
     /// why this cannot live in the parts themselves.
-    fn nosplit2_indirect(&mut self, part: &WordPart) -> Option<Str> {
+    fn cond_word_indirect(&mut self, part: &WordPart) -> Option<Str> {
         let (arr, label) = match part {
             WordPart::Indirect { refname, index } => (
                 self.indirect_ref_part(refname, index)?,
@@ -19915,13 +19931,13 @@ impl Shell {
         fields.concat()
     }
 
-    /// The same, for a `[[ ]]` operand or a `case` subject: bash's `W_NOSPLIT2`,
-    /// which joins like an assignment's value but for the one rule
-    /// [`Shell::nosplit2_indirect`] records.
+    /// The same, for a `[[ ]]` operand or a `case` subject — [`Shell::cond_word`],
+    /// which joins like an assignment's value but for the two rules
+    /// [`Shell::at_sep`] and [`Shell::cond_word_indirect`] record.
     fn expand_cond_string(&mut self, word: &Word) -> Str {
-        let saved = std::mem::replace(&mut self.nosplit2, true);
+        let saved = std::mem::replace(&mut self.cond_word, true);
         let out = self.expand_to_string(word);
-        self.nosplit2 = saved;
+        self.cond_word = saved;
         out
     }
 
@@ -19929,9 +19945,9 @@ impl Shell {
     /// operand of `[[ == ]]`/`[[ != ]]`. `${x#pat}`'s pattern is *not* one of
     /// these: it is a modifier's operand, not a word in a command.
     fn expand_cond_pattern(&mut self, word: &Word) -> Vec<EChar> {
-        let saved = std::mem::replace(&mut self.nosplit2, true);
+        let saved = std::mem::replace(&mut self.cond_word, true);
         let out = self.expand_word_pattern(word);
-        self.nosplit2 = saved;
+        self.cond_word = saved;
         out
     }
 
@@ -21356,7 +21372,24 @@ impl Shell {
     /// The separator a `[@]` reference joins a *derived* list with: the first
     /// character of `$IFS`, but a space when `$IFS` is empty — where the `[*]`
     /// spelling ([`Shell::star_sep`]) joins with nothing.
+    ///
+    /// In a `[[ ]]` operand or a `case` word ([`Shell::cond_word`]) it is a space
+    /// whatever `$IFS` says, quoted or not — the `[@]` half of that context does
+    /// not consult `$IFS` at all:
+    ///
+    /// ```text
+    ///                  IFS=:                    IFS=
+    /// [[ ${n[@]#a} ]]  x by cz                  x by cz
+    /// [[ ${n[*]#a} ]]  x:by:cz                  xbycz     — the `[*]` half still does
+    /// a=${n[@]#a}      x:by:cz                  x by cz   — and so does every other context
+    /// ```
+    ///
+    /// The `[*]` spelling keeps `$IFS` here, which is why this is a rule about
+    /// the `[@]` separator rather than about the context's join as a whole.
     fn at_sep(&self) -> Str {
+        if self.cond_word {
+            return b" ".to_vec();
+        }
         let sep = self.star_sep();
         if sep.is_empty() { b" ".to_vec() } else { sep }
     }
@@ -21702,10 +21735,10 @@ impl Shell {
         self.comsub_count = self.comsub_count.wrapping_add(1);
         // The word context the substitution sits in is not the one its own
         // commands run in: `[[ $(f) ]]` leaves `f`'s words to establish their
-        // own. See [`Shell::nosplit2`].
-        let saved_nosplit2 = std::mem::replace(&mut self.nosplit2, false);
+        // own. See [`Shell::cond_word`].
+        let saved_cond_word = std::mem::replace(&mut self.cond_word, false);
         let out = self.command_sub_body_inner(body);
-        self.nosplit2 = saved_nosplit2;
+        self.cond_word = saved_cond_word;
         out
     }
 

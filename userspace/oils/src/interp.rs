@@ -1304,6 +1304,24 @@ enum Flow {
     Abort,
 }
 
+/// An armed non-fatal abort: the status the discarded command reports, and
+/// which of bash's two `jump_to_top_level(DISCARD)` depths raised it.
+///
+/// The depth is what decides the [`Flow`] the flag finally becomes — see
+/// [`Flow::Discard`] and [`Flow::Abort`] — so it has to travel *with* the
+/// status rather than beside it: the two are armed at one site and read at
+/// another, often several frames apart, and a separate flag would be one
+/// `take()` away from desynchronising.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiscardAbort {
+    /// The status the discarded command reports.
+    status: i32,
+    /// Whether the unwind passes *through* a nested read-eval loop rather than
+    /// being caught by it. Only an arithmetic error while binding an
+    /// integer-attribute value sets this; see [`Shell::eval_int_assign`].
+    past_eval: bool,
+}
+
 /// What a nested read-eval loop — an `eval`, a `.`/`source`, a trap handler —
 /// yielded: bash's `parse_and_execute` return, which a [`Flow`] alone cannot
 /// carry because it has no room for a status.
@@ -3795,9 +3813,17 @@ pub struct Shell {
     /// * `${a[@]=v}` / `${a[@]:=v}`, which would have to assign to `a[@]` — 2
     /// * an invalid indirect expansion / invalid variable name — 1
     ///
+    /// …plus one that is *not* an expansion error and does not stop where these
+    /// do: an arithmetic error while binding an integer-attribute value. It is
+    /// armed the same way but carries [`DiscardAbort::past_eval`], which turns
+    /// it into a [`Flow::Abort`] instead — see [`Shell::eval_int_assign`].
+    ///
     /// The simple-command driver, the bare-assignment path and the prefix-value
-    /// path each take the flag after expansion and return `Flow::Discard`.
-    discard_error: Option<i32>,
+    /// path each take the flag after expansion and turn it into that `Flow`
+    /// (see [`Shell::take_discard_flow`]). Arm it through
+    /// [`Shell::arm_discard`], never by assigning here, so the kind is always
+    /// set alongside the status.
+    discard_error: Option<DiscardAbort>,
     /// Set when a [`Flow::Abort`] has to cross a builtin boundary. `eval` and
     /// `.`/`source` are builtins, so the flow their input produced is lost at
     /// the `i32` return; this carries the abort so the post-builtin teardown
@@ -8589,11 +8615,56 @@ impl Shell {
                 // the subscript through the same path. The driver turns the flag
                 // into a `Flow::Exit(1)`.
                 if e.in_subscript {
-                    self.discard_error = Some(1);
+                    self.arm_discard(1);
                 }
                 None
             }
         }
+    }
+
+    /// Arm the ordinary non-fatal abort: the one a nested read-eval loop
+    /// catches, so an `eval` or a sourced file confines it to itself.
+    ///
+    /// This is the kind every *expansion* error raises. For the one exception —
+    /// an arithmetic error while binding an integer-attribute value, which
+    /// unwinds past such a loop — see [`Self::arm_int_bind_discard`].
+    fn arm_discard(&mut self, status: i32) {
+        self.discard_error = Some(DiscardAbort {
+            status,
+            past_eval: false,
+        });
+    }
+
+    /// Arm the abort that a nested read-eval loop does *not* catch.
+    ///
+    /// bash raises the integer-binding error from `bind_variable`, below the
+    /// depth `parse_and_execute` guards, so `eval` and `.`/`source` are unwound
+    /// along with their caller: `f() { eval 'declare -i b=2+'; echo yes; }; f`
+    /// prints no `yes` and leaves `$?` at 1, where the same function around
+    /// `eval 'a[-9]=x'` — an expansion error, armed by [`Self::arm_discard`] —
+    /// does print it. The flag becomes a [`Flow::Abort`] rather than a
+    /// [`Flow::Discard`]; see [`Self::take_discard_flow`].
+    fn arm_int_bind_discard(&mut self) {
+        self.discard_error = Some(DiscardAbort {
+            status: 1,
+            past_eval: true,
+        });
+    }
+
+    /// Consume an armed abort and report the [`Flow`] it unwinds as, leaving
+    /// `$?` at the status it carried. `None` means nothing was armed.
+    ///
+    /// Every site that turns the flag into control flow goes through this, so
+    /// the two depths bash raises these from stay distinguished all the way
+    /// out — see [`Self::arm_discard`] and [`Self::arm_int_bind_discard`].
+    fn take_discard_flow(&mut self) -> Option<Flow> {
+        let armed = self.discard_error.take()?;
+        self.last_status = armed.status;
+        Some(if armed.past_eval {
+            Flow::Abort
+        } else {
+            Flow::Discard
+        })
     }
 
     /// Turn a pending expansion-style abort into a [`Flow::Discard`] for a
@@ -8606,13 +8677,7 @@ impl Shell {
     /// error. Without this, the flag would stay armed and be consumed by whatever
     /// *next* command ran — which silently swallowed a following line.
     fn arith_discard_flow(&mut self) -> Flow {
-        match self.discard_error.take() {
-            Some(code) => {
-                self.last_status = code;
-                Flow::Discard
-            }
-            None => Flow::Next,
-        }
+        self.take_discard_flow().unwrap_or(Flow::Next)
     }
 
     /// Evaluate an *integer-assignment* initializer — the value bound to a
@@ -8622,7 +8687,11 @@ impl Shell {
     /// expression), an arithmetic error in an integer *assignment* is **fatal**
     /// in bash: the diagnostic is printed and the shell aborts with status 1.
     /// The command driver / `run_builtin` tail consumes the `discard_error`
-    /// flag set here and turns it into a `Flow::Exit(1)`.
+    /// flag set here and turns it into the unwind.
+    ///
+    /// It is the *deeper* of bash's two abort depths — raised from
+    /// `bind_variable`, not from the word expander — so a nested `eval` or
+    /// `source` does not contain it; see [`Self::arm_int_bind_discard`].
     ///
     /// `None` means the expression was bad, and the caller must then store
     /// *nothing*: bash leaves the variable exactly as it was, so
@@ -8630,7 +8699,7 @@ impl Shell {
     fn eval_int_assign(&mut self, raw: BStr<'_>) -> Option<i64> {
         let v = self.eval_arith_expanded(raw);
         if v.is_none() {
-            self.discard_error = Some(1);
+            self.arm_int_bind_discard();
         }
         v
     }
@@ -8648,7 +8717,7 @@ impl Shell {
         match self.eval_arith_raw(raw) {
             Some(n) => n,
             None => {
-                self.discard_error = Some(1);
+                self.arm_discard(1);
                 0
             }
         }
@@ -10977,7 +11046,7 @@ impl Shell {
                     if crate::unparse::word_src(idx_word).is_empty() {
                         self.perrln(&format!("{}[]: bad array subscript", a.name));
                         if !self.decl_builtin_ctx {
-                            self.discard_error = Some(1);
+                            self.arm_discard(1);
                             self.note_shell_error(FatalWhen::ErrexitOrPosix);
                         }
                         return false;
@@ -11079,7 +11148,7 @@ impl Shell {
                             ];
                             self.berrln(&line);
                             if !self.decl_builtin_ctx {
-                                self.discard_error = Some(1);
+                                self.arm_discard(1);
                                 self.note_shell_error(FatalWhen::ErrexitOrPosix);
                             }
                             return false;
@@ -11795,7 +11864,7 @@ impl Shell {
                     && self.unbound_error.is_none()
                     && self.shell_option_enabled("posix")
                 {
-                    self.discard_error = Some(1);
+                    self.arm_discard(1);
                     // …and when the command it prefixes is a POSIX *special*
                     // builtin the refusal is fatal rather than merely
                     // discarding: `r=x eval :` and `r=x :` end the shell where
@@ -11886,7 +11955,7 @@ impl Shell {
                 // main level and the subshell fails without aborting the parent.
                 if l < 0 {
                     self.perrln(&format!("{l}: substring expression < 0"));
-                    self.discard_error = Some(1);
+                    self.arm_discard(1);
                     return Vec::new();
                 }
                 (start + l).min(n)
@@ -12327,7 +12396,7 @@ impl Shell {
                 &src,
                 b": invalid indirect expansion"
             ]);
-            self.discard_error = Some(1);
+            self.arm_discard(1);
             return Err(());
         }
         match self.param_elem_value(refname, index) {
@@ -12337,7 +12406,7 @@ impl Shell {
             // — leaves the reference pointing nowhere, which is not an error.
             None if index.is_none() => {
                 self.perrln(&format!("{refname}: invalid indirect expansion"));
-                self.discard_error = Some(1);
+                self.arm_discard(1);
                 Err(())
             }
             None => Ok(None),
@@ -12367,7 +12436,7 @@ impl Shell {
                     // expansion" error as an unset pointer (status 1, the rest
                     // of the parse unit discarded).
                     self.perrln(&format!("{refname}: invalid indirect expansion"));
-                    self.discard_error = Some(1);
+                    self.arm_discard(1);
                     return Str::new();
                 }
             }
@@ -12404,7 +12473,7 @@ impl Shell {
             self.emit_stderr(&line);
             // Non-fatal, like the unset-pointer case above — until `set -e` or
             // posix mode promotes it to a whole-shell abort.
-            self.discard_error = Some(1);
+            self.arm_discard(1);
             self.note_shell_error(FatalWhen::ErrexitOrPosix);
             return Str::new();
         };
@@ -13573,7 +13642,7 @@ impl Shell {
                                 crate::unparse::word_src(w),
                                 b"]: bad array subscript"
                             ]);
-                            self.discard_error = Some(1);
+                            self.arm_discard(1);
                             self.note_shell_error(FatalWhen::ErrexitOnly);
                             return b"0".to_vec();
                         }
@@ -13600,7 +13669,7 @@ impl Shell {
                             let line =
                                 bfmt![self.err_prefix(), &src, b"]: bad array subscript\n"];
                             self.emit_stderr(&line);
-                            self.discard_error = Some(1);
+                            self.arm_discard(1);
                             self.note_shell_error(FatalWhen::ErrexitOnly);
                             return b"0".to_vec();
                         }
@@ -13798,9 +13867,8 @@ impl Shell {
         // its own entry point and treats as an expansion error wherever it
         // appears (`arith::ArithError::in_subscript`). Prefix assignment-value errors are checked after their own
         // expansion.
-        if let Some(code) = self.discard_error.take() {
-            self.last_status = code;
-            return Flow::Discard;
+        if let Some(flow) = self.take_discard_flow() {
+            return flow;
         }
 
         // `shopt -s failglob`: a command-word glob that matched nothing is a
@@ -13852,16 +13920,22 @@ impl Shell {
                 self.last_status = status;
                 return Flow::Exit(status);
             }
-            let discard = self.discard_error.take();
-            if !ok || discard.is_some() {
-                // A readonly rejection or a word-expansion error in the value of
-                // a *bare* assignment command discards the command and abandons
-                // the rest of the current top-level parse unit, but does not exit
-                // the shell: `readonly c=1; c=2` on one line, `x=$((1/0))` and
-                // `a[-9]=v` all let a *following line* run (bash). A temporary
-                // assignment *prefix* to a command is not fatal at all — that path
-                // is handled separately in the command-execution branch.
-                self.last_status = discard.unwrap_or(1);
+            let discard = self.take_discard_flow();
+            if let Some(flow) = discard {
+                // A word-expansion error in the value of a *bare* assignment
+                // command discards the command and abandons the rest of the
+                // current top-level parse unit, but does not exit the shell:
+                // `x=$((1/0))` and `a[-9]=v` both let a *following line* run
+                // (bash). A temporary assignment *prefix* to a command is not
+                // fatal at all — that path is handled separately in the
+                // command-execution branch. An integer-binding error unwinds
+                // further ([`Flow::Abort`]), which is why the flow comes from
+                // the flag rather than being assumed here.
+                return flow;
+            } else if !ok {
+                // A readonly rejection discards the same way, with status 1:
+                // `readonly c=1; c=2` on one line still lets the next line run.
+                self.last_status = 1;
                 return Flow::Discard;
             } else if self.comsub_count == comsub_before {
                 // No command substitution ran; a plain assignment resets $? to 0.
@@ -13986,7 +14060,7 @@ impl Shell {
         // abandons the rest of the current top-level parse unit but does not exit
         // the shell (matching the bare-assignment and command-word cases above;
         // a following line still runs).
-        if let Some(code) = self.discard_error.take() {
+        if let Some(flow) = self.take_discard_flow() {
             // …with one exception: a prefix refused for naming a readonly
             // variable is an *assignment error on a special builtin* when that
             // is what it prefixes, and in posix mode that ends the shell. bash
@@ -14001,8 +14075,7 @@ impl Shell {
                 self.last_status = status;
                 return Flow::Exit(status);
             }
-            self.last_status = code;
-            return Flow::Discard;
+            return flow;
         }
 
         // A fatal word-expansion error while expanding a prefix value — a
@@ -19191,7 +19264,7 @@ impl Shell {
                     Ok(s) => s,
                     Err(bad_len) => {
                         self.perrln(&format!("{bad_len}: substring expression < 0"));
-                        self.discard_error = Some(1);
+                        self.arm_discard(1);
                         Str::new()
                     }
                 }
@@ -19298,7 +19371,7 @@ impl Shell {
                         Some(t) => Some(t.spelling()),
                         None => {
                             self.perrln(&format!("{refname}: invalid indirect expansion"));
-                            self.discard_error = Some(1);
+                            self.arm_discard(1);
                             return Str::new();
                         }
                     }
@@ -19329,7 +19402,7 @@ impl Shell {
                                     bfmt![self.err_prefix(), &t, b": invalid variable name\n"];
                                 self.emit_stderr(&msg);
                                 // Non-fatal: discards the command, status 1.
-                                self.discard_error = Some(1);
+                                self.arm_discard(1);
                                 return Str::new();
                             }
                         }
@@ -19417,7 +19490,7 @@ impl Shell {
         if fatal {
             self.unbound_error = Some(1);
         } else {
-            self.discard_error = Some(1);
+            self.arm_discard(1);
             // …unless `set -e` or posix mode promotes the DISCARD to an abort
             // anyway, which for this diagnostic both do.
             self.note_shell_error(FatalWhen::ErrexitOrPosix);
@@ -19480,7 +19553,7 @@ impl Shell {
                         && !crate::parser::is_valid_name(name.as_bytes())
                     {
                         self.perrln(&format!("${name}: cannot assign in this way"));
-                        self.discard_error = Some(1);
+                        self.arm_discard(1);
                         return Str::new();
                     }
                     let v = self.expand_to_string(arg);
@@ -19502,7 +19575,7 @@ impl Shell {
                             "invalid variable name"
                         };
                         self.perrln(&format!("{name}: {complaint}"));
-                        self.discard_error = Some(1);
+                        self.arm_discard(1);
                         return Str::new();
                     }
                     // The default has to go somewhere, so a subscript that names
@@ -19510,7 +19583,7 @@ impl Shell {
                     // complaint is already given, and the command is discarded
                     // the way a division by zero is.
                     if !self.assign_elem(name, index, v.clone()) {
-                        self.discard_error = Some(1);
+                        self.arm_discard(1);
                         return Str::new();
                     }
                     v
@@ -19632,7 +19705,7 @@ impl Shell {
                     self.perrln(&format!("{name}[{sub}]: bad array subscript"));
                     // bash discards the command with status **2** here — not
                     // the 1 every other bad-subscript site uses.
-                    self.discard_error = Some(2);
+                    self.arm_discard(2);
                     Vec::new()
                 }
             }
@@ -20716,7 +20789,7 @@ impl Shell {
                 self.emit_arith_error(s, &e);
                 // …unless it came from a subscript, which is fatal even here.
                 if e.in_subscript {
-                    self.discard_error = Some(1);
+                    self.arm_discard(1);
                 }
                 None
             }
@@ -20811,7 +20884,7 @@ impl Shell {
             Ok(v) => v,
             Err(e) => {
                 self.emit_arith_error(s, &e);
-                self.discard_error = Some(1);
+                self.arm_discard(1);
                 0
             }
         }
@@ -20841,7 +20914,7 @@ impl Shell {
                 // An arithmetic error in a `$(( … ))` word/value substitution
                 // makes the whole simple command abort (bash) rather than run
                 // with a fabricated value; the driver consumes this flag.
-                self.discard_error = Some(1);
+                self.arm_discard(1);
                 // Posix mode goes further and ends the shell. errexit
                 // deliberately does not: bash reports arithmetic errors through
                 // a path its `report_error` exit hook never sees, so
@@ -21270,7 +21343,10 @@ impl Shell {
     /// boundary. A [`Flow::Discard`] normally does *not*: the handler bash
     /// installs in `parse_and_execute` is where its `jump_to_top_level(DISCARD)`
     /// lands, so only the string being run is abandoned and the caller carries
-    /// on — `eval 'a[-9]=x'; echo "rc=$?"` still reaches the `echo`.
+    /// on — `eval 'a[-9]=x'; echo "rc=$?"` still reaches the `echo`. bash's
+    /// *other* discard, the one an integer-attribute binding raises, is thrown
+    /// from below that handler and so arrives here already a `Flow::Abort` —
+    /// see [`Shell::arm_int_bind_discard`].
     ///
     /// That handler ends the jump only in the **main shell environment**,
     /// though. Inside a subshell bash keeps unwinding past it, and what ends is
@@ -21302,7 +21378,7 @@ impl Shell {
                 run.status
             }
             Flow::Discard if self.subshell_depth > 0 => {
-                self.discard_error = Some(run.status);
+                self.arm_discard(run.status);
                 run.status
             }
             // A loop flow belongs to the caller's loop: neither `eval` nor a
@@ -22015,10 +22091,10 @@ impl Shell {
         // The declare/local builtin sets `discard_error` via `eval_int_assign`;
         // honour it here exactly as the simple-command driver does for a bare
         // `k=$((…))` assignment. In a subshell this discard is caught at the
-        // subshell boundary (status 1, parent continues).
-        if let Some(code) = self.discard_error.take() {
-            self.last_status = code;
-            return Flow::Discard;
+        // subshell boundary (status 1, parent continues) — but an `eval` around
+        // it does *not* catch it, which is why the flow comes from the flag.
+        if let Some(flow) = self.take_discard_flow() {
+            return flow;
         }
         flow
     }
@@ -31296,11 +31372,8 @@ impl Shell {
                 let status = self.fatal_abort_status(code);
                 self.last_status = status;
                 Some(Flow::Exit(status))
-            } else if let Some(code) = self.discard_error.take() {
-                self.last_status = code;
-                Some(Flow::Discard)
             } else {
-                None
+                self.take_discard_flow()
             };
             if let Some(flow) = expansion_failure {
                 // A failure in the *expansion* pass rolls the name back to its
@@ -32897,7 +32970,7 @@ impl Shell {
                     // `get_numeric_arg` reaches `no_args` only after
                     // `legal_number` succeeds).
                     self.perrln("shift: too many arguments");
-                    self.discard_error = Some(1);
+                    self.arm_discard(1);
                     return 1;
                 }
                 if v < 0 {
@@ -44764,9 +44837,11 @@ mod tests {
         //
         // Each probe reads the variable on a *following line*: the failure is
         // fatal to the list it is in, so an `echo` after a `;` would never run.
+        // The harness is deliberately *not* `-c` — that has no outer level for
+        // the abort to be caught at, so the shell would exit and the reader
+        // would never run either (see `a_refused_integer_value_unwinds_past_eval`).
         fn run_cmd(src: &str) -> String {
             let mut sh = new_shell();
-            sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
             {
@@ -44816,9 +44891,12 @@ mod tests {
         // clearing and the elements before the failure survive. The exception is
         // a non-append *associative* literal, which bash builds off to the side
         // and swaps in, making that one shape all-or-nothing.
+        //
+        // The harness is deliberately *not* `-c`, for the reason given in
+        // `a_failed_integer_assignment_stores_nothing`: a binding failure
+        // unwinds past a `-c` shell's only level and would end it outright.
         fn run_cmd(src: &str) -> String {
             let mut sh = new_shell();
-            sh.set_command_mode();
             sh.set_interactive_shell(false);
             let buf = capture_sink();
             {
@@ -60927,6 +61005,76 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -i u=2+ 2>/dev/null\nunset u\ndeclare -a u; declare -p u").0,
             "declare -a u\n"
+        );
+    }
+
+    #[test]
+    fn a_refused_integer_value_unwinds_past_eval() {
+        // bash raises the integer-binding error from below the depth `eval` and
+        // `.`/`source` guard, so they do not contain it: the caller goes too.
+        // Every builtin that binds such a value raises it from the same place.
+        for src in [
+            "declare -i v=2+",
+            "eval 'declare -i v=2+'",
+            "declare -i v; eval 'v=2+'",
+            "declare -i v; eval 'v+=2+'",
+            "declare -i v; eval 'export v=2+'",
+            "declare -i v; eval 'readonly v=2+'",
+            "declare -i v; eval 'printf -v v \"%s\" \"2+\"'",
+            "declare -ai v; eval 'v[0]=2+'",
+            "eval 'declare -ai v=(2+)'",
+            "declare -i v; eval 'read v <<< \"2+\"'",
+            // Nesting does not slow it down.
+            "eval 'eval \"declare -i v=2+\"; echo NOT-REACHED'",
+        ] {
+            assert_eq!(
+                run(&format!(
+                    "f() {{ {src} 2>/dev/null; echo NOT-REACHED; }}\nf; echo NOT-REACHED\necho next"
+                ))
+                .0,
+                "next\n",
+                "{src}"
+            );
+        }
+        // An expansion error *is* caught there, for contrast: it is raised from
+        // the expander, which those loops are wrapped around.
+        for (src, before) in [
+            ("eval 'a[-9]=x'", ""),
+            ("eval 'echo $((1/0))'", ""),
+            // This one reports the bad subscript while expanding an argument of
+            // an `echo` that then still runs — the flag is only consumed by the
+            // *next* command — so a blank line lands before the `yes`.
+            ("eval 'echo ${zz[-9]}'", "\n"),
+        ] {
+            assert_eq!(
+                run(&format!(
+                    "f() {{ {src} 2>/dev/null; echo yes; }}\nf; echo \"rc=$?\""
+                ))
+                .0,
+                format!("{before}yes\nrc=0\n"),
+                "{src}"
+            );
+        }
+        // A subshell is its own top level, so it contains the unwind wherever
+        // inside it the value was bound; the parent carries on.
+        assert_eq!(
+            run("( eval 'declare -i v=2+' 2>/dev/null; echo NOT-REACHED )\necho \"rc=$?\"").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("x=$( eval 'declare -i v=2+' 2>/dev/null; echo NOT-REACHED )\necho \"rc=$? x=[$x]\"")
+                .0,
+            "rc=1 x=[]\n"
+        );
+        // …and under `-c` there is no outer level left to resume at, so the
+        // shell exits with the status the abort carried.
+        assert_eq!(
+            run_cmd_mode("declare -i v=2+ 2>/dev/null\necho NOT-REACHED"),
+            ("".to_string(), 1)
+        );
+        assert_eq!(
+            run_cmd_mode("a[-9]=x 2>/dev/null\necho after"),
+            ("after\n".to_string(), 0)
         );
     }
 

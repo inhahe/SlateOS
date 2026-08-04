@@ -15980,13 +15980,19 @@ impl Shell {
 
     /// The directories a bare-name lookup searches, in `$PATH` order.
     ///
-    /// Each is resolved against *this* shell's directory rather than the
-    /// process's, so a relative entry (`.`, `bin`) means what the shell means by
-    /// it — and an **empty** entry is the current directory, which is POSIX's
-    /// reading and bash's (`PATH=:/bin` searches here first). Each is spelled
-    /// the way the shell spells paths, because a hit is not only spawned but
-    /// reported: it is what `hash` and `type` print and what `$_` carries into
-    /// the child, and bash puts a `/`-separated path in all three.
+    /// Each entry is kept **as written**, because a hit is not only spawned but
+    /// reported — it is what `hash`, `type`, `command -v` and `$_` print, and
+    /// bash prints the entry joined to the name without tidying either. So
+    /// `PATH=bin` answers `bin/tool`, `PATH=./bin` answers `./bin/tool`, and
+    /// `PATH=bin//` answers `bin//tool`. (Resolving the entry against the
+    /// shell's directory is [`Shell::probe_path`]'s job, and happens only when
+    /// the filesystem is actually asked.)
+    ///
+    /// An **empty** entry is the current directory, which is POSIX's reading and
+    /// bash's (`PATH=:/bin` searches here first), and it is spelled `.` — the
+    /// spelling bash reports for it. An empty `$PATH` *as a whole* is not that:
+    /// bash searches the working directory by name there, so `PATH= tool` in
+    /// `/w` answers `/w/tool` rather than `./tool`.
     ///
     /// An unset or **empty** `$PATH` is not "no search": it is one empty entry,
     /// so it searches the current directory and nothing else. bash reads the
@@ -16016,17 +16022,12 @@ impl Shell {
         }
         split_search_path(&path)
             .into_iter()
-            .map(|d| {
-                if d.is_empty() {
-                    return self.search_dir_here();
-                }
-                shell_path(&bytes::bytes_to_path(&self.resolve_str(&d)))
-            })
+            .map(|d| if d.is_empty() { b".".to_vec() } else { d })
             .collect()
     }
 
-    /// The directory an *empty* `$PATH` entry names: the shell's own, or `.`
-    /// when it has none to give.
+    /// The directory an *empty* `$PATH` names — the whole variable, not one of
+    /// its entries: the shell's own directory, or `.` when it has none to give.
     fn search_dir_here(&self) -> Str {
         if self.cwd.is_empty() {
             b".".to_vec()
@@ -16036,10 +16037,22 @@ impl Shell {
     }
 
     /// The file `name` would name in the `$PATH` directory `dir`, spelled the
-    /// way [`Shell::search_dirs`] spells the directory — one `/` between the
-    /// two, and no host separator introduced by the join.
-    fn path_candidate(dir: BStr<'_>, name: BStr<'_>) -> std::path::PathBuf {
-        bytes::bytes_to_path(&join_under(dir, name))
+    /// way [`Shell::search_dirs`] spells the directory — the entry as written,
+    /// then `name`, with a `/` written between them only when the entry does not
+    /// already end in one. (bash's `sh_makepath`, which is why `PATH=bin//`
+    /// answers `bin//tool` rather than a tidied `bin/tool`.)
+    fn path_candidate(dir: BStr<'_>, name: BStr<'_>) -> Str {
+        if dir.ends_with(b"/") { bfmt![dir, name] } else { bfmt![dir, b"/", name] }
+    }
+
+    /// A path in the shell's spelling, as the host must spell it to be asked
+    /// about — resolved against *this* shell's directory rather than the
+    /// process's, since nothing here ever calls `set_current_dir`.
+    ///
+    /// Every filesystem question about a `$PATH` candidate goes through this, so
+    /// that the candidate itself can stay the relative thing the user wrote.
+    fn probe_path(&self, path: BStr<'_>) -> std::path::PathBuf {
+        bytes::bytes_to_path(&self.host_path(path))
     }
 
     /// Search `$PATH` for an executable named `name`. A name containing a slash
@@ -16053,8 +16066,10 @@ impl Shell {
         temp_path: Option<BStr<'_>>,
     ) -> Option<std::path::PathBuf> {
         if name.contains(&b'/') || name.contains(&b'\\') {
-            let p = self.resolve(name);
-            return p.is_file().then_some(p);
+            // The word itself is the answer — it already said which file, and
+            // bash reports it back unedited (`command -v ./x` is `./x`). Only
+            // the *question* is asked of the resolved path.
+            return self.probe_path(name).is_file().then(|| bytes::bytes_to_path(name));
         }
         for dir in self.search_dirs(temp_path) {
             let cand = Self::path_candidate(&dir, name);
@@ -16065,15 +16080,15 @@ impl Shell {
             // the exec bit on unix. On the Windows host executability is by
             // extension, so an exact `is_file()` match plus the extension probe
             // below is the closest analogue.
-            if path_is_executable(&cand) {
-                return Some(cand);
+            if path_is_executable(&self.probe_path(&cand)) {
+                return Some(bytes::bytes_to_path(&cand));
             }
             // Host convenience: try common Windows executable extensions.
             #[cfg(windows)]
             for ext in ["exe", "cmd", "bat"] {
-                let c = cand.with_extension(ext);
-                if c.is_file() {
-                    return Some(c);
+                let c = shell_path(&bytes::bytes_to_path(&cand).with_extension(ext));
+                if self.probe_path(&c).is_file() {
+                    return Some(bytes::bytes_to_path(&c));
                 }
             }
         }
@@ -16093,9 +16108,10 @@ impl Shell {
     /// A name containing a separator is not a search at all; callers check that
     /// before coming here.
     fn find_source_in_path(&self, name: BStr<'_>) -> Option<Str> {
-        self.search_dirs(None).into_iter().find(|dir| {
-            Self::path_candidate(dir, name).is_file()
-        }).map(|dir| join_under(&dir, name))
+        self.search_dirs(None)
+            .into_iter()
+            .map(|dir| Self::path_candidate(&dir, name))
+            .find(|cand| self.probe_path(cand).is_file())
     }
 
     /// Remember `name` as resolving to `path`, with `hits` prior uses.
@@ -16198,27 +16214,32 @@ impl Shell {
     /// suppressed while preserving first-seen order.
     ///
     /// The same directories and the same executability test as the single-hit
-    /// search: `type -a` must agree with what would actually run, so the first
-    /// entry it prints is by construction what [`Shell::find_in_path`] returns.
+    /// search, so the first entry it prints is by construction what
+    /// [`Shell::find_in_path`] returns.
     fn find_all_in_path(&self, name: BStr<'_>) -> Vec<std::path::PathBuf> {
         let mut out: Vec<std::path::PathBuf> = Vec::new();
         if name.contains(&b'/') || name.contains(&b'\\') {
-            let p = self.resolve(name);
-            if p.is_file() {
-                out.push(p);
+            if self.probe_path(name).is_file() {
+                out.push(bytes::bytes_to_path(name));
             }
             return out;
         }
+        let mut push = |cand: &[u8]| {
+            let p = bytes::bytes_to_path(cand);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        };
         for dir in self.search_dirs(None) {
             let cand = Self::path_candidate(&dir, name);
-            if path_is_executable(&cand) && !out.contains(&cand) {
-                out.push(cand.clone());
+            if path_is_executable(&self.probe_path(&cand)) {
+                push(&cand);
             }
             #[cfg(windows)]
             for ext in ["exe", "cmd", "bat"] {
-                let c = cand.with_extension(ext);
-                if c.is_file() && !out.contains(&c) {
-                    out.push(c);
+                let c = shell_path(&bytes::bytes_to_path(&cand).with_extension(ext));
+                if self.probe_path(&c).is_file() {
+                    push(&c);
                 }
             }
         }
@@ -22812,7 +22833,13 @@ impl Shell {
         arg0: BStr<'_>,
         args: &[Str],
     ) -> (PCommand, Option<Str>) {
-        let indirect = resolved.and_then(shell_script_indirection);
+        // The lookup's answer is in the shell's spelling and may be relative to
+        // the shell's directory, which is not the process's — so reading the
+        // file to look for a `#!` line has to go through [`Shell::probe_path`].
+        let indirect = resolved
+            .map(|p| self.probe_path(&bytes::path_to_bytes(p)))
+            .as_deref()
+            .and_then(shell_script_indirection);
         let (program, args) = match (&indirect, resolved) {
             (Some(via), Some(path)) => {
                 let script = if word.contains(&b'/') || word.contains(&b'\\') {
@@ -22838,7 +22865,15 @@ impl Shell {
                 (program, a)
             }
             _ => (
-                resolved.map_or_else(|| self.resolve_program(word), bytes::path_to_bytes),
+                // A `$PATH` hit is spelled the way `$PATH` spelled it — possibly
+                // relative to the *shell's* directory, which is not the
+                // process's — so the image to launch is that hit resolved. A
+                // word nothing was found for goes over as typed, for the OS to
+                // look up ([`Shell::resolve_program`]).
+                resolved.map_or_else(
+                    || self.resolve_program(word),
+                    |p| self.host_path(&bytes::path_to_bytes(p)),
+                ),
                 args.to_vec(),
             ),
         };
@@ -53346,10 +53381,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(sh.find_in_path(b"only1.sh", None).is_none());
     }
 
-    /// The directories a `$PATH` search visits: resolved against the *shell's*
-    /// directory, spelled the way the shell spells paths, with an empty entry
-    /// meaning the current one — and a command's own `PATH=` prefix outranking
-    /// the shell's own (TD-OILS-PREFIX-PATH-LOOKUP).
+    /// The directories a `$PATH` search visits: each entry exactly as written,
+    /// because a hit is reported as well as spawned, with an empty entry meaning
+    /// the current one (spelled `.`) — and a command's own `PATH=` prefix
+    /// outranking the shell's own (TD-OILS-PREFIX-PATH-LOOKUP).
     #[test]
     fn the_search_path_is_the_shell_s_own_and_a_prefix_outranks_it() {
         let mut sh = new_shell();
@@ -53357,23 +53392,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let dirs = |sh: &Shell, over: Option<&[u8]>| {
             sh.search_dirs(over).iter().map(|d| String::from_utf8_lossy(d).into_owned()).collect::<Vec<_>>()
         };
+        // `:` on every host, because that is the shell's separator rather than
+        // the host's (see [`split_search_path`]).
         sh.vars.insert("PATH".to_string(), b"/abs:rel::/tail/".to_vec());
         assert_eq!(
             dirs(&sh, None),
-            // `/abs` is already rooted; `rel` and the empty entry are resolved
-            // against the shell's directory (the empty one *is* that directory);
-            // the trailing separator on `/tail/` is not doubled by the join
+            // Every entry survives as typed — `rel` is *not* made absolute, or
+            // `command -v` would answer `/here/rel/cmd` where bash answers
+            // `rel/cmd` — and the empty entry becomes the `.` bash reports for
+            // it. The trailing separator on `/tail/` is not doubled by the join
             // below, which is why the spelling matters.
-            vec!["/abs", "/here/rel", "/here", "/tail/"]
+            vec!["/abs", "rel", ".", "/tail/"]
         );
-        assert_eq!(
-            bytes::path_to_bytes(&Shell::path_candidate(b"/tail/", b"cmd")),
-            b"/tail/cmd".to_vec()
-        );
+        assert_eq!(Shell::path_candidate(b"/tail/", b"cmd"), b"/tail/cmd".to_vec());
+        assert_eq!(Shell::path_candidate(b"rel", b"cmd"), b"rel/cmd".to_vec());
         // A `PATH=` written as a command prefix is searched instead, without
         // being stored: the shell's own `$PATH` is untouched by the lookup.
         assert_eq!(dirs(&sh, Some(b"/only")), vec!["/only"]);
-        assert_eq!(dirs(&sh, None), vec!["/abs", "/here/rel", "/here", "/tail/"]);
+        assert_eq!(dirs(&sh, None), vec!["/abs", "rel", ".", "/tail/"]);
         // No `$PATH` at all and an environment the shell already owns: the
         // process's leftover `$PATH` is not consulted — but "no `$PATH`" is not
         // "no search". bash reads a missing value as `""`, which is one empty
@@ -53395,10 +53431,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn the_search_path_separator_is_the_shell_s_own() {
         let split = |s: &[u8]| {
-            split_search_path(s)
-                .iter()
-                .map(|d| String::from_utf8_lossy(d).into_owned())
-                .collect::<Vec<_>>()
+            split_search_path(s).iter().map(|d| String::from_utf8_lossy(d).into_owned()).collect::<Vec<_>>()
         };
         assert_eq!(split(b"/usr/bin:/bin"), vec!["/usr/bin", "/bin"]);
         assert_eq!(split(b"bin"), vec!["bin"]);

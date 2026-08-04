@@ -16110,10 +16110,11 @@ impl Shell {
     /// local frame (once per name) and clear the current binding so the `local`
     /// declaration starts fresh. Returns `false` if not inside a function.
     ///
-    /// Two things stop the clearing: a binding made by an assignment prefix
-    /// outside this frame, and `shopt -s localvar_inherit`. Both are documented
-    /// at their tests below.
-    fn declare_local(&mut self, name: &str) -> bool {
+    /// Three things stop the clearing: a binding made by an assignment prefix
+    /// outside this frame, `shopt -s localvar_inherit`, and this declaration's
+    /// own `-I` (`inherit`), which is the same request made one command at a
+    /// time. All are documented at their tests below.
+    fn declare_local(&mut self, name: &str, inherit: bool) -> bool {
         let Some(frame) = self.local_frames.last() else {
             return false;
         };
@@ -16189,7 +16190,37 @@ impl Shell {
         // is inherited as unset. The one exception is the nameref marking:
         // bash drops `-n` and keeps the *value*, so a `local -n v=t` shadowed
         // by a bare `local v` yields the plain string `t`.
-        if self.shopt.get("localvar_inherit").copied().unwrap_or(false) {
+        //
+        // `-I` (`inherit`) is the same request made one declaration at a time,
+        // and bash implements it as exactly that — every corner above holds for
+        // it too. Measured against bash 5.2.37:
+        //
+        // ```sh
+        // a() { local -i n=5; b; }
+        // b() { local -I n=2+3; declare -p n; }; a   # declare -i n="5"  — the
+        //                                            #  inherited `-i` still
+        //                                            #  transforms the explicit
+        //                                            #  value the `-I` gave
+        // c() { local v=A; d; }
+        // d() { e; }
+        // e() { local -I v; echo "$v"; }; c          # A  — the *nearest* scope
+        //                                            #  that has the name wins,
+        //                                            #  so frames without it are
+        //                                            #  skipped and the global
+        //                                            #  is the last resort
+        // f() { local -n r=t; g; }
+        // g() { local -I r; declare -p r; }; f       # declare -- r="t"  — `-n`
+        //                                            #  dropped, value kept
+        // h() { local v=H; i; }
+        // i() { local +I v; declare -p v; }; h       # declare -- v="H"  — bash
+        //                                            #  records the letter
+        //                                            #  without looking at the
+        //                                            #  sign, so `+I` inherits
+        // ```
+        //
+        // Outside a function `declare -I` is accepted and silent, which falls
+        // out of the `local_frames` check above rather than needing a case.
+        if inherit || self.shopt.get("localvar_inherit").copied().unwrap_or(false) {
             self.nameref_attr.remove(name);
             self.declared.insert(name.to_string());
             return true;
@@ -31983,6 +32014,10 @@ impl Shell {
         // recorded so `declare -p`, `${v@a}` and `declare -t` report it.
         let mut trace = false;
         let mut unset_trace = false;
+        // `-I`: this declaration's locals start as a *copy* of the binding they
+        // shadow, which is what `shopt -s localvar_inherit` asks for standingly.
+        // See [`Shell::declare_local`].
+        let mut inherit = false;
         let mut i = 0;
         while let Some(arg) = args.get(i) {
             if i >= flag_limit {
@@ -32072,10 +32107,14 @@ impl Shell {
                         // still tracked because it suppresses the `-a`/`-A`
                         // self-conflict refusal below.
                         b'p' if enable => print_mode = true,
+                        // `-I` and `+I` both ask to inherit: bash's option loop
+                        // records the letter without looking at its sign, so
+                        // `local +I v` copies the shadowed binding just as
+                        // `local -I v` does.
+                        b'I' => inherit = true,
                         // Accepted but with no attribute effect in this
-                        // reimplementation: +p, -f/-F (function restriction),
-                        // -I (inherit).
-                        b'p' | b'f' | b'F' | b'I' => {}
+                        // reimplementation: +p, -f/-F (function restriction).
+                        b'p' | b'f' | b'F' => {}
                         _ => {
                             // Genuinely unknown option letter: bash prints an
                             // "invalid option" diagnostic plus the usage synopsis
@@ -32569,7 +32608,7 @@ impl Shell {
             // Shadow the name (snapshot + clear) before (re)binding it when this
             // declaration is function-local.
             if make_local {
-                self.declare_local(base_name);
+                self.declare_local(base_name, inherit);
             }
             // A valueless `-n` inherits whatever the binding already holds as
             // the name it refers to, so that value is judged now — after the
@@ -33497,6 +33536,9 @@ impl Shell {
         // run against what it left: `declare -l x=(A); declare -a +u x=(BC)`
         // ends up with no fold at all, not the lowercase one it started with.
         let mut kind_or_scope_flag = false;
+        // `-I`/`+I`: the local this operand shadows into starts as a copy of the
+        // binding it shadows. See [`Shell::declare_local`].
+        let mut inherit = false;
         let mut first_value_letter_on: Option<bool> = None;
         let mut int_named = false;
         let mut seen_lower = false;
@@ -33579,6 +33621,9 @@ impl Shell {
                     b't' if enable => trace = true,
                     b't' => unset_trace = true,
                     b'p' if enable => print_mode = true,
+                    // Both signs ask to inherit — see the same letter in
+                    // [`Shell::builtin_declare_scoped`].
+                    b'I' => inherit = true,
                     _ => {}
                 }
             }
@@ -33840,7 +33885,7 @@ impl Shell {
             // A function-local array declaration shadows the name in the current
             // frame first.
             if make_local {
-                self.declare_local(&target);
+                self.declare_local(&target, inherit);
             }
             // The kind and the value attributes have to go on before the literal
             // binds (the kind picks the binding branch, and `-i`/`-l` transform each
@@ -54658,6 +54703,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("f() { local v; declare -p v; }; g() { local -i v=7; f; }; g").0,
             "declare -- v\n"
+        );
+    }
+
+    #[test]
+    fn a_declaration_inherits_the_binding_it_shadows_under_i() {
+        // `-I` is `localvar_inherit` asked for one declaration at a time, and
+        // bash implements it as exactly that, so the option's every corner
+        // holds for it too. Expectations are bash 5.2.37's — see the corpus
+        // case `a-declaration-inherits-the-binding-it-shadows-under-I.sh`.
+        //
+        // The value comes from the enclosing scope and is a *copy*: writing it
+        // does not reach back out.
+        assert_eq!(
+            run("o() { local v=OUT; m; echo \"[$v]\"; }; \
+                 m() { local -I v; echo \"[$v]\"; v=MID; i; }; \
+                 i() { echo \"[$v]\"; }; o")
+                .0,
+            "[OUT]\n[MID]\n[OUT]\n"
+        );
+        // The *nearest* scope that has the name wins, so a frame without it is
+        // skipped and a global is the last resort.
+        assert_eq!(
+            run("a() { local v=A; b; }; b() { c; }; c() { local -I v; echo \"[$v]\"; }; a").0,
+            "[A]\n"
+        );
+        assert_eq!(run("g=G; f() { local -I g; echo \"[$g]\"; }; f").0, "[G]\n");
+        // Attributes and array contents come across with it.
+        assert_eq!(
+            run("a() { local -i n=5; b; }; b() { local -I n; declare -p n; }; a").0,
+            "declare -i n=\"5\"\n"
+        );
+        assert_eq!(
+            run("a() { local -a v=(x y); b; }; b() { local -I v; declare -p v; }; a").0,
+            "declare -a v=([0]=\"x\" [1]=\"y\")\n"
+        );
+        // `-n` is the exception: the marking is dropped, the target's *name* is
+        // kept as an ordinary string.
+        assert_eq!(
+            run("t=T; a() { local -n r=t; b; }; b() { local -I r; declare -p r; }; a").0,
+            "declare -- r=\"t\"\n"
+        );
+        // An explicit value overrides the inherited one, but an inherited
+        // attribute still transforms it.
+        assert_eq!(
+            run("a() { local -i n=5; b; }; b() { local -I n=2+3; declare -p n; }; a").0,
+            "declare -i n=\"5\"\n"
+        );
+        // bash records the letter without looking at its sign, so `+I` inherits
+        // exactly as `-I` does.
+        assert_eq!(
+            run("a() { local v=A; b; }; b() { local +I v; declare -p v; }; a").0,
+            "declare -- v=\"A\"\n"
+        );
+        // Outside a function there is nothing to shadow, and it is silent.
+        assert_eq!(run("declare -I zz; echo rc=$?").0, "rc=0\n");
+        // Without the flag it is the ordinary fresh local again.
+        assert_eq!(
+            run("a() { local -i n=5; b; }; b() { local n; declare -p n; }; a").0,
+            "declare -- n\n"
         );
     }
 

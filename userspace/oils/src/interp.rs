@@ -15956,7 +15956,7 @@ impl Shell {
         redir: &RedirPlan,
         temp_path: Option<BStr<'_>>,
     ) -> bool {
-        if let Some(path) = self.find_in_path(target, temp_path) {
+        if let Some(path) = self.find_in_path_described(target, temp_path) {
             let ps = bytes::path_to_bytes(&path);
             let line = if verbose {
                 bfmt![target, b" is ", &ps]
@@ -16055,6 +16055,56 @@ impl Shell {
         bytes::bytes_to_path(&self.host_path(path))
     }
 
+    /// Whether `$EXECIGNORE` says to treat `path` as not executable.
+    ///
+    /// bash's `exec_name_should_ignore` (`findcmd.c`): a `:`-separated list of
+    /// patterns, each matched against the **whole** candidate path rather than
+    /// per component — so `*` crosses a `/`, and `bin/tool` is ignored by
+    /// `*tool` or `bin/*` but not by `tool`. bash passes `FNM_CASEFOLD`
+    /// unconditionally, so the match folds case whatever the shell's options
+    /// say: `EXECIGNORE=bin/TOOL` hides `bin/tool` while
+    /// `[[ bin/tool == bin/TOOL ]]` is still false. `shopt extglob` is honoured.
+    ///
+    /// The list filters what a *lookup* turns up — a `$PATH` search, and what
+    /// `type`/`command -v` report about a word that already spelled a path (see
+    /// [`Shell::find_in_path_described`]). Nothing else: running such a word is
+    /// not a lookup and is not filtered, a `hash` hit never reaches the search,
+    /// `test -x` asks the filesystem rather than the shell, and `.`/`source`
+    /// looks for a readable file rather than an executable one.
+    fn exec_name_ignored(&self, path: BStr<'_>) -> bool {
+        let Some(value) = self.param_value("EXECIGNORE") else {
+            return false;
+        };
+        let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
+        let text: Vec<Ch> = bytes::chars(path).collect();
+        value.split(|&b| b == b':').filter(|p| !p.is_empty()).any(|pat| {
+            let pat: Vec<EChar> =
+                bytes::chars(pat).map(|c| EChar { c, quoted: false }).collect();
+            glob_match_echars_ci(&pat, &text, true, extglob)
+        })
+    }
+
+    /// [`Shell::find_in_path`] as `type` and `command -v` ask it: the same
+    /// search, plus `$EXECIGNORE` applied to a word that already spelled a path.
+    ///
+    /// bash reaches that word through `file_status`, which consults
+    /// `$EXECIGNORE`, while *running* it goes straight to `shell_execve`, which
+    /// does not — so `EXECIGNORE=bin/x` makes `command -v bin/x` say nothing
+    /// about a `bin/x` that still runs perfectly well.
+    fn find_in_path_described(
+        &self,
+        name: BStr<'_>,
+        temp_path: Option<BStr<'_>>,
+    ) -> Option<std::path::PathBuf> {
+        let hit = self.find_in_path(name, temp_path)?;
+        if (name.contains(&b'/') || name.contains(&b'\\'))
+            && self.exec_name_ignored(&bytes::path_to_bytes(&hit))
+        {
+            return None;
+        }
+        Some(hit)
+    }
+
     /// Search `$PATH` for an executable named `name`. A name containing a slash
     /// is checked directly. Returns the first matching regular file.
     ///
@@ -16080,14 +16130,17 @@ impl Shell {
             // the exec bit on unix. On the Windows host executability is by
             // extension, so an exact `is_file()` match plus the extension probe
             // below is the closest analogue.
-            if path_is_executable(&self.probe_path(&cand)) {
+            // `$EXECIGNORE` is asked last, of the candidate that would otherwise
+            // have won: it makes a file *stop counting as executable*, so the
+            // search goes on to the next directory rather than ending here.
+            if path_is_executable(&self.probe_path(&cand)) && !self.exec_name_ignored(&cand) {
                 return Some(bytes::bytes_to_path(&cand));
             }
             // Host convenience: try common Windows executable extensions.
             #[cfg(windows)]
             for ext in ["exe", "cmd", "bat"] {
                 let c = shell_path(&bytes::bytes_to_path(&cand).with_extension(ext));
-                if self.probe_path(&c).is_file() {
+                if self.probe_path(&c).is_file() && !self.exec_name_ignored(&c) {
                     return Some(bytes::bytes_to_path(&c));
                 }
             }
@@ -16214,12 +16267,13 @@ impl Shell {
     /// suppressed while preserving first-seen order.
     ///
     /// The same directories and the same executability test as the single-hit
-    /// search, so the first entry it prints is by construction what
-    /// [`Shell::find_in_path`] returns.
+    /// search — `$EXECIGNORE` included, since `type -a` must agree with what
+    /// would actually run, so the first entry it prints is by construction what
+    /// [`Shell::find_in_path_described`] returns.
     fn find_all_in_path(&self, name: BStr<'_>) -> Vec<std::path::PathBuf> {
         let mut out: Vec<std::path::PathBuf> = Vec::new();
         if name.contains(&b'/') || name.contains(&b'\\') {
-            if self.probe_path(name).is_file() {
+            if self.probe_path(name).is_file() && !self.exec_name_ignored(name) {
                 out.push(bytes::bytes_to_path(name));
             }
             return out;
@@ -16232,13 +16286,13 @@ impl Shell {
         };
         for dir in self.search_dirs(None) {
             let cand = Self::path_candidate(&dir, name);
-            if path_is_executable(&self.probe_path(&cand)) {
+            if path_is_executable(&self.probe_path(&cand)) && !self.exec_name_ignored(&cand) {
                 push(&cand);
             }
             #[cfg(windows)]
             for ext in ["exe", "cmd", "bat"] {
                 let c = shell_path(&bytes::bytes_to_path(&cand).with_extension(ext));
-                if self.probe_path(&c).is_file() {
+                if self.probe_path(&c).is_file() && !self.exec_name_ignored(&c) {
                     push(&c);
                 }
             }
@@ -53452,6 +53506,62 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             assert_eq!(split(b"a;b"), vec!["a;b"]);
             assert_eq!(split(b"C:/Windows"), vec!["C", "/Windows"]);
         }
+    }
+
+    /// `$EXECIGNORE`'s patterns are matched against the *whole* candidate path
+    /// rather than one component of it — so a `*` crosses a `/` — and the match
+    /// folds case whatever the `nocasematch`/`nocaseglob` options say, because
+    /// bash passes `FNM_CASEFOLD` here and nowhere near `[[ == ]]`.
+    #[test]
+    fn execignore_matches_a_whole_candidate_path_and_folds_case() {
+        let mut sh = new_shell();
+        let ignored = |sh: &Shell, cand: &[u8]| sh.exec_name_ignored(cand);
+
+        // Unset, empty, and all-empty-entries are each inert.
+        assert!(!ignored(&sh, b"bin/tool"));
+        sh.vars.insert("EXECIGNORE".to_string(), Vec::new());
+        assert!(!ignored(&sh, b"bin/tool"));
+        sh.vars.insert("EXECIGNORE".to_string(), b"::".to_vec());
+        assert!(!ignored(&sh, b"bin/tool"));
+
+        // The pattern sees the whole path, so `*` crosses the slash — and a
+        // pattern anchored at a component boundary that the whole path does not
+        // start with does not match.
+        for pat in [&b"*tool"[..], b"bin/*", b"bin/tool", b"bin*", b"*/tool"] {
+            sh.vars.insert("EXECIGNORE".to_string(), pat.to_vec());
+            assert!(ignored(&sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
+        }
+        for pat in [&b"tool"[..], b"*/bin/*", b"xin/tool"] {
+            sh.vars.insert("EXECIGNORE".to_string(), pat.to_vec());
+            assert!(!ignored(&sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
+        }
+
+        // A list, with the empty entries skipped rather than matching everything.
+        sh.vars.insert("EXECIGNORE".to_string(), b"::*/nope:bin/tool:".to_vec());
+        assert!(ignored(&sh, b"bin/tool"));
+        assert!(!ignored(&sh, b"bin/other"));
+
+        // Case is folded unconditionally — in either direction, and in the
+        // directory as readily as the file.
+        for pat in [&b"bin/TOOL"[..], b"bin/tOOl", b"BIN/tool"] {
+            sh.vars.insert("EXECIGNORE".to_string(), pat.to_vec());
+            assert!(ignored(&sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
+        }
+        sh.vars.insert("EXECIGNORE".to_string(), b"bin/tool".to_vec());
+        assert!(ignored(&sh, b"BIN/TOOL"));
+
+        // A pattern that will not parse is a pattern that matches nothing, not
+        // an error.
+        sh.vars.insert("EXECIGNORE".to_string(), b"[".to_vec());
+        assert!(!ignored(&sh, b"bin/tool"));
+
+        // `extglob` is honoured, so the same value means different things.
+        sh.vars.insert("EXECIGNORE".to_string(), b"bin/@(tool|helper)".to_vec());
+        assert!(!ignored(&sh, b"bin/tool"));
+        sh.shopt.insert("extglob".to_string(), true);
+        assert!(ignored(&sh, b"bin/tool"));
+        assert!(ignored(&sh, b"bin/helper"));
+        assert!(!ignored(&sh, b"bin/other"));
     }
 
     /// The `PATH=` a lookup honours is the *last* one written, and the shell

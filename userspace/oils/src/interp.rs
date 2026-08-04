@@ -13137,9 +13137,9 @@ impl Shell {
     /// bash's `get_var_and_type` split, mirrored by `looks_through` in the
     /// `IndirectOp` arm of [`Shell::expand_dynamic_with`].
     ///
-    /// A *recogniser*, like [`Shell::indirect_array_elems`]: it reports nothing,
-    /// so a `None` costs only a second silent pointer lookup on the general
-    /// path — which is where the complaint belongs.
+    /// A *recogniser*, like [`Shell::indirect_ref_part`]: it reports nothing, so
+    /// a `None` costs only a second silent pointer lookup on the general path —
+    /// which is where the complaint belongs.
     fn indirect_op_part(
         &mut self,
         refname: &str,
@@ -13334,7 +13334,16 @@ impl Shell {
                 self.note_unbound_modifier(name, index);
                 return Str::new();
             }
-            let Some(target) = self.attr_report_target(name) else {
+            // An indirection resolves to a *name*, and that name may carry its
+            // own subscript: `r='n[1]'` makes the modifier's parameter the text
+            // `n[1]`. The rename could not put that subscript back into `index`
+            // — the word there would be evaluated a second time, unexpanded (see
+            // the `IndirectOp` arm of [`Self::expand_dynamic_with`]) — so it is
+            // split off here. Both operators then ask about the *base*: bash
+            // answers `${!r@a}` with the array's `a` and `${!r@A}` with
+            // `declare -a n='by'`, the element the reference already read.
+            let subscripted = subscript_base(name).filter(|b| is_identifier(b));
+            let Some(target) = self.attr_report_target(subscripted.unwrap_or(name)) else {
                 return Str::new();
             };
             // Reuse that ask — but only when it was an ask about this element
@@ -13349,7 +13358,13 @@ impl Shell {
             //     it is the *name* the reference holds, so `${!r@A}` would
             //     recreate the target with its own name for a value. That ask
             //     evaluated no subscript, so asking again is still one.
-            let reuse = matches!(operand, Operand::Param) && elem.is_some();
+            //
+            // A reference that resolved to a subscripted name is the exception
+            // to the exception: its operand *is* the element (the nameref case
+            // looks through to it too), and `target` no longer carries the
+            // subscript, so asking again would read element 0.
+            let reuse =
+                subscripted.is_some() || (matches!(operand, Operand::Param) && elem.is_some());
             let elem = if reuse {
                 elem
             } else {
@@ -43095,19 +43110,35 @@ fn is_valid_indirect_target(s: &str) -> bool {
     if s.bytes().all(|b| b.is_ascii_digit()) {
         return true;
     }
-    // A plain identifier, optionally followed by a non-empty `[subscript]`.
-    let name = if let Some(open) = s.find('[') {
-        let Some(inner) = s.strip_suffix(']') else {
-            return false; // `[` without a closing `]`
-        };
-        if inner.get(open + 1..).unwrap_or("").is_empty() {
-            return false; // empty subscript `name[]`
-        }
-        &s[..open]
-    } else {
-        s
+    // A plain identifier, optionally followed by a non-empty `[subscript]` —
+    // a malformed subscript answers with the whole string, which holds a `[`
+    // and so is not an identifier.
+    is_identifier(subscript_base(s).unwrap_or(s))
+}
+
+/// The base identifier of a reference spelled `name[subscript]`, or `None` when
+/// `s` carries no subscript at all. A `[` without a closing `]`, or an empty
+/// subscript, answers with the whole of `s` so the caller still rejects it.
+///
+/// Only the *spelling* is inspected — the subscript is not evaluated, and the
+/// base need not exist. Both callers want the same split: an indirect target
+/// (`ptr='n[1]'`) is the one place a resolved parameter name can carry its
+/// subscript inside the name.
+fn subscript_base(s: &str) -> Option<&str> {
+    let open = s.find('[')?;
+    let Some(inner) = s.strip_suffix(']') else {
+        return Some(s); // `[` without a closing `]` — not a name either way
     };
-    let mut bytes = name.bytes();
+    if inner.get(open.checked_add(1)?..).unwrap_or("").is_empty() {
+        return Some(s); // empty subscript `name[]`
+    }
+    s.get(..open)
+}
+
+/// Whether `s` is a plain shell identifier: a leading letter or `_`, then
+/// letters, digits and `_`.
+fn is_identifier(s: &str) -> bool {
+    let mut bytes = s.bytes();
     match bytes.next() {
         Some(b) if b == b'_' || b.is_ascii_alphabetic() => {}
         _ => return false,

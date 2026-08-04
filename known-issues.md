@@ -31294,82 +31294,101 @@ fd 2, and `exec_stdout_shadowing`'s "fd 1's ambient sink is a value, not a stack
 comment would stop being true — which is the same reason it is worth doing: the
 asymmetry between the two standard write descriptors is itself the tech debt.
 
-### TD-OILS-COMMAND-V-DOES-NOT-CONSULT-THE-HASH-TABLE. a hashed command is neither reported from the table nor exempt from `$EXECIGNORE` — OPEN — 2026-08-04
+### TD-OILS-COMMAND-V-DOES-NOT-CONSULT-THE-HASH-TABLE. a described name does not ask the `hash` table — ✅ **FIXED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::command_describe_file` and
-`find_in_path_described`, which go straight to the `$PATH` walk. The hash table
-(`Shell::hashed`) is read on the *execution* path but not on the *description*
-one.
+`Shell::builtin_type`, which went straight to the `$PATH` walk. The hash table
+(`Shell::cmd_hash`) was read on the *execution* path but not on the
+*description* one.
 
-**Reproduce (1) — a hashed command that `$PATH` can no longer find:**
+**Note on the original report.** This entry was first written from a model that
+turned out to be partly wrong, and its original reproducers do not reproduce.
+Measured against bash 5.2.37: `command -v` / `type` never *hash* a name (only
+running it does), and **any** assignment to `$PATH` flushes the whole table — so
+the original "hash it with `command -v`, then reassign `$PATH`" recipes emptied
+the table before the interesting line ran. osh already got both of those right,
+and already reported `tool is hashed (…)` from `type`'s verbose form.
+
+**The real divergences** (measured with a fixture that is *run* to hash it, and
+without touching `$PATH` afterwards) were narrower:
+
+- `command -v` and `command -V` did not consult the table at all.
+- `type -a` counted a hash entry as "found" when it should not: bash's `-a`
+  (without `-P`) is the one form that ignores the table and walks `$PATH`.
+- `type -P` and `type -p` checked the `$PATH` hits before the table, so a hash
+  entry lost to a later `$PATH` answer.
+
+**Reproduce (needs a real run to populate the table, and no later `PATH=`):**
 
 ```sh
-mkdir -p bin; printf '#!/bin/sh\necho x\n' > bin/tool; chmod +x bin/tool
-PATH=bin; hash tool          # remembers bin/tool
-PATH=/nonexistent
-command -v tool
+mkdir -p bin bin2
+printf '#!/bin/sh\necho one\n' > bin/tool
+printf '#!/bin/sh\necho two\n' > bin2/tool
+chmod +x bin/tool bin2/tool
+PATH=bin:bin2; hash -r; tool > /dev/null     # remembers bin/tool
+command -v tool          # bash: ./bin/tool   osh (before): bin/tool
+type -P tool             # bash: ./bin/tool   osh (before): bin/tool
+type -aP tool            # bash: ./bin/tool (one line, from the table)
+type -ap tool            # bash: bin/tool then bin2/tool (the $PATH walk)
 ```
 
-bash prints `bin/tool` — the table answers, the search never runs.
-osh prints nothing and exits 1.
+**The measured rule.** The table answers **every** describing form *except*
+`-a` without `-P`: `command -v`, `command -V`, `type`, `type -t`, `type -p`,
+`type -P` and `type -aP` all short-circuit to it, while `type -a`/`-at`/`-ap`
+walk `$PATH`. A `PATH=` written as a *prefix* on the describing command bypasses
+the table entirely — it is asking about a different search. `$EXECIGNORE` never
+reaches a hash hit, because it filters the search and the search never runs.
 
-**Reproduce (2) — `$EXECIGNORE` should not reach a hash hit:**
+**The fix.** Two predicates next to `hash_remember`, so no call site can drift
+from another:
 
-```sh
-PATH=bin; hash -r; command -v tool > /dev/null   # hashes bin/tool
-EXECIGNORE='bin/tool'
-command -v tool
-```
+- `hashed_description(name) -> Option<Str>` — the one place that turns a table
+  entry into the spelling it is *described* by (see
+  TD-OILS-A-DESCRIBED-HASH-HIT-LOSES-ITS-DOT-SLASH below for what that spelling
+  is).
+- `hash_answers_description(mode_a, mode_pp) -> bool` — `mode_pp || !mode_a`,
+  the whole truth table above in one expression.
 
-bash still prints `bin/tool`: `$EXECIGNORE` filters the *search*, and a hash hit
-never reaches the search. osh prints nothing, because it always searches and the
-search now filters.
+`command_describe_file` now asks `hashed_description` before
+`find_in_path_described`, gated on there being no `PATH=` prefix and no slash in
+the name; `builtin_type` computes `hashed` once through
+`hash_answers_description` and consults it ahead of `files` in every arm.
+Covered by the unit test
+`a_hashed_command_is_described_with_a_dot_slash_while_it_still_runs`; it cannot
+be a corpus case because populating the table needs a *runnable* fixture, and
+shebang scripts do not run on the Windows dev host
+(HOST-OILS-SHEBANG-SCRIPTS-DO-NOT-RUN-ON-THE-WINDOWS-DEV-HOST).
 
-**Impact.** Anything that describes a name — `command -v`, `command -V`, `type`,
-`type -a`, `type -P` — disagrees with bash whenever the name has been hashed and
-the `$PATH` answer has since changed or been ignored. `type` also loses bash's
-distinct `tool is hashed (bin/tool)` wording, which the corpus does not yet
-exercise.
+### TD-OILS-A-DESCRIBED-HASH-HIT-LOSES-ITS-DOT-SLASH. bash writes `./bin/tool` where osh writes `bin/tool` — ✅ **FIXED 2026-08-04**
 
-**What the proper fix looks like.** `command_describe_file` should ask the hash
-table first, exactly as `execute_command` does, and report a hit from it without
-consulting `$PATH` or `$EXECIGNORE` — bash's `find_hashed_filename`, checked
-before `search_for_command`'s path walk. The table's entry is already stored in
-the shell's spelling, so nothing else has to change. Note that bash *does*
-re-`stat` a hashed file and drops the entry if it has gone (`phash_remove` in
-`find_hashed_filename`), so the fix is "look it up and validate it", not "trust
-it blindly".
-
-### TD-OILS-A-DESCRIBED-HASH-HIT-LOSES-ITS-DOT-SLASH. bash writes `./bin/tool` where osh writes `bin/tool` — OPEN — 2026-08-04
-
-**Where:** `userspace/oils/src/interp.rs` — the same description path as
-TD-OILS-COMMAND-V-DOES-NOT-CONSULT-THE-HASH-TABLE, and blocked behind it: the
-divergence is only reachable once a hash hit is reported at all.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::hashed_description`, the same
+description path as the entry above, and fixed with it: the divergence is only
+reachable once a hash hit is reported at all.
 
 **Reproduce:**
 
 ```sh
 mkdir -p bin; printf '#!/bin/sh\necho x\n' > bin/tool; chmod +x bin/tool
-PATH=bin; hash -r; command -v tool > /dev/null
-hash
+PATH=bin; hash -r; tool > /dev/null
+hash                # bash lists  bin/tool   — the stored path, raw
+command -v tool     # bash prints ./bin/tool — the described path
 ```
 
-bash's `hash` listing and its `command -v` both answer `./bin/tool`; osh answers
-`bin/tool`.
+**Why (measured, replacing the original guess).** The original entry blamed
+bash's `sh_makepath(MP_DOCWD)` at *store* time and claimed `hash`'s own listing
+also shows `./bin/tool`. Neither is so. The table stores the search's own
+spelling — `bin/tool` — and `hash`'s listing prints it raw. The `./` is added at
+**description** time, and only under two conditions: the stored path is
+*relative*, **and** `./` + stored is *currently executable*. The executability
+check is made afresh on every description and is relative to the shell's cwd, so
+a `cd` or a deleted file changes the answer without changing the table. An
+absolute entry never gets a `./`.
 
-**Why.** bash's `sh_makepath` is called with `MP_DOCWD` when the resulting path
-is to be *remembered* rather than merely reported, and that flag prefixes `./`
-to a relative result so the remembered name cannot later be re-searched as a
-bare name. It is a property of the hash table's spelling, not of the `$PATH`
-entry's — a plain `command -v` on an unhashed name still answers `bin/tool`,
-which osh already gets right (corpus case
-`a-path-entry-is-reported-exactly-as-it-was-written.sh`).
-
-**What the proper fix looks like.** When storing into `Shell::hashed`, prefix
-`./` to a path that is relative and does not already begin with `./` — bash's
-`MP_DOCWD` — and report the stored spelling verbatim thereafter. Do this
-together with the hash-table lookup above, since neither is observable without
-the other.
+**The fix.** `hashed_description` implements exactly that: return the stored
+path unchanged if `path_is_rooted`, else probe `./` + stored via
+`path_is_executable(self.probe_path(..))` and return the dotted form only if it
+still runs. The unit test pins all four cases (relative-and-runnable,
+after-a-`cd`, after-the-file-is-removed, absolute).
 
 ### HOST-OILS-MSYS-DERIVES-THE-EXECUTE-BIT-FROM-A-SHEBANG. `[ -x file ]` disagrees on the Windows dev host — WONTFIX (host artifact) — 2026-08-04
 

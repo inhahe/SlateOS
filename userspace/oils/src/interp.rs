@@ -2977,10 +2977,28 @@ enum DynListing {
     /// `=()`. The call-stack arrays are always present, and empty outside a
     /// function: `declare -a BASH_SOURCE=()`.
     EmptyArray,
+    /// Nothing at all, on a name of the *array* kind — `declare -a FUNCNAME`.
+    ///
+    /// This is [`Self::Bare`]'s reason on an array: bash builds `BASH_SOURCE`
+    /// and `BASH_LINENO` at startup by assigning them an empty array, but
+    /// creates `FUNCNAME` without ever assigning it, and an array that was
+    /// never assigned prints without the `=()` (see
+    /// [`Shell::note_int_refusal_assigned`], which is the same distinction
+    /// reached from the other direction).
+    BareArray,
     /// The live value, exactly as the named form prints it. `PPID` is an
     /// ordinary variable bash binds once at startup rather than a computed one,
     /// so its stored value is there for the listing to print.
     Live,
+}
+
+impl DynListing {
+    /// Whether the name is of the *array* kind — which decides how an
+    /// assignment to it is taken and whether there is a scalar to convert —
+    /// however the listing then ends.
+    fn is_array(self) -> bool {
+        matches!(self, Self::EmptyArray | Self::BareArray)
+    }
 }
 
 /// What became of the write to `getopts`' name operand. See
@@ -10963,7 +10981,7 @@ impl Shell {
                     && let Some(d) = self.dynamic_special(&a.name)
                     // The call-stack arrays take an assignment as an ordinary
                     // array store; only the scalars are intercepted here.
-                    && d.listed != DynListing::EmptyArray
+                    && !d.listed.is_array()
                 {
                     // Every one of these names is a number to bash, so the
                     // string is parsed here and it is the *number* that is
@@ -13239,12 +13257,16 @@ impl Shell {
     /// than bash. Every listing that walks the variable tables must merge this
     /// table in to match bash; see [`DynamicSpecial`].
     ///
-    /// `BASH_SOURCE`/`BASH_LINENO` are call-stack arrays that bash keeps present
-    /// (possibly empty) at every level; osh only stores them in `arrays` while
-    /// inside a function/script, so they are listed here too to match bash at
-    /// the top level. `FUNCNAME` is deliberately *absent*: bash does not list it
-    /// outside a function, and osh's in-function `arrays` entry is picked up
-    /// there, so it appears only where bash lists it.
+    /// `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO` are call-stack arrays that bash
+    /// keeps present (possibly empty) at every level; osh only stores them in
+    /// `arrays` while a frame is active, so they are listed here too to match
+    /// bash at the top level. `FUNCNAME` is the one of the three that is empty
+    /// *and* absent from `arrays` at a script's top level (`refresh_funcname`
+    /// removes it whenever no function frame is up), so it is the one this table
+    /// actually answers for; the other two are here for the `-c`/stdin case.
+    /// `unset FUNCNAME` still takes the binding away for good, which is what
+    /// makes it stay gone inside a later function call — bash refuses to unset
+    /// the other two at all.
     ///
     /// Both flag columns and the listing form are measured against bash 5.2
     /// (`declare -p`, `declare -p NAME`, `declare -i`, `declare -a`,
@@ -13258,6 +13280,7 @@ impl Shell {
         DynamicSpecial { name: "BASH_ARGV0", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard, assign_evals: false },
         DynamicSpecial { name: "BASH_LINENO", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray, assign: DynAssign::Discard, assign_evals: false },
         DynamicSpecial { name: "BASH_SOURCE", named_flags: "a", listed_flags: "a", listed: DynListing::EmptyArray, assign: DynAssign::Discard, assign_evals: false },
+        DynamicSpecial { name: "FUNCNAME", named_flags: "a", listed_flags: "a", listed: DynListing::BareArray, assign: DynAssign::Discard, assign_evals: false },
         // Assignable: the number given moves the depth counter itself, so it is
         // what this level reads and each level further in reads one more.
         DynamicSpecial { name: "BASH_SUBSHELL", named_flags: "", listed_flags: "", listed: DynListing::Bare, assign: DynAssign::Discard, assign_evals: false },
@@ -13294,13 +13317,30 @@ impl Shell {
         Self::dynamic_special_entry(name)
     }
 
-    /// The dynamic special names a listing or a name enumeration should still
-    /// report — every table entry `unset` has not dropped.
+    /// The dynamic special names a *listing* should still report — every table
+    /// entry `unset` has not dropped.
     fn dynamic_special_live_names<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
         Self::DYNAMIC_SPECIALS
             .iter()
             .map(|d| d.name)
             .filter(|n| !self.dyn_unset.contains(*n))
+    }
+
+    /// The dynamic special names a *name enumeration* should report — the live
+    /// ones, minus the ones bash holds invisible.
+    ///
+    /// [`DynListing::BareArray`] is that invisibility by another name: the
+    /// array prints bare because it was never assigned, and bash's
+    /// `all_visible_variables` passes over it for exactly that reason, so at a
+    /// script's top level `${!FUNC*}` is empty though `declare -p FUNCNAME`
+    /// reports the name. Once a frame fills `FUNCNAME` in it has a real
+    /// `arrays` entry with elements, and [`Shell::visible_var_names`] names it
+    /// from there.
+    fn dynamic_special_visible_names<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
+        Self::DYNAMIC_SPECIALS
+            .iter()
+            .filter(|d| !self.dyn_unset.contains(d.name) && d.listed != DynListing::BareArray)
+            .map(|d| d.name)
     }
 
     /// The table entry a *listing* should use for `name`: `None` when the name
@@ -13410,7 +13450,7 @@ impl Shell {
     /// and the caller's ordinary array handling applies to them unchanged.
     fn dyn_array_convert(&mut self, name: &str) -> Option<Str> {
         let d = self.dynamic_special(name)?;
-        if d.listed == DynListing::EmptyArray {
+        if d.listed.is_array() {
             return None;
         }
         // A `local` of the name already shadowed the dynamic binding with an
@@ -13546,9 +13586,7 @@ impl Shell {
     fn name_is_array_kind(&self, name: &str) -> bool {
         self.arrays.contains_key(name)
             || self.assoc.contains_key(name)
-            || self
-                .dynamic_special(name)
-                .is_some_and(|d| d.listed == DynListing::EmptyArray)
+            || self.dynamic_special(name).is_some_and(|d| d.listed.is_array())
     }
 
     /// Whether the array `name` — of either kind — *holds* a value, as opposed
@@ -13595,7 +13633,7 @@ impl Shell {
                     .map(String::as_str)
                     .filter(|k| self.array_is_visible(k)),
             )
-            .chain(self.dynamic_special_live_names())
+            .chain(self.dynamic_special_visible_names())
             .collect();
         names.sort_unstable();
         names.dedup();
@@ -14705,11 +14743,20 @@ impl Shell {
     ///     differ in length at a script's top level (FUNCNAME 0, the others 1).
     ///   * `FUNCNAME` is left *unset* whenever no function frame is active,
     ///     even inside a sourced file whose frame the other two arrays show.
+    ///
+    /// `unset FUNCNAME` takes the name away for good — bash drops the binding
+    /// and never restores it, so a later function call finds nothing there
+    /// (`unset FUNCNAME; f() { declare -p FUNCNAME; }; f` reports `not found`).
+    /// That is the [`Shell::dyn_unset`] state, and this stops writing the array
+    /// once the name is in it. The other two cannot reach that state: bash
+    /// refuses to unset them.
     fn refresh_funcname(&mut self) {
         let mut names: BTreeMap<usize, Str> = BTreeMap::new();
         let mut linenos: BTreeMap<usize, Str> = BTreeMap::new();
         let mut sources: BTreeMap<usize, Str> = BTreeMap::new();
-        let in_function = !self.fn_stack.is_empty();
+        // A `FUNCNAME` whose binding `unset` dropped stays dropped, frames or
+        // no frames.
+        let in_function = !self.fn_stack.is_empty() && !self.dyn_unset.contains("FUNCNAME");
         let mut idx = 0usize;
         // Walk the merged stack from innermost (last) to outermost (first).
         for (name, src, line) in self.merged_frames().into_iter().rev() {
@@ -29001,10 +29048,11 @@ impl Shell {
         // The table's letters plus any a declaration builtin has applied: the
         // declaration did not replace the binding, it only added to it.
         let letters = self.dynamic_special_letters(name, d.named_flags);
-        if d.listed == DynListing::EmptyArray {
+        if d.listed.is_array() {
             // A call-stack array has no scalar value to read, and outside a
-            // function bash prints it as the empty array either way.
-            return Some(Self::declare_line(&letters, name, b"=()"));
+            // function bash prints it the way it was built — see [`DynListing`].
+            let tail: &[u8] = if d.listed == DynListing::EmptyArray { b"=()" } else { b"" };
+            return Some(Self::declare_line(&letters, name, tail));
         }
         let val = self.param_value(name)?;
         Some(Self::declare_line(&letters, name, &bfmt![b"=\"", &val, b"\""]))
@@ -29016,9 +29064,10 @@ impl Shell {
     fn format_dynamic_special_listing(&self, name: &str) -> Option<Str> {
         let d = self.dynamic_special_listed(name)?;
         let letters = self.dynamic_special_letters(name, self.dynamic_special_listed_flags(d));
-        if d.listed == DynListing::EmptyArray {
+        if d.listed.is_array() {
             // A call-stack array has no scalar value cell to print from.
-            return Some(Self::declare_line(&letters, name, b"=()"));
+            let tail: &[u8] = if d.listed == DynListing::EmptyArray { b"=()" } else { b"" };
+            return Some(Self::declare_line(&letters, name, tail));
         }
         // The value cell, not a fresh reading: a listing walks the variable
         // table and prints what is in it, so it reports the value the last
@@ -30579,7 +30628,18 @@ impl Shell {
         want_indexed: bool,
     ) -> Option<(&'static str, &'static str)> {
         if want_assoc {
-            if self.arrays.contains_key(name) {
+            // A live array-kind dynamic special is an indexed array whether or
+            // not a frame has materialised it into `arrays` yet: at a script's
+            // top level `FUNCNAME` has no table entry at all, and bash still
+            // refuses `declare -A FUNCNAME`. `dynamic_special_listed` is the
+            // right question because it stands down once a real binding —
+            // a `local` of the name, say — shadows the table entry, and the
+            // table check above then speaks for that binding instead.
+            if self.arrays.contains_key(name)
+                || self
+                    .dynamic_special_listed(name)
+                    .is_some_and(|d| d.listed.is_array())
+            {
                 Some(("indexed", "associative"))
             } else {
                 None
@@ -57329,6 +57389,71 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("export SECONDS; unset SECONDS; declare -p SECONDS").1, 1);
         // And none of it escapes the subshell that did it.
         assert_eq!(run(&format!("( declare SECONDS ); {listed}")).0, "gone\n");
+    }
+
+    #[test]
+    fn funcname_is_present_and_empty_outside_a_function() {
+        // bash keeps `FUNCNAME` present at every level, as it does the other two
+        // call-stack arrays. What differs is how it was built: the other two
+        // were given an empty array and so print `=()`, while `FUNCNAME` was
+        // never assigned and so prints bare — the same never-assigned state a
+        // `declare -a q` leaves behind.
+        assert_eq!(run("declare -p FUNCNAME").0, "declare -a FUNCNAME\n");
+        assert_eq!(run("declare -p FUNCNAME").1, 0);
+        assert_eq!(run("declare -p BASH_SOURCE").0, "declare -a BASH_SOURCE=()\n");
+        assert_eq!(run("declare -p BASH_LINENO").0, "declare -a BASH_LINENO=()\n");
+        // The flag-filtered listings report it too…
+        assert_eq!(run("declare -a | grep -c '^declare -a FUNCNAME$'").0, "1\n");
+        // …while every listing built from *values* passes over it, exactly as
+        // it passes over a bare `declare -a q`.
+        assert_eq!(run("echo [${!FUNCNAME*}]").0, "[]\n");
+        assert_eq!(run("echo [$(compgen -A variable FUNCNAME)]").0, "[]\n");
+        assert_eq!(run("echo [$(compgen -A arrayvar FUNCNAME)]").0, "[]\n");
+        // A frame fills it in, and then it is named like any other array.
+        assert_eq!(
+            run("f() { echo \"[${!FUNCNAME*}] [$(compgen -A arrayvar FUNCNAME)]\"; }; f").0,
+            "[FUNCNAME] [FUNCNAME]\n"
+        );
+        // The expansion side does not follow the listing: the name is reported
+        // and still expands unset, until a call settles the two.
+        assert_eq!(run("echo set=[${FUNCNAME+SET}] n=[${#FUNCNAME[@]}]").0, "set=[] n=[0]\n");
+        // (`n` is 1 rather than bash's 2 for a script only because this harness
+        // has no enclosing `main` frame; the corpus case measures the depth.)
+        assert_eq!(
+            run("f() { echo set=[${FUNCNAME+SET}] n=[${#FUNCNAME[@]}]; }; f").0,
+            "set=[SET] n=[1]\n"
+        );
+
+        // Being an array is what makes a reference to it impossible, and what
+        // makes `-A` a conversion rather than a fresh declaration — both of
+        // which have to be answered at the top level, where there is no table
+        // entry to read the kind off.
+        assert_eq!(
+            run("declare -n FUNCNAME=t 2>/dev/null; echo rc=$?").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("declare -A FUNCNAME 2>/dev/null; echo rc=$?; declare -p FUNCNAME").0,
+            "rc=1\ndeclare -a FUNCNAME\n"
+        );
+        // …and `-a` is the kind it already has, so it is a no-op.
+        assert_eq!(run("declare -a FUNCNAME; declare -p FUNCNAME").0, "declare -a FUNCNAME\n");
+
+        // `unset` is the one thing that tells the three apart for good: bash
+        // refuses the two it assigned and lets `FUNCNAME` go, after which a
+        // later call finds nothing there.
+        assert_eq!(run("unset FUNCNAME; echo rc=$?").0, "rc=0\n");
+        assert_eq!(run("unset BASH_SOURCE 2>/dev/null; echo rc=$?").0, "rc=1\n");
+        assert_eq!(run("unset BASH_LINENO 2>/dev/null; echo rc=$?").0, "rc=1\n");
+        assert_eq!(
+            run("unset FUNCNAME; f() { declare -p FUNCNAME 2>/dev/null; echo rc=$?; }; f").0,
+            "rc=1\n"
+        );
+        // After that it is an ordinary name, and an assignment sticks.
+        assert_eq!(
+            run("unset FUNCNAME; FUNCNAME=zz; f() { declare -p FUNCNAME; }; f").0,
+            "declare -- FUNCNAME=\"zz\"\n"
+        );
     }
 
     #[test]

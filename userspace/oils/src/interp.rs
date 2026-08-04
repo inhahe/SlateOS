@@ -2462,6 +2462,20 @@ struct TempScope {
     /// ([`Shell::reveal_temp_shadow`]) and whether a valueless `local` inherits
     /// the prefix's value ([`Shell::declare_local`]).
     local_depth: usize,
+    /// Whether this scope is the temporary environment of a **function call** —
+    /// the prefix of the very command that then pushed local frame
+    /// `local_depth`.
+    ///
+    /// bash keeps a function call's temporary environment in the *same*
+    /// variable context as that call's locals, so the two are one scope level:
+    /// a `local` of a name the prefix bound writes over the prefix's binding
+    /// rather than shadowing it ([`Shell::declare_local`]), and an `unset` from
+    /// a deeper frame pops both at once ([`Shell::unbind_var`]). A prefix on
+    /// anything else — `q=3 eval 'f'`, `q=3 some_builtin` — is a scope of its
+    /// own that any function called underneath it shadows normally, which is
+    /// the whole reason this needs recording: `local_depth` alone cannot tell
+    /// `q=3 f` from `q=3 eval 'f'`.
+    call_env: bool,
     /// The names bound, each with the [`VarSnapshot`] it displaced.
     binds: Vec<(String, VarSnapshot)>,
 }
@@ -15419,6 +15433,14 @@ impl Shell {
         // rather than going on computing, and an `unset` of one reveals what it
         // displaced at once.
         let temp_pushed = self.push_temp_shadow(assigns);
+        // …but it is the *call's* environment, which bash keeps in the same
+        // variable context as the call's locals. Mark it so `local` and `unset`
+        // can treat the two as one scope level; see [`TempScope::call_env`].
+        // `local_depth` was recorded as the index the frame below is about to
+        // take, which is what ties the two together.
+        if temp_pushed && let Some(scope) = self.temp_shadow.last_mut() {
+            scope.call_env = true;
+        }
 
         // Push a fresh local scope so `local` declarations inside the body are
         // restored on return.
@@ -25173,6 +25195,10 @@ impl Shell {
         }
         self.temp_shadow.push(TempScope {
             local_depth: self.local_frames.len(),
+            // Set by [`Shell::call_function`] for the one scope that is a
+            // call's temporary environment; every other prefix is its own
+            // scope.
+            call_env: false,
             binds,
         });
         true
@@ -34780,6 +34806,38 @@ impl Shell {
         // Decided before anything is removed, because the reveal at the end
         // takes the prefix's away.
         let shadowed = self.is_ordinary_shadowed(name);
+        // Which call frame owns the innermost `local` binding of the name, if
+        // any. `unset` does not simply "make the name unset": it takes the
+        // innermost binding off the scope stack and lets the next one show
+        // through, so this decides *whose* binding goes. See the tail of this
+        // function for the three outcomes.
+        let owner = self
+            .local_frames
+            .iter()
+            .rposition(|f| f.iter().any(|(n, _)| n == name));
+        // …unless an assignment prefix opened *inside* that frame binds the
+        // name too, in which case the prefix's binding is the nearer one and
+        // [`Shell::reveal_temp_shadow`] is the pop that applies. A scope
+        // recorded `local_frames.len()` when it opened, so it is inside frame
+        // `idx` exactly when that length was already past it.
+        let owner = owner.filter(|&idx| {
+            !self
+                .temp_shadow
+                .iter()
+                .any(|s| s.local_depth > idx && s.binds.iter().any(|(n, _)| n == name))
+        });
+        // Whether that frame's binding came out of its own call's temporary
+        // environment, which is the same scope level (see
+        // [`TempScope::call_env`]). It changes both outcomes: the pop takes the
+        // prefix's binding with it, and the mark keeps the export marking —
+        // bash's "preserve the export attribute if the variable came from a
+        // temporary environment", the one attribute `unset` does not drop.
+        let from_call_env = owner.is_some_and(|idx| {
+            self.temp_shadow
+                .iter()
+                .any(|s| s.call_env && s.local_depth == idx && s.binds.iter().any(|(n, _)| n == name))
+        });
+        let was_exported = self.exported.contains(name);
         self.vars.remove(name);
         self.arrays.remove(name);
         self.assoc.remove(name);
@@ -34818,10 +34876,96 @@ impl Shell {
         if !shadowed {
             self.drop_dynamic_binding(name);
         }
-        // A prefix binding is not merely cleared but taken out of its scope, so
-        // what it displaced comes back at once rather than when the command
-        // ends. Last, so it outranks the clearing above.
-        self.reveal_temp_shadow(name);
+        // Now let the next binding show through — the half of `unset` that the
+        // clearing above cannot express, because the clearing only reaches the
+        // live tables and a shadowed binding lives in a scope.
+        //
+        // A `local` of the **frame now running** is the one case bash does not
+        // pop: it is "marked unset" instead, keeping its name. `declare -p`
+        // still reports the bare `declare -- c`, the name is still local, a
+        // later write in the frame still goes to it, and repeating the `unset`
+        // never reaches past it:
+        //
+        // ```sh
+        // c=global
+        // f() { local c=one; unset c; declare -p c; c=two; }; f   # declare -- c
+        // echo "$c"                                               # global
+        // ```
+        //
+        // An **enclosing** frame's local is popped, so the binding underneath —
+        // an outer local, or the global — becomes visible at once, a second
+        // `unset` pops the level below that, and the frame that declared it has
+        // nothing left to restore on return, which is why a write after the
+        // unset outlives it:
+        //
+        // ```sh
+        // a=global
+        // i1() { unset a; a=fromi1; }
+        // i2() { local a=two; i1; }; i2
+        // echo "$a"                                               # fromi1
+        // ```
+        //
+        // `shopt -s localvar_unset` — off by default — extends the current
+        // frame's rule to every frame: "identical to the behavior of unsetting
+        // local variables at the current function scope", as the manual puts
+        // it.
+        match owner {
+            Some(idx)
+                if idx + 1 == self.local_frames.len()
+                    || self.shopt.get("localvar_unset").copied().unwrap_or(false) =>
+            {
+                // Marked, not removed: the name survives the clearing above,
+                // and with it the export marking a temporary environment gave
+                // it. `q=1; f() { local q=2; unset q; declare -p q; }; q=3 f`
+                // reports `declare -x q`.
+                self.declared.insert(name.to_string());
+                if from_call_env && was_exported {
+                    self.exported.insert(name.to_string());
+                }
+            }
+            Some(idx) => {
+                // Popped: the frame gives its snapshot back and forgets it. A
+                // prefix scope binding the name is necessarily *outside* this
+                // frame (the filter above saw to that), so it stays hidden
+                // underneath what we just revealed and `reveal_temp_shadow`
+                // must not run as well — that would pop two levels at once.
+                let frame_snap = self.local_frames.get_mut(idx).and_then(|f| {
+                    f.iter()
+                        .position(|(n, _)| n == name)
+                        .map(|at| f.remove(at).1)
+                });
+                // …with one exception: the frame's *own* call environment is
+                // not a level underneath it but the same level, so the two go
+                // together and what shows through is what the prefix displaced.
+                // The frame's snapshot is then only the prefix's binding read
+                // back, and is dropped rather than restored.
+                //
+                // ```sh
+                // q=1
+                // f() { local q=2; g; }
+                // g() { unset q; declare -p q; }
+                // q=3 f                       # declare -- q="1", not q="3"
+                // ```
+                let call_snap = self
+                    .temp_shadow
+                    .iter_mut()
+                    .find(|s| s.call_env && s.local_depth == idx)
+                    .and_then(|s| {
+                        s.binds
+                            .iter()
+                            .position(|(n, _)| n == name)
+                            .map(|at| s.binds.remove(at).1)
+                    });
+                if let Some(snap) = call_snap.or(frame_snap) {
+                    self.restore_var(name, snap);
+                }
+            }
+            // No frame owns it, so any prefix binding is the innermost one. It
+            // too is taken out of its scope rather than merely cleared, so what
+            // it displaced comes back at once rather than when the command
+            // ends. Last, so it outranks the clearing above.
+            None => self.reveal_temp_shadow(name),
+        }
         // Unsetting `HOSTFILE` throws the hostname list away, rather than
         // leaving it to be added to — the one asymmetry in
         // [`Shell::compgen_hostnames`], and the reason it needs a hook here:
@@ -54236,6 +54380,84 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("f() { local v; declare -p v; }; g() { local -i v=7; f; }; g").0,
             "declare -- v\n"
+        );
+    }
+
+    #[test]
+    fn unset_of_a_local_pops_one_shadow() {
+        // `unset NAME` takes the *innermost* binding off the scope stack and
+        // lets the next one show through — except in the frame that declared
+        // the local, where it is merely marked unset. Every expectation is
+        // bash 5.2.37's; see the corpus case
+        // `an-unset-of-a-local-pops-one-shadow.sh`.
+        //
+        // The current frame's own local keeps its name, stays local, and takes
+        // a later write; repeating the `unset` never reaches the global.
+        assert_eq!(
+            run("c=g; f() { local c=one; unset c; unset c; declare -p c; c=two; }; f; echo \"$c\"")
+                .0,
+            "declare -- c\ng\n"
+        );
+        // An enclosing frame's local is popped, so the global shows through.
+        assert_eq!(
+            run("a=g; i1() { unset a; echo \"[${a-U}]\"; }; \
+                 i2() { local a=two; i1; echo \"[${a-U}]\"; }; i2; echo \"[${a-U}]\"")
+                .0,
+            "[g]\n[g]\n[g]\n"
+        );
+        // One level per `unset`, three frames deep.
+        assert_eq!(
+            run("a=g; l1() { unset a; echo \"[${a-U}]\"; unset a; echo \"[${a-U}]\"; }; \
+                 l2() { local a=two; l1; }; l3() { local a=three; l2; }; l3")
+                .0,
+            "[three]\n[g]\n"
+        );
+        // The revealed binding brings its attributes back with it.
+        assert_eq!(
+            run("declare -i b=1; o1() { unset b; declare -p b; }; \
+                 o2() { local b=two; o1; }; o2")
+                .0,
+            "declare -i b=\"1\"\n"
+        );
+        // The frame has nothing left to restore, so a write after the unset
+        // outlives the function that had the local…
+        assert_eq!(
+            run("a=g; q1() { unset a; a=fromq1; }; q2() { local a=two; q1; }; q2; echo \"$a\"").0,
+            "fromq1\n"
+        );
+        // …unless `localvar_unset` makes every frame behave like the current
+        // one, in which case the write lands on the still-shadowed local.
+        assert_eq!(
+            run("shopt -s localvar_unset; a=g; q1() { unset a; a=fromq1; }; \
+                 q2() { local a=two; q1; }; q2; echo \"$a\"")
+                .0,
+            "g\n"
+        );
+        // A call's temporary environment is the same scope level as that call's
+        // locals, so one `unset` from a deeper frame takes both away…
+        assert_eq!(
+            run("q=1; t1() { unset q; declare -p q; }; t2() { local q=2; t1; }; q=3 t2").0,
+            "declare -- q=\"1\"\n"
+        );
+        // …and unsetting it in the frame it belongs to marks it, keeping the
+        // export marking it came in with — the one attribute `unset` spares.
+        assert_eq!(
+            run("q=1; v1() { local q=2; unset q; declare -p q; }; q=3 v1").0,
+            "declare -x q\n"
+        );
+        // A `-x` the declaration itself asked for is dropped like any other.
+        assert_eq!(
+            run("w1() { local -x w=1; unset w; declare -p w; }; w1").0,
+            "declare -- w\n"
+        );
+        // A prefix on something that is *not* a call is a scope of its own, so
+        // a function underneath it shadows the prefix normally and popping the
+        // local reveals the prefix's binding rather than the global.
+        assert_eq!(
+            run("q=1; aa1() { unset q; declare -p q; }; aa2() { local q=2; aa1; }; \
+                 q=3 eval 'aa2'")
+                .0,
+            "declare -x q=\"3\"\n"
         );
     }
 

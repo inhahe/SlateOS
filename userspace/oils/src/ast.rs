@@ -147,18 +147,21 @@ pub enum CondExpr {
     Group(Box<CondExpr>),
 }
 
-/// A `[[ … ]]` unary test operator together with the spelling it was written
-/// with.
+/// A `[[ … ]]` unary test operator, held as the spelling it was written with.
 ///
 /// bash keeps the operator's source word in the node and echoes it back
 /// verbatim — both in a `set -x` trace and when `declare -f` reprints the
 /// function — so a synonym must survive parsing: `[[ -h f ]]` comes back out as
-/// `-h`, never normalised to its twin `-L`. The [`UnaryOp`] carries the
-/// semantics, `text` only the spelling; nothing should dispatch on `text`.
+/// `-h`, never normalised to its twin `-L`.
+///
+/// The spelling is *all* the node carries, because the spelling is what selects
+/// the test: `[[ … ]]` and the `test`/`[` builtin recognise one and the same set
+/// of primaries ([`unary_op_text`]) and evaluate them with one and the same
+/// code. Lowering to a separate semantic enum here would mean a second table to
+/// keep in step with the builtin's — which is exactly how `[[ -R nr ]]` came to
+/// be a syntax error while `[ -R nr ]` worked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CondUnary {
-    /// Which test to perform.
-    pub op: UnaryOp,
     /// The operator exactly as written (`-h` vs. `-L`).
     pub text: &'static str,
 }
@@ -174,35 +177,40 @@ pub struct CondBinary {
     pub text: &'static str,
 }
 
-/// Unary test operators inside `[[ … ]]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnaryOp {
-    /// `-e` — path exists.
-    Exists,
-    /// `-f` — exists and is a regular file.
-    File,
-    /// `-d` — exists and is a directory.
-    Dir,
-    /// `-r` — readable.
-    Readable,
-    /// `-w` — writable.
-    Writable,
-    /// `-x` — executable.
-    Executable,
-    /// `-s` — exists and has non-zero size.
-    NonEmptyFile,
-    /// `-z` — string has zero length.
-    ZeroLen,
-    /// `-n` — string has non-zero length.
-    NonZeroLen,
-    /// `-v` — the named shell variable (or array element) is set.
-    VarSet,
-    /// `-o` — the named shell option is enabled.
-    OptionSet,
-    /// `-L`/`-h` — path exists and is a symbolic link.
-    Symlink,
-    /// `-t` — the file descriptor (0/1/2) is open and refers to a terminal.
-    Terminal,
+/// The unary test primaries, and the *only* table of them.
+///
+/// bash draws `[[ … ]]` and the `test`/`[` builtin from one list — measured:
+/// every one of these 26 parses in both, and nothing else parses in either — so
+/// this is one list here too. `unary_op_from` in the parser and
+/// `is_test_unary_op` in the interpreter are both this function, which is what
+/// keeps the two surfaces from drifting apart.
+///
+/// Each primary is a single letter after `-`, and the two synonym pairs
+/// (`-e`/`-a`, `-L`/`-h`) are separate entries so that each keeps its own
+/// spelling for a `set -x` trace or a `declare -f` reprint.
+///
+/// | | |
+/// |---|---|
+/// | `-e` `-a` `-f` `-d` `-s` | exists / regular file / directory / non-empty |
+/// | `-r` `-w` `-x` | readable / writable / executable by us |
+/// | `-b` `-c` `-p` `-S` | block / character / FIFO / socket |
+/// | `-u` `-g` `-k` | setuid / setgid / sticky bit |
+/// | `-O` `-G` | owned by our effective uid / gid |
+/// | `-L` `-h` | symbolic link (final component not followed) |
+/// | `-N` | modified since it was last read |
+/// | `-t` | descriptor is a terminal |
+/// | `-z` `-n` | string is empty / non-empty |
+/// | `-v` `-o` `-R` | variable set / option enabled / name is a nameref |
+///
+/// Returns the matched spelling as a `&'static str` so the caller can store it
+/// in a [`CondUnary`] without borrowing the source.
+#[must_use]
+pub fn unary_op_text(s: &[u8]) -> Option<&'static str> {
+    const OPS: &[&str] = &[
+        "-a", "-b", "-c", "-d", "-e", "-f", "-g", "-h", "-k", "-n", "-o", "-p", "-r", "-s", "-t",
+        "-u", "-v", "-w", "-x", "-z", "-G", "-L", "-N", "-O", "-R", "-S",
+    ];
+    OPS.iter().copied().find(|t| t.as_bytes() == s)
 }
 
 /// Binary comparison operators inside `[[ … ]]`.

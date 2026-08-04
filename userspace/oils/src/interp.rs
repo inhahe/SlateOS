@@ -119,7 +119,7 @@ use crate::ast::{
     ForArithClause, ForClause, FunctionDef, IfClause, LineMap, LoopClause, ParamOp, Pipeline,
     Program, Redirect,
     RedirectOp,
-    ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
+    ReplaceAnchor, SelectClause, SimpleCommand, Word, WordPart,
 };
 use crate::histexpand::{Expansion, HistCtx};
 use crate::lexer;
@@ -9731,65 +9731,23 @@ impl Shell {
         pattern
     }
 
+    /// Evaluate a `[[ … ]]` unary primary — which is the *same* primary the
+    /// `test`/`[` builtin evaluates, run by the same code
+    /// ([`Shell::eval_test_unary`]).
+    ///
+    /// bash recognises one set of unary operators and answers each one way; the
+    /// two spellings differ only in how the operand reaches the test, and
+    /// `[[ … ]]`'s way is this expansion. Sharing the evaluator is what gives
+    /// `[[ ]]` the primaries it used to be missing (`-b`, `-c`, `-p`, `-S`,
+    /// `-u`, `-g`, `-k`, `-O`, `-G`, `-N`, `-R`, `-a`) along with the real
+    /// `access(2)`-shaped `-r`/`-w`/`-x` instead of an exists-ish guess.
     fn cond_unary(&mut self, op: CondUnary, w: &Word, invert: bool) -> bool {
         // bash expands the operand, traces what it expanded to, and only then
         // runs the test — so any substitution in the operand has already happened
         // by the time the trace line appears.
         let arg = self.expand_to_string(w);
         self.cond_trace_unary(invert, op.text, &arg);
-        // `-z`/`-n` operate on the string value; the rest are file tests.
-        match op.op {
-            UnaryOp::ZeroLen => arg.is_empty(),
-            UnaryOp::NonZeroLen => !arg.is_empty(),
-            // `-v name` tests whether the shell variable/element is set; the
-            // operand is the *name*, not a value to expand to. A name is always
-            // text (the grammar cannot spell any other kind), so an operand
-            // that is not text names nothing and the test is false.
-            UnaryOp::VarSet => bytes::as_str(&arg).is_some_and(|n| self.var_is_set(n)),
-            // `-o optname` tests whether the named shell option is enabled.
-            UnaryOp::OptionSet => {
-                bytes::as_str(&arg).is_some_and(|n| self.shell_option_enabled(n))
-            }
-            // `-L`/`-h` — the operand is a path; test whether it is a symlink
-            // (without following the final component).
-            UnaryOp::Symlink => {
-                let path = self.resolve(&arg);
-                std::fs::symlink_metadata(&path)
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false)
-            }
-            // `-t fd` — the operand is a descriptor number, not a path.
-            UnaryOp::Terminal => match bytes::parse_i64(&arg) {
-                Some(0) => io::stdin().is_terminal(),
-                Some(1) => io::stdout().is_terminal(),
-                Some(2) => io::stderr().is_terminal(),
-                _ => false,
-            },
-            _ => {
-                let path = self.resolve(&arg);
-                let meta = std::fs::metadata(&path);
-                match op.op {
-                    UnaryOp::Exists => meta.is_ok(),
-                    UnaryOp::File => meta.map(|m| m.is_file()).unwrap_or(false),
-                    UnaryOp::Dir => meta.map(|m| m.is_dir()).unwrap_or(false),
-                    UnaryOp::NonEmptyFile => {
-                        meta.map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
-                    }
-                    // Best-effort permission tests: `-r` ≈ exists, `-w` ≈ exists
-                    // and not read-only, `-x` ≈ exists. Proper mode-bit checks
-                    // arrive with the slateos permission model (see todo.txt).
-                    UnaryOp::Readable => meta.is_ok(),
-                    UnaryOp::Writable => meta.map(|m| !m.permissions().readonly()).unwrap_or(false),
-                    UnaryOp::Executable => meta.is_ok(),
-                    UnaryOp::ZeroLen
-                    | UnaryOp::NonZeroLen
-                    | UnaryOp::VarSet
-                    | UnaryOp::OptionSet
-                    | UnaryOp::Symlink
-                    | UnaryOp::Terminal => unreachable!(),
-                }
-            }
-        }
+        self.eval_test_unary(op.text.as_bytes(), &arg)
     }
 
     fn cond_binary(&mut self, l: &Word, op: CondBinary, r: &Word, invert: bool) -> bool {
@@ -43936,36 +43894,13 @@ fn test_parse_int(s: BStr<'_>) -> Result<i64, Str> {
 /// Whether `op` is a recognised `test`/`[` *unary* primary. bash's unary
 /// operators are all a single letter after `-`; an unrecognised two-argument
 /// operator (e.g. a binary op like `-eq` used with a missing operand) is an
-/// error, not a silent success. Kept in sync with `eval_unary`.
+/// error, not a silent success.
+///
+/// The set is [`crate::ast::unary_op_text`] — shared with the `[[ … ]]` parser, since
+/// bash recognises the same primaries in both. `eval_test_unary` answers every
+/// entry in it.
 fn is_test_unary_op(op: BStr<'_>) -> bool {
-    matches!(
-        op,
-        b"-a" | b"-b"
-            | b"-c"
-            | b"-d"
-            | b"-e"
-            | b"-f"
-            | b"-g"
-            | b"-h"
-            | b"-k"
-            | b"-n"
-            | b"-o"
-            | b"-p"
-            | b"-r"
-            | b"-s"
-            | b"-t"
-            | b"-u"
-            | b"-v"
-            | b"-w"
-            | b"-x"
-            | b"-z"
-            | b"-G"
-            | b"-L"
-            | b"-N"
-            | b"-O"
-            | b"-R"
-            | b"-S"
-    )
+    crate::ast::unary_op_text(op).is_some()
 }
 
 /// Evaluate a `test`/`[` binary primary. Returns `Err(msg)` (the full
@@ -55812,6 +55747,46 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("[[ -n foo ]]").1, 0);
         assert_eq!(run("x=; [[ -z $x ]]").1, 0);
         assert_eq!(run("x=set; [[ -n $x ]]").1, 0);
+    }
+
+    /// `[[ … ]]` and `test`/`[` recognise one and the same set of unary
+    /// primaries and answer each the same way, because they share both the
+    /// table ([`crate::ast::unary_op_text`]) and the evaluator
+    /// ([`Shell::eval_test_unary`]).
+    #[test]
+    fn a_conditional_knows_every_test_primary() {
+        // Every primary parses in `[[ ]]`: an unrecognised one is a *syntax*
+        // error (status 2 with a diagnostic), so a plain 0-or-1 is proof that
+        // the operator was understood.
+        for op in [
+            "-a", "-b", "-c", "-d", "-e", "-f", "-g", "-h", "-k", "-n", "-o", "-p", "-r", "-s",
+            "-t", "-u", "-v", "-w", "-x", "-z", "-G", "-L", "-N", "-O", "-R", "-S",
+        ] {
+            let (out, st) = run(&format!("[[ {op} zzz ]]"));
+            assert!(st == 0 || st == 1, "{op}: status {st}, out {out:?}");
+            // …and the two spellings agree on that same operand.
+            assert_eq!(st, run(&format!("[ {op} zzz ]")).1, "{op} disagrees");
+        }
+        // Outside the table it is still refused, in `[[ ]]`'s own way.
+        assert_eq!(run("[[ -q x ]]").1, 2);
+        // `-R` asks whether the name carries the nameref attribute, which a
+        // nameref pointing at nothing does and a plain variable does not.
+        assert_eq!(run("v=1; declare -n nr=v; [[ -R nr ]]").1, 0);
+        assert_eq!(run("v=1; [[ -R v ]]").1, 1);
+        assert_eq!(run("declare -n d=missing; [[ -R d ]]").1, 0);
+        assert_eq!(run("declare -n d=missing; [[ -v d ]]").1, 1);
+        // `-a` leads as the primary; between two words it is not grammar here.
+        assert_eq!(run("[[ -a nope ]]").1, 1);
+        assert_eq!(run("[[ x -a y ]]").1, 2);
+        // `-v` still reaches an array element, and `-o` a shell option.
+        assert_eq!(run("declare -a A=(1 2); [[ -v A[1] ]]").1, 0);
+        assert_eq!(run("declare -a A=(1 2); [[ -v A[9] ]]").1, 1);
+        assert_eq!(run("set -e; [[ -o errexit ]]").1, 0);
+        // A synonym reprints as the spelling it was written with.
+        assert_eq!(
+            run("q() { [[ -h f ]] && [[ -L f ]] && [[ -R n ]]; }; declare -f q").0,
+            "q () \n{ \n    [[ -h f ]] && [[ -L f ]] && [[ -R n ]]\n}\n"
+        );
     }
 
     #[test]

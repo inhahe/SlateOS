@@ -35,7 +35,7 @@ use crate::ast::{
     LoopClause,
     ParamOp,
     Pipeline, Program,
-    Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, UnaryOp, Word, WordPart,
+    Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, Word, WordPart,
 };
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
@@ -4061,29 +4061,11 @@ fn is_indirect_referent(name: &str) -> bool {
 /// Map a `[[ … ]]` unary operator string to its [`CondUnary`], keeping the
 /// spelling it was written with (`-h` and `-L` are the same test but must print
 /// back differently).
+///
+/// The set is [`crate::ast::unary_op_text`] — the same one the `test`/`[` builtin
+/// recognises, because bash's is the same for both.
 fn unary_op_from(s: BStr<'_>) -> Option<CondUnary> {
-    // A table rather than a `match`, because the spelling has to come back out
-    // as a `&'static str`: `-L` and `-h` select the same test but are distinct
-    // entries so that each keeps its own name.
-    const OPS: &[(&str, UnaryOp)] = &[
-        ("-e", UnaryOp::Exists),
-        ("-f", UnaryOp::File),
-        ("-d", UnaryOp::Dir),
-        ("-r", UnaryOp::Readable),
-        ("-w", UnaryOp::Writable),
-        ("-x", UnaryOp::Executable),
-        ("-s", UnaryOp::NonEmptyFile),
-        ("-z", UnaryOp::ZeroLen),
-        ("-n", UnaryOp::NonZeroLen),
-        ("-v", UnaryOp::VarSet),
-        ("-o", UnaryOp::OptionSet),
-        ("-L", UnaryOp::Symlink),
-        ("-h", UnaryOp::Symlink),
-        ("-t", UnaryOp::Terminal),
-    ];
-    OPS.iter()
-        .find(|(text, _)| text.as_bytes() == s)
-        .map(|&(text, op)| CondUnary { op, text })
+    crate::ast::unary_op_text(s).map(|text| CondUnary { text })
 }
 
 /// Where inside a `[[ … ]]` conditional an operand was expected — selects the
@@ -5118,11 +5100,19 @@ mod tests {
             let Command::Cond(CondExpr::Unary(op, _)) = &prog.items[0].list.first.commands[0] else {
                 panic!("expected cond unary");
             };
-            (op.op, op.text)
+            op.text
         };
-        assert_eq!(unop("[[ -h f ]]"), (UnaryOp::Symlink, "-h"));
-        assert_eq!(unop("[[ -L f ]]"), (UnaryOp::Symlink, "-L"));
-        assert_eq!(unop("[[ -n f ]]"), (UnaryOp::NonZeroLen, "-n"));
+        // The synonyms keep their own spelling rather than normalising to one
+        // of the pair — that spelling is what a trace and a `declare -f` reprint
+        // have to show, and now also what selects the test.
+        assert_eq!(unop("[[ -h f ]]"), "-h");
+        assert_eq!(unop("[[ -L f ]]"), "-L");
+        assert_eq!(unop("[[ -n f ]]"), "-n");
+        // The whole `test`/`[` set parses here too, which is the property that
+        // sharing one table buys: these used to be syntax errors in `[[ ]]`.
+        for op in ["-a", "-b", "-c", "-g", "-k", "-p", "-u", "-G", "-N", "-O", "-R", "-S"] {
+            assert_eq!(unop(&format!("[[ {op} f ]]")), op);
+        }
     }
 
     #[test]

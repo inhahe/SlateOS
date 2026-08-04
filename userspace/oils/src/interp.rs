@@ -10306,6 +10306,25 @@ impl Shell {
         }
     }
 
+    /// A bad `-i` value stores nothing, but the *variable* it was aimed at still
+    /// counts as having been assigned — bash clears `att_invisible` on the way to
+    /// the arithmetic, and the error jumps out past the store without putting it
+    /// back. Nothing shows while the name is a scalar (`declare -p n` reports the
+    /// bare `declare -i n` either way, and `${n+SET}` stays empty), but the
+    /// distinction survives to be read once the name becomes an array: `declare
+    /// -i n=2+; declare -a n` prints `declare -ai n=()`, where a never-assigned
+    /// `declare -i q; declare -a q` prints the bare `declare -ai q`. See
+    /// [`Self::array_valued`], which is osh's spelling of that flag, and `unset`,
+    /// which clears it again.
+    ///
+    /// Only a write aimed at the *variable* marks it. An element write that fails
+    /// the same way leaves its array alone (`declare -ai e; e[0]=2+` keeps the
+    /// bare `declare -ai e`), and so does an array literal, whose pairs never
+    /// reach the table at all.
+    fn note_int_refusal_assigned(&mut self, name: &str) {
+        self.array_valued.insert(name.to_string());
+    }
+
     /// [`Self::apply_value_attrs`] with `+=` resolved against `cur`, the current
     /// contents of the slot being written. The two attribute groups append
     /// differently: `-i` *adds* numerically (`declare -i a=5; declare -i a+=3`
@@ -10420,7 +10439,15 @@ impl Shell {
         let stored = match self.apply_value_attrs(&base, val) {
             // A bad `-i` expression stores nothing; the abort it armed ends the
             // command, so `false` here needs no diagnostic of its own.
-            None => false,
+            None => {
+                // …but a whole-variable write still counts as assigned. See
+                // [`Shell::note_int_refusal_assigned`]; an element destination
+                // does not, which is why this asks.
+                if matches!(dest, ScalarDest::Var(_)) {
+                    self.note_int_refusal_assigned(&base);
+                }
+                false
+            }
             Some(val) => match dest {
                 ScalarDest::Var(n) => {
                     self.set_scalar_store(n, val);
@@ -11116,6 +11143,8 @@ impl Shell {
                             .and_then(|c| bytes::parse_i64(c))
                             .unwrap_or(0);
                         let Some(n) = self.eval_int_assign(&val) else {
+                            // See [`Shell::note_int_refusal_assigned`].
+                            self.note_int_refusal_assigned(&a.name);
                             return false;
                         };
                         let sum = base.wrapping_add(n);
@@ -11132,6 +11161,8 @@ impl Shell {
                     }
                 } else if is_int {
                     let Some(n) = self.eval_int_assign(&val) else {
+                        // See [`Shell::note_int_refusal_assigned`].
+                        self.note_int_refusal_assigned(&a.name);
                         return false;
                     };
                     self.set_scalar_store(&a.name, n.to_string().into_bytes());
@@ -60808,6 +60839,94 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("a=(); unset a; declare -a a; declare -p a").0,
             "declare -a a\n"
+        );
+    }
+
+    #[test]
+    fn a_refused_integer_value_still_counts_as_an_assignment() {
+        // A malformed `-i` value stores nothing, but the name it was aimed at
+        // still counts as assigned. Nothing shows while the name is a scalar…
+        assert_eq!(
+            run("declare -i sc=2+ 2>/dev/null\ndeclare -p sc\necho \"[${sc+SET}]\"").0,
+            "declare -i sc\n[]\n"
+        );
+        // …and it is read out once the name becomes an array, where a
+        // never-assigned name still prints bare.
+        assert_eq!(
+            run("declare -i n=2+ 2>/dev/null\ndeclare -a n; declare -p n").0,
+            "declare -ai n=()\n"
+        );
+        assert_eq!(
+            run("declare -i q\ndeclare -a q; declare -p q").0,
+            "declare -ai q\n"
+        );
+        assert_eq!(
+            run("declare -i s=2+ 2>/dev/null\ndeclare -A s; declare -p s").0,
+            "declare -Ai s=()\n"
+        );
+        // Whichever write asked: a plain assignment, `+=`, the attribute
+        // builtins, `read`, `printf -v`, and a write through a nameref.
+        for src in [
+            "declare -i n\nn=2+ 2>/dev/null",
+            "declare -i n\nn+=2+ 2>/dev/null",
+            "declare -i n\nexport n=2+ 2>/dev/null",
+            "declare -i n\nreadonly n=2+ 2>/dev/null",
+            "declare -i n\nread n <<< '2+' 2>/dev/null",
+            "declare -i n\nprintf -v n '%s' '2+' 2>/dev/null",
+            "declare -i n\ndeclare -n rf=n\nrf=2+ 2>/dev/null",
+        ] {
+            assert_eq!(
+                run(&format!("{src}\ndeclare -a n; declare -p n")).0,
+                "declare -ai n=()\n",
+                "{src}"
+            );
+        }
+        // A local's flag goes with its frame: the refusal abandons the rest of
+        // the function body, and the global it shadowed comes back untouched.
+        assert_eq!(
+            run("declare -ai g=(1)\nf() {\nlocal -i g=2+ 2>/dev/null\ndeclare -p g\n}\nf\ndeclare -p g").0,
+            "declare -ai g=([0]=\"1\")\n"
+        );
+        // An element write leaves its array alone, and so does a literal whose
+        // pairs never reach the table.
+        for src in [
+            "declare -ai e\ne[0]=2+ 2>/dev/null",
+            "declare -ai e\ndeclare -n re='e[0]'\nre=2+ 2>/dev/null",
+            "declare -ai e\nread 'e[0]' <<< '2+' 2>/dev/null",
+            "declare -ai e\ne=(1 2+) 2>/dev/null\nunset 'e[0]'",
+        ] {
+            assert_eq!(
+                run(&format!("{src}\ndeclare -p e")).0,
+                if src.contains("e=(1") {
+                    "declare -ai e=()\n"
+                } else {
+                    "declare -ai e\n"
+                },
+                "{src}"
+            );
+        }
+        assert_eq!(
+            run("declare -Ai m\nm=([k]=2+) 2>/dev/null\ndeclare -p m").0,
+            "declare -Ai m\n"
+        );
+        assert_eq!(
+            run("declare -Ai m\nm+=([k]=2+) 2>/dev/null\ndeclare -p m").0,
+            "declare -Ai m\n"
+        );
+        // A whole-array write marks it even when nothing lands, because it
+        // emptied the array before it failed.
+        assert_eq!(
+            run("declare -ai w\nread -a w <<< '2+' 2>/dev/null\ndeclare -p w").0,
+            "declare -ai w=()\n"
+        );
+        assert_eq!(
+            run("declare -ai w\nmapfile -t w <<< '2+' 2>/dev/null\ndeclare -p w").0,
+            "declare -ai w=()\n"
+        );
+        // `unset` clears it again (along with the `-i` that made it possible).
+        assert_eq!(
+            run("declare -i u=2+ 2>/dev/null\nunset u\ndeclare -a u; declare -p u").0,
+            "declare -a u\n"
         );
     }
 

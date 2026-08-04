@@ -9107,7 +9107,10 @@ impl Shell {
             }
             DebugVerdict::Exit(code) => return Flow::Exit(code),
         }
-        let subject: Vec<Ch> = bytes::chars(self.expand_cond_string(&c.word).as_bytes()).collect();
+        // A `case` is the one construct that does no quote removal on either
+        // side, so both sides are expanded by an entry of their own that keeps
+        // the mark a quoted empty in an operand left — see [`keep_marks`].
+        let subject: Vec<Ch> = self.expand_case_subject(&c.word);
         // `shopt -s nocasematch` makes `case` (and `[[ == ]]`) matching
         // case-insensitive.
         let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
@@ -9120,7 +9123,7 @@ impl Shell {
                 // Preserve per-character quoting so an escaped/quoted
                 // metacharacter (`a\*b`, `a'*'b`) matches literally, while a
                 // metacharacter from an unquoted expansion stays live.
-                let pattern = self.expand_cond_pattern(pat);
+                let pattern = self.expand_case_pattern(pat);
                 glob_match_echars_ci(&pattern, &subject, ci, extglob)
             });
             if !matched {
@@ -19722,7 +19725,22 @@ impl Shell {
     /// assignment wants (`v=$unset` assigns the empty string) and what a
     /// redirection target does not.
     fn expand_word_joined(&mut self, word: &Word) -> Vec<Str> {
-        let mut cur = Str::new();
+        // Every joining context but one reaches quote removal, so all any of
+        // them wants is the text — and [`echars_text`] is quote removal.
+        self.expand_word_joined_annotated(word)
+            .iter()
+            .map(|f| echars_text(f))
+            .collect()
+    }
+
+    /// [`Shell::expand_word_joined`]'s quote-annotated half, of which that is
+    /// the quote-removed view — see [`EChar`].
+    ///
+    /// The annotation exists for the one joining context that does *not* remove
+    /// quotes: a `case` subject, which has to keep the [`EChar::MARK`] a quoted
+    /// empty in an operand left ([`Shell::expand_case_subject`]).
+    fn expand_word_joined_annotated(&mut self, word: &Word) -> Vec<Vec<EChar>> {
+        let mut cur: Vec<EChar> = Vec::new();
         let mut started = false;
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
@@ -19730,26 +19748,35 @@ impl Shell {
                     // A tilde expands to `$HOME`/a home directory — a path, and
                     // so bytes; the literal text around it is source.
                     if idx == 0 {
-                        cur.extend_from_slice(&self.tilde_expand(s.as_bytes()));
+                        let home = self.tilde_expand(s.as_bytes());
+                        push_chars(&mut cur, &home, false);
                     } else {
-                        cur.extend_from_slice(s.as_bytes());
+                        push_chars(&mut cur, s.as_bytes(), false);
                     }
                     started = true;
                 }
                 WordPart::SingleQuoted { text: s, .. } => {
-                    cur.extend_from_slice(s.as_bytes());
+                    push_chars(&mut cur, s.as_bytes(), true);
                     started = true;
                 }
                 WordPart::DoubleQuoted(parts) => {
-                    cur.extend_from_slice(&self.expand_double_quoted(parts));
+                    let s = self.expand_double_quoted(parts);
+                    push_chars(&mut cur, &s, true);
                     started = true;
                 }
                 other => {
-                    let val = match self.joined_value(other) {
-                        Some(v) => v,
-                        None => self.expand_dynamic(other),
-                    };
-                    cur.extend_from_slice(&val);
+                    // A `:-`/`:+` operand is the only part that can carry a
+                    // mark out, and the only one this asks about — every other
+                    // part answers `None` and is expanded as text below.
+                    if let Some(chars) = self.operand_chars(other) {
+                        cur.extend_from_slice(&chars);
+                    } else {
+                        let val = match self.joined_value(other) {
+                            Some(v) => v,
+                            None => self.expand_dynamic(other),
+                        };
+                        push_chars(&mut cur, &val, false);
+                    }
                     started = true;
                 }
             }
@@ -20338,6 +20365,11 @@ impl Shell {
                         // quoting out of an operand, which decides nothing about
                         // splitting here but everything about globbing.
                         if let Some(chars) = self.operand_chars(other) {
+                            // Nothing splits this run, so quote removal has
+                            // come and the marks go with it — and an operand
+                            // that produced nothing but marks is the empty
+                            // expansion the null-word removal below wants.
+                            let chars = drop_marks(&chars);
                             if !chars.is_empty() {
                                 cur.extend_from_slice(&chars);
                                 open = true;
@@ -20447,6 +20479,33 @@ impl Shell {
         let out = self.expand_word_pattern(word);
         self.cond_word = saved;
         out
+    }
+
+    /// A `case` arm's pattern — [`Shell::expand_cond_pattern`] without the quote
+    /// removal, which is the one thing a `case` does not do. See
+    /// [`keep_marks`] for what stands in its place.
+    fn expand_case_pattern(&mut self, word: &Word) -> Vec<EChar> {
+        let saved_cond = std::mem::replace(&mut self.cond_word, true);
+        let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
+        let out = self.expand_word_pattern_inner(word);
+        self.bad_sub_word = saved;
+        self.cond_word = saved_cond;
+        keep_marks(out)
+    }
+
+    /// A `case`'s subject — [`Shell::expand_cond_string`] without the quote
+    /// removal, for the same reason and by the same rule. The characters are
+    /// what the match reads, so they come back decoded.
+    fn expand_case_subject(&mut self, word: &Word) -> Vec<Ch> {
+        let saved_cond = std::mem::replace(&mut self.cond_word, true);
+        let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
+        let fields = self.expand_word_joined_annotated(word);
+        self.bad_sub_word = saved;
+        self.cond_word = saved_cond;
+        keep_marks(fields.concat())
+            .into_iter()
+            .filter_map(|e| e.c)
+            .collect()
     }
 
     /// Expand an assignment RHS to a single string. Like `expand_to_string`, but
@@ -20584,7 +20643,11 @@ impl Shell {
         let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
         let buf = self.expand_word_pattern_inner(word);
         self.bad_sub_word = saved;
-        buf
+        // A pattern is reached through quote removal, so the marks an operand
+        // put in it stop here: `${w#${x:-''a''}}` strips the one-character
+        // pattern `a`. Every pattern but a `case` arm's — see
+        // [`Shell::expand_case_pattern`].
+        drop_marks(&buf).into_owned()
     }
 
     /// Expand the operand of a `${x:-w}`/`${x:+w}` as the word it is, keeping
@@ -22099,11 +22162,13 @@ impl Shell {
                     quoted: false,
                 });
             }
-            // Nothing downstream of here splits, so quote removal has come and
-            // the marks go with it: `v=${x:-''a''}` assigns `a`, and
-            // `${w#${x:-''a''}}` strips the one-character pattern `a`. See
-            // [`EChar::MARK`].
-            out.extend_from_slice(&drop_marks(f));
+            // The marks come out as they are. Nothing downstream of here
+            // splits, so every caller but one is quote removal's side of the
+            // mark and drops them ([`drop_marks`]) — `v=${x:-''a''}` assigns
+            // `a`, and `${w#${x:-''a''}}` strips the one-character pattern
+            // `a`. The exception is a `case`, which does no quote removal and
+            // matches the mark as a character. See [`EChar::MARK`].
+            out.extend_from_slice(f);
         }
         Some(out)
     }
@@ -40007,6 +40072,34 @@ fn drop_marks(field: &[EChar]) -> Cow<'_, [EChar]> {
         return Cow::Borrowed(field);
     }
     Cow::Owned(field.iter().copied().filter(|e| e.c.is_some()).collect())
+}
+
+/// The byte a mark is where quote removal never comes: `\177`, bash's `CTLNUL`.
+///
+/// A `case` is the one construct that does no quote removal on either side. It
+/// expands both with `expand_word_leave_quoted` and matches the `CTLNUL` bytes
+/// as they stand, so a mark is a character there like any other — `case abc in
+/// ${x:-a''bc})` does *not* match, and a real `$'a\177b'` subject matches the
+/// pattern `${x:-a''b}` because the mark **is** that byte.
+///
+/// The one exception is bash's `QUOTED_NULL` macro, which each side applies to
+/// itself once: a word that is *nothing but* a single mark is the empty string
+/// instead. That is what makes `case ${x:-''} in ${y:-''})` match — both sides
+/// are `""` — while `case ${x:-''} in ${y:-''''})` does not, the pattern there
+/// being two marks and so two characters.
+///
+/// The mark is [`EChar::MARK`], which is `quoted`, so the byte it becomes is a
+/// literal in a pattern rather than glob syntax.
+fn keep_marks(mut field: Vec<EChar>) -> Vec<EChar> {
+    if matches!(field.as_slice(), [e] if e.c.is_none()) {
+        return Vec::new();
+    }
+    for e in &mut field {
+        if e.c.is_none() {
+            e.c = Some(Ch::U('\u{7f}'));
+        }
+    }
+    field
 }
 
 /// Lay already-formed fields into the word being built: the first joins

@@ -19503,7 +19503,6 @@ impl Shell {
                     }
                 }
                 other => {
-                    let val = self.expand_dynamic(other);
                     if !split {
                         // `W_NOSPLIT2`: the expansion is one run of characters,
                         // unquoted so a glob metacharacter it produced still
@@ -19511,12 +19510,52 @@ impl Shell {
                         // the field unopened, exactly as the splitting path
                         // below does — that is the null-word removal a redirect
                         // target still depends on.
+                        //
+                        // A list-valued parameter is one run of characters here
+                        // too — `a=${n[@]}` is the elements joined by a space
+                        // under every `$IFS` — so this path never asks
+                        // [`Self::split_items`] anything.
+                        let val = self.expand_dynamic(other);
                         if !val.is_empty() {
                             push_chars(&mut cur, &val, false);
                             open = true;
                         }
                         continue;
                     }
+                    // A few parts expand to a *list* rather than to text (see
+                    // [`Self::split_items`]). Under a null `$IFS` that list is
+                    // the only thing left that can break a field, so it is laid
+                    // out directly: consecutive items are separate fields, and
+                    // an empty item adds no characters — `IFS=; n=('a b' c);
+                    // ${n[@]}` is `<a b><c>`, and a leading/trailing empty
+                    // element opens no field of its own. Adjacent literal text
+                    // still joins the ends (`A${n[@]}B` → `<Ax><y><zB>`), which
+                    // is why this walks the same `cur`/`open` pair the
+                    // splitting scan below does.
+                    let val = match self.split_items(other) {
+                        Some(SplitItems::List(items)) if self.ifs_is_null() => {
+                            for (i, el) in items.iter().enumerate() {
+                                if i > 0 && open {
+                                    fields.push(std::mem::take(&mut cur));
+                                    open = false;
+                                }
+                                if !el.is_empty() {
+                                    push_chars(&mut cur, el, false);
+                                    open = true;
+                                }
+                            }
+                            continue;
+                        }
+                        // With a non-null `$IFS` the two kinds of list behave
+                        // alike: join the items with the first `$IFS` character
+                        // and split the result, which puts a break between every
+                        // pair (the separator is a delimiter by construction)
+                        // while still splitting *inside* an item that holds one.
+                        Some(SplitItems::List(items) | SplitItems::Joined(items)) => {
+                            items.join(self.at_sep().as_slice())
+                        }
+                        None => self.expand_dynamic(other),
+                    };
                     // Field-split the unquoted expansion against IFS while keeping
                     // the *boundary* delimiters relative to adjacent literal/quoted
                     // text. Only the characters produced by this expansion are split
@@ -21003,6 +21042,105 @@ impl Shell {
             // one is taken whole; a byte that is not part of any character still
             // separates, and is emitted as itself.
             Some(ifs) => bytes::chars(ifs).next().map_or_else(Str::new, bytes::Ch::to_str),
+        }
+    }
+
+    /// Whether `$IFS` is set *and empty* — the one setting under which nothing
+    /// an expansion produces can break a field, so a list has to stay a list to
+    /// survive. An **unset** `IFS` is not this: it means the default ` \t\n`.
+    fn ifs_is_null(&self) -> bool {
+        self.vars.get("IFS").is_some_and(Vec::is_empty)
+    }
+
+    /// The items an *unquoted* expansion of `part` is made of, when it is one of
+    /// the parts that expands to a list rather than to text — `None` for every
+    /// other part, which the caller expands as a string instead.
+    ///
+    /// Unquoted, the `[*]` spelling says nothing: `${a[*]}` splits exactly as
+    /// `${a[@]}` does, and `$*` as `$@`. The star only chooses a separator
+    /// inside double quotes, which is why the quoted list in
+    /// [`Shell::expand_word_annotated`] is the `[@]` forms alone while this one
+    /// takes both. (That quoted list is deliberately a separate match: it wants
+    /// one field per element from *every* part it accepts, whereas here the two
+    /// kinds of list part company — see [`SplitItems`].)
+    ///
+    /// Which parts are [`SplitItems::Joined`] is measured, not derived: bash
+    /// keeps the elements apart for `${a[@]/x/y}`, `${a[@]^^}`, `${a[@]@Q}` and
+    /// the rest, but not for a `#`/`##`/`%`/`%%` trim of a *named array*
+    /// (`${a[@]#x}` is one space-joined field under a null `$IFS`) — though it
+    /// does keep them apart for the same trim of the *positionals* (`${@#x}`).
+    /// `${!a[*]}` is joined too, with [`Shell::at_sep`]; `${!prefix*}` is the
+    /// odd one out, joining with [`Shell::star_sep`] like a quoted `[*]`, and so
+    /// is left to the scalar path below with the `[*]` forms of a scalar
+    /// parameter.
+    fn split_items(&mut self, part: &WordPart) -> Option<SplitItems> {
+        // One expansion error ends the whole word, so a part after it is not
+        // expanded at all — the same guard [`Self::expand_dynamic_with`] opens
+        // with, repeated because this path reaches the element helpers directly.
+        if self.expansion_failed() {
+            return None;
+        }
+        match part {
+            WordPart::ArrayRef {
+                name,
+                index: ArrayIndex::All | ArrayIndex::Star,
+                length: false,
+            } => Some(SplitItems::List(self.array_elements(name))),
+            WordPart::Param { name, .. } if name == "@" || name == "*" => {
+                Some(SplitItems::List(self.positional.clone()))
+            }
+            WordPart::ArrayKeys { name, star } => {
+                let keys = self.array_keys(name);
+                Some(if *star {
+                    SplitItems::Joined(keys)
+                } else {
+                    SplitItems::List(keys)
+                })
+            }
+            WordPart::VarNames { prefix, star: false } => Some(SplitItems::List(
+                self.var_names_with_prefix(prefix)
+                    .into_iter()
+                    .map(String::into_bytes)
+                    .collect(),
+            )),
+            WordPart::ArraySlice {
+                name,
+                star,
+                offset,
+                length,
+            } => Some(SplitItems::List(
+                self.slice_elements(name, *star, offset, length),
+            )),
+            WordPart::ArrayOp {
+                name,
+                star,
+                op,
+                colon,
+                arg,
+            } => Some(SplitItems::List(
+                self.array_op_fields(name, *star, *op, *colon, arg),
+            )),
+            WordPart::ArrayBulk { name, star: _, op } => {
+                // `true`: `@A` builds its declaration out of several *items*
+                // (`declare`, `-a`, `n=(…)`), and those items are what this
+                // context's fields are made of — see
+                // [`Shell::split_transform_items`]. Every other transform is
+                // one item per element either way.
+                let items = self.bulk_elements(name, op, true);
+                let trims_an_array =
+                    matches!(op, BulkOp::Trim { .. }) && name != "@" && name != "*";
+                Some(if trims_an_array {
+                    SplitItems::Joined(items)
+                } else {
+                    SplitItems::List(items)
+                })
+            }
+            // `${!ref}` where `ref` names a whole array (`ref='a[@]'`) is that
+            // array's element list; anything else it can reach is text.
+            WordPart::Indirect { refname, index } => {
+                self.indirect_array_elems(refname, index).map(SplitItems::List)
+            }
+            _ => None,
         }
     }
 
@@ -37972,6 +38110,22 @@ enum ElemValue {
     BadSubscript(String),
 }
 
+/// What an *unquoted* expansion of a list-valued parameter contributes to the
+/// fields of its word. See [`Shell::split_items`], which classifies the parts,
+/// and the `other` arm of [`Shell::expand_word_annotated`], which consumes it.
+enum SplitItems {
+    /// The items are the word's own list: a field boundary falls between two
+    /// of them no matter what `$IFS` says. Only visible under a **null**
+    /// `$IFS`, where nothing else can break a field — under any other `$IFS`
+    /// joining the items with [`Shell::at_sep`] and splitting the result gives
+    /// the same answer, and that is what the caller does.
+    List(Vec<Str>),
+    /// The items were only ever a way to build one string: they join with
+    /// [`Shell::at_sep`] and the result splits like any other expansion, so a
+    /// null `$IFS` leaves them as a single (space-joined) field.
+    Joined(Vec<Str>),
+}
+
 /// Where a `${…<op>}` modifier reads the text it works on.
 ///
 /// Written directly, that is the parameter the modifier names, and there is
@@ -48978,8 +49132,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (o, s) = run("declare -a t=(v v); IFS=:; echo ${!t[@]#h}");
         assert_eq!((o.as_str(), s), ("", 1));
         // An empty `$IFS` falls back to a space for `[@]` and to nothing for
-        // `[*]`, so only the star spelling can glue a name out of pieces.
-        assert_eq!(run("declare -a h=(he llo); IFS=; hello=y; echo ${!h[*]}x").0, "01x\n");
+        // `[*]`, so only the star spelling can glue a *name* out of pieces. The
+        // bare key listing is not that join: unquoted, `${!a[*]}` is one of the
+        // forms that joins with `[@]`'s separator (see [`Shell::split_items`]),
+        // so its own empty-`$IFS` answer has the space back.
+        assert_eq!(run("declare -a h=(he llo); IFS=; hello=y; echo ${!h[*]}x").0, "0 1x\n");
         assert_eq!(run("declare -a h=(he llo); IFS=; hello=y; echo ${!h[*]#z}").0, "y\n");
         let (o, s) = run("declare -a h=(he llo); IFS=; echo ${!h[@]#z}");
         assert_eq!((o.as_str(), s), ("", 1));

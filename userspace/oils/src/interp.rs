@@ -3685,9 +3685,20 @@ pub struct Shell {
     errexit: bool,
     /// `set -u` (nounset): expanding an unset variable is an error that aborts.
     nounset: bool,
-    /// `set -x` (xtrace): print each simple command (prefixed `+ `) to stderr
-    /// before executing it.
+    /// `set -x` (xtrace): print each simple command (prefixed `+ `) before
+    /// executing it — to stderr, or to whatever [`Shell::xtrace_fd`] names.
     xtrace: bool,
+    /// The descriptor `$BASH_XTRACEFD` names, when it names a usable one — where
+    /// the `set -x` trace goes instead of stderr. `None` is stderr.
+    ///
+    /// A *number*, not a captured sink, because the trace follows fd N wherever
+    /// a later redirect points it: `exec 8> a; BASH_XTRACEFD=8; exec 8> b`
+    /// traces into `b`. Only the descriptor ceasing to exist ends the diversion,
+    /// and that arrives through [`Shell::note_fd_closed`] rather than through the
+    /// lookup, because reopening the same number does *not* bring it back.
+    ///
+    /// Maintained solely by [`Shell::sync_xtrace_fd`], the variable's hook.
+    xtrace_fd: Option<i32>,
     /// How many levels of *expansion* the shell is currently executing inside —
     /// bash's `indirection_level`. Zero at the top level; a command
     /// substitution (or a process substitution) adds one for the whole of its
@@ -4608,6 +4619,7 @@ impl Shell {
             errexit: false,
             nounset: false,
             xtrace: false,
+            xtrace_fd: None,
             xtrace_level: 0,
             noglob: false,
             allexport: false,
@@ -5394,6 +5406,133 @@ impl Shell {
         }
         if name == "GLOBIGNORE" {
             self.sync_globignore_dotglob();
+        }
+        if name == "BASH_XTRACEFD" {
+            self.sync_xtrace_fd();
+        }
+    }
+
+    /// bash's `sv_xtracefd`: `$BASH_XTRACEFD` names the descriptor the `set -x`
+    /// trace is written to, and the name gaining or losing a value is what moves
+    /// the trace there and back.
+    ///
+    /// The value is read the way `strtol` reads it — leading blanks and a sign
+    /// are allowed, trailing text is not — and the descriptor it names has to be
+    /// **open already**. One that is not is refused with a diagnostic, and the
+    /// diversion in force is left exactly as it was: an invalid assignment is a
+    /// complaint, not a reset.
+    ///
+    /// ```sh
+    /// exec 8> log; BASH_XTRACEFD=8; BASH_XTRACEFD=99   # still fd 8, plus an error
+    /// ```
+    ///
+    /// Losing the value — an `unset`, an assignment of the empty string, a
+    /// `local` going out of scope — puts the trace back on stderr *and closes the
+    /// descriptor*, which is bash's `fclose` on the stream it opened over it. It
+    /// really is a close, and it is not fussy about which descriptor: with
+    /// `BASH_XTRACEFD=2` an `unset` leaves the shell with no stderr at all.
+    /// Moving the name from one descriptor to another closes neither.
+    ///
+    /// A descriptor that is open but has no write half is accepted in silence and
+    /// swallows the trace, as writing to it would.
+    fn sync_xtrace_fd(&mut self) {
+        let Some(value) = self.vars.get("BASH_XTRACEFD") else {
+            self.release_xtrace_fd();
+            return;
+        };
+        if value.is_empty() {
+            self.release_xtrace_fd();
+            return;
+        }
+        match parse_xtrace_fd(value) {
+            Some(n) if self.fd_is_open(n) => self.xtrace_fd = Some(n),
+            _ => {
+                let line = bfmt![
+                    self.err_prefix(),
+                    b"BASH_XTRACEFD: ",
+                    self.vars.get("BASH_XTRACEFD").map_or(&[][..], Vec::as_slice),
+                    b": invalid value for trace file descriptor"
+                ];
+                self.berrln(&line);
+            }
+        }
+    }
+
+    /// Give up the descriptor `$BASH_XTRACEFD` named, closing it, and put the
+    /// trace back on stderr. The reset half of [`Shell::sync_xtrace_fd`].
+    fn release_xtrace_fd(&mut self) {
+        if let Some(n) = self.xtrace_fd.take() {
+            self.close_fd(n);
+        }
+    }
+
+    /// Whether descriptor `n` exists — the question `$BASH_XTRACEFD` asks before
+    /// accepting a value, and the one `{v}>…` asks when hunting for a free
+    /// number.
+    ///
+    /// A descriptor counts as open if *either* half of it is bound, since a
+    /// read-only fd 3 is still fd 3. The standard three are open unless a
+    /// redirect closed them.
+    fn fd_is_open(&self, n: i32) -> bool {
+        match n {
+            0 => !self.stdin_is_closed(),
+            1 => !matches!(self.exec_stdout, Some(WriteFd::Closed)),
+            2 => !matches!(self.exec_stderr, Some(WriteFd::Closed)),
+            _ => {
+                self.open_fds.contains_key(&n)
+                    || self.open_write_fds.contains_key(&n)
+                    || self.coproc_read_fds.contains_key(&n)
+            }
+        }
+    }
+
+    /// Close descriptor `n`, whichever of the shell's tables holds it — the one
+    /// place a descriptor stops existing, shared by `exec N>&-`, `exec N<&-` and
+    /// `$BASH_XTRACEFD` giving one up.
+    ///
+    /// Routed through here so that [`Shell::note_fd_closed`] cannot be forgotten
+    /// at a close: a descriptor going away is not the same event as a descriptor
+    /// being rebound, and the trace descriptor is the difference between them.
+    fn close_fd(&mut self, n: i32) {
+        match n {
+            // Not `None`, which for fd 0 means "the real stdin": a shell that
+            // closed fd 0 must answer a `read` of it with `EBADF`, not go on
+            // reading the terminal. See [`InputSrc::Closed`].
+            0 => {
+                self.exec_stdin = Some(closed_input());
+                self.exec_stdin_write = None;
+            }
+            // Likewise `None` would mean "the real fd 1 / fd 2". A shell that
+            // closed fd 1 must answer its own writes with `EBADF`
+            // (`echo: write error: …`) rather than print to the terminal, and one
+            // that closed fd 2 has nowhere to report a failed write — but its
+            // diagnostics must not appear on the terminal instead. A close takes
+            // the *whole* descriptor, so any read half an `exec 1< f` gave it
+            // goes with it.
+            1 | 2 => {
+                self.set_std_write_half(n, Some(WriteFd::Closed));
+                self.set_std_read_half(n, None);
+            }
+            _ => {
+                self.open_fds.remove(&n);
+                self.open_write_fds.remove(&n);
+                self.coproc_read_fds.remove(&n);
+            }
+        }
+        self.note_fd_closed(n);
+    }
+
+    /// Note that descriptor `n` has *ceased to exist*, as opposed to merely
+    /// having been rebound.
+    ///
+    /// The distinction is `$BASH_XTRACEFD`'s alone. The trace follows fd N
+    /// wherever a later redirect points it, so a rebind must not disturb it; but
+    /// a close ends the diversion for good, and reopening the same number does
+    /// not bring it back. Called from [`Shell::close_fd`] and from the
+    /// per-command `N>&-`, whose close is applied by the redirect installer.
+    fn note_fd_closed(&mut self, n: i32) {
+        if self.xtrace_fd == Some(n) {
+            self.xtrace_fd = None;
         }
     }
 
@@ -8340,7 +8479,7 @@ impl Shell {
             if self.xtrace {
                 let prefix = self.xtrace_prefix();
                 let line = bfmt![prefix, &header, b"\n"];
-                self.emit_stderr(&line);
+                self.emit_xtrace(&line);
             }
             match self.announce_debug(header.clone(), out, stdin) {
                 DebugVerdict::Run => {}
@@ -9481,7 +9620,10 @@ impl Shell {
                     self.open_write_fds
                         .insert(*fd, WriteFd::File(Arc::clone(wr)));
                 }
-                ExtraFdOp::Close => {} // already removed above
+                // Already removed from the tables above; all that is left is to
+                // say that this was a *close* and not a rebind, which is the
+                // trace descriptor's question. See [`Shell::note_fd_closed`].
+                ExtraFdOp::Close => self.note_fd_closed(*fd),
             }
         }
         saved_fds
@@ -10031,6 +10173,10 @@ impl Shell {
             errexit: self.errexit,
             nounset: self.nounset,
             xtrace: self.xtrace,
+            // A fork inherits both the descriptor table and the variable, so it
+            // inherits the diversion too — `BASH_XTRACEFD=8; ( set -x; … )`
+            // traces into fd 8.
+            xtrace_fd: self.xtrace_fd,
             // Inherited, not reset: a `( … )` group inside a substitution keeps
             // tracing at the substitution's depth (bash).
             xtrace_level: self.xtrace_level,
@@ -10801,7 +10947,7 @@ impl Shell {
         let prefix = self.xtrace_prefix();
         let op: &[u8] = if a.append { b"+=" } else { b"=" };
         let line = bfmt![prefix, &a.name, op, b"(", buf.join(&b' '), b")\n"];
-        self.emit_stderr(&line);
+        self.emit_xtrace(&line);
     }
 
     /// Apply a variable assignment. `trace` is true only for a *bare* assignment
@@ -10863,7 +11009,7 @@ impl Shell {
         if trace && self.xtrace && !trace_scalar {
             let prefix = self.xtrace_prefix();
             let line = bfmt![prefix, crate::unparse::assignment_src(a), b"\n"];
-            self.emit_stderr(&line);
+            self.emit_xtrace(&line);
         }
         // A readonly variable cannot be reassigned; report and leave it intact.
         if self.readonly.contains(&a.name) {
@@ -10922,7 +11068,7 @@ impl Shell {
                     let prefix = self.xtrace_prefix();
                     let op: &[u8] = if a.append { b"+=" } else { b"=" };
                     let line = bfmt![prefix, &a.name, op, xtrace_quote_value(&val), b"\n"];
-                    self.emit_stderr(&line);
+                    self.emit_xtrace(&line);
                 }
                 // The scalar half of the `noassign` refusal (see above): traced,
                 // then dropped on the floor, and the command succeeds anyway.
@@ -13154,7 +13300,7 @@ impl Shell {
             xtrace_quote_value(value),
             b"\n"
         ];
-        self.emit_stderr(&line);
+        self.emit_xtrace(&line);
     }
 
     /// Emit the `set -x` trace for a command word list — every argument
@@ -13179,7 +13325,7 @@ impl Shell {
             line.extend_from_slice(&xtrace_quote(a));
         }
         line.push(b'\n');
-        self.emit_stderr(&line);
+        self.emit_xtrace(&line);
     }
 
     /// Emit a single `set -x` trace line (prefix + `text` + newline) to stderr,
@@ -13193,7 +13339,7 @@ impl Shell {
     fn bxtrace_emit(&mut self, text: BStr<'_>) {
         let prefix = self.xtrace_prefix();
         let line = bfmt![prefix, text, b"\n"];
-        self.emit_stderr(&line);
+        self.emit_xtrace(&line);
     }
 
     /// Expand `s` as a prompt string: decode the prompt escapes, then expand
@@ -17033,11 +17179,7 @@ impl Shell {
     /// one command each get a distinct number).
     fn alloc_varfd(&self, reserved: &[i32]) -> i32 {
         let mut n = 10;
-        while self.open_fds.contains_key(&n)
-            || self.open_write_fds.contains_key(&n)
-            || self.coproc_read_fds.contains_key(&n)
-            || reserved.contains(&n)
-        {
+        while self.fd_is_open(n) || reserved.contains(&n) {
             n += 1;
         }
         n
@@ -17331,34 +17473,10 @@ impl Shell {
     ) -> Result<(), Str> {
         match Self::classify_dup_word(target) {
             DupWord::Close => {
-                // `N>&-` / `N<&-`: close the descriptor.
-                match fd {
-                    // `exec 0>&-` closes fd 0 exactly as `exec 0<&-` does. Not
-                    // `None`, which means "the real stdin"; see
-                    // [`Shell::apply_persistent_dup_in`].
-                    0 => {
-                        self.exec_stdin = Some(closed_input());
-                        self.exec_stdin_write = None;
-                    }
-                    // Not `None`, which for fd 1 means "the real stdout": a
-                    // shell that closed fd 1 must answer its own writes with
-                    // `EBADF` (`echo: write error: …`), not print to the
-                    // terminal. See [`WriteFd::Closed`].
-                    // As for fd 1: `None` would mean "the real stderr". A shell
-                    // that closed fd 2 has nowhere to report a failed write, so
-                    // its diagnostics are dropped — but they must not appear on
-                    // the terminal instead. A close takes the *whole* descriptor,
-                    // so any read half an `exec 1< f` gave it goes with it.
-                    1 | 2 => {
-                        self.set_std_write_half(fd, Some(WriteFd::Closed));
-                        self.set_std_read_half(fd, None);
-                    }
-                    _ => {
-                        self.open_write_fds.remove(&fd);
-                        self.open_fds.remove(&fd);
-                        self.coproc_read_fds.remove(&fd);
-                    }
-                }
+                // `N>&-` / `N<&-`: close the descriptor. `exec 0>&-` closes fd 0
+                // exactly as `exec 0<&-` does — which side of the `&` the `-` is
+                // written on says nothing about which descriptor is meant.
+                self.close_fd(fd);
             }
             DupWord::BadFd => {
                 return Err(bfmt![
@@ -17458,26 +17576,9 @@ impl Shell {
     ) -> Result<(), Str> {
         match Self::classify_dup_word(target) {
             DupWord::Close => {
-                // `N<&-`: close the input descriptor.
-                if fd == 0 {
-                    // Not `None`, which for fd 0 means "the real stdin": a
-                    // shell that closed fd 0 must answer a `read` of it with
-                    // `EBADF`, not go on reading the terminal. See
-                    // [`InputSrc::Closed`].
-                    self.exec_stdin = Some(closed_input());
-                    self.exec_stdin_write = None;
-                } else if fd == 1 || fd == 2 {
-                    // `exec 1<&-` closes fd 1 exactly as `exec 1>&-` does: which
-                    // side of the `&` the `-` is written on says nothing about
-                    // which descriptor is meant. See
-                    // [`Shell::apply_persistent_dup_out`].
-                    self.set_std_write_half(fd, Some(WriteFd::Closed));
-                    self.set_std_read_half(fd, None);
-                } else {
-                    self.open_fds.remove(&fd);
-                    self.open_write_fds.remove(&fd);
-                    self.coproc_read_fds.remove(&fd);
-                }
+                // `N<&-`: close the input descriptor — the same close `N>&-`
+                // performs. See [`Shell::close_fd`].
+                self.close_fd(fd);
             }
             DupWord::BadFd => {
                 return Err(bfmt![
@@ -36763,6 +36864,53 @@ impl Shell {
         self.emit_stderr_depth(bytes, self.stderr_stack.len());
     }
 
+    /// Write one `set -x` trace line to wherever the trace currently goes: the
+    /// descriptor `$BASH_XTRACEFD` names, or fd 2 when it names none.
+    ///
+    /// The descriptor is resolved *here*, not when the name was assigned, so the
+    /// trace follows fd N through a later `exec N> elsewhere`. A descriptor that
+    /// exists but has no write half swallows the line, exactly as writing to it
+    /// would; one that is not there at all was closed behind the shell's back,
+    /// and stderr is where bash's own close leaves the trace.
+    fn emit_xtrace(&self, bytes: &[u8]) {
+        let Some(n) = self.xtrace_fd else {
+            self.emit_stderr(bytes);
+            return;
+        };
+        match n {
+            2 => self.emit_stderr(bytes),
+            // fd 1's live sink is the `Out` value a command carries, and a trace
+            // raised from inside a `[[ … ]]` primary has no `Out` to consult —
+            // so the trace reaches the *ambient* fd 1 rather than a capture or a
+            // pipeline stage's. See known-issues
+            // TD-OILS-XTRACEFD-STDOUT-IS-THE-AMBIENT-ONE.
+            1 => match &self.exec_stdout {
+                Some(w) => {
+                    let _ = write_to_write_fd(w, bytes);
+                }
+                None => {
+                    let o = io::stdout();
+                    let mut lock = o.lock();
+                    let _ = lock.write_all(bytes);
+                    let _ = lock.flush();
+                }
+            },
+            // Writable only when an `<>` open gave fd 0 a write half; otherwise
+            // the line is dropped, as a write to a read-only descriptor is.
+            0 => {
+                if let Some(w) = self.ambient_stdin_write_fd() {
+                    let _ = write_to_write_fd(&w, bytes);
+                }
+            }
+            _ => match self.open_write_fds.get(&n) {
+                Some(w) => {
+                    let _ = write_to_write_fd(w, bytes);
+                }
+                None => self.emit_stderr(bytes),
+            },
+        }
+    }
+
     /// Install a persistent fd 2 target — `exec 2> file`, `exec 2>&-`,
     /// `exec 2>&N`, or the fd 2 half of `exec &> file`.
     ///
@@ -41317,6 +41465,42 @@ fn redir_is_close(r: &Redirect) -> bool {
 /// silently takes the shell's stdin away with status 0. That is a bug rather
 /// than a rule, and it gets the same refusal an out-of-range number does. See
 /// TD-OILS-VARFD-CLOSE-OF-A-NON-NUMBER-CLOSES-STDIN in `known-issues.md`.
+/// The descriptor `$BASH_XTRACEFD`'s value names, or `None` when it names none.
+///
+/// `strtol` followed by "and the rest of the string is empty", which is how bash
+/// reads it: leading blanks and a sign are consumed, so ` 8`, `+8` and `08` all
+/// name fd 8, while `8x`, `8 ` and the empty string name nothing. A negative
+/// number parses but can never be an open descriptor, so it is refused here —
+/// the caller answers both refusals with the one diagnostic, as bash does.
+fn parse_xtrace_fd(value: BStr<'_>) -> Option<i32> {
+    // C's `isspace` in the "C" locale, which is what `strtol` skips — one
+    // character wider than Rust's `is_ascii_whitespace`, which omits the
+    // vertical tab. Only *leading* blanks: `strtol` stops at the first
+    // non-digit, and bash then insists that stopping place be the terminator.
+    let ws = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r');
+    let mut s = value;
+    while s.first().is_some_and(ws) {
+        s = s.get(1..).unwrap_or_default();
+    }
+    let digits = match s.split_first() {
+        Some((b'+', rest)) => rest,
+        // A `-` parses as a number and is then rejected for not being a
+        // descriptor; there is no need to distinguish the two here.
+        Some((b'-', _)) => return None,
+        _ => s,
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut n: i64 = 0;
+    for d in digits {
+        // Overflow is `strtol` clamping to `LONG_MAX`, which is not a descriptor
+        // either — same refusal.
+        n = n.checked_mul(10)?.checked_add(i64::from(d - b'0'))?;
+    }
+    i32::try_from(n).ok()
+}
+
 fn varfd_close_target(value: BStr<'_>) -> Option<i32> {
     // C's `isspace` in the "C" locale, which is what `strtoimax` skips — and
     // one character wider than Rust's `is_ascii_whitespace`, which omits the
@@ -65316,6 +65500,66 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("{ x=foo; set -x; case $x in f*) :;; esac; } 2>&1").0,
             "+ case $x in\n+ :\n"
+        );
+    }
+
+    #[test]
+    fn xtracefd_moves_the_trace_to_a_descriptor() {
+        // Pointed at a descriptor, the trace goes there instead of to stderr —
+        // here fd 3 aliases fd 1, so the trace lands on stdout.
+        assert_eq!(
+            run("exec 3>&1; BASH_XTRACEFD=3; { set -x; :; set +x; } 2>/dev/null").0,
+            "+ :\n+ set +x\n"
+        );
+        // The descriptor is resolved when the line is written, not when the name
+        // was assigned: fd 3 starts out as stderr and the trace still follows it
+        // onto stdout.
+        assert_eq!(
+            run("exec 3>&2; BASH_XTRACEFD=3; exec 3>&1; { set -x; :; set +x; } 2>/dev/null").0,
+            "+ :\n+ set +x\n"
+        );
+        // `strtol` spelling: leading blanks and a `+` are part of the number.
+        assert_eq!(
+            run("exec 3>&1; BASH_XTRACEFD=' +3'; { set -x; :; } 2>/dev/null").0,
+            "+ :\n"
+        );
+        // Closing the descriptor ends the diversion for good — reopening the
+        // same number does not bring it back.
+        assert_eq!(
+            run("exec 3>&1; BASH_XTRACEFD=3; exec 3>&-; exec 3>&1; \
+                 { set -x; :; set +x; } 2>/dev/null; echo after")
+            .0,
+            "after\n"
+        );
+        // Losing the value closes the descriptor as well as ending the
+        // diversion, so a later write through it is `EBADF`.
+        assert_eq!(
+            run("exec 3>&1; BASH_XTRACEFD=3; unset BASH_XTRACEFD; \
+                 { echo x >&3; } 2>/dev/null; echo st=$?")
+            .0,
+            "st=1\n"
+        );
+        // An assignment that names no open descriptor is a complaint, not a
+        // reset: the trace stays where it was.
+        let (o, _) = run(
+            "exec 3>&1; BASH_XTRACEFD=3; { BASH_XTRACEFD=99; BASH_XTRACEFD=nope; } 2>&1; \
+             { set -x; :; } 2>/dev/null",
+        );
+        assert!(
+            o.contains("BASH_XTRACEFD: 99: invalid value for trace file descriptor"),
+            "output: {o:?}"
+        );
+        assert!(
+            o.contains("BASH_XTRACEFD: nope: invalid value for trace file descriptor"),
+            "output: {o:?}"
+        );
+        assert!(o.ends_with("+ :\n"), "output: {o:?}");
+        // Moving the name from one descriptor to another closes neither.
+        assert_eq!(
+            run("exec 3>&1; BASH_XTRACEFD=3; BASH_XTRACEFD=1; \
+                 { echo x >&3; } 2>/dev/null; echo st=$?")
+            .0,
+            "x\nst=0\n"
         );
     }
 

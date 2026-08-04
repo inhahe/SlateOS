@@ -31230,3 +31230,46 @@ now that both the opens and the tests are routed away from the literal path, but
 they are why `[ -e /dev/full ]` still answers true on this host, and why a
 case-insensitive `[ -e /dev/NULL ]` does too. Deleting them is the operator's
 call, since they sit outside the repository.
+
+---
+
+### TD-OILS-XTRACEFD-STDOUT-IS-THE-AMBIENT-ONE. `BASH_XTRACEFD=1` traces to the shell's fd 1, not to an enclosing capture or pipeline stage — 2026-08-04 — OPEN
+
+**Where:** `Shell::emit_xtrace` in `userspace/oils/src/interp.rs`, the `1 => …`
+arm.
+
+**What.** `$BASH_XTRACEFD` is otherwise complete: the trace follows the number it
+names through a rebind, a close ends the diversion, an unset closes the
+descriptor, and every descriptor ≥ 3 resolves through `open_write_fds`, which is
+the *live* binding. fd 2 is likewise the live fd 2, because `emit_stderr` already
+resolves it through the `stderr_stack`. fd 1 is the exception: its live sink is
+the `Out` value threaded through command execution, and `emit_xtrace` has no
+`Out` — so it falls back to `exec_stdout` (an `exec > file`) or the shell's real
+stdout.
+
+The divergence is therefore confined to `BASH_XTRACEFD=1` *inside* a context that
+rebinds fd 1 without an `exec`:
+
+```sh
+x=$(BASH_XTRACEFD=1; set -x; echo hi; set +x)   # bash: x holds the trace
+echo one | { BASH_XTRACEFD=1; set -x; read v; } > p.txt   # bash: trace in p.txt
+```
+
+bash puts the trace in the capture / in `p.txt`; osh puts it on the terminal. A
+group's `> file` and a pipeline stage's pipe are the same case. Anything ≥ 3 —
+which is what the feature exists for, diverting a trace into a log file — is
+exact.
+
+**Why it is not simply fixed.** Threading `Out` into the trace emitters means
+threading it into `cond_trace_unary` / `cond_trace_binary` and so into the whole
+`[[ … ]]` evaluator, which takes no `Out` today because a conditional writes
+nothing. Roughly a dozen signatures, for a case (`BASH_XTRACEFD=1` under a
+capture) that is a curiosity rather than a use.
+
+**What the proper fix looks like.** Give the shell an fd-1 counterpart to
+`stderr_stack` — a stack of live fd-1 sinks pushed and popped where `Out` is
+currently switched (command substitution, pipeline stage, a compound command's
+`> file`). `emit_xtrace` would then resolve fd 1 the way it already resolves
+fd 2, and `exec_stdout_shadowing`'s "fd 1's ambient sink is a value, not a stack"
+comment would stop being true — which is the same reason it is worth doing: the
+asymmetry between the two standard write descriptors is itself the tech debt.

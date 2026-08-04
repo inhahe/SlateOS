@@ -101,6 +101,45 @@ version is also the more useful answer.
 clear `arith_cmd` at the top of `run_simple_command` for a non-builtin, which
 is what bash's `execute_command` does.
 
+### TD-OILS-INT-BIND-DISCARD-STOPS-AT-EVAL. A bad `-i` value's abort is caught by `eval`/`source` in osh; bash's unwinds past them — 2026-08-03
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::read_eval_builtin_status`,
+whose `Flow::Discard` arm re-raises only inside a subshell, and
+`Shell::eval_int_assign`, which is the single place an integer-binding abort is
+armed.
+
+**What.** bash has two aborts that both read as "discard the rest of the parse
+unit", and they differ in whether the `eval`/`source` boundary catches them.
+A bad array *subscript* is caught there — this is `parse_and_execute`'s
+`jump_to_top_level(DISCARD)` handler, which osh already models. An arithmetic
+error while *binding an integer-attribute value* is **not**: it unwinds past
+`eval`, past `source`, past every enclosing function, all the way to the
+outermost read-eval loop (a subshell boundary still contains it).
+
+```sh
+f() { eval 'a[-9]=x';         echo yes; }; f    # both: yes        (caught)
+g() { eval 'declare -i b=2+'; echo yes; }; g    # bash: no yes, rc 1
+                                                # osh : yes,     rc 0
+h() { . ./inc.sh;             echo yes; }; h    # inc.sh: declare -i b=2+
+                                                # bash: no yes    osh: yes
+eval 'declare -i e=2+' 2>/dev/null; echo yes    # bash: no yes    osh: yes
+```
+
+Every write that binds an integer value behaves this way — `declare -i a=2+`,
+`b=2+`, `c+=2+`, `declare -ai d=(1 2+)`, `read e`, `printf -v f`, `g[k]=2+`,
+`export h=2+` — because they all funnel through the same arithmetic error.
+`let`, `(( … ))` and `$(( … ))` are *not* affected: those merely fail.
+
+**Proper fix:** the abort needs a kind, so the `eval`/`source` boundary can tell
+which of the two it is holding. `Shell::eval_int_assign` is the only site that
+arms the uncaught kind, so a payload on `Shell::discard_error` (or a companion
+flag armed only through a helper, so the two cannot desync) is enough; then
+`read_eval_builtin_status`'s `Flow::Discard` arm re-raises the uncaught kind
+unconditionally instead of only when `subshell_depth > 0`. Do not clear the kind
+where `discard_error` is merely read — it must survive the re-raise through
+`Shell::pending_abort`/`run_builtin_body` so a nested `eval` inside an `eval`
+keeps unwinding.
+
 ### TD-OILS-DECLARE-N-WITH-OTHER-ATTRS. `declare -n` combined with another attribute ignores the other attribute — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 
 **Where:** `userspace/oils/src/interp.rs` — the `builtin_declare_scoped` operand
@@ -165,33 +204,51 @@ a function, which is not what bash 5.2.37 does.
 though `declare -p` lists it, so the two views genuinely disagree and the
 dynamic-special machinery must not make the name *expand* as set.
 
-### TD-OILS-BAD-INT-VALUE-LEAVES-NO-PENDING-ARRAY. A name left behind by a bad `-i` value does not become a *valued* empty array — 2026-08-03
+### TD-OILS-BAD-INT-VALUE-LEAVES-NO-PENDING-ARRAY. A name left behind by a bad `-i` value did not become a *valued* empty array — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 
-**Where:** `userspace/oils/src/interp.rs` — the `attr_store` failure path in the
-`builtin_declare_scoped` operand loop, which does `self.declared.insert(name)`
-and breaks, and `Shell::array_valued`.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::note_int_refusal_assigned`,
+`Shell::scalar_write_store`, and the two scalar `is_int` failure paths in
+`Shell::apply_assignment_inner`.
 
-**What:** bash's `declare -i n=2+` leaves `n` behind in an "invisible" state that
-still remembers a pending assignment, so a later `declare -a n` reports a
-*valued* empty array. osh leaves only a plain declaration:
+**The bug.** A malformed `-i` value stores nothing, but bash still counts the
+name it was aimed at as *assigned*: it clears `att_invisible` on the way to the
+arithmetic, and the error jumps out past the store without putting it back.
+Nothing shows while the name is a scalar — `declare -p` reports the same bare
+declaration either way and `${n+SET}` stays empty — but the distinction survives
+to be read once the name becomes an array. osh dropped it:
 
 ```sh
 declare -i n=2+       # both: 2+: syntax error: operand expected
-declare -p n          # both: declare -i n
+declare -p n          # both: declare -i n   (and ${n+SET} empty in both)
 declare -a n; declare -p n
                       # bash: declare -ai n=()        osh: declare -ai n
 ```
 
-Nothing else about the state differs — `declare n=5` afterwards gives
-`declare -i n="5"` in both — and a name declared unset by any *other* route
-(`declare -i v; declare -a v`) agrees, so this is specific to the aborted
-assignment.
+**What was measured.** Every write aimed at the *whole variable* marks it,
+whichever builtin asked — `declare -i n=2+`, `n=2+`, `n+=2+`, `export n=2+`,
+`readonly n=2+`, `local -i n=2+`, `read n`, `printf -v n`, and a write through a
+nameref — and the associative kind reads the flag the same way (`declare -A s`
+after `declare -i s=2+` gives `declare -Ai s=()`). A write aimed at an *element*
+does not (`declare -ai e; e[0]=2+` keeps the bare `declare -ai e`, and likewise
+through `declare -n re='e[0]'` or `read 'e[0]'`), and neither does an array
+literal, whose pairs never reach the table (`declare -Ai m; m=([k]=2+)` and its
+`+=` form both stay bare). A whole-array write *does* mark it, because it emptied
+the array before it failed (`read -a w`, `mapfile -t w` → `declare -ai w=()`), and
+`declare -ai a=(1 2+)` keeps the prefix it managed to store. `unset` clears the
+flag again.
 
-**Proper fix:** on the `attr_store`/`apply_value_attrs` failure path, insert the
-name into `array_valued` as well as `declared`, matching what the "cannot destroy
-array variables" and `-aA` refusals already do a few lines above. Check first
-that this does not make a *scalar* `declare -p` print an `=()`, since
-`array_valued` is consulted for both.
+**The fix.** osh spells bash's not-`att_invisible` as `Shell::array_valued`, which
+only the array listings read, so a scalar that never becomes one is unaffected.
+`Shell::note_int_refusal_assigned` records it, and is called from the three
+places a whole-*variable* store can be refused for a bad `-i` expression: the
+`None` arm of `scalar_write_store` (guarded on a `ScalarDest::Var` destination,
+so an element write does not mark its array) and the plain and `+=` scalar
+`is_int` arms of `apply_assignment_inner`. The element and array-literal paths
+were already correct and were left alone.
+
+Covered by the lib test `a_refused_integer_value_still_counts_as_an_assignment`
+and the corpus case
+`a-a-refused-integer-value-still-counts-as-an-assignment.sh`.
 
 ### TD-OILS-TRAP-P-OPERANDS-AS-FILTER. `trap -p SPEC…` filtered the trap table instead of walking its operands, so it reordered its output, swallowed duplicates and ignored a bad signal name — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

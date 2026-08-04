@@ -219,7 +219,7 @@ invisible.) Corpus case
 `a-a-name-enumeration-passes-over-a-bare-declaration.sh`; lib test
 `a_name_enumeration_passes_over_a_bare_declaration`.
 
-### TD-OILS-FUNCNAME-NOT-LISTED-AT-TOP-LEVEL. `declare -p FUNCNAME` says "not found" outside a function — 2026-08-03
+### TD-OILS-FUNCNAME-NOT-LISTED-AT-TOP-LEVEL. `declare -p FUNCNAME` says "not found" outside a function — 2026-08-03 — ✅ **RESOLVED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::DYNAMIC_SPECIALS` (~13156),
 which deliberately omits `FUNCNAME`, and `Shell::refresh_funcname` (~14553),
@@ -242,12 +242,66 @@ being visible to the checks that walk the array tables. The
 `DYNAMIC_SPECIALS` doc comment states that bash does not list `FUNCNAME` outside
 a function, which is not what bash 5.2.37 does.
 
-**Proper fix:** add a `FUNCNAME` row to `DYNAMIC_SPECIALS` alongside
-`BASH_SOURCE`/`BASH_LINENO` (`named_flags: "a"`, `listed_flags: "a"`,
-`listed: DynListing::EmptyArray`, `assign: DynAssign::Discard`), then check that
-`${FUNCNAME+set}` is still empty at top level — bash reports it unset there even
-though `declare -p` lists it, so the two views genuinely disagree and the
-dynamic-special machinery must not make the name *expand* as set.
+**Fixed in `58f03723d`.** `FUNCNAME` has a `DYNAMIC_SPECIALS` row now, but
+not the `DynListing::EmptyArray` the note above guessed at: bash builds
+`BASH_SOURCE` and `BASH_LINENO` by *assigning* them an empty array, and creates
+`FUNCNAME` without ever assigning it, so the first two print `=()` and the third
+prints bare. That is the same never-assigned state a `declare -a q` leaves
+behind, so the new `DynListing::BareArray` says exactly that, and the four sites
+that asked "is this listing an array?" go through `DynListing::is_array()`
+instead of comparing against `EmptyArray`.
+
+Three consequences fell out of the name being present at the top level, where it
+has no `arrays` entry to read anything off:
+
+* It is *invisible*, in bash's sense — reported by `declare -p`, passed over by
+  the value listings. `dynamic_special_visible_names` is what
+  `Shell::visible_var_names` chains, and it drops a `BareArray`; see
+  TD-OILS-NAME-ENUMERATION-LISTS-INVISIBLE-NAMES for the other half of that rule.
+* `declare -A FUNCNAME` is a *conversion*, so `array_kind_conflict` now asks
+  `dynamic_special_listed` as well as the `arrays` table (bash: `cannot convert
+  indexed to associative array`, rc 1, name unchanged).
+* `unset FUNCNAME` drops the binding for good — bash never rebuilds it, so a
+  later call finds nothing there — which `refresh_funcname` honours by checking
+  `dyn_unset` before writing the array. bash refuses to unset the other two at
+  all, so only `FUNCNAME` can reach that state.
+
+`${FUNCNAME+set}` is still empty at the top level as the note asked: the
+listing and the expansion genuinely disagree there, and a function call settles
+them. Corpus case
+`a-a-funcname-is-present-and-empty-outside-a-function.sh`; lib test
+`funcname_is_present_and_empty_outside_a_function`.
+
+### TD-OILS-LOCAL-NOASSIGN-OUTRANKS-READONLY. A `local` of a readonly call-stack array reports the wrong refusal — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `self.noassign.contains(base_name)
+&& (value.is_some() || make_local)` guard in the `builtin_declare_scoped` operand
+loop (~30055), which runs before the readonly refusal.
+
+**What:** when a name is both un-assignable (`NOASSIGN_VARS` — the call-stack
+arrays, `GROUPS`, …) and `readonly`, bash reports the *readonly* refusal and osh
+reports the un-assignable one. Both give rc 1 and neither binds, so only the
+message differs. Measured against bash 5.2.37:
+
+```sh
+declare -r BASH_SOURCE; f() { local BASH_SOURCE; }; f
+# bash: local: BASH_SOURCE: readonly variable
+# osh : local: BASH_SOURCE: variable may not be assigned value
+declare -r FUNCNAME;    f() { local FUNCNAME; }; f      # same divergence
+declare -r SECONDS;     f() { local SECONDS; }; f       # both: readonly variable ✅
+declare -r ord=1;       f() { local ord; }; f           # both: readonly variable ✅
+```
+
+So it is specific to the names in `noassign`; an ordinary readonly and a readonly
+*scalar* dynamic special already match. Without the readonly the un-assignable
+message is the right one, so the guard cannot simply move — it has to yield to a
+readonly that is also present.
+
+**Proper fix:** check `self.readonly.contains(base_name)` ahead of the `noassign`
+guard and emit the readonly refusal in that case, keeping the un-assignable
+refusal for a name that is only in `noassign`. Verify against the whole of
+`NOASSIGN_VARS` and against the valueless/valued and `local`/`declare` forms,
+since only the `local` form speaks at all.
 
 ### TD-OILS-BAD-INT-VALUE-LEAVES-NO-PENDING-ARRAY. A name left behind by a bad `-i` value did not become a *valued* empty array — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

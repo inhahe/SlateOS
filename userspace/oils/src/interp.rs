@@ -33362,29 +33362,15 @@ impl Shell {
         let ifs = self.vars.get("IFS").cloned().unwrap_or_else(|| b" \t\n".to_vec());
 
         if let Some(arr) = array {
-            // `-a` fills a whole array, so it takes a plain name: an element is
-            // not an array to put a record in. Both this and the readonly guard
-            // happen here rather than up front, because the input has already
-            // been consumed by the time bash looks at where to put it.
-            let Some(name) = bytes::as_str(&arr).filter(|a| crate::parser::is_valid_name(a.as_bytes()))
-            else {
-                self.berrln(&bfmt![
-                    self.err_prefix(),
-                    b"read: `",
-                    &arr,
-                    b"': not a valid identifier"
-                ]);
+            // `-a` fills a whole array, so the operand names one the same way
+            // `mapfile`'s does — through a nameref, never an element, and not
+            // an associative one. That is settled *here* rather than up front
+            // because the input has already been consumed by the time bash
+            // looks at where to put it: a refused `read -a` still eats its
+            // record, where a refused `mapfile` leaves the input untouched.
+            let Some(name) = self.whole_array_write_target(&arr, "read") else {
                 return 1;
             };
-            if self.readonly.contains(name) {
-                self.berrln(&bfmt![self.err_prefix(), name, b": readonly variable"]);
-                return 1;
-            }
-            // …and one the shell maintains is refused silently — see
-            // [`Shell::noassign`]. `read -a GROUPS` reports 1 and says nothing.
-            if self.noassign.contains(name) {
-                return 1;
-            }
             // The record replaces whatever the array held rather than merging
             // into it, so an EOF leaves a defined but empty array.
             // `-N` assigns the raw record without IFS splitting: a single
@@ -33395,7 +33381,6 @@ impl Shell {
             } else {
                 read_split(&line, &ifs, raw, None).into_iter().enumerate().collect()
             };
-            let name = name.to_string();
             self.vars.remove(&name);
             self.assoc.remove(&name);
             self.array_valued.insert(name.clone());
@@ -33516,6 +33501,70 @@ impl Shell {
                 take(&mut lock, delim, max)
             }
         }
+    }
+
+    /// The one array name a whole-array write fills, resolved from the operand
+    /// `mapfile` or `read -a` was handed. `None` if it cannot be filled, having
+    /// already reported why.
+    ///
+    /// A nameref is followed to it, so `declare -n r=zz; read -a r` fills `zz`
+    /// — but the *complaint* stays with the operand. bash blames `r` for what
+    /// it found at `zz`, both for a target that is not an indexed array and for
+    /// a readonly one, and blames the operand even through a chain of them: a
+    /// bare name looks like it is blamed by what it resolved to only because
+    /// that is also what was written down.
+    ///
+    /// bash asks the questions in this order, and each is worded its own way —
+    /// the readonly complaint names the variable alone (the attribute is the
+    /// variable's, not the builtin's doing), while the other two are the
+    /// builtin's own objections and carry its name.
+    fn whole_array_write_target(&mut self, operand: &[u8], tag: &str) -> Option<String> {
+        // The variable tables are keyed by `String` and an identifier is
+        // spelled in the shell's identifier syntax, so a name that is not text
+        // is not a valid identifier — the complaint it already gets, quoting
+        // the bytes it was given.
+        let Some(text) = bytes::as_str(operand) else {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                tag,
+                b": `",
+                operand,
+                b"': not a valid identifier"
+            ]);
+            return None;
+        };
+        let blame = text.to_string();
+        let target = self.resolve_ref_use(text)?;
+        // A reference designating one *element* names no array to fill, so it is
+        // refused exactly as a malformed name is — quoting the target as the
+        // reference spells it, subscript and all.
+        let Some(array) = target
+            .as_name()
+            .filter(|a| crate::parser::is_valid_name(a.as_bytes()))
+            .map(str::to_string)
+        else {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                tag,
+                b": `",
+                target.spelling(),
+                b"': not a valid identifier"
+            ]);
+            return None;
+        };
+        if self.readonly.contains(&array) {
+            self.perrln(&format!("{blame}: readonly variable"));
+            return None;
+        }
+        // …and one the shell maintains, silently — see [`Shell::noassign`].
+        if self.noassign.contains(&array) {
+            return None;
+        }
+        if self.assoc.contains_key(&array) {
+            self.berrln(&bfmt![self.err_prefix(), tag, b": ", blame.as_str(), b": not an indexed array"]);
+            return None;
+        }
+        Some(array)
     }
 
     /// The `mapfile`/`readarray [-d delim] [-n count] [-O origin] [-s skip] [-t]
@@ -33692,57 +33741,11 @@ impl Shell {
 
         // Everything the target name has to be is settled *before* a byte is
         // read: a refused `mapfile` leaves the input where it was, so a `read`
-        // sharing the same redirection still sees the first line. bash asks the
-        // three questions in this order, and each is worded its own way — the
-        // readonly complaint names the variable alone (the attribute is the
-        // variable's, not the builtin's doing), while the other two are the
-        // builtin's own objections and carry its name.
-        // The variable tables are keyed by `String` and an identifier is
-        // spelled in the shell's identifier syntax, so a name that is not text
-        // is not a valid identifier — the complaint it already gets, quoting
-        // the bytes it was given.
-        let Some(text) = bytes::as_str(&array) else {
-            self.berrln(&bfmt![
-                self.err_prefix(),
-                tag,
-                b": `",
-                &array,
-                b"': not a valid identifier"
-            ]);
+        // sharing the same redirection still sees the first line. (`read -a` is
+        // the other caller and cannot do that — see [`Shell::builtin_read`].)
+        let Some(array) = self.whole_array_write_target(&array, tag) else {
             return 1;
         };
-        let Some(target) = self.resolve_ref_use(text) else {
-            return 1;
-        };
-        // A reference designating one *element* names no array to fill, so it is
-        // refused exactly as a malformed name is — quoting the target as the
-        // reference spells it, subscript and all.
-        let Some(array) = target
-            .as_name()
-            .filter(|a| crate::parser::is_valid_name(a.as_bytes()))
-            .map(str::to_string)
-        else {
-            self.berrln(&bfmt![
-                self.err_prefix(),
-                tag,
-                b": `",
-                target.spelling(),
-                b"': not a valid identifier"
-            ]);
-            return 1;
-        };
-        if self.readonly.contains(&array) {
-            self.perrln(&format!("{array}: readonly variable"));
-            return 1;
-        }
-        // …and one the shell maintains, silently — see [`Shell::noassign`].
-        if self.noassign.contains(&array) {
-            return 1;
-        }
-        if self.assoc.contains_key(&array) {
-            self.perrln(&format!("{tag}: {array}: not an indexed array"));
-            return 1;
-        }
 
         let mut ufd_plan = RedirPlan::default();
         let inherit_src = StdinSrc::Inherit;
@@ -66278,6 +66281,70 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "readonly arr; read -a arr <<< 'p q'; s=$?; echo \"[${arr[*]}]|$s\"",
         );
         assert_eq!(out, "[]|1\n");
+    }
+
+    /// `read -a` names its array the way `mapfile` does — through a nameref,
+    /// never an element, and never an associative one.
+    #[test]
+    fn read_a_names_its_array_the_way_mapfile_does() {
+        // A nameref is followed to the array actually filled, and survives it:
+        // the write lands on the target, not on the reference.
+        assert_eq!(
+            run("declare -n r=zz; read -a r <<< 'p q'; declare -p zz; declare -p r").0,
+            "declare -a zz=([0]=\"p\" [1]=\"q\")\ndeclare -n r=\"zz\"\n"
+        );
+        // What it finds there is refused as `mapfile` would refuse it, with
+        // `read`'s own name on the builtin's own objections…
+        assert_eq!(
+            run("declare -A m; declare -n r=m; { read -a r <<< x; } 2>&1; echo rc=$?").0,
+            "osh: read: r: not an indexed array\nrc=1\n"
+        );
+        assert_eq!(
+            run("declare -n r='q[1]'; { read -a r <<< x; } 2>&1; echo rc=$?").0,
+            "osh: read: `q[1]': not a valid identifier\nrc=1\n"
+        );
+        // …and the readonly complaint naming the variable alone, since the
+        // attribute is the variable's doing and not the builtin's.
+        assert_eq!(
+            run("declare -ar k=(o); declare -n r=k; { read -a r <<< x; } 2>&1; echo rc=$?").0,
+            "osh: r: readonly variable\nrc=1\n"
+        );
+        // Both of those are blamed by the *operand*, not by the name the chain
+        // landed on, and stay so however many links the chain has.
+        assert_eq!(
+            run("declare -A m; declare -n r1=r2; declare -n r2=m; { read -a r1 <<< x; } 2>&1").0,
+            "osh: read: r1: not an indexed array\n"
+        );
+        // A bare operand only *looks* blamed by its resolution: it is the
+        // operand too.
+        assert_eq!(
+            run("declare -A m; { read -a m <<< x; } 2>&1; echo rc=$?; declare -p m").0,
+            "osh: read: m: not an indexed array\nrc=1\ndeclare -A m\n"
+        );
+        // Readonly outranks the kind check, so a readonly associative array is
+        // refused as readonly.
+        assert_eq!(
+            run("declare -Ar m=([k]=1); { read -a m <<< x; } 2>&1; echo rc=$?").0,
+            "osh: m: readonly variable\nrc=1\n"
+        );
+        // A name the shell maintains refuses silently, reference or not.
+        assert_eq!(run("{ read -a GROUPS <<< x; } 2>&1; echo rc=$?").0, "rc=1\n");
+        assert_eq!(
+            run("declare -n r=GROUPS; { read -a r <<< x; } 2>&1; echo rc=$?").0,
+            "rc=1\n"
+        );
+        // A refusal still eats the record it read — the input is consumed
+        // before bash looks at where to put it, unlike `mapfile`, which settles
+        // its target first and leaves the input where it was.
+        assert_eq!(
+            run("declare -A m; { read -a m; read y; } <<< $'p\\nq' 2>/dev/null; echo \"y=[$y]\"").0,
+            "y=[q]\n"
+        );
+        assert_eq!(
+            run("declare -A m; { mapfile -t m; read y; } <<< $'p\\nq' 2>/dev/null; echo \"y=[$y]\"")
+                .0,
+            "y=[p]\n"
+        );
     }
 
     #[test]

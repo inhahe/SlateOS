@@ -76,6 +76,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import proctree  # noqa: E402  (needs the path above)
+
 REPO = Path(__file__).resolve().parent.parent
 CORPUS = REPO / "userspace" / "oils" / "tests" / "corpus"
 # Where a failing case's full report is left behind; see the module docstring.
@@ -204,17 +207,22 @@ def run_case(shell: Path, case: Case) -> Run:
                 "COLUMNS": "80",
             }
         )
-        try:
-            proc = subprocess.run(
-                [str(shell), "case.sh"],
-                cwd=workdir,
-                input=case.stdin.encode(),
-                capture_output=True,
-                timeout=case.timeout,
-                env=env,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
+        # `proctree.run_captured`, not `subprocess.run(timeout=…)`: a case is
+        # free to leave a process behind — a `&` job, an interposed `#!`
+        # interpreter — and on Windows such a grandchild inherits the capture
+        # pipes. `subprocess.run` kills only the shell and then drains those
+        # pipes with no timeout of its own, so one surviving grandchild wedges
+        # the whole sweep for good (observed: the runner sitting at 0% CPU,
+        # childless, hours past a 20s budget). Killing the tree first is what
+        # closes the write ends. See `proctree.py`.
+        res = proctree.run_captured(
+            [str(shell), "case.sh"],
+            cwd=workdir,
+            input=case.stdin.encode(),
+            timeout=case.timeout,
+            env=env,
+        )
+        if res.timed_out:
             return Run(
                 stdout="",
                 stderr=f"<timed out after {case.timeout}s>",
@@ -222,9 +230,9 @@ def run_case(shell: Path, case: Case) -> Run:
                 timed_out=True,
             )
     return Run(
-        stdout=proc.stdout.decode("utf-8", "replace"),
-        stderr=proc.stderr.decode("utf-8", "replace"),
-        status=proc.returncode,
+        stdout=res.stdout.decode("utf-8", "replace"),
+        stderr=res.stderr.decode("utf-8", "replace"),
+        status=res.returncode,
     )
 
 

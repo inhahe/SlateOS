@@ -4,12 +4,17 @@ process-tree cleanup.
 
 The motivating problem: wrapping `cargo test` in coreutils `timeout` only
 kills `cargo` itself; the spawned test binaries survive as orphans and can
-linger for hours (a deadlocked test never exits on its own). This runner
-fixes that on Windows by assigning the child — and every descendant it
-spawns — to a Job Object created with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
-Killing the job (on timeout, on Ctrl-C, or when this runner itself dies)
-tears down the entire tree atomically, so nothing is ever orphaned. On
-POSIX it uses a process group + SIGKILL for the same effect.
+linger for hours (a deadlocked test never exits on its own). The fix is
+`proctree.Tree`, which holds the child and every descendant it spawns in one
+killable unit — a Job Object on Windows, a process group on POSIX — so a
+timeout, a Ctrl-C, or this runner's own death tears down the whole tree
+atomically and nothing is ever orphaned. See `proctree.py` for the mechanism.
+
+This module is the *streaming* front end to that: the child keeps this
+process's stdout and stderr, so its output appears live. For the batch case —
+feed stdin, capture the output, enforce a deadline — call
+`proctree.run_captured` directly rather than `subprocess.run(timeout=…)`,
+whose timeout can silently become infinite (again, see `proctree.py`).
 
 While the child runs, the runner prints a heartbeat line every
 `--poll` seconds ("[run-timeout] still running, Ns elapsed") so a long
@@ -29,115 +34,21 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import proctree  # noqa: E402  (needs the path above)
 
 POLL_DEFAULT = 15.0
 EXIT_TIMEOUT = 124
 EXIT_LAUNCH = 125
 EXIT_INTERRUPT = 130
 
-IS_WINDOWS = sys.platform.startswith("win")
+IS_WINDOWS = proctree.IS_WINDOWS
 
 
 def _log(msg: str) -> None:
     print(f"[run-timeout] {msg}", flush=True)
-
-
-if IS_WINDOWS:
-    import ctypes
-    from ctypes import wintypes
-
-    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
-    JobObjectExtendedLimitInformation = 9
-
-    class _IO_COUNTERS(ctypes.Structure):
-        _fields_ = [
-            ("ReadOperationCount", ctypes.c_ulonglong),
-            ("WriteOperationCount", ctypes.c_ulonglong),
-            ("OtherOperationCount", ctypes.c_ulonglong),
-            ("ReadTransferCount", ctypes.c_ulonglong),
-            ("WriteTransferCount", ctypes.c_ulonglong),
-            ("OtherTransferCount", ctypes.c_ulonglong),
-        ]
-
-    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-        _fields_ = [
-            ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
-            ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
-            ("LimitFlags", wintypes.DWORD),
-            ("MinimumWorkingSetSize", ctypes.c_size_t),
-            ("MaximumWorkingSetSize", ctypes.c_size_t),
-            ("ActiveProcessLimit", wintypes.DWORD),
-            ("Affinity", ctypes.POINTER(wintypes.ULONG)),
-            ("PriorityClass", wintypes.DWORD),
-            ("SchedulingClass", wintypes.DWORD),
-        ]
-
-    class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-        _fields_ = [
-            ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
-            ("IoInfo", _IO_COUNTERS),
-            ("ProcessMemoryLimit", ctypes.c_size_t),
-            ("JobMemoryLimit", ctypes.c_size_t),
-            ("PeakProcessMemoryUsed", ctypes.c_size_t),
-            ("PeakJobMemoryUsed", ctypes.c_size_t),
-        ]
-
-    def _create_kill_on_close_job():
-        """Create a Job Object that kills all member processes when the last
-        handle to it closes. Returns the job handle, or None on failure."""
-        _k32.CreateJobObjectW.restype = wintypes.HANDLE
-        job = _k32.CreateJobObjectW(None, None)
-        if not job:
-            return None
-        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not _k32.SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            ctypes.byref(info),
-            ctypes.sizeof(info),
-        ):
-            _k32.CloseHandle(job)
-            return None
-        return job
-
-    def _assign_to_job(job, proc) -> bool:
-        # proc._handle is the process HANDLE on Windows.
-        return bool(_k32.AssignProcessToJobObject(job, int(proc._handle)))
-
-    def _terminate_tree(job, proc) -> None:
-        # Closing the kill-on-close job handle terminates the whole tree.
-        if job:
-            _k32.CloseHandle(job)
-        # Belt-and-suspenders: also taskkill the tree in case assignment
-        # raced and missed an early grandchild.
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-        except OSError:
-            pass
-
-else:
-    import os
-    import signal
-
-    def _create_kill_on_close_job():
-        return None  # POSIX uses process groups instead
-
-    def _assign_to_job(job, proc) -> bool:
-        return True  # child already leads its own group (start_new_session)
-
-    def _terminate_tree(job, proc) -> None:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
 
 
 def main(argv: list[str]) -> int:
@@ -165,25 +76,12 @@ def main(argv: list[str]) -> int:
         return EXIT_LAUNCH
     command = args[1:]
 
-    job = _create_kill_on_close_job()
-    if IS_WINDOWS and job is None:
-        _log("warning: could not create Job Object; relying on taskkill fallback")
-
-    popen_kwargs = {}
-    if not IS_WINDOWS:
-        popen_kwargs["start_new_session"] = True  # child leads its own process group
-
     _log(f"launching (timeout {timeout:g}s): {' '.join(command)}")
     try:
-        proc = subprocess.Popen(command, **popen_kwargs)
+        tree = proctree.Tree(command, warn=lambda m: _log(f"warning: {m}"))
     except OSError as e:
         _log(f"failed to launch: {e}")
-        if job:
-            _k32.CloseHandle(job)
         return EXIT_LAUNCH
-
-    if job is not None and not _assign_to_job(job, proc):
-        _log("warning: AssignProcessToJobObject failed; relying on taskkill fallback")
 
     start = time.monotonic()
     deadline = start + timeout
@@ -199,34 +97,36 @@ def main(argv: list[str]) -> int:
     hb = threading.Thread(target=_heartbeat, daemon=True)
     hb.start()
 
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                stop_heartbeat.set()
-                _log(f"TIMEOUT after {timeout:g}s -- killing process tree")
-                _terminate_tree(job, proc)
+    # The `with` is the safety net: however this block is left — return, raise,
+    # or an interrupt that arrives between statements — the job handle closes
+    # and the tree goes with it.
+    with tree:
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stop_heartbeat.set()
+                    _log(f"TIMEOUT after {timeout:g}s -- killing process tree")
+                    tree.kill()
+                    try:
+                        tree.proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        _log("warning: tree did not exit within 10s of kill")
+                    return EXIT_TIMEOUT
                 try:
-                    proc.wait(timeout=10)
+                    code = tree.proc.wait(timeout=min(remaining, 1.0))
                 except subprocess.TimeoutExpired:
-                    _log("warning: tree did not exit within 10s of kill")
-                return EXIT_TIMEOUT
-            try:
-                code = proc.wait(timeout=min(remaining, 1.0))
-            except subprocess.TimeoutExpired:
-                continue
+                    continue
+                stop_heartbeat.set()
+                elapsed = time.monotonic() - start
+                status = "PASS" if code == 0 else f"FAIL (exit {code})"
+                _log(f"child exited: {status}, {elapsed:.0f}s elapsed")
+                return code
+        except KeyboardInterrupt:
             stop_heartbeat.set()
-            elapsed = time.monotonic() - start
-            status = "PASS" if code == 0 else f"FAIL (exit {code})"
-            _log(f"child exited: {status}, {elapsed:.0f}s elapsed")
-            if job:
-                _k32.CloseHandle(job)
-            return code
-    except KeyboardInterrupt:
-        stop_heartbeat.set()
-        _log("interrupted -- killing process tree")
-        _terminate_tree(job, proc)
-        return EXIT_INTERRUPT
+            _log("interrupted -- killing process tree")
+            tree.kill()
+            return EXIT_INTERRUPT
 
 
 if __name__ == "__main__":

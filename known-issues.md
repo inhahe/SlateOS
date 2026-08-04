@@ -32039,31 +32039,70 @@ Three subtleties were worth the trouble they caused:
 **Pinned by** `tests/corpus/a-quoted-operand-is-a-quoted-word.sh`, which walks
 the whole rule and both of its near-misses.
 
-### TD-OILS-SINGLE-QUOTES-IN-A-QUOTED-SUBSTITUTION-ARE-EATEN. `"${x:-'a b'}"` drops the quotes bash keeps — 2026-08-04 — OPEN
+### TD-OILS-A-QUOTED-SUBSTITUTIONS-OPERAND-IS-LEXED-AS-IF-IT-WERE-BARE. `"${x:-'a b'}"` drops the quotes bash keeps — 2026-08-04 — OPEN
+
+*(Was TD-OILS-SINGLE-QUOTES-IN-A-QUOTED-SUBSTITUTION-ARE-EATEN. Renamed
+2026-08-04: measuring it turned up backslash as well as `'`, `:=` as well as
+`:-`, and heredoc bodies as well as double quotes. The single quote was one
+symptom of a lexer being run in the wrong mode.)*
 
 **Where:** `userspace/oils/src/parser.rs` — the `${…}` operand is lexed the same
-way wherever the substitution appears, so the `'` inside it always opens a
-quoted stretch. Inside double quotes it must not: there is no quoting left to
-start, and `'` is an ordinary character.
+way wherever the substitution appears. It goes through `word_from_source`
+(`tokenize`), which is the *bare-word* lexer: `'` opens a quoted stretch and a
+backslash escapes whatever follows it. Inside a double-quoting context neither
+is true, and the lexer that does know it is already there —
+`dquote_word_from_source`/`crate::lexer::lex_dquote_body`, written for `PS4` and
+`${x@P}`.
 
-**Reproduce:**
+**Reproduce** (`v=set`, `x` unset; every line is inside `"…"`):
 
 ```sh
-printf '  <%s>\n' "${nope:-'a b'}"    # bash: <'a b'>    osh: <a b>
-printf '  <%s>\n' "${nope:-"a b"}"    # both: <a b>      (a nested `"` does nest)
-printf '  <%s>\n' ${nope:-'a b'}      # both: <a b>      (unquoted, quotes work)
+show() { printf '  %-14s(%d)' "$1" $(($# - 1)); shift; printf '<%s>' "$@"; printf '\n'; }
+show 'sq'        "${nope:-'a b'}"   # bash: <'a b'>   osh: <a b>
+show 'bs space'  "${nope:-a\ b}"    # bash: <a\ b>    osh: <a b>
+show 'bs quote'  "${nope:-\'a\'}"   # bash: <\'a\'>   osh: <'a'>
+show 'bs n'      "${nope:-a\nb}"    # bash: <a\nb>    osh: <anb>
+show 'bs t'      "${nope:-\t}"      # bash: <\t>      osh: <t>
+show 'assign'    "${x:='a b'}"      # bash: <'a b'> and x is 'a b';  osh: <a b>
+cat <<EOF
+  heredoc: [${nope:-'a b'}]         # bash: ['a b']   osh: [a b]
+EOF
 ```
 
-**The rule.** Within `"…"`, a `${…}` operand's `'` is literal — bash's
-`extract_dollar_brace_string` is called with the enclosing quoting state, and a
-single quote inside a double-quoted context does not quote. A nested `"` *does*
-still work (bash re-enters the quoted run as its own word, which is the same
-rule the `bad_sub_word` handling in `expand_word_annotated` already records).
+**The rule.** Within any double-quoting context — `"…"` and an unquoted heredoc
+body alike — the *word* operand of `${x OP w}` is lexed with double-quote rules:
 
-**The fix.** Thread the enclosing quoting state into the operand's parse so the
-lexer treats `'` as a literal character when the substitution is inside double
-quotes. It is a parser change, not an expansion one — the expander already does
-the right thing with whatever parts it is handed.
+* `'` is an ordinary character, and so is anything between a pair of them.
+* `\` escapes only `$`, `` ` ``, `"`, `\`, a newline — and `}`, which the brace
+  scan strips so the operand can hold one. Before anything else the backslash
+  **stays**: `\ ` is a backslash and a space, `\n` is a backslash and an `n`.
+* `$'…'` and `$"…"` are still processed (`"${nope:-$'a\tb'}"` is a real tab),
+  which is why this is the operand's own rule rather than plain double-quoting —
+  inside real quotes `"$'a\tb'"` is literal.
+* A nested `"` re-enters quoting as its own word, so `"${nope:-x"'y'"z}"` is
+  `x'y'z`: the inner run quotes, and the `'` inside it is literal for the same
+  reason.
+
+The rule is the operand's, not the substitution's: the **pattern** operators
+still remove quotes, and osh already agrees there — `"${v#'s'}"` strips a literal
+`s` and `"${v/'e'/X}"` replaces a literal `e`, in both shells. `:=` is on the
+operand side and so gets it wrong today in the assignment as well as the answer.
+
+The four backslash cases osh already handles (`\$`, `` \` ``, `\"`, `\}`) are the
+ones the brace scan happens to protect. That they pass is a coincidence of the
+scan, not evidence the operand is lexed right.
+
+**The fix.** Thread the enclosing quoting state into the operand's parse and
+route it to `dquote_word_from_source` instead of `word_from_source` when the
+substitution sits inside a double-quoting context. It is a parser change, not an
+expansion one — the expander already does the right thing with whatever parts it
+is handed, and `SplitMode::QuotedOperand` already gives them the right context.
+
+Watch the interaction with TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD:
+that entry is about the *unquoted* `${nope:-'' ''}`, where the `''` really is a
+quoted empty stretch. Inside quotes there is no such stretch to lose — the same
+source is two literal apostrophes — so the two fixes do not overlap, and neither
+one makes the other's case go away.
 
 **Pinned by** nothing yet.
 

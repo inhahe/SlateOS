@@ -11994,7 +11994,14 @@ impl Shell {
     /// [`BulkOp`] to each (`${a[@]#pat}`, `${@/x/y}`, `${a[*]^^}`, …). For `@`/
     /// `*` the list is the positional parameters (matching bash — unlike a
     /// slice, `$0` is *not* included here).
-    fn bulk_elements(&mut self, name: &str, op: &BulkOp) -> Vec<Str> {
+    ///
+    /// `fields` says whether the caller is a context that keeps fields apart —
+    /// a quoted `[@]` — rather than one that wants a single string. Only `@A`
+    /// cares, because it is the one transform whose *items* are not its fields:
+    /// the quoted `[@]` form field-splits the declaration it builds, and every
+    /// other context joins the items it had before any splitting. See
+    /// [`Shell::split_transform_items`].
+    fn bulk_elements(&mut self, name: &str, op: &BulkOp, fields: bool) -> Vec<Str> {
         // `@k` / `@K` are key-aware: they interleave subscripts and values
         // rather than transforming each value in place. This is an *array*-only
         // transform, though: on the positional parameters (`${@@k}`/`${*@K}`)
@@ -12012,7 +12019,7 @@ impl Shell {
         // `@A` yields one re-inputtable declare/`set --`, `@a` yields each
         // element's attribute letters.
         if let BulkOp::Transform { op: t @ ('A' | 'a') } = op {
-            return self.bulk_attr_transform(name, *t);
+            return self.bulk_attr_transform(name, *t, fields);
         }
         // An empty/unknown/multi-char `@` transform over `[@]`/`[*]` (or the
         // positionals): empty when the collection has no elements, but a "bad
@@ -12044,18 +12051,29 @@ impl Shell {
     /// `${a[@]@a}` (per-element attribute letters) — collection-wide `@`
     /// transforms that do not fit the per-element [`Shell::apply_bulk_op`] model.
     ///
-    /// `@A` on a real array/assoc yields a single field holding the full
-    /// re-inputtable `declare` (identical to `declare -p`); on the positional
-    /// params (`${@@A}`/`${*@A}`) it yields a single `set -- 'a' 'b' …` field,
-    /// matching bash. `@a` yields one attribute-letter field per element (the
-    /// array's flag letters, e.g. `a`/`A`/`ar`); positional params have no
-    /// attributes, so each field is empty.
+    /// `@A` builds one *item* per thing there is to recreate: an array or assoc
+    /// has a single one, the full re-inputtable `declare` (identical to
+    /// `declare -p`), while the positional params have one per parameter with
+    /// the `set -- ` glued to the first. `@a` yields one attribute-letter field
+    /// per element (the array's flag letters, e.g. `a`/`A`/`ar`); positional
+    /// params have no attributes, so each field is empty.
+    ///
+    /// An item is not a field. A quoted `[@]` — the one context that keeps
+    /// fields apart — field-splits each item against `$IFS`; see
+    /// [`Shell::split_transform_item`], which is where the three words of
+    /// `"${n[@]@A}"` come from. Every other context wants one string and joins
+    /// the items *unsplit*, so `x="${n[@]@A}"` is the whole declaration under
+    /// every `$IFS`. That order matters when `$IFS` is empty, where the split
+    /// still cuts on spaces but the join puts nothing between the items:
+    /// `${*@A}` becomes the single word `set -- 'a''b'`. `@a` has one field per
+    /// element in every context and is never split, so `fields` does not reach
+    /// it.
     ///
     /// A name that is *not* a collection is one element deep, so `[@]` names the
     /// scalar itself and both operators give the scalar's own answer as a single
     /// field — or as no field at all when that answer is empty. See the comment
     /// on the branch below.
-    fn bulk_attr_transform(&mut self, name: &str, op: char) -> Vec<Str> {
+    fn bulk_attr_transform(&mut self, name: &str, op: char, fields: bool) -> Vec<Str> {
         let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             return Vec::new();
         };
@@ -12091,15 +12109,25 @@ impl Shell {
                 if self.positional.is_empty() {
                     return Vec::new();
                 }
-                let body = self
+                // One item per parameter, with the `set -- ` glued to the
+                // first, because that is the shape both the split and the join
+                // work on: `IFS=:` gives `set -- 'a':'b':'c'`, colons between
+                // the parameters and spaces inside the statement head. One
+                // string split afterwards could not produce that, and one item
+                // per *word* could not either.
+                let items: Vec<Str> = self
                     .positional
                     .iter()
-                    .map(|v| shell_quote(v))
-                    .collect::<Vec<_>>()
-                    .join(&b' ');
-                return vec![bfmt![b"set -- ", &body]];
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let q = shell_quote(v);
+                        if i == 0 { bfmt![b"set -- ", &q] } else { q }
+                    })
+                    .collect();
+                return self.split_transform_items(items, fields);
             }
-            return self.format_declare_def(name).map_or_else(Vec::new, |s| vec![s]);
+            let items = self.format_declare_def(name).map_or_else(Vec::new, |s| vec![s]);
+            return self.split_transform_items(items, fields);
         }
         // op == 'a'
         let count = if positional {
@@ -12114,6 +12142,165 @@ impl Shell {
             self.attr_flag_letters(name).into_bytes()
         };
         vec![letters; count]
+    }
+
+    /// Turn the items of a whole-collection `@A` into fields: a quoted `[@]`
+    /// field-splits each one against `$IFS`, and every other context — the `[*]`
+    /// spelling, and *any* context that wants a single string — gets them back
+    /// untouched to join.
+    ///
+    /// The flag is "does the caller keep fields apart", not "is this `[*]`",
+    /// because a scalar context does not split either however it is spelled:
+    /// `x="${n[@]@A}"` is the whole declaration under every `$IFS`, the same as
+    /// `x="${n[*]@A}"`. The split belongs to the field context, not to the
+    /// subscript.
+    ///
+    /// The declaration a collection `@A` builds is split *inside double quotes*,
+    /// where an ordinary expansion is not, which is what makes `"${n[@]@A}"` the
+    /// three words `declare`, `-a` and `n=([0]="x" [1]="y")` rather than one.
+    /// The rules are the ordinary field-splitting ones — whitespace runs
+    /// collapse, a non-whitespace delimiter stands alone, no trailing empty
+    /// field — applied to the characters the item is made of:
+    ///
+    /// ```text
+    /// IFS=' '   declare / -a / n=([0]="x" [1]="y")
+    /// IFS=:     declare -a n=([0]="x" [1]="y")          (no colon anywhere)
+    /// IFS=a     decl / re - /  n=([0]="x" [1]="y")
+    /// IFS==     declare -a n / ([0]="x" [1]="y")
+    /// ```
+    ///
+    /// The `IFS=a` row is the one to keep in mind: this is a raw character
+    /// split, not a re-tokenisation, and it happily cuts `declare` in half. What
+    /// it does respect is the regions a shell would read as one word — `'…'`,
+    /// `"…"` and `(…)` — so the spaces and `=`s *inside* the element list never
+    /// delimit, and a `)` inside double quotes does not end the group. That is
+    /// why the third field above survives with a space in it.
+    ///
+    /// An empty `$IFS` does not mean "no delimiter" here, the way it does for a
+    /// join: bash marks such a word `W_SPLITSPACE` — split on space anyway — so
+    /// `IFS=` gives the same three words `IFS=' '` does. Splitting before
+    /// joining is what keeps the two apart, and it is observable: `${*@A}` under
+    /// `IFS=` is the single word `set -- 'a''b'`, which is the *items* joined
+    /// with nothing rather than the fields.
+    ///
+    /// Only the collection forms are split, which is why this is applied where
+    /// the declaration is built rather than to every transform: a scalar's `@A`
+    /// stays one field however many spaces it holds, so `${s[@]@A}` on
+    /// `s='a b'` is the single word `s='a b'` and `${iv[@]@A}` on an integer is
+    /// the single word `declare -i iv='7'`.
+    fn split_transform_items(&self, items: Vec<Str>, fields: bool) -> Vec<Str> {
+        if !fields {
+            return items;
+        }
+        items.iter().flat_map(|it| self.split_transform_item(it)).collect()
+    }
+
+    /// Field-split one item of a whole-collection `@A` — see
+    /// [`Shell::split_transform_items`], which owns the rule.
+    fn split_transform_item(&self, s: &Str) -> Vec<Str> {
+        // An empty `$IFS` splits on space rather than not at all — bash's
+        // `W_SPLITSPACE`. An unset one is the usual ` \t\n`.
+        let ifs = match self.vars.get("IFS") {
+            None => b" \t\n".to_vec(),
+            Some(v) if v.is_empty() => b" ".to_vec(),
+            Some(v) => v.clone(),
+        };
+        // An undecodable byte is never a delimiter: `IFS` holds characters, and
+        // membership is tested character-wise so a multi-byte entry matches
+        // whole rather than by its individual bytes. Same rule as the ordinary
+        // unquoted split in [`Self::expand_word_fields`].
+        let ifs_has = |c: char| bytes::chars(&ifs).any(|i| i.as_char() == Some(c));
+        let cv: Vec<Ch> = bytes::chars(s).collect();
+
+        // Mark the characters the split passes over. A quote shields through to
+        // its partner, and a `(` through to the `)` that balances it — with
+        // quotes taking precedence inside, so the `)` in `[0]="a)b"` closes
+        // nothing.
+        let mut shielded = vec![false; cv.len()];
+        let mut quote: Option<char> = None;
+        let mut depth = 0usize;
+        for (i, c) in cv.iter().enumerate() {
+            let a = c.as_ascii();
+            // Set before the transition, so an opening delimiter is shielded by
+            // the region it opens and a closing one by the region it ends.
+            shielded[i] = quote.is_some() || depth > 0;
+            match quote {
+                Some(q) => {
+                    if a == Some(q) {
+                        quote = None;
+                    }
+                }
+                None => match a {
+                    Some(q @ ('\'' | '"')) => {
+                        quote = Some(q);
+                        shielded[i] = true;
+                    }
+                    Some('(') => {
+                        depth += 1;
+                        shielded[i] = true;
+                    }
+                    // A `)` with nothing open is ordinary text, not an
+                    // underflow.
+                    Some(')') => depth = depth.saturating_sub(1),
+                    _ => {}
+                },
+            }
+        }
+
+        let is_ws = |i: usize| {
+            !shielded[i]
+                && matches!(cv[i].as_char(), Some(c) if matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
+        };
+        let is_nonws = |i: usize| {
+            !shielded[i]
+                && matches!(cv[i].as_char(), Some(c) if !matches!(c, ' ' | '\t' | '\n') && ifs_has(c))
+        };
+
+        let mut fields: Vec<Str> = Vec::new();
+        let mut cur = Str::new();
+        let mut open = false;
+        let n = cv.len();
+        let mut i = 0;
+        while i < n {
+            if is_ws(i) {
+                let had_open = open;
+                while i < n && is_ws(i) {
+                    i += 1;
+                }
+                // Leading whitespace with no field behind it is trimmed rather
+                // than made into an empty field; otherwise the run closes the
+                // field, absorbing one following non-whitespace delimiter so
+                // that `ws* nonws ws*` is a single delimiter between two fields.
+                if had_open {
+                    fields.push(std::mem::take(&mut cur));
+                    open = false;
+                    if i < n && is_nonws(i) {
+                        i += 1;
+                        while i < n && is_ws(i) {
+                            i += 1;
+                        }
+                    }
+                }
+            } else if is_nonws(i) {
+                fields.push(std::mem::take(&mut cur));
+                open = false;
+                i += 1;
+                while i < n && is_ws(i) {
+                    i += 1;
+                }
+            } else {
+                cv[i].push_to(&mut cur);
+                open = true;
+                i += 1;
+            }
+        }
+        // A field is only closed by something following it, so a trailing
+        // delimiter leaves no empty field behind — `IFS=:` splits `a:` into the
+        // one field `a`.
+        if open {
+            fields.push(cur);
+        }
+        fields
     }
 
     /// `${a[@]@k}` / `${a[@]@K}` — expand an array (or the positional params) as
@@ -18922,7 +19109,7 @@ impl Shell {
                                 star: false,
                                 op,
                             },
-                        ] => Some(self.bulk_elements(name, op)),
+                        ] => Some(self.bulk_elements(name, op, true)),
                         // `"${a[@]:-word}"` / `"${a[@]:+word}"` — one field per
                         // element when active; the operand word (as a single
                         // field) otherwise. The `[*]` star form joins instead and
@@ -19498,8 +19685,12 @@ impl Shell {
                 self.join_derived(&fields, *star)
             }
             WordPart::ArrayBulk { name, star, op } => {
-                let fields = self.bulk_elements(name, op);
-                self.join_derived(&fields, *star)
+                // A context that wants one string wants the *items*, whichever
+                // spelling it used: `x="${n[@]@A}"` is the whole declaration
+                // under every `$IFS`, not the pieces a quoted `[@]` would split
+                // it into. See [`Shell::split_transform_items`].
+                let items = self.bulk_elements(name, op, false);
+                self.join_derived(&items, *star)
             }
             WordPart::ArrayOp {
                 name,
@@ -62167,6 +62358,46 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("set -- ; echo \"[${*@A}]\"").0, "[]\n");
         // With params it still produces the re-inputtable `set --` form.
         assert_eq!(run("set -- x y; echo \"${@@A}\"").0, "set -- 'x' 'y'\n");
+    }
+
+    #[test]
+    fn a_collection_declaration_is_split_only_where_fields_are_kept() {
+        // `@A` builds *items* — one whole `declare` for an array, one per
+        // parameter for the positionals. Only a quoted `[@]`, the one context
+        // that keeps fields apart, splits those items against `$IFS`; every
+        // other context joins them unsplit. So the same expansion is three
+        // words here…
+        let src = "declare -a n=(x y)
+             set -- \"${n[@]@A}\"; printf '%s|' \"$@\"; echo";
+        assert_eq!(run(src).0, "declare|-a|n=([0]=\"x\" [1]=\"y\")|\n");
+        // …and one string here, under the same default `$IFS`.
+        let src = "declare -a n=(x y); x=\"${n[@]@A}\"; printf '[%s]\\n' \"$x\"";
+        assert_eq!(run(src).0, "[declare -a n=([0]=\"x\" [1]=\"y\")]\n");
+        // The split is a raw character split that respects `'…'`, `\"…\"` and
+        // `(…)`, so `IFS=a` cuts `declare` in half and leaves the element list
+        // whole.
+        let src = "declare -a n=(x y)
+             IFS=a; set -- \"${n[@]@A}\"; printf '[%s]' \"$@\"; echo";
+        assert_eq!(run(src).0, "[decl][re -][ n=([0]=\"x\" [1]=\"y\")]\n");
+        // An empty `$IFS` splits on space anyway (bash's `W_SPLITSPACE`), while
+        // the `[*]` join puts nothing between the items — which is only visible
+        // on the positional form, the one with more than one item.
+        let src = "set -- 'p q' r; IFS=; set -- \"${*@A}\"; printf 'n=%s [%s]\\n' \"$#\" \"$1\"";
+        assert_eq!(run(src).0, "n=1 [set -- 'p q''r']\n");
+        let src = "set -- 'p q' r; IFS=; set -- \"${@@A}\"; printf 'n=%s' \"$#\"; printf ' [%s]' \"$@\"; echo";
+        assert_eq!(run(src).0, "n=4 [set] [--] ['p q'] ['r']\n");
+        // A scalar is not a collection and is never split, however many spaces
+        // its value holds.
+        let src = "s='a b'; set -- \"${s[@]@A}\"; printf 'n=%s [%s]\\n' \"$#\" \"$1\"";
+        assert_eq!(run(src).0, "n=1 [s='a b']\n");
+        // Unquoted, the items are joined first and the *ordinary* field split
+        // runs over the result — so the element list is cut too, giving four
+        // words where the quoted form gave three.
+        let src = "declare -a n=(x y); set -- ${n[@]@A}; printf 'n=%s' \"$#\"; printf ' [%s]' \"$@\"; echo";
+        assert_eq!(
+            run(src).0,
+            "n=4 [declare] [-a] [n=([0]=\"x\"] [[1]=\"y\")]\n"
+        );
     }
 
     #[test]

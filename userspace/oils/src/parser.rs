@@ -59,7 +59,7 @@ pub(crate) use crate::lexer::is_valid_name;
 /// identifier rule, so `None` is unreachable in practice — but it is the honest
 /// return for bytes that are not text, and every caller has a sensible
 /// not-an-assignment / not-an-identifier answer for it.
-fn name_text(name: BStr<'_>) -> Option<String> {
+pub(crate) fn name_text(name: BStr<'_>) -> Option<String> {
     bytes::as_str(name).map(str::to_owned)
 }
 
@@ -2067,23 +2067,18 @@ impl Parser {
             self.pos += 1;
             return self.parse_for_arith(&raw);
         }
-        let Some(name) = self.bare_word_here() else {
+        if !matches!(self.peek(), Some(Tok::Word(_))) {
             // `for` with no loop variable (`for; do …`, `for` at EOF, `for |`):
             // bash names the unexpected token / reports end of input.
             return Err(self.unexpected_here());
-        };
-        // A loop variable is a *name*, and names are ASCII identifiers, so a
-        // word that is not one — including a word that is not text at all —
-        // gets the same error bash gives for `for 1x`. `is_valid_name`
-        // accepting the bytes also guarantees they are ASCII, so the two
-        // checks together reject exactly what bash rejects.
-        let Some(var) = name_text(&name).filter(|v| is_valid_name(v.as_bytes())) else {
-            return Err(ParseError::new(&bfmt![
-                b"`",
-                &name,
-                b"': not a valid identifier"
-            ]));
-        };
+        }
+        // *Any* word goes here. bash's grammar asks only for a WORD and leaves
+        // identifier-ness to `execute_for_command`, so `for 'a[0]'` parses and
+        // then fails at run time with status 1 — where a syntax error would
+        // have abandoned the rest of the parse unit. The word is stored by its
+        // source spelling because that is what bash checks (`"x"` is refused
+        // though `x` is fine) and what it quotes back. See `Shell::exec_for`.
+        let var = self.token_display();
         self.pos += 1;
         self.skip_newlines();
         let words = self.parse_in_list()?;
@@ -2129,17 +2124,12 @@ impl Parser {
     /// the word-list `for` loop; the runtime difference is the interactive menu.
     fn parse_select(&mut self) -> Result<Command, ParseError> {
         self.expect_reserved("select")?;
-        let Some(name) = self.bare_word_here() else {
+        if !matches!(self.peek(), Some(Tok::Word(_))) {
             return Err(self.unexpected_here());
-        };
-        // Same name rule as the word-list `for` loop; see `parse_for`.
-        let Some(var) = name_text(&name).filter(|v| is_valid_name(v.as_bytes())) else {
-            return Err(ParseError::new(&bfmt![
-                b"`",
-                &name,
-                b"': not a valid identifier"
-            ]));
-        };
+        }
+        // Same rule as the word-list `for` loop: any word parses and the name is
+        // checked where the loop runs; see `parse_for`.
+        let var = self.token_display();
         self.pos += 1;
         self.skip_newlines();
         let words = self.parse_in_list()?;
@@ -4365,12 +4355,21 @@ mod tests {
         let e = super::parse(b"f() a\xffb").unwrap_err();
         assert_eq!(e.msg, b"syntax error near unexpected token `a\xffb'");
 
-        // A loop variable that is not an identifier — and cannot be one, since
-        // a name is ASCII by construction.
-        let e = super::parse(b"for a\xffb in x; do :; done").unwrap_err();
-        assert_eq!(e.msg, b"`a\xffb': not a valid identifier");
-        let e = super::parse(b"select a\xffb in x; do :; done").unwrap_err();
-        assert_eq!(e.msg, b"`a\xffb': not a valid identifier");
+        // A loop variable that is not an identifier — and cannot be one, since a
+        // name is ASCII by construction — *parses*; the refusal is bash's at run
+        // time. The clause therefore has to carry the bytes through unchanged so
+        // that message can quote them (see the corpus case
+        // `a-for-loops-variable-is-a-word-until-the-loop-runs.sh`).
+        let prog = super::parse(b"for a\xffb in x; do :; done").unwrap();
+        let Command::For(f) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected for");
+        };
+        assert_eq!(f.var, b"a\xffb");
+        let prog = super::parse(b"select a\xffb in x; do :; done").unwrap();
+        let Command::Select(s) = &prog.items[0].list.first.commands[0] else {
+            panic!("expected select");
+        };
+        assert_eq!(s.var, b"a\xffb");
 
         // The `[[ … ]]` family names its token the same way, on the second line.
         let e = super::parse(b"[[ -z x a\xffb ]]").unwrap_err();
@@ -4502,8 +4501,41 @@ mod tests {
         let Command::For(f) = &prog.items[0].list.first.commands[0] else {
             panic!("expected for");
         };
-        assert_eq!(f.var, "x");
+        assert_eq!(f.var, b"x");
         assert_eq!(f.words.as_ref().unwrap().len(), 3);
+    }
+
+    /// bash's `for`/`select` productions accept any WORD and leave the name
+    /// check to execution, so the parser's job is only to record the spelling.
+    /// Every expectation is bash 5.2.37's own — the word it quotes back in
+    /// `` `WORD': not a valid identifier ``.
+    #[test]
+    fn loop_variable_is_any_word() {
+        let var = |kw: &str, src: &str| {
+            let prog = parse(&format!("{kw} {src} in a; do :; done")).unwrap();
+            match &prog.items[0].list.first.commands[0] {
+                Command::For(f) => text(&f.var),
+                Command::Select(s) => text(&s.var),
+                _ => panic!("expected a loop: {src}"),
+            }
+        };
+        // Quoted, escaped, expanded, an assignment, a tilde — all parse, and all
+        // keep the spelling that will be refused at run time.
+        for name in
+            ["1x", "'a[0]'", "\"a[0]\"", "a=b", "a\\[0\\]", "''", "'a b'", "~", "a.b", "$v", "\\x"]
+        {
+            assert_eq!(var("for", name), name.to_string(), "for {name}");
+            assert_eq!(var("select", name), name.to_string(), "select {name}");
+        }
+        // A reserved word is only reserved in command position, so it is an
+        // ordinary — and perfectly valid — loop variable here.
+        for name in ["do", "in", "if", "time", "x"] {
+            assert_eq!(var("for", name), name.to_string(), "for {name}");
+        }
+        // What is *not* a word at all is still a syntax error, as in bash.
+        for src in ["for; do :; done", "for >f in a; do :; done", "for"] {
+            assert!(parse(src).is_err(), "should not have parsed: {src}");
+        }
     }
 
     #[test]

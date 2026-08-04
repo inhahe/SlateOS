@@ -347,7 +347,17 @@ pub struct LoopClause {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForClause {
-    pub var: String,
+    /// The loop variable as *written*. bash's grammar accepts any word where the
+    /// control variable goes and checks it for identifier-ness at run time, so
+    /// `'a[0]'`, `a=b`, `1x` and `$v` all parse and then fail with ``line N:
+    /// `WORD': not a valid identifier``. The check is on the spelling and not on
+    /// what it would expand to — `"x"` is refused though `x` is a fine name — so
+    /// the source spelling is what must be stored, both to make the decision and
+    /// to quote back in the error.
+    ///
+    /// Bytes, not text, for the same reason as [`FunctionDef::name`]: a word
+    /// that is not an identifier need not be UTF-8 either.
+    pub var: Str,
     /// The `in …` word list; `None` means iterate over `"$@"`.
     pub words: Option<Vec<Word>>,
     pub body: Program,
@@ -359,7 +369,10 @@ pub struct ForClause {
 /// stores the raw line in `REPLY`, and runs the body until EOF or `break`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectClause {
-    pub var: String,
+    /// The menu variable as written — see [`ForClause::var`]. `select` checks it
+    /// the same way and at the same moment, with one difference: posix mode does
+    /// not make the refusal fatal here, only in `for`.
+    pub var: Str,
     /// The `in …` word list; `None` means iterate over `"$@"`.
     pub words: Option<Vec<Word>>,
     pub body: Program,

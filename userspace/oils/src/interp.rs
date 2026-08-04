@@ -4557,6 +4557,29 @@ pub struct Shell {
     /// * [`Shell::usage_suppress`] carries bash's `CMD_IGNORE_RETURN`, and the
     ///   pipeline's own `!` carries `CMD_INVERT_RETURN`.
     special_builtin_failed: bool,
+    /// The last thing to fail was a `for`/`select` control variable that is not
+    /// an identifier — a failure bash arms neither errexit nor the ERR trap on.
+    ///
+    /// `$?` is 1 and `&&`/`||`/`if` all see the failure, so it is a failure in
+    /// every other respect; it simply never reaches the node check that fires
+    /// `set -e` and `trap … ERR`. Measured against bash 5.2.37, which draws the
+    /// boundary at the enclosing *simple command*:
+    ///
+    /// ```sh
+    /// set -e; for 'a[0]' in x; do :; done;   echo AFTER   # AFTER (exempt)
+    /// set -e; { for 'a[0]' in x; do :; done; }; echo AFTER # AFTER (a group is
+    ///                                                     #  not a command)
+    /// set -e; f() { for 'a[0]' in x; do :; done; }; f      # exits: `f` failed
+    /// set -e; eval 'for "a[0]" in x; do :; done'           # exits: so did eval
+    /// ```
+    ///
+    /// Hence the flag is cleared once any simple command completes: a function
+    /// call, an `eval` or a `.` hands back a status of its own, and *that* is an
+    /// ordinary failure. A `{ … }` group, a loop body and a subshell's parent
+    /// have no such command in between, so the exemption stands. It is read
+    /// (and left alone) by [`Shell::exec_and_or`], which is where bash decides
+    /// both errexit and the ERR trap.
+    for_name_failed: bool,
     /// bash's `CMD_IGNORE_RETURN`, as it applies to the usage class only: the
     /// non-final operands of an `&&`/`||` list and the condition of an
     /// `if`/`while`/`until`, propagated dynamically into whatever function or
@@ -4837,6 +4860,7 @@ impl Shell {
             builtin_failure: None,
             command_builtin_depth: 0,
             special_builtin_failed: false,
+            for_name_failed: false,
             usage_suppress: 0,
             exit_requested: false,
             jobs: Vec::new(),
@@ -7179,7 +7203,10 @@ impl Shell {
         let failed_unexempt = self.errexit_suppress == 0
             && ran_final
             && !final_pipe.negated
-            && self.last_status != 0;
+            && self.last_status != 0
+            // A `for`/`select` name refusal fails the command without reaching
+            // this check in bash — see [`Shell::for_name_failed`].
+            && !self.for_name_failed;
         if failed_unexempt && err_armed_at_start {
             // The ERR trap fires regardless of whether `set -e` is on, but only
             // when it was armed for this frame at the command's start (see the
@@ -8565,7 +8592,41 @@ impl Shell {
         Flow::Next
     }
 
+    /// The variable a `for`/`select` header names, or `None` when the word it
+    /// was written as is not an identifier.
+    ///
+    /// The test is on the *spelling*, which is why the clause stores it: bash
+    /// checks the word as the parser saw it, so `"x"`, `\x` and `$x` are all
+    /// refused however they would expand. `is_valid_name` accepting the bytes
+    /// also guarantees they are ASCII, so the pair of tests here rejects exactly
+    /// what bash rejects and the text conversion cannot fail.
+    fn loop_var_name(var: BStr<'_>) -> Option<String> {
+        crate::parser::name_text(var).filter(|v| crate::parser::is_valid_name(v.as_bytes()))
+    }
+
     fn exec_for(&mut self, c: &ForClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // The loop variable is checked here, where the loop *runs*, and before
+        // anything else the loop would do: bash refuses the name without ever
+        // expanding the `in` list, so `for 'a[0]' in $(cmd)` never runs `cmd`.
+        let Some(var) = Self::loop_var_name(&c.var) else {
+            self.perrln(&bfmt![b"`", &c.var, b"': not a valid identifier"]);
+            // In posix mode this ends a non-interactive shell, exactly as a bad
+            // function name does — an unconditional unwind that `!`, an `if`
+            // condition, `eval` and an ERR trap all fail to spare, though a
+            // subshell contains it and the EXIT trap still runs. `select` is
+            // *not* fatal here; bash only wrote the posix branch into
+            // `execute_for_command`.
+            if self.posix_noninteractive() {
+                self.last_status = 2;
+                return Flow::Exit(2);
+            }
+            // Otherwise status 1 and the rest of the list still runs — but
+            // *without* arming errexit or the ERR trap; see
+            // [`Shell::for_name_failed`].
+            self.last_status = 1;
+            self.for_name_failed = true;
+            return Flow::Next;
+        };
         let items: Vec<Str> = match &c.words {
             Some(words) => {
                 let mut v = Vec::new();
@@ -8601,7 +8662,7 @@ impl Shell {
                 ),
                 None => b"\"$@\"".to_vec(),
             };
-            bfmt![b"for ", c.var.as_str(), b" in ", &words]
+            bfmt![b"for ", &c.var, b" in ", &words]
         };
         let mut body_status = 0;
         for item in items {
@@ -8631,8 +8692,8 @@ impl Shell {
             // loop with status 1, leaving the variable's value alone. The rest
             // of the command list still runs; only the loop is given up. (The
             // `set -x` header above has already been printed by then.)
-            if self.readonly.contains(&c.var) {
-                self.perrln(&format!("{}: readonly variable", c.var));
+            if self.readonly.contains(&var) {
+                self.perrln(&format!("{var}: readonly variable"));
                 self.last_status = 1;
                 self.note_shell_error(FatalWhen::ErrexitOrPosix);
                 if let Some(code) = self.unbound_error.take() {
@@ -8646,7 +8707,7 @@ impl Shell {
             // the same way, minus the diagnostic — see [`Shell::noassign`]. Like
             // the readonly case this is discovered on the first *iteration*, so
             // a loop over an empty list still succeeds.
-            if self.noassign.contains(&c.var) {
+            if self.noassign.contains(&var) {
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -8655,7 +8716,7 @@ impl Shell {
             // folds its case), an existing array is written at element 0, and
             // `set -a` exports it. A nameref is the one thing *not* followed:
             // bash stores into the reference itself, leaving its target alone.
-            self.scalar_write_store(&ScalarDest::Var(c.var.clone()), item);
+            self.scalar_write_store(&ScalarDest::Var(var.clone()), item);
             match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
                 Flow::Break(n) => {
@@ -8716,6 +8777,17 @@ impl Shell {
     /// EOF or `break`. The loop's exit status is the last body execution (0 if the
     /// body never runs).
     fn exec_select(&mut self, c: &SelectClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // As in `for`, the menu variable is checked here and before everything
+        // else — ahead of the `set -x` header below and of expanding the list.
+        // Unlike `for`, posix mode does not make it fatal: bash's posix branch
+        // lives only in `execute_for_command`, so this always leaves status 1
+        // and lets the rest of the list run.
+        let Some(var) = Self::loop_var_name(&c.var) else {
+            self.perrln(&bfmt![b"`", &c.var, b"': not a valid identifier"]);
+            self.last_status = 1;
+            self.for_name_failed = true;
+            return Flow::Next;
+        };
         // The `select` header is announced once, and — unlike `for`, which
         // announces its own once per iteration — *before* the word list is
         // expanded: `set -x` prints it ahead of any trace the list's own
@@ -8729,7 +8801,7 @@ impl Shell {
                 ),
                 None => b"\"$@\"".to_vec(),
             };
-            bfmt![b"select ", c.var.as_str(), b" in ", &words]
+            bfmt![b"select ", &c.var, b" in ", &words]
         };
         if self.xtrace {
             self.bxtrace_emit(&header);
@@ -8829,12 +8901,12 @@ impl Shell {
             // fails the same way: a readonly name is reported once the choice
             // has been read (so the prompt has already been written), the loop
             // is given up with status 1, and the variable keeps its value.
-            if self.readonly.contains(&c.var) {
-                self.perrln(&format!("{}: readonly variable", c.var));
+            if self.readonly.contains(&var) {
+                self.perrln(&format!("{var}: readonly variable"));
                 self.last_status = 1;
                 return Flow::Next;
             }
-            self.scalar_write_store(&ScalarDest::Var(c.var.clone()), choice);
+            self.scalar_write_store(&ScalarDest::Var(var.clone()), choice);
             match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
                 Flow::Break(n) => {
@@ -10515,6 +10587,10 @@ impl Shell {
             // set it, so a fork starts clean; the suppression counter restarts
             // too, because the subshell's commands are their own nodes.
             special_builtin_failed: false,
+            // Likewise a fork's own concern: the parent judges a subshell by the
+            // status it exits with, which is an ordinary failure however it was
+            // reached (`set -e; ( for 'a[0]' in x; do :; done )` does exit).
+            for_name_failed: false,
             usage_suppress: 0,
             // A subshell's own `exit` unwinds only the subshell; the flag is a
             // top-level-input concern, so it never carries into a clone.
@@ -14726,6 +14802,11 @@ impl Shell {
         // the restore puts this command's own word back for the bind below.
         let outer = self.pending_last_arg.take();
         let flow = self.exec_simple_inner(sc, out, stdin);
+        // Whatever the command was — a function whose body refused a `for`
+        // variable, an `eval` of one, or something else entirely — the status it
+        // hands back is its own, and an ordinary failure. See
+        // [`Shell::for_name_failed`].
+        self.for_name_failed = false;
         if let Some(last) = std::mem::replace(&mut self.pending_last_arg, outer) {
             self.put_var("_", last);
         }
@@ -43424,16 +43505,20 @@ fn special_redirect_fd(path: BStr<'_>) -> Option<i32> {
 /// the fixed *English* part, which is unaffected by what the quoted word holds.
 fn wrap_parse_message(msg: BStr<'_>, prefix: BStr<'_>) -> Str {
     // Messages that are already in one of bash's canonical parser forms pass
-    // through verbatim: `syntax error…`, any `unexpected …` diagnostic
-    // (`unexpected EOF…`, `unexpected argument…`, `unexpected token…`), and the
-    // `… not a valid identifier` form. Everything else is a bare osh fragment
-    // that bash would prefix with `syntax error: `.
+    // through verbatim: `syntax error…` and any `unexpected …` diagnostic
+    // (`unexpected EOF…`, `unexpected argument…`, `unexpected token…`).
+    // Everything else is a bare osh fragment that bash would prefix with
+    // `syntax error: `.
+    //
+    // `` `WORD': not a valid identifier `` is *not* listed: bash never raises it
+    // from the parser. Every name it complains about — a `for`/`select` control
+    // variable, a function name, a builtin's operand — is checked while the
+    // command runs, which is why a bad one does not abandon the parse unit.
     if msg.starts_with(b"syntax error")
         || msg.starts_with(b"unexpected ")
         // bash's `[[ … ]]` "conditional binary operator expected" diagnostic is a
         // complete message with no `syntax error:` tag (TD-OILS-COND-ERRTEXT).
         || msg.starts_with(b"conditional ")
-        || msg.ends_with(b"not a valid identifier")
     {
         bfmt![prefix, msg]
     } else {
@@ -47410,14 +47495,20 @@ mod tests {
             "got {:?}",
             err.msg
         );
-        // An invalid `for` loop variable: bash prints `\`1abc': not a valid
-        // identifier` with no `syntax error:` tag.
-        let err = parse("for 1abc in x; do :; done".as_bytes()).expect_err("should fail");
-        assert_eq!(err.msg, b"`1abc': not a valid identifier");
-        // The interp-level message wrapper must pass both through without wrapping.
+        // The wrapper passes that form through untagged.
         assert_eq!(
             wrap_parse_message(&err.msg, "osh: "),
-            "osh: `1abc': not a valid identifier"
+            "osh: syntax error near unexpected token `|'"
+        );
+        // An invalid `for` loop variable is *not* a parse error: bash's grammar
+        // asks only for a WORD there, so the clause parses and the refusal comes
+        // from `exec_for` when the loop runs. That is the whole difference — a
+        // syntax error would have abandoned the rest of the parse unit, and this
+        // does not, so `after` still runs.
+        assert!(parse("for 1abc in x; do :; done".as_bytes()).is_ok());
+        assert_eq!(
+            run("for 1abc in x; do echo NO; done 2>&1; echo rc=$?; echo after"),
+            ("osh: `1abc': not a valid identifier\nrc=1\nafter\n".to_string(), 0)
         );
     }
 

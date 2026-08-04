@@ -12252,17 +12252,32 @@ impl Shell {
             let Some(name) = self.prefix_assignment_name(a) else {
                 continue;
             };
-            // The readonly attribute lives on the *variable*, so a reference is
-            // tested through what it resolves to — but reported by the name as
+            // The prefix binds the name the reference *resolves to*, not the
+            // reference itself: `declare -n r=t; r=V cmd` puts `t=V` in the
+            // command's environment — under that name, and only that one — and
+            // leaves `r` a nameref, so `$r` reads the binding through it. A
+            // chain is followed to its end.
+            //
+            // Two endings name no variable the scope could bind, and both fall
+            // back to the name as written, which then shadows the nameref cell
+            // for the command's duration. A chain ending in an *element*
+            // (`declare -n r='a[1]'`) is one: bash binds `r` itself and leaves
+            // `a` untouched — the temporary environment holds variables, not
+            // elements. A **circular** chain is the other; it warns first, as
+            // every use of such a name does, naming the variable written rather
+            // than any member of the cycle.
+            let resolved = self.resolve_ref_use(&name);
+            let target = resolved
+                .as_ref()
+                .filter(|t| t.sub.is_none())
+                .map_or_else(|| name.clone(), |t| t.base.clone());
+            // The readonly attribute lives on the *variable*, so it is tested on
+            // whatever the binding would land on — but reported by the name as
             // written, which is what bash's temporary-environment path quotes
             // back (`declare -n n=r; readonly r=1; n=2 cmd` says `n`, where the
-            // same refusal reached through `((n=5))` says `r`). A circular
-            // nameref resolves to nothing and stands in for its own name, since
-            // reporting it here would double up with the assignment's own
-            // diagnostic.
-            let target = self
-                .resolve_ref_name(&name)
-                .map_or_else(|| name.clone(), |t| t.base);
+            // same refusal reached through `((n=5))` says `r`). Testing the
+            // bound name is also why a readonly *array* behind an element
+            // reference does not refuse: nothing would be written to it.
             if self.readonly.contains(&target) {
                 // bash (with neither `-e` nor posix mode) reports this but STILL
                 // runs the command: the assignment is simply dropped from the
@@ -12303,8 +12318,10 @@ impl Shell {
             {
                 return assigns;
             }
+            // The trace shows the assignment as *written*, nameref and all, so
+            // it is the one place the written name survives.
             self.xtrace_assignment(&name, &val);
-            assigns.push((name, val));
+            assigns.push((target, val));
         }
         assigns
     }
@@ -71378,6 +71395,71 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // this path's own rule (`((n=5))` on the same nameref says `r`).
         let (o, _) = run("{ declare -n n=r; readonly r=1; n=2 true; } 2>&1");
         assert_eq!(o, "osh: n: readonly variable\n");
+    }
+
+    /// A prefix binds the name its nameref *resolves to*, under that name and
+    /// only that one, leaving the reference itself a nameref.
+    #[test]
+    fn a_prefix_assignment_binds_what_its_nameref_resolves_to() {
+        let (o, _) = run(
+            "t=orig; declare -n r=t; \
+             r=V eval 'declare -p r t'; declare -p r t",
+        );
+        assert_eq!(
+            o,
+            "declare -n r=\"t\"\ndeclare -x t=\"V\"\n\
+             declare -n r=\"t\"\ndeclare -- t=\"orig\"\n"
+        );
+
+        // A chain is followed to its end; a target nothing has bound is created
+        // for the duration and gone afterwards.
+        let (o, _) = run(
+            "u=orig; declare -n m=u; declare -n n=m; \
+             n=V eval 'echo \"$u $m $n\"'; echo \"$u\"",
+        );
+        assert_eq!(o, "V V V\norig\n");
+        let (o, _) = run("declare -n r=fresh; r=V eval 'echo \"[${fresh-U}]\"'; echo \"[${fresh-U}]\"");
+        assert_eq!(o, "[V]\n[U]\n");
+
+        // A chain ending in an *element* names no variable a scope could bind,
+        // so the name as written is bound instead and the array is untouched.
+        let (o, _) = run(
+            "declare -a a=(p q); declare -n r='a[1]'; \
+             r=V eval 'declare -p r; echo \"[${a[1]}]\"'",
+        );
+        assert_eq!(o, "declare -x r=\"V\"\n[q]\n");
+        // …which is also why a readonly array behind one does not refuse.
+        let (o, st) = run(
+            "{ declare -a a=(p q); readonly a; declare -n r='a[1]'; \
+             r=V eval 'echo \"[${r-U}]\"'; } 2>&1",
+        );
+        assert_eq!(o, "[V]\n");
+        assert_eq!(st, 0);
+
+        // A circular chain warns — naming the variable written, not a member of
+        // the cycle — then binds that name, and the command's own status stands.
+        let (o, st) = run(
+            "{ declare -n c=d; declare -n d=c; c=V eval 'echo \"[${c-U}]\"'; } 2>&1",
+        );
+        assert_eq!(o, "osh: warning: c: circular name reference\n[V]\n");
+        assert_eq!(st, 0);
+
+        // The readonly attribute is tested on the name the binding would land
+        // on, but reported by the name as written.
+        let (o, st) = run(
+            "{ readonly ro=frozen; declare -n n=ro; n=V eval 'echo \"[$ro]\"'; } 2>&1",
+        );
+        assert_eq!(o, "osh: n: readonly variable\n[frozen]\n");
+        assert_eq!(st, 0);
+
+        // The binding inherits none of the target's attributes, and the trace
+        // is the one place the written name survives.
+        let (o, _) = run(
+            "declare -i t=1; declare -n r=t; r=3*4 eval 'declare -p t'; declare -p t",
+        );
+        assert_eq!(o, "declare -x t=\"3*4\"\ndeclare -i t=\"1\"\n");
+        let (o, _) = run("{ t=o; declare -n r=t; set -x; r=V true; } 2>&1");
+        assert!(o.ends_with("+ r=V\n+ true\n"), "got: {o:?}");
     }
 
     /// Re-reading a string or a file is a level of expansion indirection to

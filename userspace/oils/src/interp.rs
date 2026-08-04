@@ -21403,7 +21403,13 @@ impl Shell {
                     }
                     // Assigning the default would require writing to `a[@]`/`a[*]`,
                     // which bash rejects as a "bad array subscript". Report the
-                    // same and abort the expansion.
+                    // same and abort the expansion — but only *after* expanding
+                    // the default word, which bash does before it judges the
+                    // subscript: `${a[@]:=$(f)}` runs `f` and then refuses,
+                    // where the positional `${@:=$(f)}` above refuses outright.
+                    // The value is dropped because there is nowhere to put it;
+                    // it is expanded for its effects, which have happened.
+                    let _ = self.expand_to_string(arg);
                     self.perrln(&format!("{name}[{sub}]: bad array subscript"));
                     // bash discards the command with status **2** here — not
                     // the 1 every other bad-subscript site uses.

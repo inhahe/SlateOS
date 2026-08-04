@@ -31891,7 +31891,7 @@ and by the three cases that caught those two corrections —
 `bad-substitution`. One thing the new case deliberately does not cover: see
 `TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD` below.
 
-### TD-OILS-ARRAY-ASSIGN-DEFAULT-OPERAND-NOT-EXPANDED. `${a[@]:=w}` complains without expanding `w` — 2026-08-04 — OPEN
+### TD-OILS-ARRAY-ASSIGN-DEFAULT-OPERAND-NOT-EXPANDED. `${a[@]:=w}` complains without expanding `w` — 2026-08-04 — ✅ FIXED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::array_op_fields`, the
 `ParamOp::AssignDefault` arm, which reports `a[@]: bad array subscript` before
@@ -31913,12 +31913,17 @@ first" comment in `Shell::expand_param_op`). The positional spelling `${@:=w}`
 is the opposite and is already correct: bash refuses `$@: cannot assign in this
 way` *without* expanding, which is why the two are separate branches.
 
-**The fix.** In the `AssignDefault` arm of `array_op_fields`, expand the operand
-before emitting the bad-subscript diagnostic, discarding the value. Keep the
-positional branch ahead of it, unexpanded.
+**The fix.** One line in the `AssignDefault` arm of `array_op_fields`: expand
+the operand and drop the value, immediately before the bad-subscript
+diagnostic. The positional branch and the associative branch already sat ahead
+of it — the first refusing without expanding, the second expanding and really
+assigning — so neither moved.
 
-**Pinned by** nothing yet; the natural home is a new corpus case about the order
-the assignment forms do their work in.
+**Pinned by** `userspace/oils/tests/corpus/an-assign-default-expands-before-it-refuses.sh`,
+which also pins the three things beside it that were already right: the active
+array reads nothing, the positional refusal comes with status 1 where the
+subscript complaint comes with 2, and an associative array assigns a key spelled
+`@` or `*`.
 
 ### TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD. `${x:-'' ''}` is one argument, not two — 2026-08-04 — OPEN
 

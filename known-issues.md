@@ -101,7 +101,7 @@ version is also the more useful answer.
 clear `arith_cmd` at the top of `run_simple_command` for a non-builtin, which
 is what bash's `execute_command` does.
 
-### TD-OILS-INT-BIND-DISCARD-STOPS-AT-EVAL. A bad `-i` value's abort is caught by `eval`/`source` in osh; bash's unwinds past them — 2026-08-03
+### TD-OILS-INT-BIND-DISCARD-STOPS-AT-EVAL. A bad `-i` value's abort is caught by `eval`/`source` in osh; bash's unwinds past them — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::read_eval_builtin_status`,
 whose `Flow::Discard` arm re-raises only inside a subshell, and
@@ -130,15 +130,25 @@ Every write that binds an integer value behaves this way — `declare -i a=2+`,
 `export h=2+` — because they all funnel through the same arithmetic error.
 `let`, `(( … ))` and `$(( … ))` are *not* affected: those merely fail.
 
-**Proper fix:** the abort needs a kind, so the `eval`/`source` boundary can tell
-which of the two it is holding. `Shell::eval_int_assign` is the only site that
-arms the uncaught kind, so a payload on `Shell::discard_error` (or a companion
-flag armed only through a helper, so the two cannot desync) is enough; then
-`read_eval_builtin_status`'s `Flow::Discard` arm re-raises the uncaught kind
-unconditionally instead of only when `subshell_depth > 0`. Do not clear the kind
-where `discard_error` is merely read — it must survive the re-raise through
-`Shell::pending_abort`/`run_builtin_body` so a nested `eval` inside an `eval`
-keeps unwinding.
+**Fixed in `db6ba24e4`.** `Shell::discard_error` now carries a `DiscardAbort`
+payload — the status *and* which of bash's two depths raised it — armed only
+through `Shell::arm_discard` (the ordinary, `eval`-caught kind) or
+`Shell::arm_int_bind_discard` (the deeper one, whose sole caller is
+`Shell::eval_int_assign`), so the two can never desync. Every site that turns
+the flag into control flow goes through the new `Shell::take_discard_flow`,
+which yields a `Flow::Discard` for the first kind and a `Flow::Abort` for the
+second — and osh's existing `Flow::Abort` machinery already does the rest: it
+unwinds past a nested read-eval loop via `Shell::pending_abort`, is caught at
+`Shell::at_outermost_read_eval`, is contained by a subshell, and becomes a
+`Flow::Exit(1)` under `-c`. Covered by the lib test
+`a_refused_integer_value_unwinds_past_eval` and the corpus case
+`a-a-refused-integer-value-unwinds-past-eval.sh`.
+
+Two existing lib tests (`a_failed_integer_assignment_stores_nothing`,
+`a_compound_array_literal_binds_in_three_stages`) had encoded the old behaviour
+by reading the surviving value on a following line of a `-c` harness; bash exits
+such a shell outright, so their harnesses were switched to script mode, where
+bash does print the value.
 
 ### TD-OILS-DECLARE-N-WITH-OTHER-ATTRS. `declare -n` combined with another attribute ignores the other attribute — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

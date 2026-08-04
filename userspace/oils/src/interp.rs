@@ -21375,6 +21375,16 @@ impl Shell {
             // `export: 3+: syntax error: operand expected`.
             "export" => Some(Cow::Borrowed(b"export")),
             "readonly" => Some(Cow::Borrowed(b"readonly")),
+            // The builtins that write a variable *named by an operand* store
+            // through the same machinery and are blamed the same way, for a
+            // malformed `-i` value and for a subscript put on a nameref that
+            // already carries one: `declare -n r=q[1]; read 'r[0]'` reports
+            // ``read: `q[1]': not a valid identifier``.
+            "read" => Some(Cow::Borrowed(b"read")),
+            "printf" => Some(Cow::Borrowed(b"printf")),
+            "mapfile" => Some(Cow::Borrowed(b"mapfile")),
+            "readarray" => Some(Cow::Borrowed(b"readarray")),
+            "getopts" => Some(Cow::Borrowed(b"getopts")),
             _ => None,
         };
         // Only this builtin's own failure class may reach the check after the
@@ -59676,6 +59686,55 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The diagnostic comes from expanding the word, so it precedes the
         // line `echo` then writes (bash prints the same order).
         assert_eq!(o2, "osh: m: bad array subscript\nr=[]\ns=0\n");
+    }
+
+    #[test]
+    fn a_builtin_that_writes_a_named_variable_signs_the_complaint() {
+        // A variable's own diagnostics — a malformed `-i` value, a subscript put
+        // on a nameref that already carries one — are made by the store, which
+        // does not know who asked. bash signs them with the builtin whose
+        // operand named the variable, so the same store speaks under several
+        // names.
+        for b in [
+            "read -r n <<< 3+",
+            "declare n=3+",
+            "typeset n=3+",
+            "export n=3+",
+            "readonly n=3+",
+        ] {
+            let tag = b.split(' ').next().unwrap_or_default();
+            let (o, _) = run(&format!("declare -i n; {{ {b}; }} 2>&1"));
+            assert_eq!(
+                o,
+                format!("osh: {tag}: 3+: syntax error: operand expected (error token is \"+\")\n"),
+                "{b}"
+            );
+        }
+        // A bare assignment and a `for` loop's control variable are nobody's
+        // operand, so they are unsigned.
+        let (o, _) = run("declare -i n; { n=3+; } 2>&1");
+        assert_eq!(o, "osh: 3+: syntax error: operand expected (error token is \"+\")\n");
+        let (o, _) = run("declare -i n; { for n in 3+; do :; done; } 2>&1");
+        assert_eq!(o, "osh: 3+: syntax error: operand expected (error token is \"+\")\n");
+        // The same signature goes on the other complaint the store makes.
+        for (b, tag) in [
+            ("read -r 'r[0]' <<< v", "read"),
+            ("mapfile -t r <<< v", "mapfile"),
+            ("readarray -t r <<< v", "readarray"),
+            ("let 'r[0] = 5'", "let"),
+        ] {
+            let (o, _) = run(&format!(
+                "q=(x y); declare -n r='q[1]'; {{ {b}; }} 2>&1"
+            ));
+            assert_eq!(o, format!("osh: {tag}: `q[1]': not a valid identifier\n"), "{b}");
+        }
+        // `getopts` names a variable too: with nothing left to scan it binds
+        // `?`, which an `-i` name cannot hold.
+        let (o, _) = run("declare -i n; { getopts a n; } 2>&1");
+        assert_eq!(
+            o,
+            "osh: getopts: ?: syntax error: operand expected (error token is \"?\")\n"
+        );
     }
 
     #[test]

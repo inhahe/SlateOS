@@ -31617,3 +31617,123 @@ actually *run* cannot get one by writing a `#!` script, so
 *describing* such files (`command -v`, `type`) plus one shell-source fixture for
 the running half. Nothing to fix; recorded so the constraint is not
 re-discovered.
+
+### TD-OILS-ASSOC-SLICE-OFFSET-IS-ONE-BASED. `${m[@]:off:len}` on an associative array counts from one, and a length of zero still yields an element — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::slice_elements`. The
+companion rule for *indexed* arrays (the offset is a subscript, not a position)
+is implemented there and pinned by
+`tests/corpus/an-array-slices-offset-is-a-subscript-not-a-position.sh`; that
+case deliberately contains no associative array, because this entry is why it
+would fail.
+
+**Reproduce** (order-independent half — a one-key array, so bash's hash order
+cannot confuse the reading):
+
+```sh
+declare -A one=([solo]=s)
+show() { printf '(%d)' $(($# - 1)); shift; printf '<%s>' "$@"; printf '\n'; }
+show x ${one[@]:0}      # bash (1)<s>   osh (1)<s>
+show x ${one[@]:1}       # bash (1)<s>   osh (0)<>     <-- diverges
+show x ${one[@]:2}       # bash (0)<>    osh (0)<>
+show x ${one[@]:0:0}     # bash (1)<s>   osh (0)<>     <-- diverges
+show x ${one[@]:1:0}     # bash (1)<s>   osh (0)<>     <-- diverges
+```
+
+**The measured rule.** Let the array's values in bash's own hash order be
+`e[0..n)`. Then `${m[@]:off:len}` is
+
+* for `off >= 0`: skip `max(off - 1, 0)` elements — so offset `0` and offset `1`
+  both name the *first* element, and only from `2` on does each step drop one
+  more;
+* for `off < 0`: skip `n + off` elements, with **no** `-1` adjustment (`-1` is
+  the last element, as one would expect), and yield nothing if that is still
+  negative;
+* when a length is given, take `max(len, 1)` — a length of `0` yields **one**
+  element, not none, unless the offset already ran off the end.
+
+Measured against bash 5.2.37 with `declare -A m=([k1]=v1 [k2]=v2 [k3]=v3
+[k4]=v4)`, whose hash order is `v4 v1 v2 v3`: `${m[@]:0}` and `${m[@]:1}` are
+both all four, `${m[@]:2}` is three, `${m[@]:4}` is one, `${m[@]:5}` is none;
+`${m[@]:0:0}`, `${m[@]:1:0}` and `${m[@]:1:1}` are all the single element `v4`,
+`${m[@]:2:0}` is the single element `v1`, `${m[@]:0:3}` is `v4 v1 v2`, and
+`${m[@]: -2:1}` is `v2`. Both quirks are independent: the offset is off by one
+*and* the length has a floor of one. osh currently applies the plain
+`skip(off).take(len)` reading it uses for a dense list.
+
+**The proper fix.** Give `slice_elements` an associative branch that implements
+the rule above, taking the values in whatever order the map iterates. It is a
+small change; what makes it awkward to *test* end to end is not the arithmetic
+but the ordering — see `TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED`
+below. A corpus case can still pin the arithmetic without ordering parity by
+using a one-key array (as above) and by printing only field *counts* for a
+multi-key one.
+
+### TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED. an associative array iterates in sorted key order; bash iterates its hash — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the `assoc` map and every reader
+that walks it (`Shell::array_elements`, `Shell::slice_elements`, the `${!m[@]}`
+key list, `declare -p`, the `${m[@]}` value list, `for k in "${!m[@]}"`).
+
+**Reproduce:**
+
+```sh
+declare -A m=([k1]=v1 [k2]=v2 [k3]=v3 [k4]=v4)
+echo ${!m[@]}   # bash: k4 k1 k2 k3      osh: k1 k2 k3 k4
+echo ${m[@]}    # bash: v4 v1 v2 v3      osh: v1 v2 v3 v4
+```
+
+osh keeps the map ordered by key, so its output is sorted and stable. bash walks
+its own open-hash table, so the order is a function of the hash of each key, the
+table size, and the insertion history — `k4` coming first here is not an
+accident of this run, it is what bash's string hash and its 64-bucket initial
+table produce for these four keys.
+
+**Why it matters.** It blocks *any* corpus case that prints more than one
+element of an associative array in a context where the order is observable —
+which is nearly all of them. Existing cases work around it by using a single
+key, by sorting the output, or by printing counts instead of values. It is also
+why `TD-OILS-ASSOC-SLICE-OFFSET-IS-ONE-BASED` cannot be pinned by a
+straightforward multi-key fixture.
+
+**What the fix would take.** Reimplementing bash's `hash.c` exactly: the same
+string hash (`FNV`-style, see `bash/hashlib.c`), the same initial bucket count,
+the same growth policy and the same chain insertion order (bash pushes a new
+entry at the *head* of its bucket chain), and then iterating buckets in index
+order and chains in list order. That is a self-contained port, but it is a real
+one, and it changes the observable order of every existing associative-array
+case — so it wants to be its own commit with a full corpus sweep rather than a
+rider on a slice fix.
+
+**Judgment call:** sorted order was and remains the right *default* for osh
+absent the port — it is deterministic and it makes cases readable — but it is
+not bash parity, and this entry exists so that is not mistaken for one.
+
+### TD-OILS-SCALAR-SLICE-IS-NOT-A-SUBSTRING. `${v[@]:off:len}` on a scalar is bash's substring operator, not a one-element list — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::slice_elements`, which
+treats a scalar as a one-element list at subscript `0`.
+
+**Reproduce:**
+
+```sh
+v=scalar
+echo "[${v[@]:1}]"      # bash [calar]   osh []
+echo "[${v[@]:1:3}]"    # bash [cal]     osh []
+echo "[${v[*]:1:3}]"    # bash [cal]     osh []
+echo "[${v[@]: -1}]"    # bash [r]       osh [scalar]
+echo "[${v[@]: -3}]"    # bash [lar]     osh []
+```
+
+**The rule.** A `[@]`/`[*]` subscript on a variable that is not an array at all
+does not make a list of one — bash falls through to the plain
+`${v:off:len}` substring operator, negative offsets and all. osh instead reads
+the scalar as a single element at subscript `0`, so any non-zero offset selects
+nothing and `-1` selects the whole value.
+
+**The proper fix.** In `slice_elements`, before building the element list, check
+whether the name resolves to a scalar (present in `vars`, absent from `arrays`
+and `assoc`) and, if so, delegate to the substring path that `${v:off:len}`
+already uses, returning its result as a single field. The existing substring
+code already implements bash's negative-offset and negative-length rules, so
+this is a delegation rather than a reimplementation.

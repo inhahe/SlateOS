@@ -12165,10 +12165,29 @@ impl Shell {
     }
 
     /// Compute an array/positional slice (`${a[@]:off:len}`, `${@:off:len}`).
-    /// Elements are gathered by position (0-based over the set values; for `@`/
-    /// `*` the list is `$0` followed by the positional parameters, matching
-    /// bash). A negative offset counts from the end; a negative length stops
-    /// that many elements before the end; an absent length runs to the end.
+    ///
+    /// The offset is a **subscript**, not a position, whenever the parameter has
+    /// an index space of its own — bash's `array_subrange` walks the array's own
+    /// indices, so a sparse `s[0]=x s[5]=y s[9]=z` answers `${s[@]:2}` with
+    /// `y z` (every element whose subscript is at least 2) and `${s[@]:6}` with
+    /// `z`. The gap is invisible in the usual dense array, where a subscript and
+    /// a position are the same number.
+    ///
+    /// The *length* stays a count of elements rather than an index span:
+    /// `${s[@]:1:2}` is `y z`, two elements six subscripts apart.
+    ///
+    /// A negative offset becomes a subscript by adding one past the highest
+    /// index — `${s[@]: -4}` is subscript `6` and so `z` — and one that is still
+    /// negative after that yields nothing (bash does *not* clamp it to the first
+    /// element). For a gapless list "one past the highest index" is the element
+    /// count, which is the older reading of the same rule.
+    ///
+    /// `$@`/`$*` have no gaps: their list is `$0` followed by the positional
+    /// parameters, positions and subscripts alike. Nor does an associative
+    /// array, whose order is its own; see `TD-OILS-ASSOC-SLICE-OFFSET-IS-ONE-BASED`
+    /// in `known-issues.md` for the separate rule bash applies there, and
+    /// `TD-OILS-SCALAR-SLICE-IS-NOT-A-SUBSTRING` for the one it applies to a
+    /// name that is not an array at all.
     fn slice_elements(
         &mut self,
         name: &str,
@@ -12176,31 +12195,56 @@ impl Shell {
         offset: &Word,
         length: &Option<Box<Word>>,
     ) -> Vec<Str> {
-        let elems: Vec<Str> = if name == "@" || name == "*" {
-            let mut v = vec![self.param_value("0").unwrap_or_default()];
-            v.extend(self.positional.iter().cloned());
-            v
+        let positional = name == "@" || name == "*";
+        // A real indexed array answers with its subscripts; everything else is
+        // a gapless list whose position stands in for one.
+        let keyed: Option<Vec<(i64, Str)>> = if positional {
+            None
         } else {
-            self.array_elements(name)
+            self.resolve_ref_use(name)
+                .and_then(RefTarget::into_name)
+                .and_then(|t| self.arrays.get(&t))
+                .map(|a| a.iter().map(|(&i, v)| (i as i64, v.clone())).collect())
+        };
+        let elems: Vec<(i64, Str)> = match keyed {
+            Some(v) => v,
+            None => {
+                let list = if positional {
+                    let mut v = vec![self.param_value("0").unwrap_or_default()];
+                    v.extend(self.positional.iter().cloned());
+                    v
+                } else {
+                    self.array_elements(name)
+                };
+                list.into_iter()
+                    .enumerate()
+                    .map(|(i, e)| (i as i64, e))
+                    .collect()
+            }
         };
         // The reference bash tags an offset/length arithmetic error with:
         // `@`/`*` for the positionals, `a[@]`/`a[*]` for an array.
         let all = if star { b'*' } else { b'@' };
-        let param_ref: Str = if name == "@" || name == "*" {
+        let param_ref: Str = if positional {
             vec![all]
         } else {
             bfmt![name, b"[", all, b"]"]
         };
-        let n = elems.len() as i64;
-        let off = self.eval_arith_substr_bound(offset, &param_ref);
-        // A negative offset counts from the end; if its magnitude exceeds the
-        // element count the start lands before the first element, and bash
-        // yields an empty slice (it does NOT clamp to 0 and return everything).
-        if off < 0 && n + off < 0 {
-            return Vec::new();
+        let mut off = self.eval_arith_substr_bound(offset, &param_ref);
+        if off < 0 {
+            let past_end = elems.last().map_or(0, |&(k, _)| k.saturating_add(1));
+            off = off.saturating_add(past_end);
+            if off < 0 {
+                return Vec::new();
+            }
         }
-        let start = if off < 0 { n + off } else { off.min(n) };
-        let end = match length {
+        // The subscripts arrive in ascending order from both sources, so the
+        // run below the offset is a prefix.
+        let from_off = elems
+            .into_iter()
+            .skip_while(move |&(k, _)| k < off)
+            .map(|(_, v)| v);
+        match length {
             Some(l) => {
                 let l = self.eval_arith_substr_bound(l, &param_ref);
                 // Unlike a string substring (where a negative length counts back
@@ -12214,18 +12258,10 @@ impl Shell {
                     self.arm_discard(1);
                     return Vec::new();
                 }
-                (start + l).min(n)
+                from_off.take(usize::try_from(l).unwrap_or(usize::MAX)).collect()
             }
-            None => n,
-        };
-        if start >= end {
-            return Vec::new();
+            None => from_off.collect(),
         }
-        elems
-            .into_iter()
-            .skip(start as usize)
-            .take((end - start) as usize)
-            .collect()
     }
 
     /// Gather the elements of an array or the positional parameters and apply a

@@ -28586,12 +28586,48 @@ inside `[0]="x" [1]="y"`. `[*]` joins the three with `IFS`, which is why
 `"${n[*]@A}"` is one word in both shells and already matches — and why the
 existing lib assertions, which all use `echo`, never saw the difference.
 
-**Proper fix.** Have `bulk_attr_transform`'s `A` case return the three pieces —
-the `declare` keyword, the flags word, and the `name=(…)` assignment — as
-separate fields, the way its `a` case already returns one field per element. The
-positional form (`${@@A}` → `set -- 'a' 'b' 'c'`) needs measuring too, since it
-is built the same way and presumably splits into `set`, `--`, and one word per
-parameter.
+**Proper fix.** *(Rewritten 2026-08-04 after measuring. The original text —
+"return the three pieces, the `declare` keyword, the flags word and the
+`name=(…)` assignment, as separate fields" — was wrong: there is nothing
+three-part about it, and hard-coding three fields would have failed every `IFS`
+below except the default.)*
+
+`@A` builds **items**, and an item is not a field:
+
+* an array or assoc has **one** item, the whole re-inputtable `declare`;
+* the positional params have **one per parameter**, with the `set -- ` glued to
+  the first — not one per word, which is why `IFS=:` gives
+  `set -- 'p q':'r'`, colons between the parameters and a space inside the
+  statement head.
+
+What each context does with the items is then three different things:
+
+| context | what happens |
+|---|---|
+| quoted `[@]` (`set -- "${n[@]@A}"`) | field-split **each item** against `$IFS` |
+| quoted `[*]`, or any scalar context (`x="${n[@]@A}"`) | join the items **unsplit** — `[*]` with `star_sep`, `[@]` with `at_sep` |
+| unquoted (`set -- ${n[@]@A}`) | join, then the **ordinary** field split runs over the result |
+
+The split is a raw character split over the item, not a re-tokenisation — `IFS=a`
+cuts `declare` in half into `decl` / `re -` / ` n=([0]="x" [1]="y")` — but it
+respects the regions a shell reads as one word (`'…'`, `"…"`, `(…)`), so the
+spaces inside the element list never delimit and a `)` in a value does not end
+the group. An empty `$IFS` splits on space anyway (bash's `W_SPLITSPACE`) rather
+than not at all, which is exactly why the split has to happen *before* the join
+and not after: under `IFS=` the `[@]` form is still three words while
+`${n[*]@A}` is the intact declaration and `${*@A}` is `set -- 'p q''r'`.
+
+The three contexts differing is also what makes the unquoted form split *twice*
+and so cut where the quoted one does not — `IFS=' '` gives the quoted form three
+fields and the unquoted form four (`n=([0]="x"` and `[1]="y")`).
+
+Scalars are never split: `${iv[@]@A}` stays the one word `declare -i iv='7'` and
+`${s[@]@A}` on `s='a b'` stays `s='a b'`. `@a` is one field per element and is
+never split either.
+
+So the shape of the fix is: `bulk_elements` returns items, the *caller* decides —
+`expand_part` joins them (`join_derived`), and the quoted `[@]` arm of
+`expand_word_annotated` splits each one.
 
 **Impact.** Anything that counts or iterates `"${a[@]@A}"` rather than echoing
 it. Rare, but it is the shape `set -- "${a[@]@A}"` and `for w in "${a[@]@A}"`
@@ -28634,6 +28670,53 @@ Covered by the corpus case
 against bash 5.2.37 over five `IFS` values × seven star forms, the `[@]` count
 for each, an unset `IFS`, and the positional spellings) and by the lib test
 `a_star_reference_joins_with_ifs_whatever_list_it_made`.
+
+### TD-OILS-AT-DERIVED-JOIN-IGNORES-IFS. a derived `[@]` list joined with a hard-coded space — 2026-08-04 — ✅ **RESOLVED 2026-08-04**
+
+**Where:** `userspace/oils/src/interp.rs` — the `[@]` branch of
+`Shell::join_elements`, which every one of its six callers shared.
+
+**What.** The `[*]` fix above (TD-OILS-STAR-BULK-JOIN-IGNORES-IFS) took the
+`[@]` half on trust: `"${a[@]}"` glues its elements with a space under every
+`$IFS`, so a space looked like what `[@]` *means*. It is not. That is only true
+of the parameter's own elements — and of `"${a[@]:-w}"`, which is that same list
+whenever the array is non-empty. Every list an *operator* derived joins with the
+first character of `$IFS`, exactly as the `[*]` spelling does:
+
+```sh
+declare -a n=(p q r); IFS=:
+x="${n[@]}";     echo "[$x]"   # bash [p q r]         osh [p q r]   ✅
+x="${n[@]:-w}";  echo "[$x]"   # bash [p q r]         osh [p q r]   ✅
+x="${!n[@]}";    echo "[$x]"   # bash [0:1:2]         osh [0 1 2]
+x="${n[@]:0:2}"; echo "[$x]"   # bash [p:q]           osh [p q]
+x="${n[@]@Q}";   echo "[$x]"   # bash ['p':'q':'r']   osh ['p' 'q' 'r']
+x="${n[@]^^}";   echo "[$x]"   # bash [P:Q:R]         osh [P Q R]
+x="${n[@]#p}";   echo "[$x]"   # bash [:q:r]          osh [ q r]
+```
+
+Where the two spellings still part company is an *empty* `$IFS`: `[*]` joins
+with nothing, `[@]` falls back to a space. That fallback is what hid the bug —
+under the default ` \t\n`, and under an unset `IFS`, both rules produce a space,
+so nothing short of setting `$IFS` to a non-space can see it.
+
+**Fixed in `88f761417`.** `join_elements` now means the parameter's own elements
+(`[*]` → `star_sep`, `[@]` → space) and keeps its two callers, `expand_array_ref`
+and `ArrayOp`; the four derived sites — `ArrayKeys`, `VarNames`, `ArraySlice`,
+`ArrayBulk` — go through a new `join_derived` (`[*]` → `star_sep`, `[@]` →
+`at_sep`), with `at_sep` being `star_sep` with the empty case raised to a space.
+Two rules, named for which one each site wants, rather than one rule that was
+right about `[*]` and wrong about `[@]`.
+
+Covered by the corpus case
+`a-an-at-reference-joins-a-derived-list-with-ifs.sh` (a full match against
+bash 5.2.37 over five `IFS` values × the four space-joining forms and the ten
+derived ones, an unset `IFS`, and the `[*]` spellings for contrast) and by the
+lib test `an_at_reference_joins_a_derived_list_with_ifs`.
+
+**Impact.** Any `"${a[@]…}"` operator form read as a single string under an
+`$IFS` that is not a space — the `IFS=:` and `IFS=$'\n'` idioms. Sibling of the
+`[*]` bug and found the same way: by measuring the half that had been assumed
+rather than tested.
 
 ### TD-OILS-QUOTED-AT-IN-A-WORD-UNJOINS-ITS-STARS. a quoted `[@]` makes the `[*]` beside it expand as a list too — 2026-08-04
 
@@ -28727,6 +28810,81 @@ choosing a better separator fixes this; the list has to survive.
 including the common `IFS=$'\n'` and `IFS=:` idioms — and any unquoted one at
 all under an empty `$IFS`. The quoted forms, which are what careful scripts use,
 are all correct.
+
+### TD-OILS-ARITH-EMPTY-PARAM-BECOMES-ZERO. an empty parameter leaves a `0` behind in the expression bash reports — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::expand_arith_params`, whose
+every substitution branch ends
+`out.extend_from_slice(if val.is_empty() { b"0" } else { val })`.
+
+**What.** bash splices a parameter's *value* into the arithmetic text and leaves
+an empty one empty; osh writes a `0` in its place. The two agree on every
+expression that evaluates, because an empty arithmetic expression is 0 and a
+missing operand next to an operator is a unary one — `$(( $novar ))` is 0 and
+`$(( $novar + 1 ))` is 1 in both. The difference is only visible in the text a
+*diagnostic* quotes:
+
+```sh
+echo $(( 1 $novar 2 ))
+# bash: 1  2 : syntax error in expression (error token is "2 ")
+# osh : 1 0 2 : syntax error in expression (error token is "0 2 ")
+```
+
+**Proper fix.** Drop the empty-to-`0` rewrite and splice the value as it is. The
+`0` looks like it is there to keep a lone `$novar` from becoming an empty
+expression, but the evaluator already answers 0 for that — `$(( ))` is 0 in both
+shells — so the guard buys nothing and costs the error text. The change is four
+identical lines (the `$((…))`, `$(…)`, `${…}` and bare-`$name` branches); the
+risk is that some evaluator path treats an empty string as an error rather than
+as 0, which is what to check first.
+
+**Impact.** Error messages only, and only for an expression that was already
+going to fail. Found while fixing the special parameters in the same function.
+
+### TD-OILS-LAST-ARG-BINDS-ON-A-DISCARDED-COMMAND. `$_` takes the words of a command that never ran — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::exec_simple_inner` (~14013)
+arms `pending_last_arg` with the last expanded word *before* the three
+word-expansion-error checks below it (`unbound_error`, `take_discard_flow`,
+`glob_error`), each of which returns without running the command; `exec_simple`
+then binds `$_` from the armed slot regardless.
+
+**What.** bash updates `$_` when a command *runs*. A command discarded by a
+word-expansion error leaves the previous binding alone:
+
+```sh
+echo alpha beta
+echo "boom $(( 1/0 ))"          # reported, command discarded
+echo "[$_]"                     # bash [beta]   osh [boom 0]
+```
+
+All three discard kinds are affected — the arithmetic-expansion error above, a
+`failglob` no-match (`bash [delta]` / `osh [echo]`), and a bad subscript
+(`${a[1/0]}`, `bash [a]` / `osh [s 1]`).
+
+**Proper fix.** Move the `pending_last_arg` arming below the three checks, so
+only a command that reaches execution arms it. The slot-saving dance in
+`exec_simple` is unaffected — it restores the *outer* command's pending word, and
+a discarded inner command simply never sets one.
+
+**A second, independent `$_` divergence** turned up in the same probe and wants
+its own measurement before it is fixed: a declaration's compound array assignment
+contributes the *name* to bash's `$_`, not the word.
+
+```sh
+declare -a a=(1 2); echo "[$_]"   # bash [a]      osh [-a]
+b=(3 4);            echo "[$_]"   # bash []       osh []      (agree)
+declare -i c=5;     echo "[$_]"   # bash [c=5]    osh [c=5]   (agree)
+```
+
+So it is specific to the *compound* (`name=(…)`) form inside a declaration
+builtin — bash's argv for it apparently carries the bare name — while the scalar
+form and a plain assignment already match.
+
+**Impact.** Scripts that read `$_` after an error, which is a debugging idiom
+more than a scripting one, and after `declare -a name=(…)`. Narrow, but `$_` is
+supposed to be a faithful record of what just ran and here it records what did
+not.
 
 ### TD-OILS-UNSET-FUNCNAME. `unset FUNCNAME` does not stop osh re-materialising it — 2026-08-01 — ✅ **RESOLVED 2026-08-04**
 

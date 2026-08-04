@@ -25209,7 +25209,17 @@ impl Shell {
         }
         let mut binds: Vec<(String, VarSnapshot)> = Vec::with_capacity(assigns.len());
         for (k, v) in assigns {
-            binds.push((k.clone(), self.snapshot_var(k)));
+            // A name assigned twice in one prefix (`w=b w=c cmd`) is *one*
+            // binding that the later assignment overwrites, not two stacked
+            // ones — bash's temporary environment holds one variable per name.
+            // So only the first occurrence records what it displaced, and that
+            // is what comes back: both when the scope closes and when an
+            // `unset` inside the command reveals what is underneath.
+            // `w=a; w=b w=c eval 'unset w; echo "$w"'` prints `a`, not `b`, and
+            // `w` is `a` again afterwards.
+            if !binds.iter().any(|(n, _)| n == k) {
+                binds.push((k.clone(), self.snapshot_var(k)));
+            }
             self.arrays.remove(k);
             self.assoc.remove(k);
             self.integer_attr.remove(k);
@@ -71395,6 +71405,36 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // this path's own rule (`((n=5))` on the same nameref says `r`).
         let (o, _) = run("{ declare -n n=r; readonly r=1; n=2 true; } 2>&1");
         assert_eq!(o, "osh: n: readonly variable\n");
+    }
+
+    /// A name assigned twice in one prefix is *one* binding the later
+    /// assignment overwrites, so what comes back is what stood there before the
+    /// prefix — never an intermediate.
+    #[test]
+    fn a_name_assigned_twice_in_one_prefix_is_one_binding() {
+        let (o, _) = run("w=a; w=b w=c eval 'echo \"[$w]\"'; echo \"[$w]\"");
+        assert_eq!(o, "[c]\n[a]\n");
+        // The `unset` that reveals what a prefix binding hides agrees with the
+        // restore: both show the value from before the prefix.
+        let (o, _) = run("q=1; q=2 q=3 eval 'unset q; echo \"[${q-U}]\"'; echo \"[${q-U}]\"");
+        assert_eq!(o, "[1]\n[1]\n");
+        let (o, _) = run(
+            "r=1; r=2 r=3 r=4 eval 'echo \"[$r]\"; unset r; echo \"[${r-U}]\"'; echo \"[${r-U}]\"",
+        );
+        assert_eq!(o, "[4]\n[1]\n[1]\n");
+        // A name that was unset before the prefix is unset again after it.
+        let (o, _) = run("s=2 s=3 eval 'echo \"[$s]\"'; echo \"[${s-U}]\"");
+        assert_eq!(o, "[3]\n[U]\n");
+        // Whatever the name held is displaced only once, so an array comes back
+        // an array.
+        let (o, _) = run("declare -a v=(x y); v=1 v=2 eval :; declare -p v");
+        assert_eq!(o, "declare -a v=([0]=\"x\" [1]=\"y\")\n");
+        // The repeats are still each an assignment of their own: traced
+        // separately, and refused separately.
+        let (o, _) = run("{ x=a; set -x; x=b x=c true; } 2>&1");
+        assert!(o.ends_with("+ x=b\n+ x=c\n+ true\n"), "got: {o:?}");
+        let (o, _) = run("{ readonly ro=f; ro=1 ro=2 true; } 2>&1");
+        assert_eq!(o, "osh: ro: readonly variable\nosh: ro: readonly variable\n");
     }
 
     /// A prefix binds the name its nameref *resolves to*, under that name and

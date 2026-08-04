@@ -15956,6 +15956,23 @@ impl Shell {
         redir: &RedirPlan,
         temp_path: Option<BStr<'_>>,
     ) -> bool {
+        // The `hash` table comes before the search, as it does when the name is
+        // *run*: what `command -v` answers has to be what would actually
+        // happen, and a remembered command never reaches `$PATH` — so neither a
+        // `$PATH` that no longer finds it nor an `$EXECIGNORE` that would hide
+        // it changes the answer. A `PATH=` written as a prefix on the
+        // describing command is the exception: it asks about a *different*
+        // search, so the table has nothing to say about it (measured).
+        if temp_path.is_none()
+            && !target.contains(&b'/')
+            && !target.contains(&b'\\')
+            && let Some(ps) = self.hashed_description(target)
+        {
+            let line =
+                if verbose { bfmt![target, b" is hashed (", &ps, b")"] } else { ps };
+            let _ = self.bwrite_line(out, redir, &line);
+            return true;
+        }
         if let Some(path) = self.find_in_path_described(target, temp_path) {
             let ps = bytes::path_to_bytes(&path);
             let line = if verbose {
@@ -16165,6 +16182,45 @@ impl Shell {
             .into_iter()
             .map(|dir| Self::path_candidate(&dir, name))
             .find(|cand| self.probe_path(cand).is_file())
+    }
+
+    /// The path a hashed `name` is *described* by — which is not quite the path
+    /// the table stores, and not what `hash`'s own listing prints.
+    ///
+    /// bash's `phash_search`: an entry remembered by a relative `$PATH` search
+    /// is stored as the search spelled it (`bin/tool`), but a description of it
+    /// is answered with `./bin/tool` — *provided* that still names an
+    /// executable. So the same table answers `./bin/tool` while the file is
+    /// there and `bin/tool` once it is gone, and `hash` lists `bin/tool`
+    /// throughout. The `./` is what stops the remembered name from being
+    /// re-searched as a bare one, so it is added only when it would actually
+    /// lead somewhere; an absolute entry never needs it.
+    ///
+    /// The probe is relative to *this* shell's directory, so a `cd` can change
+    /// the answer without changing the table — which is bash's behaviour too,
+    /// the check being made afresh on every description.
+    fn hashed_description(&self, name: BStr<'_>) -> Option<Str> {
+        let (path, _) = self.cmd_hash.get(name)?;
+        let stored = bytes::path_to_bytes(path);
+        if path_is_rooted(&stored) {
+            return Some(stored);
+        }
+        let dotted = bfmt![b"./", &stored];
+        Some(if path_is_executable(&self.probe_path(&dotted)) { dotted } else { stored })
+    }
+
+    /// Whether a name's description should be answered from the `hash` table at
+    /// all, given how `type` was asked.
+    ///
+    /// bash consults it for every form *except* `-a` without `-P`: a plain
+    /// `type -a` (and `-at`, `-ap`) is a request to walk `$PATH` and report
+    /// every meaning, so the table — which holds at most one — is skipped and a
+    /// name only the table knows is `not found`. `-P` overrides that and short-
+    /// circuits to the table even under `-a`, which is why `type -aP` prints one
+    /// line where `type -ap` prints one per `$PATH` hit. Measured against bash
+    /// 5.2.37.
+    fn hash_answers_description(mode_a: bool, mode_pp: bool) -> bool {
+        mode_pp || !mode_a
     }
 
     /// Remember `name` as resolving to `path`, with `hits` prior uses.
@@ -36375,9 +36431,16 @@ impl Shell {
                 Vec::new()
             };
             // A command remembered in the hash table counts as found even when a
-            // fresh PATH search comes up empty (bash reports it as hashed).
-            let is_hashed = self.cmd_hash.contains_key(name.as_slice());
-            let found = alias.is_some() || is_kw || is_fn || is_bi || !files.is_empty() || is_hashed;
+            // fresh PATH search comes up empty — but only in the forms that
+            // consult the table at all (see [`Shell::hash_answers_description`]),
+            // so a name only the table knows is `not found` to `type -a`.
+            let hashed = if Self::hash_answers_description(mode_a, mode_pp) {
+                self.hashed_description(name)
+            } else {
+                None
+            };
+            let found =
+                alias.is_some() || is_kw || is_fn || is_bi || !files.is_empty() || hashed.is_some();
             if !found {
                 if !mode_t && !mode_p && !mode_pp {
                     self.berrln(&bfmt![self.err_prefix(), b"type: ", name, b": not found"]);
@@ -36387,8 +36450,13 @@ impl Shell {
             }
 
             if mode_pp {
-                // Force PATH search; print only file paths.
-                if files.is_empty() {
+                // Force PATH search; print only file paths. A hash hit
+                // short-circuits it entirely, `-a` or not — which is why
+                // `type -aP` prints the one remembered path where `type -ap`
+                // prints one line per `$PATH` hit.
+                if let Some(p) = &hashed {
+                    let _ = self.bwrite_line(out, redir, p);
+                } else if files.is_empty() {
                     status = 1;
                 } else if mode_a {
                     for f in &files {
@@ -36447,20 +36515,17 @@ impl Shell {
                 // print all file paths.
                 if alias.is_some() || is_kw || is_fn || is_bi {
                     // Nothing to print, but the name is found ⇒ status stays 0.
+                } else if let Some(p) = &hashed {
+                    // The table answers ahead of the search, as it does when the
+                    // name is run. Under `-a` it is not consulted at all, so
+                    // this arm is the `-p` one.
+                    let _ = self.bwrite_line(out, redir, p);
                 } else if mode_a {
                     for f in &files {
                         let _ = self.bwrite_line(out, redir, &bytes::path_to_bytes(f));
                     }
                 } else if let Some(f) = files.first() {
                     let _ = self.bwrite_line(out, redir, &bytes::path_to_bytes(f));
-                } else if let Some(p) = self
-                    .cmd_hash
-                    .get(name.as_slice())
-                    .map(|(p, _)| bytes::path_to_bytes(p))
-                {
-                    // A hashed command with no live PATH match still prints its
-                    // remembered path.
-                    let _ = self.bwrite_line(out, redir, &p);
                 }
                 continue;
             }
@@ -36497,12 +36562,9 @@ impl Shell {
                     let kind = self.builtin_kind_word(name);
                     let _ = self
                         .bwrite_line(out, redir, &bfmt![name, b" is a", kind, b" shell builtin"]);
-                } else if let Some(p) = self
-                    .cmd_hash
-                    .get(name.as_slice())
-                    .map(|(p, _)| bytes::path_to_bytes(p))
-                {
-                    // A previously-run command is remembered in the hash table.
+                } else if let Some(p) = &hashed {
+                    // A previously-run command is remembered in the hash table,
+                    // and the table is asked before `$PATH` is walked again.
                     let _ = self.bwrite_line(out, redir, &bfmt![name, b" is hashed (", p, b")"]);
                 } else {
                     let _ = self.bwrite_line(
@@ -53613,6 +53675,66 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // table nor adds to it for a lookup made under a prefix `$PATH`.
         assert_eq!(sh.resolve_external_with(b"tool", &prefix), None);
         assert_eq!(sh.cmd_hash.get(b"tool".as_slice()).map(|(_, h)| *h), Some(4));
+    }
+
+    /// A remembered command is *described* by a path the table does not hold:
+    /// a relative one gains a `./`, but only while that still leads to an
+    /// executable, and the table itself is never rewritten.
+    ///
+    /// This cannot be a corpus case. Showing it needs a fixture that both
+    /// shells agree is executable and can run, and on the Windows development
+    /// host no such fixture exists: MSYS derives `access(X_OK)` from a `#!`
+    /// line, so a plain file is not executable to bash, while a `#!/bin/sh`
+    /// file names an interpreter osh cannot resolve. See
+    /// HOST-OILS-MSYS-DERIVES-THE-EXECUTE-BIT-FROM-A-SHEBANG. Verified by hand
+    /// against bash 5.2.37 with `#!` fixtures, which agrees line for line.
+    #[test]
+    fn a_hashed_command_is_described_with_a_dot_slash_while_it_still_runs() {
+        let dir = ScratchDir::new("hash_describe");
+        std::fs::create_dir_all(dir.join("bin")).expect("create bin");
+        let tool = dir.join("bin").join("tool");
+        std::fs::write(&tool, b"echo tool\n").expect("write tool");
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        let mut sh = new_shell();
+        sh.cwd = bytes::path_to_bytes(&dir.path);
+        sh.hash_remember(b"tool".to_vec(), std::path::PathBuf::from("bin/tool"), 0);
+
+        // The stored path is untouched — it is what `hash` lists — while the
+        // description of it gains the `./` that stops it being re-searched as a
+        // bare name.
+        assert_eq!(
+            sh.cmd_hash.get(b"tool".as_slice()).map(|(p, _)| bytes::path_to_bytes(p)),
+            Some(b"bin/tool".to_vec())
+        );
+        assert_eq!(sh.hashed_description(b"tool"), Some(b"./bin/tool".to_vec()));
+
+        // The check is made afresh every time and is relative to *this* shell's
+        // directory, so the same table answers differently after a `cd`…
+        sh.cwd = bytes::path_to_bytes(&dir.join("bin"));
+        assert_eq!(sh.hashed_description(b"tool"), Some(b"bin/tool".to_vec()));
+        sh.cwd = bytes::path_to_bytes(&dir.path);
+        // …and once the file is gone, which is bash's answer too.
+        std::fs::remove_file(&tool).expect("remove tool");
+        assert_eq!(sh.hashed_description(b"tool"), Some(b"bin/tool".to_vec()));
+
+        // An absolute entry never needs the prefix, whether or not it resolves.
+        sh.hash_remember(b"abs".to_vec(), std::path::PathBuf::from("/nowhere/tool"), 0);
+        assert_eq!(sh.hashed_description(b"abs"), Some(b"/nowhere/tool".to_vec()));
+        // A name the table does not hold has no description to give.
+        assert_eq!(sh.hashed_description(b"other"), None);
+
+        // Which forms of `type` ask the table at all: every one except `-a`
+        // without `-P`.
+        assert!(Shell::hash_answers_description(false, false));
+        assert!(Shell::hash_answers_description(false, true));
+        assert!(Shell::hash_answers_description(true, true));
+        assert!(!Shell::hash_answers_description(true, false));
     }
 
     /// A bare word the shell's `$PATH` could not place is `command not found`

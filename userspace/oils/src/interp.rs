@@ -19883,18 +19883,24 @@ impl Shell {
         Some(items.join(sep))
     }
 
-    /// The fields a **double-quoted** run expands to when it is nothing but one
-    /// list-valued parameter: `"${a[@]}"`, `"$@"`, `"${!a[@]}"`, `"${a[@]:1:2}"`,
+    /// The fields a **double-quoted** part expands to when it is a list-valued
+    /// parameter: `"${a[@]}"`, `"$@"`, `"${!a[@]}"`, `"${a[@]:1:2}"`,
     /// `"${a[@]#p}"`, `"${a[@]:-d}"` and `"${!ref}"` all keep one field per
-    /// element instead of joining. `None` means the run is not one of those and
-    /// expands to a single string.
+    /// element instead of joining. `None` means the part is not one of those and
+    /// contributes a single string.
+    ///
+    /// The question is asked of one part at a time, and the answer is the same
+    /// whatever else shares the quotes — a list's field breaks are its own, so
+    /// `"${a[@]}Z"` is two fields with the `Z` glued to the last of them. The
+    /// slice this takes is therefore a slice of one, except where an arm asks
+    /// the question again of a part it derived (`"${!ref}"`).
     ///
     /// The `[*]` spellings are deliberately absent: inside quotes the star is
     /// exactly the instruction to join, so they belong to the scalar path.
     ///
     /// This is a *recogniser*: it reports nothing. A `None` sends the caller to
-    /// [`Shell::expand_double_quoted`], which is where every complaint about
-    /// these parts is made, so answering one here would make it twice.
+    /// [`Shell::expand_dynamic`], which is where every complaint about these
+    /// parts is made, so answering one here would make it twice.
     fn quoted_per_element(&mut self, parts: &[WordPart]) -> Option<Vec<Str>> {
         // These parts are inside quotes as much as the ones
         // [`Shell::expand_double_quoted`] takes are, and the quoting reaches
@@ -20085,27 +20091,71 @@ impl Shell {
                     // `"${arr[@]}"` (and `"$@"`) expand to one field per element,
                     // preserving embedded whitespace; empty arrays yield no field.
                     // `"${!arr[@]}"` does the same over the keys/indices.
+                    //
+                    // The run is walked part by part rather than recognised
+                    // whole, because a list's field breaks are *its own* and
+                    // nothing sharing the quotes can close them up: `"${a[@]}Z"`
+                    // is `<p q><rZ>` and `"${a[@]}${a[@]}"` is three fields, not
+                    // four and not one. Text before a list joins its first
+                    // element, text after joins its last, and a second list
+                    // starts counting from wherever the first stopped — which is
+                    // exactly [`lay_out_fields`], the same layout a quoted
+                    // operand uses (see [`SplitMode::QuotedOperand`]).
+                    //
                     // A bad substitution reached from inside these quotes names
                     // the quoted section's *contents*, without the enclosing
                     // quotes — same rule `expand_double_quoted` applies on the
-                    // scalar path below (bash re-enters the quoted run as its
-                    // own word).
+                    // scalar path (bash re-enters the quoted run as its own
+                    // word). It is the whole run that is named, not the part in
+                    // hand, so the save is around the loop.
                     let saved_word = self.bad_sub_word.replace(crate::unparse::parts_src(parts));
-                    let per_element = self.quoted_per_element(parts);
-                    self.bad_sub_word = saved_word;
-                    if let Some(items) = per_element {
-                        for (i, el) in items.into_iter().enumerate() {
-                            if i > 0 {
-                                fields.push(std::mem::take(&mut cur));
-                            }
-                            push_chars(&mut cur, &el, true);
-                            open = true;
-                        }
-                    } else {
-                        let s = self.expand_double_quoted(parts);
-                        push_chars(&mut cur, &s, true);
+                    // The quotes are part of the context the parts expand in,
+                    // not just of how their results are joined — see
+                    // [`Shell::dquote`]. Set once here, so the per-part
+                    // recogniser is asked in the state it expects.
+                    let saved_dquote = std::mem::replace(&mut self.dquote, true);
+                    // A run with nothing in it is still a word: `""` is one
+                    // empty argument. Every other part opens the field itself —
+                    // text and scalars unconditionally, a list once it has an
+                    // element — which is what leaves `"${z0[@]}"` no argument at
+                    // all, so this is the only case the loop cannot state.
+                    if parts.is_empty() {
                         open = true;
                     }
+                    for part in parts {
+                        match part {
+                            WordPart::Literal(t) | WordPart::SingleQuoted { text: t, .. } => {
+                                push_chars(&mut cur, t.as_bytes(), true);
+                                open = true;
+                            }
+                            other => {
+                                let items =
+                                    self.quoted_per_element_parts(std::slice::from_ref(other));
+                                let Some(items) = items else {
+                                    // Not a list: its characters join the field
+                                    // in hand, and it opens one even when it
+                                    // brought none — `"${nope}"` is one empty
+                                    // argument where `"${z0[@]}"` is no argument
+                                    // at all.
+                                    let s = self.expand_dynamic(other);
+                                    push_chars(&mut cur, &s, true);
+                                    open = true;
+                                    continue;
+                                };
+                                let items: Vec<Vec<EChar>> = items
+                                    .iter()
+                                    .map(|el| {
+                                        let mut f = Vec::new();
+                                        push_chars(&mut f, el, true);
+                                        f
+                                    })
+                                    .collect();
+                                lay_out_fields(&items, &mut fields, &mut cur, &mut open);
+                            }
+                        }
+                    }
+                    self.dquote = saved_dquote;
+                    self.bad_sub_word = saved_word;
                 }
                 other => {
                     // Inside quotes the operand is a double-quoted word, and

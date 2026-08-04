@@ -14,6 +14,105 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-LOCALVAR-INHERIT-IS-INERT. `shopt -s localvar_inherit` was listed but did nothing — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::declare_local`.
+
+**What:** the option was in osh's `shopt` inventory and could be turned on and
+off, but no code ever read it, so a `local` always started fresh. bash 5.2.37
+with the option on starts the new local as a *copy* of the binding it shadows:
+
+```sh
+shopt -s localvar_inherit
+f() { local v; declare -p v; }
+g() { local -i v=7; f; }; g     # bash: declare -i v="7"   osh: declare -- v
+```
+
+**Fixed 2026-08-04.** `declare_local` returns early, before the clearing, when
+the option is on — leaving value, array kind and every attribute in place and
+letting the declaration's own flags be applied on top of them, which is exactly
+what the clearing was there to prevent.
+
+Measured while implementing it, all bash 5.2.37:
+
+- **"Previous scope" is just the live binding.** An outer frame's local, a
+  global and a temporary-environment prefix all serve equally, and a name that
+  is unset there — including one an inner `unset` took away — is inherited as
+  unset. That makes the implementation a *deletion* rather than a lookup:
+  osh's live tables already hold the innermost binding.
+- **The nameref marking is the one exception.** `-n` is dropped and the value
+  — the target's *name* — is kept as a plain string, so a `local -n v=t`
+  shadowed by a bare `local v` yields `declare -- v="t"`.
+- **The declaration's flags are added, not substituted.** `local -x v` under an
+  outer `local -i v=7` reports `declare -ix v="7"`.
+- **Inheritance precedes the declaration's own assignment,** so an inherited
+  attribute converts it: under `local -i v=7`, an inner `local v=own` reports
+  `v="0"` and `local v=3+4` reports `v="7"`; under `local -l v=x`, an inner
+  `local v=ABC` reports `v="abc"`.
+- **An inherited array kind still cannot be converted** (`local -A v` over an
+  inherited indexed array is the usual `cannot convert indexed to associative
+  array`), an inherited readonly makes a readonly local, and a readonly
+  *global* is refused before any of this — all of which fell out unchanged.
+- `declare` inside a function inherits too, being the same declaration;
+  `declare -g` names the global and never shadows, so it cannot.
+
+**Pinned by** `tests/corpus/a-local-can-be-told-to-inherit-what-it-shadows.sh`
+and the `localvar_inherit_copies_the_binding_being_shadowed` unit test in
+`src/interp.rs`.
+
+### TD-OILS-UNSET-DOES-NOT-POP-A-SHADOWED-LOCAL. `unset` of an outer frame's local marks it unset where bash removes the binding, and a current-frame local loses its name entirely — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `unset` builtin's variable
+path, and `Shell::local_frames`.
+
+**What:** bash's `unset NAME` pops the *innermost* binding of `NAME` off the
+variable scope stack, exposing the next one; only when that binding belongs to
+the **current** function frame is it merely *marked* unset instead. osh always
+marks, and its mark also drops the name from `declared`, so `declare -p` cannot
+see it. Two separate divergences, both in bash's **default** mode
+(`localvar_unset` off). Measured against bash 5.2.37:
+
+```sh
+# (a) a current-frame local stays a *name* after unset
+c=global
+f() { local c=one; unset c; declare -p c; }
+f            # bash: declare -- c        osh: declare: c: not found
+             # a second and third `unset c` change nothing in either shell
+
+# (b) an enclosing frame's local is popped, not marked
+a=global
+i1() { unset a; echo "[$a]"; }
+i2() { local a=two; i1; echo "[$a]"; }
+i2           # bash: [global] [global]   osh: [] []
+# …and the frame entry is gone, so a later write lands on the exposed binding
+# and survives the outer return: bash ends with a=fromi1 where osh restores
+# a=global.
+```
+
+Three frames deep, `unset` from the innermost pops one level per call:
+`l3 (local a=three) → l2 (local a=two) → l1 (unset a)` leaves `three` visible,
+and a second `unset` leaves the global. The popped binding's attributes come
+back with it (`declare -i b=1` global under a `local b=two` reads back as
+`declare -i b="1"`). A readonly local is refused before any of this, which osh
+already matches.
+
+`shopt -s localvar_unset` is what turns (b) into (a) — "identical to the
+behavior of unsetting local variables at the current function scope", as the
+manual puts it — so osh is currently hard-wired to the *non-default* half of
+that option, and gets the default wrong.
+
+**Proper fix:** in the `unset` variable path, find the innermost
+`local_frames` entry that owns the name.
+
+- No frame owns it → a global: remove it outright (osh already correct).
+- The **last** frame owns it → mark unset: clear the value/array but leave the
+  name in `declared`, so `declare -p` still reports `declare -- c`.
+- An **earlier** frame owns it and `localvar_unset` is off → pop: restore that
+  frame's saved `VarSnapshot` into the live tables and *remove* the entry, so
+  the next `unset` pops the level below and the frame's return restores nothing.
+- An earlier frame owns it and `localvar_unset` is on → mark, as for the last
+  frame.
+
 ### TD-OILS-NAMEREF-CYCLE-ARRAY-WRITE. A write through a circular nameref refuses in `osh` where bash warns and writes the raw name — 2026-08-03
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_ref_use`, and its

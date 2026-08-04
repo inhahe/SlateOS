@@ -15987,6 +15987,10 @@ impl Shell {
     /// Mark `name` as function-local: snapshot its prior state into the current
     /// local frame (once per name) and clear the current binding so the `local`
     /// declaration starts fresh. Returns `false` if not inside a function.
+    ///
+    /// Two things stop the clearing: a binding made by an assignment prefix
+    /// outside this frame, and `shopt -s localvar_inherit`. Both are documented
+    /// at their tests below.
     fn declare_local(&mut self, name: &str) -> bool {
         let Some(frame) = self.local_frames.last() else {
             return false;
@@ -16037,6 +16041,35 @@ impl Shell {
             self.trace_attr.remove(name);
             self.array_valued.remove(name);
             self.declared.remove(name);
+            return true;
+        }
+        // `shopt -s localvar_inherit` asks for the opposite of the clearing
+        // below: the new local starts as a *copy* of the binding it shadows —
+        // value, array kind and every attribute — and the flags on the
+        // declaration are then applied on top. bash 5.2.37:
+        //
+        // ```sh
+        // shopt -s localvar_inherit
+        // f() { local v; declare -p v; }
+        // g() { local -i v=7; f; }; g          # declare -i v="7"
+        // h() { local -x v; declare -p v; }
+        // k() { local -i v=7; h; }; k          # declare -ix v="7"  (added, not
+        //                                      #  replaced)
+        // m() { local v=own; declare -p v; }
+        // n() { local -i v=7; m; }; n          # declare -i v="0"   (the
+        //                                      #  inherited `-i` converts the
+        //                                      #  initialiser)
+        // ```
+        //
+        // "Previous scope" is simply the live binding, so an outer frame's
+        // local, a global and a temporary-environment prefix all serve, and a
+        // name that is unset there — including one an inner `unset` took away —
+        // is inherited as unset. The one exception is the nameref marking:
+        // bash drops `-n` and keeps the *value*, so a `local -n v=t` shadowed
+        // by a bare `local v` yields the plain string `t`.
+        if self.shopt.get("localvar_inherit").copied().unwrap_or(false) {
+            self.nameref_attr.remove(name);
+            self.declared.insert(name.to_string());
             return true;
         }
         // Clear the binding being shadowed: a bare `local x` starts unset/empty
@@ -54153,6 +54186,57 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // later global `g=5+5` is evaluated arithmetically.
         let src = "declare -i g=1; f() { local g; g=9+9; echo $g; }; f; g=5+5; echo $g";
         assert_eq!(run(src).0, "9+9\n10\n");
+    }
+
+    #[test]
+    fn localvar_inherit_copies_the_binding_being_shadowed() {
+        // `shopt -s localvar_inherit` turns the clearing in [`Shell::declare_local`]
+        // off: the new local starts as a copy of whatever the name reads as, and
+        // the declaration's own flags land on top of the inherited ones. Every
+        // expectation here is bash 5.2.37's — see the corpus case
+        // `a-local-can-be-told-to-inherit-what-it-shadows.sh`.
+        let on = "shopt -s localvar_inherit; f() { local v; declare -p v; }; ";
+        // Value, array kind and attributes all come across…
+        assert_eq!(
+            run(&format!("{on}g() {{ local -i v=7; f; }}; g")).0,
+            "declare -i v=\"7\"\n"
+        );
+        assert_eq!(
+            run(&format!("{on}g() {{ local -a v=(p q); f; }}; g")).0,
+            "declare -a v=([0]=\"p\" [1]=\"q\")\n"
+        );
+        // … and a global or a temporary-environment prefix is a previous scope
+        // just as an outer frame's local is.
+        assert_eq!(
+            run(&format!("{on}declare -i v=9; f")).0,
+            "declare -i v=\"9\"\n"
+        );
+        assert_eq!(run(&format!("{on}v=g; v=temp f")).0, "declare -x v=\"temp\"\n");
+        // The nameref marking is the exception: `-n` is dropped, the value (the
+        // target's *name*) is kept.
+        assert_eq!(
+            run(&format!("{on}g() {{ local t=target; local -n v=t; f; }}; g")).0,
+            "declare -- v=\"t\"\n"
+        );
+        // The inheritance happens before the declaration's value is assigned, so
+        // an inherited `-i` converts it; and an explicit flag is *added*.
+        assert_eq!(
+            run("shopt -s localvar_inherit; f() { local v=own; declare -p v; }; \
+                 g() { local -i v=7; f; }; g")
+                .0,
+            "declare -i v=\"0\"\n"
+        );
+        assert_eq!(
+            run("shopt -s localvar_inherit; f() { local -x v; declare -p v; }; \
+                 g() { local -i v=7; f; }; g")
+                .0,
+            "declare -ix v=\"7\"\n"
+        );
+        // With the option off it is the ordinary fresh local again.
+        assert_eq!(
+            run("f() { local v; declare -p v; }; g() { local -i v=7; f; }; g").0,
+            "declare -- v\n"
+        );
     }
 
     #[test]

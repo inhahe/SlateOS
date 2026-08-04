@@ -34,16 +34,44 @@
 
 use crate::bytes::{BStr, Str};
 
-/// The bucket count a fresh table starts with — bash's `hash_create (0)`.
-///
-/// Must be a power of two: the bucket is masked, not divided.
-const INITIAL_BUCKETS: usize = 1024;
-
 /// bash grows the table once it holds this many entries per bucket.
 const LOAD_FACTOR: usize = 2;
 
 /// …and multiplies the bucket count by this much when it does.
 const GROW_BY: usize = 4;
+
+/// Which of bash's hash tables this is.
+///
+/// bash makes several `hash_create` calls with different initial sizes and then
+/// runs all of them through the same `hashlib.c`. The size is the *only* thing
+/// that differs, but it decides every bucket index and therefore the whole
+/// enumeration order, so a table built with the wrong one is wrong from its
+/// first key. Each size below is measured, not read out of a header — see
+/// `TD-OILS-THE-ALIAS-AND-COMMAND-MIRRORS-ARE-NOT-THEIR-OWN-TABLES` in
+/// `known-issues.md` for the fits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TableShape {
+    /// An associative array (`declare -A`). bash's `assoc_create (0)`.
+    #[default]
+    Assoc,
+    /// The alias table, mirrored by `BASH_ALIASES`.
+    Alias,
+    /// The hashed-command table, mirrored by `BASH_CMDS` and listed by `hash`.
+    Command,
+}
+
+impl TableShape {
+    /// The bucket count a fresh table of this shape starts with.
+    ///
+    /// Always a power of two: the bucket is masked, not divided.
+    const fn initial_buckets(self) -> usize {
+        match self {
+            Self::Assoc => 1024,
+            Self::Alias => 64,
+            Self::Command => 256,
+        }
+    }
+}
 
 /// bash's `hash_string` — FNV-1 over the key's bytes.
 ///
@@ -60,29 +88,50 @@ fn hash_string(key: BStr<'_>) -> u32 {
     i
 }
 
-/// A map from byte-string keys to byte-string values that enumerates in bash's
-/// hash order.
+/// A map from byte-string keys to values that enumerates in bash's hash order.
+///
+/// Generic over the value because bash's other tables are the same structure
+/// with a different payload: the alias table maps to replacement text, the
+/// hashed-command table to a path and a hit count. Sharing the implementation is
+/// not tidiness — it is the only way those tables enumerate correctly, since
+/// their order is a property of *this* algorithm and nothing else.
 ///
 /// The invariant every method here maintains: `nentries` is the number of
 /// `(key, value)` pairs across all of `buckets`, no key appears in two chains,
 /// and `buckets.len()` is either zero (no table yet — a bare `declare -A m`
-/// that has never been written) or a power of two at least [`INITIAL_BUCKETS`].
-#[derive(Clone, Debug, Default)]
-pub struct AssocArray {
+/// that has never been written) or a power of two at least
+/// `shape.initial_buckets()`.
+/// Equality is *structural*, over the buckets rather than the key set: two
+/// tables holding the same pairs compare equal only if they also enumerate the
+/// same way. That is the right test for the parser's "did the alias table
+/// change" check — a reordering it did not notice would expand aliases in the
+/// wrong precedence — and it costs nothing, since a table can only be reordered
+/// by a mutation the check wanted to catch anyway.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AssocArray<V = Str> {
+    /// Which of bash's tables this is, and so how many buckets it starts with.
+    /// Fixed at construction: changing it would invalidate every bucket index.
+    shape: TableShape,
     /// The bucket array; each chain runs from its head, which is where a new
     /// entry is pushed. Empty until the first element is assigned, so an
     /// untouched `declare -A m` does not pay for a table it never uses.
-    buckets: Vec<Vec<(Str, Str)>>,
+    buckets: Vec<Vec<(Str, V)>>,
     /// The number of entries across every chain — what the load factor is
     /// measured against, and what `${#m[@]}` reports.
     nentries: usize,
 }
 
-impl AssocArray {
+impl<V: Default> AssocArray<V> {
     /// An array with no elements — a bare `declare -A m`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty table of one of bash's other shapes.
+    #[must_use]
+    pub fn with_shape(shape: TableShape) -> Self {
+        Self { shape, buckets: Vec::new(), nentries: 0 }
     }
 
     /// How many elements the array holds (`${#m[@]}`).
@@ -116,9 +165,19 @@ impl AssocArray {
 
     /// The value at `key`, or `None` if the array has no such key.
     #[must_use]
-    pub fn get(&self, key: BStr<'_>) -> Option<&Str> {
+    pub fn get(&self, key: BStr<'_>) -> Option<&V> {
         let (b, i) = self.find(key)?;
         self.buckets.get(b)?.get(i).map(|(_, v)| v)
+    }
+
+    /// The value at `key` to write through, or `None` if there is no such key.
+    ///
+    /// Deliberately does *not* create the key: a caller that wants that says so
+    /// with [`set`](Self::set), and one that is only bumping a hit count must
+    /// not accidentally link a new entry and reorder the table.
+    pub fn get_mut(&mut self, key: BStr<'_>) -> Option<&mut V> {
+        let (b, i) = self.find(key)?;
+        self.buckets.get_mut(b)?.get_mut(i).map(|(_, v)| v)
     }
 
     /// Whether `key` is present. An element may be present and empty, which is
@@ -130,8 +189,34 @@ impl AssocArray {
 
     /// The elements in bash's hash order: buckets by index, each chain from its
     /// head.
-    pub fn iter(&self) -> std::iter::Flatten<std::slice::Iter<'_, Vec<(Str, Str)>>> {
+    pub fn iter(&self) -> std::iter::Flatten<std::slice::Iter<'_, Vec<(Str, V)>>> {
         self.buckets.iter().flatten()
+    }
+
+    /// A copy of this table with every chain reversed and every value mapped —
+    /// the `BASH_ALIASES` / `BASH_CMDS` mirrors.
+    ///
+    /// The reversal is not a choice between two orders: bash has readers of both
+    /// kinds over the very same table. `hash -l` walks the hashed-command chains
+    /// from the head, as [`iter`](Self::iter) does, while the mirrors come out
+    /// the other way — a table whose chain holds `bfs atj aoo aft` lists in that
+    /// order and mirrors as `aft aoo atj bfs`. Reversing here, rather than at
+    /// the reader, is what lets the mirror be an ordinary array that the
+    /// ordinary readers (`${!m[@]}`, `declare -p`, `@K`, …) walk unaware.
+    ///
+    /// The shape is carried over, which is the whole point: a mirror rebuilt as
+    /// a *default* table would be 1024 buckets and would enumerate in an order
+    /// that exists nowhere in bash.
+    pub fn mirrored<W>(&self, mut value: impl FnMut(&V) -> W) -> AssocArray<W> {
+        AssocArray {
+            shape: self.shape,
+            buckets: self
+                .buckets
+                .iter()
+                .map(|chain| chain.iter().rev().map(|(k, v)| (k.clone(), value(v))).collect())
+                .collect(),
+            nentries: self.nentries,
+        }
     }
 
     /// The keys in hash order (`${!m[@]}`).
@@ -140,7 +225,7 @@ impl AssocArray {
     }
 
     /// The values in hash order (`${m[@]}`).
-    pub fn values(&self) -> impl Iterator<Item = &Str> {
+    pub fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, v)| v)
     }
 
@@ -148,19 +233,14 @@ impl AssocArray {
     ///
     /// Re-assigning an existing key leaves it exactly where it is: bash writes
     /// through the entry it found rather than relinking it, and so does this.
-    pub fn set(&mut self, key: Str, val: Str) {
+    pub fn set(&mut self, key: Str, val: V) {
         self.slot(key).1 = val;
-    }
-
-    /// Append to `key` (`m[k]+=v`), starting from empty if it is absent.
-    pub fn append(&mut self, key: Str, val: BStr<'_>) {
-        self.slot(key).1.extend_from_slice(val);
     }
 
     /// The `(key, value)` slot for `key`, created empty at the head of its
     /// chain if it is not already there. The single place a new key is
     /// introduced, so the entry count and the chains cannot drift apart.
-    fn slot(&mut self, key: Str) -> &mut (Str, Str) {
+    fn slot(&mut self, key: Str) -> &mut (Str, V) {
         let (b, i) = self.place(key);
         // `place` returns a position it has just linked an entry into or found
         // one at, so this cannot fail; going through `get_mut` keeps the method
@@ -186,7 +266,7 @@ impl AssocArray {
             return found;
         }
         if self.buckets.is_empty() {
-            self.buckets = vec![Vec::new(); INITIAL_BUCKETS];
+            self.buckets = empty_buckets(self.shape.initial_buckets());
         } else if self.nentries >= self.buckets.len().saturating_mul(LOAD_FACTOR) {
             self.grow();
         }
@@ -194,7 +274,7 @@ impl AssocArray {
         // fallback for the impossible case that stays inside the array.
         let b = self.bucket_of(&key).unwrap_or(0);
         if let Some(chain) = self.buckets.get_mut(b) {
-            chain.insert(0, (key, Str::new()));
+            chain.insert(0, (key, V::default()));
             self.nentries = self.nentries.saturating_add(1);
         }
         (b, 0)
@@ -209,7 +289,7 @@ impl AssocArray {
     /// insertion history rather than only on the key set.
     fn grow(&mut self) {
         let old = std::mem::take(&mut self.buckets);
-        self.buckets = vec![Vec::new(); old.len().saturating_mul(GROW_BY)];
+        self.buckets = empty_buckets(old.len().saturating_mul(GROW_BY));
         for chain in old {
             for e in chain {
                 // The new table is larger than the old, so it is non-empty and
@@ -220,6 +300,29 @@ impl AssocArray {
                 }
             }
         }
+    }
+
+    /// Drop every entry but keep the bucket array — bash's `hash_flush`.
+    ///
+    /// Distinct from [`reset`](Self::reset), and the difference is observable: a
+    /// table that had grown keeps its grown bucket count here, so the keys put
+    /// back after a `hash -r` land where a *larger* table puts them. bash flushes
+    /// (not disposes) on `hash -r` and on a `$PATH` change.
+    pub fn clear(&mut self) {
+        for chain in &mut self.buckets {
+            chain.clear();
+        }
+        self.nentries = 0;
+    }
+
+    /// Throw the table away entirely — bash's `hash_dispose`, after which the
+    /// next insertion builds a fresh one at the shape's initial size.
+    ///
+    /// This is what `unalias -a` does, and what `m=()` does to an associative
+    /// array. See [`clear`](Self::clear) for the one that does not.
+    pub fn reset(&mut self) {
+        self.buckets = Vec::new();
+        self.nentries = 0;
     }
 
     /// Remove `key` if present, reporting whether there was one.
@@ -239,10 +342,26 @@ impl AssocArray {
     }
 }
 
-impl FromIterator<(Str, Str)> for AssocArray {
+impl AssocArray<Str> {
+    /// Append to `key` (`m[k]+=v`), starting from empty if it is absent.
+    pub fn append(&mut self, key: Str, val: BStr<'_>) {
+        self.slot(key).1.extend_from_slice(val);
+    }
+}
+
+/// `n` empty chains.
+///
+/// Not `vec![Vec::new(); n]`: that clones a prototype and so would demand
+/// `V: Clone` from every table, which the hashed-command table's payload need
+/// not satisfy. Each chain here is independently new.
+fn empty_buckets<V>(n: usize) -> Vec<Vec<(Str, V)>> {
+    (0..n).map(|_| Vec::new()).collect()
+}
+
+impl<V: Default> FromIterator<(Str, V)> for AssocArray<V> {
     /// Build from `(key, value)` pairs, keeping the first position of a
     /// repeated key and its *last* value — the same rule `set` follows.
-    fn from_iter<I: IntoIterator<Item = (Str, Str)>>(iter: I) -> Self {
+    fn from_iter<I: IntoIterator<Item = (Str, V)>>(iter: I) -> Self {
         let mut m = Self::new();
         for (k, v) in iter {
             m.set(k, v);
@@ -251,9 +370,9 @@ impl FromIterator<(Str, Str)> for AssocArray {
     }
 }
 
-impl<'a> IntoIterator for &'a AssocArray {
-    type Item = &'a (Str, Str);
-    type IntoIter = std::iter::Flatten<std::slice::Iter<'a, Vec<(Str, Str)>>>;
+impl<'a, V: Default> IntoIterator for &'a AssocArray<V> {
+    type Item = &'a (Str, V);
+    type IntoIter = std::iter::Flatten<std::slice::Iter<'a, Vec<(Str, V)>>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()

@@ -1307,7 +1307,7 @@ fn starts_command(prev: Option<&Tok>) -> bool {
 pub fn expand_aliases(
     toks: &[Tok],
     lines: &[u32],
-    aliases: &std::collections::BTreeMap<Str, Str>,
+    aliases: &crate::assoc::AssocArray,
     opts: ParseOpts,
 ) -> (Vec<Tok>, Vec<u32>) {
     let (out, out_lines, _) = expand_aliases_tracked(toks, lines, aliases, opts);
@@ -1325,7 +1325,7 @@ pub fn expand_aliases(
 pub fn expand_aliases_tracked(
     toks: &[Tok],
     lines: &[u32],
-    aliases: &std::collections::BTreeMap<Str, Str>,
+    aliases: &crate::assoc::AssocArray,
     opts: ParseOpts,
 ) -> (Vec<Tok>, Vec<u32>, Vec<Option<usize>>) {
     let mut active = std::collections::BTreeSet::new();
@@ -1337,7 +1337,7 @@ pub fn expand_aliases_tracked(
 fn expand_aliases_inner(
     toks: &[Tok],
     lines: &[u32],
-    aliases: &std::collections::BTreeMap<Str, Str>,
+    aliases: &crate::assoc::AssocArray,
     opts: ParseOpts,
     active: &mut std::collections::BTreeSet<Str>,
     out: &mut AliasOut,

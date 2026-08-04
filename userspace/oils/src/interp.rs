@@ -108,7 +108,7 @@ use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 
 use crate::arith::{self, VarLookup};
-use crate::assoc::AssocArray;
+use crate::assoc::{AssocArray, TableShape};
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str, StrBuf};
 use crate::ast::{
@@ -4477,9 +4477,15 @@ pub struct Shell {
     disabled_builtins: HashSet<String>,
     /// Command aliases defined via the `alias` builtin (name → replacement
     /// text). Expanded over the token stream before parsing (see
-    /// `parse_with_aliases`). `BTreeMap` keeps `alias` listings sorted. Cloned
-    /// into subshells (bash inherits aliases).
-    aliases: BTreeMap<Str, Str>,
+    /// `parse_with_aliases`). Cloned into subshells (bash inherits aliases).
+    ///
+    /// This is bash's alias table, not a map that happens to hold aliases: it is
+    /// the [`AssocArray`] hash table with [`TableShape::Alias`]'s 64 buckets,
+    /// because `BASH_ALIASES` enumerates it and that order is a property of the
+    /// table's shape and of nothing else. `alias -p` sorts its own listing,
+    /// which is why an ordinary sorted map was good enough until the mirror had
+    /// to agree with bash.
+    aliases: AssocArray,
     /// Signal/pseudo-signal traps set by the `trap` builtin, keyed by the
     /// normalized spec (`EXIT`, `ERR`, `INT`, …). The value is the action
     /// command string; an empty string means "ignore". Currently only the
@@ -4635,7 +4641,12 @@ pub struct Shell {
     /// but `/` and NUL. Value is `(resolved path, hit count)`. bash
     /// caches every PATH search here and consults it before re-searching; the
     /// table is inherited by subshell clones. See `resolve_external`.
-    cmd_hash: std::collections::HashMap<Str, (std::path::PathBuf, u64)>,
+    ///
+    /// Like [`Self::aliases`] this is bash's own table — the [`AssocArray`] with
+    /// [`TableShape::Command`]'s 256 buckets — because both `hash`/`hash -l` and
+    /// the `BASH_CMDS` mirror enumerate it, in *opposite* chain directions, and
+    /// neither order exists outside the table's shape.
+    cmd_hash: AssocArray<(std::path::PathBuf, u64)>,
     /// Whether anything has *ever* been hashed in this shell — sticky, so
     /// `hash -r` does not clear it.
     ///
@@ -4817,7 +4828,7 @@ impl Shell {
             login_shell: false,
             logout_pending: None,
             disabled_builtins: HashSet::new(),
-            aliases: BTreeMap::new(),
+            aliases: AssocArray::with_shape(TableShape::Alias),
             traps: HashMap::new(),
             trap_shadow: HashMap::new(),
             exit_trap_done: false,
@@ -4835,7 +4846,7 @@ impl Shell {
             hostname_list: Vec::new(),
             hostname_source: None,
             umask_val: 0o022,
-            cmd_hash: std::collections::HashMap::new(),
+            cmd_hash: AssocArray::with_shape(TableShape::Command),
             cmd_hash_created: false,
             rlimits: default_rlimits(),
         };
@@ -5028,16 +5039,14 @@ impl Shell {
     /// Rebuild the `BASH_ALIASES` associative-array mirror from `self.aliases`.
     /// Called at every alias-table mutation so the mirror stays live.
     ///
-    /// The keys are fed in `self.aliases` (a `BTreeMap`) order, so the mirror
-    /// enumerates as [`crate::assoc`]'s table would have them if they had been
-    /// *defined* in sorted order. bash's `BASH_ALIASES` is not an associative
-    /// array at all but a view of the alias table, which is its own smaller
-    /// `hash_create` — a different order, and not this one. See
-    /// `TD-OILS-THE-ALIAS-AND-COMMAND-MIRRORS-ARE-NOT-THEIR-OWN-TABLES` in
-    /// `known-issues.md`.
+    /// bash's `BASH_ALIASES` is not an associative array but a view of the alias
+    /// table, which is its own smaller `hash_create`. The mirror is therefore
+    /// the alias table itself — same 64 buckets, same chains — rather than the
+    /// alias *contents* poured into a fresh 1024-bucket array, which would
+    /// enumerate in an order that exists nowhere in bash. See
+    /// [`AssocArray::mirrored`] for why the chains come out reversed.
     fn sync_bash_aliases(&mut self) {
-        let v: AssocArray =
-            self.aliases.iter().map(|(k, val)| (k.clone(), val.clone())).collect();
+        let v = self.aliases.mirrored(Clone::clone);
         self.assoc.insert("BASH_ALIASES".to_string(), v);
         // Mark has-a-value so `declare -p` renders `=()` even when empty.
         self.array_valued.insert("BASH_ALIASES".to_string());
@@ -5045,23 +5054,15 @@ impl Shell {
 
     /// Rebuild the `BASH_CMDS` associative-array mirror from `self.cmd_hash`.
     ///
-    /// `cmd_hash` is a `HashMap`, so its iteration order is nondeterministic and
-    /// has to be sorted before it can be fed in at all — which is also why the
-    /// mirror cannot reach bash's order, that being a view of the hashed-command
-    /// table rather than an associative array. See
-    /// `TD-OILS-THE-ALIAS-AND-COMMAND-MIRRORS-ARE-NOT-THEIR-OWN-TABLES` in
-    /// `known-issues.md`.
+    /// As with `BASH_ALIASES`, the mirror is the hashed-command table itself —
+    /// 256 buckets, chains reversed — and not its contents in a fresh array.
+    /// The hit count is dropped: bash's mirror holds only the path.
     fn sync_bash_cmds(&mut self) {
         // A hashed command's path is a *path*, i.e. bytes — `to_string_lossy`
         // here would hand the script a mangled path it could not exec
         // (TD-OILS-BYTE-STRINGS).
-        let mut v: Vec<(Str, Str)> = self
-            .cmd_hash
-            .iter()
-            .map(|(k, (p, _))| (k.clone(), bytes::path_to_bytes(p)))
-            .collect();
-        v.sort_by(|a, b| a.0.cmp(&b.0));
-        self.assoc.insert("BASH_CMDS".to_string(), v.into_iter().collect());
+        let v = self.cmd_hash.mirrored(|(p, _)| bytes::path_to_bytes(p));
+        self.assoc.insert("BASH_CMDS".to_string(), v);
         self.array_valued.insert("BASH_CMDS".to_string());
     }
 
@@ -12035,7 +12036,7 @@ impl Shell {
             } else {
                 val
             };
-            self.aliases.insert(key, final_val);
+            self.aliases.set(key, final_val);
             self.sync_bash_aliases();
             return;
         }
@@ -16661,7 +16662,7 @@ impl Shell {
     /// [`Shell::cmd_hash_created`] can never fall out of step with the table
     /// it describes.
     fn hash_remember(&mut self, name: Str, path: std::path::PathBuf, hits: u64) {
-        self.cmd_hash.insert(name, (path, hits));
+        self.cmd_hash.set(name, (path, hits));
         self.cmd_hash_created = true;
     }
 
@@ -28423,8 +28424,14 @@ impl Shell {
             if self.aliases.is_empty() {
                 return 0;
             }
+            // Sorted, unlike `hash`: bash's `alias -p` sorts the flattened alias
+            // table before printing it, so the listing is alphabetical even
+            // though `BASH_ALIASES` enumerates the table's own order. The two
+            // really do disagree, and both are pinned.
+            let mut listing: Vec<(&Str, &Str)> = self.aliases.iter().map(|(k, v)| (k, v)).collect();
+            listing.sort_by(|a, b| a.0.cmp(b.0));
             let mut buf = Str::new();
-            for (name, val) in &self.aliases {
+            for (name, val) in listing {
                 buf.extend_from_slice(&alias_line(name, val, reusable));
             }
             let rc = self.write_bytes(out, redir, &buf);
@@ -28451,7 +28458,7 @@ impl Shell {
                     continue;
                 }
                 // `split_at` leaves the `=` on the front of the value.
-                self.aliases.insert(name.to_vec(), val.get(1..).unwrap_or_default().to_vec());
+                self.aliases.set(name.to_vec(), val.get(1..).unwrap_or_default().to_vec());
             } else if let Some(val) = self.aliases.get(op.as_slice()).cloned() {
                 let line = alias_line(op, &val, reusable);
                 self.write_bytes(out, redir, &line);
@@ -28492,7 +28499,9 @@ impl Shell {
             }
         }
         if all {
-            self.aliases.clear();
+            // bash's `delete_all_aliases` disposes the table rather than
+            // flushing it, so the next alias starts a fresh 64-bucket one.
+            self.aliases.reset();
             self.sync_bash_aliases();
             return 0;
         }
@@ -28504,7 +28513,7 @@ impl Shell {
         }
         let mut status = 0;
         for name in names {
-            if self.aliases.remove(name.as_slice()).is_none() {
+            if !self.aliases.remove(name.as_slice()) {
                 self.berrln(&bfmt![self.err_prefix(), b"unalias: ", name, b": not found"]);
                 status = 1;
             }
@@ -28619,9 +28628,12 @@ impl Shell {
                 self.sync_bash_cmds();
                 return 0;
             }
-            let mut entries: Vec<(&Str, &(std::path::PathBuf, u64))> =
-                self.cmd_hash.iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
+            // Table order, *not* sorted: bash walks the hashed-command table and
+            // prints what it finds, so four names that share a bucket come out
+            // in the reverse of the order they were hashed in. `alias -p` sorts
+            // and this deliberately does not — the two builtins differ here.
+            let entries: Vec<(&Str, &(std::path::PathBuf, u64))> =
+                self.cmd_hash.iter().map(|(k, v)| (k, v)).collect();
             let mut s = Str::new();
             if list {
                 // Re-inputtable output: the path is emitted as its own bytes,
@@ -28705,7 +28717,7 @@ impl Shell {
                 // nothing has ever been hashed, in which case bash's table has
                 // not been allocated yet and its `phash_remove()` returns
                 // success without looking. See `cmd_hash_created`.
-                if self.cmd_hash.remove(name.as_slice()).is_none() && self.cmd_hash_created {
+                if !self.cmd_hash.remove(name.as_slice()) && self.cmd_hash_created {
                     self.berrln(&bfmt![self.err_prefix(), b"hash: ", name, b": not found"]);
                     status = 1;
                 }

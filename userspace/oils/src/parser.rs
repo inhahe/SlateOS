@@ -37,6 +37,7 @@ use crate::ast::{
     Pipeline, Program,
     Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, Word, WordPart,
 };
+use crate::assoc::AssocArray;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
@@ -44,7 +45,6 @@ use crate::lexer::{
     tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
-use std::collections::BTreeMap;
 
 /// Whether `s` is a syntactically valid shell identifier.
 ///
@@ -285,7 +285,7 @@ pub fn parse_strict_heredoc(src: BStr<'_>, opts: ParseOpts) -> Result<Program, P
 /// Returns [`ParseError`] on a lexing or grammar error.
 pub fn parse_with_aliases(
     src: BStr<'_>,
-    aliases: &BTreeMap<Str, Str>,
+    aliases: &AssocArray,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
     let (toks, lines) = tokenize_spanned(src, opts).map_err(ParseError::from)?;
@@ -452,7 +452,7 @@ pub struct IncrementalParser {
     /// The alias state `work` was built under, or `None` if never built. The
     /// inner `Option` is the caller's argument (`None` = expansion disabled), so
     /// a `shopt -u expand_aliases` also invalidates.
-    last_aliases: Option<Option<BTreeMap<Str, Str>>>,
+    last_aliases: Option<Option<AssocArray>>,
     /// An unterminated quote/substitution that ended the input. Held back until
     /// the complete lines before it have been handed out and executed, because
     /// bash reports it only after running them.
@@ -612,7 +612,7 @@ impl IncrementalParser {
 
     /// Re-expand the unconsumed remainder of the original token stream under
     /// `aliases`.
-    fn rebuild(&mut self, aliases: Option<&BTreeMap<Str, Str>>) {
+    fn rebuild(&mut self, aliases: Option<&AssocArray>) {
         // Alias-spliced tokens we are standing in the middle of have no
         // counterpart in `orig`, so carry them over verbatim: re-expanding from
         // `pos` would replay the part of the splice already executed. (Reachable
@@ -776,7 +776,7 @@ impl IncrementalParser {
     /// one level down: a change re-*lexes* the remaining input.
     pub fn next_unit(
         &mut self,
-        aliases: Option<&BTreeMap<Str, Str>>,
+        aliases: Option<&AssocArray>,
         opts: ParseOpts,
     ) -> Option<Result<Program, ParseError>> {
         // A lexing option must be applied before aliases, since re-lexing

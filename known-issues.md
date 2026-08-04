@@ -32515,7 +32515,7 @@ cannot be hard-coded into a test. No corpus case can pin it either: a case that
 printed the host name would only match on the machine that wrote it, which is
 why this went unnoticed in the first place.
 
-### TD-OILS-THE-ALIAS-AND-COMMAND-MIRRORS-ARE-NOT-THEIR-OWN-TABLES. `BASH_ALIASES` and `BASH_CMDS` enumerate as associative arrays; bash views the alias and command tables — 2026-08-04 — OPEN
+### TD-OILS-THE-ALIAS-AND-COMMAND-MIRRORS-ARE-NOT-THEIR-OWN-TABLES. `BASH_ALIASES` and `BASH_CMDS` enumerate as associative arrays; bash views the alias and command tables — 2026-08-04 — ✅ FIXED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::sync_bash_aliases` and
 `Shell::sync_bash_cmds`, which rebuild the two mirrors by collecting into an
@@ -32580,18 +32580,53 @@ two rules. Asking bash for exactly 2049 keys showed `assoc.rs` was the wrong one
 See the "Corrected 2026-08-04" note under
 `TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED`.
 
-**The fix.** Two parts, and the second is the awkward one:
+**One insertion rule, two readers.** The "chain comes out in" column above is a
+property of the *mirror*, not of the table, and that turned out to be the whole
+shape of the fix. Measuring `hash -l` against `${!BASH_CMDS[@]}` over the same
+four-name table shows them disagreeing:
 
-1. Give `AssocArray` a bucket count and a chain-walk direction so the mirrors can
-   be built with the alias/command table's shape, the assoc-array default staying
-   1024/head.
-2. Feed them in bash's insertion order, which means keeping one. `self.aliases`
-   would have to record definition order beside its sorted lookup (bash's own
-   `alias -p` listing *is* sorted, so the sort cannot simply be dropped), and
-   `self.cmd_hash` would have to become ordered — which is the same
-   `AssocArray`-shaped problem, so the honest fix is probably to store the
-   hashed-command table *as* one of these tables and read both the mirror and
-   `hash -l` out of it.
+```
+hash -p /p/aft aft; … /p/aoo aoo; … /p/atj atj; … /p/bfs bfs
+hash -l          →  bfs atj aoo aft      (walks each chain head→tail)
+${!BASH_CMDS[@]} →  aft aoo atj bfs      (the mirror comes out the other way)
+alias -p         →  sorted, ignoring the table's order entirely
+```
 
-**Pinned by** nothing yet — no corpus case prints more than one key of either
-mirror, precisely because the order was known to differ.
+So there is no per-table insertion direction to model. All three tables insert
+at the head; `hash`/`hash -l` read a chain forwards, the two mirrors read it
+backwards, and `alias -p` sorts. That collapses part 2 of the plan below into a
+five-line `mirrored()` view.
+
+**Fixed 2026-08-04.**
+
+- `src/assoc.rs`: `AssocArray` is now generic in its value (`AssocArray<V = Str>`)
+  and carries a `TableShape` (`Assoc` → 1024 buckets, `Alias` → 64,
+  `Command` → 256), constructed with `with_shape`. Everything else — FNV-1 over
+  signed chars, `hash & (nbuckets - 1)`, head insertion, `nbuckets *= 4` at
+  `n >= nbuckets * 2`, chain-reversing rehash — is shared, because bash's
+  `hashlib.c` is shared.
+- `AssocArray::mirrored(f)` builds the view: same shape, same buckets, each chain
+  reversed, each value mapped. `sync_bash_aliases` mirrors with `Clone::clone`;
+  `sync_bash_cmds` mirrors with `|(p, _)| path_to_bytes(p)`, dropping the hit
+  count.
+- `src/interp.rs`: `aliases` is an `AssocArray` of shape `Alias` (was
+  `BTreeMap<Str, Str>`) and `cmd_hash` an `AssocArray<(PathBuf, u64)>` of shape
+  `Command` (was `HashMap`). `unalias -a` calls `reset()` (bash's
+  `delete_all_aliases` disposes the table); `hash -r` and the PATH-change hook
+  call `clear()` (bash's `hash_flush` keeps the buckets).
+- `hash` / `hash -l` lost their sort and `alias -p` gained one — the two
+  builtins genuinely differ, and dropping the `BTreeMap` would otherwise have
+  silently unsorted `alias -p`.
+- `src/parser.rs` and `src/lexer.rs` take `&AssocArray` in place of
+  `&BTreeMap<Str, Str>`. The parser's alias-staleness check relies on
+  `AssocArray`'s derived `PartialEq` being *structural* — order-sensitive —
+  which is what that check wants.
+
+**Pinned by** `tests/corpus/the-alias-and-command-tables-are-bashs-own.sh`, which
+uses `aft aoo atj bfs` (one bucket at 64 *and* at 256) to show chain order rather
+than bucket order, and covers: three insertion orders, a removal, a re-add, a
+rewrite, `unalias -a`, a 64→256 growth, the same for the command table, the
+`hash` / mirror disagreement, `hash -r` and `hash -d`, the same four keys in an
+ordinary associative array (a *third* order, `aft bfs aoo atj`), subshell
+inheritance, and defining an alias by writing through the mirror. Bucket counts
+and growth points are pinned separately by the unit tests in `src/assoc.rs`.

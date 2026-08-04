@@ -5,10 +5,11 @@
 # yields *one* element rather than none. The two quirks are independent:
 # `${m[@]:2:0}` is one element, and it is the second.
 #
-# The order the elements come in is a different question, and not one this case
-# asks: osh iterates its map by key where bash walks its hash. So everything
-# below reports field *counts* for a multi-key array, and keeps values for the
-# one-key one, where there is only one order.
+# The order the elements come in is a different question, answered in
+# `an-associative-array-iterates-in-bashs-hash-order.sh` — but now that it *is*
+# answered, everything below reports the values as well as the count, so a slice
+# of a four-key array names which four and not merely how many. (It could not,
+# while osh iterated its map by key and bash walked its hash.)
 
 declare -A one=([solo]=s)
 declare -A two=([a]=1 [b]=2)
@@ -20,8 +21,8 @@ declare -A empty=()
 # before the slice is taken — otherwise `$2` below would report a *value*, and
 # the case would be asking about bash's hash order after all.
 ran() { j=0; eval ": \${$1:$2:j++}"; printf ' %s:j=%d' "$2" "$j"; }
-cnt() { local o=$2; eval "set -- \${$1:$2}"; printf ' %s=%d' "$o" "$#"; }
-cl()  { local o=$2 l=$3; eval "set -- \${$1:$2:$3}"; printf ' %s:%s=%d' "$o" "$l" "$#"; }
+cnt() { local o=$2; eval "set -- \${$1:$2}"; printf ' %s=%d' "$o" "$#"; printf '<%s>' "$@"; }
+cl()  { local o=$2 l=$3; eval "set -- \${$1:$2:$3}"; printf ' %s:%s=%d' "$o" "$l" "$#"; printf '<%s>' "$@"; }
 
 echo "### a one-key array, where the order is not a question"
 show() { printf '  %-14s(%d)' "$1" $(($# - 1)); shift; printf '<%s>' "$@"; printf '\n'; }
@@ -38,7 +39,7 @@ show 'q one:1'  "${one[@]:1}"
 show 'q one:2'  "${one[@]:2}"
 show 'one*:1'   ${one[*]:1}
 
-echo "### how many fields, for two and four keys"
+echo "### which fields, for two and four keys"
 printf '  two  '; for o in 0 1 2 3 4; do cnt 'two[@]' "$o"; done; echo
 printf '  two  '; for o in "-1" "-2" "-3" "-4" "-5"; do cnt 'two[@]' " $o"; done; echo
 printf '  four '; for o in 0 1 2 3 4 5 6 99; do cnt 'four[@]' "$o"; done; echo
@@ -71,8 +72,8 @@ for o in "-5" "-6"; do (eval "echo \${four[@]: $o:-1}"); echo "    four: $o rc=$
 for o in 0 1; do (eval "echo \${empty[@]:$o:-1}"); echo "    empty:$o rc=$?"; done
 
 echo "### the star spelling joins, so it is one field or none"
-for o in 0 2 4 5; do eval "set -- \"\${four[*]:$o:2}\""; printf ' %s=%d' "$o" "$#"; done; echo
-for o in 0 2 4 5; do eval "set -- \"\${four[@]:$o:2}\""; printf ' %s=%d' "$o" "$#"; done; echo
+for o in 0 2 4 5; do eval "set -- \"\${four[*]:$o:2}\""; printf ' %s=%d' "$o" "$#"; printf '<%s>' "$@"; done; echo
+for o in 0 2 4 5; do eval "set -- \"\${four[@]:$o:2}\""; printf ' %s=%d' "$o" "$#"; printf '<%s>' "$@"; done; echo
 
 echo "### an empty and a missing associative array"
 show 'empty:0'   ${empty[@]:0}

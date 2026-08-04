@@ -31673,19 +31673,20 @@ through instead, so that it meets the shared "nothing to measure" exit rather
 than repeating it.
 
 **Pinned by** `tests/corpus/an-associative-slices-offset-counts-from-one.sh`.
-Ordering parity is still missing, so the case reports field *counts* for the
-two- and four-key arrays and keeps values for a one-key one, where there is
-only one order — see `TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED`
-below, which remains open. Note that the case's helpers save their labels into
-locals before taking the slice: `set --` replaces a function's own positionals,
-so reading `$2` afterwards would have printed a *value* and quietly turned the
-case into a hash-order test.
+It first reported field *counts* for the two- and four-key arrays, ordering
+parity being missing at the time; now that
+`TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED` below is fixed it reports
+the values too, so a slice names *which* elements and not merely how many. Note
+that the case's helpers save their labels into locals before taking the slice:
+`set --` replaces a function's own positionals, so reading `$2` afterwards would
+print a *value* and quietly turn the case into a hash-order test.
 
-### TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED. an associative array iterates in sorted key order; bash iterates its hash — 2026-08-04 — OPEN
+### TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED. an associative array iterates in sorted key order; bash iterates its hash — 2026-08-04 — ✅ **FIXED 2026-08-04**
 
-**Where:** `userspace/oils/src/interp.rs` — the `assoc` map and every reader
-that walks it (`Shell::array_elements`, `Shell::slice_elements`, the `${!m[@]}`
-key list, `declare -p`, the `${m[@]}` value list, `for k in "${!m[@]}"`).
+**Where:** `userspace/oils/src/assoc.rs` — the `AssocArray` the `assoc` map
+holds, and so every reader that walks it (`Shell::array_elements`,
+`Shell::slice_elements`, the `${!m[@]}` key list, `declare -p`, the `${m[@]}`
+value list, `for k in "${!m[@]}"`).
 
 **Reproduce:**
 
@@ -31708,18 +31709,42 @@ key, by sorting the output, or by printing counts instead of values. It is also
 why `TD-OILS-ASSOC-SLICE-OFFSET-IS-ONE-BASED` cannot be pinned by a
 straightforward multi-key fixture.
 
-**What the fix would take.** Reimplementing bash's `hash.c` exactly: the same
-string hash (`FNV`-style, see `bash/hashlib.c`), the same initial bucket count,
-the same growth policy and the same chain insertion order (bash pushes a new
-entry at the *head* of its bucket chain), and then iterating buckets in index
-order and chains in list order. That is a self-contained port, but it is a real
-one, and it changes the observable order of every existing associative-array
-case — so it wants to be its own commit with a full corpus sweep rather than a
-rider on a slice fix.
+**The fix.** `userspace/oils/src/assoc.rs` is now a port of bash's `hashlib.c`:
+`AssocArray` is the bucket array itself (`Vec<Vec<(Str, Str)>>`, each chain from
+its head) rather than an insertion-ordered `Vec` with a hash index beside it, so
+`iter`/`keys`/`values` are the same walk bash makes and every reader inherits the
+order for free. Lookup stays O(1) — the load factor bounds a chain at a handful
+of entries — which was the property the old shape existed to provide.
 
-**Judgment call:** sorted order was and remains the right *default* for osh
-absent the port — it is deterministic and it makes cases readable — but it is
-not bash parity, and this entry exists so that is not mistaken for one.
+**The parameters were measured, not read out of a header.** They are the only
+combination that fits bash 5.2.37 over the key sets `key0..key{n}` for n of 4, 8,
+16, 32, 40, 64, 100, 200, 300, 600, 2050 and 4200 (crossing a growth), plus short
+sets, numeric-looking keys, high-byte keys, removals, re-adds and `m=()` resets:
+
+| | |
+|---|---|
+| hash | **FNV-1** — multiply *then* xor — 32-bit, seed `2166136261`, prime `16777619` |
+| byte | xored in as a **signed** char, so `\xff` contributes `0xffffffff` (bash walks a `char *`) |
+| bucket | `hash & (nbuckets - 1)`, starting at **1024** buckets |
+| insert | at the **head** of the chain, so within a bucket the order is the reverse of insertion |
+| growth | `nentries > nbuckets * 2` → `nbuckets *= 4`, checked *before* the entry is linked |
+| rehash | old buckets in index order, each entry pushed onto the **head** of its new chain |
+| removal | unlinks only; the table never shrinks and nothing else moves |
+
+**What it moved.** Six unit tests in `interp.rs` asserted the old order
+(`assoc_all_values_and_keys`, `assoc_literal_elements_are_not_split_or_brace_expanded`,
+`assoc_quoted_all_preserves_fields`, `declare_p_quotes_associative_keys_like_bash`,
+`export_assigns_through_the_array_aware_store`, `param_transform_keyvalue`);
+each new expectation was re-derived from bash's own output for the same script
+rather than from the new implementation, and all six now match it byte for byte.
+
+**Pinned by** `userspace/oils/tests/corpus/an-associative-array-iterates-in-bashs-hash-order.sh`,
+which covers the bucket walk, the chain reversal (`aaa fan jfk pkb` collide, so
+inserting them backwards reverses them, while eight non-colliding keys are
+insensitive to their insertion order), a growth at 2100 keys, removal and re-add,
+a rewrite that does not relink, `m=()` starting a fresh table, high-byte keys,
+and the six readers agreeing (`${!m[@]}`, `${m[@]}`, `declare -p`, `@K`, `for`,
+and a slice).
 
 ### TD-OILS-SCALAR-SLICE-IS-NOT-A-SUBSTRING. `${v[@]:off:len}` on a scalar is bash's substring operator, not a one-element list — ✅ **FIXED 2026-08-04**
 
@@ -32470,3 +32495,61 @@ real host-name call returns and the question disappears.
 
 **Pinned by** nothing — no corpus case prints a prompt, which is why this went
 unnoticed.
+
+### TD-OILS-THE-ALIAS-AND-COMMAND-MIRRORS-ARE-NOT-THEIR-OWN-TABLES. `BASH_ALIASES` and `BASH_CMDS` enumerate as associative arrays; bash views the alias and command tables — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::sync_bash_aliases` and
+`Shell::sync_bash_cmds`, which rebuild the two mirrors by collecting into an
+ordinary `AssocArray`.
+
+**Reproduce:**
+
+```sh
+alias zz='echo z'; alias aa='echo a'; alias mm='echo m'; alias bb='echo b'
+echo "${!BASH_ALIASES[@]}"     # bash: zz mm bb aa    osh: aa zz mm bb
+hash -p /bin/x zz; hash -p /bin/y aa; hash -p /bin/z mm
+echo "${!BASH_CMDS[@]}"        # bash: mm aa zz       osh: aa zz mm
+```
+
+**Why.** In bash these two are not associative arrays, they are *views* of the
+alias table and the hashed-command table — separate `hash_create` calls with
+their own bucket counts. So fixing
+`TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED` did not fix these: the
+mirrors now walk a bash-shaped table, just not the right one, and fed in the
+wrong order besides (`sync_bash_aliases` feeds `self.aliases`, a `BTreeMap`, in
+*sorted* order; `sync_bash_cmds` has to sort at all because `self.cmd_hash` is a
+`HashMap` and has no order to feed).
+
+**What is measured so far.** Fitting the same model `src/assoc.rs` implements
+against bash 5.2.37, over two key sets each (four short names and forty
+`al0..al39` / `cm0..cm39`):
+
+| table | fits |
+|---|---|
+| associative array | 1024 buckets, head insertion (`src/assoc.rs`, fixed and pinned) |
+| alias table | **64** buckets, chains coming out in *insertion* order |
+| hashed commands | **256 or 512** buckets, likewise |
+
+The "insertion order" is the interesting part and is probably not a second
+insertion rule: head insertion with the chain *walked from the tail* produces
+exactly the same result for a table that is only ever read at the end, and that
+is the more likely shape given the assoc table demonstrably inserts at the head.
+Two data points per table is thin — this wants the same treatment `assoc.rs` got
+(a growth-crossing set, a deliberately colliding set, a removal) before anything
+is implemented against it.
+
+**The fix.** Two parts, and the second is the awkward one:
+
+1. Give `AssocArray` a bucket count and a chain-walk direction so the mirrors can
+   be built with the alias/command table's shape, the assoc-array default staying
+   1024/head.
+2. Feed them in bash's insertion order, which means keeping one. `self.aliases`
+   would have to record definition order beside its sorted lookup (bash's own
+   `alias -p` listing *is* sorted, so the sort cannot simply be dropped), and
+   `self.cmd_hash` would have to become ordered — which is the same
+   `AssocArray`-shaped problem, so the honest fix is probably to store the
+   hashed-command table *as* one of these tables and read both the mirror and
+   `hash -l` out of it.
+
+**Pinned by** nothing yet — no corpus case prints more than one key of either
+mirror, precisely because the order was known to differ.

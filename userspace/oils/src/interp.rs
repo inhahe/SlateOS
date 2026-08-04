@@ -5026,9 +5026,15 @@ impl Shell {
     }
 
     /// Rebuild the `BASH_ALIASES` associative-array mirror from `self.aliases`.
-    /// Called at every alias-table mutation so the mirror stays live. Keys come
-    /// out in `self.aliases` (BTreeMap) sorted order — bash uses its internal
-    /// hash order, an unspecified/cosmetic difference; sorted is deterministic.
+    /// Called at every alias-table mutation so the mirror stays live.
+    ///
+    /// The keys are fed in `self.aliases` (a `BTreeMap`) order, so the mirror
+    /// enumerates as [`crate::assoc`]'s table would have them if they had been
+    /// *defined* in sorted order. bash's `BASH_ALIASES` is not an associative
+    /// array at all but a view of the alias table, which is its own smaller
+    /// `hash_create` — a different order, and not this one. See
+    /// `TD-OILS-THE-ALIAS-AND-COMMAND-MIRRORS-ARE-NOT-THEIR-OWN-TABLES` in
+    /// `known-issues.md`.
     fn sync_bash_aliases(&mut self) {
         let v: AssocArray =
             self.aliases.iter().map(|(k, val)| (k.clone(), val.clone())).collect();
@@ -5038,8 +5044,13 @@ impl Shell {
     }
 
     /// Rebuild the `BASH_CMDS` associative-array mirror from `self.cmd_hash`.
-    /// `cmd_hash` is a `HashMap`, so its iteration order is nondeterministic;
-    /// sort by key for stable output (bash uses hash order, unspecified).
+    ///
+    /// `cmd_hash` is a `HashMap`, so its iteration order is nondeterministic and
+    /// has to be sorted before it can be fed in at all — which is also why the
+    /// mirror cannot reach bash's order, that being a view of the hashed-command
+    /// table rather than an associative array. See
+    /// `TD-OILS-THE-ALIAS-AND-COMMAND-MIRRORS-ARE-NOT-THEIR-OWN-TABLES` in
+    /// `known-issues.md`.
     fn sync_bash_cmds(&mut self) {
         // A hashed command's path is a *path*, i.e. bytes — `to_string_lossy`
         // here would hand the script a mangled path it could not exec
@@ -12394,11 +12405,10 @@ impl Shell {
     /// and it is the *second*. The offset still decides whether the length is
     /// read at all, on the same `0..=n` test the positionals use.
     ///
-    /// The order the elements come in is a separate question that this does not
-    /// answer: osh iterates its map by key where bash walks its hash. See
-    /// `TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED` in
-    /// `known-issues.md`; it is why the corpus case for this rule reports field
-    /// *counts* for a multi-key array and reserves values for a one-key one.
+    /// The order the elements come in is a separate question, and [`crate::assoc`]
+    /// is where it is answered — this slices whatever order the map iterates in,
+    /// which is now bash's own hash order, so the corpus case for this rule can
+    /// name *which* elements a slice selects rather than only how many.
     fn assoc_slice(
         &mut self,
         values: &[Str],
@@ -54532,11 +54542,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let src = "declare -A k; k[@]=1; k['@@']=2; k['a@b']=3; k['#']=4; k['#x']=5; \
                    k['a#b']=6; k['~']=7; k['a~b']=8; k['a,b']=9; k['a-b']=10; k[a.b]=11; \
                    k['a b']=12; k[plain]=13; declare -p k";
+        // The listing is in bash's hash order, not the order the keys were
+        // written — see [`crate::assoc`].
         assert_eq!(
             run(src).0,
-            "declare -A k=([\"@\"]=\"1\" [@@]=\"2\" [a@b]=\"3\" [\"#\"]=\"4\" [\"#x\"]=\"5\" \
-             [a#b]=\"6\" [\"~\"]=\"7\" [a~b]=\"8\" [a,b]=\"9\" [a-b]=\"10\" [a.b]=\"11\" \
-             [\"a b\"]=\"12\" [plain]=\"13\" )\n"
+            "declare -A k=([a,b]=\"9\" [@@]=\"2\" [\"#x\"]=\"5\" [a#b]=\"6\" [\"#\"]=\"4\" \
+             [\"@\"]=\"1\" [\"~\"]=\"7\" [a.b]=\"11\" [a-b]=\"10\" [\"a b\"]=\"12\" \
+             [a@b]=\"3\" [plain]=\"13\" [a~b]=\"8\" )\n"
         );
     }
 
@@ -58151,10 +58163,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("declare -A h=([m]=1); echo \"[${h[@]@K}]\"").0,
             "[m \"1\" ]\n"
         );
-        // Associative arrays interleave string keys.
+        // Associative arrays interleave string keys, in bash's hash order.
         assert_eq!(
             run("declare -A m; m[a]=1; m[b]=2; echo ${m[@]@k}").0,
-            "a 1 b 2\n"
+            "b 2 a 1\n"
         );
         // A key is quoted when it would not read back as itself — the same test
         // `declare -p` makes on a subscript, so `@K` stays re-inputtable. `@k`
@@ -63004,12 +63016,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "declare -ax arr=([0]=\"9\" [1]=\"2\")\n"
         );
         // Same for an associative array, where the subscript-less value takes
-        // key "0". (bash lists `[0]` first here; the key *order* of an assoc
-        // listing is TD-OILS-ASSOC-ORDER, not this fix — what matters is that
-        // the key exists and holds the value.)
+        // key "0" — which bash's hash order then lists ahead of `k`.
         assert_eq!(
             run("declare -A m=([k]=v); export m=9; declare -p m").0,
-            "declare -Ax m=([k]=\"v\" [0]=\"9\" )\n"
+            "declare -Ax m=([0]=\"9\" [k]=\"v\" )\n"
         );
         // The append form reads back through the same routing, so it extends
         // element 0's value rather than an empty scalar slot.
@@ -63607,7 +63617,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // literal, which expands its elements like command words, does with the
         // same text.
         let (o, _) = run("s='x y'; declare -A m=(a $s b); declare -p m");
-        assert_eq!(o, "declare -A m=([a]=\"x y\" [b]=\"\" )\n");
+        assert_eq!(o, "declare -A m=([b]=\"\" [a]=\"x y\" )\n");
         let (o2, _) = run("s='x y'; declare -a n=(a $s b); declare -p n");
         assert_eq!(o2, "declare -a n=([0]=\"a\" [1]=\"x\" [2]=\"y\" [3]=\"b\")\n");
         // Brace expansion does not run either, so the braces are part of the key.
@@ -64318,9 +64328,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn assoc_all_values_and_keys() {
-        // Values and keys come back in insertion order.
-        assert_eq!(run("declare -A m; m[a]=x; m[b]=y; echo ${m[@]}").0, "x y\n");
-        assert_eq!(run("declare -A m; m[a]=x; m[b]=y; echo ${!m[@]}").0, "a b\n");
+        // Values and keys come back in bash's hash order, which for `a` and `b`
+        // puts `b` first — see [`crate::assoc`].
+        assert_eq!(run("declare -A m; m[a]=x; m[b]=y; echo ${m[@]}").0, "y x\n");
+        assert_eq!(run("declare -A m; m[a]=x; m[b]=y; echo ${!m[@]}").0, "b a\n");
     }
 
     #[test]
@@ -65106,7 +65117,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn assoc_quoted_all_preserves_fields() {
         let src = r#"declare -A m; m[a]="x y"; m[b]=z; for v in "${m[@]}"; do echo "[$v]"; done"#;
-        assert_eq!(run(src).0, "[x y]\n[z]\n");
+        assert_eq!(run(src).0, "[z]\n[x y]\n");
     }
 
     #[test]

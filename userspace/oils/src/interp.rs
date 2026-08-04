@@ -12174,7 +12174,11 @@ impl Shell {
     /// a position are the same number.
     ///
     /// The *length* stays a count of elements rather than an index span:
-    /// `${s[@]:1:2}` is `y z`, two elements six subscripts apart.
+    /// `${s[@]:1:2}` is `y z`, two elements six subscripts apart. It is read
+    /// only when the offset landed inside the parameter, so an offset past the
+    /// end never evaluates it — `${a[@]:99:-1}` is silent where `${a[@]:1:-1}`
+    /// is a fatal "substring expression < 0", and `${a[@]:99:j++}` leaves `j`
+    /// alone.
     ///
     /// A negative offset becomes a subscript by adding one past the highest
     /// index — `${s[@]: -4}` is subscript `6` and so `z` — and one that is still
@@ -12240,10 +12244,31 @@ impl Shell {
         }
         // The subscripts arrive in ascending order from both sources, so the
         // run below the offset is a prefix.
-        let from_off = elems
+        let count = elems.len() as i64;
+        let from_off: Vec<Str> = elems
             .into_iter()
             .skip_while(move |&(k, _)| k < off)
-            .map(|(_, v)| v);
+            .map(|(_, v)| v)
+            .collect();
+        // bash reads the length only once the offset landed *inside* the
+        // parameter, and an offset past the end returns here without looking at
+        // it at all: `${a[@]:99:-1}` is silent where `${a[@]:1:-1}` is fatal,
+        // and `${a[@]:99:j++}` never runs the `j++`.
+        //
+        // "Inside" is not the same question for the two shapes. An array is
+        // inside while some element still has a subscript at least `off`, so a
+        // three-element array is done at `3` and the empty array is done at `0`.
+        // The positionals allow one *past* the last — the walk down the list
+        // ended, it did not fall off — so `set -- p q` still reads the length at
+        // `3` (`$0` included) and stops at `4`.
+        let inside = if positional {
+            off <= count
+        } else {
+            !from_off.is_empty()
+        };
+        if !inside {
+            return Vec::new();
+        }
         match length {
             Some(l) => {
                 let l = self.eval_arith_substr_bound(l, &param_ref);
@@ -12258,9 +12283,12 @@ impl Shell {
                     self.arm_discard(1);
                     return Vec::new();
                 }
-                from_off.take(usize::try_from(l).unwrap_or(usize::MAX)).collect()
+                from_off
+                    .into_iter()
+                    .take(usize::try_from(l).unwrap_or(usize::MAX))
+                    .collect()
             }
-            None => from_off.collect(),
+            None => from_off,
         }
     }
 

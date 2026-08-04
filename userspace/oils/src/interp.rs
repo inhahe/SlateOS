@@ -21071,7 +21071,23 @@ impl Shell {
                 if is_active {
                     vec![self.expand_to_string(arg)]
                 } else {
-                    Vec::new()
+                    // The only operator whose *own* answer can be null, and the
+                    // one place where "no field" and "one empty field" part
+                    // company: `"${a[@]:+A}"` on `a=("")` is one empty field,
+                    // while on `a=()` — or an array that was never declared —
+                    // it is no field at all. bash keeps a quoted null for a
+                    // reference that reached something and returns nothing for
+                    // one that reached nothing.
+                    //
+                    // Unquoted the two are the same word either way, since an
+                    // empty field is removed; this is visible only inside
+                    // quotes, and only through the `[@]` spelling (a quoted
+                    // `[*]` is one field by definition).
+                    if elements.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![Str::new()]
+                    }
                 }
             }
             ParamOp::AssignDefault => {

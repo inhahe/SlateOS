@@ -87,6 +87,10 @@ sweep_test_out.txt
 serial_out.txt
 serial_out*.txt
 
+# Python bytecode caches left behind by the repo's own scripts (scripts/*.py).
+__pycache__/
+*.py[cod]
+
 # Exception: this saved page is intentionally tracked (reference kept in-repo),
 # even though the blanket *.html rule above ignores saved web pages.
 !Aero Desktop (offline).html

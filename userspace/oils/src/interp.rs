@@ -8911,16 +8911,29 @@ impl Shell {
                 Some(n) if n >= 1 && n <= items.len() => items[n - 1].clone(),
                 _ => Str::new(),
             };
-            // Binding the selection is an assignment like the `for` loop's, and
-            // fails the same way: a readonly name is reported once the choice
-            // has been read (so the prompt has already been written), the loop
-            // is given up with status 1, and the variable keeps its value.
-            if self.readonly.contains(&var) {
-                self.perrln(&format!("{var}: readonly variable"));
+            // Binding the selection is an ordinary scalar assignment to the
+            // name — which means it goes *through* a nameref rather than over
+            // it, exactly as `NAME=value` does. `declare -n r=t; select r in …`
+            // leaves `r` a nameref and gives `t` the choice, and a nameref to an
+            // array element (`declare -n r='a[1]'`) writes the element.
+            //
+            // This is where `select` parts company with `for`, which
+            // deliberately does *not* follow a nameref and overwrites the
+            // nameref cell itself — see [`Shell::exec_for`].
+            //
+            // Every way the assignment can be refused ends the loop with status
+            // 1, leaving the target as it was, and each is reported the way that
+            // write is reported anywhere else: a circular chain warns
+            // (`warning: NAME: circular name reference`) blaming the name
+            // written, a readonly target blames the name *resolved* to
+            // (`declare -n n=ro; select n …` says `ro: readonly variable`), and
+            // a name the shell maintains itself refuses silently. All of them
+            // happen once the choice has been read, so the prompt has already
+            // been written.
+            if !self.set_scalar_checked(&var, choice) {
                 self.last_status = 1;
                 return Flow::Next;
             }
-            self.scalar_write_store(&ScalarDest::Var(var.clone()), choice);
             match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
                 Flow::Break(n) => {
@@ -49822,6 +49835,71 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn select_sets_reply() {
         let (o, _) = run("select x in a b; do echo \"r=$REPLY x=$x\"; break; done <<< \"1\"");
         assert_eq!(o, "r=1 x=a\n");
+    }
+
+    #[test]
+    fn select_binds_its_name_through_a_nameref() {
+        // The choice is bound with an ordinary scalar assignment, so it goes
+        // *through* a nameref: the cell stays a nameref and the target takes
+        // the value. This is where `select` parts company with `for`, which
+        // deliberately overwrites the nameref cell instead.
+        let (o, _) = run(
+            "t=orig; declare -n r=t; select r in a b; do break; done <<< \"1\"; declare -p r t",
+        );
+        assert_eq!(o, "declare -n r=\"t\"\ndeclare -- t=\"a\"\n");
+        let (o, _) = run("t=orig; declare -n r=t; for r in a b; do :; done; declare -p r t");
+        assert_eq!(o, "declare -n r=\"b\"\ndeclare -- t=\"orig\"\n");
+
+        // A nameref to an array element writes the element, and one to a name
+        // nothing has bound creates it.
+        let (o, _) = run(
+            "declare -a q=(p q r); declare -n r='q[1]'; \
+             select r in a b; do break; done <<< \"2\"; declare -p q",
+        );
+        assert_eq!(o, "declare -a q=([0]=\"p\" [1]=\"b\" [2]=\"r\")\n");
+        let (o, _) = run(
+            "declare -n r=fresh; select r in a b; do break; done <<< \"1\"; declare -p fresh",
+        );
+        assert_eq!(o, "declare -- fresh=\"a\"\n");
+
+        // A chain is followed to its end.
+        let (o, _) = run(
+            "u=orig; declare -n m=u; declare -n n=m; \
+             select n in a b; do break; done <<< \"2\"; declare -p n m u",
+        );
+        assert_eq!(
+            o,
+            "declare -n n=\"m\"\ndeclare -n m=\"u\"\ndeclare -- u=\"b\"\n"
+        );
+
+        // Every refusal gives up the loop with status 1, leaving the target as
+        // it was. A circular chain blames the name written…
+        let (o, st) = run(
+            "declare -n c1=c2; declare -n c2=c1; \
+             select c1 in a b; do echo RAN; break; done <<< \"1\"",
+        );
+        assert_eq!(o, "");
+        assert_eq!(st, 1);
+        // …a readonly target blames the name *resolved* to, not the one
+        // written…
+        let (o, st) = run(
+            "readonly ro=frozen; declare -n n=ro; \
+             select n in a b; do echo RAN; break; done <<< \"1\"; echo \"[$ro]\"",
+        );
+        assert_eq!(o, "[frozen]\n");
+        assert_eq!(st, 0); // the trailing `echo` is the last command
+        // …and a name the shell maintains itself refuses silently.
+        let (o, st) = run("select FUNCNAME in a b; do echo RAN; break; done <<< \"1\"");
+        assert_eq!(o, "");
+        assert_eq!(st, 1);
+
+        // The write is the same store as any other, so the attributes of
+        // whatever it lands on still apply.
+        let (o, _) = run(
+            "declare -i t; declare -n r=t; \
+             select r in 3*4 z; do break; done <<< \"1\"; declare -p t",
+        );
+        assert_eq!(o, "declare -i t=\"12\"\n");
     }
 
     #[test]

@@ -12246,6 +12246,16 @@ impl Shell {
                     .collect()
             }
         };
+        // A parameter with nothing in it is answered before anything is
+        // measured: an empty or missing array evaluates neither the offset nor
+        // the length, so `${e[@]:i++}` leaves `i` alone and `${e[@]:0:-1}` is
+        // silent where an in-range negative length is fatal. The positionals
+        // never take this exit — `$0` heads their list even after `set --` —
+        // and neither does a set-but-empty scalar, which has one position and
+        // went to [`Shell::scalar_slice`] above.
+        if elems.is_empty() {
+            return Vec::new();
+        }
         let mut off = self.eval_arith_substr_bound(offset, &param_ref);
         if off < 0 {
             let past_end = elems.last().map_or(0, |&(k, _)| k.saturating_add(1));
@@ -20475,24 +20485,36 @@ impl Shell {
                 offset,
                 length,
             } => {
-                let value = self.modifier_operand(operand, name, index);
                 // `${x:off:len}` — a malformed offset/length is fatal (bash), and
                 // a negative length that puts the end before the start is a fatal
                 // "substring expression < 0" word-expansion error (discards the
                 // command, status 1) — the same class as an array-slice negative
                 // length. Route it through `discard_error` so the simple-command
                 // driver discards the command.
-                let param_ref = crate::unparse::name_sub(name, index);
-                let off = self.eval_arith_substr_bound(offset, &param_ref);
-                let len = length
-                    .as_ref()
-                    .map(|l| self.eval_arith_substr_bound(l, &param_ref));
-                match param_substr(&value, off, len) {
-                    Ok(s) => s,
-                    Err(bad_len) => {
-                        self.perrln(&format!("{bad_len}: substring expression < 0"));
-                        self.arm_discard(1);
+                //
+                // An *unset* parameter is answered before any of that: bash
+                // measures nothing, so `${qq:i++}` leaves `i` alone and
+                // `${qq:0:-1}` is silent where `${w:0:-1}` with `w=` set and
+                // empty is fatal. Being empty is not being unset.
+                match self.op_operand(operand, name, index) {
+                    None => {
+                        self.note_unbound_modifier(name, index);
                         Str::new()
+                    }
+                    Some(value) => {
+                        let param_ref = crate::unparse::name_sub(name, index);
+                        let off = self.eval_arith_substr_bound(offset, &param_ref);
+                        let len = length
+                            .as_ref()
+                            .map(|l| self.eval_arith_substr_bound(l, &param_ref));
+                        match param_substr(&value, off, len) {
+                            Ok(s) => s,
+                            Err(bad_len) => {
+                                self.perrln(&format!("{bad_len}: substring expression < 0"));
+                                self.arm_discard(1);
+                                Str::new()
+                            }
+                        }
                     }
                 }
             }

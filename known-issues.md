@@ -32468,7 +32468,7 @@ that fix and is unrelated to it.
 which walks both halves over a scalar, an element, an array, the positionals and
 an associative array.
 
-### TD-OILS-PROMPT-HOSTNAME-IS-THE-WINDOWS-SPELLING. `\h` shouts where bash does not — 2026-08-04 — OPEN
+### TD-OILS-PROMPT-HOSTNAME-IS-THE-WINDOWS-SPELLING. `\h` shouts where bash does not — 2026-08-04 — ✅ **FIXED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — the prompt decoder's `\h`/`\H`
 escapes read `COMPUTERNAME`, which Windows spells in upper case. MSYS bash reads
@@ -32488,13 +32488,20 @@ The `\$` half of that line is **not** a bug: `#` is right because osh reports
 bring-up — see `reported_identity`), and MSYS bash is the one synthesising a
 non-zero UID. Only the hostname's case differs for no reason.
 
-**The fix.** Read the host name from `GetComputerNameExW` with
-`ComputerNameDnsHostname` rather than the `COMPUTERNAME` environment variable,
-which is the upper-cased NetBIOS spelling. On SlateOS this becomes whatever the
-real host-name call returns and the question disappears.
+**The fix.** `Shell::system_hostname`'s Windows arm now calls
+`GetComputerNameExW(ComputerNameDnsHostname, …)` instead of reading
+`COMPUTERNAME`, which is the upper-cased *NetBIOS* spelling. The buffer starts at
+64 wide chars and grows once on `ERROR_MORE_DATA`, since the call reports the
+size it wants; `COMPUTERNAME` remains as a fallback, an upper-cased name being
+better than none. The Unix arm (procfs, then `HOSTNAME`) is untouched. On SlateOS
+this becomes whatever the real host-name call returns and the question
+disappears.
 
-**Pinned by** nothing — no corpus case prints a prompt, which is why this went
-unnoticed.
+**Pinned by** `the_windows_host_name_is_not_the_netbios_spelling` in `interp.rs`,
+which asserts the two spellings differ only in case — the machine name itself
+cannot be hard-coded into a test. No corpus case can pin it either: a case that
+printed the host name would only match on the machine that wrote it, which is
+why this went unnoticed in the first place.
 
 ### TD-OILS-THE-ALIAS-AND-COMMAND-MIRRORS-ARE-NOT-THEIR-OWN-TABLES. `BASH_ALIASES` and `BASH_CMDS` enumerate as associative arrays; bash views the alias and command tables — 2026-08-04 — OPEN
 

@@ -43130,8 +43130,8 @@ fn split_assignment_target(s: BStr<'_>) -> Option<(&str, Option<BStr<'_>>)> {
 /// On SlateOS/Linux the kernel exposes the hostname through
 /// `/proc/sys/kernel/hostname` (the canonical live source) with `/etc/hostname`
 /// as a static fallback for early boot before procfs is populated. On the
-/// Windows test host there is no procfs, so we read the `COMPUTERNAME`
-/// environment variable, which Windows always sets to the machine name.
+/// Windows test host there is no procfs, so we ask the OS for the DNS host name
+/// — see the `#[cfg(windows)]` variant below for why not `COMPUTERNAME`.
 ///
 /// Returns `None` (leaving `$HOSTNAME` unset) when no source yields a value, so
 /// callers can distinguish "unknown host" from an empty string.
@@ -43148,10 +43148,59 @@ fn system_hostname() -> Option<String> {
     None
 }
 
-/// See the Unix variant above. The Windows test host has no procfs, so we read
-/// the machine name from `COMPUTERNAME`.
+/// See the Unix variant above. The Windows test host has no procfs, so the
+/// machine name comes from `GetComputerNameExW`.
+///
+/// **Not `COMPUTERNAME`.** That environment variable holds the *NetBIOS*
+/// spelling, which Windows upper-cases; the name the machine was actually given
+/// is the DNS host name, and that is what `gethostname(2)` returns on every
+/// other system and what MSYS bash therefore shows. Reading the variable made
+/// `\h` in a prompt print `LOGOPLEX3` where bash prints `Logoplex3` — the same
+/// host, differing only in a case the environment threw away.
+///
+/// Falls back to `COMPUTERNAME` if the call fails, since an upper-cased name is
+/// better than none.
 #[cfg(windows)]
 fn system_hostname() -> Option<String> {
+    /// `ComputerNameDnsHostname`: the host-name component of the machine's fully
+    /// qualified DNS name, in the case it was registered with.
+    const COMPUTER_NAME_DNS_HOSTNAME: i32 = 1;
+    const ERROR_MORE_DATA: u32 = 234;
+    // SAFETY: the standard kernel32 signatures. `GetComputerNameExW` takes an
+    // enum, an out buffer and an in/out length in *code units*; `GetLastError`
+    // reads the calling thread's own error slot. Neither borrows anything past
+    // the call nor frees anything.
+    unsafe extern "system" {
+        fn GetComputerNameExW(name_type: i32, lp_buffer: *mut u16, n_size: *mut u32) -> i32;
+        fn GetLastError() -> u32;
+    }
+    // A DNS host-name label is at most 63 characters, so this is a first ask
+    // that will not normally come back short; the loop is for the case where it
+    // does rather than a real expectation.
+    let mut buf = vec![0u16; 64];
+    loop {
+        let mut n = u32::try_from(buf.len()).ok()?;
+        // SAFETY: `buf` is `n` code units long and writable for the duration of
+        // the call, and `n` is a live local. The call writes at most `n` code
+        // units into it and reports through `n` how many it wrote — or, having
+        // written none, how many it needs.
+        let ok = unsafe { GetComputerNameExW(COMPUTER_NAME_DNS_HOSTNAME, buf.as_mut_ptr(), &raw mut n) };
+        if ok != 0 {
+            let name = String::from_utf16_lossy(buf.get(..usize::try_from(n).ok()?)?);
+            return Some(name).filter(|s| !s.is_empty());
+        }
+        // SAFETY: reads the error slot the call immediately above just set;
+        // nothing has run on this thread in between.
+        if unsafe { GetLastError() } != ERROR_MORE_DATA {
+            break;
+        }
+        let need = usize::try_from(n).ok()?;
+        // A "needs more" that does not actually ask for more would spin.
+        if need <= buf.len() {
+            break;
+        }
+        buf = vec![0u16; need];
+    }
     std::env::var("COMPUTERNAME").ok().filter(|s| !s.is_empty())
 }
 
@@ -46852,7 +46901,7 @@ mod tests {
             assert_eq!(got, Some("env.example.com"));
         }
         // (3) With no env HOSTNAME, synthesise from the OS hostname (both the
-        // Windows test host, via COMPUTERNAME, and Linux/SlateOS, via
+        // Windows test host, via `GetComputerNameExW`, and Linux/SlateOS, via
         // /proc/sys/kernel/hostname, yield a value here).
         {
             let _g = env_guard();
@@ -46867,6 +46916,26 @@ mod tests {
                 system_hostname().map(String::into_bytes)
             );
         }
+    }
+
+    /// The Windows host name is the OS's own spelling, not the environment's.
+    ///
+    /// `COMPUTERNAME` is the NetBIOS name and Windows upper-cases it, so a shell
+    /// that reads it prints `LOGOPLEX3` where every other system's
+    /// `gethostname(2)` — and MSYS bash — prints `Logoplex3`. Asserting the two
+    /// agree *case-insensitively* pins "same machine, its own case" without
+    /// naming a host this test cannot know.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_host_name_is_not_the_netbios_spelling() {
+        let Ok(netbios) = std::env::var("COMPUTERNAME") else {
+            return; // Nothing to compare against; not a failure of the rule.
+        };
+        let got = system_hostname().expect("Windows always has a host name");
+        assert!(
+            got.eq_ignore_ascii_case(&netbios),
+            "host name {got:?} is not COMPUTERNAME {netbios:?} in another case"
+        );
     }
 
     /// Like [`run`] but in `-c` command mode (`set_command_mode`). The default

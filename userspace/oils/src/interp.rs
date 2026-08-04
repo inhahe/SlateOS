@@ -9945,7 +9945,21 @@ impl Shell {
     /// metacharacters are backslash-escaped — while *unquoted* parts (bare
     /// literals and unquoted `$var`/`$(…)` expansions) contribute active regex
     /// syntax. No field splitting or globbing is performed (this is `[[ … ]]`).
+    ///
+    /// The RHS is a `[[ ]]` word like any other, so it joins like one
+    /// ([`Shell::cond_word`]) — the walk here is only about *quoting*, and it
+    /// reaches [`Shell::joined_value`] for the same parts an assignment's value
+    /// would. `IFS=:; [[ 'ax by' =~ ${n[@]:0:2} ]]` matches.
     fn regex_pattern_from_rhs(&mut self, word: &Word) -> Str {
+        let saved = std::mem::replace(&mut self.cond_word, true);
+        let out = self.regex_pattern_parts(word);
+        self.cond_word = saved;
+        out
+    }
+
+    /// The quote-aware walk itself; see [`Shell::regex_pattern_from_rhs`], which
+    /// is what establishes the context it runs in.
+    fn regex_pattern_parts(&mut self, word: &Word) -> Str {
         fn escape_ere(s: BStr<'_>, out: &mut Str) {
             for c in bytes::chars(s) {
                 // The full ERE metacharacter set; escaping any other char is a
@@ -9977,8 +9991,16 @@ impl Shell {
                 }
                 // Unquoted dynamic parts (`$var`, `${…}`, `$(…)`, `$((…))`):
                 // their expansion is live regex, so a variable can carry a
-                // pattern (`p='^h.*o$'; [[ hello =~ $p ]]`).
-                other => pattern.extend(self.expand_dynamic(other)),
+                // pattern (`p='^h.*o$'; [[ hello =~ $p ]]`). A list parameter
+                // joins as this context joins one, which is the question
+                // [`Self::joined_value`] answers.
+                other => {
+                    let val = match self.joined_value(other) {
+                        Some(v) => v,
+                        None => self.expand_dynamic(other),
+                    };
+                    pattern.extend(val);
+                }
             }
         }
         pattern

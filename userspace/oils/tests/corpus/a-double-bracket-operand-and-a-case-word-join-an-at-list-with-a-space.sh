@@ -87,6 +87,17 @@ for lbl in default colon null; do
     *) echo "  pat  \${!n[@]}  other" ;;
   esac
 
+  # A `=~` right-hand side is a word in the same context, so it joins the same
+  # way — the quote-awareness that makes it a *pattern* is a separate question.
+  [[ 'ax by cz' =~ ${n[@]} ]]    && echo "  =~ \${n[@]}    yes" || echo "  =~ \${n[@]}    no"
+  [[ 'x by cz'  =~ ${n[@]#a} ]]  && echo "  =~ \${n[@]#a}  yes" || echo "  =~ \${n[@]#a}  no"
+  [[ 'x:by:cz'  =~ ${n[@]#a} ]]  && echo "  =~ colon      yes" || echo "  =~ colon      no"
+  [[ 'ax by'    =~ ${n[@]:0:2} ]] && echo "  =~ \${n[@]:0:2} yes" || echo "  =~ \${n[@]:0:2} no"
+  [[ '0 1 2'    =~ ${!n[@]} ]]   && echo "  =~ \${!n[@]}   yes" || echo "  =~ \${!n[@]}   no"
+  r='n[@]'; s='n[*]'
+  [[ 'ax by cz' =~ ${!r} ]]      && echo "  =~ \${!r}      yes" || echo "  =~ \${!r}      no"
+  [[ 'ax by cz' =~ ${!s} ]]      && echo "  =~ \${!s}      yes" || echo "  =~ \${!s}      no"
+
   # The other joined contexts keep $IFS for both halves.
   a=${n[@]#a};   echo "  a=\${n[@]#a}   [$a]"
   a=${n[*]#a};   echo "  a=\${n[*]#a}   [$a]"

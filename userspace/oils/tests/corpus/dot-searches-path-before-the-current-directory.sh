@@ -10,10 +10,6 @@
 # The lookup is for a *readable* file, not an executable one, which is why it is
 # a different search from the one a command name gets. That half is not shown
 # here: this host has no execute bit to take away.
-#
-# (Only single-entry `$PATH` values appear below. The two shells disagree about
-# the separator on this host — see TD-OILS-PATH-IS-SPLIT-ON-THE-HOSTS-SEPARATOR —
-# so a list would not be comparable.)
 
 mkdir -p d/sub && cd d || exit 1
 echo 'echo "  from the current directory"' > lib.sh

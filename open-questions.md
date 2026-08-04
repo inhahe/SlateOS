@@ -134,70 +134,19 @@ maps to the *test* rootfs `/bin`), `kernel/src/proc/spawn.rs`
 whatever eventually assembles the *production* rootfs `/bin` vs. the Rust
 coreutils in `userspace/`.
 
-## Q36 — Should osh split `$PATH` on `:` on the dev host, and if so how do Windows drive letters survive it? — Status: OPEN
-
-**Question.** osh splits `$PATH` with `std::env::split_paths`, which on Windows
-splits on `;`. Every shell script in the world writes `PATH=/a:/b` — and osh
-reads that as *one* directory literally named `/a:/b`, which never exists. So a
-multi-entry `$PATH` built by a script silently finds nothing. This is not
-hypothetical: it is why the new `.`/`source` corpus case can only use
-single-entry `$PATH` values, and it equally breaks command lookup, `hash`,
-`type`, `command -v` and `compgen -c`.
-
-It is not a one-line fix, because the separator and the path *syntax* are the
-same decision. `:` is only unambiguous as a separator if a path can never
-contain one — but osh keeps native Windows paths with drive letters
-(`C:/Users/...`), where the msys bash it is diffed against maps the same
-directory to `/c/Users/...`. Switching the split to `:` without changing the
-path syntax makes `PATH=C:/tools` mean the two directories `C` and `/tools`.
-
-**Options.**
-
-- **A — Adopt msys-style drive mapping everywhere.** `/c/Users/...` becomes the
-  shell's canonical spelling; a drive letter is mapped in at the OS boundary and
-  out again on the way to `CreateFile`. Then `:` is unambiguous and osh matches
-  the reference bash on this host exactly. *Pro:* the only option that makes
-  every `$PATH`-bearing script behave; removes a whole class of future diffs
-  (`$PWD`, `$OLDPWD`, `pwd`, `BASH_SOURCE`, glob results, `cd` all print the
-  msys spelling too). *Con:* the largest change — it touches every place a host
-  path enters or leaves the shell, and it bakes an msys convention into a shell
-  whose real target is SlateOS, where paths are already `/`-rooted and this
-  whole problem does not exist.
-- **B — Map only at the `$PATH` boundary.** Keep native paths everywhere, but
-  split `$PATH` (and `CDPATH`, `MAILPATH`, …) on `:` with a drive-letter escape:
-  a single letter followed by `:` and a separator character is not a split
-  point. *Pro:* small and local — one function; fixes the actual breakage;
-  leaves the rest of the shell's path handling alone. *Con:* a heuristic, so it
-  is wrong for a one-letter directory name (`PATH=x:/b`); the shell now has two
-  path dialects, and the seam between them is a place bugs will keep appearing.
-- **C — Accept the divergence as dev-host scaffolding.** Leave `split_paths` in
-  place, document that multi-entry `$PATH` is host-separator-only on Windows, and
-  let it come right for free when osh runs on SlateOS (where the separator is
-  `:` and there are no drive letters). *Pro:* zero risk, zero work; the defect
-  cannot survive to the real target. *Con:* every corpus case that would need a
-  two-entry `$PATH` is unwritable today, so a real bash-parity gap in `$PATH`
-  lookup order stays permanently untested until osh boots on SlateOS.
-
-**Claude's recommendation.** **B**, with the escape restricted to a *drive
-letter followed by `:` and then `/` or `\`* (so `x:/b` is a drive and `x:b` is
-not — matching how Windows itself reads the two). It buys the behaviour that
-matters — scripts' `$PATH` works, and multi-entry lookup order becomes testable
-— for one localised function, and it does not commit the project to an msys
-convention that SlateOS will never use. A is the "right" answer only if osh is
-meant to be a first-class Windows shell, which it is not; it is a SlateOS shell
-that currently develops on Windows. C is defensible but leaves a real parity gap
-untestable for as long as the dev host is Windows, which is the whole
-foreseeable future of this work.
-
-**Where it bites.** `Shell::search_dirs` and `shell_path` in
-`userspace/oils/src/interp.rs` (the split and the path canonicaliser), plus
-`find_in_path` / `find_source_in_path` / `hash_remember` /
-`compgen_path_commands` which all walk what `search_dirs` returns. Logged as
-`TD-OILS-PATH-IS-SPLIT-ON-THE-HOSTS-SEPARATOR` in `known-issues.md`.
-
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):
+
+- Q36 How osh splits `$PATH` on the Windows dev host — resolved 2026-08-04
+  (§103): **option B — split at the `$PATH` boundary only, with a drive-letter
+  escape.** `:` is the separator everywhere (the whole rule on SlateOS); on
+  Windows `;` is honoured too, since the inherited value is written that way;
+  and a `:` after a single letter *and followed by `/` or `\`* is a drive
+  letter, not a split point. Decided by Claude autonomously rather than by the
+  operator — the recommended option proved small, local and easy to reverse,
+  and leaving it open was blocking every corpus case needing a `$PATH` list.
+  The operator may overrule.
 
 - Q33 Next phase of the fastpy integration (initiative F) — resolved 2026-07-23
   (§87): **option B — reduce the embedded-ELF kernel bloat (TD-KERNEL-EMBED-BLOAT)

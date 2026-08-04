@@ -742,6 +742,57 @@ fn resolve_against(cwd: BStr<'_>, path: BStr<'_>) -> Str {
     join_under(cwd, path)
 }
 
+/// Split a `$PATH`-shaped value into its entries, empty ones included.
+///
+/// The shell's separator is `:`. That is a fact about the *shell language*, not
+/// about the host — `PATH=lib:/usr/bin` means two directories wherever the shell
+/// runs, and on the SlateOS target that is the whole rule.
+///
+/// The Windows *development* host is the exception, and only because the value
+/// the shell starts with there is the host's own: written with `;`, and with
+/// drive letters that put a `:` *inside* an entry. So on that host both
+/// separators are honoured, and a `:` belonging to a drive letter is not one
+/// (see [`drive_colon_at`]). Without that, a shell script's own
+/// `PATH=bin:$PATH` would be one long unusable entry, and splitting the
+/// inherited value on `:` alone would cut every entry after its drive letter.
+///
+/// `std::env::split_paths` is deliberately not used: it knows only `;` on
+/// Windows, it yields nothing at all for an empty string where the shell wants
+/// one empty entry, and it strips double quotes around an entry — which bash
+/// does not.
+fn split_search_path(path: BStr<'_>) -> Vec<Str> {
+    let mut out: Vec<Str> = Vec::new();
+    let mut start = 0usize;
+    for (i, &b) in path.iter().enumerate() {
+        let separator = match b {
+            b';' => cfg!(windows),
+            b':' => !drive_colon_at(path, start, i),
+            _ => false,
+        };
+        if separator {
+            out.push(path.get(start..i).unwrap_or_default().to_vec());
+            start = i.saturating_add(1);
+        }
+    }
+    out.push(path.get(start..).unwrap_or_default().to_vec());
+    out
+}
+
+/// Whether the `:` at `i` in `path` belongs to a Windows drive letter rather
+/// than separating two `$PATH` entries: the entry that began at `start` is a
+/// single ASCII letter, and a path separator follows the colon.
+///
+/// The separator is required, so `PATH=x:y` still splits into `x` and `y` — a
+/// one-letter directory name is far likelier in a shell script than a
+/// drive-relative `x:y`. On any host but Windows there are no drive letters and
+/// this is always false.
+fn drive_colon_at(path: BStr<'_>, start: usize, i: usize) -> bool {
+    cfg!(windows)
+        && i == start.saturating_add(1)
+        && path.get(start).is_some_and(|b| b.is_ascii_alphabetic())
+        && path.get(i.saturating_add(1)).is_some_and(|&b| b == b'/' || b == b'\\')
+}
+
 /// Join `rel` under the directory `cwd` unconditionally: `cwd`'s trailing
 /// slashes are trimmed and exactly one separator is written between the two.
 ///
@@ -15958,14 +16009,14 @@ impl Shell {
             }
             (None, None) => Str::new(),
         };
-        // Spelled out because the host splitter does not agree: it yields *no*
-        // elements for an empty string where the shell wants one empty one.
+        // Spelled out because the splitter below answers one empty entry for an
+        // empty string, and an empty `$PATH` is not that (see above).
         if path.is_empty() {
             return vec![self.search_dir_here()];
         }
-        std::env::split_paths(&bytes::bytes_to_os(&path))
+        split_search_path(&path)
+            .into_iter()
             .map(|d| {
-                let d = bytes::path_to_bytes(&d);
                 if d.is_empty() {
                     return self.search_dir_here();
                 }
@@ -53260,10 +53311,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// executable one, and a directory sharing the name is stepped past rather
     /// than ending the search — so a later entry can still win.
     ///
-    /// This cannot be a corpus case: showing it needs a `$PATH` with more than
-    /// one entry, and the two shells do not agree on the separator on this host
-    /// (TD-OILS-PATH-IS-SPLIT-ON-THE-HOSTS-SEPARATOR). The host's own separator
-    /// is used here, which is what osh currently splits on.
+    /// A unit test rather than a corpus case because it needs a *directory*
+    /// standing where the file should be, which is awkward to set up in a
+    /// script and easy to state here.
     #[test]
     fn source_steps_past_a_directory_to_a_later_path_entry() {
         let dir = ScratchDir::new("source_path_test");
@@ -53279,10 +53329,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         std::fs::write(p1.join("only1.sh"), b"echo from-p1\n").expect("write p1/only1.sh");
 
         let mut sh = new_shell();
-        let sep = if cfg!(windows) { b";".as_slice() } else { b":" };
         sh.vars.insert(
             "PATH".to_string(),
-            bfmt![bytes::path_to_bytes(&p1), sep, bytes::path_to_bytes(&p2)],
+            bfmt![bytes::path_to_bytes(&p1), b":", bytes::path_to_bytes(&p2)],
         );
         assert_eq!(
             sh.find_source_in_path(b"lib.sh").map(|p| bytes::bytes_to_path(&p).is_file()),
@@ -53308,10 +53357,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let dirs = |sh: &Shell, over: Option<&[u8]>| {
             sh.search_dirs(over).iter().map(|d| String::from_utf8_lossy(d).into_owned()).collect::<Vec<_>>()
         };
-        // One entry per host separator, so the test speaks the host's `$PATH`
-        // the way a shell running on it would.
-        let sep = if cfg!(windows) { ";" } else { ":" };
-        sh.vars.insert("PATH".to_string(), format!("/abs{sep}rel{sep}{sep}/tail/").into_bytes());
+        sh.vars.insert("PATH".to_string(), b"/abs:rel::/tail/".to_vec());
         assert_eq!(
             dirs(&sh, None),
             // `/abs` is already rooted; `rel` and the empty entry are resolved
@@ -53340,6 +53386,39 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(dirs(&sh, None), vec!["/here"]);
         assert_eq!(dirs(&sh, Some(b"/only")), vec!["/only"]);
         assert_eq!(dirs(&sh, Some(b"")), vec!["/here"]);
+    }
+
+    /// `$PATH` is split on the shell's separator, `:`, everywhere — and on the
+    /// Windows development host also on the host's `;`, since the value the
+    /// shell inherits there is written that way and carries drive letters whose
+    /// `:` must not be mistaken for a separator.
+    #[test]
+    fn the_search_path_separator_is_the_shell_s_own() {
+        let split = |s: &[u8]| {
+            split_search_path(s)
+                .iter()
+                .map(|d| String::from_utf8_lossy(d).into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(split(b"/usr/bin:/bin"), vec!["/usr/bin", "/bin"]);
+        assert_eq!(split(b"bin"), vec!["bin"]);
+        // Empty entries are entries: leading, trailing and interior alike.
+        assert_eq!(split(b":a::b:"), vec!["", "a", "", "b", ""]);
+        assert_eq!(split(b""), vec![""]);
+        // A one-letter entry is a directory name, not a drive: only a colon
+        // *followed by a separator* can be a drive letter's.
+        assert_eq!(split(b"x:y"), vec!["x", "y"]);
+        // The host's own spelling, which is what the shell starts with there.
+        if cfg!(windows) {
+            assert_eq!(split(br"C:\Windows;D:\bin"), vec![r"C:\Windows", r"D:\bin"]);
+            assert_eq!(split(b"bin:C:/Windows"), vec!["bin", "C:/Windows"]);
+            assert_eq!(split(br"C:\a;bin"), vec![r"C:\a", "bin"]);
+        } else {
+            // Elsewhere a `;` is an ordinary byte and a drive letter is not a
+            // thing, so both split the way the shell says.
+            assert_eq!(split(b"a;b"), vec!["a;b"]);
+            assert_eq!(split(b"C:/Windows"), vec!["C", "/Windows"]);
+        }
     }
 
     /// The `PATH=` a lookup honours is the *last* one written, and the shell

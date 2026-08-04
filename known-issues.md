@@ -995,7 +995,7 @@ increasing order of size:
   `SIG`-prefixed signal name. (Blocked by
   TD-OILS-SIGNAL-TABLE-IS-LINUXS-NOT-THE-HOSTS.)
 
-### TD-OILS-PATH-IS-SPLIT-ON-THE-HOSTS-SEPARATOR, so a `:`-separated `$PATH` is one entry — 2026-08-03 — ⚠️ **OPEN (needs a decision — see open-questions.md Q36)**
+### TD-OILS-PATH-IS-SPLIT-ON-THE-HOSTS-SEPARATOR, so a `:`-separated `$PATH` is one entry — 2026-08-03 — ✅ **FIXED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::search_dirs` — the
 `std::env::split_paths` call, which on the Windows development host splits on
@@ -1027,14 +1027,34 @@ keeps `C:` drive letters, which is deliberate (see its doc) and is what `$PWD`,
 
 So the choice is between adopting an msys-style drive mapping for *all* paths,
 mapping only at the `$PATH` boundary, or leaving the host separator in place on
-Windows and accepting the divergence as scaffolding. That is a fork with no
-obviously-correct answer, so it is Q36 in `open-questions.md` rather than a
-decision taken here.
+Windows and accepting the divergence as scaffolding. That was a fork with no
+obviously-correct answer, so it was raised as Q36 in `open-questions.md`.
 
-**Blast radius while it stands:** `Shell::search_dirs` and everything built on it
+**The fix (2026-08-04).** Q36's option B, taken autonomously and recorded in
+`design-decisions.md` §"`$PATH` is split on the shell's separator, and on the
+host's too where the host wrote the value". `std::env::split_paths` is gone,
+replaced by two free functions in `interp.rs`:
+
+* `split_search_path` — splits on `:` *everywhere*, which is the whole rule on
+  the SlateOS target; on the Windows development host it also splits on `;`,
+  because the value the shell inherits there is the host's own and is written
+  that way. It also answers one empty entry for an empty string, which
+  `split_paths` does not, and does not strip quotes, which `split_paths` does.
+* `drive_colon_at` — the one exception: a `:` immediately after a single ASCII
+  letter *and followed by `/` or `\`* belongs to a drive letter, not to the
+  list. The trailing-separator requirement is what keeps `PATH=x:y` splitting
+  into two one-letter directory names, which is far likelier in a shell script
+  than a drive-relative `x:y`.
+
+So a script's own `PATH=bin:$PATH` now works on the development host, and the
+inherited `C:\a;C:\b` still splits into two entries. Covered by the unit test
+`the_search_path_separator_is_the_shell_s_own`, and the corpus is no longer
+restricted to single-entry `$PATH` values.
+
+**Blast radius while it stood:** `Shell::search_dirs` and everything built on it
 — command lookup, `hash`, `type`, `command -v`, `compgen -c`, and (since
 2026-08-03) `.`/`source`. Single-entry `$PATH` values, which is what every corpus
-case uses, behave correctly.
+case used, behaved correctly throughout.
 
 ### TD-OILS-GREAT-AND-FILE-LOSES-ITS-SPELLING. The parser rewrites `>&file` into `&>file`, so nothing downstream can tell the two apart — 2026-08-03 — ✅ **FIXED 2026-08-03**
 
@@ -31273,3 +31293,118 @@ currently switched (command substitution, pipeline stage, a compound command's
 fd 2, and `exec_stdout_shadowing`'s "fd 1's ambient sink is a value, not a stack"
 comment would stop being true — which is the same reason it is worth doing: the
 asymmetry between the two standard write descriptors is itself the tech debt.
+
+### TD-OILS-COMMAND-V-DOES-NOT-CONSULT-THE-HASH-TABLE. a hashed command is neither reported from the table nor exempt from `$EXECIGNORE` — OPEN — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::command_describe_file` and
+`find_in_path_described`, which go straight to the `$PATH` walk. The hash table
+(`Shell::hashed`) is read on the *execution* path but not on the *description*
+one.
+
+**Reproduce (1) — a hashed command that `$PATH` can no longer find:**
+
+```sh
+mkdir -p bin; printf '#!/bin/sh\necho x\n' > bin/tool; chmod +x bin/tool
+PATH=bin; hash tool          # remembers bin/tool
+PATH=/nonexistent
+command -v tool
+```
+
+bash prints `bin/tool` — the table answers, the search never runs.
+osh prints nothing and exits 1.
+
+**Reproduce (2) — `$EXECIGNORE` should not reach a hash hit:**
+
+```sh
+PATH=bin; hash -r; command -v tool > /dev/null   # hashes bin/tool
+EXECIGNORE='bin/tool'
+command -v tool
+```
+
+bash still prints `bin/tool`: `$EXECIGNORE` filters the *search*, and a hash hit
+never reaches the search. osh prints nothing, because it always searches and the
+search now filters.
+
+**Impact.** Anything that describes a name — `command -v`, `command -V`, `type`,
+`type -a`, `type -P` — disagrees with bash whenever the name has been hashed and
+the `$PATH` answer has since changed or been ignored. `type` also loses bash's
+distinct `tool is hashed (bin/tool)` wording, which the corpus does not yet
+exercise.
+
+**What the proper fix looks like.** `command_describe_file` should ask the hash
+table first, exactly as `execute_command` does, and report a hit from it without
+consulting `$PATH` or `$EXECIGNORE` — bash's `find_hashed_filename`, checked
+before `search_for_command`'s path walk. The table's entry is already stored in
+the shell's spelling, so nothing else has to change. Note that bash *does*
+re-`stat` a hashed file and drops the entry if it has gone (`phash_remove` in
+`find_hashed_filename`), so the fix is "look it up and validate it", not "trust
+it blindly".
+
+### TD-OILS-A-DESCRIBED-HASH-HIT-LOSES-ITS-DOT-SLASH. bash writes `./bin/tool` where osh writes `bin/tool` — OPEN — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the same description path as
+TD-OILS-COMMAND-V-DOES-NOT-CONSULT-THE-HASH-TABLE, and blocked behind it: the
+divergence is only reachable once a hash hit is reported at all.
+
+**Reproduce:**
+
+```sh
+mkdir -p bin; printf '#!/bin/sh\necho x\n' > bin/tool; chmod +x bin/tool
+PATH=bin; hash -r; command -v tool > /dev/null
+hash
+```
+
+bash's `hash` listing and its `command -v` both answer `./bin/tool`; osh answers
+`bin/tool`.
+
+**Why.** bash's `sh_makepath` is called with `MP_DOCWD` when the resulting path
+is to be *remembered* rather than merely reported, and that flag prefixes `./`
+to a relative result so the remembered name cannot later be re-searched as a
+bare name. It is a property of the hash table's spelling, not of the `$PATH`
+entry's — a plain `command -v` on an unhashed name still answers `bin/tool`,
+which osh already gets right (corpus case
+`a-path-entry-is-reported-exactly-as-it-was-written.sh`).
+
+**What the proper fix looks like.** When storing into `Shell::hashed`, prefix
+`./` to a path that is relative and does not already begin with `./` — bash's
+`MP_DOCWD` — and report the stored spelling verbatim thereafter. Do this
+together with the hash-table lookup above, since neither is observable without
+the other.
+
+### HOST-OILS-MSYS-DERIVES-THE-EXECUTE-BIT-FROM-A-SHEBANG. `[ -x file ]` disagrees on the Windows dev host — WONTFIX (host artifact) — 2026-08-04
+
+**Not an osh bug.** MSYS's `access(X_OK)` answers *yes* for a file whose first
+two bytes are `#!`, whatever the filesystem says, because Windows has no execute
+bit and MSYS synthesises one. Rust's `std::fs` does not, so:
+
+```sh
+printf '#!/bin/sh\necho x\n' > bin/tool
+[ -x bin/tool ]; echo $?
+```
+
+is `0` under the reference bash and `1` under osh, with no `$EXECIGNORE`
+involved. The same asymmetry is why the `$EXECIGNORE` corpus case
+(`execignore-makes-a-file-stop-counting-as-executable.sh`) deliberately omits
+`test -x` / `[[ -x ]]` even though bash's answer there is interesting (they are
+*not* filtered by `$EXECIGNORE`).
+
+On SlateOS there is a real execute bit and the two agree by construction, so
+there is nothing to fix — recorded only so the next investigation does not
+mistake it for a divergence in the code under test.
+
+### HOST-OILS-SHEBANG-SCRIPTS-DO-NOT-RUN-ON-THE-WINDOWS-DEV-HOST. `#!/bin/sh` names a file the host does not have — WONTFIX (host artifact) — 2026-08-04
+
+**Not an osh bug.** A corpus fixture written as `#!/bin/sh` runs under the
+reference bash on this host because MSYS resolves `/bin/sh` inside its own
+mounted root; osh keeps native paths, so `/bin/sh` names nothing and the spawn
+fails. osh's own shebang handling (`shell_script_indirection`) is correct and is
+tested independently — it is the *interpreter path in the fixture* that is
+unresolvable, not the mechanism.
+
+**Consequence for corpus cases.** A case that needs an external program to
+actually *run* cannot get one by writing a `#!` script, so
+`a-path-entry-is-reported-exactly-as-it-was-written.sh` and
+`execignore-makes-a-file-stop-counting-as-executable.sh` confine themselves to
+*describing* such files (`command -v`, `type`) plus one shell-source fixture for
+the running half. Nothing to fix; recorded so the constraint is not
+re-discovered.

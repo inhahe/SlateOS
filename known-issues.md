@@ -28805,55 +28805,180 @@ where `IFS=:; printf '<%s>' "x${n[@]}y"` is three fields in bash and one in osh.
 **Impact.** A word that mixes a quoted `[@]` reference with a quoted bulk `[*]`
 one. Rare enough that no corpus case had it before this one was written.
 
-### TD-OILS-UNQUOTED-ARRAY-EXPANSION-IS-A-JOINED-STRING. `IFS=:; echo ${a[@]}` is one field in osh and three in bash — 2026-08-04
+### TD-OILS-UNQUOTED-ARRAY-EXPANSION-IS-A-JOINED-STRING. `IFS=:; echo ${a[@]}` is one field in osh and three in bash — 2026-08-04 — ✅ **FIXED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — the `other` arm of
-`Shell::expand_word_annotated` (~18970), which asks `expand_part` for a single
-string and then field-splits it. Every multi-element reference therefore has to
-survive a round trip through a joined string, and the join it gets is the
-`[@]`-form space.
+`Shell::expand_word_annotated`, which asked `expand_dynamic` for a single string
+and then field-split it. Every multi-element reference therefore had to survive a
+round trip through a joined string, and the join it got was the `[@]`-form space.
 
-**What.** An unquoted `${a[@]}` is a *list* in bash: each element becomes its own
-field first, and only then is each field split on `$IFS`. osh joins with a space
-and splits the result, so an `$IFS` without a space in it loses the boundaries:
+**What.** An unquoted `${a[@]}` is a *list* in bash, and osh joined it with a
+space and split the result, so an `$IFS` without a space in it lost the
+boundaries:
 
 ```sh
 declare -a n=(x y z)
 IFS=:
 printf '<%s>' ${n[@]}    ; echo    # bash <x><y><z>   osh <x y z>
-printf '<%s>' ${n[@]@Q}  ; echo    # bash <'x'><'y'><'z'>   osh <'x' 'y' 'z'>
-```
-
-An **empty** `$IFS` is the same bug from the other side, and hits the star forms
-too, because bash marks such a word `W_SPLITSPACE` — "split on space even though
-`IFS` is null" — rather than leaving it unsplit:
-
-```sh
 IFS=
 printf '<%s>' ${n[*]}    ; echo    # bash <x><y><z>   osh <xyz>
 printf '<%s>' ${n[*]@Q}  ; echo    # bash <'x'><'y'><'z'>   osh <'x''y''z'>
-printf '<%s>' ${!n[*]}   ; echo    # bash <0 1 2>     osh <012>
 ```
 
-— note that `${!n[*]}` is the odd one out even in bash: unquoted, the keys join
-with a space (bash's `string_list_dollar_at` falls back to `' '` when `$IFS` is
-empty) and the result is then not split, so it stays one field. `${!pre*}` joins
-with nothing and also stays one field. Both were measured, not guessed.
+**Fixed.** `Shell::split_items` now classifies the parts that expand to a list,
+and the `other` arm lays that list out instead of a string. The rule the fix
+implements was **measured** across five `$IFS` settings × ~30 forms (bash 5.2.37)
+and is not the one this entry originally proposed:
 
-**Proper fix.** Give the `other` arm the same shape the quoted arm already has:
-ask for a `Vec<Str>` of items where the part can make one (`ArrayRef` with
-`All`/`Star`, `ArrayKeys`, `VarNames`, `ArraySlice`, `ArrayBulk`, `ArrayOp`,
-`$@`/`$*`, and an `Indirect` that reaches an array), split *each* item against
-`$IFS` on its own, and force a field break between items. That is bash's order of
-operations and it makes the `IFS`-empty cases fall out for free — with the two
-exceptions above, which want a joined string and so should keep asking
-`expand_part`. A joined string cannot express the boundary, so no amount of
-choosing a better separator fixes this; the list has to survive.
+* Unquoted, the `[*]` spelling says *nothing* — `${a[*]}` splits exactly as
+  `${a[@]}`, and `$*` as `$@`. The star only chooses a separator inside double
+  quotes.
+* With a **non-null** `$IFS` the answer is "join the items with `$IFS`'s first
+  character, then field-split" — *not* "split each item and force a break
+  between". The two differ on empty items: `z=('' q ''); IFS=:` gives `<><q>` in
+  bash, which is the join talking (`:q:`), where a forced break would give a
+  third, empty field.
+* With a **null** `$IFS` nothing can split, so the list itself is the fields:
+  consecutive items are separate fields and an empty item adds no characters.
+  Adjacent literal text still joins the ends (`A${n[@]}B` → `<Ax><y><zB>`).
+* Two forms are lists only as a way of building one string, and stay a single
+  field under a null `$IFS`: a `#`/`##`/`%`/`%%` trim of a *named array*
+  (`${a[@]#x}` → `< y z>`) and `${!a[*]}` (→ `<0 1 2>`), both joined with
+  `at_sep`. The same trim of the *positionals* (`${@#x}`) is a real list —
+  measured, not derivable. `${!prefix*}` is joined too but with `star_sep`
+  (nothing), which osh already did.
+* The **`!split`** contexts (assignment RHS, redirect target) were left alone:
+  there `${n[@]}` is space-joined under every `$IFS`, which osh already matched.
 
-**Impact.** Any unquoted array expansion under an `$IFS` that lacks a space —
-including the common `IFS=$'\n'` and `IFS=:` idioms — and any unquoted one at
-all under an empty `$IFS`. The quoted forms, which are what careful scripts use,
-are all correct.
+Covered by
+`tests/corpus/an-unquoted-list-parameter-splits-as-a-list-not-as-a-joined-string.sh`
+(29 forms × 4 `$IFS` settings, plus elements holding `$IFS` characters, empty
+elements, and the `!split` contrast). The unit test
+`an_array_subscript_can_point_as_well_as_list_keys` had baked in the old
+`${!h[*]}` answer (`01x`) and was corrected to bash's `0 1x`.
+
+**Still divergent (separate entries):**
+`TD-OILS-NOSPLIT-SLICE-AND-KEYS-JOIN-WITH-IFS`,
+`TD-OILS-INDIRECT-OP-ON-AN-ARRAY-IS-NOT-A-LIST` and
+`TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT`.
+
+### TD-OILS-NOSPLIT-SLICE-AND-KEYS-JOIN-WITH-IFS. `IFS=:; a=${n[@]:0:2}` is `x:y` in osh and `x y` in bash — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `ArraySlice` and `ArrayKeys` arms
+of `Shell::expand_dynamic_with`, which both end in `join_derived(&items, star)`.
+For `star == false` that is `at_sep()` (`$IFS`'s first character), and it is the
+right answer in the *quoted* and *split* contexts but not in the `!split` one.
+
+**What.** In a context that wants one string and does no splitting — an
+assignment RHS, a redirect target — bash joins an *unquoted* `[@]` list with a
+space, whatever `$IFS` says. It does that for `${n[@]}`, `$@`, `${n[@]:-d}` and
+`${!ref}` (all of which osh already matches, via `join_elements`), and also for
+the two forms below, which osh joins with `$IFS` instead:
+
+```sh
+declare -a n=(x y z); set -- p q; IFS=:
+a=${n[@]:0:2}; echo "[$a]"     # bash [x y]    osh [x:y]
+a=${@:1:2};    echo "[$a]"     # bash [p q]    osh [p:q]
+a=${!n[@]};    echo "[$a]"     # bash [0 1 2]  osh [0:1:2]
+```
+
+The `[*]` spellings all join with `$IFS`'s first character and are correct, as
+are the *quoted* forms — `a="${n[@]:0:2}"` really is `x:y` in bash, so the two
+contexts genuinely disagree and the join cannot simply be changed in one place.
+`${a[@]@Q}`/`${a[@]#x}` (`ArrayBulk`) and `${!prefix@}` (`VarNames`) are the
+other way round again: those *do* join with `$IFS` even unquoted-and-unsplit, and
+osh matches. Measured against bash 5.2.37 over `${n[@]}`, `${n[*]}`, both slice
+spellings, `@Q`, `#`, both key spellings, `${!pre@}`/`${!pre*}`, `${!ref}`, `$@`,
+`$*` and both positional slices under three `$IFS` settings.
+
+**Proper fix.** Have the `!split` branch of `Shell::expand_word_annotated`'s
+`other` arm choose the separator rather than leaving it to `expand_dynamic`:
+give `ArraySlice { star: false }` and `ArrayKeys { star: false }` the
+`join_elements` space there, the way `ArrayRef`/`ArrayOp` already get it. The
+cleanest shape is a small `nosplit_value(part)` beside
+[`Shell::split_items`], so that all three contexts (quoted, split, neither) name
+their rule in one place each instead of sharing one join by accident.
+
+**Impact.** Only an assignment or redirect target holding an unquoted array
+*slice* or key list under an `$IFS` whose first character is not a space. Narrow,
+but it is a silent wrong value rather than an error.
+
+### TD-OILS-INDIRECT-OP-ON-AN-ARRAY-IS-NOT-A-LIST. `ref='a[@]'; ${!ref:-d}` is one field in osh and three in bash — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `IndirectOp` arm of
+`Shell::expand_dynamic_with`. It resolves the pointer to a target *name*, reads
+that name's value as a single string (`indirect_target_value`), rewrites the
+modifier to name the target and re-enters `expand_dynamic_with`. Everything
+downstream of the rewrite therefore works on text, so the list is already gone
+before the modifier runs — and `Shell::split_items` cannot classify the part,
+because the renamed node is a scalar `ParamTrim`/`ParamOp`, not an `ArrayBulk`.
+
+**What.** When the reference names a whole array, bash keeps the elements apart
+exactly as it does for the written-out spelling:
+
+```sh
+declare -a n=(ax by cz); r='n[@]'
+IFS=:
+printf '<%s>' ${!r:-d};  echo    # bash <ax><by><cz>   osh <ax by cz>
+printf '<%s>' ${!r#a};   echo    # bash <x><by><cz>    osh <x by cz>
+IFS=
+printf '<%s>' ${!r:-d};  echo    # bash <ax><by><cz>   osh <ax by cz>
+```
+
+The bare `${!r}` (no modifier) is correct — that is `WordPart::Indirect`, which
+`split_items` handles through `indirect_array_elems`. Only the
+modifier-carrying `${!r<op>}` spelling loses the list.
+
+**Proper fix.** Split the `IndirectOp` arm's resolution — everything from the
+label through `rename_param_target` and the operand lookup — into a helper that
+hands back `(renamed_part, operand, label)`. `expand_dynamic_with` then joins as
+today, while `split_items` can recurse into the renamed part with the same
+operand and classify it. The renamed part also has to become the *array* node
+(`ArrayBulk`/`ArrayOp`) when the target name carries an `[@]`/`[*]` subscript,
+which is the larger half of the work: today `rename_param_target` only swaps a
+name into the node the parser built, so `${!r#a}` stays a `ParamTrim` whose
+"name" is the string `n[@]`.
+
+**Impact.** Indirection through a reference that spells a whole array, combined
+with a modifier — an exotic corner. Nothing in the corpus depends on it, and the
+answers agree under the default `$IFS`, which is why it went unnoticed.
+
+### TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT. `IFS=:; ${e[@]:-"${n[@]}"}` is one field in osh and three in bash — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::array_op_fields`, whose
+inactive branches return `vec![self.expand_to_string(arg)]`: the substituted word
+is flattened to *one* item before the caller ever sees it.
+
+**What.** bash expands a `:-`/`:+`/`:?` operand as a word *list*, so a quoted
+`"${n[@]}"` inside it contributes one field per element; and an unquoted
+`${n[@]}` inside it is marked `W_SPLITSPACE`, so a null `$IFS` still breaks it on
+the spaces the join put there:
+
+```sh
+declare -a n=(ax by cz); declare -a e=()
+IFS=:
+printf '<%s>' ${e[@]:-"${n[@]}"}; echo   # bash <ax><by><cz>   osh <ax by cz>
+IFS=
+printf '<%s>' ${e[@]:-${n[@]}};   echo   # bash <ax><by><cz>   osh <ax by cz>
+printf '<%s>' ${u:-${n[@]}};      echo   # bash <ax><by><cz>   osh <ax by cz>
+```
+
+An operand of plain text is already right (`IFS=:; ${e[@]:-a:b}` is `<a><b>` in
+both), because the single item it becomes is field-split by the caller. Only a
+*nested list* inside the operand is lost, and the scalar `${u:-…}` form has the
+same hole.
+
+**Proper fix.** Two parts. (1) Return the operand's fields instead of its
+concatenation: `array_op_fields` (and the scalar `ParamOp` path) should expand
+the word with `expand_word(arg, true)` and hand the caller every field, which
+makes the quoted-nested case fall out. (2) Model bash's `W_SPLITSPACE`: an
+unquoted `$@`-like expansion *inside* such an operand splits on spaces even when
+`$IFS` is null. That flag has no representation in osh's expander yet; the same
+rule already exists in `Shell::split_transform_item` for `@A`, so it wants to
+become a shared notion rather than a third copy.
+
+**Impact.** `${x:-…}` defaults whose word expands to a list — uncommon, and
+invisible under the default `$IFS` unless the nested expansion is quoted.
 
 ### TD-OILS-ARITH-EMPTY-PARAM-BECOMES-ZERO. an empty parameter leaves a `0` behind in the expression bash reports — 2026-08-04
 

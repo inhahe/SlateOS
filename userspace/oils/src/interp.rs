@@ -12611,30 +12611,41 @@ impl Shell {
     /// One builder for every consumer — `declare -p`, `readonly -p`, `${var@a}`
     /// and `${var@A}` all use the same order in bash, and the order had already
     /// drifted apart once while it was written out twice.
+    ///
+    /// A dynamic special's attributes live in [`Shell::DYNAMIC_SPECIALS`]
+    /// rather than in the attribute sets, so they are read from there too:
+    /// nothing puts `SECONDS` in `integer_attr`, and without the table
+    /// `${SECONDS@a}` would answer nothing where `declare -p SECONDS` says
+    /// `declare -i`. [`Shell::dynamic_special_listed`] is the right question
+    /// because a real binding — `RANDOM=7` — makes the name ordinary, and then
+    /// the sets speak for it alone.
     fn attr_flag_letters(&self, name: &str) -> String {
+        let table = self
+            .dynamic_special_listed(name)
+            .map_or("", |d| d.named_flags);
         let mut s = String::new();
         if self.assoc.contains_key(name) {
             s.push('A');
-        } else if self.arrays.contains_key(name) {
+        } else if self.arrays.contains_key(name) || table.contains('a') {
             s.push('a');
         }
         // bash emits the letters in a fixed order — kind, then `i n r t x`, then
         // the case letter — not in the order they were given: `declare -tinlrx v`
         // reports `declare -inrtxl v`. osh had `n` before `i`, which showed up on
         // the one variable that can carry both (`declare -ni`).
-        if self.integer_attr.contains(name) {
+        if table.contains('i') || self.integer_attr.contains(name) {
             s.push('i');
         }
         if self.nameref_attr.contains(name) {
             s.push('n');
         }
-        if self.readonly.contains(name) {
+        if table.contains('r') || self.readonly.contains(name) {
             s.push('r');
         }
         if self.trace_attr.contains(name) {
             s.push('t');
         }
-        if self.exported.contains(name) {
+        if table.contains('x') || self.exported.contains(name) {
             s.push('x');
         }
         // Only one of the three can be in force at a time (they cancel each other
@@ -13204,11 +13215,9 @@ impl Shell {
     /// makes it is observable — see [`Shell::param_transform`]. `None` is an
     /// unset element, which is what renders the bare `declare -a arr`.
     ///
-    /// Only the array forms consult it. A scalar renders the *variable's* own
-    /// value, which is the same thing whenever the subscript names element 0
-    /// and a different one when it does not — bash gives `${s[5]@A}` on a
-    /// scalar the empty string rather than `s='hi'`, which osh does not yet do
-    /// (TD-OILS-TRANSFORM-SCALAR-IGNORES-SUBSCRIPT).
+    /// Every form consults it, a scalar included: a subscript other than 0 on a
+    /// scalar names nothing, so `${s[5]@A}` renders the valueless form where
+    /// `${s[0]@A}` renders `s='hi'`.
     fn transform_assign(&self, name: &str, elem: Option<Str>) -> Str {
         if self.assoc.contains_key(name) || self.arrays.contains_key(name) {
             let flags = self.declare_attr_flags(name);
@@ -13217,25 +13226,34 @@ impl Shell {
                 None => bfmt![b"declare ", &flags, b" ", name],
             };
         }
-        let Some(v) = self.vars.get(name) else {
-            // Declared without a value (`declare -x xx`): there is no `=value`
-            // to print, but the declaration itself is still worth recreating,
-            // so bash renders the bare `declare -x xx`. A name declared with no
-            // attributes either (`declare t`) has nothing to recreate — bash
-            // gives the empty string, even though `declare -p` still lists it.
-            if self.declared.contains(name) && !self.attr_flag_letters(name).is_empty() {
+        // The element the reference named, not the variable's own cell. The two
+        // are the same value whenever the subscript names element 0, and a
+        // scalar has nothing anywhere else — so `${s[5]@A}` renders the
+        // valueless form. It is also where a *dynamic* special's value comes
+        // from, `self.vars` holding no cell for one.
+        let Some(v) = elem else {
+            // Nothing to print an `=value` for, but the declaration itself is
+            // still worth recreating, so bash renders the bare `declare -x xx`.
+            // That covers both ways of arriving here — a name declared and
+            // never assigned (`declare -x xx`), and a subscript that named
+            // nothing on a name that was (`declare -i iv=7; ${iv[5]@A}`) — and
+            // it is the array branch's rule above, which prints the bare
+            // `declare -a n` for an unset element.
+            //
+            // The attributes are the whole of the question: a name with none
+            // (`declare t`, or a plain `s=hi` subscripted past its one element)
+            // has nothing to recreate, and bash gives the empty string even
+            // though `declare -p` still lists it.
+            if !self.attr_flag_letters(name).is_empty() {
                 return bfmt![b"declare ", self.declare_attr_flags(name), b" ", name];
             }
             return Str::new();
         };
-        let attributed = self.readonly.contains(name)
-            || self.exported.contains(name)
-            || self.integer_attr.contains(name)
-            || self.lower_attr.contains(name)
-            || self.upper_attr.contains(name)
-            || self.capcase_attr.contains(name)
-            || self.nameref_attr.contains(name)
-            || self.trace_attr.contains(name);
+        // "Carries any attribute at all" — the same question the valueless form
+        // above asks, and asked the same way, because the two disagreeing is
+        // what let `${SECONDS@A}` drop the `declare -i` its own valueless form
+        // would have printed.
+        let attributed = !self.attr_flag_letters(name).is_empty();
         // Both the plain (`name='value'`) and attributed (`declare -r name='value'`)
         // scalar forms single-quote the value: bash's `@A` uses sh_single_quote
         // here, unlike `declare -p`, which double-quotes.
@@ -13246,10 +13264,10 @@ impl Shell {
                 b" ",
                 name,
                 b"=",
-                shell_quote(v)
+                shell_quote(&v)
             ]
         } else {
-            bfmt![name, b"=", shell_quote(v)]
+            bfmt![name, b"=", shell_quote(&v)]
         }
     }
 
@@ -43863,10 +43881,16 @@ mod tests {
     /// shell: `Shell::new` leaves `$PWD` to `seed_startup_dirs`, which runs only
     /// when an environment is imported, and an inherited `$PWD` naming the
     /// *harness's* directory would otherwise contradict `pwd`.
+    ///
+    /// Exported for the same reason, because that is the other half of what
+    /// `seed_startup_dirs` does and the difference is observable: an
+    /// unexported `$PWD` is `declare -- PWD=…` to `declare -p` and carries no
+    /// letters for `${PWD@a}`, neither of which is what a real shell answers.
     fn new_shell() -> Shell {
         let mut sh = Shell::new();
         sh.cwd = test_cwd();
         sh.put_var("PWD".to_string(), sh.cwd.clone());
+        sh.exported.insert("PWD".to_string());
         sh.refresh_dirstack();
         sh
     }
@@ -54733,6 +54757,47 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("n=(x y); declare -n r=n; echo \"${!r@A}\"").0, "declare -a n='x'\n");
         assert_eq!(run("n=(x y); declare -n r=n; echo \"${r@A}\"").0, "declare -a n='x'\n");
         assert_eq!(run("s=hi; p=s; echo \"${!p@A}\"").0, "s='hi'\n");
+    }
+
+    #[test]
+    fn a_variable_transform_renders_the_element_not_the_storage_cell() {
+        // A scalar's element 0 is the scalar, and every other subscript names
+        // nothing — so `${s[5]@A}` is the valueless form even though `s` is set.
+        assert_eq!(run("s=hi; echo \"[${s@A}] [${s[0]@A}] [${s[5]@A}]\"").0, "[s='hi'] [s='hi'] []\n");
+        // Valueless is not empty: the bare declaration is printed whenever
+        // there is an attribute to recreate, which is the array form's rule for
+        // an unset element applied to a scalar.
+        assert_eq!(
+            run("declare -i iv=7; echo \"[${iv[0]@A}] [${iv[5]@A}]\"").0,
+            "[declare -i iv='7'] [declare -i iv]\n"
+        );
+        // Both ways the value can go missing render alike — never assigned on
+        // the left, assigned and subscripted past on the right.
+        assert_eq!(
+            run("declare -x e1; declare -x e2=4; echo \"[${e1@A}] [${e2[9]@A}]\"").0,
+            "[declare -x e1] [declare -x e2]\n"
+        );
+        // A name carrying no attribute has nothing to recreate either way, so
+        // it is the empty string rather than a bare `declare`.
+        assert_eq!(run("declare t1; t2=v; echo \"[${t1@A}] [${t2[9]@A}]\"").0, "[] []\n");
+
+        // The shell's own scalars are the case where there is nothing but the
+        // element: no storage cell to fall back on, and attributes that live in
+        // the dynamic-special table rather than in the attribute sets. `@a` has
+        // to agree with `declare -p` about the `-i` nothing ever set.
+        assert_eq!(run("echo \"[${SECONDS@a}] [${PPID@a}] [${PWD@a}]\"").0, "[i] [ir] [x]\n");
+        assert_eq!(run("echo \"[${LINENO@a}] [${EPOCHSECONDS@a}]\"").0, "[] []\n");
+        // …and the rendering carries them and a value both.
+        assert!(run("echo \"${SECONDS@A}\"").0.starts_with("declare -i SECONDS="), "{:?}", run("echo \"${SECONDS@A}\"").0);
+        assert!(run("echo \"${PWD@A}\"").0.starts_with("declare -x PWD="), "{:?}", run("echo \"${PWD@A}\"").0);
+        // A name with no letters renders as a plain assignment, as any other
+        // unattributed variable does.
+        assert!(run("echo \"${EPOCHSECONDS@A}\"").0.starts_with("EPOCHSECONDS="), "{:?}", run("echo \"${EPOCHSECONDS@A}\"").0);
+        // Assigning does not shed them: the write is taken by the shell rather
+        // than making a binding that could shadow the table.
+        assert_eq!(run("RANDOM=7; echo \"[${RANDOM@a}]\"").0, "[i]\n");
+        // `unset` is what takes the name out of the shell's hands.
+        assert_eq!(run("unset SECONDS; echo \"[${SECONDS@a}] [${SECONDS@A}]\"").0, "[] []\n");
     }
 
     #[test]

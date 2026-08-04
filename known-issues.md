@@ -157,6 +157,18 @@ A later **compound** operand already sees it (`declare -a r=(x y) t=(${r[1]})`
 is `y` in both), because those are bound in operand order — so the gap is only
 between a compound and a scalar written after it.
 
+**Second symptom, same cause — a compound is lost when a *later* word fails to
+expand.** Because bash has already performed it, the binding stands:
+
+```sh
+declare r=(a) x=$((1/0))   # bash: rc 1, r is (a)   osh: rc 1, r unset
+```
+
+osh expands the whole list first, so the failure comes before any compound binds
+and `r` is never created. Two compounds already behave correctly — `declare
+r4=(a) r5=($((1/0)))` leaves `r4` bound and `r5` unset in both — which is the
+same "compounds are ordered among themselves, but not against the scalars" gap.
+
 **The measured rule (bash 5.2.37), which is entirely consistent:** a compound
 assignment is *performed* as the expansion pass reaches it; a scalar one is only
 *expanded* there, and the assignment itself is deferred to the builtin. Hence:

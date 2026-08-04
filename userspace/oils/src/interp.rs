@@ -19942,21 +19942,71 @@ impl Shell {
                     op,
                 },
             ] => Some(self.bulk_elements(name, op, true)),
-            // `"${a[@]:-word}"` / `"${a[@]:+word}"` — one field per
-            // element when active; the operand word (as a single
-            // field) otherwise. The `[*]` star form joins instead and
-            // falls through to the scalar path below.
+            // `"${a[@]:-word}"` / `"${a[@]:+word}"` — one field per element
+            // when active, and otherwise the fields the operand word made,
+            // which the quotes around the substitution reach. The `[*]` form
+            // is here too, unlike the other list parts: its star joins the
+            // *elements*, but an operand is a word and keeps its own fields.
             [
                 WordPart::ArrayOp {
                     name,
-                    star: false,
+                    star,
                     op,
                     colon,
                     arg,
                 },
             ] => Some(
-                self.array_op_fields(name, false, *op, *colon, arg)
-                    .quoted_fields(),
+                match self.array_op_fields(name, *star, *op, *colon, arg) {
+                    // Only the *elements* answer to the `[*]` spelling. The
+                    // operand is a word, and the quotes reach it, so
+                    // `"${z[*]:-"${a[@]}"}"` is the two fields that word made —
+                    // the star had no elements to join.
+                    items @ SplitItems::Fields(_) => items.quoted_fields(),
+                    // A quoted `[*]` joins its elements into the one field the
+                    // star asks for. Doing it here rather than declining to the
+                    // scalar path matters: the operator has already run, and
+                    // answering `None` now would run it — and complain — twice.
+                    items if *star => {
+                        let texts = items.texts();
+                        vec![self.join_elements(&texts, true)]
+                    }
+                    items => items.texts(),
+                },
+            ),
+            // `"${x:-w}"` / `"${x:+w}"` on a *scalar*. The parameter's own value
+            // is one field, but the operand is a word the quotes reach, so a
+            // `[@]` inside it makes fields exactly as it would anywhere else in
+            // quotes: `"${x:-"${a[@]}"}"` is two. The other two operators are
+            // deliberately absent — `:=` and `:?` do not substitute a word, so
+            // they have only ever one field to give and the scalar path makes
+            // their complaints.
+            [
+                WordPart::ParamOp {
+                    name,
+                    index,
+                    op: op @ (ParamOp::UseDefault | ParamOp::UseAlternate),
+                    colon,
+                    arg,
+                    label,
+                },
+            ] => Some(
+                match self.expand_param_op(
+                    ParamOpNode {
+                        name,
+                        index,
+                        op: *op,
+                        colon: *colon,
+                        arg,
+                        label: label.as_deref(),
+                    },
+                    Operand::Param,
+                ) {
+                    items @ SplitItems::Fields(_) => items.quoted_fields(),
+                    // A quoted scalar is one field however little it holds —
+                    // the quotes are around it, and `"${nope:+A}"` is one empty
+                    // argument where the `[@]` spelling of the same is none.
+                    items => vec![items.text()],
+                },
             ),
             // `"${!ref}"` where `ref` names a whole array is the array node's
             // answer, asked of the node itself: `ref='n[@]'` yields one field
@@ -20058,8 +20108,55 @@ impl Shell {
                     }
                 }
                 other => {
-                    // An operand splits nothing itself — the word the
-                    // substitution sits in does that, to whatever characters
+                    // Inside quotes the operand is a double-quoted word, and
+                    // every list in it answers as one: `[@]` keeps its elements
+                    // apart (each of them a field even when empty, which is
+                    // what quoting a list means), `[*]` joins them with `$IFS`,
+                    // and nothing else here splits or globs. The quotes around
+                    // the substitution are what reach in — an unquoted
+                    // `"${x:-${a[@]}}"` makes the same two fields the quoted
+                    // spelling does.
+                    if mode == SplitMode::QuotedOperand {
+                        let run = match self.split_items(other) {
+                            Some(SplitItems::Fields(items)) => {
+                                lay_out_fields(&items, &mut fields, &mut cur, &mut open);
+                                continue;
+                            }
+                            // A `[*]` is the instruction to join, and here it is
+                            // obeyed however it was spelled: [`Shell::split_items`]
+                            // reports an *unquoted* one as a plain list because
+                            // unquoted it breaks fields like `[@]`, but nothing
+                            // inside these quotes does, so the spelling is all
+                            // that is left to ask. `"${x:-${a[*]}}"` joins with
+                            // `$IFS` exactly as `"${x:-"${a[*]}"}"` does.
+                            Some(items) if part_is_star(other) => {
+                                items.texts().join(self.star_sep().as_slice())
+                            }
+                            Some(SplitItems::List(items)) => {
+                                let items: Vec<Vec<EChar>> = items
+                                    .iter()
+                                    .map(|el| {
+                                        let mut f = Vec::new();
+                                        push_chars(&mut f, el, true);
+                                        f
+                                    })
+                                    .collect();
+                                lay_out_fields(&items, &mut fields, &mut cur, &mut open);
+                                continue;
+                            }
+                            Some(SplitItems::Joined(items)) => {
+                                items.join(self.star_sep().as_slice())
+                            }
+                            None => self.expand_dynamic(other),
+                        };
+                        if !run.is_empty() {
+                            push_chars(&mut cur, &run, true);
+                            open = true;
+                        }
+                        continue;
+                    }
+                    // Unquoted, an operand splits nothing *itself* — the word
+                    // the substitution sits in does that, to whatever characters
                     // this leaves — so a list turns into text here, joined the
                     // way the *spelling* says: a space for `[@]`, `$IFS` for
                     // `[*]`. It is [`Shell::join_elements`] rather than
@@ -20077,18 +20174,12 @@ impl Shell {
                     if mode == SplitMode::Operand {
                         let star = part_is_star(other);
                         let run = match self.split_items(other) {
+                            // Unlike an element, an *empty* operand field still
+                            // opens one: `${x:-''}` is one empty argument where
+                            // `IFS=; ${x:-${e[@]}}` over an array of empty
+                            // elements is none.
                             Some(SplitItems::Fields(items)) => {
-                                for (i, el) in items.iter().enumerate() {
-                                    if i > 0 && open {
-                                        fields.push(std::mem::take(&mut cur));
-                                    }
-                                    // Unlike an element, an *empty* operand
-                                    // field still opens one: `${x:-''}` is one
-                                    // empty argument where `IFS=; ${x:-${e[@]}}`
-                                    // over an array of empty elements is none.
-                                    cur.extend_from_slice(el);
-                                    open = true;
-                                }
+                                lay_out_fields(&items, &mut fields, &mut cur, &mut open);
                                 continue;
                             }
                             Some(SplitItems::List(items)) if self.ifs_is_null() => {
@@ -20398,8 +20489,16 @@ impl Shell {
     /// in flight wins and `${y:-pre${x@Z}post}` names `pre${x@Z}post`, not the
     /// substitution around it.
     fn expand_operand_fields(&mut self, arg: &Word) -> Vec<Vec<EChar>> {
+        // The quotes around the substitution are part of the context the
+        // operand expands in, not just of how its result is used — see
+        // [`Shell::dquote`] and [`SplitMode::QuotedOperand`].
+        let mode = if self.dquote {
+            SplitMode::QuotedOperand
+        } else {
+            SplitMode::Operand
+        };
         let saved = self.bad_sub_word.replace(crate::unparse::word_src(arg));
-        let fields = self.expand_word_annotated(arg, SplitMode::Operand);
+        let fields = self.expand_word_annotated(arg, mode);
         self.bad_sub_word = saved;
         fields
     }
@@ -20753,14 +20852,18 @@ impl Shell {
                 colon,
                 arg,
             } => {
-                // `quoted_fields` rather than `texts`: a string context joins
-                // an operand's own fields with a space under every `$IFS`, so
-                // `IFS=:; v=${a[*]:-'p q' r}` is `p q r`, not `p q:r`. Only the
-                // *elements* of a list answer to the `[*]` separator.
-                let fields = self
-                    .array_op_fields(name, *star, *op, *colon, arg)
-                    .quoted_fields();
-                self.join_elements(&fields, *star)
+                match self.array_op_fields(name, *star, *op, *colon, arg) {
+                    // A string context joins an operand's own fields with a
+                    // space under every `$IFS`, whatever spelling asked for it:
+                    // `IFS=:; v=${a[*]:-A"${b[@]}"B}` is `Ap q rB`, not
+                    // `Ap q:rB`. Only a list's *elements* answer to the `[*]`
+                    // separator.
+                    items @ SplitItems::Fields(_) => items.text(),
+                    items => {
+                        let fields = items.texts();
+                        self.join_elements(&fields, *star)
+                    }
+                }
             }
             WordPart::CommandSub { body } => self.command_sub_body(body),
             // The substitution's path is a temp file name this shell generates,
@@ -39038,6 +39141,14 @@ enum SplitMode {
     /// join this shares with [`SplitMode::Text`] already puts a delimiter
     /// between the items, and the caller's scan finds it.
     Operand,
+    /// The operand of a `"${x:-w}"`/`"${x:+w}"` — the same word, with the
+    /// quotes around the substitution reaching it. That makes it a
+    /// double-quoted word, and it behaves as one: nothing splits, a `[@]` keeps
+    /// one field per element *whether or not it is itself quoted*, and a `[*]`
+    /// joins with `$IFS`. So `"${x:-${a[@]}}"` and `"${x:-"${a[@]}"}"` are both
+    /// two fields under every `$IFS`, where `"${x:-${a[*]}}"` is one — and a
+    /// literal `IFS=:; "${x:-a:b}"` is one too, because no context here splits.
+    QuotedOperand,
 }
 
 /// What an *unquoted* expansion of a list-valued parameter contributes to the
@@ -39086,17 +39197,18 @@ impl SplitItems {
         self.texts().join(&b' ')
     }
 
-    /// The fields a **quoted** `"${a[@]…}"` makes of this answer. The elements
-    /// of a list are each their own, but an operand is one — it is a word, and
-    /// the quotes are around it, so nothing inside it can break a field.
+    /// The fields a **quoted** `"${a[@]…}"` makes of this answer: the elements
+    /// of a list are each their own, and so are an operand's, which
+    /// [`SplitMode::QuotedOperand`] has already decided under the same quotes.
     ///
-    /// A word that expands to nothing is still one *empty* field, which is the
-    /// whole difference between the two operators there: `"${a[@]:-}"` on an
-    /// empty array is one empty argument, where the inactive `"${a[@]:+A}"`
+    /// The one thing that needs saying here is the empty operand, because a
+    /// word that expands to nothing is still one *empty* field. That is the
+    /// whole difference between the two operators: `"${a[@]:-}"` on an empty
+    /// array is one empty argument, where the inactive `"${a[@]:+A}"`
     /// substitutes no word at all and is none.
     fn quoted_fields(self) -> Vec<Str> {
         match self {
-            items @ SplitItems::Fields(_) => vec![items.text()],
+            SplitItems::Fields(fields) if fields.is_empty() => vec![Str::new()],
             items => items.texts(),
         }
     }
@@ -39707,6 +39819,28 @@ struct EChar {
 fn push_chars(buf: &mut Vec<EChar>, s: BStr<'_>, quoted: bool) {
     for c in bytes::chars(s) {
         buf.push(EChar { c, quoted });
+    }
+}
+
+/// Lay already-formed fields into the word being built: the first joins
+/// whatever is open, each of the rest starts a new one, and the last is left
+/// open for the text that follows. `A"${a[@]}"B` is `<Ap q><rB>` this way.
+///
+/// An empty field is still a field — this is the layout for the two contexts
+/// where a boundary has already been decided (a quoted list's elements, an
+/// operand's own fields), and neither can lose one to emptiness.
+fn lay_out_fields(
+    items: &[Vec<EChar>],
+    fields: &mut Vec<Vec<EChar>>,
+    cur: &mut Vec<EChar>,
+    open: &mut bool,
+) {
+    for (i, el) in items.iter().enumerate() {
+        if i > 0 && *open {
+            fields.push(std::mem::take(cur));
+        }
+        cur.extend_from_slice(el);
+        *open = true;
     }
 }
 

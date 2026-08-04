@@ -31969,44 +31969,75 @@ when the quoted stretch produced nothing and `mode == SplitMode::Operand`, and
 covers the whole rule *except* this, and the two lines above are the ones to add
 to it when this is fixed.
 
-### TD-OILS-QUOTED-OPERAND-JOINS-A-QUOTED-AT. `"${x:-"${a[@]}"}"` is one field where bash makes two — 2026-08-04 — OPEN
+### TD-OILS-QUOTED-OPERAND-JOINS-A-QUOTED-AT. `"${x:-"${a[@]}"}"` is one field where bash makes two — 2026-08-04 — ✅ FIXED 2026-08-04
 
-**Where:** `userspace/oils/src/interp.rs` — `Shell::expand_double_quoted` and
-the `DoubleQuoted` arm of `Shell::expand_word_annotated`. Inside double quotes
-the arm asks `Shell::quoted_per_element` for the per-element answer, and that
-helper recognises `"${a[@]}"` and `"${a[@]:-w}"` but not a `"${x:-…}"` whose
-*operand* holds one — so the operand goes down the scalar `expand_double_quoted`
-path, which returns one string.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::expand_operand_fields`,
+`Shell::expand_word_annotated`, and `Shell::quoted_per_element_parts`. The
+symptom named in the title was only the visible corner of it: the operand of a
+*quoted* substitution was expanded in `SplitMode::Operand`, the mode written for
+the unquoted case, so every list in it was joined to text and the quotes that
+should have reached it never did.
 
-**Reproduce:**
+**Reproduce (all fixed):**
 
 ```sh
-a=('p q' r)
-printf '  <%s>\n' "${nope:-"${a[@]}"}"   # bash: <p q> then <r>;  osh: <p q r>
-IFS=:
-printf '  <%s>\n' "${nope:-"${a[@]}"}"   # the same, under any $IFS
-x="${nope:-"${a[@]}"}"; echo "[$x]"      # both: [p q r] — a string context still
-                                         #   joins, and the two agree there
+a=('p q' r); z0=(); ee=('' '')
+printf '  <%s>\n' "${nope:-"${a[@]}"}"   # bash: <p q> <r>;  osh was: <p q r>
+printf '  <%s>\n' "${nope:-${a[@]}}"     # the same — quoted in it or not
+IFS=:; printf '  <%s>\n' "${nope:-${a[*]}}"   # one field, `p q:r`
+printf '  <%s>\n' "${nope:-a:b}"              # still one field: nothing splits
+unset IFS
+printf '  <%s>\n' "${z0[*]:-"${a[@]}"}"  # two: the star joins elements, not the operand
+printf '  <%s>\n' "${nope:-"${ee[@]}"}"  # two empty fields
 ```
 
-**The rule.** A quoted `[@]` inside a `:-`/`:+` operand makes fields even when
-the whole substitution is quoted, because the operand is a word expanded where
-the substitution stands and that is what a quoted `[@]` does there. The
-unquoted spelling of the same thing is already right — see
-TD-OILS-OPERAND-QUOTING-IS-LOST, whose `SplitItems::Fields` carries exactly
-these breaks — so this is the quoted half of a rule whose unquoted half now
-works.
+**The rule (measured against bash 5.2.37).** Inside quotes the operand of a
+`:-`/`:+` is simply **a double-quoted word**, and it behaves as one in every
+respect. Nothing in it splits, under any `$IFS`, whether it is literal text
+(`IFS=:; "${x:-a:b}"` is one field) or the result of an expansion. A `[@]` in it
+keeps one field per element **whether or not it is itself quoted** — the quoting
+that decides that is the substitution's, so `"${x:-${a[@]}}"` and
+`"${x:-"${a[@]}"}"` are the same two fields. A `[*]` joins with `$IFS` for the
+same reason. Empty elements of a quoted list are fields like any other, and text
+glues to the ends at both the inner and the outer edge:
+`X"${nope:-A"${a[@]}"B}"Y` is `<XAp q><rBY>`.
 
-**The fix.** Give `quoted_per_element_parts` an arm for `ParamOp`/`ArrayOp` with
-`UseDefault`/`UseAlternate`: when the operator's answer is a
-`SplitItems::Fields` of more than one field, those fields *are* the per-element
-answer. Careful with the interaction: the same helper is what makes
-`"${a[@]:-w}"` work today, and there the fields come from the array's elements
-rather than from the operand.
+Two things are *not* this rule. The `[*]` spelling of the **outer** operator
+joins its *elements*, never its operand — `"${z0[*]:-"${a[@]}"}"` is two fields,
+because the star found no elements to join and an operand is a word. And a
+scalar substitution is one field however little it holds, so an inactive
+`"${nope:+A}"` is one empty argument where the `[@]` spelling of the same is
+none at all.
 
-**Pinned by** nothing yet; it belongs beside
-`tests/corpus/a-substituted-operand-is-the-word-it-was-written-as.sh`, which
-deliberately stops at the unquoted forms.
+This is the quoted half of the rule TD-OILS-OPERAND-QUOTING-IS-LOST records for
+the unquoted case, where the operand's characters are handed to the enclosing
+word's own scan. Here there is no scan to hand them to, so the only breaks are
+the ones a list brings with it.
+
+**The fix.** A fourth `SplitMode::QuotedOperand`, chosen in
+`Shell::expand_operand_fields` off the existing `Shell::dquote`. Its branch in
+`expand_word_annotated` takes the `SplitItems` classification straight: a `List`
+becomes one field per element, a `Joined` is `$IFS`-joined, and everything else
+is text — with `lay_out_fields` (a new free function shared with the unquoted
+branch) doing the glue so `A"${a[@]}"B` attaches at both ends.
+
+Three subtleties were worth the trouble they caused:
+
+* **`part_is_star(other)`, not the `SplitItems` variant, decides the join.**
+  `split_items` reports an *unquoted* `[*]` as a plain `List`, which is right
+  where things split and wrong here; inside these quotes the spelling is all
+  that is left to ask.
+* **The `[*]` join for a quoted `${a[*]:-w}` happens inside
+  `quoted_per_element_parts`**, whose `ArrayOp` arm no longer pins `star:
+  false`. Returning `None` to decline to the scalar path would run the operator
+  — and make its complaints — a second time.
+* **`SplitItems::quoted_fields` keeps an operand's own fields** rather than
+  joining them, and turns an *empty* `Fields` into one empty field. That last is
+  the whole difference between the two operators: `"${a[@]:-}"` on an empty array
+  is one empty argument where the inactive `"${a[@]:+A}"` is none.
+
+**Pinned by** `tests/corpus/a-quoted-operand-is-a-quoted-word.sh`, which walks
+the whole rule and both of its near-misses.
 
 ### TD-OILS-SINGLE-QUOTES-IN-A-QUOTED-SUBSTITUTION-ARE-EATEN. `"${x:-'a b'}"` drops the quotes bash keeps — 2026-08-04 — OPEN
 
@@ -32033,5 +32064,60 @@ rule the `bad_sub_word` handling in `expand_word_annotated` already records).
 lexer treats `'` as a literal character when the substitution is inside double
 quotes. It is a parser change, not an expansion one — the expander already does
 the right thing with whatever parts it is handed.
+
+**Pinned by** nothing yet.
+
+### TD-OILS-A-QUOTED-LIST-LOSES-ITS-FIELDS-WHEN-ANYTHING-ELSE-IS-IN-THE-QUOTES. `"${a[@]}Z"` is one field where bash makes two — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::quoted_per_element_parts`.
+It matches on the quoted run's parts as a slice, and every arm of that match is
+a **one-element** pattern `[ WordPart::… ]`. So a quoted run is recognised as
+per-element only when it is *nothing but* the list: add a single literal
+character, or a second expansion, and the whole run falls through to
+`Shell::expand_double_quoted`, which returns one string.
+
+This is the last general gap in the quoted-list story;
+TD-OILS-QUOTED-OPERAND-JOINS-A-QUOTED-AT (fixed) made the *operand* of a quoted
+substitution lay its fields out correctly, and `lay_out_fields` is already the
+routine that does the gluing. The run itself has never had the equivalent.
+
+**Reproduce:**
+
+```sh
+show() { printf '  %-20s(%d)' "$1" $(($# - 1)); shift; printf '<%s>' "$@"; printf '\n'; }
+b=('p q' r)
+show 'at then text'  "${b[@]}Z"          # bash: (2)<p q><rZ>       osh: (1)<p q rZ>
+show 'text then at'  "Z${b[@]}"          # bash: (2)<Zp q><r>       osh: (1)<Zp q r>
+show 'at then at'    "${b[@]}${b[@]}"    # bash: (3)<p q><rp q><r>  osh: (1)<p q rp q r>
+show 'at then empty' "${b[@]}${nope}"    # bash: (2)<p q><r>        osh: (1)<p q r>
+show 'at then star'  "${b[@]}${b[*]}"    # bash: (2)<p q><rp q r>   osh: (1)<p q rp q r>
+show 'op then text'  "${b[@]:-d}Z"       # bash: (2)<p q><rZ>       osh: (1)<p q rZ>
+```
+
+Note `at then empty`: bash still makes two fields, because the field break is
+the *list's*, and an expansion that contributes no characters after it cannot
+close it up. And `at then star`: only the `[@]` breaks; the `[*]` beside it is
+text that glues onto the last field.
+
+**The rule.** Inside `"…"`, a `[@]`-spelled list breaks a field between each
+pair of adjacent elements no matter what else shares the quotes. Text before it
+joins the first element, text after it joins the last, and a second list starts
+counting again from wherever the first one left off. This is exactly the layout
+`lay_out_fields` implements for the operand case — first field joins what is
+open, each of the rest starts a new one, the last is left open.
+
+**The fix.** Stop treating "is this run per-element?" as a whole-slice question
+and make it a per-part one: walk the run's parts in order, and for each ask
+`Shell::split_items` (or the operator helpers) whether it is a list. Feed a list
+to `lay_out_fields` and push anything else onto the open field. That is
+structurally the `QuotedOperand` branch of `expand_word_annotated` — which is
+the hint that the right move is to *reuse* it rather than write a third copy:
+a quoted run and a quoted operand are the same kind of word, and the operand
+mode already answers every question this one has.
+
+Careful with the scalar-vs-list distinction `quoted_per_element_parts` currently
+encodes in its arms. `"${nope:+A}"` must stay one empty field where
+`"${z0[@]:+A}"` is none, so the rewrite has to keep asking each part whether it
+is list-valued rather than assuming a `Fields` answer means per-element.
 
 **Pinned by** nothing yet.

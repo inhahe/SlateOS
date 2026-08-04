@@ -12324,7 +12324,8 @@ impl Shell {
                 let pat = self.expand_word_pattern(pattern);
                 let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
                 let repl = self.expand_replacement(replacement, patsub);
-                param_replace(value, &pat, &repl, *all, *anchor, extglob)
+                let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
+                param_replace(value, &pat, &repl, *all, *anchor, extglob, ci)
             }
             BulkOp::Case {
                 mode,
@@ -19652,7 +19653,8 @@ impl Shell {
                 let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
                 let repl = self.expand_replacement(replacement, patsub);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
-                param_replace(&value, &pat, &repl, *all, *anchor, extglob)
+                let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
+                param_replace(&value, &pat, &repl, *all, *anchor, extglob, ci)
             }
             WordPart::ParamCase {
                 name,
@@ -40376,6 +40378,11 @@ fn build_repl(replacement: &[ReplTok], matched: &[Ch]) -> Str {
 
 /// `${name/pat/repl}` and friends. `replacement` is a token stream so an
 /// unquoted `&` can expand to the matched text at each occurrence.
+///
+/// `ci` is `shopt -s nocasematch`, which bash applies to this operator (it does
+/// *not* apply it to `${name#pat}`/`${name%pat}` — measured: with the option set,
+/// `${v/ABC/X}` on `abcABC` yields `XABC` while `${v#ABC}` yields `abcABC`
+/// unchanged).
 fn param_replace(
     value: BStr<'_>,
     pattern: &[EChar],
@@ -40383,11 +40390,32 @@ fn param_replace(
     all: bool,
     anchor: ReplaceAnchor,
     extglob: bool,
+    ci: bool,
 ) -> Str {
     let v: Vec<Ch> = bytes::chars(value).collect();
+    // Under `nocasematch` the *matching* runs against ASCII-lowercased copies of
+    // both sides while the result is still built from the original characters —
+    // the same shape `nocaseglob` uses for pathname expansion. The fold has to
+    // be ASCII, and so 1:1, because this operator needs the *positions* of the
+    // match: a Unicode fold can change the character count (`İ` lowercases to
+    // two), after which an index into the folded text is not an index into the
+    // original. bash folds with `tolower`, which is 1:1 as well.
+    let pat_ci: Option<Vec<EChar>> = ci.then(|| {
+        pattern
+            .iter()
+            .map(|e| EChar {
+                c: e.c.to_ascii_lowercase(),
+                quoted: e.quoted,
+            })
+            .collect()
+    });
+    let v_ci: Option<Vec<Ch>> = ci.then(|| v.iter().map(|c| c.to_ascii_lowercase()).collect());
+    let pattern: &[EChar] = pat_ci.as_deref().unwrap_or(pattern);
+    // The text the matchers see; `v` stays the text the result is built from.
+    let m: &[Ch] = v_ci.as_deref().unwrap_or(&v);
     match anchor {
         ReplaceAnchor::Start => {
-            if let Some(end) = glob_match_at(pattern, &v, 0, extglob) {
+            if let Some(end) = glob_match_at(pattern, m, 0, extglob) {
                 let mut s = build_repl(replacement, &v[..end]);
                 for c in &v[end..] {
                     c.push_to(&mut s);
@@ -40398,7 +40426,7 @@ fn param_replace(
         }
         ReplaceAnchor::End => {
             for i in 0..=v.len() {
-                if glob_match_e(pattern, &v[i..], extglob) {
+                if glob_match_e(pattern, &m[i..], extglob) {
                     let mut s = bytes::from_chars(v[..i].iter().copied());
                     s.extend_from_slice(&build_repl(replacement, &v[i..]));
                     return s;
@@ -40413,7 +40441,7 @@ fn param_replace(
             while i < v.len() {
                 let can_replace = !done || all;
                 if can_replace
-                    && let Some(end) = glob_match_at(pattern, &v, i, extglob)
+                    && let Some(end) = glob_match_at(pattern, m, i, extglob)
                 {
                     if end > i {
                         // Non-empty match: consume the matched span.
@@ -48015,6 +48043,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("shopt -s nocasematch; [[ Hello == hello ]] && echo y").0, "y\n");
         // Sanity: without it, the literal comparison is case-sensitive.
         assert_eq!(run("[[ Hello == hello ]] && echo y || echo n").0, "n\n");
+    }
+
+    #[test]
+    fn nocasematch_replacement_but_not_trim() {
+        // bash applies `nocasematch` to the replacement operator and *not* to
+        // the trim operators — measured on `abcABC` with the option set:
+        // `${v/ABC/X}` is `XABC` while `${v#ABC}` is the value unchanged.
+        let on = "shopt -s nocasematch; v=abcABC;";
+        assert_eq!(run(&format!("{on} echo \"${{v/ABC/X}}\"")).0, "XABC\n");
+        assert_eq!(run(&format!("{on} echo \"${{v//ABC/X}}\"")).0, "XX\n");
+        assert_eq!(run(&format!("{on} echo \"${{v/#ABC/X}}\"")).0, "XABC\n");
+        assert_eq!(run(&format!("{on} echo \"${{v/%abc/X}}\"")).0, "abcX\n");
+        assert_eq!(run(&format!("{on} echo \"${{v#ABC}}\"")).0, "abcABC\n");
+        assert_eq!(run(&format!("{on} echo \"${{v%abc}}\"")).0, "abcABC\n");
+        // Only the matching folds: the surviving text keeps its own case, and
+        // an `&` in the replacement reproduces what was actually there.
+        assert_eq!(run("shopt -s nocasematch; w=HeLLo; echo \"${w/ll/[&]}\"").0, "He[LL]o\n");
+        // A bracket expression folds with everything else.
+        assert_eq!(run("shopt -s nocasematch; v=abcABC; echo \"${v//[A-C]/.}\"").0, "......\n");
+        // Off again, the same expansions are case-sensitive.
+        assert_eq!(run("v=abcABC; echo \"${v/ABC/X}\"").0, "abcX\n");
+        assert_eq!(run("w=HeLLo; echo \"${w/hello/X}\"").0, "HeLLo\n");
     }
 
     #[test]
@@ -55721,6 +55771,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 &[ReplTok::Lit(Ch::U('-'))],
                 true,
                 ReplaceAnchor::None,
+                false,
                 false,
             ),
             b"---"

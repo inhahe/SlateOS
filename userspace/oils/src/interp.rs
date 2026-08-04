@@ -3066,6 +3066,39 @@ struct BoundCompoundFlags {
     unset_trace: bool,
 }
 
+/// What a declaration builtin's *word-expansion* half leaves for its *builtin*
+/// half.
+///
+/// bash splits `declare -a x=(1 2)` across the command's temporary environment.
+/// Only a compound operand can bind a whole array, so it is expanded *and bound*
+/// while the command's words are being expanded — before the prefix assignments
+/// are so much as expanded — whereas a scalar operand is merely expanded to a
+/// `name=value` string and handed to the builtin. Three things follow, all
+/// measured against bash 5.2 and all of them the other way round in osh before
+/// the split:
+///
+/// ```sh
+/// set -x; P=1 declare -a m=(a)      # `+ m=('a')` comes before `+ P=1`
+/// A=$(echo pre >&2) declare -a x=($(echo op >&2))   # `op` before `pre`
+/// y=(old); Y=$(echo "${y[0]}") declare -a y=(new)   # Y is `new`, not `old`
+/// ```
+///
+/// So the two halves sit on opposite sides of [`Shell::prefix_assignments`] in
+/// [`Shell::exec_simple_inner`], and everything the second needs from the first
+/// travels here.
+struct DeclCompounds {
+    /// Where each compound operand's binding landed, in operand order — what the
+    /// builtin walks interleaved with its own words so that the diagnostics come
+    /// out in the order the operands were written. See [`BoundCompound`].
+    bound: Vec<BoundCompound>,
+    /// `-p`: the builtin is *asked about* its operands rather than told about
+    /// them, and applies none of its own attributes.
+    print_mode: bool,
+    /// The attributes the builtin half applies to each compound operand, decided
+    /// by the flag prescan the first half already ran.
+    flags: BoundCompoundFlags,
+}
+
 /// One `complete`/`compopt` completion specification. osh's line-oriented REPL
 /// has no interactive tab-completion, so these specs are stored, printed
 /// (`complete -p`) and mutated (`compopt`) purely for script compatibility —
@@ -13763,6 +13796,79 @@ impl Shell {
             return Flow::Next;
         }
 
+        // `declare -a x=(1 2)` and friends: the array-literal operands are bound
+        // during this word-expansion pass rather than by the builtin, and so
+        // before the command's prefix assignments are so much as expanded — see
+        // [`DeclCompounds`]. bash traces them accordingly: one `x=('1' '2')`
+        // line per operand at the point the operand is expanded, then the prefix
+        // assignments' own lines, and only then the builtin's. So the tracing for
+        // this form happens inside those two functions, not here.
+        let decl_with_arrays = !sc.decl_arrays.is_empty()
+            && matches!(
+                argv[0].as_slice(),
+                b"declare" | b"typeset" | b"local" | b"readonly" | b"export"
+            );
+        // Kept alive across the prefix assignments below because [`DeclWords`]
+        // borrows them, and it is wanted by both halves of the command.
+        let mut spliced: Vec<Str> = Vec::new();
+        let mut positions: Vec<usize> = Vec::new();
+        let mut flag_limit = 0usize;
+        let mut prepared: Option<DeclCompounds> = None;
+        if decl_with_arrays {
+            // The builtin's `set -x` line shows a *bare name* where each compound
+            // operand was written (`+ declare -x SC=1 arr SD=2`), so rebuild the
+            // word list with the names spliced back in at their source positions.
+            // The operands are in source order, so the k-th one lands `k` slots
+            // further right than its recorded position — every earlier operand has
+            // already been spliced in ahead of it. A `word_index` past the last word
+            // means the operand was written after every word, hence appended.
+            //
+            // The same list answers a second question, so it is built whether or
+            // not tracing is on: under `-p` the builtin is *asked about* its
+            // operands, and the compound ones have to be in the list it is asked
+            // with or `declare -p q r=(1)` would report only `q`.
+            spliced = argv.clone();
+            for (k, d) in sc.decl_arrays.iter().enumerate() {
+                let at = word_starts
+                    .get(d.word_index)
+                    .copied()
+                    .unwrap_or(argv.len())
+                    .saturating_add(k)
+                    .min(spliced.len());
+                spliced.insert(at, d.assign.name.clone().into_bytes());
+            }
+            // …and the same positions answer a third: where flag parsing has to
+            // stop. bash reads a declaration builtin's flags with getopt, which
+            // stops at the first non-option word — and a compound operand is one,
+            // so every word behind the earliest of them is an operand however it
+            // is spelled (`declare q=(1) -x` refuses `-x` as a name). The words
+            // that would say so were lifted out of `argv`, so the boundary has to
+            // be carried separately.
+            //
+            // …and a fourth: which operand came before which, so the builtin's
+            // per-operand diagnostics can come out in the order they were
+            // written rather than compound-last.
+            positions = sc
+                .decl_arrays
+                .iter()
+                .map(|d| word_starts.get(d.word_index).copied().unwrap_or(argv.len()))
+                .collect();
+            flag_limit = positions.iter().copied().min().unwrap_or(argv.len());
+            let words = DeclWords {
+                spliced: &spliced,
+                positions: &positions,
+                flag_limit,
+                xtrace: self.xtrace,
+            };
+            match self.exec_declare_compounds(&argv, &sc.decl_arrays, &words) {
+                Ok(p) => prepared = Some(p),
+                // An operand that could not bind takes the whole command with it:
+                // the prefix assignments are never expanded, the builtin never
+                // runs, and the rest of the parse unit goes.
+                Err(flow) => return flow,
+            }
+        }
+
         // Command present: build the env prefixes (`FOO=bar cmd`) — expanded,
         // vetted and `set -x`-traced one at a time, in source order, which is
         // also where a subscripted or readonly name is refused and dropped (see
@@ -13828,18 +13934,6 @@ impl Shell {
             return Flow::Discard;
         }
 
-        // `declare -a x=(1 2)` and friends: the array-literal operands are bound
-        // during this word-expansion pass rather than by the builtin (see
-        // `exec_declare_with_arrays`), and bash traces them accordingly — one
-        // `x=('1' '2')` line per operand, emitted at the point the operand is
-        // expanded, and only then the builtin's own line. So the tracing for this
-        // form has to happen inside that function, not here.
-        let decl_with_arrays = !sc.decl_arrays.is_empty()
-            && matches!(
-                argv[0].as_slice(),
-                b"declare" | b"typeset" | b"local" | b"readonly" | b"export"
-            );
-
         // `set -x`: trace the command before running it (its assignments were
         // traced as they were expanded, above).
         if !decl_with_arrays {
@@ -13893,60 +13987,20 @@ impl Shell {
         // `execve`, which must name the file the user actually wrote.
         let name_str = bytes::as_str(&name).map(str::to_owned);
 
-        // `declare -A m=([k]=v)` one-liner: array-literal operands are attached
-        // to the command as `decl_arrays`; apply them with the declared kind.
-        // `readonly`/`export` also accept inline array literals (`readonly
-        // arr=(1 2)`), applying their implied `-r`/`-x` attribute.
-        if decl_with_arrays {
-            // The builtin's `set -x` line shows a *bare name* where each compound
-            // operand was written (`+ declare -x SC=1 arr SD=2`), so rebuild the
-            // word list with the names spliced back in at their source positions.
-            // The operands are in source order, so the k-th one lands `k` slots
-            // further right than its recorded position — every earlier operand has
-            // already been spliced in ahead of it. A `word_index` past the last word
-            // means the operand was written after every word, hence appended.
-            //
-            // The same list answers a second question, so it is built whether or
-            // not tracing is on: under `-p` the builtin is *asked about* its
-            // operands, and the compound ones have to be in the list it is asked
-            // with or `declare -p q r=(1)` would report only `q`.
-            let spliced = {
-                let mut w = argv.clone();
-                for (k, d) in sc.decl_arrays.iter().enumerate() {
-                    let at = word_starts
-                        .get(d.word_index)
-                        .copied()
-                        .unwrap_or(argv.len())
-                        .saturating_add(k)
-                        .min(w.len());
-                    w.insert(at, d.assign.name.clone().into_bytes());
-                }
-                w
-            };
-            // …and the same positions answer a third: where flag parsing has to
-            // stop. bash reads a declaration builtin's flags with getopt, which
-            // stops at the first non-option word — and a compound operand is one,
-            // so every word behind the earliest of them is an operand however it
-            // is spelled (`declare q=(1) -x` refuses `-x` as a name). The words
-            // that would say so were lifted out of `argv`, so the boundary has to
-            // be carried separately.
-            //
-            // …and a fourth: which operand came before which, so the builtin's
-            // per-operand diagnostics can come out in the order they were
-            // written rather than compound-last.
-            let positions: Vec<usize> = sc
-                .decl_arrays
-                .iter()
-                .map(|d| word_starts.get(d.word_index).copied().unwrap_or(argv.len()))
-                .collect();
-            let flag_limit = positions.iter().copied().min().unwrap_or(argv.len());
+        // `declare -A m=([k]=v)` one-liner: the array-literal operands already
+        // bound, above the prefix assignments; what is left is the builtin — its
+        // flags, its scalar operands, and the attributes it applies to what the
+        // literals left behind. `readonly`/`export` also accept inline array
+        // literals (`readonly arr=(1 2)`), applying their implied `-r`/`-x`.
+        if let Some(prepared) = prepared {
             let words = DeclWords {
                 spliced: &spliced,
                 positions: &positions,
                 flag_limit,
                 xtrace: self.xtrace,
             };
-            return self.exec_declare_with_arrays(&argv, &sc.decl_arrays, &words, out, &redir);
+            return self
+                .exec_declare_with_arrays(&argv, &sc.decl_arrays, &words, prepared, out, &redir);
         }
 
         // Function? A function invocation's own redirects (`myfunc > file`,
@@ -30212,25 +30266,64 @@ impl Shell {
     ///
     /// `words` carries what the expanded `argv` cannot say about the *source*
     /// words — see [`DeclWords`]. Its trace line is emitted here, after the
-    /// per-operand `name=(…)` lines that phase 1 produces, so the caller must not
-    /// trace this command itself.
+    /// per-operand `name=(…)` lines the first half produces, so the caller must
+    /// not trace this command itself.
+    ///
+    /// The command is split in two across its temporary environment, exactly as
+    /// bash splits it: [`Shell::exec_declare_compounds`] expands and binds the
+    /// compound operands during the word-expansion pass, and this — the builtin
+    /// itself — runs afterwards. See [`DeclCompounds`].
     fn exec_declare_with_arrays(
         &mut self,
         argv: &[Str],
         decl_arrays: &[DeclArray],
         words: &DeclWords,
+        prepared: DeclCompounds,
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
-        // `-g` retargets every operand — compound and scalar alike — at the
-        // global binding, so the swap wraps all three phases below rather than
-        // sitting inside the builtin: the compound literals are bound in phase 1
-        // without ever reaching it. `local` is never global. See
-        // [`Shell::enter_global_scope`].
+        self.in_declare_global_scope(argv, decl_arrays, |sh| {
+            sh.exec_declare_with_arrays_scoped(argv, words, &prepared, out, redir)
+        })
+    }
+
+    /// The word-expansion half of a declaration builtin with compound operands:
+    /// the flag prescan, and the literals bound in operand order. Runs *before*
+    /// the command's prefix assignments — see [`DeclCompounds`].
+    ///
+    /// `Err` carries the flow an operand's failure imposes on the whole command:
+    /// the builtin never runs, and the rest of the parse unit goes with it.
+    fn exec_declare_compounds(
+        &mut self,
+        argv: &[Str],
+        decl_arrays: &[DeclArray],
+        words: &DeclWords,
+    ) -> Result<DeclCompounds, Flow> {
+        self.in_declare_global_scope(argv, decl_arrays, |sh| {
+            sh.declare_compounds_scoped(argv, decl_arrays, words)
+        })
+    }
+
+    /// Run `body` with `-g`'s retargeting in force, if the command asked for it.
+    ///
+    /// `-g` retargets every operand — compound and scalar alike — at the global
+    /// binding, so the swap has to wrap *both* halves of the command rather than
+    /// sitting inside the builtin: the compound literals bind in the first half
+    /// without ever reaching it. `local` is never global. Entering and leaving
+    /// once per half is the same as once around the whole, because leaving parks
+    /// what the half made of the global back in the frame that shadows it, which
+    /// is exactly where the next enter reads it from. See
+    /// [`Shell::enter_global_scope`].
+    fn in_declare_global_scope<T>(
+        &mut self,
+        argv: &[Str],
+        decl_arrays: &[DeclArray],
+        body: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         if argv.first().map(Vec::as_slice) == Some(b"local".as_slice())
             || !Self::declare_global_flag(argv.get(1..).unwrap_or_default())
         {
-            return self.exec_declare_with_arrays_scoped(argv, decl_arrays, words, out, redir);
+            return body(self);
         }
         let mut names = Self::declare_operand_names(argv.get(1..).unwrap_or_default());
         // Compound operands were lifted out of `argv` into `decl_arrays`, so
@@ -30241,9 +30334,9 @@ impl Shell {
             }
         }
         let saved = self.enter_global_scope(&names);
-        let flow = self.exec_declare_with_arrays_scoped(argv, decl_arrays, words, out, redir);
+        let outcome = body(self);
         self.leave_global_scope(saved);
-        flow
+        outcome
     }
 
     /// Which of the three case folds `name` currently carries, in the same
@@ -30281,14 +30374,12 @@ impl Shell {
         }
     }
 
-    fn exec_declare_with_arrays_scoped(
+    fn declare_compounds_scoped(
         &mut self,
         argv: &[Str],
         decl_arrays: &[DeclArray],
         words: &DeclWords,
-        out: &mut Out,
-        redir: &RedirPlan,
-    ) -> Flow {
+    ) -> Result<DeclCompounds, Flow> {
         // The command word named a declaration builtin, so it is text by
         // construction — the builtin table is keyed by `String`, and this
         // function is only reached through it.
@@ -30537,9 +30628,13 @@ impl Shell {
         // the command, not inside the builtin: only a compound operand can bind a
         // whole array, so it is bound in place while the words are being expanded,
         // whereas a *scalar* operand is merely expanded to a `name=value` string
-        // and handed to the builtin to assign. Three consequences, all measured
+        // and handed to the builtin to assign. Four consequences, all measured
         // against bash 5.2 and all wrong in osh before this ordering:
         //
+        //   * A compound binds before the command's own *prefix* assignments are
+        //     so much as expanded, so `Y=${y[0]} declare -a y=(new)` gives `Y`
+        //     the new array — which is why this half runs above
+        //     [`Shell::prefix_assignments`]. See [`DeclCompounds`].
         //   * A compound sees an earlier compound's binding —
         //     `declare -a x=(1 2) y=(${x[1]})` gives `y=([0]="2")` — which osh
         //     already got right, since the loop below is in operand order.
@@ -30604,7 +30699,7 @@ impl Shell {
                     let msg = bfmt![b"`", base.as_bytes(), b"[", &sub, b"]': not a valid identifier"];
                     self.berrln(&bfmt![self.err_prefix(), &msg]);
                     self.last_status = 1;
-                    return Flow::Discard;
+                    return Err(Flow::Discard);
                 }
                 // A followed reference that resolves to no name at all is a cycle
                 // — `resolve_ref_use` has already warned — so the operand falls
@@ -30748,7 +30843,7 @@ impl Shell {
                 // discards the rest of the parse unit rather than merely failing.
                 self.perrln(&format!("{}: cannot convert {from_kind} to {to_kind} array", a.name));
                 self.last_status = 1;
-                return Flow::Discard;
+                return Err(Flow::Discard);
             }
             if assoc {
                 self.array_kind_apply(&target, true);
@@ -30964,7 +31059,7 @@ impl Shell {
                 if !expanded {
                     self.restore_var(&target, snap);
                 }
-                return flow;
+                return Err(flow);
             }
             // A rejected compound operand (the readonly guard in
             // `apply_assignment`, which has already emitted its diagnostic) ends
@@ -30973,13 +31068,57 @@ impl Shell {
             // unit is discarded.
             if !bound {
                 self.last_status = 1;
-                return Flow::Discard;
+                return Err(Flow::Discard);
             }
         }
+        Ok(DeclCompounds {
+            bound,
+            print_mode,
+            flags: BoundCompoundFlags {
+                kind_conflict: self_kind_conflict,
+                unset_assoc,
+                unset_indexed,
+                nameref,
+                unset_nameref,
+                export,
+                unset_export,
+                readonly,
+                unset_readonly,
+                trace,
+                unset_trace,
+            },
+        })
+    }
+
+    /// The builtin half of a declaration command with compound operands: its own
+    /// trace line, its flags, its scalar operands, and the attributes it applies
+    /// to the literals the first half already bound. See [`DeclCompounds`].
+    fn exec_declare_with_arrays_scoped(
+        &mut self,
+        argv: &[Str],
+        words: &DeclWords,
+        prepared: &DeclCompounds,
+        out: &mut Out,
+        redir: &RedirPlan,
+    ) -> Flow {
+        // The command word named a declaration builtin, so it is text by
+        // construction — the builtin table is keyed by `String`, and this
+        // function is only reached through it.
+        let cmd = argv
+            .first()
+            .map(Vec::as_slice)
+            .and_then(bytes::as_str)
+            .unwrap_or_default();
+        let is_local = cmd == "local";
+        // Only the `declare` family reads a `+` word as a flag at all, which
+        // decides both where phase 2 stops scanning and whether phase 3 runs.
+        let global_builtin = cmd == "export" || cmd == "readonly";
+        let DeclCompounds { bound, print_mode, flags } = prepared;
+        let (print_mode, flags) = (*print_mode, *flags);
         // Every compound operand has bound (and traced), so the builtin's own trace
-        // line comes now — after them, and only if the command got this far: bash
-        // does not trace the builtin at all when an operand's binding aborted the
-        // command above.
+        // line comes now — after them *and after the command's prefix assignments*,
+        // and only if the command got this far: bash does not trace the builtin at
+        // all when an operand's binding aborted the command in the half above.
         if words.xtrace {
             let mut line = self.xtrace_prefix();
             for (i, w) in words.spliced.iter().enumerate() {
@@ -31031,7 +31170,7 @@ impl Shell {
             // still spoken — it is only the *attributes* a printing command
             // applies none of, which is why the rest of `apply_bound_compound`
             // is skipped here rather than the whole of it.
-            for c in &bound {
+            for c in bound {
                 if let Some(msg) = &c.refused_local {
                     self.berrln(msg);
                 }
@@ -31072,14 +31211,14 @@ impl Shell {
             "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir, limit),
             "export" if has_scalar_operand => self.builtin_export(&argv[1..], out, redir, limit),
             "readonly" | "export" => 0,
-            // `_scoped`: any `-g` swap is already in force for the whole
-            // command (see the wrapper below), and re-entering it here would
-            // pair the inner restore with the outer's saved binding.
-            // The compound operands go with them: `builtin_declare_scoped`
-            // walks them interleaved with its own words, so its diagnostics
-            // come out in the order the operands were written, as bash's
-            // single loop over all of them does.
-            _ => self.builtin_declare_scoped(&argv[1..], is_local, cmd, limit, &bound),
+            // `_scoped`: any `-g` swap is already in force for this half of the
+            // command (see [`Shell::in_declare_global_scope`]), and re-entering
+            // it here would pair the inner restore with the outer's saved
+            // binding. The compound operands go with them:
+            // `builtin_declare_scoped` walks them interleaved with its own
+            // words, so its diagnostics come out in the order the operands were
+            // written, as bash's single loop over all of them does.
+            _ => self.builtin_declare_scoped(&argv[1..], is_local, cmd, limit, bound),
         };
         // Phase 3 — the compound operands of `readonly`/`export`, which are the
         // two builtins whose scalar operands went to an entry point of their own
@@ -31098,24 +31237,8 @@ impl Shell {
         // `+` word as a flag at all (so `unset_assoc`/`unset_indexed` are), and
         // the kind conflict is the `declare` family's alone.
         if global_builtin {
-            for c in &bound {
-                if self.apply_bound_compound(
-                    c,
-                    cmd,
-                    BoundCompoundFlags {
-                        kind_conflict: self_kind_conflict,
-                        unset_assoc,
-                        unset_indexed,
-                        nameref,
-                        unset_nameref,
-                        export,
-                        unset_export,
-                        readonly,
-                        unset_readonly,
-                        trace,
-                        unset_trace,
-                    },
-                ) {
+            for c in bound {
+                if self.apply_bound_compound(c, cmd, flags) {
                     status = 1;
                 }
             }
@@ -58891,6 +59014,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -ai n=(1+1 3*3); declare -al lo=(AB); declare -p n lo").0,
             "declare -ai n=([0]=\"2\" [1]=\"9\")\ndeclare -al lo=([0]=\"ab\")\n"
+        );
+    }
+
+    #[test]
+    fn a_compound_operand_binds_before_the_commands_prefix_assignments() {
+        // Binding during the word-expansion pass puts the compound operands
+        // *ahead of the command's own prefix assignments*, which are expanded
+        // later — so their traces come first, as a block.
+        let trace = |src: &str| run(&format!("{{ set -x; {src}; }} 2>&1")).0;
+        assert_eq!(
+            trace("P=1 Q=2 declare -a m=(a) n=(b)"),
+            "+ m=('a')\n+ n=('b')\n+ P=1\n+ Q=2\n+ declare -a m n\n"
+        );
+        // Not just the trace: the operand's *side effects* come first too. osh
+        // ran the prefix first, so `pre` came out before `op`.
+        assert_eq!(
+            run("exec 2>&1\nA=$(echo pre >&2; echo a) declare -a x=($(echo op >&2; echo o))").0,
+            "op\npre\n"
+        );
+        // …and a `${u=…}` in the operand is what sets `u`, so the prefix's own
+        // copy of it merely reads what the operand left. osh had it the other
+        // way round and stored `FROMPREFIX`.
+        assert_eq!(
+            run("A=${u=FROMPREFIX} declare -a z=(${u=FROMOP}); declare -p z; echo \"u=$u\"").0,
+            "declare -a z=([0]=\"FROMOP\")\nu=FROMOP\n"
+        );
+        // The prefix assignment is not in force while the operand expands —
+        // which was already right, since the operand ran before the *binding*
+        // of the prefix either way.
+        assert_eq!(
+            run("v=old; v=new declare -a x=($v); declare -p x; echo \"v=$v\"").0,
+            "declare -a x=([0]=\"old\")\nv=old\n"
+        );
+        // The converse is the half that moved: the prefix's own expansion sees
+        // the array the operand has *already bound*. osh showed it `old`.
+        assert_eq!(
+            run("exec 2>&1\ny=(old)\nY=$(echo \"prefix-sees=${y[0]}\" >&2) declare -a y=(new)").0,
+            "prefix-sees=new\n"
+        );
+        // `-g` retargets the operand at the global binding without leaking into
+        // the prefix, which still reads the local — the two halves of the
+        // command enter the global scope separately (`in_declare_global_scope`).
+        assert_eq!(
+            run("exec 2>&1\nf() { local x=(loc); X=$(echo \"p=${x[0]}\" >&2) declare -ga x=(glob); echo \"in=${x[0]}\"; }\nf; echo \"out=${x[0]}\"").0,
+            "p=loc\nin=loc\nout=glob\n"
         );
     }
 

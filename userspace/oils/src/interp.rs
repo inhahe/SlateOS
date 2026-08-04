@@ -3121,16 +3121,12 @@ struct DeclWords<'a> {
     /// (`+ declare -x SC=1 arr SD=2`); under `-p` it is the operand list the
     /// builtin is *asked about*, so that `declare -p q r=(1)` reports both.
     spliced: &'a [Str],
-    /// Where each compound operand sat in `argv`: the index of the word it
-    /// would have been, in `decl_arrays` order. This is what lets the operand
-    /// order be reconstructed once the builtin is reached, so its diagnostics
-    /// come out in the order the operands were written.
-    positions: &'a [usize],
     /// How many leading entries of `argv` may still be read as flag words.
     /// bash parses flags with getopt, which stops at the first non-option word;
     /// a compound operand is one, so everything behind the earliest of them is
     /// an operand however it is spelled. `argv.len()` when nothing forces an
-    /// early stop — it is simply the smallest of `positions`.
+    /// early stop — it is simply how much of `argv` stood there when the first
+    /// operand was reached. See [`CompoundBinding::flag_limit`].
     flag_limit: usize,
     /// Whether `set -x` is on, so the builtin's own trace line is wanted.
     xtrace: bool,
@@ -3228,6 +3224,46 @@ struct DeclCompounds {
     /// The attributes the builtin half applies to each compound operand, decided
     /// by the flag prescan the first half already ran.
     flags: BoundCompoundFlags,
+}
+
+/// A declaration builtin's compound operands, bound one at a time as the
+/// word-expansion pass reaches each of them — see [`DeclCompounds`] for the
+/// split this is the first half of.
+///
+/// bash performs a compound assignment *at the operand's position in the word
+/// list*, not after the list has expanded, and two things follow that only this
+/// interleaving gives. A word written after the operand is expanded with it
+/// already bound:
+///
+/// ```sh
+/// declare -a r=(x y) s=${r[1]}     # s is `y`
+/// declare a=1 b=($a)               # …but b is empty: a scalar is only
+///                                  # *expanded* here, and assigned by the
+///                                  # builtin afterwards
+/// ```
+///
+/// …and a later word failing to expand does not take back what already bound:
+///
+/// ```sh
+/// declare r=(a) x=$((1/0))         # rc 1, and r is (a)
+/// ```
+#[derive(Default)]
+struct CompoundBinding {
+    /// How many of the operands have been bound so far.
+    done: usize,
+    /// Where each bound operand stood in `argv`: the index of the word it would
+    /// have been, in operand order. This is what lets the operand order be
+    /// reconstructed once the builtin is reached, so its diagnostics come out in
+    /// the order the operands were written.
+    positions: Vec<usize>,
+    /// Where flag parsing stopped, fixed when the *first* operand is reached:
+    /// getopt ends at the first non-option word, and an operand is one, so every
+    /// flag necessarily precedes it. See [`DeclWords::flag_limit`].
+    flag_limit: usize,
+    /// What the bound operands leave for the builtin half. The flag prescan
+    /// reads the same words to the same answer every time, so the first
+    /// operand's copy speaks for all of them and the rest only add to `bound`.
+    prepared: Option<DeclCompounds>,
 }
 
 /// One `complete`/`compopt` completion specification. osh's line-oriented REPL
@@ -15046,15 +15082,18 @@ impl Shell {
             .and_then(word_as_plain_literal)
             .is_some_and(is_declaration_builtin);
         let mut argv: Vec<Str> = Vec::new();
-        // Where each source word's fields start in `argv`. Only a declaration
-        // builtin with compound operands needs it, to put the operands back at
-        // their source positions in the `set -x` line — a word can expand to any
-        // number of fields, so the mapping is not the identity.
-        let mut word_starts: Vec<usize> = Vec::new();
+        // A compound operand is *performed* where it stands in the word list, so
+        // it binds here rather than after the list has expanded, and the words
+        // written after it are expanded with it bound. See [`CompoundBinding`].
+        // Only a declaration builtin has any, and the check is per *word*, so it
+        // is worth not making at all for the commands that cannot.
         let track_words = !sc.decl_arrays.is_empty();
+        let mut cb = CompoundBinding::default();
         for (wi, w) in sc.words.iter().enumerate() {
-            if track_words {
-                word_starts.push(argv.len());
+            if track_words
+                && let Err(flow) = self.bind_compounds_before(wi, &argv, &sc.decl_arrays, &mut cb)
+            {
+                return flow;
             }
             if is_decl && wi > 0 && is_assignment_word(w) {
                 argv.push(self.expand_decl_assignment(w));
@@ -15066,39 +15105,14 @@ impl Shell {
                 argv.extend(self.expand_word(&bw, true));
             }
         }
-        // `set -u`: a reference to an unset variable during expansion aborts the
-        // shell (matching a non-interactive bash under nounset). The abort status
-        // is carried by the flag (127 for nounset/`:?`, 1 for a bad substitution)
-        // but only at the main shell; a subshell yields 1 (see fatal_abort_status).
-        if let Some(code) = self.unbound_error.take() {
-            let status = self.fatal_abort_status(code);
-            self.last_status = status;
-            return Flow::Exit(status);
-        }
-
-        // A non-fatal word-expansion error while expanding a command word
-        // (`echo $((1/0))`, a bad `${a[i]}` subscript, a `${v:o:l}` substring-<0,
-        // `${!unset_ptr}`) discards the command without running it: bash reports
-        // it, sets $? to the carried status, and abandons the rest of the current
-        // top-level parse unit — but does NOT exit the shell (a following line
-        // still runs). Arithmetic *commands* (`(( ))`, `let`, `for ((`) never set
-        // this flag — only the `$(( … ))`/`$[ … ]` expansion path (`arith_sub`)
-        // does, plus the arithmetic *subscript* path, which bash reaches through
-        // its own entry point and treats as an expansion error wherever it
-        // appears (`arith::ArithError::in_subscript`). Prefix assignment-value errors are checked after their own
-        // expansion.
-        if let Some(flow) = self.take_discard_flow() {
+        // …and the ones written after every word.
+        if track_words
+            && let Err(flow) = self.bind_compounds_before(usize::MAX, &argv, &sc.decl_arrays, &mut cb)
+        {
             return flow;
         }
-
-        // `shopt -s failglob`: a command-word glob that matched nothing is a
-        // word-expansion error — bash reports `no match: PATTERN`, discards the
-        // command (and the rest of the current parse unit) and continues.
-        if let Some(pat) = self.glob_error.take() {
-            let msg = bfmt![self.err_prefix(), b"no match: ", &pat, b"\n"];
-            self.emit_stderr(&msg);
-            self.last_status = 1;
-            return Flow::Discard;
+        if let Some(flow) = self.command_word_expansion_failure() {
+            return flow;
         }
 
         // Pure assignment (no command word): persist the variables/arrays.
@@ -15202,19 +15216,18 @@ impl Shell {
                 b"declare" | b"typeset" | b"local" | b"readonly" | b"export"
             );
         // Kept alive across the prefix assignments below because [`DeclWords`]
-        // borrows them, and it is wanted by both halves of the command.
+        // borrows it, and it is wanted by both halves of the command.
         let mut spliced: Vec<Str> = Vec::new();
-        let mut positions: Vec<usize> = Vec::new();
         let mut flag_limit = 0usize;
         let mut prepared: Option<DeclCompounds> = None;
         if decl_with_arrays {
             // The builtin's `set -x` line shows a *bare name* where each compound
             // operand was written (`+ declare -x SC=1 arr SD=2`), so rebuild the
-            // word list with the names spliced back in at their source positions.
-            // The operands are in source order, so the k-th one lands `k` slots
-            // further right than its recorded position — every earlier operand has
-            // already been spliced in ahead of it. A `word_index` past the last word
-            // means the operand was written after every word, hence appended.
+            // word list with the names spliced back in at their source positions
+            // — how much of `argv` stood there when each one bound. The operands
+            // are in source order, so the k-th one lands `k` slots further right
+            // than its recorded position: every earlier operand has already been
+            // spliced in ahead of it.
             //
             // The same list answers a second question, so it is built whether or
             // not tracing is on: under `-p` the builtin is *asked about* its
@@ -15222,44 +15235,17 @@ impl Shell {
             // with or `declare -p q r=(1)` would report only `q`.
             spliced = argv.clone();
             for (k, d) in sc.decl_arrays.iter().enumerate() {
-                let at = word_starts
-                    .get(d.word_index)
+                let at = cb
+                    .positions
+                    .get(k)
                     .copied()
                     .unwrap_or(argv.len())
                     .saturating_add(k)
                     .min(spliced.len());
                 spliced.insert(at, d.assign.name.clone().into_bytes());
             }
-            // …and the same positions answer a third: where flag parsing has to
-            // stop. bash reads a declaration builtin's flags with getopt, which
-            // stops at the first non-option word — and a compound operand is one,
-            // so every word behind the earliest of them is an operand however it
-            // is spelled (`declare q=(1) -x` refuses `-x` as a name). The words
-            // that would say so were lifted out of `argv`, so the boundary has to
-            // be carried separately.
-            //
-            // …and a fourth: which operand came before which, so the builtin's
-            // per-operand diagnostics can come out in the order they were
-            // written rather than compound-last.
-            positions = sc
-                .decl_arrays
-                .iter()
-                .map(|d| word_starts.get(d.word_index).copied().unwrap_or(argv.len()))
-                .collect();
-            flag_limit = positions.iter().copied().min().unwrap_or(argv.len());
-            let words = DeclWords {
-                spliced: &spliced,
-                positions: &positions,
-                flag_limit,
-                xtrace: self.xtrace,
-            };
-            match self.exec_declare_compounds(&argv, &sc.decl_arrays, &words) {
-                Ok(p) => prepared = Some(p),
-                // An operand that could not bind takes the whole command with it:
-                // the prefix assignments are never expanded, the builtin never
-                // runs, and the rest of the parse unit goes.
-                Err(flow) => return flow,
-            }
+            flag_limit = cb.flag_limit;
+            prepared = cb.prepared.take();
         }
 
         // Command present: build the env prefixes (`FOO=bar cmd`) — expanded,
@@ -15394,7 +15380,6 @@ impl Shell {
         if let Some(prepared) = prepared {
             let words = DeclWords {
                 spliced: &spliced,
-                positions: &positions,
                 flag_limit,
                 xtrace: self.xtrace,
             };
@@ -33241,20 +33226,122 @@ impl Shell {
         })
     }
 
-    /// The word-expansion half of a declaration builtin with compound operands:
-    /// the flag prescan, and the literals bound in operand order. Runs *before*
-    /// the command's prefix assignments — see [`DeclCompounds`].
+    /// How a command's *word expansion* failed, if it did — the three ways, in
+    /// the order they are ruled out. Checked once the whole list has expanded,
+    /// and again before each compound operand binds, since one written after the
+    /// word that failed is never reached.
     ///
-    /// `Err` carries the flow an operand's failure imposes on the whole command:
-    /// the builtin never runs, and the rest of the parse unit goes with it.
+    /// * `set -u`: a reference to an unset variable during expansion aborts the
+    ///   shell (matching a non-interactive bash under nounset). The abort status
+    ///   is carried by the flag (127 for nounset/`:?`, 1 for a bad substitution)
+    ///   but only at the main shell; a subshell yields 1 (see
+    ///   [`Shell::fatal_abort_status`]).
+    /// * A non-fatal word-expansion error (`echo $((1/0))`, a bad `${a[i]}`
+    ///   subscript, a `${v:o:l}` substring-<0, `${!unset_ptr}`) discards the
+    ///   command without running it: bash reports it, sets `$?` to the carried
+    ///   status, and abandons the rest of the current top-level parse unit — but
+    ///   does NOT exit the shell (a following line still runs). Arithmetic
+    ///   *commands* (`(( ))`, `let`, `for ((`) never set this flag — only the
+    ///   `$(( … ))`/`$[ … ]` expansion path (`arith_sub`) does, plus the
+    ///   arithmetic *subscript* path, which bash reaches through its own entry
+    ///   point and treats as an expansion error wherever it appears
+    ///   (`arith::ArithError::in_subscript`). Prefix assignment-value errors are
+    ///   checked after their own expansion.
+    /// * `shopt -s failglob`: a command-word glob that matched nothing is a
+    ///   word-expansion error — bash reports `no match: PATTERN`, discards the
+    ///   command (and the rest of the current parse unit) and continues.
+    fn command_word_expansion_failure(&mut self) -> Option<Flow> {
+        if let Some(code) = self.unbound_error.take() {
+            let status = self.fatal_abort_status(code);
+            self.last_status = status;
+            return Some(Flow::Exit(status));
+        }
+        if let Some(flow) = self.take_discard_flow() {
+            return Some(flow);
+        }
+        if let Some(pat) = self.glob_error.take() {
+            let msg = bfmt![self.err_prefix(), b"no match: ", &pat, b"\n"];
+            self.emit_stderr(&msg);
+            self.last_status = 1;
+            return Some(Flow::Discard);
+        }
+        None
+    }
+
+    /// Bind every compound operand written before source word `wi`, each with
+    /// exactly the words before it expanded into `argv` — see
+    /// [`CompoundBinding`]. `usize::MAX` takes the ones written after every
+    /// word.
+    fn bind_compounds_before(
+        &mut self,
+        wi: usize,
+        argv: &[Str],
+        decl_arrays: &[DeclArray],
+        st: &mut CompoundBinding,
+    ) -> Result<(), Flow> {
+        // Only a declaration builtin binds them. The parser marks the operands
+        // from the command word as written, which can still expand to something
+        // else (`d=echo; $d a=(1)`) — bash decides on the expanded word, so the
+        // check waits until there is one.
+        if !argv.first().map(Vec::as_slice).is_some_and(|w| {
+            matches!(w, b"declare" | b"typeset" | b"local" | b"readonly" | b"export")
+        }) {
+            return Ok(());
+        }
+        while let Some(d) = decl_arrays.get(st.done) {
+            if d.word_index > wi {
+                break;
+            }
+            // A word *before* this operand failing to expand ends the command
+            // where it failed, so the operand is never reached and never binds:
+            // `declare x=$((1/0)) r=(a)` leaves `r` unset, where the same two
+            // written the other way round leaves `r` bound.
+            if let Some(flow) = self.command_word_expansion_failure() {
+                return Err(flow);
+            }
+            if st.prepared.is_none() {
+                st.flag_limit = argv.len();
+            }
+            st.positions.push(argv.len());
+            let prepared = self.exec_declare_compounds(
+                argv,
+                std::slice::from_ref(d),
+                st.flag_limit,
+                &st.positions[st.done..],
+            )?;
+            match &mut st.prepared {
+                Some(first) => first.bound.extend(prepared.bound),
+                None => st.prepared = Some(prepared),
+            }
+            st.done = st.done.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// The word-expansion half of a declaration builtin with compound operands:
+    /// the flag prescan, and the literal bound — see [`DeclCompounds`] for the
+    /// split, and [`CompoundBinding`] for the interleaving.
+    ///
+    /// This half is called once *per operand*, as the word-expansion pass
+    /// reaches it, so `argv` is only as much of the command as has been expanded
+    /// by then — which is all it needs. `flag_limit` and `positions` are what it
+    /// takes from [`DeclWords`], whose other two fields belong to the builtin
+    /// half; both are known by the time the operand is reached, since every flag
+    /// necessarily precedes the first operand and a position is just how much of
+    /// `argv` stood there.
+    ///
+    /// `Err` carries the flow the operand's failure imposes on the whole
+    /// command: the builtin never runs, and the rest of the parse unit goes with
+    /// it. What earlier operands already bound stands all the same.
     fn exec_declare_compounds(
         &mut self,
         argv: &[Str],
         decl_arrays: &[DeclArray],
-        words: &DeclWords,
+        flag_limit: usize,
+        positions: &[usize],
     ) -> Result<DeclCompounds, Flow> {
         self.in_declare_global_scope(argv, decl_arrays, |sh| {
-            sh.declare_compounds_scoped(argv, decl_arrays, words)
+            sh.declare_compounds_scoped(argv, decl_arrays, flag_limit, positions)
         })
     }
 
@@ -33332,7 +33419,8 @@ impl Shell {
         &mut self,
         argv: &[Str],
         decl_arrays: &[DeclArray],
-        words: &DeclWords,
+        flag_limit: usize,
+        positions: &[usize],
     ) -> Result<DeclCompounds, Flow> {
         // The command word named a declaration builtin, so it is text by
         // construction — the builtin table is keyed by `String`, and this
@@ -33424,7 +33512,7 @@ impl Shell {
         // word. The scalar path already had this — neither builtin's own loop
         // strips a `+` — so it is only this loop that read one.
         let global_builtin = cmd == "export" || cmd == "readonly";
-        for arg in argv.get(1..words.flag_limit.max(1)).unwrap_or_default() {
+        for arg in argv.get(1..flag_limit.max(1)).unwrap_or_default() {
             if global_builtin && arg.starts_with(b"+") {
                 break;
             }
@@ -33671,7 +33759,7 @@ impl Shell {
             // one less. A compound written after every word sits past the end,
             // and the loop appends it.
             bound.push(BoundCompound {
-                at: words.positions.get(k).copied().unwrap_or(argv.len()).saturating_sub(1),
+                at: positions.get(k).copied().unwrap_or(argv.len()).saturating_sub(1),
                 name: a.name.clone(),
                 target: target.clone(),
                 refused_local: None,
@@ -71649,6 +71737,61 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(o, "declare -x t=\"3*4\"\ndeclare -i t=\"1\"\n");
         let (o, _) = run("{ t=o; declare -n r=t; set -x; r=V true; } 2>&1");
         assert!(o.ends_with("+ r=V\n+ true\n"), "got: {o:?}");
+    }
+
+    /// A declaration builtin's compound operand is *performed* where it stands
+    /// in the word list, so a word written after it is expanded with it bound —
+    /// while a scalar operand is only expanded there and assigned later.
+    #[test]
+    fn a_declaration_builtins_compound_operand_binds_where_it_stands() {
+        // A scalar operand after a compound one sees it…
+        let (o, _) = run("declare -a r=(x y) s=${r[1]}; echo \"[$s]\"");
+        assert_eq!(o, "[y]\n");
+        let (o, _) = run("declare -A A=([k]=v) t=${A[k]}; echo \"[$t]\"");
+        assert_eq!(o, "[v]\n");
+        // …and so does another compound.
+        let (o, _) = run("declare -a p=(x y) q=(${p[1]}); declare -p q");
+        assert_eq!(o, "declare -a q=([0]=\"y\")\n");
+        // …but nothing sees a *scalar* one, whose assignment the builtin only
+        // performs once every word has expanded.
+        let (o, _) = run("declare a=1 b=($a); declare -p b");
+        assert_eq!(o, "declare -a b=()\n");
+        let (o, _) = run("declare c=1 d=$c; echo \"[${d-U}]\"");
+        assert_eq!(o, "[]\n");
+        // …so a scalar's value reads the name's *old* value even where the same
+        // command is about to replace it, while the builtin still applies its
+        // own scalars in order.
+        let (o, _) = run("a=OLD; declare a=NEW s=$a; echo \"[$s][$a]\"");
+        assert_eq!(o, "[OLD][NEW]\n");
+        let (o, _) = run("declare c=x c+=y; echo \"[$c]\"");
+        assert_eq!(o, "[xy]\n");
+
+        // A compound already bound stays bound when a *later* operand fails,
+        // whether the builtin refuses it…
+        let (o, st) = run("{ readonly ro=1; declare -a r=(x y) ro=2; } 2>&1; declare -p r");
+        assert_eq!(
+            o,
+            "osh: declare: ro: readonly variable\ndeclare -a r=([0]=\"x\" [1]=\"y\")\n"
+        );
+        assert_eq!(st, 0);
+        // …or a later word fails to expand. The error abandons the rest of the
+        // parse unit it happened in, hence the `eval`.
+        let (o, _) = run("eval 'declare r=(a) x=$((1/0))' 2>&1\ndeclare -p r");
+        assert_eq!(
+            o,
+            "osh: 1/0: division by 0 (error token is \"0\")\ndeclare -a r=([0]=\"a\")\n"
+        );
+        // …while an *earlier* failure means the operand is never reached.
+        let (o, _) = run("eval 'declare x=$((1/0)) r=(a)' 2>&1\ndeclare -p r 2>&1");
+        assert_eq!(
+            o,
+            "osh: 1/0: division by 0 (error token is \"0\")\nosh: declare: r: not found\n"
+        );
+
+        // The trace shows the compound where it was written, and the builtin's
+        // own line a bare name in its place.
+        let (o, _) = run("{ set -x; declare -a t=(m n) s=${t[0]}; } 2>&1");
+        assert!(o.ends_with("+ t=('m' 'n')\n+ declare -a t s=m\n"), "got: {o:?}");
     }
 
     /// Re-reading a string or a file is a level of expansion indirection to

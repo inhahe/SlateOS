@@ -134,11 +134,11 @@ same bound name. Confirmed against bash:
 (20 sections) and the `a_prefix_assignment_binds_what_its_nameref_resolves_to`
 unit test in `src/interp.rs`.
 
-### TD-OILS-DECL-COMPOUND-NOT-SEEN-BY-A-LATER-SCALAR. A compound operand binds too late for a later scalar operand's value — OPEN — 2026-08-04
+### TD-OILS-DECL-COMPOUND-NOT-SEEN-BY-A-LATER-SCALAR. A compound operand bound too late for a later scalar operand's value — 2026-08-04 — ✅ FIXED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — the word-expansion loop in
 `Shell::exec_simple` (`for (wi, w) in sc.words.iter().enumerate()`), which
-expands **every** word into `argv` before `Shell::exec_declare_compounds` binds
+expanded **every** word into `argv` before `Shell::exec_declare_compounds` bound
 any compound operand.
 
 **What:** a declaration builtin's compound operand is bound during the
@@ -185,24 +185,47 @@ assignment is *performed* as the expansion pass reaches it; a scalar one is only
   (`readonly ro=1; declare -a r=(x y) ro=2` fails but leaves `r` bound), which
   osh already matches.
 
-`local` behaves identically. osh matches every one of these except the first
+`local` behaves identically. osh matched every one of these except the first
 group.
 
-**Proper fix:** interleave the two. In the word-expansion loop, before expanding
-the word at index `wi`, bind every compound operand whose `word_index` is `wi`.
-That needs `Shell::declare_compounds_scoped` split in two — a flag prescan and a
-bind-one-operand step — which is workable because every flag necessarily
-precedes the first compound operand (getopt stops at the first non-option word,
-which is why `declare q=(1) -x` refuses `-x` as a *name*): the prescan's
-`argv[1..flag_limit]` is exactly the part of `argv` already expanded when the
-first compound is reached, and `positions[k]` is just `argv.len()` at the moment
-operand `k` is reached.
+**Fixed 2026-08-04.** The two are now **interleaved**: the word-expansion loop
+in `Shell::exec_simple` calls the new `Shell::bind_compounds_before` before
+expanding the word at index `wi`, which binds every compound operand written
+ahead of that word, and once more with `usize::MAX` after the loop for the ones
+written after every word. `Shell::exec_declare_compounds` and
+`Shell::declare_compounds_scoped` are therefore called **once per operand**,
+taking `flag_limit: usize, positions: &[usize]` in place of the whole
+`DeclWords` — both are known by the time the operand is reached, because every
+flag necessarily precedes the first compound one (getopt stops at the first
+non-option word, which is why `declare q=(1) -x` refuses `-x` as a *name*), so
+`argv[1..flag_limit]` is exactly what had expanded when the first operand was
+reached and `positions[k]` is just `argv.len()` at the moment operand `k` was.
+The per-operand state lives in the new `CompoundBinding`, and the flag prescan
+being *pure* is what makes re-running it per operand safe: the first operand's
+`DeclCompounds` speaks for all of them, and the rest only extend its `bound`.
 
-The one knot is `Shell::in_declare_global_scope`, which currently wraps each
-half and reads the operand names out of the *expanded* `argv`. Wrapping the word
-loop instead means collecting those names from the **source** words, which is
-possible without expanding them — an assignment word's name is literal text
-before its `=`.
+`Shell::in_declare_global_scope` needed no rework after all: `-g` does not reach
+value expansion (`local x=L; declare -g a=(1) y=$x` binds `y` to `L` in bash),
+so it still wraps each *binding* rather than the word loop, and entering and
+leaving it per operand is the same as per half — leaving parks what the operand
+made of the global back in the frame that shadows it, which is where the next
+enter reads it from.
+
+Two smaller things fell out. The three post-loop expansion-failure checks became
+`Shell::command_word_expansion_failure`, since a binding has to make the same
+check before it — a word *before* an operand failing means the operand is never
+reached and never binds, which is the entry's second symptom. And `word_starts`
+went away entirely: `CompoundBinding::positions` records the same numbers, so
+the `set -x`/`-p` splice reads them instead and no per-word bookkeeping is
+needed for commands that have no compound operands at all.
+
+**Pinned by** `tests/corpus/a-declaration-builtins-compound-operand-binds-where-it-stands.sh`
+(17 sections) and the `a_declaration_builtins_compound_operand_binds_where_it_stands`
+unit test in `src/interp.rs`. The corpus case has to keep the failure cases'
+bindings in *this* shell, so it reads their diagnostics from a scratch file
+rather than down a `2>&1 |` pipeline, and wraps the word-expansion failures in
+an `eval` because such an error abandons the rest of the parse unit it happened
+in — which would otherwise swallow the very `declare -p` that asks what bound.
 
 ### TD-OILS-PREFIX-IGNORES-PLUS-EQUALS. A `+=` command prefix assigned rather than appended, and a prefix assignment did not see the ones before it — 2026-08-04 — ✅ FIXED 2026-08-04
 

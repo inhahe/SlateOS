@@ -134,6 +134,64 @@ same bound name. Confirmed against bash:
 (20 sections) and the `a_prefix_assignment_binds_what_its_nameref_resolves_to`
 unit test in `src/interp.rs`.
 
+### TD-OILS-DECL-COMPOUND-NOT-SEEN-BY-A-LATER-SCALAR. A compound operand binds too late for a later scalar operand's value — OPEN — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the word-expansion loop in
+`Shell::exec_simple` (`for (wi, w) in sc.words.iter().enumerate()`), which
+expands **every** word into `argv` before `Shell::exec_declare_compounds` binds
+any compound operand.
+
+**What:** a declaration builtin's compound operand is bound during the
+word-expansion pass, which osh already models (see `DeclCompounds`) — but bash
+does it *at the operand's position in the word list*, so a word written after it
+is expanded with it already bound. osh binds them all after the whole list has
+expanded, so a later **scalar** operand's value sees nothing:
+
+```sh
+declare -a r=(x y) s=${r[1]}     # bash: s=y      osh: s=
+declare -A A=([k]=v) s=${A[k]}   # bash: s=v      osh: s=
+declare a=1 r=(x y) s=${r[0]}$a  # bash: s=x      osh: s=
+```
+
+A later **compound** operand already sees it (`declare -a r=(x y) t=(${r[1]})`
+is `y` in both), because those are bound in operand order — so the gap is only
+between a compound and a scalar written after it.
+
+**The measured rule (bash 5.2.37), which is entirely consistent:** a compound
+assignment is *performed* as the expansion pass reaches it; a scalar one is only
+*expanded* there, and the assignment itself is deferred to the builtin. Hence:
+
+- a scalar after a compound sees it (`s=y` above), and so does a compound after
+  a compound;
+- a compound after a *scalar* does **not** (`declare a=1 b=($a)` leaves `b`
+  empty), nor does a scalar after a scalar (`declare a=1 b=$a` → `b` empty),
+  nor a scalar before a compound (`declare s=${r[1]} r=(x y)` → `s` empty);
+- a scalar's value is expanded at its own position but assigned later, so
+  `a=OLD; declare a=NEW s=$a` leaves `s` as `OLD` — while the builtin then
+  applies its scalars in order, so `declare c=x c+=y` is `xy`;
+- the compound's binding stands even when a later operand is refused
+  (`readonly ro=1; declare -a r=(x y) ro=2` fails but leaves `r` bound), which
+  osh already matches.
+
+`local` behaves identically. osh matches every one of these except the first
+group.
+
+**Proper fix:** interleave the two. In the word-expansion loop, before expanding
+the word at index `wi`, bind every compound operand whose `word_index` is `wi`.
+That needs `Shell::declare_compounds_scoped` split in two — a flag prescan and a
+bind-one-operand step — which is workable because every flag necessarily
+precedes the first compound operand (getopt stops at the first non-option word,
+which is why `declare q=(1) -x` refuses `-x` as a *name*): the prescan's
+`argv[1..flag_limit]` is exactly the part of `argv` already expanded when the
+first compound is reached, and `positions[k]` is just `argv.len()` at the moment
+operand `k` is reached.
+
+The one knot is `Shell::in_declare_global_scope`, which currently wraps each
+half and reads the operand names out of the *expanded* `argv`. Wrapping the word
+loop instead means collecting those names from the **source** words, which is
+possible without expanding them — an assignment word's name is literal text
+before its `=`.
+
 ### TD-OILS-PREFIX-IGNORES-PLUS-EQUALS. A `+=` command prefix assigned rather than appended, and a prefix assignment did not see the ones before it — 2026-08-04 — ✅ FIXED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::prefix_assignments` and

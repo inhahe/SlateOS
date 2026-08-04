@@ -19495,11 +19495,11 @@ impl Shell {
                 length,
             } => {
                 let fields = self.slice_elements(name, *star, offset, length);
-                self.join_elements(&fields, *star)
+                self.join_derived(&fields, *star)
             }
             WordPart::ArrayBulk { name, star, op } => {
                 let fields = self.bulk_elements(name, op);
-                self.join_elements(&fields, *star)
+                self.join_derived(&fields, *star)
             }
             WordPart::ArrayOp {
                 name,
@@ -19524,7 +19524,7 @@ impl Shell {
             } => self.expand_array_ref(name, index, *length),
             WordPart::ArrayKeys { name, star } => {
                 let keys = self.array_keys(name);
-                self.join_elements(&keys, *star)
+                self.join_derived(&keys, *star)
             }
             WordPart::Indirect { refname, index } => self.expand_indirect(refname, index),
             WordPart::IndirectOp { refname, index, target } => {
@@ -19633,7 +19633,7 @@ impl Shell {
                     .into_iter()
                     .map(String::into_bytes)
                     .collect();
-                self.join_elements(&names, *star)
+                self.join_derived(&names, *star)
             }
             WordPart::BadSubst(raw) => self.bad_substitution(raw),
             // Literal/quoted handled by callers.
@@ -20397,22 +20397,57 @@ impl Shell {
         s
     }
 
-    /// Join a list of elements for a context that wants one string: every `[*]`
-    /// form joins with [`Shell::star_sep`], every `[@]` form with a space.
+    /// Join a parameter's *own* elements for a context that wants one string:
+    /// `[*]` with [`Shell::star_sep`], `[@]` with a space.
     ///
-    /// The join belongs to the *reference*, so what the list is made of never
-    /// enters into it: the elements themselves (`"${a[*]}"`), the keys
-    /// (`"${!a[*]}"`), the names carrying a prefix (`"${!pre*}"`), a slice
-    /// (`"${a[*]:1:2}"`) and an element-wise transform (`"${a[*]@Q}"`) are one
-    /// rule, not five. Every site goes through here for that reason — written
-    /// out per site, the four latter ones hard-coded the space and only
-    /// `${a[*]}` was kept in step with `$IFS`.
+    /// Only two references get this rule — `"${a[@]}"`/`"$@"` and the `:-`
+    /// family, which is that same list whenever the array is non-empty. A list
+    /// an operator *derived* joins its `[@]` form with `$IFS` instead; see
+    /// [`Shell::join_derived`], which is the rule for the other four sites.
+    ///
+    /// The `[*]` half is common to both and is why one helper became two rather
+    /// than six: written out per site the star join was kept in step with `$IFS`
+    /// only where `${a[*]}` itself asked, and the keys, the prefix names, the
+    /// slice and the element-wise transform each hard-coded a space.
     fn join_elements(&self, elems: &[Str], star: bool) -> Str {
         if star {
             elems.join(self.star_sep().as_slice())
         } else {
             elems.join(b" ".as_slice())
         }
+    }
+
+    /// Join a list an *operator* derived from a parameter for a context that
+    /// wants one string: `[*]` with [`Shell::star_sep`], `[@]` with
+    /// [`Shell::at_sep`].
+    ///
+    /// The `[@]` half is the surprise. `"${a[@]}"` glues its elements with a
+    /// space under every `$IFS`, and it is tempting to read that as "`[@]` means
+    /// a space" — but it is only true of the parameter's *own* elements (and so
+    /// of `"${a[@]:-w}"`, which is that same list when the array is non-empty).
+    /// Every list an operator built joins with `$IFS` exactly as the `[*]`
+    /// spelling does:
+    ///
+    /// ```text
+    /// IFS=:   "${n[@]}"   p q r        "${n[@]:0:2}"  p:q
+    ///         "${n[@]:-w}" p q r       "${n[@]@Q}"    'p':'q':'r'
+    /// ```
+    ///
+    /// Where the two spellings still part company is an *empty* `$IFS`: `[*]`
+    /// joins with nothing, `[@]` falls back to a space. That fallback is why the
+    /// difference hides from a test that only uses the default `IFS` — under
+    /// ` \t\n` both rules produce a space.
+    fn join_derived(&self, elems: &[Str], star: bool) -> Str {
+        let sep = if star { self.star_sep() } else { self.at_sep() };
+        elems.join(sep.as_slice())
+    }
+
+    /// The separator a `[@]` reference joins a *derived* list with: the first
+    /// character of `$IFS`, but a space when `$IFS` is empty — where the `[*]`
+    /// spelling ([`Shell::star_sep`]) joins with nothing.
+    fn at_sep(&self) -> Str {
+        let sep = self.star_sep();
+        if sep.is_empty() { b" ".to_vec() } else { sep }
     }
 
     /// The separator that `"$*"` (and `"${a[*]}"`) uses to join elements: the
@@ -54973,6 +55008,35 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The positional forms are the same reference.
         assert_eq!(run("set -- 'a b' c; IFS=:; echo \"[${*@Q}]\"").0, "['a b':'c']\n");
         assert_eq!(run("set -- 'a b' c; IFS=:; set -- \"${@@Q}\"; echo \"$#\"").0, "2\n");
+    }
+
+    #[test]
+    fn an_at_reference_joins_a_derived_list_with_ifs() {
+        // The `[@]` counterpart, and it is *not* "`[@]` means a space". Only the
+        // parameter's own elements join that way — and the `:-` family, which is
+        // that same list when the array is non-empty.
+        let src = |e: &str| format!("declare -a n=(p q r); IFS=:; x=\"{e}\"; echo \"[$x]\"");
+        assert_eq!(run(&src("${n[@]}")).0, "[p q r]\n");
+        assert_eq!(run(&src("${n[@]:-w}")).0, "[p q r]\n");
+        assert_eq!(run("set -- s t u; IFS=:; x=\"$@\"; echo \"[$x]\"").0, "[s t u]\n");
+        // Every list an operator derived joins with `$IFS`, exactly as the `[*]`
+        // spelling does.
+        assert_eq!(run(&src("${!n[@]}")).0, "[0:1:2]\n");
+        assert_eq!(run(&src("${n[@]:0:2}")).0, "[p:q]\n");
+        assert_eq!(run(&src("${n[@]@Q}")).0, "['p':'q':'r']\n");
+        assert_eq!(run(&src("${n[@]^^}")).0, "[P:Q:R]\n");
+        assert_eq!(run(&src("${n[@]#p}")).0, "[:q:r]\n");
+        assert_eq!(run(&src("${n[@]/q/Z}")).0, "[p:Z:r]\n");
+        assert_eq!(run("zz1=1; zz2=2; IFS=:; x=\"${!zz@}\"; echo \"[$x]\"").0, "[zz1:zz2]\n");
+        assert_eq!(run("set -- s t u; IFS=:; x=\"${@:1:2}\"; echo \"[$x]\"").0, "[s:t]\n");
+        assert_eq!(run("set -- s t; IFS=:; x=\"${@@Q}\"; echo \"[$x]\"").0, "['s':'t']\n");
+        // Where the two spellings part company: an empty `$IFS` makes `[@]` fall
+        // back to a space while `[*]` joins with nothing. An unset one is a
+        // space either way, which is what hides the whole rule from a test that
+        // never sets `$IFS`.
+        assert_eq!(run("declare -a n=(p q r); IFS=; x=\"${n[@]@Q}\"; echo \"[$x]\"").0, "['p' 'q' 'r']\n");
+        assert_eq!(run("declare -a n=(p q r); IFS=; x=\"${n[*]@Q}\"; echo \"[$x]\"").0, "['p''q''r']\n");
+        assert_eq!(run("declare -a n=(p q r); unset IFS; x=\"${!n[@]}\"; echo \"[$x]\"").0, "[0 1 2]\n");
     }
 
     #[test]

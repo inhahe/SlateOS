@@ -33375,16 +33375,28 @@ impl Shell {
             // into it, so an EOF leaves a defined but empty array.
             // `-N` assigns the raw record without IFS splitting: a single
             // element holding exactly the characters read (bash).
-            let map: BTreeMap<usize, Str> = if exact {
+            let fields: Vec<Str> = if exact {
                 let v = if raw { line } else { unescape_read_line(&line) };
-                std::iter::once((0usize, v)).collect()
+                vec![v]
             } else {
-                read_split(&line, &ifs, raw, None).into_iter().enumerate().collect()
+                read_split(&line, &ifs, raw, None)
             };
             self.vars.remove(&name);
             self.assoc.remove(&name);
             self.array_valued.insert(name.clone());
-            self.arrays.insert(name.clone(), map);
+            self.arrays.insert(name.clone(), BTreeMap::new());
+            // Each field is stored as its own assignment, so the array's value
+            // attributes reach every one of them — `declare -ai k; read -a k`
+            // stores `7` for the field `3+4`, and `declare -au k` uppercases.
+            // A malformed `-i` field abandons the command where it stands, so
+            // the fields before it stay and the ones after it are never read
+            // (bash).
+            for (idx, field) in fields.into_iter().enumerate() {
+                let Some(field) = self.apply_value_attrs(&name, field) else {
+                    return 1;
+                };
+                self.arrays.entry(name.clone()).or_default().insert(idx, field);
+            }
             // `read -a DIRSTACK` writes through the dynamic hook like any other
             // assignment — see [`Shell::after_var_write`].
             self.after_var_write(&name);
@@ -33829,6 +33841,15 @@ impl Shell {
                     return n;
                 }
             }
+            // Each element is stored as its own assignment, so the array's
+            // value attributes reach every one of them — `declare -ai a;
+            // mapfile -t a` stores `7` for the line `3+4`. A malformed `-i`
+            // line abandons the command where it stands: the lines before it
+            // stay, and the ones after it are never assigned. The callback has
+            // already fired for this one, as it fires before the assignment.
+            let Some(s) = self.apply_value_attrs(&array, s) else {
+                return 1;
+            };
             // Re-look up the array every iteration: the callback is arbitrary
             // shell code and may have inserted, removed or replaced it, so a
             // reference held across the call could dangle.
@@ -66281,6 +66302,75 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "readonly arr; read -a arr <<< 'p q'; s=$?; echo \"[${arr[*]}]|$s\"",
         );
         assert_eq!(out, "[]|1\n");
+    }
+
+    /// Filling a whole array is a series of ordinary element assignments, so
+    /// the array's value attributes shape every one of them.
+    #[test]
+    fn a_whole_array_write_applies_the_names_value_attributes() {
+        for b in ["read -a k", "mapfile -t k", "readarray -t k"] {
+            assert_eq!(
+                run(&format!("declare -ai k; {b} <<< '3+4'; declare -p k")).0,
+                "declare -ai k=([0]=\"7\")\n",
+                "{b} -i"
+            );
+            assert_eq!(
+                run(&format!("declare -au k; {b} <<< 'ab'; declare -p k")).0,
+                "declare -au k=([0]=\"AB\")\n",
+                "{b} -u"
+            );
+            assert_eq!(
+                run(&format!("declare -al k; {b} <<< 'AB'; declare -p k")).0,
+                "declare -al k=([0]=\"ab\")\n",
+                "{b} -l"
+            );
+            assert_eq!(
+                run(&format!("declare -ac k; {b} <<< 'ab'; declare -p k")).0,
+                "declare -ac k=([0]=\"Ab\")\n",
+                "{b} -c"
+            );
+        }
+        // Every field, not just the first.
+        assert_eq!(
+            run("declare -ai k; read -a k <<< '3+4 5*2'; declare -p k").0,
+            "declare -ai k=([0]=\"7\" [1]=\"10\")\n"
+        );
+        // `-N` reads one raw element and it is attributed too.
+        assert_eq!(
+            run("declare -ai k; read -N 3 -a k <<< '3+4'; declare -p k").0,
+            "declare -ai k=([0]=\"7\")\n"
+        );
+        // The attributes are the *target's*, so a nameref carries none of its
+        // own and a name that is not yet an array still has its scalar ones.
+        assert_eq!(
+            run("declare -ai t; declare -n rr=t; read -a rr <<< '2*3'; declare -p t").0,
+            "declare -ai t=([0]=\"6\")\n"
+        );
+        assert_eq!(
+            run("declare -i w; read -a w <<< '1+1'; declare -p w").0,
+            "declare -ai w=([0]=\"2\")\n"
+        );
+        // A malformed `-i` element is the store's refusal, signed by the
+        // builtin that named the array, and it abandons the command where it
+        // stands: the elements before it stay and the ones after it are never
+        // assigned. The array was already emptied, so what is left is a prefix.
+        assert_eq!(
+            run("declare -ai k=(z z z)\nread -a k <<< '1 q+ 3' 2>&1\ndeclare -p k").0,
+            "osh: read: q+: syntax error: operand expected (error token is \"+\")\n\
+             declare -ai k=([0]=\"1\")\n"
+        );
+        assert_eq!(
+            run("declare -ai j=(z z z)\nmapfile -t j <<< $'1\\nq+\\n3' 2>&1\ndeclare -p j").0,
+            "osh: mapfile: q+: syntax error: operand expected (error token is \"+\")\n\
+             declare -ai j=([0]=\"1\")\n"
+        );
+        // With `-O` the array is *not* emptied first, so the survivors outside
+        // the written range are still there when the write stops early.
+        assert_eq!(
+            run("declare -ai p=(9 9 9 9)\nmapfile -t -O 1 p <<< $'1\\nq+\\n3' 2>&1\ndeclare -p p").0,
+            "osh: mapfile: q+: syntax error: operand expected (error token is \"+\")\n\
+             declare -ai p=([0]=\"9\" [1]=\"1\" [2]=\"9\" [3]=\"9\")\n"
+        );
     }
 
     /// `read -a` names its array the way `mapfile` does — through a nameref,

@@ -13540,26 +13540,77 @@ impl Shell {
             || self.declared.contains(name)
     }
 
-    /// `${!prefix*}` / `${!prefix@}` — the names of all set variables (scalars,
-    /// indexed arrays, associative arrays) whose name begins with `prefix`,
-    /// sorted (bash lists them in lexicographic order).
-    fn var_names_with_prefix(&self, prefix: &str) -> Vec<String> {
-        let mut names: Vec<String> = self
+    /// Whether `name` holds an array of either kind — what `compgen -A
+    /// arrayvar` asks. A dynamic special is answered from the table, since the
+    /// call-stack arrays have no entry of their own at every level.
+    fn name_is_array_kind(&self, name: &str) -> bool {
+        self.arrays.contains_key(name)
+            || self.assoc.contains_key(name)
+            || self
+                .dynamic_special(name)
+                .is_some_and(|d| d.listed == DynListing::EmptyArray)
+    }
+
+    /// Whether the array `name` — of either kind — *holds* a value, as opposed
+    /// to having been merely declared. This is bash's visible-vs-invisible for
+    /// an array, and it is the same question [`Shell::format_var_assignment`]
+    /// answers when it chooses between printing `a=()` and the bare `a`:
+    /// anything with an element in it was assigned, and an empty one was
+    /// assigned only if [`Shell::array_valued`] says so.
+    ///
+    /// Distinct from [`Shell::array_shape_exists`], which asks whether there is
+    /// an array there to subscript at all — a bare `declare -a a` gives a name
+    /// that reads and writes as an array while still being invisible.
+    fn array_is_visible(&self, name: &str) -> bool {
+        self.array_valued.contains(name)
+            || self.arrays.get(name).is_some_and(|a| !a.is_empty())
+            || self.assoc.get(name).is_some_and(|m| !m.is_empty())
+    }
+
+    /// Every name a *name enumeration* should report — `${!prefix*}`,
+    /// `compgen -A variable` — which is bash's `all_visible_variables`, and so
+    /// leaves out the names bash calls invisible. Sorted and deduplicated,
+    /// since a dynamic special that is also materialised into the tables would
+    /// otherwise be named twice.
+    ///
+    /// A declaration is not an assignment, so `declare -a q` and `declare -i q`
+    /// both leave the name existing-but-invisible: `declare -p` reports them
+    /// (that is the whole point of the state), but a name enumeration passes
+    /// over them until something assigns — `q=()`, `q[0]=x`, `q=1`. osh keeps
+    /// the scalar half of that by never putting a bare declaration in
+    /// [`Shell::vars`], and the array half in [`Shell::array_is_visible`].
+    ///
+    /// The dynamic specials have no entry in the tables at all and so have to
+    /// be added by hand; one `unset` has dropped is gone from here too, exactly
+    /// as an ordinary unset variable is.
+    fn visible_var_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
             .vars
             .keys()
-            .chain(self.arrays.keys())
-            .chain(self.assoc.keys())
             .map(String::as_str)
-            // …plus the dynamic special variables, which have no entry in those
-            // tables. One `unset` has dropped is gone from here too, exactly as
-            // an ordinary unset variable is.
+            .chain(
+                self.arrays
+                    .keys()
+                    .chain(self.assoc.keys())
+                    .map(String::as_str)
+                    .filter(|k| self.array_is_visible(k)),
+            )
             .chain(self.dynamic_special_live_names())
-            .filter(|k| k.starts_with(prefix))
-            .map(str::to_string)
             .collect();
-        names.sort();
+        names.sort_unstable();
         names.dedup();
         names
+    }
+
+    /// `${!prefix*}` / `${!prefix@}` — the names of all visible variables
+    /// (scalars, indexed arrays, associative arrays) whose name begins with
+    /// `prefix`, sorted (bash lists them in lexicographic order).
+    fn var_names_with_prefix(&self, prefix: &str) -> Vec<String> {
+        self.visible_var_names()
+            .into_iter()
+            .filter(|k| k.starts_with(prefix))
+            .map(str::to_string)
+            .collect()
     }
 
     /// Whether `name` is an array or associative array that exists to be asked
@@ -34538,16 +34589,25 @@ impl Shell {
                 // which is neither alphabetical nor the order they are listed
                 // anywhere else.
                 "keyword" => cands.extend(str_bytes(KEYWORDS.iter().copied())),
+                // The same set `${!prefix*}` reports, for the same reason: bash
+                // generates both from `all_visible_variables`. See
+                // [`Shell::visible_var_names`].
                 "variable" => {
-                    let mut v: Vec<Str> = name_bytes(self.vars.keys());
-                    v.extend(name_bytes(self.arrays.keys()));
-                    v.extend(name_bytes(self.assoc.keys()));
+                    let v: Vec<Str> = self
+                        .visible_var_names()
+                        .into_iter()
+                        .map(|n| n.as_bytes().to_vec())
+                        .collect();
                     cands.extend(sorted(v));
                 }
                 // `arrayvar` is the array-valued subset, not every variable.
                 "arrayvar" => {
-                    let mut v: Vec<Str> = name_bytes(self.arrays.keys());
-                    v.extend(name_bytes(self.assoc.keys()));
+                    let v: Vec<Str> = self
+                        .visible_var_names()
+                        .into_iter()
+                        .filter(|n| self.name_is_array_kind(n))
+                        .map(|n| n.as_bytes().to_vec())
+                        .collect();
                     cands.extend(sorted(v));
                 }
                 "export" => cands.extend(sorted(name_bytes(self.exported.iter()))),
@@ -48154,6 +48214,75 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A user variable and a dynamic special sharing a prefix are merged and
         // sorted together.
         assert_eq!(run("SECRET=1; echo ${!SEC*}").0, "SECONDS SECRET\n");
+    }
+
+    #[test]
+    fn a_name_enumeration_passes_over_a_bare_declaration() {
+        // A declaration is not an assignment, so the name it creates is
+        // *invisible*: `declare -p` reports it, but every listing built from
+        // values passes over it. That holds whichever attribute was named, and
+        // for an export and a `local` in an inactive frame too.
+        for decl in [
+            "declare -a q",
+            "declare -A q",
+            "declare -i q",
+            "declare -r q",
+            "declare q",
+            "export q",
+            "local q 2>/dev/null",
+            "declare -a q; unset q",
+        ] {
+            assert_eq!(run(&format!("{decl}; echo [${{!q*}}]")).0, "[]\n", "{decl}");
+            assert_eq!(
+                run(&format!("{decl}; echo [$(compgen -A variable q)]")).0,
+                "[]\n",
+                "{decl}"
+            );
+        }
+        // …while `declare -p` still has it, which is the whole point of the
+        // state: it exists, it is just not worth naming in a value listing.
+        assert_eq!(run("declare -a q; declare -p q").0, "declare -a q\n");
+
+        // Anything that puts a value there makes the name visible, including
+        // the empty array literal and the empty scalar.
+        for assign in [
+            "q=()",
+            "declare -A q; q=()",
+            "q=1",
+            "q=",
+            "declare -a q; q[0]=x",
+            "declare -a q; q+=(x)",
+            "declare -A q; q[k]=v",
+            "declare -a q=()",
+        ] {
+            assert_eq!(run(&format!("{assign}; echo [${{!q*}}]")).0, "[q]\n", "{assign}");
+            assert_eq!(
+                run(&format!("{assign}; echo [$(compgen -A variable q)]")).0,
+                "[q]\n",
+                "{assign}"
+            );
+        }
+        // And `unset` takes a visible name back out again.
+        assert_eq!(run("q=(); unset q; echo [${!q*}]").0, "[]\n");
+
+        // `compgen -A arrayvar` is the array-valued subset of that same
+        // listing — not every variable, and not a bare declaration either.
+        assert_eq!(run("q=(1); echo [$(compgen -A arrayvar q)]").0, "[q]\n");
+        assert_eq!(run("declare -A q; q[k]=v; echo [$(compgen -A arrayvar q)]").0, "[q]\n");
+        assert_eq!(run("declare -a q; echo [$(compgen -A arrayvar q)]").0, "[]\n");
+        assert_eq!(run("q=1; echo [$(compgen -A arrayvar q)]").0, "[]\n");
+        // A call-stack array is an array; a computed scalar is not.
+        assert_eq!(
+            run("echo [$(compgen -A arrayvar BASH_SOURCE)]").0,
+            "[BASH_SOURCE]\n"
+        );
+        assert_eq!(run("echo [$(compgen -A arrayvar SECONDS)]").0, "[]\n");
+        // A name that is both a table entry and a computed one is still one
+        // variable, and is listed once.
+        assert_eq!(
+            run("echo [$(compgen -A variable BASH_SOURCE)]").0,
+            "[BASH_SOURCE]\n"
+        );
     }
 
     #[test]

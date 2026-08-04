@@ -2791,7 +2791,10 @@ impl Parser {
                     strip: here_strip,
                 });
                 self.pos = self.pos.saturating_add(1);
-                self.word_from_segs(&segs)?
+                // An unquoted delimiter makes the body a double-quoted run, so a
+                // substitution's operand in it is read with the quotes' rules.
+                let q = if quoted { Quoting::Bare } else { Quoting::Dquote };
+                word_from_segs_in(&segs, self.opts, q)?
             }
             Some(Tok::Word(segs)) => {
                 let segs = segs.clone();
@@ -3131,16 +3134,41 @@ fn cond_error_near(tok: BStr<'_>) -> Str {
     }
 }
 
+/// Whether the segments being lowered sit inside a double-quoted run.
+///
+/// It has to be carried down because a substitution's *operand* — the `w` of
+/// `${x:-w}` — is read with the enclosing quoting still in force. Inside `"…"`
+/// a `'` there is an ordinary character and only the characters double-quoting
+/// leaves live can be backslash-escaped, so `"${x:-'a b'}"` keeps its quotes
+/// where a bare `${x:-'a b'}` loses them. A here-document body with an unquoted
+/// delimiter is the same context, and hands [`Quoting::Dquote`] down too.
+///
+/// Nothing else about the parse depends on it: the patterns, replacements and
+/// subscripts beside the operand are read bare either way, because bash's
+/// pattern reader does its own quote removal regardless of the quotes outside.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Quoting {
+    Bare,
+    Dquote,
+}
+
 /// Lower lexer segments into an [`ast::Word`] (stateless).
 fn word_from_segs(segs: &[Seg], opts: ParseOpts) -> Result<Word, ParseError> {
+    word_from_segs_in(segs, opts, Quoting::Bare)
+}
+
+/// [`word_from_segs`] for segments already known to sit in a given quoting
+/// context — the here-document body, whose unquoted delimiter makes its text a
+/// double-quoted run without any quotes being written.
+fn word_from_segs_in(segs: &[Seg], opts: ParseOpts, q: Quoting) -> Result<Word, ParseError> {
     let mut parts = Vec::with_capacity(segs.len());
     for s in segs {
-        parts.push(seg_to_part(s, opts)?);
+        parts.push(seg_to_part(s, opts, q)?);
     }
     Ok(Word { parts })
 }
 
-fn seg_to_part(seg: &Seg, opts: ParseOpts) -> Result<WordPart, ParseError> {
+fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, ParseError> {
     Ok(match seg {
         Seg::Lit(s) => WordPart::Literal(s.clone()),
         Seg::Sq(s, escaped) => WordPart::SingleQuoted {
@@ -3150,12 +3178,12 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts) -> Result<WordPart, ParseError> {
         Seg::Dq(inner) => {
             let mut parts = Vec::with_capacity(inner.len());
             for s in inner {
-                parts.push(seg_to_part(s, opts)?);
+                parts.push(seg_to_part(s, opts, Quoting::Dquote)?);
             }
             WordPart::DoubleQuoted(parts)
         }
         Seg::Param(n) => WordPart::Param { name: n.clone(), braced: false },
-        Seg::ParamBraced(raw) => parse_braced_param(raw, opts)?,
+        Seg::ParamBraced(raw) => parse_braced_param_in(raw, opts, q)?,
         // A backtick body is not parsed here at all: bash reads it only when the
         // word is expanded, as an input of its own. See [`CmdSubBody`].
         Seg::CmdSub(raw, close_line, src) => WordPart::CommandSub {
@@ -3358,6 +3386,16 @@ fn is_length_target(name: &str) -> bool {
 }
 
 pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: ParseOpts) -> Result<WordPart, ParseError> {
+    parse_braced_param_in(raw, opts, Quoting::Bare)
+}
+
+/// [`parse_braced_param`] with the quoting the `${…}` was written in, which
+/// only its operand cares about. See [`Quoting`].
+fn parse_braced_param_in(
+    raw: BStr<'_>,
+    opts: ParseOpts,
+    q: Quoting,
+) -> Result<WordPart, ParseError> {
     if let Some(after_hash) = raw.strip_prefix(b"#") {
         if after_hash.is_empty() {
             // `${#}` is the positional-parameter count — treat as `$#`.
@@ -3488,7 +3526,7 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: ParseOpts) -> Result<WordP
                 name.clone().into_bytes()
             };
             modifier_src.extend(bytes::from_chars(remaining.iter().copied()));
-            let mut target = parse_braced_param(&modifier_src, opts)?;
+            let mut target = parse_braced_param_in(&modifier_src, opts, q)?;
             if positional {
                 if name == "@" && matches!(target, WordPart::ParamCase { .. }) {
                     return Ok(WordPart::BadSubst(raw.to_vec()));
@@ -3612,7 +3650,7 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: ParseOpts) -> Result<WordP
                 star,
                 op,
                 colon,
-                arg: Box::new(word_verbatim_from_source(&arg_str, opts)?),
+                arg: Box::new(operand_from_source(&arg_str, opts, q)?),
             });
         }
     };
@@ -3682,7 +3720,7 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: ParseOpts) -> Result<WordP
                 name,
                 op,
                 colon,
-                arg: Box::new(word_verbatim_from_source(&arg_str, opts)?),
+                arg: Box::new(operand_from_source(&arg_str, opts, q)?),
             });
         }
     }
@@ -3782,7 +3820,7 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: ParseOpts) -> Result<WordP
                 index: elem_index,
                 op,
                 colon,
-                arg: Box::new(word_verbatim_from_source(&arg_str, opts)?),
+                arg: Box::new(operand_from_source(&arg_str, opts, q)?),
                 // Written directly, the name read and the name complained about
                 // are the same one; only indirection separates them.
                 label: None,
@@ -3943,7 +3981,29 @@ pub(crate) fn word_verbatim_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<
     let segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError::new(&e.msg))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
-        parts.push(seg_to_part(seg, opts)?);
+        parts.push(seg_to_part(seg, opts, Quoting::Bare)?);
+    }
+    Ok(Word { parts })
+}
+
+/// Parse the *operand* of a substitution — the `w` of `${x:-w}`, `${x:=w}`,
+/// `${x:+w}` and `${x:?w}`. Written bare it is a verbatim word like a pattern
+/// is; written inside `"…"` it is read with double-quote rules instead, because
+/// the quotes around the substitution never stopped applying. See [`Quoting`]
+/// and [`crate::lexer::lex_operand_in_dquote`].
+fn operand_from_source(s: BStr<'_>, opts: ParseOpts, q: Quoting) -> Result<Word, ParseError> {
+    if q == Quoting::Bare {
+        return word_verbatim_from_source(s, opts);
+    }
+    if s.is_empty() {
+        return Ok(Word::default());
+    }
+    let segs = crate::lexer::lex_operand_in_dquote(s).map_err(|e| ParseError::new(&e.msg))?;
+    let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
+    for seg in &segs {
+        // Still inside the quotes: a substitution nested in the operand is read
+        // the same way its host was.
+        parts.push(seg_to_part(seg, opts, Quoting::Dquote)?);
     }
     Ok(Word { parts })
 }
@@ -3962,7 +4022,9 @@ pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Wo
     let segs = crate::lexer::lex_dquote_body(s).map_err(|e| ParseError::new(&e.msg))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
-        parts.push(seg_to_part(seg, opts)?);
+        // The whole point of this entry is that `s` is a double-quoted run, so
+        // an operand inside it is read as one too.
+        parts.push(seg_to_part(seg, opts, Quoting::Dquote)?);
     }
     Ok(Word { parts })
 }
@@ -3978,7 +4040,7 @@ fn word_replacement_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, Pa
     let segs = crate::lexer::lex_replacement_verbatim(s).map_err(|e| ParseError::new(&e.msg))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
-        parts.push(seg_to_part(seg, opts)?);
+        parts.push(seg_to_part(seg, opts, Quoting::Bare)?);
     }
     Ok(Word { parts })
 }
@@ -3997,7 +4059,7 @@ fn word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
             }
             first = false;
             for seg in segs {
-                parts.push(seg_to_part(seg, opts)?);
+                parts.push(seg_to_part(seg, opts, Quoting::Bare)?);
             }
         }
     }

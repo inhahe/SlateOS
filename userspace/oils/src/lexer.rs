@@ -1042,6 +1042,25 @@ pub fn tokenize_spanned_strict(src: BStr<'_>, opts: ParseOpts) -> Result<(Vec<To
     lx.run()
 }
 
+/// What a verbatim word's quotes and backslashes mean. The three contexts that
+/// read a word out of already-scanned source agree on everything else — `$…`,
+/// `` `…` `` and a nested `"…"` are live in all of them, and no character is an
+/// operator — and differ only here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verbatim {
+    /// A pattern (`${var#pat}`, `${var/pat/…}`) or a subscript: written bare, so
+    /// `'…'` quotes and every backslash escapes the character after it.
+    Bare,
+    /// The *replacement* of `${var/pat/repl}`: as [`Verbatim::Bare`], except that
+    /// `\&` and `\\` keep their backslash for the later `&`-scan.
+    Replacement,
+    /// The operand of a substitution that is itself inside `"…"` — the `w` of
+    /// `"${x:-w}"`. bash reads that operand with the *enclosing* quoting still in
+    /// force, so a `'` is an ordinary character and only the characters
+    /// double-quoting leaves live can be escaped.
+    Dquote,
+}
+
 /// Lex `src` as a single word, preserving all literal characters verbatim
 /// (whitespace and shell operator characters stay literal) while still
 /// processing quotes and `$…`/backtick expansions. Used for the pattern and
@@ -1053,7 +1072,7 @@ pub fn tokenize_spanned_strict(src: BStr<'_>, opts: ParseOpts) -> Result<(Vec<To
 /// Returns [`LexError`] on an unterminated quote or substitution.
 pub fn lex_word_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
-    lx.read_word_verbatim(false)
+    lx.read_word_verbatim(Verbatim::Bare)
 }
 
 /// Lex `src` as if it were the body of a double-quoted string that runs to the
@@ -1080,7 +1099,24 @@ pub fn lex_dquote_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
 /// Returns [`LexError`] on an unterminated quote or substitution.
 pub fn lex_replacement_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
-    lx.read_word_verbatim(true)
+    lx.read_word_verbatim(Verbatim::Replacement)
+}
+
+/// Lex `src` as the operand of a substitution written inside double quotes — the
+/// `w` of `"${x:-w}"`. The quotes around the substitution are still in force
+/// inside it, so `'a b'` is three literal characters and a space, and a
+/// backslash escapes only `$`, `` ` ``, `"`, `\` and `}` (and a newline, which is
+/// a line continuation); before anything else it stays a literal backslash.
+///
+/// This is not [`lex_dquote_body`]: a real double-quoted body would leave
+/// `$'…'` and `$"…"` alone, but an operand still expands them, because it is a
+/// *word* being read — the quoting only says how its characters are spelled.
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated quote or substitution.
+pub fn lex_operand_in_dquote(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
+    let mut lx = Lexer::new(src, ParseOpts::default());
+    lx.read_word_verbatim(Verbatim::Dquote)
 }
 
 /// Reserved words after which a new command begins, so a word following one of
@@ -2158,12 +2194,14 @@ impl Lexer {
     /// Used for the pattern and replacement of `${var/pat/repl}`, where bash
     /// applies expansion and quote removal but neither word-splitting nor
     /// operator tokenization, so embedded/leading/trailing spaces are literal.
-    fn read_word_verbatim(&mut self, repl_escapes: bool) -> Result<Vec<Seg>, LexError> {
+    fn read_word_verbatim(&mut self, mode: Verbatim) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = Str::new();
         while let Some(c) = self.peek() {
             match c {
-                '\'' => {
+                // Inside quotes a `'` opens nothing — it is a character like any
+                // other, and `"${nope:-'a b'}"` keeps both of them.
+                '\'' if mode != Verbatim::Dquote => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
                     let s = self.read_single_quote()?;
@@ -2182,12 +2220,37 @@ impl Lexer {
                     let close = self.cur_line();
                     segs.push(Seg::CmdSub(raw, close, Some(src)));
                 }
+                // A backslash inside quotes reaches only as far as double
+                // quoting itself does: the four characters that stay live there,
+                // plus the `}` that ends the substitution, plus a newline (a line
+                // continuation). Before anything else it is not an escape at all,
+                // so `"${nope:-a\tb}"` keeps the backslash and the `t` both.
+                '\\' if mode == Verbatim::Dquote => {
+                    self.pos += 1;
+                    match self.peek() {
+                        Some('\n') => {
+                            self.pos += 1;
+                        }
+                        Some('$' | '`' | '"' | '\\' | '}') => {
+                            let next = self.bump_ch();
+                            flush_lit(&mut segs, &mut lit);
+                            if let Some(next) = next {
+                                // Quoted, so the character it protected is not
+                                // read again as a substitution or a quote.
+                                segs.push(Seg::Sq(next.to_str(), true));
+                            }
+                        }
+                        // Not an escape: the backslash stands for itself, and the
+                        // character after it is read as it would have been.
+                        _ => lit.push(b'\\'),
+                    }
+                }
                 '\\' => {
                     self.pos += 1;
                     if let Some(next) = self.bump_ch()
                         && next != '\n'
                     {
-                        if repl_escapes && (next == '&' || next == '\\') {
+                        if mode == Verbatim::Replacement && (next == '&' || next == '\\') {
                             // Replacement context: keep `\&`/`\\` intact so the
                             // later `&`-scan can tell an escaped ampersand (a
                             // literal `&`) from an active one.

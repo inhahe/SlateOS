@@ -32039,7 +32039,7 @@ Three subtleties were worth the trouble they caused:
 **Pinned by** `tests/corpus/a-quoted-operand-is-a-quoted-word.sh`, which walks
 the whole rule and both of its near-misses.
 
-### TD-OILS-A-QUOTED-SUBSTITUTIONS-OPERAND-IS-LEXED-AS-IF-IT-WERE-BARE. `"${x:-'a b'}"` drops the quotes bash keeps — 2026-08-04 — OPEN
+### TD-OILS-A-QUOTED-SUBSTITUTIONS-OPERAND-IS-LEXED-AS-IF-IT-WERE-BARE. `"${x:-'a b'}"` drops the quotes bash keeps — 2026-08-04 — ✅ FIXED 2026-08-04
 
 *(Was TD-OILS-SINGLE-QUOTES-IN-A-QUOTED-SUBSTITUTION-ARE-EATEN. Renamed
 2026-08-04: measuring it turned up backslash as well as `'`, `:=` as well as
@@ -32092,11 +32092,31 @@ The four backslash cases osh already handles (`\$`, `` \` ``, `\"`, `\}`) are th
 ones the brace scan happens to protect. That they pass is a coincidence of the
 scan, not evidence the operand is lexed right.
 
-**The fix.** Thread the enclosing quoting state into the operand's parse and
-route it to `dquote_word_from_source` instead of `word_from_source` when the
-substitution sits inside a double-quoting context. It is a parser change, not an
-expansion one — the expander already does the right thing with whatever parts it
-is handed, and `SplitMode::QuotedOperand` already gives them the right context.
+**The fix.** A parser change, not an expansion one: the expander already does
+the right thing with whatever parts it is handed, and `SplitMode::QuotedOperand`
+already gives them the right context. What was missing was that the parse never
+knew where the `${…}` was written.
+
+* `parser.rs` gained a `Quoting` (`Bare` / `Dquote`) carried down through
+  `seg_to_part` → `parse_braced_param_in` → the three operand sites. `Seg::Dq`
+  hands `Dquote` down; a here-document body hands it down when its delimiter was
+  *not* quoted; `dquote_word_from_source` (`PS4`, `${x@P}`) hands it down because
+  that is what the entry point means. Everything else stays `Bare`, so the
+  patterns, replacements, subscripts and slice bounds sitting beside the operand
+  are untouched — which is what keeps `"${v#'s'}"` stripping a literal `s`.
+* `lexer.rs`'s `read_word_verbatim` took a `Verbatim` mode (`Bare` /
+  `Replacement` / `Dquote`) in place of its `repl_escapes: bool` — the third
+  context needed a third answer, not a second flag. In `Dquote` the `'` arm is
+  gone (a `'` falls through to the literal path) and the backslash consumes
+  itself only before `$`, `` ` ``, `"`, `\`, `}` and a newline, emitting the
+  character it protected as a one-char quoted segment so it is not read again.
+
+The reason this could **not** just reuse `dquote_word_from_source` — the obvious
+route, and the one this entry originally proposed — is `$'…'`/`$"…"`. A real
+double-quoted body leaves them alone, but an operand expands them
+(`"${nope:-$'a\tb'}"` is a real tab), because the operand is a *word* being read
+and the quoting only says how its characters are spelled. Hence a third lexer
+mode rather than a second caller of the second one.
 
 Watch the interaction with TD-OILS-QUOTED-EMPTY-IN-AN-OPERAND-LEAVES-NO-FIELD:
 that entry is about the *unquoted* `${nope:-'' ''}`, where the `''` really is a
@@ -32104,7 +32124,7 @@ quoted empty stretch. Inside quotes there is no such stretch to lose — the sam
 source is two literal apostrophes — so the two fixes do not overlap, and neither
 one makes the other's case go away.
 
-**Pinned by** nothing yet.
+**Pinned by** `userspace/oils/tests/corpus/a-quoted-operands-quoting-is-the-quotes-it-sits-in.sh`.
 
 ### TD-OILS-A-QUOTED-LIST-LOSES-ITS-FIELDS-WHEN-ANYTHING-ELSE-IS-IN-THE-QUOTES. `"${a[@]}Z"` is one field where bash makes two — 2026-08-04 — ✅ FIXED 2026-08-04
 
@@ -32169,3 +32189,64 @@ Two things had to be got right, and one of them was a real regression on the way
   Missing it made `a=("" "")` a zero-element array and broke three unit tests.
 
 **Pinned by** `tests/corpus/a-quoted-lists-field-breaks-are-its-own.sh`.
+
+### TD-OILS-A-BAD-SLICE-BOUND-DOES-NOT-STOP-THE-SECOND-ONE. `${v:'0':'2'}` complains twice where bash complains once — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the substring/slice expansion
+evaluates the offset and the length as two independent arithmetic evaluations
+and reports whatever each one says. bash evaluates the offset first and a
+syntax error there abandons the whole expansion (its arithmetic evaluator
+`longjmp`s out), so the length is never looked at.
+
+**Reproduce:**
+
+```sh
+v=abcdef
+echo "${v:'0':'2'}"
+# bash: one error   -- v: '0': syntax error: operand expected (error token is "'0'")
+# osh:  two errors  -- the same, then the identical complaint about '2'
+echo "${v:1+:2+}"   # same shape: bash names `1+` only, osh names `1+` and `2+`
+```
+
+Both shells produce no output for the command and neither aborts the script, so
+only the diagnostics differ — but they differ on stderr, which the corpus differ
+compares, so any case that trips a bad slice bound would fail on this.
+
+**The fix.** Make the slice evaluation short-circuit: evaluate the offset, and
+on an arithmetic error return without touching the length. The same question is
+worth asking of every other place that evaluates two arithmetic words for one
+expansion.
+
+**Found:** while probing `"${v:'0':'2'}"` for
+TD-OILS-A-QUOTED-SUBSTITUTIONS-OPERAND-IS-LEXED-AS-IF-IT-WERE-BARE; it predates
+that fix and is unrelated to it.
+
+**Pinned by** nothing — no corpus case reaches it yet.
+
+### TD-OILS-PROMPT-HOSTNAME-IS-THE-WINDOWS-SPELLING. `\h` shouts where bash does not — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the prompt decoder's `\h`/`\H`
+escapes read `COMPUTERNAME`, which Windows spells in upper case. MSYS bash reads
+the DNS host name and gets the mixed-case one.
+
+**Reproduce:**
+
+```sh
+x='h:\h w:\$'
+echo "${x@P}"
+# bash: h:Logoplex3 w:$
+# osh:  h:LOGOPLEX3 w:#
+```
+
+The `\$` half of that line is **not** a bug: `#` is right because osh reports
+`EUID=0` on purpose (open-questions Q28 option A, root for the pre-privilege
+bring-up — see `reported_identity`), and MSYS bash is the one synthesising a
+non-zero UID. Only the hostname's case differs for no reason.
+
+**The fix.** Read the host name from `GetComputerNameExW` with
+`ComputerNameDnsHostname` rather than the `COMPUTERNAME` environment variable,
+which is the upper-cased NetBIOS spelling. On SlateOS this becomes whatever the
+real host-name call returns and the question disappears.
+
+**Pinned by** nothing — no corpus case prints a prompt, which is why this went
+unnoticed.

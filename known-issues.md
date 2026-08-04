@@ -31216,8 +31216,8 @@ that has nothing to do with the behaviour under test.
    the incoherence the table exists to prevent (a redirect that creates a stray
    file into a device the tests say is a character device).
 2. *The descriptor names* (`/dev/stdin`, `/dev/stdout`, `/dev/stderr`,
-   `/dev/fd/N`) — these already work as redirection targets (`dup_target_fd`
-   handles them per the bash manual, on every platform). The file tests would
+   `/dev/fd/N`) — these already work as redirection targets
+   (`special_redirect_fd` handles them per the bash manual, on every platform). The file tests would
    have to ask about the descriptor rather than a path: `GetFileType` on the
    handle maps cleanly onto the primaries — `FILE_TYPE_CHAR` → `-c`,
    `FILE_TYPE_PIPE` → `-p`, `FILE_TYPE_DISK` → `-f` plus a real size for `-s`.

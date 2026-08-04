@@ -12749,22 +12749,44 @@ impl Shell {
         // nameref is resolved to the variable it names first. See
         // [`Self::attr_report_target`].
         //
-        // Asking about the variable is still no excuse for an unset one: bash
-        // faults on `${x@a}` under `set -u` even for a name that was declared
-        // but never assigned (`declare -i d`). The question is about the
-        // reference as written, so it is asked here rather than of the target —
-        // and only when `set -u` could act on the answer, since asking
-        // evaluates the subscript (see TD-OILS-TRANSFORM-SUBSCRIPT-TWICE).
-        if (op == 'a' || op == 'A')
-            && self.unbound_is_error(name)
-            && self.op_operand(operand, name, index).is_none()
-        {
-            self.note_unbound_modifier(name, index);
-            return Str::new();
-        }
+        // Neither operator has a reason of its own to read the parameter, and
+        // bash reads it anyway — first to decide whether `set -u` has anything
+        // to say, then, for `@A`, to render the element. Two uses of one read
+        // while it succeeds, which is why the ask is made here rather than
+        // twice over inside the two branches.
+        //
+        // The ask is about the reference *as written*, because that is what
+        // `set -u` is about: asking after the variable is no excuse for an
+        // unset one — bash faults on `${x@a}` even for a name that was declared
+        // but never assigned (`declare -i d`) — and the fault names the
+        // reference the writer typed rather than the nameref target it landed
+        // on.
         if op == 'a' || op == 'A' {
+            let elem = self.op_operand(operand, name, index);
+            if elem.is_none() && self.unbound_is_error(name) {
+                self.note_unbound_modifier(name, index);
+                return Str::new();
+            }
             let Some(target) = self.attr_report_target(name) else {
                 return Str::new();
+            };
+            // Reuse that ask — but only when it was an ask about this element
+            // and it found one. Anything else is asked over:
+            //
+            //   * an ask that found nothing is one bash makes again, in full,
+            //     for either operator: `${n[-9]@a}` reports `bad array
+            //     subscript` *twice*, and a side-effecting subscript that
+            //     names nothing runs twice where one that names an element
+            //     runs once. Only `set -u` cuts it short, above.
+            //   * an indirection's operand is not this element — for a nameref
+            //     it is the *name* the reference holds, so `${!r@A}` would
+            //     recreate the target with its own name for a value. That ask
+            //     evaluated no subscript, so asking again is still one.
+            let reuse = matches!(operand, Operand::Param) && elem.is_some();
+            let elem = if reuse {
+                elem
+            } else {
+                self.param_elem_value(&target, index)
             };
             if op == 'a' {
                 // Reports type even for an unset scalar. Attribute letters are
@@ -12773,7 +12795,7 @@ impl Shell {
             }
             // The whole-array forms (`${arr[@]@A}` / `${arr[*]@A}`) are handled
             // in the bulk path; here `index` is either absent or one element.
-            return self.transform_assign(&target, index);
+            return self.transform_assign(&target, elem);
         }
         // An unset variable yields the empty string for every transform (bash):
         // `${x@Q}` on unset is empty, whereas a set-but-empty variable is still
@@ -13176,10 +13198,21 @@ impl Shell {
     /// is a re-inputtable full `declare` and is produced by the bulk path
     /// ([`Shell::bulk_attr_transform`]), not here. An unset variable yields the
     /// empty string.
-    fn transform_assign(&mut self, name: &str, index: &Option<Box<Word>>) -> Str {
+    ///
+    /// `elem` is that single element, already read. The read belongs to the
+    /// caller because the caller has to make it anyway, and how many times bash
+    /// makes it is observable — see [`Shell::param_transform`]. `None` is an
+    /// unset element, which is what renders the bare `declare -a arr`.
+    ///
+    /// Only the array forms consult it. A scalar renders the *variable's* own
+    /// value, which is the same thing whenever the subscript names element 0
+    /// and a different one when it does not — bash gives `${s[5]@A}` on a
+    /// scalar the empty string rather than `s='hi'`, which osh does not yet do
+    /// (TD-OILS-TRANSFORM-SCALAR-IGNORES-SUBSCRIPT).
+    fn transform_assign(&self, name: &str, elem: Option<Str>) -> Str {
         if self.assoc.contains_key(name) || self.arrays.contains_key(name) {
             let flags = self.declare_attr_flags(name);
-            return match self.param_elem_value(name, index) {
+            return match elem {
                 Some(v) => bfmt![b"declare ", &flags, b" ", name, b"=", shell_quote(&v)],
                 None => bfmt![b"declare ", &flags, b" ", name],
             };
@@ -54648,6 +54681,58 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // An unset variable yields the empty string.
         assert_eq!(run("echo \"[${nope@A}]\"").0, "[]\n");
+    }
+
+    #[test]
+    fn a_variable_transform_asks_again_only_when_the_first_ask_found_nothing() {
+        // `@a` and `@A` answer from the *variable*, so neither has a use of its
+        // own for the parameter's value — and bash reads it regardless. While
+        // the read succeeds it is read once and put to two uses: deciding
+        // whether `set -u` has anything to say, and rendering `@A`'s element.
+        // A side-effecting subscript is what makes the count visible.
+        let once = "declare -A m=([k]=v); echo \"${m[$(echo E >&2; echo k)]@A}\"";
+        assert_eq!(run(&format!("{{ {once} ; }} 2>&1")).0, "E\ndeclare -A m='v'\n");
+        let once_a = "declare -A m=([k]=v); echo \"${m[$(echo E >&2; echo k)]@a}\"";
+        assert_eq!(run(&format!("{{ {once_a} ; }} 2>&1")).0, "E\nA\n");
+
+        // An ask that comes back with nothing is one bash makes again, in full
+        // — for either operator, and whether or not `@A` had any use for the
+        // answer. So the subscript runs twice.
+        let twice = "declare -A m=([k]=v); echo \"${m[$(echo E >&2; echo no)]@A}\"";
+        assert_eq!(run(&format!("{{ {twice} ; }} 2>&1")).0, "E\nE\ndeclare -A m\n");
+        let twice_a = "declare -A m=([k]=v); echo \"${m[$(echo E >&2; echo no)]@a}\"";
+        assert_eq!(run(&format!("{{ {twice_a} ; }} 2>&1")).0, "E\nE\nA\n");
+        // A variable that does not exist at all is nothing in the same way.
+        let none = "echo \"[${nada[$(echo E >&2; echo x)]@A}]\"";
+        assert_eq!(run(&format!("{{ {none} ; }} 2>&1")).0, "E\nE\n[]\n");
+
+        // The second ask is the whole reference over, so a bad subscript is
+        // reported once per ask. No other operator asks twice.
+        let bad = "declare -a n=(x y); echo \"[${n[-9]@A}]\"";
+        assert_eq!(
+            run(&format!("{{ {bad} ; }} 2>&1")).0,
+            "osh: n: bad array subscript\nosh: n: bad array subscript\n[declare -a n]\n"
+        );
+        let bad_q = "declare -a n=(x y); echo \"[${n[-9]@Q}]\"";
+        assert_eq!(
+            run(&format!("{{ {bad_q} ; }} 2>&1")).0,
+            "osh: n: bad array subscript\n[]\n"
+        );
+
+        // `set -u` is the one thing that cuts the second ask off, because the
+        // fault happens between the two.
+        let unset_u = "set -u; declare -A m=([k]=v); echo \"${m[$(echo E >&2; echo no)]@A}\"";
+        let (out, _) = run(&format!("{{ {unset_u} ; }} 2>&1"));
+        assert!(out.starts_with("E\n") && !out.starts_with("E\nE"), "{out:?}");
+        assert!(out.contains("unbound variable"), "{out:?}");
+
+        // An indirection's operand is not the element `@A` renders — for a
+        // nameref it is the *name* the reference holds — so that element is
+        // read here rather than reused, and `${!r@A}` recreates the target with
+        // the target's own value.
+        assert_eq!(run("n=(x y); declare -n r=n; echo \"${!r@A}\"").0, "declare -a n='x'\n");
+        assert_eq!(run("n=(x y); declare -n r=n; echo \"${r@A}\"").0, "declare -a n='x'\n");
+        assert_eq!(run("s=hi; p=s; echo \"${!p@A}\"").0, "s='hi'\n");
     }
 
     #[test]

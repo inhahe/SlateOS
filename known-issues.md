@@ -14,6 +14,119 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-NAMEREF-CYCLE-ARRAY-WRITE. A write through a circular nameref refuses in `osh` where bash warns and writes the raw name — 2026-08-03
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_ref_use`, and its
+callers on the write side (`whole_array_write_target`,
+`set_scalar_target_checked`, `arith_write_dest`).
+
+**What:** bash's cycle detection does not abandon the write. It warns and then
+treats the *starting* name as the target, which for an array write also strips
+the nameref attribute off it. Measured against bash 5.2.37:
+
+| form | bash | osh |
+|---|---|---|
+| `declare -n c1=c2; declare -n c2=c1; read -a c1 <<< x` | one warning, rc 0, `declare -a c1=([0]="x")` | one warning, rc 1, `c1` unchanged |
+| `… read 'c1[0]' <<< v` | **two** warnings, rc 0, `declare -a c1=([0]="v")` | one warning, rc 1 |
+| `… (( c1[0] = 5 ))` | **three** warnings, rc 0, nameref attribute gone | no warning, rc 0, `declare -an c1=([0]="5")` |
+| `… printf -v c1 x` (scalar) | one warning, rc 1 (refuses) | one warning, rc 1 ✅ |
+
+So the *scalar* store already matches; only the array-valued writes differ, and
+bash's own warning count varies with how many times the resolution is retried
+internally.
+
+**Why deferred:** reproducing it means modelling bash's retry structure (each
+`nameref_transform_name` call that re-walks the chain emits its own warning),
+not just its answer, and a cycle is a script bug in every case — the observable
+difference is between two flavours of "your nameref is broken". The refusal is
+arguably the safer answer.
+
+**Proper fix:** give `resolve_ref_use` a mode that, on a cycle, warns and hands
+back the *starting* name rather than `None`, and have the array-write callers
+use it (also clearing the target's nameref attribute before the write). Count
+the warnings by matching bash's call sites per construct.
+
+### TD-OILS-FOR-SUBSCRIPTED-NAME-PARSE. `for 'a[0]' in …` is a parse error in `osh` and a runtime complaint in bash — 2026-08-03
+
+**Where:** `userspace/oils/src/parser.rs` — the `for` name production.
+
+**What:** bash accepts any word where a `for` loop's control variable goes and
+complains at *run* time if it is not an identifier:
+
+```sh
+$ bash -c "for 'a[0]' in x; do :; done; echo rc=\$?"
+bash: line 0: `'a[0]'': not a valid identifier
+# rc=1, and the rest of the *unit* still runs
+
+$ osh -c "for 'a[0]' in x; do :; done"
+osh: line 1: syntax error near unexpected token `'a[0]''
+```
+
+The difference is not just the wording: a parse error abandons more input than
+bash's runtime refusal does, and it is raised even when the loop would never
+have run.
+
+**Proper fix:** parse the control variable as an ordinary word, and check it
+for identifier-ness in `exec_for` — reporting bash's `` `WORD': not a valid
+identifier `` with status 1 (untagged: a `for` variable is nobody's operand;
+see the `a-a-builtin-that-writes-a-named-variable-signs-the-complaint.sh`
+corpus case).
+
+### TD-OILS-BUILTIN-TAG-SURVIVES-A-NESTED-COMMAND. `osh` restores a builtin's diagnostic tag after running a nested command; bash's is cleared — 2026-08-03
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::arith_cmd`, saved and
+restored around builtin dispatch (~21366 / ~21909).
+
+**What:** bash's `this_command_name` is a plain global that every builtin
+assigns at entry and nobody restores, and executing *any* command clears it. So
+a diagnostic a builtin raises after running nested shell code is unsigned:
+
+```sh
+declare -ai q
+mapfile -t -C 'echo cb $1 $2' -c 1 q <<< $'1+1\nq+'
+# bash:  case.sh: line 2: q+: syntax error: operand expected …
+# osh:   case.sh: line 2: mapfile: q+: syntax error: operand expected …
+```
+
+osh saves and restores the tag, so `mapfile`'s survives the callback. The line
+number is right in both (fixed 2026-08-03); only the tag differs.
+
+**Why deferred:** matching it means changing the tag's *lifetime* globally —
+from a scoped save/restore to "set on dispatch, cleared by any command" — which
+touches every signed diagnostic in the shell for the sake of one exotic corner
+(a `-C` callback plus an integer array plus a malformed element). The scoped
+version is also the more useful answer.
+
+**Proper fix:** if it is ever worth matching, drop the restore at ~21909 and
+clear `arith_cmd` at the top of `run_simple_command` for a non-builtin, which
+is what bash's `execute_command` does.
+
+### TD-OILS-DECLARE-N-WITH-OTHER-ATTRS. `declare -n` combined with another attribute ignores the other attribute — 2026-08-03
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped` /
+`exec_declare_with_arrays_scoped`, where `-n` is applied.
+
+**What:** bash resolves the combination before the nameref is made; osh records
+both flags and applies neither. Measured against bash 5.2.37 (`declare -nX v=t`
+followed by `declare -p v`):
+
+| flags | bash | osh |
+|---|---|---|
+| `-ni` | rc **1**, `v` never created | rc 0, `declare -in v="t"` |
+| `-nu` | `declare -nu v="T"` (the *target name* is folded) | `declare -nu v="t"` |
+| `-nc` | `declare -nc v="T"` | `declare -nc v="t"` |
+| `-na` | `declare -a v=([0]="t")` — an ordinary array, `-n` dropped | `declare -an v` |
+| `-nA` | `declare -A v=([0]="t" )` | `declare -An v` |
+| `-nl`, `-nr`, `-nx`, `-nt` | match | ✅ |
+
+The `-nu`/`-nc` case matters most: `declare -nu v=t` in bash points `v` at `T`,
+so a write through `v` lands somewhere else entirely than it does in osh.
+
+**Proper fix:** apply the case attribute to the reference's *value* (the target
+name) when `-n` is set, make `-a`/`-A` win over `-n` (dropping the nameref
+attribute and taking the value as a one-element array), and refuse `-i` with
+`-n` at status 1 and no variable created.
+
 ### TD-OILS-TRAP-P-OPERANDS-AS-FILTER. `trap -p SPEC…` filtered the trap table instead of walking its operands, so it reordered its output, swallowed duplicates and ignored a bad signal name — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::trap_print`.

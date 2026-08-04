@@ -40998,6 +40998,17 @@ fn unique_temp_path(prefix: &str) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// The pseudo-device paths this host has no node for, each paired with the
+/// native path that stands in for it.
+///
+/// One table, because the shell asks two questions about the same set — where
+/// does an *open* of this path go ([`map_device_path`]), and what do the *file
+/// tests* say about it ([`emulated_device_unary`]) — and a path answered for one
+/// but not the other is incoherent: a redirect that discards into a device the
+/// file tests report absent.
+#[cfg(windows)]
+const EMULATED_DEVICES: &[(&[u8], &[u8])] = &[(b"/dev/null", b"NUL")];
+
 /// Map well-known Unix pseudo-device paths to the host's equivalent.
 ///
 /// On the Windows test host `/dev/null` has no native path: opening it for
@@ -41009,10 +41020,38 @@ fn unique_temp_path(prefix: &str) -> String {
 /// node, so the path is returned unchanged.
 #[cfg(windows)]
 fn map_device_path(path: BStr<'_>) -> BStr<'_> {
-    match path {
-        b"/dev/null" => b"NUL",
-        _ => path,
+    EMULATED_DEVICES.iter().find(|(p, _)| *p == path).map_or(path, |&(_, native)| native)
+}
+
+/// What the `test`/`[`/`[[` file primaries say about an emulated pseudo-device.
+/// `None` means "not emulated here — stat the path as usual".
+///
+/// The answers have to be *stated* rather than measured, because on this host
+/// there is nothing to measure. The literal path resolves to `\dev\null` at the
+/// drive root — normally absent, but possibly a stray file left there before
+/// [`map_device_path`] existed, whose size then makes `[ -s /dev/null ]` true —
+/// and the native stand-in cannot be stat'd either: opening `NUL` succeeds but
+/// `GetFileInformationByHandle` on it fails with `ERROR_INVALID_FUNCTION`, so
+/// `fs::metadata("NUL")` is an error.
+///
+/// So the answers are the ones a character device gives, which is what bash
+/// reports on every host that has the node — measured against the reference
+/// bash, which reports exactly `-e -c -r -w -O -G` true for `/dev/null` (and for
+/// `/dev/zero`, `/dev/tty`, `/dev/full`, `/dev/random` alike). `-O`/`-G` are true
+/// here for the same reason [`unary_owner`] says yes to every file this host can
+/// see: Windows has no UID to compare against.
+///
+/// `-z`, `-n` and `-t` are deliberately *not* answered: they ask about the
+/// string or a descriptor, not about a file, so the path never enters into them.
+#[cfg(windows)]
+fn emulated_device_unary(path: BStr<'_>, op: BStr<'_>) -> Option<bool> {
+    if matches!(op, b"-z" | b"-n" | b"-t") {
+        return None;
     }
+    if !EMULATED_DEVICES.iter().any(|(p, _)| *p == path) {
+        return None;
+    }
+    Some(matches!(op, b"-e" | b"-a" | b"-c" | b"-r" | b"-w" | b"-O" | b"-G"))
 }
 
 #[cfg(not(windows))]
@@ -43697,6 +43736,13 @@ fn cd_is_explicit(t: BStr<'_>) -> bool {
 /// primaries it did not implement, which made `[ -p nosuchfile ]` — and every
 /// other unimplemented spelling — unconditionally true.)
 fn eval_unary(cwd: BStr<'_>, op: BStr<'_>, x: BStr<'_>) -> bool {
+    // A path the host has no node for cannot be stat'd, so its answers are
+    // stated instead — the same set of paths the shell already redirects
+    // elsewhere. See `emulated_device_unary`.
+    #[cfg(windows)]
+    if let Some(answer) = emulated_device_unary(x, op) {
+        return answer;
+    }
     // The filesystem primaries name a path relative to *this shell's* directory.
     let p = || bytes::bytes_to_path(&resolve_against(cwd, x));
     match op {
@@ -62571,6 +62617,41 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(st, 0);
         // A subsequent read of /dev/null still sees EOF (nothing was persisted).
         assert_eq!(run("read x < /dev/null; echo \"[$x]\"").0, "[]\n");
+    }
+
+    #[test]
+    fn dev_null_tests_as_a_character_device() {
+        // The file primaries must describe the device the redirections already
+        // go to, not whatever the literal path resolves to on the host — which
+        // on Windows is `\dev\null` at the drive root, absent or (if an older
+        // build left one there) a stray regular file with a nonzero size.
+        //
+        // Measured on bash 5.2.37: exactly `-e -c -r -w -O -G` hold.
+        for op in ["-e", "-a", "-c", "-r", "-w"] {
+            assert_eq!(run(&format!("[ {op} /dev/null ]")).1, 0, "{op} should hold");
+        }
+        for op in ["-f", "-d", "-b", "-p", "-S", "-s", "-u", "-g", "-k", "-L", "-h", "-x"] {
+            assert_eq!(run(&format!("[ {op} /dev/null ]")).1, 1, "{op} should not hold");
+        }
+        // Ownership and freshness are asserted only where the answers are the
+        // shell's own: a real `/dev/null` belongs to root and carries whatever
+        // timestamps the host booted with, so a Unix run reports on the node.
+        #[cfg(windows)]
+        {
+            assert_eq!(run("[ -O /dev/null ]").1, 0);
+            assert_eq!(run("[ -G /dev/null ]").1, 0);
+            assert_eq!(run("[ -N /dev/null ]").1, 1);
+        }
+        // The string primaries ask about the operand, not about a file, so the
+        // device answers must not reach them.
+        assert_eq!(run("[ -n /dev/null ]").1, 0);
+        assert_eq!(run("[ -z /dev/null ]").1, 1);
+        // `[[ … ]]` shares the evaluator, so it shares the answers.
+        assert_eq!(run("[[ -c /dev/null ]]").1, 0);
+        assert_eq!(run("[[ -f /dev/null ]]").1, 1);
+        // A path that merely looks like one is still just a path.
+        assert_eq!(run("[ -e /dev/nul ]").1, 1);
+        assert_eq!(run("[ -e dev/null ]").1, 1);
     }
 
     #[test]

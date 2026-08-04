@@ -10457,7 +10457,7 @@ impl Shell {
         let Some(dest) = self.scalar_write_dest(name) else {
             return false;
         };
-        self.scalar_write_checked(&dest, val)
+        self.scalar_write_checked(&dest, None, val)
     }
 
     /// The same store as [`Self::set_scalar_checked`], for a target that the
@@ -10471,33 +10471,54 @@ impl Shell {
     /// both halves here, instead of pasting them back together for
     /// [`Self::scalar_write_dest`] to take apart again.
     ///
-    /// Only a *plain* name follows the nameref chain, which is not a narrowing:
-    /// no variable can be named `arr[0]`, so a subscripted target is never a
-    /// nameref's name and the chain never applied to it.
+    /// A subscript does not stop the chain being followed. Nothing is *named*
+    /// `arr[0]`, so a subscripted target is never itself a nameref's name — but
+    /// its base is an ordinary name and is one as readily as any other:
+    /// `declare -n r=arr; read 'r[0]'` writes element 0 of `arr`, takes `arr`'s
+    /// value attributes, syncs `arr`'s dynamic write-back hook, and is refused
+    /// by a readonly `arr`.
+    ///
+    /// What the chain does not carry into the refusal is the name it landed on.
+    /// bash blames a subscripted target by the name the writer wrote — `r`,
+    /// not `arr` — where a *bare* one is blamed by the name it resolved to, so
+    /// the two spell the same refusal differently.
+    ///
+    /// A chain that names nothing, or that already designates an element and so
+    /// leaves this subscript nothing to apply to, is not a readonly question at
+    /// all: the store refuses those, and says so.
     fn set_scalar_target_checked(
         &mut self,
         base: &str,
         sub: Option<BStr<'_>>,
         val: Str,
     ) -> bool {
-        let dest = match sub {
-            Some(sub) => ScalarDest::Elem(base.to_string(), sub.to_vec()),
-            None => {
-                let Some(dest) = self.scalar_write_dest(base) else {
-                    return false;
-                };
-                dest
-            }
+        let Some(sub) = sub else {
+            let Some(dest) = self.scalar_write_dest(base) else {
+                return false;
+            };
+            return self.scalar_write_checked(&dest, None, val);
         };
-        self.scalar_write_checked(&dest, val)
+        let landed = self
+            .resolve_ref_name(base)
+            .and_then(RefTarget::into_name)
+            .unwrap_or_else(|| base.to_string());
+        self.scalar_write_checked(&ScalarDest::Elem(landed, sub.to_vec()), Some(base), val)
     }
 
     /// The readonly guard and the store, shared by every checked scalar write.
     /// Returns `false` with the diagnostic already emitted when the write was
     /// refused.
-    fn scalar_write_checked(&mut self, dest: &ScalarDest, val: Str) -> bool {
+    ///
+    /// `blame` is the name a refusal is reported under when that is not the
+    /// destination's own — see [`Self::set_scalar_target_checked`].
+    fn scalar_write_checked(
+        &mut self,
+        dest: &ScalarDest,
+        blame: Option<&str>,
+        val: Str,
+    ) -> bool {
         if self.readonly.contains(dest.base()) {
-            let base = dest.base().to_string();
+            let base = blame.unwrap_or_else(|| dest.base()).to_string();
             self.perrln(&format!("{base}: readonly variable"));
             return false;
         }
@@ -60404,10 +60425,37 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("a=(x y); readonly a; read 'a[1]' <<< NEW 2>&1; declare -p a").0,
             "osh: a: readonly variable\ndeclare -ar a=([0]=\"x\" [1]=\"y\")\n"
         );
-        // A nameref reaches the array it stands for.
+        // A nameref reaches the array it stands for — and reaches everything
+        // that goes with it: the array's value attributes apply to what lands
+        // in the element, and a readonly array refuses the write.
         assert_eq!(
             run("declare -n r=arr; read 'r[0]' <<< NEW; declare -p arr").0,
             "declare -a arr=([0]=\"NEW\")\n"
+        );
+        assert_eq!(
+            run("declare -ai q=(0 0); declare -n r=q; read 'r[1]' <<< '3+4'; declare -p q").0,
+            "declare -ai q=([0]=\"0\" [1]=\"7\")\n"
+        );
+        assert_eq!(
+            run("declare -A m=([k]=old); readonly m; declare -n r=m; \
+                 read 'r[k]' <<< NEW 2>&1; echo \"rc=$?\"; declare -p m")
+            .0,
+            "osh: r: readonly variable\nrc=1\ndeclare -Ar m=([k]=\"old\" )\n"
+        );
+        // …but the refusal is spelled with the name the *writer* wrote, not the
+        // one the chain landed on, however long the chain: bash blames a bare
+        // target by where it resolved to and a subscripted one by where it
+        // started.
+        assert_eq!(
+            run("a=(x); readonly a; declare -n r1=a; declare -n r2=r1; \
+                 read 'r2[0]' <<< NEW 2>&1; echo \"rc=$?\"; read r2 <<< NEW 2>&1")
+            .0,
+            "osh: r2: readonly variable\nrc=1\nosh: a: readonly variable\n"
+        );
+        // A name the shell maintains refuses silently through a chain too.
+        assert_eq!(
+            run("declare -n r=GROUPS; read 'r[0]' <<< NEW; echo \"rc=$?\"").0,
+            "rc=1\n"
         );
     }
 

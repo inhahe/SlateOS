@@ -12281,7 +12281,9 @@ impl Shell {
         if elems.is_empty() {
             return Vec::new();
         }
-        let mut off = self.eval_arith_substr_bound(offset, &param_ref);
+        let Some(mut off) = self.eval_arith_substr_bound(offset, &param_ref) else {
+            return Vec::new();
+        };
         if off < 0 {
             let past_end = elems.last().map_or(0, |&(k, _)| k.saturating_add(1));
             off = off.saturating_add(past_end);
@@ -12318,7 +12320,9 @@ impl Shell {
         }
         match length {
             Some(l) => {
-                let l = self.eval_arith_substr_bound(l, &param_ref);
+                let Some(l) = self.eval_arith_substr_bound(l, &param_ref) else {
+                    return Vec::new();
+                };
                 // Unlike a string substring (where a negative length counts back
                 // from the end of the string), an array / positional-parameter
                 // slice rejects a negative length as a fatal expansion error
@@ -12367,7 +12371,9 @@ impl Shell {
         length: &Option<Box<Word>>,
         param_ref: BStr<'_>,
     ) -> Vec<Str> {
-        let off = self.eval_arith_substr_bound(offset, param_ref);
+        let Some(off) = self.eval_arith_substr_bound(offset, param_ref) else {
+            return Vec::new();
+        };
         let n = values.len() as i64;
         let start = if off < 0 {
             off.saturating_add(n).saturating_add(1)
@@ -12381,7 +12387,9 @@ impl Shell {
         let rest = values.get(skip..).unwrap_or_default();
         match length {
             Some(l) => {
-                let l = self.eval_arith_substr_bound(l, param_ref);
+                let Some(l) = self.eval_arith_substr_bound(l, param_ref) else {
+                    return Vec::new();
+                };
                 if l < 0 {
                     self.perrln(&format!("{l}: substring expression < 0"));
                     self.arm_discard(1);
@@ -12415,15 +12423,23 @@ impl Shell {
         length: &Option<Box<Word>>,
         param_ref: BStr<'_>,
     ) -> Vec<Str> {
-        let off = self.eval_arith_substr_bound(offset, param_ref);
+        let Some(off) = self.eval_arith_substr_bound(offset, param_ref) else {
+            return Vec::new();
+        };
         let n = bytes::chars(value).count() as i64;
         let start = if off < 0 { off.saturating_add(n) } else { off };
         if start < 0 || start > n {
             return Vec::new();
         }
-        let len = length
-            .as_ref()
-            .map(|l| self.eval_arith_substr_bound(l, param_ref));
+        let len = match length.as_deref() {
+            None => None,
+            Some(l) => {
+                let Some(l) = self.eval_arith_substr_bound(l, param_ref) else {
+                    return Vec::new();
+                };
+                Some(l)
+            }
+        };
         match param_substr(value, off, len) {
             Ok(s) => vec![s],
             Err(bad_len) => {
@@ -20817,19 +20833,19 @@ impl Shell {
                         Str::new()
                     }
                     Some(value) => {
+                        // The rule is [`Shell::scalar_slice`]'s, and deliberately
+                        // not a second copy of it: `${v[@]:off:len}` on a name
+                        // that is no array reaches the very same operator. The
+                        // offset decides whether the length is read at all — so
+                        // `${v:99:j++}` never runs the `j++` — and a bound that
+                        // will not evaluate stops the other one. All that differs
+                        // is how "no field" is spelled: a string context has only
+                        // the empty string to say it with.
                         let param_ref = crate::unparse::name_sub(name, index);
-                        let off = self.eval_arith_substr_bound(offset, &param_ref);
-                        let len = length
-                            .as_ref()
-                            .map(|l| self.eval_arith_substr_bound(l, &param_ref));
-                        match param_substr(&value, off, len) {
-                            Ok(s) => s,
-                            Err(bad_len) => {
-                                self.perrln(&format!("{bad_len}: substring expression < 0"));
-                                self.arm_discard(1);
-                                Str::new()
-                            }
-                        }
+                        self.scalar_slice(&value, offset, length, &param_ref)
+                            .into_iter()
+                            .next()
+                            .unwrap_or_default()
                     }
                 }
             }
@@ -22852,16 +22868,24 @@ impl Shell {
     /// compound element as `['1+1']='w'` — the subscript exactly as it read after
     /// word expansion, untrimmed — which the evaluated index cannot reproduce.
     fn eval_arith_index_text(&mut self, s: BStr<'_>) -> i64 {
+        self.eval_arith_index_text_checked(s).unwrap_or(0)
+    }
+
+    /// [`Self::eval_arith_index_text`] for a caller that must be able to tell an
+    /// error from a zero. The diagnostic is still made and the discard still
+    /// armed; only the fabricated `0` is withheld, so a caller with a *second*
+    /// expression to evaluate can decline to evaluate it.
+    fn eval_arith_index_text_checked(&mut self, s: BStr<'_>) -> Option<i64> {
         let s = bytes::trim(s);
         if s.is_empty() {
-            return 0;
+            return Some(0);
         }
         match arith::eval(s, self) {
-            Ok(v) => v,
+            Ok(v) => Some(v),
             Err(e) => {
                 self.emit_arith_error(s, &e);
                 self.arm_discard(1);
-                0
+                None
             }
         }
     }
@@ -22870,9 +22894,18 @@ impl Shell {
     /// bound. bash's `parameter_brace_substring` swaps `this_command_name` for
     /// the parameter reference while evaluating those two expressions, so the
     /// diagnostic reads `a[0]: 1 z: syntax error in expression`.
-    fn eval_arith_substr_bound(&mut self, w: &Word, param_ref: BStr<'_>) -> i64 {
+    ///
+    /// `None` is a bound that would not evaluate, and every caller must stop
+    /// where it stands. bash's `evalexp` leaves the whole expansion by `longjmp`
+    /// on an arithmetic error, so the *other* bound is never reached:
+    /// `${v:'0':'2'}` names `'0'` and says nothing about `'2'`. The command is
+    /// discarded either way, so what the caller answers with is never read — it
+    /// is the second diagnostic, and any side effect in the second expression,
+    /// that going on would wrongly produce.
+    fn eval_arith_substr_bound(&mut self, w: &Word, param_ref: BStr<'_>) -> Option<i64> {
         let saved = self.arith_cmd.replace(Cow::Owned(param_ref.to_vec()));
-        let v = self.eval_arith_index(w);
+        let s = self.expand_to_arith_string(w);
+        let v = self.eval_arith_index_text_checked(&s);
         self.arith_cmd = saved;
         v
     }

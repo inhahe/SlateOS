@@ -3954,6 +3954,34 @@ pub struct Shell {
     /// are not part of the word, and their own words are in whatever context
     /// they establish for themselves.
     cond_word: bool,
+
+    /// Whether the word being expanded has met a quoted `[@]`-style **list**
+    /// part — `"$@"`, `"${a[@]}"`, `"${!a[@]}"`, `"${a[@]:1:2}"`, `"${a[@]#p}"`.
+    ///
+    /// It decides one thing, in an operand: which of bash's two expansion paths
+    /// a *joined* reading of that operand is reading. An `istring` is the text
+    /// as written and its `QUOTED_NULL`s stand; a `WORD_LIST` is a list of
+    /// words, so the text between the list's breaks is word-split first and only
+    /// a wholly empty word was `quote_string`d into a `CTLNUL`. A list part is
+    /// what moves the word from the first to the second — so `case a in
+    /// ${x:-''"${f[@]}"a})` matches (`f=('')`, and the list took the `''`'s mark
+    /// with it) where `case a in ${x:-''a})` does not. See
+    /// [`Shell::word_list_fields`], which is where the second path is built, and
+    /// [`EChar::MARK`].
+    ///
+    /// Scoped to one operand: [`Shell::expand_operand_fields`] saves and clears
+    /// it, so a list inside a *nested* operand is that operand's own business —
+    /// `case a in ${x:-${y:-"${f[@]}"}a})` does not match.
+    ///
+    /// The `[*]` spellings are deliberately not lists: they join their elements
+    /// into one string, and `${x:-''a"$*"}` keeps both its marks.
+    saw_quoted_list: bool,
+
+    /// What [`Shell::saw_quoted_list`] came to for the operand that just
+    /// finished — the answer [`Shell::expand_operand_fields`] leaves behind for
+    /// [`Shell::operand_chars`], which is above it and so cannot watch the flag
+    /// itself.
+    operand_saw_list: bool,
     /// Inside a double-quoted run (bash's `Q_DOUBLE_QUOTES`). Only the `[*]`
     /// spelling of the `:-`/`:+` family asks: the test for "null" is the string
     /// the reference *would* expand to here, and outside quotes a `[*]` expands
@@ -4731,6 +4759,8 @@ impl Shell {
             bad_sub_word: None,
             ref_label: None,
             cond_word: false,
+            saw_quoted_list: false,
+            operand_saw_list: false,
             dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
@@ -10323,6 +10353,8 @@ impl Shell {
             bad_sub_word: None,
             ref_label: None,
             cond_word: false,
+            saw_quoted_list: false,
+            operand_saw_list: false,
             dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
@@ -19768,7 +19800,13 @@ impl Shell {
                     // A `:-`/`:+` operand is the only part that can carry a
                     // mark out, and the only one this asks about — every other
                     // part answers `None` and is expanded as text below.
-                    if let Some(chars) = self.operand_chars(other) {
+                    //
+                    // The two joining contexts part company here: a `[[ ]]`
+                    // operand and a `case` word ([`Shell::cond_word`]) are
+                    // word-split before the join, an assignment's value and a
+                    // here-document are not. See [`Shell::operand_chars`].
+                    let split_words = self.cond_word;
+                    if let Some(chars) = self.operand_chars(other, split_words) {
                         cur.extend_from_slice(&chars);
                     } else {
                         let val = match self.joined_value(other) {
@@ -19967,14 +20005,23 @@ impl Shell {
                     index: ArrayIndex::All,
                     length: false,
                 },
-            ] => Some(self.array_elements(name)),
-            [WordPart::ArrayKeys { name, star: false }] => Some(self.array_keys(name)),
-            [WordPart::VarNames { prefix, star: false }] => Some(
-                self.var_names_with_prefix(prefix)
-                    .into_iter()
-                    .map(String::into_bytes)
-                    .collect(),
-            ),
+            ] => {
+                self.saw_quoted_list = true;
+                Some(self.array_elements(name))
+            }
+            [WordPart::ArrayKeys { name, star: false }] => {
+                self.saw_quoted_list = true;
+                Some(self.array_keys(name))
+            }
+            [WordPart::VarNames { prefix, star: false }] => {
+                self.saw_quoted_list = true;
+                Some(
+                    self.var_names_with_prefix(prefix)
+                        .into_iter()
+                        .map(String::into_bytes)
+                        .collect(),
+                )
+            }
             // `"${a[@]:off:len}"` / `"${@:off:len}"` — one field per
             // sliced element (the `[*]`/`$*` star form joins instead,
             // handled by the scalar fallback below).
@@ -19985,7 +20032,10 @@ impl Shell {
                     offset,
                     length,
                 },
-            ] => Some(self.slice_elements(name, false, offset, length)),
+            ] => {
+                self.saw_quoted_list = true;
+                Some(self.slice_elements(name, false, offset, length))
+            }
             // `"${a[@]#pat}"` / `"${@^^}"` — one field per element
             // after the element-wise transform.
             [
@@ -19994,7 +20044,10 @@ impl Shell {
                     star: false,
                     op,
                 },
-            ] => Some(self.bulk_elements(name, op, true)),
+            ] => {
+                self.saw_quoted_list = true;
+                Some(self.bulk_elements(name, op, true))
+            }
             // `"${a[@]:-word}"` / `"${a[@]:+word}"` — one field per element
             // when active, and otherwise the fields the operand word made,
             // which the quotes around the substitution reach. The `[*]` form
@@ -20023,7 +20076,12 @@ impl Shell {
                         let texts = items.texts();
                         vec![self.join_elements(&texts, true)]
                     }
-                    items => items.texts(),
+                    items => {
+                        // The elements themselves — the one branch here that is
+                        // a list. See [`Shell::saw_quoted_list`].
+                        self.saw_quoted_list = true;
+                        items.texts()
+                    }
                 },
             ),
             // `"${x:-w}"` / `"${x:+w}"` on a *scalar*. The parameter's own value
@@ -20100,7 +20158,10 @@ impl Shell {
             // `"$@"` expands to one field per positional parameter,
             // preserving embedded whitespace (`"$*"` joins instead and
             // is handled by the scalar fallback below).
-            [WordPart::Param { name, .. }] if name == "@" => Some(self.positional.clone()),
+            [WordPart::Param { name, .. }] if name == "@" => {
+                self.saw_quoted_list = true;
+                Some(self.positional.clone())
+            }
             _ => None,
         }
     }
@@ -20364,7 +20425,9 @@ impl Shell {
                         // [`Self::split_items`] is whether the part carried
                         // quoting out of an operand, which decides nothing about
                         // splitting here but everything about globbing.
-                        if let Some(chars) = self.operand_chars(other) {
+                        // `false`: this mode is a redirect word in posix mode,
+                        // which is the one redirect bash does *not* split.
+                        if let Some(chars) = self.operand_chars(other, false) {
                             // Nothing splits this run, so quote removal has
                             // come and the marks go with it — and an operand
                             // that produced nothing but marks is the empty
@@ -20669,7 +20732,12 @@ impl Shell {
             SplitMode::Operand
         };
         let saved = self.bad_sub_word.replace(crate::unparse::word_src(arg));
+        // Scoped to this operand, and reported to whoever joins its fields:
+        // a list inside a *nested* operand is that operand's own business, and
+        // this restore is what keeps it there. See [`Shell::saw_quoted_list`].
+        let outer = std::mem::replace(&mut self.saw_quoted_list, false);
         let fields = self.expand_word_annotated(arg, mode);
+        self.operand_saw_list = std::mem::replace(&mut self.saw_quoted_list, outer);
         self.bad_sub_word = saved;
         fields
     }
@@ -20705,7 +20773,12 @@ impl Shell {
                     // well: `case ab in ${x:-'*'}` does not match, and
                     // `${v#${x:-'a*'}}` removes the literal `a*`, because the
                     // star the operand kept is not pattern syntax.
-                    if let Some(chars) = self.operand_chars(other) {
+                    //
+                    // `true`: every pattern is a word bash word-splits the
+                    // operand in — `w='  X'; ${w#${x:-"${f[@]}"  X}}` strips
+                    // nothing, the pattern having become `\177 X`. See
+                    // [`Shell::operand_chars`].
+                    if let Some(chars) = self.operand_chars(other, true) {
                         buf.extend_from_slice(&chars);
                         continue;
                     }
@@ -22127,7 +22200,16 @@ impl Shell {
     /// separator and only [`Shell::joined_value`] knows it. The parts named here
     /// have no such question — several fields join with a space, which is what
     /// `a=${n[@]}` does under every `$IFS`.
-    fn operand_chars(&mut self, part: &WordPart) -> Option<Vec<EChar>> {
+    ///
+    /// `split_words` is whether this context is one bash *word-splits* the
+    /// operand in before joining it — see [`Shell::word_list_fields`], which is
+    /// the whole of what it decides. Every context does except the three bash
+    /// names: an assignment's RHS (`PF_ASSIGNRHS`), a here-document or
+    /// here-string (`Q_HERE_DOCUMENT`), and the inside of double quotes
+    /// (`Q_DOUBLE_QUOTES`, which is [`SplitMode::QuotedOperand`] and never
+    /// asks this). So `v=${x:-"${f[@]}"  X}` keeps both its spaces where
+    /// `case ${x:-"${f[@]}"  X}` has one.
+    fn operand_chars(&mut self, part: &WordPart, split_words: bool) -> Option<Vec<EChar>> {
         // Asked before the expansion runs, because it can only be asked once:
         // the operand's side effects must not happen twice, so there is no
         // falling back to the text path after looking.
@@ -22152,6 +22234,14 @@ impl Shell {
             push_chars(&mut out, &joined, false);
             return Some(out);
         };
+        // A quoted `[@]` list in the operand moved it onto bash's `WORD_LIST`
+        // path, where what is joined is *words* rather than the text as
+        // written — see [`Shell::word_list_fields`].
+        let fields = if split_words && self.operand_saw_list {
+            Self::word_list_fields(&fields, &self.ifs_chars())
+        } else {
+            fields
+        };
         let mut out = Vec::new();
         for (i, f) in fields.iter().enumerate() {
             if i > 0 {
@@ -22171,6 +22261,53 @@ impl Shell {
             out.extend_from_slice(f);
         }
         Some(out)
+    }
+
+    /// The *words* an operand that met a quoted `[@]` list is made of, out of
+    /// the fields the list's own breaks left it in.
+    ///
+    /// bash expands a word along two paths — an `istring`, which is the text as
+    /// written and whose `QUOTED_NULL`s stand, and a `WORD_LIST`, which a quoted
+    /// `[@]` moves it onto. On the second path the result is a *list of words*,
+    /// so before anything joins it the text between the list's breaks is
+    /// word-split like any other; and a word carries a `CTLNUL` only when it is
+    /// wholly empty, the marks the ordinary quoted stretches made having gone
+    /// with the path. Hence, with `f=('')` and `g=('' '')`:
+    ///
+    /// ```text
+    /// ${x:-''"${f[@]}"a}    a          — both marks gone, one word
+    /// ${x:-"${g[@]}"a}      \177 a     — the word that came out empty kept one
+    /// ${x:-"${f[@]}"  X}    \177 X     — and the run of spaces was a delimiter
+    /// ```
+    ///
+    /// The operand's fields are only the breaks the list made — the rest of the
+    /// word is still unsplit text — so the scan runs *inside* each of them,
+    /// exactly as [`Shell::expand_word_annotated`]'s [`SplitMode::Fields`] arm
+    /// runs it over the same fields. That is why the splitting reader cannot
+    /// tell the two paths apart, and only a joining one ever sees this.
+    fn word_list_fields(fields: &[Vec<EChar>], ifs: BStr<'_>) -> Vec<Vec<EChar>> {
+        let mut words: Vec<Vec<EChar>> = Vec::new();
+        let mut cur: Vec<EChar> = Vec::new();
+        let mut open = false;
+        for (i, f) in fields.iter().enumerate() {
+            if i > 0 && open {
+                words.push(std::mem::take(&mut cur));
+                open = false;
+            }
+            if f.is_empty() {
+                open = true;
+            } else {
+                split_run(f, ifs, &mut words, &mut cur, &mut open);
+            }
+        }
+        if open {
+            words.push(cur);
+        }
+        for w in &mut words {
+            let kept = drop_marks(w).into_owned();
+            *w = if kept.is_empty() { vec![EChar::MARK] } else { kept };
+        }
+        words
     }
 
     /// The characters that delimit fields: `$IFS`, or the default ` \t\n` when

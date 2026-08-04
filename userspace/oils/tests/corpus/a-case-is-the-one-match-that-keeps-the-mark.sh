@@ -15,6 +15,10 @@
 # Only an *operand* leaves a mark. A quoted empty written in the `case` word
 # itself is plain quoting and expands to nothing at all, so `case abc in
 # ''a''b''c'')` matches, and so does `case a''bc in abc)`.
+#
+# A quoted `[@]` list in the operand takes the other marks with it — that is
+# `a-list-in-an-operand-makes-it-a-word-list.sh`, and the two lines here that
+# touch it are only the corner where the two rules meet.
 
 p() { printf '  %-22s' "$1"; }
 u=; unset n
@@ -31,6 +35,8 @@ p pat-dq-unset; case abc in ${nope:-"$n"a*}) echo match;; *) echo no;; esac
 p pat-dq-null;  case abc in ${nope:-"$u"a*}) echo match;; *) echo no;; esac
 p pat-tail-lit; case abc in ${nope:-abc''}) echo match;; *) echo no;; esac
 p pat-bare;     case abc in ${nope:-a*}) echo match;; *) echo no;; esac
+p pat-one-empty; case abc in ${nope:-"${f[@]}"a*}) echo match;; *) echo no;; esac
+p pat-empty-arr; case abc in ${nope:-"${e[@]}"a*}) echo match;; *) echo no;; esac
 p pat-alt;      s=v; case abc in ${s:+a''bc}) echo match;; *) echo no;; esac
 
 echo "### and in the subject"

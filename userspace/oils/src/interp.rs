@@ -2965,6 +2965,36 @@ enum DynListing {
     Live,
 }
 
+/// What became of the write to `getopts`' name operand. See
+/// [`Shell::getopts_bind`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GetoptsBind {
+    /// The write went through.
+    Bound,
+    /// The operand names a variable that would not take the value — it is
+    /// readonly.
+    Refused,
+    /// The operand does not name a variable at all: `getopts a 'bad name'`.
+    /// Already diagnosed by the time this is returned.
+    NotAName,
+}
+
+impl GetoptsBind {
+    /// The status a call that *found* an option reports.
+    ///
+    /// The find itself is worth 0, and the two ways of not landing it cost
+    /// different things: a readonly variable is an error in the call (bash says
+    /// 2), whereas an operand that is not a name leaves the call with nothing
+    /// to say, which is the same 1 the end of the options is worth.
+    fn found_status(self) -> i32 {
+        match self {
+            Self::Bound => 0,
+            Self::Refused => 2,
+            Self::NotAName => 1,
+        }
+    }
+}
+
 /// Which command(s) a programmable-completion spec applies to (see
 /// [`Shell::comp_specs`]). `Name` is an ordinary command name; the three
 /// specials mirror bash's `complete -D` (default, applied when no other spec
@@ -32699,12 +32729,6 @@ impl Shell {
         }
     }
 
-    /// The `getopts optstring name [args...]` builtin: POSIX-style option
-    /// parser. Reads one option per invocation, tracking position across calls
-    /// via the `OPTIND` shell variable and the internal `getopts_col` cursor
-    /// (for bundled flags like `-abc`). Sets `name` to the option character,
-    /// `OPTARG` to any option-argument. Returns 0 while options remain, 1 at
-    /// the end of the option list.
     /// Bind `getopts`' name operand to the value this call worked out.
     ///
     /// It is an ordinary scalar assignment, so it follows a nameref, obeys the
@@ -32714,13 +32738,41 @@ impl Shell {
     /// bind `?` — so a caller reading the variable never sees the previous
     /// call's answer.
     ///
-    /// Returns whether the write went through. A refusal costs the *option*
-    /// results their status (bash reports 2 rather than 0), but leaves the
-    /// out-of-options status at 1: there the 1 is the answer, not the write.
-    fn getopts_bind(&mut self, name: &str, value: BStr<'_>) -> bool {
-        self.set_scalar_checked(name, value.to_vec())
+    /// The operand is checked for being a name *here*, at the binding, rather
+    /// than up front where the other operands are validated — because that is
+    /// where bash checks it, and the difference shows. A scan with a bad name
+    /// still runs in full: `getopts a 'bad name'` on `-z` prints its own
+    /// `illegal option`, advances `OPTIND`, and sets `OPTARG` in silent mode,
+    /// and only then refuses to bind. So the complaint is the *last* thing said,
+    /// and it is said even when there was nothing left to scan.
+    fn getopts_bind(&mut self, name: BStr<'_>, value: BStr<'_>) -> GetoptsBind {
+        // The variable tables are keyed by `String` and a name is spelled in
+        // the shell's identifier syntax, so a name that is not text is not a
+        // valid identifier either — the same complaint covers both.
+        let Some(text) =
+            bytes::as_str(name).filter(|n| crate::parser::is_valid_name(n.as_bytes()))
+        else {
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"getopts: `",
+                name,
+                b"': not a valid identifier"
+            ]);
+            return GetoptsBind::NotAName;
+        };
+        if self.set_scalar_checked(text, value.to_vec()) {
+            GetoptsBind::Bound
+        } else {
+            GetoptsBind::Refused
+        }
     }
 
+    /// The `getopts optstring name [args...]` builtin: POSIX-style option
+    /// parser. Reads one option per invocation, tracking position across calls
+    /// via the `OPTIND` shell variable and the internal `getopts_col` cursor
+    /// (for bundled flags like `-abc`). Sets `name` to the option character,
+    /// `OPTARG` to any option-argument. Returns 0 while options remain, 1 at
+    /// the end of the option list.
     fn builtin_getopts(&mut self, args: &[Str]) -> i32 {
         // getopts has no options of its own, so bash's internal_getopt rejects
         // any leading `-X` (letter) as an invalid option; `--` ends option
@@ -32746,26 +32798,13 @@ impl Shell {
                 return 2;
             }
         };
-        // The `name` operand names a variable, and the variable tables are
-        // keyed by `String`, so a name that is not text is not a valid
-        // identifier — which is what bash calls it.
-        let name = match args.get(base + 1).map(Vec::as_slice) {
-            Some(s) => match bytes::as_str(s) {
-                Some(n) => n.to_string(),
-                None => {
-                    self.berrln(&bfmt![
-                        self.err_prefix(),
-                        b"getopts: `",
-                        s,
-                        b"': not a valid identifier"
-                    ]);
-                    return 2;
-                }
-            },
-            None => {
-                self.errln("getopts: usage: getopts optstring name [arg ...]");
-                return 2;
-            }
+        // Whether the operand is a *usable* name is not decided here: a missing
+        // operand is a usage error, but an unusable one is only found out about
+        // at the binding, after the scan has run and had its say. See
+        // [`Shell::getopts_bind`].
+        let Some(name) = args.get(base + 1).cloned() else {
+            self.errln("getopts: usage: getopts optstring name [arg ...]");
+            return 2;
         };
         let silent = optstring.starts_with(b":");
         // bash suppresses getopts' own diagnostics when `OPTERR` is exactly
@@ -32801,6 +32840,10 @@ impl Shell {
                 self.getopts_col = 0;
                 self.getopts_optind = optind;
                 self.put_var("OPTIND".to_string(), optind.to_string());
+                // The outcome of the write is not consulted on any of the three
+                // paths that report the end of the options: there the 1 is the
+                // answer to the question asked, and neither a readonly variable
+                // nor an unnameable operand has a different answer to give.
                 self.getopts_bind(&name, b"?");
                 return 1;
             }
@@ -32874,7 +32917,7 @@ impl Shell {
                 }
                 self.getopts_optind = optind;
                 self.put_var("OPTIND".to_string(), optind.to_string());
-                return if self.getopts_bind(&name, b"?") { 0 } else { 2 };
+                return self.getopts_bind(&name, b"?").found_status();
             }
 
             if takes_arg {
@@ -32911,11 +32954,11 @@ impl Shell {
                     };
                     self.getopts_optind = optind;
                     self.put_var("OPTIND".to_string(), optind.to_string());
-                    return if self.getopts_bind(&name, reported) { 0 } else { 2 };
+                    return self.getopts_bind(&name, reported).found_status();
                 }
                 self.getopts_optind = optind;
                 self.put_var("OPTIND".to_string(), optind.to_string());
-                return if self.getopts_bind(&name, &opt.to_str()) { 0 } else { 2 };
+                return self.getopts_bind(&name, &opt.to_str()).found_status();
             }
 
             // Plain flag with no argument.
@@ -32926,7 +32969,7 @@ impl Shell {
             }
             self.getopts_optind = optind;
             self.put_var("OPTIND".to_string(), optind.to_string());
-            return if self.getopts_bind(&name, &opt.to_str()) { 0 } else { 2 };
+            return self.getopts_bind(&name, &opt.to_str()).found_status();
         }
     }
 
@@ -47854,6 +47897,48 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("readonly r=1; set --; getopts ab r 2>&1; echo \"rc=$? r=$r\"").0,
             "osh: r: readonly variable\nrc=1 r=1\n"
         );
+    }
+
+    #[test]
+    fn getopts_checks_its_name_where_it_binds_it() {
+        // The name is looked at only when there is something to store in it —
+        // after the scan has advanced OPTIND, set OPTARG and printed its own
+        // complaint about the argument list. So the two diagnostics come out in
+        // that order, and the scan's work stands.
+        assert_eq!(
+            run("set -- -z; getopts a 'bad name' 2>&1; echo \"rc=$? ind=$OPTIND\"").0,
+            "osh: illegal option -- z\n\
+             osh: getopts: `bad name': not a valid identifier\n\
+             rc=1 ind=2\n"
+        );
+        assert_eq!(
+            run("set -- -z -a; getopts :a 'bad name' 2>&1; echo \"rc=$? oa=[$OPTARG]\"").0,
+            "osh: getopts: `bad name': not a valid identifier\nrc=1 oa=[z]\n"
+        );
+        // Worth 1 even where a name would have been worth 0 — the call has no
+        // answer to give — and the complaint is made with nothing to scan.
+        assert_eq!(
+            run("set -- -a; getopts a 'bad name' 2>/dev/null; echo \"rc=$?\"").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("set --; getopts a 'bad name' 2>&1; echo \"rc=$? ind=$OPTIND\"").0,
+            "osh: getopts: `bad name': not a valid identifier\nrc=1 ind=1\n"
+        );
+        // It is the builtin's complaint, not the scan's, so OPTERR=0 — which
+        // mutes the scan — leaves it alone.
+        assert_eq!(
+            run("set -- -z; OPTERR=0 getopts a 'bad name' 2>&1; echo \"rc=$?\"").0,
+            "osh: getopts: `bad name': not a valid identifier\nrc=1\n"
+        );
+        // A variable that already exists is not touched by the refusal.
+        assert_eq!(
+            run("o=keep; set -- -a; getopts a 'bad name' 2>/dev/null; echo \"o=$o\"").0,
+            "o=keep\n"
+        );
+        // A *missing* name is a different thing: a usage error, settled before
+        // the scan and worth 2.
+        assert_eq!(run("set -- -a; getopts a 2>/dev/null; echo \"rc=$?\"").0, "rc=2\n");
     }
 
     #[test]

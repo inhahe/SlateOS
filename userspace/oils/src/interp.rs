@@ -12474,7 +12474,7 @@ impl Shell {
     /// reads its base value through here, and each of them carries on with the
     /// element treated as unset once the complaint is made — so `${a[-9]-D}`
     /// gives the default and `${a[-9]:?msg}` raises its own error after this one.
-    fn param_elem_value(&mut self, name: &str, index: &Option<Box<Word>>) -> Option<Str> {
+    fn param_elem_value(&mut self, name: &str, index: Option<&Word>) -> Option<Str> {
         match self.param_elem_lookup(name, index) {
             ElemValue::Value(v) => Some(v),
             ElemValue::Absent => None,
@@ -12497,7 +12497,7 @@ impl Shell {
     /// Kept apart from the reporting wrapper for the callers that only need to
     /// *recognise* what a reference names and will resolve it again, in full, if
     /// it turns out not to be theirs: resolving twice must not complain twice.
-    fn param_elem_lookup(&mut self, name: &str, index: &Option<Box<Word>>) -> ElemValue {
+    fn param_elem_lookup(&mut self, name: &str, index: Option<&Word>) -> ElemValue {
         let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             return ElemValue::Absent;
         };
@@ -12595,12 +12595,50 @@ impl Shell {
     /// the pointer is an array element. The subscript is rendered from its
     /// *source*, not its value, because that is what bash's complaints about
     /// such a reference quote: `${!a[$n]}` names `a[$n]`.
-    fn indirect_ref_src(refname: &str, index: &Option<Box<Word>>) -> Str {
-        crate::unparse::name_sub(refname, index)
+    fn indirect_ref_src(refname: &str, index: &Option<ArrayIndex>) -> Str {
+        crate::unparse::name_index(refname, index)
+    }
+
+    /// Read a pointer's own value, honouring its subscript.
+    ///
+    /// The pointer is the one place a subscript may be `[@]`/`[*]` and still
+    /// name a single thing: `${!a[@]op}` reads *all* of `a` and uses that one
+    /// string as the target's name.
+    ///
+    /// The join is the *derived* one ([`Shell::join_derived`]), which is worth
+    /// saying because it contradicts the reading the spelling invites. Written
+    /// out, `x="${a[@]}"` joins `a`'s own elements with a space whatever `$IFS`
+    /// says; read through a pointer, that same `a[@]` joins with `$IFS[0]`. With
+    /// `two=(v v)` and `IFS=:` the assignment gives `v v` and the pointer names
+    /// `v:v`. Only the empty-`$IFS` fallback to a space is shared, and it is
+    /// what makes `[*]` the spelling that can glue: `IFS=` turns `(he llo)` into
+    /// the single legal name `hello` for `[*]` and the invalid `he llo` for
+    /// `[@]`.
+    ///
+    /// A *zero-element* list is `Absent` rather than the empty name, which is
+    /// the distinction bash draws: `mt=()` points nowhere — empty, status 0, and
+    /// `${!mt[@]:-d}` takes the default — while one empty *element*
+    /// (`earr=('')`) really does resolve to the empty name and earns
+    /// "invalid variable name".
+    fn pointer_lookup(&mut self, refname: &str, index: &Option<ArrayIndex>) -> ElemValue {
+        match index {
+            None => self.param_elem_lookup(refname, None),
+            Some(ArrayIndex::Index(w)) => self.param_elem_lookup(refname, Some(w)),
+            Some(i) => {
+                let star = matches!(i, ArrayIndex::Star);
+                let elems = self.array_elements(refname);
+                if elems.is_empty() {
+                    ElemValue::Absent
+                } else {
+                    ElemValue::Value(self.join_derived(&elems, star))
+                }
+            }
+        }
     }
 
     /// The value a `${!ref}` expansion points *with*: `ref`'s own value, or —
-    /// when the reference carries a subscript (`${!a[0]}`) — the element's.
+    /// when the reference carries a subscript (`${!a[0]}`, `${!a[@]op}`) — the
+    /// element's, or the whole list's.
     ///
     /// Three outcomes rather than two, because an element that is not there is
     /// not the same as a pointer that is not there. A reference whose *variable*
@@ -12612,7 +12650,7 @@ impl Shell {
     fn indirect_pointer_value(
         &mut self,
         refname: &str,
-        index: &Option<Box<Word>>,
+        index: &Option<ArrayIndex>,
     ) -> Result<Option<Str>, ()> {
         // `${!@}` / `${!*}` indirect through the positional list: the value of
         // `$@`/`$*` becomes the target name. With **no** positionals there is
@@ -12633,17 +12671,24 @@ impl Shell {
             self.arm_discard(1);
             return Err(());
         }
-        match self.param_elem_value(refname, index) {
-            Some(v) => Ok(Some(v)),
+        match self.pointer_lookup(refname, index) {
+            ElemValue::Value(v) => Ok(Some(v)),
             // A plain pointer that is unset is the fatal case; an absent element
-            // — or one whose subscript `param_elem_value` has already called bad
-            // — leaves the reference pointing nowhere, which is not an error.
-            None if index.is_none() => {
+            // — or an empty list, or one whose subscript was called bad — leaves
+            // the reference pointing nowhere, which is not an error.
+            ElemValue::Absent if index.is_none() => {
                 self.perrln(&format!("{refname}: invalid indirect expansion"));
                 self.arm_discard(1);
                 Err(())
             }
-            None => Ok(None),
+            ElemValue::Absent => Ok(None),
+            ElemValue::BadSubscript(base) => {
+                self.perrln(&format!("{base}: bad array subscript"));
+                // Reading through a bad subscript is not a discard on its own,
+                // but `set -e` ends the shell over the diagnostic all the same.
+                self.note_shell_error(FatalWhen::ErrexitOnly);
+                Ok(None)
+            }
         }
     }
 
@@ -12652,7 +12697,7 @@ impl Shell {
     /// `${!ref}` — indirect expansion: read the variable whose name is the
     /// value of `ref`. The referent may itself name an array element
     /// (`ref=a[0]` / `ref=m[key]`), and so may the pointer (`${!a[0]}`).
-    fn expand_indirect(&mut self, refname: &str, index: &Option<Box<Word>>) -> Str {
+    fn expand_indirect(&mut self, refname: &str, index: &Option<ArrayIndex>) -> Str {
         // Nameref special case: `${!ref}` where `ref` has the `-n` attribute
         // expands to the *name* of the referenced variable, not a second level
         // of indirection (bash). Only a *bare* reference asks this: with a
@@ -12788,7 +12833,7 @@ impl Shell {
     fn indirect_array_elems(
         &mut self,
         refname: &str,
-        index: &Option<Box<Word>>,
+        index: &Option<ArrayIndex>,
     ) -> Option<Vec<Str>> {
         if index.is_none() && self.nameref_attr.contains(refname) {
             return None;
@@ -12796,7 +12841,7 @@ impl Shell {
         if index.is_some() && !self.ref_name_exists(refname) {
             return None;
         }
-        let ElemValue::Value(target) = self.param_elem_lookup(refname, index) else {
+        let ElemValue::Value(target) = self.pointer_lookup(refname, index) else {
             return None;
         };
         // A referent is a variable *name*, optionally subscripted, and every
@@ -12918,7 +12963,7 @@ impl Shell {
         index: &Option<Box<Word>>,
     ) -> Option<Str> {
         match operand {
-            Operand::Param => self.param_elem_value(name, index),
+            Operand::Param => self.param_elem_value(name, index.as_deref()),
             Operand::Value(v) => v.map(<[u8]>::to_vec),
         }
     }
@@ -13013,7 +13058,7 @@ impl Shell {
             let elem = if reuse {
                 elem
             } else {
-                self.param_elem_value(&target, index)
+                self.param_elem_value(&target, index.as_deref())
             };
             if op == 'a' {
                 // Reports type even for an unset scalar. Attribute letters are
@@ -48433,6 +48478,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             )),
             b"echo ${!x:-def}".as_slice()
         );
+    }
+
+    #[test]
+    fn an_array_subscript_can_point_as_well_as_list_keys() {
+        // `${!a[@]}` is the keys only while it stands alone. With an operator it
+        // is indirection whose pointer is `a[@]`: the whole array read as one
+        // string is the target's *name*.
+        assert_eq!(run("declare -a o=(v); v=hi; echo ${!o[@]}").0, "0\n");
+        assert_eq!(run("declare -a o=(v); v=hi; echo ${!o[@]#h}").0, "i\n");
+        assert_eq!(run("declare -a o=(v); v=hi; echo ${!o[*]#h}").0, "i\n");
+        assert_eq!(run("declare -a o=(v); v=hello; echo ${!o[@]:1:3}").0, "ell\n");
+        assert_eq!(run("declare -a o=(v); v=hi; echo ${!o[@]@Q}").0, "'hi'\n");
+        // The name is built with the *derived* join, which is the surprise: the
+        // same reference written out joins with a space whatever `$IFS` says.
+        assert_eq!(run("declare -a t=(v v); IFS=:; x=\"${t[@]}\"; echo \"$x\"").0, "v v\n");
+        let (o, s) = run("declare -a t=(v v); IFS=:; echo ${!t[@]#h}");
+        assert_eq!((o.as_str(), s), ("", 1));
+        // An empty `$IFS` falls back to a space for `[@]` and to nothing for
+        // `[*]`, so only the star spelling can glue a name out of pieces.
+        assert_eq!(run("declare -a h=(he llo); IFS=; hello=y; echo ${!h[*]}x").0, "01x\n");
+        assert_eq!(run("declare -a h=(he llo); IFS=; hello=y; echo ${!h[*]#z}").0, "y\n");
+        let (o, s) = run("declare -a h=(he llo); IFS=; echo ${!h[@]#z}");
+        assert_eq!((o.as_str(), s), ("", 1));
+        // Three ways of having no name: unset is fatal, set-but-empty points
+        // nowhere, one empty element resolves to the illegal empty name.
+        let (o, s) = run("echo ${!nope[@]#x}; echo after");
+        assert_eq!((o.as_str(), s), ("", 1));
+        assert_eq!(run("declare -a mt=(); echo \"[${!mt[@]#x}]\"").0, "[]\n");
+        assert_eq!(run("declare -a mt=(); echo \"[${!mt[@]:-d}]\"").0, "[d]\n");
+        let (o, s) = run("declare -a e=(''); echo ${!e[@]#x}");
+        assert_eq!((o.as_str(), s), ("", 1));
+        // Downstream it is ordinary indirection: `:=` writes the target.
+        assert_eq!(
+            run("declare -a p=(tgt); echo ${!p[@]:=set}; echo post=$tgt").0,
+            "set\npost=set\n"
+        );
+        // Round-trips through the unparser with the subscript intact.
+        for src in ["echo ${!a[@]#x}", "echo ${!a[*]#x}", "echo ${!a[0]#x}"] {
+            assert_eq!(
+                crate::bytes::trim(&crate::unparse::program_inline(
+                    &parse(src.as_bytes()).unwrap()
+                )),
+                src.as_bytes()
+            );
+        }
     }
 
     #[test]

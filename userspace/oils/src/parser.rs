@@ -3440,13 +3440,21 @@ pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: ParseOpts) -> Result<WordP
         //
         // The *pointer* may carry one too (`${!a[0]}`): what is read is then the
         // element's value, and from there on the expansion is the same. Only a
-        // specific subscript can point — `[@]`/`[*]` were the key listing just
-        // above — and only a plain name can carry one, no positional or special
-        // parameter being an array.
-        let index: Option<Box<Word>> = match subscript {
+        // plain name can carry one, no positional or special parameter being an
+        // array.
+        //
+        // `[@]`/`[*]` point as well, and reaching here with one means an
+        // operator followed — the bare spelling was claimed by the key listing
+        // just above. That is bash's rule and it is easy to misread as a typo:
+        // `${!a[@]}` is the keys, but `${!a[@]#x}` reads the *elements* as the
+        // target's name, so `one=(v); v=hello; ${!one[@]#h}` is `ello` and
+        // `n=(x y z); ${!n[@]#x}` complains that `x y z` is not a variable name.
+        let index: Option<ArrayIndex> = match subscript {
             None => None,
-            Some(ArrayIndex::Index(w)) if is_valid_name(name.as_bytes()) => Some(w),
-            Some(_) => return Ok(WordPart::BadSubst(raw.to_vec())),
+            Some(_) if !is_valid_name(name.as_bytes()) => {
+                return Ok(WordPart::BadSubst(raw.to_vec()));
+            }
+            Some(i) => Some(i),
         };
         if is_indirect_referent(&name) {
             if remaining.is_empty() {

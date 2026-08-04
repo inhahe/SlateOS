@@ -31024,10 +31024,19 @@ the spelling looks like the key listing and reads like a typo.
 
 **Measured rules** (bash 5.2.37, all verified):
 
-* The pointer name is formed by the parameter's **own** element join, not the
-  derived one: `[@]` joins with a **space under every `$IFS`** (`IFS=` still
-  gives `v v`), `[*]` joins with `$IFS[0]` (`IFS=` glues `(he llo)` into the
-  single name `hello`). That is exactly `Shell::join_elements`.
+* The pointer name is formed by the **derived** join (`Shell::join_derived`),
+  which contradicts what the spelling suggests. Written out, `x="${a[@]}"` glues
+  the elements with a space whatever `$IFS` says; read *through a pointer* the
+  same `a[@]` glues them with `$IFS[0]`. With `two=(v v)` and `IFS=:` the
+  assignment gives `v v` while the pointer names `v:v`. Only the empty-`$IFS`
+  fallback to a space is shared, and it is what lets the `[*]` spelling — which
+  joins with nothing — glue `(he llo)` into the single legal name `hello` where
+  `[@]` still produces the invalid `he llo`.
+
+  *(This bullet said the opposite when the entry was first written: the first
+  probe only varied `$IFS` for the `[*]` spelling and set it to `:` and to
+  empty for `[@]`, where the space fallback made "always a space" fit the two
+  data points. Varying `$IFS` for both spellings is what separated them.)*
 * A pointer array that is **unset** is the fatal `nope[@]: invalid indirect
   expansion`; one that is **set but empty** (`mt=()`) points *nowhere* — empty
   with status 0, `${!mt[@]:-d}` takes the default, `${!mt[@]:+p}` is empty, and
@@ -31043,13 +31052,25 @@ the spelling looks like the key listing and reads like a typo.
 change `WordPart::Indirect`/`IndirectOp`'s `index` from `Option<Box<Word>>` to
 `Option<ArrayIndex>`, accept `All`/`Star` in the parser whenever `remaining` is
 non-empty (the bare form is already claimed by the `ArrayKeys` branch above),
-render the new shapes in `unparse::name_sub`'s indirection sites, and teach
-`Shell::indirect_pointer_value` to answer `All`/`Star` with
-`join_elements(&self.array_elements(name), star)` — returning `Ok(None)` for a
-zero-element list so the "points nowhere" outcomes above fall out of the
-existing code rather than needing their own branch.
+render the new shapes in an `unparse::name_index` beside `name_sub`, and teach
+the pointer read to answer `All`/`Star` with the joined element list —
+returning "absent" for a zero-element list so the "points nowhere" outcomes
+above fall out of the existing code rather than needing their own branch.
 
 **Impact.** Any script that writes `${!ref[@]op}` gets a hard "bad substitution"
 and a discarded command where bash quietly expands. Narrow, but it fails loudly
 and in a way that is hard to read, since the message blames the whole
 expansion rather than the pointer.
+
+**Fixed in `<this commit>`**, as described. The read went into a new
+`Shell::pointer_lookup`, which is where the three subscript shapes now meet:
+`None` and `[i]` delegate to `param_elem_lookup` (whose subscript parameter
+became a plain `Option<&Word>` borrow, since a pointer holding an `ArrayIndex`
+can no longer hand it a `&Option<Box<Word>>`), and `[@]`/`[*]` join the
+elements. `indirect_pointer_value` and `indirect_array_elems` both read through
+it, so the quoted whole-array path (`ref=a[@]`) and the scalar one cannot drift
+apart.
+
+Covered by the corpus case
+`a-an-array-subscript-can-point-as-well-as-list-keys.sh` and the lib test
+`an_array_subscript_can_point_as_well_as_list_keys`.

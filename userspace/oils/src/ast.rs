@@ -560,9 +560,16 @@ pub enum WordPart {
     /// the indirection may therefore carry a subscript, and they are separate
     /// facts: `index` says where the *name* is read from, while the name read
     /// may itself be an element reference (`ref=a[0]`, `ref=a[@]`).
+    ///
+    /// The pointer's subscript is a full [`ArrayIndex`] rather than a plain
+    /// index expression because `[@]`/`[*]` may point too — with an operator
+    /// after it, which is the only way to reach this variant with such a
+    /// subscript, since a bare `${!a[@]}` is the key listing
+    /// ([`WordPart::ArrayKeys`]) instead. The name is then read from the whole
+    /// list, joined as the parameter's own elements are.
     Indirect {
         refname: String,
-        index: Option<Box<Word>>,
+        index: Option<ArrayIndex>,
     },
     /// `${!ref<op>}` — indirect expansion *combined with* a modifier, e.g.
     /// `${!ref:-def}`, `${!ref^^}`, `${!ref#pat}`, `${!ref/a/b}`. Bash forms the
@@ -574,7 +581,7 @@ pub enum WordPart {
     /// rewritten to the resolved target name at expansion time.
     IndirectOp {
         refname: String,
-        index: Option<Box<Word>>,
+        index: Option<ArrayIndex>,
         target: Box<WordPart>,
     },
     /// `${!prefix*}` / `${!prefix@}` — the names of all set variables that begin

@@ -958,6 +958,20 @@ pub fn name_sub(name: &str, index: &Option<Box<Word>>) -> Str {
     }
 }
 
+/// `name` optionally followed by a whole subscript — `[i]`, `[@]` or `[*]`.
+///
+/// The wider counterpart of [`name_sub`], for the one place a subscript may be
+/// any of the three: an indirection's *pointer* (`${!a[0]}`, `${!a[@]#x}`).
+#[must_use]
+pub fn name_index(name: &str, index: &Option<ArrayIndex>) -> Str {
+    match index {
+        Some(ArrayIndex::Index(i)) => bfmt![name, b"[", &word_src(i), b"]"],
+        Some(ArrayIndex::All) => bfmt![name, b"[@]"],
+        Some(ArrayIndex::Star) => bfmt![name, b"[*]"],
+        None => name.as_bytes().to_vec(),
+    }
+}
+
 /// Re-quote a [`WordPart::SingleQuoted`] run.
 ///
 /// `escaped` text was written with backslashes in the source, so it goes back
@@ -1070,7 +1084,7 @@ fn part_src(p: &WordPart) -> Str {
             bfmt![b"${", &name_sub(name, index), op, &word_src(pattern), b"}"]
         }
         WordPart::Indirect { refname, index } => {
-            bfmt![b"${!", &name_sub(refname, index), b"}"]
+            bfmt![b"${!", &name_index(refname, index), b"}"]
         }
         WordPart::IndirectOp { refname, index, target } => {
             // The `target` carries the referent name as a bare placeholder, so
@@ -1082,7 +1096,7 @@ fn part_src(p: &WordPart) -> Str {
                 .strip_prefix(b"${")
                 .and_then(|rest| rest.strip_prefix(refname.as_bytes()))
             {
-                Some(op) => bfmt![b"${!", &name_sub(refname, index), op],
+                Some(op) => bfmt![b"${!", &name_index(refname, index), op],
                 None => inner.clone(),
             }
         }

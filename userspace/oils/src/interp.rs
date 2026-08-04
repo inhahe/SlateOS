@@ -27603,66 +27603,80 @@ impl Shell {
         // writing it to stdout. The name may be a separate token (`-v x`) or
         // glued (`-vx`). `--` ends option processing; any other `-X` is a usage
         // error (bash's getopt behavior).
+        //
+        // The scan is a *loop*, because bash's `internal_getopt` is: `printf -v
+        // a -v b …` is not a misuse but two options, and the last one names the
+        // variable actually written — the earlier ones are read, checked, and
+        // dropped. It also means an option word is still an option word after
+        // one has been seen, so `printf -v x -- …` ends the scan on the `--` and
+        // `printf -v x -z` is refused for the `-z`.
+        //
+        // `-v` takes whatever word follows it, option-looking or not, so
+        // `printf -v -v x` reads `-v` as the *name* — and is refused for it.
         let mut i = 0;
-        let mut assign_var: Option<Str> = None;
-        if let Some(first) = args.first() {
-            if first.as_slice() == b"--" {
-                i = 1;
-            } else if let Some(glued) = first.strip_prefix(b"-v".as_slice()) {
-                if glued.is_empty() {
-                    // `-v NAME` — the name is the next token.
-                    let Some(name) = args.get(1) else {
-                        self.perrln("printf: -v: option requires an argument");
-                        // bash follows the diagnostic with the usage synopsis.
-                        self.emit_stderr(b"printf: usage: printf [-v var] format [arguments]\n");
-                        return 2;
-                    };
-                    assign_var = Some(name.clone());
-                    i = 2;
-                } else {
-                    // `-vNAME` — the name is glued to the flag.
-                    assign_var = Some(glued.to_vec());
-                    i = 1;
-                }
-            } else if let Some(flags) = first.strip_prefix(b"-").filter(|f| !f.is_empty()) {
-                // A leading option that is not `-v`/`--` is invalid. The dash and
-                // the letter after it — a *character*, so a multi-byte one is
-                // quoted back whole rather than cut.
-                let opt = bfmt![b"-", bytes::char_at(flags, 0)];
+        let mut assign_var: Option<(String, Option<Str>)> = None;
+        while let Some(word) = args.get(i) {
+            if word.as_slice() == b"--" {
+                i = i.saturating_add(1);
+                break;
+            }
+            // A bare `-` is not an option; it is the format.
+            let Some(rest) = word.strip_prefix(b"-".as_slice()).filter(|f| !f.is_empty()) else {
+                break;
+            };
+            let Some(glued) = rest.strip_prefix(b"v".as_slice()) else {
+                // An option that is not `-v`. The dash and the letter after it —
+                // a *character*, so a multi-byte one is quoted back whole rather
+                // than cut.
+                let opt = bfmt![b"-", bytes::char_at(rest, 0)];
                 return self.builtin_invalid_option(
                     "printf",
                     &opt,
                     "printf [-v var] format [arguments]",
                 );
-            }
-        }
-        // The `-v` name is checked as it is read, before printf looks for a
-        // format at all — so `printf -v 1bad` is refused for its name rather
-        // than for the format it is also missing, and `printf -v 1bad '%d' abc`
-        // never gets far enough to complain about the number. Nothing is
-        // formatted, nothing is written, and the status is the usage error's 2
-        // rather than the 1 a refused *store* would leave.
-        // A base *name* is text by definition — the name tables are keyed by
-        // `String` and a name is spelled in the shell's own identifier syntax —
-        // but a **subscript** is an ordinary shell word and may hold any byte,
-        // so the two are separated before either is judged. `printf -v "m[$k]"`
-        // with a `$k` that is not text names a key an associative array stores
-        // perfectly well; gating on the whole operand rejected it.
-        let assign_var: Option<(String, Option<Str>)> = match &assign_var {
-            Some(name) => {
-                let Some((base, sub)) = split_assignment_target(name) else {
-                    self.berrln(&bfmt![
-                        self.err_prefix(),
-                        b"printf: `",
-                        name,
-                        b"': not a valid identifier"
-                    ]);
+            };
+            let name = if glued.is_empty() {
+                // `-v NAME` — the name is the next token.
+                let Some(name) = args.get(i.saturating_add(1)) else {
+                    self.perrln("printf: -v: option requires an argument");
+                    // bash follows the diagnostic with the usage synopsis.
+                    self.emit_stderr(b"printf: usage: printf [-v var] format [arguments]\n");
                     return 2;
                 };
-                Some((base.to_string(), sub.map(<[u8]>::to_vec)))
-            }
-            None => None,
-        };
+                i = i.saturating_add(2);
+                name.clone()
+            } else {
+                // `-vNAME` — the name is glued to the flag.
+                i = i.saturating_add(1);
+                glued.to_vec()
+            };
+            // Each name is checked as it is read — every one of them, not just
+            // the one that will be written — and before printf looks for a
+            // format at all. So `printf -v 1bad` is refused for its name rather
+            // than for the format it is also missing, `printf -v 1bad '%d' abc`
+            // never gets far enough to complain about the number, and
+            // `printf -v 1bad -v ok …` is refused for the name it *discards*.
+            // Nothing is formatted, nothing is written, and the status is the
+            // usage error's 2 rather than the 1 a refused *store* would leave.
+            //
+            // A base *name* is text by definition — the name tables are keyed by
+            // `String` and a name is spelled in the shell's own identifier
+            // syntax — but a **subscript** is an ordinary shell word and may hold
+            // any byte, so the two are separated before either is judged.
+            // `printf -v "m[$k]"` with a `$k` that is not text names a key an
+            // associative array stores perfectly well; gating on the whole
+            // operand rejected it.
+            let Some((base, sub)) = split_assignment_target(&name) else {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"printf: `",
+                    name.as_slice(),
+                    b"': not a valid identifier"
+                ]);
+                return 2;
+            };
+            assign_var = Some((base.to_string(), sub.map(<[u8]>::to_vec)));
+        }
         let Some(fmt) = args.get(i) else {
             // No format operand (`printf`, or `printf -v var` with nothing
             // after): bash prints the usage synopsis (unprefixed, like the other
@@ -60678,6 +60692,49 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "declare -A m=([\"k v\"]=\"x\" )\n"
         );
         assert_eq!(run("printf -v a '%s' hi; echo \"[$a]\"").0, "[hi]\n");
+    }
+
+    #[test]
+    fn printf_scans_its_options_in_a_loop() {
+        // bash's option scan is `internal_getopt`, which loops. `printf -v a -v
+        // b` is therefore not a misuse but two options: the last one names the
+        // variable written, and the earlier ones are read, checked, and dropped
+        // without ever being created.
+        assert_eq!(
+            run("printf -v a1 -v a2 '%s' q; echo \"rc=$? a1=${a1+set}[$a1] a2=[$a2]\"").0,
+            "rc=0 a1=[] a2=[q]\n"
+        );
+        assert_eq!(
+            run("printf -vb1 -vb2 '%s' q; echo \"b1=${b1+set}[$b1] b2=[$b2]\"").0,
+            "b1=[] b2=[q]\n"
+        );
+        // Every name is checked as it is read, including the ones about to be
+        // discarded — so a bad *first* name refuses the whole command.
+        assert_eq!(
+            run("printf -v 1bad -v ok '%s' q 2>&1; echo rc=$?").0,
+            "osh: printf: `1bad': not a valid identifier\nrc=2\n"
+        );
+        // An option word is still an option word after one has been seen, so
+        // `--` ends the scan wherever it falls and a bad option is still bad.
+        assert_eq!(run("printf -v c1 -- '%s' q; echo \"c1=[$c1]\"").0, "c1=[q]\n");
+        assert_eq!(
+            run("printf -v c2 -z '%s' q 2>&1; echo rc=$?").0,
+            "osh: printf: -z: invalid option\nprintf: usage: printf [-v var] format [arguments]\nrc=2\n"
+        );
+        // `-v` takes the next word whatever it looks like, so this reads `-v`
+        // as the name and is refused for it rather than seeing two options.
+        assert_eq!(
+            run("printf -v -v x '%s' q 2>&1; echo rc=$?").0,
+            "osh: printf: `-v': not a valid identifier\nrc=2\n"
+        );
+        // A bare `-` is not an option; it is the format.
+        assert_eq!(run("printf -; echo \"rc=$?\"").0, "-rc=0\n");
+        assert_eq!(run("printf -v d1 -; echo \"d1=[$d1]\"").0, "d1=[-]\n");
+        // A `-v` with nothing after it is the usage error.
+        assert_eq!(
+            run("printf -v e1 -v 2>&1; echo rc=$?").0,
+            "osh: printf: -v: option requires an argument\nprintf: usage: printf [-v var] format [arguments]\nrc=2\n"
+        );
     }
 
     #[test]

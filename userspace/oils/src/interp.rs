@@ -3934,6 +3934,17 @@ pub struct Shell {
     /// on an unset target reports `!r`. Saved/restored around the nested
     /// expansion, like [`Shell::bad_sub_word`].
     ref_label: Option<Str>,
+    /// Inside a `[[ ]]` operand or a `case` word/pattern — bash's `W_NOSPLIT2`.
+    /// It is a *joined* context like an assignment's value, but not the same
+    /// one: an indirect reference to a whole array is flattened with a **space**
+    /// here, whatever the referent's `[@]`/`[*]` and whatever its modifier,
+    /// where the assignment and here-string contexts keep `$IFS`'s answer. See
+    /// [`Shell::nosplit2_indirect`].
+    ///
+    /// Cleared for the duration of a command substitution: the commands it runs
+    /// are not part of the word, and their own words are in whatever context
+    /// they establish for themselves.
+    nosplit2: bool,
     /// Set when a `[[ … =~ RHS ]]` match fails because the RHS could not be
     /// compiled as a regex. bash reports such a `[[` command as status 2 (not 1
     /// "no match") and prints nothing to stderr. `exec_cond` checks this flag
@@ -4699,6 +4710,7 @@ impl Shell {
             pending_unwind: None,
             bad_sub_word: None,
             ref_label: None,
+            nosplit2: false,
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
@@ -9074,7 +9086,7 @@ impl Shell {
             }
             DebugVerdict::Exit(code) => return Flow::Exit(code),
         }
-        let subject: Vec<Ch> = bytes::chars(self.expand_to_string(&c.word).as_bytes()).collect();
+        let subject: Vec<Ch> = bytes::chars(self.expand_cond_string(&c.word).as_bytes()).collect();
         // `shopt -s nocasematch` makes `case` (and `[[ == ]]`) matching
         // case-insensitive.
         let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
@@ -9087,7 +9099,7 @@ impl Shell {
                 // Preserve per-character quoting so an escaped/quoted
                 // metacharacter (`a\*b`, `a'*'b`) matches literally, while a
                 // metacharacter from an unquoted expansion stays live.
-                let pattern = self.expand_word_pattern(pat);
+                let pattern = self.expand_cond_pattern(pat);
                 glob_match_echars_ci(&pattern, &subject, ci, extglob)
             });
             if !matched {
@@ -9813,7 +9825,7 @@ impl Shell {
             // bash's parser rewrites a bare word into the `-n` test it means, and
             // everything downstream sees only the rewrite — the trace included.
             CondExpr::Word(w) => {
-                let arg = self.expand_to_string(w);
+                let arg = self.expand_cond_string(w);
                 self.cond_trace_unary(invert, "-n", &arg);
                 // `-n` is true for a non-empty operand, so `invert` flips it:
                 // spelled as an equality because clippy rejects `!x != y`.
@@ -9872,7 +9884,7 @@ impl Shell {
     /// status 2 (matching bash, which prints nothing and returns 2 rather than
     /// the ordinary 1 "no match").
     fn cond_regex(&mut self, l: &Word, r: &Word, invert: bool) -> bool {
-        let subject = self.expand_to_string(l);
+        let subject = self.expand_cond_string(l);
         // Quote-aware RHS: bash treats *unquoted* portions of the pattern as
         // regex and *quoted* portions (single/double quotes) as literal text —
         // so `[[ a.b =~ "a.b" ]]` matches only the literal, while `[[ … =~ a.b ]]`
@@ -9977,7 +9989,7 @@ impl Shell {
         // bash expands the operand, traces what it expanded to, and only then
         // runs the test — so any substitution in the operand has already happened
         // by the time the trace line appears.
-        let arg = self.expand_to_string(w);
+        let arg = self.expand_cond_string(w);
         self.cond_trace_unary(invert, op.text, &arg);
         self.eval_test_unary(op.text.as_bytes(), &arg)
     }
@@ -9985,7 +9997,7 @@ impl Shell {
     fn cond_binary(&mut self, l: &Word, op: CondBinary, r: &Word, invert: bool) -> bool {
         match op.op {
             CondBinOp::StrEq | CondBinOp::StrNe => {
-                let subject_s = self.expand_to_string(l);
+                let subject_s = self.expand_cond_string(l);
                 let subject: Vec<Ch> = bytes::chars(&subject_s).collect();
                 // `shopt -s nocasematch` folds case for both the literal and the
                 // glob comparison.
@@ -9994,7 +10006,7 @@ impl Shell {
                 // escaped/quoted metacharacter (`a\*b`, `"a*b"`) is a literal,
                 // an unquoted one is a live glob metacharacter. Expanding once
                 // also ensures an RHS `$(cmd)` runs a single time.
-                let pat = self.expand_word_pattern(r);
+                let pat = self.expand_cond_pattern(r);
                 // The trace shows the pattern as built, which is what bash prints
                 // here: a character a quote (or a backslash) made literal appears
                 // backslash-escaped, so `[[ ab == "a"b ]]` traces `[[ ab == \ab ]]`.
@@ -10026,7 +10038,7 @@ impl Shell {
                 }
             }
             CondBinOp::StrLt | CondBinOp::StrGt => {
-                let (a, b) = (self.expand_to_string(l), self.expand_to_string(r));
+                let (a, b) = (self.expand_cond_string(l), self.expand_cond_string(r));
                 self.cond_trace_binary(invert, &a, op.text, &b);
                 if matches!(op.op, CondBinOp::StrLt) { a < b } else { a > b }
             }
@@ -10041,7 +10053,7 @@ impl Shell {
                 // left turns out to be malformed. Only the arithmetic then
                 // short-circuits: a malformed left operand prints its diagnostic
                 // and the comparison is false without the right being evaluated.
-                let (ls, rs) = (self.expand_to_string(l), self.expand_to_string(r));
+                let (ls, rs) = (self.expand_cond_string(l), self.expand_cond_string(r));
                 self.cond_trace_binary(invert, &ls, op.text, &rs);
                 let Some(a) = self.eval_arith_cond_operand(&ls) else {
                     return false;
@@ -10060,7 +10072,7 @@ impl Shell {
                 }
             }
             CondBinOp::FileNewer | CondBinOp::FileOlder | CondBinOp::SameFile => {
-                let (a, b) = (self.expand_to_string(l), self.expand_to_string(r));
+                let (a, b) = (self.expand_cond_string(l), self.expand_cond_string(r));
                 self.cond_trace_binary(invert, &a, op.text, &b);
                 let which: BStr<'_> = match op.op {
                     CondBinOp::FileNewer => b"-nt",
@@ -10264,6 +10276,7 @@ impl Shell {
             pending_unwind: None,
             bad_sub_word: None,
             ref_label: None,
+            nosplit2: false,
             cond_regex_error: false,
             arith_cmd: None,
             decl_builtin_ctx: false,
@@ -13018,27 +13031,45 @@ impl Shell {
         self.arrays.contains_key(target) || self.assoc.contains_key(target)
     }
 
-    /// If `${!ref}` names a whole-array reference (`ref=a[@]` / `ref=a[*]`),
-    /// return the array's element list (used by the quoted `"${!ref}"` field-
-    /// preserving path). Returns `None` for scalar/element/name-list referents.
+    /// The array node a bare `${!ref}` really is, when the reference names a
+    /// whole array: `ref='a[@]'` is `${a[@]}` and `ref='a[*]'` is `${a[*]}`,
+    /// byte for byte. Measured against bash 5.2.37 — the indirect spelling and
+    /// the written-out one agree on every context that can tell them apart
+    /// (unquoted, quoted, glued to literal text, an assignment's value, a
+    /// here-string, `for`, an array literal) under three `$IFS` settings.
     ///
-    /// This only *recognises* the whole-array case; a `None` sends the caller
-    /// back to `expand_indirect`, so nothing is reported here — otherwise every
-    /// complaint about the pointer would be made twice.
-    fn indirect_array_elems(
+    /// The `[*]` half is the reason this hands back a *node* rather than an
+    /// element list: `[*]` keeps the elements apart when the context splits, yet
+    /// joins them with `star_sep` when it does not — `IFS=:` makes `${!ref}`
+    /// three fields but `"${!ref}"` and `a=${!ref}` the one string `ax:by:cz`.
+    /// Only the array node knows that, and it already does.
+    ///
+    /// `None` for scalar, element and name-list referents — and for a nameref,
+    /// which answers with the *name* it holds, so `declare -n g='n[@]'; "${!g}"`
+    /// is the text `n[@]` and not the array it reaches. The look-through starts
+    /// only once a modifier is involved; see [`Shell::indirect_op_part`].
+    ///
+    /// A *recogniser*: a `None` sends the caller back to `expand_indirect`, so
+    /// nothing is reported here — otherwise every complaint about the pointer
+    /// would be made twice.
+    fn indirect_ref_part(
         &mut self,
         refname: &str,
         index: &Option<ArrayIndex>,
-    ) -> Option<Vec<Str>> {
-        // A nameref answers with the *name* it holds, so `declare -n g='n[@]';
-        // "${!g}"` is the text `n[@]` and not the array it reaches. The
-        // look-through starts only once a modifier is involved — see
-        // [`Shell::indirect_op_part`].
+    ) -> Option<WordPart> {
         if index.is_none() && self.nameref_attr.contains(refname) {
             return None;
         }
-        let (name, _star) = self.indirect_whole_array(refname, index)?;
-        Some(self.array_elements(&name))
+        let (name, star) = self.indirect_whole_array(refname, index)?;
+        Some(WordPart::ArrayRef {
+            name,
+            index: if star {
+                ArrayIndex::Star
+            } else {
+                ArrayIndex::All
+            },
+            length: false,
+        })
     }
 
     /// The whole-array reference a `${!ref…}` pointer names: `(base, star)` for a
@@ -19483,6 +19514,14 @@ impl Shell {
         if self.expansion_failed() {
             return None;
         }
+        // The `[[ ]]`/`case` half of this context has one rule of its own, which
+        // applies to *any* indirect whole-array reference and so is asked before
+        // the parts are looked at at all.
+        if self.nosplit2
+            && let Some(s) = self.nosplit2_indirect(part)
+        {
+            return Some(s);
+        }
         match part {
             WordPart::ArraySlice {
                 name,
@@ -19514,6 +19553,68 @@ impl Shell {
             }
             _ => None,
         }
+    }
+
+    /// The one string an *unquoted* indirect reference to a whole array makes in
+    /// the `[[ ]]`/`case` context — bash's `W_NOSPLIT2`. `None` for every other
+    /// part, and for a reference that names no whole array; both are the
+    /// ordinary [`Shell::joined_value`] answer.
+    ///
+    /// This is the one place the indirect spelling and the written-out one
+    /// genuinely disagree — everywhere else `${!r}` is `${n[*]}` byte for byte
+    /// (see [`Shell::indirect_ref_part`]). Here `$IFS`'s first character is a
+    /// **space**, and only the `[*]` referent's null-`$IFS` rule survives:
+    ///
+    /// ```text
+    ///            IFS=' '     IFS=:       IFS=
+    /// r='n[@]'   ax by cz    ax by cz    ax by cz     ${!r} in `case`/`[[ ]]`
+    /// r='n[*]'   ax by cz    ax by cz    axbycz
+    /// ${n[*]}    ax by cz    ax:by:cz    axbycz       — the written-out twin
+    /// "${!r}"    ax by cz    ax:by:cz    axbycz       — and the quoted one
+    /// ```
+    ///
+    /// Only the *join* changes: the elements are still modified one at a time —
+    /// `${!r@Q}` is three quoted words, not one quoted `ax by cz` — so the list
+    /// is built exactly as the splitting context builds it and only then glued.
+    /// An assignment's value and a here-string keep `$IFS`'s answer, which is
+    /// why this cannot live in the parts themselves.
+    fn nosplit2_indirect(&mut self, part: &WordPart) -> Option<Str> {
+        let (arr, label) = match part {
+            WordPart::Indirect { refname, index } => (
+                self.indirect_ref_part(refname, index)?,
+                bfmt![b"!", Self::indirect_ref_src(refname, index)],
+            ),
+            WordPart::IndirectOp {
+                refname,
+                index,
+                target,
+            } => (
+                self.indirect_op_part(refname, index, target)?,
+                bfmt![b"!", Self::indirect_ref_src(refname, index)],
+            ),
+            _ => return None,
+        };
+        // A `[*]` referent under a null `$IFS` still joins with nothing — that
+        // much of the star survives the space.
+        let star = matches!(
+            &arr,
+            WordPart::ArrayRef {
+                index: ArrayIndex::Star,
+                ..
+            } | WordPart::ArrayOp { star: true, .. }
+                | WordPart::ArrayBulk { star: true, .. }
+                | WordPart::ArraySlice { star: true, .. }
+        );
+        let saved = self.ref_label.replace(label);
+        let items = self.split_items(&arr);
+        self.ref_label = saved;
+        let (SplitItems::List(items) | SplitItems::Joined(items)) = items?;
+        let sep: BStr<'_> = if star && self.star_sep().is_empty() {
+            b""
+        } else {
+            b" "
+        };
+        Some(items.join(sep))
     }
 
     /// The fields a **double-quoted** run expands to when it is nothing but one
@@ -19577,9 +19678,18 @@ impl Shell {
                     arg,
                 },
             ] => Some(self.array_op_fields(name, false, *op, *colon, arg)),
-            // `"${!ref}"` where ref resolves to `name[@]` yields one
-            // field per element (bash), like `"${name[@]}"`.
-            [WordPart::Indirect { refname, index }] => self.indirect_array_elems(refname, index),
+            // `"${!ref}"` where `ref` names a whole array is the array node's
+            // answer, asked of the node itself: `ref='n[@]'` yields one field
+            // per element, `ref='n[*]'` one joined field (which the node
+            // declines to recognise, so the scalar fallback joins it).
+            [WordPart::Indirect { refname, index }] => {
+                let part = self.indirect_ref_part(refname, index)?;
+                let label = bfmt![b"!", Self::indirect_ref_src(refname, index)];
+                let saved = self.ref_label.replace(label);
+                let out = self.quoted_per_element(std::slice::from_ref(&part));
+                self.ref_label = saved;
+                out
+            }
             // `"${!ref#pat}"` and friends, where `ref` names a whole array: the
             // modifier is the array's own, so the answer is the array node's —
             // asked here rather than restated, so the two spellings cannot drift.
@@ -19803,6 +19913,26 @@ impl Shell {
     fn expand_to_string(&mut self, word: &Word) -> Str {
         let fields = self.expand_word(word, false);
         fields.concat()
+    }
+
+    /// The same, for a `[[ ]]` operand or a `case` subject: bash's `W_NOSPLIT2`,
+    /// which joins like an assignment's value but for the one rule
+    /// [`Shell::nosplit2_indirect`] records.
+    fn expand_cond_string(&mut self, word: &Word) -> Str {
+        let saved = std::mem::replace(&mut self.nosplit2, true);
+        let out = self.expand_to_string(word);
+        self.nosplit2 = saved;
+        out
+    }
+
+    /// The pattern side of that context — a `case` arm's pattern, or the right
+    /// operand of `[[ == ]]`/`[[ != ]]`. `${x#pat}`'s pattern is *not* one of
+    /// these: it is a modifier's operand, not a word in a command.
+    fn expand_cond_pattern(&mut self, word: &Word) -> Vec<EChar> {
+        let saved = std::mem::replace(&mut self.nosplit2, true);
+        let out = self.expand_word_pattern(word);
+        self.nosplit2 = saved;
+        out
     }
 
     /// Expand an assignment RHS to a single string. Like `expand_to_string`, but
@@ -20284,7 +20414,20 @@ impl Shell {
                 let keys = self.array_keys(name);
                 self.join_derived(&keys, *star)
             }
-            WordPart::Indirect { refname, index } => self.expand_indirect(refname, index),
+            WordPart::Indirect { refname, index } => {
+                // A reference that names a whole array is that array: `${!r}`
+                // with `r='n[*]'` joins with `star_sep` — `ax:by:cz` under
+                // `IFS=:`, `axbycz` under a null one — where the scalar path
+                // below joins every referent with a space. Ask the node.
+                if let Some(part) = self.indirect_ref_part(refname, index) {
+                    let label = bfmt![b"!", Self::indirect_ref_src(refname, index)];
+                    let saved = self.ref_label.replace(label);
+                    let out = self.expand_dynamic(&part);
+                    self.ref_label = saved;
+                    return out;
+                }
+                self.expand_indirect(refname, index)
+            }
             WordPart::IndirectOp { refname, index, target } => {
                 // `${!ref<op>}`: resolve the reference to a target *name* (the
                 // value read through the reference, or the nameref chain's
@@ -21322,9 +21465,14 @@ impl Shell {
                 })
             }
             // `${!ref}` where `ref` names a whole array (`ref='a[@]'`) is that
-            // array's element list; anything else it can reach is text.
+            // array node's classification; anything else it can reach is text.
             WordPart::Indirect { refname, index } => {
-                self.indirect_array_elems(refname, index).map(SplitItems::List)
+                let part = self.indirect_ref_part(refname, index)?;
+                let label = bfmt![b"!", Self::indirect_ref_src(refname, index)];
+                let saved = self.ref_label.replace(label);
+                let out = self.split_items(&part);
+                self.ref_label = saved;
+                out
             }
             // `${!ref#p}` where `ref` names a whole array: the array node's
             // classification, asked of the node itself so the indirect spelling
@@ -21552,6 +21700,16 @@ impl Shell {
         // Count every command substitution so callers (e.g. pure assignments)
         // can tell whether one ran while expanding a value.
         self.comsub_count = self.comsub_count.wrapping_add(1);
+        // The word context the substitution sits in is not the one its own
+        // commands run in: `[[ $(f) ]]` leaves `f`'s words to establish their
+        // own. See [`Shell::nosplit2`].
+        let saved_nosplit2 = std::mem::replace(&mut self.nosplit2, false);
+        let out = self.command_sub_body_inner(body);
+        self.nosplit2 = saved_nosplit2;
+        out
+    }
+
+    fn command_sub_body_inner(&mut self, body: &CmdSubBody) -> Str {
         match body {
             CmdSubBody::Parsed { prog, src, map } => {
                 // The `$(< file)` peek reuses the eager parse: for a body of

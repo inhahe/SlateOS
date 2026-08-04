@@ -45,6 +45,7 @@ for ref in 'n[@]' 'n[*]' 'n[1]' 'n'; do
     show '"${!r^^}"'   "${!r^^}"
     show '"${!r@Q}"'   "${!r@Q}"
     show 'A${!r#a}B'   A${!r#a}B
+    a=${!r};      echo "  a=\${!r}     [$a]"
     a=${!r#a};    echo "  a=\${!r#a}   [$a]"
     a=${!r:1:2};  echo "  a=\${!r:1:2} [$a]"
     a="${!r:1:2}"; echo "  a=\"..\"     [$a]"
@@ -94,3 +95,45 @@ r='e[@]'
 echo "### assigning through the reference is still a bad subscript"
 r='n[@]'
 (echo ${!r:=v}); echo "  rc=$?"
+
+# A `[[ ]]` operand and a `case` word are the one context in which the indirect
+# spelling and the written-out one part company: there $IFS's first character is
+# a space, and only a `[*]` referent's null-$IFS rule survives it. Quoting the
+# same reference puts $IFS back.
+echo "### a [[ ]] operand and a case word join the reference with a space"
+for lbl in default colon null; do
+  echo "=== IFS $lbl"
+  case $lbl in
+    default) IFS=$SAVE ;;
+    colon) IFS=: ;;
+    null) IFS= ;;
+  esac
+  r='n[@]'; s='n[*]'
+  [[ ${!r}     =~ ^(.*)$ ]] && echo "  \${!r}       <${BASH_REMATCH[1]}>"
+  [[ ${!s}     =~ ^(.*)$ ]] && echo "  \${!s}       <${BASH_REMATCH[1]}>"
+  [[ ${n[*]}   =~ ^(.*)$ ]] && echo "  \${n[*]}     <${BASH_REMATCH[1]}>"
+  [[ "${!r}"   =~ ^(.*)$ ]] && echo "  \"\${!r}\"     <${BASH_REMATCH[1]}>"
+  [[ "${!s}"   =~ ^(.*)$ ]] && echo "  \"\${!s}\"     <${BASH_REMATCH[1]}>"
+  [[ ${!r#a}   =~ ^(.*)$ ]] && echo "  \${!r#a}     <${BASH_REMATCH[1]}>"
+  [[ ${!s#a}   =~ ^(.*)$ ]] && echo "  \${!s#a}     <${BASH_REMATCH[1]}>"
+  [[ "${!s#a}" =~ ^(.*)$ ]] && echo "  \"\${!s#a}\"   <${BASH_REMATCH[1]}>"
+  [[ ${!r:0:2} =~ ^(.*)$ ]] && echo "  \${!r:0:2}   <${BASH_REMATCH[1]}>"
+  [[ ${!s:0:2} =~ ^(.*)$ ]] && echo "  \${!s:0:2}   <${BASH_REMATCH[1]}>"
+  [[ ${!r:-d}  =~ ^(.*)$ ]] && echo "  \${!r:-d}    <${BASH_REMATCH[1]}>"
+  [[ ${!s:-d}  =~ ^(.*)$ ]] && echo "  \${!s:-d}    <${BASH_REMATCH[1]}>"
+  case ${!s} in 'ax by cz') echo "  case \${!s}   space" ;; 'ax:by:cz') echo "  case \${!s}   colon" ;; *) echo "  case \${!s}   other" ;; esac
+  case ${n[*]} in 'ax by cz') echo "  case \${n[*]} space" ;; 'ax:by:cz') echo "  case \${n[*]} colon" ;; *) echo "  case \${n[*]} other" ;; esac
+  # A command substitution's own words are in whatever context they make.
+  f() { local v=${!s}; echo "$v"; }
+  [[ $(f) =~ ^(.*)$ ]] && echo "  \$(f)        <${BASH_REMATCH[1]}>"
+done
+IFS=$SAVE
+
+echo "### the same reference in the contexts that keep \$IFS"
+IFS=:
+s='n[*]'
+a=${!s};       echo "  a=\${!s}   [$a]"
+declare D=${!s}; echo "  declare   [$D]"
+printf '  <<<       '; cat <<< ${!s}
+printf '  split     '; printf '<%s>' ${!s}; echo
+IFS=$SAVE

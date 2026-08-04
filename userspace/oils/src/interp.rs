@@ -13030,30 +13030,90 @@ impl Shell {
         refname: &str,
         index: &Option<ArrayIndex>,
     ) -> Option<Vec<Str>> {
+        // A nameref answers with the *name* it holds, so `declare -n g='n[@]';
+        // "${!g}"` is the text `n[@]` and not the array it reaches. The
+        // look-through starts only once a modifier is involved — see
+        // [`Shell::indirect_op_part`].
         if index.is_none() && self.nameref_attr.contains(refname) {
             return None;
         }
-        if index.is_some() && !self.ref_name_exists(refname) {
-            return None;
-        }
-        let ElemValue::Value(target) = self.pointer_lookup(refname, index) else {
-            return None;
+        let (name, _star) = self.indirect_whole_array(refname, index)?;
+        Some(self.array_elements(&name))
+    }
+
+    /// The whole-array reference a `${!ref…}` pointer names: `(base, star)` for a
+    /// referent spelled `base[@]` or `base[*]`, and `None` for anything else — a
+    /// scalar name, an element reference, a pointer that reads nothing.
+    ///
+    /// Silent, like both its callers: whatever complaint a malformed or unset
+    /// referent deserves is made on the general path they fall back to, and
+    /// answering it here as well would make it twice.
+    fn indirect_whole_array(
+        &mut self,
+        refname: &str,
+        index: &Option<ArrayIndex>,
+    ) -> Option<(String, bool)> {
+        let referent: Str = if index.is_none() && self.nameref_attr.contains(refname) {
+            // What the reference points *at*, spelled as it holds it.
+            self.resolve_ref_name(refname)?.spelling()
+        } else {
+            if index.is_some() && !self.ref_name_exists(refname) {
+                return None;
+            }
+            match self.pointer_lookup(refname, index) {
+                ElemValue::Value(v) => v,
+                _ => return None,
+            }
         };
         // A referent is a variable *name*, optionally subscripted, and every
         // name a shell can hold is text; a value that is not names nothing.
-        let target = bytes::as_str(&target)?;
-        if target.is_empty() {
+        let referent = bytes::as_str(&referent)?;
+        let open = referent.find('[')?;
+        let inner = referent.strip_suffix(']')?;
+        let base = referent.get(..open)?;
+        let sub = inner.get(open.checked_add(1)?..)?;
+        if base.is_empty() {
             return None;
         }
-        let open = target.find('[')?;
-        let inner = target.strip_suffix(']')?;
-        let name = &target[..open];
-        let sub = &inner[open + 1..];
-        if sub == "@" || sub == "*" {
-            Some(self.array_elements(name))
-        } else {
-            None
+        match sub {
+            "@" => Some((base.to_owned(), false)),
+            "*" => Some((base.to_owned(), true)),
+            _ => None,
         }
+    }
+
+    /// The array node a `${!ref<op>}` really is, when the reference names a
+    /// whole array. bash applies the modifier to the array exactly as the
+    /// written-out `${base[@]<op>}` would — `r='n[@]'; ${!r#a}` is
+    /// `<x><by><cz>`, one field per element, and `${!r:1:2}` is a *slice* rather
+    /// than a substring — so the honest answer is to hand back that part and let
+    /// the ordinary array code run. Measured against bash 5.2.37: every modifier
+    /// spelling agrees with its written-out twin under three `$IFS` settings,
+    /// quoted and not.
+    ///
+    /// One combination does not look through: a **nameref** whose modifier is
+    /// the `${x:-…}` family. `declare -n g='n[@]'` makes `${!g}` and `${!g:-d}`
+    /// the *name* `n[@]`, while `${!g#a}` and `${!g:1:2}` reach the elements —
+    /// bash's `get_var_and_type` split, mirrored by `looks_through` in the
+    /// `IndirectOp` arm of [`Shell::expand_dynamic_with`].
+    ///
+    /// A *recogniser*, like [`Shell::indirect_array_elems`]: it reports nothing,
+    /// so a `None` costs only a second silent pointer lookup on the general
+    /// path — which is where the complaint belongs.
+    fn indirect_op_part(
+        &mut self,
+        refname: &str,
+        index: &Option<ArrayIndex>,
+        target: &WordPart,
+    ) -> Option<WordPart> {
+        if index.is_none()
+            && self.nameref_attr.contains(refname)
+            && matches!(target, WordPart::ParamOp { .. })
+        {
+            return None;
+        }
+        let (name, star) = self.indirect_whole_array(refname, index)?;
+        array_target_part(target, name, star)
     }
 
     /// Attribute-flag letters for a variable, in bash's reporting order — which is
@@ -19437,6 +19497,117 @@ impl Shell {
                 let keys = self.array_keys(name);
                 Some(self.join_elements(&keys, false))
             }
+            // `a=${!r:1:2}` where `ref` names a whole array is `by cz` under
+            // every `$IFS`, exactly as the written-out slice is — so ask the
+            // array node rather than restating its rule.
+            WordPart::IndirectOp {
+                refname,
+                index,
+                target,
+            } => {
+                let part = self.indirect_op_part(refname, index, target)?;
+                let label = bfmt![b"!", Self::indirect_ref_src(refname, index)];
+                let saved = self.ref_label.replace(label);
+                let out = self.joined_value(&part);
+                self.ref_label = saved;
+                out
+            }
+            _ => None,
+        }
+    }
+
+    /// The fields a **double-quoted** run expands to when it is nothing but one
+    /// list-valued parameter: `"${a[@]}"`, `"$@"`, `"${!a[@]}"`, `"${a[@]:1:2}"`,
+    /// `"${a[@]#p}"`, `"${a[@]:-d}"` and `"${!ref}"` all keep one field per
+    /// element instead of joining. `None` means the run is not one of those and
+    /// expands to a single string.
+    ///
+    /// The `[*]` spellings are deliberately absent: inside quotes the star is
+    /// exactly the instruction to join, so they belong to the scalar path.
+    ///
+    /// This is a *recogniser*: it reports nothing. A `None` sends the caller to
+    /// [`Shell::expand_double_quoted`], which is where every complaint about
+    /// these parts is made, so answering one here would make it twice.
+    fn quoted_per_element(&mut self, parts: &[WordPart]) -> Option<Vec<Str>> {
+        match parts {
+            [
+                WordPart::ArrayRef {
+                    name,
+                    index: ArrayIndex::All,
+                    length: false,
+                },
+            ] => Some(self.array_elements(name)),
+            [WordPart::ArrayKeys { name, star: false }] => Some(self.array_keys(name)),
+            [WordPart::VarNames { prefix, star: false }] => Some(
+                self.var_names_with_prefix(prefix)
+                    .into_iter()
+                    .map(String::into_bytes)
+                    .collect(),
+            ),
+            // `"${a[@]:off:len}"` / `"${@:off:len}"` — one field per
+            // sliced element (the `[*]`/`$*` star form joins instead,
+            // handled by the scalar fallback below).
+            [
+                WordPart::ArraySlice {
+                    name,
+                    star: false,
+                    offset,
+                    length,
+                },
+            ] => Some(self.slice_elements(name, false, offset, length)),
+            // `"${a[@]#pat}"` / `"${@^^}"` — one field per element
+            // after the element-wise transform.
+            [
+                WordPart::ArrayBulk {
+                    name,
+                    star: false,
+                    op,
+                },
+            ] => Some(self.bulk_elements(name, op, true)),
+            // `"${a[@]:-word}"` / `"${a[@]:+word}"` — one field per
+            // element when active; the operand word (as a single
+            // field) otherwise. The `[*]` star form joins instead and
+            // falls through to the scalar path below.
+            [
+                WordPart::ArrayOp {
+                    name,
+                    star: false,
+                    op,
+                    colon,
+                    arg,
+                },
+            ] => Some(self.array_op_fields(name, false, *op, *colon, arg)),
+            // `"${!ref}"` where ref resolves to `name[@]` yields one
+            // field per element (bash), like `"${name[@]}"`.
+            [WordPart::Indirect { refname, index }] => self.indirect_array_elems(refname, index),
+            // `"${!ref#pat}"` and friends, where `ref` names a whole array: the
+            // modifier is the array's own, so the answer is the array node's —
+            // asked here rather than restated, so the two spellings cannot drift.
+            [
+                WordPart::IndirectOp {
+                    refname,
+                    index,
+                    target,
+                },
+            ] => {
+                // A nameref never keeps the elements apart inside quotes:
+                // `declare -n g='n[@]'` makes `"${!g#a}"` one field joined with
+                // `[@]`'s separator, even though unquoted it is three. Only a
+                // plain pointer's look-through reaches them as fields.
+                if index.is_none() && self.nameref_attr.contains(refname) {
+                    return None;
+                }
+                let part = self.indirect_op_part(refname, index, target)?;
+                let label = bfmt![b"!", Self::indirect_ref_src(refname, index)];
+                let saved = self.ref_label.replace(label);
+                let out = self.quoted_per_element(std::slice::from_ref(&part));
+                self.ref_label = saved;
+                out
+            }
+            // `"$@"` expands to one field per positional parameter,
+            // preserving embedded whitespace (`"$*"` joins instead and
+            // is handled by the scalar fallback below).
+            [WordPart::Param { name, .. }] if name == "@" => Some(self.positional.clone()),
             _ => None,
         }
     }
@@ -19480,67 +19651,7 @@ impl Shell {
                     // scalar path below (bash re-enters the quoted run as its
                     // own word).
                     let saved_word = self.bad_sub_word.replace(crate::unparse::parts_src(parts));
-                    let per_element: Option<Vec<Str>> = match parts.as_slice() {
-                        [
-                            WordPart::ArrayRef {
-                                name,
-                                index: ArrayIndex::All,
-                                length: false,
-                            },
-                        ] => Some(self.array_elements(name)),
-                        [WordPart::ArrayKeys { name, star: false }] => Some(self.array_keys(name)),
-                        [WordPart::VarNames { prefix, star: false }] => Some(
-                            self.var_names_with_prefix(prefix)
-                                .into_iter()
-                                .map(String::into_bytes)
-                                .collect(),
-                        ),
-                        // `"${a[@]:off:len}"` / `"${@:off:len}"` — one field per
-                        // sliced element (the `[*]`/`$*` star form joins instead,
-                        // handled by the scalar fallback below).
-                        [
-                            WordPart::ArraySlice {
-                                name,
-                                star: false,
-                                offset,
-                                length,
-                            },
-                        ] => Some(self.slice_elements(name, false, offset, length)),
-                        // `"${a[@]#pat}"` / `"${@^^}"` — one field per element
-                        // after the element-wise transform.
-                        [
-                            WordPart::ArrayBulk {
-                                name,
-                                star: false,
-                                op,
-                            },
-                        ] => Some(self.bulk_elements(name, op, true)),
-                        // `"${a[@]:-word}"` / `"${a[@]:+word}"` — one field per
-                        // element when active; the operand word (as a single
-                        // field) otherwise. The `[*]` star form joins instead and
-                        // falls through to the scalar path below.
-                        [
-                            WordPart::ArrayOp {
-                                name,
-                                star: false,
-                                op,
-                                colon,
-                                arg,
-                            },
-                        ] => Some(self.array_op_fields(name, false, *op, *colon, arg)),
-                        // `"${!ref}"` where ref resolves to `name[@]` yields one
-                        // field per element (bash), like `"${name[@]}"`.
-                        [WordPart::Indirect { refname, index }] => {
-                            self.indirect_array_elems(refname, index)
-                        }
-                        // `"$@"` expands to one field per positional parameter,
-                        // preserving embedded whitespace (`"$*"` joins instead and
-                        // is handled by the scalar fallback below).
-                        [WordPart::Param { name, .. }] if name == "@" => {
-                            Some(self.positional.clone())
-                        }
-                        _ => None,
-                    };
+                    let per_element = self.quoted_per_element(parts);
                     self.bad_sub_word = saved_word;
                     if let Some(items) = per_element {
                         for (i, el) in items.into_iter().enumerate() {
@@ -20186,6 +20297,16 @@ impl Shell {
                 // about the reference as written — the writer named `!ref`, and
                 // the variable it resolved to is not theirs to be told about.
                 let label = bfmt![b"!", Self::indirect_ref_src(refname, index)];
+                // A reference that names a whole array (`r='n[@]'`) makes the
+                // modifier the *array's* — `${!r#a}` is `${n[@]#a}`, elements
+                // and all. Answer as that part rather than flattening the array
+                // to text first; see [`Shell::indirect_op_part`].
+                if let Some(arr) = self.indirect_op_part(refname, index, target) {
+                    let saved_label = self.ref_label.replace(label);
+                    let out = self.expand_dynamic(&arr);
+                    self.ref_label = saved_label;
+                    return out;
+                }
                 let nameref = index.is_none() && self.nameref_attr.contains(refname);
                 let pointed_at: Option<Str> = if nameref {
                     match self.resolve_ref_name(refname) {
@@ -20554,15 +20675,15 @@ impl Shell {
                     } else {
                         b"parameter not set"
                     };
-                    let line = bfmt![
-                        self.err_prefix(),
-                        name,
-                        b"[",
-                        sub,
-                        b"]: ",
-                        text,
-                        b"\n"
-                    ];
+                    // Reached through an indirection the complaint is about the
+                    // reference as written (`!r`), not the array it landed on —
+                    // the same rule `note_unbound_modifier` applies to the
+                    // scalar modifiers.
+                    let shown = self
+                        .ref_label
+                        .clone()
+                        .unwrap_or_else(|| bfmt![name, b"[", sub, b"]"]);
+                    let line = bfmt![self.err_prefix(), &shown, b": ", text, b"\n"];
                     self.emit_stderr(&line);
                     // `${a[@]:?}` on an unset/null array exits 127, like scalar `:?`.
                     self.arm_unbound_abort();
@@ -21204,6 +21325,21 @@ impl Shell {
             // array's element list; anything else it can reach is text.
             WordPart::Indirect { refname, index } => {
                 self.indirect_array_elems(refname, index).map(SplitItems::List)
+            }
+            // `${!ref#p}` where `ref` names a whole array: the array node's
+            // classification, asked of the node itself so the indirect spelling
+            // cannot drift from the written one.
+            WordPart::IndirectOp {
+                refname,
+                index,
+                target,
+            } => {
+                let part = self.indirect_op_part(refname, index, target)?;
+                let label = bfmt![b"!", Self::indirect_ref_src(refname, index)];
+                let saved = self.ref_label.replace(label);
+                let out = self.split_items(&part);
+                self.ref_label = saved;
+                out
             }
             _ => None,
         }
@@ -42797,6 +42933,92 @@ fn is_valid_indirect_target(s: &str) -> bool {
 /// as written, `!ref`. The two part ways here and nowhere else: the reader was
 /// asking about a name they never wrote down, so being told the resolved one
 /// would name a variable they never mentioned.
+/// The whole-array counterpart of a scalar modifier node: `${x#p}`'s
+/// [`WordPart::ParamTrim`] becomes `${a[@]#p}`'s [`WordPart::ArrayBulk`],
+/// `${x:1:2}`'s [`WordPart::ParamSubstr`] becomes the *slice*
+/// [`WordPart::ArraySlice`], and so on.
+///
+/// Used when a `${!ref<op>}` turns out to name an array — see
+/// [`Shell::indirect_op_part`] — so that the indirect spelling and the written
+/// one run the very same code rather than two implementations of one rule.
+///
+/// `None` for a node with no array counterpart, which sends the caller back to
+/// the scalar rewrite ([`rename_param_target`]).
+fn array_target_part(part: &WordPart, name: String, star: bool) -> Option<WordPart> {
+    Some(match part {
+        WordPart::ParamOp {
+            op, colon, arg, ..
+        } => WordPart::ArrayOp {
+            name,
+            star,
+            op: *op,
+            colon: *colon,
+            arg: arg.clone(),
+        },
+        WordPart::ParamTrim {
+            suffix,
+            longest,
+            pattern,
+            ..
+        } => WordPart::ArrayBulk {
+            name,
+            star,
+            op: BulkOp::Trim {
+                suffix: *suffix,
+                longest: *longest,
+                pattern: pattern.clone(),
+            },
+        },
+        WordPart::ParamReplace {
+            all,
+            anchor,
+            pattern,
+            replacement,
+            ..
+        } => WordPart::ArrayBulk {
+            name,
+            star,
+            op: BulkOp::Replace {
+                all: *all,
+                anchor: *anchor,
+                pattern: pattern.clone(),
+                replacement: replacement.clone(),
+            },
+        },
+        WordPart::ParamCase {
+            mode,
+            all,
+            pattern,
+            ..
+        } => WordPart::ArrayBulk {
+            name,
+            star,
+            op: BulkOp::Case {
+                mode: *mode,
+                all: *all,
+                pattern: pattern.clone(),
+            },
+        },
+        WordPart::ParamTransform { op, .. } => WordPart::ArrayBulk {
+            name,
+            star,
+            op: BulkOp::Transform { op: *op },
+        },
+        WordPart::BadTransform { raw, .. } => WordPart::ArrayBulk {
+            name,
+            star,
+            op: BulkOp::BadTransform { raw: raw.clone() },
+        },
+        WordPart::ParamSubstr { offset, length, .. } => WordPart::ArraySlice {
+            name,
+            star,
+            offset: offset.clone(),
+            length: length.clone(),
+        },
+        _ => return None,
+    })
+}
+
 fn rename_param_target(part: &WordPart, new_name: &str, label: BStr<'_>) -> WordPart {
     let mut out = part.clone();
     out.set_param_name(new_name.to_string());

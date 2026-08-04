@@ -30039,6 +30039,24 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // The shadow itself is refused too, so even a *valueless* `declare
+            // ro` inside a function reports and abandons the operand — where the
+            // same declaration at top level asks for no shadow, is a plain
+            // attribute update, and succeeds. Only a shadow is refused, so
+            // `declare -g ro`, `export ro` and `readonly ro` all go on reaching
+            // the readonly global itself.
+            //
+            // Ahead of the un-assignable refusal below, because a name can be
+            // both and bash answers `readonly` first: `declare -r BASH_SOURCE;
+            // f() { local BASH_SOURCE; }` reports `readonly variable`, not
+            // `variable may not be assigned value`. Without the readonly the
+            // other refusal is still the right one, which is why this is an
+            // ordering rather than a wider condition.
+            if shadow_new && readonly_blocks {
+                self.perrln(&format!("{tag}: {base_name}: readonly variable"));
+                status = 1;
+                continue;
+            }
             // A variable the shell maintains refuses the value too — and, unlike
             // the readonly case, refuses the *attributes* along with it: the
             // operand is abandoned before any of them is applied, so
@@ -30058,17 +30076,6 @@ impl Shell {
                         "{tag}: {base_name}: variable may not be assigned value"
                     ));
                 }
-                status = 1;
-                continue;
-            }
-            // The shadow itself is refused too, so even a *valueless* `declare
-            // ro` inside a function reports and abandons the operand — where the
-            // same declaration at top level asks for no shadow, is a plain
-            // attribute update, and succeeds. Only a shadow is refused, so
-            // `declare -g ro`, `export ro` and `readonly ro` all go on reaching
-            // the readonly global itself.
-            if shadow_new && readonly_blocks {
-                self.perrln(&format!("{tag}: {base_name}: readonly variable"));
                 status = 1;
                 continue;
             }
@@ -53383,9 +53390,36 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             let want = format!("{tag}: GROUPS: variable may not be assigned value\n1\n");
             assert!(out.ends_with(&want), "{script}: {out:?}");
         }
+        // …unless the name is *also* readonly, which outranks it: the shadow the
+        // `local` asks for is refused before the assignment it carries is, so
+        // bash speaks the readonly refusal instead. Only the message differs —
+        // both give 1 and neither binds.
+        for script in [
+            "f() { local GROUPS; echo $?; }; f",
+            "f() { local GROUPS=5; echo $?; }; f",
+            "f() { local -a BASH_SOURCE; echo $?; }; f",
+            "f() { declare FUNCNAME; echo $?; }; f",
+        ] {
+            let name = ["GROUPS", "BASH_SOURCE", "FUNCNAME"]
+                .into_iter()
+                .find(|n| script.contains(n))
+                .unwrap_or("GROUPS");
+            let (out, _) = run(&format!("{{ declare -r {name}; {script} ; }} 2>&1"));
+            assert!(out.ends_with(&format!("{name}: readonly variable\n1\n")), "{script}: {out:?}");
+        }
         // `-g` and `export` name the global, so they take the global refusal.
         assert_eq!(run("f() { declare -g GROUPS=5; echo $?; }; f 2>&1").0, "1\n");
         assert_eq!(run("f() { export GROUPS=5; echo $?; }; f 2>&1").0, "0\n");
+        // A `-g` asks for no shadow, so it never reaches the ordering above: a
+        // readonly global refuses the *value* first, one check earlier still.
+        assert_eq!(
+            run("declare -r GROUPS; f() { declare -g GROUPS=5; echo $?; }; f 2>&1").0,
+            "main: declare: GROUPS: readonly variable\n1\n"
+        );
+        // Without the readonly the un-assignable refusal is the one there, which
+        // is what makes this an ordering between two refusals rather than a
+        // readonly name swallowing the other.
+        assert_eq!(run("f() { declare -g GROUPS=5; echo $?; }; f 2>&1").0, "1\n");
         // A compound literal splits the same way — and the local half is reported
         // *twice*: by the compound-assignment machinery, which inside a function
         // tags its diagnostics with the function's name, and by the builtin.

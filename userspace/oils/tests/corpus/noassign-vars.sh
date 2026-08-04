@@ -98,6 +98,27 @@ echo "=== a declaration builtin refuses it by where the binding would land"
 ( f() { declare -g GROUPS=5; echo "rc=$?"; }; f ) 2>&1
 ( f() { export GROUPS=5; echo "rc=$?"; }; f ) 2>&1
 
+echo "=== a readonly one outranks the refusal, and says so instead"
+# A name can be both un-assignable and readonly, and then it is the *readonly*
+# refusal bash speaks — which shows only in the `local` shapes, since those are
+# the only ones that say anything at all. Without the readonly the un-assignable
+# message is still the right one, so this is an ordering between two refusals
+# rather than one swallowing the other.
+( declare -r GROUPS; f() { local GROUPS; }; f; echo "rc=$?" ) 2>&1
+( f() { local GROUPS; }; f; echo "rc=$?" ) 2>&1
+( declare -r FUNCNAME; f() { local FUNCNAME; }; f; echo "rc=$?" ) 2>&1
+( declare -r BASH_SOURCE; f() { local -a BASH_SOURCE; }; f; echo "rc=$?" ) 2>&1
+( declare -r GROUPS; f() { local GROUPS=5; }; f; echo "rc=$?" ) 2>&1
+( declare -r GROUPS; f() { declare GROUPS; }; f; echo "rc=$?" ) 2>&1
+# `-g` names the global, where no shadow is asked for and the un-assignable
+# refusal is the only one there is to make.
+( declare -r GROUPS; f() { declare -g GROUPS=5; }; f; echo "rc=$?" ) 2>&1
+( declare -r GROUPS; declare GROUPS=5; echo "rc=$?" ) 2>&1
+# A readonly scalar dynamic special and an ordinary readonly already took the
+# readonly refusal; that is the shape the two above now match.
+( declare -r SECONDS; f() { local SECONDS; }; f; echo "rc=$?" ) 2>&1
+( declare -r ord=1; f() { local ord; }; f; echo "rc=$?" ) 2>&1
+
 echo "=== and a compound literal splits the same way, twice over"
 # The local refusal is reported by the compound-assignment machinery — which
 # inside a function tags its diagnostics with the function's name — and then

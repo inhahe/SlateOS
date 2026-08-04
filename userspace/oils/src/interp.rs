@@ -13783,14 +13783,11 @@ impl Shell {
                 let elems = self.array_elements(name);
                 if length {
                     elems.len().to_string().into_bytes()
-                } else if matches!(index, ArrayIndex::Star) {
-                    // `${arr[*]}` joins with the first character of `$IFS`
-                    // (space when unset, empty when IFS is empty) — bash. The
-                    // quoted `"${arr[*]}"` form reaches this scalar path, so the
-                    // separator is observable.
-                    elems.join(self.star_sep().as_slice())
                 } else {
-                    elems.join(b" ".as_slice())
+                    // The quoted `"${arr[*]}"` form reaches this scalar path, so
+                    // which separator the join uses is observable — see
+                    // [`Shell::join_elements`].
+                    self.join_elements(&elems, matches!(index, ArrayIndex::Star))
                 }
             }
             ArrayIndex::Index(w) => {
@@ -19496,11 +19493,13 @@ impl Shell {
                 star,
                 offset,
                 length,
-            } => self
-                .slice_elements(name, *star, offset, length)
-                .join(b" ".as_slice()),
-            WordPart::ArrayBulk { name, op, .. } => {
-                self.bulk_elements(name, op).join(b" ".as_slice())
+            } => {
+                let fields = self.slice_elements(name, *star, offset, length);
+                self.join_elements(&fields, *star)
+            }
+            WordPart::ArrayBulk { name, star, op } => {
+                let fields = self.bulk_elements(name, op);
+                self.join_elements(&fields, *star)
             }
             WordPart::ArrayOp {
                 name,
@@ -19510,11 +19509,7 @@ impl Shell {
                 arg,
             } => {
                 let fields = self.array_op_fields(name, *star, *op, *colon, arg);
-                if *star {
-                    fields.join(self.star_sep().as_slice())
-                } else {
-                    fields.join(b" ".as_slice())
-                }
+                self.join_elements(&fields, *star)
             }
             WordPart::CommandSub { body } => self.command_sub_body(body),
             // The substitution's path is a temp file name this shell generates,
@@ -19527,7 +19522,10 @@ impl Shell {
                 index,
                 length,
             } => self.expand_array_ref(name, index, *length),
-            WordPart::ArrayKeys { name, .. } => self.array_keys(name).join(b" ".as_slice()),
+            WordPart::ArrayKeys { name, star } => {
+                let keys = self.array_keys(name);
+                self.join_elements(&keys, *star)
+            }
             WordPart::Indirect { refname, index } => self.expand_indirect(refname, index),
             WordPart::IndirectOp { refname, index, target } => {
                 // `${!ref<op>}`: resolve the reference to a target *name* (the
@@ -19629,8 +19627,13 @@ impl Shell {
                 self.ref_label = saved_label;
                 out
             }
-            WordPart::VarNames { prefix, .. } => {
-                self.var_names_with_prefix(prefix).join(" ").into_bytes()
+            WordPart::VarNames { prefix, star } => {
+                let names: Vec<Str> = self
+                    .var_names_with_prefix(prefix)
+                    .into_iter()
+                    .map(String::into_bytes)
+                    .collect();
+                self.join_elements(&names, *star)
             }
             WordPart::BadSubst(raw) => self.bad_substitution(raw),
             // Literal/quoted handled by callers.
@@ -20392,6 +20395,24 @@ impl Shell {
             s.push('s');
         }
         s
+    }
+
+    /// Join a list of elements for a context that wants one string: every `[*]`
+    /// form joins with [`Shell::star_sep`], every `[@]` form with a space.
+    ///
+    /// The join belongs to the *reference*, so what the list is made of never
+    /// enters into it: the elements themselves (`"${a[*]}"`), the keys
+    /// (`"${!a[*]}"`), the names carrying a prefix (`"${!pre*}"`), a slice
+    /// (`"${a[*]:1:2}"`) and an element-wise transform (`"${a[*]@Q}"`) are one
+    /// rule, not five. Every site goes through here for that reason — written
+    /// out per site, the four latter ones hard-coded the space and only
+    /// `${a[*]}` was kept in step with `$IFS`.
+    fn join_elements(&self, elems: &[Str], star: bool) -> Str {
+        if star {
+            elems.join(self.star_sep().as_slice())
+        } else {
+            elems.join(b" ".as_slice())
+        }
     }
 
     /// The separator that `"$*"` (and `"${a[*]}"`) uses to join elements: the
@@ -54885,6 +54906,37 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A name in the table with no letters renders the plain assignment.
         assert!(run("echo \"${LINENO[@]@A}\"").0.starts_with("LINENO='"), "{:?}", run("echo \"${LINENO[@]@A}\"").0);
         assert_eq!(run("set -- \"${LINENO[@]@a}\"; echo $#").0, "0\n");
+    }
+
+    #[test]
+    fn a_star_reference_joins_with_ifs_whatever_list_it_made() {
+        // The join belongs to the reference, not to the list: the keys, the
+        // prefix name-list, a slice and an element-wise transform all take the
+        // first character of `$IFS`, exactly as the elements themselves do.
+        let src = |e: &str| format!("declare -a n=(x y z); zz1=1; zz2=2; IFS=:; echo \"[{e}]\"");
+        assert_eq!(run(&src("${n[*]}")).0, "[x:y:z]\n");
+        assert_eq!(run(&src("${!n[*]}")).0, "[0:1:2]\n");
+        assert_eq!(run(&src("${!zz*}")).0, "[zz1:zz2]\n");
+        assert_eq!(run(&src("${n[*]:0:3}")).0, "[x:y:z]\n");
+        assert_eq!(run(&src("${n[*]@Q}")).0, "[\'x\':\'y\':\'z\']\n");
+        assert_eq!(run(&src("${n[*]^^}")).0, "[X:Y:Z]\n");
+        assert_eq!(run(&src("${n[*]:-D}")).0, "[x:y:z]\n");
+        // An empty `IFS` joins with nothing, an unset one with a space.
+        assert_eq!(run("declare -a n=(x y z); IFS=; echo \"[${n[*]@Q}]\"").0, "['x''y''z']\n");
+        assert_eq!(run("declare -a n=(x y z); unset IFS; echo \"[${!n[*]}]\"").0, "[0 1 2]\n");
+
+        // Only the star form asks. Every `[@]` spelling is one field per
+        // element however `$IFS` reads.
+        let cnt = |e: &str| format!("declare -a n=(x y z); IFS=:; set -- \"{e}\"; echo \"$#:$2\"");
+        assert_eq!(run(&cnt("${n[@]}")).0, "3:y\n");
+        assert_eq!(run(&cnt("${!n[@]}")).0, "3:1\n");
+        assert_eq!(run(&cnt("${n[@]:0:3}")).0, "3:y\n");
+        assert_eq!(run(&cnt("${n[@]@Q}")).0, "3:\'y\'\n");
+        assert_eq!(run(&cnt("${n[@]:-D}")).0, "3:y\n");
+
+        // The positional forms are the same reference.
+        assert_eq!(run("set -- 'a b' c; IFS=:; echo \"[${*@Q}]\"").0, "['a b':'c']\n");
+        assert_eq!(run("set -- 'a b' c; IFS=:; set -- \"${@@Q}\"; echo \"$#\"").0, "2\n");
     }
 
     #[test]

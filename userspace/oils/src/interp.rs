@@ -33830,13 +33830,23 @@ impl Shell {
                 && let Some(cb) = &callback
             {
                 let cmd = bfmt![cb, b" ", idx.to_string(), b" ", single_quote_bytes(&s)];
+                // The callback is text `mapfile` runs, not a source of its own,
+                // so it runs *at the `mapfile` command's line* — `$LINENO`
+                // inside it is that line, and so is any diagnostic raised after
+                // it by the rest of this builtin. The line is restored either
+                // way, since the callback's own last line must not become the
+                // shell's (a trap handler is run the same way).
+                let saved_line = self.current_line;
+                let map = LineMap::Offset(saved_line.saturating_sub(1));
                 // An `exit N` in the callback terminates the *shell* (bash), so
                 // the read loop stops and the array is never assigned at all.
                 // A builtin can only hand back an `i32`, hence the side channel.
                 // The callback runs in the current shell, so it gets the shell's
                 // stdin — not the file/fd `mapfile` is itself consuming, whose
                 // remaining bytes belong to the read loop.
-                if let Flow::Exit(n) = self.run_source_flow_out(&cmd, out, stdin, &LineMap::Offset(0), HistRead::Off) {
+                let flow = self.run_source_flow_out(&cmd, out, stdin, &map, HistRead::Off);
+                self.current_line = saved_line;
+                if let Flow::Exit(n) = flow {
                     self.pending_builtin_exit = Some(n);
                     return n;
                 }
@@ -58666,6 +58676,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             o,
             "cb 0 [a] have=-1\ncb 1 [b] have=0\ncb 2 [c] have=1\nfinal=a b c\n"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The callback is text `mapfile` runs, not a source of its own, so it runs
+    /// at the *`mapfile` command's* line — and leaves the shell's line where it
+    /// found it rather than at the callback's own last one.
+    #[test]
+    fn mapfile_callback_runs_at_the_commands_line() {
+        let path = scratch_script("mapfile_cb_lineno", "a\nb\n");
+        let (o, _) = run(&format!(
+            "x=1\n\
+             y=2\n\
+             mapfile -t -C 'echo cb=$LINENO' -c 1 arr < {path}\n\
+             echo \"after=$LINENO\""
+        ));
+        assert_eq!(o, "cb=3 0 a\ncb=3 1 b\nafter=4\n");
+        // …and a callback that spans lines does not leave the shell at its last
+        // one: the line after the `mapfile` is still the line after it.
+        let (o, _) = run(&format!(
+            "mapfile -t -C 'echo one\necho two' -c 2 brr < {path}\n\
+             echo \"after=$LINENO\""
+        ));
+        assert_eq!(o, "one\ntwo 1 b\nafter=3\n");
         let _ = std::fs::remove_file(&path);
     }
 

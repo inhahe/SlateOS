@@ -31727,7 +31727,7 @@ sets, numeric-looking keys, high-byte keys, removals, re-adds and `m=()` resets:
 | byte | xored in as a **signed** char, so `\xff` contributes `0xffffffff` (bash walks a `char *`) |
 | bucket | `hash & (nbuckets - 1)`, starting at **1024** buckets |
 | insert | at the **head** of the chain, so within a bucket the order is the reverse of insertion |
-| growth | `nentries > nbuckets * 2` → `nbuckets *= 4`, checked *before* the entry is linked |
+| growth | `nentries >= nbuckets * 2` → `nbuckets *= 4`, checked *before* the entry is linked |
 | rehash | old buckets in index order, each entry pushed onto the **head** of its new chain |
 | removal | unlinks only; the table never shrinks and nothing else moves |
 
@@ -31737,6 +31737,18 @@ sets, numeric-looking keys, high-byte keys, removals, re-adds and `m=()` resets:
 `export_assigns_through_the_array_aware_store`, `param_transform_keyvalue`);
 each new expectation was re-derived from bash's own output for the same script
 rather than from the new implementation, and all six now match it byte for byte.
+
+**Corrected 2026-08-04:** the growth test shipped as `>` and is `>=`, so osh
+grew a 1024-bucket table on its 2050th key where bash grows on its 2049th. It
+took a second table to find: the same model fitted to the *alias* table (see
+`TD-OILS-THE-ALIAS-AND-COMMAND-MIRRORS-ARE-NOT-THEIR-OWN-TABLES`) came back
+`>=`, which cannot be right for one hashlib and wrong for the other, and asking
+bash for exactly 2049 keys settled it. The reason nothing caught it: past a
+growth most chains hold a single entry, and a lone entry lands the same way
+whether it was rehashed into its bucket or inserted there — 2050, 2100 and 4200
+keys all come out *identical* under either rule. `assoc.rs` now pins 2048 and
+2049 in `grows_on_the_key_that_reaches_the_load_factor`, the only nearby sizes
+that tell the two apart.
 
 **Pinned by** `userspace/oils/tests/corpus/an-associative-array-iterates-in-bashs-hash-order.sh`,
 which covers the bucket walk, the chain reversal (`aaa fan jfk pkb` collide, so

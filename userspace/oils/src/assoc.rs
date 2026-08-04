@@ -20,7 +20,7 @@
 //!   `hash & (nbuckets - 1)`.
 //! * A new entry goes at the **head** of its chain, so within one bucket the
 //!   order is the reverse of insertion.
-//! * The table grows when the entry count passes [`LOAD_FACTOR`] per bucket,
+//! * The table grows when the entry count *reaches* [`LOAD_FACTOR`] per bucket,
 //!   multiplying the bucket count by [`GROW_BY`]; the rehash walks the old
 //!   buckets in index order and pushes each entry onto the head of its new
 //!   chain, which is why a growth reshuffles more than it redistributes.
@@ -39,7 +39,7 @@ use crate::bytes::{BStr, Str};
 /// Must be a power of two: the bucket is masked, not divided.
 const INITIAL_BUCKETS: usize = 1024;
 
-/// bash grows the table once it holds more than this many entries per bucket.
+/// bash grows the table once it holds this many entries per bucket.
 const LOAD_FACTOR: usize = 2;
 
 /// …and multiplies the bucket count by this much when it does.
@@ -176,14 +176,18 @@ impl AssocArray {
     ///
     /// The load factor is checked *before* the entry is linked, which is bash's
     /// order and matters: the entry that trips a growth is placed into the
-    /// grown table rather than rehashed out of the old one.
+    /// grown table rather than rehashed out of the old one. The comparison is
+    /// `>=`, not `>`, so the 2049th key is the one that grows a 1024-bucket
+    /// table — see [`grows_on_the_key_that_reaches_the_load_factor`].
+    ///
+    /// [`grows_on_the_key_that_reaches_the_load_factor`]: self::tests::grows_on_the_key_that_reaches_the_load_factor
     fn place(&mut self, key: Str) -> (usize, usize) {
         if let Some(found) = self.find(&key) {
             return found;
         }
         if self.buckets.is_empty() {
             self.buckets = vec![Vec::new(); INITIAL_BUCKETS];
-        } else if self.nentries > self.buckets.len().saturating_mul(LOAD_FACTOR) {
+        } else if self.nentries >= self.buckets.len().saturating_mul(LOAD_FACTOR) {
             self.grow();
         }
         // The table is non-empty by here, so there is a bucket; `0` is a
@@ -387,6 +391,47 @@ mod tests {
         assert_eq!(ks.get(ks.len() - 8..), Some(&tail.map(String::from)[..]));
         // And every key is still reachable across the rehash.
         for i in 0..4200 {
+            assert!(m.contains_key(format!("key{i}").as_bytes()), "key{i}");
+        }
+    }
+
+    /// The growth is tripped by the key that *reaches* two per bucket.
+    ///
+    /// bash's test is `nentries >= nbuckets * LOAD_FACTOR`, so a 1024-bucket
+    /// table grows while binding its **2049th** key, not its 2050th. The
+    /// difference is one key's worth of rehashing and it is almost always
+    /// invisible: at 4096 buckets and ~2000 entries most chains are a single
+    /// entry, and a lone entry lands the same way whether it was rehashed into
+    /// its bucket or inserted there. 2049 is one of the few sizes where it
+    /// shows, which is exactly why this table wants pinning at the boundary and
+    /// not merely far past it — [`growth_rehashes_the_way_bash_does`] above
+    /// passes under *either* rule.
+    ///
+    /// Both expectations are bash 5.2.37's own output for the same key set.
+    #[test]
+    fn grows_on_the_key_that_reaches_the_load_factor() {
+        // 2048 keys: exactly at the load factor, and still not grown.
+        let m: AssocArray =
+            (0..2048).map(|i| (format!("key{i}").into_bytes(), b"v".to_vec())).collect();
+        let ks = keys(&m);
+        let head = ["key899", "key898", "key891", "key890", "key893", "key892", "key895", "key894"];
+        let tail =
+            ["key1535", "key640", "key1534", "key641", "key1537", "key642", "key1536", "key643"];
+        assert_eq!(ks.get(..8), Some(&head.map(String::from)[..]));
+        assert_eq!(ks.get(ks.len() - 8..), Some(&tail.map(String::from)[..]));
+
+        // 2049: the one key that grows it. Under `>` this order is wrong.
+        let m: AssocArray =
+            (0..2049).map(|i| (format!("key{i}").into_bytes(), b"v".to_vec())).collect();
+        let ks = keys(&m);
+        let head =
+            ["key217", "key1104", "key216", "key1105", "key215", "key1106", "key214", "key1107"];
+        let tail = [
+            "key1207", "key1206", "key1205", "key1204", "key1203", "key1202", "key1201", "key1200",
+        ];
+        assert_eq!(ks.get(..8), Some(&head.map(String::from)[..]));
+        assert_eq!(ks.get(ks.len() - 8..), Some(&tail.map(String::from)[..]));
+        for i in 0..2049 {
             assert!(m.contains_key(format!("key{i}").as_bytes()), "key{i}");
         }
     }

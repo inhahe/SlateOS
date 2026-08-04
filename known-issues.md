@@ -28597,6 +28597,137 @@ parameter.
 it. Rare, but it is the shape `set -- "${a[@]@A}"` and `for w in "${a[@]@A}"`
 take, and a script doing either gets one word where bash gives three.
 
+### TD-OILS-STAR-BULK-JOIN-IGNORES-IFS. every `[*]` reference except `${a[*]}` itself joined with a hard-coded space — 2026-08-04 — ✅ **RESOLVED 2026-08-04**
+
+**Where:** `userspace/oils/src/interp.rs` — the `ArraySlice`, `ArrayBulk`,
+`ArrayKeys` and `VarNames` arms of `Shell::expand_part`, each of which ended in
+`.join(b" ")`.
+
+**What.** `"${a[*]}"` joins with the first character of `$IFS`, and so does
+every *other* list a reference can make — but only the first one asked:
+
+```sh
+declare -a n=(x y z); zz1=1; zz2=2
+IFS=:
+echo "[${n[*]}]"      # bash [x:y:z]        osh [x:y:z]   ✅
+echo "[${!n[*]}]"     # bash [0:1:2]        osh [0 1 2]
+echo "[${!zz*}]"      # bash [zz1:zz2]      osh [zz1 zz2]
+echo "[${n[*]:0:3}]"  # bash [x:y:z]        osh [x y z]
+echo "[${n[*]@Q}]"    # bash ['x':'y':'z']  osh ['x' 'y' 'z']
+```
+
+Found while measuring TD-OILS-WHOLE-ARRAY-TRANSFORM-IS-ONE-WORD, whose probe
+happened to set `IFS`. The `[@]` spellings were right, and so was
+`${a[*]:-word}` — `ArrayOp` already had the two-branch join — which is exactly
+what made the bug invisible: the rule was written out in two places and only one
+of them was kept up to date, the same drifted-duplicate hazard that
+TD-OILS-TRANSFORM-SCALAR-IGNORES-SUBSCRIPT turned on.
+
+**Fixed in `a0e1ae84d`.** The rule now lives in one place —
+`Shell::join_elements(&elems, star)` — and all six sites go through it, the two
+that were already correct (`expand_array_ref`'s `[@]`/`[*]` and `ArrayOp`)
+included. Nothing about the *list* enters into it, which is the point: the join
+belongs to the reference.
+
+Covered by the corpus case
+`a-a-star-reference-joins-with-ifs-whatever-list-it-made.sh` (a full match
+against bash 5.2.37 over five `IFS` values × seven star forms, the `[@]` count
+for each, an unset `IFS`, and the positional spellings) and by the lib test
+`a_star_reference_joins_with_ifs_whatever_list_it_made`.
+
+### TD-OILS-QUOTED-AT-IN-A-WORD-UNJOINS-ITS-STARS. a quoted `[@]` makes the `[*]` beside it expand as a list too — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `DoubleQuoted` arm of
+`Shell::expand_word_annotated` (~18884), which only recognises the per-element
+forms when the quoted section is a *single* part. A section with more than one
+part falls through to `expand_double_quoted`, which concatenates strings and so
+cannot express a field boundary at all.
+
+**What.** bash sets a per-word flag when a quoted `$@`/`${a[@]}` is expanded, and
+once it is set the bulk-produced `[*]` forms in that same word stop joining and
+become lists as well — whichever order the two appear in, and whatever `$IFS`
+says:
+
+```sh
+declare -a n=('a:b' 'c d' e)
+IFS=:
+printf '<%s>' "${n[*]@Q}"                 ; echo   # <'a:b':'c d':'e'>
+printf '<%s>' "${n[@]@Q} ${n[*]@Q}"       ; echo   # <'a:b'><'c d'><'e' 'a:b'><'c d'><'e'>
+```
+
+The second line is not a re-split of the joined string — `'a:b'` survives with
+its colon — so the star form genuinely produced three items. Plain `${a[*]}` is
+exempt (`"[${n[*]}] [${n[@]}]"` keeps the colons), and two stars with no `[@]`
+between them are exempt, and the two references in *separate words* are exempt.
+
+osh gives one joined field for the star half either way. Before
+TD-OILS-STAR-BULK-JOIN-IGNORES-IFS it joined with a space and so happened to
+agree with bash here while being wrong everywhere else; now it joins with `$IFS`
+and is wrong here instead. That trade is deliberate — this shape is far rarer
+than a lone `"${a[*]@Q}"` — but it is a real regression in this one corner and is
+recorded as such.
+
+**Proper fix.** The same restructuring TD-OILS-UNQUOTED-ARRAY-EXPANSION-IS-A-
+JOINED-STRING calls for, applied to the quoted arm: a quoted section has to
+expand to a *list of items* rather than a string, so that a multi-part section
+can carry a field boundary through it. Once it can, this rule is one flag —
+"some part of this word was a quoted `[@]`" — consulted when a bulk star form
+decides whether to join. Doing it also fixes the plainer divergence next door,
+where `IFS=:; printf '<%s>' "x${n[@]}y"` is three fields in bash and one in osh.
+
+**Impact.** A word that mixes a quoted `[@]` reference with a quoted bulk `[*]`
+one. Rare enough that no corpus case had it before this one was written.
+
+### TD-OILS-UNQUOTED-ARRAY-EXPANSION-IS-A-JOINED-STRING. `IFS=:; echo ${a[@]}` is one field in osh and three in bash — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `other` arm of
+`Shell::expand_word_annotated` (~18970), which asks `expand_part` for a single
+string and then field-splits it. Every multi-element reference therefore has to
+survive a round trip through a joined string, and the join it gets is the
+`[@]`-form space.
+
+**What.** An unquoted `${a[@]}` is a *list* in bash: each element becomes its own
+field first, and only then is each field split on `$IFS`. osh joins with a space
+and splits the result, so an `$IFS` without a space in it loses the boundaries:
+
+```sh
+declare -a n=(x y z)
+IFS=:
+printf '<%s>' ${n[@]}    ; echo    # bash <x><y><z>   osh <x y z>
+printf '<%s>' ${n[@]@Q}  ; echo    # bash <'x'><'y'><'z'>   osh <'x' 'y' 'z'>
+```
+
+An **empty** `$IFS` is the same bug from the other side, and hits the star forms
+too, because bash marks such a word `W_SPLITSPACE` — "split on space even though
+`IFS` is null" — rather than leaving it unsplit:
+
+```sh
+IFS=
+printf '<%s>' ${n[*]}    ; echo    # bash <x><y><z>   osh <xyz>
+printf '<%s>' ${n[*]@Q}  ; echo    # bash <'x'><'y'><'z'>   osh <'x''y''z'>
+printf '<%s>' ${!n[*]}   ; echo    # bash <0 1 2>     osh <012>
+```
+
+— note that `${!n[*]}` is the odd one out even in bash: unquoted, the keys join
+with a space (bash's `string_list_dollar_at` falls back to `' '` when `$IFS` is
+empty) and the result is then not split, so it stays one field. `${!pre*}` joins
+with nothing and also stays one field. Both were measured, not guessed.
+
+**Proper fix.** Give the `other` arm the same shape the quoted arm already has:
+ask for a `Vec<Str>` of items where the part can make one (`ArrayRef` with
+`All`/`Star`, `ArrayKeys`, `VarNames`, `ArraySlice`, `ArrayBulk`, `ArrayOp`,
+`$@`/`$*`, and an `Indirect` that reaches an array), split *each* item against
+`$IFS` on its own, and force a field break between items. That is bash's order of
+operations and it makes the `IFS`-empty cases fall out for free — with the two
+exceptions above, which want a joined string and so should keep asking
+`expand_part`. A joined string cannot express the boundary, so no amount of
+choosing a better separator fixes this; the list has to survive.
+
+**Impact.** Any unquoted array expansion under an `$IFS` that lacks a space —
+including the common `IFS=$'\n'` and `IFS=:` idioms — and any unquoted one at
+all under an empty `$IFS`. The quoted forms, which are what careful scripts use,
+are all correct.
+
 ### TD-OILS-UNSET-FUNCNAME. `unset FUNCNAME` does not stop osh re-materialising it — 2026-08-01 — ✅ **RESOLVED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::refresh_funcname`, which

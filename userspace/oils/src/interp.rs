@@ -12050,11 +12050,40 @@ impl Shell {
     /// matching bash. `@a` yields one attribute-letter field per element (the
     /// array's flag letters, e.g. `a`/`A`/`ar`); positional params have no
     /// attributes, so each field is empty.
+    ///
+    /// A name that is *not* a collection is one element deep, so `[@]` names the
+    /// scalar itself and both operators give the scalar's own answer as a single
+    /// field — or as no field at all when that answer is empty. See the comment
+    /// on the branch below.
     fn bulk_attr_transform(&mut self, name: &str, op: char) -> Vec<Str> {
         let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             return Vec::new();
         };
         let positional = name == "@" || name == "*";
+        // A scalar has one element and `[@]` names it, so the collection forms
+        // degenerate to the *scalar* transform — `${s[@]@A}` is `s='a b'`, the
+        // same thing `${s@A}` is, and not the `declare -p` line `declare -- s="a
+        // b"`. The two differ in more than the flags: the scalar form
+        // single-quotes its value and omits the whole `declare --` when the name
+        // carries no attributes. That covers the dynamic specials too, which are
+        // scalars with no storage cell (`${SECONDS[@]@A}` → `declare -i
+        // SECONDS='0'`, `${LINENO[@]@A}` → `LINENO='5'`).
+        //
+        // An empty answer is *no field* rather than one empty field, which is
+        // where this parts company with the positional form: `${t[@]@A}` on an
+        // attribute-less `declare t` expands to nothing, and so does
+        // `${s[@]@a}` on a name with no letters, while `${@@a}` yields one empty
+        // field per parameter.
+        if !positional && !self.assoc.contains_key(name) && !self.arrays.contains_key(name) {
+            let field = if op == 'A' {
+                let elem = self.param_value(name);
+                self.transform_assign(name, elem)
+            } else {
+                // Attribute letters are ASCII by construction.
+                self.attr_flag_letters(name).into_bytes()
+            };
+            return if field.is_empty() { Vec::new() } else { vec![field] };
+        }
         if op == 'A' {
             if positional {
                 // With no positional parameters, bash yields nothing (`${@@A}`
@@ -54824,6 +54853,38 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("declare -a a=(1 2 3); echo \"${a[@]@a}\"").0, "a a a\n");
         assert_eq!(run("declare -ar a=(1 2); echo \"${a[@]@a}\"").0, "ar ar\n");
         assert_eq!(run("declare -a a=(1 2 3); echo \"${a[1]@a}\"").0, "a\n");
+    }
+
+    #[test]
+    fn a_whole_collection_transform_on_a_scalar_gives_the_scalar_form() {
+        // A scalar is one element deep, so `[@]` names the scalar itself and
+        // both operators answer as the scalar forms do. That is not the same
+        // thing as `declare -p`: the scalar form single-quotes its value, and
+        // drops the `declare --` entirely for a name with no attributes.
+        assert_eq!(run("s='a b'; echo \"[${s[@]@A}]\"").0, "[s='a b']\n");
+        assert_eq!(run("s='a b'; echo \"[${s[*]@A}]\"").0, "[s='a b']\n");
+        assert_eq!(run("declare -i iv=7; echo \"[${iv[@]@A}]\"").0, "[declare -i iv='7']\n");
+        assert_eq!(run("declare -u uv=abc; echo \"[${uv[@]@A}]\"").0, "[declare -u uv='ABC']\n");
+        // Declared and never assigned renders the bare declaration, as the
+        // scalar form does.
+        assert_eq!(run("declare -x xx; echo \"[${xx[@]@A}]\"").0, "[declare -x xx]\n");
+
+        // An empty answer is *no field*, not one empty field — so these expand
+        // to nothing at all rather than to an empty word.
+        assert_eq!(run("declare t; set -- \"${t[@]@A}\"; echo $#").0, "0\n");
+        assert_eq!(run("set -- \"${nope[@]@A}\"; echo $#").0, "0\n");
+        assert_eq!(run("s=plain; set -- \"${s[@]@a}\"; echo $#").0, "0\n");
+        // Which is where it parts company with the positional form, whose
+        // empty attribute strings each still count as a field.
+        assert_eq!(run("set -- a b c; set -- \"${@@a}\"; echo $#").0, "3\n");
+
+        // The dynamic specials are scalars with no storage cell, and they get
+        // the same treatment — including the letters that live in the table.
+        assert_eq!(run("set -- \"${SECONDS[@]@A}\"; echo \"$#:$1\"").0, "1:declare -i SECONDS='0'\n");
+        assert_eq!(run("set -- \"${SECONDS[@]@a}\"; echo \"$#:$1\"").0, "1:i\n");
+        // A name in the table with no letters renders the plain assignment.
+        assert!(run("echo \"${LINENO[@]@A}\"").0.starts_with("LINENO='"), "{:?}", run("echo \"${LINENO[@]@A}\"").0);
+        assert_eq!(run("set -- \"${LINENO[@]@a}\"; echo $#").0, "0\n");
     }
 
     #[test]

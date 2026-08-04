@@ -22,14 +22,15 @@ b=(x y)
 b=z
 echo "scalar-into-array=${b[*]} keys=${!b[@]}"
 
-# Associative arrays: order is bash's internal hash order, so only probe by key.
+# Associative arrays: the order is bash's internal hash order, which osh shares,
+# so the key list is reported beside the probes by name.
 declare -A m
 m[alpha]=1
 m['two words']=2
-echo "m-alpha=${m[alpha]} m-two=${m['two words']} n=${#m[@]}"
+echo "m-alpha=${m[alpha]} m-two=${m['two words']} n=${#m[@]} keys=[${!m[@]}]"
 echo "has-alpha=${m[alpha]+yes} has-nope=${m[nope]+yes}(end)"
 unset 'm[alpha]'
-echo "after-unset n=${#m[@]}"
+echo "after-unset n=${#m[@]} keys=[${!m[@]}]"
 
 # Unset without a subscript removes the whole array.
 unset a

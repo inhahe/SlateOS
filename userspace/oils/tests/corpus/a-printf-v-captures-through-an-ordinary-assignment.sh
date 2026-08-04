@@ -29,9 +29,9 @@ declare -n l1=l2; declare -n l2=dest; printf -v l1 '%s' far; echo "dest=$dest"
 echo "=== a bare name on an array writes element 0"
 declare -a a2=(x y); printf -v a2 '%s' z; declare -p a2
 declare -A m1; printf -v m1 '%s' v; declare -p m1
-# (an already-populated one is checked by key, not by `declare -p`: bash's
-# associative order is its hash order — see TD-OILS-ASSOC-ORDER)
-declare -A m2=([k]=old); printf -v m2 '%s' v; echo "n=${#m2[@]} 0=${m2[0]} k=${m2[k]}"
+# (an already-populated one gains a `0` key beside the one it had, so it can
+# report the pair: the order is bash's hash order, which osh shares.)
+declare -A m2=([k]=old); printf -v m2 '%s' v; echo "n=${#m2[@]} 0=${m2[0]} k=${m2[k]}"; declare -p m2
 
 echo "=== a subscript is a shell word and keeps its bytes"
 declare -A m3; printf -v 'm3[a b]' '%s' v; declare -p m3

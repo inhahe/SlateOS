@@ -18,8 +18,8 @@
 # The rule is the same for a `declare -A` operand and for a bare `m=(…)`, and
 # it is the same for `+=`.
 #
-# (Key *order* is bash's hash order and osh's is not it, so nothing here prints
-# a multi-key `declare -p`; the keys are asked about by name instead.)
+# (Key *order* is bash's hash order, which osh shares, so the arrays that end up
+# with more than one key print a whole `declare -p` beside the named probes.)
 
 s='x y'
 a=(p q)
@@ -27,6 +27,7 @@ a=(p q)
 echo "=== one element in, one element out"
 declare -A m=(a $s b)
 echo "  n=${#m[@]} a=[${m[a]}] b=[${m[b]}]"
+declare -p m
 declare -a n=(a $s b)
 echo "  indexed n=${#n[@]}: ${n[0]}|${n[1]}|${n[2]}|${n[3]}"
 
@@ -54,6 +55,7 @@ declare -A kv=([$k]=$s)
 echo "  n=${#kv[@]} dk=[${kv[dk]}]"
 declare -A pm=(x 1 [y]=2)
 echo "  n=${#pm[@]} lit=[${pm['[y]=2']}]"
+declare -p pm
 
 echo "=== the bare form and += follow the same rule"
 declare -A b1
@@ -61,6 +63,7 @@ b1=($s v)
 echo "  n=${#b1[@]} key=[${b1['x y']}]"
 b1+=(more $s)
 echo "  n=${#b1[@]} more=[${b1[more]}]"
+declare -p b1
 
 echo "=== the trace shows the elements as expanded"
 set -x

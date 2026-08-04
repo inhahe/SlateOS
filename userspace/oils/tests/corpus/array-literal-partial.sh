@@ -15,9 +15,10 @@
 # integer assignment is fatal to the list it is in, so a reader after a `;` would
 # never run at all.
 #
-# Only `${!m[*]}` key *order* is left out of these probes: bash lists associative
-# keys in its hash order and osh in insertion order (TD-OILS-ASSOC-ORDER), so the
-# associative probes read named keys rather than the whole list.
+# The associative probes name the keys they expect, and — bash listing keys in
+# its hash order, which osh shares — also print `${!m[*]}` wherever an array ends
+# up with more than one, so a partial append reports *which* keys survived and
+# not merely that the named one did.
 
 echo "=== stage 1: the values read the array being replaced ==="
 a=(1 2)
@@ -57,7 +58,7 @@ echo "assoc-old=[${g[a]}] assoc-new=[${g[x]-absent}]"
 # But `+=` on the same array binds in place, so the first element stays.
 declare -iA i=([a]=9)
 i+=([x]=1 [y]=1/0); echo "unreachable-assoc-append"
-echo "append-old=[${i[a]}] append-new=[${i[x]-absent}]"
+echo "append-old=[${i[a]}] append-new=[${i[x]-absent}] keys=[${!i[*]}]"
 
 echo "=== a literal that does not fail is unaffected by any of this ==="
 declare -ia ok=(9 9)
@@ -65,7 +66,7 @@ ok=(1+1 2+2 3+3)
 echo "ok=[${ok[*]}] rc=$?"
 declare -iA okm=([z]=9)
 okm=([p]=1+1 [q]=2+2)
-echo "okm=[${okm[p]} ${okm[q]}] z=[${okm[z]-absent}] rc=$?"
+echo "okm=[${okm[p]} ${okm[q]}] z=[${okm[z]-absent}] keys=[${!okm[*]}] rc=$?"
 # The empty literal still clears, in both flavours.
 declare -a emp=(1 2 3)
 emp=()

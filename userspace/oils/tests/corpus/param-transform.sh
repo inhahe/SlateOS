@@ -89,7 +89,8 @@ echo "[${@@K}][${@@k}]"
 
 # @K is meant to read back as shell input, so it quotes a *key* that would not
 # — to exactly the degree `declare -p` does. @k quotes neither key nor value.
-# (One key per array: bash walks its own hash order, which osh does not share.)
+# (One key per array keeps each answer to itself; the whole set then goes into
+# one array below, whose order is bash's hash order and so also osh's.)
 k() { unset -v m; declare -A m; m[$1]=v; echo "K=[${m[@]@K}] k=[${m[@]@k}]"; }
 k 'a b'
 k 'd"e'
@@ -101,6 +102,11 @@ k '#c'
 k $'f\tg'
 k 'a=b'
 k plain
+# All of them at once, which asks about the order as well as the quoting.
+declare -A qs=(['a b']=1 ['d"e']=2 ["it's"]=3 ['x$y']=4 ['p*q']=5 ['~t']=6 ['#c']=7 [$'f\tg']=8 ['a=b']=9 [plain]=10)
+echo "all-K=[${qs[@]@K}]"
+echo "all-k=[${qs[@]@k}]"
+declare -p qs
 
 # Transformations apply element-wise across "${arr[@]}" but produce a single
 # word for "${arr[*]}".

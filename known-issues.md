@@ -31618,14 +31618,14 @@ actually *run* cannot get one by writing a `#!` script, so
 the running half. Nothing to fix; recorded so the constraint is not
 re-discovered.
 
-### TD-OILS-ASSOC-SLICE-OFFSET-IS-ONE-BASED. `${m[@]:off:len}` on an associative array counts from one, and a length of zero still yields an element — 2026-08-04 — OPEN
+### TD-OILS-ASSOC-SLICE-OFFSET-IS-ONE-BASED. `${m[@]:off:len}` on an associative array counts from one, and a length of zero still yields an element — ✅ **FIXED 2026-08-04**
 
-**Where:** `userspace/oils/src/interp.rs` — `Shell::slice_elements`. The
-companion rule for *indexed* arrays (the offset is a subscript, not a position)
-is implemented there and pinned by
+**Where:** `userspace/oils/src/interp.rs` — `Shell::slice_elements`, now
+dispatching to `Shell::assoc_slice`. The companion rule for *indexed* arrays
+(the offset is a subscript, not a position) is implemented there and pinned by
 `tests/corpus/an-array-slices-offset-is-a-subscript-not-a-position.sh`; that
 case deliberately contains no associative array, because this entry is why it
-would fail.
+would have failed.
 
 **Reproduce** (order-independent half — a one-key array, so bash's hash order
 cannot confuse the reading):
@@ -31646,11 +31646,16 @@ show x ${one[@]:1:0}     # bash (1)<s>   osh (0)<>     <-- diverges
 * for `off >= 0`: skip `max(off - 1, 0)` elements — so offset `0` and offset `1`
   both name the *first* element, and only from `2` on does each step drop one
   more;
-* for `off < 0`: skip `n + off` elements, with **no** `-1` adjustment (`-1` is
-  the last element, as one would expect), and yield nothing if that is still
-  negative;
+* for `off < 0`: the start is `off + n + 1`, **not** `off + n` — so `-1` is the
+  last element, `-(n+1)` is the first, and `-(n+2)` is the first that is out of
+  range. (The first draft of this entry guessed `off + n` with no adjustment;
+  measuring `-5` and `-6` against a four-key array disproved it — `-5` is still
+  inside.) From there the same `max(start - 1, 0)` skip applies.
 * when a length is given, take `max(len, 1)` — a length of `0` yields **one**
   element, not none, unless the offset already ran off the end.
+* the offset decides whether the length is read at all, on the same `0..=n`
+  test the positionals use: `${m[@]:5:j++}` on a four-key array leaves `j`
+  alone, and `${m[@]:5:-1}` is silent where `${m[@]:4:-1}` is fatal.
 
 Measured against bash 5.2.37 with `declare -A m=([k1]=v1 [k2]=v2 [k3]=v3
 [k4]=v4)`, whose hash order is `v4 v1 v2 v3`: `${m[@]:0}` and `${m[@]:1}` are
@@ -31658,16 +31663,23 @@ both all four, `${m[@]:2}` is three, `${m[@]:4}` is one, `${m[@]:5}` is none;
 `${m[@]:0:0}`, `${m[@]:1:0}` and `${m[@]:1:1}` are all the single element `v4`,
 `${m[@]:2:0}` is the single element `v1`, `${m[@]:0:3}` is `v4 v1 v2`, and
 `${m[@]: -2:1}` is `v2`. Both quirks are independent: the offset is off by one
-*and* the length has a floor of one. osh currently applies the plain
-`skip(off).take(len)` reading it uses for a dense list.
+*and* the length has a floor of one. osh applied the plain `skip(off).take(len)`
+reading it uses for a dense list.
 
-**The proper fix.** Give `slice_elements` an associative branch that implements
-the rule above, taking the values in whatever order the map iterates. It is a
-small change; what makes it awkward to *test* end to end is not the arithmetic
-but the ordering — see `TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED`
-below. A corpus case can still pin the arithmetic without ordering parity by
-using a one-key array (as above) and by printing only field *counts* for a
-multi-key one.
+**The fix.** `slice_elements` dispatches an associative target to the new
+`Shell::assoc_slice`, which implements the rule above over the values in
+whatever order the map iterates. An *empty* associative array is left to fall
+through instead, so that it meets the shared "nothing to measure" exit rather
+than repeating it.
+
+**Pinned by** `tests/corpus/an-associative-slices-offset-counts-from-one.sh`.
+Ordering parity is still missing, so the case reports field *counts* for the
+two- and four-key arrays and keeps values for a one-key one, where there is
+only one order — see `TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED`
+below, which remains open. Note that the case's helpers save their labels into
+locals before taking the slice: `set --` replaces a function's own positionals,
+so reading `$2` afterwards would have printed a *value* and quietly turned the
+case into a hash-order test.
 
 ### TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED. an associative array iterates in sorted key order; bash iterates its hash — 2026-08-04 — OPEN
 

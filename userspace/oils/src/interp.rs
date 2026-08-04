@@ -12224,6 +12224,18 @@ impl Shell {
         {
             return self.scalar_slice(&value, offset, length, &param_ref);
         }
+        // An associative array has no subscripts to count and bash does not
+        // count its positions the ordinary way either. An *empty* one is left
+        // to fall through, so that it meets the "nothing to measure" exit below
+        // rather than repeating it here.
+        let assoc: Option<Vec<Str>> = target
+            .as_ref()
+            .and_then(|t| self.assoc.get(t))
+            .map(|m| m.values().cloned().collect::<Vec<Str>>())
+            .filter(|v| !v.is_empty());
+        if let Some(values) = assoc {
+            return self.assoc_slice(&values, offset, length, &param_ref);
+        }
         // A real indexed array answers with its subscripts; everything else is
         // a gapless list whose position stands in for one.
         let keyed: Option<Vec<(i64, Str)>> = target
@@ -12311,6 +12323,61 @@ impl Shell {
                     .collect()
             }
             None => from_off,
+        }
+    }
+
+    /// `${m[@]:off:len}` where `m` is an associative array — bash counts it
+    /// neither by subscript (there is none to count) nor by position.
+    ///
+    /// A non-negative offset is **one-based**, except that `0` and `1` both
+    /// name the first element: the run skipped is `max(off - 1, 0)`, so only
+    /// from `2` on does each step drop one more. A negative one is measured
+    /// against `n + 1` rather than `n` — `-1` is the last element and `-(n+1)`
+    /// is the first, with `-(n+2)` the first that is out of range. And a length
+    /// of `0` yields **one** element rather than none: the count taken is
+    /// `max(len, 1)`.
+    ///
+    /// Both quirks are bash's, measured against 5.2.37 rather than reasoned
+    /// from its source, and they are independent — `${m[@]:2:0}` is one element
+    /// and it is the *second*. The offset still decides whether the length is
+    /// read at all, on the same `0..=n` test the positionals use.
+    ///
+    /// The order the elements come in is a separate question that this does not
+    /// answer: osh iterates its map by key where bash walks its hash. See
+    /// `TD-OILS-ASSOC-ITERATION-ORDER-IS-SORTED-NOT-HASHED` in
+    /// `known-issues.md`; it is why the corpus case for this rule reports field
+    /// *counts* for a multi-key array and reserves values for a one-key one.
+    fn assoc_slice(
+        &mut self,
+        values: &[Str],
+        offset: &Word,
+        length: &Option<Box<Word>>,
+        param_ref: BStr<'_>,
+    ) -> Vec<Str> {
+        let off = self.eval_arith_substr_bound(offset, param_ref);
+        let n = values.len() as i64;
+        let start = if off < 0 {
+            off.saturating_add(n).saturating_add(1)
+        } else {
+            off
+        };
+        if start < 0 || start > n {
+            return Vec::new();
+        }
+        let skip = usize::try_from(start.saturating_sub(1).max(0)).unwrap_or(0);
+        let rest = values.get(skip..).unwrap_or_default();
+        match length {
+            Some(l) => {
+                let l = self.eval_arith_substr_bound(l, param_ref);
+                if l < 0 {
+                    self.perrln(&format!("{l}: substring expression < 0"));
+                    self.arm_discard(1);
+                    return Vec::new();
+                }
+                let take = usize::try_from(l).unwrap_or(usize::MAX).max(1);
+                rest.iter().take(take).cloned().collect()
+            }
+            None => rest.to_vec(),
         }
     }
 

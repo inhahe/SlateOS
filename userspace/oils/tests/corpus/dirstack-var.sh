@@ -55,6 +55,10 @@ echo "=== unsetting an element changes nothing; the value function refills it"
 
 echo "=== every other write path goes through the same hook"
 ( pushd "$ROOT/../sub2" >/dev/null; printf -v 'DIRSTACK[1]' /etc; echo "rc=$? [${DIRSTACK[1]}]" )
+( pushd "$ROOT/../sub2" >/dev/null; read -r 'DIRSTACK[1]' <<</etc; echo "rc=$? [${DIRSTACK[1]}]" )
+# A `read`'s *later* names are stored down a different path from its first.
+( pushd "$ROOT/../sub2" >/dev/null; read -r j 'DIRSTACK[1]' <<<'a /etc'; echo "rc=$? [${DIRSTACK[1]}]" )
+( pushd "$ROOT/../sub2" >/dev/null; let 'DIRSTACK[1] = 5'; echo "rc=$? [${DIRSTACK[1]}]" )
 ( pushd "$ROOT/../sub2" >/dev/null; read -a DIRSTACK <<<'p q'; echo "rc=$? n=${#DIRSTACK[@]} [${DIRSTACK[1]}]" )
 ( pushd "$ROOT/../sub2" >/dev/null; mapfile -t DIRSTACK <<<$'p\nq'; echo "rc=$? n=${#DIRSTACK[@]} [${DIRSTACK[1]}]" )
 ( pushd "$ROOT/../sub2" >/dev/null; (( DIRSTACK[1] = 5 )); echo "rc=$? [${DIRSTACK[1]}]" )

@@ -10417,21 +10417,32 @@ impl Shell {
         if self.allexport {
             self.mark_exported(base.clone());
         }
-        // A bad `-i` expression stores nothing; the abort it armed ends the
-        // command, so `false` here needs no diagnostic of its own.
-        let Some(val) = self.apply_value_attrs(&base, val) else {
-            return false;
+        let stored = match self.apply_value_attrs(&base, val) {
+            // A bad `-i` expression stores nothing; the abort it armed ends the
+            // command, so `false` here needs no diagnostic of its own.
+            None => false,
+            Some(val) => match dest {
+                ScalarDest::Var(n) => {
+                    self.set_scalar_store(n, val);
+                    true
+                }
+                ScalarDest::Elem(n, sub) => {
+                    let (n, sub) = (n.clone(), sub.clone());
+                    self.assign_elem(&n, &Some(Box::new(Word::literal(sub))), val)
+                }
+            },
         };
-        match dest {
-            ScalarDest::Var(n) => {
-                self.set_scalar_store(n, val);
-                true
-            }
-            ScalarDest::Elem(n, sub) => {
-                let (n, sub) = (n.clone(), sub.clone());
-                self.assign_elem(&n, &Some(Box::new(Word::literal(sub))), val)
-            }
-        }
+        // A name the shell also keeps somewhere else takes the write back out of
+        // the variable table again — see [`Shell::after_var_write`]. Every write
+        // to a *scalar* destination arrives here, whoever asked for it, so this
+        // is the one place the hook has to be for `read 'DIRSTACK[1]'` to sync
+        // the stack exactly as `DIRSTACK[1]=…` does. Writes that replace a whole
+        // array — `read -a`, `mapfile`, an arithmetic element store — do not
+        // come through here and run the hook for themselves. It runs whether or
+        // not the store landed, since a refusal part-way still leaves behind
+        // whatever got through.
+        self.after_var_write(&base);
+        stored
     }
 
     /// Store a plain scalar value into a variable, honoring the readonly guard,
@@ -36646,9 +36657,9 @@ impl VarLookup for Shell {
         // left of an `=` would: through namerefs, on element 0 of an existing
         // array, and exported under `set -a`.
         if let Some(dest) = self.arith_write_dest(name)? {
-            let base = dest.base().to_string();
+            // The store runs the dynamic write-back hook itself — see
+            // [`Shell::scalar_write_store`].
             self.scalar_write_store(&dest, value.to_string().into_bytes());
-            self.after_var_write(&base);
         }
         Ok(())
     }
@@ -55300,16 +55311,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             "pushd \"{t}\" >/dev/null; unset 'DIRSTACK[1]'; echo \"$? ${{#DIRSTACK[@]}}\""
         ));
         assert_eq!(out, "0 2\n");
-        // Every other write path goes through the same hook.
-        for w in [
-            "printf -v 'DIRSTACK[1]' /etc",
-            "(( DIRSTACK[1] = 5 ))",
-            "declare 'DIRSTACK[1]'=/etc",
+        // Every other write path goes through the same hook, and none of them
+        // has to remember to: the store every *scalar* destination lands in
+        // runs it (see [`Shell::scalar_write_store`]), and the two that replace
+        // a whole array run it for themselves.
+        for (w, want) in [
+            ("printf -v 'DIRSTACK[1]' /etc", "/etc"),
+            ("(( DIRSTACK[1] = 5 ))", "5"),
+            ("let 'DIRSTACK[1] = 5'", "5"),
+            ("declare 'DIRSTACK[1]'=/etc", "/etc"),
+            ("read -r 'DIRSTACK[1]' <<< /etc", "/etc"),
+            // A `read`'s later names are stored down a different path from its
+            // first, which is how the hook came to be missing from one of them.
+            ("read -r junk 'DIRSTACK[1]' <<< 'a /etc'", "/etc"),
+            ("read -r -a DIRSTACK <<< 'a /etc'", "/etc"),
+            ("mapfile -t DIRSTACK <<< $'a\n/etc'", "/etc"),
         ] {
             let (out, _) = run(&format!(
-                "pushd \"{t}\" >/dev/null; {w}; echo \"$? ${{#DIRSTACK[@]}}\""
+                "pushd \"{t}\" >/dev/null; {w}; echo \"$? ${{#DIRSTACK[@]}} ${{DIRSTACK[1]}}\""
             ));
-            assert_eq!(out, "0 2\n", "{w}");
+            assert_eq!(out, format!("0 2 {want}\n"), "{w}");
         }
         // `unset DIRSTACK` drops the dynamic hooks with the variable and nothing
         // puts them back: the name is ordinary, and `pushd` stops touching it.

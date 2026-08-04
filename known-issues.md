@@ -101,31 +101,97 @@ version is also the more useful answer.
 clear `arith_cmd` at the top of `run_simple_command` for a non-builtin, which
 is what bash's `execute_command` does.
 
-### TD-OILS-DECLARE-N-WITH-OTHER-ATTRS. `declare -n` combined with another attribute ignores the other attribute — 2026-08-03
+### TD-OILS-DECLARE-N-WITH-OTHER-ATTRS. `declare -n` combined with another attribute ignores the other attribute — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 
-**Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped` /
-`exec_declare_with_arrays_scoped`, where `-n` is applied.
+**Where:** `userspace/oils/src/interp.rs` — the `builtin_declare_scoped` operand
+loop, and the new `Shell::nameref_array_error`.
 
-**What:** bash resolves the combination before the nameref is made; osh records
-both flags and applies neither. Measured against bash 5.2.37 (`declare -nX v=t`
+**What:** bash resolves the combination before the nameref is made; osh recorded
+both flags and applied neither. Measured against bash 5.2.37 (`declare -nX v=t`
 followed by `declare -p v`):
 
-| flags | bash | osh |
+| flags | bash | osh (before) |
 |---|---|---|
 | `-ni` | rc **1**, `v` never created | rc 0, `declare -in v="t"` |
 | `-nu` | `declare -nu v="T"` (the *target name* is folded) | `declare -nu v="t"` |
-| `-nc` | `declare -nc v="T"` | `declare -nc v="t"` |
+| `-nc` | `declare -nc v="Tq"` | `declare -nc v="tq"` |
 | `-na` | `declare -a v=([0]="t")` — an ordinary array, `-n` dropped | `declare -an v` |
 | `-nA` | `declare -A v=([0]="t" )` | `declare -An v` |
+| `declare -i q; declare -n q=t` | `declare -n q="t"` — `-n` clears the value attributes | `declare -in q="t"` |
+| `declare -a q; declare -n q=t` | `q: reference variable cannot be an array`, rc 1 | accepted |
 | `-nl`, `-nr`, `-nx`, `-nt` | match | ✅ |
 
-The `-nu`/`-nc` case matters most: `declare -nu v=t` in bash points `v` at `T`,
-so a write through `v` lands somewhere else entirely than it does in osh.
+The `-nu`/`-nc` case mattered most: `declare -nu v=t` in bash points `v` at `T`,
+so a write through `v` landed somewhere else entirely than it did in osh.
 
-**Proper fix:** apply the case attribute to the reference's *value* (the target
-name) when `-n` is set, make `-a`/`-A` win over `-n` (dropping the nameref
-attribute and taking the value as a one-element array), and refuse `-i` with
-`-n` at status 1 and no variable created.
+**Fixed in `7ad30befd`.** `-n` clears the name's prior `-i`/`-u`/`-l`/`-c` (but
+not `-x`/`-t`/`-r`); the stored reference name is folded by this command's case
+attributes; `-i` beside `-n` keeps the attributes it can, declines to make the
+reference and refuses the assignment silently (still running the arithmetic, so
+a malformed target name is the ordinary bad-`-i` failure); `-a`/`-A` beside `-n`
+takes the name for its array and drops the reference attribute; and a name that
+is already an array refuses to become a reference, ahead of the readonly
+refusal. Covered by the lib test
+`a_nameref_declaration_settles_the_attributes_named_beside_it` and the corpus
+case `a-a-nameref-declaration-settles-the-attributes-named-beside-it.sh`.
+
+### TD-OILS-FUNCNAME-NOT-LISTED-AT-TOP-LEVEL. `declare -p FUNCNAME` says "not found" outside a function — 2026-08-03
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::DYNAMIC_SPECIALS` (~13156),
+which deliberately omits `FUNCNAME`, and `Shell::refresh_funcname` (~14553),
+which removes `arrays["FUNCNAME"]` whenever no function frame is active.
+
+**What:** bash keeps `FUNCNAME` present-but-empty at every level, so at a
+script's top level:
+
+```sh
+declare -p FUNCNAME   # bash: declare -a FUNCNAME        osh: FUNCNAME: not found (rc 1)
+declare -p | grep -c FUNCNAME   # bash: 1                osh: 0
+declare -a | grep FUNCNAME      # bash: declare -a FUNCNAME
+declare -n FUNCNAME=t # bash: FUNCNAME: reference variable cannot be an array
+                      #       osh: silent rc 1 (nothing there to refuse)
+```
+
+The expansion side is already right — `${FUNCNAME[@]}` is empty at top level and
+correct inside a function — so this is purely about the name being *listed* and
+being visible to the checks that walk the array tables. The
+`DYNAMIC_SPECIALS` doc comment states that bash does not list `FUNCNAME` outside
+a function, which is not what bash 5.2.37 does.
+
+**Proper fix:** add a `FUNCNAME` row to `DYNAMIC_SPECIALS` alongside
+`BASH_SOURCE`/`BASH_LINENO` (`named_flags: "a"`, `listed_flags: "a"`,
+`listed: DynListing::EmptyArray`, `assign: DynAssign::Discard`), then check that
+`${FUNCNAME+set}` is still empty at top level — bash reports it unset there even
+though `declare -p` lists it, so the two views genuinely disagree and the
+dynamic-special machinery must not make the name *expand* as set.
+
+### TD-OILS-BAD-INT-VALUE-LEAVES-NO-PENDING-ARRAY. A name left behind by a bad `-i` value does not become a *valued* empty array — 2026-08-03
+
+**Where:** `userspace/oils/src/interp.rs` — the `attr_store` failure path in the
+`builtin_declare_scoped` operand loop, which does `self.declared.insert(name)`
+and breaks, and `Shell::array_valued`.
+
+**What:** bash's `declare -i n=2+` leaves `n` behind in an "invisible" state that
+still remembers a pending assignment, so a later `declare -a n` reports a
+*valued* empty array. osh leaves only a plain declaration:
+
+```sh
+declare -i n=2+       # both: 2+: syntax error: operand expected
+declare -p n          # both: declare -i n
+declare -a n; declare -p n
+                      # bash: declare -ai n=()        osh: declare -ai n
+```
+
+Nothing else about the state differs — `declare n=5` afterwards gives
+`declare -i n="5"` in both — and a name declared unset by any *other* route
+(`declare -i v; declare -a v`) agrees, so this is specific to the aborted
+assignment.
+
+**Proper fix:** on the `attr_store`/`apply_value_attrs` failure path, insert the
+name into `array_valued` as well as `declared`, matching what the "cannot destroy
+array variables" and `-aA` refusals already do a few lines above. Check first
+that this does not make a *scalar* `declare -p` print an `=()`, since
+`array_valued` is consulted for both.
 
 ### TD-OILS-TRAP-P-OPERANDS-AS-FILTER. `trap -p SPEC…` filtered the trap table instead of walking its operands, so it reordered its output, swallowed duplicates and ignored a bad signal name — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

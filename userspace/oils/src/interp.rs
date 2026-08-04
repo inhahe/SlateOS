@@ -21280,14 +21280,15 @@ impl Shell {
                     out.extend_from_slice(if val.is_empty() { b"0" } else { val });
                 }
                 _ => {
-                    i += 1;
-                    let mut n = String::new();
-                    while let Some(c) = chars.get(i).copied().map(syn).filter(|c| {
-                        c.is_ascii_alphanumeric() || *c == '_'
-                    }) {
-                        n.push(c);
+                    let Some(n) = Self::scan_arith_param(&chars, i + 1) else {
+                        // Nothing a `$` could name follows it, so it is a
+                        // literal — and the evaluator, not this pass, is the one
+                        // to complain about it.
+                        out.push(b'$');
                         i += 1;
-                    }
+                        continue;
+                    };
+                    i += 1 + n.chars().count();
                     let val = self.param_value(&n).unwrap_or_default();
                     let val = bytes::trim(&val);
                     out.extend_from_slice(if val.is_empty() { b"0" } else { val });
@@ -21316,6 +21317,41 @@ impl Shell {
         let map = LineMap::Offset(0);
         let path = self.comsub_text_read_file(text, &map);
         self.command_sub(text, &map, path)
+    }
+
+    /// The parameter a bare `$…` in an arithmetic expression names, reading
+    /// from `chars[start]` — just past the `$` — or `None` when what follows
+    /// names nothing and the `$` is a literal.
+    ///
+    /// The rule is bash's, and it is *not* "the longest run of name
+    /// characters": only the alphabetic form is greedy. A digit is a
+    /// single-digit positional, so `$12` is `$1` and then a literal `2` and only
+    /// `${12}` reaches the twelfth parameter; each special parameter is one
+    /// character, so `$#x` is the count and then a literal `x`. Getting this
+    /// wrong is not a near miss — reading `#` as part of no name at all left
+    /// `$#` expanding to `0#`, which is a base prefix, so `$(($# - 1))` failed
+    /// with `invalid number` instead of counting.
+    fn scan_arith_param(chars: &[Ch], start: usize) -> Option<String> {
+        let first = syn_at(chars, start);
+        // `$0`…`$9`, and the special parameters, are one character each.
+        if first.is_ascii_digit() || matches!(first, '#' | '?' | '!' | '$' | '*' | '@' | '-') {
+            return Some(first.to_string());
+        }
+        if !first.is_ascii_alphabetic() && first != '_' {
+            return None;
+        }
+        let mut n = String::new();
+        let mut i = start;
+        while let Some(c) = chars
+            .get(i)
+            .copied()
+            .map(syn)
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        {
+            n.push(c);
+            i += 1;
+        }
+        Some(n)
     }
 
     /// From `chars[start..]` (just past an opening `(`), return the balanced
@@ -55991,6 +56027,47 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("echo $(( 8#17 ))").0, "15\n");
         assert_eq!(run("echo $(( 017 ))").0, "15\n");
         assert_eq!(run("echo $(( 64#_ ))").0, "63\n");
+    }
+
+    #[test]
+    fn arith_a_dollar_names_one_parameter() {
+        // The special parameters expand inside `$(( … ))` like anywhere else.
+        // `$#` is the one that made this worth its own test: read as no name at
+        // all it left a literal `#` behind, and `0#` is a *base prefix*, so
+        // `$(($# - 1))` failed with `invalid number` rather than counting.
+        assert_eq!(run("set -- a b c; echo $(( $# ))").0, "3\n");
+        assert_eq!(run("set -- a b c; echo $(( $# - 1 ))").0, "2\n");
+        assert_eq!(run("false; echo $(( $? ))").0, "1\n");
+        assert_eq!(run("echo $(( $$ == $$ ))").0, "1\n");
+        // The option letters are not a number, so they name a variable, and an
+        // unset one is 0 — the point is that `$-` expanded at all.
+        assert_eq!(run("echo $(( $- ))").0, "0\n");
+        // Only the alphabetic form is greedy. A digit is a *single*-digit
+        // positional, so `$12` is `$1` and then a literal `2`; the twelfth
+        // parameter needs the braces.
+        assert_eq!(run("set -- 7 8; echo $(( $12 ))").0, "72\n");
+        assert_eq!(run("x=3; x1=99; echo $(( $x1 ))").0, "99\n");
+        assert_eq!(run("x=3; echo $(( $x$x ))").0, "33\n");
+        // …and a special parameter is one character, so the `x` is literal and
+        // `7x` is a bad digit for base 10 rather than a name.
+        assert_eq!(run("set -- a b c d e f g; echo $(( $#x ))").1, 1);
+        // `$*` and `$@` splice their joined text in, which is why a single
+        // parameter evaluates and several do not.
+        assert_eq!(run("set -- 42; echo $(( $* ))").0, "42\n");
+        assert_eq!(run("set -- 42; echo $(( $@ ))").0, "42\n");
+        assert_eq!(run("set -- 4 5 6; echo $(( $* ))").1, 1);
+        // A `$` that names nothing is a literal, and reaches the evaluator as
+        // one rather than becoming a silent zero.
+        assert_eq!(run("echo $(( 1 + $ 2 ))").1, 1);
+        assert_eq!(run("echo $(( $+2 ))").1, 1);
+        assert_eq!(run("echo $(( $ ))").1, 1);
+        // The same reading serves every arithmetic context.
+        assert_eq!(run("set -- p q; (( $# == 2 )); echo $?").0, "0\n");
+        assert_eq!(run("set -- p q; let \"n = $# + 1\"; echo $n").0, "3\n");
+        assert_eq!(
+            run("set -- p q; for ((i = 0; i < $#; i++)); do echo $i; done").0,
+            "0\n1\n"
+        );
     }
 
     #[test]

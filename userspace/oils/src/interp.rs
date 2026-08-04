@@ -5392,6 +5392,42 @@ impl Shell {
         if name == "POSIXLY_CORRECT" {
             self.refresh_shellopts();
         }
+        if name == "GLOBIGNORE" {
+            self.sync_globignore_dotglob();
+        }
+    }
+
+    /// bash's `sv_globignore`: `$GLOBIGNORE` and the `dotglob` option are one
+    /// setting seen twice.
+    ///
+    /// A non-empty `$GLOBIGNORE` turns `dotglob` **on** — that is *how* the
+    /// manual's "leading-dot names are matched" works, not a rule of its own —
+    /// and the name losing its value turns it **off** again, even when the user
+    /// had set the option themselves:
+    ///
+    /// ```sh
+    /// shopt -s dotglob; GLOBIGNORE=x; unset GLOBIGNORE; shopt dotglob   # off
+    /// ```
+    ///
+    /// A value that is set but *empty* leaves the option alone, so it is only an
+    /// assignment or an unset that moves it. Between those, `shopt -u dotglob`
+    /// wins and stays won: with `$GLOBIGNORE` set, turning the option off really
+    /// does stop leading-dot names matching — until the next assignment to the
+    /// name turns it back on.
+    ///
+    /// Because the option carries the effect, pathname expansion reads only
+    /// `dotglob`; `$GLOBIGNORE` itself is left with the one job of filtering.
+    fn sync_globignore_dotglob(&mut self) {
+        match self.vars.get("GLOBIGNORE") {
+            Some(v) if !v.is_empty() => {
+                self.shopt.insert("dotglob".to_string(), true);
+            }
+            // Set but empty: bash's hook leaves `glob_dot_filenames` untouched.
+            Some(_) => {}
+            None => {
+                self.shopt.insert("dotglob".to_string(), false);
+            }
+        }
     }
 
     /// Record the command string the shell was invoked with under `-c`, exposed
@@ -38237,10 +38273,11 @@ fn glob_or_literal(
         out.push(literal);
         return;
     }
-    // A non-null GLOBIGNORE enables a dotglob-like effect for this expansion.
-    let effective_dotglob = dotglob || globignore_active;
-    let mut matches =
-        glob_expand_field(cwd, field, effective_dotglob, nocaseglob, extglob, globstar);
+    // `$GLOBIGNORE`'s leading-dot effect is not applied here: assigning the name
+    // turns the `dotglob` option itself on (see `Shell::sync_globignore_dotglob`),
+    // so it arrives in `dotglob` — and a later `shopt -u dotglob` can take it
+    // away again, which an effect computed here would override.
+    let mut matches = glob_expand_field(cwd, field, dotglob, nocaseglob, extglob, globstar);
     if globignore_active {
         // Drop names matching any GLOBIGNORE pattern, and always drop the `.`
         // and `..` entries (bash ignores them whenever GLOBIGNORE is non-null,
@@ -58280,8 +58317,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
         let basename = |p: &Str| p.rsplit(|&b| b == b'/').next().unwrap_or(p).to_vec();
 
-        // GLOBIGNORE=*.log active: drops c.log, and the dotglob effect surfaces
-        // .hidden (which `*` would normally skip).
+        // GLOBIGNORE=*.log active: drops c.log. `dotglob` is passed on because
+        // assigning `$GLOBIGNORE` is what turns that option on (see
+        // `Shell::sync_globignore_dotglob`), which is how `.hidden` — a name `*`
+        // would normally skip — comes to be in the list at all.
         let gi = build_globignore(format!("{uniq}/*.log").as_bytes(), false);
         let mut out = Vec::new();
         let mut failed = None;
@@ -58291,7 +58330,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             &mut out,
             false,
             false,
-            false,
+            true,
             false,
             false,
             false,
@@ -58315,7 +58354,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             &mut out,
             false,
             false,
-            false,
+            true,
             false,
             false,
             false,
@@ -58326,6 +58365,39 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let names: Vec<Str> = out.iter().map(&basename).collect();
         assert!(names.iter().all(|n| n != b"." && n != b".."));
         assert!(names.contains(&b".hidden".to_vec()));
+    }
+
+    #[test]
+    fn globignore_moves_the_dotglob_option() {
+        // Assigning the name turns the option on, and losing the name turns it
+        // off again — even when the option was the user's own doing.
+        assert_eq!(run("shopt dotglob; GLOBIGNORE=x; shopt dotglob").0, "dotglob        \toff\ndotglob        \ton\n");
+        assert_eq!(
+            run("shopt -s dotglob; GLOBIGNORE=x; unset GLOBIGNORE; shopt dotglob").0,
+            "dotglob        \toff\n"
+        );
+        // Set but empty moves nothing.
+        assert_eq!(
+            run("shopt -s dotglob; GLOBIGNORE=; shopt dotglob").0,
+            "dotglob        \ton\n"
+        );
+        assert_eq!(run("GLOBIGNORE=; shopt dotglob").0, "dotglob        \toff\n");
+        // The option can be turned off underneath a set variable, and the next
+        // assignment turns it back on.
+        assert_eq!(
+            run("GLOBIGNORE=x; shopt -u dotglob; shopt dotglob; GLOBIGNORE=y; shopt dotglob").0,
+            "dotglob        \toff\ndotglob        \ton\n"
+        );
+        // A `local` going out of scope is the name losing its value.
+        assert_eq!(
+            run("f() { local GLOBIGNORE=z; shopt dotglob; }; f; shopt dotglob").0,
+            "dotglob        \ton\ndotglob        \toff\n"
+        );
+        // So is an assignment prefix ending.
+        assert_eq!(
+            run("GLOBIGNORE=q shopt dotglob; shopt dotglob").0,
+            "dotglob        \ton\ndotglob        \toff\n"
+        );
     }
 
     #[test]

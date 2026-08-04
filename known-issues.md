@@ -28565,7 +28565,7 @@ the *shapes* — the values are host state) and by the lib test
 `a_variable_transform_renders_the_element_not_the_storage_cell`. Full sweep
 321/321.
 
-### TD-OILS-WHOLE-ARRAY-TRANSFORM-IS-ONE-WORD. `"${a[@]@A}"` is three words in bash and one in osh — 2026-08-04
+### TD-OILS-WHOLE-ARRAY-TRANSFORM-IS-ONE-WORD. `"${a[@]@A}"` is three words in bash and one in osh — 2026-08-04 — ✅ **RESOLVED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::bulk_attr_transform`, which
 builds the whole-array `@A` declaration as a single field.
@@ -28632,6 +28632,30 @@ So the shape of the fix is: `bulk_elements` returns items, the *caller* decides 
 **Impact.** Anything that counts or iterates `"${a[@]@A}"` rather than echoing
 it. Rare, but it is the shape `set -- "${a[@]@A}"` and `for w in "${a[@]@A}"`
 take, and a script doing either gets one word where bash gives three.
+
+**Fixed in `ed457c1ab`** — `bulk_elements` grew a `fields` flag saying whether
+the caller is a context that keeps fields apart, `bulk_attr_transform`'s `A`
+branch builds the items and hands them to a new `split_transform_items`, and
+`split_transform_item` does the shielded character split.
+
+Two things about the shape are worth keeping, because both were wrong in an
+earlier draft of this entry and were only caught by measuring:
+
+* **The flag is "does the caller keep fields apart", not "is this `[*]`."** A
+  scalar context does not split either, however it is spelled — `x="${n[@]@A}"`
+  is the whole declaration under every `$IFS`. Keying on the star would have
+  split the `[@]` half of that.
+* **The split stayed inside the transform** rather than moving to the caller, as
+  the paragraph above proposed. The caller cannot do it without knowing that the
+  op is `A`, since `@a` and every element-wise transform must not be touched —
+  and that knowledge already lives here. The flag exports the *decision* to the
+  caller while leaving the *rule* in one place.
+
+Covered by the corpus case
+`a-a-collection-declaration-is-split-into-words.sh` (a full match against bash
+5.2.37 across `IFS` = space, `:`, empty, `a`, `=`, `x`, `e` and unset, in all
+three contexts and both spellings) and by the lib test
+`a_collection_declaration_is_split_only_where_fields_are_kept`.
 
 ### TD-OILS-STAR-BULK-JOIN-IGNORES-IFS. every `[*]` reference except `${a[*]}` itself joined with a hard-coded space — 2026-08-04 — ✅ **RESOLVED 2026-08-04**
 

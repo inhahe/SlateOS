@@ -29072,26 +29072,17 @@ impl Shell {
     /// command has just shadowed — holds nothing to judge, so it is fine:
     /// `q=0; f() { declare -n q; }` succeeds.
     fn nameref_existing_value_error(&self, tag: &str, name: &str) -> Option<Str> {
-        let not_an_array = |shell: &Self| -> Str {
-            bfmt![
-                shell.err_prefix(),
-                format!("{tag}: {name}: reference variable cannot be an array\n")
-            ]
-        };
-        if self.arrays.contains_key(name) || self.assoc.contains_key(name) {
-            return Some(not_an_array(self));
+        if let Some(msg) = self.nameref_array_error(tag, name) {
+            return Some(msg);
         }
         let value = match self.vars.get(name) {
             Some(v) => v.clone(),
             None => {
                 // No stored binding: a live dynamic special still has a value
                 // function, unless an ordinary (unset) declaration shadows it.
-                let d = self
-                    .dynamic_special(name)
+                // (One that *lists* as an array was refused just above.)
+                self.dynamic_special(name)
                     .filter(|_| !self.declared.contains(name))?;
-                if d.named_flags.contains('a') {
-                    return Some(not_an_array(self));
-                }
                 self.dynamic_special_value(name)?
             }
         };
@@ -29105,6 +29096,34 @@ impl Shell {
             value.as_slice(),
             b"': invalid variable name for name reference\n"
         ])
+    }
+
+    /// The `reference variable cannot be an array` refusal on its own — the one
+    /// question a `-n` declaration asks of *every* operand, valued or not.
+    ///
+    /// A reference holds one name; an array holds elements; nothing can be both.
+    /// The dynamic specials that list as arrays (`BASH_SOURCE`, `BASH_LINENO`,
+    /// `FUNCNAME`, `BASH_VERSINFO`) answer for it too, though they have no
+    /// stored binding to look at.
+    ///
+    /// It outranks the readonly refusal — `declare -ar q=(1); declare -n q=t`
+    /// reports the array rather than the attribute — and it is asked whatever
+    /// *else* the command names, so a `-na` on an existing array is refused
+    /// rather than quietly taking the name for its own array.
+    fn nameref_array_error(&self, tag: &str, name: &str) -> Option<Str> {
+        let is_array = self.arrays.contains_key(name)
+            || self.assoc.contains_key(name)
+            || (!self.vars.contains_key(name)
+                && self
+                    .dynamic_special(name)
+                    .filter(|_| !self.declared.contains(name))
+                    .is_some_and(|d| d.named_flags.contains('a')));
+        is_array.then(|| {
+            bfmt![
+                self.err_prefix(),
+                format!("{tag}: {name}: reference variable cannot be an array\n")
+            ]
+        })
     }
 
     /// `declare`/`typeset`/`local` — the entry point, which handles `-g` by
@@ -29728,6 +29747,36 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // …and then of the name itself, which may not already be an array.
+            // A *valueless* `-n` asks the same question further down, where it
+            // can also judge the value the binding already holds; here it comes
+            // first because it outranks the readonly refusal below
+            // (`declare -ar q=(1); declare -n q=t` reports the array). A
+            // declaration binding a *local* asks later still — its fresh shadow
+            // hides whatever array the name held, and bash's own refusal to
+            // shadow a readonly name comes out first.
+            if nameref
+                && value.is_some()
+                && !make_local
+                && let Some(msg) = self.nameref_array_error(tag, base_name)
+            {
+                self.emit_stderr(&msg);
+                status = 1;
+                continue;
+            }
+            // `-n` and `-i` cannot both be honoured on a value: the integer
+            // attribute reduces what is stored to a number, and a number is no
+            // name for a reference to hold. bash applies the attributes it can,
+            // declines to make the reference, and refuses the assignment —
+            // silently, because the value it judged is one it computed rather
+            // than one that was written down. Only this operand is dropped;
+            // `declare -ni v=t ok=w` refuses both and creates neither.
+            //
+            // The `-n` half is what decides, as everywhere here, so `+n` in the
+            // same command does not rescue it — but `+i` does, since by the time
+            // the value binds the integer attribute is already gone.
+            let nameref_int_refusal =
+                nameref && !assoc && !indexed && integer && !unset_integer && value.is_some();
             // Whether a *fresh* local shadow is about to be made for this name,
             // and whether the binding it would hide is a local some still-running
             // call owns. bash's `make_local_variable` refuses to shadow a
@@ -29826,13 +29875,62 @@ impl Shell {
             // shadow step above, because a fresh local holds nothing to judge,
             // and before any attribute is applied, because the refusal
             // abandons the whole operand. See `nameref_existing_value_error`.
+            //
+            // A valued one has only the array question left (its value was
+            // judged higher up), and only a local-binding declaration still has
+            // it to ask: `declare -a q=(1); f() { local -n q=t; }` shadows the
+            // array rather than meeting it, while the same operand outside a
+            // function was refused before the readonly check.
             if nameref
-                && value.is_none()
-                && let Some(msg) = self.nameref_existing_value_error(tag, base_name)
+                && let Some(msg) = if value.is_none() {
+                    self.nameref_existing_value_error(tag, base_name)
+                } else {
+                    self.nameref_array_error(tag, base_name)
+                }
             {
                 self.emit_stderr(&msg);
                 status = 1;
                 continue;
+            }
+            // See `nameref_int_refusal`. The arithmetic is still *run* — bash
+            // reaches the refusal through the ordinary assignment, so the
+            // target name is evaluated and a malformed one is the same syntax
+            // error that discards the command (`t='q+'; declare -ni v=t ok=1`
+            // reports `q+` and abandons `ok`). It is run here, last of the
+            // questions asked about the operand, because every refusal above
+            // pre-empts it: a readonly name, an array, and a value that is no
+            // name at all are all reported instead.
+            let mut nameref_int_syntax_error = false;
+            if nameref_int_refusal {
+                let joined = match self.vars.get(base_name) {
+                    Some(old) if append => bfmt![old, value.as_deref().unwrap_or_default()],
+                    _ => value.clone().unwrap_or_default(),
+                };
+                nameref_int_syntax_error = self.eval_int_assign(&joined).is_none();
+                if !nameref_int_syntax_error {
+                    status = 1;
+                    // bash hangs a declaration's attributes on the variable it
+                    // found or made, and an operand carrying a value makes one
+                    // only by *binding* it. So a binding refused for the value
+                    // it computed leaves a name that was not already there with
+                    // none of the attributes either: `declare -ni v=t; v=3+4`
+                    // gives a plain `v="3+4"`, where `declare -x v; declare -ni
+                    // v=t` leaves `declare -ix v` behind. A `local` has made its
+                    // binding by here, so its attributes do land —
+                    // `f() { local -nix v=t; }` gives `declare -ix v`.
+                    //
+                    // A binding refused for a *malformed* expression is the
+                    // ordinary bad-`-i` failure and leaves the name behind
+                    // created-but-unset, so that one runs on to the store below.
+                    if !make_local
+                        && !self.vars.contains_key(base_name)
+                        && !self.arrays.contains_key(base_name)
+                        && !self.assoc.contains_key(base_name)
+                        && !self.declared.contains(base_name)
+                    {
+                        continue;
+                    }
+                }
             }
             // Giving a *local* scalar an array kind drops its value, where the
             // same widening at global scope keeps it as element 0: bash builds
@@ -29971,6 +30069,22 @@ impl Shell {
             // visible in the value, not just the attribute: `declare -i +i x=3+4`
             // stores the string `3+4`, because by the time the value binds the
             // integer attribute is already gone.
+            //
+            // A `-n` re-declares what the name *means*, so the value attributes
+            // it arrived with go first: they would fold or arithmetically
+            // mangle the target's name, which is what the binding now holds.
+            // `declare -iu q; declare -n q=t` leaves `declare -n q="t"`, and
+            // this command's own letters then apply on top — `declare -i q;
+            // declare -nu q=t` gives `declare -nu q="T"`. Only the value
+            // attributes go; `-x`, `-t` and `-r` describe the binding rather
+            // than what is stored in it, and stay. The `-n` half decides on its
+            // own, so a `+n` beside it does not spare them either.
+            if nameref {
+                self.integer_attr.remove(base_name);
+                self.lower_attr.remove(base_name);
+                self.upper_attr.remove(base_name);
+                self.capcase_attr.remove(base_name);
+            }
             if unset_integer {
                 self.integer_attr.remove(base_name);
             } else if integer {
@@ -29988,7 +30102,24 @@ impl Shell {
                 // `nameref_off_name` above.
                 self.nameref_attr.remove(&nameref_off_name);
             } else if nameref {
-                self.nameref_attr.insert(base_name.to_string());
+                if assoc || indexed {
+                    // An array kind named alongside `-n` takes the name for
+                    // itself: nothing can be both a reference to one name and a
+                    // collection of elements, and bash lets the array win
+                    // outright — the attribute is not applied, and one the name
+                    // already carried is taken off (`declare -n v=t;
+                    // declare -na v=q` leaves `declare -a v=([0]="q")`). The
+                    // nameref *questions* were still asked, because they are
+                    // asked while the letter is read: a value that is no name is
+                    // refused, and so is a name that is already an array.
+                    self.nameref_attr.remove(base_name);
+                } else if !nameref_int_refusal {
+                    // …and `-i` beside `-n` leaves the reference unmade rather
+                    // than holding a number, without disturbing one the name
+                    // already had: `declare -n v=t; declare -ni v=t` keeps the
+                    // reference to `t` it started with, and merely adds `-i`.
+                    self.nameref_attr.insert(base_name.to_string());
+                }
             }
             if unset_trace {
                 self.trace_attr.remove(base_name);
@@ -30117,16 +30248,39 @@ impl Shell {
             // Past the subscripted branch, `name` and `base_name` are the same
             // operand — and it has already been checked to be text.
             let name = base_name;
+            // See `nameref_int_refusal`: the attributes have landed and the
+            // arithmetic has run, but the reference is not made and its name
+            // does not bind. Silent, and only this operand — the flags below
+            // still apply, so `f() { local -nix v=t; }` really does leave
+            // `declare -ix v`. A malformed expression is the ordinary bad-`-i`
+            // failure, and leaves what that leaves: the name created-but-unset,
+            // with every operand after it abandoned.
+            if nameref_int_syntax_error {
+                self.declared.insert(name.to_string());
+                break;
+            }
+            let value = if nameref_int_refusal { None } else { value };
             if let Some(v) = value {
                 if self.nameref_attr.contains(name) {
-                    // `declare -n ref=target` — store the target *name* literally
-                    // (no case-fold, and bypassing the assignment redirect so the
-                    // nameref itself is bound, not its eventual target). `+=`
-                    // extends the *name*, which is how `declare -n r=a; declare
-                    // -n r+='[1]'` builds the element reference `a[1]` (bash).
+                    // `declare -n ref=target` — store the target *name*, bypassing
+                    // the assignment redirect so the nameref itself is bound and
+                    // not its eventual target. `+=` extends the *name*, which is
+                    // how `declare -n r=a; declare -n r+='[1]'` builds the element
+                    // reference `a[1]` (bash).
                     let v = match self.vars.get(name) {
                         Some(old) if append => bfmt![old, &v],
                         _ => v,
+                    };
+                    // The name a reference holds is a value like any other, so
+                    // this command's case attributes fold it — the whole of it,
+                    // subscript included: `declare -nu v='m[aB]'` refers to
+                    // `M[AB]`, and `declare -nu v=t; v=5` sets `T`. The name it
+                    // arrived with cannot fold it, having been cleared above,
+                    // and `-i` never reaches here (`nameref_int_refusal`), so
+                    // there is no arithmetic to fail — the `break` is the same
+                    // answer a bad `-i` value gets anywhere else.
+                    let Some(v) = self.apply_value_attrs(name, v) else {
+                        break;
                     };
                     self.put_var(name.to_string(), v);
                 } else if assoc || indexed {
@@ -54301,6 +54455,120 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("unset SECONDS; declare -n SECONDS; declare -p SECONDS").0,
             "declare -n SECONDS\n"
+        );
+    }
+
+    #[test]
+    fn a_nameref_declaration_settles_the_attributes_named_beside_it() {
+        // `-n` re-declares what the name *means*: what it holds is another
+        // variable's name, so the value attributes it arrived with go — they
+        // would fold or arithmetically mangle that name — while `-x`, `-t` and
+        // `-r`, which describe the binding rather than what is in it, stay.
+        assert_eq!(run("declare -iu q; declare -n q=t; declare -p q").0, "declare -n q=\"t\"\n");
+        assert_eq!(run("declare -l q; declare -n q=t; declare -p q").0, "declare -n q=\"t\"\n");
+        assert_eq!(
+            run("declare -x q; declare -t q; declare -n q=t; declare -p q").0,
+            "declare -ntx q=\"t\"\n"
+        );
+        // The `-n` half decides on its own, so a `+n` beside it clears them too.
+        assert_eq!(run("declare -i q; declare -n +n q=t; declare -p q").0, "declare -- q=\"t\"\n");
+        // This command's own letters then apply on top, and they apply to the
+        // name the reference holds — the whole of it, subscript included.
+        assert_eq!(run("declare -i q; declare -nu q=t; declare -p q").0, "declare -nu q=\"T\"\n");
+        assert_eq!(run("declare -nl v=TQ; declare -p v").0, "declare -nl v=\"tq\"\n");
+        assert_eq!(run("declare -nc v=tq; declare -p v").0, "declare -nc v=\"Tq\"\n");
+        assert_eq!(run("declare -nu v='m[aB]'; declare -p v").0, "declare -nu v=\"M[AB]\"\n");
+        assert_eq!(run("declare -nu v=t; declare -nu v+=q; declare -p v").0, "declare -nu v=\"TQ\"\n");
+        // …so the reference really does lead to the folded name.
+        assert_eq!(run("declare -nu v=t; v=5; declare -p T").0, "declare -- T=\"5\"\n");
+
+        // `-i` is the one that cannot be honoured: it reduces what is stored to
+        // a number, and a number is no name for a reference to hold. bash keeps
+        // the attributes it can, declines to make the reference, and refuses the
+        // assignment silently — the value it judged was one it computed.
+        assert_eq!(run("declare -ni v=t; echo rc=$?").0, "rc=1\n");
+        assert_eq!(run("declare -ni v=t; declare -p v 2>&1").0, "osh: declare: v: not found\n");
+        // A name that was not already there keeps none of the attributes either,
+        // since bash hangs them on the variable the refused binding never made.
+        assert_eq!(run("declare -ni v=t; v=3+4; declare -p v").0, "declare -- v=\"3+4\"\n");
+        assert_eq!(
+            run("declare -x v; declare -ni v=t; declare -p v").0,
+            "declare -ix v\n"
+        );
+        assert_eq!(
+            run("f() { local -nix v=t; declare -p v; }; f").0,
+            "declare -ix v\n"
+        );
+        // A reference the name already carried is left as it was.
+        assert_eq!(
+            run("declare -n v=t; declare -ni v=w; declare -p v").0,
+            "declare -in v=\"t\"\n"
+        );
+        // `+i` rescues it: by the time the value binds the attribute is gone.
+        assert_eq!(run("declare -ni +i v=t; declare -p v").0, "declare -n v=\"t\"\n");
+        // Only this operand is dropped — but the arithmetic still runs, so a
+        // malformed target name is the same syntax error that discards the rest.
+        assert_eq!(run("declare -ni v=t ok=w; echo rc=$?").0, "rc=1\n");
+        // …and a malformed one is then the ordinary bad-`-i` failure: it leaves
+        // the name created-but-unset and abandons every operand after it.
+        assert_eq!(
+            run("t='q+'\ndeclare -ni v=t ok=1 2>&1; echo NOT-REACHED\necho after").0,
+            "osh: declare: q+: syntax error: operand expected (error token is \"+\")\nafter\n"
+        );
+        assert_eq!(
+            run("t='q+'\ndeclare -ni v=t ok=1 2>/dev/null\ndeclare -p v; declare -p ok 2>&1").0,
+            "declare -i v\nosh: declare: ok: not found\n"
+        );
+
+        // An array kind named beside `-n` takes the name for itself: nothing can
+        // be both a reference to one name and a collection of elements.
+        assert_eq!(run("declare -na v=t; declare -p v").0, "declare -a v=([0]=\"t\")\n");
+        assert_eq!(run("declare -na v; declare -p v").0, "declare -a v\n");
+        assert_eq!(run("declare -nA v=t; declare -p v").0, "declare -A v=([0]=\"t\" )\n");
+        assert_eq!(
+            run("declare -n v=t; declare -na v=q; declare -p v").0,
+            "declare -a v=([0]=\"q\")\n"
+        );
+        // The nameref *questions* are still asked, because bash asks them while
+        // the letter is read: a value that is no name is refused all the same.
+        assert_eq!(
+            run("declare -na v='(1 2)' 2>&1").0,
+            "osh: declare: `(1 2)': invalid variable name for name reference\n"
+        );
+
+        // …and so is a name that is already an array, valued or not, whatever
+        // else the command asks for. It outranks the readonly refusal, and it
+        // reaches the dynamic specials that list as arrays.
+        assert_eq!(
+            run("declare -a q; declare -n q=t 2>&1").0,
+            "osh: declare: q: reference variable cannot be an array\n"
+        );
+        assert_eq!(
+            run("declare -A q; declare -nA q=t 2>&1").0,
+            "osh: declare: q: reference variable cannot be an array\n"
+        );
+        assert_eq!(
+            run("declare -ar q=(1); declare -n q=t 2>&1").0,
+            "osh: declare: q: reference variable cannot be an array\n"
+        );
+        assert_eq!(
+            run("declare -n BASH_LINENO=t 2>&1").0,
+            "osh: declare: BASH_LINENO: reference variable cannot be an array\n"
+        );
+        // The raw value is judged before the name is, though.
+        assert_eq!(
+            run("declare -a q; declare -n q=3 2>&1").0,
+            "osh: declare: `3': invalid variable name for name reference\n"
+        );
+        // A `local` shadows the array before it can meet it — and bash's own
+        // refusal to shadow a readonly name comes out ahead of both.
+        assert_eq!(
+            run("declare -a q=(1); f() { local -n q=t; declare -p q; }; f").0,
+            "declare -n q=\"t\"\n"
+        );
+        assert_eq!(
+            run("declare -ar q=(1); f() { local -n q=t; }; f 2>&1").0,
+            "main: local: q: readonly variable\n"
         );
     }
 

@@ -28885,7 +28885,7 @@ as 0, which is what to check first.
 **Impact.** Error messages only, and only for an expression that was already
 going to fail. Found while fixing the special parameters in the same function.
 
-### TD-OILS-LAST-ARG-BINDS-ON-A-DISCARDED-COMMAND. `$_` takes the words of a command that never ran — 2026-08-04
+### TD-OILS-LAST-ARG-BINDS-ON-A-DISCARDED-COMMAND. `$_` takes the words of a command that never ran — ✅ **FIXED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::exec_simple_inner` (~14013)
 arms `pending_last_arg` with the last expanded word *before* the three
@@ -28929,6 +28929,29 @@ form and a plain assignment already match.
 more than a scripting one, and after `declare -a name=(…)`. Narrow, but `$_` is
 supposed to be a faithful record of what just ran and here it records what did
 not.
+
+**Fixed.** The slot is no longer written at the end of the word-expansion loop.
+It is written through one new method, `Shell::arm_last_arg`, called from exactly
+the two points where the command is committed to running: after the pure-
+assignment branch's own error checks (with an empty slice, which is what binds
+the empty string), and after the command branch's prefix-assignment checks, just
+before the `set -x` trace. Everything that returns before one of those two — the
+three command-word expansion checks, the assignment branch's three, the readonly
+rejection, and a compound operand that could not bind — now leaves the previous
+binding alone by construction rather than by remembering to undo an arming.
+
+The second divergence went with it: the command branch arms from `spliced` when
+the command is a declaration builtin with compound operands, which is the word
+list that already carries a bare name where each `name=(…)` was written (it is
+what `set -x` traces and what `declare -p` is asked with). Measured: bash binds
+`a` for `declare -a a=(1 2)`, `w=2` for `declare q=(1) w=2`, `q2` for
+`declare w2=2 q2=(1)`, `t=9` for `export s=(1) t=9`.
+
+Also measured while placing the calls, and now covered: a command that merely
+*fails* has still run and does arm (`nosuchcmd a b` binds `b`, `echo mm >
+/nosuch/dir/f` binds `mm`), and a redirect failure on a null command does not
+take back the empty binding (`< nosuchfile` binds `""`). Corpus case
+`dollar-underscore-takes-the-words-of-a-command-that-ran.sh`.
 
 ### TD-OILS-UNSET-FUNCNAME. `unset FUNCNAME` does not stop osh re-materialising it — 2026-08-01 — ✅ **RESOLVED 2026-08-04**
 

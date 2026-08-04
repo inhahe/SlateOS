@@ -4008,6 +4008,9 @@ pub struct Shell {
     /// empty string, which is why this is `Some("")` rather than `None` for a
     /// pure assignment. [`Self::exec_simple`] saves and restores the slot around
     /// each command, so a nested one cannot be mistaken for its parent.
+    /// Armed only through [`Self::arm_last_arg`], and only once the command is
+    /// committed to running — a command discarded by a word-expansion error
+    /// never arms it, and so leaves the previous binding alone.
     pending_last_arg: Option<Str>,
     /// Stack of function-local variable scopes. Each frame records the variables
     /// shadowed by `local` in that function call and their prior state, restored
@@ -14332,6 +14335,25 @@ impl Shell {
         flow
     }
 
+    /// Arm `$_` with this command's last word, for [`Self::exec_simple`] to bind
+    /// once the command is over.
+    ///
+    /// Call it only where the command is *committed to running*. bash updates
+    /// `$_` when a command runs, so one discarded during word expansion leaves
+    /// the previous binding alone — `echo alpha beta; echo "boom $(( 1/0 ))";
+    /// echo "$_"` prints `beta`, and so do the `failglob`-miss, bad-subscript,
+    /// refused-prefix-assignment and readonly-rejection discards. A command
+    /// that merely *fails* has still run and does arm: `nosuchcmd a b` binds
+    /// `b`, and `echo mm > /nosuch/dir/f` binds `mm`.
+    ///
+    /// A command with no words at all — a pure assignment, or a bare
+    /// redirection — binds the empty string rather than leaving the previous
+    /// value in place, so `echo a b c; v=x; echo "[$_]"` prints `[]` in bash.
+    /// Pass an empty slice for those.
+    fn arm_last_arg(&mut self, argv: &[Str]) {
+        self.pending_last_arg = Some(argv.last().cloned().unwrap_or_default());
+    }
+
     fn exec_simple_inner(&mut self, sc: &SimpleCommand, out: &mut Out, stdin: &StdinSrc) -> Flow {
         // bash clears `special_builtin_failed` at the top of every simple
         // command, which is what disarms the usage-error abort whenever any
@@ -14429,13 +14451,6 @@ impl Shell {
                 argv.extend(self.expand_word(&bw, true));
             }
         }
-        // Arm `$_` with this command's last *expanded* word, for
-        // [`Self::exec_simple`] to bind once the command is over. A command with
-        // no words at all — a pure assignment, or a bare redirection — binds the
-        // empty string rather than leaving the previous value in place, so
-        // `echo a b c; v=x; echo "[$_]"` prints `[]` in bash and not `[c]`.
-        self.pending_last_arg = Some(argv.last().cloned().unwrap_or_default());
-
         // `set -u`: a reference to an unset variable during expansion aborts the
         // shell (matching a non-interactive bash under nounset). The abort status
         // is carried by the flag (127 for nounset/`:?`, 1 for a bad substitution)
@@ -14533,6 +14548,12 @@ impl Shell {
             }
             // Otherwise `command_sub` already left the last substitution's status
             // in `self.last_status`.
+
+            // Past every way this assignment could have been discarded, so it
+            // counts as having run: `$_` becomes the empty string (no words).
+            // A redirect failure below does not take that back — bash's
+            // `echo gg hh; < nosuchfile; echo "[$_]"` prints `[]`.
+            self.arm_last_arg(&[]);
 
             // A null command (`> f`, `2> e`, `x=1 > f`) still performs its
             // redirections: bash creates/truncates the output target and reports
@@ -14689,6 +14710,13 @@ impl Shell {
             self.last_status = 1;
             return Flow::Discard;
         }
+
+        // Past every way this command could have been discarded, so `$_` takes
+        // its last word. For a declaration builtin with compound operands that
+        // is `spliced`, not `argv`: bash's argv carries a *bare name* where each
+        // `name=(…)` was written, so `declare -a a=(1 2)` binds `a` and
+        // `declare w=2 q=(1)` binds `q` — the same list `set -x` traces.
+        self.arm_last_arg(if decl_with_arrays { &spliced } else { &argv });
 
         // `set -x`: trace the command before running it (its assignments were
         // traced as they were expanded, above).

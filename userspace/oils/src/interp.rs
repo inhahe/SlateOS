@@ -8856,6 +8856,17 @@ impl Shell {
                 self.last_status = 1;
                 return Flow::Next;
             }
+            // A *circular* nameref is abandoned like a readonly name — one
+            // warning, status 1, no iteration at all — even though the bind
+            // below does not otherwise follow a reference. bash asks the
+            // question in `bind_variable` before it decides where to store, so
+            // a chain that closes on itself stops the loop whether or not the
+            // store would have gone through the reference.
+            if self.is_circular_ref(&var) {
+                self.perrln(&format!("warning: {var}: circular name reference"));
+                self.last_status = 1;
+                return Flow::Next;
+            }
             // Binding the loop variable is an assignment, so the name's
             // attributes apply (`declare -i n` evaluates each word, `declare -u`
             // folds its case), an existing array is written at element 0, and
@@ -11145,9 +11156,13 @@ impl Shell {
             };
             return self.scalar_write_checked(&dest, None, val);
         };
+        // A circular chain leaves the element write on the name as written —
+        // with the warning, and with the reference attribute gone, since the
+        // store is about to make it an array. See
+        // [`Shell::resolve_ref_array_write`].
         let landed = self
-            .resolve_ref_name(base)
-            .and_then(RefTarget::into_name)
+            .resolve_ref_elem_write(base)
+            .into_name()
             .unwrap_or_else(|| base.to_string());
         self.scalar_write_checked(&ScalarDest::Elem(landed, sub.to_vec()), Some(base), val)
     }
@@ -11368,11 +11383,22 @@ impl Shell {
         // A nameref (`declare -n ref=target`) redirects the assignment to its
         // target: rewrite the name and re-run. `resolve_ref_name` follows the
         // whole chain, so the rewritten name is not itself a nameref (no loop).
-        // A *circular* chain has no target to redirect to — bash warns and the
-        // assignment fails (status 1), leaving every variable in the cycle
-        // untouched.
-        let Some(target) = self.resolve_ref_use(&a.name) else {
-            return false;
+        //
+        // A *circular* chain has no target to redirect to, and what bash then
+        // does depends on the shape of the value. A **scalar** store warns and
+        // fails (status 1, every variable in the cycle untouched — and, being
+        // a failed variable assignment, that ends the shell). An **array**
+        // one — a subscripted element or a compound literal — warns and lands
+        // on the reference itself; see [`Shell::resolve_ref_array_write`].
+        let target = if a.index.is_some() {
+            self.resolve_ref_elem_write(&a.name)
+        } else if matches!(a.value, AssignRhs::Array(_)) {
+            self.resolve_ref_array_write(&a.name)
+        } else {
+            let Some(target) = self.resolve_ref_use(&a.name) else {
+                return false;
+            };
+            target
         };
         if target.sub.is_some() || target.base != a.name {
             let mut a2 = a.clone();
@@ -22451,6 +22477,75 @@ impl Shell {
             self.perrln(&format!("warning: {name}: circular name reference"));
         }
         target
+    }
+
+    /// Resolve a nameref chain for a write that names an *array*, which a
+    /// circular chain does not abandon the way a scalar store does.
+    ///
+    /// bash's `nameref_transform_name` warns and hands back the name the walk
+    /// *started* from, so the write falls on the reference variable itself —
+    /// and the variable stops being a reference, because bash has no such thing
+    /// as an array nameref (`declare -a a; declare -n a=x` is `a: reference
+    /// variable cannot be an array`). Measured against bash 5.2.37:
+    ///
+    /// ```sh
+    /// declare -n c1=c2; declare -n c2=c1
+    /// read -a c1 <<< x        # warning, status 0, declare -a c1=([0]="x")
+    /// c1=x                    # warning, and the assignment simply fails
+    /// ```
+    ///
+    /// Dropping the attribute is what makes the shell usable again afterwards
+    /// rather than merely quiet: `c2` still names `c1`, and since `c1` is no
+    /// longer a reference the cycle is gone — `${c2[0]}` reads `x`.
+    ///
+    /// A chain that resolves is answered exactly as [`Self::resolve_ref_name`]
+    /// answers it, so this costs nothing in the ordinary case.
+    fn resolve_ref_array_write(&mut self, name: &str) -> RefTarget {
+        self.resolve_ref_write_walks(name, 1)
+    }
+
+    /// [`Self::resolve_ref_array_write`] for a *subscripted* target
+    /// (`ref[i]=v`, `read 'ref[i]'`, `printf -v 'ref[i]'`), which warns twice.
+    ///
+    /// The count is not decoration: bash resolves the name once to find the
+    /// array (`array_variable_part`) and again to bind the element, and each
+    /// walk of a circular chain reports it. A whole-array fill resolves once
+    /// and warns once, which is what makes `read -a c1` and `read 'c1[0]'`
+    /// differ by a line.
+    fn resolve_ref_elem_write(&mut self, name: &str) -> RefTarget {
+        self.resolve_ref_write_walks(name, 2)
+    }
+
+    /// The body of the two write-side resolvers, differing only in how many
+    /// times bash walks the chain — and so in how many warnings a circular one
+    /// earns.
+    fn resolve_ref_write_walks(&mut self, name: &str, walks: usize) -> RefTarget {
+        if let Some(target) = self.resolve_ref_name(name) {
+            return target;
+        }
+        for _ in 0..walks {
+            self.perrln(&format!("warning: {name}: circular name reference"));
+        }
+        self.nameref_attr.remove(name);
+        // The value goes with the attribute. A reference's value is the *name*
+        // it points at, which means nothing once it is no longer a reference —
+        // and a store that leaves it behind would find it again as element 0 of
+        // the array it is making. bash keeps nothing of it either: `c1[3]=v`
+        // through the cycle is `declare -a c1=([3]="v")`, not `([0]="c2"
+        // [3]="v")`.
+        self.vars.remove(name);
+        RefTarget::plain(name.to_string())
+    }
+
+    /// Whether `name` heads a nameref chain that closes on itself, asked
+    /// *without* the warning [`Self::resolve_ref_use`] would give.
+    ///
+    /// For the handful of writes that neither follow a nameref nor may store
+    /// through one — a `for`/`select` control variable, which bash binds into
+    /// the reference cell itself — the cycle is still fatal to the write, so
+    /// the question has to be asked separately from the resolution.
+    fn is_circular_ref(&self, name: &str) -> bool {
+        self.nameref_attr.contains(name) && self.resolve_ref_name(name).is_none()
     }
 
     /// Walk a nameref chain to the *last* reference in it — the one whose value
@@ -37403,7 +37498,10 @@ impl Shell {
             return None;
         };
         let blame = text.to_string();
-        let target = self.resolve_ref_use(text)?;
+        // A circular chain does not refuse a whole-array fill: it lands on the
+        // operand itself, which stops being a reference. See
+        // [`Shell::resolve_ref_array_write`].
+        let target = self.resolve_ref_array_write(text);
         // A reference designating one *element* names no array to fill, so it is
         // refused exactly as a malformed name is — quoting the target as the
         // reference spells it, subscript and all.
@@ -63058,6 +63156,113 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("w=5; f() { local -n r=w; declare -a r=(z); declare -p w; }; f; declare -p w").0,
             "declare -a w=([0]=\"z\")\ndeclare -- w=\"5\"\n"
+        );
+    }
+
+    /// A circular chain does not refuse every write — only the scalar ones.
+    #[test]
+    fn a_circular_nameref_write_lands_on_the_name_it_started_from() {
+        let cyc = "declare -n c1=c2; declare -n c2=c1;";
+        let w = "osh: warning: c1: circular name reference\n";
+
+        // An *array*-shaped store lands on the name the walk started from, and
+        // that name stops being a reference — bash has no array namerefs.
+        for (src, want) in [
+            ("read -a c1 <<< 'p q'", "declare -a c1=([0]=\"p\" [1]=\"q\")\n"),
+            ("mapfile -t c1 <<< x", "declare -a c1=([0]=\"x\")\n"),
+            ("c1=(a b)", "declare -a c1=([0]=\"a\" [1]=\"b\")\n"),
+            ("c1=()", "declare -a c1=()\n"),
+            ("declare -A c1=([k]=v)", "declare -A c1=([k]=\"v\" )\n"),
+        ] {
+            assert_eq!(
+                run(&format!("{{ {cyc} {src}; }} 2>&1; echo \"rc=$?\"; declare -p c1")).0,
+                format!("{w}rc=0\n{want}"),
+                "{src}"
+            );
+        }
+
+        // A *subscripted* target lands the same way but warns twice: bash
+        // resolves the name once to find the array and again to bind the
+        // element, and each walk of a circular chain reports it.
+        for (src, want) in [
+            ("c1[0]=z", "declare -a c1=([0]=\"z\")\n"),
+            ("c1[3]=v", "declare -a c1=([3]=\"v\")\n"),
+            ("c1[0]+=z", "declare -a c1=([0]=\"z\")\n"),
+            ("read 'c1[2]' <<< s", "declare -a c1=([2]=\"s\")\n"),
+            ("printf -v 'c1[0]' x", "declare -a c1=([0]=\"x\")\n"),
+        ] {
+            assert_eq!(
+                run(&format!("{{ {cyc} {src}; }} 2>&1; echo \"rc=$?\"; declare -p c1")).0,
+                format!("{w}{w}rc=0\n{want}"),
+                "{src}"
+            );
+        }
+
+        // A *scalar* store has nowhere to land: one warning, status 1, and
+        // every variable in the cycle left as it was.
+        for src in [
+            "read c1 <<< q",
+            "read -N 1 c1 <<< q",
+            "printf -v c1 x",
+            "getopts x c1",
+        ] {
+            assert_eq!(
+                run(&format!(
+                    "{{ {cyc} {src}; }} 2>&1; echo \"rc=$?\"; declare -p c1 c2"
+                ))
+                .0,
+                format!("{w}rc=1\ndeclare -n c1=\"c2\"\ndeclare -n c2=\"c1\"\n"),
+                "{src}"
+            );
+        }
+        // A *bare* assignment is a failed variable assignment besides, so it
+        // ends the shell it is in — the `echo` after it never runs.
+        for src in ["c1=x", "c1+=x"] {
+            assert_eq!(
+                run(&format!("({cyc} {src}; echo unreached) 2>&1; echo \"rc=$?\"")).0,
+                format!("{w}rc=1\n"),
+                "{src}"
+            );
+        }
+
+        // A `for` loop is refused before its first iteration — though, like the
+        // readonly refusal beside it, only once there *is* an iteration to try.
+        assert_eq!(
+            run(&format!(
+                "{{ {cyc} for c1 in v w; do echo unreached; done; }} 2>&1; \
+                 echo \"rc=$?\"; declare -p c1"
+            ))
+            .0,
+            format!("{w}rc=1\ndeclare -n c1=\"c2\"\n"),
+        );
+        assert_eq!(
+            run(&format!(
+                "{{ {cyc} for c1 in; do echo unreached; done; }} 2>&1; echo \"rc=$?\""
+            ))
+            .0,
+            "rc=0\n",
+        );
+
+        // Dropping the attribute is what makes the shell usable again: the
+        // other end of the cycle still names `c1`, and `c1` is no longer a
+        // reference, so the cycle is gone and the value reads back through it.
+        assert_eq!(
+            run(&format!("{{ {cyc} read -a c1 <<< x; }} 2>&1; echo \"[${{c2[0]}}]\"")).0,
+            format!("{w}[x]\n"),
+        );
+        // The blame is the name that was *written*, however long the chain.
+        assert_eq!(
+            run("{ declare -n a1=a2; declare -n a2=a3; declare -n a3=a1; read -a a1 <<< x; } 2>&1; \
+                 declare -p a1 a2")
+                .0,
+            "osh: warning: a1: circular name reference\n\
+             declare -a a1=([0]=\"x\")\ndeclare -n a2=\"a3\"\n",
+        );
+        // None of this touches a chain that resolves: the write still goes
+        // through to the target and the reference stays one.
+        assert_eq!(
+            run("t=orig; declare -n r=t; read -a r <<< 'p q'; declare -p r t").0,
+            "declare -n r=\"t\"\ndeclare -a t=([0]=\"p\" [1]=\"q\")\n",
         );
     }
 

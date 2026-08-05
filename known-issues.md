@@ -1466,37 +1466,73 @@ two agree turned out to be most of the work. Measured, all bash 5.2.37:
 **Pinned by** `tests/corpus/an-unset-of-a-local-pops-one-shadow.sh` and the
 `unset_of_a_local_pops_one_shadow` unit test in `src/interp.rs`.
 
-### TD-OILS-NAMEREF-CYCLE-ARRAY-WRITE. A write through a circular nameref refuses in `osh` where bash warns and writes the raw name — 2026-08-03
+### TD-OILS-NAMEREF-CYCLE-ARRAY-WRITE. A write through a circular nameref refuses in `osh` where bash warns and writes the raw name — 2026-08-03 — ✅ **FIXED 2026-08-05** (arithmetic warning counts remain; see below)
 
-**Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_ref_use`, and its
-callers on the write side (`whole_array_write_target`,
-`set_scalar_target_checked`, `arith_write_dest`).
+**Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_ref_array_write` /
+`resolve_ref_elem_write` / `resolve_ref_write_walks` / `is_circular_ref`, and
+their callers `whole_array_write_target`, `apply_assignment_inner`,
+`set_scalar_target_checked` and `exec_for`.
 
-**What:** bash's cycle detection does not abandon the write. It warns and then
-treats the *starting* name as the target, which for an array write also strips
-the nameref attribute off it. Measured against bash 5.2.37:
+**What.** bash's cycle detection does not abandon every write. Which of its two
+answers you get is chosen by the **shape of the value**, and probing turned that
+into a rule the tracker's original sketch did not have:
+
+* A **scalar** store has nowhere to go: one warning, status 1, every variable in
+  the cycle untouched — and a bare `c1=x`, being a failed variable assignment,
+  ends the shell.
+* An **array** store does not fail. `nameref_transform_name` warns and hands
+  back the name the walk *started* from, so the write lands on the reference
+  variable itself, which stops being a reference (bash has no array namerefs:
+  `declare -a a; declare -n a=x` is `reference variable cannot be an array`).
+
+That second half is the load-bearing one, and it is more than cosmetic: osh's
+refusal turned `c1=(a b)`, `c1[0]=v` and `c1+=(a)` into *failed assignments*, so
+where bash carried on the shell **exited**.
+
+Three details only measurement gives:
+
+* The warning is printed **once per walk of the chain**, so a subscripted target
+  — which bash resolves twice, once to find the array and once to bind the
+  element — reports it twice where a whole-array fill reports it once.
+* The old value goes with the attribute. `c1[3]=v` through a cycle is
+  `declare -a c1=([3]="v")`, not `([0]="c2" [3]="v")`: a reference's value is
+  the *name* it pointed at, and keeping it would make it element 0 of the array
+  the store is creating.
+* Dropping the attribute is what makes the shell **usable again** rather than
+  merely quiet. `c2` still names `c1`, and with `c1` no longer a reference the
+  cycle is gone — so `${c2[0]}` reads what was just written.
+
+A `for`/`select` control variable is a case of its own: bash does *not* follow a
+nameref there (`declare -n r=t; for r in v` leaves `t` alone and makes `r` a
+reference to `v`), yet a circular chain still stops it — one warning, status 1,
+and not one iteration, discovered on the first iteration the way the readonly
+refusal beside it is, so an empty list stays silent. Hence `is_circular_ref`,
+which asks the question without the resolution.
+
+**Fixed 2026-08-05.** Pinned by
+`a-circular-nameref-write-lands-on-the-name-it-started-from.sh` (byte-exact
+against bash 5.2.37, warning counts included) and the lib test
+`a_circular_nameref_write_lands_on_the_name_it_started_from`.
+
+**Still open — the arithmetic warning counts.** The *arithmetic* writes land
+correctly but under-report, because osh resolves the name once where bash walks
+the chain again for each of its internal steps:
 
 | form | bash | osh |
 |---|---|---|
-| `declare -n c1=c2; declare -n c2=c1; read -a c1 <<< x` | one warning, rc 0, `declare -a c1=([0]="x")` | one warning, rc 1, `c1` unchanged |
-| `… read 'c1[0]' <<< v` | **two** warnings, rc 0, `declare -a c1=([0]="v")` | one warning, rc 1 |
-| `… (( c1[0] = 5 ))` | **three** warnings, rc 0, nameref attribute gone | no warning, rc 0, `declare -an c1=([0]="5")` |
-| `… printf -v c1 x` (scalar) | one warning, rc 1 (refuses) | one warning, rc 1 ✅ |
+| `let "c1 = 5"` | 2 warnings, rc 0, no write | 1 warning |
+| `(( c1++ ))` | 3 warnings, rc 1, no write | 2 warnings |
+| `let "c1[0] = 5"` | 3 warnings, rc 0, `declare -a c1=([0]="5")` | 0 warnings, and the nameref attribute survives (`declare -an`) |
+| `(( c1[0]++ ))` | 5 warnings, rc 1, `declare -a c1=([0]="1")` | 1 warning, blaming `c2` rather than `c1` |
 
-So the *scalar* store already matches; only the array-valued writes differ, and
-bash's own warning count varies with how many times the resolution is retried
-internally.
-
-**Why deferred:** reproducing it means modelling bash's retry structure (each
-`nameref_transform_name` call that re-walks the chain emits its own warning),
-not just its answer, and a cycle is a script bug in every case — the observable
-difference is between two flavours of "your nameref is broken". The refusal is
-arguably the safer answer.
-
-**Proper fix:** give `resolve_ref_use` a mode that, on a cycle, warns and hands
-back the *starting* name rather than `None`, and have the array-write callers
-use it (also clearing the target's nameref attribute before the write). Count
-the warnings by matching bash's call sites per construct.
+The count model that fits every measurement is "arithmetic costs one walk more
+than the shell-level form of the same write, and a subscript costs one more than
+a bare name" — so 1/2 for a scalar shell/arith store and 2/3 for a subscripted
+one, with a read-modify-write (`++`) paying for its read as well. **Proper fix:**
+route the arithmetic element path (`Shell::arith_elem`, today `&self`, and
+`arith_write_dest`) through `resolve_ref_elem_write`/`resolve_ref_array_write`
+like the others, and give the read side its own walk count. Left out here
+because it needs `arith_elem` to become `&mut self`, which the read paths share.
 
 ### TD-OILS-FOR-SUBSCRIPTED-NAME-PARSE. `for 'a[0]' in …` is a parse error in `osh` and a runtime complaint in bash — 2026-08-03 — ✅ FIXED 2026-08-04
 

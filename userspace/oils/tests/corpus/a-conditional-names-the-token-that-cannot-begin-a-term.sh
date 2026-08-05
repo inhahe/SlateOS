@@ -25,13 +25,12 @@
 # reaches this message; `[[ !Q ]]` is a negated string test and succeeds.
 #
 # Each case runs under `eval` in a subshell, since a syntax error otherwise
-# abandons the rest of the input. Two cases run through `grep` as well: when the
-# offending token is inside a `( … )` group bash adds an `expected `)'` line
-# that osh does not — see TD-OILS-COND-ERROR-DROPS-THE-EXPECTED-PAREN-LINE in
-# known-issues.md — so they are pinned for everything else they print.
+# abandons the rest of the input. The two cases inside a `( … )` group print an
+# extra `expected `)'` line, which is the group's own frame speaking rather than
+# this message — see
+# `tests/corpus/a-conditional-group-adds-the-paren-it-never-reached.sh`.
 
 e() { ( eval "$1" ) 2>&1; }
-g() { ( eval "$1" ) 2>&1 | grep -v "expected \`)'"; }
 
 echo "=== an operator cannot begin a term, so it is named"
 e '[[ ;Q ]]'
@@ -73,8 +72,8 @@ echo "=== primary position is wherever a term is expected, not just the first"
 e '[[ ! ;Q ]]'
 e '[[ P == P && ;Q ]]'
 e '[[ P == P || ;Q ]]'
-g '[[ ( ;Q ) ]]'
-g '[[ ( a '
+e '[[ ( ;Q ) ]]'
+e '[[ ( a '
 
 echo "=== a second-position operator gets the other sentence"
 e '[[ P;Q ]]'

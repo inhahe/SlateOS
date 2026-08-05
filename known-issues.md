@@ -35662,17 +35662,30 @@ cascade — an inner error passing through a group — that loses it.
 and the group's `?` re-raises that string unchanged. There is no place left to
 insert a clause between the two lines.
 
-**The proper fix** is to stop treating a conditional diagnostic as a string
-until it is printed: carry the clauses and the `near` position in the error, so
-an enclosing group can append `expected `)'` to the clause list and the `near`
-line is rendered last, whoever raised it. That also gives
-TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT somewhere to put the alias's own
-text.
-
 **Impact.** Cosmetic; one diagnostic line, and only for a conditional that fails
 inside parentheses.
-`tests/corpus/a-conditional-names-the-token-that-cannot-begin-a-term.sh` runs
-those two cases through `grep -v` so they are pinned for everything else.
+
+**Fixed 2026-08-05.** A conditional diagnostic is no longer a string until it is
+printed: `CondError` carries the clauses and the last line separately, the
+`[[ … ]]` grammar returns it in place of a `ParseError`, and a group's frame
+appends `expected `)'` as the error passes out through it. `parse_cond` renders
+whatever arrives. TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT now has
+somewhere to put the alias's own text as well.
+
+Two things fell out that the measurement above had not reached. One clause
+arrives per group the error passed through — three for `[[ ( ( ( ;Q ) ) ) ]]` —
+and each is reported at the line its *own* `(` was on rather than the line the
+failure was found on, because bash's `cond_term` saves `line_number` on entry
+and hands the saved one to `parser_error`. A multi-line diagnostic therefore
+does not have a single line number, so `ParseError::line_at` records the message
+lines that differ from the error's own and `format_parse_error` tags each with
+its own.
+
+That same frame also names the token when its contents *did* parse and the input
+then ran out, which osh had been dropping altogether: `[[ ( -n x ` says
+`unexpected token `EOF', expected `)'` before the end-of-file line.
+
+**Pinned by** `tests/corpus/a-conditional-group-adds-the-paren-it-never-reached.sh`.
 
 
 ### TD-OILS-ARITH-COMMAND-CLOSES-ACROSS-A-CONTINUATION — 2026-08-05

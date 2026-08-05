@@ -41549,13 +41549,22 @@ impl Shell {
         // A `ParseError` message may span several physical lines (bash emits
         // multi-line diagnostics, e.g. `unexpected argument \`]]' to conditional
         // binary operator` followed by `syntax error near \`]]'`). Prefix each
-        // line the way bash tags every line with `<$0>: <src>: line N:`.
+        // line the way bash tags every line with `<$0>: <src>: line N:` — and
+        // at the line *that* line is reported at, which is not always the
+        // error's own: bash builds a multi-line diagnostic from several frames,
+        // each passing its own `line_number` (see `ParseError::line_at`).
         let mut out = Str::new();
         for (i, msg_line) in e.msg.split(|&b| b == b'\n').enumerate() {
             if i > 0 {
                 out.push(b'\n');
             }
-            out.push_str(&wrap_parse_message(msg_line, &prefix));
+            let at = e.line_of(i, line);
+            let own = if at == line {
+                prefix.clone()
+            } else {
+                self.syntax_error_prefix(at)
+            };
+            out.push_str(&wrap_parse_message(msg_line, &own));
         }
         // bash echoes the offending physical source line on a final diagnostic
         // line whenever it reports the error "near" a token (`near unexpected
@@ -46341,6 +46350,12 @@ fn wrap_parse_message(msg: BStr<'_>, prefix: BStr<'_>) -> Str {
         // bash's `[[ … ]]` "conditional binary operator expected" diagnostic is a
         // complete message with no `syntax error:` tag (TD-OILS-COND-ERRTEXT).
         || msg.starts_with(b"conditional ")
+        // Nor does the `expected `)'` a conditional's `( … )` group adds when the
+        // expression inside it failed: bash hands that to `parser_error` as its
+        // whole message too. Spelled out rather than matched by prefix, because
+        // osh's *own* fragments start that way as well (`expected redirection
+        // operator`) and those do take the tag.
+        || msg == b"expected `)'"
     {
         bfmt![prefix, msg]
     } else {

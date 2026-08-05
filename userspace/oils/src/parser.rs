@@ -138,13 +138,51 @@ pub struct ParseError {
     /// The *unit* is what dies, not the line: `echo one; a=(x; y)` never prints
     /// `one`, because `;` chains it into the same unit.
     pub recoverable: bool,
+    /// The lines of `msg` that are *not* reported at `line`, as
+    /// `(index of the line in `msg`, the line to report it at)`.
+    ///
+    /// Empty for almost every error, because a diagnostic is normally reported
+    /// wholly at one place. bash does not promise that, though: it prints a
+    /// multi-line diagnostic from several frames, each passing its *own*
+    /// `line_number` to `parser_error`. A conditional failing inside `( … )` is
+    /// the case that shows it — every enclosing group contributes an
+    /// `expected \`)'` line reported at the line its own `(` was on, which is
+    /// not the line the failure was found on:
+    ///
+    /// ```sh
+    /// [[ ( a &&
+    /// b ; ]]        # line 2: unexpected token `;', …
+    ///               # line 1: expected `)'
+    ///               # line 2: syntax error near `;'
+    /// ```
+    ///
+    /// The lines here are absolute and already mapped ([`LineMap`]), the same
+    /// as `line`.
+    pub line_at: Vec<(u32, u32)>,
 }
 
 impl ParseError {
     /// A parse error with no known line (the common construction site inside
     /// the grammar; [`parse_tokens`] stamps the line afterwards).
     pub fn new(msg: &(impl bytes::PushBytes + ?Sized)) -> Self {
-        Self { msg: bfmt![msg], line: None, fatal: false, recoverable: false }
+        Self {
+            msg: bfmt![msg],
+            line: None,
+            fatal: false,
+            recoverable: false,
+            line_at: Vec::new(),
+        }
+    }
+
+    /// Where the `i`th line of `msg` is reported, given the error's own line.
+    /// See [`Self::line_at`].
+    #[must_use]
+    pub fn line_of(&self, i: usize, line: u32) -> u32 {
+        let i = u32::try_from(i).unwrap_or(u32::MAX);
+        self.line_at
+            .iter()
+            .find_map(|&(at, l)| (at == i).then_some(l))
+            .unwrap_or(line)
     }
 
     /// Mark this error as costing only its own parse unit. See [`Self::recoverable`].
@@ -205,6 +243,7 @@ impl From<crate::lexer::LexError> for ParseError {
             line: e.line,
             fatal: false,
             recoverable: e.recoverable,
+            line_at: Vec::new(),
         }
     }
 }
@@ -2424,7 +2463,8 @@ impl Parser {
     fn parse_cond(&mut self) -> Result<Command, ParseError> {
         // Consume `[[`.
         self.pos += 1;
-        let expr = self.parse_cond_or()?;
+        // Nothing encloses this frame, so whatever comes back is complete.
+        let expr = self.parse_cond_or().map_err(CondError::into_parse_error)?;
         if !self.at_bare_word(b"]]") {
             // A complete expression but no closer: bash emits
             // `unexpected EOF while looking for \`]]'` then `syntax error:
@@ -2465,7 +2505,7 @@ impl Parser {
         Ok(Command::Cond(expr))
     }
 
-    fn parse_cond_or(&mut self) -> Result<CondExpr, ParseError> {
+    fn parse_cond_or(&mut self) -> Result<CondExpr, CondError> {
         let mut left = self.parse_cond_and()?;
         while self.at_op(Op::OrIf) {
             self.pos += 1;
@@ -2475,7 +2515,7 @@ impl Parser {
         Ok(left)
     }
 
-    fn parse_cond_and(&mut self) -> Result<CondExpr, ParseError> {
+    fn parse_cond_and(&mut self) -> Result<CondExpr, CondError> {
         let mut left = self.parse_cond_not()?;
         while self.at_op(Op::AndIf) {
             self.pos += 1;
@@ -2485,15 +2525,16 @@ impl Parser {
         Ok(left)
     }
 
-    fn parse_cond_not(&mut self) -> Result<CondExpr, ParseError> {
+    fn parse_cond_not(&mut self) -> Result<CondExpr, CondError> {
         // A term may start on a later line than the operator that introduced it.
         self.skip_cond_newlines();
         if self.peek().is_none() {
             // Waiting for a term and the input ran out. bash names the token it
             // did not get, rather than reporting a missing `]]` — that message
             // is reserved for an expression that *was* complete.
-            return Err(ParseError::new(
-                "unexpected token `EOF' in conditional command\nsyntax error: unexpected end of file",
+            return Err(CondError::new(
+                "unexpected token `EOF' in conditional command",
+                "syntax error: unexpected end of file",
             ));
         }
         if self.at_bare_word(b"!") {
@@ -2504,27 +2545,33 @@ impl Parser {
         self.parse_cond_primary()
     }
 
-    fn parse_cond_primary(&mut self) -> Result<CondExpr, ParseError> {
+    fn parse_cond_primary(&mut self) -> Result<CondExpr, CondError> {
         // Parenthesised sub-expression.
         if self.at_op(Op::LParen) {
+            // bash's `cond_term` saves the line it started on and reports its
+            // own `expected \`)'` there, however far the failure inside is.
+            let open = self.cur_line();
             self.pos += 1;
-            let inner = self.parse_cond_or()?;
+            let inner = self.parse_cond_or().map_err(|e| e.in_group(open))?;
             if !self.at_op(Op::RParen) {
                 // A parsed sub-expression but no `)`: bash says `unexpected
-                // token \`X', expected \`)'` (+ the `near \`X'` echo). At end of
-                // input it falls back to its implicit-newline model, which we
-                // don't reproduce.
+                // token \`X', expected \`)'` (+ the `near \`X'` echo), and spells
+                // the token `EOF` when the input simply ran out — with no `near`
+                // line then, since there is nothing to point at.
                 if self.peek().is_none() {
-                    return Err(ParseError::new("syntax error: unexpected end of file"));
+                    return Err(CondError::Cond {
+                        clauses: vec![(Some(open), b"unexpected token `EOF', expected `)'".to_vec())],
+                        tail: b"syntax error: unexpected end of file".to_vec(),
+                    });
                 }
                 let tok = self.token_display();
-                return Err(ParseError::new(&bfmt![
-                    b"unexpected token `",
-                    &tok,
-                    b"', expected `)'\nsyntax error near `",
-                    &tok,
-                    b"'"
-                ]));
+                return Err(CondError::Cond {
+                    clauses: vec![(
+                        Some(open),
+                        bfmt![b"unexpected token `", &tok, b"', expected `)'"],
+                    )],
+                    tail: bfmt![b"syntax error near `", &tok, b"'"],
+                });
             }
             self.pos += 1;
             // A finished term may be followed by a newline before whatever comes
@@ -2574,11 +2621,10 @@ impl Parser {
             && !matches!(segs.as_slice(), [Seg::Lit(s)] if s.as_slice() == b"]]")
         {
             let tok = self.token_display();
-            return Err(ParseError::new(&bfmt![
-                b"conditional binary operator expected\nsyntax error near `",
-                tok,
-                b"'"
-            ]));
+            return Err(CondError::new(
+                b"conditional binary operator expected".as_slice(),
+                &bfmt![b"syntax error near `", tok, b"'"],
+            ));
         }
         // A newline here is *not* skipped — this is the one position where the
         // binary operator would go, and bash reads it without skipping so that
@@ -2589,13 +2635,14 @@ impl Parser {
         if matches!(self.peek(), Some(Tok::Newline)) {
             let tok = self.token_display();
             let near = self.cond_near();
-            return Err(ParseError::new(&bfmt![
-                b"unexpected token `",
-                tok,
-                b"', conditional binary operator expected\nsyntax error near `",
-                near,
-                b"'"
-            ]));
+            return Err(CondError::new(
+                &bfmt![
+                    b"unexpected token `",
+                    tok,
+                    b"', conditional binary operator expected"
+                ],
+                &bfmt![b"syntax error near `", near, b"'"],
+            ));
         }
         // Any other *operator* here is in the same position and is named the
         // same way — the "unexpected token" clause is what distinguishes an
@@ -2610,13 +2657,14 @@ impl Parser {
         {
             let tok = self.token_display();
             let near = self.cond_near_at(self.pos);
-            return Err(ParseError::new(&bfmt![
-                b"unexpected token `",
-                tok,
-                b"', conditional binary operator expected\nsyntax error near `",
-                near,
-                b"'"
-            ]));
+            return Err(CondError::new(
+                &bfmt![
+                    b"unexpected token `",
+                    tok,
+                    b"', conditional binary operator expected"
+                ],
+                &bfmt![b"syntax error near `", near, b"'"],
+            ));
         }
         Ok(CondExpr::Word(left))
     }
@@ -2669,13 +2717,13 @@ impl Parser {
     /// or binary operator bash prepends `unexpected argument \`X' to conditional
     /// {unary,binary} operator`, whereas in primary position it reports only
     /// `syntax error near \`X'`.
-    fn expect_cond_word(&mut self, pos: CondPos) -> Result<Word, ParseError> {
+    fn expect_cond_word(&mut self, pos: CondPos) -> Result<Word, CondError> {
         if let Some(Tok::Word(segs)) = self.peek() {
             // `]]` is the closer, never an operand.
             if !matches!(segs.as_slice(), [Seg::Lit(s)] if s.as_slice() == b"]]") {
                 let segs = segs.clone();
                 self.pos += 1;
-                return self.word_from_segs(&segs);
+                return Ok(self.word_from_segs(&segs)?);
             }
         }
         Err(self.cond_operand_error(pos))
@@ -2709,43 +2757,48 @@ impl Parser {
     /// line (handled by `format_parse_error`); at end of input it uses an
     /// implicit-`newline` model we don't reproduce, so we fall back to a plain
     /// end-of-file diagnostic there.
-    fn cond_operand_error(&self, pos: CondPos) -> ParseError {
+    fn cond_operand_error(&self, pos: CondPos) -> CondError {
         if self.peek().is_none() {
             // End of input in primary position is the one place bash *does*
             // name the token: `cond_term` calls `read_token`, is handed `EOF`,
             // and falls to the same `else` an operator falls to.
             let eof = "syntax error: unexpected end of file";
             return match pos {
-                CondPos::Primary => ParseError::new(&bfmt![
-                    b"unexpected token `EOF' in conditional command\n",
-                    eof.as_bytes()
-                ]),
-                CondPos::Unary | CondPos::Binary => ParseError::new(eof),
+                CondPos::Primary => {
+                    CondError::new("unexpected token `EOF' in conditional command", eof)
+                }
+                CondPos::Unary | CondPos::Binary => CondError::bare(eof),
             };
         }
         let tok = self.token_display();
         // A newline never becomes the token bash reports "near", so an operand
         // slot that a line end walked into names the operator instead.
         let near = bfmt![b"syntax error near `", self.cond_near(), b"'"];
-        let msg = match pos {
+        match pos {
             CondPos::Primary => match self.cond_primary_token() {
-                Some(t) => bfmt![b"unexpected token ", t, b" in conditional command\n", near],
-                None => near,
+                Some(t) => CondError::new(
+                    &bfmt![b"unexpected token ", t, b" in conditional command"],
+                    &near,
+                ),
+                None => CondError::bare(&near),
             },
-            CondPos::Unary => bfmt![
-                b"unexpected argument `",
-                tok,
-                b"' to conditional unary operator\n",
-                near
-            ],
-            CondPos::Binary => bfmt![
-                b"unexpected argument `",
-                tok,
-                b"' to conditional binary operator\n",
-                near
-            ],
-        };
-        ParseError::new(&msg)
+            CondPos::Unary => CondError::new(
+                &bfmt![
+                    b"unexpected argument `",
+                    tok,
+                    b"' to conditional unary operator"
+                ],
+                &near,
+            ),
+            CondPos::Binary => CondError::new(
+                &bfmt![
+                    b"unexpected argument `",
+                    tok,
+                    b"' to conditional binary operator"
+                ],
+                &near,
+            ),
+        }
     }
 
     /// Peek at a binary operator following an operand, without consuming.
@@ -4361,6 +4414,97 @@ enum CondPos {
     /// Right after a binary operator (`==`, `-eq`, …): `unexpected argument
     /// \`X' to conditional binary operator`.
     Binary,
+}
+
+/// A failure inside `[[ … ]]`, kept in pieces until it is printed.
+///
+/// bash builds a conditional diagnostic from more than one frame. The frame
+/// that could not parse says what it saw; each enclosing `( … )` group the
+/// error passes through then adds the `)` it never reached; and only afterwards
+/// is the closing `syntax error near \`X'` line appended. So the pieces arrive
+/// in an order a rendered string cannot express — a group's clause belongs
+/// *between* the inner diagnostic and the `near` line, and gluing the `near`
+/// line on at the raising frame would leave it nowhere to go:
+///
+/// ```sh
+/// [[ ( ;Q ) ]]   # unexpected token `;' in conditional command
+///                # expected `)'
+///                # syntax error near `;Q'
+/// ```
+///
+/// Each clause also carries the line *it* is reported at, because a group's is
+/// the line of its own `(` rather than the line the failure was found on (see
+/// [`ParseError::line_at`]).
+enum CondError {
+    /// A conditional diagnostic: the clauses in the order bash prints them,
+    /// then the last line — `syntax error near \`X'`, or the end-of-input one.
+    Cond {
+        clauses: Vec<(Option<u32>, Str)>,
+        tail: Str,
+    },
+    /// A failure that is not part of that model, raised by something the
+    /// conditional grammar merely calls — the word lowering underneath it. bash
+    /// reports those from elsewhere entirely, so no group adds anything to them.
+    Other(ParseError),
+}
+
+impl From<ParseError> for CondError {
+    fn from(e: ParseError) -> Self {
+        CondError::Other(e)
+    }
+}
+
+impl CondError {
+    /// A diagnostic with one clause of its own, reported wherever the enclosing
+    /// error is, followed by `tail`.
+    fn new(clause: &(impl bytes::PushBytes + ?Sized), tail: &(impl bytes::PushBytes + ?Sized)) -> Self {
+        CondError::Cond {
+            clauses: vec![(None, bfmt![clause])],
+            tail: bfmt![tail],
+        }
+    }
+
+    /// A diagnostic that is only its last line — the primary position bash
+    /// cannot name a token for (`[[ ( ]]`, whose `]]` leaves through an earlier
+    /// arm) prints just the `near` line.
+    fn bare(tail: &(impl bytes::PushBytes + ?Sized)) -> Self {
+        CondError::Cond {
+            clauses: Vec::new(),
+            tail: bfmt![tail],
+        }
+    }
+
+    /// Note that this error passed out through a `( … )` group whose `(` was on
+    /// line `open`: bash's `cond_term` checks for the `)` it never reached and
+    /// reports that too, at the line the group started on.
+    fn in_group(self, open: u32) -> Self {
+        match self {
+            CondError::Cond { mut clauses, tail } => {
+                clauses.push((Some(open), b"expected `)'".to_vec()));
+                CondError::Cond { clauses, tail }
+            }
+            other => other,
+        }
+    }
+
+    /// Render, now that no more clauses can arrive.
+    fn into_parse_error(self) -> ParseError {
+        let (clauses, tail) = match self {
+            CondError::Other(e) => return e,
+            CondError::Cond { clauses, tail } => (clauses, tail),
+        };
+        let mut msg = Str::new();
+        let mut line_at = Vec::new();
+        for (i, (line, text)) in clauses.iter().enumerate() {
+            if let Some(l) = *line {
+                line_at.push((u32::try_from(i).unwrap_or(u32::MAX), l));
+            }
+            msg.extend_from_slice(text);
+            msg.push(b'\n');
+        }
+        msg.extend_from_slice(&tail);
+        ParseError { line_at, ..ParseError::new(&msg) }
+    }
 }
 
 /// Raw binary operator recognised inside `[[ … ]]` (before lowering; `Regex`

@@ -13,17 +13,29 @@
 # process substitution, between `{fd}` and the `>` that assigns it, and between
 # the two `)` that close `$(( ))`.
 #
+# It reaches a here-document's *delimiter* as well, which is read before any
+# body: `<<E\<newline>OF` wants `EOF` and still expands the body, and
+# `<<\E\<newline>OF` wants `EOF` and does not — the `\E` quoted it, while the
+# continuation is simply absent rather than a second escape.
+#
 # The places the reader stops removing them are the ones where a backslash is
 # not an escape to begin with: inside `'…'`, inside a here-document whose
 # delimiter was quoted, and inside a comment. There the backslash and the
-# newline are ordinary text — so a comment still ends at its newline, and the
-# next line runs.
+# newline are ordinary text — so a comment still ends at its newline, the next
+# line runs, and a delimiter written `<<'E\<newline>OF'` wants a newline no line
+# can hold, which is the one case here that ends at end-of-file.
 #
 # Because the pair is gone before the parser counts anything, it never costs a
 # line: the newline still advanced the reader, so `$LINENO` on the line after a
-# continuation is that line's own number. The line-number cases source a written
-# file rather than `eval`, since `eval` reports the *caller's* line and would
-# pin this file's own numbering.
+# continuation is that line's own number.
+#
+# `l` runs a snippet from a written file, for the cases that would otherwise
+# take the rest of this one with them — a syntax error, or that unmatchable
+# delimiter — and because sourcing numbers the lines of the file it reads, it
+# also keeps the `$LINENO` rows independent of this file's own numbering
+# (`eval` would report the caller's line instead).
+
+l() { printf '%s\n' "$1" > sourced.sh; ( . ./sourced.sh ) 2>&1; rm -f sourced.sh; }
 
 echo "=== between the two characters of an operator"
 false |\
@@ -131,8 +143,43 @@ b'}
 cat <<< 'herestring-a\
 b'
 
+echo "=== a here-document delimiter is read after the deletions too"
+v=expanded
+cat <<E\
+OF
+$v
+EOF
+cat <<\E\
+OF
+$v
+EOF
+cat <<"E\
+OF"
+$v
+EOF
+cat <<\
+-EOF
+	dash-past-a-continuation
+EOF
+cat <<-\
+EOF
+	continuation-past-a-dash
+EOF
+cat << \
+EOF
+blank-then-continuation
+EOF
+cat <<\
+ EOF
+continuation-then-blank
+EOF
+echo "--- but not inside single quotes, so this one runs to end of input"
+l 'cat <<'"'"'E\
+OF'"'"'
+never-matched
+EOF'
+
 echo "=== it costs no line"
-l() { printf '%s\n' "$1" > sourced.sh; ( . ./sourced.sh ) 2>&1; rm -f sourced.sh; }
 l '\
 echo $LINENO'
 l 'echo \

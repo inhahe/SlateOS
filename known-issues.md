@@ -35610,3 +35610,40 @@ path as a script file; the divergence is in *which* reader, not in the parser.
 
 **Impact.** Real, not cosmetic: a piped script runs commands after the error
 that bash never reaches — here `== b ]]` is attempted as a command.
+
+
+### TD-OILS-ARITH-COMMAND-CLOSES-ACROSS-A-CONTINUATION — 2026-08-05
+
+**Where:** `userspace/oils/src/lexer.rs`, `Lexer::read_arith` — the `eat_conts`
+before the second `)` is peeked at.
+
+**What.** bash treats the two `)` that close an *arithmetic command* as having
+to be literally adjacent, even though a line continuation is deleted everywhere
+else in the same construct. osh accepts the split:
+
+```text
+((1+1)\<nl>)  && echo hit    bash: line 2: syntax error near unexpected token `'
+                                   line 2: `) && echo hit'
+                             osh:  hit
+
+echo $((1+1)\<nl>)           bash: 2    osh: 2     (the *expansion* does allow it)
+((1 +\<nl>1)) && echo hit    bash: hit  osh: hit   (so does the body)
+(\<nl>( 1+1 )) && echo hit   bash: hit  osh: hit   (and the opening pair)
+```
+
+**Why.** bash reads the body with `parse_matched_pair`, which passes
+`remove_quoted_newline` on — hence the body and the opening `((`. But
+`parse_dparen` then checks for the second `)` with its own read, which does not
+remove, so the pair must be adjacent. `$(( … ))` goes through the substitution
+path instead and keeps removing throughout. osh has one `read_arith` shared by
+both callers, and it eats continuations before the closing peek for both.
+
+**The proper fix** is to give `read_arith` the caller's rule — the `$((`
+expansion closes across continuations, the `((` command does not — and then to
+match bash's *diagnostic* for the rejected form, which is the ordinary
+`syntax error near unexpected token` reported on the line the second `)` ended
+up on, not the `malformed arithmetic expansion` osh reaches today by scanning on.
+
+**Impact.** osh accepts input bash rejects; no silent wrong output (osh computes
+what the author plainly meant). Confined to `(( … ))` written with the closing
+parentheses split across lines.

@@ -1620,6 +1620,23 @@ impl Lexer {
         }
     }
 
+    /// Step over the line continuations at the cursor; `true` if any were there.
+    ///
+    /// `record` says whether they are being *deleted* or merely passed. The
+    /// `$( … )` raw scan copies its source verbatim for a re-lex later, so a
+    /// continuation it walks over is still present in the text it stored and
+    /// must not be cut out of the command history (see [`Tokenized::conts`]) —
+    /// only the top-level scan deletes for real.
+    fn skip_conts(&mut self, record: bool) -> bool {
+        if record {
+            return self.eat_conts() != 0;
+        }
+        let to = self.cont_skip(self.pos);
+        let moved = to != self.pos;
+        self.pos = to;
+        moved
+    }
+
     /// If the cursor sits on a varfd redirect prefix `{name}` immediately
     /// followed by a redirection operator (`{fd}>`, `{fd}<`), return the name
     /// and the index just past the closing `}`. Returns `None` otherwise, so a
@@ -3087,19 +3104,33 @@ impl Lexer {
                         self.pos += 1;
                         raw.extend_from_slice(b"<<");
                         cases.finish_word(depth);
+                        // Read past the reader's deletions the way
+                        // `lex_heredoc_op` does. Nothing is recorded as deleted
+                        // here: this scan is copying source for a later re-lex,
+                        // which will run the same deletions again. `<<` and `-`
+                        // are written into `raw` rather than copied from it, so
+                        // a continuation between them simply does not reach the
+                        // re-lex; the delimiter below *is* copied verbatim, so
+                        // its own continuations travel and are deleted there.
+                        self.skip_conts(false);
                         let strip = self.peek() == Some('-');
                         if strip {
                             self.pos += 1;
                             raw.push(b'-');
                         }
-                        while matches!(self.peek(), Some(' ' | '\t')) {
-                            self.take_into(&mut raw);
+                        loop {
+                            while matches!(self.peek(), Some(' ' | '\t')) {
+                                self.take_into(&mut raw);
+                            }
+                            if !self.skip_conts(false) {
+                                break;
+                            }
                         }
                         // Copy the delimiter word as written — quotes and all, since
                         // the re-lex has to draw the same expand/no-expand
                         // conclusion from it that `read_heredoc_delim` just did.
                         let word = self.pos;
-                        let (delim, _) = self.read_heredoc_delim();
+                        let (delim, _) = self.read_heredoc_delim(false);
                         let written = self.slice(word, self.pos);
                         raw.extend_from_slice(&written);
                         pending.push((delim, strip));
@@ -3500,14 +3531,23 @@ impl Lexer {
     /// the current line, emit the operator token plus a placeholder body token,
     /// and record the here-doc for body collection at the next newline.
     fn lex_heredoc_op(&mut self, out: &mut Vec<Tok>) {
+        // Everything up to the delimiter is read after the reader's deletions,
+        // so `<<-` may be written with a continuation inside it and blanks and
+        // continuations may alternate freely before the word (see
+        // [`Lexer::eat_conts`]).
         let strip = self.peek() == Some('-');
         if strip {
-            self.pos += 1;
+            self.adv();
         }
-        while matches!(self.peek(), Some(' ' | '\t')) {
-            self.pos += 1;
+        loop {
+            while matches!(self.peek(), Some(' ' | '\t')) {
+                self.pos += 1;
+            }
+            if !self.skip_conts(true) {
+                break;
+            }
         }
-        let (delim, expand) = self.read_heredoc_delim();
+        let (delim, expand) = self.read_heredoc_delim(true);
         out.push(Tok::Op(if strip { Op::DLessDash } else { Op::DLess }));
         let tok_index = out.len();
         out.push(Tok::HereDoc(Vec::new(), delim.clone(), !expand));
@@ -3521,10 +3561,20 @@ impl Lexer {
 
     /// Read a here-document delimiter word. Any quoting (`'EOF'`, `"EOF"`,
     /// `\EOF`) disables expansion of the body and is stripped from the delimiter.
-    fn read_heredoc_delim(&mut self) -> (Str, bool) {
+    ///
+    /// A line continuation anywhere in the word was deleted before this scan —
+    /// so `<<E\<newline>OF` wants `EOF` and still expands the body, while
+    /// `<<\E\<newline>OF` wants `EOF` and does not (the `\E` quoted it, the
+    /// continuation is simply absent). The one exemption is the reader's own:
+    /// inside `'…'` the pair is data, so `<<'E\<newline>OF'` wants a delimiter
+    /// with a newline in it, which no line can equal. `record` is
+    /// [`Lexer::skip_conts`]'s.
+    fn read_heredoc_delim(&mut self, record: bool) -> (Str, bool) {
         let mut delim = Str::new();
         let mut expand = true;
-        while let Some(c) = self.peek() {
+        loop {
+            self.skip_conts(record);
+            let Some(c) = self.peek() else { break };
             match c {
                 ' ' | '\t' | '\n' | '\r' | ';' | '&' | '|' | '<' | '>' | '(' | ')' => break,
                 '\'' => {
@@ -3540,7 +3590,9 @@ impl Lexer {
                 '"' => {
                     expand = false;
                     self.pos += 1;
-                    while let Some(q) = self.bump_ch() {
+                    loop {
+                        self.skip_conts(record);
+                        let Some(q) = self.bump_ch() else { break };
                         if q == '"' {
                             break;
                         }

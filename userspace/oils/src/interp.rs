@@ -11414,11 +11414,41 @@ impl Shell {
     /// trace), while a plain scalar's trace is emitted at the store site below so
     /// the RHS is expanded exactly once.
     fn apply_assignment(&mut self, a: &Assignment, trace: bool) -> bool {
+        self.apply_assignment_spelled(a, trace, None)
+    }
+
+    /// [`Self::apply_assignment`], plus the assignment **as the writer wrote
+    /// it** for the two things that are answered in those terms rather than in
+    /// the resolved one.
+    ///
+    /// A nameref redirection rewrites the name — and, where the reference
+    /// designates an element, adds that element's subscript — and then re-runs
+    /// the assignment against the target. Everything the store *does* belongs to
+    /// the target, but two things the writer sees do not:
+    ///
+    /// * the `set -x` trace, which is the line as typed: `declare -n r=x; r=5`
+    ///   traces `+ r=5`, and `declare -n r=x[1]; r=9` traces `+ r=9` rather than
+    ///   the `x[1]=9` it became.
+    /// * a readonly refusal, but only for an **array-shaped** write — a
+    ///   subscripted operand or a compound literal. `r[0]=5` and `r=(a b)`
+    ///   through a reference to a readonly `x` are `r: readonly variable`, where
+    ///   the scalar `r=5` is `x: readonly variable`. The same seam as everywhere
+    ///   else a nameref meets an array: a write that makes one is about the
+    ///   reference's own name.
+    ///
+    /// `spelled` is `None` at the top, and carries the original across the
+    /// rewrite.
+    fn apply_assignment_spelled(
+        &mut self,
+        a: &Assignment,
+        trace: bool,
+        spelled: Option<&Assignment>,
+    ) -> bool {
         // bash scans the assignment word before it does anything with it.
         if self.assignment_scan_failed(a) {
             return false;
         }
-        let ok = self.apply_assignment_inner(a, trace);
+        let ok = self.apply_assignment_inner(a, trace, spelled.unwrap_or(a));
         // A name the shell also keeps somewhere else takes the write back out of
         // the variable table again — see [`Shell::after_var_write`]. Run whether
         // or not the assignment succeeded, since a literal that failed part-way
@@ -11428,8 +11458,14 @@ impl Shell {
     }
 
     /// The body of [`Shell::apply_assignment`], which wraps it only to run the
-    /// dynamic-variable write-back hook on every exit.
-    fn apply_assignment_inner(&mut self, a: &Assignment, trace: bool) -> bool {
+    /// dynamic-variable write-back hook on every exit. `spelled` is the
+    /// assignment as written — see [`Self::apply_assignment_spelled`].
+    fn apply_assignment_inner(
+        &mut self,
+        a: &Assignment,
+        trace: bool,
+        spelled: &Assignment,
+    ) -> bool {
         // A nameref (`declare -n ref=target`) redirects the assignment to its
         // target: rewrite the name and re-run. `resolve_ref_name` follows the
         // whole chain, so the rewritten name is not itself a nameref (no loop).
@@ -11472,21 +11508,36 @@ impl Shell {
                 }
                 None => a2.name = target.base,
             }
-            return self.apply_assignment(&a2, trace);
+            return self.apply_assignment_spelled(&a2, trace, Some(spelled));
         }
         // `set -x`: a plain scalar assignment is traced with its *expanded* value
         // (emitted at the scalar store below); everything else (indexed element,
         // array literal) is traced now in source form.
-        let trace_scalar =
-            trace && self.xtrace && a.index.is_none() && matches!(a.value, AssignRhs::Scalar(_));
+        //
+        // Both are the assignment *as written*: a nameref redirection is not
+        // something `set -x` shows, so it is `spelled` that is rendered and
+        // `spelled` that decides which of the two forms this is.
+        let trace_scalar = trace
+            && self.xtrace
+            && spelled.index.is_none()
+            && matches!(spelled.value, AssignRhs::Scalar(_));
         if trace && self.xtrace && !trace_scalar {
             let prefix = self.xtrace_prefix();
-            let line = bfmt![prefix, crate::unparse::assignment_src(a), b"\n"];
+            let line = bfmt![prefix, crate::unparse::assignment_src(spelled), b"\n"];
             self.emit_xtrace(&line);
         }
         // A readonly variable cannot be reassigned; report and leave it intact.
         if self.readonly.contains(&a.name) {
-            self.perrln(&format!("{}: readonly variable", a.name));
+            // An *array-shaped* write is blamed by the name the writer wrote,
+            // a scalar one by the name it resolved to — see
+            // [`Self::apply_assignment_spelled`]. Without a nameref in the way
+            // the two are the same name and the distinction does not show.
+            let blame = if spelled.index.is_some() || matches!(spelled.value, AssignRhs::Array(_)) {
+                &spelled.name
+            } else {
+                &a.name
+            };
+            self.perrln(&format!("{blame}: readonly variable"));
             self.note_shell_error(FatalWhen::ErrexitOrPosix);
             return false;
         }
@@ -11539,8 +11590,8 @@ impl Shell {
                 // RHS, minimally quoted, emitted once here so no re-expansion.
                 if trace_scalar {
                     let prefix = self.xtrace_prefix();
-                    let op: &[u8] = if a.append { b"+=" } else { b"=" };
-                    let line = bfmt![prefix, &a.name, op, xtrace_quote_value(&val), b"\n"];
+                    let op: &[u8] = if spelled.append { b"+=" } else { b"=" };
+                    let line = bfmt![prefix, &spelled.name, op, xtrace_quote_value(&val), b"\n"];
                     self.emit_xtrace(&line);
                 }
                 // The scalar half of the `noassign` refusal (see above): traced,

@@ -2461,6 +2461,16 @@ impl Parser {
     /// Parse a `[[ … ]]` conditional expression. The opening `[[` word is at
     /// the current position; parsing stops at the matching `]]` word.
     fn parse_cond(&mut self) -> Result<Command, ParseError> {
+        // bash's `cond_error` — the frame that speaks when a *complete*
+        // expression is followed by something that is not `]]` — reports at
+        // `cond_lineno`, the line the `[[` itself was on, however far down the
+        // stray token is. Only the `near` line that follows it comes from where
+        // the reader stopped:
+        //
+        //   [[ a &&        line 1: syntax error in conditional expression
+        //   b -gt c -gt d ]]
+        //                  line 2: syntax error near `-gt'
+        let open = self.cur_line();
         // Consume `[[`.
         self.pos += 1;
         // Nothing encloses this frame, so whatever comes back is complete.
@@ -2495,19 +2505,25 @@ impl Parser {
             let tok = self.token_display();
             if matches!(self.peek(), Some(Tok::Op(_))) {
                 let near = self.cond_near_at(self.pos);
-                return Err(ParseError::new(&bfmt![
-                    b"syntax error in conditional expression: unexpected token `",
-                    &tok,
-                    b"'\nsyntax error near `",
-                    near,
-                    b"'"
-                ]));
+                return Err(ParseError {
+                    line_at: vec![(0, open)],
+                    ..ParseError::new(&bfmt![
+                        b"syntax error in conditional expression: unexpected token `",
+                        &tok,
+                        b"'\nsyntax error near `",
+                        near,
+                        b"'"
+                    ])
+                });
             }
-            return Err(ParseError::new(&bfmt![
-                b"syntax error in conditional expression\nsyntax error near `",
-                tok,
-                b"'"
-            ]));
+            return Err(ParseError {
+                line_at: vec![(0, open)],
+                ..ParseError::new(&bfmt![
+                    b"syntax error in conditional expression\nsyntax error near `",
+                    tok,
+                    b"'"
+                ])
+            });
         }
         self.pos += 1;
         Ok(Command::Cond(expr))

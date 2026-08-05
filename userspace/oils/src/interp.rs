@@ -31403,6 +31403,14 @@ impl Shell {
             .collect();
         all.sort();
         all.dedup();
+        // `local -` binds a cell under a name that no table walk reports: bash
+        // answers a lookup for it (`declare -p -` prints `declare -- -`) and
+        // passes over it in every listing. Filtering it here covers all of
+        // them, this being the one enumerator they share; the other two —
+        // bare `set` and [`Shell::visible_var_names`] — never see it, because
+        // both read [`Shell::vars`] and it is only ever `declared`. See the
+        // `local -` case in [`Shell::declare_compounds_scoped`].
+        all.retain(|n| n != "-");
         all
     }
 
@@ -31428,7 +31436,28 @@ impl Shell {
         let names = Self::print_operand_names(args);
         if names.is_empty() {
             let mut listing = Str::new();
+            // The cell `local -` binds is reported as the declaration that made
+            // it — the literal line `local -`, not the `declare -- -` a lookup
+            // by name gives. It comes first, once, however many `local -` the
+            // frame ran and however late the last of them came. bash 5.2.37:
+            //
+            // ```sh
+            // f() { local w=W; local -; local x=X; local -p; }; f
+            // #   local -
+            // #   declare -- w="W"
+            // #   declare -- x="X"
+            // ```
+            //
+            // (First is also where sorting would put it — no identifier can
+            // begin below `-` — but it is emitted deliberately rather than
+            // left to that, since it is not one of the lines being sorted.)
+            if frame.iter().any(|n| n == "-") {
+                listing.extend_from_slice(b"local -\n");
+            }
             for name in &frame {
+                if name == "-" {
+                    continue;
+                }
                 if let Some(def) = self.format_declare_def(name) {
                     listing.extend_from_slice(&def);
                     listing.push(b'\n');
@@ -32257,11 +32286,41 @@ impl Shell {
                     continue;
                 }
             };
-            // `local -`: make the shell's `set` options local to this function.
-            // The first `local -` in a call captures the current option state;
-            // it is restored on return (`call_function`), so any `set` changes
-            // made afterwards are undone. Handled as a special "name", not a
-            // variable, so it neither shadows nor creates a var called `-`.
+            // `local -` does two things, not one.
+            //
+            // The documented half makes the shell's `set` options local to this
+            // function: the first `local -` in a call captures the current
+            // option state, which is restored on return (`call_function`), so
+            // any `set` change made afterwards is undone.
+            //
+            // The undocumented half is that it also *binds a variable named*
+            // `-` in the frame, and that binding is what a lookup finds.
+            // Measured against bash 5.2.37:
+            //
+            // ```sh
+            // f() { local -; declare -p -; }; f              # declare -- -
+            // g() { declare -p -; }
+            // h() { local -; g; }; h                         # declare -- -
+            // declare -p -                          # declare: -: not found
+            // k() { local -; }; k; declare -p -     # declare: -: not found
+            // ```
+            //
+            // It is a local like any other — scoped to this frame, gone on
+            // return, and reached from an inner frame by the ordinary name
+            // lookup — with two peculiarities. It never holds a value, so it
+            // reports as the bare `declare -- -` and `test -v -` is false; and
+            // it is left out of *every* full listing, so `declare`, `declare
+            // -p`, `set` and `compgen -v` all pass over it and only a lookup by
+            // name can see it. `local -p` does report it, but as the
+            // declaration that made it rather than as a variable — see
+            // [`Shell::local_print`].
+            //
+            // None of this touches `$-`, which is a special parameter and not
+            // this cell: `echo "${-}"` still prints the option letters while
+            // the binding is in scope, and so does `n=-; echo "${!n}"`.
+            //
+            // `-` is not a valid identifier, so nothing else can ever create
+            // this name and no other code path has to guard against it.
             if is_local && name_val.as_slice() == b"-" {
                 // Only the first `local -` in the frame captures; a later one
                 // must not overwrite the earlier baseline (bash restores to the
@@ -32271,6 +32330,13 @@ impl Shell {
                     if let Some(last) = self.local_opt_saves.last_mut() {
                         *last = Some(snap);
                     }
+                }
+                // Outside a function there is no frame to bind in, and
+                // `declare_local` says so by returning false. Repeating it in
+                // one frame is harmless: `declare_local` leaves a name that is
+                // already local alone, and the mark is a set membership.
+                if self.declare_local("-", false) {
+                    self.declared.insert("-".to_string());
                 }
                 continue;
             }
@@ -54966,6 +55032,88 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let src = "f(){ local - x=5; set -x; echo \"x=$x\"; }; f; \
                    case $- in *x*) echo leaked;; *) echo clean;; esac";
         assert_eq!(run(src).0, "x=5\nclean\n");
+    }
+
+    #[test]
+    fn local_dash_binds_a_variable_no_listing_reports() {
+        // The other half of `local -`: it binds a cell named `-`, scoped to the
+        // frame like any other local, which a lookup by name finds and which no
+        // table walk ever reports. Every expectation below is bash 5.2.37's.
+        //
+        // Found where it was made, and from an inner frame by the ordinary
+        // scope walk — but not before the frame, nor after it returns.
+        assert_eq!(run("f(){ local -; declare -p -; }; f").0, "declare -- -\n");
+        assert_eq!(run("g(){ declare -p -; }; f(){ local -; g; }; f").0, "declare -- -\n");
+        assert_eq!(
+            run("declare -p - 2>&1; echo rc=$?").0,
+            "osh: declare: -: not found\nrc=1\n"
+        );
+        assert_eq!(
+            run("f(){ local -; }; f; declare -p - 2>&1; echo rc=$?").0,
+            "osh: declare: -: not found\nrc=1\n"
+        );
+        // It holds nothing, and `$-` is a different thing entirely — the
+        // special parameter goes on answering with the option letters, under
+        // its own name and through an indirection alike.
+        assert_eq!(run("f(){ local -; test -v - && echo v || echo u; }; f").0, "u\n");
+        assert_eq!(
+            run("f(){ local -; s=$-; n=-; [ \"${!n}\" = \"$s\" ] && echo same; }; f").0,
+            "same\n"
+        );
+        // No listing that walks the variable table reports it.
+        let hidden = "f(){ local -; \
+                      declare -p | grep -c '^declare -- -$'; \
+                      declare | grep -c '^-$'; \
+                      set | grep -c '^-='; \
+                      compgen -v | grep -c '^-$'; \
+                      declare -x | grep -c -- ' -$'; }; f";
+        assert_eq!(run(hidden).0, "0\n0\n0\n0\n0\n");
+        // `local -p` does report it — as the declaration that made it, first,
+        // and once however many `local -` the frame ran.
+        assert_eq!(
+            run("f(){ local w=W; local -; local x=X; local -p; }; f").0,
+            "local -\ndeclare -- w=\"W\"\ndeclare -- x=\"X\"\n"
+        );
+        assert_eq!(
+            run("f(){ local -; local -; local w=W; local -p; }; f").0,
+            "local -\ndeclare -- w=\"W\"\n"
+        );
+        assert_eq!(run("f(){ local -; local -p; }; f").0, "local -\n");
+        // …but `local -p` asks about the current frame only, so an inner frame
+        // does not find the outer one's.
+        assert_eq!(
+            run("g(){ local -p -; }; f(){ local -; g; }; f 2>&1").0,
+            "main: local: -: not found\n"
+        );
+        // A lookup by name answers alongside ordinary names.
+        assert_eq!(
+            run("v=V; f(){ local -; declare -p - v; }; f").0,
+            "declare -- -\ndeclare -- v=\"V\"\n"
+        );
+        // It takes no attributes: a declaration validates the identifier before
+        // it gets as far as the binding, and the cell is left as it was.
+        assert_eq!(
+            run("f(){ local -; declare -r -; echo rc=$?; declare -p -; }; f 2>&1").0,
+            "main: declare: `-': not a valid identifier\nrc=1\ndeclare -- -\n"
+        );
+        // `unset` reports success and leaves it in place.
+        assert_eq!(
+            run("f(){ local -; unset -; echo rc=$?; declare -p -; }; f").0,
+            "rc=0\ndeclare -- -\n"
+        );
+        // A subshell inherits it, and two frames each get their own.
+        assert_eq!(run("f(){ local -; ( declare -p - ); }; f").0, "declare -- -\n");
+        assert_eq!(
+            run("g(){ local -; local -p; declare -p -; }; f(){ local -; g; local -p; }; f").0,
+            "local -\ndeclare -- -\nlocal -\n"
+        );
+        // …and none of it disturbs the option half.
+        assert_eq!(
+            run("set +u; f(){ local -; set -u; declare -p -; }; f; \
+                 case $- in *u*) echo leaked;; *) echo clean;; esac")
+            .0,
+            "declare -- -\nclean\n"
+        );
     }
 
     #[test]

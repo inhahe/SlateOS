@@ -98,6 +98,106 @@ tests.
 
 ---
 
+### TD-OILS-A-NAMEREF-TO-AN-ELEMENT-WAS-READ-BY-ONLY-ONE-FORM. `declare -n r='n[1]'` then `"${r#c}"` was empty, and a reference to a whole array read as its first element — 2026-08-05 — ✅ **FIXED 2026-08-05**
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::param_elem_lookup`,
+`Shell::ref_target_value`, `Shell::ref_length`, and `VarLookup for Shell`'s
+`get_str`.
+
+**What.** `declare -n r='n[1]'` makes `r` a name for one *element*. A plain
+`"${r}"` read it (via `nameref_elem_value`), but every **other** form that reads
+a parameter's value did not: `param_elem_lookup` resolved the chain, asked
+`RefTarget::into_name()` for a variable name, got `None`, and answered *unset*.
+So the whole operator family came back empty — and the `:-`/`:+`/`:?`/`:=`
+family, which decides "set or unset" by that same read, took the wrong branch:
+
+```text
+                bash        osh (before)
+"${r}"          c d         c d        ✅
+"${r#c}"         d          (empty)
+"${r^^}"        C D         (empty)
+"${r/ /-}"      c-d         (empty)
+"${r:0:2}"      c           (empty)
+"${r@Q}"        'c d'       (empty)
+"${r:+Y}"       Y           (empty)
+"${r?msg}"      c d         r: msg  — and the script died
+"${r:=Z}"       c d         `n[1]': not a valid identifier
+```
+
+A reference may also name a **whole** array — `declare -n g='n[*]'` or `'n[@]'`
+— and there `resolve_ref_name` handed back `sub: Some("*")`, which the readers
+evaluated as an ordinary subscript *expression*. `*` arithmetics to `0`, so
+`"${g}"` was the array's **first element** rather than its elements joined.
+
+**Fixed 2026-08-05.** `Shell::ref_target_value` is now the one place that says
+what a subscripted reference reads as, and `param_elem_lookup` consults it for
+an unsubscripted read instead of dropping the target. `[*]`/`[@]` are recognised
+there rather than evaluated: bash hands a whole-array reference on as a
+*string*, its elements already joined, so both spellings read as one scalar and
+every operator downstream works on that join. The separators are
+`Shell::join_derived`'s, which is why a null `$IFS` parts the two spellings —
+`abcc de` for `[*]` against `abc c d e` for `[@]`. An array with no elements is
+*unset* rather than empty, so `${g-D}` takes the default.
+
+Two answers cut the other way and are the reason the fix is not simply "read
+through everywhere":
+
+* `${#r}` is **0** — for every element or whole-array reference, indexed or
+  associative, set or unset. bash's length path asks for a *variable* named
+  `n[1]`, and no variable can be called that. Turning `set -u` on changes the
+  answer to the length of the value (`3`, and `9` for the join), the check
+  sending the question down the full expansion route instead; an unset element
+  is still `0` there rather than a fault. `Shell::ref_length` holds both
+  columns.
+* Arithmetic does not see the join at all. `$((g))` *subscripts* the array,
+  finds `[*]` where an index belongs, and reports `n[*]: bad array subscript`
+  before evaluating 0 — except on an associative array, where `[*]` is a key
+  like any other and simply names no entry. `get_str` holds that.
+
+**Corpus:** `a-nameref-to-an-element-is-read-by-every-form-that-reads-it.sh`.
+
+### TD-OILS-A-WHOLE-ARRAY-NAMEREF-IS-A-BAD-SUBSCRIPT-TO-EVERY-WRITE. `declare -n g='n[*]'; g=v` says `*: syntax error` where bash says `n[*]: bad array subscript` — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::scalar_write_dest` (~11320)
+and `Shell::assign_elem`, plus arithmetic's `Shell::set` / `VarLookup::set`.
+Every one of them turns a `RefTarget { sub: Some("*") }` into an element
+destination and then evaluates `*` as an arithmetic subscript.
+
+**What.** The read side of a whole-array reference was fixed by
+TD-OILS-A-NAMEREF-TO-AN-ELEMENT-WAS-READ-BY-ONLY-ONE-FORM; the write side still
+diverges. bash answers every store through such a reference with
+`base[sub]: bad array subscript` — spelling the whole reference — and stores
+nothing. Measured against bash 5.2.37 with `n=(3 5 7)`, `declare -n g='n[*]'`:
+
+```text
+                    bash                              osh
+(( g += 1 ))        `n[*]: bad array subscript` ×2,   `3 5 7: syntax error in
+                    status 0, n unchanged             expression`, status 1
+g=NEW               `n[*]: bad array subscript`,      `*: syntax error: operand
+                    rest of the parse unit dropped    expected`, then continues
+printf -v g x       `n[*]: bad array subscript`,      `printf: *: syntax error:
+                    status 1                          operand expected`
+read -r g           same                              `read: *: syntax error: …`
+"${g:=D}"           `n[*]: bad array subscript`,      stores through and prints
+                    rest of the parse unit dropped
+```
+
+The `(( g += 1 ))` case reports **twice** — once for the read walk, once for the
+write — and still exits 0, the expression's value being 1.
+
+**Proper fix.** The subscripts `*` and `@` have to be recognised as
+whole-array *tokens* on the write side too, the way `Shell::ref_target_value`
+now recognises them on the read side, rather than handed to `eval_arith_index`.
+A small `RefTarget` helper answering "does this subscript name the array
+whole?" would serve all four call sites; each then reports
+`base[sub]: bad array subscript` and refuses the store, with the plain
+assignment and the `:=` arming the usual discard.
+
+**Impact.** Any write through a nameref pointing at a whole array — rare, and
+loudly wrong rather than silently wrong in every case, since osh already
+refuses the store. What differs is the wording, the status and (for the plain
+assignment and `${g:=w}`) whether the rest of the parse unit runs.
+
 ### TD-OILS-A-COMMENT-INSIDE-ARITHMETIC-CAN-EAT-ITS-OWN-CLOSER. `$(( #5 ))` is not an arithmetic error at all — bash's second scan of the word honours `#`, so the comment swallows the `))` — 2026-08-04 — ✅ FIXED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — `arith_comment_hides_closer`,

@@ -13975,8 +13975,23 @@ impl Shell {
         // is the same split arithmetic's element read has. See
         // [`Self::resolve_ref_use_walks`].
         let walks = usize::from(index.is_some()) + 1;
-        let Some(name) = &self.resolve_ref_use_walks(name, walks).and_then(RefTarget::into_name)
-        else {
+        let Some(target) = self.resolve_ref_use_walks(name, walks) else {
+            return ElemValue::Absent;
+        };
+        // A reference designating an element — or a whole array — names no
+        // variable, but it does name a *value*, and every form that reads a
+        // parameter's value reads it: the trims, the case and substitution
+        // operators, the slices, the `@`-transforms, and the `:-`/`:+`/`:?`
+        // family, which decide "set or unset" by this same read. Only a
+        // *second* subscript is one too many — `${r[0]}` names nothing at all,
+        // there being no array left to subscript — and the *length* is asked by
+        // a different route entirely (see [`Self::ref_length`]).
+        if index.is_none()
+            && let Some(sub) = &target.sub
+        {
+            return self.ref_target_value(&target.base, sub);
+        }
+        let Some(name) = &target.into_name() else {
             return ElemValue::Absent;
         };
         let found = match index {
@@ -22454,22 +22469,28 @@ impl Shell {
             // character counts as one, which is what bash's C locale does too.
             // Two walks of any nameref chain: bash asks after the parameter and
             // then reads the value to measure. See [`Self::param_value_walks`].
-            WordPart::Length(name) => match self.param_value_walks(name, 2) {
-                Some(v) => bytes::char_count(&v).to_string().into_bytes(),
-                None => {
-                    // `${#!}` answers 0 rather than faulting: asking how long
-                    // the last background pid is asks about the *parameter*,
-                    // which bash counts among the always-set specials here even
-                    // though a plain `$!` read is not one. Every other special
-                    // always has a value, so this is the only place the two
-                    // questions come apart.
-                    if name != "!" {
-                        // `${#name}` has no unbraced spelling, so it names the
-                        // parameter without a `$` whatever the parameter is.
-                        self.note_unbound(name, name.as_bytes());
+            // A reference designating an element answers apart, and does not
+            // walk at all — see [`Self::ref_length`].
+            WordPart::Length(name) => match self.ref_length(name) {
+                Some(v) => v,
+                None => match self.param_value_walks(name, 2) {
+                    Some(v) => bytes::char_count(&v).to_string().into_bytes(),
+                    None => {
+                        // `${#!}` answers 0 rather than faulting: asking how
+                        // long the last background pid is asks about the
+                        // *parameter*, which bash counts among the always-set
+                        // specials here even though a plain `$!` read is not
+                        // one. Every other special always has a value, so this
+                        // is the only place the two questions come apart.
+                        if name != "!" {
+                            // `${#name}` has no unbraced spelling, so it names
+                            // the parameter without a `$` whatever the
+                            // parameter is.
+                            self.note_unbound(name, name.as_bytes());
+                        }
+                        b"0".to_vec()
                     }
-                    b"0".to_vec()
-                }
+                },
             },
             WordPart::ParamOp {
                 name,
@@ -23761,31 +23782,118 @@ impl Shell {
     }
 
     /// If `name` is a nameref whose target is an array element (`arr[0]` /
-    /// `m[key]`), return the referenced element's value. `None` when there is no
-    /// value to read — because `name` is not such a nameref, because the element
-    /// is unset, or because the subscript names nowhere (which is reported here,
-    /// as reading it directly would be). The caller falls through to normal
-    /// resolution in every case, and finds nothing for the latter two.
+    /// `m[key]`) or a whole array (`arr[@]` / `arr[*]`), return the value it
+    /// reads as. `None` when there is no value to read — because `name` is not
+    /// such a nameref, because the element is unset, or because the subscript
+    /// names nowhere (which is reported here, as reading it directly would be).
+    /// The caller falls through to normal resolution in every case, and finds
+    /// nothing for the latter two.
     fn nameref_elem_value(&self, name: &str) -> Option<Str> {
+        let (base, sub) = self.nameref_elem_target(name)?;
+        match self.ref_target_value(&base, &sub) {
+            ElemValue::Value(v) => Some(v),
+            ElemValue::Absent => None,
+            ElemValue::BadSubscript(base) => {
+                self.perrln(&format!("{base}: bad array subscript"));
+                None
+            }
+        }
+    }
+
+    /// The `(base, subscript)` a nameref designates — `None` when `name` is not
+    /// a nameref at all, when its chain is circular, or when it names a whole
+    /// variable rather than a part of one.
+    ///
+    /// Silent about the circular case: every caller resolves again right after
+    /// and reports it there, so warning here would double it.
+    fn nameref_elem_target(&self, name: &str) -> Option<(String, Str)> {
         if !self.nameref_attr.contains(name) {
             return None;
         }
-        // Silent: `param_value` resolves again right after and reports a
-        // circular chain there, so warning here would double it.
         let target = self.resolve_ref_name(name)?;
-        let sub = target.sub.as_ref()?;
-        let base = target.base.as_str();
+        let sub = target.sub?;
+        Some((target.base, sub))
+    }
+
+    /// The value a reference designating one element — or a whole array — reads
+    /// as, with *why* it is nothing when it is.
+    ///
+    /// The whole-array subscripts are the interesting half. bash lets a
+    /// reference name a whole array, and what it hands the reader is a
+    /// *string*: the elements already joined by the time anything sees them. So
+    /// both spellings read as one scalar, and every operator that follows works
+    /// on that join rather than on the elements. The two separators are
+    /// [`Shell::join_derived`]'s — `[*]` writes `$IFS`'s first character and
+    /// nothing at all when `$IFS` is null, `[@]` falls back to a space — which
+    /// is the one setting that parts them: with `n=(abc 'c d' e)` and `IFS=`,
+    /// `'n[*]'` reads `abcc de` where `'n[@]'` reads `abc c d e`.
+    ///
+    /// An array with no elements is *unset* rather than empty — `${g-D}` takes
+    /// the default — which falls out of there being no value to join.
+    fn ref_target_value(&self, base: &str, sub: BStr<'_>) -> ElemValue {
+        let whole = match sub {
+            b"*" => Some(true),
+            b"@" => Some(false),
+            _ => None,
+        };
+        if let Some(star) = whole {
+            let elems = self.array_elements(base);
+            return if elems.is_empty() {
+                ElemValue::Absent
+            } else {
+                ElemValue::Value(self.join_derived(&elems, star))
+            };
+        }
         if self.assoc.contains_key(base) {
-            return self.assoc_element(base, sub);
+            return self
+                .assoc_element(base, sub)
+                .map_or(ElemValue::Absent, ElemValue::Value);
         }
         // A literal integer subscript (the common `arr[0]` case). Non-numeric
         // subscripts on an indexed array fall back to index 0, as bash does.
         let idx = bytes::as_str(sub).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         if self.subscript_is_bad(base, idx) {
-            self.perrln(&format!("{base}: bad array subscript"));
-            return None;
+            return ElemValue::BadSubscript(base.to_string());
         }
-        self.array_element(base, idx)
+        self.array_element(base, idx).map_or(ElemValue::Absent, ElemValue::Value)
+    }
+
+    /// `${#r}` where `r` is a reference designating an array *element* or a
+    /// whole array — `None` when it is not one, and the caller measures the
+    /// ordinary way.
+    ///
+    /// bash answers **0** for every such reference: its length path asks for a
+    /// *variable* named `arr[1]`, and no variable can be called that. Turning
+    /// `set -u` on changes the answer to the length of the value, the check
+    /// sending the question down the full expansion route instead — which does
+    /// follow the reference, and which ignores unbound, so an unset element is
+    /// still 0 there rather than a fault. Measured against bash 5.2.37 with
+    /// `n=(abc 'c d' e)`; the two columns really are the same flag:
+    ///
+    /// ```text
+    ///                       set +u   set -u
+    /// declare -n E='n[1]'      0        3
+    /// declare -n g='n[*]'      0        9
+    /// declare -n V='n[9]'      0        0
+    /// ```
+    fn ref_length(&self, name: &str) -> Option<Str> {
+        let (base, sub) = self.nameref_elem_target(name)?;
+        if !self.nounset {
+            return Some(b"0".to_vec());
+        }
+        let n = match self.ref_target_value(&base, &sub) {
+            ElemValue::Value(v) => bytes::char_count(&v),
+            ElemValue::Absent => 0,
+            // Reported but not counted: the subscript named nowhere, so there
+            // is nothing to measure. bash complains here for the same reason a
+            // plain read of it does — and only here, since without `set -u` it
+            // never looks.
+            ElemValue::BadSubscript(base) => {
+                self.perrln(&format!("{base}: bad array subscript"));
+                0
+            }
+        };
+        Some(n.to_string().into_bytes())
     }
 
     /// Build the value of `$-`: the currently-enabled single-letter shell
@@ -42250,6 +42358,30 @@ impl Shell {
 /// Let the arithmetic evaluator read shell variables.
 impl VarLookup for Shell {
     fn get_str(&self, name: &str) -> Option<Str> {
+        // A reference naming a *whole* array is not a value arithmetic can
+        // read. The expansion path hands one on as its elements joined (see
+        // [`Shell::ref_target_value`]), but arithmetic subscripts the array
+        // instead, finds `[*]`/`[@]` where an index belongs, and calls it a bad
+        // subscript — spelling the whole reference — before evaluating 0. An
+        // *element* reference is read through as usual: `$((r))` with
+        // `declare -n r='n[1]'` is element 1, and a non-numeric one is the
+        // expression error reading it directly would be.
+        if let Some((base, sub)) = self.nameref_elem_target(name) {
+            let whole = match sub.as_slice() {
+                b"*" => Some('*'),
+                b"@" => Some('@'),
+                _ => None,
+            };
+            if let Some(c) = whole {
+                // …except on an associative array, where `[*]` is a key like
+                // any other and simply names no entry.
+                if self.assoc.contains_key(&base) {
+                    return self.assoc_element(&base, &sub);
+                }
+                self.perrln(&format!("{base}[{c}]: bad array subscript"));
+                return None;
+            }
+        }
         // Return the raw value; the arithmetic evaluator recursively evaluates
         // it (`b=a; a=5; $((b))` → 5), including octal/hex literals.
         self.param_value(name)

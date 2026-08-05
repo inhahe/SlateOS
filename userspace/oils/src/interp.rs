@@ -7840,11 +7840,32 @@ impl Shell {
                 (Some(tx), Some(rx))
             })
             .unzip();
-        // Waiting is bounded, and a lapsed wait just runs the stage anyway: a
-        // stage that blocks before its first command (`{ read x; } | cat` with
-        // no input yet) must not be able to hold the whole pipeline up, and no
-        // arrangement of stages may deadlock. The ordering is thus a strong
-        // preference, not a lock — which is also what bash offers.
+        // A second chain, signalled the moment stage i's thread *begins* — the
+        // exact analogue of bash's `fork` having returned in the child. It
+        // exists to keep the two things the one chain used to conflate apart:
+        //
+        // * how long the operating system takes to get the thread running,
+        //   which is not the stage's doing and must not be waited out. A
+        //   `spawn_scoped` that succeeded will run, and a closure that never
+        //   runs is one whose spawn failed — which drops the sender and answers
+        //   the wait at once. So this half needs no timeout and can have none.
+        // * how long the stage then takes to reach its first command, which
+        //   *is* the stage's doing and must be bounded (below).
+        //
+        // Timing them together made the ordering load-sensitive: on a busy
+        // machine thread startup alone could eat the whole budget, and the
+        // traces came out reversed with nothing blocked at all.
+        let (mut spawned_tx, mut spawned_rx): (Vec<_>, Vec<_>) = (0..n - 1)
+            .map(|_| {
+                let (tx, rx) = mpsc::channel();
+                (Some(tx), Some(rx))
+            })
+            .unzip();
+        // The second wait is bounded, and a lapsed wait just runs the stage
+        // anyway: a stage that blocks before its first command (`echo $(cat) |
+        // cat` with no input yet) must not be able to hold the whole pipeline
+        // up, and no arrangement of stages may deadlock. The ordering is thus a
+        // strong preference, not a lock — which is also what bash offers.
         let start_wait = std::time::Duration::from_millis(100);
 
         // Scoped threads let each stage borrow the shared AST (`cmds`) while
@@ -7853,6 +7874,11 @@ impl Shell {
         std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(n.saturating_sub(1));
             for i in 0..n - 1 {
+                // Taken before anything that can `continue`, so that every path
+                // out of this iteration drops it. The successor's wait on it is
+                // *unbounded*, so a sender left behind in the vector — which
+                // outlives the scope — would be a hang rather than a delay.
+                let announce_spawned = spawned_tx.get_mut(i).and_then(Option::take);
                 if skipped.get(i).copied().unwrap_or(false) {
                     // Taken away by the extdebug verdict. Dropping the endpoints
                     // is the whole of it: the write end going leaves the next
@@ -7865,6 +7891,7 @@ impl Shell {
                         drop(head_stdin.take());
                     }
                     drop(start_tx.get_mut(i).and_then(Option::take));
+                    drop(announce_spawned);
                     continue;
                 }
                 let mut sub = self.clone_for_pipeline_stage();
@@ -7894,6 +7921,10 @@ impl Shell {
                     .checked_sub(1)
                     .and_then(|k| start_rx.get_mut(k))
                     .and_then(Option::take);
+                let wait_spawned = i
+                    .checked_sub(1)
+                    .and_then(|k| spawned_rx.get_mut(k))
+                    .and_then(Option::take);
                 sub.stage_started = start_tx.get_mut(i).and_then(Option::take);
                 // A stage evaluates arbitrarily deep shell, so it gets the same
                 // reserved stack the interpreter thread has — and, because that
@@ -7903,6 +7934,21 @@ impl Shell {
                     .stack_size(SHELL_STACK_SIZE)
                     .spawn_scoped(scope, move || {
                         sub.rebase_stack(SHELL_STACK_SIZE);
+                        // Announce the fork before waiting on the one upstream,
+                        // so a chain of stages starts as fast as the scheduler
+                        // will let it rather than one timeout at a time.
+                        // Discarded deliberately: the only error is that the
+                        // successor gave up, and there is nothing to do about
+                        // it here.
+                        if let Some(tx) = &announce_spawned {
+                            let _ = tx.send(());
+                        }
+                        if let Some(rx) = wait_spawned {
+                            // Unbounded on purpose — see the chain's comment.
+                            // `Err` is `Disconnected`: the predecessor's spawn
+                            // failed, so there is nothing to come.
+                            let _ = rx.recv();
+                        }
                         if let Some(rx) = wait {
                             // `Err` is fine and expected, hence discarded:
                             // `Disconnected` means the predecessor finished (or
@@ -7947,7 +7993,15 @@ impl Shell {
             }
 
             // Last stage: run on this thread (writing to `out`). It is the tail
-            // of the start chain, so it waits for stage n-2 and signals nobody.
+            // of both chains, so it waits for stage n-2 twice and signals nobody.
+            if let Some(rx) = n
+                .checked_sub(2)
+                .and_then(|k| spawned_rx.get_mut(k))
+                .and_then(Option::take)
+            {
+                // Discarded for the same reason as in the workers above.
+                let _ = rx.recv();
+            }
             if let Some(rx) = n
                 .checked_sub(2)
                 .and_then(|k| start_rx.get_mut(k))

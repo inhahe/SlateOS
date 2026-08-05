@@ -1,7 +1,8 @@
 # `disown` forgets jobs. Each of its operands is resolved and acted on before
 # the next one is looked at, which is what makes the order-dependent cases below
 # come out the way they do. Every job outlives the `disown` that names it, so
-# nothing here turns on timing.
+# only one line here turns on timing at all — the `-r` one, which needs one job
+# finished and one still running at the same moment, and says so where it is.
 
 echo "=== with no operand it forgets the current job, not the last row"
 sleep 0.7 & sleep 0.8 & disown; jobs
@@ -10,7 +11,15 @@ wait
 echo "=== -a takes every job, -r only the ones still running"
 sleep 0.7 & sleep 0.8 & disown -a; jobs; echo "rc=$?"
 wait
-sleep 0.05 & sleep 0.7 & sleep 0.4; disown -r; jobs
+# `-r` has to look while job 1 is already finished and job 2 is not, so the two
+# deadlines are read against the same foreground wait. One direction is safe by
+# construction: job 1 is forked first and sleeps less, so it cannot outlast a
+# wait that was forked after it. The other is a margin, and it has to be a wide
+# one — the wait is a process spawn, and on a machine loaded enough to make
+# spawning slow the second job spent its whole life inside it. At `sleep 0.7`
+# the margin was 0.3 s and a full-corpus sweep ate it: bash found both jobs
+# finished, disowned neither, and listed the second one too.
+sleep 0.05 & sleep 5 & sleep 0.4; disown -r; jobs
 wait
 
 echo "=== an operand names a job; -h keeps it in the table"

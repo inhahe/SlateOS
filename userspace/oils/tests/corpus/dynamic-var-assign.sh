@@ -24,6 +24,14 @@
 # the string, so `BASHPID=7` is not an error and leaves the slot exactly as it
 # was. `PPID` never gets that far — it is readonly.
 #
+# `SECONDS` counts whole seconds, so watching it move costs whole seconds too:
+# the sleeps below come to 8 s and the case takes about 15 s a shell on an idle
+# machine. That is inside the default budget by too little to survive a
+# full-corpus sweep — the reference bash, whose every `sleep` is a process
+# spawn, has twice run past 20 s and been recorded as a timeout — so the case
+# asks for a budget with room in it rather than one it only just fits.
+# TIMEOUT: 120
+#
 # Values that differ between two shells on the same host are masked. The mask
 # spells no double quote and no backslash of its own: osh cannot yet hand
 # either to an external command on the Windows host it is developed on — see

@@ -24494,8 +24494,7 @@ impl Shell {
                     // `$((expr))` — nested arithmetic. Find the matching `))`.
                     if let Some((inner, next)) = Self::scan_arith_sub(&chars, i + 3) {
                         let val = self.arith_sub(&inner, false);
-                        let val = bytes::trim(&val);
-                        out.extend_from_slice(if val.is_empty() { b"0" } else { val });
+                        out.extend_from_slice(bytes::trim(&val));
                         i = next;
                         continue;
                     }
@@ -24555,8 +24554,7 @@ impl Shell {
                             .and_then(|n| self.param_value(n))
                             .unwrap_or_default(),
                     };
-                    let val = bytes::trim(&val);
-                    out.extend_from_slice(if val.is_empty() { b"0" } else { val });
+                    out.extend_from_slice(bytes::trim(&val));
                 }
                 _ => {
                     let Some(n) = Self::scan_arith_param(&chars, i + 1) else {
@@ -24569,8 +24567,7 @@ impl Shell {
                     };
                     i += 1 + n.chars().count();
                     let val = self.param_value(&n).unwrap_or_default();
-                    let val = bytes::trim(&val);
-                    out.extend_from_slice(if val.is_empty() { b"0" } else { val });
+                    out.extend_from_slice(bytes::trim(&val));
                 }
             }
         }

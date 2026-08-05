@@ -13498,10 +13498,27 @@ impl Shell {
     /// stored where it is not. The array is not brought into being either: a
     /// write that never happened should leave no trace of having been tried.
     fn assign_elem(&mut self, name: &str, index: &Option<Box<Word>>, value: Str) -> bool {
-        // A circular chain names nothing to write to; the read that led here
-        // has already reported it.
-        let Some(target) = self.resolve_ref_name(name) else {
-            return false;
+        // A circular chain parts the two destinations, exactly as it parts the
+        // two arithmetic writes.
+        //
+        // A *subscripted* one is not abandoned: bash walks the chain twice more
+        // (once to find the array, once to bind the element), lands the store on
+        // the name the walk started from, and takes the nameref attribute off it
+        // — so `${c1[0]:=v}` through a cycle really does assign, and breaks the
+        // cycle doing it. See [`Self::resolve_ref_elem_write`].
+        //
+        // An *unsubscripted* one has no array to make, so there is nothing for
+        // the store to fall back on: bash walks once more, stores nothing, and
+        // the caller discards the command. Either way the read that led here has
+        // already paid for its own walks.
+        let target = match index {
+            Some(_) => self.resolve_ref_elem_write(name),
+            None => {
+                let Some(target) = self.resolve_ref_use_walks(name, 1) else {
+                    return false;
+                };
+                target
+            }
         };
         // A reference that already designates one element leaves the subscript
         // written here nothing to apply to — bash refuses and stores nothing,
@@ -22200,6 +22217,12 @@ impl Shell {
                     // The value is dropped because there is nowhere to put it;
                     // it is expanded for its effects, which have happened.
                     let _ = self.expand_to_string(arg);
+                    // The store looks for the array to write into before it
+                    // judges the subscript, which is one more walk of any
+                    // nameref chain — and it happens *after* the default word,
+                    // measurably so: `${c1[@]:=$(echo SIDE >&2)}` through a
+                    // cycle prints two warnings, `SIDE`, then the third.
+                    drop(self.resolve_ref_use_walks(name, 1));
                     self.perrln(&format!("{name}[{sub}]: bad array subscript"));
                     // bash discards the command with status **2** here — not
                     // the 1 every other bad-subscript site uses.
@@ -63708,6 +63731,88 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("t=v; declare -n r=t; { echo \"[${r@a}][${r@A}]\"; } 2>&1").0,
             "[][t='v']\n",
+        );
+    }
+
+    /// `${name:=word}` through a circular chain parts along the seam the
+    /// arithmetic writes part along: whether the store has anything to fall back
+    /// on. An unsubscripted one has not, so it walks once more, stores nothing,
+    /// and the expansion is abandoned. A subscripted one has the array it would
+    /// have had to make, so it walks twice more, lands the store on the name the
+    /// walk started from, and takes the nameref attribute off it — breaking the
+    /// cycle it just complained about four times.
+    #[test]
+    fn an_element_assign_default_through_a_circular_nameref_lands_and_breaks_the_cycle() {
+        let cyc = "declare -n c1=c2; declare -n c2=c1;";
+
+        // Unsubscripted: two walks, nothing stored, and the command abandoned —
+        // the text after it never runs.
+        for src in ["${c1:=v}", "${c1=v}"] {
+            let out = run(&format!("{{ {cyc} echo \"[{src}]\"; echo not-reached; }} 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), 2, "{src} -> {out:?}");
+            assert!(!out.contains("not-reached"), "{src} -> {out:?}");
+        }
+
+        // Subscripted: four walks, and the value really is stored — under `c1`
+        // itself, which is a plain array by the time the expansion returns.
+        for (src, want) in [
+            ("${c1[0]:=v}", "declare -a c1=([0]=\"v\")\n"),
+            ("${c1[3]:=v}", "declare -a c1=([3]=\"v\")\n"),
+            ("${c1[0]=v}", "declare -a c1=([0]=\"v\")\n"),
+        ] {
+            let out = run(&format!("{{ {cyc} echo \"[{src}]\"; }} 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), 4, "{src} -> {out:?}");
+            assert!(out.ends_with("[v]\n"), "{src} -> {out:?}");
+            assert_eq!(
+                run(&format!("{{ {cyc} echo \"[{src}]\"; }} 2>/dev/null; declare -p c1")).0,
+                format!("[v]\n{want}"),
+            );
+        }
+
+        // The cycle is gone, so the far end reads the stored value back, and a
+        // second write warns about nothing.
+        assert_eq!(
+            run(&format!(
+                "{{ {cyc} echo \"[${{c1[0]:=v}}]\"; }} 2>/dev/null; \
+                 {{ echo \"c2=[${{c2[0]}}]\"; echo \"[${{c1[0]:=w}}]\"; }} 2>&1"
+            ))
+            .0,
+            "[v]\nc2=[v]\n[v]\n",
+        );
+
+        // `[@]`/`[*]` pay the store's walk and then refuse the subscript — and
+        // pay it *after* the default word, which its side effect shows.
+        for sub in ["@", "*"] {
+            let out = run(&format!("{{ {cyc} echo \"[${{c1[{sub}]:=v}}]\"; }} 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), 3, "{sub} -> {out:?}");
+            assert!(out.ends_with(&format!("c1[{sub}]: bad array subscript\n")), "{out:?}");
+        }
+        let out = run(&format!(
+            "{{ {cyc} echo \"[${{c1[@]:=$(echo SIDE >&2)}}]\"; }} 2>&1"
+        ))
+        .0;
+        let marks: Vec<&str> = out
+            .lines()
+            .filter_map(|l| {
+                if l.contains("circular") {
+                    Some("W")
+                } else if l.contains("SIDE") {
+                    Some("S")
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(marks, ["W", "W", "S", "W"], "{out:?}");
+
+        // A chain that resolves is silent, and stores where it points.
+        assert_eq!(
+            run("declare -n r=t; { echo \"[${r:=v}]\"; } 2>&1; declare -p t").0,
+            "[v]\ndeclare -- t=\"v\"\n",
+        );
+        assert_eq!(
+            run("declare -n r=t; { echo \"[${r[1]:=w}]\"; } 2>&1; declare -p t").0,
+            "[w]\ndeclare -a t=([1]=\"w\")\n",
         );
     }
 

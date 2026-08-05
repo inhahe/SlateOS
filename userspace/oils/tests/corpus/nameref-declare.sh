@@ -30,11 +30,12 @@
 # attributes on `arr` and the value in `arr[1]`, but `export`/`readonly` refuse
 # a subscript outright — while still storing through the reference.
 #
-# bash emits its circular-nameref warning a varying number of times (see
-# known-issues TD-OILS-NAMEREF-WARNING-COUNT), so the cases below that provoke
-# one either drop the warning or show it deduplicated.
+# bash emits its circular-nameref warning once for every time it walks the
+# chain, which each shape does a fixed number of times — so the cases below
+# that provoke one either drop the warning, to keep the line about the values,
+# or count it.
 d() { grep -v 'circular name reference'; }
-u() { grep 'circular name reference' | sort -u; }
+u() { grep -c 'circular name reference'; }
 
 echo "=== which declarations follow the reference"
 ( w=5; declare -n r=w; declare -i r;   declare -p w r ) 2>&1
@@ -98,10 +99,21 @@ echo "=== a circular chain declares nothing"
 ( declare -n a=b; declare -n b=a; readonly a;   echo "rc=$?" ) 2>&1 | d
 ( declare -n a=b; declare -n b=a; export a=5;   echo "rc=$?"; declare -p a b ) 2>&1 | d
 ( declare -n a=b; declare -n b=a; readonly a=5; echo "rc=$?" ) 2>&1 | d
-# …and it does say so, however many times over.
-( declare -n a=b; declare -n b=a; declare -i a ) 2>&1 | u
-( declare -n a=b; declare -n b=a; export a )     2>&1 | u
-( declare -n a=b; declare -n b=a; export a=5 )   2>&1 | u
+# …and it says so once per walk: twice for an ordinary operand, three times
+# when a value adds a store, once when `-n` skips the marking lookup or when an
+# array-making operand stops at the first walk.
+( declare -n a=b; declare -n b=a; declare -i a )   2>&1 | u
+( declare -n a=b; declare -n b=a; export a )       2>&1 | u
+( declare -n a=b; declare -n b=a; export a=5 )     2>&1 | u
+( declare -n a=b; declare -n b=a; readonly a=5 )   2>&1 | u
+( declare -n a=b; declare -n b=a; export -n a )    2>&1 | u
+( declare -n a=b; declare -n b=a; export -n a=5 )  2>&1 | u
+( declare -n a=b; declare -n b=a; declare -a a )   2>&1 | u
+( declare -n a=b; declare -n b=a; export -a a )    2>&1 | u
+( declare -n a=b; declare -n b=a; export -a a=5 )  2>&1 | u
+( declare -n a=b; declare -n b=a; unset a )        2>&1 | u
+( declare -n a=b; declare -n b=a; unset 'a[0]' )   2>&1 | u
+( declare -n a=b; declare -n b=a; unset -n a )     2>&1 | u
 
 echo "=== a self reference never becomes one, so nothing is followed"
 ( declare -n r=r; declare -i r; declare -p r ) 2>&1

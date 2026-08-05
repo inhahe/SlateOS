@@ -35339,3 +35339,47 @@ rewrite, `unalias -a`, a 64→256 growth, the same for the command table, the
 ordinary associative array (a *third* order, `aft bfs aoo atj`), subshell
 inheritance, and defining an alias by writing through the mirror. Bucket counts
 and growth points are pinned separately by the unit tests in `src/assoc.rs`.
+
+
+### TD-OILS-COND-SYNTAX-ERROR-NAMES-ONLY-THE-TOKEN. `[[ P;Q ]]` says ``near `;'`` where bash says ``near `;Q'`` — 2026-08-04
+
+**Where:** `userspace/oils/src/parser.rs` — the `[[ ]]` conditional parser's error
+reporting, which names the offending token as the lexer read it.
+
+**What.** bash's second diagnostic line names the token *together with the first
+character of whatever follows it*, where osh names the bare token. The first
+line (`unexpected token …, conditional binary operator expected`) and the third
+(the echoed source line) already match.
+
+```text
+[[ P;Q ]]     bash: syntax error near `;Q'     osh: syntax error near `;'
+[[ P;QRS ]]   bash: syntax error near `;Q'     osh: syntax error near `;'
+[[ P;$n ]]    bash: syntax error near `;$'     osh: syntax error near `;'
+[[ P;"Q" ]]   bash: syntax error near `;"'     osh: syntax error near `;'
+[[ P;;Q ]]    bash: syntax error near `;Q'     osh: syntax error near `;'
+[[ P|Q ]]     bash: syntax error near `|Q'     osh: syntax error near `|'
+[[ P&Q ]]     bash: syntax error near `&Q'     osh: syntax error near `&'
+[[ P; Q ]]    bash: syntax error near `;'      osh: syntax error near `;'   — agree
+[[ P;\nQ ]]   bash: syntax error near `;'      osh: syntax error near `;'   — agree
+```
+
+A blank or a newline after the token is where the two agree, which is why every
+existing corpus case that provokes this error matches: they are all written with
+a space.
+
+**Why bash does it.** `report_syntax_error` in bash's `parse.y` does not print
+the parsed token — it calls `error_token_from_text`, which reconstructs a token
+by walking the raw `shell_input_line` backwards from the current read index. The
+index has already moved past the lexer's one-character lookahead, so the text it
+recovers carries that extra character. The `;;Q` row (reported as `;Q`, not
+`;;Q`) is the same reconstruction seen from the other side: in `[[ ]]` the lexer
+reads `;` singly, so the walk starts inside the pair.
+
+**Impact.** Cosmetic — the message text of a syntax error inside `[[ ]]`. Exit
+status, the other two lines, and every non-error behaviour are unaffected.
+
+**The proper fix** is to give the conditional parser the same reconstruction:
+report the error position as an offset into the source line and slice the token
+text out of that line rather than out of the token, so the lookahead character
+comes along. Until then, any corpus case that provokes a `[[ ]]` syntax error
+must put a blank after the offending token or be marked `# EXPECT-DIFF:`.

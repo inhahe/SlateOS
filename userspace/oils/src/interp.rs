@@ -1835,6 +1835,23 @@ enum InputSrc {
     /// `read: read error: 0: Bad file descriptor` from the body, not
     /// `3: Bad file descriptor` from the redirect.
     WriteOnly,
+    /// A directory, opened for reading.
+    ///
+    /// `< dir` is not an error: POSIX opens a directory read-only quite
+    /// happily, and it is the first *read* that answers `EISDIR`. That is
+    /// visible in the status and in who reports it — `exec < dir` succeeds, and
+    /// `read < dir` is the thing that says `read: read error: 0: Is a
+    /// directory` — so refusing the redirect would put the wrong diagnostic on
+    /// the wrong line.
+    ///
+    /// A shape of its own rather than a real handle, because the development
+    /// host cannot supply one that behaves: Win32 fails `CreateFile` on a
+    /// directory outright unless `FILE_FLAG_BACKUP_SEMANTICS` is asked for, and
+    /// even then every read through the handle comes back
+    /// `ERROR_ACCESS_DENIED`, which is `Permission denied` and not what bash
+    /// says. Carrying the fact in the variant costs nothing on the SlateOS
+    /// target, where the same `EISDIR` would arrive from the kernel.
+    Directory,
 }
 
 /// Wrap the absence of a descriptor as an [`InputFd`], so a closed fd 0 can be
@@ -1851,12 +1868,20 @@ fn write_only_input() -> InputFd {
     Arc::new(Mutex::new(InputSrc::WriteOnly))
 }
 
+/// A directory bound to a descriptor — see [`InputSrc::Directory`]. Like
+/// [`write_only_input`], each call makes its own handle: there is no position
+/// to share when no byte will ever be read.
+fn directory_input() -> InputFd {
+    Arc::new(Mutex::new(InputSrc::Directory))
+}
+
 impl io::Read for InputSrc {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         match self {
             InputSrc::Bytes(c) => c.read(out),
             InputSrc::File(f) => f.read(out),
             InputSrc::Closed | InputSrc::WriteOnly => Err(ebadf()),
+            InputSrc::Directory => Err(io::Error::from(io::ErrorKind::IsADirectory)),
         }
     }
 }
@@ -1867,6 +1892,7 @@ impl BufRead for InputSrc {
             InputSrc::Bytes(c) => c.fill_buf(),
             InputSrc::File(f) => f.fill_buf(),
             InputSrc::Closed | InputSrc::WriteOnly => Err(ebadf()),
+            InputSrc::Directory => Err(io::Error::from(io::ErrorKind::IsADirectory)),
         }
     }
 
@@ -1875,7 +1901,7 @@ impl BufRead for InputSrc {
             InputSrc::Bytes(c) => c.consume(n),
             InputSrc::File(f) => f.consume(n),
             // Nothing was ever handed out to consume.
-            InputSrc::Closed | InputSrc::WriteOnly => {}
+            InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => {}
         }
     }
 }
@@ -1890,6 +1916,7 @@ impl std::fmt::Debug for InputSrc {
             InputSrc::File(_) => f.write_str("InputSrc::File"),
             InputSrc::Closed => f.write_str("InputSrc::Closed"),
             InputSrc::WriteOnly => f.write_str("InputSrc::WriteOnly"),
+            InputSrc::Directory => f.write_str("InputSrc::Directory"),
         }
     }
 }
@@ -2024,11 +2051,18 @@ fn child_input(c: &InputFd) -> ChildIn {
             let _ = cur.read_to_end(&mut rest);
             ChildIn::Bytes(rest)
         }
-        // Neither has bytes to hand over. A write-only fd 0 is a descriptor the
-        // child would really receive and really fail to read, but handing over
-        // one that answers `EBADF` on read needs the same platform-specific
-        // dance a closed one does — see [`ChildIn::Closed`].
-        InputSrc::Closed | InputSrc::WriteOnly => ChildIn::Closed,
+        // None of these has bytes to hand over. A write-only fd 0 is a
+        // descriptor the child would really receive and really fail to read,
+        // but handing over one that answers `EBADF` on read needs the same
+        // platform-specific dance a closed one does — see [`ChildIn::Closed`].
+        // A directory is the same trade for a different reason: the host
+        // *would* give up a handle for it, but reads through that handle say
+        // `Permission denied` rather than `Is a directory`, so an approximation
+        // is all there is either way. It is why the corpus case for this keeps
+        // to the shell's own readers (`read`, `mapfile`), where the answer is
+        // exact — bash's `cat < dir` fails inside `cat`, and what a host's
+        // `cat` makes of a directory is not the shell's business.
+        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => ChildIn::Closed,
     }
 }
 
@@ -18231,9 +18265,9 @@ impl Shell {
                 if let Some(n) = special_redirect_fd(&path) {
                     return self.persistent_special_dup(fd, &path, n, true, out);
                 }
-                let f = self.open_in_target(&path)?;
+                let f = self.open_input_source(&path)?;
                 if fd == 0 {
-                    self.exec_stdin = Some(file_input(f));
+                    self.exec_stdin = Some(f);
                     // `exec 0< f` reopens fd 0 read-only, dropping any write
                     // half an earlier `exec 0<> other` had installed.
                     self.exec_stdin_write = None;
@@ -18242,10 +18276,10 @@ impl Shell {
                     // to a source that has no write half, so the shell's own
                     // writes to it fail from here on — with fd 2's diagnostics
                     // simply dropped, having nowhere to be reported.
-                    self.set_std_read_half(fd, Some(file_input(f)));
+                    self.set_std_read_half(fd, Some(f));
                     self.set_std_write_half(fd, Some(WriteFd::ReadOnly));
                 } else {
-                    self.open_fds.insert(fd, file_input(f));
+                    self.open_fds.insert(fd, f);
                     // Open, but with no write half — which is what makes a
                     // later `echo >&N` fail at the *write* and a `M>&N` copy it
                     // rather than call it no descriptor at all.
@@ -19273,11 +19307,11 @@ impl Shell {
                     // diagnostic and gives every later reader of the descriptor
                     // the *same* open file description, which is what makes a
                     // child's consumption visible to the shell afterwards.
-                    let f = self.open_in_target(&path)?;
+                    let f = self.open_input_source(&path)?;
                     match fd {
                         0 => {
                             plan.clear_stdin();
-                            plan.stdin = Some(file_input(f));
+                            plan.stdin = Some(f);
                         }
                         // `1< file` / `2< file`: the redirect is legal on a
                         // standard *write* descriptor and binds it to a source
@@ -19286,13 +19320,13 @@ impl Shell {
                         // `read <&1` in its body finds the file's bytes.
                         1 => {
                             plan.clear_stdout();
-                            plan.stdout_read = Some(file_input(f));
+                            plan.stdout_read = Some(f);
                         }
                         2 => {
                             plan.clear_stderr();
-                            plan.stderr_read = Some(file_input(f));
+                            plan.stderr_read = Some(f);
                         }
-                        _ => plan.extra_fds.push((fd, ExtraFdOp::Input(file_input(f)))),
+                        _ => plan.extra_fds.push((fd, ExtraFdOp::Input(f))),
                     }
                 }
                 RedirectOp::ReadWrite => {
@@ -25260,10 +25294,21 @@ impl Shell {
     /// the path as the *user* wrote it, and a message that says `Is a directory`
     /// where the host could only manage `Permission denied` (see
     /// [`open_error`]).
-    fn open_in_target(&self, path: BStr<'_>) -> Result<std::fs::File, Str> {
+    ///
+    /// A directory is *not* such a failure — `< dir` opens, and it is the first
+    /// read that answers `EISDIR` — so it is answered with the descriptor shape
+    /// that carries that fact, [`InputSrc::Directory`]. The check comes before
+    /// the open rather than after it because the development host would refuse
+    /// the open outright; on a POSIX host it merely names the same descriptor a
+    /// successful `open(2)` would have handed back.
+    fn open_input_source(&self, path: BStr<'_>) -> Result<InputFd, Str> {
         let resolved = self.host_path(path);
         let host = bytes::bytes_to_path(&resolved);
+        if host.is_dir() {
+            return Ok(directory_input());
+        }
         std::fs::File::open(&host)
+            .map(file_input)
             .map_err(|e| bfmt![path, b": ", io_error_message(&open_error(&host, e))])
     }
 
@@ -50471,6 +50516,53 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let p = dir.to_string_lossy().replace('\\', "/");
         let (o, _) = run(&format!("v=$(< '{p}'); echo \"[$v] e=$?\""));
         assert_eq!(o, "[] e=0\n");
+    }
+
+    #[test]
+    fn input_redirect_of_a_directory_opens_and_fails_the_read() {
+        // A directory is a legal *input* redirect target: the open succeeds and
+        // it is the first read through the descriptor that answers `EISDIR`.
+        // So the status belongs to the reading command rather than to the
+        // redirect, and a command that never reads does not notice at all.
+        // (Contrast the write forms, which refuse the directory outright —
+        // see the corpus case `a-directory-is-not-a-file-a-redirect-can-open`,
+        // which pins both halves against bash.)
+        let dir = std::env::temp_dir();
+        let p = dir.to_string_lossy().replace('\\', "/");
+
+        // The redirect itself is fine, however it is spelled.
+        let (o, _) = run(&format!("(exec < '{p}'); echo \"e=$?\""));
+        assert_eq!(o, "e=0\n");
+        let (o, _) = run(&format!("true < '{p}'; echo \"e=$?\""));
+        assert_eq!(o, "e=0\n");
+
+        // `read` is what fails, and names the descriptor it was pointed at.
+        // (`2>&1` folds the diagnostic into the captured stdout.)
+        let (o, _) = run(&format!("read x < '{p}' 2>&1; echo \"e=$? x=[$x]\""));
+        assert_eq!(o, "osh: read: read error: 0: Is a directory\ne=1 x=[]\n");
+        // `-u N` moves that name; `<&N` does not (the read is still fd 0).
+        let (o, _) = run(&format!("(exec 3< '{p}'; read -u 3 x) 2>&1; echo \"e=$?\""));
+        assert_eq!(o, "osh: read: read error: 3: Is a directory\ne=1\n");
+        // The fact rides on the open file description, so a dup carries it.
+        let (o, _) = run(&format!(
+            "(exec 3< '{p}'; exec 4<&3; read x <&4) 2>&1; echo \"e=$?\""
+        ));
+        assert_eq!(o, "osh: read: read error: 0: Is a directory\ne=1\n");
+        // Even on a descriptor that is normally the *write* side.
+        let (o, _) = run(&format!("({{ read x <&1; }} 1< '{p}') 2>&1; echo \"e=$?\""));
+        assert_eq!(o, "osh: read: read error: 0: Is a directory\ne=1\n");
+
+        // A `while read` loop simply never runs its body — and a loop that ran
+        // zero iterations is status 0, whatever ended it.
+        let (o, _) = run(&format!(
+            "while read x; do echo body; done < '{p}' 2>/dev/null; echo \"e=$?\""
+        ));
+        assert_eq!(o, "e=0\n");
+
+        // `mapfile` treats the read error as end of input: no message, status
+        // 0, and an array with nothing in it.
+        let (o, _) = run(&format!("mapfile v < '{p}'; echo \"e=$? n=${{#v[@]}}\""));
+        assert_eq!(o, "e=0 n=0\n");
     }
 
     #[test]

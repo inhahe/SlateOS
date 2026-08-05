@@ -2684,10 +2684,10 @@ stays away from the combination.)
 
 Covered by `noclobber-guards-every-form-that-truncates.sh`.
 
-### TD-OILS-A-DIRECTORY-AS-A-REDIRECT-TARGET-REPORTS-THE-WRONG-ERROR-AND-FAILS-A-READ — 2026-08-03 — ⚠️ **OPEN (the message half is fixed; the read half remains)**
+### TD-OILS-A-DIRECTORY-AS-A-REDIRECT-TARGET-REPORTS-THE-WRONG-ERROR-AND-FAILS-A-READ — 2026-08-03 — ✅ **FIXED 2026-08-05**
 
 **Where:** `userspace/oils/src/interp.rs`, `open_error` and the input-open path
-(`Shell::open_in_target`, and the `RedirectOp::Read` planner).
+(`Shell::open_input_source`, and the `RedirectOp::Read` planner).
 
 **What.** Two divergences, one cosmetic and one real, both from opening a
 directory:
@@ -2721,17 +2721,43 @@ with the builtin and with a lower-case "is" (`.: ad: is a directory`) — and th
 refusal is an ordinary failure, not the failed open that ends a non-interactive
 posix shell. Covered by `a-directory-is-not-a-file-a-redirect-can-open.sh`.
 
-**Still open — the read.** `< ad` must *open*, and fail at the first read.
-`FILE_FLAG_BACKUP_SEMANTICS` (via `OpenOptionsExt::custom_flags`) gets the
-handle on Windows, but the reads through it fail `ERROR_ACCESS_DENIED` too, so
-the read half also needs an `InputSrc` variant that knows it is a directory and
-answers `EISDIR` — that is what would give `exec < ad` its status 0 and `read <
-ad` its `read error: 0: Is a directory`. An **external** command reading the
-descriptor cannot be matched even then (bash's `cat < ad` fails inside `cat`,
-with whatever the host's `cat` makes of a directory handle), so the corpus case
-deliberately stays away from the reading forms. On the SlateOS target none of
-this applies: a directory opens for reading and reads answer `EISDIR` without
-any of the scaffolding, which is why this is filed rather than built now.
+**Fixed 2026-08-05 — the read.** `< ad` now *opens*, and fails at the first
+read. `Shell::open_in_target` became `open_input_source`, returning an `InputFd`
+rather than a `File`, and answering a path that `is_dir()` with a new
+`InputSrc::Directory` whose `Read`/`BufRead` impls yield `ErrorKind::IsADirectory`.
+Because it is a new enum arm, every exhaustive match on `InputSrc` — `read`,
+`fill_buf`, `consume`, `Debug`, `child_input` — was a compile error until it had
+been considered, which is exactly why a variant was preferred to a flag.
+
+That one shape is enough for the whole family, because everything downstream
+already routes through the descriptor rather than the redirect: `exec < ad` and
+`true < ad` are status 0, `read < ad` says `read: read error: 0: Is a directory`
+at status 1, `read -u 3` names fd 3 where a `<&3` copy still names 0, a dup
+(`exec 4<&3`) carries the fact, `1< ad` puts it on the write descriptor,
+`while read; done < ad` runs its body zero times, `mapfile` treats it as end of
+input (status 0, empty array), and `$(< ad)` stays empty at status 0.
+
+**Not fixed, and cannot be:** an **external** command reading the descriptor.
+bash's `cat < ad` fails inside `cat`, with whatever the host's `cat` makes of a
+directory handle, and `child_input` has no real handle to hand over — Win32
+needs `FILE_FLAG_BACKUP_SEMANTICS` even to open one, and reads through the
+result still answer `ERROR_ACCESS_DENIED` (`Permission denied`), which is not
+what bash says. So a directory bound to a child's fd 0 is passed as closed, the
+same approximation a write-only fd 0 already gets, and the corpus case keeps to
+the shell's *own* readers where the answer is exact. On the SlateOS target the
+question does not arise: a directory opens for reading and reads answer `EISDIR`
+from the kernel, so the variant merely names what would have happened anyway.
+
+Pinned by the extended corpus case
+`a-directory-is-not-a-file-a-redirect-can-open.sh` (which now covers both
+halves) and the unit test `input_redirect_of_a_directory_opens_and_fails_the_read`.
+
+**Standing lesson:** a host limitation is a reason to *model* a behaviour, not a
+reason to skip it. The entry deferred this because Windows could not supply a
+handle that behaves — but the behaviour that mattered was never the handle, it
+was what the shell's readers say, and that is entirely the shell's own code. Ask
+what the host actually blocks: usually it is one narrow edge (here, a child
+process's view), not the feature.
 
 ### TD-OILS-COMPLETE-TABLE-AND-OPERANDS. `complete`/`compopt` got ten things wrong at once, all downstream of two facts about bash they did not model — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 

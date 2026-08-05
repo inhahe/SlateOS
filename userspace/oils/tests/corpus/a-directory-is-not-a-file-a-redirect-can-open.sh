@@ -12,10 +12,15 @@
 # current-directory fallback left to find it with, so the operand is simply
 # `file not found` — and that, being a failed `.`, ends the shell.
 #
-# (The *reading* forms — `< dir`, `exec < dir` — are left out. bash opens a
-# directory for reading successfully and lets the reading command be the one to
-# fail; osh cannot on this host, where `CreateFile` refuses a directory outright.
-# See TD-OILS-A-DIRECTORY-AS-A-REDIRECT-TARGET-REPORTS-THE-WRONG-ERROR-AND-FAILS-A-READ.)
+# Reading is the other way round entirely: `< dir` *succeeds*, and it is the
+# first read through the descriptor that answers `Is a directory`. So the status
+# belongs to the reading command rather than to the redirect, and a command that
+# never reads (`true < dir`) does not notice at all.
+#
+# Only the shell's own readers are exercised here. bash's `cat < dir` fails
+# inside `cat`, and what a host's `cat` makes of a directory descriptor is not
+# the shell's business — see
+# TD-OILS-A-DIRECTORY-AS-A-REDIRECT-TARGET-REPORTS-THE-WRONG-ERROR-AND-FAILS-A-READ.
 
 mkdir -p ad || exit 1
 
@@ -52,5 +57,23 @@ source ad; echo "  source rc=$?"
 
 echo "=== and in posix mode it is not even found"
 ( set -o posix; . ad; echo "  not reached" ); echo "  posix rc=$?"
+
+echo "=== but a directory opens for *reading*: the read is what fails"
+( exec < ad; echo "  exec < rc=$?" )
+true < ad; echo "  a command that never reads rc=$?"
+read x < ad; echo "  read rc=$? x=[$x]"
+{ read x; } < ad; echo "  read in a group rc=$?"
+read x < ad/; echo "  a trailing slash rc=$?"
+read x 0< ad; echo "  spelled 0< rc=$?"
+read -N 1 x < ad; echo "  read -N rc=$?"
+read -d "" x < ad; echo "  read -d rc=$?"
+mapfile v < ad; echo "  mapfile rc=$? n=${#v[@]}"
+while read x; do echo "  not reached"; done < ad; echo "  while rc=$?"
+x=$(< ad); echo "  \$(< ) rc=$? [$x]"
+
+echo "=== and the descriptor carries it, however it is named or copied"
+( exec 3< ad; read -u 3 x; echo "  read -u 3 rc=$?" )
+( exec 3< ad; exec 4<&3; read x <&4; echo "  through a dup rc=$?" )
+( { read x <&1; } 1< ad; echo "  on fd 1 rc=$?" )
 
 echo "still here"

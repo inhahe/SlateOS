@@ -14,6 +14,161 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-ULIMIT-A-PADS-ONE-FIELD-WHERE-BASH-WRITES-TWO. The `(unit, -x)` token was right-aligned against a single width-36 field, so the closing paren sat a column short of bash's and a long description would have been truncated — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `fn ulimit_line`.
+
+**What:** osh computed `36 - paren.len()` and padded the description to that,
+which makes the paren close in column 39. bash writes two independent printf
+fields, `%-20s` for the description and `%21s` for a `(unit, -x) ` token that
+carries its own trailing space:
+
+```text
+core file size              (blocks, -c) 0
+open files                          (-n) 3200
+pipe size                (512 bytes, -p) 8
+```
+
+**Measured rule** (bash 5.2.37, checked on all nine limits MSYS exposes —
+description widths 25, 28 and 36 among them): the `)` lands in **column 40**
+and the value starts in **42**, for every unit width. That is the whole point
+of the layout: it is what makes a column of values line up.
+
+The two-field form is not a stylistic restatement of one padded width — it is
+what decides the overflow case. A description longer than 20 is *not*
+truncated; the token is still right-aligned behind it, so the columns give way
+rather than the text. No label in `RLIMIT_SPECS` is that long today (`POSIX
+message queues` is exactly 20), but the rule is bash's, not a coincidence of
+the current table, so it is spelled as bash spells it.
+
+**Fixed** by `format!("{:<20}{:>20} {}\n", …)`. Pinned by the unit test
+`ulimit_dash_a_puts_the_closing_paren_in_column_forty` (which walks every line
+asserting the paren column and the gap byte, then spot-checks the three unit
+widths literally) and by the corpus case `ulimit-a-aligns-the-unit-token.sh`.
+
+**Standing lesson:** when a layout is described by a single derived width, ask
+what the source computes it *from*. A width that happens to agree on today's
+data is not the rule; two fields and one field differ only in the case the
+current table does not reach, which is exactly the case a port gets wrong.
+
+---
+
+### TD-OILS-ONE-NUMBER-PARSE-FOR-THREE-DIFFERENT-READERS. `shift`, `read -n/-N/-u`, `read -t` and `ulimit` each parsed their count with the same Rust `str::parse`, but bash reads them with three different functions with three different grammars — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_shift`, `read`'s
+option arms, and `ulimit`'s operand parse.
+
+**What:** a numeric operand is not one thing in bash. Which helper a builtin
+reaches for decides what it accepts *and* what it says when it refuses:
+
+| helper | callers | grammar |
+|---|---|---|
+| `legal_number` (= `strtol`) | `shift`, `read -n`, `-N`, `-u` | leading blanks stepped over, trailing blanks allowed, leading `+`/`-` |
+| `all_digits` | `ulimit` | digits only — no sign, no blank, either side |
+| `uconvert` | `read -t` | `[+-]? DIGIT* ( '.' DIGIT* )?`, fully consumed |
+
+**Measured rule** (bash 5.2.37). Consequences osh got wrong:
+
+```sh
+shift " 1"      # shifts once      osh: numeric argument required
+shift "1 "      # shifts once      osh: numeric argument required
+shift "  +1"    # shifts once      osh: numeric argument required
+shift " -1"     # shift count out of range   osh: numeric argument required
+ulimit -n +5    # +5: invalid number         osh: accepted
+ulimit -c ''    # zero — an empty word passes `all_digits` vacuously
+ulimit -c 012   # 12 — read base ten, not as octal
+read -t .       # accepted; so are ``, `5.`, `.5`, `00.5`, `-0`
+read -t 1e2     # refused — `uconvert` has no exponent
+```
+
+`ulimit`'s overflow saturates at `LONG_MAX` rather than failing, and a leading
+`-` never reaches the operand at all (`ulimit -n -5` is an unknown *option*:
+rc 2 and the synopsis, not a number complaint).
+
+The refusals name the base the word reached for. That is bash's
+`sh_invalidnum` (`builtins/common.c`), which looks at the **first two bytes
+only** with the octal arm tested first: `0` before a digit → `invalid octal
+number`; `0` before a lowercase `x` → `invalid hex number`; else `invalid
+number`. So `012x` is octal, `0x3` hex, `0X3` plain, and ` 0x3` plain. It is
+used by `read -n/-N` and by `ulimit`, but **not** by `shift`, which has its own
+`numeric argument required`.
+
+**Fixed** by routing each caller to the reader bash routes it to: `shift` and
+`read -n/-N/-u` to the existing `legal_number`, `ulimit` to an inline
+`all_digits` gate with a saturating base-ten fold, and `read -t` to a new
+`read_timeout_seconds` spelling `uconvert`'s grammar. `sh_invalidnum_kind` is
+spelled once and shared. Pinned by the unit tests
+`shift_steps_over_the_blanks_strtol_steps_over`,
+`read_reads_its_counts_the_way_strtol_reads_them`,
+`read_timeout_is_uconverts_grammar_not_a_floats`,
+`ulimit_wants_digits_and_names_the_base_it_refused`, and by the corpus case
+`a-builtins-count-is-read-the-way-strtol-reads-one.sh`.
+
+**Standing lesson:** when a builtin's error message differs from bash's, the
+question is not "what does bash accept here" but "*which helper* did bash
+reach for". The messages are the helper's, not the builtin's — which is why
+one wrong answer in `ulimit` was really one wrong answer repeated in four
+builtins that should never have shared a parse.
+
+---
+
+### TD-OILS-ULIMIT-DOES-NOT-PAIR-OPTIONS-WITH-OPERANDS. bash applies `ulimit -c 3 -f 4` as two settings and silently ignores extra operands; osh reports `too many arguments` — 2026-08-04 — OPEN (deferred)
+
+**Where:** `userspace/oils/src/interp.rs` — `ulimit`'s argument loop.
+
+**What:** osh treats `ulimit` as "a set of option letters, then at most one
+operand". bash pairs each option letter with the operand that follows it, and
+drops any surplus without complaint:
+
+```sh
+ulimit -c 3 -f 4   # bash: sets core=3 and file=4    osh: too many arguments (rc 1)
+ulimit -c 1 2      # bash: core=1, rc 0, silent      osh: too many arguments (rc 1)
+```
+
+**Why deferred:** it is hard to observe on the development host — MSYS bash
+cannot modify most rlimits (EPERM on `-n`, EINVAL on `-f`; only `-c` is
+settable), so a corpus case comparing multi-limit *setting* would be measuring
+MSYS rather than bash. The single-letter paths, the listing layout and every
+error path are all pinned; this is the one shape left unmodelled.
+
+**Proper fix:** restructure the loop to consume an operand per option letter as
+it goes, applying each pair immediately, and drop trailing surplus words
+silently. Then pin it with a corpus case restricted to `-c` (the one limit MSYS
+will move) plus unit tests for the multi-letter pairing, where osh's own model
+is the reference and no host limit is involved.
+
+---
+
+### TD-OILS-CORPUS-FILTER-MATCHED-THE-LINE-NOT-THE-NAME. A corpus case filtered whole-environment listings with `grep -i zz`, so a random scratch-directory name containing `zzz` dragged `PWD` and `DIRSTACK` into the comparison — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:**
+`userspace/oils/tests/corpus/posix-mode-makes-export-and-readonly-list-in-their-own-spelling.sh`.
+
+**What:** the case exercises `export -p` / `readonly -p`, which enumerate the
+*whole* environment — most of which differs between the two shells — so it
+filtered down to the names it makes, all containing `zz`. The harness runs each
+case in a randomly named scratch directory; on one sweep in a few that name is
+something like `oshdiff-l2655zzz`, and then `declare -x PWD="…zzz"` and
+`declare -a DIRSTACK=(…zzz)` match the filter and appear on one side only.
+
+Symptom: a one-case failure in a full sweep that does not reproduce on a rerun,
+easily mistaken for a regression from whatever landed just before it.
+
+**Fixed** by anchoring the filter to the *name position* of a listing line
+rather than to the line anywhere:
+
+```sh
+mine() { grep -E '^[a-z]+( -[A-Za-z]+)* ZZ[A-Z]*(=|$)'; :; }
+```
+
+**Standing lesson:** a corpus filter is part of the comparison, not scaffolding
+around it. If it matches anywhere on the line it will eventually match
+something the environment chose rather than something the case made — so match
+the *position* the construct puts the name in. Anything else is a flake waiting
+for the right scratch directory.
+
+---
+
 ### TD-OILS-DECL-P-IGNORED-ON-THE-FUNCTION-SIDE. `-p` alongside `-f`/`-F` was read only on the variable side, so it neither suppressed the marking routes nor changed what a named listing printed — 2026-08-04 — ✅ FIXED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::declare_functions` and the

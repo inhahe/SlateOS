@@ -32357,8 +32357,43 @@ impl Shell {
                     }
                     None => (name_val.as_slice(), false, None),
                 };
-            if name.is_empty() {
-                continue;
+            // An empty name is no name, and bash says so rather than passing
+            // over the operand: `declare ""`, `declare -- ""`, `declare -a ""`,
+            // `local ""` and `typeset ""` all report `` `': not a valid
+            // identifier `` with status 1, and so does `declare '=5'` — the same
+            // operand once the `=` is split off, quoted back whole as `` `=5' ``.
+            // The identifier gate just below already gives exactly that, so an
+            // empty name needs no branch of its own; it only must not be skipped
+            // before reaching it.
+            //
+            // One operand is judged before it is spelled, though. Under `-n` the
+            // wholly empty operand — and only that one, not `declare -n '=x'` or
+            // `declare -n '='`, which carry a value and are refused for the name
+            // alone — trips the *self-reference* rule first, because the empty
+            // name is equal to the empty value an unbound name reads back as.
+            // That rule speaks in the two voices [`Shell::nameref_value_error`]
+            // gives it, and the choice is the same one: at global scope it is a
+            // hard refusal that abandons the operand, and in a function it is
+            // only a warning and the operand goes on to be spelled. Measured
+            // against bash 5.2.37 (`local -n` says `local:` for both):
+            //
+            // ```sh
+            // declare -n ""              # declare: : nameref variable self
+            //                            #   references not allowed — and no more
+            // f(){ declare -n ""; }; f   # declare: warning: : circular name
+            //                            #   reference, then `': not a valid …
+            // declare -n "" 1x           # the refusal, then `1x': not a valid …
+            // declare -n "" ""           # the refusal, twice
+            // ```
+            if nameref && name_val.is_empty() {
+                if self.local_frames.is_empty() {
+                    self.perrln(&format!(
+                        "{tag}: : nameref variable self references not allowed"
+                    ));
+                    status = 1;
+                    continue;
+                }
+                self.perrln(&format!("{tag}: warning: : circular name reference"));
             }
             // A subscripted target (`name[sub]=value` / `name[sub]`) assigns (or
             // declares) an array element; attributes still apply to the *base*
@@ -55429,6 +55464,85 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(s, 1);
         let (o, _) = run("declare 1x=v 2>&1");
         assert_eq!(o, "osh: declare: `1x=v': not a valid identifier\n");
+    }
+
+    /// The empty operand is a *name* like any other bad one: it has to be
+    /// refused, not passed over. osh used to skip an operand whose name half
+    /// was empty, so `declare ""` and `declare '=5'` both succeeded silently.
+    #[test]
+    fn declare_refuses_an_empty_operand() {
+        // Every spelling of the declaration builtins reports it, tagged with
+        // the name the command was written under.
+        for cmd in [
+            "declare \"\"",
+            "declare -- \"\"",
+            "declare -a \"\"",
+            "declare -A \"\"",
+            "declare -i \"\"",
+            "declare -r \"\"",
+            "declare -x \"\"",
+            "declare -g \"\"",
+            "typeset \"\"",
+        ] {
+            let tag = if cmd.starts_with("typeset") { "typeset" } else { "declare" };
+            let (o, s) = run(&format!("{cmd} 2>&1"));
+            assert_eq!(o, format!("osh: {tag}: `': not a valid identifier\n"), "{cmd}");
+            assert_eq!(s, 1, "{cmd}");
+        }
+        let (o, s) = run("f(){ local \"\"; }; f 2>&1");
+        assert_eq!(o, "main: local: `': not a valid identifier\n");
+        assert_eq!(s, 1);
+        // An operand that is only a value has an empty name too, and is quoted
+        // back whole — the `=` and all.
+        let (o, _) = run("declare '=5' 2>&1");
+        assert_eq!(o, "osh: declare: `=5': not a valid identifier\n");
+        let (o, _) = run("f(){ local '=5'; }; f 2>&1");
+        assert_eq!(o, "main: local: `=5': not a valid identifier\n");
+        // One refused operand does not stop the others — `w` and `v` are still
+        // bound — though the command as a whole reports the failure.
+        assert_eq!(
+            run("f(){ local \"\" w=W 2>/dev/null; echo \"$? $w\"; }; f").0,
+            "1 W\n"
+        );
+        assert_eq!(
+            run("declare \"\" v=1 2>/dev/null; echo $?; declare -p v").0,
+            "1\ndeclare -- v=\"1\"\n"
+        );
+        // Each empty operand speaks for itself, in the order written.
+        assert_eq!(
+            run("declare \"\" 1x \"\" 2>&1").0,
+            "osh: declare: `': not a valid identifier\n\
+             osh: declare: `1x': not a valid identifier\n\
+             osh: declare: `': not a valid identifier\n"
+        );
+        // Under `-n` the empty operand trips the self-reference rule before it
+        // is ever spelled — a hard refusal at global scope, a warning inside a
+        // function — and only the wholly empty one does: `-n '=x'` and `-n '='`
+        // carry a value and get the bare refusal.
+        assert_eq!(
+            run("declare -n \"\" 2>&1").0,
+            "osh: declare: : nameref variable self references not allowed\n"
+        );
+        assert_eq!(
+            run("declare -n \"\" 1x 2>&1").0,
+            "osh: declare: : nameref variable self references not allowed\n\
+             osh: declare: `1x': not a valid identifier\n"
+        );
+        assert_eq!(
+            run("f(){ declare -n \"\"; }; f 2>&1").0,
+            "main: declare: warning: : circular name reference\n\
+             main: declare: `': not a valid identifier\n"
+        );
+        assert_eq!(
+            run("f(){ local -n \"\"; }; f 2>&1").0,
+            "main: local: warning: : circular name reference\n\
+             main: local: `': not a valid identifier\n"
+        );
+        assert_eq!(run("declare -n '=x' 2>&1").0, "osh: declare: `=x': not a valid identifier\n");
+        assert_eq!(run("declare -n '=' 2>&1").0, "osh: declare: `=': not a valid identifier\n");
+        // The listing forms already answered for it and still do.
+        assert_eq!(run("declare -p \"\" 2>&1").0, "osh: declare: : not found\n");
+        assert_eq!(run("f(){ local -p \"\"; }; f 2>&1").0, "main: local: : not found\n");
     }
 
     #[test]

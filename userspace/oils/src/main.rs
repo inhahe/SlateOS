@@ -713,6 +713,15 @@ fn repl(sh: &mut Shell) -> i32 {
             if sh.exit_requested() {
                 return sh.last_status();
             }
+            // A syntax error ends a non-interactive shell here too, and for the
+            // same reason: bash's `report_syntax_error` finishes with
+            // `jump_to_top_level (FORCE_EOF)`, so `printf 'echo one\n[[ a\n== b ]]\necho tail\n' | bash`
+            // prints `one`, the diagnostic, and stops — it does not resume at
+            // the next line and run `== b ]]`. Only interactive input
+            // resynchronises and prompts again.
+            if sh.took_syntax_abandon() {
+                return sh.last_status();
+            }
         }
         // Count blank/comment-only buffers too — bash's line counter tracks
         // physical lines read, not commands run.

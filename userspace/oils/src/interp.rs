@@ -4778,6 +4778,15 @@ pub struct Shell {
     /// (`eval`, `source`, trap handlers, subshells) unwinds through `Flow::Exit`
     /// and reaches this flag only if it propagates all the way out.
     exit_requested: bool,
+    /// Set when a syntax error reached the shell's *outermost* read-eval loop.
+    /// bash's `report_syntax_error` ends a non-interactive shell there —
+    /// `jump_to_top_level (FORCE_EOF)`, which sets `EOF_Reached` and stops
+    /// `reader_loop` — so a script abandoned mid-way is abandoned whichever
+    /// reader supplied it. A script *file* and a `-c` string are one call each,
+    /// so returning from the unit loop is already the whole abandonment; stdin
+    /// is read a logical command at a time, so the REPL has to be told. Polled
+    /// (and cleared) via [`Shell::took_syntax_abandon`].
+    syntax_abandon: bool,
     /// Background jobs started with `&`, tracked so `jobs`/`wait` can report and
     /// reap them. NOT inherited by subshell clones (a subshell has no jobs).
     /// Each new job takes the lowest unused job number (bash semantics), so the
@@ -5046,6 +5055,7 @@ impl Shell {
             assign_refused_maintained: None,
             usage_suppress: 0,
             exit_requested: false,
+            syntax_abandon: false,
             jobs: Vec::new(),
             current_job: None,
             previous_job: None,
@@ -6200,6 +6210,20 @@ impl Shell {
         self.exit_requested
     }
 
+    /// Whether a syntax error has just ended a non-interactive shell — and
+    /// clears the flag, so each error is answered once.
+    ///
+    /// bash's `report_syntax_error` does not merely score the error: unless the
+    /// shell is interactive it calls `jump_to_top_level (FORCE_EOF)`, setting
+    /// `EOF_Reached` and stopping `reader_loop`. So the rest of the input is
+    /// abandoned however it arrived — and stdin, which the REPL reads a logical
+    /// command at a time, must stop reading rather than resynchronise at the
+    /// next line. (A file or a `-c` string is a single [`Shell::run_source_at`]
+    /// call, so returning from it is already the whole abandonment.)
+    pub fn took_syntax_abandon(&mut self) -> bool {
+        std::mem::take(&mut self.syntax_abandon)
+    }
+
     /// Returns `true` if `src` is an *incomplete* command — it fails to parse
     /// only because the input ends mid-construct (an unterminated quote or
     /// substitution, an unfinished `if`/`while`/`for`/`case`/`{`/`(` compound
@@ -7002,6 +7026,19 @@ impl Shell {
         if self.comsub_read_eval && self.at_outermost_read_eval() {
             self.last_status = if e.fatal { 1 } else { 2 };
             return Flow::Next;
+        }
+        // Past the backtick case, a syntax error that reached the outermost
+        // reader ends a *non-interactive* shell outright, whatever the
+        // invocation mode and whatever the status: bash's
+        // `report_syntax_error` finishes with `jump_to_top_level (FORCE_EOF)`,
+        // which sets `EOF_Reached` and so stops `reader_loop` — while an
+        // interactive shell only resynchronises and prompts again. A script
+        // file and a `-c` string are parsed as one unit, so returning from the
+        // unit loop below already abandons all that is left of them; stdin is
+        // read a logical command at a time, so its loop has to be told, which
+        // it is via [`Shell::took_syntax_abandon`].
+        if self.at_outermost_read_eval() && !self.interactive_shell {
+            self.syntax_abandon = true;
         }
         if !e.fatal {
             self.last_status = 2;
@@ -10928,6 +10965,9 @@ impl Shell {
             // A subshell's own `exit` unwinds only the subshell; the flag is a
             // top-level-input concern, so it never carries into a clone.
             exit_requested: false,
+            // Same: a syntax error inside a `$( … )` or a `( … )` is that
+            // sub-parse's own affair, and never abandons the outer reader.
+            syntax_abandon: false,
             // A clone starts with no job table. Whether it keeps it that way is
             // the caller's business: a fork *does* carry the parent's table
             // across (see [`Shell::inherit_jobs`]), but the two clones that go

@@ -35693,13 +35693,14 @@ line come from it.
 **Impact.** Cosmetic, and confined to conditionals reached through an alias.
 
 
-### TD-OILS-STDIN-RESYNCS-AFTER-A-SYNTAX-ERROR — 2026-08-05
+### TD-OILS-STDIN-RESYNCS-AFTER-A-SYNTAX-ERROR — 2026-08-05 — ✅ FIXED 2026-08-05
 
-**Where:** `userspace/oils/src/interp.rs` — the non-interactive stdin read
-loop, which keeps parsing after a syntax error where the file and `-c` routes
-correctly abandon.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::parse_error_flow` and the
+new `Shell::took_syntax_abandon`; `userspace/oils/src/main.rs` — `repl`, the
+non-interactive stdin read loop, which kept parsing after a syntax error where
+the file and `-c` routes correctly abandoned.
 
-**What.** The same script abandons from a file and continues from stdin:
+**What.** The same script abandoned from a file and continued from stdin:
 
 ```sh
 [[ a
@@ -35714,15 +35715,39 @@ osh <FILE: 3 diagnostic lines, then `line 2: ==: command not found`, then `tail`
 bash<FILE: 3 diagnostic lines, then nothing
 ```
 
-`parse_tokens`' own doc comment already states the rule — "bash abandons the
-rest of a script (or `eval`/`source` string) after a syntax error rather than
-resynchronising" — so the stdin route is the one that does not implement it.
+With a leading `echo one` the statuses diverged too: bash exited 2, osh 0.
 
-**The proper fix** is to route stdin through the same abandon-on-syntax-error
-path as a script file; the divergence is in *which* reader, not in the parser.
+**Why.** bash's `report_syntax_error` does not merely score the error. Unless
+the shell is interactive it finishes with `jump_to_top_level (FORCE_EOF)`,
+which sets `EOF_Reached` and so stops `reader_loop` outright — the rest of the
+input is never read, whichever reader supplied it.
 
-**Impact.** Real, not cosmetic: a piped script runs commands after the error
-that bash never reaches — here `== b ]]` is attempted as a command.
+osh had the behaviour, but only by accident of shape: a script file and a `-c`
+string are each **one** `run_source_at` call, so `parse_error_flow` returning
+`Flow::Next` already abandoned everything there was. Stdin is read a *logical
+command* at a time, so the same `Flow::Next` abandoned only the current buffer
+and the loop came back for the next line — which is exactly bash's
+*interactive* resynchronisation, applied to a non-interactive shell.
+
+**Fixed by** making the abandonment explicit rather than incidental.
+`parse_error_flow` now latches `Shell::syntax_abandon` when the error reaches
+the outermost read-eval loop and the shell is not interactive — after the
+backtick-body case returns, since a `` ` … ` `` body's own loop ends only
+itself. `repl` polls it with `Shell::took_syntax_abandon` (take-and-clear)
+right beside its existing `exit_requested` check and returns
+`Shell::last_status`. The flag never carries into a subshell clone.
+
+Everything else keeps its behaviour: an interactive shell still resynchronises
+and prompts again (`osh -i` runs the command after the bad one, as bash does),
+`eval` and `.`/`source` still end only their own string or file, an incomplete
+construct is still accumulated rather than reported, and a *runtime* error is
+still not a syntax error.
+
+**Pinned by**
+`tests/corpus/a-syntax-error-abandons-the-rest-of-the-input-on-every-reader.sh`
+— the same script through all three readers, nine error shapes, two
+unterminated constructs, three multi-line commands that are *not* errors, plus
+the runtime-error and `eval`/`source` non-cases and the surviving exit status.
 
 
 ### TD-OILS-COND-ERROR-DROPS-THE-EXPECTED-PAREN-LINE — 2026-08-05 — ✅ FIXED 2026-08-05

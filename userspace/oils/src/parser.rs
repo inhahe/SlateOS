@@ -41,7 +41,7 @@ use crate::assoc::AssocArray;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
-    ParseOpts, Op, ReaderWarning, Seg, Spanned, Tok, Tokenized, expand_aliases,
+    AliasExpansion, ParseOpts, Op, ReaderWarning, Seg, Spanned, Tok, TokSpan, Tokenized,
     expand_aliases_tracked, tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
@@ -159,6 +159,23 @@ pub struct ParseError {
     /// The lines here are absolute and already mapped ([`LineMap`]), the same
     /// as `line`.
     pub line_at: Vec<(u32, u32)>,
+    /// The text to echo under a `syntax error near …`, when it is not the
+    /// physical source line that `line` names.
+    ///
+    /// bash echoes `shell_input_line`, and an alias makes that something other
+    /// than a line of the script: `push_string` sets `shell_input_line` to the
+    /// replacement while it is being read. So an error found inside one is
+    /// echoed as the replacement, at the line number the alias word was on:
+    ///
+    /// ```text
+    /// alias A="[[ P;Q"
+    /// A ]]          line 2: syntax error near `;Q'
+    ///               line 2: `[[ P;Q'
+    /// ```
+    ///
+    /// `None` — the overwhelmingly common case — leaves the caller to echo the
+    /// script's own line, which is all it can do for a text it does not hold.
+    pub echo: Option<Str>,
 }
 
 impl ParseError {
@@ -171,6 +188,7 @@ impl ParseError {
             fatal: false,
             recoverable: false,
             line_at: Vec::new(),
+            echo: None,
         }
     }
 
@@ -203,6 +221,15 @@ impl ParseError {
     fn or_line(mut self, line: u32) -> Self {
         if self.line.is_none() {
             self.line = Some(line);
+        }
+        self
+    }
+
+    /// Attach the text to echo instead of the source line, if there is one and
+    /// none is set. See [`Self::echo`].
+    fn or_echo(mut self, text: Option<Str>) -> Self {
+        if self.echo.is_none() {
+            self.echo = text;
         }
         self
     }
@@ -244,6 +271,7 @@ impl From<crate::lexer::LexError> for ParseError {
             fatal: false,
             recoverable: e.recoverable,
             line_at: Vec::new(),
+            echo: None,
         }
     }
 }
@@ -331,13 +359,15 @@ pub fn parse_with_aliases(
 ) -> Result<Program, ParseError> {
     let Spanned { toks, lines, ends } = tokenize_spanned(src, opts).map_err(ParseError::from)?;
     // An alias splices in tokens that were never written where they are being
-    // read, so the offsets index nothing: drop the source and let the
-    // diagnostics fall back to naming the token.
+    // read — but they *were* written somewhere, in the alias's own value, which
+    // bash pushes onto the input and reports errors against. So the expansion
+    // carries its replacement texts along and they become further sources.
     let (toks, lines, spans) = if aliases.is_empty() {
         (toks, lines, Spans::of(src, ends))
     } else {
-        let (toks, lines) = expand_aliases(&toks, &lines, aliases, opts);
-        (toks, lines, Spans::default())
+        let x = expand_aliases_tracked(&toks, &lines, &ends, aliases, opts);
+        let spans = Spans::expanded(bytes::chars(src).collect(), &x);
+        (x.toks, x.lines, spans)
     };
     parse_tokens(toks, lines, spans, opts)
 }
@@ -679,36 +709,52 @@ impl IncrementalParser {
         let mut work = self.work.get(self.wpos..end).unwrap_or(&[]).to_vec();
         let mut work_lines = self.work_lines.get(self.wpos..end).unwrap_or(&[]).to_vec();
         let mut work_origin = vec![None; work.len()];
+        // Those tokens keep the alias replacement they were read from, so their
+        // diagnostics still quote it; the texts come along below.
+        let old = std::mem::take(&mut self.work_spans);
+        let carried = old.ends.get(self.wpos..end).unwrap_or(&[]).to_vec();
 
         let rest = self.orig.get(self.pos..).unwrap_or(&[]);
         let rest_lines = self.orig_lines.get(self.pos..).unwrap_or(&[]);
-        match aliases {
+        // The source is snapshotted rather than borrowed because history
+        // expansion can rewrite `src` later, and these offsets index the text as
+        // it was lexed.
+        let rest_ends = self.orig_ends.get(self.pos..).unwrap_or(&[]);
+        let mut spans = match aliases {
             Some(map) if !map.is_empty() => {
-                let (t, l, o) = expand_aliases_tracked(rest, rest_lines, map, self.opts);
-                work.extend(t);
-                work_lines.extend(l);
-                work_origin.extend(o.into_iter().map(|i| i.map(|i| i.saturating_add(self.pos))));
+                let x = expand_aliases_tracked(rest, rest_lines, rest_ends, map, self.opts);
+                let spans = Spans::expanded(self.src.clone(), &x);
+                work.extend(x.toks);
+                work_lines.extend(x.lines);
+                work_origin
+                    .extend(x.origin.into_iter().map(|i| i.map(|i| i.saturating_add(self.pos))));
+                spans
             }
             _ => {
                 work.extend_from_slice(rest);
                 work_lines.extend_from_slice(rest_lines);
                 work_origin.extend((self.pos..self.orig.len()).map(Some));
+                Spans {
+                    srcs: vec![self.src.clone()],
+                    parents: Vec::new(),
+                    ends: rest_ends.iter().map(|&end| TokSpan { src: 0, end }).collect(),
+                }
             }
-        }
+        };
         self.work = work;
         self.work_lines = work_lines;
         self.work_origin = work_origin;
-        // An alias-spliced token has no `orig` counterpart and so no source of
-        // its own; `u32::MAX` is the "cannot slice this" marker `Spans` reads.
-        // The rest keep the offsets their original token had, which is why the
-        // source is snapshotted here rather than borrowed: history expansion can
-        // rewrite `src` later, and these offsets index the text as it was lexed.
-        let ends = self
-            .work_origin
-            .iter()
-            .map(|o| o.and_then(|i| self.orig_ends.get(i).copied()).unwrap_or(u32::MAX))
-            .collect();
-        self.work_spans = Spans { src: self.src.clone(), ends };
+        // The replacements the carried tokens point at go after the ones this
+        // expansion pushed, so both numberings survive side by side. (Their
+        // *parents* still name `srcs[0]`, which a history expansion could since
+        // have rewritten — a stale offset there is possible in principle, but it
+        // takes an alias that both spans a `;` and changes the alias state, and
+        // a `!`-reference on the same unit.)
+        let shift = u32::try_from(spans.srcs.len()).unwrap_or(u32::MAX).saturating_sub(1);
+        spans.srcs.extend(old.srcs.into_iter().skip(1));
+        spans.parents.extend(old.parents.iter().map(|&p| p.shifted(shift)));
+        spans.ends.splice(0..0, carried.iter().map(|&s| s.shifted(shift)));
+        self.work_spans = spans;
         self.wpos = 0;
         self.last_aliases = Some(aliases.cloned());
     }
@@ -902,7 +948,7 @@ impl IncrementalParser {
         let ran_out = p.peek().is_none();
         let outcome = outcome.map_err(|e| {
             let line = p.reader_line().saturating_add(u32::from(e.is_incomplete()));
-            e.or_line(line)
+            e.or_line(line).or_echo(p.reader_echo())
         });
         self.wpos = p.pos;
         self.work = p.toks;
@@ -1407,7 +1453,7 @@ fn parse_tokens_ending(
     // the last token's line.
     parsed.map_err(|e| {
         let line = p.reader_line().saturating_add(u32::from(e.is_incomplete()));
-        e.or_line(line)
+        e.or_line(line).or_echo(p.reader_echo())
     })
 }
 
@@ -1439,24 +1485,72 @@ struct Parser {
 /// because the whitespace that decides where the slice stops is the very thing
 /// lexing threw away.
 ///
-/// Empty when the stream has no single text behind it — an alias-expanded parse
-/// splices in tokens that were never written where they are being read — in
-/// which case the diagnostics fall back to naming the token.
+/// There is more than one such text once aliases are in play, because bash reads
+/// an alias by pushing its replacement onto the *input*: `push_string` (parse.y)
+/// makes the replacement `shell_input_line` outright, and `pop_string` restores
+/// what it displaced when the reader passes its end. So a token an alias spliced
+/// in does have a text of its own after all — the alias's — and an error found
+/// while the reader is still inside it is reported against that text, both in the
+/// `near` slice and in the source line echoed underneath:
+///
+/// ```text
+/// alias A="[[ P;Q"
+/// A ]]          line 2: syntax error near `;Q'
+///               line 2: `[[ P;Q'
+/// ```
+///
+/// Empty when the stream has no text behind it at all, in which case the
+/// diagnostics fall back to naming the token.
 #[derive(Default)]
 struct Spans {
-    /// Exactly the text that was tokenized: NULs already stripped, since the
-    /// offsets index that text and not whatever the caller read (see
-    /// [`crate::lexer::strip_nuls`]).
-    src: Vec<Ch>,
-    /// Parallel to the token stream: the character offset into `src` just past
-    /// each token's last character. `u32::MAX` marks a token with no source of
-    /// its own — one an alias spliced in — for which no slice can be taken.
-    ends: Vec<u32>,
+    /// The texts the tokens were read from. `srcs[0]` is the shell input itself
+    /// — exactly what was tokenized, NULs already stripped, since the offsets
+    /// index that text and not whatever the caller read (see
+    /// [`crate::lexer::strip_nuls`]) — and the rest are alias replacements.
+    srcs: Vec<Vec<Ch>>,
+    /// Parallel to `srcs` minus its first entry: where the reader returns when it
+    /// runs off the end of `srcs[i + 1]`, which is bash's `pop_string`. See
+    /// [`Spans::reader_stop`].
+    parents: Vec<TokSpan>,
+    /// Parallel to the token stream: which text each token was read from, and the
+    /// character offset into it just past the token's last character. An `end` of
+    /// `u32::MAX` marks a token with no text of its own, for which no slice can
+    /// be taken.
+    ends: Vec<TokSpan>,
 }
 
 impl Spans {
     fn of(src: BStr<'_>, ends: Vec<u32>) -> Self {
-        Self { src: bytes::chars(src).collect(), ends }
+        Self {
+            srcs: vec![bytes::chars(src).collect()],
+            parents: Vec::new(),
+            ends: ends.into_iter().map(|end| TokSpan { src: 0, end }).collect(),
+        }
+    }
+
+    /// The spans of an alias-expanded stream: the shell's own text first, then
+    /// every replacement the pass pushed into it, in the order it pushed them —
+    /// which is the numbering [`crate::lexer::TokSpan::src`] uses.
+    fn expanded(src: Vec<Ch>, x: &AliasExpansion) -> Self {
+        Self {
+            srcs: std::iter::once(src)
+                .chain(x.bodies.iter().map(|b| bytes::chars(&b.text).collect()))
+                .collect(),
+            parents: x.bodies.iter().map(|b| b.parent).collect(),
+            ends: x.spans.clone(),
+        }
+    }
+
+    /// The text with the given [`TokSpan::src`] id.
+    fn text(&self, src: u32) -> Option<&[Ch]> {
+        self.srcs.get(src as usize).map(Vec::as_slice)
+    }
+
+    /// Where the reader goes when it reads past the end of text `src`: bash's
+    /// `pop_string`, restoring the line the alias replacement displaced. `None`
+    /// for the shell's own input, which has nothing under it.
+    fn parent(&self, src: u32) -> Option<TokSpan> {
+        self.parents.get((src as usize).checked_sub(1)?).copied()
     }
 
     /// The text bash would report an error "near", given that the reader had
@@ -1476,16 +1570,18 @@ impl Spans {
     /// - exactly one character written flush *after* it comes along too, and no
     ///   more: `[[ P;QRS ]]` reports `;Q`, while `[[ P; Q ]]` reports only `;`.
     ///
-    /// `None` when there is no source to slice — an alias-expanded stream, or a
-    /// token that is not in this stream at all — leaving the caller to name the
+    /// `None` when there is no source to slice — a token with no text of its own,
+    /// or one that is not in this stream at all — leaving the caller to name the
     /// token instead.
     fn near(&self, pos: usize, r: Reader) -> Option<Str> {
-        let t = &self.src;
         // Where the reader stopped, not where the token ended: a `\<newline>`
         // its lookahead deleted is text the parser never had, so
-        // `[[ P;\<newline>Q ]]` is reported near `Q`, not near `;\`. See
-        // [`Spans::reader_stop`].
-        let (mut i, _) = self.reader_stop(pos, r)?;
+        // `[[ P;\<newline>Q ]]` is reported near `Q`, not near `;\`. And *which*
+        // text it stopped in, since an alias replacement it has run off the end
+        // of is no longer the current input line. See [`Spans::reader_stop`].
+        let (stop, _) = self.reader_stop(pos, r)?;
+        let t = self.text(stop.src)?;
+        let mut i = stop.end as usize;
         if t.is_empty() || i > t.len() {
             return None;
         }
@@ -1550,8 +1646,8 @@ impl Spans {
     }
 
     /// Where bash's reader had got to when the token at `pos` was handed over:
-    /// the offset into `src` it stopped at, and how many input lines it fetched
-    /// getting there.
+    /// the text it was reading and the offset into it it stopped at, plus how
+    /// many input lines it fetched getting there.
     ///
     /// Both halves come out of the same walk because both are decided by the
     /// same thing — how far the token's own reading looked past its last
@@ -1565,7 +1661,7 @@ impl Spans {
     /// - Anything else looked at least once more, so a continuation flush
     ///   against it is deleted and the reader is dragged onto the next line:
     ///   `[[ a>\<newline>Q ]]` errors on line 2, near `Q`. The lexer may have
-    ///   eaten that continuation into the span already ([`Spans::ends_in_cont`])
+    ///   eaten that continuation into the span already ([`ends_in_cont`])
     ///   or left it ahead — after `;;` it eats, after `)` it does not — so both
     ///   sides are counted, and they cannot double-count, since a span that ends
     ///   in one leaves the walk starting past it.
@@ -1579,46 +1675,89 @@ impl Spans {
     ///   `[[ 2>\<newline>Q ]]` errors on line 2, near `Q`, while the very same
     ///   token in `[[ 2>Q ]]` errors on line 1, near `2>`.
     ///
+    /// A reader that looks past the end of an *alias replacement* leaves it: that
+    /// read is the `shell_getc` which finds the pushed string used up and calls
+    /// `pop_string`, so the current input line becomes the one the alias word was
+    /// written on again, at the offset just past that word. Which is why the same
+    /// `;` is blamed on two different texts depending only on whether anything
+    /// follows it inside the alias:
+    ///
+    /// ```text
+    /// alias A="[[ P;Q";  A ]]      near `;Q'   line `[[ P;Q'
+    /// alias A="[[ P ;";  A Q ]]    near `A'    line `A Q ]]'
+    /// ```
+    ///
+    /// An operator that never looked again (`r.peeks` false) has not made that
+    /// read, so it stays inside the replacement even when it ends flush against
+    /// its last character — `alias A="[[ a>>"; A b ]]` is still reported near
+    /// `a>>` against `[[ a>>`.
+    ///
     /// `None` when the token has no source of its own to measure from.
-    fn reader_stop(&self, pos: usize, r: Reader) -> Option<(usize, u32)> {
-        let end = *self.ends.get(pos)? as usize;
-        if !r.peeks {
-            return Some((end, 0));
+    fn reader_stop(&self, pos: usize, r: Reader) -> Option<(TokSpan, u32)> {
+        let mut at = *self.ends.get(pos)?;
+        if at.end == u32::MAX {
+            return None;
         }
-        let mut n = u32::from(self.ends_in_cont(end));
+        if !r.peeks {
+            return Some((at, 0));
+        }
+        // The look past the token pops every replacement it has exhausted.
+        while at.end as usize >= self.text(at.src)?.len()
+            && let Some(parent) = self.parent(at.src)
+        {
+            at = parent;
+        }
+        let t = self.text(at.src)?;
+        let end = at.end as usize;
+        let mut n = u32::from(ends_in_cont(t, end));
         let mut i = end;
-        while let Some(len) = cont_len(self.src.get(i..).unwrap_or(&[])) {
+        while let Some(len) = cont_len(t.get(i..).unwrap_or(&[])) {
             i = i.saturating_add(len);
             n = n.saturating_add(1);
         }
-        if n == 0 && r.word && matches!(self.src.get(end), Some(&Ch::U('<' | '>'))) {
+        if n == 0 && r.word && matches!(t.get(end), Some(&Ch::U('<' | '>'))) {
             let mut j = end.saturating_add(1);
             let mut m = 0u32;
-            while let Some(len) = cont_len(self.src.get(j..).unwrap_or(&[])) {
+            while let Some(len) = cont_len(t.get(j..).unwrap_or(&[])) {
                 j = j.saturating_add(len);
                 m = m.saturating_add(1);
             }
             if m > 0 {
-                return Some((j, m));
+                return Some((TokSpan { src: at.src, end: u32::try_from(j).ok()? }, m));
             }
         }
-        Some((i, n))
+        Some((TokSpan { src: at.src, end: u32::try_from(i).ok()? }, n))
     }
 
-    /// Whether the character just before `end` is the newline of a `\<newline>`
-    /// the lexer deleted. A *plain* newline is not one: it is the last character
-    /// of the line it terminates, and bash bumps `line_number` only on the fetch
-    /// that follows.
-    fn ends_in_cont(&self, end: usize) -> bool {
-        if self.src.get(end.wrapping_sub(1)) != Some(&Ch::U('\n')) {
-            return false;
+    /// The text bash would echo under the diagnostic for an error at the token
+    /// `pos` — `shell_input_line` as it stands where the reader stopped — when
+    /// that is an alias replacement rather than the shell's own input.
+    ///
+    /// `None` for the shell's own input, which the caller echoes by line number
+    /// instead: that is the physical line, and the reader's `src` says nothing
+    /// about which of them it is on.
+    fn echo_line(&self, pos: usize, r: Reader) -> Option<Str> {
+        let (stop, _) = self.reader_stop(pos, r)?;
+        if stop.src == 0 {
+            return None;
         }
-        // `\<newline>`, or the `\<CR><LF>` a CRLF file writes.
-        match self.src.get(end.wrapping_sub(2)) {
-            Some(&Ch::U('\\')) => true,
-            Some(&Ch::U('\r')) => self.src.get(end.wrapping_sub(3)) == Some(&Ch::U('\\')),
-            _ => false,
-        }
+        Some(bytes::from_chars(self.text(stop.src)?.iter().copied()))
+    }
+}
+
+/// Whether the character just before `end` in `t` is the newline of a
+/// `\<newline>` the lexer deleted. A *plain* newline is not one: it is the last
+/// character of the line it terminates, and bash bumps `line_number` only on the
+/// fetch that follows.
+fn ends_in_cont(t: &[Ch], end: usize) -> bool {
+    if t.get(end.wrapping_sub(1)) != Some(&Ch::U('\n')) {
+        return false;
+    }
+    // `\<newline>`, or the `\<CR><LF>` a CRLF file writes.
+    match t.get(end.wrapping_sub(2)) {
+        Some(&Ch::U('\\')) => true,
+        Some(&Ch::U('\r')) => t.get(end.wrapping_sub(3)) == Some(&Ch::U('\\')),
+        _ => false,
     }
 }
 
@@ -1743,6 +1882,15 @@ impl Parser {
     fn reader_line(&self) -> u32 {
         let r = Reader::of(self.toks.get(self.pos));
         self.cur_line().saturating_add(self.spans.cont_lines(self.pos, r))
+    }
+
+    /// The text bash would echo under a `syntax error near …` at the current
+    /// token, when that is an alias replacement rather than the script itself.
+    /// Read from the same cursor as [`Parser::reader_line`], because both ask
+    /// the same question — where bash's reader is. See [`Spans::echo_line`].
+    fn reader_echo(&self) -> Option<Str> {
+        let r = Reader::of(self.toks.get(self.pos));
+        self.spans.echo_line(self.pos, r)
     }
 
     fn bump(&mut self) -> Option<Tok> {

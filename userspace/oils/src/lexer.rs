@@ -1172,14 +1172,80 @@ enum Prev {
     Other,
 }
 
+/// Which text a token was read from, and where in it the token ends.
+///
+/// An alias pass produces tokens from several texts at once, because bash reads
+/// an alias by *pushing its replacement onto the input*: `push_string` (parse.y)
+/// sets `shell_input_line` to the replacement outright, and `pop_string` puts
+/// the old line back when the reader passes its end. So while the reader is
+/// inside a replacement, "the current input line" — the thing every `syntax
+/// error near …` slice and every echoed source line comes from — *is* the
+/// replacement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokSpan {
+    /// Which text this token was read from. `0` is the text the alias pass was
+    /// handed; `n + 1` is `AliasExpansion::bodies[n]`.
+    pub src: u32,
+    /// The character offset into that text just past the token's last
+    /// character, or [`u32::MAX`] for a token with no text of its own.
+    pub end: u32,
+}
+
+impl TokSpan {
+    /// The same span against a source table whose replacements have been
+    /// renumbered `by` places further along. `0` is the shell's own input in
+    /// every table, so it never moves.
+    #[must_use]
+    pub fn shifted(self, by: u32) -> Self {
+        if self.src == 0 {
+            self
+        } else {
+            Self { src: self.src.saturating_add(by), ..self }
+        }
+    }
+}
+
+/// An alias replacement that was spliced into a token stream, and where the
+/// reader returns when it runs off the end of it.
+#[derive(Clone, Debug)]
+pub struct AliasBody {
+    /// The replacement text, exactly as it was tokenized.
+    pub text: Str,
+    /// bash's `pop_string`: the saved `shell_input_line` and
+    /// `shell_input_line_index` this push displaced — that is, the text the
+    /// alias word itself was written in and the offset just past that word.
+    pub parent: TokSpan,
+}
+
+/// What [`expand_aliases_tracked`] hands back: the expanded stream plus enough
+/// bookkeeping to resume the parse and to blame the right text for an error.
+pub struct AliasExpansion {
+    pub toks: Vec<Tok>,
+    /// Parallel to `toks`: the 1-based source line of each token. A replacement's
+    /// tokens all inherit the alias word's line, as bash's do.
+    pub lines: Vec<u32>,
+    /// Parallel to `toks`: the index of the input token each came from, or
+    /// `None` when an alias's replacement text spliced it in.
+    pub origin: Vec<Option<usize>>,
+    /// Parallel to `toks`: the text each token was read from. See [`TokSpan`].
+    pub spans: Vec<TokSpan>,
+    /// The replacement texts that were pushed, in the order they were pushed.
+    pub bodies: Vec<AliasBody>,
+}
+
 /// The output of an alias pass, plus the running state its command-position
-/// test needs. The three vectors are parallel and always pushed together.
+/// test needs. The four vectors are parallel and always pushed together.
 struct AliasOut {
     toks: Vec<Tok>,
     lines: Vec<u32>,
     /// For each output token, the index of the input token it came from, or
     /// `None` when an alias's replacement text spliced it in.
     origin: Vec<Option<usize>>,
+    /// For each output token, the text it was read from. See [`TokSpan`].
+    spans: Vec<TokSpan>,
+    /// The replacement texts pushed so far; a token's [`TokSpan::src`] of
+    /// `n + 1` names `bodies[n]`.
+    bodies: Vec<AliasBody>,
     prev: Prev,
     /// bash's `PST_REDIRLIST`: everything read of the simple command so far has
     /// been a redirection, so the word after one is still the *command* word.
@@ -1194,6 +1260,8 @@ impl AliasOut {
             toks: Vec::new(),
             lines: Vec::new(),
             origin: Vec::new(),
+            spans: Vec::new(),
+            bodies: Vec::new(),
             prev: Prev::Start,
             redir_list: true,
         }
@@ -1316,40 +1384,55 @@ fn starts_command(prev: Option<&Tok>) -> bool {
 /// expansion candidate (guarded against recursion by `active`, so `alias
 /// ls='ls -l'` terminates). If an alias value ends in a blank, the *next* word
 /// is also checked (bash's trailing-blank rule, enabling `alias sudo='sudo '`).
-#[must_use]
-pub fn expand_aliases(
-    toks: &[Tok],
-    lines: &[u32],
-    aliases: &crate::assoc::AssocArray,
-    opts: ParseOpts,
-) -> (Vec<Tok>, Vec<u32>) {
-    let (out, out_lines, _) = expand_aliases_tracked(toks, lines, aliases, opts);
-    (out, out_lines)
-}
-
-/// [`expand_aliases`] plus a parallel *origin* vector: for each output token,
+///
+/// `ends` is parallel to `toks`: the offset into the text they were lexed from
+/// just past each token. It is carried through so that a diagnostic raised while
+/// the reader is inside a replacement can quote *that* text — see [`TokSpan`].
+/// Pass an empty slice where no such text exists.
+///
+/// Beside the expanded stream comes an *origin* vector: for each output token,
 /// the index of the input token it came from, or `None` when the token was
 /// spliced in by an alias's replacement text.
-///
-/// [`crate::parser::IncrementalParser`] needs this to resume: after executing
-/// one item it must know which *original* token to continue from, and must not
+/// [`crate::parser::IncrementalParser`] needs it to resume — after executing one
+/// item it must know which *original* token to continue from, and must not
 /// re-expand tokens an alias already produced.
 #[must_use]
 pub fn expand_aliases_tracked(
     toks: &[Tok],
     lines: &[u32],
+    ends: &[u32],
     aliases: &crate::assoc::AssocArray,
     opts: ParseOpts,
-) -> (Vec<Tok>, Vec<u32>, Vec<Option<usize>>) {
+) -> AliasExpansion {
     let mut active = std::collections::BTreeSet::new();
     let mut out = AliasOut::new();
-    expand_aliases_inner(toks, lines, aliases, opts, &mut active, &mut out, true);
-    (out.toks, out.lines, out.origin)
+    let input = AliasInput { toks, lines, ends, src: 0 };
+    expand_aliases_inner(&input, aliases, opts, &mut active, &mut out, true);
+    AliasExpansion {
+        toks: out.toks,
+        lines: out.lines,
+        origin: out.origin,
+        spans: out.spans,
+        bodies: out.bodies,
+    }
+}
+
+/// One text's worth of tokens for the alias pass to walk: the stream, the line
+/// and end offset of each token, and which text those offsets index. The pass
+/// recurses on this — a replacement is just another text to read.
+struct AliasInput<'a> {
+    toks: &'a [Tok],
+    lines: &'a [u32],
+    /// Parallel to `toks`: where each token ends in the text named by `src`.
+    /// Empty when that text is unknown, which makes every token here
+    /// unsliceable.
+    ends: &'a [u32],
+    /// Which text these were read from, as a [`TokSpan::src`].
+    src: u32,
 }
 
 fn expand_aliases_inner(
-    toks: &[Tok],
-    lines: &[u32],
+    inp: &AliasInput<'_>,
     aliases: &crate::assoc::AssocArray,
     opts: ParseOpts,
     active: &mut std::collections::BTreeSet<Str>,
@@ -1358,6 +1441,11 @@ fn expand_aliases_inner(
     // in the caller's stream, so they record origin `None`.
     from_input: bool,
 ) {
+    let &AliasInput { toks, lines, ends, src } = inp;
+    let span_of = |i: usize| TokSpan {
+        src,
+        end: ends.get(i).copied().unwrap_or(u32::MAX),
+    };
     // Whether the *next* token must be treated as command position regardless of
     // structure (carried across an alias whose value ended in a blank).
     let mut force = false;
@@ -1372,18 +1460,31 @@ fn expand_aliases_inner(
             && let [Seg::Lit(name)] = segs.as_slice()
             && !active.contains(name)
             && let Some(val) = aliases.get(name)
-            && let Ok(mut repl) = tokenize(val, opts)
+            && let Ok(Spanned { toks: mut repl, ends: mut repl_ends, .. }) =
+                tokenize_spanned(val, opts)
         {
             // Drop a trailing newline the lexer may append so the splice stays
             // within the current command.
             while matches!(repl.last(), Some(Tok::Newline)) {
                 repl.pop();
+                repl_ends.pop();
             }
             // Replacement tokens all inherit the alias word's source line.
             let repl_lines = vec![tok_line; repl.len()];
             let mark = out.toks.len();
+            // bash's `push_string`: the replacement becomes the current input
+            // line, and the line it displaced — with the reader's index just
+            // past the alias word — is stacked for `pop_string` to restore.
+            out.bodies.push(AliasBody { text: val.to_vec(), parent: span_of(i) });
+            let body_src = u32::try_from(out.bodies.len()).unwrap_or(u32::MAX);
             active.insert(name.clone());
-            expand_aliases_inner(&repl, &repl_lines, aliases, opts, active, out, false);
+            let body = AliasInput {
+                toks: &repl,
+                lines: &repl_lines,
+                ends: &repl_ends,
+                src: body_src,
+            };
+            expand_aliases_inner(&body, aliases, opts, active, out, false);
             active.remove(name);
             // The *first* token of the replacement stands in for the alias word
             // itself, so it keeps the alias word's origin; only the tokens after
@@ -1403,6 +1504,7 @@ fn expand_aliases_inner(
         out.toks.push(tok.clone());
         out.lines.push(tok_line);
         out.origin.push(if from_input { Some(i) } else { None });
+        out.spans.push(span_of(i));
         out.advance(tok, at_cmd);
     }
 }

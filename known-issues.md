@@ -35404,9 +35404,10 @@ though bash's `shell_input_line` there is the enclosing line — measured, befor
 any plumbing was written (`echo $([[ a>>b ]])` reports `a>>b`, not `$([[ a>>b`).
 
 An alias-expanded parse splices in tokens that were never written where they are
-being read, so its offsets index nothing: that path drops the spans (`u32::MAX`
-in `IncrementalParser`'s rebuilt `ends`) and falls back to naming the token via
-`cond_error_near`. See TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT.
+being read — but they *were* written somewhere, in the alias's value, and bash
+reads that value by pushing it onto the input, so the scan runs over it. The
+spans therefore name a *text* as well as an offset; see
+TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT for that rule.
 
 **Pinned by** `tests/corpus/a-conditional-error-quotes-the-source-not-the-token.sh`.
 
@@ -35661,13 +35662,15 @@ Primary position is wherever a *term* is expected, not just the first one, so
 **Pinned by** `tests/corpus/a-conditional-names-the-token-that-cannot-begin-a-term.sh`.
 
 
-### TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT — 2026-08-05
+### TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT — 2026-08-05 — ✅ FIXED 2026-08-05
 
-**Where:** `userspace/oils/src/parser.rs` — the alias path in
-`IncrementalParser::rebuild`, which marks alias-spliced tokens `u32::MAX` so
-`Spans::near` declines and the diagnostic falls back to `cond_error_near`.
+**Where:** `userspace/oils/src/lexer.rs` — `expand_aliases_tracked` and the new
+`TokSpan` / `AliasBody` / `AliasExpansion`; `userspace/oils/src/parser.rs` —
+`Spans` (now a *table* of texts), `Spans::reader_stop`, the new
+`Spans::echo_line` / `Parser::reader_echo`, and `ParseError::echo`;
+`userspace/oils/src/interp.rs` — `Shell::format_parse_error`.
 
-**What.** When the conditional's text arrived through an alias, bash reports
+**What.** When the offending text arrived through an alias, bash reported
 against the *expansion* and osh against the line as written:
 
 ```sh
@@ -35681,16 +35684,48 @@ bash: line 3: syntax error near `;Q'   line 3: `[[ P;Q'
 osh:  line 3: syntax error near `;'    line 3: `A ]]'
 ```
 
-The first diagnostic line agrees. This is deliberate for now: an alias splices
-in tokens that were never written where they are being read, so their offsets
-index nothing, and inventing a slice would be worse than naming the token.
+**Why.** osh treated an alias splice as text that does not exist: the spliced
+tokens were marked `u32::MAX`, `Spans::near` declined, and the diagnostic fell
+back to naming the token and echoing the physical line. But the tokens *were*
+written somewhere — in the alias's value — and bash reads that value by
+pushing it onto the **input**: `push_string` (parse.y 1932) assigns
+`shell_input_line = s` outright, and `pop_string` restores the line it
+displaced once the reader passes the replacement's end. So while the reader is
+inside a replacement, the current input line *is* the replacement, and that is
+what `error_token_from_text` slices and what `report_syntax_error` echoes.
 
-**The proper fix** is to keep the alias's *own* text beside the spliced tokens
-— bash's `shell_input_line` genuinely becomes the expansion, because the alias
-is pushed onto the input stack and re-read — so both the slice and the echoed
-line come from it.
+The pop is the whole of the rest of the rule, and it is observable: the same
+`;` is blamed on two different texts depending only on whether anything
+follows it inside the alias.
 
-**Impact.** Cosmetic, and confined to conditionals reached through an alias.
+```text
+alias A="[[ P;Q";  A ]]      near `;Q'   line `[[ P;Q'
+alias A="[[ P ;";  A Q ]]    near `A'    line `A Q ]]'
+```
+
+In the second the `;` is the replacement's last character, so the look past it
+is the read that finds the pushed string used up — and the error lands on the
+written line, at the offset just past the alias word. An operator completed by
+its own lookahead never makes that read, so it stays inside the replacement
+even flush against its end (`alias A="[[ a>>"; A b ]]` → near `a>>`, line
+`[[ a>>`).
+
+**Fixed by** making a replacement a first-class *source*. `Spans` holds a table
+of texts rather than one: `srcs[0]` is the shell's own input and the rest are
+the replacements the alias pass pushed, each with the `parent` span
+`pop_string` would restore. Every token carries a `TokSpan` — which text it
+was read from and where in it it ends — so `Spans::near` runs bash's textual
+scan over the right text, and `Spans::reader_stop` pops a replacement the
+reader has read past before scanning. The echoed line follows the same walk
+(`Spans::echo_line`), riding out on `ParseError::echo` for
+`format_parse_error` to print in place of the physical line.
+
+The line *number* is unchanged and still the alias word's: a replacement is not
+a line of the script and has none of its own.
+
+**Pinned by** `tests/corpus/an-alias-is-the-input-line-while-it-is-being-read.sh`
+— 21 shapes, including both sides of the pop, the non-peeking operator, a
+nested alias, and a capture.
 
 
 ### TD-OILS-STDIN-RESYNCS-AFTER-A-SYNTAX-ERROR — 2026-08-05 — ✅ FIXED 2026-08-05
@@ -36025,3 +36060,41 @@ which is the ordinary stderr-only pipe, already drained before the wait.
 which re-invokes the shell under test and so tripped over this while pinning
 something else.
 
+
+### TD-OILS-A-SUBSTITUTION-INSIDE-AN-ALIAS-IS-BLAMED-ON-ITS-OWN-LINE-1 — 2026-08-05
+
+**Where:** `userspace/oils/src/lexer.rs` — `expand_aliases_inner`, which
+re-tokenizes an alias value with `tokenize_spanned(val, opts)`. That lex starts
+its line numbering at 1, and a `$( … )` in the value carries those numbers out
+with it.
+
+**What.** A parse error inside a command substitution written in an *alias
+value* is reported at line 1 of the value rather than at the alias's call site:
+
+```sh
+shopt -s expand_aliases
+alias A="echo \$( ! )"
+A
+```
+
+```text
+bash: line 3: syntax error near unexpected token `)'   line 3: `A'
+osh:  line 1: syntax error near unexpected token `)'   line 1: `shopt -s expand_aliases'
+```
+
+The same substitution written directly is right (`echo $( ! )` on line 2 reports
+line 2), so this is the alias path alone. Note bash blames the *written* line
+here, not the replacement — the body is parsed after the reader has already
+passed the alias's end, so `pop_string` has run (see
+TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT for that rule).
+
+**The proper fix** is to map the replacement's line numbers onto the alias
+word's line the way the alias pass already maps its tokens' — a `LineMap` for
+the nested lex, so a substitution body parsed out of a replacement reports the
+call site. The echoed line then falls out of the existing `pop_string` walk.
+
+**Impact.** Cosmetic, and confined to a substitution that fails to parse inside
+an alias value. Predates the `TokSpan` work (verified against the parent commit).
+
+**Found by** the probe matrix for
+TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT.

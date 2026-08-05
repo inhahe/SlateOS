@@ -41677,8 +41677,17 @@ impl Shell {
         // The echo is the source line *verbatim*: it is what the user typed, and
         // a shell word may hold any byte, so it goes back out unchanged rather
         // than through a decode that would rewrite the very text being blamed.
+        //
+        // It is not always a line of the script, though: bash echoes
+        // `shell_input_line`, and an alias replacement *becomes* that while the
+        // reader is inside it, so an error found there is echoed as the
+        // replacement instead — see [`crate::parser::ParseError::echo`], which
+        // carries it when that is so.
         if bytes::contains(&e.msg, b"syntax error near ")
-            && let Some(text) = map.unmap(line).and_then(|n| nth_source_line(src, n))
+            && let Some(text) = e
+                .echo
+                .as_deref()
+                .or_else(|| map.unmap(line).and_then(|n| nth_source_line(src, n)))
         {
             out.push_str(&bfmt![b"\n", &prefix, b"`", text, b"'"]);
         }

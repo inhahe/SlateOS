@@ -63,4 +63,14 @@ echo "=== …for declare too"
 f6() { declare +p - >out 2>err; r; }
 f6
 
+echo "=== a -- ends the scan, so a -p behind one selects nothing"
+declare -- -p >out 2>err; r
+declare -r -- -p >out 2>err; r
+declare -- -p v >out 2>err; r
+typeset -- -p >out 2>err; r
+f7() { local w=W; local -- -p >out 2>err; r; }
+f7
+f8() { local w=W; local -r -- -p >out 2>err; r; }
+f8
+
 rm -f out err

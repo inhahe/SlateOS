@@ -24121,11 +24121,7 @@ impl Shell {
                 } else if lead.contains(&b'F') || lead.contains(&b'f') {
                     // `declare -F`/`-f` operate on functions (name listing).
                     self.declare_functions(args, lead.contains(&b'F'), out, redir)
-                } else if args
-                    .iter()
-                    .take_while(|a| Self::is_decl_flag_word(a))
-                    .any(|a| a.contains(&b'p'))
-                {
+                } else if Self::declare_wants_print(args) {
                     // Unlike `-f`/`-F`, `p` is honoured whichever sign carries
                     // it: `declare +rp` is a listing, not a declaration. The
                     // sign still decides what it *filters* by, though — see
@@ -24169,8 +24165,7 @@ impl Shell {
                 // reports `local: w: not found` rather than declaring it).
                 // Reading only the minus direction here made both of those
                 // declare nothing and print nothing.
-                let listing =
-                    args.iter().take_while(|a| Self::is_decl_flag_word(a)).any(|a| a.contains(&b'p'));
+                let listing = Self::declare_wants_print(args);
                 // Both of `local`'s standing refusals come before the routing,
                 // and in this order — `local -q` outside a function is the
                 // frame refusal, not the option one. `declare_option_check`
@@ -31253,6 +31248,29 @@ impl Shell {
             }
         }
         i
+    }
+
+    /// Whether a `p` was written among the leading flag words — the letter that
+    /// turns a declaration builtin into a listing.
+    ///
+    /// Either sign carries it (`declare +rp` lists just as `-rp` does; the sign
+    /// only decides what the listing filters *by*), but a `--` ends the scan, so
+    /// a `-p` behind one is an operand and a bad name rather than a request to
+    /// list. Measured against bash 5.2.37:
+    ///
+    /// ```sh
+    /// declare -- -p       # declare: `-p': not a valid identifier — no listing
+    /// declare -r -- -p    # likewise
+    /// f(){ local -- -p; } # local: `-p': not a valid identifier
+    /// ```
+    ///
+    /// The routing used a bare `take_while(is_decl_flag_word)`, which reads `--`
+    /// as a flag word like any other and walks straight past it — so
+    /// `declare -- -p` dumped every variable in the shell.
+    fn declare_wants_print(args: &[Str]) -> bool {
+        args.iter()
+            .take_while(|a| Self::is_decl_flag_word(a) && a.as_slice() != b"--")
+            .any(|a| a.contains(&b'p'))
     }
 
     /// Whether `w` is a **flag word** to a declaration builtin: a sign followed
@@ -54362,6 +54380,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("f() { local w=W; local +p; }; f").0, "declare -- w=\"W\"\n");
         assert_eq!(run("f() { local w=W; local +rp; }; f").0, "declare -- w=\"W\"\n");
         assert_eq!(run("f() { local +p w; }; f 2>&1").0, "main: local: w: not found\n");
+        // A `--` ends the scan too, so a `-p` written behind one is an operand
+        // and a bad name — not a request to list. The routing walked straight
+        // past the `--` (it is a flag word like any other to
+        // `is_decl_flag_word`), so `declare -- -p` dumped the whole table.
+        assert_eq!(e("declare -- -p"), "0|1");
+        assert_eq!(
+            run("declare -- -p 2>&1").0,
+            "osh: declare: `-p': not a valid identifier\n"
+        );
+        assert_eq!(e("declare -r -- -p"), "0|1");
+        assert_eq!(e("v=V; declare -- -p v"), "0|1");
+        assert_eq!(
+            run("f(){ local -- -p; }; f 2>&1").0,
+            "main: local: `-p': not a valid identifier\n"
+        );
     }
 
     /// In posix mode `export -p` and `readonly -p` print in their own spelling

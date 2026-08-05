@@ -33,10 +33,9 @@
 #
 # A `\<newline>` is deleted by the reader before the parser sees any of this, so
 # the character after the token is the first one on the next line:
-# `[[ P;\<newline>Q ]]` is near `Q', with no backslash in sight. (bash also
-# blames that error on line 2 and echoes line 2's text; osh says line 1 — see
-# TD-OILS-COND-ERROR-LINE-AFTER-A-CONTINUATION in known-issues.md, which is why
-# that one case is run for its `near' text alone.)
+# `[[ P;\<newline>Q ]]` is near `Q', with no backslash in sight. Deleting it cost
+# the reader a fetch, so the error is blamed on line 2 as well — see
+# a-continuation-after-a-token-moves-the-error-down-a-line.sh.
 #
 # Each case runs under `eval` in a subshell, since a syntax error otherwise
 # abandons the rest of the input.
@@ -85,8 +84,8 @@ e '[[ a'
 e '[[ a -eq'
 
 echo "=== the reader deleted the line continuation"
-( eval '[[ P;\
-Q ]]' ) 2>&1 | sed -n 's/.*\(syntax error near .*\)/\1/p'
+e '[[ P;\
+Q ]]'
 e '[[ a b\
 c ]]'
 e '[[ -z x y\

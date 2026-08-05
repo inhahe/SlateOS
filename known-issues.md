@@ -35478,10 +35478,10 @@ quoted delimiter, and a comment (which therefore still ends at its newline).
 **Pinned by** `tests/corpus/a-line-continuation-is-deleted-before-anything-reads-it.sh`.
 
 
-### TD-OILS-COND-ERROR-LINE-AFTER-A-CONTINUATION — 2026-08-05
+### TD-OILS-COND-ERROR-LINE-AFTER-A-CONTINUATION — 2026-08-05 — ✅ FIXED 2026-08-05
 
-**Where:** `userspace/oils/src/parser.rs` — the line a `[[ ]]` syntax error is
-blamed on, and the source line echoed under it.
+**Where:** `userspace/oils/src/parser.rs` — the line a syntax error is blamed on,
+and the source line echoed under it.
 
 **What.** With a line continuation between the offending token and the
 one-character lookahead that follows it, bash blames the *later* line:
@@ -35498,26 +35498,112 @@ Q ]]
 
 The ``near `Q'`` text agrees — that is what
 TD-OILS-COND-SYNTAX-ERROR-NAMES-ONLY-THE-TOKEN fixed. Only the line *number* and
-the echoed line differ, and only when a newline lies between the token and its
-lookahead. Ordinary (non-conditional) errors already agree, because there the
-offending token and the reader are on the same line
-(`echo a; \<nl>foo | ; bar` is line 2 in both).
+the echoed line differed.
+
+This entry originally claimed the divergence was specific to `[[ ]]`, on the
+grounds that "ordinary (non-conditional) errors already agree". **That was
+wrong** — measuring them showed the same one-line shift everywhere a
+continuation is written flush after the offending token, with no conditional in
+sight:
+
+```text
+echo a ;;\             bash: line 2: syntax error near unexpected token `;;'
+b                            line 2: `b'
+                       osh:  line 1: … / line 1: `echo a ;;\'
+```
+
+`echo a )\<nl>b`, `foo() ;\<nl>x`, `case x in esac ;;\<nl>y` and
+`if true; then :; fi ;;\<nl>x` all behaved the same way.
 
 **Why.** bash reports at `line_number` — *the reader's* current line — and
 echoes `shell_input_line`, which the reader has already refilled with line 2 by
-the time it peeked past `;`. osh reports the offending token's own line and
-echoes that.
+the time it peeked past `;`. `shell_getc` deletes a `\<newline>` by bumping
+`line_number` and fetching the next line, so a token with one written flush
+after it leaves the reader a line further down than the token ends.
 
-**The proper fix** is to model bash's per-physical-line input buffer: carry the
-error position as (reader line, offset within that line) rather than as the
-token's line, so both the number and the echo come from the line the reader was
-on. Related to (but not the same as)
-TD-OILS-LINE-CONTINUATION-INSIDE-AN-OPERATOR-IS-NOT-DELETED: fixing the deletion
-does not fix this, because the token still *ends* on line 1.
+**Fixed** by reporting the *reader's* line rather than the token's:
+`Parser::reader_line` = `cur_line()` plus `Spans::cont_lines`, the number of
+continuations the reader crossed getting past the token. Both central stamping
+sites (`parse_tokens` and `IncrementalParser`) now use it, so every diagnostic —
+conditional or not — moves, and the echoed source line follows for free because
+osh echoes whichever line it reports. No per-physical-line input buffer was
+needed after all.
 
-**Impact.** Cosmetic; two of the three diagnostic lines.
-`tests/corpus/a-conditional-error-quotes-the-source-not-the-token.sh` runs that
-one case through `sed` so it is pinned for its `near` text alone.
+`cont_lines` counts a continuation on *either* side of the recorded token span,
+because the lexer does not draw that boundary the same way everywhere: after
+`;;` it deletes the continuation before stopping, so the span ends in one, while
+after `)` it stops first and the continuation is still ahead. Both are the same
+crossing. The two cannot double-count, since a span ending in a continuation
+leaves the forward walk starting past it.
+
+**Pinned by** `tests/corpus/a-continuation-after-a-token-moves-the-error-down-a-line.sh`,
+which also covers the three things that do *not* move the error (a space before
+the continuation, a plain newline, a tab) and the long runs that move it more
+than one line. The `sed` workaround in
+`a-conditional-error-quotes-the-source-not-the-token.sh` is gone; that case is
+now compared whole.
+
+**Left behind:** TD-OILS-A-ONE-CHARACTER-REDIRECTION-OPERATOR-PEEKS-PAST-A-CONTINUATION,
+the one shape the reader-line rule does not reach.
+
+
+### TD-OILS-A-ONE-CHARACTER-REDIRECTION-OPERATOR-PEEKS-PAST-A-CONTINUATION — 2026-08-05
+
+**Where:** `userspace/oils/src/parser.rs` — `Parser::reader_line` /
+`Parser::cond_near_at`, which take the reader's position to be the end of the
+offending token.
+
+**What.** A file-descriptor number written flush against a *single-character*
+redirection operator, with a continuation flush after that, leaves bash's reader
+a line further down than osh's:
+
+```text
+[[ 2>\           bash: line 2: unexpected token 284 in conditional command
+Q ]]                   line 2: syntax error near `Q'
+                       line 2: `Q ]]'
+                 osh:  line 1: unexpected token 284 in conditional command
+                       line 1: syntax error near `2>'
+                       line 1: `[[ 2>\'
+```
+
+`[[ {fd}>\<nl>Q ]]` (token 283, REDIR_WORD) behaves the same way. Everything
+around it already agrees, and the pattern says exactly what the difference is:
+
+| written | bash | why |
+|---|---|---|
+| `[[ 2>\<nl>Q ]]` | line 2, near `Q` | **diverges** |
+| `[[ 2>>\<nl>Q ]]` | line 1, near `2>` | agrees — `>>` is unambiguous |
+| `[[ 2> \<nl>Q ]]` | line 1, near `2>` | agrees — the space is the peeked char |
+| `[[ 2\<nl>>Q ]]` | line 2, near `>` | agrees — the ordinary reader-line rule |
+| `[[ 2>Q\<nl>R ]]` | line 1, near `2>` | agrees |
+
+**Why.** Having read `>`, bash reads one more character to tell `>` from `>>`,
+`>&` and `>|`. That read is a `shell_getc`, so it deletes the `\<newline>` — and
+deleting one bumps `line_number` and refills `shell_input_line` with the next
+line. The `>` is then pushed back, but the line bump and the refilled buffer are
+not undone, so both the reported line *and* `error_token_from_text`'s slice come
+from line 2. `>>` needs no such test and so never looks, which is why it agrees.
+
+osh has no lookahead to model here: the offending token is the word `2`, whose
+span ends before the `>`, so `Spans::cont_lines` finds no continuation and
+`Spans::near` slices back from the `>` to give `2>`.
+
+**The proper fix** is to let the reader position run past a single-character
+redirection operator lexed flush after the token — i.e. when `toks[pos]` is a
+NUMBER/REDIR_WORD and `toks[pos + 1]` is a one-character redirection operator
+starting exactly where `pos` ends, take `pos + 1`'s span as the reader's. Both
+the line number and the `near` slice then fall out of the existing machinery
+(`cont_lines` sees the continuation; `near` skips it and lands on `Q`). Needs its
+own measurement pass first over `>`, `<`, `>&`, `>|`, `<&`, `<>` and the
+`{fd}` forms.
+
+**Impact.** Cosmetic, and confined to a diagnostic that is already exotic — the
+message prints a raw yacc token number (284/283) because bash's
+`error_token_from_token` switches on the global `current_token` rather than on
+the token it was handed. Not pinned by the corpus; the four *agreeing* shapes in
+the table above are, in
+`tests/corpus/a-continuation-after-a-token-moves-the-error-down-a-line.sh`, so a
+fix that overreached would be caught.
 
 
 ### TD-OILS-COND-ERROR-MISSES-THE-PRIMARY-OPERATOR-LINE — 2026-08-05

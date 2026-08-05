@@ -901,7 +901,7 @@ impl IncrementalParser {
         // error can name a token from outside this stream).
         let ran_out = p.peek().is_none();
         let outcome = outcome.map_err(|e| {
-            let line = p.cur_line().saturating_add(u32::from(e.is_incomplete()));
+            let line = p.reader_line().saturating_add(u32::from(e.is_incomplete()));
             e.or_line(line)
         });
         self.wpos = p.pos;
@@ -1397,14 +1397,16 @@ fn parse_tokens_ending(
     };
     // Stamp the offending line centrally. `pos` is not advanced past a failing
     // token, so the parser's cursor still points at the error site. bash reports
-    // the token's own line for a grammar error, but for an *unexpected end of
-    // file* error it reports one line past the last token — the position where
-    // the missing terminator would go. Key that off the message, not the cursor:
+    // the line its *reader* was on for a grammar error — the token's own line
+    // unless a `\<newline>` written flush after it dragged the reader onto the
+    // next one — but for an *unexpected end of file* error it reports one line
+    // past the last token, the position where the missing terminator would go.
+    // Key that off the message, not the cursor:
     // an error can name a token that is not in this stream at all (a `$( … )`
     // body reports the substitution's closing `)`), and those still belong on
     // the last token's line.
     parsed.map_err(|e| {
-        let line = p.cur_line().saturating_add(u32::from(e.is_incomplete()));
+        let line = p.reader_line().saturating_add(u32::from(e.is_incomplete()));
         e.or_line(line)
     })
 }
@@ -1509,6 +1511,68 @@ impl Spans {
         let slice = if token_end > 0 { t.get(i..token_end)? } else { t.get(..1)? };
         Some(bytes::from_chars(slice.iter().copied()))
     }
+
+    /// How many further input lines the reader had to fetch to get past the
+    /// token at `pos` — one for every `\<newline>` written flush after it.
+    ///
+    /// bash blames a syntax error on `line_number`, the last line its reader has
+    /// **fetched**, and having finished a token the reader has always looked at
+    /// the character after it, if only to find that the token ends there. A
+    /// `\<newline>` in that position is deleted by `shell_getc`, which bumps
+    /// `line_number` and fetches the next line in order to do it — so the error
+    /// lands a line below the token, and the source echoed under it is that next
+    /// line's:
+    ///
+    /// ```text
+    /// echo a ;;\
+    /// b            line 2: syntax error near unexpected token `;;'
+    ///              line 2: `b'
+    /// ```
+    ///
+    /// Only a continuation written *flush* against the token drags the reader
+    /// along. A space in between is the character it looked at, and it stops
+    /// there: `echo a ;; \<newline>b` stays on line 1. A plain newline does not
+    /// count either — it is the last character of the line it terminates, and
+    /// bash bumps `line_number` only on the *fetch* that follows.
+    ///
+    /// A continuation flush after the token can fall on either side of the
+    /// recorded span, because the lexer does not draw that boundary the same way
+    /// everywhere: after `;;` it deletes the continuation before stopping, so
+    /// the span *ends* in one, while after `)` it stops first and the
+    /// continuation is still ahead. Both are the same crossing, so both are
+    /// counted — and they cannot double-count, since a span that ends in a
+    /// continuation leaves the walk starting past it.
+    ///
+    /// The line already stamped on the token is the line of the span's *last*
+    /// character (see [`Lexer::stamp_lines`](crate::lexer)), which is why a span
+    /// ending in a continuation is worth exactly one more and not the whole run.
+    fn cont_lines(&self, pos: usize) -> u32 {
+        let Some(&end) = self.ends.get(pos) else { return 0 };
+        let end = end as usize;
+        let mut n = u32::from(self.ends_in_cont(end));
+        let mut i = end;
+        while let Some(len) = cont_len(self.src.get(i..).unwrap_or(&[])) {
+            i = i.saturating_add(len);
+            n = n.saturating_add(1);
+        }
+        n
+    }
+
+    /// Whether the character just before `end` is the newline of a `\<newline>`
+    /// the lexer deleted. A *plain* newline is not one: it is the last character
+    /// of the line it terminates, and bash bumps `line_number` only on the fetch
+    /// that follows.
+    fn ends_in_cont(&self, end: usize) -> bool {
+        if self.src.get(end.wrapping_sub(1)) != Some(&Ch::U('\n')) {
+            return false;
+        }
+        // `\<newline>`, or the `\<CR><LF>` a CRLF file writes.
+        match self.src.get(end.wrapping_sub(2)) {
+            Some(&Ch::U('\\')) => true,
+            Some(&Ch::U('\r')) => self.src.get(end.wrapping_sub(3)) == Some(&Ch::U('\\')),
+            _ => false,
+        }
+    }
 }
 
 /// The length of the line continuation at the front of `t`, if there is one:
@@ -1558,6 +1622,13 @@ impl Parser {
             .or_else(|| self.lines.last())
             .copied()
             .unwrap_or(1)
+    }
+
+    /// The line bash would *report* an error at the current token on: not the
+    /// token's own line but the reader's, which is a line further down for every
+    /// `\<newline>` written flush after the token. See [`Spans::cont_lines`].
+    fn reader_line(&self) -> u32 {
+        self.cur_line().saturating_add(self.spans.cont_lines(self.pos))
     }
 
     fn bump(&mut self) -> Option<Tok> {

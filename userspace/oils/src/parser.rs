@@ -2516,11 +2516,12 @@ impl Parser {
                     ])
                 });
             }
+            let near = self.cond_near_at(self.pos);
             return Err(ParseError {
                 line_at: vec![(0, open)],
                 ..ParseError::new(&bfmt![
                     b"syntax error in conditional expression\nsyntax error near `",
-                    tok,
+                    near,
                     b"'"
                 ])
             });
@@ -2644,10 +2645,15 @@ impl Parser {
         if let Some(Tok::Word(segs)) = self.peek()
             && !matches!(segs.as_slice(), [Seg::Lit(s)] if s.as_slice() == b"]]")
         {
-            let tok = self.token_display();
+            // The `near` text is the source slice here as everywhere else, not
+            // the word: bash reaches `report_syntax_error` with its reader
+            // parked just past the word, so what comes along is whatever was
+            // *written* around it — `[[ a b;c ]]` is near `;`, `[[ a b) ]]`
+            // near `b)`, and `[[ a $(echo x) ]]` near `x)`.
+            let near = self.cond_near_at(self.pos);
             return Err(CondError::new(
                 b"conditional binary operator expected".as_slice(),
-                &bfmt![b"syntax error near `", tok, b"'"],
+                &bfmt![b"syntax error near `", near, b"'"],
             ));
         }
         // A newline here is *not* skipped — this is the one position where the

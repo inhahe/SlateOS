@@ -24,6 +24,13 @@
 # bash's input line ends there, so stepping back off the end skips the newline
 # and every space before it. `[[ a` is near `a' and `[[ a -eq` near `-eq'.
 #
+# None of this is reserved for the diagnostics that *name* a token. Every
+# conditional error goes through the same slice, including the two that report
+# only a bare sentence — `conditional binary operator expected` and `syntax
+# error in conditional expression` — so a word in either of those positions is
+# still reported as source and not as itself: `[[ a b;c ]]` is near `;', not
+# near `b'.
+#
 # A `\<newline>` is deleted by the reader before the parser sees any of this, so
 # the character after the token is the first one on the next line:
 # `[[ P;\<newline>Q ]]` is near `Q', with no backslash in sight. (bash also
@@ -80,6 +87,12 @@ e '[[ a -eq'
 echo "=== the reader deleted the line continuation"
 ( eval '[[ P;\
 Q ]]' ) 2>&1 | sed -n 's/.*\(syntax error near .*\)/\1/p'
+e '[[ a b\
+c ]]'
+e '[[ -z x y\
+z ]]'
+e '[[ a $(echo x)\
+b ]]'
 
 echo "=== the same wherever the conditional is written"
 e 'echo $([[ a>>b ]])'
@@ -92,7 +105,7 @@ e '[[ P;Q ]] && echo x'
 e 'echo one
 [[ P;Q ]]'
 
-echo "=== a word position names the word, which the source agrees with"
+echo "=== a word position is sliced the same way, not named"
 e '[[ a b ]]'
 e '[[ -z x y ]]'
 e '[[ 3 -gt 2 -gt 1 ]]'
@@ -100,4 +113,21 @@ e '[[ a "<" b ]]'
 e "[[ 'a<' b ]]"
 e '[[ ]]'
 e '[[ -n ]]'
+e '[[ a b;c ]]'
+e '[[ a b|c ]]'
+e '[[ a b&c ]]'
+e '[[ a b;;c ]]'
+e '[[ a b) ]]'
+e '[[ a b( ]]'
+e '[[ a b	c ]]'
+e '[[ a $(echo x) ]]'
+e '[[ a `echo x` ]]'
+e '[[ a ${x}y ]]'
+e '[[ a && b c;d ]]'
+e '[[ ( a b) ]]'
+e '[[ -z x y;z ]]'
+e '[[ -z x $(echo q) ]]'
+e '[[ a == b c|d ]]'
+e '[[ a == b y) ]]'
+e '[[ ( a ) b;c ]]'
 echo done

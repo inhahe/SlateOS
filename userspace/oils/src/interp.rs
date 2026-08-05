@@ -13558,25 +13558,47 @@ impl Shell {
                     self.assoc_set(name, key, value, false);
                 } else {
                     let idx = self.eval_arith_index(w);
-                    if self.subscript_is_bad(name, idx) {
+                    let bound = self.elem_write_bound(name);
+                    if idx < 0 && Self::resolve_index(idx, bound).is_none() {
                         let src = self.expand_to_string(w);
                         let line =
                             bfmt![self.err_prefix(), name, b"[", &src, b"]: bad array subscript"];
                         self.berrln(&line);
                         return false;
                     }
-                    let bound = self.highest_index_bound(name);
                     let Some(real) = Self::resolve_index(idx, bound) else {
                         return false;
                     };
                     if self.refuse_readonly_store(name) {
                         return false;
                     }
+                    // Only now that the store is certain to happen: a subscript
+                    // that named nowhere leaves the scalar a scalar, which
+                    // `printf -v 't[-2]'` on `t=v` shows.
+                    self.array_kind_apply(name, false);
                     self.arrays.entry(name.to_string()).or_default().insert(real, value);
                 }
             }
         }
         true
+    }
+
+    /// What a negative subscript counts back from when the store is a *write*
+    /// rather than a read — [`Self::highest_index_bound`], except that a name
+    /// holding a plain scalar answers 1 rather than 0.
+    ///
+    /// The scalar is about to become element 0 of the array the write brings
+    /// into being (see [`Self::array_kind_apply`]), so by the time the index is
+    /// resolved there is an element there to count back over: `t=v; t[-1]=w`
+    /// replaces the `v` rather than reaching past the start. A *read* of the
+    /// same name sees no array and keeps the strict answer, which is why
+    /// `t=v; echo "[${t[-1]:=w}]"` reports one `bad array subscript` — from the
+    /// read — and then completes the store anyway.
+    fn elem_write_bound(&self, name: &str) -> usize {
+        if !self.arrays.contains_key(name) && self.vars.contains_key(name) {
+            return 1;
+        }
+        self.highest_index_bound(name)
     }
 
     /// The readonly guard [`Self::assign_elem`] puts in front of each of its
@@ -63926,6 +63948,79 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("readonly q; { printf -v q x; echo \"rc=$?\"; echo reached; } 2>&1").0,
             "osh: q: readonly variable\nrc=1\nreached\n",
         );
+    }
+
+    /// A write that names an *element* of a name holding a plain scalar does not
+    /// throw the scalar away: it becomes element 0 of the array the write brings
+    /// into being. So a negative subscript counts back over the element about to
+    /// exist — while the *read* that comes first still sees no array.
+    #[test]
+    fn an_element_write_carries_a_scalar_in_as_element_zero() {
+        // Every write that names an element, not just the plain assignment.
+        for src in [
+            "t[1]=w",
+            "echo \"[${t[1]:=w}]\" >/dev/null",
+            "printf -v 't[1]' w",
+            "read 't[1]' <<< w",
+            "declare -n r=t[1]; r=w",
+        ] {
+            assert_eq!(
+                run(&format!("t=v; {src}; declare -p t")).0,
+                "declare -a t=([0]=\"v\" [1]=\"w\")\n",
+                "{src}",
+            );
+        }
+        // An empty scalar is a value like any other; nothing at all is not.
+        assert_eq!(run("t=; t[1]=w; declare -p t").0, "declare -a t=([0]=\"\" [1]=\"w\")\n");
+        assert_eq!(run("unset t; t[1]=w; declare -p t").0, "declare -a t=([1]=\"w\")\n");
+        // The attributes come with it.
+        assert_eq!(
+            run("export t=v; echo \"[${t[1]:=w}]\"; declare -p t").0,
+            "[w]\ndeclare -ax t=([0]=\"v\" [1]=\"w\")\n",
+        );
+        assert_eq!(
+            run("declare -i t=5; echo \"[${t[1]:=7}]\"; declare -p t").0,
+            "[7]\ndeclare -ai t=([0]=\"5\" [1]=\"7\")\n",
+        );
+
+        // `-1` counts back over the element about to exist, so it replaces it.
+        for src in ["t[-1]=w", "printf -v 't[-1]' w", "read 't[-1]' <<< w", "declare -n r=t[-1]; r=w"]
+        {
+            assert_eq!(
+                run(&format!("t=v; {{ {src}; }} 2>&1; declare -p t")).0,
+                "declare -a t=([0]=\"w\")\n",
+                "{src}",
+            );
+        }
+        // The read that comes first still sees no array, so `:=` reports it once
+        // and completes the store anyway.
+        assert_eq!(
+            run("t=v; { echo \"[${t[-1]:=w}]\"; } 2>&1; declare -p t").0,
+            "osh: t: bad array subscript\n[w]\ndeclare -a t=([0]=\"w\")\n",
+        );
+
+        // One step further back is nowhere, and the scalar is left alone — the
+        // carry only happens once the store is certain. So does a refusal.
+        for src in ["printf -v 't[-2]' w", "read 't[-2]' <<< w"] {
+            assert_eq!(
+                run(&format!("t=v; {{ {src}; }} 2>/dev/null; declare -p t")).0,
+                "declare -- t=\"v\"\n",
+                "{src}",
+            );
+        }
+        // Through a reference it is fatal rather than merely refused, so the
+        // `declare -p` never runs — but the scalar is untouched all the same.
+        assert_eq!(
+            run("t=v; declare -n r=t[-2]; { r=w; } 2>&1; declare -p t").0,
+            "osh: t[-2]: bad array subscript\n",
+        );
+        assert_eq!(
+            run("declare -r t=v; { printf -v 't[1]' w; } 2>&1; declare -p t").0,
+            "osh: t: readonly variable\ndeclare -r t=\"v\"\n",
+        );
+
+        // An existing array keeps its own bound, scalar rule or no.
+        assert_eq!(run("a=(x y); a[-1]=w; declare -p a").0, "declare -a a=([0]=\"x\" [1]=\"w\")\n");
     }
 
     /// `+n` names two variables at once: the reference, for its own letter, and

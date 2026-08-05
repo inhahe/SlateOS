@@ -11315,6 +11315,10 @@ impl Shell {
     /// trace), while a plain scalar's trace is emitted at the store site below so
     /// the RHS is expanded exactly once.
     fn apply_assignment(&mut self, a: &Assignment, trace: bool) -> bool {
+        // bash scans the assignment word before it does anything with it.
+        if self.assignment_scan_failed(a) {
+            return false;
+        }
         let ok = self.apply_assignment_inner(a, trace);
         // A name the shell also keeps somewhere else takes the write back out of
         // the variable table again — see [`Shell::after_var_write`]. Run whether
@@ -12291,6 +12295,12 @@ impl Shell {
         let Some(idx) = a.index.as_ref() else {
             return Some(a.name.clone());
         };
+        // The scan comes first, as it does for any word: bash never reaches the
+        // "not a valid identifier" complaint below when the subscript's
+        // `$(( … ))` has lost its closer.
+        if self.assignment_scan_failed(a) {
+            return None;
+        }
         // `+=` is not part of what is quoted back: bash echoes the name and its
         // subscript, not the operator.
         let msg = bfmt![
@@ -21683,12 +21693,7 @@ impl Shell {
     /// Pass the returned value back to [`Shell::end_word`].
     fn begin_word(&mut self, w: &Word) -> Option<Str> {
         let saved = self.bad_sub_word.replace(crate::unparse::word_src(w));
-        if let Some(expr) = w
-            .parts
-            .iter()
-            .find_map(|p| p.first_scanned_arith(&mut Self::arith_comment_hides_closer))
-            .cloned()
-        {
+        if let Some(expr) = Self::arith_hiding_its_closer(w) {
             self.arith_unclosed_by_comment(&expr);
         }
         saved
@@ -21697,6 +21702,55 @@ impl Shell {
     /// Undo [`Shell::begin_word`].
     fn end_word(&mut self, saved: Option<Str>) {
         self.bad_sub_word = saved;
+    }
+
+    /// The first `$(( … ))` in `w` whose closing `))` a comment has eaten.
+    fn arith_hiding_its_closer(w: &Word) -> Option<Str> {
+        w.parts
+            .iter()
+            .find_map(|p| p.first_scanned_arith(&mut Self::arith_comment_hides_closer))
+            .cloned()
+    }
+
+    /// Scan an assignment's *subscripts* before performing it.
+    ///
+    /// A subscript is not a word in its own right — it is arithmetic read out
+    /// of the assignment — so [`Shell::begin_word`] never sees it, and bash
+    /// names the fault accordingly: `a[$(( #5 ))]=1` and, for one element of a
+    /// literal, `[$(( #5 ))]=1`, where the same fault in the *value* names just
+    /// the value word (`a[1]=$(( #5 ))` reports `$(( #5 ))`). Two scans in
+    /// bash, and two here: the value's is [`Shell::begin_word`], reached
+    /// through [`Shell::expand_assignment_value`].
+    ///
+    /// Without this the fault surfaces only later, from the evaluation-time
+    /// backstop in [`Shell::arith_sub`] — and then twice over, because the
+    /// assignment carries on with an empty subscript and complains again about
+    /// the "bad array subscript" its own first error produced. A diagnostic
+    /// about the consequence of an error already reported is noise.
+    ///
+    /// Returns `true` when the assignment must be abandoned.
+    fn assignment_scan_failed(&mut self, a: &Assignment) -> bool {
+        let hit = a
+            .index
+            .as_ref()
+            .and_then(Self::arith_hiding_its_closer)
+            .map(|e| (e, crate::unparse::assignment_src(a)))
+            .or_else(|| match &a.value {
+                AssignRhs::Array(elems) => elems.iter().find_map(|elem| match elem {
+                    ArrayElem::Keyed { index, .. } => {
+                        Self::arith_hiding_its_closer(index).map(|e| (e, elem_src(elem)))
+                    }
+                    ArrayElem::Positional(_) => None,
+                }),
+                AssignRhs::Scalar(_) => None,
+            });
+        let Some((expr, named)) = hit else {
+            return false;
+        };
+        let saved = self.bad_sub_word.replace(named);
+        self.arith_unclosed_by_comment(&expr);
+        self.bad_sub_word = saved;
+        true
     }
 
     /// The non-fatal (DISCARD-class) "bad substitution" — see
@@ -50729,10 +50783,41 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // comes from expanding *its* words, names just the inner word, and
         // leaves the outer command's status alone.
         let (o4, _) = run("{ echo \"$( echo $(( #5 )) )\"; echo rc=$?; } 2>&1");
-        assert_eq!(
-            o4,
-            "osh: bad substitution: no closing `)' in $(( #5 ))\n\nrc=0\n"
-        );
+        assert_eq!(
+            o4,
+            "osh: bad substitution: no closing `)' in $(( #5 ))\n\nrc=0\n"
+        );
+    }
+
+    #[test]
+    fn an_assignment_subscript_is_scanned_as_part_of_the_assignment() {
+        // A subscript is not a word of its own — it is arithmetic read out of
+        // the assignment — so the eaten-closer complaint names the assignment,
+        // brackets, operator and value included.
+        for (src, named) in [
+            ("a[$(( #5 ))]=1", "a[$(( #5 ))]=1"),
+            ("a[$(( #5 ))]=$(( 1 ))", "a[$(( #5 ))]=$(( 1 ))"),
+            ("declare a[$(( #5 ))]=1", "a[$(( #5 ))]=1"),
+            // One element of a literal is named on its own.
+            ("a=([$(( #5 ))]=1)", "[$(( #5 ))]=1"),
+            // A command-prefix assignment is scanned before bash gets as far
+            // as refusing `a[…]` as an identifier.
+            ("x=1 a[$(( #5 ))]=1 true", "a[$(( #5 ))]=1"),
+        ] {
+            let (o, _) = run(&format!("{{ {src}; }} 2>&1"));
+            assert_eq!(
+                o,
+                format!("osh: bad substitution: no closing `)' in {named}\n"),
+                "{src}"
+            );
+        }
+        // The *value* is a word, and names itself.
+        let (o, _) = run("{ a[1]=$(( #5 )); } 2>&1");
+        assert_eq!(o, "osh: bad substitution: no closing `)' in $(( #5 ))\n");
+        // One complaint, not two: an associative array used to go on to report
+        // the empty subscript its own first error had produced.
+        let (o2, _) = run("{ declare -A m; m[$(( #5 ))]=1; } 2>&1");
+        assert_eq!(o2.lines().count(), 1, "{o2:?}");
     }
 
     #[test]

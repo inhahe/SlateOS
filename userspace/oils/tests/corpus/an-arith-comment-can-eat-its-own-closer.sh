@@ -46,6 +46,27 @@ echo '--- a $( ) body is its own business: it reports, the outer word does not'
 echo "$( echo $(( #5 )) )"
 echo "rc=$?"
 
+echo '--- a subscript is read out of the assignment, so the assignment is named'
+a[$(( #5 ))]=1
+echo "rc=$?"
+a[$(( #5 ))]=$(( 1 ))
+echo "rc=$?"
+declare a[$(( #5 ))]=1
+echo "rc=$?"
+a=([$(( #5 ))]=1)
+echo "rc=$?"
+x=1 a[$(( #5 ))]=1 true
+echo "rc=$?"
+
+echo '--- the value, though, is a word and names itself'
+a[1]=$(( #5 ))
+echo "rc=$?"
+
+echo '--- and the complaint comes once, not once per consequence'
+declare -A m
+m[$(( #5 ))]=1
+echo "rc=$?"
+
 echo '--- body index 0 is preceded by the `(`, so this is arithmetic'
 echo $((#5))
 echo "rc=$?"

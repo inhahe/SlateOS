@@ -30133,12 +30133,35 @@ impl Shell {
     /// operands — but does not query or enforce the real kernel limits yet (see
     /// known-issues `TD-OILS-ULIMIT`). Modelled on Linux bash's option set,
     /// which is what slateos (a unix/linux-family target) mirrors.
+    ///
+    /// The argument grammar is bash's, and it is *not* "collect the flags, then
+    /// read one operand". Every limit letter carries its **own** optional
+    /// value, taken from the rest of its own word (`-c0`) or from the next word
+    /// when that word does not begin with `-` (`-c 0`). So `-c 0 -f` sets the
+    /// core limit and *reports* the file limit, and `-cf` is not `-c -f` at all
+    /// — the `f` is the core limit's value, which is why bash answers `f:
+    /// invalid number`.
+    ///
+    /// A letter is acted on only when the *next* letter arrives, or at the very
+    /// end; until then it is pending. That one-deep delay is what lets the
+    /// trailing operand of `ulimit -c -- 5` reach the `-c` across the `--`,
+    /// what lets a later `-a` cancel a set already spelled out (`ulimit -c 7
+    /// -a` reports and leaves the core limit alone), and what makes an invalid
+    /// option abandon everything before it (`ulimit -c 5 -z` sets nothing).
+    /// Words left over past the one value are dropped in silence: `ulimit -c 5
+    /// junk` is `ulimit -c 5`.
     fn builtin_ulimit(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
-        let mut resources: Vec<char> = Vec::new();
         let mut want_hard = false;
         let mut want_soft = false;
         let mut show_all = false;
-        let mut value: Option<BStr<'_>> = None;
+        // How many limit letters were asked for. bash labels its report when
+        // more than one was, even if only one of them is reported in the end:
+        // `ulimit -c 0 -f` prints the labelled form for the file limit alone.
+        // The count is bumped before the previous letter is settled, so that
+        // the `-c` of `ulimit -c -f` is already labelled when it prints.
+        let mut asked = 0usize;
+        // The letter whose fate is not yet decided — see the doc comment.
+        let mut pending: Option<(char, Option<Str>)> = None;
 
         let mut i = 0;
         while i < args.len() {
@@ -30147,119 +30170,151 @@ impl Shell {
                 i += 1;
                 break;
             }
-            if let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) {
+            // Anything that is not an option word — including a bare `-` — ends
+            // the options and becomes the first leftover.
+            let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
+                break;
+            };
+            i += 1;
+            let mut j = 0;
+            while j < flags.len() {
+                let ch = flags[j];
+                j += 1;
                 // Read a byte at a time, as bash does. Every option letter is
                 // ASCII, so a byte that is not one matches no resource spec and
                 // is reported as the byte it is.
-                for ch in flags {
-                    match char::from(*ch) {
-                        'H' => want_hard = true,
-                        'S' => want_soft = true,
-                        'a' => show_all = true,
-                        c if RLIMIT_SPECS.iter().any(|s| s.opt == c) => resources.push(c),
-                        _ => {
-                            self.berrln(&bfmt![
-                                self.err_prefix(),
-                                b"ulimit: -",
-                                *ch,
-                                b": invalid option"
-                            ]);
-                            self.emit_stderr(ULIMIT_USAGE.as_bytes());
-                            return 2;
+                match char::from(ch) {
+                    'H' => want_hard = true,
+                    'S' => want_soft = true,
+                    'a' => show_all = true,
+                    c if RLIMIT_SPECS.iter().any(|s| s.opt == c) => {
+                        asked += 1;
+                        if let Some((prev, value)) = pending.take() {
+                            let mode = UlimitMode { want_soft, want_hard, labelled: asked > 1 };
+                            let st = self.ulimit_settle(prev, value.as_deref(), mode, out, redir);
+                            if st != 0 {
+                                return st;
+                            }
                         }
+                        let value = if j < flags.len() {
+                            // The rest of the word is the value, not more flags.
+                            let v = flags[j..].to_vec();
+                            j = flags.len();
+                            Some(v)
+                        } else if args.get(i).is_some_and(|w| !w.starts_with(b"-")) {
+                            let v = args[i].clone();
+                            i += 1;
+                            Some(v)
+                        } else {
+                            None
+                        };
+                        pending = Some((c, value));
+                    }
+                    _ => {
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"ulimit: -",
+                            ch,
+                            b": invalid option"
+                        ]);
+                        self.emit_stderr(ULIMIT_USAGE.as_bytes());
+                        return 2;
                     }
                 }
-                i += 1;
-            } else {
-                value = Some(a.as_slice());
-                i += 1;
-                break;
             }
-        }
-        // Any tokens after the value operand are extra arguments (bash errors).
-        if i < args.len() {
-            self.perrln("ulimit: too many arguments");
-            return 1;
         }
 
         if show_all {
-            return self.ulimit_print_all(want_hard, out, redir);
+            // `-a` answers the whole call: the pending letter is abandoned
+            // unsettled, so `ulimit -c 7 -a` sets nothing. With both -H and -S
+            // it is the soft limits that are reported.
+            return self.ulimit_print_all(want_hard && !want_soft, out, redir);
         }
 
-        // With no resource letters, bash defaults to the file-size limit (`-f`).
-        if resources.is_empty() {
-            resources.push('f');
+        // With no letter at all bash assumes `-f`, and reports it unlabelled.
+        let (opt, mut value) = pending.unwrap_or(('f', None));
+        if value.is_none() {
+            // The one place a leftover word is read: it is the value of the
+            // last letter, if that letter did not already have one.
+            value = args.get(i).cloned();
         }
-
-        // Neither -H nor -S: setting affects both, showing reports the soft limit.
-        let set_soft = want_soft || !want_hard;
-        let set_hard = want_hard || !want_soft;
-        let show_hard = want_hard;
-
-        if let Some(v) = value {
-            for &opt in &resources {
-                let entry = self.rlimits.entry(opt).or_insert((None, None));
-                let new = match v {
-                    b"unlimited" => None,
-                    b"hard" => entry.1,
-                    b"soft" => entry.0,
-                    // A limit is *only* ASCII digits — `ulimit` reads it with
-                    // bash's `all_digits`, not with the `strtol` leniency
-                    // `shift` and `read` get, so no blank may lead and no sign
-                    // may: `ulimit -n +5` and `ulimit -n " 5"` are both refused
-                    // where `shift " 1"` is not. An operand of no bytes at all
-                    // passes that test vacuously and is the number zero, and
-                    // one too large for `strtol` saturates rather than failing.
-                    // Anything else is refused by the base it reached for.
-                    n if n.iter().all(u8::is_ascii_digit) => Some(
-                        n.iter()
-                            .fold(0u64, |acc, b| {
-                                acc.saturating_mul(10).saturating_add(u64::from(*b - b'0'))
-                            })
-                            // `strtol` stops at `LONG_MAX`, so the ceiling is
-                            // the signed one even though a limit is unsigned.
-                            .min(i64::MAX.unsigned_abs()),
-                    ),
-                    n => {
-                        self.berrln(&bfmt![
-                            self.err_prefix(),
-                            b"ulimit: ",
-                            n,
-                            b": ",
-                            sh_invalidnum_kind(n).as_bytes()
-                        ]);
-                        return 1;
-                    }
-                };
-                if set_soft {
-                    entry.0 = new;
-                }
-                if set_hard {
-                    entry.1 = new;
-                }
-            }
-            return 0;
-        }
-
-        // No value: report. A single resource prints the bare value; multiple
-        // resources print one labelled line each (matching bash).
-        if resources.len() == 1 {
-            let opt = resources[0];
-            let (soft, hard) = self.rlimits.get(&opt).copied().unwrap_or((None, None));
-            let v = if show_hard { hard } else { soft };
-            let line = format!("{}\n", ulimit_value_str(v));
-            return self.write_bytes(out, redir, line.as_bytes());
-        }
-        let mut buf = Vec::new();
-        for &opt in &resources {
-            if let Some(spec) = RLIMIT_SPECS.iter().find(|s| s.opt == opt) {
-                let (soft, hard) = self.rlimits.get(&opt).copied().unwrap_or((None, None));
-                let v = if show_hard { hard } else { soft };
-                buf.extend_from_slice(ulimit_line(spec, v).as_bytes());
-            }
-        }
-        self.write_bytes(out, redir, &buf)
+        let mode = UlimitMode { want_soft, want_hard, labelled: asked > 1 };
+        self.ulimit_settle(opt, value.as_deref(), mode, out, redir)
     }
+
+    /// Act on one `(letter, value)` pair for [`Shell::builtin_ulimit`]: set the
+    /// limit when a value came with it, report it when none did.
+    ///
+    /// A non-zero return ends the whole builtin. bash abandons the rest of the
+    /// arguments once a pair fails, so `ulimit -cf -n` — whose `-c` is handed
+    /// the value `f` — never reaches the `-n`.
+    fn ulimit_settle(
+        &mut self,
+        opt: char,
+        value: Option<BStr<'_>>,
+        mode: UlimitMode,
+        out: &mut Out,
+        redir: &RedirPlan,
+    ) -> i32 {
+        // Neither -H nor -S: setting moves both, reporting names the soft
+        // limit. Both together also move both — and still report the soft one,
+        // so -H alone is the only spelling that reports the hard limit.
+        let set_soft = mode.want_soft || !mode.want_hard;
+        let set_hard = mode.want_hard || !mode.want_soft;
+        let show_hard = mode.want_hard && !mode.want_soft;
+
+        let Some(v) = value else {
+            let (soft, hard) = self.rlimits.get(&opt).copied().unwrap_or((None, None));
+            let shown = if show_hard { hard } else { soft };
+            let line = match RLIMIT_SPECS.iter().find(|s| s.opt == opt) {
+                Some(spec) if mode.labelled => ulimit_line(spec, shown),
+                _ => format!("{}\n", ulimit_value_str(shown)),
+            };
+            return self.write_bytes(out, redir, line.as_bytes());
+        };
+
+        let entry = self.rlimits.entry(opt).or_insert((None, None));
+        let new = match v {
+            b"unlimited" => None,
+            b"hard" => entry.1,
+            b"soft" => entry.0,
+            // A limit is *only* ASCII digits — `ulimit` reads it with
+            // bash's `all_digits`, not with the `strtol` leniency
+            // `shift` and `read` get, so no blank may lead and no sign
+            // may: `ulimit -n +5` and `ulimit -n " 5"` are both refused
+            // where `shift " 1"` is not. An operand of no bytes at all
+            // passes that test vacuously and is the number zero, and
+            // one too large for `strtol` saturates rather than failing.
+            // Anything else is refused by the base it reached for.
+            n if n.iter().all(u8::is_ascii_digit) => Some(
+                n.iter()
+                    .fold(0u64, |acc, b| {
+                        acc.saturating_mul(10).saturating_add(u64::from(*b - b'0'))
+                    })
+                    // `strtol` stops at `LONG_MAX`, so the ceiling is
+                    // the signed one even though a limit is unsigned.
+                    .min(i64::MAX.unsigned_abs()),
+            ),
+            n => {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"ulimit: ",
+                    n,
+                    b": ",
+                    sh_invalidnum_kind(n).as_bytes()
+                ]);
+                return 1;
+            }
+        };
+        if set_soft {
+            entry.0 = new;
+        }
+        if set_hard {
+            entry.1 = new;
+        }
+        0
+    }
+
 
     /// Print every known resource limit in bash's `ulimit -a` format.
     fn ulimit_print_all(&mut self, show_hard: bool, out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -44141,6 +44196,16 @@ struct RlimitSpec {
     default: Option<u64>,
 }
 
+/// How one `(letter, value)` pair of a `ulimit` call is to be acted on: which
+/// of `-H`/`-S` were asked for, and whether a report of it carries the `-a`
+/// style label. See [`Shell::ulimit_settle`].
+#[derive(Clone, Copy)]
+struct UlimitMode {
+    want_soft: bool,
+    want_hard: bool,
+    labelled: bool,
+}
+
 /// The resource limits osh models, in the order bash prints them for `-a`.
 /// Values/units mirror Linux bash; defaults are conventional soft limits.
 const RLIMIT_SPECS: &[RlimitSpec] = &[
@@ -50783,11 +50848,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // comes from expanding *its* words, names just the inner word, and
         // leaves the outer command's status alone.
         let (o4, _) = run("{ echo \"$( echo $(( #5 )) )\"; echo rc=$?; } 2>&1");
-        assert_eq!(
-            o4,
-            "osh: bad substitution: no closing `)' in $(( #5 ))\n\nrc=0\n"
-        );
-    }
+        assert_eq!(
+            o4,
+            "osh: bad substitution: no closing `)' in $(( #5 ))\n\nrc=0\n"
+        );
+    }
 
     #[test]
     fn an_assignment_subscript_is_scanned_as_part_of_the_assignment() {
@@ -67978,6 +68043,64 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // before a digit is read in base ten, not as octal.
         assert_eq!(run("ulimit -c ''; ulimit -c").0, "0\n");
         assert_eq!(run("ulimit -c 012; ulimit -c").0, "12\n");
+    }
+
+    #[test]
+    fn each_ulimit_letter_takes_its_own_value() {
+        const CORE: &str = "core file size              (blocks, -c) ";
+        const FILES: &str = "open files                          (-n) ";
+
+        // A value belongs to the letter it follows, so one call can set one
+        // limit and report another. The report is labelled because more than
+        // one letter was asked for — not because more than one printed.
+        assert_eq!(run("ulimit -c 7 -n"), (format!("{FILES}1024\n"), 0));
+        assert_eq!(run("ulimit -c 7 -n; ulimit -c").0, format!("{FILES}1024\n7\n"));
+        // The value may also be the rest of the letter's own word.
+        assert_eq!(run("ulimit -c7; ulimit -c").0, "7\n");
+        // Which is why combined letters are not split: the `f` of `-cf` is the
+        // core limit's value, and the `-n` after it is never reached.
+        assert_eq!(run("ulimit -cf -n 2>&1"), ("osh: ulimit: f: invalid number\n".into(), 1));
+        // A word starting with `-` is an option, not a value.
+        assert_eq!(run("ulimit -c -n").0, format!("{CORE}0\n{FILES}1024\n"));
+
+        // The pending letter reaches across `--` for its value, and takes only
+        // the first leftover word — the rest are dropped in silence.
+        assert_eq!(run("ulimit -c -- 5; ulimit -c").0, "5\n");
+        assert_eq!(run("ulimit -c 1 2; ulimit -c").0, "1\n");
+        assert_eq!(run("ulimit -c 5 junk -n; ulimit -c"), ("5\n".into(), 0));
+        // With no letter at all the leftover is the file limit's value.
+        assert_eq!(run("ulimit -- 5; ulimit -f").0, "5\n");
+        // A bare `-` is a leftover word, not an option — so it is read as a
+        // value, and refused as the number it is not.
+        assert_eq!(run("ulimit -c - 2>&1"), ("osh: ulimit: -: invalid number\n".into(), 1));
+        assert_eq!(run("ulimit - 2>&1"), ("osh: ulimit: -: invalid number\n".into(), 1));
+
+        // The pending letter is settled only when the next one arrives, so a
+        // later `-a` or a later bad option abandons it unset.
+        assert_eq!(run("ulimit -c 9 -a >/dev/null; ulimit -c").0, "0\n");
+        let (o, st) = run("ulimit -c 9 -z 2>&1; ulimit -c");
+        assert_eq!(st, 0);
+        assert!(o.starts_with("osh: ulimit: -z: invalid option\n"), "{o:?}");
+        assert!(o.ends_with("\n0\n"), "the abandoned set took effect: {o:?}");
+        // A pair that fails ends the call where it stands.
+        assert_eq!(run("ulimit -c abc -n 2>&1"), ("osh: ulimit: abc: invalid number\n".into(), 1));
+
+        // Repeats are applied in order, and the last one wins.
+        assert_eq!(run("ulimit -c 2 -c 3; ulimit -c").0, "3\n");
+        assert_eq!(run("ulimit -c -c").0, format!("{CORE}0\n{CORE}0\n"));
+        // -H and -S together set both and report the soft limit, so -H alone is
+        // the only spelling that reports the hard one.
+        assert_eq!(run("ulimit -Sn 100; ulimit -HSn").0, "100\n");
+        assert_eq!(run("ulimit -Sn 100; ulimit -SHn").0, "100\n");
+        assert_eq!(run("ulimit -Sn 100; ulimit -Hn").0, "unlimited\n");
+        assert!(run("ulimit -Sn 100; ulimit -aHS").0.contains("(-n) 100\n"));
+        // Neither flag moves both — the half the corpus case cannot check,
+        // because whether a host kernel really lowers a hard limit is the
+        // host's business and MSYS declines to lower the core one at all.
+        assert_eq!(run("ulimit -c 0; ulimit -H -c").0, "0\n");
+        // And the flags are read where the letter is *settled*, not where they
+        // stand: the `-H` behind `-c` still decides what `-c` reports.
+        assert_eq!(run("ulimit -Sn 100; ulimit -n -H").0, "unlimited\n");
     }
 
     #[test]

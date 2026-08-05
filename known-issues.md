@@ -1567,7 +1567,8 @@ below, along with the parameter-expansion reads (`${c1[0]}`, `${c1[@]}`,
 `${#c1}`, `unset 'c1[0]'`) that bash also doubles. Separately,
 `$(( c1[@] ))` was a bash arithmetic *subscript* form osh's lexer rejected
 outright — unrelated to namerefs, and not tracked before; it was found here and
-fixed the same day as TD-OILS-ARITH-AT-SUBSCRIPT below.
+fixed the same day as TD-OILS-ARITH-AT-SUBSCRIPT below. *(Both of these are
+closed now: TD-OILS-NAMEREF-WARNING-COUNT was finished on 2026-08-04.)*
 
 ### TD-OILS-ARITH-AT-SUBSCRIPT. `$(( a[@] ))` was a syntax error in osh where bash calls it a bad subscript and carries on — 2026-08-05 — ✅ FIXED 2026-08-05
 
@@ -4969,7 +4970,8 @@ and the cycle), and `interp.rs` gained `nameref_cycle_reads_as_unset`,
 `nameref_cycle_write_fails_and_leaves_the_cycle_intact` and
 `nameref_to_unset_or_element_target_is_not_v_set`.
 
-**Remaining cosmetic gap — see TD-OILS-NAMEREF-WARNING-COUNT below.**
+**Remaining cosmetic gap — see TD-OILS-NAMEREF-WARNING-COUNT below**, itself
+closed on 2026-08-04.
 
 ### BUG-OILS-INDIRECT-SUBSCRIPT-NAMEREF-BASE. A subscript reached through `${!ref}` did not follow a nameref base, so the element read as unset — 2026-07-28 — ✅ RESOLVED 2026-07-28
 
@@ -5005,7 +5007,8 @@ is right here: this is a genuine *use* of the base name, and it is reached only
 after the reference itself has already been resolved by the caller, so it cannot
 double-report the reference. A circular base emits one warning and expands to
 nothing — value and exit status match bash; only the warning *count* differs,
-which is the pre-existing TD-OILS-NAMEREF-WARNING-COUNT gap below, not new.
+which is the pre-existing TD-OILS-NAMEREF-WARNING-COUNT gap below, not new (and
+closed on 2026-08-04).
 
 **Coverage.** New corpus case `tests/corpus/indirection-modifiers.sh`, which
 pins the whole `${!ref}`-plus-modifier surface against bash: an ordinary pointer,
@@ -6144,14 +6147,13 @@ text before the designator on the current physical line, which is exact for a
 single-line command and the only case bash's own docs describe usefully. Not
 covered by the corpus case.
 
-### TD-OILS-NAMEREF-WARNING-COUNT. bash reports a circular nameref once per walk of the chain; osh matches on the expansion and arithmetic sides, not yet on the declaration builtins — 2026-07-28 — OPEN (partly fixed 2026-08-04)
+### TD-OILS-NAMEREF-WARNING-COUNT. bash reports a circular nameref once per walk of the chain — 2026-07-28 — FIXED 2026-08-04
 
 **The rule, measured.** bash prints `warning: NAME: circular name reference`
 **once for every time it walks the chain**, and each syntactic shape walks it a
 fixed number of times. Counts add for a read-modify-write. This was originally
 logged as an unprincipled implementation artifact; it is not — it is a
-consistent, decomposable rule, and osh now implements it for expansions and
-arithmetic:
+consistent, decomposable rule, and osh now implements it everywhere:
 
 | shape | walks | why |
 |---|---|---|
@@ -6167,50 +6169,198 @@ arithmetic:
 | `${c1[@]:=v}` | 3 | read 2, store 1, then `bad array subscript` |
 | `(( c1 ))` / `(( c1[0] ))` | 1 / 2 | the same read split |
 
-**Fixed** in commits `1799ee4b6`, `d95c40900` (arithmetic), `90157f573`
-(parameter reads), `36804129f` (`@a`/`@A`), `0463535a0` (assign-default).
-Corpus: `arithmetic-through-a-circular-nameref-warns-once-per-walk.sh`,
-`a-parameter-read-through-a-circular-nameref-warns-once-per-walk.sh`,
-`an-element-assign-default-through-a-circular-nameref-lands-and-breaks-the-cycle.sh`.
+**And on the declaration side**, where the count is decided by what the operand
+*does* rather than by how it is spelled. The dividing predicate is whether the
+operand **makes an array** — brings one into being rather than only saying
+something about a binding that is already there:
 
-**Still under-counted (osh emits 1 where bash emits more).** All measured
-against bash 5.2.37 with `declare -n c1=c2; declare -n c2=c1`; values, exit
-statuses and stdout all match, only the stderr line count differs:
-
-| shape | bash | osh |
+| shape | walks | why |
 |---|---|---|
-| `unset c1`, `unset 'c1[0]'` | 2 | 1 |
-| `declare c1`, `declare -i c1`, `declare -x c1`, `declare -r c1`, `declare -l c1`, `declare -t c1`, `export c1`, `readonly c1`, `typeset c1`, `declare -gx c1`, `declare +n c1` | 2 | 1 |
-| `declare c1=5`, `declare -x c1=5`, `declare -r c1=5` | 2 | 1 |
-| `export c1=5`, `readonly c1=5` | 3 | 1 |
-| `export -a c1`, `readonly -a c1` | 2 | 1 |
+| `declare c1`, `declare -i c1`, `declare -x c1`, `typeset c1`, `local c1`, `declare +n c1`, and a valued `declare c1=5` | 2 | once to learn what is being declared, once to declare it — and the operand is then dropped with the status left alone |
+| `declare -a c1`, `declare -A c1`, `declare -ax c1`, `declare -i 'c1[0]'`, `declare -a c1=(x)` | 1 | an array-making operand stops at the first walk: it has learnt the chain leads nowhere and turns to the operand's *own* name, dropping the nameref attribute and breaking the cycle |
+| `export c1`, `readonly c1` | 2 | find, then mark |
+| `export c1=5`, `readonly c1=5` | 3 | find, mark, store |
+| `export -n c1` / `export -n c1=5` | 1 / 2 | `-n` never reaches the marking lookup |
+| `export -a c1`, `readonly -a c1` | 2 | the letter alone creates nothing for these two — `export -a fresh` is a plain `declare -x fresh` — so it keeps the ordinary rule |
+| `export -a c1=5` | 1 | *with* a value it is an array write, which falls back on the reference's own name: `declare -ax c1=([0]="5")` |
+| `unset c1`, `unset 'c1[0]'` | 2 | once to learn what is being unset, once to unset it |
+| `unset -n c1`, `declare -p c1`, `declare -n c1` | 0 | these ask nothing of the chain |
 
-The shapes that already agree, and which pin down where the seam is: an operand
-that **makes an array** walks only once — `declare -a c1`, `declare -A c1`,
-`declare -ax c1`, `declare -i 'c1[0]'`, `declare -a c1=(x)`, `export -a c1=5` —
-as do `export -n c1` and `declare -a +n c1`. `declare -p c1` and `declare -n c1`
-walk not at all.
+**Fixed** in commits `1799ee4b6`, `d95c40900` (arithmetic), `90157f573`
+(parameter reads), `36804129f` (`@a`/`@A`), `0463535a0` (assign-default),
+`22a752847` (the `declare` family, count *and* the array-making behaviour),
+`67b8d6118` (`export`/`readonly`), `ba6490b58` (`unset`). Corpus:
+`arithmetic-through-a-circular-nameref-warns-once-per-walk.sh`,
+`a-parameter-read-through-a-circular-nameref-warns-once-per-walk.sh`,
+`an-element-assign-default-through-a-circular-nameref-lands-and-breaks-the-cycle.sh`,
+`a-declaration-that-makes-an-array-makes-the-operands-own-when-the-chain-is-circular.sh`,
+`export-and-readonly-walk-a-nameref-chain-once-for-the-store-and-once-for-the-mark.sh`,
+`unset-through-a-circular-nameref-gives-up-the-subscript-and-removes-the-reference.sh`.
+`nameref-declare.sh` counts the warning as of `e5f937b7e`, having deduplicated
+it with `sort -u` while the counts disagreed.
 
-**Where.** `userspace\oils\src\interp.rs` — the declaration builtins resolve at
-`Shell::builtin_declare` (the `let target = if follow { self.resolve_ref_use(…) }`
-site), and `unset` at the two `resolve_ref_use` calls in
-`Shell::builtin_unset`. Each needs `resolve_ref_use_walks(…, 2)` instead, with
-the array-making operands kept at 1 and a third walk added for a *valued*
-`export`/`readonly`.
+**The behaviour differences found while measuring are fixed too.**
+`declare -a c1` on a cycle drops the nameref attribute and makes the array;
+`declare -aA c1` reports `cannot convert associative to indexed array`;
+`export -a c1=5` makes `declare -ax c1=([0]="5")`; `unset` removes the
+*reference*, leaving the rest of the cycle, and a subscripted operand through a
+cycle gives up on the element and removes the reference whole without ever
+reading the subscript.
 
-**Related behaviour bugs found while measuring, not yet fixed.** These are not
-count differences — the results differ:
+**Where.** `userspace\oils\src\interp.rs` — `Shell::resolve_ref_use_walks` is
+the one place that counts, and its callers pass what their shape costs:
+`Shell::builtin_declare_scoped`'s `makes_array`, `AttrRefRule::use_walks` for
+`export`/`readonly`, and the two sites in `Shell::builtin_unset`.
 
-* `declare -a c1` / `declare -A c1` on a circular chain: bash drops the nameref
-  attribute and makes the array (`declare -a c1`); osh leaves
-  `declare -n c1="c2"` untouched. Same for `declare -ax c1`.
-* `declare -aA c1`: bash reports `c1: cannot convert associative to indexed
-  array`, rc 1, leaving `declare -A c1`; osh reports nothing, rc 0.
-* `export -a c1=5`: bash makes `declare -ax c1=([0]="5")`, rc 0; osh leaves the
-  reference alone, rc 1.
+**Not copied: the local-frame corner is a bash bug.** See
+TD-OILS-NAMEREF-LOCAL-FRAME-DECLARATION-IS-A-BASH-BUG.
 
-`tests/corpus/nameref-declare.sh` still deduplicates the warning (`sort -u`)
-rather than counting it, and should count once this is finished.
+### TD-OILS-NAMEREF-LOCAL-FRAME-DECLARATION-IS-A-BASH-BUG. a declaration against a circular nameref *local to the frame* leaves bash confused — 2026-08-04 — WONTFIX (bash bug, deliberately not copied)
+
+Everything here is bash 5.2.37 inside `f() { declare -n c1=c2; declare -n c2=c1;
+…; }` — the cycle made of *locals*, so the reference being declared is in the
+same frame as the declaration. At top level every one of these shapes agrees
+with osh exactly; it is only the shared frame that breaks bash.
+
+**Array-making operands.** The array-making rule of
+TD-OILS-NAMEREF-WARNING-COUNT — a subscript
+or `-a`/`-A` drops the nameref attribute and makes the operand's own array —
+was scoped to exclude the `-a`/`-A` half when the declaration binds a *local*,
+because bash's answers there are not a specification of anything. With the
+reference itself local to the frame, bash keeps the nameref attribute *and*
+makes the array:
+
+```
+$ f() { declare -n c1=c2; declare -n c2=c1; local -a c1; declare -p c1; }; f
+declare -an c1=()
+```
+
+`declare -an` is impossible — a name is a reference or an array, not both — and
+the neighbouring shapes are worse:
+
+| input (inside `f`, after `declare -n c1=c2; declare -n c2=c1`) | bash 5.2.37 | osh |
+|---|---|---|
+| `local -a c1` | `declare -an c1=()` | `declare -n c1="c2"` |
+| `declare -i 'c1[0]'` | `declare -ain c1=()` | `declare -ai c1` |
+| `local 'c1[0]'=9` | `` local: `9': invalid variable name for name reference ``, then `declare -an c1=()` | `declare -a c1=([0]="9")` |
+| `local -a c1=x` | `` local: `????????': not a valid identifier `` — the quoted bytes are **uninitialised memory**, varying run to run and not valid UTF-8 — then `declare -an c1=()` | `declare -n c1="c2"` |
+
+The last is decisive: a diagnostic that prints indeterminate bytes is a bug, not
+behaviour to match. osh keeps the subscript half of the rule here — the array is
+made, and made out of the operand's own name, which is the sane reading of what
+bash was reaching for — and declines the `-a`/`-A` half, which would otherwise
+have to produce the impossible `declare -an`.
+
+**Where.** `userspace\oils\src\interp.rs`, `Shell::builtin_declare_scoped`, the
+`makes_array` predicate: `subscript.is_some() || (!make_local && (indexed ||
+assoc))`. The `!make_local` guard is the exclusion, and mirrors the one already
+on `unreference`.
+
+**The counts here are not matched either, and deliberately.** Where the operand
+is dropped osh happens to agree (`local -a c1`: two walks each), but where it
+makes something osh stops at one walk and bash takes two — bash is walking the
+chain again on its way into the state above, so reproducing the count would mean
+reproducing the state. Separately, `local -a c1` in a frame that merely
+*shadows* a global circular nameref walks twice in bash and not at all in osh;
+the result matches, only the count differs.
+
+**Taking the letter *off* in the same frame is confused the same way.** These
+are not array-making at all, and osh asks the chain nothing — the operand names
+the reference itself, which is right here — while bash walks it anyway:
+
+| input (inside `f`) | bash 5.2.37 | osh |
+|---|---|---|
+| `declare +n c1` | 2 walks, `declare -- c1="c2"` | 0 walks, same result |
+| `declare -x +n c1` | 2 walks, `declare -x c1="c2"` | 0 walks, same result |
+| `declare -n c1` (re-declaring) | 3 walks, unchanged | 0 walks, same result |
+| `declare +n c1=5` | 2 walks, then `` declare: `5': not a valid identifier ``, leaving `declare -n c1="c2"` | 0 walks, `declare -- c1="5"` |
+| `unset -n c1` | 0 walks, `declare -- c1` | identical |
+
+`declare +n c1=5` is the tell: bash has quoted the **value** as though it were a
+name, the same confusion as `` local: `9': invalid variable name for name
+reference `` above. At top level the same line on the same cycle warns twice and
+quietly leaves the reference alone in *both* shells, so the frame is the whole
+of the difference. osh takes the letter off and stores, which is what `+n`
+means.
+
+The 0 walks are not an oversight but the same `!make_local` scoping: `follow` in
+`builtin_declare_scoped` is off for a `+n` operand binding a local, because
+`local -n r=w; declare -x +n r` must export `r` and leave `w` alone — a rule
+verified against bash. bash resolves the chain anyway and throws the answer
+away, which is where its extra warnings come from; asking osh to walk a chain it
+has already decided not to follow, only in the frame where bash is demonstrably
+confused, would be copying the artifact rather than the rule.
+
+**No corpus case.** Output containing uninitialised bytes cannot be diffed.
+
+### TD-OILS-TEST-V-SUBSCRIPT-WALK-COUNT-DEPENDS-ON-QUOTING. bash walks a circular nameref chain twice for an *unquoted* `[[ -v c1[0] ]]` and once for every other spelling — 2026-08-04 — WONTFIX (bash artifact)
+
+**What.** `[[ -v NAME[SUB] ]]` should not care how its operand was quoted — the
+word is parsed as a `-v` operand either way — but bash 5.2.37 reports a circular
+chain twice for the bare form and once for all three others:
+
+```
+declare -n c1=c2; declare -n c2=c1
+
+[[ -v c1[0] ]]      → 2 warnings      [[ -v 'c1[0]' ]]    → 1
+                                      [[ -v "c1[0]" ]]    → 1
+                                      v='c1[0]'; [[ -v $v ]] → 1
+```
+
+All four answer false, status 1. Everything around them agrees with osh:
+`[[ -v c1 ]]` and `[ -v c1 ]` warn once and answer false, and `[[ -R c1 ]]`
+asks nothing of the chain at all — no warning, status 0, since `c1` *is* a
+reference whatever it points at.
+
+Nothing in the once-per-walk model predicts a *quoting*-dependent count: the
+unquoted word takes a different path through bash's `[[` word expansion, which
+resolves it once more before the `-v` test sees it. osh emits one warning for
+all four spellings. Copying this would mean threading the operand's original
+quoting into the `-v` test purely to reproduce an artifact.
+
+**Where.** `userspace\oils\src\interp.rs` — the `-v` arm of the conditional
+evaluator; osh resolves the operand once, as the quoted forms do.
+
+### TD-OILS-BASH-CRASHES-ON-A-READONLY-ELEMENT-AFTER-A-CIRCULAR-NAMEREF. resolving a circular chain leaves the reference shell able to segfault later — 2026-08-04 — WONTFIX (bash bug; a corpus-authoring hazard)
+
+**What.** On its own, an assign-default into an element of a readonly scalar
+reached from inside a function is refused and fatal, and osh matches bash
+5.2.37 byte for byte — including the way the diagnostic is introduced, which
+differs between the two spellings:
+
+```
+$ cat r.sh
+f() { echo "[${t[1]:=w}]"; }; ( declare -r t=v; f ); echo "rc=$?"
+$ bash --norc r.sh              $ osh r.sh
+r.sh: line 1: t: readonly variable   (identical)
+rc=2
+```
+
+But let the shell resolve a **circular nameref chain** two or more times first —
+even inside subshells of a pipeline, which should leave the parent untouched —
+and the same line crashes bash instead:
+
+```
+declare -n c1=c2; declare -n c2=c1        # …resolved twice, in subshells
+f() { echo "[${t[1]:=w}]"; }; ( declare -r t=v; f )
+bash: line 4: 128313 Segmentation fault      ( declare -r t=v; f )
+rc=139
+```
+
+One prior resolution is not enough; two are. The crash needs *both* the prior
+circular resolution and the function frame — `( declare -r t=v; t=9 )`,
+`( echo hi )` and a plain function call all survive unharmed afterwards — so
+this looks like state the circular-nameref walk leaves behind rather than
+anything about the readonly refusal itself. (The reference bash here is the
+MSYS build, whose `fork` is emulated, so the subshell isolation that ought to
+contain it may be part of the story.)
+
+**Consequence — a hazard when writing corpus cases.** A case that provokes
+circular-nameref warnings and *later* does something in this neighbourhood will
+diff a live shell against a crashed one, and the failure will look like an osh
+bug. Keep the two apart. The readonly-element shape is covered by the
+`an_assign_default_into_a_readonly_element_is_refused_and_fatal` lib test rather
+than by the corpus for exactly this reason.
 
 ### TD-OILS-CMDSUB-ABORT-LINENO. bash inflates the reported line number for a special-builtin usage error inside `$( )`; osh reports the true line — 2026-07-28 — OPEN (diagnostic wording only)
 
@@ -10716,7 +10866,8 @@ The one remaining divergence is the number of `warning: a: circular name
 reference` lines bash prints — two for a bare operand, three for a valued
 one, against osh's one. That is the pre-existing
 **TD-OILS-NAMEREF-WARNING-COUNT** below, so the corpus case deduplicates
-the warning rather than counting it.
+the warning rather than counting it. *(Closed 2026-08-04; the corpus case
+counts the warning as of `e5f937b7e`.)*
 
 ### TD-OILS-DECL-NAMEREF-SUBSCRIPT. A subscripted `declare` operand naming a nameref is neither resolved nor un-referenced — 2026-07-31 — ✅ RESOLVED 2026-07-31
 

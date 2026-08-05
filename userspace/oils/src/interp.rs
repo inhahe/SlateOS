@@ -59965,6 +59965,44 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(run("readonly q=5; readonly -p").0.contains("declare -r q=\"5\"\n"));
     }
 
+    /// An assign-default into an *element* of a readonly scalar is refused, and
+    /// the refusal is fatal: the expansion is abandoned and the shell exits 2,
+    /// exactly as the unsubscripted `${t:=w}` does.
+    ///
+    /// The refusal is raised from wherever it happens, which decides how it is
+    /// introduced: a function body belongs to the script, so it is named; an
+    /// expansion in the script's own text is the shell speaking for itself, so
+    /// it uses the shell's own name. Both spellings agree with bash 5.2.37.
+    ///
+    /// A lib test rather than a corpus case because bash **crashes** on the
+    /// function spelling once the shell has resolved a circular nameref chain a
+    /// couple of times beforehand, which is exactly what the neighbouring
+    /// corpus cases do. See `known-issues.md`,
+    /// TD-OILS-BASH-CRASHES-ON-A-READONLY-ELEMENT-AFTER-A-CIRCULAR-NAMEREF.
+    #[test]
+    fn an_assign_default_into_a_readonly_element_is_refused_and_fatal() {
+        assert_eq!(
+            run(r#"f() { echo "[${t[1]:=w}]"; }; { ( declare -r t=v; f ); } 2>&1; echo "rc=$?""#)
+                .0,
+            "main: t: readonly variable\nrc=2\n"
+        );
+        assert_eq!(
+            run(r#"{ ( declare -r t=v; echo "[${t[1]:=w}]" ); } 2>&1; echo "rc=$?""#).0,
+            "osh: t: readonly variable\nrc=2\n"
+        );
+        // It is the *store* that is refused, so a `:=` with nothing to store —
+        // `t` is set and non-null — passes through a readonly untouched.
+        assert_eq!(
+            run(r#"{ ( declare -r t=v; echo "[${t:=w}]" ); } 2>&1; echo "rc=$?""#).0,
+            "[v]\nrc=0\n"
+        );
+        // The shell is gone before the next command, so nothing follows.
+        assert_eq!(
+            run(r#"declare -r t=v; { echo "[${t[1]:=w}]"; } 2>&1; declare -p t"#).0,
+            "osh: t: readonly variable\n"
+        );
+    }
+
     #[test]
     fn readonly_functions() {
         // `readonly -f NAME` marks a function readonly: it can't be redefined or

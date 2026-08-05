@@ -11052,6 +11052,131 @@ impl Shell {
         })
     }
 
+    /// Let a **dynamic special** take a write in place of a variable-table
+    /// entry, and answer whether it did. `false` means `name` has no live
+    /// dynamic binding and the write must go on to the ordinary store.
+    ///
+    /// bash keeps these names in the shell's own state rather than the variable
+    /// table, and gives each an *assign function*. A write runs the name's own
+    /// side effect — `RANDOM=n` reseeds the generator, `SECONDS=n` rebases the
+    /// elapsed-seconds counter, `BASH_SUBSHELL=n` moves the depth counter,
+    /// `BASH_ARGV0=name` sets `$0` — and then either fills the name's value cell
+    /// or drops the string on the floor, per [`DynamicSpecial::assign`]. What it
+    /// never does is make a `vars` entry: that would shadow the dynamic read and
+    /// freeze the name at the assigned value, where bash keeps computing
+    /// (`LINENO=7` leaves `$LINENO` reporting the real line, and `SECONDS=7`
+    /// restarts the count rather than stopping it).
+    ///
+    /// The assign function belongs to the **name**, not to the `NAME=value`
+    /// syntax, so every write that reaches the variable runs it — `read
+    /// SECONDS`, `printf -v RANDOM`, a `for` loop's control variable, `getopts`,
+    /// `(( SECONDS = 5 ))`. That is why this sits beside the shared scalar store
+    /// instead of inside [`Shell::apply_assignment_inner`], for the same reason
+    /// [`Shell::after_var_write`] does.
+    ///
+    /// `append` is the one thing the syntax does decide, and only the
+    /// `NAME+=value` form has it; it changes both what the old value contributes
+    /// and whether the integer attribute reaches the value at all.
+    ///
+    /// A bad `-i` expression leaves the slot exactly as it was, and is still not
+    /// a failure: bash prints the diagnostic and carries on with a status of 0
+    /// (`RANDOM=1/0; echo $?` → the error, then `0`, and `read SECONDS <<< 1/0`
+    /// likewise), so the abort `eval_int_assign` armed is disarmed here and the
+    /// write still answers `true`.
+    fn dyn_special_write(&mut self, name: &str, val: BStr<'_>, append: bool) -> bool {
+        // Each of these hooks belongs to the name's *dynamic* binding, so
+        // `unset` takes it away with the rest ([`Shell::dynamic_special`] answers
+        // `None` from then on): after `unset RANDOM` the name is ordinary and
+        // `RANDOM=5` really does store 5. See [`Shell::dyn_unset`].
+        //
+        // A `local` of the name, or the assignment prefix of the command now
+        // running, takes them away the same way for as long as it stands: bash's
+        // value and assign functions belong to the *global* variable, so behind
+        // an ordinary binding of the name it neither computes on a read nor
+        // reaches the counter on a write. `f() { local SECONDS=9; echo
+        // $SECONDS; }` prints 9 and leaves the clock outside alone, `f() { local
+        // SECONDS; SECONDS=7; }` writes the local rather than rebasing anything,
+        // and `SECONDS=100 eval 'SECONDS=5'` leaves the clock at 0 too. See
+        // [`Shell::is_ordinary_shadowed`], and the matching guard in
+        // [`Shell::dynamic_special_value`].
+        if self.is_ordinary_shadowed(name) {
+            return false;
+        }
+        let Some(d) = self.dynamic_special(name) else {
+            return false;
+        };
+        // `BASH_ARGV0=name` sets `$0` (the shell/script name used in diagnostics
+        // and `$0` expansion) — the one of these whose value is a string rather
+        // than a number, so it is taken before the parse below. We intercept
+        // `+=` too (appending to the current `$0`) so a stray append never
+        // leaves a stale `vars` entry that reads would ignore. (bash's own `+=`
+        // here depends on an obscure lazy-materialization quirk —
+        // `BASH_ARGV0=a; BASH_ARGV0+=b` yields `b`, not `ab`, unless a read
+        // intervened; osh uses the predictable append instead. See known-issues
+        // TD-OILS-MISSING-SPECIAL-ARRAYS.)
+        if d.name == "BASH_ARGV0" {
+            self.name = if append {
+                bfmt![&self.name, val]
+            } else {
+                val.to_vec()
+            };
+            return true;
+        }
+        // The call-stack arrays take an assignment as an ordinary array store;
+        // only the scalars are intercepted here.
+        if d.listed.is_array() {
+            return false;
+        }
+        // Every one of these names is a number to bash, so the string is parsed
+        // here and it is the *number* that is stored and acted on.
+        let has_int = self.dyn_integer_attr(d);
+        // The integer attribute only reaches the *value* of a non-appending
+        // assignment for the names whose own assign function consults it. bash's
+        // `assign_seconds` and `assign_random` do; the rest take the string as a
+        // plain decimal however it was declared, so `declare -i BASH_SUBSHELL;
+        // BASH_SUBSHELL=3+4` stores 0 where the same on `SECONDS` stores 7. An
+        // *appending* assignment is evaluated either way, because bash forms the
+        // appended string before the assign function is reached. See
+        // [`DynamicSpecial::assign_evals`].
+        let int = has_int && (append || d.assign_evals);
+        // `+=` resolves against the value cell either way, not against a fresh
+        // reading.
+        let cur = self.dyn_cell_value(name);
+        let armed = self.discard_error;
+        let Some(n) = self.dyn_assigned_number(int, cur, val.to_vec(), append) else {
+            self.discard_error = armed;
+            return true;
+        };
+        match d.name {
+            "RANDOM" => {
+                // The generator is seeded from the number, when it fits the
+                // seed: bash's is a 32-bit one.
+                if let Ok(seed) = u32::try_from(n) {
+                    self.rng.set(seed);
+                }
+            }
+            "SECONDS" => {
+                self.seconds_base = n;
+                self.seconds_anchor = std::time::Instant::now();
+            }
+            "BASH_SUBSHELL" => {
+                // The counter bash's assign function writes is the very one a
+                // subshell increments, so the number given is what this level
+                // reads and each level further in reads one more.
+                self.subshell_base = n.saturating_sub(i64::from(self.subshell_level));
+            }
+            // The rest have no counter to move: `SRANDOM` draws from the system
+            // entropy source, so there is no seed to set, and
+            // `LINENO`/`HISTCMD`/`EPOCHSECONDS` are read off the shell's own
+            // state.
+            _ => {}
+        }
+        if d.assign == DynAssign::Cell {
+            self.set_dyn_cell(name, n.to_string().into_bytes());
+        }
+        true
+    }
+
     /// Store `val` at an already-resolved destination, applying `set -a` and
     /// the name's value attributes. The readonly guard is deliberately *not*
     /// here: the callers disagree on how a refusal should be reported (a
@@ -11066,6 +11191,21 @@ impl Shell {
         // attribute automatically.
         if self.allexport {
             self.mark_exported(base.clone());
+        }
+        // A dynamic special takes the write itself, running the name's own side
+        // effect instead of landing in the variable table — see
+        // [`Shell::dyn_special_write`]. Asked before the value attributes,
+        // because the name's assign function is what decides whether the string
+        // is an arithmetic expression, and it disagrees with `declare -i` about
+        // that. Only a whole-variable destination: `SECONDS[1]=9` widens the
+        // name into an ordinary array first, and from then on it is one.
+        //
+        // [`Shell::after_var_write`] is not owed anything here — the only name
+        // it syncs is `DIRSTACK`, which is an ordinary array.
+        if let ScalarDest::Var(n) = dest
+            && self.dyn_special_write(n, &val, false)
+        {
+            return true;
         }
         let stored = match self.apply_value_attrs(&base, val) {
             // A bad `-i` expression stores nothing; the abort it armed ends the
@@ -11688,110 +11828,12 @@ impl Shell {
                 if self.noassign.contains(&a.name) {
                     return true;
                 }
-                // `BASH_ARGV0=name` sets `$0` (the shell/script name used in
-                // diagnostics and `$0` expansion). It is dynamic — not stored in
-                // `vars`; reads go through `param_value`, which returns
-                // `self.name`. We intercept `+=` too (appending to the current
-                // `$0`) so a stray append never leaves a stale `vars` entry that
-                // reads would ignore. (bash's own `+=` here depends on an obscure
-                // lazy-materialization quirk — `BASH_ARGV0=a; BASH_ARGV0+=b`
-                // yields `b`, not `ab`, unless a read intervened; osh uses the
-                // predictable append instead. See known-issues TD-OILS-MISSING-
-                // SPECIAL-ARRAYS.)
-                // Each of these three hooks belongs to the name's *dynamic*
-                // binding, so `unset` takes it away with the rest: after `unset
-                // RANDOM` the name is ordinary and `RANDOM=5` really does store
-                // 5. See [`Shell::dyn_unset`].
-                //
-                // A `local` of the name, or the assignment prefix of the command
-                // now running, takes them away the same way for as long as it
-                // stands: bash's value and assign functions belong to the
-                // *global* variable, so behind an ordinary binding of the name
-                // it neither computes on a read nor reaches the counter on a
-                // write. `f() { local SECONDS=9; echo $SECONDS; }` prints 9 and
-                // leaves the clock outside alone, `f() { local SECONDS;
-                // SECONDS=7; }` writes the local rather than rebasing anything,
-                // and `SECONDS=100 eval 'SECONDS=5'` leaves the clock at 0 too.
-                // See [`Shell::is_ordinary_shadowed`], and the matching guard in
-                // [`Shell::dynamic_special_value`].
-                let dynamic =
-                    !self.dyn_unset.contains(&a.name) && !self.is_ordinary_shadowed(&a.name);
-                if dynamic && a.index.is_none() && a.name == "BASH_ARGV0" {
-                    self.name = if a.append { bfmt![&self.name, &val] } else { val };
-                    return true;
-                }
-                // An assignment to any other dynamic special runs the name's own
-                // side effect — `RANDOM=n` reseeds the generator, `SECONDS=n`
-                // rebases the elapsed-seconds counter — and then either fills
-                // the name's value cell or drops the string on the floor, per
-                // [`DynamicSpecial::assign`]. What it never does is make a
-                // `vars` entry: that would shadow the dynamic read and freeze
-                // the name at the assigned value, where bash keeps computing
-                // (`LINENO=7` leaves `$LINENO` reporting the real line, and
-                // `SECONDS=7` restarts the count rather than stopping it).
-                if dynamic
-                    && a.index.is_none()
-                    && let Some(d) = self.dynamic_special(&a.name)
-                    // The call-stack arrays take an assignment as an ordinary
-                    // array store; only the scalars are intercepted here.
-                    && !d.listed.is_array()
-                {
-                    // Every one of these names is a number to bash, so the
-                    // string is parsed here and it is the *number* that is
-                    // stored and acted on.
-                    let has_int = self.dyn_integer_attr(d);
-                    // The integer attribute only reaches the *value* of a
-                    // non-appending assignment for the names whose own assign
-                    // function consults it. bash's `assign_seconds` and
-                    // `assign_random` do; the rest take the string as a plain
-                    // decimal however it was declared, so
-                    // `declare -i BASH_SUBSHELL; BASH_SUBSHELL=3+4` stores 0
-                    // where the same on `SECONDS` stores 7. An *appending*
-                    // assignment is evaluated either way, because bash forms
-                    // the appended string before the assign function is
-                    // reached. See [`DynamicSpecial::assign_evals`].
-                    let int = has_int && (a.append || d.assign_evals);
-                    // `+=` resolves against the value cell either way, not
-                    // against a fresh reading.
-                    let cur = self.dyn_cell_value(&a.name);
-                    let Some(n) = self.dyn_assigned_number(int, cur, val, a.append) else {
-                        // A bad `-i` expression leaves the slot exactly as it
-                        // was — but, unlike the same expression assigned to an
-                        // ordinary `-i` variable, it does not abort: bash
-                        // prints the diagnostic and carries on with a status of
-                        // 0 (`RANDOM=1/0; echo $?` → the error, then `0`), so
-                        // the abort `eval_int_assign` armed is disarmed here.
-                        self.discard_error = armed;
-                        return true;
-                    };
-                    match a.name.as_str() {
-                        "RANDOM" => {
-                            // The generator is seeded from the number, when it
-                            // fits the seed: bash's is a 32-bit one.
-                            if let Ok(seed) = u32::try_from(n) {
-                                self.rng.set(seed);
-                            }
-                        }
-                        "SECONDS" => {
-                            self.seconds_base = n;
-                            self.seconds_anchor = std::time::Instant::now();
-                        }
-                        "BASH_SUBSHELL" => {
-                            // The counter bash's assign function writes is the
-                            // very one a subshell increments, so the number
-                            // given is what this level reads and each level
-                            // further in reads one more.
-                            self.subshell_base = n.saturating_sub(i64::from(self.subshell_level));
-                        }
-                        // The rest have no counter to move: `SRANDOM` draws
-                        // from the system entropy source, so there is no seed
-                        // to set, and `LINENO`/`HISTCMD`/`EPOCHSECONDS` are
-                        // read off the shell's own state.
-                        _ => {}
-                    }
-                    if d.assign == DynAssign::Cell {
-                        self.set_dyn_cell(&a.name, n.to_string().into_bytes());
-                    }
+                // A dynamic special takes the write itself, running the
+                // name's own side effect instead of landing in the variable
+                // table — see [`Shell::dyn_special_write`]. Only a
+                // subscript-less write: `SECONDS[1]=9` widens the name into an
+                // ordinary array first, and from then on it is one.
+                if a.index.is_none() && self.dyn_special_write(&a.name, &val, a.append) {
                     return true;
                 }
                 // With the integer attribute (`declare -i`), the value is an

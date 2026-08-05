@@ -18921,7 +18921,62 @@ the `noassign` branch.
 with a command substitution on the right. Found while probing
 TD-OILS-A-REFUSED-ASSIGNMENT-STILL-EXPANDS-AND-TRACES.
 
-### TD-OILS-DYNAMIC-SPECIALS-ONLY-ANSWER-A-PLAIN-ASSIGNMENT. `SECONDS`, `RANDOM` and `BASH_SUBSHELL` act on a write only when it is spelled `NAME=value`; every other write path stores a string that nothing reads — OPEN 2026-08-04
+### TD-OILS-ALLEXPORT-MARKS-EVERY-WRITE, NOT THE SCALAR-SHAPED ONES. `set -a` exports an array-shaped write and a write a dynamic special takes, and misses the nameref it was written through — OPEN 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the two `self.allexport` guards, in
+`Shell::apply_assignment_inner` (~11776) and `Shell::scalar_write_store`
+(~11190). Both mark the base name unconditionally.
+
+**What.** bash's allexport marks the *variable an assignment made*, and it can
+only ever make a scalar one: an array has no environment representation, so a
+write that makes or extends an array is passed over, as is a write that makes no
+variable at all. The shape that decides it is the same one the readonly blame
+uses (see TD-OILS-READONLY-REFUSAL-NAMES-TARGET) — **array-shaped** is a
+subscripted operand or a compound literal — only here it is the *complement*
+that is marked.
+
+| `set -a` then…              | bash              | osh                |
+|-----------------------------|-------------------|--------------------|
+| `zz=5`                      | `declare -x zz`   | `declare -x zz`    |
+| `read zz` / `printf -v zz`  | `declare -x zz`   | `declare -x zz`    |
+| `for zz in 9` / `((zz=9))` / `getopts a zz` | `declare -x zz` | `declare -x zz` |
+| `declare -a zz; zz=5`       | `declare -ax zz`  | `declare -ax zz`   |
+| `zz[1]=9`                   | `declare -a zz`   | `declare -ax zz`   |
+| `zz=(1 2)`                  | `declare -a zz`   | `declare -ax zz`   |
+| `declare -A mm; mm[k]=9`    | `declare -A mm`   | `declare -Ax mm`   |
+| `read 'zz[1]'`              | `declare -a zz`   | `declare -ax zz`   |
+| `SECONDS=5`                 | `declare -i SECONDS` | `declare -ix SECONDS` |
+| `SECONDS[1]=9`              | `declare -ai SECONDS` | `declare -aix SECONDS` |
+| `declare -n r=zz; r=5`      | `declare -x zz` **and** `declare -nx r` | `declare -x zz`, `declare -n r` |
+
+The dynamic-special row is the sharpest of them, because it is observable
+without a listing: `set -a; read SECONDS <<< 5; env | grep -c '^SECONDS='` is 0
+in bash and 1 in osh. An explicit `export SECONDS` *does* mark the name and
+*does* reach the environment — that is a declaration, not an assignment — so
+the rule is about the write, not about the name.
+
+Two things are deliberately not in the table because they are a declaration
+builtin's own business and bash treats them differently again: `declare zz=(1
+2)` and `export zz=(1 2)` under `set -a` both give `declare -ax zz`, where the
+bare `zz=(1 2)` does not.
+
+**Proper fix.** Ask the shape once, in both guards. The dynamic-special half is
+already a method — `Shell::dyn_special_write` answers exactly "did the name take
+this write instead of the variable table" — so factor its `is_ordinary_shadowed`
++ `dynamic_special` + non-array test into a `Shell::dyn_special_for_write`
+predicate the allexport guard can ask without doing the write. The array-shaped
+half is `a.index.is_some() || matches!(a.value, AssignRhs::Array(_))` in the
+assignment path and `matches!(dest, ScalarDest::Elem(_, _))` in the shared store.
+The nameref half wants the *written* name marked as well as the target, which is
+the `spelled` argument the same function already carries.
+
+**Impact.** Under `set -a` — rare in scripts, but `set -a` is exactly what a
+`.env`-style sourced file uses — osh puts arrays and shell-maintained names into
+every child's environment that bash does not, and leaves a nameref unexported
+that bash exports. Found while checking that the dynamic-special store fix did
+not disturb allexport.
+
+### TD-OILS-DYNAMIC-SPECIALS-ONLY-ANSWER-A-PLAIN-ASSIGNMENT. `SECONDS`, `RANDOM` and `BASH_SUBSHELL` act on a write only when it is spelled `NAME=value`; every other write path stores a string that nothing reads — 2026-08-04 — ✅ RESOLVED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — the dynamic-special branch of
 `Shell::apply_assignment_inner` (~11640–11706), which is where
@@ -18961,6 +19016,30 @@ a `for` control variable or any arithmetic assignment is silently inert
 (measured); every other caller of the shared scalar store — `select`, `getopts`,
 a `read` element target — is presumably the same and was not probed. Found
 while probing TD-OILS-READONLY-REFUSAL-NAMES-TARGET.
+
+**Fixed** exactly as prescribed: the whole effect — the shadowing guard, the
+`BASH_ARGV0` interception, the number parse, the three counters and the value
+cell — moved into `Shell::dyn_special_write`, called from
+`Shell::scalar_write_store`'s whole-variable arm as well as from
+`Shell::apply_assignment_inner`. The assignment path keeps only `a.append`,
+which is the one thing its syntax decides. Covered by
+`tests/corpus/every-write-to-a-dynamic-special-runs-the-names-own-assign-function.sh`,
+which runs every path against `SECONDS`, `RANDOM`, `BASH_SUBSHELL`,
+`BASH_ARGV0`, `LINENO`, `EPOCHSECONDS`, `BASHPID`, `PPID` and the call-stack
+arrays.
+
+The probe that confirmed it also settled three things the entry had not:
+
+* `getopts` and `select` do run the assign function — `getopts a BASH_SUBSHELL`
+  leaves the counter at 0, not at `"a"` — so the guess in **Impact** was right.
+* A bad `-i` value is a diagnostic and *not* a failure whichever path carries
+  it: `read SECONDS <<< 1/0` prints `read: 1/0: division by 0` and still
+  reports 0, exactly as `RANDOM=1/0` does. `dyn_special_write` therefore
+  disarms the abort `eval_int_assign` armed and answers success either way.
+* The integer attribute reaches the value on every path, not just the
+  assignment: with `SECONDS` touched, `read SECONDS <<< 3+4` stores 7 and an
+  untouched one stores 0 — which is `DynamicSpecial::assign_evals` doing the
+  same work for `read` that it did for `NAME=value`.
 
 ### TD-OILS-DECL-COMPOUND-OPERAND-TRACED-AFTER-THE-PREFIX. `set -x` orders a declaration builtin's compound operands after the command's prefix assignments, where bash puts them first — 2026-07-31 — ✅ RESOLVED 2026-08-03
 

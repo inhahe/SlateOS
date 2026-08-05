@@ -35026,6 +35026,39 @@ impl Shell {
                 self.exported_funcs.remove(a.as_slice());
                 continue;
             }
+            // Only an *explicit* `-v` makes `unset` check that the operand is
+            // spelled like a variable. Measured against bash 5.2.37:
+            //
+            // ```
+            // unset 1x        # silent, rc 0 — falls back to the function name
+            // unset -f 1x     # silent, rc 0 — a function may be named anything
+            // unset -n 1x     # silent, rc 0
+            // unset -v 1x     # unset: `1x': not a valid identifier, rc 1
+            // unset -nv 1x    # likewise — the `-v` is what decides
+            // unset -v -- 1x  # likewise — `--` only ends the options
+            // ```
+            //
+            // What passes is a plain identifier *or* an element reference, since
+            // `unset -v a[0]` is how a single element is removed. So `a[0]` and
+            // `m[no such]` are accepted while `a[]`, `q[0]junk` and `1x[0]` are
+            // not — which is exactly [`subscript_base`]'s split, the same
+            // spelling test the subscript branch below applies.
+            //
+            // The complaint quotes the operand whole, bad subscript and all, and
+            // one bad name does not stop the rest: `unset -v 1x 2y` reports both
+            // and `unset -v 1x a` still unsets `a`.
+            if vars_only
+                && !bytes::as_str(a).is_some_and(|s| is_identifier(subscript_base(s).unwrap_or(s)))
+            {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    b"unset: `",
+                    a.as_slice(),
+                    b"': not a valid identifier"
+                ]);
+                status = 1;
+                continue;
+            }
             // `unset -n ref` removes the nameref binding itself. Those tables
             // are keyed by `String` and a variable name is spelled in the
             // shell's identifier syntax, so a name that is not text is bound to
@@ -70684,6 +70717,62 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // An *unset* variable is never probed, so a subscript that would be a
         // hard error on a real array is silently accepted.
         assert_eq!(run("unset 'nosuch[x y]'; echo \"st=$?\"").0, "st=0\n");
+    }
+
+    /// Those same tokens *do* get rejected once `-v` says the operand names a
+    /// variable — the one spelling under which `unset` checks at all.
+    #[test]
+    fn unset_validates_the_operand_only_under_an_explicit_v() {
+        let bad = "osh: unset: `1x': not a valid identifier\n";
+        // Plain `unset`, `-f` and `-n` accept anything, silently and with rc 0.
+        assert_eq!(run("{ unset 1x; } 2>&1; echo st=$?").0, "st=0\n");
+        assert_eq!(run("{ unset -f 1x; } 2>&1; echo st=$?").0, "st=0\n");
+        assert_eq!(run("{ unset -n 1x; } 2>&1; echo st=$?").0, "st=0\n");
+        assert_eq!(run("{ unset -- 1x; } 2>&1; echo st=$?").0, "st=0\n");
+        // An explicit `-v` reports and fails — wherever the `v` appears, and
+        // whether or not a `--` or another flag comes with it.
+        assert_eq!(run("{ unset -v 1x; } 2>&1; echo st=$?").0, format!("{bad}st=1\n"));
+        assert_eq!(run("{ unset -nv 1x; } 2>&1; echo st=$?").0, format!("{bad}st=1\n"));
+        assert_eq!(run("{ unset -vn 1x; } 2>&1; echo st=$?").0, format!("{bad}st=1\n"));
+        assert_eq!(run("{ unset -v -n 1x; } 2>&1; echo st=$?").0, format!("{bad}st=1\n"));
+        assert_eq!(run("{ unset -v -- 1x; } 2>&1; echo st=$?").0, format!("{bad}st=1\n"));
+        // An element reference passes, since that is how one element is unset.
+        assert_eq!(run("n=(1 2); unset -v 'n[0]'; echo \"st=$? n=${#n[@]}\"").0, "st=0 n=1\n");
+        assert_eq!(
+            run("declare -A m=([k v]=1); unset -v 'm[k v]'; echo \"st=$? m=${#m[@]}\"").0,
+            "st=0 m=0\n"
+        );
+        // A malformed one does not, and is quoted back whole.
+        assert_eq!(
+            run("n=(1 2); { unset -v 'n[]'; } 2>&1; echo \"st=$? n=${#n[@]}\"").0,
+            "osh: unset: `n[]': not a valid identifier\nst=1 n=2\n"
+        );
+        assert_eq!(
+            run("{ unset -v 'n[0]junk'; } 2>&1; echo st=$?").0,
+            "osh: unset: `n[0]junk': not a valid identifier\nst=1\n"
+        );
+        assert_eq!(
+            run("{ unset -v '1x[0]'; } 2>&1; echo st=$?").0,
+            "osh: unset: `1x[0]': not a valid identifier\nst=1\n"
+        );
+        // So do the empty operand and the lone signs.
+        for name in ["", "-", "+", "a b", "a+", "@", "1"] {
+            let (o, st) = run(&format!("{{ unset -v '{name}'; }} 2>&1"));
+            assert_eq!(o, format!("osh: unset: `{name}': not a valid identifier\n"));
+            assert_eq!(st, 1);
+        }
+        // Every bad name is reported and the good ones are still unset.
+        assert_eq!(
+            run("a=A; { unset -v 1x 2y a; } 2>&1; echo \"st=$? [${a-gone}]\"").0,
+            "osh: unset: `1x': not a valid identifier\nosh: unset: `2y': not a valid identifier\n\
+             st=1 [gone]\n"
+        );
+        // The identifier check and the readonly refusal each speak in turn.
+        assert_eq!(
+            run("ro=RO; readonly ro; { unset -v ro 1x; } 2>&1; echo st=$?").0,
+            "osh: unset: ro: cannot unset: readonly variable\n\
+             osh: unset: `1x': not a valid identifier\nst=1\n"
+        );
     }
 
     #[test]

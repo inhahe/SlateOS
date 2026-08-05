@@ -11211,6 +11211,16 @@ impl Shell {
     /// `Ok(None)` is a circular nameref: it designates nothing, the warning has
     /// been given, and the write simply does not happen — which is not an error
     /// and does not stop the expression.
+    ///
+    /// A refusal is spelled with the name the writer *wrote* when the write is
+    /// array-shaped — see [`Self::arith_blame`]. An arithmetic `r=5` onto an
+    /// indexed array is array-shaped where the same as a plain assignment is
+    /// not, which is the one place the two paths part company:
+    ///
+    /// ```text
+    /// readonly -a q=(1); declare -n r=q; r=5      # q: readonly variable
+    /// readonly -a q=(1); declare -n r=q; ((r=5))  # r: readonly variable
+    /// ```
     fn arith_write_dest(&self, name: &str) -> Result<Option<ScalarDest>, arith::ArithError> {
         // Two walks, because bash resolves the name once to find the variable
         // and again to bind it. Unlike the element write above, a circular chain
@@ -11226,16 +11236,44 @@ impl Shell {
         };
         if self.readonly.contains(dest.base()) {
             return Err(arith::ArithError::about_var(
-                dest.base(),
+                self.arith_blame(name, &dest),
                 "readonly variable",
             ));
         }
         // A variable the shell maintains is refused the same way, minus the
         // diagnostic — see [`Shell::noassign`] and [`arith::ArithError::silent`].
         if self.noassign.contains(dest.base()) {
-            return Err(arith::ArithError::silently_refused(dest.base()));
+            return Err(arith::ArithError::silently_refused(
+                self.arith_blame(name, &dest),
+            ));
         }
         Ok(Some(dest))
+    }
+
+    /// Which of the two names an arithmetic write to `spelled` reports a refusal
+    /// under, having landed on `dest`.
+    ///
+    /// A nameref redirects the store, and the refusal follows the store — except
+    /// where the write is *array-shaped*, which is about the reference's own
+    /// name, exactly as it is for a plain assignment (see
+    /// [`Shell::apply_assignment_spelled`]). What arithmetic counts as
+    /// array-shaped is wider by one case: a subscript-less write onto an
+    /// **indexed** array is element 0 of that array, so it is array-shaped here
+    /// where the same spelling as a plain assignment is not.
+    ///
+    /// An *associative* array is not in that case, measured rather than
+    /// reasoned: `((r=5))` onto one stores under key `0` just as readily, but
+    /// bash blames the target for it — `m`, not `r` — and only a written
+    /// subscript (`((r[k]=5))`) moves the blame back to the reference.
+    ///
+    /// A reference that designates an element (`declare -n r=q[1]`) is *not* an
+    /// array-shaped write: nothing about it makes an array, so it is blamed on
+    /// the target like any other scalar store.
+    fn arith_blame<'a>(&self, spelled: &'a str, dest: &'a ScalarDest) -> &'a str {
+        match dest {
+            ScalarDest::Var(base) if self.arrays.contains_key(base) => spelled,
+            _ => dest.base(),
+        }
     }
 
     /// What an arithmetic *element* reference (`a[i]`, `m[k]`) designates, after
@@ -11315,15 +11353,20 @@ impl Shell {
 
     /// Refuse an arithmetic write to an element of a readonly array, or of one
     /// the shell maintains — the array is what carries the attribute, so it is
-    /// the array that is named (and, for the latter, silently: see
+    /// the array that is asked (and, for the latter, the refusal is silent: see
     /// [`Shell::noassign`]). See [`Self::arith_write_dest`] for why the refusal
     /// travels as an error.
-    fn arith_elem_writable(&self, base: &str) -> Result<(), arith::ArithError> {
+    ///
+    /// The array is asked but the *writer's* name is blamed: a subscripted write
+    /// is array-shaped, and an array-shaped write is about the name as written
+    /// even when a nameref carried it somewhere else — see
+    /// [`Self::arith_blame`]. Without a reference the two are the same name.
+    fn arith_elem_writable(&self, spelled: &str, base: &str) -> Result<(), arith::ArithError> {
         if self.readonly.contains(base) {
-            return Err(arith::ArithError::about_var(base, "readonly variable"));
+            return Err(arith::ArithError::about_var(spelled, "readonly variable"));
         }
         if self.noassign.contains(base) {
-            return Err(arith::ArithError::silently_refused(base));
+            return Err(arith::ArithError::silently_refused(spelled));
         }
         Ok(())
     }
@@ -41103,7 +41146,7 @@ impl VarLookup for Shell {
         let Some(base) = self.arith_elem_write_base(name) else {
             return Ok(());
         };
-        self.arith_elem_writable(&base)?;
+        self.arith_elem_writable(name, &base)?;
         // Mirror the indexed branch of `assign_elem`: negative indices count
         // back from `highest_index + 1` (bash sparse semantics).
         let arr = self.arrays.entry(base.clone()).or_default();
@@ -41119,7 +41162,7 @@ impl VarLookup for Shell {
         let Some(base) = self.arith_elem_write_base(name) else {
             return Ok(());
         };
-        self.arith_elem_writable(&base)?;
+        self.arith_elem_writable(name, &base)?;
         self.assoc_set(&base, key.to_vec(), value.to_string().into_bytes(), false);
         Ok(())
     }

@@ -18741,42 +18741,203 @@ inside `$(( ))` or a `declare -i` value), which fell out of reusing
 the array itself as the control, and a scalar write through the same element
 reference (which still lands). Full differential corpus: 108 matched, 0 failed.
 
-### TD-OILS-READONLY-REFUSAL-NAMES-TARGET. A refused write through a nameref names the resolved target where bash sometimes names the reference — OPEN 2026-07-28
+### TD-OILS-READONLY-REFUSAL-NAMES-TARGET. A refused write through a nameref names the resolved target where bash names the reference — 2026-07-28 — ✅ RESOLVED 2026-08-04
 
-**Where:** `userspace/oils/src/interp.rs` — `Shell::arith_write_dest` /
-`Shell::set_scalar_checked`, which both report `ScalarDest::base()`.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::apply_assignment_spelled`,
+`Shell::arith_write_dest` / `Shell::arith_blame`, `Shell::arith_elem_writable`.
 
-**What.** bash is not consistent about which of the two names a readonly refusal
-puts to the reader. Where the nameref's target is a *scalar* it names the
-resolved target; where the target is an array or an associative array it names
-the *reference*:
+**What.** A nameref redirects a store to its target, and everything the store
+*does* belongs to the target — but a readonly refusal does not always say so.
+It names the **reference** for an *array-shaped* write and the **target** for a
+scalar one. That is the same seam as everywhere else a nameref meets an array
+(compare the `+a` refusal above, and `Shell::resolve_ref_array_write`): a write
+that makes an array is about the reference's own name.
 
-```
-$ bash -c 'readonly x=1; declare -n r=x; ((r=5))'          # x: readonly variable
-$ bash -c 'readonly -a q=(1); declare -n r=q; ((r=5))'     # r: readonly variable
-$ osh  -c 'readonly -a q=(1); declare -n r=q; ((r=5))'     # q: readonly variable
-```
+The original entry called this "the target is array- or assoc-valued", which is
+wrong on both halves; a 60-row probe of both shells gave the real rule.
 
-**Proper fix.** Arguably none: osh applies the scalar rule (name what was
-actually refused) uniformly, which is the principled reading, and bash's split
-looks like an artifact of which internal lookup happened to fail first. Logged
-so the divergence is not mistaken for an oversight. If it is ever matched, the
-condition is "the resolved target is array- or assoc-valued".
+**The rule, measured.** For a plain assignment the write is array-shaped when
+the *operand as written* has a subscript or the value is a compound literal:
 
-**Scope narrowed 2026-07-31.** A *temporary environment* assignment is its own
-path and has its own rule — it names the reference whatever the target is — and
-osh now matches it there (`Shell::prefix_assignments`), covered by
-`tests/corpus/env-prefix.sh`:
+| written                       | target            | blamed |
+|-------------------------------|-------------------|--------|
+| `r=5`, `r+=5`                 | readonly scalar   | target |
+| `r=5`                         | readonly array    | target |
+| `r[0]=5`, `r[k]=5`            | anything readonly | **ref** |
+| `r=(a b)`                     | anything readonly | **ref** |
+| `r=5`, ref is to `q[1]`       | readonly array    | target |
+| `declare -i r; r=5`           | readonly array    | target |
+
+For an *arithmetic* write the rule is the same plus one case: a bare operand
+whose target is an **indexed** array is really `q[0]=…`, so it too is
+array-shaped. An associative one is not — measured, not reasoned:
+
+| written                        | target             | blamed |
+|--------------------------------|--------------------|--------|
+| `((r=5))`, `((r++))`, `let r=5`| readonly scalar    | target |
+| `((r=5))`, `((r+=2))`, `((++r))`| readonly indexed array | **ref** |
+| `((r=5))`                      | readonly assoc     | target |
+| `((r[0]=5))`, `((r[k]=5))`     | anything readonly  | **ref** |
+| `((r=5))`, ref is to `q[1]`    | readonly array     | target |
+
+Along a chain the reference blamed is the **outermost** name — the one the
+reader can see — not the link it went through. Every arithmetic entry point
+(`((`, `let`, `$(( ))`, `for ((;;))`) spells it the same way. Without a nameref
+the two names are one, so nothing is observable there.
+
+**Fixed** by threading the assignment *as written* through the nameref rewrite
+(`Shell::apply_assignment_spelled`, which also fixed the `set -x` trace — see
+below) and by giving the arithmetic write paths a blame name of their own
+(`Shell::arith_blame`). Corpus:
+`tests/corpus/an-assignment-through-a-nameref-is-traced-and-blamed-by-the-name-as-written.sh`
+and
+`tests/corpus/an-array-shaped-arithmetic-write-through-a-nameref-is-refused-by-the-name-as-written.sh`.
+
+**The trace, fixed with it.** The same probe turned up a second divergence
+nobody had logged: `set -x` shows an assignment **as typed**, never as
+resolved. `declare -n r=x; r=5` traces `+ r=5`, and a reference that designates
+an element traces `+ r=9` rather than the `x[1]=9` the store became. osh traced
+the resolved form.
+
+**Already matched before this.** A *temporary environment* assignment is its
+own path and names the reference whatever the target is
+(`Shell::prefix_assignments`, covered by `tests/corpus/env-prefix.sh`):
 
 ```
 $ bash -c 'declare -n n=r; readonly r=1; n=2 true'   # n: readonly variable
 $ bash -c 'declare -n n=r; readonly r=1; n=2'        # r: readonly variable
 ```
 
-What remains open is only the arithmetic/`set_scalar_checked` path above.
+**Still open, found by the same probe:** bash *expands before it checks*, so a
+refused write still runs the RHS's side effects and still traces — see
+TD-OILS-A-REFUSED-ASSIGNMENT-STILL-EXPANDS-AND-TRACES.
 
-**Impact.** Wording of one stderr line, in a shape combining `readonly`, a
-nameref and an array. Kept out of `tests/corpus/nameref.sh`.
+### TD-OILS-A-REFUSED-ASSIGNMENT-STILL-EXPANDS-AND-TRACES. bash expands an assignment's value before it asks whether the variable may be written, so a refused write still runs the RHS's side effects and still traces — OPEN 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::apply_assignment_inner`,
+which takes the readonly/`noassign` branch *before* it expands the value word.
+
+**What.** Three things follow from the order, and osh has all three the other
+way round:
+
+```
+$ bash -c 'readonly x=1; x=$(echo SIDE >&2; echo v)'
+SIDE
+bash: x: readonly variable
+$ osh -c 'readonly x=1; x=$(echo SIDE >&2; echo v)'
+osh: x: readonly variable
+```
+
+* **Side effects run.** The command substitution above executes in bash and not
+  in osh.
+* **The value is expanded before the subscript.** For an element write bash
+  expands the *value* first and the *subscript* second — the reverse of the
+  order they are written in:
+  ```
+  $ bash -c 'readonly -a q=(1); q[$(echo SUB >&2; echo 0)]=$(echo VAL >&2; echo v)'
+  VAL
+  SUB
+  bash: q: readonly variable
+  ```
+* **A refused scalar is still traced.** osh already traces a refused *element*
+  write (`+ q[0]=5`) and a refused compound one (`+ x=(a b)`) — both are formed
+  from the source text — but a scalar's trace carries the expanded value, so it
+  is emitted on the far side of the check and never reaches the reader:
+  ```
+  $ bash -c 'readonly x=1; set -x; x=5'      # + x=5, then the refusal
+  $ osh  -c 'readonly x=1; set -x; x=5'      # only the refusal
+  ```
+
+**Proper fix.** Move the value expansion in `Shell::apply_assignment_inner`
+ahead of the readonly/`noassign` guard — expanding the value, then the
+subscript, then checking — so that all three fall out at once. The guard itself
+does not move relative to the *store*, only relative to the expansion. The
+scalar trace already sits with the expansion, so it comes along for free.
+
+Watch for: an expansion that itself aborts (`x=$(exit)` under `set -e`, a
+bad `declare -i` value, `${v:?}`) must keep reporting what it reports today,
+and the refusal must still come *after* whatever the expansion printed.
+
+**Impact.** A missing side effect and a missing trace line, in the shape
+"assignment to a readonly (or shell-maintained) variable". Discovered while
+mapping TD-OILS-READONLY-REFUSAL-NAMES-TARGET; deliberately left out of
+`tests/corpus/an-assignment-through-a-nameref-is-traced-and-blamed-by-the-name-as-written.sh`,
+which keeps its trace sections free of refusals so it stays green until this
+lands.
+
+### TD-OILS-A-REFUSED-MAINTAINED-ASSIGNMENT-KEEPS-THE-SUBSTITUTION-STATUS. An assignment-only command refused by `att_noassign` reports the command substitution's status where bash reports 1 — OPEN 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::apply_assignment_inner`'s
+`noassign` branch (~11599), which returns without disturbing the status the
+command substitution left behind.
+
+**What.** An assignment-only command normally takes its status from the last
+command substitution in it (`z=$(exit 3); echo $?` → 3, in both shells). When
+one of its assignments is refused because the shell maintains the name, bash
+replaces that with 1 — but *only* when there was a substitution to replace: a
+plain `FUNCNAME=5` still reports 0, and so does `FUNCNAME=$((1+1))`, which is
+an arithmetic expansion rather than a substitution.
+
+```
+              FUNCNAME=5   FUNCNAME=$(exit 0)   FUNCNAME=$(exit 3)   FUNCNAME=$((1+1))
+    bash          0                1                    1                   0
+    osh           0                0                    3                   0
+```
+
+It is the whole command that is judged, not the one assignment: `z=$(exit 3)
+FUNCNAME=1` and `FUNCNAME=$(exit 3) z=1` are both 1, and `FUNCNAME+=$(exit 3)`
+is too.
+
+**Proper fix.** Have the assignment-only command remember that one of its
+assignments was refused and, if the status it is about to report came from a
+command substitution, report 1 instead. The two facts have to meet at the
+*command*, not at the assignment, which is why this is not a one-line change in
+the `noassign` branch.
+
+**Impact.** `$?` after an assignment to one of the six `att_noassign` names,
+with a command substitution on the right. Found while probing
+TD-OILS-A-REFUSED-ASSIGNMENT-STILL-EXPANDS-AND-TRACES.
+
+### TD-OILS-DYNAMIC-SPECIALS-ONLY-ANSWER-A-PLAIN-ASSIGNMENT. `SECONDS`, `RANDOM` and `BASH_SUBSHELL` act on a write only when it is spelled `NAME=value`; every other write path stores a string that nothing reads — OPEN 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the dynamic-special branch of
+`Shell::apply_assignment_inner` (~11640–11706), which is where
+`seconds_base`/`seconds_anchor`, the `rng` seed and `subshell_base` are moved.
+Every other write reaches `Shell::scalar_write_store` instead, which knows
+nothing about them.
+
+**What.** bash attaches an *assign function* to these names, so it runs
+whatever reaches the variable. osh runs it for `NAME=value` (and for a nameref
+or an environment prefix, which funnel into the same path) and for nothing
+else:
+
+| write            | `SECONDS=5` then `$SECONDS` | bash | osh |
+|------------------|------------------------------|------|-----|
+| `SECONDS=5`      |                              | 5    | 5   |
+| `((SECONDS=5))`  |                              | 5    | 0   |
+| `let 'SECONDS=5'`|                              | 5    | 0   |
+| `read SECONDS`   |                              | 5    | 0   |
+| `printf -v SECONDS 5` |                         | 5    | 0   |
+| `for SECONDS in 5; do :; done` |                | 5    | 0   |
+
+`RANDOM` is the same (a seed set by `((RANDOM=42))` or `printf -v RANDOM 42`
+does not reproduce its sequence in osh, and does in bash), and so is
+`BASH_SUBSHELL` (`((BASH_SUBSHELL=7))` → 7 in bash, 1 in osh). The store *does*
+land in the value cell, so `declare -p` can disagree with the reading.
+
+**Proper fix.** Move the dynamic-special handling out of
+`apply_assignment_inner` and into the shared scalar store
+(`Shell::scalar_write_store`), which every checked scalar write already passes
+through — the same place `Shell::after_var_write` sits, and for the same
+reason. The `NAME=value` path keeps only what is genuinely its own: the
+`declare -i`-evaluated value (`DynamicSpecial::assign_evals`) and the append
+form, both of which are decided from the assignment's syntax.
+
+**Impact.** A write to one of the dynamic specials through `read`, `printf -v`,
+a `for` control variable or any arithmetic assignment is silently inert
+(measured); every other caller of the shared scalar store — `select`, `getopts`,
+a `read` element target — is presumably the same and was not probed. Found
+while probing TD-OILS-READONLY-REFUSAL-NAMES-TARGET.
 
 ### TD-OILS-DECL-COMPOUND-OPERAND-TRACED-AFTER-THE-PREFIX. `set -x` orders a declaration builtin's compound operands after the command's prefix assignments, where bash puts them first — 2026-07-31 — ✅ RESOLVED 2026-08-03
 

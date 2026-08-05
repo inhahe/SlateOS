@@ -26,6 +26,31 @@ echo one; A'
 r 'alias A="echo \$( ! )"
 A'
 
+echo "=== and the echoed line is the replacement, while the reader is still in it"
+# The error is found with the reader at the end of the word holding the
+# substitution — the body is parsed while that word is lowered. Text written
+# after the substitution in the value leaves the reader inside the replacement,
+# so the replacement is what is echoed; a substitution that ends the value is
+# read past, which pops it, and the script's own line is echoed instead (the
+# section above). One token later the reader has left the word either way, so
+# the two cases are only distinguishable from where the word ends.
+r 'alias A="echo \$( for ) tail"
+A'
+r 'alias A="echo \$( for ) tail"
+echo one; A'
+r 'alias A="cat <( for ) tail"
+A'
+r 'alias A="x=\$( for ) echo hi"
+A'
+r 'alias A="echo hi > \$( for ) tail"
+A'
+r 'alias A="case \$( for ) in x) ;; esac tail"
+A'
+r 'alias A="for i in \$( for ) tail; do :; done"
+A'
+r 'alias A="[[ -n \$( for ) ]] tail"
+A'
+
 echo "=== a process substitution records a line the same way"
 r 'alias A="cat <( for )"
 A'

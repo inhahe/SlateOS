@@ -1893,6 +1893,20 @@ impl Parser {
         self.spans.echo_line(self.pos, r)
     }
 
+    /// [`Parser::reader_echo`] for an error found while lowering the token at
+    /// `at`, rather than at the token the parser has since moved on to.
+    ///
+    /// The reader is placed at the end of that token and nowhere further, which
+    /// is the whole difference: an alias replacement whose last character the
+    /// token consumed has been popped by the look past it, and one with text
+    /// still to come has not. So `alias A="echo $( for )"` is echoed against the
+    /// script's own line and `alias A="echo $( for ) tail"` against the
+    /// replacement — a distinction taking the echo one token later cannot make,
+    /// because by then the reader has left the token in every case.
+    fn echo_at(&self, at: usize) -> Option<Str> {
+        self.spans.echo_line(at, Reader::of(self.toks.get(at)))
+    }
+
     fn bump(&mut self) -> Option<Tok> {
         let t = self.toks.get(self.pos).cloned();
         if t.is_some() {
@@ -2630,8 +2644,9 @@ impl Parser {
         let mut ws = Vec::new();
         while let Some(Tok::Word(segs)) = self.peek() {
             let segs = segs.clone();
+            let at = self.pos;
             self.pos += 1;
-            ws.push(self.word_from_segs(&segs)?);
+            ws.push(self.word_from_segs_at(&segs, at)?);
         }
         self.skip_separators();
         Ok(Some(ws))
@@ -2693,7 +2708,7 @@ impl Parser {
             // \`;'`), or reports end of input.
             return Err(self.unexpected_here());
         };
-        let word = self.word_from_segs(&segs.clone())?;
+        let word = self.word_from_segs_at(&segs.clone(), self.pos)?;
         self.pos += 1;
         self.skip_newlines();
         self.expect_reserved("in")?;
@@ -2717,7 +2732,7 @@ impl Parser {
                     // unexpected token \`;&'`, `case x in )` → \`)').
                     return Err(self.unexpected_here());
                 };
-                patterns.push(self.word_from_segs(&segs.clone())?);
+                patterns.push(self.word_from_segs_at(&segs.clone(), self.pos)?);
                 self.pos += 1;
                 if self.at_op(Op::Pipe) {
                     self.pos += 1;
@@ -3085,8 +3100,9 @@ impl Parser {
             // `]]` is the closer, never an operand.
             if !matches!(segs.as_slice(), [Seg::Lit(s)] if s.as_slice() == b"]]") {
                 let segs = segs.clone();
+                let at = self.pos;
                 self.pos += 1;
-                return Ok(self.word_from_segs(&segs)?);
+                return Ok(self.word_from_segs_at(&segs, at)?);
             }
         }
         Err(self.cond_operand_error(pos))
@@ -3249,8 +3265,9 @@ impl Parser {
                         cmd.assignments.push(a);
                         continue;
                     }
+                    let at = self.pos;
                     self.pos += 1;
-                    cmd.words.push(self.word_from_segs(&segs)?);
+                    cmd.words.push(self.word_from_segs_at(&segs, at)?);
                     seen_word = true;
                 }
                 Some(Tok::ArrayAssign { .. }) => {
@@ -3387,16 +3404,19 @@ impl Parser {
                     quoted,
                     strip: here_strip,
                 });
+                let at = self.pos;
                 self.pos = self.pos.saturating_add(1);
                 // An unquoted delimiter makes the body a double-quoted run, so a
                 // substitution's operand in it is read with the quotes' rules.
                 let q = if quoted { Quoting::Bare } else { Quoting::Dquote };
-                word_from_segs_in(&segs, self.opts, q)?
+                word_from_segs_in(&segs, self.opts, q)
+                    .map_err(|e| e.or_echo(self.echo_at(at)))?
             }
             Some(Tok::Word(segs)) => {
                 let segs = segs.clone();
+                let at = self.pos;
                 self.pos = self.pos.saturating_add(1);
-                self.word_from_segs(&segs)?
+                self.word_from_segs_at(&segs, at)?
             }
             _ => return Err(self.unexpected_here()),
         };
@@ -3499,13 +3519,28 @@ impl Parser {
             name,
             index,
             append,
-            value: AssignRhs::Scalar(self.word_from_segs(&value_segs)?),
+            value: AssignRhs::Scalar(self.word_from_segs_at(&value_segs, self.pos)?),
         }))
     }
 
-    /// Lower lexer segments into an [`ast::Word`].
-    fn word_from_segs(&self, segs: &[Seg]) -> Result<Word, ParseError> {
-        word_from_segs(segs, self.opts)
+    /// Lower lexer segments into an [`ast::Word`], blaming the token at `at` for
+    /// whatever goes wrong inside it.
+    ///
+    /// The index is passed rather than read off [`Parser::pos`] because the two
+    /// are not reliably related — some callers step past the word first and some
+    /// do not — and getting it wrong is silent: it only shows in the source line
+    /// echoed under a diagnostic.
+    ///
+    /// That echo is why the index is wanted at all. A `$( … )` body is parsed
+    /// here, while the word holding it is lowered, so an error from it is found
+    /// with bash's reader standing at the end of *that* word. Stamping the echo
+    /// centrally from [`Parser::pos`] would place it at the end of the next one
+    /// instead, which is a different answer whenever the word came out of an
+    /// alias replacement: one more token's worth of reading can pop the
+    /// replacement the error should have been echoed against. See
+    /// [`Parser::echo_at`].
+    fn word_from_segs_at(&self, segs: &[Seg], at: usize) -> Result<Word, ParseError> {
+        word_from_segs(segs, self.opts).map_err(|e| e.or_echo(self.echo_at(at)))
     }
 
     /// Parse `name[SUBSCRIPT]=value` / `name[SUBSCRIPT]+=value` where the
@@ -3569,9 +3604,9 @@ impl Parser {
         };
         Ok(Some(Assignment {
             name,
-            index: Some(self.word_from_segs(&sub_segs)?),
+            index: Some(self.word_from_segs_at(&sub_segs, self.pos)?),
             append,
-            value: AssignRhs::Scalar(self.word_from_segs(&value_segs)?),
+            value: AssignRhs::Scalar(self.word_from_segs_at(&value_segs, self.pos)?),
         }))
     }
 }

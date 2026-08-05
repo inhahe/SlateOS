@@ -36061,7 +36061,7 @@ which re-invokes the shell under test and so tripped over this while pinning
 something else.
 
 
-### TD-OILS-A-SUBSTITUTION-INSIDE-AN-ALIAS-IS-BLAMED-ON-ITS-OWN-LINE-1 — 2026-08-05 — ✅ LINE FIXED 2026-08-05, ECHO OPEN
+### TD-OILS-A-SUBSTITUTION-INSIDE-AN-ALIAS-IS-BLAMED-ON-ITS-OWN-LINE-1 — 2026-08-05 — ✅ MOSTLY FIXED 2026-08-05
 
 **Where:** `userspace/oils/src/lexer.rs` — `expand_aliases_inner`, which
 re-tokenizes an alias value with `tokenize_spanned(val, opts)`. That lex starts
@@ -36093,33 +36093,43 @@ of an input line (parse.y 2346), and reading a pushed alias string is not a
 fetch, so a replacement genuinely has no lines of its own. Pinned by
 `tests/corpus/a-substitution-in-an-alias-value-is-reported-at-the-call-site.sh`.
 
-**Still open: the echoed line, and a multi-line alias value.**
-
-Two shapes remain, both about the *second* diagnostic line rather than the
-first:
+**Fixed (the echoed line) 2026-08-05** by `Parser::echo_at`. The echo used to
+be stamped centrally from the parser's *current* token
+(`Parser::reader_echo`, taken at `Parser::pos`), but a substitution's body is
+parsed while a word is lowered, and every caller has stepped past that word by
+then — so the lookup placed bash's reader one token too far. One token's worth
+of extra reading is exactly what pops an exhausted alias replacement, so the
+error was echoed against the script's own line even where bash was still
+standing in the value:
 
 ```text
-alias A="echo $( for ) tail";  A     bash echoes `echo $( for ) tail'   osh `A'
+alias A="echo $( for ) tail";  A     bash echoes `echo $( for ) tail'
+```
+
+`Parser::word_from_segs_at` now takes the index of the word it is handed and
+stamps `ParseError::echo` from *its* end, through the same
+`Spans::echo_line`/`reader_stop` walk the central path uses. The two answers
+then differ exactly where they should: a substitution with text after it in the
+value leaves the reader inside the replacement and echoes it, while one that
+ends the value is read past, popped, and echoed against the script. The index is
+an explicit parameter rather than `Parser::pos - 1` because the callers are not
+uniform — `parse_case`, the case-pattern loop and both `try_assignment` arms
+convert *before* bumping — and getting it wrong is silent.
+
+**Still open: a nested alias, and a multi-line alias value.**
+
+```text
 alias B="echo $( for )"; alias A="B"; A
                                      bash echoes ` '                    osh `A'
 ```
 
-In the first, bash is still inside the replacement when the error is found —
-there is text after the substitution, so `pop_string` has not run — and echoes
-it. osh's echo is stamped centrally from the parser's *current* token
-(`Parser::reader_echo`, taken at `Parser::pos`), but a substitution's body is
-parsed while converting a word the parser has already stepped past, so the
-lookup lands on the following token and pops out of the replacement. The proper
-fix is for a word-conversion error to carry the echo of the token that *holds*
-it rather than of the token after it — the reader is inside that token, so no
-pop applies — which means `Parser::word_from_segs` (and its
-`word_from_segs_in` sibling on the here-document path) stamping
-`ParseError::echo` from the index of the word it was handed. Every call site
-bumps past the word first, so that index is `Parser::pos - 1`, but the
-convention is worth making explicit in the signature rather than assumed.
-
-The second shape is the same mechanism seen through a nested alias, where the
-text bash is standing in is the *outer* replacement's leftover.
+The reader pops out of B's replacement (the `)` ends it), then out of A's (the
+`B` ends *that*), and bash is left standing in a one-character text that is
+neither replacement nor the script line. The likely source is the synthetic
+END_ALIAS space `shell_getc` returns at the end of a pushed alias string
+(parse.y 2614–2642) rather than popping it — osh has no counterpart for that
+space, which is also why it never shows up in the `near` slice. Pinning it wants
+its own probe pass over what that space does to a *nested* push.
 
 Separately, a **multi-line** alias value is still numbered wrongly inside the
 substitution:

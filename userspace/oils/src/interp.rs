@@ -45901,9 +45901,11 @@ fn format_conversion(
 
     // `%(FORMAT)T` — strftime-style time conversion. The parenthesised format
     // occupies the position of the conversion character and is followed by `T`.
-    // It consumes one argument: seconds since the Unix epoch (missing, empty, or
-    // a negative value ⇒ the current time; bash's `-2` "shell start" is
-    // approximated as now here). Time is rendered in UTC.
+    // It consumes one argument: seconds since the Unix epoch. Two values are
+    // sentinels rather than times — `-1` is now and `-2` is the shell's start
+    // (approximated as now here) — and so is a missing or empty argument. Every
+    // *other* negative is an ordinary time before the epoch: `-86400` is
+    // 1969-12-31, not today. Time is rendered in UTC.
     if chars.peek() == Some(&b'(') {
         chars.next();
         let mut tfmt = Str::new();
@@ -45936,7 +45938,7 @@ fn format_conversion(
                 // `printf '%(%Y)T' abc` complains and still prints `1970`.
                 let n = star_arg(args, arg_i, diags);
                 #[allow(clippy::cast_possible_wrap)]
-                if n < 0 { unix_time().0 as i64 } else { n }
+                if n == -1 || n == -2 { unix_time().0 as i64 } else { n }
             } else {
                 #[allow(clippy::cast_possible_wrap)]
                 {
@@ -45947,7 +45949,14 @@ fn format_conversion(
         // An empty format is not an empty result: bash passes `%X` to strftime,
         // which in the C locale is the 24-hour clock time.
         let tfmt: &[u8] = if tfmt.is_empty() { b"%X" } else { &tfmt };
-        let rendered = format_strftime(tfmt, secs);
+        let mut rendered = format_strftime(tfmt, secs);
+        // bash renders the time and then lays it out as a string, so precision
+        // truncates it the way it truncates `%s` — by bytes, as C counts them —
+        // making `%.2(%Y)T` `19` and `%.0` nothing at all. A precision longer
+        // than the time adds nothing.
+        if let Some(p) = prec_n {
+            rendered.truncate(p);
+        }
         // String-style field-width padding (never zero-padded).
         let len = bytes::char_count(&rendered);
         if len < width_n {
@@ -46437,6 +46446,17 @@ fn format_strftime(fmt: &[u8], epoch: i64) -> Str {
             // local zone; matching that is gated on a timezone database.
             b'z' => out.extend_from_slice(b"+0000"),
             b'Z' => out.extend_from_slice(b"UTC"),
+            // `%U`/`%W` — the plain week counts, which are not the ISO one and
+            // do not share its year: week 1 starts at the year's first Sunday
+            // (`%U`) or first Monday (`%W`), and every day before that is week
+            // `00`. So 2006-01-01, a Sunday, is `%U` 01 but `%W` 00.
+            b'U' | b'W' => {
+                let first = if c == b'U' { ctx.wday } else { (ctx.wday + 6) % 7 };
+                // `yday` counts from 1; the arithmetic wants it from 0.
+                let doy = ctx.yday.saturating_sub(1);
+                let week = (doy + 7 - i64::try_from(first).unwrap_or(0)).div_euclid(7);
+                num(out, &format!("{week:02}"));
+            }
             // ISO 8601 week date: %V = week number (01-53), %G = week-based year,
             // %g = week-based year mod 100.
             b'V' => {
@@ -53262,6 +53282,64 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("printf '[%.0b]' abc").0, "[]");
         assert_eq!(run("printf '[%.3q]' 'a b c'").0, "[a\\ ]");
         assert_eq!(run("printf '[%.0q]' abc").0, "[]");
+        // …and over `%(…)T`'s, which bash lays out as a string once rendered.
+        assert_eq!(run("TZ=UTC printf '[%.2(%Y-%m-%d)T]' 0").0, "[19]");
+        assert_eq!(run("TZ=UTC printf '[%.0(%Y)T]' 0").0, "[]");
+        assert_eq!(run("TZ=UTC printf '[%.20(%Y)T]' 0").0, "[1970]");
+        // The width still pads with spaces, and never with zeros.
+        assert_eq!(run("TZ=UTC printf '[%12.2(%Y)T]' 0").0, "[          19]");
+        assert_eq!(run("TZ=UTC printf '[%-12.2(%Y)T]' 0").0, "[19          ]");
+        assert_eq!(run("TZ=UTC printf '[%012.6(%Y-%m-%d)T]' 0").0, "[      1970-0]");
+    }
+
+    #[test]
+    fn only_minus_one_and_minus_two_are_time_sentinels() {
+        // `-1` is now and `-2` is the shell's start; every other negative is an
+        // ordinary instant before the epoch, not a third spelling of "now".
+        for (secs, want) in [
+            ("-3", "1969-12-31 23:59:57"),
+            ("-60", "1969-12-31 23:59:00"),
+            ("-86400", "1969-12-31 00:00:00"),
+            ("-100000", "1969-12-30 20:13:20"),
+            ("-2208988800", "1900-01-01 00:00:00"),
+            ("-0", "1970-01-01 00:00:00"),
+            ("0", "1970-01-01 00:00:00"),
+        ] {
+            let cmd = format!("TZ=UTC printf '%(%Y-%m-%d %H:%M:%S)T' {secs}");
+            assert_eq!(run(&cmd).0, want, "{secs}");
+        }
+        // The two that are sentinels land in this century rather than in 1969.
+        for secs in ["-1", "-2"] {
+            let year = run(&format!("TZ=UTC printf '%(%Y)T' {secs}")).0;
+            let year: i64 = year.parse().unwrap_or(0);
+            assert!(year >= 2020, "{secs} gave {year}");
+        }
+    }
+
+    #[test]
+    fn the_plain_week_counts_are_neither_iso_nor_each_other() {
+        // Week 1 begins at the year's first Sunday for `%U` and its first Monday
+        // for `%W`; everything before it is week `00`. Neither is `%V`, which
+        // has its own year.
+        for (secs, want) in [
+            // 1970-01-01 Thu — before both, and ISO week 1 of 1970.
+            ("0", "00|00|01|1970"),
+            // 2009-02-13 Fri — the plain counts agree, ISO is one ahead.
+            ("1234567890", "06|06|07|2009"),
+            // 2005-01-01 Sat — before both; ISO says the last week of 2004.
+            ("1104537600", "00|00|53|2004"),
+            // 2006-01-01 Sun — `%U`'s week 1 has begun, `%W`'s has not.
+            ("1136073600", "01|00|52|2005"),
+            // 2006-01-02 Mon — now `%W` has caught up, and so has ISO.
+            ("1136160000", "01|01|01|2006"),
+            // 2001-01-01 Mon — `%W` starts at 01 while `%U` waits for Sunday.
+            ("978307200", "00|01|01|2001"),
+            // 2021-01-01 Fri — before both; ISO says the last week of 2020.
+            ("1609459200", "00|00|53|2020"),
+        ] {
+            let cmd = format!("TZ=UTC printf '%(%U|%W|%V|%G)T' {secs}");
+            assert_eq!(run(&cmd).0, want, "{secs}");
+        }
     }
 
     #[test]

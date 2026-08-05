@@ -4156,6 +4156,51 @@ pub struct Shell {
     /// `x` set does not).
     saw_quoted_at_list: bool,
 
+    /// Whether the double-quoted run being expanded holds a **quoted** `[@]`
+    /// list *anywhere* in it — which is what stops the *derived* `[*]` forms in
+    /// that same run from joining, and leaves them one field per item instead.
+    ///
+    /// The rule looks arbitrary and is not. bash builds the derived `[*]` lists
+    /// (`${a[*]@Q}`, `${!a[*]}`, `${a[*]#p}`, `${a[*]:i:j}`) by gluing their
+    /// items with an **unquoted** `$IFS[0]`, the items themselves quote-
+    /// protected, and then splits the finished word on `$IFS` if and only if it
+    /// met a quoted `[@]` while expanding it (`quoted_dollar_at`). So the
+    /// separator it just wrote is the thing that comes apart, the items are not,
+    /// and the answer is one field per item however little the `[@]` and the
+    /// `[*]` have to do with each other:
+    ///
+    /// ```text
+    /// n=('a:b' 'c d' e); IFS=:
+    /// "${n[*]@Q}"              <'a:b':'c d':'e'>        joined, as the star asks
+    /// "${n[*]@Q} ${n[@]}"      <'a:b'><'c d'><'e' a:b><c d><e>
+    /// "${n[@]} ${n[*]@Q}"      <a:b><c d><e 'a:b'><'c d'><'e'>   order is nothing
+    /// "${n[*]@Q}""${n[@]}"     <'a:b':'c d':'e'a:b><c d><e>      …but the run is
+    /// "${n[*]@Q}"x"${n[@]}"    <'a:b':'c d':'e'xa:b><c d><e>     everything
+    /// ```
+    ///
+    /// The **run** is the scope, not the word, because a run is its own word to
+    /// bash — `expand_word_internal` is re-entered on the contents — and the
+    /// flag is that call's. An *operand* is not: the deciding `[@]` may be
+    /// outside it (`"${x:-${n[*]@Q}} ${n[@]}"`), inside it
+    /// (`"${n[*]@Q} ${x:-${n[@]}}"`) or nested deeper still, and all of them
+    /// unjoin — so [`parts_have_quoted_at`] descends into operand words and the
+    /// operand modes inherit this flag rather than recompute it.
+    ///
+    /// Two more consequences of the mechanism are why this is a flag rather than
+    /// a look at the neighbouring part. It is *static*: an `[@]` with no
+    /// elements sets it just the same (`"${n[*]@Q} $@"` with no positionals
+    /// still unjoins), because meeting the spelling is the whole test. And a
+    /// **null** `$IFS` turns it off entirely — there is no separator to write,
+    /// so the items run together into the one field the star wanted, which is
+    /// [`Shell::star_unjoins`]'s other half.
+    ///
+    /// An **unquoted** `[@]` does not set it (`"${n[*]@Q}"${n[@]}` stays
+    /// joined) — it is `quoted_dollar_at`, not any `[@]`. Neither does a context
+    /// that never splits: an assignment keeps the star joined
+    /// (`a="${n[*]@Q} ${n[@]}"`), so [`SplitMode::Text`] holds the flag down for
+    /// the whole word, nested runs and operands included.
+    run_at_unjoins: bool,
+
     /// Inside a double-quoted run (bash's `Q_DOUBLE_QUOTES`). Only the `[*]`
     /// spelling of the `:-`/`:+` family asks: the test for "null" is the string
     /// the reference *would* expand to here, and outside quotes a `[*]` expands
@@ -5009,6 +5054,7 @@ impl Shell {
             saw_at_list: false,
             operand_saw_at_list: false,
             saw_quoted_at_list: false,
+            run_at_unjoins: false,
             dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
@@ -10831,6 +10877,7 @@ impl Shell {
             saw_at_list: false,
             operand_saw_at_list: false,
             saw_quoted_at_list: false,
+            run_at_unjoins: false,
             dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
@@ -21160,12 +21207,21 @@ impl Shell {
                 self.saw_quoted_list = true;
                 Some(self.array_elements_walks(name, 2))
             }
-            [WordPart::ArrayKeys { name, star: false }] => {
-                self.saw_quoted_list = true;
+            // The four *derived* lists below take the `[*]` spelling too, when
+            // the quoted run they are in also holds a `[@]`: bash builds them
+            // by gluing their items with an unquoted separator, and that
+            // separator is what the word's final split comes apart on. The
+            // items are the same either way — only whether they stay one field
+            // differs — so the star arms are these arms, under a guard. See
+            // [`Shell::star_unjoins`], and note that a star does *not* set
+            // [`Shell::saw_quoted_list`]: the fields are the split's, not a
+            // quoted list's, and bash's `WORD_LIST` path is not reached.
+            [WordPart::ArrayKeys { name, star }] if !*star || self.star_unjoins() => {
+                self.saw_quoted_list |= !*star;
                 Some(self.array_keys(name))
             }
-            [WordPart::VarNames { prefix, star: false }] => {
-                self.saw_quoted_list = true;
+            [WordPart::VarNames { prefix, star }] if !*star || self.star_unjoins() => {
+                self.saw_quoted_list |= !*star;
                 Some(
                     self.var_names_with_prefix(prefix)
                         .into_iter()
@@ -21179,25 +21235,23 @@ impl Shell {
             [
                 WordPart::ArraySlice {
                     name,
-                    star: false,
+                    star,
                     offset,
                     length,
                 },
-            ] => {
-                self.saw_quoted_list = true;
-                Some(self.slice_elements(name, false, offset, length))
+            ] if !*star || self.star_unjoins() => {
+                self.saw_quoted_list |= !*star;
+                Some(self.slice_elements(name, *star, offset, length))
             }
             // `"${a[@]#pat}"` / `"${@^^}"` — one field per element
             // after the element-wise transform.
-            [
-                WordPart::ArrayBulk {
-                    name,
-                    star: false,
-                    op,
-                },
-            ] => {
-                self.saw_quoted_list = true;
-                Some(self.bulk_elements(name, op, true))
+            [WordPart::ArrayBulk { name, star, op }] if !*star || self.star_unjoins() => {
+                self.saw_quoted_list |= !*star;
+                // The star spelling is one item even here — `"${a[*]@A}"` is the
+                // single `declare` line the whole array deparses to, where the
+                // `[@]` spelling is one line per element. Unjoining splits what
+                // the items were glued with; it does not make more of them.
+                Some(self.bulk_elements(name, op, !*star))
             }
             // `"${a[@]:-word}"` / `"${a[@]:+word}"` — one field per element
             // when active, and otherwise the fields the operand word made,
@@ -21342,6 +21396,23 @@ impl Shell {
         // produced no character. Every other mode either does its own splitting
         // (and has `open` to hand) or does none at all.
         let mark_empties = mode == SplitMode::Operand;
+        // Whether a quoted `[*]` may keep its elements apart here at all: a
+        // context that never splits has nothing for the separator to come apart
+        // on, so `a="${n[*]@Q} ${n[@]}"` joins. Asked of the *word's* mode, so
+        // an operand inside an assignment is covered by its inherited flag.
+        // See [`Shell::run_at_unjoins`].
+        let can_unjoin = mode != SplitMode::Text;
+        let saved_unjoins = self.run_at_unjoins;
+        self.run_at_unjoins = match mode {
+            // An operand is not a word of its own for this: the `[@]` that
+            // decides may be outside it (`"${x:-${n[*]@Q}} ${n[@]}"`) or inside
+            // it (`"${n[*]@Q} ${x:-${n[@]}}"`), and both unjoin.
+            SplitMode::Operand | SplitMode::QuotedOperand => saved_unjoins,
+            // A quoted run *is* its own word — bash re-enters
+            // `expand_word_internal` on the contents — so the flag starts clear
+            // and each run below sets its own.
+            SplitMode::Fields | SplitMode::Text => false,
+        };
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => {
@@ -21386,6 +21457,20 @@ impl Shell {
                     // [`Shell::dquote`]. Set once here, so the per-part
                     // recogniser is asked in the state it expects.
                     let saved_dquote = std::mem::replace(&mut self.dquote, true);
+                    // A quoted `[@]` anywhere in *this run* unjoins the derived
+                    // `[*]` forms in it, and one in a neighbouring run does not:
+                    // `"${n[*]@Q} ${n[@]}"` is three fields where the same two
+                    // parts in two runs (`"${n[*]@Q}""${n[@]}"`) leave the star
+                    // joined. That is bash's `quoted_dollar_at`, which is local
+                    // to the `expand_word_internal` call a run gets its own of.
+                    //
+                    // A run *inside an operand* keeps what it inherited as well,
+                    // because the operand is not its own word: the deciding
+                    // `[@]` may be in the enclosing run, which is what makes
+                    // `"${x:-"${n[*]@Q}"} ${n[@]}"` unjoin too.
+                    let saved_run = self.run_at_unjoins;
+                    self.run_at_unjoins =
+                        can_unjoin && (saved_run || parts_have_quoted_at(parts, true));
                     // In an operand, a run that turns out to have produced no
                     // character leaves a [`EChar::MARK`] behind, exactly as a
                     // `''` does — `${x:-"" ""}` is two arguments too. "No
@@ -21451,6 +21536,7 @@ impl Shell {
                     {
                         cur.push(EChar::MARK);
                     }
+                    self.run_at_unjoins = saved_run;
                     self.dquote = saved_dquote;
                     self.leave_quoted_run(saved_word);
                 }
@@ -21472,6 +21558,29 @@ impl Shell {
                         // is about to reach.
                         if self.cond_word && part_is_at_list(other) {
                             self.saw_quoted_at_list = true;
+                        }
+                        // A derived `[*]` unjoins in here exactly as it does in
+                        // the run around it — the operand is not a word of its
+                        // own for that question, so `"${x:-${n[*]@Q}} ${n[@]}"`
+                        // is three fields. Asked of the *quoted* recogniser
+                        // rather than of `split_items`, because that is where
+                        // the star spellings' items are built (`@A` is one item
+                        // there and three here). See [`Shell::run_at_unjoins`].
+                        if part_is_derived_star(other)
+                            && self.star_unjoins()
+                            && let Some(items) =
+                                self.quoted_per_element_parts(std::slice::from_ref(other))
+                        {
+                            let items: Vec<Vec<EChar>> = items
+                                .iter()
+                                .map(|el| {
+                                    let mut f = Vec::new();
+                                    push_chars(&mut f, el, true);
+                                    f
+                                })
+                                .collect();
+                            lay_out_fields(&items, &mut fields, &mut cur, &mut open);
+                            continue;
                         }
                         let run = match self.split_items(other) {
                             Some(SplitItems::Fields(items)) => {
@@ -21735,6 +21844,7 @@ impl Shell {
         if open {
             fields.push(cur);
         }
+        self.run_at_unjoins = saved_unjoins;
         fields
     }
 
@@ -22154,6 +22264,13 @@ impl Shell {
         // this is.
         let saved = self.enter_quoted_run(parts);
         let saved_dquote = std::mem::replace(&mut self.dquote, true);
+        // A `[[ ]]`/`case` run is a run like any other, and a quoted `[@]` in it
+        // unjoins the derived `[*]` forms beside it just the same:
+        // `[[ P:Q"${n[*]@Q} ${n[@]}" =~ ^(.*)$ ]]` matches `P:Q'a:b' 'c d' 'e'
+        // a:b c d e`, where the star alone would have kept its `$IFS` joins.
+        // See [`Shell::run_at_unjoins`].
+        let saved_unjoins =
+            std::mem::replace(&mut self.run_at_unjoins, parts_have_quoted_at(parts, true));
         let mut items: Vec<Str> = vec![Str::new()];
         for part in parts {
             match part {
@@ -22205,6 +22322,7 @@ impl Shell {
                 }
             }
         }
+        self.run_at_unjoins = saved_unjoins;
         self.dquote = saved_dquote;
         self.leave_quoted_run(saved);
         items
@@ -23958,6 +24076,21 @@ impl Shell {
             // separates, and is emitted as itself.
             Some(ifs) => bytes::chars(ifs).next().map_or_else(Str::new, bytes::Ch::to_str),
         }
+    }
+
+    /// Whether a quoted `[*]` in the run being expanded keeps one field per
+    /// element instead of joining them — [`Shell::run_at_unjoins`] and the
+    /// `$IFS` half of the same question.
+    ///
+    /// The separator bash writes between the items is `$IFS`'s first character
+    /// and it writes it *unquoted*, so a null `$IFS` writes nothing and there is
+    /// nothing left for the final split to find: `IFS=` makes
+    /// `"${n[*]@Q} ${n[@]}"` the one field `'a:b''c d''e' a:b` even though the
+    /// `[@]` is right there. That is [`Shell::star_sep`]'s emptiness, not
+    /// [`Shell::at_sep`]'s — the latter substitutes a space for it, which is the
+    /// `[@]` separator and never the star's.
+    fn star_unjoins(&self) -> bool {
+        self.run_at_unjoins && !self.star_sep().is_empty()
     }
 
     /// The characters `part` contributes to a context that does no splitting of
@@ -43205,6 +43338,56 @@ fn part_is_at_list(part: &WordPart) -> bool {
         | WordPart::VarNames { star, .. }
         | WordPart::ArraySlice { star, .. }
         | WordPart::ArrayBulk { star, .. } => !*star,
+        _ => false,
+    }
+}
+
+/// Whether a **quoted** `[@]` list appears anywhere in `parts` — the question
+/// [`Shell::run_at_unjoins`] is, asked of a whole run before any of it expands.
+///
+/// `quoted` says whether `parts` is already inside double quotes, because that
+/// is the whole of what makes an `[@]` count: `"${n[*]@Q}"${n[@]}` keeps its
+/// star joined. A quoted run turns it on for its contents, and an operand word
+/// inherits it — `"${n[*]@Q} ${x:-${n[@]}}"` unjoins, and so does the same run
+/// with the two halves swapped, because the operand belongs to this run and is
+/// not a word of its own.
+///
+/// It stops at a command substitution, which *is* a word of its own (several,
+/// in fact) and whose text arrives here already expanded.
+fn parts_have_quoted_at(parts: &[WordPart], quoted: bool) -> bool {
+    parts.iter().any(|p| part_has_quoted_at(p, quoted))
+}
+
+/// Whether `part` is one of the *derived* `[*]` lists — the ones whose join bash
+/// writes itself, out of items it made, and which a quoted `[@]` in the same run
+/// therefore takes apart again.
+///
+/// A plain `${a[*]}`/`$*` is not one of them and never unjoins: its separator is
+/// as much the value as the elements are (`"${n[*]} ${n[@]}"` is `a:b c d e a:b`
+/// and two more fields). Nor is `${a[*]:-w}` — the `:-`/`:+` family joins the
+/// *elements*, and its operand is a word whose own fields stand either way.
+fn part_is_derived_star(part: &WordPart) -> bool {
+    match part {
+        WordPart::ArrayKeys { star, .. }
+        | WordPart::VarNames { star, .. }
+        | WordPart::ArraySlice { star, .. }
+        | WordPart::ArrayBulk { star, .. } => *star,
+        _ => false,
+    }
+}
+
+fn part_has_quoted_at(part: &WordPart, quoted: bool) -> bool {
+    if quoted && part_is_at_list(part) {
+        return true;
+    }
+    match part {
+        WordPart::DoubleQuoted(inner) => parts_have_quoted_at(inner, true),
+        // The `:-`/`:+` operand, whose word is expanded where the substitution
+        // stands. Only these two carry a word that makes fields of its own; a
+        // pattern or a subscript is text by the time it matters.
+        WordPart::ParamOp { arg, .. } | WordPart::ArrayOp { arg, .. } => {
+            parts_have_quoted_at(&arg.parts, quoted)
+        }
         _ => false,
     }
 }

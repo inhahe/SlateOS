@@ -31052,18 +31052,15 @@ lib test `an_at_reference_joins_a_derived_list_with_ifs`.
 `[*]` bug and found the same way: by measuring the half that had been assumed
 rather than tested.
 
-### TD-OILS-QUOTED-AT-IN-A-WORD-UNJOINS-ITS-STARS. a quoted `[@]` makes the `[*]` beside it expand as a list too — 2026-08-04
+### TD-OILS-QUOTED-AT-IN-A-WORD-UNJOINS-ITS-STARS. a quoted `[@]` makes the `[*]` beside it expand as a list too — 2026-08-04 — ✅ **FIXED 2026-08-05**
 
 **Where:** `userspace/oils/src/interp.rs` — the `DoubleQuoted` arm of
-`Shell::expand_word_annotated` (~18884), which only recognises the per-element
-forms when the quoted section is a *single* part. A section with more than one
-part falls through to `expand_double_quoted`, which concatenates strings and so
-cannot express a field boundary at all.
+`Shell::expand_word_annotated`, `Shell::quoted_per_element_parts` and
+`Shell::cond_dquote_items`.
 
-**What.** bash sets a per-word flag when a quoted `$@`/`${a[@]}` is expanded, and
-once it is set the bulk-produced `[*]` forms in that same word stop joining and
-become lists as well — whichever order the two appear in, and whatever `$IFS`
-says:
+**What.** bash sets a flag when a quoted `$@`/`${a[@]}` is expanded, and once it
+is set the *derived* `[*]` forms expanded alongside it stop joining and come out
+one field per item — whichever order the two appear in, and whatever `$IFS` says:
 
 ```sh
 declare -a n=('a:b' 'c d' e)
@@ -31073,27 +31070,61 @@ printf '<%s>' "${n[@]@Q} ${n[*]@Q}"       ; echo   # <'a:b'><'c d'><'e' 'a:b'><'
 ```
 
 The second line is not a re-split of the joined string — `'a:b'` survives with
-its colon — so the star form genuinely produced three items. Plain `${a[*]}` is
-exempt (`"[${n[*]}] [${n[@]}]"` keeps the colons), and two stars with no `[@]`
-between them are exempt, and the two references in *separate words* are exempt.
+its colon — so the star form genuinely produced three items. osh gave one joined
+field for the star half either way. Before TD-OILS-STAR-BULK-JOIN-IGNORES-IFS it
+joined with a space and so happened to agree with bash here while being wrong
+everywhere else; the fix for that traded this corner away deliberately, and this
+entry recorded the trade.
 
-osh gives one joined field for the star half either way. Before
-TD-OILS-STAR-BULK-JOIN-IGNORES-IFS it joined with a space and so happened to
-agree with bash here while being wrong everywhere else; now it joins with `$IFS`
-and is wrong here instead. That trade is deliberate — this shape is far rarer
-than a lone `"${a[*]@Q}"` — but it is a real regression in this one corner and is
-recorded as such.
+**Fixed 2026-08-05.** `Shell::run_at_unjoins` is the flag, set from a static
+scan (`parts_have_quoted_at`) of a double-quoted run before any of it expands,
+and `Shell::star_unjoins` is that flag plus the `$IFS` gate. The four derived
+star forms are then the same arms of `quoted_per_element_parts` their `[@]`
+spellings already used, under a guard — the items were never in question, only
+whether they stayed one field.
 
-**Proper fix.** The same restructuring TD-OILS-UNQUOTED-ARRAY-EXPANSION-IS-A-
-JOINED-STRING calls for, applied to the quoted arm: a quoted section has to
-expand to a *list of items* rather than a string, so that a multi-part section
-can carry a field boundary through it. Once it can, this rule is one flag —
-"some part of this word was a quoted `[@]`" — consulted when a bulk star form
-decides whether to join. Doing it also fixes the plainer divergence next door,
-where `IFS=:; printf '<%s>' "x${n[@]}y"` is three fields in bash and one in osh.
+The rule was **measured** against bash 5.2.37 (six `$IFS` settings × ~40 shapes)
+and is narrower than this entry originally described. bash builds a derived star
+list by gluing its items with an **unquoted** `$IFS[0]`, the items themselves
+quote-protected, and splits the finished word iff `quoted_dollar_at` was set. So:
 
-**Impact.** A word that mixes a quoted `[@]` reference with a quoted bulk `[*]`
-one. Rare enough that no corpus case had it before this one was written.
+* Only the *derived* stars unjoin — `${a[*]@Q}`/`@A`/`^^`/`#p`/`%p`/`/p/r`,
+  `${!a[*]}`, `${!pre*}`, `${a[*]:i:j}`, and the `$*` spellings of those. A plain
+  `${a[*]}`/`$*` never does (its separator is as much the value as the elements
+  are), nor does `${a[*]:-w}` (it joins *elements*, and its operand is a word
+  with fields of its own), nor `${#a[*]}`, nor an associative `${h[*]}`.
+* The scope is the **quoted run**, not the word — the original entry had this
+  wrong. bash re-enters `expand_word_internal` on a run's contents, and
+  `quoted_dollar_at` is that call's: `"${n[*]@Q} ${n[@]}"` unjoins where
+  `"${n[*]@Q}""${n[@]}"` and `"${n[*]@Q}"x"${n[@]}"` do not.
+* An **unquoted** `[@]` does not count (`"${n[*]@Q}"${n[@]}` stays joined); an
+  `[@]` with **no elements** does (`"${n[*]@Q}" "$@"` with no positionals still
+  unjoins). Order is nothing.
+* A **null** `$IFS` turns it off entirely: there is no separator to write, so
+  nothing is left for the split to find and the items run together —
+  `IFS=` gives the one field `'a:b''c d''e' a:b`. That is `star_sep`'s emptiness,
+  not `at_sep`'s, which substitutes a space and is never the star's separator.
+* A context that never splits keeps the star joined: `v="${n[*]@Q} ${n[@]}"` is
+  one string. `SplitMode::Text` clears the flag for the whole word.
+* An **operand is not a run of its own**. The deciding `[@]` may be outside it
+  (`"${x:-${n[*]@Q}} ${n[@]}"`), inside it (`"${n[*]@Q} ${x:-${n[@]}}"`), nested
+  (`"${n[@]} ${x:-${y:-${n[*]@Q}}}"`) or quoted within it — all unjoin. So the
+  scan descends into `${x:-w}`/`${a[*]:-w}` operand words and the operand modes
+  inherit the flag rather than recompute it. A command substitution *is* its own
+  word and takes nothing with it.
+* `[[ ]]`/`case` runs answer to it too (`cond_dquote_items`), which is why the
+  flag is set there as well.
+
+One deliberate asymmetry: a star arm does **not** set `Shell::saw_quoted_list`.
+The fields are the final split's, not a quoted list's, so bash's `WORD_LIST`
+path is not reached by them.
+
+The claim this entry used to make that the fix would "also fix the plainer
+divergence next door, where `IFS=:; printf '<%s>' "x${n[@]}y"` is three fields in
+bash and one in osh" was already stale when written: that shape has been correct
+in osh since TD-OILS-UNQUOTED-ARRAY-EXPANSION-IS-A-JOINED-STRING.
+
+**Corpus:** `a-quoted-at-in-a-run-unjoins-the-derived-stars-beside-it.sh`.
 
 ### TD-OILS-UNQUOTED-ARRAY-EXPANSION-IS-A-JOINED-STRING. `IFS=:; echo ${a[@]}` is one field in osh and three in bash — 2026-08-04 — ✅ **FIXED 2026-08-04**
 

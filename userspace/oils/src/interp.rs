@@ -23933,9 +23933,10 @@ impl Shell {
     ///
     /// Text that will not parse as a word — an unbalanced quote, say — comes
     /// back as the literal it was, which the arithmetic evaluator then refuses.
-    /// bash rejects most of those earlier still, while validating the name
-    /// (`printf -v 'n["1]'` is `not a valid identifier` there); see
-    /// TD-OILS-A-SUBSCRIPT-IS-SPLIT-OFF-WITHOUT-REGARD-FOR-ITS-QUOTES.
+    /// Little reaches that: an operand whose quoting leaves the subscript
+    /// unclosed is not a *name*, and is refused as one long before here
+    /// (`printf -v 'n["1]'` is `not a valid identifier`). See
+    /// [`skip_subscript`].
     ///
     /// The whole-array token check belongs *in front* of this, never behind it:
     /// bash refuses `n[*]` before expanding anything, while `n[$s]` with
@@ -34757,15 +34758,19 @@ impl Shell {
             }
             // A subscripted target (`name[sub]=value` / `name[sub]`) assigns (or
             // declares) an array element; attributes still apply to the *base*
-            // name. A well-formed subscript is `BASE[...]` with a closing `]` at
-            // the very end and a valid identifier `BASE`. Anything else (an
-            // unbalanced `h[a`, or a bad base) fails identifier validation below.
+            // name. A well-formed subscript is `BASE[...]` closing at the very
+            // end, where "closing" is a question about quoting rather than about
+            // the last byte — see [`skip_subscript`]. Anything else (an
+            // unbalanced `h[a`, a `n["1]` whose quote never ends, or a bad base)
+            // is left whole for the identifier validation below to refuse.
             let (base_name, subscript): (BStr<'_>, Option<BStr<'_>>) =
                 match name.iter().position(|b| *b == b'[') {
-                    Some(p) if p > 0 && name.ends_with(b"]") => (
-                        name.get(..p).unwrap_or_default(),
-                        name.get(p + 1..name.len().saturating_sub(1)),
-                    ),
+                    Some(p) if p > 0 => match skip_subscript(name, p) {
+                        Some(close) if close.saturating_add(1) == name.len() => {
+                            (name.get(..p).unwrap_or_default(), name.get(p + 1..close))
+                        }
+                        _ => (name, None),
+                    },
                     _ => (name, None),
                 };
             // Every declare target must be a valid identifier (bash rejects
@@ -37558,7 +37563,10 @@ impl Shell {
                 // token is an array reference at all.
                 let base = bytes::as_str(a.get(..open)?)
                     .filter(|b| crate::parser::is_valid_name(b.as_bytes()))?;
-                let sub = a.strip_suffix(b"]")?.get(open.saturating_add(1)..)?;
+                // Quoting decides where the subscript closes — see
+                // [`skip_subscript`].
+                let close = skip_subscript(a, open).filter(|c| c.checked_add(1) == Some(a.len()))?;
+                let sub = a.get(open.saturating_add(1)..close)?;
                 (!sub.is_empty()).then_some((base, sub))
             });
             if let Some((base, sub_src)) = subscript {
@@ -46581,24 +46589,11 @@ fn attr_assignment_split(word: BStr<'_>) -> Option<usize> {
             b'=' => return Some(i),
             b'+' if b.get(i + 1) == Some(&b'=') => return Some(i + 1),
             b'[' => {
-                // One subscript, nested brackets included (`a[b[0]]=v`), and it
+                // One subscript — nested brackets and quoted `]`s included, so
+                // `a[b[0]]=v` and `m["]"]=v` both find their `=`, while `n["1]=v`
+                // finds none and is refused whole. See [`skip_subscript`]. It
                 // must be the last thing before the `=`.
-                let mut depth = 0usize;
-                let mut j = i;
-                let close = loop {
-                    match b.get(j) {
-                        Some(b'[') => depth += 1,
-                        Some(b']') => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break j;
-                            }
-                        }
-                        Some(_) => {}
-                        None => return None,
-                    }
-                    j += 1;
-                };
+                let close = skip_subscript(b, i)?;
                 return match (b.get(close + 1), b.get(close + 2)) {
                     (Some(b'='), _) => Some(close + 1),
                     (Some(b'+'), Some(b'=')) => Some(close + 2),
@@ -46636,16 +46631,104 @@ fn split_assignment_target(s: BStr<'_>) -> Option<(&str, Option<BStr<'_>>)> {
     let name = |b| bytes::as_str(b).filter(|n| crate::parser::is_valid_name(n.as_bytes()));
     match bytes::find(s, b"[") {
         // `BASE[SUB]`: the subscript must close at the very end and be
-        // non-empty, and the base must still be an identifier.
+        // non-empty, and the base must still be an identifier. Where it closes
+        // is a question about quoting, not about the last byte — see
+        // [`skip_subscript`].
         Some(p) => {
-            let sub = s.get(p.saturating_add(1)..s.len().checked_sub(1)?)?;
-            if !s.ends_with(b"]") || sub.is_empty() {
+            let close = skip_subscript(s, p)?;
+            if close.checked_add(1)? != s.len() {
+                return None;
+            }
+            let sub = s.get(p.checked_add(1)?..close)?;
+            if sub.is_empty() {
                 return None;
             }
             Some((name(s.get(..p)?)?, Some(sub)))
         }
         None => Some((name(s)?, None)),
     }
+}
+
+/// Where the `]` closing the subscript that opens at `start` is, or `None` when
+/// it never closes — bash's `skipsubscript`, which is `skip_matched_pair` on the
+/// pair `[`/`]`.
+///
+/// The scan steps *over* quoting rather than through it, and that is the whole
+/// point of having it: a `]` inside a quoted run, behind a backslash, or inside
+/// a `` `…` ``/`$(…)`/`${…}` does not close the subscript, and a run that never
+/// ends means the subscript never closes at all. So `m["]"]` names the subscript
+/// `"]"` and is a perfectly good target, while `n["1]` and `n[$(echo 1]` name
+/// nothing and are refused as names — before anything is expanded, which is why
+/// bash answers `not a valid identifier` rather than an arithmetic complaint.
+/// Brackets nest, so `a[b[0]]` closes on the last of them.
+///
+/// Written as an explicit stack of what each open construct is waiting for,
+/// rather than the mutual recursion bash uses, so that a pathologically nested
+/// operand costs memory instead of stack. Nothing inside a `$(…)` or `${…}` can
+/// close the subscript, so `[`/`]` count only while one is the innermost thing
+/// open — which is bash's arrangement too, `extract_command_subst` swallowing
+/// its body whole before the bracket counter ever sees it.
+fn skip_subscript(s: BStr<'_>, start: usize) -> Option<usize> {
+    // Innermost last. Non-empty for as long as the subscript is open.
+    let mut want: Vec<u8> = vec![b']'];
+    let mut i = start.checked_add(1)?;
+    while let Some(&c) = s.get(i) {
+        let in_dquote = want.last() == Some(&b'"');
+        match c {
+            // A backslash hides whatever follows it, end of string included.
+            b'\\' => {
+                i = i.checked_add(2)?;
+                continue;
+            }
+            // Single quotes are not quotes inside double quotes.
+            b'\'' if !in_dquote => {
+                i = skip_run(s, i.checked_add(1)?, b'\'')?;
+                continue;
+            }
+            b'`' => {
+                i = skip_run(s, i.checked_add(1)?, b'`')?;
+                continue;
+            }
+            b'$' if matches!(s.get(i.checked_add(1)?), Some(b'(')) => {
+                want.push(b')');
+                i = i.checked_add(2)?;
+                continue;
+            }
+            b'$' if matches!(s.get(i.checked_add(1)?), Some(b'{')) => {
+                want.push(b'}');
+                i = i.checked_add(2)?;
+                continue;
+            }
+            b'"' if !in_dquote => {
+                want.push(b'"');
+                i = i.checked_add(1)?;
+                continue;
+            }
+            b'[' if want.last() == Some(&b']') => {
+                want.push(b']');
+                i = i.checked_add(1)?;
+                continue;
+            }
+            _ => {}
+        }
+        if want.last() == Some(&c) {
+            want.pop();
+            if want.is_empty() {
+                return Some(i);
+            }
+        }
+        i = i.checked_add(1)?;
+    }
+    None
+}
+
+/// Past the closing `term` of a run that begins at `i`, or `None` when the run
+/// never closes. bash's `skip_single_quoted` and its backquote handling: nothing
+/// inside is special, not even a backslash.
+fn skip_run(s: BStr<'_>, i: usize, term: u8) -> Option<usize> {
+    let rest = s.get(i..)?;
+    let off = rest.iter().position(|&c| c == term)?;
+    i.checked_add(off)?.checked_add(1)
 }
 
 /// The OS hostname, used to synthesise `$HOSTNAME` when the environment does not
@@ -47960,13 +48043,18 @@ fn is_valid_indirect_target(s: &str) -> bool {
 /// subscript inside the name.
 fn subscript_base(s: &str) -> Option<&str> {
     let open = s.find('[')?;
-    let Some(inner) = s.strip_suffix(']') else {
-        return Some(s); // `[` without a closing `]` — not a name either way
-    };
-    if inner.get(open.checked_add(1)?..).unwrap_or("").is_empty() {
-        return Some(s); // empty subscript `name[]`
+    // Where the subscript closes is a question about quoting — see
+    // [`skip_subscript`]. `n["1]` never closes it, and so is a name in its own
+    // right rather than a base with a subscript: not one bash will accept.
+    let close = skip_subscript(s.as_bytes(), open);
+    match close {
+        Some(c) if c.checked_add(1) == Some(s.len()) && c > open.saturating_add(1) => {
+            s.get(..open)
+        }
+        // `[` that never closes, an empty `name[]`, or text past the `]` — not a
+        // name either way, so it is answered whole and refused as one.
+        _ => Some(s),
     }
-    s.get(..open)
 }
 
 /// Whether `s` is a plain shell identifier: a leading letter or `_`, then

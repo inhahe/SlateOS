@@ -268,7 +268,8 @@ Three things had to be got right beyond the parse:
 
 Two divergences found alongside it have their own entries:
 TD-OILS-A-SUBSCRIPT-THAT-WILL-NOT-EVALUATE-NAMES-NOBODY-AND-STORES-NOWHERE
-(since fixed) and TD-OILS-A-SUBSCRIPT-IS-SPLIT-OFF-WITHOUT-REGARD-FOR-ITS-QUOTES.
+(since fixed) and TD-OILS-A-SUBSCRIPT-IS-SPLIT-OFF-WITH-REGARD-FOR-ITS-QUOTES
+(since fixed).
 
 ### TD-OILS-A-SUBSCRIPT-THAT-WILL-NOT-EVALUATE-NAMES-NOBODY-AND-STORES-NOWHERE. `read -r 'n[2+]'` said `read: 2+: syntax error` and then wrote element 0 — 2026-08-05 — ✅ **FIXED 2026-08-05**
 
@@ -310,41 +311,56 @@ on `None`, so a subscript that named nowhere stores nowhere.
 
 **Corpus:** `a-subscript-that-will-not-evaluate-names-nobody-and-stores-nowhere.sh`.
 
-### TD-OILS-A-SUBSCRIPT-IS-SPLIT-OFF-WITHOUT-REGARD-FOR-ITS-QUOTES. `printf -v 'n["1]' X` stores at index 0 where bash says `not a valid identifier` — 2026-08-05 — OPEN
+### TD-OILS-A-SUBSCRIPT-IS-SPLIT-OFF-WITH-REGARD-FOR-ITS-QUOTES. `printf -v 'n["1]' X` wrote index 0 where bash says `not a valid identifier` — 2026-08-05 — ✅ **FIXED 2026-08-05**
 
-**Where:** `userspace/oils/src/interp.rs` — `split_assignment_target` (near the
-bottom of the file), which scans for `[` and requires the last byte to be `]`
-without noticing quotes.
+**Where:** `userspace/oils/src/interp.rs` — the new `skip_subscript` (beside
+`split_assignment_target`, near the bottom of the file) and the five splits that
+now use it: `split_assignment_target`, `attr_assignment_split`,
+`subscript_base`, the `declare`/`local` operand split and `unset`'s element
+split.
 
-**What.** bash validates a name-with-subscript by matching the brackets
-*through* the quoting, so a `]` inside a quoted run does not close the
-subscript. An operand whose brackets do not balance is not a valid name at all,
-and is refused before anything is expanded. Measured with `n=(a b c)`:
+**What.** bash matches a name-with-subscript with `skipsubscript`, which steps
+*over* quoted runs, backslashes and `` `…` ``/`$(…)`/`${…}` rather than through
+them. So a `]` inside quotes does not close the subscript, and a quote that
+never ends means the subscript never closes at all — which makes the whole
+operand not a name, refused as one *before* anything is expanded. Measured with
+`n=(a b c)`:
 
 ```text
-                          bash                              osh
-printf -v 'n["1]' X       `printf: ...: not a valid          stores at n[0],
+                          bash                              osh (before)
+printf -v 'n["1]' X       `printf: …: not a valid           wrote n[0],
                           identifier`, status 2             status 0
-printf -v 'n[$(echo 1]' Y same                              stores at n[0]
-declare -n r='n["1]'      `declare: ...: invalid variable    accepted; reads
+printf -v 'n[$(echo 1]' Y same                              wrote n[0]
+declare 'n["1]=U'         `declare: …: not a valid          wrote n[0]
+                          identifier`
+export 'n["1]=E'          blames the *whole* operand        blamed `n["1]`
+declare -n r='n["1]'      `declare: …: invalid variable     accepted; read
                           name for name reference`          element 0
+unset -v 'n["1]'          `unset: …: not a valid            silent, status 0
+                          identifier`
+q='n["1]'; echo "${!q}"   `n["1]: invalid variable name`    read element 1
 ```
 
-osh splits at the first `[` and the final `]` regardless, so `n["1]` looks like
-the name `n` with the subscript `"1`, which then fails to parse as a word and
-is taken literally — landing on element 0. (Before
-TD-OILS-A-SUBSCRIPT-THAT-ARRIVES-AS-BYTES-IS-EXPANDED-AT-EVERY-USE it failed
-loudly as arithmetic instead; the expansion made it quiet, which is worse.)
+Five splits each scanned for `[` and required the last byte to be `]`, so
+`n["1]` looked like the name `n` with the subscript `"1`.
 
-**Proper fix.** Give `split_assignment_target` a quote-aware scan for the
-matching `]` — the same one bash's `skipsubscript` performs, stepping over
-single- and double-quoted runs and backslash escapes — and answer `None` when
-the brackets do not balance, so the caller reports the name as invalid. The
-same scan belongs to the nameref-target validation, which shares the wording
-`invalid variable name for name reference`.
+**Fixed 2026-08-05.** `skip_subscript` is bash's `skipsubscript` —
+`skip_matched_pair` on `[`/`]`. It is written as an explicit stack of what each
+open construct is waiting for rather than the mutual recursion bash uses, so a
+pathologically nested operand costs memory instead of stack. Nothing inside a
+`$(…)` or `${…}` can close the subscript, so `[`/`]` count only while one is
+the innermost thing open — bash's arrangement too, `extract_command_subst`
+swallowing its body whole before the bracket counter ever sees it.
 
-**Impact.** Narrow — it takes an unbalanced quote inside a subscript to reach
-— but the failure mode is a silent write to the wrong element.
+The five callers ask it where the subscript closes and require that to be the
+last byte. What *is* well-quoted keeps working and is now reachable from every
+one of them: `m["]"]` is the key `]`, `m["k k"]` the key `k k`.
+
+`unset` keeps its own rule about *when* to check — only an explicit `-v` makes
+it judge the spelling — so `unset 'n["1]'` is still the quiet no-op bash makes
+of it while `unset -v 'n["1]'` complains.
+
+**Corpus:** `a-subscript-is-split-off-with-regard-for-its-quotes.sh`.
 
 ### TD-OILS-A-COMMENT-INSIDE-ARITHMETIC-CAN-EAT-ITS-OWN-CLOSER. `$(( #5 ))` is not an arithmetic error at all — bash's second scan of the word honours `#`, so the comment swallows the `))` — 2026-08-04 — ✅ FIXED 2026-08-04
 

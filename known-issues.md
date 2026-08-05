@@ -14,6 +14,167 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-PRINTF-READ-ITS-FLOATS-WITH-RUSTS-PARSER-NOT-STRTODS. `printf %f` refused hex floats, named the wrong base when it refused, spelled `nan`/`inf` four different ways and let the `0` flag pad them — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `parse_printf_float_checked`,
+`parse_printf_int_checked`, `format_g`, `format_a`, and the `%f`/`%e` arms of
+the printf formatter.
+
+**What:** four separate divergences, all from reading and writing a float with
+Rust's own spellings rather than C's.
+
+1. **Hex floats.** bash's `printf` reads a float with `strtod`, whose grammar
+   includes `[+-]? 0[xX] HEX* ('.' HEX*)? ([pP][+-]?DIGIT+)?` — the binary
+   exponent is **optional**. So `0x10` is 16, `0xa.b` is 10.6875, `0X1P-2` is
+   0.25 and `0x.8p1` is 1. Rust's `f64::from_str` has no hex form at all, so
+   every one of these was a complaint. The partial forms matter too: `strtod`
+   backs up to the longest valid prefix, so `0x` is 0, `0xg` is 0, `0x1p` is 1
+   (the `p` with no digits is not consumed) and `0x1p4z` is 16 with rc 1.
+
+2. **The base the complaint names.** The radix `strtoimax`/`strtod` reads in is
+   chosen *after* stepping over blanks and a sign, and either case of `x` will
+   do. The radix the *message* names comes from `sh_invalidnum`, which looks at
+   the raw word's **first two bytes only**, tries the octal arm first, and
+   accepts only a lowercase `x`. So `0X3z` is read as hex (value 3) but reported
+   as a plain `invalid number`, and so are ` 0x3z` and `-012x`, while `012x` is
+   an `invalid octal number` and `0x3z` an `invalid hex number`.
+
+3. **Non-finite spelling.** C spells these by the *case of the conversion
+   letter*: `nan`/`inf` for `%f %e %g %a`, `NAN`/`INF` for `%F %E %G %A`, with
+   the sign bit shown (`-nan` is a thing). osh had three hand-rolled spellings
+   and one arm with none.
+
+4. **The `0` flag.** C ignores it for a value with no digits, so
+   `printf "[%08f][%08G][%08d]\n" nan -inf 5` is `[     nan][    -INF][00000005]`
+   — the integer still pads with zeros, the floats do not.
+
+**Fixed** by a new `parse_hex_float` implementing strtod's hex grammar (u128
+mantissa capped at 28 hex digits with a sticky low bit so rounding is correct,
+bounded `powi` scaling so intermediates cannot spuriously overflow), by routing
+both number readers' messages through the `sh_invalidnum_kind` helper the
+previous commit added, by naming the non-finite predicate once in
+`format_nonfinite`, and by suppressing `zero` for a rendered float body that
+contains no digit — which, since every finite float renders at least one digit,
+is exactly the non-finite case. Pinned by
+`printf_reads_the_hexadecimal_float_strtod_reads`,
+`printf_names_the_base_from_the_word_not_from_the_radix`,
+`printf_spells_a_non_finite_value_by_the_letters_case` and the corpus case
+`printf-reads-a-float-the-way-strtod-does.sh`.
+
+**Standing lesson:** a conversion is two grammars, not one — what the host
+library *reads* and what it *writes* — and neither is Rust's. The four bugs
+here are one bug seen four times: `f64::from_str`/`{}` was standing in for
+`strtod`/`printf`, and it differs at the edges in both directions.
+
+---
+
+### TD-OILS-PRINTF-TREATED-EVERY-NEGATIVE-TIME-AS-NOW. `%(fmt)T` took any negative argument for a sentinel, never truncated the rendered time to a precision, and had no `%U`/`%W` — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `%(…)T` arm of the printf
+formatter and `format_strftime`.
+
+**What:** three divergences in what happens *after* strftime has produced its
+bytes.
+
+* Only `-1` (now) and `-2` (shell start) are sentinels. Everything else
+  negative is a real pre-epoch time: `-3` is 1969-12-31 23:59:57, `-86400` is
+  1969-12-31 00:00:00, `-2208988800` is 1900-01-01. osh answered "now" to all
+  of them.
+* bash renders the time and then lays the result out *as a string*, so a
+  precision truncates it by bytes the way it truncates `%s`: `%.2(%Y-%m-%d)T`
+  is `19`, `%.0(%Y)T` is empty, and `%012.6(%Y-%m-%d)T` is `      1970-0`.
+* `%U` and `%W` were simply absent. They are the plain week counts —
+  `(yday0 + 7 − wday) / 7` and `(yday0 + 7 − ((wday+6) mod 7)) / 7` — which
+  share neither the ISO week `%V` nor its year `%G`. 2006-01-01 is a Sunday, so
+  it is `%U` 01 but `%W` 00.
+
+**Fixed** in `e225565f6`, pinned by `only_minus_one_and_minus_two_are_time_sentinels`,
+`the_plain_week_counts_are_neither_iso_nor_each_other`, the `%(…)T` assertions
+in `a_precision_truncates_the_rendered_b_and_q`, and the corpus case
+`printf-lays-a-time-out-as-a-string.sh`.
+
+**Standing lesson:** when a conversion produces text, ask which of the format's
+flags apply to the *value* and which apply to the *text it became*. `%T`'s
+precision is the second kind, and so is `%s`'s — which is why the fix was two
+lines once the question was put that way.
+
+---
+
+### TD-OILS-PRINTF-IS-DOUBLE-WHERE-BASHS-IS-LONG-DOUBLE. bash reads printf's floats with `strtold` and writes them with the `%L` conversions, so osh's `f64` differs in range, in precision and in the out-of-range warning — 2026-08-04 — OPEN (structural)
+
+**Where:** `userspace/oils/src/interp.rs` — `parse_printf_float_checked` and
+every float arm of the printf formatter.
+
+**What:** on x86 `long double` is the 80-bit extended format: 64 mantissa bits
+against a double's 53, and an exponent range reaching ~1e4932 against ~1e308.
+Measured against bash 5.2.37:
+
+```sh
+printf '%.25f\n' 0.1        # 0.1000000000000000000013553   osh: …0000000000555112
+printf '%.0f\n'  9007199254740993   # exact                 osh: 9007199254740992
+printf '%e\n'    1e309      # 1.000000e+309                 osh: inf
+printf '%f\n'    1e4933     # printf: warning: 1e4933: Numerical result out of range
+```
+
+**Why deferred:** this is not a bug in a parse or a format string — it is the
+arithmetic type. Fixing it properly means an 80-bit soft-float: an `f80`
+mantissa/exponent pair with `strtold`-grade decimal→binary conversion and a
+correctly-rounded `printf` back out. That is a self-contained project, and it
+touches nothing else in the shell, so it is worth doing on its own rather than
+bolted onto a printf fix.
+
+**Proper fix:** a small `f80` module (add/mul/scale by powers of ten, decimal
+parse with round-to-nearest-even, `%f`/`%e`/`%g`/`%a` rendering via exact
+integer expansion), used only by printf. Everything else in osh is integer
+arithmetic and is unaffected. Then extend
+`printf-reads-a-float-the-way-strtod-does.sh` with the values above, which it
+currently avoids on purpose — its header says every value in it is exact in a
+double precisely so the case does not measure this gap.
+
+---
+
+### TD-OILS-BASHS-UNTERMINATED-TIME-FORMAT-WARNING-QUOTES-AN-INDETERMINATE-BYTE. `printf '%(%Y'` warns about a byte bash read past the end of its format string — 2026-08-04 — OPEN (deliberate deviation)
+
+**Where:** `userspace/oils/src/interp.rs` — the `%(…)T` arm's unterminated case.
+
+**What:** bash's `printf` scans forward for the `)` that closes a `%(`; when
+there is none it still dereferences the byte at the stopping position and puts
+it in the `%c: invalid format character` warning. What that byte is depends on
+what the allocator left after the format string, so the warning is not
+reproducible — the same script run twice can name two different characters.
+
+**Why deferred:** this is a bash bug, not a bash behaviour. Matching it would
+mean matching an uninitialised read, which is neither possible nor desirable.
+osh reports the case with a stable message instead.
+
+**Proper fix:** none. Recorded so a future session does not "fix" osh into
+chasing it. If bash ever tightens this, revisit; the corpus deliberately does
+not cover it.
+
+---
+
+### TD-OILS-SIGNAL-NUMBERS-ARE-LINUXS-AND-CANNOT-BE-CHECKED-AGAINST-MSYS. `kill -l` and `trap` model Linux's signal table; the development host's bash uses a BSD-ish MSYS one — 2026-08-04 — OPEN (unverifiable on this host)
+
+**Where:** `userspace/oils/src/interp.rs` — the signal name/number table behind
+`kill`, `trap` and `$?`'s 128+n encoding.
+
+**What:** osh numbers signals the way Linux does (SIGBUS 7, SIGUSR1 10,
+SIGUSR2 12) and stops at 31. MSYS bash numbers them the BSD way (SIGEMT 7,
+SIGBUS 10, SIGSYS 12) and exposes 64 including the real-time range. Every
+*behavioural* section — what `kill` accepts, how `trap` lists, what a killed
+job reports — matches; only the table differs.
+
+**Why deferred:** it is not a bug. osh targets SlateOS, whose signal numbering
+is the Linux one by design; the divergence is the reference shell's host libc,
+not osh. It is logged so a corpus case is never written against `kill -l`
+output, and so a future session does not mistake the difference for a defect.
+
+**Proper fix:** none needed for the numbering. If the signal *table* ever needs
+testing, it has to be against a glibc bash, not MSYS — which is also why the
+existing `kill` corpus cases test behaviour and never the numbers.
+
+---
+
 ### TD-OILS-ULIMIT-A-PADS-ONE-FIELD-WHERE-BASH-WRITES-TWO. The `(unit, -x)` token was right-aligned against a single width-36 field, so the closing paren sat a column short of bash's and a long description would have been truncated — 2026-08-04 — ✅ FIXED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — `fn ulimit_line`.

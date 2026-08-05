@@ -3826,8 +3826,8 @@ pub struct Shell {
     /// Signed, because bash counts on from whatever number it was given:
     /// `SECONDS=-3` reads `-3`, then `-2` a second later.
     seconds_base: i64,
-    /// State for the `$RANDOM` pseudo-random generator. `Cell` so a read
-    /// (`param_value(&self)`) can advance it; assigning `RANDOM=n` reseeds it.
+    /// State for the `$RANDOM` pseudo-random generator. `Cell` so the `&self`
+    /// value helper can advance it; assigning `RANDOM=n` reseeds it.
     rng: std::cell::Cell<u32>,
     /// Fallback state for `$SRANDOM`, used only when the system entropy source
     /// is unreachable (see [`Shell::next_srandom`]). Separate from `rng` so
@@ -4546,10 +4546,10 @@ pub struct Shell {
     /// attributes, which is why `SECONDS=7` lists as `declare -- SECONDS="7"`
     /// and stays out of `declare -i`.
     ///
-    /// A [`std::cell::Cell`] because the read path ([`Shell::param_value`]) is
-    /// `&self`, and it is called from expansion paths that hold other borrows;
-    /// a bitmask because the table is fixed and small, so no allocation is
-    /// needed on what is a very hot path.
+    /// A [`std::cell::Cell`] because the value helpers that fill it are `&self`
+    /// and are called from paths that hold other borrows; a bitmask because the
+    /// table is fixed and small, so no allocation is needed on what is a very
+    /// hot path.
     ///
     /// Cloned into subshells. `unset` clears the bit along with the rest of the
     /// binding (see [`Shell::dyn_unset`]); a `local` of the name shadows it with
@@ -5449,7 +5449,7 @@ impl Shell {
     /// [`crate::parser::IncrementalParser::next_unit`] reproduces by re-lexing
     /// the unread tail when this changes. `set -o posix` rides the same channel
     /// for the same reason.
-    pub(crate) fn parse_opts(&self) -> crate::lexer::ParseOpts {
+    pub(crate) fn parse_opts(&mut self) -> crate::lexer::ParseOpts {
         crate::lexer::ParseOpts {
             extglob: self.shopt.get("extglob").copied().unwrap_or(false),
             posix: self.shell_option_enabled("posix"),
@@ -5467,7 +5467,7 @@ impl Shell {
     /// `list_minus_o_opts` the `set` builtin uses, so the two always agree:
     /// `-o` gives `name<pad>on|off` columns, `+o` re-inputtable `set ±o name`
     /// lines. Note it is a listing, not an error — the shell carries on.
-    pub fn format_named_option_list(&self, enable: bool) -> String {
+    pub fn format_named_option_list(&mut self, enable: bool) -> String {
         self.format_option_list(!enable)
     }
 
@@ -6310,7 +6310,7 @@ impl Shell {
     /// are treated as complete-with-empty-body by the lexer, so `<<EOF` with no
     /// body does not trigger continuation — a documented limitation.)
     #[must_use]
-    pub fn parse_incomplete(&self, src: BStr<'_>) -> bool {
+    pub fn parse_incomplete(&mut self, src: BStr<'_>) -> bool {
         // Alias-aware grammar/quote check, mirroring `run_source`: catches open
         // quotes/substitutions and unfinished compound commands / trailing
         // operators (all surfaced as bash's "unexpected end of file" / "unexpected
@@ -6688,7 +6688,7 @@ impl Shell {
     /// reader is plainly still waiting for the joined line. That is asked
     /// separately, of the lexer rather than of the text, so the two agree on
     /// which backslashes are continuations at all.
-    fn needs_more_lines(&self, src: BStr<'_>) -> bool {
+    fn needs_more_lines(&mut self, src: BStr<'_>) -> bool {
         let opts = self.parse_opts();
         if crate::lexer::ends_in_continuation(src, opts) {
             return true;
@@ -6773,7 +6773,7 @@ impl Shell {
     ///
     /// An unset, empty or negative `HISTSIZE` unstifles the list. One that is
     /// not a number at all is ignored and leaves the previous cap in force.
-    fn hist_stifle_pending(&self) -> Option<(usize, usize, Option<usize>)> {
+    fn hist_stifle_pending(&mut self) -> Option<(usize, usize, Option<usize>)> {
         let text = self.param_value("HISTSIZE");
         if text.as_deref() == self.hist_seen.as_deref() {
             return None;
@@ -6798,7 +6798,7 @@ impl Shell {
 
     /// The base and front-drop a read of the history should see, accounting for
     /// a `HISTSIZE` change that has not been applied to the list yet.
-    fn hist_view(&self) -> (usize, usize) {
+    fn hist_view(&mut self) -> (usize, usize) {
         match self.hist_stifle_pending() {
             Some((base, dropped, _)) => (base, dropped),
             None => (self.hist_base, 0),
@@ -6891,7 +6891,7 @@ impl Shell {
     /// The file `history -a/-n/-r/-w` acts on: the operand, else `$HISTFILE`,
     /// else `$HOME/.history` — readline's fallback, and the one a
     /// non-interactive shell always lands on, since it never sets `HISTFILE`.
-    fn hist_file(&self, arg: Option<&Str>) -> Option<Str> {
+    fn hist_file(&mut self, arg: Option<&Str>) -> Option<Str> {
         if let Some(a) = arg {
             return Some(a.clone());
         }
@@ -7040,7 +7040,7 @@ impl Shell {
 
     /// The number `$HISTCMD` reports: the number the *newest* entry carries, or
     /// 0 when the list is empty (as in a pristine shell, where `hist_base` is 1).
-    fn hist_number(&self) -> usize {
+    fn hist_number(&mut self) -> usize {
         let (base, dropped) = self.hist_view();
         base.saturating_add(self.history.len().saturating_sub(dropped))
             .saturating_sub(1)
@@ -7211,7 +7211,7 @@ impl Shell {
     /// they would make an interactive session unpleasant to type at: a slip of
     /// the finger should not end the shell, and a filename completion should
     /// still glob. bash spells it `posixly_correct && interactive_shell == 0`.
-    fn posix_noninteractive(&self) -> bool {
+    fn posix_noninteractive(&mut self) -> bool {
         !self.interactive_shell && self.shell_option_enabled("posix")
     }
 
@@ -7228,7 +7228,7 @@ impl Shell {
     /// the invocation — see [`Shell::fatal_abort_status`]).
     ///
     /// An interactive shell is exempt: it reports the failure and reads on.
-    fn posix_special_builtin_fatal(&self) -> bool {
+    fn posix_special_builtin_fatal(&mut self) -> bool {
         self.posix_noninteractive()
     }
 
@@ -7247,7 +7247,7 @@ impl Shell {
     /// that looks the other way round — `type`, `command -v`/`-V` and
     /// `declare -f` all still report the function, and `unset -f` still removes
     /// it.
-    fn posix_special_builtin_first(&self, name: Option<&str>) -> bool {
+    fn posix_special_builtin_first(&mut self, name: Option<&str>) -> bool {
         name.is_some_and(|n| {
             Self::is_special_builtin(n)
                 && self.builtin_enabled(n)
@@ -7265,7 +7265,7 @@ impl Shell {
     /// shell, so the description says which kind a name is. `type -t` is
     /// unaffected: its answer is the machine-readable `builtin` either way, as
     /// is `command -v`'s bare name.
-    fn builtin_kind_word(&self, name: &[u8]) -> &'static str {
+    fn builtin_kind_word(&mut self, name: &[u8]) -> &'static str {
         let special = bytes::as_str(name).is_some_and(Self::is_special_builtin)
             && self.shell_option_enabled("posix");
         if special { " special" } else { "" }
@@ -7275,7 +7275,7 @@ impl Shell {
     /// [`Shell::builtin_failure`]. The two classes differ in which prefix takes
     /// the rule away — see [`BuiltinVia`].
     fn posix_special_builtin_abort(
-        &self,
+        &mut self,
         name: &str,
         via: BuiltinVia,
         failure: BuiltinFailure,
@@ -7299,7 +7299,7 @@ impl Shell {
     /// both from the command word as written, so `command eval` and
     /// `builtin eval` alike are outside the rule: neither `command` nor
     /// `builtin` is itself a special builtin.
-    fn posix_special_builtin_word_fatal(&self, word: &Str) -> bool {
+    fn posix_special_builtin_word_fatal(&mut self, word: &Str) -> bool {
         self.posix_special_builtin_fatal()
             && bytes::as_str(word).is_some_and(Self::is_special_builtin)
     }
@@ -8706,7 +8706,7 @@ impl Shell {
     /// An interactive shell is exempt, as it is from the other posix
     /// fatalities — bash reports these two only when it is about to end the
     /// shell over them.
-    fn posix_function_name_error(&self, f: &FunctionDef) -> Option<&'static str> {
+    fn posix_function_name_error(&mut self, f: &FunctionDef) -> Option<&'static str> {
         if !self.posix_noninteractive() {
             return None;
         }
@@ -11520,8 +11520,12 @@ impl Shell {
                     true
                 }
                 ScalarDest::Elem(n, sub) => {
+                    // The subscript arrived as bytes (a `printf -v`/`read` name
+                    // operand, or a nameref target), so it still has to be read
+                    // as the word it spells — see [`Shell::sub_word`].
                     let (n, sub) = (n.clone(), sub.clone());
-                    self.assign_elem(&n, &Some(Box::new(Word::literal(sub))), val)
+                    let idx = self.sub_word(&sub);
+                    self.assign_elem(&n, &Some(Box::new(idx)), val)
                 }
             },
         };
@@ -12020,11 +12024,11 @@ impl Shell {
             match target.sub {
                 // A nameref may point at an array element (`declare -n
                 // ref=arr[0]`): convert `ref=v` into `arr[0]=v`. The subscript
-                // is a shell word, so it goes back into the rewritten
-                // assignment as the bytes the reference carried.
+                // is a shell word rather than the bytes the reference carried,
+                // and is read as one — see [`Shell::sub_word`].
                 Some(sub) if a.index.is_none() => {
                     a2.name = target.base;
-                    a2.index = Some(Word::literal(sub));
+                    a2.index = Some(self.sub_word(&sub));
                 }
                 // `ref[i]=v` through a reference that already designates one
                 // element is a subscript on a subscript, which bash has no room
@@ -14980,7 +14984,7 @@ impl Shell {
     /// backslash and following character. Time-based escapes render in UTC (no
     /// local-timezone model yet, consistent with the `%(…)T` printf
     /// conversion — see TD-OILS9).
-    fn prompt_decode(&self, s: &str) -> Str {
+    fn prompt_decode(&mut self, s: &str) -> Str {
         let (epoch, _) = unix_time();
         let epoch = epoch as i64;
         // The escapes insert *values* — the working directory, `$0`, the host
@@ -15119,12 +15123,11 @@ impl Shell {
                     // read our seeded EUID rather than guessing from the name.
                     // Falls back to the name-based heuristic only if EUID is
                     // somehow unset (it is always seeded in `seed_shell_vars`).
-                    let root = self
-                        .vars
-                        .get("EUID")
-                        .map_or_else(|| self.prompt_username().as_slice() == b"root", |e| {
-                            e.as_slice() == b"0"
-                        });
+                    let euid = self.vars.get("EUID").cloned();
+                    let root = match euid {
+                        Some(e) => e.as_slice() == b"0",
+                        None => self.prompt_username().as_slice() == b"root",
+                    };
                     out.push(if root { b'#' } else { b'$' });
                     chars.next();
                 }
@@ -15164,7 +15167,7 @@ impl Shell {
     }
 
     /// The host name for prompt `\h`/`\H` — from `$HOSTNAME`, else `localhost`.
-    fn prompt_hostname(&self) -> Str {
+    fn prompt_hostname(&mut self) -> Str {
         self.param_value("HOSTNAME")
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| b"localhost".to_vec())
@@ -15172,7 +15175,7 @@ impl Shell {
 
     /// The user name for prompt `\u` — from `$USER`, then `$LOGNAME`, else
     /// `user`.
-    fn prompt_username(&self) -> Str {
+    fn prompt_username(&mut self) -> Str {
         // bash reads the name from `getpwuid`, which we have no equivalent for
         // yet; the environment is the next best source. `USERNAME` is included
         // because that — not `USER`/`LOGNAME` — is the name the host sets when
@@ -15185,7 +15188,7 @@ impl Shell {
 
     /// The working directory for prompt `\w` (full, `$HOME`→`~`) or `\W`
     /// (basename only).
-    fn prompt_cwd(&self, basename_only: bool) -> Str {
+    fn prompt_cwd(&mut self, basename_only: bool) -> Str {
         let cwd = self.cwd.clone();
         if basename_only {
             let base = cwd
@@ -16420,7 +16423,7 @@ impl Shell {
     /// The active `FUNCNEST` ceiling as a positive frame count, or `None` when
     /// the check is disabled (variable unset, empty, `0`/negative, or not a
     /// valid integer). Read live from the variable each call, as bash does.
-    fn funcnest_limit(&self) -> Option<usize> {
+    fn funcnest_limit(&mut self) -> Option<usize> {
         let raw = self.param_value("FUNCNEST")?;
         let n = bytes::parse_i64(bytes::trim(&raw))?;
         if n > 0 { usize::try_from(n).ok() } else { None }
@@ -17658,7 +17661,7 @@ impl Shell {
     /// `temp_path` is a `PATH=` written as a command's assignment prefix, which
     /// outranks the shell's own: bash reads every variable through the
     /// temporary environment first, and its `$PATH` search is no exception.
-    fn search_dirs(&self, temp_path: Option<BStr<'_>>) -> Vec<Str> {
+    fn search_dirs(&mut self, temp_path: Option<BStr<'_>>) -> Vec<Str> {
         let path = match (temp_path, self.param_value("PATH")) {
             (Some(p), _) => p.to_vec(),
             (None, Some(p)) => p,
@@ -17723,7 +17726,7 @@ impl Shell {
     /// not a lookup and is not filtered, a `hash` hit never reaches the search,
     /// `test -x` asks the filesystem rather than the shell, and `.`/`source`
     /// looks for a readable file rather than an executable one.
-    fn exec_name_ignored(&self, path: BStr<'_>) -> bool {
+    fn exec_name_ignored(&mut self, path: BStr<'_>) -> bool {
         let Some(value) = self.param_value("EXECIGNORE") else {
             return false;
         };
@@ -17744,7 +17747,7 @@ impl Shell {
     /// does not — so `EXECIGNORE=bin/x` makes `command -v bin/x` say nothing
     /// about a `bin/x` that still runs perfectly well.
     fn find_in_path_described(
-        &self,
+        &mut self,
         name: BStr<'_>,
         temp_path: Option<BStr<'_>>,
     ) -> Option<std::path::PathBuf> {
@@ -17763,7 +17766,7 @@ impl Shell {
     /// `temp_path` is a `PATH=` from the command's assignment prefix; see
     /// [`Shell::search_dirs`].
     fn find_in_path(
-        &self,
+        &mut self,
         name: BStr<'_>,
         temp_path: Option<BStr<'_>>,
     ) -> Option<std::path::PathBuf> {
@@ -17812,7 +17815,7 @@ impl Shell {
     ///
     /// A name containing a separator is not a search at all; callers check that
     /// before coming here.
-    fn find_source_in_path(&self, name: BStr<'_>) -> Option<Str> {
+    fn find_source_in_path(&mut self, name: BStr<'_>) -> Option<Str> {
         self.search_dirs(None)
             .into_iter()
             .map(|dir| Self::path_candidate(&dir, name))
@@ -17937,7 +17940,7 @@ impl Shell {
     /// Measured against bash 5.2.37: `hash -r; cmd | cat; hash` reports an
     /// empty table, where `cmd` on its own hashes it.
     fn resolve_external_forked(
-        &self,
+        &mut self,
         name: BStr<'_>,
         assigns: &[(String, Str)],
     ) -> Option<std::path::PathBuf> {
@@ -17961,7 +17964,7 @@ impl Shell {
     /// search — `$EXECIGNORE` included, since `type -a` must agree with what
     /// would actually run, so the first entry it prints is by construction what
     /// [`Shell::find_in_path_described`] returns.
-    fn find_all_in_path(&self, name: BStr<'_>) -> Vec<std::path::PathBuf> {
+    fn find_all_in_path(&mut self, name: BStr<'_>) -> Vec<std::path::PathBuf> {
         let mut out: Vec<std::path::PathBuf> = Vec::new();
         if name.contains(&b'/') || name.contains(&b'\\') {
             if self.probe_path(name).is_file() && !self.exec_name_ignored(name) {
@@ -22228,7 +22231,7 @@ impl Shell {
     /// A tilde expansion's result is pushed **quoted** and the remainder
     /// unquoted, which is bash's own split — see [`Shell::tilde_split`] for why
     /// the two halves must not be conflated.
-    fn push_literal_annotated(&self, buf: &mut Vec<EChar>, s: BStr<'_>, leading: bool) {
+    fn push_literal_annotated(&mut self, buf: &mut Vec<EChar>, s: BStr<'_>, leading: bool) {
         match if leading { self.tilde_split(s) } else { None } {
             Some((dir, rest)) => {
                 push_chars(buf, &dir, true);
@@ -23385,8 +23388,8 @@ impl Shell {
     }
 
     /// A 32-bit value for `$SRANDOM`, from the system entropy source when there
-    /// is one. `param_value` reads through `&self`, so the fallback state lives
-    /// behind a `Cell`.
+    /// is one. Reading advances state through `&self`, so the fallback state
+    /// lives behind a `Cell`.
     fn next_srandom(&self) -> u32 {
         // bash's `$SRANDOM` is explicitly *not* the `$RANDOM` generator: it
         // draws 32 bits from the system entropy source, which is why it has no
@@ -23412,8 +23415,8 @@ impl Shell {
     }
 
     /// Advance the `$RANDOM` generator and return a value in `0..=32767`
-    /// (matching bash's 15-bit range). Uses a classic LCG; `param_value` reads
-    /// through `&self`, so the state lives behind a `Cell`.
+    /// (matching bash's 15-bit range). Uses a classic LCG; the read advances
+    /// state through `&self`, so it lives behind a `Cell`.
     fn next_random(&self) -> u32 {
         // Numerical Recipes LCG constants.
         let next = self.rng.get().wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -23490,7 +23493,7 @@ impl Shell {
     /// `-v !` and `-v -` are all false however much of a value the parameter
     /// has. (`_` is not among them — it is a perfectly ordinary identifier, and
     /// `-v _` says yes.)
-    fn named_param_is_set(&self, name: &str) -> bool {
+    fn named_param_is_set(&mut self, name: &str) -> bool {
         if !name.bytes().all(|b| b.is_ascii_digit()) && !lexer::is_valid_name(name.as_bytes()) {
             return false;
         }
@@ -23504,7 +23507,7 @@ impl Shell {
     /// reads a bare array name as that array's element 0, whereas indirecting
     /// through an array whose element 0 is missing is still a valid indirection
     /// — bash's `q=(); echo "${!q[0]}"` is empty rather than an error.
-    fn ref_name_exists(&self, name: &str) -> bool {
+    fn ref_name_exists(&mut self, name: &str) -> bool {
         let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             return false;
         };
@@ -23865,7 +23868,7 @@ impl Shell {
     /// names nowhere (which is reported here, as reading it directly would be).
     /// The caller falls through to normal resolution in every case, and finds
     /// nothing for the latter two.
-    fn nameref_elem_value(&self, name: &str) -> Option<Str> {
+    fn nameref_elem_value(&mut self, name: &str) -> Option<Str> {
         let (base, sub) = self.nameref_elem_target(name)?;
         match self.ref_target_value(&base, &sub) {
             ElemValue::Value(v) => Some(v),
@@ -23914,6 +23917,35 @@ impl Shell {
         }
     }
 
+    /// A subscript that reached the shell as *bytes* rather than as a parsed
+    /// word, read as the word those bytes spell.
+    ///
+    /// Two things deliver one, and neither is an assignment: a **name operand**
+    /// (`printf -v 'a[i]'`, `read 'a[i]'`, `declare 'a[i]=v'`) and a **nameref
+    /// target** (`declare -n r='a[i]'`). bash expands both, and expands them on
+    /// *every use* — `declare -n r='n[$i]'` reads a different element as `$i`
+    /// changes, and a command substitution in one runs again at each read. So
+    /// the bytes are parsed here and handed on as a `Word`, which puts them on
+    /// exactly the path a *written* subscript takes: `expand_arith_string`
+    /// rules for an indexed array (`n["1"]` is index 1, `n['1']` a syntax
+    /// error) and ordinary word expansion for an associative key (`m['kk']` is
+    /// the key `kk`). Nothing about those two languages is re-decided here; the
+    /// only thing that was missing was the parse.
+    ///
+    /// Text that will not parse as a word — an unbalanced quote, say — comes
+    /// back as the literal it was, which the arithmetic evaluator then refuses.
+    /// bash rejects most of those earlier still, while validating the name
+    /// (`printf -v 'n["1]'` is `not a valid identifier` there); see
+    /// TD-OILS-A-SUBSCRIPT-IS-SPLIT-OFF-WITHOUT-REGARD-FOR-ITS-QUOTES.
+    ///
+    /// The whole-array token check belongs *in front* of this, never behind it:
+    /// bash refuses `n[*]` before expanding anything, while `n[$s]` with
+    /// `s='*'` is an ordinary expression. See [`Self::whole_array_sub`].
+    fn sub_word(&mut self, sub: BStr<'_>) -> Word {
+        crate::parser::word_verbatim_from_source(sub, self.parse_opts())
+            .unwrap_or_else(|_| Word::literal(sub.to_vec()))
+    }
+
     /// bash's complaint about a subscript that names the array **whole** where
     /// one element belongs: `base[*]: bad array subscript`, spelling the whole
     /// reference rather than the subscript alone, and untagged by whichever
@@ -23950,7 +23982,7 @@ impl Shell {
     ///
     /// An array with no elements is *unset* rather than empty — `${g-D}` takes
     /// the default — which falls out of there being no value to join.
-    fn ref_target_value(&self, base: &str, sub: BStr<'_>) -> ElemValue {
+    fn ref_target_value(&mut self, base: &str, sub: BStr<'_>) -> ElemValue {
         if let Some(c) = Self::whole_array_sub(sub) {
             let elems = self.array_elements(base);
             let star = c == '*';
@@ -23960,14 +23992,22 @@ impl Shell {
                 ElemValue::Value(self.join_derived(&elems, star))
             };
         }
+        // The subscript is live shell syntax, read afresh at every use — see
+        // [`Shell::sub_word`]. So a command substitution in one runs again for
+        // each read, and `declare -n r='n[i=2]'` really does assign to `i`.
+        let w = self.sub_word(sub);
         if self.assoc.contains_key(base) {
+            let key = self.expand_to_string(&w);
             return self
-                .assoc_element(base, sub)
+                .assoc_element(base, &key)
                 .map_or(ElemValue::Absent, ElemValue::Value);
         }
-        // A literal integer subscript (the common `arr[0]` case). Non-numeric
-        // subscripts on an indexed array fall back to index 0, as bash does.
-        let idx = bytes::as_str(sub).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        // An expression that will not evaluate has already been reported and
+        // has already armed the discard; there is no value to answer with.
+        let src = self.expand_to_arith_string(&w);
+        let Some(idx) = self.eval_arith_index_text_checked(&src) else {
+            return ElemValue::Absent;
+        };
         if self.subscript_is_bad(base, idx) {
             return ElemValue::BadSubscript(base.to_string());
         }
@@ -23992,7 +24032,7 @@ impl Shell {
     /// declare -n g='n[*]'      0        9
     /// declare -n V='n[9]'      0        0
     /// ```
-    fn ref_length(&self, name: &str) -> Option<Str> {
+    fn ref_length(&mut self, name: &str) -> Option<Str> {
         let (base, sub) = self.nameref_elem_target(name)?;
         if !self.nounset {
             return Some(b"0".to_vec());
@@ -24684,7 +24724,7 @@ impl Shell {
     /// [`Shell::param_value`]: `unset SECONDS` takes the value function away
     /// with the variable and bash never restores it, so afterwards the name has
     /// to fall through to the ordinary variable tables. See [`Shell::dyn_unset`].
-    fn dynamic_special_value(&self, name: &str) -> Option<Str> {
+    fn dynamic_special_value(&mut self, name: &str) -> Option<Str> {
         if self.dyn_unset.contains(name) {
             return None;
         }
@@ -24760,7 +24800,7 @@ impl Shell {
     /// value cell, or — for one of the few valued from the start — a reading
     /// taken now. `None` while the cell is still empty, and `None` when an
     /// ordinary binding shadows the dynamic one or `unset` has dropped it.
-    fn dynamic_special_listed_value(&self, name: &str) -> Option<Str> {
+    fn dynamic_special_listed_value(&mut self, name: &str) -> Option<Str> {
         let d = self.dynamic_special_listed(name)?;
         if let Some(v) = self.dyn_cell_value(name) {
             return Some(v);
@@ -24774,7 +24814,7 @@ impl Shell {
         None
     }
 
-    fn param_value(&self, name: &str) -> Option<Str> {
+    fn param_value(&mut self, name: &str) -> Option<Str> {
         self.param_value_walks(name, 1)
     }
 
@@ -24788,7 +24828,7 @@ impl Shell {
     /// ([`Self::param_elem_lookup`]) and the length walks once
     /// ([`Self::expand_array_ref`]): the two questions are answered by different
     /// routes, and each route walks what it walks.
-    fn param_value_walks(&self, name: &str, walks: usize) -> Option<Str> {
+    fn param_value_walks(&mut self, name: &str, walks: usize) -> Option<Str> {
         if let Some(v) = self.nameref_elem_value(name) {
             return Some(v);
         }
@@ -25786,7 +25826,7 @@ impl Shell {
         None
     }
 
-    fn tilde_expand(&self, s: BStr<'_>) -> Str {
+    fn tilde_expand(&mut self, s: BStr<'_>) -> Str {
         match self.tilde_split(s) {
             Some((dir, rest)) => bfmt![&dir, rest],
             None => s.to_vec(),
@@ -25804,7 +25844,7 @@ impl Shell {
     /// of the word is not: with `HOME='a*'`, `echo ~` prints `a*` even when a
     /// file `ab` exists, and `[[ 'a*' == ~ ]]` is *true* — but `~/c*d` still
     /// globs its `c*d`.
-    fn tilde_split<'a>(&self, s: &'a [u8]) -> Option<(Str, &'a [u8])> {
+    fn tilde_split<'a>(&mut self, s: &'a [u8]) -> Option<(Str, &'a [u8])> {
         let after = s.strip_prefix(b"~")?;
         // The tilde-prefix runs from just after `~` to the first `/` (or end);
         // the remainder (including any leading `/`) is appended verbatim.
@@ -26804,7 +26844,7 @@ impl Shell {
     /// longer around to be read again.
     #[cfg_attr(not(unix), allow(unused_variables))]
     fn external_command(
-        &self,
+        &mut self,
         word: BStr<'_>,
         resolved: Option<&std::path::Path>,
         arg0: BStr<'_>,
@@ -26886,7 +26926,7 @@ impl Shell {
     /// backslashes differently. Encoding for it there is not an optimisation
     /// but the difference between the child seeing what the shell expanded and
     /// seeing something else; see [`crate::wincmd`].
-    fn push_child_args(&self, pc: &mut PCommand, args: &[Str]) {
+    fn push_child_args(&mut self, pc: &mut PCommand, args: &[Str]) {
         #[cfg(windows)]
         {
             let program = bytes::os_to_bytes(pc.get_program());
@@ -26922,7 +26962,7 @@ impl Shell {
     /// [`Self::child_underscore`]). `None` suppresses that, for the one caller
     /// that is not forking a child — `exec`.
     fn apply_child_env(
-        &self,
+        &mut self,
         pc: &mut PCommand,
         assigns: &[(String, Str)],
         program: Option<ChildProgram<'_>>,
@@ -26949,11 +26989,15 @@ impl Shell {
         // value is computed — but bash calls the value function when it builds
         // the child's environment, so `export SECONDS` really does put a
         // `SECONDS=` in it, holding the value the name has at that moment.
-        for k in &self.exported {
-            if !self.vars.contains_key(k)
-                && let Some(v) = self.dynamic_special_value(k)
-            {
-                pc.env(k, bytes::bytes_to_os(&v));
+        let computed: Vec<String> = self
+            .exported
+            .iter()
+            .filter(|k| !self.vars.contains_key(*k))
+            .cloned()
+            .collect();
+        for k in computed {
+            if let Some(v) = self.dynamic_special_value(&k) {
+                pc.env(&k, bytes::bytes_to_os(&v));
             }
         }
         // Exported *functions* (`export -f`) travel as `BASH_FUNC_<name>%%`,
@@ -27240,7 +27284,7 @@ impl Shell {
 
     /// Render a directory path for `dirs`/`pushd`/`popd` output: unless `long`,
     /// contract a leading `$HOME` to `~` (bash's default short form).
-    fn dirs_render(&self, path: BStr<'_>, long: bool) -> Str {
+    fn dirs_render(&mut self, path: BStr<'_>, long: bool) -> Str {
         if long {
             return path.to_vec();
         }
@@ -30305,7 +30349,7 @@ impl Shell {
     /// a POSIX `open` of a directory succeeds and the read that follows finds
     /// no bytes; Windows refuses the open outright, so the emptiness has to be
     /// supplied here for the two hosts to agree.
-    fn read_inputrc_file(&self, path: &[u8]) -> std::io::Result<Str> {
+    fn read_inputrc_file(&mut self, path: &[u8]) -> std::io::Result<Str> {
         let expanded = self.tilde_expand(path);
         let host = self.host_path(&expanded);
         let host = bytes::bytes_to_path(&host);
@@ -33882,7 +33926,7 @@ impl Shell {
         bfmt![b"declare ", Self::flag_group(letters), b" ", name, tail]
     }
 
-    fn format_declare_def(&self, name: &str) -> Option<Str> {
+    fn format_declare_def(&mut self, name: &str) -> Option<Str> {
         // Dynamic special variables (`BASHPID`, `RANDOM`, …) have no entry in
         // the variable tables but still answer `declare -p NAME` in bash, which
         // prints the *live* value with the variable's fixed attributes. So
@@ -33898,7 +33942,7 @@ impl Shell {
     /// value rather than by computing one: `declare -p RANDOM` prints
     /// `declare -i RANDOM="12365"` but `declare -p` lists a bare
     /// `declare -i RANDOM`.
-    fn format_declare_def_listed(&self, name: &str) -> Option<Str> {
+    fn format_declare_def_listed(&mut self, name: &str) -> Option<Str> {
         self.format_declare_def_stored(name)
             .or_else(|| self.format_dynamic_special_listing(name))
     }
@@ -33925,7 +33969,7 @@ impl Shell {
     /// `declare -p NAME` line for a dynamic special variable, or `None` if
     /// `name` is not one. The value is read live via [`Self::param_value`],
     /// because bash's named form calls the variable's own getter.
-    fn format_dynamic_special_declare(&self, name: &str) -> Option<Str> {
+    fn format_dynamic_special_declare(&mut self, name: &str) -> Option<Str> {
         let d = self.dynamic_special(name)?;
         // The table's letters plus any a declaration builtin has applied: the
         // declaration did not replace the binding, it only added to it.
@@ -33943,7 +33987,7 @@ impl Shell {
     /// The line a listing prints for a dynamic special variable, or `None` if
     /// `name` is not one (or is shadowed by a real binding). See
     /// [`DynListing`] for why most of them list without a value.
-    fn format_dynamic_special_listing(&self, name: &str) -> Option<Str> {
+    fn format_dynamic_special_listing(&mut self, name: &str) -> Option<Str> {
         let d = self.dynamic_special_listed(name)?;
         let letters = self.dynamic_special_letters(name, self.dynamic_special_listed_flags(d));
         if d.listed.is_array() {
@@ -34016,7 +34060,7 @@ impl Shell {
     /// double-quoted form as `declare -p`, but scalars use bash's minimal
     /// single-quote style (see `quote_set_value`) — e.g. `y=5`, `x='a b'` rather
     /// than `declare -p`'s `y="5"`, `x="a b"`.
-    fn format_var_setline(&self, name: &str) -> Option<Str> {
+    fn format_var_setline(&mut self, name: &str) -> Option<Str> {
         if self.assoc.contains_key(name) || self.arrays.contains_key(name) {
             return self.format_var_assignment(name);
         }
@@ -34160,7 +34204,7 @@ impl Shell {
     /// A name with no binding at all — including one a `local` in this very
     /// command has just shadowed — holds nothing to judge, so it is fine:
     /// `q=0; f() { declare -n q; }` succeeds.
-    fn nameref_existing_value_error(&self, tag: &str, name: &str) -> Option<Str> {
+    fn nameref_existing_value_error(&mut self, tag: &str, name: &str) -> Option<Str> {
         if let Some(msg) = self.nameref_array_error(tag, name) {
             return Some(msg);
         }
@@ -35416,7 +35460,10 @@ impl Shell {
                     };
                     let assignment = Assignment {
                         name: base_name.to_string(),
-                        index: Some(Word::literal(sub)),
+                        // Bytes off an operand, so read as the word they spell
+                        // — `declare 'n[$i]=v'` stores where `$i` points. See
+                        // [`Shell::sub_word`].
+                        index: Some(self.sub_word(sub.as_bytes())),
                         append,
                         value: AssignRhs::Scalar(Word::literal(v)),
                     };
@@ -37033,9 +37080,9 @@ impl Shell {
     /// bash. A readonly function cannot later be redefined or `unset -f`.
     fn readonly_functions(&mut self, names: &[&Str], out: &mut Out, redir: &RedirPlan) -> i32 {
         if names.is_empty() {
+            let posix = self.shell_option_enabled("posix");
             let mut ro: Vec<&Str> = self.readonly_funcs.iter().collect();
             ro.sort();
-            let posix = self.shell_option_enabled("posix");
             let mut listing = Str::new();
             for name in ro {
                 if let Some(body) = self.funcs.get(name) {
@@ -37936,24 +37983,24 @@ impl Shell {
         // re-inputtable `name=value` form, followed by every function definition
         // (matching bash, which prints functions after the variables).
         if args.is_empty() {
-            let mut all: Vec<String> = self
-                .vars
-                .keys()
-                .chain(self.arrays.keys())
-                .chain(self.assoc.keys())
-                .cloned()
-                // …plus any dynamic special variable whose value cell is filled
-                // in. A bare `set` is about *values*, so it lists the ones a
-                // lookup or an assignment has put something in and the ones
-                // valued from the start (`PPID`), and passes over the rest —
-                // and over the merely `declared`. See [`Shell::dyn_cell`].
-                .chain(
-                    Self::DYNAMIC_SPECIALS
-                        .iter()
-                        .filter(|d| self.dynamic_special_listed_value(d.name).is_some())
-                        .map(|d| d.name.to_string()),
-                )
-                .collect();
+            // …plus any dynamic special variable whose value cell is filled
+            // in. A bare `set` is about *values*, so it lists the ones a
+            // lookup or an assignment has put something in and the ones
+            // valued from the start (`PPID`), and passes over the rest —
+            // and over the merely `declared`. See [`Shell::dyn_cell`].
+            // Asked first, and on its own: a value function may run shell code.
+            let mut all: Vec<String> = Self::DYNAMIC_SPECIALS
+                .iter()
+                .filter(|d| self.dynamic_special_listed_value(d.name).is_some())
+                .map(|d| d.name.to_string())
+                .collect::<Vec<_>>();
+            all.extend(
+                self.vars
+                    .keys()
+                    .chain(self.arrays.keys())
+                    .chain(self.assoc.keys())
+                    .cloned(),
+            );
             all.sort();
             all.dedup();
             let mut listing = Str::new();
@@ -38304,7 +38351,7 @@ impl Shell {
     /// order), so `set -o` output matches bash even for options osh models as
     /// always-on defaults or does not yet act on. Each option's reported state
     /// comes from [`Shell::shell_option_enabled`], so it is always truthful.
-    fn format_option_list(&self, reinput: bool) -> String {
+    fn format_option_list(&mut self, reinput: bool) -> String {
         let mut s = String::new();
         for name in STANDARD_SET_O_OPTIONS {
             let on = self.shell_option_enabled(name);
@@ -38324,7 +38371,7 @@ impl Shell {
     /// Return whether the named `set -o` option is currently enabled. Used by the
     /// `[ -o NAME ]` / `[[ -o NAME ]]` test operator. Unknown option names are
     /// reported as disabled (matching bash, which returns false for them).
-    fn shell_option_enabled(&self, name: &str) -> bool {
+    fn shell_option_enabled(&mut self, name: &str) -> bool {
         match name {
             "pipefail" => self.pipefail,
             "errexit" => self.errexit,
@@ -40461,7 +40508,7 @@ impl Shell {
     /// which has no execute bit, only files with a known executable extension
     /// (`.exe`/`.cmd`/`.bat`/`.com`) qualify, and that extension is stripped so
     /// the bare command name is offered.
-    fn compgen_path_commands(&self, _word: BStr<'_>) -> Vec<Str> {
+    fn compgen_path_commands(&mut self, _word: BStr<'_>) -> Vec<Str> {
         let mut out: Vec<Str> = Vec::new();
         // The same directory list a real lookup walks — including the empty
         // entry that means the cwd — so what `compgen -c` offers cannot drift
@@ -42473,7 +42520,7 @@ impl Shell {
 
 /// Let the arithmetic evaluator read shell variables.
 impl VarLookup for Shell {
-    fn get_str(&self, name: &str) -> Option<Str> {
+    fn get_str(&mut self, name: &str) -> Option<Str> {
         // A reference naming a *whole* array is not a value arithmetic can
         // read. The expansion path hands one on as its elements joined (see
         // [`Shell::ref_target_value`]), but arithmetic subscripts the array
@@ -50141,7 +50188,7 @@ mod tests {
     /// [`Shell::param_value`] as an owned `String`, for assertions. Same rule as
     /// [`as_text`]: a value these tests set that will not decode is a failure.
     #[track_caller]
-    fn pval(sh: &Shell, name: &str) -> Option<String> {
+    fn pval(sh: &mut Shell, name: &str) -> Option<String> {
         sh.param_value(name)
             .map(|v| String::from_utf8(v).expect("test value is not text"))
     }
@@ -50415,7 +50462,7 @@ mod tests {
     /// coverage for the multi-line REPL grow-phase feature.
     #[test]
     fn parse_incomplete_classifies_repl_continuation() {
-        let sh = new_shell();
+        let mut sh = new_shell();
         // --- incomplete: unfinished compound commands (keep reading) ---
         for src in [
             "if true",
@@ -51828,7 +51875,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = new_shell();
         sh.run_source(setup.as_bytes());
         let buf = capture_sink();
-        let prog = parse_with_aliases(src.as_bytes(), &sh.aliases, sh.parse_opts()).expect("parse");
+        let opts = sh.parse_opts();
+        let prog = parse_with_aliases(src.as_bytes(), &sh.aliases, opts).expect("parse");
         {
             let mut out = Out::Capture(buf.clone());
             sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
@@ -51932,7 +51980,9 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let buf = capture_sink();
         {
             let mut out = Out::Capture(buf.clone());
-            sh.exec_program(&parse_with_aliases("g".as_bytes(), &sh.aliases, sh.parse_opts()).expect("parse"), &mut out, &StdinSrc::Inherit);
+            let opts = sh.parse_opts();
+            let prog = parse_with_aliases("g".as_bytes(), &sh.aliases, opts).expect("parse");
+            sh.exec_program(&prog, &mut out, &StdinSrc::Inherit);
         }
         // `parse_with_aliases` applies the table unconditionally — it is the
         // *caller* (`run_source`) that consults the gate — so the body did run.
@@ -60155,14 +60205,14 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn the_search_path_is_the_shell_s_own_and_a_prefix_outranks_it() {
         let mut sh = new_shell();
         sh.cwd = b"/here".to_vec();
-        let dirs = |sh: &Shell, over: Option<&[u8]>| {
+        let dirs = |sh: &mut Shell, over: Option<&[u8]>| {
             sh.search_dirs(over).iter().map(|d| String::from_utf8_lossy(d).into_owned()).collect::<Vec<_>>()
         };
         // `:` on every host, because that is the shell's separator rather than
         // the host's (see [`split_search_path`]).
         sh.vars.insert("PATH".to_string(), b"/abs:rel::/tail/".to_vec());
         assert_eq!(
-            dirs(&sh, None),
+            dirs(&mut sh, None),
             // Every entry survives as typed — `rel` is *not* made absolute, or
             // `command -v` would answer `/here/rel/cmd` where bash answers
             // `rel/cmd` — and the empty entry becomes the `.` bash reports for
@@ -60174,20 +60224,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(Shell::path_candidate(b"rel", b"cmd"), b"rel/cmd".to_vec());
         // A `PATH=` written as a command prefix is searched instead, without
         // being stored: the shell's own `$PATH` is untouched by the lookup.
-        assert_eq!(dirs(&sh, Some(b"/only")), vec!["/only"]);
-        assert_eq!(dirs(&sh, None), vec!["/abs", "rel", ".", "/tail/"]);
+        assert_eq!(dirs(&mut sh, Some(b"/only")), vec!["/only"]);
+        assert_eq!(dirs(&mut sh, None), vec!["/abs", "rel", ".", "/tail/"]);
         // No `$PATH` at all and an environment the shell already owns: the
         // process's leftover `$PATH` is not consulted — but "no `$PATH`" is not
         // "no search". bash reads a missing value as `""`, which is one empty
         // entry, so the shell's own directory is searched and nothing else.
         sh.vars.remove("PATH");
         sh.env_imported = true;
-        assert_eq!(dirs(&sh, None), vec!["/here"]);
+        assert_eq!(dirs(&mut sh, None), vec!["/here"]);
         // An explicitly empty one says the same thing.
         sh.vars.insert("PATH".to_string(), Str::new());
-        assert_eq!(dirs(&sh, None), vec!["/here"]);
-        assert_eq!(dirs(&sh, Some(b"/only")), vec!["/only"]);
-        assert_eq!(dirs(&sh, Some(b"")), vec!["/here"]);
+        assert_eq!(dirs(&mut sh, None), vec!["/here"]);
+        assert_eq!(dirs(&mut sh, Some(b"/only")), vec!["/only"]);
+        assert_eq!(dirs(&mut sh, Some(b"")), vec!["/here"]);
     }
 
     /// `$PATH` is split on the shell's separator, `:`, everywhere — and on the
@@ -60227,53 +60277,53 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn execignore_matches_a_whole_candidate_path_and_folds_case() {
         let mut sh = new_shell();
-        let ignored = |sh: &Shell, cand: &[u8]| sh.exec_name_ignored(cand);
+        let ignored = |sh: &mut Shell, cand: &[u8]| sh.exec_name_ignored(cand);
 
         // Unset, empty, and all-empty-entries are each inert.
-        assert!(!ignored(&sh, b"bin/tool"));
+        assert!(!ignored(&mut sh, b"bin/tool"));
         sh.vars.insert("EXECIGNORE".to_string(), Vec::new());
-        assert!(!ignored(&sh, b"bin/tool"));
+        assert!(!ignored(&mut sh, b"bin/tool"));
         sh.vars.insert("EXECIGNORE".to_string(), b"::".to_vec());
-        assert!(!ignored(&sh, b"bin/tool"));
+        assert!(!ignored(&mut sh, b"bin/tool"));
 
         // The pattern sees the whole path, so `*` crosses the slash — and a
         // pattern anchored at a component boundary that the whole path does not
         // start with does not match.
         for pat in [&b"*tool"[..], b"bin/*", b"bin/tool", b"bin*", b"*/tool"] {
             sh.vars.insert("EXECIGNORE".to_string(), pat.to_vec());
-            assert!(ignored(&sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
+            assert!(ignored(&mut sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
         }
         for pat in [&b"tool"[..], b"*/bin/*", b"xin/tool"] {
             sh.vars.insert("EXECIGNORE".to_string(), pat.to_vec());
-            assert!(!ignored(&sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
+            assert!(!ignored(&mut sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
         }
 
         // A list, with the empty entries skipped rather than matching everything.
         sh.vars.insert("EXECIGNORE".to_string(), b"::*/nope:bin/tool:".to_vec());
-        assert!(ignored(&sh, b"bin/tool"));
-        assert!(!ignored(&sh, b"bin/other"));
+        assert!(ignored(&mut sh, b"bin/tool"));
+        assert!(!ignored(&mut sh, b"bin/other"));
 
         // Case is folded unconditionally — in either direction, and in the
         // directory as readily as the file.
         for pat in [&b"bin/TOOL"[..], b"bin/tOOl", b"BIN/tool"] {
             sh.vars.insert("EXECIGNORE".to_string(), pat.to_vec());
-            assert!(ignored(&sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
+            assert!(ignored(&mut sh, b"bin/tool"), "{}", String::from_utf8_lossy(pat));
         }
         sh.vars.insert("EXECIGNORE".to_string(), b"bin/tool".to_vec());
-        assert!(ignored(&sh, b"BIN/TOOL"));
+        assert!(ignored(&mut sh, b"BIN/TOOL"));
 
         // A pattern that will not parse is a pattern that matches nothing, not
         // an error.
         sh.vars.insert("EXECIGNORE".to_string(), b"[".to_vec());
-        assert!(!ignored(&sh, b"bin/tool"));
+        assert!(!ignored(&mut sh, b"bin/tool"));
 
         // `extglob` is honoured, so the same value means different things.
         sh.vars.insert("EXECIGNORE".to_string(), b"bin/@(tool|helper)".to_vec());
-        assert!(!ignored(&sh, b"bin/tool"));
+        assert!(!ignored(&mut sh, b"bin/tool"));
         sh.shopt.insert("extglob".to_string(), true);
-        assert!(ignored(&sh, b"bin/tool"));
-        assert!(ignored(&sh, b"bin/helper"));
-        assert!(!ignored(&sh, b"bin/other"));
+        assert!(ignored(&mut sh, b"bin/tool"));
+        assert!(ignored(&mut sh, b"bin/helper"));
+        assert!(!ignored(&mut sh, b"bin/other"));
     }
 
     /// The `PATH=` a lookup honours is the *last* one written, and the shell
@@ -75148,7 +75198,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn a_child_gets_an_underscore_naming_its_own_program() {
-        let sh = new_shell();
+        let mut sh = new_shell();
         let underscore = |pc: &PCommand| {
             pc.get_envs()
                 .find(|(k, _)| *k == OsStr::new("_"))
@@ -78186,7 +78236,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Interactive non-login: the rc file only.
         let files = StartupFiles { interactive: true, ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&files), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("bashrc"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("bashrc"));
 
         // A login shell never reads the rc file, and takes the *first* profile
         // that exists — `.bash_profile` is absent, so `.bash_login` wins over
@@ -78194,13 +78244,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         sh.run_source("unset SAW".as_bytes());
         sh.set_login_shell();
         assert_eq!(sh.run_startup_files(&files), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("bash_login"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("bash_login"));
 
         // Adding the earlier name pre-empts it.
         write_startup(&home, ".bash_profile", "SAW=bash_profile");
         sh.run_source("unset SAW".as_bytes());
         assert_eq!(sh.run_startup_files(&files), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("bash_profile"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("bash_profile"));
     }
 
     /// `--noprofile`/`--norc` suppress their own set, and a non-interactive
@@ -78213,12 +78263,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         let norc = StartupFiles { interactive: true, no_rc: true, ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&norc), None);
-        assert_eq!(pval(&sh, "SAW"), None);
+        assert_eq!(pval(&mut sh, "SAW"), None);
 
         // Non-interactive: no rc file even without `--norc`.
         let plain = StartupFiles::default();
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(pval(&sh, "SAW"), None);
+        assert_eq!(pval(&mut sh, "SAW"), None);
 
         // `--rcfile` names a different file, and only an interactive shell uses it.
         write_startup(&home, "my.rc", "SAW=my_rc");
@@ -78226,7 +78276,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let named =
             StartupFiles { interactive: true, rc_file: Some(rcfile.as_bytes()), ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&named), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("my_rc"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("my_rc"));
 
         // Login + `--noprofile`: nothing at all, the rc file included.
         sh.run_source("unset SAW".as_bytes());
@@ -78234,7 +78284,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let noprofile =
             StartupFiles { interactive: true, no_profile: true, ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&noprofile), None);
-        assert_eq!(pval(&sh, "SAW"), None);
+        assert_eq!(pval(&mut sh, "SAW"), None);
     }
 
     /// `$BASH_ENV` is for non-interactive shells, is read *after* any profile,
@@ -78249,20 +78299,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let plain = StartupFiles::default();
         sh.run_source(format!("BASH_ENV='{home}/env.sh'").as_bytes());
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("env"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("env"));
 
         // After the profile, so the profile's assignment is the one it appends to.
         sh.run_source("unset SAW".as_bytes());
         sh.set_login_shell();
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("profenv"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("profenv"));
 
         // Never for an interactive shell.
         sh.run_source("unset SAW".as_bytes());
         let inter =
             StartupFiles { interactive: true, no_profile: true, no_rc: true, rc_file: None };
         assert_eq!(sh.run_startup_files(&inter), None);
-        assert_eq!(pval(&sh, "SAW"), None);
+        assert_eq!(pval(&mut sh, "SAW"), None);
 
         // A parameter expansion in the value applies (single quotes here so the
         // *shell running the test* does not expand it first — the point is that
@@ -78270,24 +78320,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         write_startup(&home, "e nv.sh", "SAW=${SAW:-}spaced");
         sh.run_source(format!("V=nv\nBASH_ENV='{home}/e${{V}}.sh'\nunset SAW").as_bytes());
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("profenv"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("profenv"));
 
         // …and the result is *not* split on the space in the name, so a path
         // with a space in it is found.
         sh.run_source(format!("unset SAW\nBASH_ENV='{home}/e nv.sh'").as_bytes());
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("profspaced"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("profspaced"));
 
         // A leading `~` expands even though it would not inside real double
         // quotes: bash tilde-expands the *result* of the expansion.
         sh.run_source("unset SAW\nBASH_ENV='~/env.sh'".as_bytes());
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("profenv"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("profenv"));
 
         // An empty value, and a name that does not exist, are both silent.
         sh.run_source("unset SAW\nBASH_ENV=".as_bytes());
         assert_eq!(sh.run_startup_files(&plain), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("prof"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("prof"));
     }
 
     /// `exit` in a startup file terminates the shell — the caller must not run
@@ -78298,7 +78348,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         write_startup(&home, ".bashrc", "SAW=rc\nexit 7\nSAW=not_reached");
         let files = StartupFiles { interactive: true, ..StartupFiles::default() };
         assert_eq!(sh.run_startup_files(&files), Some(7));
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("rc"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("rc"));
 
         // `return` stops the file too, but the shell carries on with the status
         // untouched: bash reads these files without `FEVAL_BUILTIN`, so the
@@ -78306,7 +78356,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (mut sh, home) = startup_home("ret");
         write_startup(&home, ".bashrc", "true\nreturn 5\nSAW=not_reached");
         assert_eq!(sh.run_startup_files(&files), None);
-        assert_eq!(pval(&sh, "SAW"), None);
+        assert_eq!(pval(&mut sh, "SAW"), None);
         assert_eq!(sh.last_status, 0);
     }
 
@@ -78320,30 +78370,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // Nothing armed it: not read at all.
         assert_eq!(sh.run_logout_file(), None);
-        assert_eq!(pval(&sh, "SAW"), None);
+        assert_eq!(pval(&mut sh, "SAW"), None);
 
         // A login shell's `exit` arms it, and the file sees the pre-`exit` status.
         sh.set_login_shell();
         assert_eq!(sh.run_source("false; exit 5".as_bytes()), 5);
         assert_eq!(sh.run_logout_file(), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("logout1"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("logout1"));
 
         // Reading it disarms it, so a second call does nothing.
         sh.run_source("unset SAW".as_bytes());
         assert_eq!(sh.run_logout_file(), None);
-        assert_eq!(pval(&sh, "SAW"), None);
+        assert_eq!(pval(&mut sh, "SAW"), None);
 
         // An `exit` *in* the logout file replaces the shell's status.
         write_startup(&home, ".bash_logout", "SAW=lo\nexit 9");
         assert_eq!(sh.run_source("exit 4".as_bytes()), 4);
         assert_eq!(sh.run_logout_file(), Some(9));
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("lo"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("lo"));
 
         // A merely *failing* command in it does not.
         write_startup(&home, ".bash_logout", "SAW=lo2\nfalse");
         assert_eq!(sh.run_source("exit 4".as_bytes()), 4);
         assert_eq!(sh.run_logout_file(), None);
-        assert_eq!(pval(&sh, "SAW").as_deref(), Some("lo2"));
+        assert_eq!(pval(&mut sh, "SAW").as_deref(), Some("lo2"));
     }
 
     /// A startup file that is a directory is reported and skipped, not fatal —

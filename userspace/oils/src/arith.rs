@@ -42,7 +42,11 @@ pub trait VarLookup {
     /// Bytes, because a shell value is bytes. One that is not text is not an
     /// arithmetic expression either, but it is still what the diagnostic must
     /// echo back — see [`ArithError::expr_override`].
-    fn get_str(&self, name: &str) -> Option<Str>;
+    ///
+    /// `&mut` because answering can *run* shell code: a nameref whose target
+    /// carries a subscript (`declare -n r='n[$(f)]'`) has that subscript
+    /// expanded afresh at every read, command substitution and all.
+    fn get_str(&mut self, name: &str) -> Option<Str>;
 
     /// Return the raw value of the array element `name[index]`, or `None` if
     /// unset/out-of-range (treated as `0`). `index` has already been evaluated
@@ -1512,7 +1516,7 @@ mod tests {
         }
     }
     impl VarLookup for Map {
-        fn get_str(&self, name: &str) -> Option<Str> {
+        fn get_str(&mut self, name: &str) -> Option<Str> {
             self.0.get(name).map(|v| v.to_string().into_bytes())
         }
         fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
@@ -1528,7 +1532,7 @@ mod tests {
         a: Vec<i64>,
     }
     impl VarLookup for ArrMap {
-        fn get_str(&self, name: &str) -> Option<Str> {
+        fn get_str(&mut self, name: &str) -> Option<Str> {
             self.scalars.get(name).map(|v| v.to_string().into_bytes())
         }
         fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
@@ -1638,7 +1642,7 @@ mod tests {
     #[derive(Default)]
     struct NoWrite(HashMap<String, i64>);
     impl VarLookup for NoWrite {
-        fn get_str(&self, name: &str) -> Option<Str> {
+        fn get_str(&mut self, name: &str) -> Option<Str> {
             self.0.get(name).map(|v| v.to_string().into_bytes())
         }
         fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {
@@ -1677,7 +1681,7 @@ mod tests {
     #[derive(Default)]
     struct AssocMap(HashMap<Str, i64>);
     impl VarLookup for AssocMap {
-        fn get_str(&self, _name: &str) -> Option<Str> {
+        fn get_str(&mut self, _name: &str) -> Option<Str> {
             None
         }
         fn is_assoc(&self, name: &str) -> bool {
@@ -1739,7 +1743,7 @@ mod tests {
     #[derive(Default)]
     struct StrMap(HashMap<String, Str>);
     impl VarLookup for StrMap {
-        fn get_str(&self, name: &str) -> Option<Str> {
+        fn get_str(&mut self, name: &str) -> Option<Str> {
             self.0.get(name).cloned()
         }
         fn set(&mut self, name: &str, value: i64) -> Result<(), ArithError> {

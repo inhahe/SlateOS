@@ -210,81 +210,137 @@ Three things had to be got right beyond the wording:
 
 **Corpus:** `a-subscript-that-names-an-array-whole-is-no-place-to-store.sh`.
 
-### TD-OILS-A-SUBSCRIPT-THAT-ARRIVES-AS-BYTES-IS-NEVER-EXPANDED. `printf -v 'n[$i]' X` and `declare -n r='n[$i]'` both take `$i` literally, where bash expands it — 2026-08-05 — OPEN
+### TD-OILS-A-SUBSCRIPT-THAT-ARRIVES-AS-BYTES-IS-EXPANDED-AT-EVERY-USE. `printf -v 'n[$i]' X` and `declare -n r='n[$i]'` took `$i` literally, where bash expands it — 2026-08-05 — ✅ **FIXED 2026-08-05**
 
-**Where:** `userspace/oils/src/interp.rs`. Every place that turns subscript
-*bytes* into an index or a key without expanding them first:
-
-* `Shell::ref_target_value` — parses the bytes as an integer directly
-  (`bytes::as_str(sub).and_then(|s| s.parse::<i64>())`) and hands them to
-  `Shell::assoc_element` as a key.
-* `Shell::apply_assignment_inner` and `Shell::scalar_write_store`, which rebuild
-  a word with `Word::literal(sub)` — a *literal* word expands to its own bytes,
-  so the quotes and the `$` reach `eval_arith_index` intact.
-* `Shell::set_scalar_target_checked`, which passes `split_assignment_target`'s
-  raw slice on the same way.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::sub_word` (beside
+`Shell::whole_array_sub`), and the four places that used to turn subscript
+*bytes* into an index or a key without it: `Shell::ref_target_value`,
+`Shell::scalar_write_store` (which `Shell::set_scalar_target_checked` feeds),
+`Shell::apply_assignment_inner`'s nameref rewrite, and the `declare`/`local`
+operand path.
 
 **What.** A subscript reaches the shell as bytes rather than as a parsed word in
-two places — a **name operand** (`printf -v 'a[i]'`, `read 'a[i]'`) and a
-**nameref target** (`declare -n r='a[i]'`) — and bash *expands* it in both, as
-an arithmetic string in a double-quoted context: `$`-expansions happen and
-double quotes are removed, while single quotes and backslashes are not special.
-osh treats the bytes as final. Measured against bash 5.2.37 with
+three places — a **name operand** (`printf -v 'a[i]'`, `read 'a[i]'`), a
+**`declare` operand** (`declare 'a[i]=v'`) and a **nameref target**
+(`declare -n r='a[i]'`) — and bash expands all three, **at every use**. osh
+treated the bytes as final. Measured against bash 5.2.37 with
 `n=(a b c d e)`, `i=3`, `k=zz`, `declare -A m=([kk]=K [zz]=Z)`:
 
 ```text
-                          bash                        osh
+                          bash                        osh (before)
 printf -v 'n[$i]' X       n[3]=X                      `$i: syntax error`
 printf -v 'n[$((1+1))]' Y n[2]=Y                      `$((1+1)): syntax error`
-printf -v 'n[$(echo 1)]'  n[1]=Z                      `$(echo 1): syntax error`
 printf -v 'n["1"]' Z      n[1]=Z                      `"1": syntax error`
 printf -v 'm["k k"]' S    key `k k`                   key `"k k"`
-printf -v 'm[$k]' T       key `zz`                    key `$k`
+declare 'n[$i]=D'         n[3]=D                      `$i: syntax error`
 declare -n rd='n[$i]'     `${rd}` is `d`              `a` — index 0
-declare -n ra='n[$((1+1))]' `${ra}` is `c`            `a`
 declare -n mq='m["kk"]'   `${mq}` is `K`              empty — no such key
 declare -n md='m[$k]'     `${md}` is `Z`              empty
 ```
 
-The two that are *not* expanded pin the context down: `n['0']` and `n[\61]` are
-`'0': syntax error` and `\61: syntax error` in **both** shells, so this is
-bash's `expand_arith_string(sub, Q_DOUBLE_QUOTES)` rather than an ordinary word
-expansion.
+**Fixed 2026-08-05.** `Shell::sub_word` parses the bytes with
+`parser::word_verbatim_from_source` and hands back a `Word`, which puts them on
+exactly the path a *written* subscript already takes — `expand_arith_string`
+rules for an indexed array, ordinary word expansion for an associative key.
+Neither language had to be re-decided; the only thing missing was the parse.
+Text that will not parse (an unbalanced quote) falls back to the literal it was.
 
-A subscript that was *parsed* as part of an assignment (`n["1"]=W`, `n[$i]=W`)
-already agrees, because there the subscript is a real `Word` and
-`Shell::eval_arith_index` expands it. So the two spellings of what looks like
-the same store part company, which is what makes this worth one shared fix
-rather than four local ones.
+Three things had to be got right beyond the parse:
 
-Two smaller divergences travel with it, both visible in the table above:
+* **It is expanded at every use, not once at declaration.** So a reference is
+  **late-bound**: off one `declare -n r='n[$i]'`, `i=1` reads `b` and `i=3`
+  reads `d`, `r=X` writes wherever `$i` currently points, a command
+  substitution in the subscript runs again for each read, and
+  `declare -n e='n[j=4]'` really does assign to `j`. (The eagerly-bound
+  `declare -n r="n[$i]"` is a different thing and always worked, the shell
+  having expanded `$i` before `declare` ever saw it.)
+* **The read path had to become `&mut self`.** Expanding can run shell code, so
+  `Shell::ref_target_value` → `nameref_elem_value` → `param_value` → … and
+  `arith::VarLookup::get_str` all take `&mut self` now — 49 signatures in all,
+  plus four borrow restructures. `VarLookup::is_assoc` stays `&self`: the parse
+  phase consults it, and it only follows the reference to the *base* name.
+* **The whole-array token check stays in front of the expansion.** bash rejects
+  `n[*]` before expanding anything, while `n[$s]` with `s='*'` is an ordinary
+  expression that fails as arithmetic. See
+  TD-OILS-A-SUBSCRIPT-THAT-NAMES-AN-ARRAY-WHOLE-IS-NO-PLACE-TO-STORE.
 
-* The diagnostic is **tagged with the builtin** — `printf: $i: syntax error`
-  against bash's bare `$i: syntax error`. Only `((` and `let` put their own name
-  in front in bash. Something leaves `Shell::arith_cmd` set across the
-  `printf -v` and `read` name operands.
-* A failed subscript on those two builtins still **stores at index 0** in osh
-  (`eval_arith_index` answers 0 on error) where bash stores nothing.
+**Corpus:** `a-subscript-that-arrives-as-bytes-is-expanded-at-every-use.sh`.
 
-**Proper fix.** One helper beside `Shell::whole_array_sub` that takes subscript
-*bytes*, parses them as a shell word and expands them the way bash's arithmetic
-strings are expanded, and answers the resulting text. Every site above calls it
-instead of parsing or `Word::literal`-ing the raw bytes; the whole-array token
-check stays *in front* of it, since bash rejects `n[*]` before expanding
-anything and `n[$s]` with `s='*'` is an ordinary expression in both shells.
-`eval_arith_index` then has to distinguish "evaluated to 0" from "failed", so
-the store can be refused rather than landed on element 0.
+Two divergences found alongside it are *not* fixed and have their own entries:
+TD-OILS-A-SUBSCRIPT-ERROR-ON-A-NAME-OPERAND-IS-BLAMED-ON-ITS-BUILTIN-AND-STILL-STORES
+and TD-OILS-A-SUBSCRIPT-IS-SPLIT-OFF-WITHOUT-REGARD-FOR-ITS-QUOTES.
 
-**Impact.** Any computed subscript on a `printf -v`/`read` operand or a nameref
-target. The nameref half costs a *feature*, not just a diagnostic: because the
-expansion happens at every use rather than once at declaration,
-`declare -n rd='n[$i]'` is a **late-bound** reference to whichever element `$i`
-currently names — off one declaration, `i=1` reads `b` and `i=3` reads `d`, and
-`rd=X` writes wherever `$i` points. (The eagerly-bound `declare -n rd="n[$i]"`
-is a different thing and already works, the shell having expanded `$i` before
-`declare` ever saw it.) osh reads and writes element 0 for all of it, silently.
-The `printf -v`/`read` half is loud instead: the store is refused with an
-expression error where bash makes it.
+### TD-OILS-A-SUBSCRIPT-ERROR-ON-A-NAME-OPERAND-IS-BLAMED-ON-ITS-BUILTIN-AND-STILL-STORES. `read -r 'n[2+]'` says `read: 2+: syntax error` and then writes element 0 — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::assign_elem`'s indexed arm
+(`let idx = self.eval_arith_index(w);`, which answers 0 on error), and whatever
+leaves `Shell::arith_cmd` set across the `printf -v` and `read` name operands.
+
+**What.** Two independent things, both on the same two builtins. Measured with
+`n=(a b c)`:
+
+```text
+                       bash                         osh
+printf -v 'n[1+]' X    `1+: syntax error: …`       `printf: 1+: syntax error: …`
+read -r 'n[2+]' <<<Y   `2+: syntax error: …`       `read: 2+: syntax error: …`
+                       n unchanged                  n[0] overwritten
+n[1+]=W                `1+: syntax error: …`       the same — this half agrees
+```
+
+1. The diagnostic is **tagged with the builtin**. bash reports a bad subscript
+   on a name operand bare, the way it reports one in an assignment; only `((`
+   and `let` put their own name in front. Something leaves `Shell::arith_cmd`
+   set (or sets it) across these two builtins. The *written* form
+   (`n[1+]=W`) is already bare, so the tag is peculiar to the operand path.
+2. The store still **lands on element 0**. `Shell::eval_arith_index` fabricates
+   a 0 for an expression that would not evaluate, and `assign_elem` stores
+   there. bash stores nothing.
+
+**Proper fix.** `assign_elem`'s indexed arm should use
+`Shell::eval_arith_index_text_checked`, which already distinguishes "evaluated
+to 0" from "failed" (the diagnostic and the discard are made inside it), and
+return `false` on `None` rather than storing. Separately, clear `arith_cmd` (or
+do not set it) while evaluating a name operand's subscript.
+
+**Impact.** Small and loud, but the store is a real corruption: a mistyped
+subscript on `read`/`printf -v` silently overwrites element 0 of the array
+instead of leaving it alone.
+
+### TD-OILS-A-SUBSCRIPT-IS-SPLIT-OFF-WITHOUT-REGARD-FOR-ITS-QUOTES. `printf -v 'n["1]' X` stores at index 0 where bash says `not a valid identifier` — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `split_assignment_target` (near the
+bottom of the file), which scans for `[` and requires the last byte to be `]`
+without noticing quotes.
+
+**What.** bash validates a name-with-subscript by matching the brackets
+*through* the quoting, so a `]` inside a quoted run does not close the
+subscript. An operand whose brackets do not balance is not a valid name at all,
+and is refused before anything is expanded. Measured with `n=(a b c)`:
+
+```text
+                          bash                              osh
+printf -v 'n["1]' X       `printf: ...: not a valid          stores at n[0],
+                          identifier`, status 2             status 0
+printf -v 'n[$(echo 1]' Y same                              stores at n[0]
+declare -n r='n["1]'      `declare: ...: invalid variable    accepted; reads
+                          name for name reference`          element 0
+```
+
+osh splits at the first `[` and the final `]` regardless, so `n["1]` looks like
+the name `n` with the subscript `"1`, which then fails to parse as a word and
+is taken literally — landing on element 0. (Before
+TD-OILS-A-SUBSCRIPT-THAT-ARRIVES-AS-BYTES-IS-EXPANDED-AT-EVERY-USE it failed
+loudly as arithmetic instead; the expansion made it quiet, which is worse.)
+
+**Proper fix.** Give `split_assignment_target` a quote-aware scan for the
+matching `]` — the same one bash's `skipsubscript` performs, stepping over
+single- and double-quoted runs and backslash escapes — and answer `None` when
+the brackets do not balance, so the caller reports the name as invalid. The
+same scan belongs to the nameref-target validation, which shares the wording
+`invalid variable name for name reference`.
+
+**Impact.** Narrow — it takes an unbalanced quote inside a subscript to reach
+— but the failure mode is a silent write to the wrong element.
 
 ### TD-OILS-A-COMMENT-INSIDE-ARITHMETIC-CAN-EAT-ITS-OWN-CLOSER. `$(( #5 ))` is not an arithmetic error at all — bash's second scan of the word honours `#`, so the comment swallows the `))` — 2026-08-04 — ✅ FIXED 2026-08-04
 

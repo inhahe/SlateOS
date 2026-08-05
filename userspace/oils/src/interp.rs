@@ -4670,6 +4670,33 @@ pub struct Shell {
     /// (and left alone) by [`Shell::exec_and_or`], which is where bash decides
     /// both errexit and the ERR trap.
     for_name_failed: bool,
+    /// [`Shell::comsub_count`] as it stood when an assignment word was last
+    /// turned away because the shell maintains the name (see
+    /// [`Shell::noassign`]) — the *silent* scalar refusal, which otherwise
+    /// reports success.
+    ///
+    /// An assignment-only command normally answers with the status of the last
+    /// command substitution in it, and a refusal is just one more thing that
+    /// sets that status — to 1 — as the words are worked through in order. What
+    /// decides the command's status is therefore whether a substitution ran
+    /// *after* the last refusal, which is exactly what comparing this count
+    /// against the one at the end asks. A command with no substitution at all
+    /// still reports 0, because the reset to 0 comes last of all.
+    ///
+    /// ```sh
+    /// FUNCNAME=5              # 0 — no substitution ran, so the reset wins
+    /// FUNCNAME=$((1+1))       # 0 — an arithmetic expansion is not a substitution
+    /// FUNCNAME=$(exit 0)      # 1 — the refusal comes after the substitution
+    /// FUNCNAME=$(exit 3)      # 1 — …and replaces its status
+    /// z=$(exit 3) FUNCNAME=1  # 1 — it is the command that is judged
+    /// FUNCNAME=1 z=$(exit 3)  # 3 — but here the substitution came after
+    /// FUNCNAME=$(exit 3) true # 0 — with a command word, the command answers
+    /// ```
+    ///
+    /// [`Shell::exec_simple`] saves and restores it around the assignment loop,
+    /// so a refusal inside one of those substitutions stays the inner command's
+    /// business.
+    assign_refused_maintained: Option<u64>,
     /// bash's `CMD_IGNORE_RETURN`, as it applies to the usage class only: the
     /// non-final operands of an `&&`/`||` list and the condition of an
     /// `if`/`while`/`until`, propagated dynamically into whatever function or
@@ -4952,6 +4979,7 @@ impl Shell {
             command_builtin_depth: 0,
             special_builtin_failed: false,
             for_name_failed: false,
+            assign_refused_maintained: None,
             usage_suppress: 0,
             exit_requested: false,
             jobs: Vec::new(),
@@ -10781,6 +10809,7 @@ impl Shell {
             // status it exits with, which is an ordinary failure however it was
             // reached (`set -e; ( for 'a[0]' in x; do :; done )` does exit).
             for_name_failed: false,
+            assign_refused_maintained: None,
             usage_suppress: 0,
             // A subshell's own `exit` unwinds only the subshell; the flag is a
             // top-level-input concern, so it never carries into a clone.
@@ -11884,8 +11913,12 @@ impl Shell {
                     return false;
                 }
                 // The scalar half of the `noassign` refusal (see above): traced,
-                // then dropped on the floor, and the command succeeds anyway.
+                // then dropped on the floor, and the command succeeds anyway —
+                // but an assignment-only command notes *where* it happened,
+                // because a refusal is one more thing that sets that command's
+                // status. See [`Shell::assign_refused_maintained`].
                 if self.noassign.contains(&a.name) {
+                    self.assign_refused_maintained = Some(self.comsub_count);
                     return true;
                 }
                 // A dynamic special takes the write itself, running the
@@ -15694,12 +15727,17 @@ impl Shell {
             // sees the prior status (expansion happens before the reset below).
             // A readonly-variable rejection fails the whole command (status 1).
             let comsub_before = self.comsub_count;
+            let refused_outer = self.assign_refused_maintained.take();
             let mut ok = true;
             for a in &sc.assignments {
                 if !self.apply_assignment(a, true) {
                     ok = false;
                 }
             }
+            // A refusal *inside* one of those substitutions was that command's
+            // own business and has already been answered for; put the caller's
+            // flag back and keep only what this command's own words did.
+            let refused_at = std::mem::replace(&mut self.assign_refused_maintained, refused_outer);
             // A `failglob` miss while expanding an array-literal value
             // (`arr=(*.nope)`) discards the command, just like the command-word
             // case (non-fatal: the shell continues with the next parse unit).
@@ -15743,6 +15781,18 @@ impl Shell {
             } else if self.comsub_count == comsub_before {
                 // No command substitution ran; a plain assignment resets $? to 0.
                 self.last_status = 0;
+            } else if refused_at == Some(self.comsub_count) {
+                // A substitution ran, but the *last* thing to set this command's
+                // status was an assignment word turned away because the shell
+                // maintains the name — nothing substituted after it — so the
+                // command is a plain failure whatever that substitution
+                // reported: `FUNCNAME=$(exit 0)` and `FUNCNAME=$(exit 3)` are
+                // both 1. A substitution after the refusal takes the status
+                // back (`FUNCNAME=1 z=$(exit 3)` is 3), and with no substitution
+                // at all the reset above wins (`FUNCNAME=5` is 0), which is why
+                // the two facts have to meet here at the command rather than at
+                // the assignment. See [`Shell::assign_refused_maintained`].
+                self.last_status = 1;
             }
             // Otherwise `command_sub` already left the last substitution's status
             // in `self.last_status`.

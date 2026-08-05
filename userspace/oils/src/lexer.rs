@@ -1469,6 +1469,13 @@ fn expand_aliases_inner(
                 repl.pop();
                 repl_ends.pop();
             }
+            // The lex above numbered the replacement's lines from 1, and a
+            // `$( … )` inside it recorded one of those numbers. It is not a line
+            // of the script, so it becomes the alias word's like everything else
+            // the replacement produces.
+            for t in &mut repl {
+                reline_tok(t, tok_line);
+            }
             // Replacement tokens all inherit the alias word's source line.
             let repl_lines = vec![tok_line; repl.len()];
             let mark = out.toks.len();
@@ -1506,6 +1513,43 @@ fn expand_aliases_inner(
         out.origin.push(if from_input { Some(i) } else { None });
         out.spans.push(span_of(i));
         out.advance(tok, at_cmd);
+    }
+}
+
+/// Re-anchor every source line recorded *inside* a token to `line`.
+///
+/// A `$( … )` remembers the line its `)` sits on and a `<( … )` the line its `(`
+/// does, in the numbering of whatever text they were lexed from. An alias
+/// replacement is lexed on its own and so numbers from 1 — but a replacement is
+/// not a line of the script and has none of its own: bash reads one by swapping
+/// `shell_input_line` for it, and `line_number` is bumped only by *fetching* a
+/// line (parse.y 2346), which reading a pushed string never does. So a
+/// substitution written in an alias value reports the line the alias word was
+/// on, and this puts that line where the parse will find it.
+///
+/// The counterpart for the tokens themselves is the `repl_lines` the caller
+/// builds; this is for the lines a token carries as payload, which no parallel
+/// array reaches.
+fn reline_tok(tok: &mut Tok, line: u32) {
+    match tok {
+        Tok::Word(segs) | Tok::HereDoc(segs, ..) => reline_segs(segs, line),
+        Tok::ArrayAssign { elems, .. } => {
+            for e in elems {
+                reline_segs(e, line);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn reline_segs(segs: &mut [Seg], line: u32) {
+    for seg in segs {
+        match seg {
+            Seg::CmdSub(_, close, _) => *close = line,
+            Seg::ProcSub(_, _, open) => *open = line,
+            Seg::Dq(inner) => reline_segs(inner, line),
+            _ => {}
+        }
     }
 }
 

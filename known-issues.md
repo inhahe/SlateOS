@@ -36061,15 +36061,15 @@ which re-invokes the shell under test and so tripped over this while pinning
 something else.
 
 
-### TD-OILS-A-SUBSTITUTION-INSIDE-AN-ALIAS-IS-BLAMED-ON-ITS-OWN-LINE-1 — 2026-08-05
+### TD-OILS-A-SUBSTITUTION-INSIDE-AN-ALIAS-IS-BLAMED-ON-ITS-OWN-LINE-1 — 2026-08-05 — ✅ LINE FIXED 2026-08-05, ECHO OPEN
 
 **Where:** `userspace/oils/src/lexer.rs` — `expand_aliases_inner`, which
 re-tokenizes an alias value with `tokenize_spanned(val, opts)`. That lex starts
-its line numbering at 1, and a `$( … )` in the value carries those numbers out
+its line numbering at 1, and a `$( … )` in the value carried those numbers out
 with it.
 
 **What.** A parse error inside a command substitution written in an *alias
-value* is reported at line 1 of the value rather than at the alias's call site:
+value* was reported at line 1 of the value rather than at the alias's call site:
 
 ```sh
 shopt -s expand_aliases
@@ -36082,19 +36082,68 @@ bash: line 3: syntax error near unexpected token `)'   line 3: `A'
 osh:  line 1: syntax error near unexpected token `)'   line 1: `shopt -s expand_aliases'
 ```
 
-The same substitution written directly is right (`echo $( ! )` on line 2 reports
-line 2), so this is the alias path alone. Note bash blames the *written* line
-here, not the replacement — the body is parsed after the reader has already
-passed the alias's end, so `pop_string` has run (see
-TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT for that rule).
+The same substitution written directly was right (`echo $( ! )` on line 2
+reports line 2), so this was the alias path alone.
 
-**The proper fix** is to map the replacement's line numbers onto the alias
-word's line the way the alias pass already maps its tokens' — a `LineMap` for
-the nested lex, so a substitution body parsed out of a replacement reports the
-call site. The echoed line then falls out of the existing `pop_string` walk.
+**Fixed (the line) 2026-08-05** by `reline_tok` in `expand_aliases_inner`: a
+replacement's tokens already inherit the alias word's line, and now so do the
+lines a token carries as *payload* — the `)` line a `Seg::CmdSub` remembers and
+the `(` line a `Seg::ProcSub` does. bash bumps `line_number` only on the fetch
+of an input line (parse.y 2346), and reading a pushed alias string is not a
+fetch, so a replacement genuinely has no lines of its own. Pinned by
+`tests/corpus/a-substitution-in-an-alias-value-is-reported-at-the-call-site.sh`.
+
+**Still open: the echoed line, and a multi-line alias value.**
+
+Two shapes remain, both about the *second* diagnostic line rather than the
+first:
+
+```text
+alias A="echo $( for ) tail";  A     bash echoes `echo $( for ) tail'   osh `A'
+alias B="echo $( for )"; alias A="B"; A
+                                     bash echoes ` '                    osh `A'
+```
+
+In the first, bash is still inside the replacement when the error is found —
+there is text after the substitution, so `pop_string` has not run — and echoes
+it. osh's echo is stamped centrally from the parser's *current* token
+(`Parser::reader_echo`, taken at `Parser::pos`), but a substitution's body is
+parsed while converting a word the parser has already stepped past, so the
+lookup lands on the following token and pops out of the replacement. The proper
+fix is for a word-conversion error to carry the echo of the token that *holds*
+it rather than of the token after it — the reader is inside that token, so no
+pop applies — which means `Parser::word_from_segs` (and its
+`word_from_segs_in` sibling on the here-document path) stamping
+`ParseError::echo` from the index of the word it was handed. Every call site
+bumps past the word first, so that index is `Parser::pos - 1`, but the
+convention is worth making explicit in the signature rather than assumed.
+
+The second shape is the same mechanism seen through a nested alias, where the
+text bash is standing in is the *outer* replacement's leftover.
+
+Separately, a **multi-line** alias value is still numbered wrongly inside the
+substitution:
+
+```sh
+shopt -s expand_aliases
+alias A="echo \$(
+for
+)"
+A                    # bash: line 5, echoing the whole replacement
+                     # osh:  line 4, echoing `)"'
+```
+
+`parse_cmdsub_body` derives the body's physical numbering from
+`close_line - (newlines in the body) - 1`, which assumes the body's lines are
+consecutive lines of the script. In a replacement they are all one line, so the
+subtraction has to be skipped — the body's every line is `close_line`'s. That
+wants `parse_cmdsub_body` to be told the body came from a text with no lines of
+its own, which is the same fact `Spans` already records as a `TokSpan::src`
+other than `0`.
 
 **Impact.** Cosmetic, and confined to a substitution that fails to parse inside
-an alias value. Predates the `TokSpan` work (verified against the parent commit).
+an alias value. Predates the `TokSpan` work (verified against the parent
+commit).
 
 **Found by** the probe matrix for
 TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT.

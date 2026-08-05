@@ -188,7 +188,15 @@ def find_shell(explicit: str | None, candidates: list[Path], what: str, newest: 
 
 def run_case(shell: Path, case: Case) -> Run:
     """Run one case with `shell`, in a throwaway cwd, and capture its output."""
-    with tempfile.TemporaryDirectory(prefix="oshdiff-") as workdir:
+    # `ignore_cleanup_errors`: on Windows a directory cannot be removed while
+    # any process has it as its cwd, so a case that leaks a background process
+    # would otherwise raise `PermissionError` *out of* this function and end the
+    # whole sweep at whatever case happened to leak. Containment is
+    # `proctree.terminate_tree`'s job; when it fails, the honest cost is one
+    # abandoned scratch directory in TEMP, not 300 unrun cases.
+    with tempfile.TemporaryDirectory(
+        prefix="oshdiff-", ignore_cleanup_errors=True
+    ) as workdir:
         script = Path(workdir) / "case.sh"
         # Byte-for-byte, *not* `write_text`: on Windows that would translate every
         # LF to CRLF, and the two shells disagree about stray CRs — which would

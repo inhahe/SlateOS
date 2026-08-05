@@ -53,6 +53,16 @@ IS_WINDOWS = sys.platform.startswith("win")
 # rather than a real budget.
 DRAIN_GRACE = 10.0
 
+# How long to let the `taskkill` fallback run. It is a belt-and-braces second
+# kill — closing the job handle has already terminated the tree — so it is never
+# the thing that decides whether the child dies, and it must never be the thing
+# that decides how long we wait. Left unbounded it is exactly that: `taskkill`
+# blocks while a target sits in an uninterruptible wait, and a caller stuck
+# inside it still *holds the job handle open*, which is what keeps a runaway
+# case alive. Observed: a sweep wedged at 0% CPU for 23 hours with one of its
+# cases spinning at 100%, having escaped the containment meant to reap it.
+TASKKILL_GRACE = 10.0
+
 
 if IS_WINDOWS:
     import ctypes
@@ -124,19 +134,40 @@ if IS_WINDOWS:
             _k32.CloseHandle(job)
 
     def terminate_tree(job, proc) -> None:
-        # Closing the kill-on-close job handle terminates the whole tree.
-        close_job(job)
-        # Belt-and-suspenders: also taskkill the tree in case assignment
-        # raced and missed an early grandchild.
+        # `taskkill /T` first, *then* the job: order matters. Assignment to the
+        # job happens a moment after `CreateProcess` returns, so a child that
+        # forks immediately — an MSYS shell reaching a `&` in its first
+        # milliseconds — can be running before the job exists and is then
+        # outside it. `/T` is what catches those, and it walks the tree from the
+        # parent down, so it needs the parent still alive. Closing the job first
+        # kills the parent and leaves `/T` nothing to enumerate; measured, that
+        # loses a forked grandchild roughly one run in three, and the survivor
+        # spins forever. Closing the job afterwards costs nothing when the tree
+        # is already dead.
+        #
+        # The call is bounded, and its own tree is torn down on expiry — see
+        # `TASKKILL_GRACE`. A hang here used to take the caller with it, and the
+        # caller is the one holding the job open, which is how a runaway case
+        # escaped the containment meant to reap it.
         try:
-            subprocess.run(
+            with Tree(
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                check=False,
-            )
+            ) as killer:
+                try:
+                    killer.proc.wait(timeout=TASKKILL_GRACE)
+                except subprocess.TimeoutExpired:
+                    pass
         except OSError:
             pass
+        # And directly, so the child dies even if taskkill is refused.
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        # Closing the kill-on-close job handle terminates whatever is left.
+        close_job(job)
 
     def popen_kwargs() -> dict:
         return {}

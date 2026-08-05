@@ -4072,6 +4072,38 @@ pub struct Shell {
     /// [`Shell::operand_chars`], which is above it and so cannot watch the flag
     /// itself.
     operand_saw_list: bool,
+
+    /// The same question asked of an **unquoted** `[@]` in an operand, which is
+    /// the other way onto bash's `WORD_LIST` path — and the one that decides how
+    /// the operand's *characters* split.
+    ///
+    /// A `${x:-…${a[@]}…}` is not the text of its elements: the elements are
+    /// words, and what an unquoted list contributes to the operand is those
+    /// words with a space between them. Which is invisible under the usual
+    /// `$IFS`, because a space is a separator there anyway — and shows up the
+    /// moment it is not:
+    ///
+    /// ```text
+    /// a=(p:q r:s)
+    /// IFS=:    ${x:-${a[@]}}     →  <p:q r:s>    one field; the colons are the
+    ///                                            elements' own and do not split
+    /// IFS=:    ${x:-${a[@]}:Z}   →  <p:q r:s Z>  the `:` that *is* the word's
+    ///                                            split it, and the words rejoin
+    /// IFS=': ' ${x:-${a[@]}}     →  <p:q><r:s>   the space between the words is
+    ///                                            a separator, the colons are not
+    /// IFS=' :' ${x:-${a[@]}}     →  <p><q><r><s> …and here nothing is protected
+    /// ```
+    ///
+    /// See [`Shell::operand_word_list`] for the three regimes those four lines
+    /// are, and why `$IFS`'s *first* character is one of the questions.
+    ///
+    /// Scoped to one operand exactly as [`Shell::saw_quoted_list`] is.
+    saw_at_list: bool,
+
+    /// What [`Shell::saw_at_list`] came to for the operand that just finished —
+    /// the answer [`Shell::expand_operand_fields`] leaves for the splitting
+    /// readers above it, which is [`Shell::saw_quoted_list`]'s arrangement.
+    operand_saw_at_list: bool,
     /// Inside a double-quoted run (bash's `Q_DOUBLE_QUOTES`). Only the `[*]`
     /// spelling of the `:-`/`:+` family asks: the test for "null" is the string
     /// the reference *would* expand to here, and outside quotes a `[*]` expands
@@ -4913,6 +4945,8 @@ impl Shell {
             cond_word: false,
             saw_quoted_list: false,
             operand_saw_list: false,
+            saw_at_list: false,
+            operand_saw_at_list: false,
             dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
@@ -10657,6 +10691,8 @@ impl Shell {
             cond_word: false,
             saw_quoted_list: false,
             operand_saw_list: false,
+            saw_at_list: false,
+            operand_saw_at_list: false,
             dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
@@ -21272,6 +21308,15 @@ impl Shell {
                             // `IFS=; ${x:-${e[@]}}` over an array of empty
                             // elements is none.
                             Some(SplitItems::Fields(items)) => {
+                                // A nested operand finishes its own word list
+                                // before this one takes it as text:
+                                // `IFS=:; ${x:-${w:-${a[@]}:Y}}` is
+                                // `<p:q r:s Y>`, the inner join and all.
+                                if let Some(one) = self.operand_word_list(&items) {
+                                    cur.extend(one);
+                                    open = true;
+                                    continue;
+                                }
                                 lay_out_fields(&items, &mut fields, &mut cur, &mut open);
                                 continue;
                             }
@@ -21297,7 +21342,34 @@ impl Shell {
                                 items.join(self.at_sep().as_slice())
                             }
                             Some(items) => {
+                                // An unquoted `[@]` is what puts the operand on
+                                // bash's word-list path, whatever it was spelled
+                                // as — see [`Shell::operand_word_list`], which
+                                // is where the flag is read.
+                                if !star {
+                                    self.saw_at_list = true;
+                                }
                                 let texts = items.texts();
+                                // The elements of a *plain* `[@]` are words, not
+                                // text: their own characters are not the
+                                // operand's to split, and only the space put
+                                // between them is. Except under an `$IFS` that
+                                // leads with a space, where bash protects
+                                // nothing at all.
+                                if part_is_plain_at(other)
+                                    && !self.ifs_leads_with_space()
+                                {
+                                    for (i, el) in texts.iter().enumerate() {
+                                        if i > 0 {
+                                            push_chars(&mut cur, b" ", false);
+                                        }
+                                        push_chars(&mut cur, el, true);
+                                    }
+                                    if !texts.is_empty() {
+                                        open = true;
+                                    }
+                                    continue;
+                                }
                                 self.join_elements(&texts, star)
                             }
                             None => self.expand_dynamic(other),
@@ -21377,6 +21449,15 @@ impl Shell {
                         // one thing no join could carry: `${x:-''}` is one empty
                         // argument where `${x:-$e}` is none.
                         Some(SplitItems::Fields(items)) => {
+                            // Unless an unquoted `[@]` in it moved the operand
+                            // onto the word-list path, where the answer is one
+                            // finished string and there is nothing here left to
+                            // split — see [`Shell::operand_word_list`].
+                            if let Some(one) = self.operand_word_list(&items) {
+                                cur.extend(one);
+                                open = true;
+                                continue;
+                            }
                             let ifs = self.ifs_chars();
                             for (i, el) in items.iter().enumerate() {
                                 if i > 0 && open {
@@ -21633,10 +21714,67 @@ impl Shell {
         // a list inside a *nested* operand is that operand's own business, and
         // this restore is what keeps it there. See [`Shell::saw_quoted_list`].
         let outer = std::mem::replace(&mut self.saw_quoted_list, false);
+        let outer_at = std::mem::replace(&mut self.saw_at_list, false);
         let fields = self.expand_word_annotated(arg, mode);
         self.operand_saw_list = std::mem::replace(&mut self.saw_quoted_list, outer);
+        self.operand_saw_at_list = std::mem::replace(&mut self.saw_at_list, outer_at);
         self.end_word(saved);
         fields
+    }
+
+    /// The one field an operand that met an **unquoted** `[@]` comes to, for the
+    /// readers that would otherwise split it — or `None` when this `$IFS` is not
+    /// one where that happens.
+    ///
+    /// An unquoted list moves the operand onto bash's `WORD_LIST` path, where
+    /// the answer is a list of *words* glued together with single spaces. What
+    /// makes it visible is that the gluing happens after the splitting, so a
+    /// separator inside the operand comes out as a space — and that the result
+    /// is then a finished string, which neither splits again nor globs:
+    ///
+    /// ```text
+    /// a=(p:q r:s);  IFS=:
+    /// ${x:-${a[@]}:Z}     → <p:q r:s Z>   the word's own `:` split, the
+    ///                                     elements' did not, and the three
+    ///                                     words came back with spaces
+    /// ${x:-${a[@]:0}}     → <p q r s>     a slice is text, so all four split
+    /// ${x:-${a[@]}}       → <p:q r:s>     nothing split; still one field
+    /// ```
+    ///
+    /// `$IFS` decides between three regimes, and the question it is asked is not
+    /// quite the same one twice:
+    ///
+    ///   * a `$IFS` with **no space** in it is this one — the words are joined
+    ///     and the join is final;
+    ///   * a `$IFS` that has a space but does not *lead* with one keeps the
+    ///     elements protected but does no joining, so the space between two
+    ///     words is a separator and the operand is several fields;
+    ///   * a `$IFS` that leads with a space — which the default one does —
+    ///     protects nothing and joins nothing, and is why none of this is
+    ///     ordinarily visible.
+    ///
+    /// A **quoted** `[@]` is not this: the breaks it made are the operand's own
+    /// fields and no join puts them back, under every `$IFS`. See
+    /// [`Shell::saw_quoted_list`], which is the other half of the same path.
+    fn operand_word_list(&self, fields: &[Vec<EChar>]) -> Option<Vec<EChar>> {
+        if !self.operand_saw_at_list || self.ifs_is_null() || self.ifs_has_space() {
+            return None;
+        }
+        let words = Self::word_list_fields(fields, &self.ifs_chars());
+        let mut out: Vec<EChar> = Vec::new();
+        for (i, w) in words.iter().enumerate() {
+            if i > 0 {
+                out.push(EChar {
+                    c: Some(Ch::U(' ')),
+                    quoted: true,
+                });
+            }
+            out.extend(w.iter().map(|e| EChar {
+                c: e.c,
+                quoted: true,
+            }));
+        }
+        Some(out)
     }
 
     /// Append one unquoted literal word part to a quote-annotated buffer,
@@ -23427,6 +23565,18 @@ impl Shell {
     /// survive. An **unset** `IFS` is not this: it means the default ` \t\n`.
     fn ifs_is_null(&self) -> bool {
         self.vars.get("IFS").is_some_and(Vec::is_empty)
+    }
+
+    /// Whether a space is a separator at all, and whether it is the *first* one
+    /// named — the two questions an operand's unquoted `[@]` asks of `$IFS`.
+    /// See [`Shell::operand_word_list`], where they are the whole of the answer.
+    fn ifs_has_space(&self) -> bool {
+        self.ifs_chars().contains(&b' ')
+    }
+
+    /// See [`Shell::ifs_has_space`].
+    fn ifs_leads_with_space(&self) -> bool {
+        self.ifs_chars().first() == Some(&b' ')
     }
 
     /// The items an *unquoted* expansion of `part` is made of, when it is one of
@@ -42312,6 +42462,35 @@ fn lay_out_fields(
         }
         cur.extend_from_slice(el);
         *open = true;
+    }
+}
+
+/// Whether `part` is a **plain** `[@]` — the array's own elements, named and
+/// nothing more: `$@`, `${a[@]}`, and the `${a[@]:-w}` family on the branch
+/// where it answers with the array it already had.
+///
+/// The distinction only matters inside an operand, and only for whether the
+/// *elements'* characters are the operand's to split — see
+/// [`Shell::operand_word_list`]. Every other list spelling (a slice, the keys,
+/// a bulk operator) hands over text bash has already made one string of, so its
+/// characters split like any other.
+///
+/// The `[*]` spellings all answer `false`, so a caller need not ask
+/// [`part_is_star`] as well. A `${a[@]:-w}` answers `true` unconditionally, on
+/// the understanding that the only caller reaches it after
+/// [`SplitItems::Fields`] has been matched away — so the operator it is asking
+/// about answered with its *array*, and the branch that answers with the word
+/// never arrives here.
+fn part_is_plain_at(part: &WordPart) -> bool {
+    match part {
+        WordPart::ArrayRef {
+            index: ArrayIndex::All,
+            length: false,
+            ..
+        } => true,
+        WordPart::Param { name, .. } => name == "@",
+        WordPart::ArrayOp { star, .. } => !*star,
+        _ => false,
     }
 }
 

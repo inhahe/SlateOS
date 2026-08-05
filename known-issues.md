@@ -31150,7 +31150,9 @@ elements, and the `!split` contrast). The unit test
 `${!h[*]}` answer (`01x`) and was corrected to bash's `0 1x`.
 
 **Still divergent (separate entry):**
-`TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT`.
+`TD-OILS-QUOTED-OPERAND-WORD-LIST-DOES-NOT-SPLIT-ITS-LITERAL`. (The operand
+entry that stood here, `TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT`, is
+resolved.)
 
 ### TD-OILS-NOSPLIT-SLICE-AND-KEYS-JOIN-WITH-IFS. `IFS=:; a=${n[@]:0:2}` is `x:y` in osh and `x y` in bash — 2026-08-04 — ✅ **FIXED 2026-08-04**
 
@@ -31275,42 +31277,162 @@ complaint's naming and the `:=` bad subscript).
 with a modifier — an exotic corner. Nothing in the corpus depended on it, and the
 answers agree under the default `$IFS`, which is why it went unnoticed.
 
-### TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT. `IFS=:; ${e[@]:-"${n[@]}"}` is one field in osh and three in bash — 2026-08-04
+### TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT. an operand that met an unquoted `[@]` is built out of words, not out of text — ✅ **RESOLVED 2026-08-04**
 
-**Where:** `userspace/oils/src/interp.rs` — `Shell::array_op_fields`, whose
-inactive branches return `vec![self.expand_to_string(arg)]`: the substituted word
-is flattened to *one* item before the caller ever sees it.
+**Where:** `userspace/oils/src/interp.rs` — the `SplitMode::Operand` arm of
+`Shell::expand_word_annotated`, and the two readers that take an operand's
+fields back (`SplitMode::Fields`' and `SplitMode::Operand`'s
+`Some(SplitItems::Fields(items))` branches).
 
-**What.** bash expands a `:-`/`:+`/`:?` operand as a word *list*, so a quoted
-`"${n[@]}"` inside it contributes one field per element; and an unquoted
-`${n[@]}` inside it is marked `W_SPLITSPACE`, so a null `$IFS` still breaks it on
-the spaces the join put there:
+**Note on the entry as first written.** The three examples it led with —
+`IFS=:; ${e[@]:-"${n[@]}"}`, `IFS=; ${e[@]:-${n[@]}}`, `IFS=; ${u:-${n[@]}}` —
+all pass today, and its "Proper fix" (return the operand's *fields*; model
+`W_SPLITSPACE`) had already been implemented by the time it was re-read:
+`expand_operand_fields`, `SplitMode::Operand` and `Shell::saw_quoted_list`
+between them are exactly that. The entry was stale, not wrong-at-the-time. What
+was still divergent was a different and larger half of the same rule, measured
+below, and the entry has been rewritten around it rather than closed silently.
+
+**What.** bash expands a word along one of two paths: an `istring`, whose answer
+is text the surrounding word then splits on `$IFS`, and a `WORD_LIST`, whose
+answer is a list of *words*. An **unquoted** `[@]` anywhere in a `${x:-…}`
+operand moves the whole operand onto the second path — and a list of words is
+glued back together with single **spaces**, not with `$IFS`, and the glue is
+final. osh had none of this: it joined the elements and then split the result
+like any other text.
+
+Two things follow, and `$IFS` decides which of them apply. With
+`a=(p:q r:s)`:
+
+| shape | `$IFS` | bash | osh (before) |
+|---|---|---|---|
+| `${x:-${a[@]}}` | `:` | `<p:q r:s>` | `<p><q r><s>` |
+| `${x:-${a[@]}}` | `': '` | `<p:q><r:s>` | `<p><q><r><s>` |
+| `${x:-${a[@]}}` | `' :'` | `<p><q><r><s>` | `<p><q><r><s>` |
+| `${x:-${a[@]}:Z}` | `:` | `<p:q r:s Z>` | `<p><q r><s><Z>` |
+| `${x:-${a[@]:0}}` | `:` | `<p q r s>` | `<p><q r><s>` |
+| `${x:-${a[@]^^}}` | `:` | `<P Q R S>` | `<P><Q R><S>` |
+| `${x:-${a[@]}}` (in `d/` holding `aa`, `ab`, with `a=('a*')`) | `:` | `<a*>` | `<aa><ab>` |
+| `c=(':' 'q'); ${x:-${c[@]}}` | `:` | `<: q>` | `<><q>` |
+
+The two rules the table is made of:
+
+  * a **plain** `[@]` — the array named and nothing more (`$@`, `${a[@]}`, or
+    `${a[@]:-w}` on the branch where it answers with the array) — contributes
+    its elements as *words*. Their own characters stop being the operand's to
+    split or to glob, and the single space put between them is the only
+    separator the list itself adds. A **derived** `[@]` (`${a[@]:0}`,
+    `${!a[@]}`, `${a[@]^^}`, `${a[@]#p}`) hands over text bash has already made
+    one string of, so its characters split like any other;
+  * then, if `$IFS` names no space **at all**, the operand is word-split and the
+    words are glued back with single spaces into **one finished field**, which
+    neither splits again nor globs.
+
+The question `$IFS` is asked is not quite the same one twice — joining asks
+whether a space is a separator at all, protection asks whether it is the *first*
+separator named — which is what makes three regimes out of two rules, and why
+the ordinary `$IFS` (leading space) hides both.
+
+A `[*]` is never this path, quoted or not; nor is a command substitution, whose
+output is text. A **quoted** `"${a[@]}"` is the other half of the same
+`WORD_LIST` path and was already modelled — see `Shell::saw_quoted_list`.
+
+**Fixed.** `Shell::saw_at_list` / `operand_saw_at_list` record an unquoted `[@]`
+for the operand that is being expanded, scoped exactly as `saw_quoted_list` is.
+`part_is_plain_at` separates the plain spelling from the derived ones — it is
+consulted only where `split_items` has already peeled off
+`SplitItems::Fields`, so an `ArrayOp` that reaches it is one that answered with
+its array rather than with its word. `Shell::ifs_has_space` /
+`ifs_leads_with_space` are the two questions, and `Shell::operand_word_list` is
+the join, wired into both readers of an operand's fields.
+
+Corpus:
+`an-operand-that-met-an-unquoted-at-list-is-built-out-of-words.sh` — the three
+regimes, the separator that comes back as a space, plain vs derived `[@]`, the
+`[*]` contrast, elements holding `$IFS` characters or nothing, the glob test,
+an empty list, `${a[@]:-w}` on both its branches, a nested operand finishing its
+own word list first, and the `:+`/`:=` operands.
+
+**Still divergent (separate entry):**
+`TD-OILS-QUOTED-OPERAND-WORD-LIST-DOES-NOT-SPLIT-ITS-LITERAL`.
+
+### TD-OILS-QUOTED-OPERAND-WORD-LIST-DOES-NOT-SPLIT-ITS-LITERAL. `IFS=:; "${x:-${a[@]}:Z}"` is two fields in osh and three in bash — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `SplitMode::QuotedOperand` arm of
+`Shell::expand_word_annotated`, whose `Some(SplitItems::Fields(items))` and
+`Some(SplitItems::List(items))` branches lay the list's breaks out as fields and
+then let the literal text around them join on unsplit.
+
+**What.** The `WORD_LIST` path described in
+`TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT` is reached from inside double
+quotes too, and there the *elements* are protected (as quoting says) but the
+**literal text** between and after them is still word-split. With
+`a=(p:q r:s)`:
 
 ```sh
-declare -a n=(ax by cz); declare -a e=()
-IFS=:
-printf '<%s>' ${e[@]:-"${n[@]}"}; echo   # bash <ax><by><cz>   osh <ax by cz>
-IFS=
-printf '<%s>' ${e[@]:-${n[@]}};   echo   # bash <ax><by><cz>   osh <ax by cz>
-printf '<%s>' ${u:-${n[@]}};      echo   # bash <ax><by><cz>   osh <ax by cz>
+IFS=:    printf '<%s>' "${x:-${a[@]}:Z}"    # bash <p:q><r:s><Z>   osh <p:q><r:s:Z>
+IFS=:    printf '<%s>' "${x:-Z:${a[@]}}"    # bash <Z><p:q><r:s>   osh <Z:p:q><r:s>
+IFS=' :' printf '<%s>' "${x:-${a[@]}:Z}"    # bash <p:q><r:s><Z>   osh <p:q><r:s:Z>
+IFS=:    printf '<%s>' "${x:-"${a[@]}":Z}"  # bash <p:q><r:s><Z>   osh <p:q><r:s:Z>
+IFS=:    printf '<%s>' "${x:-${!a[@]}:Z}"   # bash <0><1><Z>       osh <0><1:Z>
 ```
 
-An operand of plain text is already right (`IFS=:; ${e[@]:-a:b}` is `<a><b>` in
-both), because the single item it becomes is field-split by the caller. Only a
-*nested list* inside the operand is lost, and the scalar `${u:-…}` form has the
-same hole.
+It is the same for the quoted and the unquoted spelling of the inner list, and
+for the derived forms, so the trigger is the `WORD_LIST` path rather than the
+`[@]` spelling. Two shapes bound it: `"${x:-${a[@]}Z}"` is `<p:q><r:sZ>` in both
+(no separator, nothing to split), and — measured, and the part that does not yet
+have an explanation — a **space** in the literal does *not* split even when
+`$IFS` is a space: `IFS=' '; "${x:-${a[@]} Z}"` is `<p:q><r:s Z>` in bash.
+Whitespace and non-whitespace `$IFS` are being treated differently here, which is
+the opposite of the ordinary splitting rule, so the fix wants that asymmetry
+measured properly before any code is written.
 
-**Proper fix.** Two parts. (1) Return the operand's fields instead of its
-concatenation: `array_op_fields` (and the scalar `ParamOp` path) should expand
-the word with `expand_word(arg, true)` and hand the caller every field, which
-makes the quoted-nested case fall out. (2) Model bash's `W_SPLITSPACE`: an
-unquoted `$@`-like expansion *inside* such an operand splits on spaces even when
-`$IFS` is null. That flag has no representation in osh's expander yet; the same
-rule already exists in `Shell::split_transform_item` for `@A`, so it wants to
-become a shared notion rather than a third copy.
+**Impact.** A quoted `${x:-…}` whose operand holds a list *and* literal text
+containing an `$IFS` character. Invisible under the default `$IFS`, which is why
+it survived the unquoted half of the same rule being fixed.
 
-**Impact.** `${x:-…}` defaults whose word expands to a list — uncommon, and
-invisible under the default `$IFS` unless the nested expansion is quoted.
+### TD-OILS-BULK-CASE-OP-JOINS-A-NOSPLIT-CONTEXT-WITH-IFS. `IFS=:; x=${a[@]^^}` is `A:B:C:D` in osh and `A:B C:D` in bash — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `ArrayBulk` arm of
+`Shell::expand_dynamic_with`, which joins with `join_derived(&items, star)`
+(`at_sep()`, i.e. `$IFS`'s first character) where an `!split` context wants a
+space.
+
+**What.** In an assignment or a redirect target a list-valued expansion is
+space-joined under every `$IFS` — `IFS=:; a=(a:b c:d); x=${a[@]}` is
+`a:b c:d`, and osh already matched that for the plain reference and, since
+`TD-OILS-NOSPLIT-SLICE-AND-KEYS-JOIN-WITH-IFS`, for slices and key lists. Most
+of the **bulk operators** were missed. With `n=(a:b c:d)` and the value of
+`x=…` shown:
+
+| shape | `IFS=:` | `IFS=` | `IFS=' :'` | osh under `IFS=:` |
+|---|---|---|---|---|
+| `${n[@]}` | `a:b c:d` | `a:b c:d` | `a:b c:d` | ✓ |
+| `${n[@]:0}` | `a:b c:d` | `a:b c:d` | `a:b c:d` | ✓ |
+| `${!n[@]}` | `0 1` | `0 1` | `0 1` | ✓ |
+| `${n[@]#a}` | `:b:c:d` | `:b c:d` | `:b c:d` | ✓ |
+| `${@#a}` | `:b c:d` | `:b c:d` | `:b c:d` | ✓ |
+| `${n[@]^^}` | `A:B C:D` | `A:B C:D` | `A:B C:D` | ✗ `A:B:C:D` |
+| `${n[@]/a/Z}` | `Z:b c:d` | `Z:b c:d` | `Z:b c:d` | ✗ `Z:b:c:d` |
+| `${@^^}` | `A:B C:D` | `A:B C:D` | `A:B C:D` | ✗ `A:B:C:D` |
+| `${n[*]#a}` | `:b:c:d` | `:bc:d` | `:b c:d` | ✓ |
+| `${n[*]^^}` | `A:B:C:D` | `A:BC:D` | `A:B C:D` | ✓ |
+
+**Proper fix.** The table is one rule, and it is a rule `split_items` already
+states for the splitting contexts: a bulk result that keeps its elements apart
+(`SplitItems::List` — every operator except a `#`/`##`/`%`/`%%` trim of a
+**named** array) is a list, and a `[@]`-spelled list in an `!split` context
+joins with a **space** under every `$IFS`. Only the trim of a named array is
+`SplitItems::Joined` — one string bash already built with `$IFS` — and that one
+keeps `at_sep()`. The `[*]` spelling is `star_sep()` throughout.
+
+So the `ArrayBulk` arm of `expand_dynamic_with` wants the same `trims_an_array`
+test `split_items` uses, and to join with a space rather than `at_sep()` when it
+fails. Sharing the predicate between the two sites is preferable to a third
+copy of it.
+
+**Impact.** An assignment or redirect target holding `${a[@]^^}`, `${a[@]/…/…}`
+or `${a[@]@…}` under a non-default `$IFS`.
 
 ### TD-OILS-ARITH-EMPTY-PARAM-BECOMES-ZERO. an empty parameter leaves a `0` behind in the expression — ✅ **RESOLVED 2026-08-04**
 

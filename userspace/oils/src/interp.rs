@@ -33390,14 +33390,50 @@ impl Shell {
             } else {
                 base_name.to_string()
             };
-            let target = if follow { self.resolve_ref_use(base_name) } else { None };
+            // Whether this operand brings an array into being rather than only
+            // saying something about a binding that is already there. A
+            // subscript makes one because the element needs somewhere to live;
+            // `-a`/`-A` make one because that is what they are for.
+            //
+            // This is a property of `declare`/`typeset`/`local` and no other
+            // builtin: `export -a q` and `readonly -a q` on a fresh name make
+            // `declare -x q` and `declare -r q`, not arrays, so they keep the
+            // ordinary follow rule on a circular chain. (They have builtins of
+            // their own — see [`Self::builtin_export`] and
+            // [`Self::builtin_readonly`] — and never come through here.) A
+            // *valued* `export -a q=5` does make one, but by the assignment
+            // route rather than this one.
+            //
+            // The `-a`/`-A` half is left out of a declaration that binds a
+            // *local*, as it is from `unreference` above. With the reference
+            // itself local to this frame bash keeps the nameref attribute and
+            // makes the array anyway, leaving the impossible
+            // `declare -an c1=()` — a corner whose neighbours print
+            // uninitialised bytes, so it is logged rather than copied; see
+            // `known-issues.md`.
+            let makes_array = subscript.is_some() || (!make_local && (indexed || assoc));
+            // …and it is also what the chain costs. An ordinary operand walks
+            // it **twice** — bash looks the name up to decide what it is
+            // declaring and again to do the declaring — so a circular one earns
+            // two warnings, where an array-making operand stops at the first
+            // walk (it has already learnt that the chain leads nowhere and
+            // turns to the operand's own name) and earns one. See
+            // [`Self::resolve_ref_use_walks`]; the model is `known-issues.md`'s
+            // TD-OILS-NAMEREF-WARNING-COUNT.
+            let target = if follow {
+                self.resolve_ref_use_walks(base_name, if makes_array { 1 } else { 2 })
+            } else {
+                None
+            };
             if follow && target.is_none() {
                 // A circular chain names nothing to declare. The warning is
-                // out; an unsubscripted operand is then dropped with the status
-                // left alone (`declare -n a=b; declare -n b=a; declare -i a;
-                // echo $?` → 0). A subscripted one still needs its array, and
-                // makes the operand's own exactly as the valued form above did.
-                if subscript.is_none() {
+                // out; an operand with nowhere of its own to go is then dropped
+                // with the status left alone (`declare -n a=b; declare -n b=a;
+                // declare -i a; echo $?` → 0). One that makes an array still
+                // has an array to make, and makes the operand's own — taking
+                // the nameref attribute off it, exactly as the valued
+                // subscripted form above did.
+                if !makes_array {
                     continue;
                 }
                 self.unreference_for_declare(base_name);
@@ -64023,6 +64059,80 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("a=(x y); a[-1]=w; declare -p a").0, "declare -a a=([0]=\"x\" [1]=\"w\")\n");
     }
 
+    /// A circular chain names nothing to declare, so most operands are dropped
+    /// — but one that *makes an array* still has an array to make, and makes the
+    /// operand's own, breaking the cycle on the way. The same line divides how
+    /// many times the chain is walked, and so how many warnings it earns.
+    #[test]
+    fn a_declaration_that_makes_an_array_makes_the_operands_own_on_a_circular_chain() {
+        let cyc = "declare -n c1=c2; declare -n c2=c1";
+        // The letter is what makes it, whichever kind of array it names and
+        // whatever else rides along — and one walk, not two, because the
+        // operand turns to its own name as soon as the chain answers nothing.
+        for (src, want) in [
+            ("declare -a c1", "declare -a c1\n"),
+            ("declare -A c1", "declare -A c1\n"),
+            ("declare -ax c1", "declare -ax c1\n"),
+            ("typeset -a c1", "declare -a c1\n"),
+            ("declare -a +n c1", "declare -a c1\n"),
+            ("declare -a c1=x", "declare -a c1=([0]=\"x\")\n"),
+            ("declare -a c1=(x y)", "declare -a c1=([0]=\"x\" [1]=\"y\")\n"),
+        ] {
+            assert_eq!(
+                run(&format!("{cyc}; {{ {src}; }} 2>&1; declare -p c1")).0,
+                format!("osh: warning: c1: circular name reference\n{want}"),
+                "{src}"
+            );
+        }
+        // …and the cycle really is gone afterwards: `c2` still names `c1`, but
+        // `c1` is an ordinary array now, so the far end reaches it.
+        assert_eq!(
+            run(&format!("{cyc}; declare -a c1 2>/dev/null; c2[1]=z; declare -p c1")).0,
+            "declare -a c1=([1]=\"z\")\n"
+        );
+        // An operand that makes nothing has nowhere to put a declaration, so it
+        // is dropped with the status left alone — and pays for two walks, the
+        // lookup that decides what is being declared and the one that would
+        // have done it.
+        for src in ["declare c1", "declare -i c1", "declare -x c1", "declare c1=5", "declare +n c1"] {
+            assert_eq!(
+                run(&format!("{cyc}; {{ {src}; echo \"rc=$?\"; }} 2>&1; declare -p c1")).0,
+                "osh: warning: c1: circular name reference\n\
+                 osh: warning: c1: circular name reference\n\
+                 rc=0\ndeclare -n c1=\"c2\"\n",
+                "{src}"
+            );
+        }
+        // Once there is a name to argue about, the two letters argue as usual.
+        assert_eq!(
+            run(&format!("{cyc}; {{ declare -aA c1; echo \"rc=$?\"; }} 2>&1; declare -p c1")).0,
+            "osh: warning: c1: circular name reference\n\
+             osh: declare: c1: cannot convert associative to indexed array\n\
+             rc=1\ndeclare -A c1\n"
+        );
+        // The letter makes an array for `declare` and its kin alone: for
+        // `export` and `readonly` the array comes from the assignment, so
+        // without one there is nothing to make and the operand follows the
+        // ordinary rule.
+        assert_eq!(run("export -a fresh; declare -p fresh").0, "declare -x fresh\n");
+        assert_eq!(run("readonly -a fresh; declare -p fresh").0, "declare -r fresh\n");
+        assert_eq!(run("declare -a fresh; declare -p fresh").0, "declare -a fresh\n");
+        // A longer cycle is no different, and a chain that resolves declares
+        // what it points at while staying a reference.
+        assert_eq!(
+            run("declare -n a1=a2; declare -n a2=a3; declare -n a3=a1; declare -a a1 2>/dev/null; declare -p a1").0,
+            "declare -a a1\n"
+        );
+        assert_eq!(
+            run("w=5; declare -n r=w; declare -a r; declare -p r w").0,
+            "declare -n r=\"w\"\ndeclare -a w=([0]=\"5\")\n"
+        );
+        assert_eq!(
+            run("declare -n r=zz; declare -a r; declare -p r zz").0,
+            "declare -n r=\"zz\"\ndeclare -a zz\n"
+        );
+    }
+
     /// `+n` names two variables at once: the reference, for its own letter, and
     /// the target it leads to, for everything else the operand asks for.
     #[test]
@@ -64091,10 +64201,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
              declare -n q=\"t\"\n"
         );
         // A cycle names nothing to declare, so nothing loses the attribute
-        // either — the warning is the whole of the command's effect.
+        // either — the warnings are the whole of the command's effect. Two of
+        // them, because the operand makes no array and so walks the chain
+        // twice; see `makes_array` in [`Shell::builtin_declare_scoped`].
         assert_eq!(
             run("declare -n c1=c2; declare -n c2=c1; { declare -x +n c1; } 2>&1; declare -p c1 c2").0,
             "osh: warning: c1: circular name reference\n\
+             osh: warning: c1: circular name reference\n\
              declare -n c1=\"c2\"\ndeclare -n c2=\"c1\"\n"
         );
     }

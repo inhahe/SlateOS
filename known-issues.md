@@ -14,6 +14,254 @@ work that should be done now."
 
 ## Active Bugs
 
+### TD-OILS-DECL-P-IGNORED-ON-THE-FUNCTION-SIDE. `-p` alongside `-f`/`-F` was read only on the variable side, so it neither suppressed the marking routes nor changed what a named listing printed — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::declare_functions` and the
+`"declare" | "typeset"` dispatch arm that routes to it.
+
+**What:** osh looked for the listing letter only when it had already decided the
+command was about variables. On the function side the `p` was dropped, so three
+separate behaviours were missed at once:
+
+```sh
+g() { :; }; h() { echo h; }; declare -ft h; export -f h
+declare -Fp g      # bash: declare -f g          osh: g
+declare -fp h      # bash: body, then declare -ftx h   osh: body only
+declare -Fp nope   # bash: declare: nope: not found rc 1   osh: silent rc 1
+declare -ftp g     # bash: prints `g`, marks nothing   osh: marked g traced
+```
+
+**Measured rule** (bash 5.2.37), all now pinned by the corpus case
+`p-makes-a-function-listing-print-the-attribute-line.sh` and the unit test
+`p_makes_a_function_listing_print_the_attribute_line`:
+
+- `-p` runs **ahead of the routing**: `declare -frp g`, `-fxp g`, `-ftp g`,
+  `-Frp g`, `-Ftp g`, `-Fxp g` are all listings that mark nothing. Without the
+  `p`, `declare -Ft g` / `-Fx g` do mark.
+- `declare -F g` is the bare name; `declare -Fp g` is instead the attribute line
+  the *nameless* `-F` listing prints — `declare -f g` — whether or not there is
+  an attribute to report.
+- `declare -f g` is the body; `declare -fp g` is the body followed by that same
+  line, but **only** when the function carries an attribute (a plain function's
+  body has already said everything).
+- A name that is no function is silent without the `-p` and
+  `TAG: NAME: not found` with it, under the name the command was written by
+  (`typeset -Fp nope` says `typeset:`). `declare -Fp v` for a *variable* `v`
+  likewise says `not found`.
+- extdebug decorates the bare `-F g` alone (`g LINE FILE`); `-Fp g` has nowhere
+  to put it.
+- Every spelling selects it: `-Fp`, `-pF`, `-F -p`, `-p -F`, `-F +p`, `-Fpg`,
+  `-Ffp`, `-Fp -- g`.
+- `+f` does **not** enter function mode — only a minus-signed `-f`/`-F` does —
+  so `declare +ftp q` is a *variable* listing and says `declare: q: not found`.
+
+**Fixed 2026-08-04.** `declare_functions` took a `print` parameter, its mutation
+branch gained `&& !print`, and its named loop was rewritten from
+accumulate-then-write to write-per-name so each operand is answered where it is
+reached: with the two streams merged, `declare -fp g nope h` reads `g`'s body,
+then the complaint, then `h`'s, which is the order bash's single loop gives.
+The `-t` trace route in the dispatch arm gained `&& !Self::declare_wants_print(args)`.
+
+**Standing lesson:** when a flag is handled on one route, ask whether the
+sibling routes see it too. The `p` here was not a variable-side detail — it ran
+before the route was even chosen.
+
+### TD-OILS-DECL-DASHDASH-DOES-NOT-END-THE-P-SCAN. A `--` among the leading words did not stop the scan that looks for the listing letter, so `declare -- -p` dumped every variable — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the two inline
+`args.iter().take_while(Self::is_decl_flag_word).any(|a| a.contains(&b'p'))`
+scans in the `declare`/`typeset` and `local` dispatch arms.
+
+**What:** `is_decl_flag_word` counts `--` as a flag word (correctly — it *is*
+one, and the one that ends the scan), and its doc comment says the callers that
+care stop at it themselves. These two callers did not, so they walked straight
+past it:
+
+```sh
+declare -- -p        # bash: rc 1  declare: `-p': not a valid identifier
+                     # osh: listed every variable in the shell
+declare -r -- -p     # same
+declare -- -p v      # same, and no listing of v
+typeset -- -p        # typeset: `-p': ...
+f() { local -- -p; }; f        # local: `-p': ...
+f() { local -r -- -p; }; f     # local: `-p': ...
+```
+
+**Fixed 2026-08-04.** The scan is spelled once, in `Shell::declare_wants_print`,
+which stops at `--` the way every other reader of the leading words already
+does. Covered by the extended corpus case
+`a-lone-sign-is-an-operand-not-a-flag-word.sh` and its unit test.
+
+**Standing lesson:** the same predicate written twice inline is the shape this
+family of bugs keeps taking (see TD-OILS-DECL-LONE-SIGN below, where it was
+written *six* times). Give it a name the first time there is a second caller.
+
+### TD-OILS-EXPORT-EQUALS-IN-A-FLAG-WORD. `export` alone read an `=` in a flag cluster as proof the word was an operand — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_export`, the
+`a.starts_with(b"-") && a.len() > 1 && !a.contains(&b'=')` guard on its flag loop.
+
+**What:** a word is an option word because of its leading `-`, not because of
+what follows. getopt has no notion of an assignment, so an `=` in a flag cluster
+is just another letter, and an unknown one. `export`'s scan carried an exception
+for it that no sibling builtin had:
+
+```sh
+export -x=1   # bash: export: -x: invalid option + synopsis, rc 2
+              # osh:  export: `-x=1': not a valid identifier, rc 1
+export -n=1   # bash: export: -=: invalid option — `-n` is fine, `=` is not
+export -q=1   # export: -q: invalid option   (first bad letter wins)
+export -=1    # export: -=: invalid option
+```
+
+Only the **leading** words are scanned, so `export a=1 -x=2` and
+`export -- -x=1` correctly report `` `-x=2' ``/`` `-x=1': not a valid identifier ``;
+and `+x=1` is an operand to `export`/`readonly`, not a flag word.
+
+**Fixed 2026-08-04.** The `!a.contains(&b'=')` clause was dropped.
+`readonly`'s scan never had it and already agreed, as did the declare family, so
+this brought the last of the five into line. Pinned by the corpus case
+`an-equals-in-a-flag-word-is-just-another-letter.sh` and the unit test
+`export_reads_an_equals_in_a_flag_word_as_a_letter`.
+
+### TD-OILS-DECL-ROUTES-BEFORE-CHECKING-OPTIONS. The declaration builtins validated their flag letters only on the way to a declaration, so every listing route silently ignored an unknown one — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `"declare" | "typeset"` and
+`"local"` dispatch arms; the fix lives in the new `Shell::declare_option_check`.
+
+**What:** bash runs **one getopt pass over the whole leading flag cluster before
+it decides what the command is**, so an unknown letter is refused whatever the
+rest would have done — status 2, `TAG: -X: invalid option`, and the synopsis.
+osh checked the letters only on the declaration path:
+
+```sh
+declare -rq        # bash: declare: -q: invalid option + synopsis, rc 2; osh: rc 0, silent
+declare -x=1       # same; osh: rc 0, silent
+declare -pq v      # same; osh: reported `v: not found`
+declare -Fq g / -fq g / -ftq g / -aq / -r -q / -rq -- / -iq v=1   # all rc 2
+```
+
+**Measured rule** (bash 5.2.37), pinned by the corpus case
+`declaration-builtins-check-options-first.sh` and the unit test
+`declaration_builtins_check_their_options_before_routing`:
+
+- `+rq` / `+q` are reported as `+q` — the sign is echoed back.
+- `-q +z` reports `-q`: the first bad letter wins, scanning left to right.
+- `=` is a letter: `-x=1` → `-x`, `-=x`/`-=1` → `-=`, `-rq=1` → `-q`,
+  `-a[0]` → `-[`.
+- `declare -- -q` → the `--` ends the scan → rc 1
+  `` declare: `-q': not a valid identifier ``, not the option error.
+- `typeset` prints its own synopsis; `local` prints
+  `local: usage: local [option] name[=value] ...`.
+- **`local` has two refusals and the frame one comes first.** At global scope
+  `local -q`, `local -pq`, `local -rq`, `local`, `local x=1`, `local -p` and
+  `local -- -q` *all* give `local: can only be used in a function` rc 1 — the
+  frame check precedes the option scan. Inside a function the option scan fires
+  (rc 2).
+
+**Fixed 2026-08-04.** `declare_option_check` hands the flag words **alone** to
+`builtin_declare`: with no name operands that is exactly the getopt pass and
+nothing more, and it keeps the single copy of the letter table. For `local` the
+same call reproduces the frame refusal first for free, because
+`builtin_declare_scoped` makes that check before reading a flag. Two now-dead
+validators were removed rather than left as defensive cruft (the
+`local_frames.is_empty()` branch in the `local` arm, and the re-validation in
+the `want.is_empty()` branch).
+
+**Standing lesson (measurement discipline):** the first probe harness for this
+wrapped each command in a helper `t() { eval "$1"; }` — a *function*, which
+silently put every "at global scope" measurement inside a frame and produced the
+wrong rule for `local`. **Measure at the scope the construct will actually be
+used in**, with bare top-level lines when scope is the variable under test.
+Separately, avoid operand-less probes like `declare -I`, `declare -n`,
+`declare -t`, `declare -r`, `declare +x`: each is a *listing* that dumps the
+whole environment and buries the signal.
+
+### TD-OILS-DECL-SKIPS-AN-EMPTY-OPERAND. `declare ""` and its siblings passed over an operand whose name half was empty instead of refusing it — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the operand loop in
+`Shell::builtin_declare_scoped`, ahead of the identifier gate.
+
+**What:** the empty string is a name like any other malformed one, and bash
+refuses it rather than passing over it. osh succeeded silently:
+
+```sh
+declare ""     # bash: declare: `': not a valid identifier, rc 1
+declare '=5'   # bash: declare: `=5': not a valid identifier — same operand,
+               #       quoted back whole once the `=` is split off
+local "" ; typeset ""          # same, under their own tags
+declare "" v=1                 # v is still bound; the command reports rc 1 at the end
+declare "" 1x ""               # every bad name speaks, in the order written
+```
+
+`-n` judges it one step earlier: the wholly empty operand — and only that one,
+not `-n '=x'` or `-n '='` — is prefixed with
+`warning: : circular name reference`, because the empty name equals the empty
+value an unbound name reads back as and so trips the nameref self-reference
+rule. That is a hard refusal at global scope and a warning inside a function,
+the same two-voiced choice `nameref_value_error` already makes.
+
+**Fixed 2026-08-04.** The empty name simply stopped being skipped before
+reaching the identifier gate, which already produced exactly that diagnostic.
+Pinned by the corpus case `declare-refuses-an-empty-operand.sh` and the unit
+test `declare_refuses_an_empty_operand`.
+
+### TD-OILS-UNSET-VALIDATES-WITHOUT-V. `unset` never checked its operand was a name, so `unset -v 1x` succeeded silently — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_unset`.
+
+**What:** bash validates the operand as a variable name **only when a `-v` says
+the operand names one**. Plain `unset X` falls back to the function namespace
+and `unset -f X` names a function, and a function may be called anything, so
+neither checks. Add a `-v` anywhere in the options and a word that is neither an
+identifier nor an element reference is
+`` unset: `WORD': not a valid identifier `` with status 1:
+
+```sh
+unset -v 1x      # bash: unset: `1x': not a valid identifier, rc 1; osh: rc 0
+unset -v ""      # same
+unset -v -       # same
+unset -v 'n[]'   # same
+unset 1x         # no complaint from either — the function namespace has no rule
+```
+
+**Fixed 2026-08-04.** The gate accepts exactly what bash accepts — a plain
+identifier or a `name[sub]` element reference, since that is how one element is
+unset — reports the operand quoted whole, and does not stop the operands after
+it. Pinned by the corpus case `unset-v-validates-the-name.sh`.
+
+### TD-OILS-DECL-LONE-SIGN. A word that is only `-` or `+` was taken for an empty flag word by six separate ad-hoc scans, so `declare -p -` listed the whole shell — 2026-08-04 — ✅ FIXED 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `-f`/`-F` routing, the `-p`
+routing, `local`'s routing, the `-p` operand split, the listing filter and the
+compound flag loop; the fix is the shared `Shell::is_decl_flag_word`.
+
+**What:** getopt ends option parsing at a word that is only a sign, so it
+becomes an operand — and since no variable can be named `-` or `+`, the usual
+answer is a complaint about it, not a listing:
+
+```sh
+declare -p -     # bash: declare: -: not found, rc 1
+                 # osh:  listed every variable in the shell
+declare - -p     # bash: two operand complaints; osh: picked the -p up and listed
+declare -pr -    # bash: complaint; osh: a readonly-filtered listing
+declare -- -     # the -- ends the options, so the - behind it is still an operand
+declare -p v --  # a -- written after an operand is an operand itself
+```
+
+**Fixed 2026-08-04.** One predicate, `is_decl_flag_word` (a sign plus at least
+one letter — the shape `declare_flag_end` and the main flag loop already tested
+for), replaced all six `starts_with` tests. Reading `local`'s leading words the
+same way also fixed `p` being honoured only on a minus there: `local +p` is a
+listing of the frame's locals and `local +p w` a listing asked about `w`,
+exactly as `declare +p` already was. Pinned by the 20-section corpus case
+`a-lone-sign-is-an-operand-not-a-flag-word.sh` (since extended to cover the
+`--` bug above) and a unit test.
+
+**Standing lesson:** six ad-hoc re-spellings of one predicate meant one missing
+case slipped through all six. This is the root cause the two entries above share
+— when a second caller needs the same test, name it.
+
 ### TD-OILS-LOCAL-DASH-BINDS-NO-VARIABLE. `local -` saved the shell options but did not bind the variable named `-` that bash binds alongside them — 2026-08-04 — ✅ FIXED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — the `local -` case in

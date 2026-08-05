@@ -3978,6 +3978,12 @@ pub struct Shell {
     /// `a"b${x@Z}"c` reports `b${x@Z}`. Saved/restored around every entry so
     /// nesting (command substitution, `${y:-${x@Z}}`) resolves innermost-first.
     bad_sub_word: Option<Str>,
+    /// The whole word being expanded, quote characters and all — what the
+    /// "no closing `)'" complaint names, and the one word-level diagnostic that
+    /// does *not* narrow when expansion descends into a double-quoted run. See
+    /// [`Shell::enter_quoted_run`]. `None` outside such a run, where
+    /// [`Shell::bad_sub_word`] is already the whole word.
+    quoted_outer_word: Option<Str>,
     /// Source text of the indirect reference (`!r`, `!a[$n]`) whose modifier is
     /// being expanded. A complaint the modifier makes is about the reference
     /// the writer typed, not about the variable it happened to reach: `${!r^^}`
@@ -4841,6 +4847,7 @@ impl Shell {
             pending_abort: false,
             pending_unwind: None,
             bad_sub_word: None,
+            quoted_outer_word: None,
             ref_label: None,
             cond_word: false,
             saw_quoted_list: false,
@@ -10552,6 +10559,7 @@ impl Shell {
             pending_abort: false,
             pending_unwind: None,
             bad_sub_word: None,
+            quoted_outer_word: None,
             ref_label: None,
             cond_word: false,
             saw_quoted_list: false,
@@ -20561,7 +20569,7 @@ impl Shell {
                     // scalar path (bash re-enters the quoted run as its own
                     // word). It is the whole run that is named, not the part in
                     // hand, so the save is around the loop.
-                    let saved_word = self.bad_sub_word.replace(crate::unparse::parts_src(parts));
+                    let saved_word = self.enter_quoted_run(parts);
                     // The quotes are part of the context the parts expand in,
                     // not just of how their results are joined — see
                     // [`Shell::dquote`]. Set once here, so the per-part
@@ -20633,7 +20641,7 @@ impl Shell {
                         cur.push(EChar::MARK);
                     }
                     self.dquote = saved_dquote;
-                    self.bad_sub_word = saved_word;
+                    self.leave_quoted_run(saved_word);
                 }
                 other => {
                     // Inside quotes the operand is a double-quoted word, and
@@ -21129,7 +21137,7 @@ impl Shell {
         // bash re-enters `expand_word_internal` on the quoted section's
         // *contents*, so a "bad substitution" inside quotes names the section
         // without its quote characters (`a"b${x@Z}"c` → `b${x@Z}`).
-        let saved = self.bad_sub_word.replace(crate::unparse::parts_src(parts));
+        let saved = self.enter_quoted_run(parts);
         // The quotes are part of the context the parts expand in, not just of
         // how their results are joined — see [`Shell::dquote`].
         let saved_dquote = std::mem::replace(&mut self.dquote, true);
@@ -21143,7 +21151,7 @@ impl Shell {
             }
         }
         self.dquote = saved_dquote;
-        self.bad_sub_word = saved;
+        self.leave_quoted_run(saved);
         s
     }
 
@@ -21446,7 +21454,7 @@ impl Shell {
             // so it is ASCII by construction — the only place a value's bytes are
             // known to be text.
             WordPart::ProcSub { input, body } => self.proc_sub(*input, body).into_bytes(),
-            WordPart::ArithSub { expr, .. } => self.arith_sub(expr),
+            WordPart::ArithSub { expr, bracket } => self.arith_sub(expr, *bracket),
             WordPart::ArrayRef {
                 name,
                 index,
@@ -21630,6 +21638,33 @@ impl Shell {
             self.note_shell_error(FatalWhen::ErrexitOrPosix);
         }
         Str::new()
+    }
+
+    /// Enter a double-quoted run, which the two word-level diagnostics name
+    /// differently.
+    ///
+    /// bash re-enters `expand_word_internal` on the run's *contents*, so a "bad
+    /// substitution" raised inside quotes names the section without its quote
+    /// characters (`a"b${x@Z}"c` names `b${x@Z}`). The "no closing `)'"
+    /// complaint comes from the scanner one level up and still names the whole
+    /// word — `p"A$(( #5 ))B"q`, quotes and neighbours included. So the outer
+    /// spelling is put aside rather than replaced, and the *outermost* one
+    /// wins: a run nested in a run must not overwrite it.
+    fn enter_quoted_run(&mut self, parts: &[WordPart]) -> (Option<Str>, Option<Str>) {
+        let outer = self
+            .quoted_outer_word
+            .clone()
+            .or_else(|| self.bad_sub_word.clone());
+        let saved_outer = std::mem::replace(&mut self.quoted_outer_word, outer);
+        let saved_named = self.bad_sub_word.replace(crate::unparse::parts_src(parts));
+        (saved_named, saved_outer)
+    }
+
+    /// Undo [`Shell::enter_quoted_run`].
+    fn leave_quoted_run(&mut self, saved: (Option<Str>, Option<Str>)) {
+        let (named, outer) = saved;
+        self.bad_sub_word = named;
+        self.quoted_outer_word = outer;
     }
 
     /// The non-fatal (DISCARD-class) "bad substitution" — see
@@ -23504,7 +23539,98 @@ impl Shell {
         v
     }
 
-    fn arith_sub(&mut self, expr: BStr<'_>) -> Str {
+    /// Does a `#` comment inside `expr` swallow the `))` meant to close it?
+    ///
+    /// bash reads a `$(( … ))` twice, and only the second read knows about
+    /// comments. The parser matches the parentheses with no such notion and
+    /// hands the expander a body; the expander then re-scans the *word source*
+    /// with `extract_delimited_string`, which does honour `#`, so a comment
+    /// running to the end of the line takes the closing `))` with it and the
+    /// scan never finds one. What comes out is not an arithmetic error at all —
+    /// it is a "no closing `)'" complaint naming the whole word.
+    ///
+    /// bash raises it while *scanning*, so it reports even for an arithmetic
+    /// substitution nothing ever evaluates (`x=5; echo "${x:-$(( #5 ))}"`);
+    /// this check runs at evaluation, so that one corner still diverges — see
+    /// `known-issues.md`, `TD-OILS-THE-COMMENT-CHECK-IS-EVALUATION-TIME-WHERE-BASHS-IS-SCAN-TIME`.
+    ///
+    /// Deciding it from the parser's already-extracted body is exact, because
+    /// the two scans differ in exactly one rule: a comment opens at a `#` whose
+    /// preceding byte is a space, a tab or a newline. That is why `$((#5))` is
+    /// an ordinary arithmetic error — the `#` is preceded by the `(` — and why
+    /// `1 +#2`, `x#2`, `1#5` and a backslashed `#` are not comments either.
+    /// Quoting protects (`$(( "a # b" ))` and `$(( 'a # b' ))` both evaluate);
+    /// a `${ … }` does not, so `$(( ${x # b} ))` is the bad substitution.
+    fn arith_comment_hides_closer(expr: BStr<'_>) -> bool {
+        let mut i = 0;
+        while i < expr.len() {
+            match expr[i] {
+                // A backslash carries the next byte past every rule below.
+                b'\\' => i += 1,
+                // Single quotes are literal through to their close.
+                b'\'' => {
+                    i += 1;
+                    while i < expr.len() && expr[i] != b'\'' {
+                        i += 1;
+                    }
+                }
+                // Double quotes are too, except that a backslash still escapes
+                // there: `$(( "a \" # b" ))` keeps the `#` inside the string.
+                b'"' => {
+                    i += 1;
+                    while i < expr.len() && expr[i] != b'"' {
+                        i += usize::from(expr[i] == b'\\') + 1;
+                    }
+                }
+                b'#' if i > 0 && matches!(expr[i - 1], b' ' | b'\t' | b'\n') => {
+                    // The comment ends at a newline. Without one it has run to
+                    // the end of the body, which means the `))` was inside it.
+                    return !expr[i..].contains(&b'\n');
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Report the `$(( … ))` whose closing `))` a comment ate — see
+    /// [`Shell::arith_comment_hides_closer`].
+    ///
+    /// The class is DISCARD, and unusually it is *errexit only*: bash raises
+    /// this from the word scanner rather than from `parameter_brace_expand`, so
+    /// posix mode's "an expansion error ends the shell" hook never sees it.
+    /// `set -e; echo $(( #5 ))` exits; `set -o posix; echo $(( #5 ))` complains
+    /// and runs the next line — the mirror image of an ordinary arithmetic
+    /// error, which posix mode makes fatal and errexit lets through.
+    fn arith_unclosed_by_comment(&mut self, expr: BStr<'_>) -> Str {
+        if self.unbound_error.is_some() || self.discard_error.is_some() {
+            return Str::new();
+        }
+        // Not `bad_sub_word`: this complaint is the scanner's, and the scanner
+        // has not stepped inside any quotes — see [`Shell::enter_quoted_run`].
+        let named = self
+            .quoted_outer_word
+            .clone()
+            .or_else(|| self.bad_sub_word.clone())
+            .unwrap_or_else(|| bfmt![b"$((", expr, b"))"]);
+        self.emit_stderr(&bfmt![
+            self.err_prefix(),
+            b"bad substitution: no closing `)' in ",
+            &named,
+            b"\n"
+        ]);
+        self.arm_discard(1);
+        self.note_shell_error(FatalWhen::ErrexitOnly);
+        Str::new()
+    }
+
+    fn arith_sub(&mut self, expr: BStr<'_>, bracket: bool) -> Str {
+        // `$[ … ]` is read by a different extractor, one with no comment rule,
+        // so only the `$(( … ))` spelling can lose its closer this way.
+        if !bracket && Self::arith_comment_hides_closer(expr) {
+            return self.arith_unclosed_by_comment(expr);
+        }
         // Expand `$name` / `${name}` parameters inside the expression first;
         // bare identifiers are resolved by the evaluator via `VarLookup`.
         let expanded = self.expand_arith_params(expr);
@@ -23618,7 +23744,7 @@ impl Shell {
                 '(' if syn_at(&chars, i + 2) == '(' => {
                     // `$((expr))` — nested arithmetic. Find the matching `))`.
                     if let Some((inner, next)) = Self::scan_arith_sub(&chars, i + 3) {
-                        let val = self.arith_sub(&inner);
+                        let val = self.arith_sub(&inner, false);
                         let val = bytes::trim(&val);
                         out.extend_from_slice(if val.is_empty() { b"0" } else { val });
                         i = next;
@@ -50455,6 +50581,80 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // the parent survives and continues.
         let (o3, _st3) = run("( echo $((1/0)) ) 2>/dev/null; echo parent");
         assert_eq!(o3, "parent\n");
+    }
+
+    #[test]
+    fn a_comment_that_eats_the_closer_is_not_an_arithmetic_error() {
+        // bash scans a `$(( … ))` word twice and only the second scan honours
+        // `#`. A comment that runs to the end of the line takes the closing
+        // `))` with it, so what is reported is a "no closing `)'" complaint
+        // naming the whole word — not the arithmetic error the body would give.
+        let (o, st) = run("{ echo \"A$(( #5 ))B\"; } 2>&1");
+        assert_eq!(
+            o,
+            "osh: bad substitution: no closing `)' in \"A$(( #5 ))B\"\n"
+        );
+        assert_eq!(st, 1);
+        // The word named is the whole word, neighbours included.
+        let (o2, _) = run("{ p\"A$(( #5 ))B\"q; } 2>&1");
+        assert_eq!(
+            o2,
+            "osh: bad substitution: no closing `)' in p\"A$(( #5 ))B\"q\n"
+        );
+        // Nesting reports the outermost word, once.
+        let (o3, _) = run("{ echo $(( 1 + $(( 2 # x )) )); } 2>&1");
+        assert_eq!(
+            o3,
+            "osh: bad substitution: no closing `)' in $(( 1 + $(( 2 # x )) ))\n"
+        );
+        // DISCARD, not fatal: the next line still runs.
+        let (o4, st4) = run("echo $(( #5 )) 2>/dev/null\necho after");
+        assert_eq!(o4, "after\n");
+        assert_eq!(st4, 0);
+        // …and errexit-only, not posix: bash raises this from the word scanner
+        // rather than from `parameter_brace_expand`, so posix mode's "an
+        // expansion error ends the shell" hook never sees it. That is the
+        // mirror image of an ordinary arithmetic error.
+        let (o5, _) = run("set -o posix\necho $(( #5 )) 2>/dev/null\necho after");
+        assert_eq!(o5, "after\n");
+        let (o6, st6) = run("set -e\necho $(( #5 )) 2>/dev/null\necho after");
+        assert_eq!(o6, "");
+        assert_eq!(st6, 1);
+    }
+
+    #[test]
+    fn only_a_hash_after_whitespace_opens_a_comment_in_arithmetic() {
+        // Body index 0 is preceded by the `(`, so `$((#5))` is ordinary
+        // arithmetic; so are the forms where the `#` follows an operator, an
+        // identifier, a digit or a backslash. Quoting protects it too — and a
+        // backslash still escapes inside a double quote. `$[ … ]` is read by an
+        // extractor with no comment rule at all.
+        for src in [
+            "$((#5))",
+            "$(( 1 +#2 ))",
+            "$(( x#2 ))",
+            "$(( 1#5 ))",
+            "$(( 1 \\# 2 ))",
+            "$(( \"a # b\" ))",
+            "$(( 'a # b' ))",
+            "$(( \"a \\\" # b\" ))",
+            "$[ #5 ]",
+        ] {
+            let (o, _) = run(&format!("{{ echo {src}; }} 2>&1"));
+            assert!(!o.is_empty(), "{src} reported nothing");
+            assert!(
+                !o.contains("no closing"),
+                "{src} should be an arithmetic error, got {o:?}"
+            );
+        }
+        // A newline closes the comment, so the `))` is found after all and the
+        // body — comment text included — reaches the evaluator.
+        let (o, _) = run("{ echo $(( 1 #x\n + 2 )); } 2>&1");
+        assert!(!o.contains("no closing"), "{o:?}");
+        assert!(o.contains("syntax error"), "{o:?}");
+        // A `${ … }` is not a quote and does not protect it.
+        let (o2, _) = run("{ echo $(( ${x # b} )); } 2>&1");
+        assert!(o2.contains("no closing"), "{o2:?}");
     }
 
     #[test]

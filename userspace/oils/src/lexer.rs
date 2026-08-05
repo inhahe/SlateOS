@@ -1824,9 +1824,36 @@ impl Lexer {
                     // is a plain `(`, and the second one is read again as the
                     // next token.
                     if self.peek() == Some('(') && arith_cmd_position(out.last()) {
+                        // …and so is a `((` whose two closing parentheses are
+                        // not adjacent. bash's `parse_arith_cmd` tests for the
+                        // second `)` with a read of its own, and on failing it
+                        // hands the text back to the ordinary grammar as
+                        // `( ( … ) )` — so `((echo hi) )` *runs* `echo hi`.
+                        // Rewind to the second `(` and emit a plain `(`; the
+                        // continuations the abandoned body scan deleted go back
+                        // too, since the same text is about to be read again.
+                        //
+                        // A `for` header is the exception. bash tests it for
+                        // the same adjacency, but through the `ARITH_FOR_EXPRS`
+                        // arm, which has nothing to fall back to: `for` cannot
+                        // be followed by a subshell, so a header that fails the
+                        // test is simply an error.
+                        let for_header = matches!(out.last(), Some(Tok::Word(segs))
+                            if matches!(segs.as_slice(), [Seg::Lit(s)] if s.as_slice() == b"for"));
+                        let arith_from = self.pos;
+                        let conts_from = self.conts.len();
                         self.pos += 1;
-                        let raw = self.read_arith()?;
-                        out.push(Tok::ArithCmd(raw));
+                        match self.read_arith_body(true)? {
+                            Some(raw) => out.push(Tok::ArithCmd(raw)),
+                            None if for_header => {
+                                return Err(LexError::new("malformed arithmetic expansion"));
+                            }
+                            None => {
+                                self.conts.truncate(conts_from);
+                                self.pos = arith_from;
+                                out.push(Tok::Op(Op::LParen));
+                            }
+                        }
                     } else {
                         out.push(Tok::Op(Op::LParen));
                     }
@@ -3486,6 +3513,30 @@ impl Lexer {
 
     /// Read a `$(( … ))` body (up to the closing `))`).
     fn read_arith(&mut self) -> Result<Str, LexError> {
+        self.read_arith_body(false)?
+            .ok_or_else(|| LexError::new("malformed arithmetic expansion"))
+    }
+
+    /// Read an arithmetic body up to its closing `))`.
+    ///
+    /// `Ok(None)` means the body was balanced but the second `)` was not where
+    /// the caller requires it. That is a plain error for the `$(( … ))`
+    /// expansion, but for the `(( … ))` *command* it is bash's cue to re-read
+    /// the whole thing as nested subshells, so it is reported rather than
+    /// raised. `Err` is reserved for running out of input, which is an error
+    /// either way — bash's `parse_matched_pair` fails outright there and
+    /// `parse_arith_cmd` passes the failure straight on without rewinding.
+    ///
+    /// `adjacent` picks which rule the second `)` is held to. The command form
+    /// requires it to be the very next character: bash reads it with
+    /// `shell_getc (0)`, which does *not* delete a `\<newline>`, so nothing at
+    /// all may come between the two — not a space, not a tab, not a newline,
+    /// not a continuation. The expansion form has no such test (it goes through
+    /// `parse_matched_pair`, whose removal is on), so it tolerates a
+    /// continuation there, as `echo $((1+1)\<newline>)` shows. The *body* is
+    /// read the same way for both, which is why `((1 +\<newline>1))` is
+    /// arithmetic.
+    fn read_arith_body(&mut self, adjacent: bool) -> Result<Option<Str>, LexError> {
         let open = self.cur_line();
         let mut depth = 0usize;
         let mut raw = Str::new();
@@ -3512,12 +3563,14 @@ impl Lexer {
                 ')' => {
                     if depth == 0 {
                         // Expect a second ')'.
-                        self.eat_conts();
+                        if !adjacent {
+                            self.eat_conts();
+                        }
                         if self.peek() == Some(')') {
                             self.pos += 1;
-                            return Ok(raw);
+                            return Ok(Some(raw));
                         }
-                        return Err(LexError::new("malformed arithmetic expansion"));
+                        return Ok(None);
                     }
                     depth -= 1;
                     raw.push(b')');

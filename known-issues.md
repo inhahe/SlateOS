@@ -35774,42 +35774,34 @@ then ran out, which osh had been dropping altogether: `[[ ( -n x ` says
 **Pinned by** `tests/corpus/a-conditional-group-adds-the-paren-it-never-reached.sh`.
 
 
-### TD-OILS-AN-ARITHMETIC-COMMAND-NEEDS-ITS-CLOSERS-ADJACENT — 2026-08-05
+### TD-OILS-AN-ARITHMETIC-COMMAND-NEEDS-ITS-CLOSERS-ADJACENT — 2026-08-05 — ✅ FIXED 2026-08-05
 
 *(was TD-OILS-ARITH-COMMAND-CLOSES-ACROSS-A-CONTINUATION, which described only
 the continuation case; measuring the rest showed the rule is much broader and
-one of its consequences is a behavioural, not cosmetic, divergence.)*
+one of its consequences was a behavioural, not cosmetic, divergence.)*
 
-**Where:** `userspace/oils/src/lexer.rs`, `Lexer::read_arith` — the peek for the
-second `)`, and the fact that failing it has no way to back out.
+**Where:** `userspace/oils/src/lexer.rs`, `Lexer::read_arith_body` and the `'('`
+arm of the tokenizer.
 
 **What.** `(( … ))` is an arithmetic command **only when the two closing
 parentheses are literally adjacent**. Anything at all between them — a space, a
 tab, a newline, a deleted line continuation — and bash re-reads the whole thing
-as *nested subshells* `( ( … ) )`. osh instead scans on and fails:
+as *nested subshells* `( ( … ) )`. osh instead scanned on and failed:
 
 ```text
-((echo hi) )              bash: hi                    osh: syntax error: malformed …
-((a=1) ); echo "a=$a"     bash: a=                    osh: syntax error: malformed …
-((1+1) )                  bash: 1+1: command not found osh: syntax error: malformed …
-((1+1)  )                 same                        same
-((1+1)<tab>)              same                        same
-(( 1+1 ) )                same                        same
-(( ) )                    bash: syntax error near unexpected token `)'
-                                and echoes `( ) '     osh: syntax error: malformed …
-((1+1)<nl>)               bash: syntax error near `((1+1)'
-                                and echoes `((1+1)'   osh: syntax error: malformed …
-((1+1)\<nl>) && echo hit  bash: line 2: syntax error near unexpected token `'
-                                line 2: `) && echo hit'
-                          osh:  hit
+((echo hi) )              bash: hi                     was: syntax error: malformed …
+((a=1) ); echo "a=$a"     bash: a=                     was: syntax error: malformed …
+((1+1) )                  bash: 1+1: command not found was: syntax error: malformed …
+((1+1)  )                 same                         was: same
+((1+1)<tab>)              same                         was: same
+(( 1+1 ) )                same                         was: same
+((1+1)<nl>)               same                         was: same
 ```
 
-The first two rows are the serious ones: bash *runs* `echo hi` and *runs* an
-assignment confined to a subshell, where osh raises a syntax error. The `(( ) )`
-row is bash's fallback landing on an empty subshell, which is itself a syntax
-error — a different message from the one osh gives, at a different place.
+The first two rows were the serious ones: bash *runs* `echo hi` and *runs* an
+assignment confined to a subshell, where osh raised a syntax error.
 
-Everything adjacent already agrees, including every other place a continuation
+Everything adjacent already agreed, including every other place a continuation
 may be split, and the whole `$(( … ))` expansion family:
 
 ```text
@@ -35823,27 +35815,108 @@ echo $((1+1)<nl>)           bash: line 2: 1+1: command not found — and so does
 
 **Why.** bash reads the body with `parse_matched_pair`, which has
 `remove_quoted_newline` on — hence the body and the opening `((` tolerate
-splits. `parse_dparen` then tests for the second `)` with its own read, which
-does not remove, so only an adjacent one counts; on failing it *rewinds* the
-input and lets the ordinary grammar see `(` `(` … `)` `)`. `$(( … ))` reaches
-the substitution path, which never needs the test, which is why the expansion
-column agrees throughout.
+splits. `parse_arith_cmd` then tests for the second `)` with `shell_getc (0)`,
+which does not remove, so only an adjacent one counts; on failing it pushes
+`(` + body + `)` + *the one character it read* back into the input and returns a
+plain `(`, so the ordinary grammar builds `( ( … ) )`. `$(( … ))` reaches the
+substitution path, which never runs the test, which is why the expansion column
+agrees throughout.
 
-The continuation row is the one place bash's rewind is visibly imperfect: the
-reader has already deleted the `\<newline>`, and rewinding cannot put it back, so
-the re-parse desynchronises and reports `unexpected token `'` — with an *empty*
-token name — on the line the second `)` ended up on.
+**Fixed by** giving the body scan the caller's rule and a way to fail that is
+not an error. `read_arith_body(adjacent)` returns `Ok(None)` when the body
+balanced but the second `)` was not where the caller requires it, reserving
+`Err` for running out of input — which is an error either way, since
+`parse_matched_pair` fails outright there and `parse_arith_cmd` passes the
+failure on without rewinding. The `((`-command arm then rewinds `pos` to the
+second `(`, truncates the continuations the abandoned scan deleted (the same
+text is about to be read again, and would otherwise record them twice) and
+emits a plain `(`.
 
-**The proper fix** is to give `read_arith` the caller's rule and a way to fail
-that is not an error: for the `((` command form, require the second `)` to be
-the very next character, and when it is not, back the lexer out and re-lex from
-the first `(` as an ordinary subshell so the grammar builds `( ( … ) )`. The
-`$((` expansion keeps today's behaviour unchanged. Matching bash's three
-*diagnostics* for the shapes that then fail to parse (empty subshell, newline,
-continuation) is the smaller, separable half — the behavioural rows above are
-what matters.
+A `for` header is the exception, and is *not* rewound: bash tests it for the
+same adjacency but through the `ARITH_FOR_EXPRS` arm, which has nothing to fall
+back to — `for` cannot be followed by a subshell — so a header that fails the
+test is simply an error.
 
-**Impact.** osh rejects input bash runs, and the rejected input is not exotic:
-`(( … ) )` with one stray space is a plausible typo whose bash meaning is
-"nested subshells", not "arithmetic". Two of the eight shapes change what
-executes; the rest change only the message.
+**Pinned by**
+`tests/corpus/an-arithmetic-command-needs-its-closing-parentheses-adjacent.sh`.
+What is left over is message-only, and is
+TD-OILS-A-REWOUND-ARITHMETIC-COMMAND-IS-NOT-REWOUND-THE-WAY-BASH-REWINDS-IT.
+
+
+### TD-OILS-A-REWOUND-ARITHMETIC-COMMAND-IS-NOT-REWOUND-THE-WAY-BASH-REWINDS-IT — 2026-08-05
+
+**Where:** `userspace/oils/src/lexer.rs`, the rewind in the `'('` arm of the
+tokenizer (see TD-OILS-AN-ARITHMETIC-COMMAND-NEEDS-ITS-CLOSERS-ADJACENT, which
+is what put it there).
+
+**What.** osh rewinds a non-adjacent `(( … ) )` by moving the cursor back and
+re-lexing the *original source*. bash instead pushes a **reconstructed string**
+— `(` + body + `)` + the one character its adjacency test read — into the input
+and parses that. The two agree on everything that parses, and differ in four
+places where something does not:
+
+```text
+(( ) )                    bash: line 1: syntax error near unexpected token `)'
+                                line 1: `( ) '
+                          osh:  line 1: syntax error near unexpected token `)'
+                                line 1: `(( ) )'
+
+((1+1)<nl>)               under `bash -c`, `eval`, `.`:
+                                line 1: syntax error near `((1+1)'
+                                line 1: `((1+1)'
+                          under `bash file` or `bash < file`:
+                                line 1: 1+1: command not found
+                          osh:  line 1: 1+1: command not found   (either way)
+
+((1+1)\<nl>) && echo hit  bash: line 2: syntax error near unexpected token `'
+                                line 2: `) && echo hit'
+                          osh:  line 1: 1+1: command not found
+
+for ((i=0;i<1;i++) ) ; …  bash: line 1: syntax error near `)'
+                                line 1: `for ((i=0;i<1;i++) ) ; do echo $i; done'
+                          osh:  line 1: syntax error: malformed arithmetic expansion
+```
+
+**Why each one.**
+
+*The echoed line.* `print_offending_line` echoes `shell_input_line`, and while
+the parser is inside the pushed string that *is* `shell_input_line`. So `(( ) )`
+echoes `( ) ` — the reconstruction — not the line as written. osh has no such
+substitute buffer and echoes the real line.
+
+*The newline row, and why bash disagrees with itself.* Reading `((1+1)<nl>)`
+from a **stream** (an executed script, or stdin) bash runs it, exactly as osh
+does. Reading the identical text from a **string** — `-c`, `eval`, `source` —
+bash reports a syntax error instead. The difference is in how `push_string`'s
+saved line interacts with a string input source, not in the parse itself, and it
+makes bash's own two answers to the same input disagree. osh follows the stream
+answer, which is the one that is not a self-contradiction.
+
+*The continuation row.* bash's rewind is visibly lossy here: the reader has
+already deleted the `\<newline>`, and reconstructing cannot put it back, so the
+re-parse desynchronises and reports `unexpected token `'` — with an **empty**
+token name — on the line the second `)` ended up on. osh's rewind loses nothing
+and simply runs the subshells.
+
+*The `for` header.* Failing the adjacency test in a `for` header makes
+`parse_dparen` return −1, which yylex hands to yacc as a value ≤ 0 — i.e. as
+the EOF token, though `EOF_Reached` is not set. So `report_syntax_error` takes
+its ordinary path and `error_token_from_text` slices the input at
+`shell_input_line_index`, which is parked one past the character the test read.
+That index lands *on* the second `)`, the scan back stops immediately at the
+space before it, and the slice is the single character `)`. osh raises a lexer
+error whose text is `malformed arithmetic expansion` and echoes no source line.
+
+**The proper fix** for the first three is to model bash's substitute input
+buffer rather than rewinding the cursor: record the reconstructed text and the
+region of source it stands for, lex *that*, and let a diagnostic raised inside
+the region echo it instead of the real line. That also gets the continuation row
+for free, since the reconstruction is what loses the `\<newline>`, and it gives
+the string-vs-stream row a place to live if it is ever worth reproducing. The
+`for` header is separable and smaller: it needs the failure to carry a
+`near`-slice and an offending line, i.e. to be raised as a parse error at the
+source position rather than as a bare `LexError`.
+
+**Impact.** Cosmetic. Every shape here is one bash also rejects, or one where
+the divergence is bash disagreeing with itself; nothing osh accepts is wrong,
+and nothing bash accepts is rejected.

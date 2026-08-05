@@ -116,6 +116,19 @@ pub trait VarLookup {
     fn refuse_empty_subscript_store(&mut self, name: &str) {
         let _ = name;
     }
+
+    /// Refuse a whole-array subscript (`(( a[@] ))`, `(( a[*]=9 ))`) — bash
+    /// prints `NAME[@]: bad array subscript`, untagged, once per read and once
+    /// per store, and then carries on: the read is worth 0 and the store is
+    /// dropped. See [`Expr::WholeSub`].
+    ///
+    /// Unlike the empty-subscript hooks above, bash gets as far as *finding*
+    /// the array before it refuses the subscript, so an implementation that
+    /// reports anything about resolving the name (a circular nameref) does that
+    /// first. The name is blamed as written, not as the reference resolves it.
+    fn refuse_whole_array_subscript(&mut self, name: &str, sym: u8) {
+        let _ = (name, sym);
+    }
 }
 
 /// An arithmetic evaluation error.
@@ -285,6 +298,15 @@ enum Expr {
     /// does not depend on the name at all: an unset name, a scalar and an
     /// associative array are all refused identically.
     EmptySub(String),
+    /// A subscript that is exactly `@` or `*` — `a[@]`. Legal *bytes* as far as
+    /// the parser is concerned, and an associative array reads them as ordinary
+    /// keys, but an indexed one has no index there and refuses them at lookup
+    /// time. Like [`Expr::EmptySub`] the refusal is a complaint rather than an
+    /// error (the read is worth 0, the store is dropped), and like it the check
+    /// is purely lexical — but on the *exact* bytes: bash rejects `a[ @]` and
+    /// `a['@']` as ordinary syntax errors. The byte is kept because it is echoed
+    /// back in the complaint.
+    WholeSub(String, u8),
     Neg(Box<Expr>),
     Not(Box<Expr>),
     BitNot(Box<Expr>),
@@ -320,6 +342,9 @@ enum Lvalue {
     /// `a[] = …` — see [`Expr::EmptySub`]. Assignable only in the sense that
     /// bash parses it and then drops the store.
     EmptySub(String),
+    /// `a[@] = …` — see [`Expr::WholeSub`]. Assignable in the same nominal
+    /// sense: parsed, complained about, and dropped.
+    WholeSub(String, u8),
 }
 
 /// An array subscript: the parsed expression together with its raw source text.
@@ -374,6 +399,8 @@ enum ResolvedLv {
     Assoc(String, Str),
     /// `a[]` — see [`Expr::EmptySub`]. There is no index to resolve.
     EmptySub(String),
+    /// `a[@]` — see [`Expr::WholeSub`]. There is no index to resolve.
+    WholeSub(String, u8),
 }
 
 /// Evaluate an arithmetic expression string against a mutable variable
@@ -988,6 +1015,14 @@ impl AParser<'_> {
                         // the `m[$k]=v` that stored the element carried.
                         return Ok(Expr::Assoc(name, bytes::trim(raw).to_vec()));
                     }
+                    // `a[@]`, `a[*]` — see `Expr::WholeSub`. Necessarily after
+                    // the question above, since those are perfectly good
+                    // *keys*, and matched on the exact bytes: bash reads `a[ @]`
+                    // and `a['@']` as ordinary expressions and fails them as
+                    // syntax errors.
+                    if let [sym @ (b'@' | b'*')] = raw {
+                        return Ok(Expr::WholeSub(name, *sym));
+                    }
                     // Indexed: parse the subscript as its own arithmetic
                     // expression (evaluated later against the live environment).
                     let sub = Sub::parse(raw, self.vars)?;
@@ -1201,7 +1236,7 @@ fn digit_value(c: u8, base: u32) -> Option<u32> {
 fn is_lvalue(e: &Expr) -> bool {
     matches!(
         e,
-        Expr::Var(_) | Expr::Index(..) | Expr::Assoc(..) | Expr::EmptySub(_)
+        Expr::Var(_) | Expr::Index(..) | Expr::Assoc(..) | Expr::EmptySub(_) | Expr::WholeSub(..)
     )
 }
 
@@ -1213,6 +1248,7 @@ fn lvalue_of(e: Expr) -> Result<Lvalue, ArithError> {
         Expr::Index(n, ix) => Ok(Lvalue::Index(n, ix)),
         Expr::Assoc(n, k) => Ok(Lvalue::Assoc(n, k)),
         Expr::EmptySub(n) => Ok(Lvalue::EmptySub(n)),
+        Expr::WholeSub(n, s) => Ok(Lvalue::WholeSub(n, s)),
         _ => Err(ArithError::new("attempted assignment to non-variable")),
     }
 }
@@ -1241,6 +1277,12 @@ fn eval_expr(e: &Expr, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
         // `(( 1 ? 7 : a[] ))` is silent.
         Expr::EmptySub(n) => {
             vars.warn_empty_subscript_read(n);
+            Ok(0)
+        }
+        // Same shape as the empty subscript beside it: reached only when the
+        // operand is actually evaluated, so `(( 1 ? 7 : a[@] ))` is silent.
+        Expr::WholeSub(n, s) => {
+            vars.refuse_whole_array_subscript(n, *s);
             Ok(0)
         }
         Expr::Neg(x) => Ok(eval_expr(x, vars, depth)?.wrapping_neg()),
@@ -1330,6 +1372,7 @@ fn resolve_lv(lv: &Lvalue, vars: &mut dyn VarLookup, depth: u32) -> Result<Resol
         }
         Lvalue::Assoc(n, k) => ResolvedLv::Assoc(n.clone(), k.clone()),
         Lvalue::EmptySub(n) => ResolvedLv::EmptySub(n.clone()),
+        Lvalue::WholeSub(n, s) => ResolvedLv::WholeSub(n.clone(), *s),
     })
 }
 
@@ -1354,6 +1397,10 @@ fn load_rlv(loc: &ResolvedLv, vars: &mut dyn VarLookup, depth: u32) -> Result<i6
             vars.warn_empty_subscript_read(n);
             Ok(0)
         }
+        ResolvedLv::WholeSub(n, s) => {
+            vars.refuse_whole_array_subscript(n, *s);
+            Ok(0)
+        }
     }
 }
 
@@ -1370,6 +1417,12 @@ fn store_rlv(loc: &ResolvedLv, v: i64, vars: &mut dyn VarLookup) -> Result<(), A
         // with the value, so `x=$(( a[]=3 ))` still yields 3 and succeeds.
         ResolvedLv::EmptySub(n) => {
             vars.refuse_empty_subscript_store(n);
+            Ok(())
+        }
+        // The same complaint as the read, and a second time: `(( a[@]++ ))`
+        // reads and stores, and bash prints the line for each.
+        ResolvedLv::WholeSub(n, s) => {
+            vars.refuse_whole_array_subscript(n, *s);
             Ok(())
         }
     }

@@ -1565,12 +1565,11 @@ against bash 5.2.37, counts included) and the lib test
 osh; that is the declaration-builtin half of TD-OILS-NAMEREF-WARNING-COUNT
 below, along with the parameter-expansion reads (`${c1[0]}`, `${c1[@]}`,
 `${#c1}`, `unset 'c1[0]'`) that bash also doubles. Separately,
-`$(( c1[@] ))` is a bash arithmetic *subscript* form osh's lexer rejects
-outright (`@: syntax error: operand expected`) where bash answers
-`c1[@]: bad array subscript` and yields 0 — unrelated to namerefs, and not
-tracked before; see TD-OILS-ARITH-AT-SUBSCRIPT below.
+`$(( c1[@] ))` was a bash arithmetic *subscript* form osh's lexer rejected
+outright — unrelated to namerefs, and not tracked before; it was found here and
+fixed the same day as TD-OILS-ARITH-AT-SUBSCRIPT below.
 
-### TD-OILS-ARITH-AT-SUBSCRIPT. `$(( a[@] ))` is a syntax error in osh where bash calls it a bad subscript and carries on — 2026-08-05 — OPEN
+### TD-OILS-ARITH-AT-SUBSCRIPT. `$(( a[@] ))` was a syntax error in osh where bash calls it a bad subscript and carries on — 2026-08-05 — ✅ FIXED 2026-08-05
 
 **Symptom.** `@` and `*` are legal *bytes* in an arithmetic subscript as far as
 bash's parser is concerned; it is the array lookup that rejects them, and only
@@ -1611,6 +1610,28 @@ store hook prints the same and drops the write. The check must come *after*
 **Found while** closing the arithmetic half of
 TD-OILS-NAMEREF-CYCLE-ARRAY-WRITE; it is unrelated to namerefs and was simply
 never probed before.
+
+**✅ FIXED 2026-08-05**, along the lines above: `Expr::WholeSub(name, byte)`
+beside `Expr::EmptySub`, recognised in the subscript lexer on the *exact* raw
+bytes and only after [`VarLookup::is_assoc`], with a
+`VarLookup::refuse_whole_array_subscript` hook called once from the read arm and
+once from the store arm — which is what makes `(( a[@]++ ))` print the line
+twice where `let "a[@] = 5"` prints it once.
+
+Two details the measurement settled that a guess would have missed. The hook
+resolves the name and *throws the answer away*: bash gets as far as finding the
+array before refusing the subscript, so a circular chain earns its two
+element-lookup warnings ahead of the refusal — but the array found has no
+bearing on the complaint, which blames the name exactly as written
+(`declare -n r=a; (( r[@] ))` is `r[@]`, and a reference that already names one
+element is `e[@]` rather than the "not a valid identifier" it would otherwise
+draw). And the store stops *before* the bind, so unlike a real element write it
+does not drop the nameref attribute: `declare -p c1` after `(( c1[@] = 5 ))`
+through a cycle still says `declare -n c1="c2"`.
+
+**Coverage.** Corpus case
+`an-arithmetic-subscript-of-at-is-refused-not-a-syntax-error.sh` and the lib
+test `an_arithmetic_subscript_of_at_is_refused_not_a_syntax_error`.
 
 ### TD-OILS-FOR-SUBSCRIPTED-NAME-PARSE. `for 'a[0]' in …` is a parse error in `osh` and a runtime complaint in bash — 2026-08-03 — ✅ FIXED 2026-08-04
 

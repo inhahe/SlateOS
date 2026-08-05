@@ -40856,6 +40856,17 @@ impl VarLookup for Shell {
         // through a nameref that already names an element.
         self.warn_elem_not_identifier(&bfmt![name, b"[]"]);
     }
+
+    fn refuse_whole_array_subscript(&mut self, name: &str, sym: u8) {
+        // bash finds the array before it refuses the subscript, so a circular
+        // chain is reported by that walk — twice, as any element lookup's is —
+        // ahead of the line below. The array itself is then thrown away: what
+        // the name resolves to has no bearing on the complaint, which blames the
+        // name exactly as written (`declare -n r=a; (( r[@] ))` is `r[@]`) and
+        // is untagged, unlike the empty subscript's store-side refusal.
+        drop(self.arith_elem_read(name));
+        self.perrln(&bfmt![name, b"[", &[sym][..], b"]: bad array subscript"]);
+    }
 }
 
 // ---- free helpers -----------------------------------------------------------
@@ -63325,6 +63336,115 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("t=orig; declare -n r=t; read -a r <<< 'p q'; declare -p r t").0,
             "declare -n r=\"t\"\ndeclare -a t=([0]=\"p\" [1]=\"q\")\n",
+        );
+    }
+
+    /// `@` and `*` are legal bytes in an arithmetic subscript; it is the *array
+    /// lookup* that has no index to make of them, so the refusal is a complaint
+    /// (`a[@]: bad array subscript`, untagged) rather than an error, and the
+    /// expression carries on with the operand worth 0.
+    #[test]
+    fn an_arithmetic_subscript_of_at_is_refused_not_a_syntax_error() {
+        let bad = |n: &str, s: char| format!("osh: {n}[{s}]: bad array subscript\n");
+        let a = "a=(1 2 3);";
+
+        // A read says so once and is worth 0 — so the expression around it goes
+        // on to use that 0, and `(( ))` reports the 1 a zero value earns.
+        for (src, sym, tail) in [
+            ("echo \"[$(( a[@] ))]\"", '@', "[0]\n"),
+            ("echo \"[$(( a[*] ))]\"", '*', "[0]\n"),
+            ("echo \"[$(( a[@]+1 ))]\"", '@', "[1]\n"),
+            // The inner refusal yields 0, so the outer subscript is `a[0]`.
+            ("echo \"[$(( a[a[@]] ))]\"", '@', "[1]\n"),
+            ("(( a[@] )); echo \"rc=$?\"", '@', "rc=1\n"),
+        ] {
+            assert_eq!(
+                run(&format!("{{ {a} {src}; }} 2>&1")).0,
+                format!("{}{tail}", bad("a", sym)),
+                "{src}"
+            );
+        }
+        // An unset name is refused the same way — the subscript never gets far
+        // enough for the name to matter.
+        assert_eq!(
+            run("{ echo \"[$(( nosuch[@] ))]\"; } 2>&1").0,
+            format!("{}[0]\n", bad("nosuch", '@')),
+        );
+
+        // A store is dropped, and complains once more than a read that shares
+        // the expression with it: `a[@]++` both reads and stores.
+        for (src, want) in [
+            ("(( a[@] = 5 )); echo \"rc=$?\"", format!("{}rc=0\n", bad("a", '@'))),
+            ("let \"a[@] = 5\"; echo \"rc=$?\"", format!("{}rc=0\n", bad("a", '@'))),
+            (
+                "(( a[@]++ )); echo \"rc=$?\"",
+                format!("{}rc=1\n", bad("a", '@').repeat(2)),
+            ),
+            (
+                "(( a[@] += 2 )); echo \"rc=$?\"",
+                format!("{}rc=0\n", bad("a", '@').repeat(2)),
+            ),
+        ] {
+            assert_eq!(
+                run(&format!("{{ {a} {src}; declare -p a; }} 2>&1")).0,
+                format!("{want}declare -a a=([0]=\"1\" [1]=\"2\" [2]=\"3\")\n"),
+                "{src}"
+            );
+        }
+
+        // Reached only when actually evaluated.
+        assert_eq!(
+            run(&format!("{{ {a} echo \"[$(( 1 ? 7 : a[@] ))][$(( 0 && a[@] ))]\"; }} 2>&1")).0,
+            "[7][0]\n",
+        );
+
+        // An associative array is untouched: there the subscript is a string
+        // key, and `@` is an ordinary one. This is why the check has to sit
+        // *after* the indexed/associative split.
+        assert_eq!(
+            run("declare -A m=([@]=7); { echo \"[$(( m[@] ))]\"; (( m[@] = 5 )); declare -p m; } 2>&1")
+                .0,
+            "[7]\ndeclare -A m=([\"@\"]=\"5\" )\n",
+        );
+
+        // The match is on the exact bytes, so anything else is an ordinary
+        // expression and fails as an ordinary syntax error.
+        for (sub, token) in [(" @", "@"), ("@ ", "@ "), ("'@'", "'@'"), ("@@", "@@")] {
+            assert_eq!(
+                run(&format!("{{ {a} echo \"[$(( a[{sub}] ))]\"; }} 2>&1")).0,
+                format!("osh: {token}: syntax error: operand expected (error token is \"{token}\")\n"),
+                "a[{sub}]"
+            );
+        }
+
+        // The name is blamed as written: a reference is followed to find the
+        // array, but the array found has no bearing on the complaint.
+        assert_eq!(
+            run(&format!("{{ {a} declare -n r=a; echo \"[$(( r[@] ))]\"; }} 2>&1")).0,
+            format!("{}[0]\n", bad("r", '@')),
+        );
+        // Including a reference that already names one element, which the
+        // subscript would otherwise have nothing to apply to.
+        assert_eq!(
+            run("{ declare -a q=(1 2); declare -n e=q[0]; echo \"[$(( e[@] ))]\"; } 2>&1").0,
+            format!("{}[0]\n", bad("e", '@')),
+        );
+        // And a circular chain is reported by the lookup — twice, as any
+        // element lookup's is — before the subscript is refused. Both the read
+        // and the store stop there, so neither drops the nameref attribute the
+        // way a real element write does.
+        let cyc = "declare -n c1=c2; declare -n c2=c1;";
+        let w = "osh: warning: c1: circular name reference\n";
+        assert_eq!(
+            run(&format!("{{ {cyc} echo \"[$(( c1[@] ))]\"; }} 2>&1")).0,
+            format!("{w}{w}{}[0]\n", bad("c1", '@')),
+        );
+        assert_eq!(
+            run(&format!(
+                "{{ {cyc} (( c1[@] = 5 )); echo \"rc=$?\"; declare -p c1; }} 2>&1"
+            ))
+            .0,
+            format!("{w}{w}{}rc=0\ndeclare -n c1=\"c2\"\n", bad("c1", '@')),
         );
     }
 

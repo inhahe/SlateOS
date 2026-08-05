@@ -24107,7 +24107,14 @@ impl Shell {
                 // With *no* name operands it is not a mutation but a listing
                 // filtered by the trace attribute (`declare -Ft`), so it falls
                 // through to `declare_functions` below.
-                if let Some((enable, start)) = Self::func_trace_op(args)
+                // Every route below reads those same leading flag words, but
+                // only the one that ends in a declaration used to *check* the
+                // letters — so a listing quietly took the ones it recognised
+                // and ignored the rest. bash refuses a bad letter before it
+                // decides what the command is; see `declare_option_check`.
+                if let Some(bad) = self.declare_option_check(args, name, false) {
+                    bad
+                } else if let Some((enable, start)) = Self::func_trace_op(args)
                     && args.get(start).is_some()
                 {
                     self.set_func_trace(enable, &args[start..])
@@ -24141,16 +24148,11 @@ impl Shell {
                     if has_names {
                         self.builtin_declare(args, false, name, args.len())
                     } else if want.is_empty() {
-                        // The flag words still have to be *valid*: `declare -Q`
-                        // is an invalid option, not a listing. `builtin_declare`
-                        // holds the one copy of the letter table and, with no
-                        // name operands, declares nothing — so running it first
-                        // is exactly the option-validation pass bash makes
-                        // before it decides to list.
-                        match self.builtin_declare(args, false, name, args.len()) {
-                            0 => self.declare_list_setline(out, redir),
-                            bad => bad,
-                        }
+                        // The flag words have already been checked for a bad
+                        // letter by `declare_option_check` above, which is that
+                        // same validation pass made for every route rather than
+                        // this one alone.
+                        self.declare_list_setline(out, redir)
                     } else {
                         self.declare_list_filtered(args, out, redir)
                     }
@@ -24169,11 +24171,25 @@ impl Shell {
                 // declare nothing and print nothing.
                 let listing =
                     args.iter().take_while(|a| Self::is_decl_flag_word(a)).any(|a| a.contains(&b'p'));
-                if !listing {
+                // Both of `local`'s standing refusals come before the routing,
+                // and in this order — `local -q` outside a function is the
+                // frame refusal, not the option one. `declare_option_check`
+                // hands the flag words to the builtin itself, which makes the
+                // frame check first, so it speaks with both voices:
+                //
+                // ```sh
+                // local -pq        # (top level) local: can only be used in a
+                //                  #   function, status 1
+                // f(){ local -pq; }; f
+                //                  # local: -q: invalid option (+ usage), 2
+                // ```
+                //
+                // That leaves nothing for the listing route to re-check: with
+                // no frame it never gets here at all.
+                if let Some(bad) = self.declare_option_check(args, "local", true) {
+                    bad
+                } else if !listing {
                     self.builtin_declare(args, true, "local", args.len())
-                } else if self.local_frames.is_empty() {
-                    self.perrln("local: can only be used in a function");
-                    1
                 } else {
                     self.local_print(args, out, redir)
                 }
@@ -31509,6 +31525,41 @@ impl Shell {
         args.iter()
             .take_while(|a| Self::is_decl_flag_word(a))
             .filter(|a| a.starts_with(b"-"))
+    }
+
+    /// Check the leading flag words for an unknown option letter, ahead of the
+    /// routing that decides what the command *is*.
+    ///
+    /// bash's declaration builtins run one getopt pass over the whole flag
+    /// cluster before anything else, so a bad letter is refused whatever the
+    /// rest of the command would have done — and refused as the usage error it
+    /// is, status 2 with the synopsis. Measured against bash 5.2.37:
+    ///
+    /// ```sh
+    /// declare -rq        # declare: -q: invalid option (+ usage), status 2
+    /// declare -pq v      # likewise — the `-p` listing never happens
+    /// declare -Fq q      # likewise — nor the function listing
+    /// declare +rq        # likewise, reported as `+q`
+    /// f(){ local -pq; }  # local: -q: invalid option, with local's own synopsis
+    /// declare -- -q      # …but `--` ends the scan, so this is a bad *name*
+    /// ```
+    ///
+    /// osh checked only on the way to a *declaration*, so every listing route
+    /// took the letters it recognised and ignored the rest: `declare -rq` and
+    /// `declare -x=1` both succeeded silently, and `declare -pq v` reported `v`
+    /// as not found. The check belongs before the routing, not inside one arm
+    /// of it.
+    ///
+    /// [`Shell::builtin_declare`] holds the one copy of the letter table, and
+    /// with no name operands it declares nothing, so handing it the flag words
+    /// alone is exactly that getopt pass and nothing more.
+    fn declare_option_check(&mut self, args: &[Str], tag: &str, is_local: bool) -> Option<i32> {
+        let end = Self::declare_flag_end(args);
+        let flags = args.get(..end).unwrap_or_default();
+        match self.builtin_declare(flags, is_local, tag, flags.len()) {
+            0 => None,
+            bad => Some(bad),
+        }
     }
 
     fn declare_print(&mut self, args: &[Str], tag: &str, out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -55543,6 +55594,71 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The listing forms already answered for it and still do.
         assert_eq!(run("declare -p \"\" 2>&1").0, "osh: declare: : not found\n");
         assert_eq!(run("f(){ local -p \"\"; }; f 2>&1").0, "main: local: : not found\n");
+    }
+
+    /// A bad option letter is refused before the routing that decides what the
+    /// command *is*, so every route answers for it alike. osh checked the
+    /// letters only on the way to a declaration, and each listing route quietly
+    /// took the ones it recognised: `declare -rq` and `declare -x=1` both
+    /// succeeded silently, and `declare -pq v` reported `v` as not found.
+    #[test]
+    fn declaration_builtins_check_their_options_before_routing() {
+        const DECL: &str = "declare: usage: declare [-aAfFgiIlnrtux] \
+                            [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]\n";
+        const TYPE: &str = "typeset: usage: typeset [-aAfFgiIlnrtux] \
+                            name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]\n";
+        const LOC: &str = "local: usage: local [option] name[=value] ...\n";
+        // Every route: the plain declaration, the `-p` listing, the `-f`/`-F`
+        // function listing, the `-ft` trace toggle, and the bare attribute
+        // listing. The sign the bad letter came under is the sign reported.
+        for (cmd, bad) in [
+            ("declare -rq", "-q"),
+            ("declare -pq", "-q"),
+            ("declare -pq v", "-q"),
+            ("declare -Fq", "-q"),
+            ("declare -fq", "-q"),
+            ("declare -Fq q", "-q"),
+            ("declare -ftq q", "-q"),
+            ("declare -aq", "-q"),
+            ("declare -r -q", "-q"),
+            ("declare -rq --", "-q"),
+            ("declare +rq", "+q"),
+            // A letter is a letter even when it is punctuation: `-x=1` is not
+            // an assignment, it is the options `x` and `=`.
+            ("declare -x=1", "-="),
+            ("declare -=x", "-="),
+            ("declare -=1", "-="),
+            ("declare -rq=1", "-q"),
+        ] {
+            let (o, s) = run(&format!("{cmd} 2>&1"));
+            assert_eq!(o, format!("osh: declare: {bad}: invalid option\n{DECL}"), "{cmd}");
+            assert_eq!(s, 2, "{cmd}");
+        }
+        let (o, s) = run("typeset -pq 2>&1");
+        assert_eq!(o, format!("osh: typeset: -q: invalid option\n{TYPE}"));
+        assert_eq!(s, 2);
+        // `local` speaks under its own name, and with its own shorter synopsis.
+        let (o, s) = run("f(){ local -pq v; }; f 2>&1");
+        assert_eq!(o, format!("main: local: -q: invalid option\n{LOC}"));
+        assert_eq!(s, 2);
+        assert_eq!(run("f(){ local -=1; }; f 2>&1").0, format!("main: local: -=: invalid option\n{LOC}"));
+        // But `local`'s older refusal still comes first: outside a function
+        // there is nothing to be local *to*, and bash says so before it ever
+        // reads the flags.
+        let (o, s) = run("local -pq 2>&1");
+        assert_eq!(o, "osh: local: can only be used in a function\n");
+        assert_eq!(s, 1);
+        // `--` ends the scan, so what follows is a bad *name*, not a bad option.
+        let (o, s) = run("declare -- -q 2>&1");
+        assert_eq!(o, "osh: declare: `-q': not a valid identifier\n");
+        assert_eq!(s, 1);
+        let (o, s) = run("f(){ local -- -q; }; f 2>&1");
+        assert_eq!(o, "main: local: `-q': not a valid identifier\n");
+        assert_eq!(s, 1);
+        // And the letters that are real are still taken: `-ax` is an exported
+        // array, not two options one of which happens to be spelled `x`.
+        assert_eq!(run("declare -ax q=(1); declare -p q").0, "declare -ax q=([0]=\"1\")\n");
+        assert_eq!(run("f(){ local -p; }; f; echo rc=$?").0, "rc=0\n");
     }
 
     #[test]

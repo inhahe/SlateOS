@@ -20788,9 +20788,12 @@ impl Shell {
     ///
     /// The `[*]` spellings are `$IFS`'s first character everywhere and need no
     /// help, and so do `${a[@]@Q}`/`${a[@]#x}` and `${!prefix@}` — those really
-    /// do join with `$IFS` even here. (The `[[ ]]`/`case` line is the one where
-    /// they do not; that context is [`Shell::cond_word`], and it reaches the
-    /// derived lists through [`Shell::at_sep`] rather than through this.)
+    /// do join with `$IFS` even here. The other half of the per-element
+    /// operators do not: `a=${n[@]^^}` and `a=${n[@]/a/Z}` take the space like
+    /// a slice does, and it is [`bulk_joins_with_ifs`] that draws the line.
+    /// (The `[[ ]]`/`case` line is the one where none of them join with `$IFS`;
+    /// that context is [`Shell::cond_word`], and it reaches the derived lists
+    /// through [`Shell::at_sep`] rather than through this.)
     fn joined_value(&mut self, part: &WordPart) -> Option<Str> {
         // One expansion error ends the whole word — see
         // [`Self::expansion_failed`], whose guard this path would otherwise skip
@@ -20819,6 +20822,16 @@ impl Shell {
             WordPart::ArrayKeys { name, star: false } => {
                 let keys = self.array_keys(name);
                 Some(self.join_elements(&keys, false))
+            }
+            // Half the per-element operators are here too, and which half is
+            // measured rather than derived — see [`bulk_joins_with_ifs`].
+            WordPart::ArrayBulk {
+                name,
+                star: false,
+                op,
+            } if !bulk_joins_with_ifs(op) => {
+                let items = self.bulk_elements(name, op, false);
+                Some(self.join_elements(&items, false))
             }
             // `a=${!r:1:2}` where `ref` names a whole array is `by cz` under
             // every `$IFS`, exactly as the written-out slice is — so ask the
@@ -42462,6 +42475,49 @@ fn lay_out_fields(
         }
         cur.extend_from_slice(el);
         *open = true;
+    }
+}
+
+/// Whether an **unquoted** `[@]`-spelled bulk operator joins its elements with
+/// `$IFS` in an `!split` context (an assignment's value, a redirect target) — as
+/// against the space every other list-valued expansion uses there. Asked by
+/// [`Shell::joined_value`], which is that context and is reached only from a
+/// word's unquoted parts.
+///
+/// A plain reference, a slice and a key list all join with a space in such a
+/// context whatever `$IFS` says, and one would expect a per-element operator to
+/// follow suit. Half of them do. The line bash actually draws is by operator
+/// and not by name, and it is measured rather than derived — with `n=(a:b c:d)`
+/// and `IFS=:`, reading the value of `x=…`:
+///
+/// ```text
+/// #  ##  %  %%     x=${n[@]#a}    :b:c:d        `$IFS`
+/// @Q @E @P @a      x=${n[@]@Q}    'a:b':'c:d'   `$IFS`
+/// /  //            x=${n[@]/a/Z}  Z:b c:d       a space
+/// ^  ^^  ,  ,,     x=${n[@]^^}    A:B C:D       a space
+/// ```
+///
+/// Quoting the expansion takes the last two rows away: `x="${n[@]^^}"` is
+/// `A:B:C:D` and `x="${n[@]/a/Z}"` is `Z:b:c:d`, both `$IFS` again. So the space
+/// is a property of the *unquoted* spelling alone, which is why the test lives
+/// on this side of the quoted/unquoted fork rather than in
+/// [`Shell::expand_dynamic_with`], where both spellings arrive together. The
+/// first two rows are indifferent to quoting and so need no test at all.
+///
+/// The positionals answer exactly as a named array does here — `x=${@#a}` is
+/// `:b:c:d` and `x=${@^^}` is `A:B C:D` — which is worth stating because the
+/// *splitting* classification in [`Shell::split_items`] does distinguish them
+/// (a trim of a named array is [`SplitItems::Joined`] there, a trim of the
+/// positionals is not). The two rules are genuinely different questions about
+/// the same operators, so they are deliberately two tests rather than one
+/// shared one.
+///
+/// The `[*]` spellings never reach this: they join with [`Shell::star_sep`]
+/// whatever the operator is.
+fn bulk_joins_with_ifs(op: &BulkOp) -> bool {
+    match op {
+        BulkOp::Trim { .. } | BulkOp::Transform { .. } | BulkOp::BadTransform { .. } => true,
+        BulkOp::Replace { .. } | BulkOp::Case { .. } => false,
     }
 }
 

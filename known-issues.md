@@ -31391,6 +31391,113 @@ measured properly before any code is written.
 containing an `$IFS` character. Invisible under the default `$IFS`, which is why
 it survived the unquoted half of the same rule being fixed.
 
+**The same shape reaches `[[ ]]`/`case` too**, where it is easier to see because
+no operand is needed: `IFS=:; n=(a:b c:d); [[ P:Q"${n[@]^^}" =~ ^(.*)$ ]]` leaves
+`P QA:B C:D` in `BASH_REMATCH[1]` — the quoted list protected its own elements
+and still made the literal `P:Q` split. It does that under a space-leading `$IFS`
+as well (`IFS=' :'` gives `P QA:B C:D`), where the *unquoted* spelling splits
+nothing at all. See `TD-OILS-A-COND-WORD-THAT-MET-AN-AT-LIST-IS-BUILT-OUT-OF-WORDS`
+for the unquoted half of the `[[ ]]`/`case` rule.
+
+### TD-OILS-A-COND-WORD-THAT-MET-AN-AT-LIST-IS-BUILT-OUT-OF-WORDS. `IFS=:; [[ ${n[@]^^} ]]` sees `A:B C:D` in osh and `A B C D` in bash — 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::expand_word_joined_annotated`
+(the funnel for `expand_cond_string` and `expand_case_subject`) and
+`Shell::expand_word_pattern` (for `expand_cond_pattern` and
+`expand_case_pattern`), neither of which knows about the word-list path. They
+glue the parts into one buffer and let `Shell::at_sep`'s `cond_word` space stand
+as the whole of the context's rule.
+
+**What.** `TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT` established that an
+unquoted `[@]` moves a `${x:-…}` operand onto bash's `WORD_LIST` path. It moves a
+`[[ ]]` operand and a `case` word onto the same path, and osh implements the rule
+only for the operand. With `n=(a:b c:d)`, reading `BASH_REMATCH[1]` out of
+`[[ … =~ ^(.*)$ ]]`:
+
+| word | `IFS=:` bash | osh |
+|---|---|---|
+| `${n[@]}` | `a:b c:d` | ✓ |
+| `${n[@]^^}` | `A B C D` | ✗ `A:B C:D` |
+| `${n[@]#a}` | ` b c d` | ✗ `:b c:d` |
+| `${n[@]@Q}` | `'a b' 'c d'` | ✗ `'a:b' 'c:d'` |
+| `${n[@]/a/Z}` | `Z b c d` | ✗ `Z:b c:d` |
+| `${n[@]:0}` | `a b c d` | ✗ `a:b c:d` |
+| `${@#a}` | ` b c d` | ✗ `:b c:d` |
+| `${n[*]^^}` | `A:B:C:D` | ✓ |
+| `"${n[@]^^}"` | `A:B C:D` | ✓ |
+| `P:Q${n[@]^^}` | `P QA B C D` | ✗ `P:QA:B C:D` |
+| `P:Q${n[@]}` | `P Qa:b c:d` | ✗ `P:Qa:b c:d` |
+| `$v${n[@]^^}` (`v=y:z`) | `y zA B C D` | ✗ `y:zA:B C:D` |
+| `P:Q$(echo m:n)${n[@]^^}` | `P Qm nA B C D` | ✗ |
+| `${x:-${n[@]^^}}` | `A B C D` | ✗ `A:B C:D` |
+| `P:Q` alone | `P:Q` | ✓ |
+| `P:Q${n[*]^^}` | `P:QA:B:C:D` | ✓ |
+| `P:Q$v` (`v=y:z`) | `P:Qy:z` | ✓ |
+
+**The rule, measured.** A `[[ ]]`/`case` word that contains an unquoted `[@]`
+(any spelling but `[*]`, and an *empty* array still counts) is built as a list of
+words and then glued with single spaces:
+
+- the **elements of a plain `[@]`** (`${n[@]}`, `$@`, and the `:-` family on the
+  branch that answers with the array) are words — their own characters do not
+  split;
+- **everything else** contributes text whose characters split on `$IFS` —
+  literals, scalars, command substitutions, and the elements of a *derived*
+  `[@]` (`:off`, `^^`, `#p`, `@Q`, `/a/Z`), which are first glued with `$IFS`'s
+  first character;
+- **quoted** stretches are protected, as ever: `"P:Q"${n[@]^^}` is
+  `P:QA B C D`.
+
+**The gate is `$IFS`'s first character, not merely a space anywhere in it.** This
+differs from the operand's join gate (`Shell::operand_word_list`, which asks
+`ifs_has_space`) and wants keeping straight:
+
+| `$IFS` | `[[ ${n[@]^^} ]]` | splits? |
+|---|---|---|
+| `:` | `A B C D` | yes |
+| `: ` | `A B C D` | yes — a space that is not first does not stop it |
+| ` :` | `A:B C:D` | no |
+| ` ` | `A:B C:D` | no |
+| (null) | `A:B C:D` | no |
+| `\t:` | `A B C D` | yes — only a *space* is special, not whitespace |
+| `:\t` | `A B C D` | yes |
+| `\n:` | `A B C D` | yes |
+
+**The `$IFS`-first-character glue is load-bearing**, not a space: with
+`z=(':' 'x')`, `[[ ${z[@]^^} ]]` is `  X` (two spaces) under `IFS=:` but ` X`
+under `IFS=$'\t:'`, because the glue is a tab there and a tab is `$IFS`
+whitespace, which absorbs the empty field the leading `:` would otherwise leave.
+Gluing with a space and splitting afterwards gets the first right and the second
+wrong.
+
+**Proper fix.** Mirror what `Shell::operand_word_list` and `part_is_plain_at`
+already do for the operand, at the two cond-word funnels:
+
+1. While building the buffer, record whether an unquoted, non-`[*]` `[@]`-valued
+   part was seen (a `cond_saw_at_list` beside the existing `saw_at_list`).
+2. For a **plain** `[@]`, push the elements as *quoted* characters separated by
+   an **unquoted `star_sep()`** so the element boundary is a real delimiter and
+   the elements' own `$IFS` characters are not. For a **derived** `[@]`, push its
+   elements glued with `star_sep()`, unquoted.
+3. At the end, if the flag is set and `!ifs_is_null() && !ifs_leads_with_space()`,
+   run `Shell::word_list_fields` over the single buffer and re-glue the words
+   with an unquoted space.
+
+Note that step 2 needs `at_sep()`'s `cond_word` space to stand *aside* under the
+gate — the derived join wants `star_sep()` there, and only the un-gated case
+wants the space `at_sep()` returns today.
+
+The `${x:-…}`-inside-a-cond-word row is a fourth site: `Shell::operand_chars`
+asks `split_words && self.operand_saw_list`, and `operand_saw_list` records only
+a *quoted* list; the unquoted `operand_saw_at_list` added in
+`TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT` belongs in that test too.
+
+**Impact.** A `[[ ]]` operand, a `[[ == ]]`/`case` pattern or a `case` subject
+that holds an unquoted `[@]` under a non-default `$IFS` whose first character is
+not a space. Invisible under the default `$IFS`, and invisible under any `$IFS`
+whose characters do not occur in the data — which is why the existing corpus
+coverage of this context did not catch it.
+
 ### TD-OILS-BULK-CASE-OP-JOINS-A-NOSPLIT-CONTEXT-WITH-IFS. `IFS=:; x=${a[@]^^}` is `A:B:C:D` in osh and `A:B C:D` in bash — ✅ **RESOLVED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::joined_value`, the `!split`

@@ -4104,6 +4104,35 @@ pub struct Shell {
     /// the answer [`Shell::expand_operand_fields`] leaves for the splitting
     /// readers above it, which is [`Shell::saw_quoted_list`]'s arrangement.
     operand_saw_at_list: bool,
+
+    /// Whether the `[[ ]]`/`case` word being built met a `[@]` list **inside
+    /// double quotes** — the other, ungated way onto bash's word-list path.
+    ///
+    /// A quoted list protects its own elements, as quoting always does, and
+    /// still moves the whole word onto the path, so the text around it is split
+    /// on `$IFS` and glued back with single spaces. With `n=(a:b c:d)`, reading
+    /// `BASH_REMATCH[1]` out of `[[ … =~ ^(.*)$ ]]`:
+    ///
+    /// ```text
+    ///            P:Q"${n[@]^^}"    P:Q${n[@]^^}    the unquoted twin
+    /// IFS=:      P QA:B C:D        P QA B C D
+    /// IFS=' :'   P QA:B C:D        P:QA:B C:D      …which this `$IFS` gates off
+    /// IFS=' '    P:QA:B C:D        P:QA:B C:D      nothing to split on
+    /// ```
+    ///
+    /// So the two flags answer to different gates — [`Shell::cond_word_list_on`]
+    /// for the unquoted one, [`Shell::cond_quoted_list_on`] for this one — and
+    /// only the *final* split is shared. Which elements are protected is still
+    /// the unquoted gate's question: under `IFS=' :'` a word holding both
+    /// spellings keeps the quoted elements whole and splits the unquoted ones
+    /// (`P:Q"${n[@]}"${n[@]}` → `P Qa:b c:da b c d`).
+    ///
+    /// Unlike [`Shell::saw_at_list`] this is *not* scoped to an operand: a
+    /// quoted list anywhere in the word counts, including inside a nested
+    /// operand that ran (`P:Q"${x:-${n[@]^^}}"` splits, and the same word with
+    /// `x` set does not).
+    saw_quoted_at_list: bool,
+
     /// Inside a double-quoted run (bash's `Q_DOUBLE_QUOTES`). Only the `[*]`
     /// spelling of the `:-`/`:+` family asks: the test for "null" is the string
     /// the reference *would* expand to here, and outside quotes a `[*]` expands
@@ -4947,6 +4976,7 @@ impl Shell {
             operand_saw_list: false,
             saw_at_list: false,
             operand_saw_at_list: false,
+            saw_quoted_at_list: false,
             dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
@@ -10364,9 +10394,14 @@ impl Shell {
         // happened by the time its characters are pushed, so the flag here
         // carries nothing but that — see [`Shell::cond_word_list`].
         let mut pattern: Vec<EChar> = Vec::new();
+        // The breaks a quoted `[@]` list left in the word, `pattern` being the
+        // one still open — see [`Shell::cond_dquote_items`].
+        let mut broken: Vec<Vec<EChar>> = Vec::new();
+        let mut open = true;
         // Scoped as [`Shell::expand_word_joined_annotated`] scopes it, and for
         // the same reason: a `=~` right-hand side is a cond word too.
         let outer_at = std::mem::replace(&mut self.saw_at_list, false);
+        let outer_q = std::mem::replace(&mut self.saw_quoted_at_list, false);
         for part in &word.parts {
             match part {
                 // Unquoted literal text is live regex syntax.
@@ -10380,10 +10415,20 @@ impl Shell {
                 // Double quotes: expand (params/cmd-sub run) but the result is
                 // matched literally, per bash.
                 WordPart::DoubleQuoted(parts) => {
-                    let s = self.expand_double_quoted(parts);
-                    let mut esc = Str::new();
-                    escape_ere(&s, &mut esc);
-                    push_chars(&mut pattern, &esc, true);
+                    // Each word the quoted list broke off is escaped on its own:
+                    // the break is between them, not inside either.
+                    let items: Vec<Vec<EChar>> = self
+                        .cond_dquote_items(parts)
+                        .iter()
+                        .map(|s| {
+                            let mut esc = Str::new();
+                            escape_ere(s, &mut esc);
+                            let mut f = Vec::new();
+                            push_chars(&mut f, &esc, true);
+                            f
+                        })
+                        .collect();
+                    lay_out_fields(&items, &mut broken, &mut pattern, &mut open);
                 }
                 // Unquoted dynamic parts (`$var`, `${…}`, `$(…)`, `$((…))`):
                 // their expansion is live regex, so a variable can carry a
@@ -10407,9 +10452,14 @@ impl Shell {
             }
         }
         let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
-        if saw_at && self.cond_word_list_on() {
-            pattern = self.cond_word_list(pattern);
-        }
+        let saw_q = std::mem::replace(&mut self.saw_quoted_at_list, outer_q);
+        broken.push(pattern);
+        let pattern = if (saw_at && self.cond_word_list_on()) || (saw_q && self.cond_quoted_list_on())
+        {
+            self.cond_word_list(&broken)
+        } else {
+            broken.concat()
+        };
         echars_text(&pattern)
     }
 
@@ -10720,6 +10770,7 @@ impl Shell {
             operand_saw_list: false,
             saw_at_list: false,
             operand_saw_at_list: false,
+            saw_quoted_at_list: false,
             dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
@@ -20733,6 +20784,10 @@ impl Shell {
     /// empty in an operand left ([`Shell::expand_case_subject`]).
     fn expand_word_joined_annotated(&mut self, word: &Word) -> Vec<Vec<EChar>> {
         let mut cur: Vec<EChar> = Vec::new();
+        // The breaks a quoted `[@]` list left in the word, `cur` being the one
+        // still open — see [`Shell::cond_dquote_items`].
+        let mut broken: Vec<Vec<EChar>> = Vec::new();
+        let mut open = true;
         let mut started = false;
         // Scoped to this word: whether it met an unquoted `[@]`, which is what
         // puts a `[[ ]]`/`case` word on bash's word-list path — see
@@ -20740,6 +20795,7 @@ impl Shell {
         // it, and a list inside a *nested* operand is that operand's own
         // business, which [`Shell::expand_operand_fields`] already keeps there.
         let outer_at = std::mem::replace(&mut self.saw_at_list, false);
+        let outer_q = std::mem::replace(&mut self.saw_quoted_at_list, false);
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => {
@@ -20758,8 +20814,8 @@ impl Shell {
                     started = true;
                 }
                 WordPart::DoubleQuoted(parts) => {
-                    let s = self.expand_double_quoted(parts);
-                    push_chars(&mut cur, &s, true);
+                    let items = quoted_echars(&self.cond_dquote_items(parts));
+                    lay_out_fields(&items, &mut broken, &mut cur, &mut open);
                     started = true;
                 }
                 other => {
@@ -20775,8 +20831,8 @@ impl Shell {
                     if self.cond_word && part_is_at_list(other) {
                         self.saw_at_list = true;
                     }
-                    if let Some(chars) = self.operand_chars(other, split_words) {
-                        cur.extend_from_slice(&chars);
+                    if let Some((items, words)) = self.operand_chars(other, split_words) {
+                        self.lay_out_operand(&items, words, &mut broken, &mut cur, &mut open);
                     } else if let Some(chars) = self.cond_plain_at(other) {
                         cur.extend_from_slice(&chars);
                     } else {
@@ -20791,9 +20847,13 @@ impl Shell {
             }
         }
         let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
-        if saw_at && self.cond_word_list_on() {
-            cur = self.cond_word_list(cur);
-        }
+        let saw_q = std::mem::replace(&mut self.saw_quoted_at_list, outer_q);
+        broken.push(cur);
+        cur = if (saw_at && self.cond_word_list_on()) || (saw_q && self.cond_quoted_list_on()) {
+            self.cond_word_list(&broken)
+        } else {
+            broken.concat()
+        };
         if started {
             vec![cur]
         } else {
@@ -21301,6 +21361,15 @@ impl Shell {
                     // `"${x:-${a[@]}}"` makes the same two fields the quoted
                     // spelling does.
                     if mode == SplitMode::QuotedOperand {
+                        // These quotes are the ones a `[[ ]]`/`case` word around
+                        // the substitution sees, so a list in here is a *quoted*
+                        // list to it — see [`Shell::saw_quoted_at_list`]. The
+                        // `:-`/`:+` family answers for itself from
+                        // [`Shell::array_op_fields`], which `split_items` below
+                        // is about to reach.
+                        if self.cond_word && part_is_at_list(other) {
+                            self.saw_quoted_at_list = true;
+                        }
                         let run = match self.split_items(other) {
                             Some(SplitItems::Fields(items)) => {
                                 lay_out_fields(&items, &mut fields, &mut cur, &mut open);
@@ -21451,7 +21520,8 @@ impl Shell {
                         // splitting here but everything about globbing.
                         // `false`: this mode is a redirect word in posix mode,
                         // which is the one redirect bash does *not* split.
-                        if let Some(chars) = self.operand_chars(other, false) {
+                        if let Some((items, _)) = self.operand_chars(other, false) {
+                            let chars = Self::join_operand_items(&items);
                             // Nothing splits this run, so quote removal has
                             // come and the marks go with it — and an operand
                             // that produced nothing but marks is the empty
@@ -21583,7 +21653,7 @@ impl Shell {
     fn expand_case_pattern(&mut self, word: &Word) -> Vec<EChar> {
         let saved_cond = std::mem::replace(&mut self.cond_word, true);
         let saved = self.begin_word(word);
-        let out = self.expand_word_pattern_inner(word);
+        let out = self.expand_word_pattern_inner(word, true);
         self.end_word(saved);
         self.cond_word = saved_cond;
         keep_marks(out)
@@ -21737,7 +21807,7 @@ impl Shell {
     /// expansions are live; single/double-quoted runs are literal.
     fn expand_word_pattern(&mut self, word: &Word) -> Vec<EChar> {
         let saved = self.begin_word(word);
-        let buf = self.expand_word_pattern_inner(word);
+        let buf = self.expand_word_pattern_inner(word, false);
         self.end_word(saved);
         // A pattern is reached through quote removal, so the marks an operand
         // put in it stop here: `${w#${x:-''a''}}` strips the one-character
@@ -21848,19 +21918,33 @@ impl Shell {
         }
     }
 
-    fn expand_word_pattern_inner(&mut self, word: &Word) -> Vec<EChar> {
+    /// `case_arm` is whether this pattern is a `case` arm's rather than a
+    /// `[[ == ]]` right operand's or a `${x#pat}`'s. It decides one thing, and
+    /// only on the *quoted* word-list path: how the finished list of words
+    /// becomes a pattern. Every other cond context glues the whole list with
+    /// single spaces (bash's `cond_expand_word` calls `string_list` on it); a
+    /// `case` arm takes the **first word alone** and drops the rest, because
+    /// bash's `execute_case_command` reads `es->word->word` off the list it got
+    /// back. `IFS=:; n=(a:b c:d); case X in P:Q"${n[@]^^}")` therefore matches
+    /// `P` — not the `P QA:B C:D` the same word means in `[[ ]]`.
+    fn expand_word_pattern_inner(&mut self, word: &Word, case_arm: bool) -> Vec<EChar> {
         let mut buf: Vec<EChar> = Vec::new();
+        // The breaks a quoted `[@]` list left in the word, `buf` being the one
+        // still open — see [`Shell::cond_dquote_items`].
+        let mut broken: Vec<Vec<EChar>> = Vec::new();
+        let mut open = true;
         // See [`Shell::expand_word_joined_annotated`], whose scoping this is:
         // a `case` arm's pattern and a `[[ == ]]` right operand are cond words
         // like the subject, and take the word-list path on the same terms.
         let outer_at = std::mem::replace(&mut self.saw_at_list, false);
+        let outer_q = std::mem::replace(&mut self.saw_quoted_at_list, false);
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => self.push_literal_annotated(&mut buf, s, idx == 0),
                 WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text.as_bytes(), true),
                 WordPart::DoubleQuoted(parts) => {
-                    let s = self.expand_double_quoted(parts);
-                    push_chars(&mut buf, &s, true);
+                    let items = quoted_echars(&self.cond_dquote_items(parts));
+                    lay_out_fields(&items, &mut broken, &mut buf, &mut open);
                 }
                 other => {
                     // A `:-`/`:+` operand's quoting reaches the pattern as
@@ -21875,8 +21959,8 @@ impl Shell {
                     if self.cond_word && part_is_at_list(other) {
                         self.saw_at_list = true;
                     }
-                    if let Some(chars) = self.operand_chars(other, true) {
-                        buf.extend_from_slice(&chars);
+                    if let Some((items, words)) = self.operand_chars(other, true) {
+                        self.lay_out_operand(&items, words, &mut broken, &mut buf, &mut open);
                         continue;
                     }
                     if let Some(chars) = self.cond_plain_at(other) {
@@ -21892,10 +21976,18 @@ impl Shell {
             }
         }
         let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
-        if saw_at && self.cond_word_list_on() {
-            buf = self.cond_word_list(buf);
+        let saw_q = std::mem::replace(&mut self.saw_quoted_at_list, outer_q);
+        let quoted_path = saw_q && self.cond_quoted_list_on();
+        broken.push(buf);
+        if (saw_at && self.cond_word_list_on()) || quoted_path {
+            if case_arm && quoted_path {
+                self.cond_first_word(&broken)
+            } else {
+                self.cond_word_list(&broken)
+            }
+        } else {
+            broken.concat()
         }
-        buf
     }
 
     fn expand_double_quoted(&mut self, parts: &[WordPart]) -> Str {
@@ -21912,12 +22004,92 @@ impl Shell {
                 WordPart::Literal(t) | WordPart::SingleQuoted { text: t, .. } => {
                     s.extend_from_slice(t.as_bytes());
                 }
-                other => s.extend_from_slice(&self.expand_dynamic(other)),
+                other => {
+                    s.extend_from_slice(&self.expand_dynamic(other));
+                }
             }
         }
         self.dquote = saved_dquote;
         self.leave_quoted_run(saved);
         s
+    }
+
+    /// [`Shell::expand_double_quoted`] for a `[[ ]]`/`case` word, which needs the
+    /// one thing a string cannot carry: **where the words break**.
+    ///
+    /// A quoted `[@]` list makes its elements separate words of the enclosing
+    /// word, exactly as it does in an ordinary command word, and on the
+    /// word-list path ([`Shell::cond_quoted_list_on`]) those breaks have to
+    /// survive as breaks. Glued into text with a separator they would not: the
+    /// separator is quoted, so nothing would split it again, and under
+    /// `IFS=' '` the whole of `P:Q"${n[@]^^}"` would come back as one word where
+    /// bash has two (`P:QA:B` and `C:D`).
+    ///
+    /// Off that path the answer is a single item, the elements glued with the
+    /// space [`Shell::at_sep`] gives a quoted list here — nothing downstream
+    /// wants breaks, and a null `$IFS` is exactly the setting under which they
+    /// are not there to be had.
+    fn cond_dquote_items(&mut self, parts: &[WordPart]) -> Vec<Str> {
+        let keep_breaks = self.cond_quoted_list_on();
+        // bash re-enters `expand_word_internal` on the quoted section's
+        // *contents* — see [`Shell::expand_double_quoted`], whose bookkeeping
+        // this is.
+        let saved = self.enter_quoted_run(parts);
+        let saved_dquote = std::mem::replace(&mut self.dquote, true);
+        let mut items: Vec<Str> = vec![Str::new()];
+        for part in parts {
+            match part {
+                WordPart::Literal(t) | WordPart::SingleQuoted { text: t, .. } => {
+                    if let Some(last) = items.last_mut() {
+                        last.extend_from_slice(t.as_bytes());
+                    }
+                }
+                other => {
+                    // The same recogniser an ordinary word asks — see
+                    // [`Shell::quoted_per_element_parts`], which runs the
+                    // expansion, so the text path below is reached only when it
+                    // declined and nothing has run yet.
+                    //
+                    // Whether it *was* a list is asked of the recogniser rather
+                    // than of the part's shape, for the reason
+                    // [`Shell::array_op_fields`] gives: the `:-`/`:+` family
+                    // cannot say before it runs. And it is asked of this part
+                    // alone — a list a *nested* operand made is that operand's
+                    // own business ([`Shell::expand_operand_fields`]), which is
+                    // why `${x:-${y:-"${f[@]}"}a}` is not a word list where
+                    // `${x:-"${f[@]}"a}` is.
+                    let outer_list = std::mem::replace(&mut self.saw_quoted_list, false);
+                    let elems = self.quoted_per_element_parts(std::slice::from_ref(other));
+                    let noted = self.saw_quoted_list;
+                    self.saw_quoted_list = outer_list || noted;
+                    if noted && self.cond_word {
+                        self.saw_quoted_at_list = true;
+                    }
+                    let Some(elems) = elems else {
+                        let s = self.expand_dynamic(other);
+                        if let Some(last) = items.last_mut() {
+                            last.extend_from_slice(&s);
+                        }
+                        continue;
+                    };
+                    for (i, el) in elems.iter().enumerate() {
+                        if i > 0 {
+                            if keep_breaks {
+                                items.push(Str::new());
+                            } else if let Some(last) = items.last_mut() {
+                                last.push(b' ');
+                            }
+                        }
+                        if let Some(last) = items.last_mut() {
+                            last.extend_from_slice(el);
+                        }
+                    }
+                }
+            }
+        }
+        self.dquote = saved_dquote;
+        self.leave_quoted_run(saved);
+        items
     }
 
     /// Expand the replacement half of `${var/pat/repl}` into a token stream
@@ -22741,7 +22913,7 @@ impl Shell {
             // element is set; an empty/undefined array counts as unset.
             exists && !elements.is_empty()
         };
-        match op {
+        let items = match op {
             ParamOp::UseDefault => {
                 if is_active {
                     SplitItems::List(elements)
@@ -22859,7 +23031,23 @@ impl Shell {
                     SplitItems::List(Vec::new())
                 }
             }
+        };
+        // Whether this was a `[@]` *list* is the one thing the `:-`/`:+` family
+        // cannot say before it runs: the branch that answers with the operand
+        // word is not a list, and the branch that answers for the operator —
+        // with the elements, or with nothing at all — is. Reporting it from
+        // here is what makes the `[[ ]]`/`case` word-list path see the two
+        // apart; see [`part_is_at_list`], which excludes this shape for exactly
+        // that reason.
+        //
+        // Only the *unquoted* spelling is reported here. The quoted one is
+        // [`Shell::quoted_per_element_parts`]'s own `ArrayOp` arm, which draws
+        // the same line one branch further out and whose answer reaches the
+        // word through [`Shell::saw_quoted_list`].
+        if self.cond_word && !star && !self.dquote && !matches!(items, SplitItems::Fields(_)) {
+            self.saw_at_list = true;
         }
+        items
     }
 
     /// A 32-bit value for `$SRANDOM`, from the system entropy source when there
@@ -23534,13 +23722,23 @@ impl Shell {
     /// not known until it has been expanded — so this is the `$IFS` half alone,
     /// and its callers pair it with [`Shell::saw_at_list`].
     ///
-    /// Inside double quotes it is off. A quoted `[@]` does move the word onto
-    /// the path in bash (`[[ P:Q"${n[@]^^}" ]]` splits the literal `P:Q`), but
-    /// it protects everything it produced, so the *quoted* expansion's own join
-    /// is the plain space `at_sep` gives — and the literal half of that is
-    /// `TD-OILS-QUOTED-OPERAND-WORD-LIST-DOES-NOT-SPLIT-ITS-LITERAL`, still open.
+    /// Inside double quotes it is off — this is the gate for the *unquoted*
+    /// spelling alone. A quoted `[@]` moves the word onto the path as well, on
+    /// its own terms and its own `$IFS` gate ([`Shell::cond_quoted_list_on`]),
+    /// and protects everything it produced, so the quoted expansion's own join
+    /// stays the plain space `at_sep` gives.
     fn cond_word_list_on(&self) -> bool {
         self.cond_word && !self.dquote && !self.ifs_is_null() && !self.ifs_leads_with_space()
+    }
+
+    /// The same question for a **quoted** `[@]` ([`Shell::saw_quoted_at_list`]),
+    /// where `$IFS` asks nothing beyond having something to split on: a quoted
+    /// list splits the text around it under `IFS=' :'` and `IFS=$'\t'` alike,
+    /// where the unquoted spelling wants a `$IFS` that does not lead with a
+    /// space. Only a null `$IFS` turns it off, and only because there is then
+    /// no separator at all.
+    fn cond_quoted_list_on(&self) -> bool {
+        self.cond_word && !self.dquote && !self.ifs_is_null()
     }
 
     /// [`Shell::cond_plain_at_chars`] for the two parts that reach a cond-word
@@ -23599,8 +23797,8 @@ impl Shell {
     /// The spaces are unquoted, unlike the operand's: nothing splits a cond word
     /// again, and a pattern built this way wants its own characters left as they
     /// were rather than turned literal.
-    fn cond_word_list(&self, field: Vec<EChar>) -> Vec<EChar> {
-        let words = Self::word_list_fields(&[field], &self.ifs_chars());
+    fn cond_word_list(&self, fields: &[Vec<EChar>]) -> Vec<EChar> {
+        let words = Self::word_list_fields(fields, &self.ifs_chars());
         let mut out: Vec<EChar> = Vec::new();
         for (i, w) in words.iter().enumerate() {
             if i > 0 {
@@ -23612,6 +23810,23 @@ impl Shell {
             out.extend_from_slice(w);
         }
         out
+    }
+
+    /// The same rebuild for a `case` arm's pattern, which keeps only the **first**
+    /// of those words: bash expands a pattern with `expand_word_leave_quoted`,
+    /// which hands back a `WORD_LIST`, and then reads `es->word->word` — the head
+    /// — rather than joining it. `IFS=:; n=(a:b c:d)` measures every shape of it:
+    /// `case X in P:Q"${n[@]^^}")` matches `P` (words `P`, `QA:B`, `C:D`),
+    /// `"${n[@]^^}"X:Y)` matches `A:B`, and a one-element or empty array still
+    /// matches `P` because the literal `P:Q` is what split.
+    ///
+    /// An empty list gives the empty pattern, which is bash's `else` branch for
+    /// a `NULL`/empty head and matches the empty subject alone.
+    fn cond_first_word(&self, fields: &[Vec<EChar>]) -> Vec<EChar> {
+        Self::word_list_fields(fields, &self.ifs_chars())
+            .into_iter()
+            .next()
+            .unwrap_or_default()
     }
 
     /// The separator that `"$*"` (and `"${a[*]}"`) uses to join elements: the
@@ -23646,7 +23861,17 @@ impl Shell {
     /// (`Q_DOUBLE_QUOTES`, which is [`SplitMode::QuotedOperand`] and never
     /// asks this). So `v=${x:-"${f[@]}"  X}` keeps both its spaces where
     /// `case ${x:-"${f[@]}"  X}` has one.
-    fn operand_chars(&mut self, part: &WordPart, split_words: bool) -> Option<Vec<EChar>> {
+    ///
+    /// The answer is the operand's *items* and whether they are **words** — the
+    /// finished list a quoted `[@]` inside the operand made, which a
+    /// `[[ ]]`/`case` word has to keep broken rather than glued: its own
+    /// word-list path runs over those breaks. Every other caller wants the one
+    /// buffer [`Shell::join_operand_items`] makes of them.
+    fn operand_chars(
+        &mut self,
+        part: &WordPart,
+        split_words: bool,
+    ) -> Option<(Vec<Vec<EChar>>, bool)> {
         // Asked before the expansion runs, because it can only be asked once:
         // the operand's side effects must not happen twice, so there is no
         // falling back to the text path after looking.
@@ -23672,12 +23897,12 @@ impl Shell {
             // word's to split. This is the branch that answers with the array,
             // so `${a[@]:-w}` is plain here — see [`part_is_plain_at`].
             if !star && self.cond_word_list_on() {
-                return Some(self.cond_plain_at_chars(&items.texts()));
+                return Some((vec![self.cond_plain_at_chars(&items.texts())], false));
             }
             let joined = self.join_elements(&items.texts(), star);
             let mut out = Vec::new();
             push_chars(&mut out, &joined, false);
-            return Some(out);
+            return Some((vec![out], false));
         };
         // An *unquoted* `[@]` inside the operand puts the enclosing `[[ ]]`/
         // `case` word on the word-list path just as one spelled directly in it
@@ -23697,30 +23922,73 @@ impl Shell {
         // A quoted `[@]` list in the operand moved it onto bash's `WORD_LIST`
         // path, where what is joined is *words* rather than the text as
         // written — see [`Shell::word_list_fields`].
-        let fields = if split_words && self.operand_saw_list {
-            Self::word_list_fields(&fields, &self.ifs_chars())
-        } else {
-            fields
-        };
+        //
+        // The marks come out of here as they are. Nothing downstream splits,
+        // so every caller but one is quote removal's side of the mark and drops
+        // them ([`drop_marks`]) — `v=${x:-''a''}` assigns `a`, and
+        // `${w#${x:-''a''}}` strips the one-character pattern `a`. The
+        // exception is a `case`, which does no quote removal and matches the
+        // mark as a character. See [`EChar::MARK`].
+        let words = split_words && self.operand_saw_list;
+        if words {
+            return Some((Self::word_list_fields(&fields, &self.ifs_chars()), true));
+        }
+        Some((fields, false))
+    }
+
+    /// The one buffer an operand's items make for a caller that wants text: the
+    /// items glued with a **space of the caller's own**, and so unquoted — a
+    /// pattern built this way still has a live space, and a `[[ ]]`/`case` word
+    /// off the word-list path still splits there.
+    ///
+    /// The callers that want the breaks instead hand the items to
+    /// [`lay_out_fields`]; see [`Shell::cond_dquote_items`], which is the same
+    /// fork one part further out.
+    fn join_operand_items(items: &[Vec<EChar>]) -> Vec<EChar> {
         let mut out = Vec::new();
-        for (i, f) in fields.iter().enumerate() {
+        for (i, f) in items.iter().enumerate() {
             if i > 0 {
-                // The separator is the *caller's*, not the operand's, so it is
-                // unquoted — a pattern built this way still has a live space.
                 out.push(EChar {
                     c: Some(Ch::U(' ')),
                     quoted: false,
                 });
             }
-            // The marks come out as they are. Nothing downstream of here
-            // splits, so every caller but one is quote removal's side of the
-            // mark and drops them ([`drop_marks`]) — `v=${x:-''a''}` assigns
-            // `a`, and `${w#${x:-''a''}}` strips the one-character pattern
-            // `a`. The exception is a `case`, which does no quote removal and
-            // matches the mark as a character. See [`EChar::MARK`].
             out.extend_from_slice(f);
         }
-        Some(out)
+        out
+    }
+
+    /// Put an operand's items into the `[[ ]]`/`case` word being built, and
+    /// report the list they were if they were one.
+    ///
+    /// A quoted `[@]` inside the operand is a list of the *enclosing* word just
+    /// as one spelled directly in it would be — `case ${z:-"${n[@]^^}"a}` and
+    /// `case "${n[@]^^}"a` come to the same words — so the breaks are kept as
+    /// breaks and the word's own path ([`Shell::cond_quoted_list_on`]) runs over
+    /// them. Gluing them into text first would lose them: the second pass would
+    /// find a word that is no longer empty and drop the [`EChar::MARK`] the
+    /// first one earned it, so `IFS=:; case ${x:-"${f[@]}":X}` would be `<:X>`
+    /// where bash has `<\177 X>`.
+    ///
+    /// The report is one level deep on purpose. `words` is this operand's own
+    /// answer, not a nested operand's — see [`Shell::expand_operand_fields`],
+    /// which is what keeps a nested one to itself.
+    fn lay_out_operand(
+        &mut self,
+        items: &[Vec<EChar>],
+        words: bool,
+        fields: &mut Vec<Vec<EChar>>,
+        cur: &mut Vec<EChar>,
+        open: &mut bool,
+    ) {
+        if words && self.cond_word {
+            self.saw_quoted_at_list = true;
+        }
+        if words && self.cond_quoted_list_on() {
+            lay_out_fields(items, fields, cur, open);
+        } else {
+            cur.extend_from_slice(&Self::join_operand_items(items));
+        }
     }
 
     /// The *words* an operand that met a quoted `[@]` list is made of, out of
@@ -42623,6 +42891,20 @@ fn push_chars(buf: &mut Vec<EChar>, s: BStr<'_>, quoted: bool) {
     }
 }
 
+/// Each of `items` as a field of quoted characters — the shape
+/// [`lay_out_fields`] lays out, for a caller that already has the text of every
+/// field ([`Shell::cond_dquote_items`]).
+fn quoted_echars(items: &[Str]) -> Vec<Vec<EChar>> {
+    items
+        .iter()
+        .map(|s| {
+            let mut f = Vec::new();
+            push_chars(&mut f, s, true);
+            f
+        })
+        .collect()
+}
+
 /// Quote removal's half of the mark: drop every [`EChar::MARK`] from a field.
 ///
 /// Called where a field leaves field splitting for a context that reads it as
@@ -42767,6 +43049,14 @@ fn part_is_plain_at(part: &WordPart) -> bool {
 /// `P Q`, the literal split by a list with no elements in it), and why the two
 /// indirect spellings are excluded: `${!r}` is a list only when `r` names one,
 /// which is not knowable here. Their own rule is [`Shell::cond_word_indirect`].
+///
+/// The `:-`/`:+` family is excluded for the opposite reason — it is the one
+/// shape whose answer is *not* static, since only the branch that answers with
+/// the array is a list and the branch that answers with the operand word is
+/// not. `IFS=:; e=()` measures both ways round: `[[ P:Q${e[@]:-A:B} ]]` is
+/// `P:QA:B` (the operand answered, nothing split) while `[[ P:Q${e[@]:+A:B} ]]`
+/// is `P Q` (the operator answered for itself, with no elements — still a
+/// list). [`Shell::array_op_fields`] reports it from the branch it took.
 fn part_is_at_list(part: &WordPart) -> bool {
     match part {
         WordPart::ArrayRef {
@@ -42778,7 +43068,6 @@ fn part_is_at_list(part: &WordPart) -> bool {
         WordPart::ArrayKeys { star, .. }
         | WordPart::VarNames { star, .. }
         | WordPart::ArraySlice { star, .. }
-        | WordPart::ArrayOp { star, .. }
         | WordPart::ArrayBulk { star, .. } => !*star,
         _ => false,
     }

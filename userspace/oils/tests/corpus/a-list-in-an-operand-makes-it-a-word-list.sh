@@ -18,6 +18,17 @@
 #   ${x:-''  X}          \177  X    — istring: the two spaces are text
 #   ${x:-"${f[@]}"  X}   \177 X     — word list: they were a delimiter
 #
+# A *nested* operand finishes its own word list before the one around it takes
+# the answer as text, so the marks collapse onto the words it actually made
+# rather than onto the fields it was built from — and the list stays the inner
+# operand's own business, which is why the outer word is an istring again:
+#
+#   ${x:-${w:-"${f[@]}"a}}   a         — the inner word is not empty
+#   ${x:-${w:-"${g[@]}"a}}   \177 a    — only the first inner word is
+#   ${x:-${w:-"${f[@]}"}a}   \177a     — the `a` is the *outer* operand's text,
+#                                       appended to a mark that is already a
+#                                       finished word
+#
 # Only a *joining* reader sees any of this: the fields are the same either way,
 # which is why a command argument cannot tell the two paths apart. And of the
 # joining readers, three do the splitting first — a `case` word, a `[[ ]]`
@@ -54,6 +65,8 @@ for q in '' '?' '??' '???'; do case ${nope:-''a"${!f[@]}"} in $q) L 'sq a keys-f
 for q in '' '?' '??' '???'; do case ${nope:-''a"${g[@]:0:1}"} in $q) L 'sq a slice-g@' "${#q}"; break;; esac; done
 for q in '' '?' '??' '???'; do case ${nope:-''a"${g[@]#x}"} in $q) L 'sq a bulk-g@' "${#q}"; break;; esac; done
 for q in '' '?' '??' '???'; do case ${nope:-${also:-"${f[@]}"}a} in $q) L 'nested' "${#q}"; break;; esac; done
+for q in '' '?' '??' '???'; do case ${nope:-${also:-"${f[@]}"a}} in $q) L 'nested inner a' "${#q}"; break;; esac; done
+for q in '' '?' '??' '???' '????'; do case ${nope:-${also:-"${g[@]}"a}} in $q) L 'nested inner g a' "${#q}"; break;; esac; done
 
 echo "### and the word splitting it brought with it"
 for q in '' '?' '??' '???' '????'; do case ${nope:-"${f[@]}"  X} in $q) L 'f@ sp sp X' "${#q}"; break;; esac; done
@@ -121,5 +134,7 @@ for q in '' '?' '??' '???' '????'; do case ${nope:-"${f[@]}":X} in $q) L 'f@ col
 for q in '' '?' '??' '???' '????'; do case ${nope:-''  X} in $q) L 'sq sp sp X' "${#q}"; break;; esac; done
 v=${nope:-"${f[@]}":X}; p 'assign f@ colon X'; b "$v"
 v=${nope:-"${f[@]}" X}; p 'assign f@ sp X';    b "$v"
+for q in '' '?' '??' '???' '????' '?????'; do case ${nope:-${also:-"${f[@]}":X}} in $q) L 'nested inner colon X' "${#q}"; break;; esac; done
+v=${nope:-${also:-"${g[@]}"a}}; p 'assign nested g a'; b "$v"
 unset IFS
 echo done

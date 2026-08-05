@@ -21441,6 +21441,21 @@ impl Shell {
                                     open = true;
                                     continue;
                                 }
+                                // And a *quoted* `[@]` inside the nested
+                                // operand finishes that operand's word list
+                                // there too: the marks collapse onto the words
+                                // it actually made, not onto the fields it was
+                                // built from. With `f=('')` and `g=('' '')`,
+                                // `${x:-${w:-"${f[@]}"a}}` is `a` — the word is
+                                // no longer empty, so it earns no mark — and
+                                // `${x:-${w:-"${g[@]}"a}}` is `\177 a`, where
+                                // laying the fields out unchanged would keep
+                                // the second mark as well.
+                                let items = if self.operand_saw_list {
+                                    Self::word_list_fields(&items, &self.ifs_chars())
+                                } else {
+                                    items
+                                };
                                 lay_out_fields(&items, &mut fields, &mut cur, &mut open);
                                 continue;
                             }

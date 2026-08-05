@@ -71,8 +71,16 @@ echo '=== the two questions about the array itself keep the single walk'
 echo '=== …which is why the unsubscripted length is the one that walks twice'
 ( eval "$cyc"; echo "[${#c1}]" )
 
+echo '=== @a and @A ask after the variable, which is two more walks on top'
+( eval "$cyc"; echo "[${c1@a}]" )
+( eval "$cyc"; echo "[${c1@A}]" )
+( eval "$cyc"; echo "[${c1[0]@a}]" )
+( eval "$cyc"; echo "[${c1[0]@A}]" )
+( eval "$cyc"; echo "[${c1[@]@a}]" )
+( eval "$cyc"; echo "[${c1[@]@A}]" )
+
 echo '=== a chain that resolves is silent, at every one of those shapes'
-( t=v; declare -n r=t; echo "[$r][${#r}][${r[0]}][${#r[0]}]" )
-( u=(p q); declare -n r=u; echo "[${r[@]}][${#r[@]}][${!r[@]}][${r[1]}]" )
+( t=v; declare -n r=t; echo "[$r][${#r}][${r[0]}][${#r[0]}][${r@a}][${r@A}]" )
+( u=(p q); declare -n r=u; echo "[${r[@]}][${#r[@]}][${!r[@]}][${r[1]}][${r[@]@a}]" )
 
 echo still here

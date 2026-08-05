@@ -13022,7 +13022,12 @@ impl Shell {
     /// field — or as no field at all when that answer is empty. See the comment
     /// on the branch below.
     fn bulk_attr_transform(&mut self, name: &str, op: char, fields: bool) -> Vec<Str> {
-        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
+        // Four walks of a nameref chain, and so four reports of a circular one:
+        // the same two the operand read costs ([@]/[*] is a subscript — see
+        // [`Self::array_elements_walks`]) plus the two that asking after the
+        // variable costs ([`Self::attr_report_target`]). One resolution answers
+        // both here, so the count is stated rather than accumulated.
+        let Some(name) = &self.resolve_ref_use_walks(name, 4).and_then(RefTarget::into_name) else {
             return Vec::new();
         };
         let positional = name == "@" || name == "*";
@@ -13978,7 +13983,13 @@ impl Shell {
         if !self.nameref_attr.contains(name) {
             return Some(name.to_string());
         }
-        let target = self.resolve_ref_use(name)?.into_name()?;
+        // Asking after the *variable* is its own pair of walks, on top of
+        // whatever the operand read already cost: bash resolves the name once to
+        // reach the variable and again to read what it is. So a circular chain
+        // is reported three times for `${c1@a}` (one for the read, two here) and
+        // four for `${c1[0]@a}`, whose read is subscripted and pays two of its
+        // own. See [`Self::resolve_ref_use_walks`].
+        let target = self.resolve_ref_use_walks(name, 2)?.into_name()?;
         // The walk stops on a reference that names nothing, answering with the
         // reference itself; that is "nowhere", not "this variable".
         (!self.nameref_attr.contains(&target)).then_some(target)
@@ -63664,6 +63675,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             assert_eq!(out.matches("circular").count(), 2, "{src} -> {out:?}");
         }
 
+        // `@a` and `@A` ask after the *variable*, which is two more walks on
+        // top of whatever the operand read cost.
+        for (src, walks) in [
+            ("echo \"[${c1@a}]\"", 3),
+            ("echo \"[${c1@A}]\"", 3),
+            ("echo \"[${c1[0]@a}]\"", 4),
+            ("echo \"[${c1[0]@A}]\"", 4),
+            ("echo \"[${c1[@]@a}]\"", 4),
+            ("echo \"[${c1[@]@A}]\"", 4),
+        ] {
+            let out = run(&format!("{{ {cyc} {src}; }} 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), walks, "{src} -> {out:?}");
+        }
+
         // None of it changes a value — the reads are all empty, and `${#…}` is
         // 0 either way.
         assert_eq!(
@@ -63679,6 +63704,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("u=(p q); declare -n r=u; { echo \"[${r[@]}][${#r[@]}][${!r[@]}]\"; } 2>&1").0,
             "[p q][2][0 1]\n",
+        );
+        assert_eq!(
+            run("t=v; declare -n r=t; { echo \"[${r@a}][${r@A}]\"; } 2>&1").0,
+            "[][t='v']\n",
         );
     }
 

@@ -24116,11 +24116,22 @@ impl Shell {
                     bad
                 } else if let Some((enable, start)) = Self::func_trace_op(args)
                     && args.get(start).is_some()
+                    && !Self::declare_wants_print(args)
                 {
+                    // …but a `p` alongside makes even this a listing: bash's
+                    // `-p` route runs before any attribute is applied, so
+                    // `declare -ftp g` prints `g` and leaves it untraced.
                     self.set_func_trace(enable, &args[start..])
                 } else if lead.contains(&b'F') || lead.contains(&b'f') {
                     // `declare -F`/`-f` operate on functions (name listing).
-                    self.declare_functions(args, lead.contains(&b'F'), out, redir)
+                    self.declare_functions(
+                        args,
+                        lead.contains(&b'F'),
+                        Self::declare_wants_print(args),
+                        name,
+                        out,
+                        redir,
+                    )
                 } else if Self::declare_wants_print(args) {
                     // Unlike `-f`/`-F`, `p` is honoured whichever sign carries
                     // it: `declare +rp` is a listing, not a declaration. The
@@ -31098,10 +31109,34 @@ impl Shell {
         status
     }
 
+    /// The `-f`/`-F` half of the declaration builtins: the function namespace.
+    ///
+    /// `name_only` is `-F` (the name, or its attribute line, instead of the
+    /// body). `print` is `-p`, which turns *every* route here into a listing —
+    /// it is what makes `declare -frp g` report `g` rather than mark it readonly
+    /// — and changes what a named listing says in three ways, all measured
+    /// against bash 5.2.37:
+    ///
+    /// ```sh
+    /// declare -F g     # g                — the bare name
+    /// declare -Fp g    # declare -f g     — the attribute line, as the nameless
+    ///                  #                    listing prints it, extdebug's
+    ///                  #                    location suffix dropped with it
+    /// declare -f g     # g () { … }       — the body alone
+    /// declare -fp g    # g () { … }       — …and the attribute line after it,
+    ///                  #                    but only if there is an attribute
+    /// declare -F nope  #                  — silent, status 1
+    /// declare -Fp nope # declare: nope: not found, status 1
+    /// ```
+    ///
+    /// `tag` is the name the command was written under, so `typeset -Fp nope`
+    /// says `typeset:`.
     fn declare_functions(
         &mut self,
         args: &[Str],
         name_only: bool,
+        print: bool,
+        tag: &str,
         out: &mut Out,
         redir: &RedirPlan,
     ) -> i32 {
@@ -31141,7 +31176,7 @@ impl Shell {
         // apply the attribute to each named function. Unlike `readonly -f` and
         // `export -f`, a nonexistent function fails *silently* — status 1 and no
         // diagnostic — matching bash's `declare` semantics.
-        if (readonly || export || unexport) && !names.is_empty() {
+        if (readonly || export || unexport) && !names.is_empty() && !print {
             let mut status = 0;
             for name in &names {
                 if self.funcs.contains_key(name.as_slice()) {
@@ -31200,12 +31235,33 @@ impl Shell {
             }
             return self.write_bytes(out, redir, &listing);
         }
-        let mut listing = Str::new();
         let mut status = 0;
+        let mut write_status = 0;
+        // Each name is answered where it is reached, rather than the answers
+        // being gathered up and written after every complaint: with the two
+        // streams merged, `declare -fp g nope h` reads `g`'s body, then the
+        // complaint, then `h`'s — the order bash's single loop gives.
         for name in names {
             let name = name.as_slice();
-            if let Some(body) = self.funcs.get(name) {
-                if name_only {
+            if !self.funcs.contains_key(name) {
+                // A name that is no function fails silently — status 1 and
+                // nothing said — which is what `declare -fr nope` does too.
+                // `-p` is what makes it worth reporting.
+                if print {
+                    self.berrln(&bfmt![self.err_prefix(), tag, b": ", name, b": not found"]);
+                }
+                status = 1;
+                continue;
+            }
+            let mut listing = Str::new();
+            let flags = self.func_attr_flags(name);
+            if name_only {
+                if print {
+                    // The attribute line the nameless listing prints, in place
+                    // of the bare name — and it is the *bare* name alone that
+                    // extdebug decorates, so the location goes with it.
+                    listing.extend_from_slice(&bfmt![b"declare ", &flags, b" ", name, b"\n"]);
+                } else {
                     listing.extend_from_slice(name);
                     // `shopt -s extdebug` is what makes `declare -F NAME` worth
                     // asking: the name is followed by where the definition was
@@ -31221,15 +31277,25 @@ impl Shell {
                         listing.extend_from_slice(&bfmt![b" ", line.to_string().as_bytes(), b" ", src.as_slice()]);
                     }
                     listing.push(b'\n');
-                } else {
-                    // `declare -f NAME` prints the function's reconstructed source.
-                    listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
                 }
             } else {
-                status = 1;
+                // `declare -f NAME` prints the function's reconstructed source.
+                if let Some(body) = self.funcs.get(name) {
+                    listing.extend_from_slice(&crate::unparse::unparse_function(name, body, self.func_redirects.get(name).map_or(&[][..], Vec::as_slice)));
+                }
+                // …and `-p` adds the attribute line after it, but only when
+                // there is an attribute to report: the body already says
+                // everything a plain function has to say, where `-F`'s line has
+                // to stand on its own whether or not it carries a letter.
+                if print && flags.len() > 2 {
+                    listing.extend_from_slice(&bfmt![b"declare ", &flags, b" ", name, b"\n"]);
+                }
+            }
+            let w = self.write_bytes(out, redir, &listing);
+            if w != 0 {
+                write_status = w;
             }
         }
-        let write_status = self.write_bytes(out, redir, &listing);
         if status != 0 { status } else { write_status }
     }
 
@@ -64669,6 +64735,71 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // silently (status 1, no diagnostic), as `declare -fr` does.
         let (out, code) = run("declare -ft nope");
         assert_eq!((out.as_str(), code), ("", 1));
+    }
+
+    /// `-p` turns every `-f`/`-F` route into a listing, and changes what a
+    /// *named* one says. osh read the `p` only on the variable side, so
+    /// `declare -Fp g` printed the bare name a plain `-F` gives, `declare -Fp
+    /// nope` was silent where bash reports it, and `declare -frp g` marked the
+    /// function readonly instead of printing it.
+    #[test]
+    fn p_makes_a_function_listing_print_the_attribute_line() {
+        let setup = "g(){ :; }; h(){ :; }; declare -ft h; export -f h;";
+        // `-F` alone is the bare name; with `-p` it is the attribute line the
+        // *nameless* listing prints, whether or not there is an attribute.
+        assert_eq!(run(&format!("{setup} declare -F g h")).0, "g\nh\n");
+        assert_eq!(
+            run(&format!("{setup} declare -Fp g h")).0,
+            "declare -f g\ndeclare -ftx h\n"
+        );
+        // Written either way round, in either sign, and past a `--`.
+        for cmd in ["declare -Fp g", "declare -pF g", "declare -F -p g", "declare -p -F g",
+                    "declare -F +p g", "declare -Fpg g", "declare -Ffp g", "declare -Fp -- g"] {
+            assert_eq!(run(&format!("{setup} {cmd}")).0, "declare -f g\n", "{cmd}");
+        }
+        // `-f` prints the body either way; `-p` adds the attribute line after
+        // it, but only for a function that has an attribute to report.
+        assert_eq!(run(&format!("{setup} declare -fp g")).0, "g () \n{ \n    :\n}\n");
+        assert_eq!(
+            run(&format!("{setup} declare -fp h")).0,
+            "h () \n{ \n    :\n}\ndeclare -ftx h\n"
+        );
+        // A name that is no function is silent without `-p` and reported with
+        // it — under the name the command was written by.
+        assert_eq!(run(&format!("{setup} declare -F nope 2>&1")), (String::new(), 1));
+        assert_eq!(run(&format!("{setup} declare -f nope 2>&1")), (String::new(), 1));
+        assert_eq!(
+            run(&format!("{setup} declare -Fp nope 2>&1")),
+            ("osh: declare: nope: not found\n".to_string(), 1)
+        );
+        assert_eq!(
+            run(&format!("{setup} typeset -fp nope 2>&1")),
+            ("osh: typeset: nope: not found\n".to_string(), 1)
+        );
+        // Each name is answered where it is reached, so the complaints fall
+        // between the listings rather than after all of them.
+        assert_eq!(
+            run(&format!("{setup} declare -Fp nope g nada h 2>&1")).0,
+            "osh: declare: nope: not found\n\
+             declare -f g\n\
+             osh: declare: nada: not found\n\
+             declare -ftx h\n"
+        );
+        // `-p` runs before any attribute would be applied, so the routes that
+        // are mutations without it are listings with it — and mark nothing.
+        for cmd in ["declare -frp g", "declare -fxp g", "declare -ftp g", "declare -Frp g"] {
+            assert_eq!(
+                run(&format!("{setup} {cmd} >/dev/null; declare -Fp g")).0,
+                "declare -f g\n",
+                "{cmd}"
+            );
+        }
+        // And extdebug decorates the bare name alone: `-p` asks for the
+        // attribute line, which has nowhere to put a location.
+        assert_eq!(
+            run("shopt -s extdebug; g(){ :; }; declare -Fp g").0,
+            "declare -f g\n"
+        );
     }
 
     #[test]

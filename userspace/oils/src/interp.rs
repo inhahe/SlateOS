@@ -23463,8 +23463,32 @@ impl Shell {
     /// reported as `$1` while `${1}` is reported as `1`. The two read alike for
     /// an identifier — only a positional or special parameter has an unbraced
     /// spelling that carries the `$` along.
+    ///
+    /// The braces decide more than the spelling for one shape: a reference
+    /// designating an array *element* or a whole array is exempt from `set -u`
+    /// **unbraced and only unbraced**. bash reads `$name` and `${name}` with two
+    /// different functions, and only the braced one asks whether the parameter
+    /// is set — `param_expand` answers an array reference out of its own branch,
+    /// with the empty string, and never reaches the check. Measured with
+    /// `n=(a b c)`, `set -u` and `declare -n V='n[9]'`:
+    ///
+    /// ```text
+    /// echo "$V"                       nothing, status 0
+    /// for x in $V; do …; done         nothing, status 0
+    /// echo "${V}"                     V: unbound variable
+    /// echo "${V#a}" / "${V^^}" / …    V: unbound variable
+    /// ```
+    ///
+    /// What the base names does not come into it: an unset base
+    /// (`declare -n Q='nosuch[0]'`) and a circular one are exempt too. What
+    /// matters is only that the reference resolves to a subscripted target at
+    /// all, which is why a chain that ends on a plain name (`declare -n E=nosuch`)
+    /// still faults.
     fn note_unbound_spelled(&mut self, name: &str, braced: bool) {
         if !self.unbound_is_error(name) {
+            return;
+        }
+        if !braced && self.nameref_elem_target(name).is_some() {
             return;
         }
         if braced || lexer::is_valid_name(name.as_bytes()) {

@@ -13530,6 +13530,9 @@ impl Shell {
         };
         match index {
             None => {
+                if self.refuse_readonly_store(name) {
+                    return false;
+                }
                 self.put_var(name.to_string(), value);
             }
             Some(w) => {
@@ -13549,6 +13552,9 @@ impl Shell {
                         ]);
                         return false;
                     }
+                    if self.refuse_readonly_store(name) {
+                        return false;
+                    }
                     self.assoc_set(name, key, value, false);
                 } else {
                     let idx = self.eval_arith_index(w);
@@ -13563,10 +13569,35 @@ impl Shell {
                     let Some(real) = Self::resolve_index(idx, bound) else {
                         return false;
                     };
+                    if self.refuse_readonly_store(name) {
+                        return false;
+                    }
                     self.arrays.entry(name.to_string()).or_default().insert(real, value);
                 }
             }
         }
+        true
+    }
+
+    /// The readonly guard [`Self::assign_elem`] puts in front of each of its
+    /// three stores. Returns `true` — with the complaint already made — when the
+    /// write must not happen.
+    ///
+    /// It sits *after* the subscript has been judged, which is measurable: a
+    /// readonly array given an out-of-range index reports the bad subscript and
+    /// says nothing about the readonly. It sits after the default word has been
+    /// expanded too, so that word's side effects have already happened by the
+    /// time the refusal is printed.
+    ///
+    /// The name blamed is the one the write resolved *to*, not the one the
+    /// writer wrote: `readonly t; declare -n r=t; ${r:=v}` reports `t`. That is
+    /// the opposite of the convention a subscripted target uses elsewhere (see
+    /// [`Self::set_scalar_target_checked`]), and it is what bash does here.
+    fn refuse_readonly_store(&mut self, name: &str) -> bool {
+        if !self.readonly.contains(name) {
+            return false;
+        }
+        self.perrln(&format!("{name}: readonly variable"));
         true
     }
 
@@ -22018,12 +22049,23 @@ impl Shell {
                         self.arm_discard(1);
                         return SplitItems::List(Vec::new());
                     }
-                    // The default has to go somewhere, so a subscript that names
-                    // nowhere makes the expansion itself impossible: the
-                    // complaint is already given, and the command is discarded
-                    // the way a division by zero is.
+                    // The default has to go somewhere, so a destination that
+                    // will not take it makes the expansion itself impossible:
+                    // the complaint is already given, and the command is
+                    // discarded the way a division by zero is.
+                    //
+                    // With status **2**, which is where the seam in this arm
+                    // lies. The three refusals above are the *expansion*
+                    // refusing to name a destination at all, and they discard
+                    // with 1 like any other bad expansion. Once a destination
+                    // has been named, a refusal is the *store* failing — a
+                    // readonly variable, a subscript that names nowhere, a chain
+                    // that leads nowhere — and bash rates that 2, the same as it
+                    // rates a failed assignment word. (A plain `q=v` to a
+                    // readonly is 1; it is the assignment happening inside an
+                    // expansion that costs the extra.)
                     if !self.assign_elem(name, index, v.clone()) {
-                        self.arm_discard(1);
+                        self.arm_discard(2);
                         return SplitItems::List(Vec::new());
                     }
                     SplitItems::List(vec![v])
@@ -63816,6 +63858,76 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
     }
 
+    /// `${name:=word}` is an assignment wearing an expansion's clothes, and the
+    /// two halves fail differently: an expansion that cannot name a destination
+    /// discards with 1, while a *store* that refuses one discards with 2 — the
+    /// same 2 bash rates any assignment that fails mid-expansion, where a plain
+    /// `q=v` to the same readonly is only worth 1.
+    #[test]
+    fn an_assign_default_that_cannot_store_refuses_and_abandons_with_status_2() {
+        // The expansion never gets as far as a destination: an ordinary bad
+        // expansion, worth 1.
+        for src in ["${1:=v}", "${@:=v}", "${*:=v}"] {
+            let (out, st) = run(&format!("echo \"[{src}]\"; echo not-reached"));
+            assert_eq!(st, 1, "{src} -> {out:?}");
+            assert!(!out.contains("not-reached"), "{src} -> {out:?}");
+        }
+        assert_eq!(run("unset z; echo \"[${!z:=v}]\"").1, 1);
+        assert_eq!(run("z=\"b c\"; echo \"[${!z:=v}]\"").1, 1);
+
+        // A destination was named and the store refused it: worth 2.
+        for src in [
+            "readonly q; echo \"[${q:=v}]\"",
+            "readonly q; echo \"[${q=v}]\"",
+            "readonly q=\"\"; echo \"[${q:=v}]\"",
+            "declare -ra w=(1); echo \"[${w[3]:=v}]\"",
+            "declare -rA m=([k]=1); echo \"[${m[j]:=v}]\"",
+            "readonly t; declare -n r=t; echo \"[${r:=v}]\"",
+            "a=(1 2); echo \"[${a[-9]:=v}]\"",
+            "q=(1 2); declare -n e=q[0]; echo \"[${e[0]:=v}]\"",
+        ] {
+            let (out, st) = run(&format!("{{ {src}; echo not-reached; }} 2>&1"));
+            assert_eq!(st, 2, "{src} -> {out:?}");
+            assert!(!out.contains("not-reached"), "{src} -> {out:?}");
+        }
+
+        // The readonly is blamed by the name the write resolved *to*, and only
+        // when the write actually had to happen.
+        assert_eq!(
+            run("readonly t; declare -n r=t; { echo \"[${r:=v}]\"; } 2>&1").0,
+            "osh: t: readonly variable\n",
+        );
+        for (src, want) in [
+            ("readonly q=1; echo \"[${q:=v}]\"", "[1]"),
+            ("declare -ra w=(1 2); echo \"[${w[1]:=v}]\"", "[2]"),
+            ("declare -rA m=([k]=1); echo \"[${m[k]:=v}]\"", "[1]"),
+        ] {
+            let (out, st) = run(&format!("{{ {src}; echo reached; }} 2>&1"));
+            assert_eq!((out.as_str(), st), (&*format!("{want}\nreached\n"), 0), "{src}");
+        }
+
+        // The subscript is judged first, so a readonly array given a bad one
+        // never mentions the readonly at all.
+        assert_eq!(
+            run("declare -ra w=(1 2); { echo \"[${w[-9]:=v}]\"; } 2>&1").0,
+            "osh: w: bad array subscript\nosh: w[-9]: bad array subscript\n",
+        );
+        // And the default word has already had its say by then.
+        assert_eq!(
+            run("readonly q; { echo \"[${q:=$(echo SIDE >&2)}]\"; } 2>&1").0,
+            "SIDE\nosh: q: readonly variable\n",
+        );
+
+        // A plain assignment to the same readonly is only worth 1 — the extra is
+        // the cost of assigning inside an expansion — and the write builtins
+        // report it without abandoning anything.
+        assert_eq!(run("readonly q=1; q=2; echo not-reached").1, 1);
+        assert_eq!(
+            run("readonly q; { printf -v q x; echo \"rc=$?\"; echo reached; } 2>&1").0,
+            "osh: q: readonly variable\nrc=1\nreached\n",
+        );
+    }
+
     /// `+n` names two variables at once: the reference, for its own letter, and
     /// the target it leads to, for everything else the operand asks for.
     #[test]
@@ -67664,10 +67776,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
         // `${a[i]:=v}` has nowhere to put the default, so the expansion cannot
         // be completed at all: the read reports it first, then the write, and
-        // the command is discarded.
+        // the command is discarded — with status 2, because a destination *was*
+        // named and it is the store that refused it. See
+        // [`an_assign_default_that_cannot_store_refuses_and_abandons_with_status_2`].
         let (o, s) = run("a=(x); { echo [${a[-5]:=v}]; } 2>&1; echo AFTER");
         assert_eq!(o, "osh: a: bad array subscript\nosh: a[-5]: bad array subscript\n");
-        assert_eq!(s, 1);
+        assert_eq!(s, 2);
     }
 
     #[test]

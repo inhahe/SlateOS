@@ -35774,38 +35774,76 @@ then ran out, which osh had been dropping altogether: `[[ ( -n x ` says
 **Pinned by** `tests/corpus/a-conditional-group-adds-the-paren-it-never-reached.sh`.
 
 
-### TD-OILS-ARITH-COMMAND-CLOSES-ACROSS-A-CONTINUATION — 2026-08-05
+### TD-OILS-AN-ARITHMETIC-COMMAND-NEEDS-ITS-CLOSERS-ADJACENT — 2026-08-05
 
-**Where:** `userspace/oils/src/lexer.rs`, `Lexer::read_arith` — the `eat_conts`
-before the second `)` is peeked at.
+*(was TD-OILS-ARITH-COMMAND-CLOSES-ACROSS-A-CONTINUATION, which described only
+the continuation case; measuring the rest showed the rule is much broader and
+one of its consequences is a behavioural, not cosmetic, divergence.)*
 
-**What.** bash treats the two `)` that close an *arithmetic command* as having
-to be literally adjacent, even though a line continuation is deleted everywhere
-else in the same construct. osh accepts the split:
+**Where:** `userspace/oils/src/lexer.rs`, `Lexer::read_arith` — the peek for the
+second `)`, and the fact that failing it has no way to back out.
+
+**What.** `(( … ))` is an arithmetic command **only when the two closing
+parentheses are literally adjacent**. Anything at all between them — a space, a
+tab, a newline, a deleted line continuation — and bash re-reads the whole thing
+as *nested subshells* `( ( … ) )`. osh instead scans on and fails:
 
 ```text
-((1+1)\<nl>)  && echo hit    bash: line 2: syntax error near unexpected token `'
-                                   line 2: `) && echo hit'
-                             osh:  hit
-
-echo $((1+1)\<nl>)           bash: 2    osh: 2     (the *expansion* does allow it)
-((1 +\<nl>1)) && echo hit    bash: hit  osh: hit   (so does the body)
-(\<nl>( 1+1 )) && echo hit   bash: hit  osh: hit   (and the opening pair)
+((echo hi) )              bash: hi                    osh: syntax error: malformed …
+((a=1) ); echo "a=$a"     bash: a=                    osh: syntax error: malformed …
+((1+1) )                  bash: 1+1: command not found osh: syntax error: malformed …
+((1+1)  )                 same                        same
+((1+1)<tab>)              same                        same
+(( 1+1 ) )                same                        same
+(( ) )                    bash: syntax error near unexpected token `)'
+                                and echoes `( ) '     osh: syntax error: malformed …
+((1+1)<nl>)               bash: syntax error near `((1+1)'
+                                and echoes `((1+1)'   osh: syntax error: malformed …
+((1+1)\<nl>) && echo hit  bash: line 2: syntax error near unexpected token `'
+                                line 2: `) && echo hit'
+                          osh:  hit
 ```
 
-**Why.** bash reads the body with `parse_matched_pair`, which passes
-`remove_quoted_newline` on — hence the body and the opening `((`. But
-`parse_dparen` then checks for the second `)` with its own read, which does not
-remove, so the pair must be adjacent. `$(( … ))` goes through the substitution
-path instead and keeps removing throughout. osh has one `read_arith` shared by
-both callers, and it eats continuations before the closing peek for both.
+The first two rows are the serious ones: bash *runs* `echo hi` and *runs* an
+assignment confined to a subshell, where osh raises a syntax error. The `(( ) )`
+row is bash's fallback landing on an empty subshell, which is itself a syntax
+error — a different message from the one osh gives, at a different place.
 
-**The proper fix** is to give `read_arith` the caller's rule — the `$((`
-expansion closes across continuations, the `((` command does not — and then to
-match bash's *diagnostic* for the rejected form, which is the ordinary
-`syntax error near unexpected token` reported on the line the second `)` ended
-up on, not the `malformed arithmetic expansion` osh reaches today by scanning on.
+Everything adjacent already agrees, including every other place a continuation
+may be split, and the whole `$(( … ))` expansion family:
 
-**Impact.** osh accepts input bash rejects; no silent wrong output (osh computes
-what the author plainly meant). Confined to `(( … ))` written with the closing
-parentheses split across lines.
+```text
+((1 +\<nl>1)) && echo hit   bash: hit  osh: hit   (the body)
+(\<nl>( 1+1 )) && echo hit  bash: hit  osh: hit   (the opening pair)
+((1+1))\<nl> && echo hit    bash: hit  osh: hit   (after the closers)
+echo $((1+1)\<nl>)          bash: 2    osh: 2
+echo $((1+1) )              bash: 1+1: command not found — and so does osh
+echo $((1+1)<nl>)           bash: line 2: 1+1: command not found — and so does osh
+```
+
+**Why.** bash reads the body with `parse_matched_pair`, which has
+`remove_quoted_newline` on — hence the body and the opening `((` tolerate
+splits. `parse_dparen` then tests for the second `)` with its own read, which
+does not remove, so only an adjacent one counts; on failing it *rewinds* the
+input and lets the ordinary grammar see `(` `(` … `)` `)`. `$(( … ))` reaches
+the substitution path, which never needs the test, which is why the expansion
+column agrees throughout.
+
+The continuation row is the one place bash's rewind is visibly imperfect: the
+reader has already deleted the `\<newline>`, and rewinding cannot put it back, so
+the re-parse desynchronises and reports `unexpected token `'` — with an *empty*
+token name — on the line the second `)` ended up on.
+
+**The proper fix** is to give `read_arith` the caller's rule and a way to fail
+that is not an error: for the `((` command form, require the second `)` to be
+the very next character, and when it is not, back the lexer out and re-lex from
+the first `(` as an ordinary subshell so the grammar builds `( ( … ) )`. The
+`$((` expansion keeps today's behaviour unchanged. Matching bash's three
+*diagnostics* for the shapes that then fail to parse (empty subshell, newline,
+continuation) is the smaller, separable half — the behavioural rows above are
+what matters.
+
+**Impact.** osh rejects input bash runs, and the rejected input is not exotic:
+`(( … ) )` with one stray space is a plausible typo whose bash meaning is
+"nested subshells", not "arithmetic". Two of the eight shapes change what
+executes; the rest change only the message.

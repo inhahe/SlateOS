@@ -36036,17 +36036,23 @@ impl Shell {
                 (!sub.is_empty()).then_some((base, sub))
             });
             if let Some((base, sub_src)) = subscript {
+                // A circular chain names nothing for the subscript to apply to,
+                // so bash gives up on the element and unsets the *reference*
+                // whole — and never reads the subscript at all, which is
+                // measurable: `unset 'c1[x y]'` through a cycle is silent about
+                // the arithmetic that would otherwise be a syntax error, and
+                // `unset 'c1[@]'` does not complain that `c1` is no array.
+                let Some(target) = self.resolve_ref_use_walks(base, 2) else {
+                    if !self.unset_resolved_name(base, vars_only) {
+                        status = 1;
+                    }
+                    continue;
+                };
                 // A reference already designating an element leaves this
                 // subscript nothing to apply to, so it names no array to remove
                 // from: the removal finds nothing, which is what the lookup
                 // through the target's spelling answered before it was split.
-                // A circular chain stands in for its own name, and finds
-                // nothing either.
-                let name = self.resolve_ref_use(base).map_or_else(
-                    || Some(base.to_string()),
-                    RefTarget::into_name,
-                );
-                if let Some(name) = name
+                if let Some(name) = target.into_name()
                     && self.unset_element(&name, sub_src)
                 {
                     continue;
@@ -36072,7 +36078,11 @@ impl Shell {
             // (bash semantics); resolve the target name first. A circular chain
             // points nowhere, so bash reports it and unsets the *reference*,
             // leaving the rest of the cycle in place.
-            let target = self.resolve_ref_use(a);
+            //
+            // Twice, because `unset` looks the name up to find out what it is
+            // unsetting and again to unset it — the once-per-walk model of
+            // `known-issues.md`'s TD-OILS-NAMEREF-WARNING-COUNT.
+            let target = self.resolve_ref_use_walks(a, 2);
             // A reference designating one *element* names no variable at all,
             // so what it unsets is that element: `declare -n r=arr[0]; unset r`
             // removes `arr[0]`. The subscript travels as the bytes the
@@ -36086,55 +36096,67 @@ impl Shell {
                 continue;
             }
             let a = &target.and_then(RefTarget::into_name).unwrap_or_else(|| a.to_string());
-            // A readonly variable cannot be unset.
-            if self.readonly.contains(a) {
-                self.perrln(&format!("unset: {a}: cannot unset: readonly variable"));
+            if !self.unset_resolved_name(a, vars_only) {
                 status = 1;
-                continue;
             }
-            // Nor can one of the four the shell can never do without
-            // ([`NOUNSET_VARS`]). This is a plain failure, not the parse-unit
-            // abort a *failed assignment* to the same name would be.
-            if NOUNSET_VARS.contains(&a.as_str()) {
-                self.perrln(&format!("unset: {a}: cannot unset"));
-                status = 1;
-                continue;
-            }
-            // A name declared without a value is still a variable, and so still
-            // takes precedence over a function of the same name: `declare f;
-            // unset f` removes the (unset) variable and leaves `f()` callable.
-            //
-            // So is one the shell maintains: `FUNCNAME` holds no value outside a
-            // function, but `unset FUNCNAME` still means the *variable* — it
-            // sheds the attribute (see [`Shell::unbind_var`]) rather than
-            // looking for a function by that name.
-            //
-            // And so is one the shell answers with a *value function*
-            // ([`Shell::DYNAMIC_SPECIALS`]): `$SECONDS` is computed rather than
-            // stored, but it is still a variable, and `unset SECONDS` drops the
-            // value function with it rather than looking for a function.
-            let is_var = self.vars.contains_key(a)
-                || self.arrays.contains_key(a)
-                || self.assoc.contains_key(a)
-                || self.declared.contains(a)
-                || self.noassign.contains(a)
-                || self.dynamic_special(a).is_some();
-            if !vars_only && !is_var {
-                // Not a set variable: fall back to unsetting a function.
-                if self.readonly_funcs.contains(a.as_bytes()) {
-                    self.perrln(&format!("unset: {a}: cannot unset: readonly function"));
-                    status = 1;
-                    continue;
-                }
-                self.funcs.remove(a.as_bytes());
-                self.func_sources.remove(a.as_bytes());
-                self.func_lines.remove(a.as_bytes());
-                self.fn_trace_attr.remove(a.as_bytes());
-                continue;
-            }
-            self.unbind_var(a);
         }
         status
+    }
+
+    /// The whole of what `unset` does once an operand has been resolved to a
+    /// plain variable name: the two refusals, the fall-back to the function
+    /// namespace, and the removal itself. Returns `false` — with the complaint
+    /// already made — when the operand fails.
+    ///
+    /// Two paths reach it. The ordinary one is an unsubscripted operand; the
+    /// other is a *subscripted* operand whose base is a circular nameref, which
+    /// bash gives up subscripting and unsets whole (see [`Self::builtin_unset`]).
+    fn unset_resolved_name(&mut self, a: &str, vars_only: bool) -> bool {
+        // A readonly variable cannot be unset.
+        if self.readonly.contains(a) {
+            self.perrln(&format!("unset: {a}: cannot unset: readonly variable"));
+            return false;
+        }
+        // Nor can one of the four the shell can never do without
+        // ([`NOUNSET_VARS`]). This is a plain failure, not the parse-unit
+        // abort a *failed assignment* to the same name would be.
+        if NOUNSET_VARS.contains(&a) {
+            self.perrln(&format!("unset: {a}: cannot unset"));
+            return false;
+        }
+        // A name declared without a value is still a variable, and so still
+        // takes precedence over a function of the same name: `declare f;
+        // unset f` removes the (unset) variable and leaves `f()` callable.
+        //
+        // So is one the shell maintains: `FUNCNAME` holds no value outside a
+        // function, but `unset FUNCNAME` still means the *variable* — it
+        // sheds the attribute (see [`Shell::unbind_var`]) rather than
+        // looking for a function by that name.
+        //
+        // And so is one the shell answers with a *value function*
+        // ([`Shell::DYNAMIC_SPECIALS`]): `$SECONDS` is computed rather than
+        // stored, but it is still a variable, and `unset SECONDS` drops the
+        // value function with it rather than looking for a function.
+        let is_var = self.vars.contains_key(a)
+            || self.arrays.contains_key(a)
+            || self.assoc.contains_key(a)
+            || self.declared.contains(a)
+            || self.noassign.contains(a)
+            || self.dynamic_special(a).is_some();
+        if !vars_only && !is_var {
+            // Not a set variable: fall back to unsetting a function.
+            if self.readonly_funcs.contains(a.as_bytes()) {
+                self.perrln(&format!("unset: {a}: cannot unset: readonly function"));
+                return false;
+            }
+            self.funcs.remove(a.as_bytes());
+            self.func_sources.remove(a.as_bytes());
+            self.func_lines.remove(a.as_bytes());
+            self.fn_trace_attr.remove(a.as_bytes());
+            return true;
+        }
+        self.unbind_var(a);
+        true
     }
 
     /// Remove every binding a name has — scalar, indexed array, associative
@@ -64118,6 +64140,64 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // An existing array keeps its own bound, scalar rule or no.
         assert_eq!(run("a=(x y); a[-1]=w; declare -p a").0, "declare -a a=([0]=\"x\" [1]=\"w\")\n");
+    }
+
+    /// `unset` looks a nameref operand up twice, so a circular chain is reported
+    /// twice and the reference itself is what goes — and a *subscripted* operand
+    /// through the same cycle gives up on the element and removes the reference
+    /// whole, without ever reading the subscript.
+    #[test]
+    fn unset_through_a_circular_nameref_gives_up_the_subscript_and_removes_the_reference() {
+        let cyc = "declare -n c1=c2; declare -n c2=c1";
+        let w = "osh: warning: c1: circular name reference\n";
+        // Whatever the subscript says — including a word that is no arithmetic
+        // at all, which proves it is never evaluated.
+        for src in [
+            "unset c1",
+            "unset -v c1",
+            "unset 'c1[0]'",
+            "unset 'c1[5]'",
+            "unset 'c1[-1]'",
+            "unset 'c1[@]'",
+            "unset 'c1[*]'",
+            "unset 'c1[k]'",
+            "unset 'c1[x y]'",
+        ] {
+            assert_eq!(
+                run(&format!("{cyc}; {{ {src}; echo \"rc=$?\"; }} 2>&1; declare -p c2; echo \"[${{c1+set}}]\"")).0,
+                format!("{}{}rc=0\ndeclare -n c2=\"c1\"\n[]\n", w, w),
+                "{src}"
+            );
+        }
+        // …which is not what those subscripts earn on an ordinary scalar.
+        assert_eq!(
+            run("t=v; { unset 't[5]'; echo \"rc=$?\"; } 2>&1; declare -p t").0,
+            "osh: unset: t: not an array variable\nrc=1\ndeclare -- t=\"v\"\n"
+        );
+        assert_eq!(
+            run("t=v; { unset 't[@]'; echo \"rc=$?\"; } 2>&1; declare -p t").0,
+            "osh: unset: t: not an array variable\nrc=1\ndeclare -- t=\"v\"\n"
+        );
+        // `-n` asks nothing of the chain and says nothing.
+        assert_eq!(
+            run(&format!("{cyc}; {{ unset -n c1; echo \"rc=$?\"; }} 2>&1; declare -p c2")).0,
+            "rc=0\ndeclare -n c2=\"c1\"\n"
+        );
+        // A longer cycle is no different: only the operand's own binding goes.
+        assert_eq!(
+            run("declare -n a1=a2; declare -n a2=a3; declare -n a3=a1; unset a1 2>/dev/null; declare -p a2 a3").0,
+            "declare -n a2=\"a3\"\ndeclare -n a3=\"a1\"\n"
+        );
+        // A chain that resolves keeps the reference and spends the removal at
+        // the far end.
+        assert_eq!(
+            run("w=5; declare -n r=w; unset r; declare -p r; echo \"[${w+set}]\"").0,
+            "declare -n r=\"w\"\n[]\n"
+        );
+        assert_eq!(
+            run("w=(a b); declare -n r=w; unset 'r[0]'; declare -p r w").0,
+            "declare -n r=\"w\"\ndeclare -a w=([1]=\"b\")\n"
+        );
     }
 
     /// `export`/`readonly` look a nameref operand up once to find it, once to

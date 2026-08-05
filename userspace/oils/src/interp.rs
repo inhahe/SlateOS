@@ -18961,9 +18961,9 @@ impl Shell {
         } else {
             (true, true)
         };
-        let saved = self.bad_sub_word.replace(crate::unparse::word_src(w));
+        let saved = self.begin_word(w);
         let fields = self.expand_word_fields(w, split, glob);
-        self.bad_sub_word = saved;
+        self.end_word(saved);
         fields
     }
 
@@ -20002,9 +20002,9 @@ impl Shell {
     /// (`${y:-${x@Z}}`) is expanded by a recursive call, so the innermost word
     /// in flight wins, exactly as bash's recursive `expand_word_internal` does.
     fn expand_word(&mut self, word: &Word, split: bool) -> Vec<Str> {
-        let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
+        let saved = self.begin_word(word);
         let fields = self.expand_word_inner(word, split);
-        self.bad_sub_word = saved;
+        self.end_word(saved);
         fields
     }
 
@@ -20889,9 +20889,9 @@ impl Shell {
     /// [`keep_marks`] for what stands in its place.
     fn expand_case_pattern(&mut self, word: &Word) -> Vec<EChar> {
         let saved_cond = std::mem::replace(&mut self.cond_word, true);
-        let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
+        let saved = self.begin_word(word);
         let out = self.expand_word_pattern_inner(word);
-        self.bad_sub_word = saved;
+        self.end_word(saved);
         self.cond_word = saved_cond;
         keep_marks(out)
     }
@@ -20901,9 +20901,9 @@ impl Shell {
     /// what the match reads, so they come back decoded.
     fn expand_case_subject(&mut self, word: &Word) -> Vec<Ch> {
         let saved_cond = std::mem::replace(&mut self.cond_word, true);
-        let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
+        let saved = self.begin_word(word);
         let fields = self.expand_word_joined_annotated(word);
-        self.bad_sub_word = saved;
+        self.end_word(saved);
         self.cond_word = saved_cond;
         keep_marks(fields.concat())
             .into_iter()
@@ -20918,9 +20918,9 @@ impl Shell {
     /// literal text is scanned for colon-delimited tilde positions; a `:`
     /// produced by a parameter/command expansion does not create one.
     fn expand_assignment_value(&mut self, word: &Word) -> Str {
-        let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
+        let saved = self.begin_word(word);
         let out = self.expand_assignment_value_inner(word);
-        self.bad_sub_word = saved;
+        self.end_word(saved);
         out
     }
 
@@ -21043,9 +21043,9 @@ impl Shell {
     /// rules mirror `expand_word_annotated`: unquoted `Literal` and dynamic
     /// expansions are live; single/double-quoted runs are literal.
     fn expand_word_pattern(&mut self, word: &Word) -> Vec<EChar> {
-        let saved = self.bad_sub_word.replace(crate::unparse::word_src(word));
+        let saved = self.begin_word(word);
         let buf = self.expand_word_pattern_inner(word);
-        self.bad_sub_word = saved;
+        self.end_word(saved);
         // A pattern is reached through quote removal, so the marks an operand
         // put in it stop here: `${w#${x:-''a''}}` strips the one-character
         // pattern `a`. Every pattern but a `case` arm's — see
@@ -21071,14 +21071,14 @@ impl Shell {
         } else {
             SplitMode::Operand
         };
-        let saved = self.bad_sub_word.replace(crate::unparse::word_src(arg));
+        let saved = self.begin_word(arg);
         // Scoped to this operand, and reported to whoever joins its fields:
         // a list inside a *nested* operand is that operand's own business, and
         // this restore is what keeps it there. See [`Shell::saw_quoted_list`].
         let outer = std::mem::replace(&mut self.saw_quoted_list, false);
         let fields = self.expand_word_annotated(arg, mode);
         self.operand_saw_list = std::mem::replace(&mut self.saw_quoted_list, outer);
-        self.bad_sub_word = saved;
+        self.end_word(saved);
         fields
     }
 
@@ -21665,6 +21665,38 @@ impl Shell {
         let (named, outer) = saved;
         self.bad_sub_word = named;
         self.quoted_outer_word = outer;
+    }
+
+    /// Begin expanding `w`: name it, and deliver the verdict bash's word
+    /// *scanner* reached before expansion started.
+    ///
+    /// Those are the same fact seen twice. The word is what a word-level
+    /// diagnostic names (see [`Shell::bad_sub_word`]) precisely because bash
+    /// has just finished scanning it as a unit — and that scan already decided
+    /// one thing osh must reproduce: whether a comment inside a `$(( … ))`
+    /// swallowed the closing `))`
+    /// ([`WordPart::first_scanned_arith`]). Answering it here rather than when
+    /// the arithmetic is evaluated is what makes
+    /// `x=5; echo "${x:-$(( #5 ))}"` complain about a branch it never takes,
+    /// and what stops `echo "$(touch f)$(( #5 ))"` from running the `touch`.
+    ///
+    /// Pass the returned value back to [`Shell::end_word`].
+    fn begin_word(&mut self, w: &Word) -> Option<Str> {
+        let saved = self.bad_sub_word.replace(crate::unparse::word_src(w));
+        if let Some(expr) = w
+            .parts
+            .iter()
+            .find_map(|p| p.first_scanned_arith(&mut Self::arith_comment_hides_closer))
+            .cloned()
+        {
+            self.arith_unclosed_by_comment(&expr);
+        }
+        saved
+    }
+
+    /// Undo [`Shell::begin_word`].
+    fn end_word(&mut self, saved: Option<Str>) {
+        self.bad_sub_word = saved;
     }
 
     /// The non-fatal (DISCARD-class) "bad substitution" — see
@@ -50655,6 +50687,52 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A `${ … }` is not a quote and does not protect it.
         let (o2, _) = run("{ echo $(( ${x # b} )); } 2>&1");
         assert!(o2.contains("no closing"), "{o2:?}");
+    }
+
+    #[test]
+    fn the_closer_is_checked_when_the_word_is_scanned_not_when_it_is_evaluated() {
+        // bash reaches this verdict while *scanning* the word, before any part
+        // of it is expanded, so a `$(( … ))` in a branch that is never taken
+        // still reports — and the word named is the whole word.
+        let (o, _) = run("{ x=5; echo \"${x:-$(( #5 ))}\"; } 2>&1");
+        assert_eq!(
+            o,
+            "osh: bad substitution: no closing `)' in \"${x:-$(( #5 ))}\"\n"
+        );
+        // Every operand, pattern, subscript and slice bound of a `${ … }` is
+        // scanned, not just the ones the expansion goes on to use.
+        for src in [
+            "x=5; echo \"${x/a/$(( #5 ))}\"",
+            "a=(1 2); echo \"${a[$(( #5 ))]}\"",
+            "x=abc; echo \"${x:1:$(( #5 ))}\"",
+            "x=abc; echo \"${x#$(( #5 ))}\"",
+            "x=abc; echo \"${x^^$(( #5 ))}\"",
+            "a=(1 2); echo \"${a[@]:$(( #5 ))}\"",
+            "a=(1 2); echo \"${a[@]#$(( #5 ))}\"",
+            "x=5; echo \"${x:?$(( #5 ))}\"",
+        ] {
+            let (o, _) = run(&format!("{{ {src}; }} 2>&1"));
+            assert!(o.contains("no closing"), "{src} reported {o:?}");
+        }
+        // Scanning happens before expansion, so nothing in the word runs. The
+        // check is the line *count*, not the absence of "ran": the diagnostic
+        // names the word, and the word says `echo ran`.
+        let (o2, _) = run("{ echo \"$(echo ran >&2)$(( #5 ))\"; } 2>&1");
+        assert!(o2.contains("no closing"), "{o2:?}");
+        assert_eq!(o2.lines().count(), 1, "the substitution ran: {o2:?}");
+        // A word that is never reached is never scanned either, so the
+        // short-circuit case agrees for the opposite reason.
+        let (o3, st3) = run("false && echo $(( #5 ))");
+        assert_eq!(o3, "");
+        assert_eq!(st3, 1);
+        // A `$( … )` body is the substitution's own business: the complaint
+        // comes from expanding *its* words, names just the inner word, and
+        // leaves the outer command's status alone.
+        let (o4, _) = run("{ echo \"$( echo $(( #5 )) )\"; echo rc=$?; } 2>&1");
+        assert_eq!(
+            o4,
+            "osh: bad substitution: no closing `)' in $(( #5 ))\n\nrc=0\n"
+        );
     }
 
     #[test]

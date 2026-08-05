@@ -23,6 +23,29 @@ echo '--- nesting reports the outermost word, once'
 echo $(( 1 + $(( 2 # x )) ))
 echo "rc=$?"
 
+echo '--- the verdict is reached while the word is *scanned*, before expansion'
+echo "${x:-$(( #5 ))}"
+echo "rc=$?"
+echo "${x/a/$(( #5 ))}"
+echo "rc=$?"
+a=(1 2)
+echo "${a[$(( #5 ))]}"
+echo "rc=$?"
+echo "${x:1:$(( #5 ))}"
+echo "rc=$?"
+
+echo '--- so nothing in the word gets to run first'
+echo "$(echo ran)$(( #5 ))"
+echo "rc=$?"
+
+echo '--- and a word never reached is never scanned, so this reports nowhere'
+false && echo $(( #5 ))
+echo "rc=$?"
+
+echo '--- a $( ) body is its own business: it reports, the outer word does not'
+echo "$( echo $(( #5 )) )"
+echo "rc=$?"
+
 echo '--- body index 0 is preceded by the `(`, so this is arithmetic'
 echo $((#5))
 echo "rc=$?"

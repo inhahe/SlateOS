@@ -722,6 +722,147 @@ pub enum WordPart {
 }
 
 impl WordPart {
+    /// The first `$(( … ))` body bash's *word scanner* would reach in this
+    /// part, among those `hides_closer` accepts.
+    ///
+    /// bash decides some things about a word before expanding any of it, by
+    /// scanning the source text left to right. The one such decision osh needs
+    /// is whether a comment inside a `$(( … ))` has swallowed the closing `))`
+    /// — see `Shell::arith_comment_hides_closer`. It has to be answered up
+    /// front because bash answers it up front: `x=5; echo "${x:-$(( #5 ))}"`
+    /// complains even though the `:-` branch is never taken.
+    ///
+    /// "Would reach" is the whole content of this function, and it is not the
+    /// same as "contains":
+    ///
+    /// * A `$( … )` body is **not** reached. Its text is the command
+    ///   substitution's own problem, raised when that command's words are
+    ///   expanded — which is why `${x:-$( echo $(( #5 )) )}` names the inner
+    ///   `$(( #5 ))` and not the outer word.
+    /// * A `<( … )` / `>( … )` body is not reached either, and for the same
+    ///   reason: the report comes from the child, after the `/dev/fd/N` has
+    ///   already been printed.
+    /// * Everything else is, including every operand, pattern, replacement,
+    ///   subscript and slice bound of a `${ … }`, and the contents of a
+    ///   double-quoted run.
+    ///
+    /// The match below is deliberately **exhaustive** — no `_ =>` arm. A new
+    /// [`WordPart`] variant that can hold a [`Word`] must then be considered
+    /// here rather than silently skipped, because a miss is invisible: the
+    /// shell simply fails to report something bash reports.
+    ///
+    /// Two known under-reports, both inside `${ … }`, where bash's scan is raw
+    /// text rather than structure and so ignores quoting: `${x:-'$(( #5 ))'}`
+    /// and `${x:-<(echo $(( #5 )))}`. Matching them would mean re-scanning raw
+    /// source, which can false-positive on a *valid* word; under-reporting
+    /// cannot. See `TD-OILS-THE-BRACE-INTERIOR-IS-SCANNED-AS-TEXT` in
+    /// `known-issues.md`.
+    pub fn first_scanned_arith<'a>(
+        &'a self,
+        hides_closer: &mut dyn FnMut(&'a [u8]) -> bool,
+    ) -> Option<&'a Str> {
+        // Helpers, so each arm below is a list of its own sub-words.
+        fn in_word<'a>(
+            w: &'a Word,
+            f: &mut dyn FnMut(&'a [u8]) -> bool,
+        ) -> Option<&'a Str> {
+            w.parts.iter().find_map(|p| p.first_scanned_arith(f))
+        }
+        fn in_opt<'a>(
+            w: &'a Option<Box<Word>>,
+            f: &mut dyn FnMut(&'a [u8]) -> bool,
+        ) -> Option<&'a Str> {
+            w.as_deref().and_then(|w| in_word(w, f))
+        }
+        fn in_index<'a>(
+            i: &'a Option<ArrayIndex>,
+            f: &mut dyn FnMut(&'a [u8]) -> bool,
+        ) -> Option<&'a Str> {
+            match i {
+                Some(ArrayIndex::Index(w)) => in_word(w, f),
+                Some(ArrayIndex::All | ArrayIndex::Star) | None => None,
+            }
+        }
+
+        match self {
+            // The one that answers the question.
+            WordPart::ArithSub { expr, bracket } => {
+                // `$[ … ]` is read by an extractor with no comment rule at all,
+                // so only the `$(( … ))` spelling can lose its closer this way.
+                (!*bracket && hides_closer(expr)).then_some(expr)
+            }
+
+            // Reached, and carrying sub-words.
+            WordPart::DoubleQuoted(parts) => {
+                parts.iter().find_map(|p| p.first_scanned_arith(hides_closer))
+            }
+            WordPart::ParamOp { index, arg, .. } => {
+                in_opt(index, hides_closer).or_else(|| in_word(arg, hides_closer))
+            }
+            WordPart::ParamTrim { index, pattern, .. }
+            | WordPart::ParamCase { index, pattern, .. } => in_opt(index, hides_closer)
+                .or_else(|| in_word(pattern, hides_closer)),
+            WordPart::ParamSubstr {
+                index,
+                offset,
+                length,
+                ..
+            } => in_opt(index, hides_closer)
+                .or_else(|| in_word(offset, hides_closer))
+                .or_else(|| in_opt(length, hides_closer)),
+            WordPart::ParamReplace {
+                index,
+                pattern,
+                replacement,
+                ..
+            } => in_opt(index, hides_closer)
+                .or_else(|| in_word(pattern, hides_closer))
+                .or_else(|| in_word(replacement, hides_closer)),
+            WordPart::ParamTransform { index, .. } | WordPart::BadTransform { index, .. } => {
+                in_opt(index, hides_closer)
+            }
+            WordPart::Indirect { index, .. } => in_index(index, hides_closer),
+            WordPart::IndirectOp { index, target, .. } => in_index(index, hides_closer)
+                .or_else(|| target.first_scanned_arith(hides_closer)),
+            WordPart::ArrayRef { index, .. } => match index {
+                ArrayIndex::Index(w) => in_word(w, hides_closer),
+                ArrayIndex::All | ArrayIndex::Star => None,
+            },
+            WordPart::ArraySlice { offset, length, .. } => in_word(offset, hides_closer)
+                .or_else(|| in_opt(length, hides_closer)),
+            WordPart::ArrayBulk { op, .. } => match op {
+                BulkOp::Trim { pattern, .. } | BulkOp::Case { pattern, .. } => {
+                    in_word(pattern, hides_closer)
+                }
+                BulkOp::Replace {
+                    pattern,
+                    replacement,
+                    ..
+                } => in_word(pattern, hides_closer)
+                    .or_else(|| in_word(replacement, hides_closer)),
+                BulkOp::Transform { .. } | BulkOp::BadTransform { .. } => None,
+            },
+            WordPart::ArrayOp { arg, .. } => in_word(arg, hides_closer),
+
+            // Reached, but with nothing inside that a `$((` could hide in: the
+            // parser has already resolved these to names and literal text.
+            WordPart::Literal(_)
+            | WordPart::SingleQuoted { .. }
+            | WordPart::Param { .. }
+            | WordPart::VarNames { .. }
+            | WordPart::Length(_)
+            | WordPart::ArrayKeys { .. }
+            // `BadSubst` holds unparsed source, so a `$((` in it is text rather
+            // than a node. bash does see it (`${x!$(( #5 ))}` reports "no
+            // closing" rather than "bad substitution"), but finding it here
+            // would mean re-scanning raw source — see the note above.
+            | WordPart::BadSubst(_) => None,
+
+            // Not reached: raised by the substitution's own expansion instead.
+            WordPart::CommandSub { .. } | WordPart::ProcSub { .. } => None,
+        }
+    }
+
     /// Rename the parameter a scalar modifier works on.
     ///
     /// The modifiers of a `${!ref<op>}` are parsed against a placeholder name

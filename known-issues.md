@@ -35341,7 +35341,7 @@ inheritance, and defining an alias by writing through the mirror. Bucket counts
 and growth points are pinned separately by the unit tests in `src/assoc.rs`.
 
 
-### TD-OILS-COND-SYNTAX-ERROR-NAMES-ONLY-THE-TOKEN. `[[ P;Q ]]` says ``near `;'`` where bash says ``near `;Q'`` — 2026-08-04
+### TD-OILS-COND-SYNTAX-ERROR-NAMES-ONLY-THE-TOKEN. `[[ P;Q ]]` says ``near `;'`` where bash says ``near `;Q'`` — 2026-08-04 — ✅ FIXED 2026-08-05
 
 **Where:** `userspace/oils/src/parser.rs` — the `[[ ]]` conditional parser's error
 reporting, which names the offending token as the lexer read it.
@@ -35411,7 +35411,7 @@ in `IncrementalParser`'s rebuilt `ends`) and falls back to naming the token via
 **Pinned by** `tests/corpus/a-conditional-error-quotes-the-source-not-the-token.sh`.
 
 
-### TD-OILS-LINE-CONTINUATION-INSIDE-AN-OPERATOR-IS-NOT-DELETED — 2026-08-05
+### TD-OILS-LINE-CONTINUATION-INSIDE-AN-OPERATOR-IS-NOT-DELETED — 2026-08-05 — ✅ FIXED 2026-08-05
 
 **Where:** `userspace/oils/src/lexer.rs` — `\<newline>` is removed while scanning
 a *word*, but not in the character stream the operator scanner reads.
@@ -35617,7 +35617,7 @@ enables the one-character-further step when the character at the span's end is
 — the whole table, both directions, inside a conditional and outside it.
 
 
-### TD-OILS-COND-ERROR-MISSES-THE-PRIMARY-OPERATOR-LINE — 2026-08-05
+### TD-OILS-COND-ERROR-MISSES-THE-PRIMARY-OPERATOR-LINE — 2026-08-05 — ✅ FIXED 2026-08-05
 
 **Where:** `userspace/oils/src/parser.rs`, `Parser::cond_operand_error`,
 the `CondPos::Primary` arm.
@@ -35725,7 +35725,7 @@ path as a script file; the divergence is in *which* reader, not in the parser.
 that bash never reaches — here `== b ]]` is attempted as a command.
 
 
-### TD-OILS-COND-ERROR-DROPS-THE-EXPECTED-PAREN-LINE — 2026-08-05
+### TD-OILS-COND-ERROR-DROPS-THE-EXPECTED-PAREN-LINE — 2026-08-05 — ✅ FIXED 2026-08-05
 
 **Where:** `userspace/oils/src/parser.rs`, `Parser::parse_cond_primary` — the
 `Op::LParen` branch, which propagates the inner parse's error with `?`.

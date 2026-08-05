@@ -1514,25 +1514,103 @@ which asks the question without the resolution.
 against bash 5.2.37, warning counts included) and the lib test
 `a_circular_nameref_write_lands_on_the_name_it_started_from`.
 
-**Still open — the arithmetic warning counts.** The *arithmetic* writes land
-correctly but under-report, because osh resolves the name once where bash walks
-the chain again for each of its internal steps:
+**Arithmetic — ✅ also fixed 2026-08-05.** The arithmetic forms used to land
+their value correctly but under-report the warning, because osh resolved the
+name once where bash walks the chain again for each of its internal steps — and
+the element forms were worse than that: `(( c1[0] = 5 ))` warned not at all,
+left the nameref attribute on (`declare -an c1=([0]="5")`), and a *read* of
+`c1[0]` fell back to reading the reference's own value as element 0, so the
+recursive arithmetic evaluation of that value produced a warning blaming the
+**next** name in the cycle (`c2`) rather than the one written.
 
-| form | bash | osh |
+The count model that fits every measurement is **one warning per walk of the
+chain**, with each shape walking it a fixed number of times:
+
+| shape | walks | example |
 |---|---|---|
-| `let "c1 = 5"` | 2 warnings, rc 0, no write | 1 warning |
-| `(( c1++ ))` | 3 warnings, rc 1, no write | 2 warnings |
-| `let "c1[0] = 5"` | 3 warnings, rc 0, `declare -a c1=([0]="5")` | 0 warnings, and the nameref attribute survives (`declare -an`) |
-| `(( c1[0]++ ))` | 5 warnings, rc 1, `declare -a c1=([0]="1")` | 1 warning, blaming `c2` rather than `c1` |
+| scalar read | 1 | `(( c1 ))`, `$(( -c1 ))`, `let "c1"` |
+| element read | 2 | `$(( c1[0] ))` — once to find the array, once to fetch |
+| scalar write | 2 | `(( c1 = 5 ))`, `let "c1 = 5"` |
+| element write | 3 | `(( c1[0] = 5 ))`, `let "c1[0] = 5"` |
 
-The count model that fits every measurement is "arithmetic costs one walk more
-than the shell-level form of the same write, and a subscript costs one more than
-a bare name" — so 1/2 for a scalar shell/arith store and 2/3 for a subscripted
-one, with a read-modify-write (`++`) paying for its read as well. **Proper fix:**
-route the arithmetic element path (`Shell::arith_elem`, today `&self`, and
-`arith_write_dest`) through `resolve_ref_elem_write`/`resolve_ref_array_write`
-like the others, and give the read side its own walk count. Left out here
-because it needs `arith_elem` to become `&mut self`, which the read paths share.
+and the counts simply add, so a read-modify-write pays for both halves:
+`(( c1 += 5 ))` and `(( c1++ ))` warn three times, `(( c1[0] += 5 ))`,
+`(( c1[0]++ ))` and `(( ++c1[0] ))` five.
+
+The two writes also differ in *kind*, not just in count. A **scalar** write
+stores nothing and leaves the name a reference — `declare -p c1` after
+`(( c1 = 5 ))` still says `declare -n c1="c2"` — because no array is being made
+for the attribute to be incompatible with. An **element** write lands on the
+name the walk started from and drops the attribute, exactly as `c1[0]=v` does,
+so the cycle is broken and `${c2[0]}` reads what was written.
+
+**Fixed by** giving the read side the same walk-count parameter the write side
+already had: `Shell::resolve_ref_use_walks(name, n)` (with `resolve_ref_use` now
+`n = 1`), `Shell::arith_elem_read` (2 walks) beside the silent `arith_elem` that
+the *parser* uses for `is_assoc`, and `Shell::arith_elem_write_base` (3 walks,
+via the existing `resolve_ref_write_walks`) replacing the duplicated
+array-or-refuse dance in `set_index`/`set_assoc`. `arith_write_dest` asks for 2
+walks directly rather than going through `scalar_write_dest`'s 1. A new
+`ArithElem::Circular` variant is what stops the read falling back to the
+reference's own value — the compiler now forces every element lookup to say
+what a cycle means to it.
+
+**Coverage.** Corpus case
+`arithmetic-through-a-circular-nameref-warns-once-per-walk.sh` (byte-exact
+against bash 5.2.37, counts included) and the lib test
+`arithmetic_through_a_circular_nameref_warns_once_per_walk`.
+
+**Still open — two neighbours, both tracked elsewhere.**
+`declare -i c1` on a circular operand draws two lines from bash and one from
+osh; that is the declaration-builtin half of TD-OILS-NAMEREF-WARNING-COUNT
+below, along with the parameter-expansion reads (`${c1[0]}`, `${c1[@]}`,
+`${#c1}`, `unset 'c1[0]'`) that bash also doubles. Separately,
+`$(( c1[@] ))` is a bash arithmetic *subscript* form osh's lexer rejects
+outright (`@: syntax error: operand expected`) where bash answers
+`c1[@]: bad array subscript` and yields 0 — unrelated to namerefs, and not
+tracked before; see TD-OILS-ARITH-AT-SUBSCRIPT below.
+
+### TD-OILS-ARITH-AT-SUBSCRIPT. `$(( a[@] ))` is a syntax error in osh where bash calls it a bad subscript and carries on — 2026-08-05 — OPEN
+
+**Symptom.** `@` and `*` are legal *bytes* in an arithmetic subscript as far as
+bash's parser is concerned; it is the array lookup that rejects them, and only
+for an **indexed** array (an associative one reads them as ordinary string
+keys). The complaint is a warning, not an error: the operand is worth 0 and the
+expression keeps going.
+
+```sh
+a=(1 2 3); declare -A m=([k]=4)
+
+$ bash                              $ osh
+$(( a[@] ))    a[@]: bad array subscript ; [0] rc=0     @: syntax error: operand expected (error token is "@")
+$(( a[*] ))    a[*]: bad array subscript ; [0] rc=0     *: syntax error: operand expected (error token is "*")
+$(( m[@] ))    [0] rc=0                                 [0] rc=0
+$(( nosuch[@] ))  nosuch[@]: bad array subscript ; [0]  @: syntax error…
+$(( a[@]+1 ))  a[@]: bad array subscript ; [1] rc=0     @: syntax error…
+(( a[@] = 5 )) a[@]: bad array subscript ; rc=0, `a` unchanged   @: syntax error…
+```
+
+osh's is an *error*, so the whole expression is abandoned and the status is 1
+where bash's is 0 — a difference in control flow, not just wording.
+
+**Where.** `userspace/oils/src/arith.rs` — the subscript lexer. It hands the
+subscript text to `Sub::parse`, which parses it as its own arithmetic
+expression and so rejects `@`/`*` as operand bytes. bash instead keeps the
+subscript's raw text and refuses it at *lookup* time, which is why the
+associative path (a string key) is unaffected.
+
+**Proper fix.** Recognise a whole-array subscript (`@` or `*`, after trimming)
+in the lexer alongside the existing empty-subscript case — `Expr::EmptySub`
+already models exactly this shape: a subscript that parses but names nothing,
+reported by a `VarLookup` hook and worth 0. Add a sibling variant carrying the
+offending spelling, whose read hook prints `NAME[@]: bad array subscript` once
+(bash prints it once here, unlike the *empty* subscript's two lines) and whose
+store hook prints the same and drops the write. The check must come *after*
+[`VarLookup::is_assoc`], since an associative array takes `@` as a key.
+
+**Found while** closing the arithmetic half of
+TD-OILS-NAMEREF-CYCLE-ARRAY-WRITE; it is unrelated to namerefs and was simply
+never probed before.
 
 ### TD-OILS-FOR-SUBSCRIPTED-NAME-PARSE. `for 'a[0]' in …` is a parse error in `osh` and a runtime complaint in bash — 2026-08-03 — ✅ FIXED 2026-08-04
 

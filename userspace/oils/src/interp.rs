@@ -11212,8 +11212,17 @@ impl Shell {
     /// been given, and the write simply does not happen — which is not an error
     /// and does not stop the expression.
     fn arith_write_dest(&self, name: &str) -> Result<Option<ScalarDest>, arith::ArithError> {
-        let Some(dest) = self.scalar_write_dest(name) else {
+        // Two walks, because bash resolves the name once to find the variable
+        // and again to bind it. Unlike the element write above, a circular chain
+        // keeps its nameref attribute: nothing is stored, so there is no array
+        // being made for the attribute to be incompatible with, and `declare -p
+        // c1` after `(( c1 = 5 ))` still says `declare -n c1="c2"`.
+        let Some(target) = self.resolve_ref_use_walks(name, 2) else {
             return Ok(None);
+        };
+        let dest = match target.sub {
+            Some(sub) => ScalarDest::Elem(target.base, sub),
+            None => ScalarDest::Var(target.base),
         };
         if self.readonly.contains(dest.base()) {
             return Err(arith::ArithError::about_var(
@@ -11239,11 +11248,52 @@ impl Shell {
     /// element, so `r[1]` would be a subscript on a subscript, which bash has
     /// no room for and refuses.
     fn arith_elem(&self, name: &str) -> ArithElem {
-        match self.resolve_ref_name(name) {
-            None => ArithElem::Array(name.to_string()),
+        Self::arith_elem_of(self.resolve_ref_name(name))
+    }
+
+    /// [`Self::arith_elem`] for a *read* (`(( a[i] ))`, `(( m[k] ))`), which
+    /// reports a circular chain — twice, because bash resolves the name once to
+    /// find the array and again to fetch the element.
+    ///
+    /// The silent form above stays for the question the *parser* asks
+    /// ([`VarLookup::is_assoc`]), which bash settles without walking anything a
+    /// second time.
+    fn arith_elem_read(&self, name: &str) -> ArithElem {
+        Self::arith_elem_of(self.resolve_ref_use_walks(name, 2))
+    }
+
+    /// What a resolved chain designates, given the walk's answer. `None` is a
+    /// circular chain, which designates nothing at all — notably *not* the name
+    /// it started from, whose own value is the next name in the cycle and would
+    /// otherwise be read as element 0 of an array that does not exist.
+    fn arith_elem_of(target: Option<RefTarget>) -> ArithElem {
+        match target {
+            None => ArithElem::Circular,
             Some(t) if t.sub.is_none() => ArithElem::Array(t.base),
-            Some(t) => ArithElem::Element(t.spelling()),
+            Some(_) => ArithElem::Element,
         }
+    }
+
+    /// The array an arithmetic *element* write to `name` should subscript, or
+    /// `None` when there is none and the complaint has already been made.
+    ///
+    /// A circular chain does not abandon the store: bash warns — three times
+    /// here, one walk more than a read, for the bind — and lands it on the name
+    /// the walk started from, which stops being a reference. See
+    /// [`Shell::resolve_ref_array_write`]; this is the same rule `c1[0]=v`
+    /// follows, with arithmetic's own walk count.
+    fn arith_elem_write_base(&mut self, name: &str) -> Option<String> {
+        let target = self.resolve_ref_write_walks(name, 3);
+        if target.sub.is_some() {
+            // Nowhere to put it: the reference already names an element, so the
+            // subscript that was written has nothing to apply to. bash
+            // complains and drops the store, but the expression is still worth
+            // its value, so the caller reports success.
+            let spelling = target.spelling();
+            self.warn_elem_not_identifier(&spelling);
+            return None;
+        }
+        Some(target.base)
     }
 
     /// bash's complaint when a *further* subscript is put on a nameref that
@@ -22472,9 +22522,23 @@ impl Shell {
     /// member of the cycle: with `a→b→c→a`, reading `$c` reports `c`. Callers
     /// then treat `None` as "no such variable".
     fn resolve_ref_use(&self, name: &str) -> Option<RefTarget> {
+        self.resolve_ref_use_walks(name, 1)
+    }
+
+    /// [`Self::resolve_ref_use`] for a path that walks the chain more than once,
+    /// and so reports a circular one more than once.
+    ///
+    /// The count is the read-side counterpart of
+    /// [`Self::resolve_ref_write_walks`], and it is measured, not decorative:
+    /// bash resolves `a[i]` once to find the array and again to fetch the
+    /// element, so `(( c1[0] ))` through a cycle warns twice where `(( c1 ))`
+    /// warns once. A chain that resolves costs one walk either way.
+    fn resolve_ref_use_walks(&self, name: &str, walks: usize) -> Option<RefTarget> {
         let target = self.resolve_ref_name(name);
         if target.is_none() {
-            self.perrln(&format!("warning: {name}: circular name reference"));
+            for _ in 0..walks {
+                self.perrln(&format!("warning: {name}: circular name reference"));
+            }
         }
         target
     }
@@ -40704,13 +40768,15 @@ impl VarLookup for Shell {
     }
 
     fn get_index_str(&self, name: &str, index: i64) -> Option<Str> {
-        match self.arith_elem(name) {
+        match self.arith_elem_read(name) {
             // `array_element` already applies bash negative-index semantics.
             ArithElem::Array(base) => self.array_element(&base, index),
             // A subscript on a nameref that already designates an element names
             // nothing. Reading it is silent (bash yields 0); only *writing*
             // draws the complaint — see `set_index`.
-            ArithElem::Element(_) => None,
+            ArithElem::Element => None,
+            // The warning is out; the read is worth 0.
+            ArithElem::Circular => None,
         }
     }
 
@@ -40722,16 +40788,18 @@ impl VarLookup for Shell {
         // is raised on the indexed path.
         match self.arith_elem(name) {
             ArithElem::Array(base) => self.assoc.contains_key(&base),
-            ArithElem::Element(_) => false,
+            // Neither reaches an array, so the subscript is read as an index and
+            // whatever refusal is owed is raised on the indexed path.
+            ArithElem::Element | ArithElem::Circular => false,
         }
     }
 
     fn get_assoc_str(&self, name: &str, key: BStr<'_>) -> Option<Str> {
-        match self.arith_elem(name) {
+        match self.arith_elem_read(name) {
             // An unset key (or empty value) evaluates to 0; a non-empty value is
             // recursively arithmetic-evaluated by the caller.
             ArithElem::Array(base) => self.assoc_element(&base, key),
-            ArithElem::Element(_) => None,
+            ArithElem::Element | ArithElem::Circular => None,
         }
     }
 
@@ -40748,15 +40816,8 @@ impl VarLookup for Shell {
     }
 
     fn set_index(&mut self, name: &str, index: i64, value: i64) -> Result<(), arith::ArithError> {
-        let base = match self.arith_elem(name) {
-            ArithElem::Array(base) => base,
-            // Nowhere to put it: the reference already names an element. bash
-            // complains and drops the store, but the expression is still worth
-            // its value, so this is `Ok`.
-            ArithElem::Element(target) => {
-                self.warn_elem_not_identifier(&target);
-                return Ok(());
-            }
+        let Some(base) = self.arith_elem_write_base(name) else {
+            return Ok(());
         };
         self.arith_elem_writable(&base)?;
         // Mirror the indexed branch of `assign_elem`: negative indices count
@@ -40771,14 +40832,8 @@ impl VarLookup for Shell {
     }
 
     fn set_assoc(&mut self, name: &str, key: BStr<'_>, value: i64) -> Result<(), arith::ArithError> {
-        let base = match self.arith_elem(name) {
-            ArithElem::Array(base) => base,
-            // See `set_index`: the reference leaves the subscript nothing to
-            // apply to.
-            ArithElem::Element(target) => {
-                self.warn_elem_not_identifier(&target);
-                return Ok(());
-            }
+        let Some(base) = self.arith_elem_write_base(name) else {
+            return Ok(());
         };
         self.arith_elem_writable(&base)?;
         self.assoc_set(&base, key.to_vec(), value.to_string().into_bytes(), false);
@@ -40933,16 +40988,23 @@ enum Operand<'a> {
     Value(Option<BStr<'a>>),
 }
 
-/// What an arithmetic element reference `name[sub]` turns out to name, once any
-/// nameref on `name` has been followed. See [`Shell::arith_elem`].
+/// What an arithmetic element *read* `name[sub]` turns out to name, once any
+/// nameref on `name` has been followed. See [`Shell::arith_elem_read`]. The
+/// write side answers with the array to subscript alone — the two "nothing"
+/// cases differ there only in the complaint they have already made, which is
+/// [`Shell::arith_elem_write_base`]'s business rather than its caller's.
 enum ArithElem {
     /// An array (or associative array) to subscript, by name.
     Array(String),
     /// A single element, already designated by the nameref — leaving the `[sub]`
-    /// that was written with nothing to apply to. The value is the target as the
-    /// nameref spells it (`q[0]`), which is what bash's refusal names, and it is
-    /// bytes because the subscript in it is a shell word.
-    Element(Str),
+    /// that was written with nothing to apply to. Reading it is silent (bash
+    /// yields 0); only a write draws a complaint, and that names the target as
+    /// the nameref spells it (`q[0]`).
+    Element,
+    /// A chain that closes on itself, and so designates nothing. A read yields
+    /// 0, having warned; a write does not come this way (see
+    /// [`Shell::arith_elem_write_base`]).
+    Circular,
 }
 
 /// The written form of a `${name[index]<op>arg}` modifier — everything the
@@ -63263,6 +63325,113 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("t=orig; declare -n r=t; read -a r <<< 'p q'; declare -p r t").0,
             "declare -n r=\"t\"\ndeclare -a t=([0]=\"p\" [1]=\"q\")\n",
+        );
+    }
+
+    /// Arithmetic reports a circular chain **once per walk of it**, and each
+    /// shape walks it a fixed number of times: a scalar read once, an element
+    /// read twice, a scalar write twice, an element write three times. The
+    /// counts add, so `(( c1[0] += 5 ))` — an element read plus an element
+    /// write — warns five times.
+    #[test]
+    fn arithmetic_through_a_circular_nameref_warns_once_per_walk() {
+        let cyc = "declare -n c1=c2; declare -n c2=c1;";
+        let w = "osh: warning: c1: circular name reference\n";
+
+        // A scalar read walks once. Its value is 0, so `(( ))` and `let`, which
+        // invert the last expression's truth, report 1.
+        for (src, tail) in [
+            ("echo \"[$(( c1 ))] rc=$?\"", "[0] rc=0\n"),
+            ("echo \"[$(( -c1 ))] rc=$?\"", "[0] rc=0\n"),
+            ("(( c1 )); echo \"rc=$?\"", "rc=1\n"),
+            ("let \"c1\"; echo \"rc=$?\"", "rc=1\n"),
+        ] {
+            assert_eq!(
+                run(&format!("{{ {cyc} {src}; }} 2>&1")).0,
+                format!("{w}{tail}"),
+                "{src}"
+            );
+        }
+
+        // An element read walks twice — once to find the array, once to fetch —
+        // and two of them warn four times.
+        assert_eq!(
+            run(&format!("{{ {cyc} echo \"[$(( c1[0] ))] rc=$?\"; }} 2>&1")).0,
+            format!("{w}{w}[0] rc=0\n"),
+        );
+        assert_eq!(
+            run(&format!(
+                "{{ {cyc} echo \"[$(( c1[0] + c1[1] ))] rc=$?\"; }} 2>&1"
+            ))
+            .0,
+            format!("{w}{w}{w}{w}[0] rc=0\n"),
+        );
+
+        // A scalar write walks twice, stores nothing, and — unlike the element
+        // write below — leaves the name a reference: no array is being made, so
+        // there is nothing for the attribute to be incompatible with.
+        for (src, tail) in [
+            ("(( c1 = 5 ))", format!("{w}{w}rc=0\n")),
+            ("let \"c1 = 5\"", format!("{w}{w}rc=0\n")),
+            // A read plus a write, so three.
+            ("(( c1 += 5 ))", format!("{w}{w}{w}rc=0\n")),
+            ("(( c1++ ))", format!("{w}{w}{w}rc=1\n")),
+        ] {
+            assert_eq!(
+                run(&format!(
+                    "{{ {cyc} {src}; echo \"rc=$?\"; declare -p c1; }} 2>&1"
+                ))
+                .0,
+                format!("{tail}declare -n c1=\"c2\"\n"),
+                "{src}"
+            );
+        }
+
+        // An element write walks three times and lands on the name the walk
+        // started from, which stops being a reference.
+        for (src, warns, rc, val) in [
+            ("(( c1[0] = 5 ))", 3, 0, "[0]=\"5\""),
+            ("let \"c1[0] = 5\"", 3, 0, "[0]=\"5\""),
+            ("(( c1[0] += 5 ))", 5, 0, "[0]=\"5\""),
+            ("(( c1[0]++ ))", 5, 1, "[0]=\"1\""),
+            ("(( ++c1[0] ))", 5, 0, "[0]=\"1\""),
+            ("(( c1[2] = 7 ))", 3, 0, "[2]=\"7\""),
+        ] {
+            assert_eq!(
+                run(&format!(
+                    "{{ {cyc} {src}; echo \"rc=$?\"; declare -p c1; }} 2>&1"
+                ))
+                .0,
+                format!("{}rc={rc}\ndeclare -a c1=({val})\n", w.repeat(warns)),
+                "{src}"
+            );
+        }
+
+        // Losing the attribute is what breaks the cycle: `c2` still names `c1`,
+        // and `c1` is no longer a reference, so the write reads back through it.
+        assert_eq!(
+            run(&format!("{{ {cyc} (( c1[0] = 5 )); }} 2>&1; echo \"[${{c2[0]}}]\"")).0,
+            format!("{}[5]\n", w.repeat(3)),
+        );
+
+        // The blame is the name that was written, however long the chain.
+        assert_eq!(
+            run("{ declare -n a1=a2; declare -n a2=a3; declare -n a3=a1; (( a1[0] = 9 )); } 2>&1; \
+                 declare -p a1")
+                .0,
+            "osh: warning: a1: circular name reference\n".repeat(3)
+                + "declare -a a1=([0]=\"9\")\n",
+        );
+
+        // A chain that resolves pays none of this: one walk, no warning, and the
+        // write goes through to the target as it always did.
+        assert_eq!(
+            run("t=3; declare -n r=t; (( r += 4 )); declare -p r t").0,
+            "declare -n r=\"t\"\ndeclare -- t=\"7\"\n",
+        );
+        assert_eq!(
+            run("declare -a u=(1 2); declare -n r=u; (( r[1] += 4 )); declare -p u").0,
+            "declare -a u=([0]=\"1\" [1]=\"6\")\n",
         );
     }
 

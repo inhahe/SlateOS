@@ -266,45 +266,49 @@ Three things had to be got right beyond the parse:
 
 **Corpus:** `a-subscript-that-arrives-as-bytes-is-expanded-at-every-use.sh`.
 
-Two divergences found alongside it are *not* fixed and have their own entries:
-TD-OILS-A-SUBSCRIPT-ERROR-ON-A-NAME-OPERAND-IS-BLAMED-ON-ITS-BUILTIN-AND-STILL-STORES
-and TD-OILS-A-SUBSCRIPT-IS-SPLIT-OFF-WITHOUT-REGARD-FOR-ITS-QUOTES.
+Two divergences found alongside it have their own entries:
+TD-OILS-A-SUBSCRIPT-THAT-WILL-NOT-EVALUATE-NAMES-NOBODY-AND-STORES-NOWHERE
+(since fixed) and TD-OILS-A-SUBSCRIPT-IS-SPLIT-OFF-WITHOUT-REGARD-FOR-ITS-QUOTES.
 
-### TD-OILS-A-SUBSCRIPT-ERROR-ON-A-NAME-OPERAND-IS-BLAMED-ON-ITS-BUILTIN-AND-STILL-STORES. `read -r 'n[2+]'` says `read: 2+: syntax error` and then writes element 0 — 2026-08-05 — OPEN
+### TD-OILS-A-SUBSCRIPT-THAT-WILL-NOT-EVALUATE-NAMES-NOBODY-AND-STORES-NOWHERE. `read -r 'n[2+]'` said `read: 2+: syntax error` and then wrote element 0 — 2026-08-05 — ✅ **FIXED 2026-08-05**
 
-**Where:** `userspace/oils/src/interp.rs` — `Shell::assign_elem`'s indexed arm
-(`let idx = self.eval_arith_index(w);`, which answers 0 on error), and whatever
-leaves `Shell::arith_cmd` set across the `printf -v` and `read` name operands.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::eval_arith_index_text_checked`
+(which now clears the tag and delegates to the new
+`Shell::eval_arith_expr_checked`), and `Shell::assign_elem`'s indexed arm.
 
 **What.** Two independent things, both on the same two builtins. Measured with
 `n=(a b c)`:
 
 ```text
-                       bash                         osh
+                       bash                         osh (before)
 printf -v 'n[1+]' X    `1+: syntax error: …`       `printf: 1+: syntax error: …`
 read -r 'n[2+]' <<<Y   `2+: syntax error: …`       `read: 2+: syntax error: …`
                        n unchanged                  n[0] overwritten
-n[1+]=W                `1+: syntax error: …`       the same — this half agrees
+n[1+]=W                `1+: syntax error: …`       the same — this half agreed
 ```
 
-1. The diagnostic is **tagged with the builtin**. bash reports a bad subscript
-   on a name operand bare, the way it reports one in an assignment; only `((`
-   and `let` put their own name in front. Something leaves `Shell::arith_cmd`
-   set (or sets it) across these two builtins. The *written* form
-   (`n[1+]=W`) is already bare, so the tag is peculiar to the operand path.
-2. The store still **lands on element 0**. `Shell::eval_arith_index` fabricates
-   a 0 for an expression that would not evaluate, and `assign_elem` stores
-   there. bash stores nothing.
+1. The diagnostic was **tagged with the builtin**. bash never blames a
+   *subscript* on the command that asked for it: `declare 'n[4+]=v'`,
+   `let 'n[7+]=1'`, `(( n[8+] = 1 ))`, `unset 'n[9+]'` and `printf -v 'n[1+]'`
+   all report `1+: syntax error …` bare, while a bad `-i` **value** in the very
+   same builtin still is tagged (`declare: 5+: syntax error …`).
+2. The store still **landed on element 0**, because `eval_arith_index`
+   fabricates a 0 for an expression that would not evaluate.
 
-**Proper fix.** `assign_elem`'s indexed arm should use
-`Shell::eval_arith_index_text_checked`, which already distinguishes "evaluated
-to 0" from "failed" (the diagnostic and the discard are made inside it), and
-return `false` on `None` rather than storing. Separately, clear `arith_cmd` (or
-do not set it) while evaluating a name operand's subscript.
+**Fixed 2026-08-05.** bash clears `this_command_name` in exactly one place —
+`array_expand_index`, around the evaluation — and osh now does the same, in
+`eval_arith_index_text_checked` rather than at each call site. Three ad-hoc
+save/restore pairs (the `name[i]=v` assignment, the name-operand target and
+`unset`) went away with it, and the fourth site that never had one — the
+`printf -v`/`read` operand path — is covered by construction. The one caller
+that wants a tag of its own, a `${param:off:len}` bound (`${v:1 z}` says
+`v: 1 z: syntax error in expression`), calls the untagged
+`eval_arith_expr_checked` underneath.
 
-**Impact.** Small and loud, but the store is a real corruption: a mistyped
-subscript on `read`/`printf -v` silently overwrites element 0 of the array
-instead of leaving it alone.
+`assign_elem`'s indexed arm now takes the *checked* index and returns `false`
+on `None`, so a subscript that named nowhere stores nowhere.
+
+**Corpus:** `a-subscript-that-will-not-evaluate-names-nobody-and-stores-nowhere.sh`.
 
 ### TD-OILS-A-SUBSCRIPT-IS-SPLIT-OFF-WITHOUT-REGARD-FOR-ITS-QUOTES. `printf -v 'n["1]' X` stores at index 0 where bash says `not a valid identifier` — 2026-08-05 — OPEN
 

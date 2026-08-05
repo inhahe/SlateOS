@@ -12290,13 +12290,7 @@ impl Shell {
                         // index counts back from `highest_index + 1` (bash:
                         // `a[-1]=v` overwrites the last element). A malformed
                         // arithmetic subscript is fatal (see `eval_arith_index`).
-                        // bash never tags a bad *subscript* arithmetic error with
-                        // the builtin name (unlike a bad `-i` *value*), even under
-                        // `declare -i`, so evaluate the subscript with the arith
-                        // tag cleared, then restore it for the value below.
-                        let saved_tag = self.arith_cmd.take();
                         let raw = self.eval_arith_index(idx_word);
-                        self.arith_cmd = saved_tag;
                         if self.discard_error.is_some() {
                             // Malformed subscript expression (`a[x y]=v`): the
                             // untagged diagnostic is emitted and `discard_error`
@@ -14180,7 +14174,15 @@ impl Shell {
                         self.warn_whole_array_sub(&name, c);
                         return false;
                     }
-                    let idx = self.eval_arith_index(w);
+                    // An expression that will not evaluate has been reported and
+                    // has armed the discard; there is no element named, so bash
+                    // stores nothing. Taking the fabricated `0` here would land
+                    // a mistyped `read 'n[2+]'` on element 0 of the array. See
+                    // [`Self::eval_arith_index_text_checked`].
+                    let src = self.expand_to_arith_string(w);
+                    let Some(idx) = self.eval_arith_index_text_checked(&src) else {
+                        return false;
+                    };
                     let bound = self.elem_write_bound(name);
                     if idx < 0 && Self::resolve_index(idx, bound).is_none() {
                         let src = self.expand_to_string(w);
@@ -23597,13 +23599,10 @@ impl Shell {
                 .get(&name)
                 .map_or_else(|| self.vars.contains_key(&name), |a| !a.is_empty());
         }
-        // bash never tags a subscript's arithmetic error with the command that
-        // asked, so evaluate with the tag cleared. A malformed expression is a
-        // discarding error: the diagnostic is already out and the parse unit is
-        // abandoned, so there is no answer left to give.
-        let saved_tag = self.arith_cmd.take();
+        // A malformed expression is a discarding error: the diagnostic is
+        // already out and the parse unit is abandoned, so there is no answer
+        // left to give.
         let idx = self.eval_arith_index(&word);
-        self.arith_cmd = saved_tag;
         if self.discard_error.is_some() {
             return false;
         }
@@ -25398,7 +25397,26 @@ impl Shell {
     /// error from a zero. The diagnostic is still made and the discard still
     /// armed; only the fabricated `0` is withheld, so a caller with a *second*
     /// expression to evaluate can decline to evaluate it.
+    ///
+    /// The command tag goes for the evaluation. bash never blames a *subscript*
+    /// on the command that asked for it: `declare 'n[1+]=v'`, `let 'n[1+]=1'`,
+    /// `unset 'n[1+]'` and `printf -v 'n[1+]'` all report `1+: syntax error …`
+    /// bare, while a bad `-i` *value* in the same builtin is tagged
+    /// (`declare: 5+: syntax error …`). `array_expand_index` clears
+    /// `this_command_name` around the call and puts it back; this is that, once
+    /// here rather than at each of the call sites. See [`Shell::arith_cmd`].
     fn eval_arith_index_text_checked(&mut self, s: BStr<'_>) -> Option<i64> {
+        let saved = self.arith_cmd.take();
+        let v = self.eval_arith_expr_checked(s);
+        self.arith_cmd = saved;
+        v
+    }
+
+    /// [`Self::eval_arith_index_text_checked`] with the command tag left as it
+    /// stands, for the one caller that has a tag of its own to put there — a
+    /// `${param:off:len}` bound, which bash blames on the parameter reference.
+    /// See [`Self::eval_arith_substr_bound`].
+    fn eval_arith_expr_checked(&mut self, s: BStr<'_>) -> Option<i64> {
         // Only the *leading* blanks go. bash's `subexpr` steps over them to
         // decide whether the expression is empty and then keeps the string from
         // there on, trailing blanks included — so `${a[ 1 z ]}` blames
@@ -25436,7 +25454,7 @@ impl Shell {
     fn eval_arith_substr_bound(&mut self, w: &Word, param_ref: BStr<'_>) -> Option<i64> {
         let saved = self.arith_cmd.replace(Cow::Owned(param_ref.to_vec()));
         let s = self.expand_to_arith_string(w);
-        let v = self.eval_arith_index_text_checked(&s);
+        let v = self.eval_arith_expr_checked(&s);
         self.arith_cmd = saved;
         v
     }
@@ -37920,12 +37938,8 @@ impl Shell {
             }
             return true;
         }
-        // Indexed (and scalar-as-one-element) subscripts are arithmetic. bash
-        // never tags a subscript's arithmetic error with the builtin name, so
-        // evaluate with the tag cleared.
-        let saved_tag = self.arith_cmd.take();
+        // Indexed (and scalar-as-one-element) subscripts are arithmetic.
         let raw = self.eval_arith_index(&word);
-        self.arith_cmd = saved_tag;
         if self.discard_error.is_some() {
             return false;
         }

@@ -63509,13 +63509,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // there is no span to report and the `real` line goes away. Those times
         // are real figures — this process may well have burned a tick or two
         // already — so it is the *shape* that is asserted.
+        // The minutes and whole-seconds fields are as wide as the figure needs;
+        // only the fraction has a fixed width. Pinning a *digit count* would
+        // make this test a stopwatch on the test binary itself — which, run
+        // with a thread per core, passes ten cumulative CPU-seconds long before
+        // it reaches here and then reports `0m45.20s`.
+        let field = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let well_formed = |line: &str, tag: &str| {
+            let Some(rest) = line.strip_prefix(tag).and_then(|r| r.strip_prefix('\t')) else {
+                return false;
+            };
+            let Some((min, rest)) = rest.split_once('m') else {
+                return false;
+            };
+            let Some((sec, frac)) = rest.strip_suffix('s').and_then(|r| r.split_once('.')) else {
+                return false;
+            };
+            field(min) && field(sec) && frac.len() == 2 && field(frac)
+        };
         let shell_report = |src: &str| {
             let o = run(src).0;
-            let shape: String = o
-                .chars()
-                .map(|c| if c.is_ascii_digit() { 'N' } else { c })
-                .collect();
-            assert_eq!(shape, "user\tNmN.NNs\nsys\tNmN.NNs\n", "got {o:?}");
+            let lines: Vec<&str> = o.lines().collect();
+            assert!(
+                lines.len() == 2
+                    && well_formed(lines[0], "user")
+                    && well_formed(lines[1], "sys"),
+                "got {o:?}"
+            );
         };
         shell_report("set -o posix\n{ time ; } 2>&1");
         // A negation still leaves no command, but a redirect or an assignment

@@ -2470,10 +2470,18 @@ impl Parser {
             // `unexpected EOF while looking for \`]]'` then `syntax error:
             // unexpected end of file` (no source echo). If a stray token sits
             // where `]]` should be, name it the ordinary way.
+            //
+            // Only the second of those two lines gets bash's end-of-file line
+            // number. The first is the reader saying where it gave up, which is
+            // the last line it actually read — so `[[ -n x ` on line 1 of a file
+            // reports `line 1` and then `line 2`.
             if self.peek().is_none() {
-                return Err(ParseError::new(
-                    "unexpected EOF while looking for `]]'\nsyntax error: unexpected end of file",
-                ));
+                return Err(ParseError {
+                    line_at: vec![(0, self.cur_line())],
+                    ..ParseError::new(
+                        "unexpected EOF while looking for `]]'\nsyntax error: unexpected end of file",
+                    )
+                });
             }
             // A complete sub-expression followed by a stray token where `]]` was
             // expected. bash reports this as `syntax error in conditional

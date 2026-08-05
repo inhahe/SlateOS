@@ -156,47 +156,135 @@ through everywhere":
 
 **Corpus:** `a-nameref-to-an-element-is-read-by-every-form-that-reads-it.sh`.
 
-### TD-OILS-A-WHOLE-ARRAY-NAMEREF-IS-A-BAD-SUBSCRIPT-TO-EVERY-WRITE. `declare -n g='n[*]'; g=v` says `*: syntax error` where bash says `n[*]: bad array subscript` — 2026-08-05 — OPEN
+### TD-OILS-A-SUBSCRIPT-THAT-NAMES-AN-ARRAY-WHOLE-IS-NO-PLACE-TO-STORE. `n[*]=v` and `declare -n g='n[*]'; g=v` said `*: syntax error` where bash says `n[*]: bad array subscript` — 2026-08-05 — ✅ **FIXED 2026-08-05**
 
-**Where:** `userspace/oils/src/interp.rs` — `Shell::scalar_write_dest` (~11320)
-and `Shell::assign_elem`, plus arithmetic's `Shell::set` / `VarLookup::set`.
-Every one of them turns a `RefTarget { sub: Some("*") }` into an element
-destination and then evaluates `*` as an arithmetic subscript.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::whole_array_sub` and
+`Shell::warn_whole_array_sub` (beside `Shell::ref_target_value`), consulted by
+`Shell::scalar_write_dest`, `Shell::arith_write_dest`,
+`Shell::apply_assignment_inner` (twice) and `Shell::assign_elem` (twice).
 
-**What.** The read side of a whole-array reference was fixed by
-TD-OILS-A-NAMEREF-TO-AN-ELEMENT-WAS-READ-BY-ONLY-ONE-FORM; the write side still
-diverges. bash answers every store through such a reference with
-`base[sub]: bad array subscript` — spelling the whole reference — and stores
-nothing. Measured against bash 5.2.37 with `n=(3 5 7)`, `declare -n g='n[*]'`:
+**What.** `n[*]` and `n[@]` name an array *whole*, which is no place to put one
+value. bash refuses every such store with `base[sub]: bad array subscript`,
+spelling the whole reference and storing nothing; osh handed the subscript to
+`eval_arith_index`, which reported `*: syntax error: operand expected` and then
+*stored at index 0* on the paths that carried on. Measured against bash 5.2.37
+with `n=(3 5 7)` and `declare -n g='n[*]'`:
 
 ```text
-                    bash                              osh
-(( g += 1 ))        `n[*]: bad array subscript` ×2,   `3 5 7: syntax error in
-                    status 0, n unchanged             expression`, status 1
-g=NEW               `n[*]: bad array subscript`,      `*: syntax error: operand
-                    rest of the parse unit dropped    expected`, then continues
-printf -v g x       `n[*]: bad array subscript`,      `printf: *: syntax error:
-                    status 1                          operand expected`
-read -r g           same                              `read: *: syntax error: …`
-"${g:=D}"           `n[*]: bad array subscript`,      stores through and prints
+                    bash                            osh (before)
+n[*]=SV             `n[*]: bad array subscript`,    `*: syntax error`, same discard
                     rest of the parse unit dropped
+declare 'n[*]=D'    same, status 1, carries on      `*: syntax error`, discarded
+printf -v 'n[*]' x  same, status 1, n unchanged     `printf: *: syntax error`, stored
+read -r 'n[@]'      same                            `read: @: syntax error`, stored
+g=NEW               `n[*]: bad array subscript`     `*: syntax error`
+printf -v g x       same, status 1                  `printf: *: syntax error`
+(( g += 1 ))        same ×2, status 0               `((: *: syntax error`
+"${g:=D}"           same                            `` `n[*]': not a valid identifier ``
 ```
 
-The `(( g += 1 ))` case reports **twice** — once for the read walk, once for the
-write — and still exits 0, the expression's value being 1.
+**Fixed 2026-08-05.** `Shell::whole_array_sub` is the one place that says which
+subscripts these are, and it recognises them as **tokens** — by the two bytes
+themselves, never evaluated. That is what bash does too: `n["*"]=v`, `n[ * ]=v`
+and `n[$s]=v` with `s='*'` are ordinary subscript expressions and fail as
+arithmetic in both shells. `Shell::warn_whole_array_sub` gives the one
+diagnostic, untagged by whichever builtin asked.
 
-**Proper fix.** The subscripts `*` and `@` have to be recognised as
-whole-array *tokens* on the write side too, the way `Shell::ref_target_value`
-now recognises them on the read side, rather than handed to `eval_arith_index`.
-A small `RefTarget` helper answering "does this subscript name the array
-whole?" would serve all four call sites; each then reports
-`base[sub]: bad array subscript` and refuses the store, with the plain
-assignment and the `:=` arming the usual discard.
+Three things had to be got right beyond the wording:
 
-**Impact.** Any write through a nameref pointing at a whole array — rare, and
-loudly wrong rather than silently wrong in every case, since osh already
-refuses the store. What differs is the wording, the status and (for the plain
-assignment and `${g:=w}`) whether the rest of the parse unit runs.
+* **Where the subscript came from decides the associative case.** A *written*
+  `m[*]=v` on an associative array stores under the key `*` like any other, and
+  `$((m[*]))` reads that key — but the same subscript arriving through a
+  `declare -n` reference is refused even there. So the refusal for a reference
+  happens in `apply_assignment_inner` *before* the rewrite that would turn
+  `g=v` into `ka[*]=v`, and the written-subscript sites carry the `!is_assoc`
+  guard instead.
+* **What follows the refusal differs by caller.** A plain assignment and
+  `${g:=v}` drop the rest of the parse unit; `declare`/`local`, `printf -v` and
+  `read` report status 1 and carry on; arithmetic reports it *without* failing,
+  which is why `arith_write_dest` answers `Ok(None)` — `(( g += 1 ))` complains
+  twice, once for the read walk and once for the write, and still exits 0.
+* **It comes before the readonly guard and before the array is made.**
+  `readonly ro; ro[*]=X` is the bad subscript, not the readonly variable, and
+  `nope[*]=Q` leaves `nope` still not found.
+
+**Corpus:** `a-subscript-that-names-an-array-whole-is-no-place-to-store.sh`.
+
+### TD-OILS-A-SUBSCRIPT-THAT-ARRIVES-AS-BYTES-IS-NEVER-EXPANDED. `printf -v 'n[$i]' X` and `declare -n r='n[$i]'` both take `$i` literally, where bash expands it — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`. Every place that turns subscript
+*bytes* into an index or a key without expanding them first:
+
+* `Shell::ref_target_value` — parses the bytes as an integer directly
+  (`bytes::as_str(sub).and_then(|s| s.parse::<i64>())`) and hands them to
+  `Shell::assoc_element` as a key.
+* `Shell::apply_assignment_inner` and `Shell::scalar_write_store`, which rebuild
+  a word with `Word::literal(sub)` — a *literal* word expands to its own bytes,
+  so the quotes and the `$` reach `eval_arith_index` intact.
+* `Shell::set_scalar_target_checked`, which passes `split_assignment_target`'s
+  raw slice on the same way.
+
+**What.** A subscript reaches the shell as bytes rather than as a parsed word in
+two places — a **name operand** (`printf -v 'a[i]'`, `read 'a[i]'`) and a
+**nameref target** (`declare -n r='a[i]'`) — and bash *expands* it in both, as
+an arithmetic string in a double-quoted context: `$`-expansions happen and
+double quotes are removed, while single quotes and backslashes are not special.
+osh treats the bytes as final. Measured against bash 5.2.37 with
+`n=(a b c d e)`, `i=3`, `k=zz`, `declare -A m=([kk]=K [zz]=Z)`:
+
+```text
+                          bash                        osh
+printf -v 'n[$i]' X       n[3]=X                      `$i: syntax error`
+printf -v 'n[$((1+1))]' Y n[2]=Y                      `$((1+1)): syntax error`
+printf -v 'n[$(echo 1)]'  n[1]=Z                      `$(echo 1): syntax error`
+printf -v 'n["1"]' Z      n[1]=Z                      `"1": syntax error`
+printf -v 'm["k k"]' S    key `k k`                   key `"k k"`
+printf -v 'm[$k]' T       key `zz`                    key `$k`
+declare -n rd='n[$i]'     `${rd}` is `d`              `a` — index 0
+declare -n ra='n[$((1+1))]' `${ra}` is `c`            `a`
+declare -n mq='m["kk"]'   `${mq}` is `K`              empty — no such key
+declare -n md='m[$k]'     `${md}` is `Z`              empty
+```
+
+The two that are *not* expanded pin the context down: `n['0']` and `n[\61]` are
+`'0': syntax error` and `\61: syntax error` in **both** shells, so this is
+bash's `expand_arith_string(sub, Q_DOUBLE_QUOTES)` rather than an ordinary word
+expansion.
+
+A subscript that was *parsed* as part of an assignment (`n["1"]=W`, `n[$i]=W`)
+already agrees, because there the subscript is a real `Word` and
+`Shell::eval_arith_index` expands it. So the two spellings of what looks like
+the same store part company, which is what makes this worth one shared fix
+rather than four local ones.
+
+Two smaller divergences travel with it, both visible in the table above:
+
+* The diagnostic is **tagged with the builtin** — `printf: $i: syntax error`
+  against bash's bare `$i: syntax error`. Only `((` and `let` put their own name
+  in front in bash. Something leaves `Shell::arith_cmd` set across the
+  `printf -v` and `read` name operands.
+* A failed subscript on those two builtins still **stores at index 0** in osh
+  (`eval_arith_index` answers 0 on error) where bash stores nothing.
+
+**Proper fix.** One helper beside `Shell::whole_array_sub` that takes subscript
+*bytes*, parses them as a shell word and expands them the way bash's arithmetic
+strings are expanded, and answers the resulting text. Every site above calls it
+instead of parsing or `Word::literal`-ing the raw bytes; the whole-array token
+check stays *in front* of it, since bash rejects `n[*]` before expanding
+anything and `n[$s]` with `s='*'` is an ordinary expression in both shells.
+`eval_arith_index` then has to distinguish "evaluated to 0" from "failed", so
+the store can be refused rather than landed on element 0.
+
+**Impact.** Any computed subscript on a `printf -v`/`read` operand or a nameref
+target. The nameref half costs a *feature*, not just a diagnostic: because the
+expansion happens at every use rather than once at declaration,
+`declare -n rd='n[$i]'` is a **late-bound** reference to whichever element `$i`
+currently names — off one declaration, `i=1` reads `b` and `i=3` reads `d`, and
+`rd=X` writes wherever `$i` points. (The eagerly-bound `declare -n rd="n[$i]"`
+is a different thing and already works, the shell having expanded `$i` before
+`declare` ever saw it.) osh reads and writes element 0 for all of it, silently.
+The `printf -v`/`read` half is loud instead: the store is refused with an
+expression error where bash makes it.
 
 ### TD-OILS-A-COMMENT-INSIDE-ARITHMETIC-CAN-EAT-ITS-OWN-CLOSER. `$(( #5 ))` is not an arithmetic error at all — bash's second scan of the word honours `#`, so the comment swallows the `))` — 2026-08-04 — ✅ FIXED 2026-08-04
 

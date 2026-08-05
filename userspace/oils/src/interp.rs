@@ -11314,15 +11314,24 @@ impl Shell {
     /// (`declare -n r=arr[0]; r=v`) — and the callers can tell neither apart from
     /// a plain name, which is what makes this worth a shared type.
     ///
-    /// `None` from [`Shell::scalar_write_dest`] means the chain is circular: it
-    /// designates nothing, the warning has already been given, and the write
-    /// simply does not happen.
+    /// `None` from [`Shell::scalar_write_dest`] means the destination designates
+    /// nothing and the write simply does not happen — the chain was circular, or
+    /// it ended on a subscript naming a whole array. Either way the warning has
+    /// already been given, and the caller's `false` is what reports it further.
     fn scalar_write_dest(&self, name: &str) -> Option<ScalarDest> {
         let target = self.resolve_ref_use(name)?;
-        Some(match target.sub {
-            Some(sub) => ScalarDest::Elem(target.base, sub),
-            None => ScalarDest::Var(target.base),
-        })
+        let Some(sub) = target.sub else {
+            return Some(ScalarDest::Var(target.base));
+        };
+        // A reference naming a whole array is no place to put one value, and
+        // that is so whatever kind of array it is — an associative one takes a
+        // *written* `m[*]=v` under the key `*`, but not one arriving this way.
+        // See [`Self::warn_whole_array_sub`].
+        if let Some(c) = Self::whole_array_sub(&sub) {
+            self.warn_whole_array_sub(&target.base, c);
+            return None;
+        }
+        Some(ScalarDest::Elem(target.base, sub))
     }
 
     /// The dynamic special that would take a subscript-less write to `name`, or
@@ -11656,6 +11665,16 @@ impl Shell {
         let Some(target) = self.resolve_ref_use_walks(name, 2) else {
             return Ok(None);
         };
+        // A reference naming a whole array is refused the same way here, and it
+        // is `Ok(None)` for the same reason a cycle is: bash reports it, stores
+        // nothing, and lets the expression carry on with the value it had, so
+        // `(( g += 1 ))` still exits 0. See [`Self::warn_whole_array_sub`].
+        if let Some(sub) = &target.sub
+            && let Some(c) = Self::whole_array_sub(sub)
+        {
+            self.warn_whole_array_sub(&target.base, c);
+            return Ok(None);
+        }
         let dest = match target.sub {
             Some(sub) => ScalarDest::Elem(target.base, sub),
             None => ScalarDest::Var(target.base),
@@ -11977,6 +11996,25 @@ impl Shell {
             };
             target
         };
+        // A reference naming a whole array is no place to put one value, and the
+        // refusal has to happen *before* the rewrite below: rewriting turns
+        // `g=v` into `ka[*]=v`, which written out on an associative array is a
+        // perfectly ordinary store under the key `*`. Only a subscript arriving
+        // through a reference is refused on one. See
+        // [`Shell::warn_whole_array_sub`].
+        if a.index.is_none()
+            && let Some(sub) = &target.sub
+            && let Some(c) = Self::whole_array_sub(sub)
+        {
+            self.warn_whole_array_sub(&target.base, c);
+            // `declare g=v` reports status 1 and carries on; a bare `g=v` drops
+            // the rest of the parse unit, as a refused assignment command does.
+            if !self.decl_builtin_ctx {
+                self.arm_discard(1);
+                self.note_shell_error(FatalWhen::ErrexitOrPosix);
+            }
+            return false;
+        }
         if target.sub.is_some() || target.base != a.name {
             let mut a2 = a.clone();
             match target.sub {
@@ -12175,6 +12213,23 @@ impl Shell {
                     // array is a separate rejection, below.
                     if crate::unparse::word_src(idx_word).is_empty() {
                         self.perrln(&format!("{}[]: bad array subscript", a.name));
+                        if !self.decl_builtin_ctx {
+                            self.arm_discard(1);
+                            self.note_shell_error(FatalWhen::ErrexitOrPosix);
+                        }
+                        return false;
+                    }
+                    // `n[*]=v` — the subscript names the array whole, which is
+                    // no place to put one value. Refused before it is evaluated,
+                    // and refused as a *token*: `n["*"]=v` and `n[ * ]=v` are
+                    // ordinary subscript expressions that fail as arithmetic.
+                    // An associative array is exempt, `*` being a key there like
+                    // any other. See [`Shell::warn_whole_array_sub`].
+                    if !is_assoc
+                        && let Some(c) =
+                            Self::whole_array_sub(&crate::unparse::word_src(idx_word))
+                    {
+                        self.warn_whole_array_sub(&a.name, c);
                         if !self.decl_builtin_ctx {
                             self.arm_discard(1);
                             self.note_shell_error(FatalWhen::ErrexitOrPosix);
@@ -14053,8 +14108,18 @@ impl Shell {
         };
         // A reference that already designates one element leaves the subscript
         // written here nothing to apply to — bash refuses and stores nothing,
-        // naming the target as the reference spells it.
+        // naming the target as the reference spells it. A reference naming an
+        // array *whole* is refused too, but as the bad subscript it is: `${g:=v}`
+        // through `declare -n g='k[*]'` says `k[*]: bad array subscript`, and
+        // says it whatever kind of array `k` is. See
+        // [`Shell::warn_whole_array_sub`].
         let Some(name) = target.as_name() else {
+            if let Some(sub) = &target.sub
+                && let Some(c) = Self::whole_array_sub(sub)
+            {
+                self.warn_whole_array_sub(&target.base, c);
+                return false;
+            }
             let spelled = target.spelling();
             self.warn_elem_not_identifier(&spelled);
             return false;
@@ -14099,6 +14164,18 @@ impl Shell {
                     }
                     self.assoc_set(name, key, value, false);
                 } else {
+                    // `printf -v 'n[*]'`, `read 'n[*]'`, `${n[*]:=v}` — the
+                    // subscript names the array whole, which is no place to put
+                    // one value. Refused before it is evaluated, and as a
+                    // *token*: `n["*"]` is an ordinary subscript expression that
+                    // fails as arithmetic. The associative arm above never asks,
+                    // `*` being a key there like any other. See
+                    // [`Shell::warn_whole_array_sub`].
+                    if let Some(c) = Self::whole_array_sub(&crate::unparse::word_src(w)) {
+                        let name = name.to_string();
+                        self.warn_whole_array_sub(&name, c);
+                        return false;
+                    }
                     let idx = self.eval_arith_index(w);
                     let bound = self.elem_write_bound(name);
                     if idx < 0 && Self::resolve_index(idx, bound).is_none() {
@@ -23815,6 +23892,49 @@ impl Shell {
         Some((target.base, sub))
     }
 
+    /// Which of the two subscripts that name an array **whole** this is — `*`
+    /// or `@` — or `None` when it names one element of it.
+    ///
+    /// A *token*, recognised by the two bytes themselves rather than evaluated:
+    /// `n["*"]=v`, `n[ * ]=v` and `n[$s]=v` with `s='*'` are all ordinary
+    /// subscript expressions and fail as arithmetic, in bash as here. The
+    /// character comes back so a diagnostic can spell the reference the way it
+    /// was written.
+    ///
+    /// Only the *expansion* path has a use for one. It joins the elements and
+    /// hands the join on as a string — see [`Self::ref_target_value`]. Every
+    /// other reader and every writer refuses it, since a whole array is neither
+    /// a number to compute with nor a place to put one value; they say so with
+    /// [`Self::warn_whole_array_sub`].
+    fn whole_array_sub(sub: BStr<'_>) -> Option<char> {
+        match sub {
+            b"*" => Some('*'),
+            b"@" => Some('@'),
+            _ => None,
+        }
+    }
+
+    /// bash's complaint about a subscript that names the array **whole** where
+    /// one element belongs: `base[*]: bad array subscript`, spelling the whole
+    /// reference rather than the subscript alone, and untagged by whichever
+    /// builtin asked (`printf -v`, `read` and `((` all report it bare).
+    ///
+    /// What follows is the caller's to arrange, and they disagree. Arithmetic
+    /// reads and writes report it *without* failing — `(( g += 1 ))` complains
+    /// twice, once for the read walk and once for the write, and still exits 0.
+    /// A plain assignment and `${g:=v}` drop the rest of the parse unit.
+    /// `declare`/`local`, `printf -v` and `read` report status 1 and carry on.
+    ///
+    /// Which subscripts count is [`Self::whole_array_sub`]'s answer, and it does
+    /// not depend on the array's kind — but *where the subscript came from*
+    /// does. A written `m[*]=v` on an **associative** array stores under the key
+    /// `*` like any other, and `$((m[*]))` reads that key; only a subscript
+    /// arriving through a `declare -n` reference is refused on one. So the
+    /// associative exemption belongs to the call sites, not here.
+    fn warn_whole_array_sub(&self, base: &str, c: char) {
+        self.perrln(&format!("{base}[{c}]: bad array subscript"));
+    }
+
     /// The value a reference designating one element — or a whole array — reads
     /// as, with *why* it is nothing when it is.
     ///
@@ -23831,13 +23951,9 @@ impl Shell {
     /// An array with no elements is *unset* rather than empty — `${g-D}` takes
     /// the default — which falls out of there being no value to join.
     fn ref_target_value(&self, base: &str, sub: BStr<'_>) -> ElemValue {
-        let whole = match sub {
-            b"*" => Some(true),
-            b"@" => Some(false),
-            _ => None,
-        };
-        if let Some(star) = whole {
+        if let Some(c) = Self::whole_array_sub(sub) {
             let elems = self.array_elements(base);
+            let star = c == '*';
             return if elems.is_empty() {
                 ElemValue::Absent
             } else {
@@ -42366,21 +42482,17 @@ impl VarLookup for Shell {
         // *element* reference is read through as usual: `$((r))` with
         // `declare -n r='n[1]'` is element 1, and a non-numeric one is the
         // expression error reading it directly would be.
-        if let Some((base, sub)) = self.nameref_elem_target(name) {
-            let whole = match sub.as_slice() {
-                b"*" => Some('*'),
-                b"@" => Some('@'),
-                _ => None,
-            };
-            if let Some(c) = whole {
-                // …except on an associative array, where `[*]` is a key like
-                // any other and simply names no entry.
-                if self.assoc.contains_key(&base) {
-                    return self.assoc_element(&base, &sub);
-                }
-                self.perrln(&format!("{base}[{c}]: bad array subscript"));
-                return None;
+        if let Some((base, sub)) = self.nameref_elem_target(name)
+            && let Some(c) = Self::whole_array_sub(&sub)
+        {
+            // …except on an associative array, where `[*]` is a key like any
+            // other and simply names no entry. (The *write* side is not so
+            // forgiving: through a reference it refuses even those.)
+            if self.assoc.contains_key(&base) {
+                return self.assoc_element(&base, &sub);
             }
+            self.warn_whole_array_sub(&base, c);
+            return None;
         }
         // Return the raw value; the arithmetic evaluator recursively evaluates
         // it (`b=a; a=5; $((b))` → 5), including octal/hex literals.

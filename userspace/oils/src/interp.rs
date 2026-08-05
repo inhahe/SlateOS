@@ -43809,16 +43809,31 @@ fn ulimit_value_str(v: Option<u64>) -> String {
 }
 
 /// Render one `ulimit -a` line: description, right-aligned `(unit, -x)` token,
-/// then the value. The `)` is placed at a fixed column so the tokens align.
+/// then the value.
+///
+/// bash writes the two as separate fields — `%-20s` for the description and
+/// `%21s` for a `(unit, -x) ` token that carries its own trailing space — so
+/// the `)` lands in column 40 and the value starts in 42:
+///
+/// ```text
+/// core file size              (blocks, -c) 0
+/// open files                          (-n) 3200
+/// pipe size                (512 bytes, -p) 8
+/// ```
+///
+/// Two fields rather than one padded width, because that is what decides the
+/// overflow case: a description longer than 20 is not truncated and the token
+/// is still right-aligned behind it, so the columns give way rather than the
+/// text. No label in `RLIMIT_SPECS` is that long today — `POSIX message
+/// queues` is exactly 20 — but the rule is bash's, not a coincidence of the
+/// current table.
 fn ulimit_line(spec: &RlimitSpec, v: Option<u64>) -> String {
     let paren = if spec.unit.is_empty() {
         format!("(-{})", spec.opt)
     } else {
         format!("({}, -{})", spec.unit, spec.opt)
     };
-    // Column of the closing paren; pad the description so `)` lands there.
-    let width = 36usize.saturating_sub(paren.len());
-    format!("{:<width$}{} {}\n", spec.label, paren, ulimit_value_str(v), width = width)
+    format!("{:<20}{:>20} {}\n", spec.label, paren, ulimit_value_str(v))
 }
 
 /// The declaration builtins whose `name=value` operands bash treats as
@@ -66958,6 +66973,24 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(out.contains("open files"));
         assert!(out.contains("(-n) 1024"));
         assert!(out.starts_with("core file size"));
+    }
+
+    #[test]
+    fn ulimit_dash_a_puts_the_closing_paren_in_column_forty() {
+        // bash's two fields — `%-20s` then a `%21s` `(unit, -x) ` token — put
+        // the `)` in column 40 whatever the unit's width, which is the only
+        // thing that makes the values line up.
+        let (out, code) = run("ulimit -a");
+        assert_eq!(code, 0);
+        for line in out.lines() {
+            let close = line.find(')').unwrap_or_else(|| panic!("no `)` in {line:?}"));
+            assert_eq!(close + 1, 40, "closing paren off column: {line:?}");
+            assert_eq!(line.as_bytes().get(40), Some(&b' '), "no gap before value: {line:?}");
+        }
+        // Spot-check the three unit widths against bash 5.2.37's own output.
+        assert!(out.contains("core file size              (blocks, -c) 0\n"), "got {out:?}");
+        assert!(out.contains("open files                          (-n) 1024\n"), "got {out:?}");
+        assert!(out.contains("pipe size                (512 bytes, -p) 8\n"), "got {out:?}");
     }
 
     #[test]

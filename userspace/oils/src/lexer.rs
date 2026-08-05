@@ -1548,6 +1548,78 @@ impl Lexer {
         self.conts.push(u32::try_from(at).unwrap_or(u32::MAX));
     }
 
+    /// The length of the line continuation at `i`, if one is there: two
+    /// characters for `\<newline>`, three for the `\<CR><LF>` a CRLF file writes.
+    fn cont_len_at(&self, i: usize) -> Option<usize> {
+        if self.at(i) != Some('\\') {
+            return None;
+        }
+        match (self.at(i + 1), self.at(i + 2)) {
+            (Some('\n'), _) => Some(2),
+            (Some('\r'), Some('\n')) => Some(3),
+            _ => None,
+        }
+    }
+
+    /// `i`, advanced past every line continuation standing at it.
+    ///
+    /// The read-only half of [`Lexer::eat_conts`], for the scans that look ahead
+    /// by index before deciding to move the cursor at all.
+    fn cont_skip(&self, mut i: usize) -> usize {
+        while let Some(n) = self.cont_len_at(i) {
+            i = i.saturating_add(n);
+        }
+        i
+    }
+
+    /// Delete the line continuations standing at the cursor, as bash's *reader*
+    /// does, and return how many newlines went with them.
+    ///
+    /// `shell_getc` (parse.y) throws a `\<newline>` away and reads on, so no
+    /// scanner in bash ever sees one. That is not a detail of word scanning: the
+    /// pair can sit between the two characters of an operator (`|\<newline>|` is
+    /// `||`), between a `$` and what it introduces (`$\<newline>(` opens a
+    /// substitution), or anywhere else two characters have to be adjacent. Every
+    /// site that reads the next character calls this first, which is what makes
+    /// those sites agree with bash.
+    ///
+    /// Runs are deleted together, since the reader simply keeps reading. The
+    /// count is returned because `stamp_lines` derives the line from the newlines
+    /// inside a token's span: a caller that eats a continuation *before* the span
+    /// begins must advance `Lexer::line` itself.
+    fn eat_conts(&mut self) -> usize {
+        let mut n = 0usize;
+        while let Some(len) = self.cont_len_at(self.pos) {
+            self.conts.push(u32::try_from(self.pos).unwrap_or(u32::MAX));
+            self.pos = self.pos.saturating_add(len);
+            // The newline is gone, but it was still *read* — so a here-document
+            // read ahead on it is redeemed exactly as `bump_ch` redeems it.
+            self.sync_ahead();
+            n = n.saturating_add(1);
+        }
+        n
+    }
+
+    /// Consume the character at the cursor and delete whatever line continuation
+    /// follows it, so the next `peek` sees the character bash's scanner would.
+    /// The step to take inside a multi-character operator.
+    fn adv(&mut self) {
+        self.pos = self.pos.saturating_add(1);
+        self.eat_conts();
+    }
+
+    /// Move the cursor to `to`, recording every line continuation on the way as
+    /// deleted. For the scans that settle where to land by index first — jumping
+    /// the cursor straight there would leave those continuations unrecorded, and
+    /// the command history reads that record (see [`Tokenized::conts`]).
+    fn seek(&mut self, to: usize) {
+        while self.pos < to {
+            if self.eat_conts() == 0 {
+                self.pos = self.pos.saturating_add(1);
+            }
+        }
+    }
+
     /// If the cursor sits on a varfd redirect prefix `{name}` immediately
     /// followed by a redirection operator (`{fd}>`, `{fd}<`), return the name
     /// and the index just past the closing `}`. Returns `None` otherwise, so a
@@ -1555,29 +1627,37 @@ impl Lexer {
     /// normal word/reserved-word path. The `{` at `self.pos` is assumed.
     fn varfd_prefix(&self) -> Option<(String, usize)> {
         debug_assert_eq!(self.at(self.pos), Some('{'));
-        let mut i = self.pos + 1;
+        // “Immediately followed by” is judged after the reader's deletions, so a
+        // line continuation anywhere in here is simply not there: `{fd}\<newline>>f`
+        // is the same prefix as `{fd}>f`. See [`Lexer::eat_conts`].
+        let mut i = self.cont_skip(self.pos.saturating_add(1));
+        // Name characters only, so the name is text by construction — which is
+        // what makes it a shell variable the redirect can assign the fd to.
+        let mut name = String::new();
         // First name char must be a name-start (letter or `_`).
         match self.at(i) {
-            Some(c) if is_name_start(c) => i += 1,
+            Some(c) if is_name_start(c) => {
+                name.push(c);
+                i = self.cont_skip(i.saturating_add(1));
+            }
             _ => return None,
         }
         while matches!(self.at(i), Some(c) if is_name_char(c)) {
-            i += 1;
+            if let Some(c) = self.at(i) {
+                name.push(c);
+            }
+            i = self.cont_skip(i.saturating_add(1));
         }
         if self.at(i) != Some('}') {
             return None;
         }
-        let close = i;
-        i += 1;
+        i = self.cont_skip(i.saturating_add(1));
         // The `}` must be immediately followed by a redirection operator for
         // this to be a varfd prefix rather than an ordinary `{word}` token.
         if !matches!(self.at(i), Some('<' | '>')) {
             return None;
         }
-        // Name characters only, so the name is text by construction — which is
-        // what makes it a shell variable the redirect can assign the fd to.
-        let name: String = (self.pos + 1..close).filter_map(|i| self.at(i)).collect();
-        Some((name, close + 1))
+        Some((name, i))
     }
 
     fn run(&mut self) -> Result<Spanned, LexError> {
@@ -1607,7 +1687,9 @@ impl Lexer {
             while matches!(self.peek(), Some(' ' | '\t')) {
                 self.pos += 1;
             }
-            let Some(c) = self.peek() else { break };
+            if self.peek().is_none() {
+                break;
+            }
             // Every token produced by this iteration starts on `start_line`;
             // `start_pos` lets us count the newlines the iteration consumes (so
             // the counter advances past newlines swallowed inside a token body).
@@ -1615,6 +1697,21 @@ impl Lexer {
             let start_pos = self.pos;
             self.iter_start = start_pos;
             self.next_tok_index = out.len();
+            // A line continuation in front of the token is not there at all —
+            // bash's reader deleted it (see [`Lexer::eat_conts`]) — but it is
+            // eaten *after* `start_pos` so the newline falls inside this
+            // iteration's span, where `stamp_lines` counts it. Blanks can follow
+            // one, and another can follow those, so alternate until neither is at
+            // the cursor.
+            loop {
+                if self.eat_conts() == 0 {
+                    break;
+                }
+                while matches!(self.peek(), Some(' ' | '\t')) {
+                    self.pos += 1;
+                }
+            }
+            let Some(c) = self.peek() else { break };
             // RHS of `=~`: read the regex as one word so that `|` and the rest
             // of the regex alphabet are literal rather than shell operators,
             // and so a `( … )` group holds on to the blanks inside it.
@@ -1655,7 +1752,7 @@ impl Lexer {
                     }
                 }
                 '|' => {
-                    self.pos += 1;
+                    self.adv();
                     if self.peek() == Some('|') {
                         self.pos += 1;
                         out.push(Tok::Op(Op::OrIf));
@@ -1668,13 +1765,13 @@ impl Lexer {
                     }
                 }
                 '&' => {
-                    self.pos += 1;
+                    self.adv();
                     if self.peek() == Some('&') {
                         self.pos += 1;
                         out.push(Tok::Op(Op::AndIf));
                     } else if self.peek() == Some('>') {
                         // `&>file` / `&>>file`: redirect both stdout and stderr.
-                        self.pos += 1;
+                        self.adv();
                         if self.peek() == Some('>') {
                             self.pos += 1;
                             out.push(Tok::Op(Op::AmpDGreat));
@@ -1686,9 +1783,9 @@ impl Lexer {
                     }
                 }
                 ';' => {
-                    self.pos += 1;
+                    self.adv();
                     if self.peek() == Some(';') {
-                        self.pos += 1;
+                        self.adv();
                         if self.peek() == Some('&') {
                             self.pos += 1;
                             out.push(Tok::Op(Op::DSemiAmp)); // `;;&`
@@ -1703,7 +1800,7 @@ impl Lexer {
                     }
                 }
                 '(' => {
-                    self.pos += 1;
+                    self.adv();
                     // `((` (with no intervening space) begins an arithmetic
                     // command; `( (` (a space between) is nested subshells. So
                     // does `((` standing where no command can start — there it
@@ -1721,7 +1818,7 @@ impl Lexer {
                     self.pos += 1;
                     out.push(Tok::Op(Op::RParen));
                 }
-                '<' | '>' if self.peek_at(1) == Some('(') => {
+                '<' | '>' if self.at(self.cont_skip(self.pos + 1)) == Some('(') => {
                     // Process substitution `<(cmd)` / `>(cmd)`: a word (filename),
                     // not a redirection operator. `read_word` consumes the whole
                     // `<(…)`/`>(…)` group as a `Seg::ProcSub` (and allows adjacent
@@ -1730,7 +1827,7 @@ impl Lexer {
                     self.emit_word(out, segs);
                 }
                 '<' => {
-                    self.pos += 1;
+                    self.adv();
                     match self.peek() {
                         Some('&') => {
                             self.pos += 1;
@@ -1742,7 +1839,7 @@ impl Lexer {
                             out.push(Tok::Op(Op::LessGreat));
                         }
                         Some('<') => {
-                            self.pos += 1;
+                            self.adv();
                             if self.peek() == Some('<') {
                                 // `<<<` here-string: the target is an ordinary
                                 // word parsed on this line.
@@ -1756,7 +1853,7 @@ impl Lexer {
                     }
                 }
                 '>' => {
-                    self.pos += 1;
+                    self.adv();
                     match self.peek() {
                         Some('>') => {
                             self.pos += 1;
@@ -1780,20 +1877,24 @@ impl Lexer {
                     // collides with a brace group (`{ …; }` has a space) or brace
                     // expansion (`{a,b}` is not followed by `<`/`>`).
                     if let Some((name, end)) = self.varfd_prefix() {
-                        self.pos = end;
+                        self.seek(end);
                         out.push(Tok::VarFd(name));
                     }
                 }
                 '0'..='9' => {
                     // Possibly an IO number (digits directly before < or >).
-                    let start = self.pos;
+                    // “Directly” is again judged after the reader's deletions, so
+                    // the digits are gathered rather than sliced: a line
+                    // continuation may sit between two of them, or between the
+                    // last one and the operator. See [`Lexer::eat_conts`].
                     let mut i = self.pos;
-                    while matches!(self.at(i), Some('0'..='9')) {
-                        i += 1;
+                    let mut digits = Str::new();
+                    while let Some(d @ '0'..='9') = self.at(i) {
+                        digits.push(u8::try_from(d).unwrap_or(b'0'));
+                        i = self.cont_skip(i.saturating_add(1));
                     }
                     if matches!(self.at(i), Some('<' | '>')) {
-                        let digits = self.slice(start, i);
-                        self.pos = i;
+                        self.seek(i);
                         // Decimal digits only, so this is text by construction. A
                         // numeric fd always fits in i32 for realistic input; fall
                         // back to a word if it somehow doesn't parse.
@@ -2450,9 +2551,16 @@ impl Lexer {
             // read the balanced `(…)` body as one segment. Handled before the
             // `<`/`>` word-break below so `diff <(a) <(b)` and concatenated forms
             // like `pre<(cmd)` both work.
-            if ext_depth == 0 && matches!(c, '<' | '>') && self.peek_at(1) == Some('(') {
+            if ext_depth == 0
+                && matches!(c, '<' | '>')
+                && self.at(self.cont_skip(self.pos + 1)) == Some('(')
+            {
                 let input = c == '<';
-                self.pos += 2; // consume `<`/`>` and `(`
+                // Consume `<`/`>` and `(` — with whatever the reader deleted
+                // between them, since `<\<newline>(cmd)` is a process
+                // substitution (see [`Lexer::eat_conts`]).
+                self.adv();
+                self.pos += 1;
                 flush_lit(&mut segs, &mut lit);
                 // Like `$( … )`, an unterminated process substitution is
                 // reported at the *end of input*, not at the line it opened on
@@ -2679,8 +2787,10 @@ impl Lexer {
     /// double-quote scanner (bash: `"a$'b'"` is the 6 literal chars `a$'b'`,
     /// and a `$` right before the closing `"` is a literal `$`).
     fn read_dollar(&mut self, in_dquote: bool) -> Result<Option<Seg>, LexError> {
-        // Consume the `$`.
-        self.pos += 1;
+        // Consume the `$`. What follows it is judged after the reader's
+        // deletions, so `$<backslash><newline>(` opens a substitution and
+        // `$<backslash><newline>{` a braced parameter. See [`Lexer::eat_conts`].
+        self.adv();
         match self.peek() {
             Some('\'') if !in_dquote => {
                 // `$'…'` — ANSI-C quoting: a literal string with backslash
@@ -2710,7 +2820,7 @@ impl Lexer {
                 Ok(Some(Seg::Arith(raw, true)))
             }
             Some('(') => {
-                if self.peek_at(1) == Some('(') {
+                if self.at(self.cont_skip(self.pos + 1)) == Some('(') {
                     // `$((` is ambiguous: arithmetic, or a substitution whose
                     // body opens with a parenthesised group (`$(( cmd ) | cmd )`,
                     // which bash runs). Nothing local tells them apart, so read it
@@ -2719,14 +2829,20 @@ impl Lexer {
                     // `parse_dollar_paren` does. Note what does *not* backtrack:
                     // `$(( echo a ))` reaches its `))`, so it stays arithmetic and
                     // fails at evaluation, in bash too.
-                    let subst_from = self.pos.saturating_add(1);
+                    let subst_from = self.cont_skip(self.pos.saturating_add(1));
+                    let conts_from = self.conts.len();
                     let open = self.cur_line();
-                    self.pos = self.pos.saturating_add(2);
+                    self.adv();
+                    self.adv();
                     if let Ok(raw) = self.read_arith() {
                         return Ok(Some(Seg::Arith(raw, false)));
                     }
-                    // Only `self.pos` moved: `cur_line` is derived from it, and
-                    // the arithmetic scan records nothing else.
+                    // `self.pos` and the continuations the abandoned scan deleted
+                    // are all that moved: `cur_line` is derived from the cursor,
+                    // and the arithmetic scan records nothing else. The
+                    // continuations have to go back too — the same text is about
+                    // to be read as a substitution body, which keeps them.
+                    self.conts.truncate(conts_from);
                     self.pos = subst_from;
                     // Blamed on the opening line, unlike a plain `$( … )` — bash
                     // has already failed the arithmetic reading by this point, and
@@ -2749,7 +2865,9 @@ impl Lexer {
                 while let Some(n) = self.peek() {
                     if is_name_char(n) {
                         name.push(n);
-                        self.pos += 1;
+                        // A continuation inside the name is not a break in it:
+                        // `$v<backslash><newline>x` reads the variable `vx`.
+                        self.adv();
                     } else {
                         break;
                     }
@@ -3214,10 +3332,18 @@ impl Lexer {
                 // First unescaped, unquoted, non-nested `}` closes the span.
                 '}' => return Ok(raw),
                 // Backslash escapes the next character (both are preserved
-                // verbatim so later re-parsing sees the escape).
+                // verbatim so later re-parsing sees the escape) — unless that
+                // character is a newline, in which case the reader deleted the
+                // pair before this scan ever ran and neither reaches the raw
+                // text: `${v\<newline>x}` names the variable `vx`.
                 '\\' => {
-                    raw.push(b'\\');
-                    self.take_into(&mut raw);
+                    if self.cont_len_at(self.pos.saturating_sub(1)).is_some() {
+                        self.pos = self.pos.saturating_sub(1);
+                        self.eat_conts();
+                    } else {
+                        raw.push(b'\\');
+                        self.take_into(&mut raw);
+                    }
                 }
                 // Single quotes: copy verbatim to the closing quote.
                 '\'' => {
@@ -3341,9 +3467,21 @@ impl Lexer {
                     depth += 1;
                     raw.push(b'(');
                 }
+                // The reader deleted a `\<newline>` before this scan saw it, so
+                // it is neither text of the expression nor something that can
+                // come between the two closing parentheses.
+                '\\' => {
+                    if self.cont_len_at(self.pos.saturating_sub(1)).is_some() {
+                        self.pos = self.pos.saturating_sub(1);
+                        self.eat_conts();
+                    } else {
+                        raw.push(b'\\');
+                    }
+                }
                 ')' => {
                     if depth == 0 {
                         // Expect a second ')'.
+                        self.eat_conts();
                         if self.peek() == Some(')') {
                             self.pos += 1;
                             return Ok(raw);

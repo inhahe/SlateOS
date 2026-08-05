@@ -41,8 +41,8 @@ use crate::assoc::AssocArray;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
-    ParseOpts, Op, ReaderWarning, Seg, Tok, Tokenized, expand_aliases, expand_aliases_tracked,
-    tokenize,
+    ParseOpts, Op, ReaderWarning, Seg, Spanned, Tok, Tokenized, expand_aliases,
+    expand_aliases_tracked, tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
 
@@ -232,9 +232,10 @@ pub fn parse_opts(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError>
     // The reader's NUL removal happens ahead of the lexer here too, so that the
     // REPL's "is this line complete yet?" probes judge the same text the run
     // will parse (see [`crate::lexer::strip_nuls`]).
-    let (toks, lines) =
-        tokenize_spanned(&crate::lexer::strip_nuls(src), opts).map_err(ParseError::from)?;
-    parse_tokens(toks, lines, opts)
+    let src = crate::lexer::strip_nuls(src);
+    let Spanned { toks, lines, ends } =
+        tokenize_spanned(&src, opts).map_err(ParseError::from)?;
+    parse_tokens(toks, lines, Spans::of(&src, ends), opts)
 }
 
 /// Parse the body of a `<( … )` / `>( … )` process substitution.
@@ -258,10 +259,11 @@ pub fn parse_procsub_body(
     open_line: u32,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
-    let (mut toks, mut lines) = tokenize_paren_body(src, opts)
+    let Spanned { mut toks, mut lines, ends } = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
     map_lines(&mut toks, &mut lines, &LineMap::Offset(open_line.saturating_sub(1)));
-    parse_tokens_ending(toks, lines, opts, true).map_err(ParseError::in_paren_body)
+    parse_tokens_ending(toks, lines, Spans::of(src, ends), opts, true)
+        .map_err(ParseError::in_paren_body)
 }
 
 /// Parse shell source with strict here-document lexing: an unterminated
@@ -274,9 +276,9 @@ pub fn parse_procsub_body(
 /// Returns [`ParseError`] on a lexing or grammar error (including an
 /// unterminated here-document).
 pub fn parse_strict_heredoc(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError> {
-    let (toks, lines) =
+    let Spanned { toks, lines, ends } =
         crate::lexer::tokenize_spanned_strict(src, opts).map_err(ParseError::from)?;
-    parse_tokens(toks, lines, opts)
+    parse_tokens(toks, lines, Spans::of(src, ends), opts)
 }
 
 /// Parse shell source, expanding shell aliases over the token stream first.
@@ -288,13 +290,17 @@ pub fn parse_with_aliases(
     aliases: &AssocArray,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
-    let (toks, lines) = tokenize_spanned(src, opts).map_err(ParseError::from)?;
-    let (toks, lines) = if aliases.is_empty() {
-        (toks, lines)
+    let Spanned { toks, lines, ends } = tokenize_spanned(src, opts).map_err(ParseError::from)?;
+    // An alias splices in tokens that were never written where they are being
+    // read, so the offsets index nothing: drop the source and let the
+    // diagnostics fall back to naming the token.
+    let (toks, lines, spans) = if aliases.is_empty() {
+        (toks, lines, Spans::of(src, ends))
     } else {
-        expand_aliases(&toks, &lines, aliases, opts)
+        let (toks, lines) = expand_aliases(&toks, &lines, aliases, opts);
+        (toks, lines, Spans::default())
     };
-    parse_tokens(toks, lines, opts)
+    parse_tokens(toks, lines, spans, opts)
 }
 
 /// A resumable top-level parse: hands back one *parse unit* at a time so the
@@ -444,6 +450,10 @@ pub struct IncrementalParser {
     /// Parallel to `work`: the `orig` index each token came from, or `None` for
     /// a token an alias spliced in (which has no original counterpart).
     work_origin: Vec<Option<usize>>,
+    /// `work`'s view of the source, rebuilt from `work_origin` beside it: the
+    /// snapshot of `src` the tokens were lexed from, with each one's end offset
+    /// into it. See [`Spans`] for what a diagnostic needs it for.
+    work_spans: Spans,
     /// Cursor into `work`.
     wpos: usize,
     /// Index into `orig` of the first token not yet consumed: the origin of the
@@ -523,6 +533,7 @@ impl IncrementalParser {
             work: Vec::new(),
             work_lines: Vec::new(),
             work_origin: Vec::new(),
+            work_spans: Spans::default(),
             wpos: 0,
             pos: 0,
             last_aliases: None,
@@ -648,6 +659,17 @@ impl IncrementalParser {
         self.work = work;
         self.work_lines = work_lines;
         self.work_origin = work_origin;
+        // An alias-spliced token has no `orig` counterpart and so no source of
+        // its own; `u32::MAX` is the "cannot slice this" marker `Spans` reads.
+        // The rest keep the offsets their original token had, which is why the
+        // source is snapshotted here rather than borrowed: history expansion can
+        // rewrite `src` later, and these offsets index the text as it was lexed.
+        let ends = self
+            .work_origin
+            .iter()
+            .map(|o| o.and_then(|i| self.orig_ends.get(i).copied()).unwrap_or(u32::MAX))
+            .collect();
+        self.work_spans = Spans { src: self.src.clone(), ends };
         self.wpos = 0;
         self.last_aliases = Some(aliases.cloned());
     }
@@ -799,6 +821,7 @@ impl IncrementalParser {
         let mut p = Parser {
             toks: std::mem::take(&mut self.work),
             lines: std::mem::take(&mut self.work_lines),
+            spans: std::mem::take(&mut self.work_spans),
             pos: self.wpos,
             opts: self.opts,
         };
@@ -845,6 +868,7 @@ impl IncrementalParser {
         self.wpos = p.pos;
         self.work = p.toks;
         self.work_lines = p.lines;
+        self.work_spans = p.spans;
         // Whether this call is about to end the input by reporting the parked lexer
         // error — either in place of a grammar error that only happened because the
         // stream was truncated, or as the end-of-input result itself. Sampled before
@@ -1183,7 +1207,7 @@ pub fn parse_cmdsub_body(
     // implicit trailing newline would otherwise go, because that is the token
     // bash's parser sees after the body's last command. See
     // [`tokenize_paren_body`].
-    let (mut toks, mut lines) = tokenize_paren_body(src, opts)
+    let Spanned { mut toks, mut lines, ends } = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
     let map = build_cmdsub_line_map(&toks, &lines, close_line);
     // The body's line 1 is the line `$(` sits on: the closing `)` is on the
@@ -1192,7 +1216,7 @@ pub fn parse_cmdsub_body(
         u32::try_from(src.iter().filter(|&&b| b == b'\n').count()).unwrap_or(u32::MAX);
     let phys = LineMap::Offset(close_line.saturating_sub(newlines).saturating_sub(1));
     map_lines(&mut toks, &mut lines, &phys);
-    let prog = parse_tokens_ending(toks, lines, opts, true)
+    let prog = parse_tokens_ending(toks, lines, Spans::of(src, ends), opts, true)
         .map_err(|e| {
             // A body that ends mid-construct is not an end of file in bash
             // either: the next token is the `)`, and that is what bash names.
@@ -1293,8 +1317,13 @@ fn map_segs(segs: &mut [Seg], map: &LineMap) {
     }
 }
 
-fn parse_tokens(toks: Vec<Tok>, lines: Vec<u32>, opts: ParseOpts) -> Result<Program, ParseError> {
-    parse_tokens_ending(toks, lines, opts, false)
+fn parse_tokens(
+    toks: Vec<Tok>,
+    lines: Vec<u32>,
+    spans: Spans,
+    opts: ParseOpts,
+) -> Result<Program, ParseError> {
+    parse_tokens_ending(toks, lines, spans, opts, false)
 }
 
 /// [`parse_tokens`], but `ends_at_paren` says the stream's final token is the
@@ -1305,12 +1334,14 @@ fn parse_tokens(toks: Vec<Tok>, lines: Vec<u32>, opts: ParseOpts) -> Result<Prog
 fn parse_tokens_ending(
     toks: Vec<Tok>,
     lines: Vec<u32>,
+    spans: Spans,
     opts: ParseOpts,
     ends_at_paren: bool,
 ) -> Result<Program, ParseError> {
     let mut p = Parser {
         toks,
         lines,
+        spans,
         pos: 0,
         opts,
     };
@@ -1348,10 +1379,124 @@ struct Parser {
     /// across newlines swallowed inside here-docs, quoted strings, and command
     /// substitutions.
     lines: Vec<u32>,
+    /// The text `toks` was lexed from, for the diagnostics that quote source
+    /// rather than tokens. See [`Spans`].
+    spans: Spans,
     pos: usize,
     /// The options the tokens were lexed under, carried so that a nested body
     /// re-lexed during parsing (`$( … )`, `<( … )`) is read the same way.
     opts: ParseOpts,
+}
+
+/// The text a token stream was lexed from, with each token's end offset into it.
+///
+/// bash's `syntax error near \`X'` does not name a token: `error_token_from_text`
+/// slices the *input line* around the position the reader had reached. That is
+/// why `[[ a>>b ]]` is reported near `a>>b` and `[[ P;Q ]]` near `;Q` — the
+/// slice runs back to the nearest ` `, `\n`, `\t`, `;`, `|` or `&` and forward
+/// by exactly one character. A token stream cannot answer that on its own,
+/// because the whitespace that decides where the slice stops is the very thing
+/// lexing threw away.
+///
+/// Empty when the stream has no single text behind it — an alias-expanded parse
+/// splices in tokens that were never written where they are being read — in
+/// which case the diagnostics fall back to naming the token.
+#[derive(Default)]
+struct Spans {
+    /// Exactly the text that was tokenized: NULs already stripped, since the
+    /// offsets index that text and not whatever the caller read (see
+    /// [`crate::lexer::strip_nuls`]).
+    src: Vec<Ch>,
+    /// Parallel to the token stream: the character offset into `src` just past
+    /// each token's last character. `u32::MAX` marks a token with no source of
+    /// its own — one an alias spliced in — for which no slice can be taken.
+    ends: Vec<u32>,
+}
+
+impl Spans {
+    fn of(src: BStr<'_>, ends: Vec<u32>) -> Self {
+        Self { src: bytes::chars(src).collect(), ends }
+    }
+
+    /// The text bash would report an error "near", given that the reader had
+    /// just finished the token at `pos`.
+    ///
+    /// A direct port of bash's `error_token_from_text` (parse.y), which is the
+    /// only reason the source text has to be carried this far. Starting from the
+    /// character just past the token, it steps back over trailing whitespace,
+    /// then back again to the nearest *delimiter* — one of ` `, `\n`, `\t`, `;`,
+    /// `|`, `&` — and returns everything from there up to and including the one
+    /// character that followed the token. Two consequences fall straight out of
+    /// that and are exactly what the token alone cannot reproduce:
+    ///
+    /// - text written flush *before* the token comes along, because the scan
+    ///   back does not stop at a token boundary: `[[ a>>b ]]` reports `a>>b`
+    ///   and `[[ -n @(a) ]]` reports `@(a` (a `(` is not a delimiter).
+    /// - exactly one character written flush *after* it comes along too, and no
+    ///   more: `[[ P;QRS ]]` reports `;Q`, while `[[ P; Q ]]` reports only `;`.
+    ///
+    /// `None` when there is no source to slice — an alias-expanded stream, or a
+    /// token that is not in this stream at all — leaving the caller to name the
+    /// token instead.
+    fn near(&self, pos: usize) -> Option<Str> {
+        let t = &self.src;
+        let mut i = *self.ends.get(pos)? as usize;
+        // bash's *reader* deletes a `\<newline>` — `shell_getc` throws both
+        // characters away and reads on — so the character "just past the token"
+        // is the first one on the next line, and the backslash is text the
+        // parser never had. `[[ P;\<newline>Q ]]` is reported near `Q`, not
+        // near `;\`.
+        while let Some(n) = cont_len(t.get(i..).unwrap_or(&[])) {
+            i = i.saturating_add(n);
+        }
+        if t.is_empty() || i > t.len() {
+            return None;
+        }
+        // bash reads `t[i]` where `i` may sit on the terminating NUL; stepping
+        // back off the end is that same step.
+        if i > 0 && i == t.len() {
+            i -= 1;
+        }
+        while i > 0 && is_error_space(t.get(i)) {
+            i -= 1;
+        }
+        let token_end = if i > 0 { i.saturating_add(1) } else { 0 };
+        while i > 0 && !is_error_delim(t.get(i)) {
+            i -= 1;
+        }
+        while i != token_end && is_error_space(t.get(i)) {
+            i = i.saturating_add(1);
+        }
+        let slice = if token_end > 0 { t.get(i..token_end)? } else { t.get(..1)? };
+        Some(bytes::from_chars(slice.iter().copied()))
+    }
+}
+
+/// The length of the line continuation at the front of `t`, if there is one:
+/// two characters for `\<newline>`, three for the `\<CR><LF>` a CRLF file
+/// writes. `None` when `t` does not start with one.
+fn cont_len(t: &[Ch]) -> Option<usize> {
+    if !matches!(t.first(), Some(&Ch::U('\\'))) {
+        return None;
+    }
+    match (t.get(1), t.get(2)) {
+        (Some(&Ch::U('\n')), _) => Some(2),
+        (Some(&Ch::U('\r')), Some(&Ch::U('\n'))) => Some(3),
+        _ => None,
+    }
+}
+
+/// bash's `whitespace()` plus the newline it tests beside it, over the character
+/// the error scan is looking at. A missing character (past the end) is neither.
+fn is_error_space(c: Option<&Ch>) -> bool {
+    matches!(c, Some(&Ch::U(' ' | '\t' | '\n')))
+}
+
+/// bash's `member (c, " \n\t;|&")` — where the scan back from an error stops.
+/// Note what is *not* here: parentheses, quotes and redirection characters are
+/// all ordinary text to it, which is why they are swept up into the slice.
+fn is_error_delim(c: Option<&Ch>) -> bool {
+    matches!(c, Some(&Ch::U(' ' | '\n' | '\t' | ';' | '|' | '&')))
 }
 
 /// Reserved words that terminate a command list or introduce a compound.
@@ -2301,7 +2446,7 @@ impl Parser {
             // bash distinguishes a token it can name from a word it cannot.
             let tok = self.token_display();
             if matches!(self.peek(), Some(Tok::Op(_))) {
-                let near = cond_error_near(&tok);
+                let near = self.cond_near_at(self.pos);
                 return Err(ParseError::new(&bfmt![
                     b"syntax error in conditional expression: unexpected token `",
                     &tok,
@@ -2464,7 +2609,7 @@ impl Parser {
             && !matches!(op, Op::AndIf | Op::OrIf | Op::RParen)
         {
             let tok = self.token_display();
-            let near = cond_error_near(&tok);
+            let near = self.cond_near_at(self.pos);
             return Err(ParseError::new(&bfmt![
                 b"unexpected token `",
                 tok,
@@ -2498,15 +2643,25 @@ impl Parser {
     /// never becomes that token, so an error on one is reported near whatever
     /// came before it: `[[ a` reports near `a`, and `[[ a -eq` near `-eq`.
     fn cond_near(&self) -> Str {
-        if !matches!(self.peek(), Some(Tok::Newline)) {
-            return self.token_display();
-        }
-        // Walk back over any newlines to the last real token.
         let mut pos = self.pos;
-        while pos > 0 && matches!(self.toks.get(pos), None | Some(Tok::Newline)) {
-            pos -= 1;
+        if matches!(self.peek(), Some(Tok::Newline)) {
+            // Walk back over any newlines to the last real token. That is where
+            // bash's own scan lands too: its input line ends at the newline, so
+            // stepping back off the end skips it and any space before it.
+            while pos > 0 && matches!(self.toks.get(pos), None | Some(Tok::Newline)) {
+                pos -= 1;
+            }
         }
-        self.token_display_at(pos)
+        self.cond_near_at(pos)
+    }
+
+    /// [`Parser::cond_near`] for a known token position: the source slice bash
+    /// would print, or — when there is no source behind this stream — the
+    /// token itself, trimmed the way [`cond_error_near`] describes.
+    fn cond_near_at(&self, pos: usize) -> Str {
+        self.spans
+            .near(pos)
+            .unwrap_or_else(|| cond_error_near(&self.token_display_at(pos)))
     }
 
     /// Expect a word operand inside `[[ … ]]` (not an operator/closer). `pos`
@@ -3115,8 +3270,12 @@ fn attach_redirect(cmd: Command, redir: Redirect) -> Command {
 /// reports that near `@(a`, having scanned back through the `(` to the space.
 ///
 /// The scan is textual, so an operator written flush against the word before it
-/// picks that word up too: `[[ a>>b ]]` is reported near `a>>b`. Reproducing
-/// that needs the source text, not the token — see TD-OILS-COND-TOKEN-SPELLING.
+/// picks that word up too: `[[ a>>b ]]` is reported near `a>>b`. That cannot be
+/// recovered from a token, which is why this is only the **fallback**: when the
+/// stream has source behind it, [`Spans::near`] runs bash's scan for real and
+/// this is never reached. It survives for the one stream that has no source of
+/// its own — an alias-expanded parse, whose tokens were never written where
+/// they are being read (TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT).
 fn cond_error_near(tok: BStr<'_>) -> Str {
     match tok.last() {
         Some(&c @ (b';' | b'|' | b'&')) => vec![c],

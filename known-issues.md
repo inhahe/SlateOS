@@ -35378,8 +35378,205 @@ reads `;` singly, so the walk starts inside the pair.
 **Impact.** Cosmetic — the message text of a syntax error inside `[[ ]]`. Exit
 status, the other two lines, and every non-error behaviour are unaffected.
 
-**The proper fix** is to give the conditional parser the same reconstruction:
-report the error position as an offset into the source line and slice the token
-text out of that line rather than out of the token, so the lookahead character
-comes along. Until then, any corpus case that provokes a `[[ ]]` syntax error
-must put a blank after the offending token or be marked `# EXPECT-DIFF:`.
+**Fixed 2026-08-05** by giving the conditional parser the same reconstruction —
+the prescribed fix, not a patch on the token text. `error_token_from_text` is
+ported whole as `Spans::near` in `src/parser.rs`: start one past the offending
+token, step back off the terminating NUL, skip back over ` `/`\t`/`\n`, set
+`token_end = i + 1`, scan back while the character is *not* in `" \n\t;|&"`,
+then skip forward over whitespace while `i != token_end`. To feed it, the lexer
+now returns a named `Spanned { toks, lines, ends }` (was a widening tuple) and
+the parser carries a `Spans { src, ends }` beside its token stream.
+
+Three things the port settles that a token could not have:
+
+- **Exactly one character after the token comes along, and no more.** `[[ P;QRS ]]`
+  is `;Q` because the forward skip stops at `token_end`.
+- **Text written flush *before* it comes along too.** `[[ a>>b ]]` is `a>>b` and
+  `[[ -n @(a) ]]` is `@(a` — parentheses, quotes and redirection characters are
+  not delimiters, so the backward scan sweeps them up.
+- **A delimiter inside a multi-character operator cuts it short**: `[[ P;;Q ]]`
+  is `;Q` and `[[ a>|b ]]` is `|b`, while `>>` and `<<<` come through whole.
+
+Scoping note worth keeping: the backward scan always stops at or after the space
+that must follow the `[[` reserved word, so it can never escape the conditional's
+body. That is why a `$( … )` or `<( … )` body needs only its *own* text, even
+though bash's `shell_input_line` there is the enclosing line — measured, before
+any plumbing was written (`echo $([[ a>>b ]])` reports `a>>b`, not `$([[ a>>b`).
+
+An alias-expanded parse splices in tokens that were never written where they are
+being read, so its offsets index nothing: that path drops the spans (`u32::MAX`
+in `IncrementalParser`'s rebuilt `ends`) and falls back to naming the token via
+`cond_error_near`. See TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT.
+
+**Pinned by** `tests/corpus/a-conditional-error-quotes-the-source-not-the-token.sh`.
+
+
+### TD-OILS-LINE-CONTINUATION-INSIDE-AN-OPERATOR-IS-NOT-DELETED — 2026-08-05
+
+**Where:** `userspace/oils/src/lexer.rs` — `\<newline>` is removed while scanning
+a *word*, but not in the character stream the operator scanner reads.
+
+**What.** bash deletes `\<newline>` in its **reader** (`shell_getc` in parse.y
+throws both characters away and reads on), so by the time anything is tokenized
+the pair is simply gone — it can sit anywhere, including between the two
+characters of a two-character operator, or between a `$` and its `(`. osh
+removes it only inside word scanning, so every other site mis-lexes:
+
+```text
+true |\<nl>| echo second   bash: `||`, prints nothing   osh: `true |  | echo second`, prints second
+false &\<nl>& echo second  bash: `&&`, prints nothing   osh: prints second
+echo a;\<nl>; b            bash: `;;` — syntax error    osh: two `;` — runs `b`
+echo x >\<nl>> f           bash: `>>` f                 osh: `>` then `>` — ambiguous redirect
+cat <\<nl><EOF             bash: heredoc                osh: ambiguous redirect, body runs as commands
+echo $\<nl>(echo hi)       bash: prints hi              osh: syntax error near `('
+```
+
+The one-line spellings all agree (`true | | echo second` is a syntax error in
+both), and words are already right (`ec\<nl>ho hi` prints `hi`), as are `[\<nl>[`
+and `]\<nl>]`. Worse than the diagnostics: three of these rows are **silently
+wrong output**, not an error — `|\<nl>|` runs the right-hand side of what the
+author wrote as `||` unconditionally.
+
+**The proper fix** is to move the deletion to where bash has it: strip
+`\<newline>` (and the `\<CR><LF>` a CRLF file writes) in the reader that feeds
+the lexer, rather than in the word scanner, so no scanner ever sees the pair.
+The offsets `Spans` indexes must then stay offsets into the *original* text,
+since the deletion happens before lexing — the same bookkeeping
+`Tokenized::ends` already does.
+
+**Impact.** Any script that wraps a long line at an operator by splitting the
+operator itself. Rare in hand-written code, but the failure mode is silent.
+
+
+### TD-OILS-COND-ERROR-LINE-AFTER-A-CONTINUATION — 2026-08-05
+
+**Where:** `userspace/oils/src/parser.rs` — the line a `[[ ]]` syntax error is
+blamed on, and the source line echoed under it.
+
+**What.** With a line continuation between the offending token and the
+one-character lookahead that follows it, bash blames the *later* line:
+
+```text
+[[ P;\
+Q ]]
+              bash: line 2: unexpected token `;', conditional binary operator expected
+                    line 2: syntax error near `Q'
+                    line 2: `Q ]]'
+              osh:  line 1: … (same first line, same `near `Q'`) …
+                    line 1: `[[ P;\'
+```
+
+The ``near `Q'`` text agrees — that is what
+TD-OILS-COND-SYNTAX-ERROR-NAMES-ONLY-THE-TOKEN fixed. Only the line *number* and
+the echoed line differ, and only when a newline lies between the token and its
+lookahead. Ordinary (non-conditional) errors already agree, because there the
+offending token and the reader are on the same line
+(`echo a; \<nl>foo | ; bar` is line 2 in both).
+
+**Why.** bash reports at `line_number` — *the reader's* current line — and
+echoes `shell_input_line`, which the reader has already refilled with line 2 by
+the time it peeked past `;`. osh reports the offending token's own line and
+echoes that.
+
+**The proper fix** is to model bash's per-physical-line input buffer: carry the
+error position as (reader line, offset within that line) rather than as the
+token's line, so both the number and the echo come from the line the reader was
+on. Related to (but not the same as)
+TD-OILS-LINE-CONTINUATION-INSIDE-AN-OPERATOR-IS-NOT-DELETED: fixing the deletion
+does not fix this, because the token still *ends* on line 1.
+
+**Impact.** Cosmetic; two of the three diagnostic lines.
+`tests/corpus/a-conditional-error-quotes-the-source-not-the-token.sh` runs that
+one case through `sed` so it is pinned for its `near` text alone.
+
+
+### TD-OILS-COND-ERROR-MISSES-THE-PRIMARY-OPERATOR-LINE — 2026-08-05
+
+**Where:** `userspace/oils/src/parser.rs`, `Parser::cond_operand_error`,
+the `CondPos::Primary` arm.
+
+**What.** When the *first* thing inside `[[ ]]` is a control operator, bash
+prints a first diagnostic line that osh omits entirely:
+
+```text
+[[ ;Q ]]   bash: unexpected token `;' in conditional command   osh: (absent)
+           bash: syntax error near `;Q'                        osh: syntax error near `;Q'
+           bash: `[[ ;Q ]]'                                    osh: `[[ ;Q ]]'
+[[ ; ]]    same shape                                          same omission
+[[ |Q ]]   unexpected token `|' in conditional command         (absent)
+```
+
+Note the wording: `in conditional command`, not the
+`, conditional binary operator expected` that a *second*-position operator gets
+(`[[ P;Q ]]`) — which osh does print. The `near` line and the echoed line
+already match, so this is one missing line.
+
+**The proper fix** is to emit that clause from the `CondPos::Primary` arm when
+the offending token is a control operator, mirroring what the binary-operator
+position already does.
+
+**Impact.** Cosmetic; one diagnostic line.
+
+
+### TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT — 2026-08-05
+
+**Where:** `userspace/oils/src/parser.rs` — the alias path in
+`IncrementalParser::rebuild`, which marks alias-spliced tokens `u32::MAX` so
+`Spans::near` declines and the diagnostic falls back to `cond_error_near`.
+
+**What.** When the conditional's text arrived through an alias, bash reports
+against the *expansion* and osh against the line as written:
+
+```sh
+shopt -s expand_aliases
+alias A="[[ P;Q"
+A ]]
+```
+
+```text
+bash: line 3: syntax error near `;Q'   line 3: `[[ P;Q'
+osh:  line 3: syntax error near `;'    line 3: `A ]]'
+```
+
+The first diagnostic line agrees. This is deliberate for now: an alias splices
+in tokens that were never written where they are being read, so their offsets
+index nothing, and inventing a slice would be worse than naming the token.
+
+**The proper fix** is to keep the alias's *own* text beside the spliced tokens
+— bash's `shell_input_line` genuinely becomes the expansion, because the alias
+is pushed onto the input stack and re-read — so both the slice and the echoed
+line come from it.
+
+**Impact.** Cosmetic, and confined to conditionals reached through an alias.
+
+
+### TD-OILS-STDIN-RESYNCS-AFTER-A-SYNTAX-ERROR — 2026-08-05
+
+**Where:** `userspace/oils/src/interp.rs` — the non-interactive stdin read
+loop, which keeps parsing after a syntax error where the file and `-c` routes
+correctly abandon.
+
+**What.** The same script abandons from a file and continues from stdin:
+
+```sh
+[[ a
+== b ]]
+echo tail
+```
+
+```text
+osh FILE:  3 diagnostic lines, then nothing        — matches bash
+osh -c:    3 diagnostic lines, then nothing        — matches bash
+osh <FILE: 3 diagnostic lines, then `line 2: ==: command not found`, then `tail`
+bash<FILE: 3 diagnostic lines, then nothing
+```
+
+`parse_tokens`' own doc comment already states the rule — "bash abandons the
+rest of a script (or `eval`/`source` string) after a syntax error rather than
+resynchronising" — so the stdin route is the one that does not implement it.
+
+**The proper fix** is to route stdin through the same abandon-on-syntax-error
+path as a script file; the divergence is in *which* reader, not in the parser.
+
+**Impact.** Real, not cosmetic: a piped script runs commands after the error
+that bash never reaches — here `== b ]]` is attempted as a command.

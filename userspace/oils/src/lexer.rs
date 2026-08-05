@@ -818,18 +818,31 @@ pub fn strip_nuls(src: BStr<'_>) -> std::borrow::Cow<'_, [u8]> {
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
 pub fn tokenize(src: BStr<'_>, opts: ParseOpts) -> Result<Vec<Tok>, LexError> {
-    tokenize_spanned(src, opts).map(|(toks, _lines)| toks)
+    tokenize_spanned(src, opts).map(|s| s.toks)
 }
 
-/// Tokenize `src`, returning the token stream alongside a parallel vector giving
-/// the 1-based source line each token starts on. The parser stamps these lines
-/// onto items for `$LINENO` and error diagnostics; unlike counting `Newline`
-/// tokens, this stays correct across newlines swallowed inside quoted strings,
-/// here-document bodies, and command substitutions.
+/// A completed tokenization: the token stream with the two parallel vectors a
+/// parser needs to talk about where each token came from.
+pub struct Spanned {
+    pub toks: Vec<Tok>,
+    /// Parallel to `toks`: the 1-based source line each token *ends* on. The
+    /// parser stamps these onto items for `$LINENO` and error diagnostics;
+    /// unlike counting `Newline` tokens, this stays correct across newlines
+    /// swallowed inside quoted strings, here-document bodies, and command
+    /// substitutions.
+    pub lines: Vec<u32>,
+    /// Parallel to `toks`: the character offset into `src` just past each
+    /// token's last character, as [`Tokenized::ends`]. A syntax error needs it
+    /// because bash names the error site by slicing its *input line*, not by
+    /// printing the token — see [`crate::parser`]'s `Spans`.
+    pub ends: Vec<u32>,
+}
+
+/// Tokenize `src`, keeping each token's source line and end offset.
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize_spanned(src: BStr<'_>, opts: ParseOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+pub fn tokenize_spanned(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, LexError> {
     let mut lx = Lexer::new(src, opts);
     lx.run()
 }
@@ -853,7 +866,7 @@ pub fn tokenize_spanned(src: BStr<'_>, opts: ParseOpts) -> Result<(Vec<Tok>, Vec
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize_paren_body(src: BStr<'_>, opts: ParseOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+pub fn tokenize_paren_body(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, LexError> {
     let mut lx = Lexer::paren_body(src, opts);
     lx.run()
 }
@@ -1037,7 +1050,7 @@ pub fn ends_in_continuation(src: BStr<'_>, opts: ParseOpts) -> bool {
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote, substitution, or here-document.
-pub fn tokenize_spanned_strict(src: BStr<'_>, opts: ParseOpts) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
+pub fn tokenize_spanned_strict(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, LexError> {
     let mut lx = Lexer::strict_heredoc(src, opts);
     lx.run()
 }
@@ -1567,14 +1580,15 @@ impl Lexer {
         Some((name, close + 1))
     }
 
-    fn run(&mut self) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
-        let mut out = Vec::new();
-        // Parallel to `out`: the 1-based source line each token *ends* on (see
+    fn run(&mut self) -> Result<Spanned, LexError> {
+        let mut toks = Vec::new();
+        // Parallel to `toks`: the 1-based source line each token *ends* on (see
         // `stamp_lines` — that is what bash's `line_number` holds once the token
         // has been read).
         let mut lines: Vec<u32> = Vec::new();
-        self.run_into(&mut out, &mut lines, &mut Vec::new(), &mut Vec::new())?;
-        Ok((out, lines))
+        let mut ends: Vec<u32> = Vec::new();
+        self.run_into(&mut toks, &mut lines, &mut Vec::new(), &mut ends)?;
+        Ok(Spanned { toks, lines, ends })
     }
 
     /// Tokenize the whole input into `out`/`lines`, keeping whatever was lexed
@@ -3608,6 +3622,7 @@ mod tests {
     /// As [`tokenize`], with per-token line numbers.
     fn tokenize_spanned(src: &str) -> Result<(Vec<Tok>, Vec<u32>), LexError> {
         super::tokenize_spanned(src.as_bytes(), ParseOpts::default())
+            .map(|s| (s.toks, s.lines))
     }
 
     /// Tokenize and drop the terminating `Newline`, so a test that counts words

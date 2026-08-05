@@ -31223,7 +31223,10 @@ impl Shell {
     ///
     /// One bad name does not stop the others from being declared: the caller
     /// folds in the status this operand contributes and moves on.
-    fn attr_operand(&mut self, tag: &str, word: BStr<'_>) -> AttrOperand {
+    ///
+    /// `rule` says how the builtin's own flags change the way a nameref operand
+    /// is followed; see [`AttrRefRule`].
+    fn attr_operand(&mut self, tag: &str, word: BStr<'_>, rule: AttrRefRule) -> AttrOperand {
         let (name, append, value) = match attr_assignment_split(word) {
             Some(eq) => {
                 let append = eq > 0 && word.get(eq - 1) == Some(&b'+');
@@ -31253,7 +31256,7 @@ impl Shell {
             return AttrOperand::Done { status: 1 };
         };
         if self.nameref_attr.contains(text) {
-            return self.attr_nameref(tag, text, append, value);
+            return self.attr_nameref(tag, text, append, value, rule);
         }
         AttrOperand::Mark {
             name: text.to_string(),
@@ -31282,24 +31285,37 @@ impl Shell {
     ///
     /// * A **circular** chain points at nothing. The warning is out;
     ///   `export a` reports 0, and only the *store* a valued operand wanted
-    ///   fails, so `export a=5` reports 1.
+    ///   fails, so `export a=5` reports 1. Unless the operand *makes an array*
+    ///   (`export -a a=5`), which is a write and so falls back on the
+    ///   reference's own name — see [`Self::resolve_ref_array_write`] — leaving
+    ///   `declare -ax a=([0]="5")` and breaking the cycle.
     /// * An **element** reference (`declare -n r=arr[1]`) names no variable, and
     ///   a subscript is exactly what these two builtins refuse — so the
     ///   marking is refused with `` export: `arr[1]': not a valid identifier ``.
     ///   The *store* still happens, through the reference and with the append
     ///   form intact (`export r+=9` leaves `arr[1]="29"`), and the status is
     ///   still 0. `declare` differs: it marks `arr` and stores into `arr[1]`.
+    ///
+    /// How many times the chain is walked — and so how many times a circular one
+    /// is reported — is [`AttrRefRule::use_walks`].
     fn attr_nameref(
         &mut self,
         tag: &str,
         name: &str,
         append: bool,
         value: Option<Str>,
+        rule: AttrRefRule,
     ) -> AttrOperand {
-        let Some(target) = self.resolve_ref_use(name) else {
-            return AttrOperand::Done {
-                status: i32::from(value.is_some()),
+        let target = if rule.array && value.is_some() {
+            self.resolve_ref_array_write(name)
+        } else {
+            let Some(target) = self.resolve_ref_use_walks(name, rule.use_walks(value.is_some()))
+            else {
+                return AttrOperand::Done {
+                    status: i32::from(value.is_some()),
+                };
             };
+            target
         };
         if target.sub.is_none() {
             return AttrOperand::Mark {
@@ -31489,7 +31505,11 @@ impl Shell {
         let _ = print; // `-p` with operands behaves like plain `export`.
         let mut status = 0;
         for a in operands {
-            let (k, append, value) = match self.attr_operand("export", a) {
+            let rule = AttrRefRule {
+                array: assoc || indexed,
+                unexport,
+            };
+            let (k, append, value) = match self.attr_operand("export", a, rule) {
                 AttrOperand::Mark { name, append, value } => (name, append, value),
                 AttrOperand::Done { status: s } => {
                     status |= s;
@@ -35481,7 +35501,12 @@ impl Shell {
             // Supports `NAME=value` and the `NAME+=value` append form; anything
             // that is not a plain identifier is refused here, and only that
             // operand is lost.
-            let (name, append, value) = match self.attr_operand("readonly", name_val) {
+            // `readonly` has no `-n`, so it always pays for the marking lookup.
+            let rule = AttrRefRule {
+                array: assoc || indexed,
+                unexport: false,
+            };
+            let (name, append, value) = match self.attr_operand("readonly", name_val, rule) {
                 AttrOperand::Mark { name, append, value } => (name, append, value),
                 AttrOperand::Done { status: s } => {
                     status |= s;
@@ -41300,6 +41325,42 @@ enum AttrOperand {
     /// operand carried has already happened; `status` is what this operand
     /// contributes to the builtin's exit status.
     Done { status: i32 },
+}
+
+/// How an `export`/`readonly` operand follows a nameref chain, which its
+/// builtin's own flags decide. See [`Shell::attr_nameref`].
+#[derive(Debug, Clone, Copy)]
+struct AttrRefRule {
+    /// `-a`/`-A` were given. Together with a value that makes the operand an
+    /// array *write* rather than a read, so a circular chain falls back on the
+    /// reference's own name instead of naming nothing. Without a value the
+    /// letter creates nothing for these two builtins — `export -a fresh` leaves
+    /// a plain `declare -x fresh` — and so changes nothing here either.
+    array: bool,
+    /// `export -n`, which takes the export attribute *off*. It asks one lookup
+    /// less of the chain than the marking forms do.
+    unexport: bool,
+}
+
+impl AttrRefRule {
+    /// How many times a *read* of the chain walks it, and so how many times a
+    /// circular one is reported. Measured against bash 5.2.37 with
+    /// `declare -n c1=c2; declare -n c2=c1`:
+    ///
+    /// ```text
+    /// export c1        2    export -n c1     1
+    /// export c1=5      3    export -n c1=5   2
+    /// readonly c1      2    readonly c1=5    3
+    /// ```
+    ///
+    /// A value costs one more walk because the store looks the name up for
+    /// itself; `-n` saves one because it never reaches the marking lookup. This
+    /// is the once-per-walk model of `known-issues.md`'s
+    /// TD-OILS-NAMEREF-WARNING-COUNT, on the declaration-builtin side.
+    fn use_walks(self, valued: bool) -> usize {
+        let marking = usize::from(!self.unexport);
+        1 + marking + usize::from(valued)
+    }
 }
 
 /// The place a plain scalar assignment ends up, after namerefs are followed.
@@ -64057,6 +64118,67 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // An existing array keeps its own bound, scalar rule or no.
         assert_eq!(run("a=(x y); a[-1]=w; declare -p a").0, "declare -a a=([0]=\"x\" [1]=\"w\")\n");
+    }
+
+    /// `export`/`readonly` look a nameref operand up once to find it, once to
+    /// mark it and — with a value — once more for the store, so a circular chain
+    /// is reported two or three times. `export -n` skips the marking lookup, and
+    /// an operand that makes an array is a *write*, which does not give up on a
+    /// circular chain at all.
+    #[test]
+    fn export_and_readonly_walk_a_nameref_chain_once_for_the_store_and_once_for_the_mark() {
+        let cyc = "declare -n c1=c2; declare -n c2=c1";
+        let w = "osh: warning: c1: circular name reference\n";
+        for (src, walks, rc) in [
+            ("export c1", 2, 0),
+            ("readonly c1", 2, 0),
+            ("export -a c1", 2, 0),
+            ("readonly -A c1", 2, 0),
+            ("export c1=5", 3, 1),
+            ("export c1+=5", 3, 1),
+            ("readonly c1=5", 3, 1),
+            ("export -n c1", 1, 0),
+            ("export -n c1=5", 2, 1),
+        ] {
+            assert_eq!(
+                run(&format!("{cyc}; {{ {src}; echo \"rc=$?\"; }} 2>&1; declare -p c1")).0,
+                format!("{}rc={rc}\ndeclare -n c1=\"c2\"\n", w.repeat(walks)),
+                "{src}"
+            );
+        }
+        // The letter and a value together are an array write, and a write
+        // through a cycle falls back on the reference's own name.
+        for (src, want) in [
+            ("export -a c1=5", "declare -ax c1=([0]=\"5\")\n"),
+            ("export -a c1+=5", "declare -ax c1=([0]=\"5\")\n"),
+            ("export -A c1=5", "declare -Ax c1=([0]=\"5\" )\n"),
+            ("readonly -a c1=5", "declare -ar c1=([0]=\"5\")\n"),
+        ] {
+            assert_eq!(
+                run(&format!("{cyc}; {{ {src}; echo \"rc=$?\"; }} 2>&1; declare -p c1")).0,
+                format!("{w}rc=0\n{want}"),
+                "{src}"
+            );
+        }
+        // …so the far end names an ordinary array afterwards.
+        assert_eq!(
+            run(&format!("{cyc}; export -a c1=5 2>/dev/null; c2[1]=z; declare -p c1")).0,
+            "declare -ax c1=([0]=\"5\" [1]=\"z\")\n"
+        );
+        // Without a value the letter creates nothing for these two builtins, so
+        // there is no write to fall back on.
+        assert_eq!(run("export -a fresh; declare -p fresh").0, "declare -x fresh\n");
+        assert_eq!(run("readonly -a fresh; declare -p fresh").0, "declare -r fresh\n");
+        // A chain that resolves is silent however often it is walked, and both
+        // the mark and the store land at the far end.
+        for (src, want) in [
+            ("export r", "declare -n r=\"w\"\ndeclare -x w=\"5\"\n"),
+            ("readonly r=9", "declare -n r=\"w\"\ndeclare -r w=\"9\"\n"),
+            ("export -a r=9", "declare -n r=\"w\"\ndeclare -ax w=([0]=\"9\")\n"),
+            ("export -n r", "declare -n r=\"w\"\ndeclare -- w=\"5\"\n"),
+        ] {
+            assert_eq!(run(&format!("w=5; declare -n r=w; {src}; declare -p r w")).0, want, "{src}");
+        }
     }
 
     /// A circular chain names nothing to declare, so most operands are dropped

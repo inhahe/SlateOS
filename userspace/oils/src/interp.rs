@@ -10327,9 +10327,11 @@ impl Shell {
     /// syntax. No field splitting or globbing is performed (this is `[[ … ]]`).
     ///
     /// The RHS is a `[[ ]]` word like any other, so it joins like one
-    /// ([`Shell::cond_word`]) — the walk here is only about *quoting*, and it
-    /// reaches [`Shell::joined_value`] for the same parts an assignment's value
-    /// would. `IFS=:; [[ 'ax by' =~ ${n[@]:0:2} ]]` matches.
+    /// ([`Shell::cond_word`]) and takes the word-list path on the same terms
+    /// ([`Shell::cond_word_list_on`]) — the walk here is only about *quoting*,
+    /// and it reaches [`Shell::joined_value`] for the same parts an assignment's
+    /// value would. `IFS=:; [[ 'ax by' =~ ${n[@]:0:2} ]]` matches, and so does
+    /// `IFS=:; n=(a:b c:d); [[ 'P QA B C D' =~ ^P:Q${n[@]^^}$ ]]`.
     fn regex_pattern_from_rhs(&mut self, word: &Word) -> Str {
         let saved = std::mem::replace(&mut self.cond_word, true);
         let out = self.regex_pattern_parts(word);
@@ -10356,18 +10358,32 @@ impl Shell {
                 c.push_to(out);
             }
         }
-        let mut pattern = Str::new();
+        // The pattern is built quote-annotated for one reason only: the
+        // word-list path splits a cond word on `$IFS` and a quoted stretch is
+        // protected from it. The ERE escaping a quoted part needs has already
+        // happened by the time its characters are pushed, so the flag here
+        // carries nothing but that — see [`Shell::cond_word_list`].
+        let mut pattern: Vec<EChar> = Vec::new();
+        // Scoped as [`Shell::expand_word_joined_annotated`] scopes it, and for
+        // the same reason: a `=~` right-hand side is a cond word too.
+        let outer_at = std::mem::replace(&mut self.saw_at_list, false);
         for part in &word.parts {
             match part {
                 // Unquoted literal text is live regex syntax.
-                WordPart::Literal(s) => pattern.extend_from_slice(s.as_bytes()),
+                WordPart::Literal(s) => push_chars(&mut pattern, s.as_bytes(), false),
                 // Single quotes: everything literal.
-                WordPart::SingleQuoted { text, .. } => escape_ere(text.as_bytes(), &mut pattern),
+                WordPart::SingleQuoted { text, .. } => {
+                    let mut esc = Str::new();
+                    escape_ere(text.as_bytes(), &mut esc);
+                    push_chars(&mut pattern, &esc, true);
+                }
                 // Double quotes: expand (params/cmd-sub run) but the result is
                 // matched literally, per bash.
                 WordPart::DoubleQuoted(parts) => {
                     let s = self.expand_double_quoted(parts);
-                    escape_ere(&s, &mut pattern);
+                    let mut esc = Str::new();
+                    escape_ere(&s, &mut esc);
+                    push_chars(&mut pattern, &esc, true);
                 }
                 // Unquoted dynamic parts (`$var`, `${…}`, `$(…)`, `$((…))`):
                 // their expansion is live regex, so a variable can carry a
@@ -10375,15 +10391,26 @@ impl Shell {
                 // joins as this context joins one, which is the question
                 // [`Self::joined_value`] answers.
                 other => {
+                    if part_is_at_list(other) {
+                        self.saw_at_list = true;
+                    }
+                    if let Some(chars) = self.cond_plain_at(other) {
+                        pattern.extend_from_slice(&chars);
+                        continue;
+                    }
                     let val = match self.joined_value(other) {
                         Some(v) => v,
                         None => self.expand_dynamic(other),
                     };
-                    pattern.extend(val);
+                    push_chars(&mut pattern, &val, false);
                 }
             }
         }
-        pattern
+        let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
+        if saw_at && self.cond_word_list_on() {
+            pattern = self.cond_word_list(pattern);
+        }
+        echars_text(&pattern)
     }
 
     /// Evaluate a `[[ … ]]` unary primary — which is the *same* primary the
@@ -20707,6 +20734,12 @@ impl Shell {
     fn expand_word_joined_annotated(&mut self, word: &Word) -> Vec<Vec<EChar>> {
         let mut cur: Vec<EChar> = Vec::new();
         let mut started = false;
+        // Scoped to this word: whether it met an unquoted `[@]`, which is what
+        // puts a `[[ ]]`/`case` word on bash's word-list path — see
+        // [`Shell::cond_word_list_on`]. An assignment's value asks nothing of
+        // it, and a list inside a *nested* operand is that operand's own
+        // business, which [`Shell::expand_operand_fields`] already keeps there.
+        let outer_at = std::mem::replace(&mut self.saw_at_list, false);
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => {
@@ -20739,7 +20772,12 @@ impl Shell {
                     // word-split before the join, an assignment's value and a
                     // here-document are not. See [`Shell::operand_chars`].
                     let split_words = self.cond_word;
+                    if self.cond_word && part_is_at_list(other) {
+                        self.saw_at_list = true;
+                    }
                     if let Some(chars) = self.operand_chars(other, split_words) {
+                        cur.extend_from_slice(&chars);
+                    } else if let Some(chars) = self.cond_plain_at(other) {
                         cur.extend_from_slice(&chars);
                     } else {
                         let val = match self.joined_value(other) {
@@ -20751,6 +20789,10 @@ impl Shell {
                     started = true;
                 }
             }
+        }
+        let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
+        if saw_at && self.cond_word_list_on() {
+            cur = self.cond_word_list(cur);
         }
         if started {
             vec![cur]
@@ -20817,11 +20859,11 @@ impl Shell {
                 length,
             } => {
                 let elems = self.slice_elements(name, false, offset, length);
-                Some(self.join_elements(&elems, false))
+                Some(self.join_derived_nosplit(&elems))
             }
             WordPart::ArrayKeys { name, star: false } => {
                 let keys = self.array_keys(name);
-                Some(self.join_elements(&keys, false))
+                Some(self.join_derived_nosplit(&keys))
             }
             // Half the per-element operators are here too, and which half is
             // measured rather than derived — see [`bulk_joins_with_ifs`].
@@ -20831,7 +20873,7 @@ impl Shell {
                 op,
             } if !bulk_joins_with_ifs(op) => {
                 let items = self.bulk_elements(name, op, false);
-                Some(self.join_elements(&items, false))
+                Some(self.join_derived_nosplit(&items))
             }
             // `a=${!r:1:2}` where `ref` names a whole array is `by cz` under
             // every `$IFS`, exactly as the written-out slice is — so ask the
@@ -21808,6 +21850,10 @@ impl Shell {
 
     fn expand_word_pattern_inner(&mut self, word: &Word) -> Vec<EChar> {
         let mut buf: Vec<EChar> = Vec::new();
+        // See [`Shell::expand_word_joined_annotated`], whose scoping this is:
+        // a `case` arm's pattern and a `[[ == ]]` right operand are cond words
+        // like the subject, and take the word-list path on the same terms.
+        let outer_at = std::mem::replace(&mut self.saw_at_list, false);
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => self.push_literal_annotated(&mut buf, s, idx == 0),
@@ -21826,7 +21872,14 @@ impl Shell {
                     // operand in — `w='  X'; ${w#${x:-"${f[@]}"  X}}` strips
                     // nothing, the pattern having become `\177 X`. See
                     // [`Shell::operand_chars`].
+                    if self.cond_word && part_is_at_list(other) {
+                        self.saw_at_list = true;
+                    }
                     if let Some(chars) = self.operand_chars(other, true) {
+                        buf.extend_from_slice(&chars);
+                        continue;
+                    }
+                    if let Some(chars) = self.cond_plain_at(other) {
                         buf.extend_from_slice(&chars);
                         continue;
                     }
@@ -21837,6 +21890,10 @@ impl Shell {
                     push_chars(&mut buf, &s, false);
                 }
             }
+        }
+        let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
+        if saw_at && self.cond_word_list_on() {
+            buf = self.cond_word_list(buf);
         }
         buf
     }
@@ -23405,13 +23462,26 @@ impl Shell {
         elems.join(sep.as_slice())
     }
 
+    /// Glue a `[@]` list an operator derived, for a context that makes one field
+    /// of the whole word — [`Shell::joined_value`]'s join. A space, except in a
+    /// `[[ ]]`/`case` word, where it is [`Shell::at_sep`]'s answer for the same
+    /// reason [`Shell::join_derived`] takes it: the word-list path glues with
+    /// `$IFS`'s first character and splits afterwards.
+    fn join_derived_nosplit(&self, elems: &[Str]) -> Str {
+        if self.cond_word {
+            elems.join(self.at_sep().as_slice())
+        } else {
+            self.join_elements(elems, false)
+        }
+    }
+
     /// The separator a `[@]` reference joins a *derived* list with: the first
     /// character of `$IFS`, but a space when `$IFS` is empty — where the `[*]`
     /// spelling ([`Shell::star_sep`]) joins with nothing.
     ///
     /// In a `[[ ]]` operand or a `case` word ([`Shell::cond_word`]) it is a space
-    /// whatever `$IFS` says, quoted or not — the `[@]` half of that context does
-    /// not consult `$IFS` at all:
+    /// whatever `$IFS` says — the `[@]` half of that context does not consult
+    /// `$IFS` at all:
     ///
     /// ```text
     ///                  IFS=:                    IFS=
@@ -23422,12 +23492,126 @@ impl Shell {
     ///
     /// The `[*]` spelling keeps `$IFS` here, which is why this is a rule about
     /// the `[@]` separator rather than about the context's join as a whole.
+    ///
+    /// Where the word is on the word-list path ([`Shell::cond_word_list_on`])
+    /// the space is only what the *finished* word shows: the elements are glued
+    /// with `$IFS`'s first character and the word is split on `$IFS` afterwards,
+    /// so the space comes back as the join between the words that produces. The
+    /// glue has to be the real separator and not a space already, because a
+    /// separator that is `$IFS` whitespace absorbs an empty field beside it and
+    /// a space that is not in `$IFS` does not — with `z=(':' 'x')`,
+    /// `[[ ${z[@]^^} ]]` is `  X` under `IFS=:` and ` X` under `IFS=$'\t:'`.
     fn at_sep(&self) -> Str {
         if self.cond_word {
-            return b" ".to_vec();
+            return if self.cond_word_list_on() {
+                self.star_sep()
+            } else {
+                b" ".to_vec()
+            };
         }
         let sep = self.star_sep();
         if sep.is_empty() { b" ".to_vec() } else { sep }
+    }
+
+    /// Whether a `[[ ]]`/`case` word this `$IFS` is expanding under is one bash
+    /// builds out of *words* — the `WORD_LIST` path
+    /// [`Shell::operand_word_list`] describes, reached from this context too.
+    ///
+    /// Two things decide it. The first is `$IFS`, and the question it is asked
+    /// here is narrower than the operand's: only a **leading** space turns the
+    /// path off, where the operand's *join* also wants no space anywhere.
+    ///
+    /// ```text
+    /// IFS=:      [[ ${n[@]^^} ]]   A B C D    the path is on
+    /// IFS=': '                     A B C D    a space that is not first does not stop it
+    /// IFS=$'\t:'                   A B C D    and only a space is special, not whitespace
+    /// IFS=' :'                     A:B C:D    off
+    /// IFS=' '                      A:B C:D    off
+    /// IFS=                         A:B C:D    off
+    /// ```
+    ///
+    /// The second is that the word actually held an unquoted `[@]`, which is
+    /// not known until it has been expanded — so this is the `$IFS` half alone,
+    /// and its callers pair it with [`Shell::saw_at_list`].
+    ///
+    /// Inside double quotes it is off. A quoted `[@]` does move the word onto
+    /// the path in bash (`[[ P:Q"${n[@]^^}" ]]` splits the literal `P:Q`), but
+    /// it protects everything it produced, so the *quoted* expansion's own join
+    /// is the plain space `at_sep` gives — and the literal half of that is
+    /// `TD-OILS-QUOTED-OPERAND-WORD-LIST-DOES-NOT-SPLIT-ITS-LITERAL`, still open.
+    fn cond_word_list_on(&self) -> bool {
+        self.cond_word && !self.dquote && !self.ifs_is_null() && !self.ifs_leads_with_space()
+    }
+
+    /// [`Shell::cond_plain_at_chars`] for the two parts that reach a cond-word
+    /// funnel still spelling a *plain* `[@]` — `${a[@]}` and `$@`. `None` for
+    /// everything else, and `None` off the word-list path, where the ordinary
+    /// text join is still the right answer.
+    ///
+    /// The `${a[@]:-w}` family is plain too on the branch where it answers with
+    /// the array, but it never gets here: [`Shell::operand_chars`] is asked
+    /// first, because only it can tell that branch from the one where the
+    /// operand's own fields are the answer, and it applies the same rule there.
+    fn cond_plain_at(&mut self, part: &WordPart) -> Option<Vec<EChar>> {
+        if !self.cond_word_list_on() {
+            return None;
+        }
+        let elems = match part {
+            WordPart::ArrayRef {
+                name,
+                index: ArrayIndex::All,
+                length: false,
+            } => self.array_elements_walks(name, 2),
+            WordPart::Param { name, .. } if name == "@" => self.positional.clone(),
+            _ => return None,
+        };
+        Some(self.cond_plain_at_chars(&elems))
+    }
+
+    /// The characters a **plain** `[@]`'s elements contribute to a `[[ ]]`/`case`
+    /// word on the word-list path: each element **quoted**, so the `$IFS`
+    /// characters inside it are not delimiters, with an unquoted `$IFS`-first
+    /// character between them, which is the one break that does make them
+    /// separate words. `IFS=:; n=(a:b c:d); [[ ${n[@]} ]]` is `a:b c:d`, and
+    /// `[[ P:Q${n[@]} ]]` is `P Qa:b c:d` — the literal split, the elements
+    /// did not.
+    ///
+    /// Taken by [`Shell::cond_plain_at`] and by the branch of
+    /// [`Shell::operand_chars`] where `${a[@]:-w}` answers with the array,
+    /// which is plain in exactly the same sense.
+    fn cond_plain_at_chars(&self, elems: &[Str]) -> Vec<EChar> {
+        let sep = self.star_sep();
+        let mut out: Vec<EChar> = Vec::new();
+        for (i, el) in elems.iter().enumerate() {
+            if i > 0 {
+                push_chars(&mut out, &sep, false);
+            }
+            push_chars(&mut out, el, true);
+        }
+        out
+    }
+
+    /// Rebuild a finished `[[ ]]`/`case` word as the list of words bash makes of
+    /// it, glued with single spaces — the last step of the path
+    /// [`Shell::cond_word_list_on`] names, and the exact counterpart of
+    /// [`Shell::operand_word_list`]'s.
+    ///
+    /// The spaces are unquoted, unlike the operand's: nothing splits a cond word
+    /// again, and a pattern built this way wants its own characters left as they
+    /// were rather than turned literal.
+    fn cond_word_list(&self, field: Vec<EChar>) -> Vec<EChar> {
+        let words = Self::word_list_fields(&[field], &self.ifs_chars());
+        let mut out: Vec<EChar> = Vec::new();
+        for (i, w) in words.iter().enumerate() {
+            if i > 0 {
+                out.push(EChar {
+                    c: Some(Ch::U(' ')),
+                    quoted: false,
+                });
+            }
+            out.extend_from_slice(w);
+        }
+        out
     }
 
     /// The separator that `"$*"` (and `"${a[*]}"`) uses to join elements: the
@@ -23482,11 +23666,34 @@ impl Shell {
         let SplitItems::Fields(fields) = items else {
             // The operator answered with the parameter's own value or elements,
             // which carry no quoting — join them as this context would have.
+            //
+            // Except on the `[[ ]]`/`case` word-list path, where a plain `[@]`'s
+            // elements are *words* and their own `$IFS` characters are not the
+            // word's to split. This is the branch that answers with the array,
+            // so `${a[@]:-w}` is plain here — see [`part_is_plain_at`].
+            if !star && self.cond_word_list_on() {
+                return Some(self.cond_plain_at_chars(&items.texts()));
+            }
             let joined = self.join_elements(&items.texts(), star);
             let mut out = Vec::new();
             push_chars(&mut out, &joined, false);
             return Some(out);
         };
+        // An *unquoted* `[@]` inside the operand puts the enclosing `[[ ]]`/
+        // `case` word on the word-list path just as one spelled directly in it
+        // would: `IFS=:; [[ ${x:-${n[@]^^}} ]]` is `A B C D`, where the same
+        // operand in an assignment's value is `A:B C:D`. The operand itself
+        // does no splitting — its text arrives here as written — so all this
+        // has to do is report the list; [`Shell::cond_word_list`] runs over the
+        // finished word and is what turns the separators into the spaces.
+        //
+        // Read only on this branch, because only here did the operand actually
+        // expand — on the other one the parameter answered and the flag still
+        // holds whatever the last operand left. Same discipline as
+        // `operand_saw_list` just below.
+        if self.cond_word && self.operand_saw_at_list {
+            self.saw_at_list = true;
+        }
         // A quoted `[@]` list in the operand moved it onto bash's `WORD_LIST`
         // path, where what is joined is *words* rather than the text as
         // written — see [`Shell::word_list_fields`].
@@ -42546,6 +42753,33 @@ fn part_is_plain_at(part: &WordPart) -> bool {
         } => true,
         WordPart::Param { name, .. } => name == "@",
         WordPart::ArrayOp { star, .. } => !*star,
+        _ => false,
+    }
+}
+
+/// Whether `part` is an unquoted `[@]`-spelled **list** of any kind — plain or
+/// derived — which is what moves a `[[ ]]`/`case` word onto bash's word-list
+/// path. See [`Shell::cond_word_list_on`], the other half of that test.
+///
+/// It is a *static* question, asked before the part is expanded, because the
+/// answer decides how the whole word is finished and every part has to be able
+/// to set it. That is why an empty array still counts (`[[ P:Q${e[@]^^} ]]` is
+/// `P Q`, the literal split by a list with no elements in it), and why the two
+/// indirect spellings are excluded: `${!r}` is a list only when `r` names one,
+/// which is not knowable here. Their own rule is [`Shell::cond_word_indirect`].
+fn part_is_at_list(part: &WordPart) -> bool {
+    match part {
+        WordPart::ArrayRef {
+            index: ArrayIndex::All,
+            length: false,
+            ..
+        } => true,
+        WordPart::Param { name, .. } => name == "@",
+        WordPart::ArrayKeys { star, .. }
+        | WordPart::VarNames { star, .. }
+        | WordPart::ArraySlice { star, .. }
+        | WordPart::ArrayOp { star, .. }
+        | WordPart::ArrayBulk { star, .. } => !*star,
         _ => false,
     }
 }

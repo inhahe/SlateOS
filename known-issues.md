@@ -31399,13 +31399,13 @@ as well (`IFS=' :'` gives `P QA:B C:D`), where the *unquoted* spelling splits
 nothing at all. See `TD-OILS-A-COND-WORD-THAT-MET-AN-AT-LIST-IS-BUILT-OUT-OF-WORDS`
 for the unquoted half of the `[[ ]]`/`case` rule.
 
-### TD-OILS-A-COND-WORD-THAT-MET-AN-AT-LIST-IS-BUILT-OUT-OF-WORDS. `IFS=:; [[ ${n[@]^^} ]]` sees `A:B C:D` in osh and `A B C D` in bash — 2026-08-04
+### TD-OILS-A-COND-WORD-THAT-MET-AN-AT-LIST-IS-BUILT-OUT-OF-WORDS. `IFS=:; [[ ${n[@]^^} ]]` sees `A:B C:D` in osh and `A B C D` in bash — ✅ **RESOLVED 2026-08-04**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::expand_word_joined_annotated`
 (the funnel for `expand_cond_string` and `expand_case_subject`) and
-`Shell::expand_word_pattern` (for `expand_cond_pattern` and
-`expand_case_pattern`), neither of which knows about the word-list path. They
-glue the parts into one buffer and let `Shell::at_sep`'s `cond_word` space stand
+`Shell::expand_word_pattern_inner` (for `expand_cond_pattern` and
+`expand_case_pattern`), neither of which knew about the word-list path. They
+glued the parts into one buffer and let `Shell::at_sep`'s `cond_word` space stand
 as the whole of the context's rule.
 
 **What.** `TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT` established that an
@@ -31414,7 +31414,7 @@ unquoted `[@]` moves a `${x:-…}` operand onto bash's `WORD_LIST` path. It move
 only for the operand. With `n=(a:b c:d)`, reading `BASH_REMATCH[1]` out of
 `[[ … =~ ^(.*)$ ]]`:
 
-| word | `IFS=:` bash | osh |
+| word | `IFS=:` bash | osh before |
 |---|---|---|
 | `${n[@]}` | `a:b c:d` | ✓ |
 | `${n[@]^^}` | `A B C D` | ✗ `A:B C:D` |
@@ -31470,33 +31470,61 @@ whitespace, which absorbs the empty field the leading `:` would otherwise leave.
 Gluing with a space and splitting afterwards gets the first right and the second
 wrong.
 
-**Proper fix.** Mirror what `Shell::operand_word_list` and `part_is_plain_at`
-already do for the operand, at the two cond-word funnels:
-
-1. While building the buffer, record whether an unquoted, non-`[*]` `[@]`-valued
-   part was seen (a `cond_saw_at_list` beside the existing `saw_at_list`).
-2. For a **plain** `[@]`, push the elements as *quoted* characters separated by
-   an **unquoted `star_sep()`** so the element boundary is a real delimiter and
-   the elements' own `$IFS` characters are not. For a **derived** `[@]`, push its
-   elements glued with `star_sep()`, unquoted.
-3. At the end, if the flag is set and `!ifs_is_null() && !ifs_leads_with_space()`,
-   run `Shell::word_list_fields` over the single buffer and re-glue the words
-   with an unquoted space.
-
-Note that step 2 needs `at_sep()`'s `cond_word` space to stand *aside* under the
-gate — the derived join wants `star_sep()` there, and only the un-gated case
-wants the space `at_sep()` returns today.
-
-The `${x:-…}`-inside-a-cond-word row is a fourth site: `Shell::operand_chars`
-asks `split_words && self.operand_saw_list`, and `operand_saw_list` records only
-a *quoted* list; the unquoted `operand_saw_at_list` added in
-`TD-OILS-A-DEFAULT-WORDS-NESTED-LIST-IS-NOT-SPLIT` belongs in that test too.
-
 **Impact.** A `[[ ]]` operand, a `[[ == ]]`/`case` pattern or a `case` subject
 that holds an unquoted `[@]` under a non-default `$IFS` whose first character is
 not a space. Invisible under the default `$IFS`, and invisible under any `$IFS`
 whose characters do not occur in the data — which is why the existing corpus
 coverage of this context did not catch it.
+
+**Fixed** by mirroring, at the cond-word funnels, what `Shell::operand_word_list`
+and `part_is_plain_at` already do for the operand:
+
+- `Shell::cond_word_list_on` is the `$IFS` half of the gate — `cond_word`, not
+  inside double quotes, `$IFS` non-null and not leading with a space. Its doc
+  carries the six-row table above, including why the question is narrower than
+  `operand_word_list`'s `ifs_has_space`.
+- `part_is_at_list` is the static "this part is an unquoted, non-`[*]` `[@]`"
+  predicate. Static because an *empty* array still puts the word on the path, so
+  the answer cannot wait for the expansion. `Indirect`/`IndirectOp` are excluded:
+  what they resolve to is not knowable here, and `Shell::cond_word_indirect` is
+  their own rule.
+- Both funnels scope a `Shell::saw_at_list` around the word (saving and restoring
+  the outer one, so a list inside a *nested* operand stays that operand's
+  business), set it from `part_is_at_list`, and finish by running
+  `Shell::cond_word_list` over the single buffer — `word_list_fields` followed by
+  an unquoted-space re-glue.
+- `Shell::cond_plain_at` / `Shell::cond_plain_at_chars` push a **plain** `[@]`'s
+  elements as *quoted* characters with an unquoted `star_sep()` between them, so
+  the element boundary is a real delimiter and the elements' own `$IFS`
+  characters are not. `Shell::operand_chars` applies the same rule on the branch
+  where `${a[@]:-w}` answers with the array — the only place that branch can be
+  told apart from the one where the operand's own fields are the answer.
+- `Shell::at_sep` returns `star_sep()` rather than its `cond_word` space while
+  the path is on, since the derived join has to be the real separator (the
+  `z=(':' 'x')` evidence above), and `Shell::join_derived_nosplit` is the
+  `joined_value` join that routes the slice, key-list and bulk arms through it.
+- `Shell::regex_pattern_parts` — a `=~` right-hand side — is a cond word on the
+  same terms (`IFS=:; [[ 'P QA B C D' =~ ^P:Q${n[@]^^}$ ]]` matches in bash), and
+  had to start building its pattern quote-annotated to take the path. The flag it
+  carries is only about splitting: the ERE escaping a quoted stretch needs has
+  already happened by the time its characters are pushed.
+- `Shell::operand_chars` was the fourth site: it asked only
+  `split_words && self.operand_saw_list`, which records a *quoted* list. It now
+  also reports `operand_saw_at_list` up into the funnel's `saw_at_list`, so
+  `[[ ${x:-${n[@]^^}} ]]` takes the final pass. Read only on the branch where the
+  operand actually expanded, the same discipline `operand_saw_list` follows.
+
+Corpus: `a-cond-word-that-met-an-unquoted-at-list-is-built-out-of-words`, which
+pins the seven-`$IFS` gate, plain vs. derived, the literal/scalar/command-
+substitution halves, the `[*]` and double-quote exclusions, the `z=(':' 'x')`
+glue evidence, the `${x:-…}` operand rows, the `=~` right-hand side, and the
+`case` subject/pattern and `[[ == ]]` pattern spellings.
+
+Still open, and deliberately out of scope here: the *quoted* half. A quoted `[@]`
+does move the word onto the path in bash — `[[ P:Q"${n[@]^^}" ]]` is
+`P QA:B C:D` — and osh leaves the literal unsplit. That is
+`TD-OILS-QUOTED-OPERAND-WORD-LIST-DOES-NOT-SPLIT-ITS-LITERAL`, whose operand half
+is the same shape.
 
 ### TD-OILS-BULK-CASE-OP-JOINS-A-NOSPLIT-CONTEXT-WITH-IFS. `IFS=:; x=${a[@]^^}` is `A:B:C:D` in osh and `A:B C:D` in bash — ✅ **RESOLVED 2026-08-04**
 

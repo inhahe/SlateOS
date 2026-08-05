@@ -2437,6 +2437,29 @@ fn write_to_write_fd(w: &WriteFd, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
+/// Give `cmd` one pipe for *both* fd 1 and fd 2, and return its read end.
+///
+/// This is what a `2>&1` landing on a capture has to do. bash's `2>&1` is a
+/// `dup2`: the two descriptors stop being two and become a single open file
+/// description, so what the child writes down them arrives in the order it
+/// wrote it, interleaved by the kernel. Handing the child two pipes and
+/// appending one drain to the other is *not* the same thing — it sorts every
+/// fd 1 byte ahead of every fd 2 byte, so `echo A >&2; echo B; echo C >&2`
+/// captures `B A C` instead of `A B C`.
+///
+/// The single read end is also why the drain cannot deadlock: with two pipes,
+/// whichever is read second can fill while the first is still being drained.
+///
+/// The caller must release the parent's copies of the write end (they live in
+/// `cmd`) before reading to EOF — the child is not the only holder.
+fn merge_child_streams(cmd: &mut PCommand) -> std::io::Result<io::PipeReader> {
+    let (reader, writer) = io::pipe()?;
+    let dup = writer.try_clone()?;
+    cmd.stdout(Stdio::from(writer));
+    cmd.stderr(Stdio::from(dup));
+    Ok(reader)
+}
+
 /// Resolve a [`WriteFd`] to a child descriptor. `what` names the binding for
 /// the error message (`exec stdout`, …).
 fn child_out_from_write_fd(w: &WriteFd, what: &str) -> Result<ChildOut, String> {
@@ -18190,9 +18213,13 @@ impl Shell {
         // When fd 2 must be captured into a buffer we pipe it and drain the
         // child's stderr after spawn (`stderr_capture`).
         let mut stderr_capture: Option<CaptureSink> = None;
-        // For `2>&1` with a captured stdout, fd 2 is appended to the same
-        // capture buffer as fd 1.
-        let mut stderr_to_stdout_capture = false;
+        // The read end of the *single* pipe a `2>&1` gives the child when fd 1 is
+        // the enclosing capture: both of its streams are that one description, so
+        // the kernel interleaves them in write order and this is the only thing to
+        // drain. Two pipes drained in turn would instead order all of fd 1's bytes
+        // before all of fd 2's — `$( { echo A >&2; echo B; } 2>&1 )` reading
+        // `B\nA` where bash's `dup2` gives `A\nB`.
+        let mut merged_capture: Option<io::PipeReader> = None;
         if redir.stderr_closed {
             // `cmd 2>&-`: bash hands the child a closed fd 2 and lets its writes
             // fail. `Stdio::null()` is behaviourally the same from outside — the
@@ -18261,14 +18288,26 @@ impl Shell {
                     cmd.stderr(s);
                 }
                 Ok(ChildOut::Sink(sink)) => {
-                    cmd.stderr(Stdio::piped());
-                    // When that sink is the one `out` holds, fd 2's bytes are
-                    // folded in *after* fd 1's so the two interleave in write
-                    // order; a sink reached some other way (an `exec 1>&N` onto
-                    // an outer capture) is its own destination.
-                    if matches!(out, Out::Capture(b) if b.is(&sink)) {
-                        stderr_to_stdout_capture = true;
+                    // When that sink is the one `out` holds *and* fd 1 still
+                    // resolves to it, the two streams are one description in
+                    // bash — a `dup2` — so the child must be handed one pipe
+                    // for both and the kernel left to interleave them.
+                    if capturing && matches!(out, Out::Capture(b) if b.is(&sink)) {
+                        match merge_child_streams(&mut cmd) {
+                            Ok(r) => merged_capture = Some(r),
+                            Err(e) => {
+                                self.perrln(&format!("pipe: {e}"));
+                                self.last_status = 1;
+                                return;
+                            }
+                        }
                     } else {
+                        // Either fd 1 was redirected away by a `>` written after
+                        // the `2>&1` (`cmd 2>&1 >f` leaves only fd 2 on the
+                        // capture), or the sink was reached some other way (an
+                        // `exec 1>&N` onto an *outer* capture) and is its own
+                        // destination. Both are a stderr-only pipe to drain.
+                        cmd.stderr(Stdio::piped());
                         stderr_capture = Some(sink);
                     }
                 }
@@ -18331,8 +18370,27 @@ impl Shell {
                     }
                 },
                 Some(StderrTarget::Buffer(b)) => {
-                    cmd.stderr(Stdio::piped());
-                    stderr_capture = Some(b.clone());
+                    // An enclosing `{ … } 2>&1` / `f 2>&1` / `( … ) 2>&1`
+                    // inside a `$( … )`: fd 2 was aliased to the capture by the
+                    // *compound's* redirect rather than by one written on this
+                    // command, but it is the same `dup2` and needs the same
+                    // single description — see the `redir.stderr_to_stdout`
+                    // arm. Where fd 1 no longer resolves to that sink (this
+                    // command redirected it away), fd 2 is alone on it again
+                    // and an ordinary stderr-only pipe is right.
+                    if capturing && matches!(out, Out::Capture(s) if b.is(s)) {
+                        match merge_child_streams(&mut cmd) {
+                            Ok(r) => merged_capture = Some(r),
+                            Err(e) => {
+                                self.perrln(&format!("pipe: {e}"));
+                                self.last_status = 1;
+                                return;
+                            }
+                        }
+                    } else {
+                        cmd.stderr(Stdio::piped());
+                        stderr_capture = Some(b.clone());
+                    }
                 }
                 // An enclosing `2>&N` (N ≥ 3) scoped stderr: hand the child a
                 // clone of the user-space write descriptor.
@@ -18363,6 +18421,14 @@ impl Shell {
             }
         };
 
+        // The child now holds the shared `2>&1` write end, but so does `cmd` —
+        // twice, since fd 1 and fd 2 each got a copy. Release them, or the read
+        // below waits for an EOF that only this process is still holding back.
+        if merged_capture.is_some() {
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
+        }
+
         if let Some(bytes) = input_bytes
             && let Some(mut si) = child.stdin.take()
         {
@@ -18392,14 +18458,11 @@ impl Shell {
 
         if capturing {
             let mut captured = Vec::new();
-            if let Some(mut so) = child.stdout.take() {
+            if let Some(mut merged) = merged_capture.take() {
+                // `2>&1`: one pipe carries both streams, already interleaved.
+                let _ = merged.read_to_end(&mut captured);
+            } else if let Some(mut so) = child.stdout.take() {
                 let _ = so.read_to_end(&mut captured);
-            }
-            // `2>&1` into a capture: fold fd 2 into the same buffer after fd 1.
-            if stderr_to_stdout_capture
-                && let Some(mut se) = child.stderr.take()
-            {
-                let _ = se.read_to_end(&mut captured);
             }
             if let Out::Capture(buf) = out {
                 lock_capture(buf).extend_from_slice(&captured);

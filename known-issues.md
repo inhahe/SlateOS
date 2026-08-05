@@ -121,48 +121,120 @@ word and not to the expression.
 
 ---
 
-### TD-OILS-THE-COMMENT-CHECK-IS-EVALUATION-TIME-WHERE-BASHS-IS-SCAN-TIME. `x=5; echo "${x:-$(( #5 ))}"` reports in bash and not in osh, because bash finds the eaten `))` while *scanning* the word — 2026-08-04 — OPEN (scoped deviation)
+### TD-OILS-THE-COMMENT-CHECK-IS-EVALUATION-TIME-WHERE-BASHS-IS-SCAN-TIME. `x=5; echo "${x:-$(( #5 ))}"` reports in bash and not in osh, because bash finds the eaten `))` while *scanning* the word — 2026-08-04 — ✅ FIXED 2026-08-04
 
-**Where:** `userspace/oils/src/interp.rs` — `arith_sub`'s call to
-`arith_comment_hides_closer`, and the nine `bad_sub_word.replace(…)` sites that
-mark the start of a word expansion (`expand_word`, `expand_word_annotated`,
+**Where:** `userspace/oils/src/ast.rs` — `WordPart::first_scanned_arith`;
+`userspace/oils/src/interp.rs` — `Shell::begin_word` / `Shell::end_word` and
+the seven word-entry sites they replace (`expand_word`,
 `expand_redirect_word`, `expand_case_pattern`, `expand_case_subject`,
-`expand_assignment_value`, `expand_word_pattern`, `expand_operand_fields`,
-`expand_double_quoted`).
+`expand_assignment_value`, `expand_word_pattern`, `expand_operand_fields`).
 
-**What:** the fix above raises the complaint when the `$(( … ))` is
+**What:** the first fix raised the complaint when the `$(( … ))` was
 *evaluated*. bash raises it when the word is *scanned*, which is earlier and
 happens whether or not the arithmetic is ever reached:
 
 ```sh
-x=5; echo "${x:-$(( #5 ))}"    # bash: bad substitution; osh: prints 5
-x=5; echo "${x/a/$(( #5 ))}"   # bash: bad substitution; osh: prints 5
-echo "$(touch f)$(( #5 ))"     # bash never runs the `touch`; osh does
+x=5; echo "${x:-$(( #5 ))}"    # bash: bad substitution; osh printed 5
+x=5; echo "${x/a/$(( #5 ))}"   # bash: bad substitution; osh printed 5
+echo "$(touch f)$(( #5 ))"     # bash never runs the `touch`; osh did
 ```
 
-The agreeing cases are the ones where the word *is* expanded, which is nearly
-all of them — and the short-circuit case agrees for the same reason in reverse:
-`false && echo $(( #5 ))` reports in neither shell, because the word is never
-reached at all.
+**Fixed** by walking the parsed word before expanding any of it.
+`WordPart::first_scanned_arith` yields the first `$(( … ))` body bash's word
+scanner would *reach*, and `Shell::begin_word` — one helper now standing in
+for seven copies of the "name this word" prologue — runs it at the outermost
+word entry. The match is **exhaustive**, with no `_ =>` arm, so a new
+`WordPart` variant is a compile error rather than a silent gap; a miss here
+would be invisible, being a diagnostic that simply never appears.
 
-**Why deferred:** the honest fix has to walk the parsed word's part tree before
-expansion begins, and `WordPart` has 23 variants with `Word`, `Box<Word>` and
-`Vec<WordPart>` fields threaded through most of them. Written carelessly that
-walk rots the moment a variant is added, and a false positive would put a
-spurious "no closing `)'" on a *valid* word — a regression in the common path,
-traded for a corner. The evaluation-time check cannot false-positive: it only
-looks at a body the parser already delimited.
+"Would reach" is the substance of it, and each case was measured rather than
+assumed. Reached: every operand, pattern, replacement, subscript and slice
+bound of a `${ … }`, and the contents of a double-quoted run. **Not** reached:
+a `$( … )` or `<( … )` body — `${x:-$( echo $(( #5 )) )}` names the *inner*
+`$(( #5 ))` and leaves the outer status at 0, because the complaint is raised
+by the substitution's own expansion.
 
-**Proper fix:** put the walk in `ast.rs`, immediately beside the enum, as
-`WordPart::first_arith_hiding_its_closer(&self) -> Option<&Str>` with an
-**exhaustive** match — no `_ =>` arm — so that adding a variant is a compile
-error rather than a silent gap. Then fold the `bad_sub_word.replace(…)` at the
-nine sites above into one `Shell::begin_word(&mut self, w: &Word) -> Option<Str>`
-helper that names the word *and* runs the walk, reporting through
-`arith_unclosed_by_comment` before any part is expanded. The existing
-`unbound_error/discard_error` guard already makes the two checks idempotent, so
-the `arith_sub` one can stay as the backstop for bodies the walk never sees
-(a nested `$((` inside a command substitution's own text, for instance).
+The evaluation-time check stays as the backstop for bodies no word walk
+reaches. Pinned by
+`the_closer_is_checked_when_the_word_is_scanned_not_when_it_is_evaluated` and
+by seven new sections in the corpus case.
+
+**Standing lesson:** *when* a shell decides something is part of its observable
+behaviour, not an implementation detail. A check moved one phase earlier
+changes which side effects happen at all — here, whether a command
+substitution in the same word ever runs.
+
+---
+
+### TD-OILS-A-SUBSCRIPT-ON-AN-ASSIGNMENT-TARGET-IS-NOT-WALKED-AS-A-WORD. `a[$(( #5 ))]=1` names only the `$((…))` and, for an associative array, reports a second time — 2026-08-04 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — wherever an assignment's `[…]`
+subscript is expanded; it does not go through `Shell::begin_word`.
+
+**What:** measured against bash 5.2.37:
+
+```text
+$ a[$(( #5 ))]=1
+bash: bad substitution: no closing `)' in a[$(( #5 ))]=1
+osh : bad substitution: no closing `)' in $(( #5 ))
+
+$ declare -A m; m[$(( #5 ))]=1
+bash: bad substitution: no closing `)' in m[$(( #5 ))]=1
+osh : bad substitution: no closing `)' in $(( #5 ))
+osh : m[$(( #5 ))]: bad array subscript          <- bash emits no such line
+```
+
+Two separate deviations. The first is naming: bash names the whole assignment
+word, osh only the arithmetic, because the subscript is reached by the
+`arith_sub` backstop rather than by the word walk. The second is worse — an
+**extra** diagnostic: after the DISCARD is armed the assignment carries on far
+enough to complain about the subscript it could not evaluate.
+
+**Proper fix:** route the assignment word through `Shell::begin_word` so the
+walk sees the subscript and names the whole word, and make the subscript
+evaluation bail out when `discard_error` is already armed rather than reporting
+a second failure caused by the first. The "bad array subscript" path should in
+general check the discard flag before speaking: a diagnostic about the
+*consequence* of an error already reported is noise in every shell.
+
+---
+
+### TD-OILS-AN-UNPARSED-BRACE-BODY-IS-TEXT-THE-WORD-WALK-CANNOT-SEE. `${x!$(( #5 ))}` gets the "bad substitution" wording where bash gives "no closing `)'" — 2026-08-04 — OPEN (accepted deviation)
+
+**Where:** `userspace/oils/src/ast.rs` — `WordPart::first_scanned_arith`, the
+`BadSubst` arm.
+
+**What:** `WordPart::BadSubst` holds the *unparsed* text between `${` and `}`,
+so a `$((` inside it is characters rather than a node and the word walk has
+nothing to find. bash scans that text and reports the eaten closer in
+preference to the malformed expansion:
+
+```text
+$ echo "${x!$(( #5 ))}"
+bash: bad substitution: no closing `)' in "${x!$(( #5 ))}"
+osh : ${x!$(( #5 ))}: bad substitution
+```
+
+Both are DISCARD-class with status 1 on a word that is malformed either way;
+only the wording and the named text differ.
+
+**Why accepted:** finding it means re-scanning raw source for `$((`, and a raw
+scan *can* false-positive — putting a spurious "no closing `)'" on a word that
+is perfectly valid. That is a regression in the common path traded for a
+corner. The structural walk cannot false-positive: it only ever looks at bodies
+the parser already delimited.
+
+Worth recording what is *not* affected, since the obvious guesses are wrong and
+were measured before being believed. Inside a `${ … }` bash scans raw text and
+so ignores quoting — `${x:-'$(( #5 ))'}` and `${x:-<(echo $(( #5 )))}` both
+report in bash — and osh agrees on both, because its parser does not build a
+`SingleQuoted` or `ProcSub` node there either. Outside braces quoting protects
+in both shells (`echo '$(( #5 ))'` and `echo "${x:-\$(( #5 ))}"` are quiet).
+`BadSubst` is the single remaining case.
+
+**Trigger for revisiting:** a scanner shared with the parser, which would make
+the raw scan exact rather than a guess and so remove the false-positive risk
+that is the whole reason to decline.
 
 ---
 

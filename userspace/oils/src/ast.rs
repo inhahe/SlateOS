@@ -751,12 +751,12 @@ impl WordPart {
     /// here rather than silently skipped, because a miss is invisible: the
     /// shell simply fails to report something bash reports.
     ///
-    /// Two known under-reports, both inside `${ … }`, where bash's scan is raw
-    /// text rather than structure and so ignores quoting: `${x:-'$(( #5 ))'}`
-    /// and `${x:-<(echo $(( #5 )))}`. Matching them would mean re-scanning raw
+    /// One known under-report: [`WordPart::BadSubst`] holds *unparsed* text, so
+    /// a `$((` inside `${x!$(( #5 ))}` is characters rather than a node and
+    /// there is nothing here to find. Matching it would mean re-scanning raw
     /// source, which can false-positive on a *valid* word; under-reporting
-    /// cannot. See `TD-OILS-THE-BRACE-INTERIOR-IS-SCANNED-AS-TEXT` in
-    /// `known-issues.md`.
+    /// cannot. See `TD-OILS-AN-UNPARSED-BRACE-BODY-IS-TEXT-THE-WORD-WALK-CANNOT-SEE`
+    /// in `known-issues.md`.
     pub fn first_scanned_arith<'a>(
         &'a self,
         hides_closer: &mut dyn FnMut(&'a [u8]) -> bool,

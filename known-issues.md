@@ -36147,3 +36147,78 @@ commit).
 
 **Found by** the probe matrix for
 TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT.
+
+
+### TD-OILS-A-CMDSUB-BODY-IS-RE-READ-AS-WRITTEN-NOT-AS-REPRINTED — 2026-08-05
+
+**Where:** `userspace/oils/src/ast.rs` — `CmdSubBody::Parsed::src`, which holds
+the `$( … )` body *as written*; `userspace/oils/src/parser.rs` —
+`parse_cmdsub_body`, which produces it.
+
+**What.** bash does not keep a `$( … )` body's text. `parse_comsub` (parse.y
+4193) throws it away and **re-prints the command it just parsed**:
+
+```c
+tcmd = print_comsub (parsed_command);   /* returns static memory */
+…
+ret[retlen++] = ')';
+```
+
+so the text re-read at expansion time is the *deparse* plus a `)`. osh keeps the
+written text instead. The round trip is invisible almost everywhere — comments
+vanish either way, words are re-printed verbatim, an alias survives unexpanded
+— but it is not invisible when the deparse does not parse:
+
+```sh
+echo $(
+!
+)
+```
+
+```text
+bash: line 4: syntax error near unexpected token `)'   line 4: `! )'
+osh:  (silence)
+```
+
+The deparse of a bare `!` is `!` with no terminator, and bash's grammar only
+admits a bare prefix as `BANG list_terminator` — a `;` or a line end (see
+`tests/corpus/prefix-bang-time.sh`). Appending `)` therefore yields `! )`, which
+is exactly what bash then reports against. `time` behaves the same
+(`time )`), and the two are the only productions that drop their own
+terminator, so this is the whole of the divergence rather than one case of it.
+
+**When it bites.** Only when the *last* command of the body is a bare prefix.
+`$( ! )` written on one line already agrees (the `)` is not a list terminator
+either way), and a bare `!` that is not last, or one inside a compound the
+deparse closes (`{ !; }`, `if … fi`, a function, `while … done`,
+`case … esac`), is fine in both.
+
+The error is raised at **expansion** time, not parse time, and is not fatal to
+the script — the substitution's command is abandoned and the shell reads on:
+
+```sh
+echo $(
+!
+)
+echo after      # bash prints the error, then `after'
+```
+
+**Where the echoed line comes from.** bash splices the re-read text into the
+current input with `shell_ungets` (parse.y 2758), so the echoed line is the
+deparse followed by whatever was left of the physical line:
+`echo "[$(<newline>!<newline>) ]"` echoes `! ) ]"`.
+
+**The proper fix** is to make the re-read text the deparse, as bash's is:
+`CmdSubBody::Parsed::src` becomes the printed form of `prog` with a `)` on the
+end. osh already has a command printer (`declare -f`), but bash's `print_comsub`
+is a *different* printer to the one `declare -f` uses, and the swap puts every
+`$( … )` in the shell through a round trip — so it wants its own measurement
+pass before it is made, not a bolt-on. A narrower change that merely rejected a
+trailing bare prefix would encode the consequence without the cause.
+
+**Impact.** osh accepts a script bash rejects; the substitution then expands to
+the body's output rather than to nothing. Confined to a `$( … )` whose last
+command is a bare `!` or `time`.
+
+**Found by** the probe matrix for
+TD-OILS-A-SUBSTITUTION-INSIDE-AN-ALIAS-IS-BLAMED-ON-ITS-OWN-LINE-1.

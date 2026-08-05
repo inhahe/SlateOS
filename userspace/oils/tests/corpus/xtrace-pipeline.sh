@@ -55,7 +55,16 @@ echo "=== function and compound stages trace their bodies, still in order"
 ( set -x; f() { true; }; cat /dev/null | f ) 2>&1
 ( set -x; { true; } | { true; } ) 2>&1
 ( set -x; ( true ) | ( true ) ) 2>&1
-( set -x; for i in 1 2; do true; done | true ) 2>&1
+
+# A loop stage traces its header once per iteration. It cannot be checked the
+# way the four above are: those work only because every stage spells its trace
+# the same, and `+ for i in 1 2` does not match `+ true`, so the interleaving
+# would be visible and the bytes would depend on which stage won the race.
+# Turning xtrace on *inside* the stage removes the race instead of hiding it —
+# a pipeline stage is its own process, so the other stage never traces at all,
+# which is a fact worth pinning in its own right.
+( f() { set -x; for i in 1 2; do true; done; }; f | true ) 2>&1
+( f() { set -x; for i in 1 2; do true; done; }; true | f ) 2>&1
 
 echo "=== a stage that runs no command at all does not hold up the next"
 ( set -x; x=1 | true ) 2>&1

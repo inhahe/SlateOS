@@ -46145,7 +46145,9 @@ fn format_conversion(
             if let Some(kind) = err {
                 diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
-            let (p, b) = split_sign(&format!("{:.*}", prec_n.unwrap_or(6), f), plus, space);
+            let s = format_nonfinite(f, conv == b'F')
+                .unwrap_or_else(|| format!("{:.*}", prec_n.unwrap_or(6), f));
+            let (p, b) = split_sign(&s, plus, space);
             num_prefix = p;
             b
         }
@@ -46155,8 +46157,8 @@ fn format_conversion(
             if let Some(kind) = err {
                 diags.errors.push((field_off, bfmt![&raw, b": ", kind]));
             }
-            let s = format!("{:.*e}", prec_n.unwrap_or(6), f);
-            let s = normalize_exp(&s);
+            let s = format_nonfinite(f, false)
+                .unwrap_or_else(|| normalize_exp(&format!("{:.*e}", prec_n.unwrap_or(6), f)));
             let s = if conv == b'E' { s.to_uppercase() } else { s };
             let (p, b) = split_sign(&s, plus, space);
             num_prefix = p;
@@ -46217,6 +46219,16 @@ fn format_conversion(
         if hash && conv == b'o' && rendered.first() != Some(&b'0') {
             rendered.insert(0, b'0');
         }
+    }
+
+    // C ignores the `0` flag for a value that has no digits, so `%08f nan` is
+    // `     nan` rather than `00000nan`. By this point the value is gone and
+    // only the body knows, but that is enough: every finite float renders at
+    // least one digit, so a digitless float body is exactly the non-finite one.
+    if matches!(conv, b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'a' | b'A')
+        && !rendered.iter().any(u8::is_ascii_digit)
+    {
+        zero = false;
     }
 
     // Apply field width padding. The sign/base prefix and the digit body are
@@ -46606,24 +46618,28 @@ fn parse_printf_int_checked(s: &[u8]) -> PrintfInt {
         Some(r) => (true, r),
         None => (false, t.strip_prefix(b"+").unwrap_or(t)),
     };
-    let (radix, digits, kind) = if let Some(h) =
+    let (radix, digits) = if let Some(h) =
         body.strip_prefix(b"0x").or_else(|| body.strip_prefix(b"0X"))
     {
-        (16u32, h, "invalid hex number")
+        (16u32, h)
     } else if body.first() == Some(&b'0') && body.get(1).is_some_and(u8::is_ascii_digit) {
         // Octal only when a digit follows the `0` (`08`, `019`); a `0` followed
-        // by a letter (`0b101`) is decimal-with-junk, so bash reports the
-        // generic "invalid number", not "invalid octal number".
-        (8u32, body.get(1..).unwrap_or_default(), "invalid octal number")
+        // by a letter (`0b101`) is decimal-with-junk.
+        (8u32, body.get(1..).unwrap_or_default())
     } else {
-        (10u32, body, "invalid number")
+        (10u32, body)
     };
     // Consume the leading run of digits valid for the radix.
     let valid_len = digits.iter().take_while(|&&b| char::from(b).is_digit(radix)).count();
     let consumed = digits.get(..valid_len).unwrap_or_default();
     let remaining = digits.get(valid_len..).unwrap_or_default();
+    // The base the *message* names is not the base the value was read in.
+    // `strtoimax` picks its radix after stepping over blanks and a sign and
+    // accepts either case of `x`; `sh_invalidnum` looks only at the raw word's
+    // first two bytes, lower-case `x` only. So `0X3z` is read as hex (value 3)
+    // but reported as a plain `invalid number`, and so are ` 0x3z` and `-012x`.
     let invalid = if consumed.is_empty() || !remaining.is_empty() {
-        Some(kind)
+        Some(sh_invalidnum_kind(s))
     } else {
         None
     };
@@ -46691,6 +46707,13 @@ fn parse_printf_float_checked(s: &[u8]) -> (f64, Option<&'static str>) {
     if let Some(rest) = t.strip_prefix(b"'").or_else(|| t.strip_prefix(b"\"")) {
         return (f64::from(first_char_code(rest)), None);
     }
+    // `strtod` also reads C's hexadecimal form, which Rust's `f64` parser does
+    // not, so it is scanned separately and takes priority: `0x10` is 16, not a
+    // `0` with junk after it.
+    if let Some((v, used)) = parse_hex_float(t) {
+        let rest = t.get(used..).unwrap_or_default();
+        return (v, if rest.is_empty() { None } else { Some(sh_invalidnum_kind(s)) });
+    }
     if let Some(v) = parse(t) {
         return (v, None);
     }
@@ -46701,7 +46724,117 @@ fn parse_printf_float_checked(s: &[u8]) -> (f64, Option<&'static str>) {
             best = v;
         }
     }
-    (best, Some("invalid number"))
+    (best, Some(sh_invalidnum_kind(s)))
+}
+
+/// Scan C's hexadecimal floating form — `[+-]? 0[xX] HEX* ('.' HEX*)? ([pP]
+/// [+-]? DIGIT+)?` — returning the value and how many bytes `strtod` consumed,
+/// or `None` when the word does not begin `0x`/`0X` at all.
+///
+/// The binary exponent is *optional* for `strtod` (unlike `scanf`'s `%a`), so
+/// `0x10` is 16. When the `0x` is not followed by a hex digit `strtod` backs up
+/// and takes just the `0` — hence `Some((0.0, 1))` for `0x`, `0xg` and `0x.`,
+/// which is a consumed prefix and a value, not a parse failure. A `p` with no
+/// digits behind it is likewise dropped rather than failing: `0x1p` is 1.
+fn parse_hex_float(t: &[u8]) -> Option<(f64, usize)> {
+    let (neg, after_sign) = match t.split_first() {
+        Some((b'-', r)) => (true, r),
+        Some((b'+', r)) => (false, r),
+        _ => (false, t),
+    };
+    let sign_len = t.len() - after_sign.len();
+    let body = after_sign
+        .strip_prefix(b"0x")
+        .or_else(|| after_sign.strip_prefix(b"0X"))?;
+    // The `0` alone is what `strtod` keeps if no hex digit follows the prefix.
+    let zero = Some((if neg { -0.0 } else { 0.0 }, sign_len + 1));
+
+    // Accumulate significant hex digits into a u128 and track the binary
+    // exponent. Digits past the 28th cannot affect a 53-bit result, but whether
+    // any of them was non-zero can decide a tie, so they are folded in as a
+    // sticky low bit rather than dropped.
+    let mut mant: u128 = 0;
+    let mut digits = 0usize;
+    let mut sticky = false;
+    let mut exp2: i32 = 0;
+    let mut any = false;
+    let mut i = 0usize;
+    let mut seen_dot = false;
+    while let Some(&b) = body.get(i) {
+        if b == b'.' {
+            if seen_dot {
+                break;
+            }
+            seen_dot = true;
+            i += 1;
+            continue;
+        }
+        let Some(d) = char::from(b).to_digit(16) else { break };
+        any = true;
+        if digits < 28 {
+            mant = (mant << 4) | u128::from(d);
+            digits += 1;
+            // An integer digit scales the whole mantissa; a fraction digit is
+            // already at the right weight because it entered the mantissa.
+            if seen_dot {
+                exp2 -= 4;
+            }
+        } else {
+            sticky |= d != 0;
+            if !seen_dot {
+                exp2 += 4;
+            }
+        }
+        i += 1;
+    }
+    if !any {
+        return zero;
+    }
+    // The `p` exponent counts only if at least one decimal digit follows it.
+    let mut used = sign_len + 2 + i;
+    if matches!(body.get(i), Some(b'p' | b'P')) {
+        let mut j = i + 1;
+        let esign = match body.get(j) {
+            Some(b'-') => {
+                j += 1;
+                -1i32
+            }
+            Some(b'+') => {
+                j += 1;
+                1
+            }
+            _ => 1,
+        };
+        let start = j;
+        let mut e: i32 = 0;
+        while let Some(&b) = body.get(j) {
+            let Some(d) = char::from(b).to_digit(10) else { break };
+            // Saturate: an exponent this large already decides the result.
+            e = e.saturating_mul(10).saturating_add(i32::try_from(d).unwrap_or(0)).min(1 << 20);
+            j += 1;
+        }
+        if j > start {
+            exp2 = exp2.saturating_add(esign.saturating_mul(e));
+            used = sign_len + 2 + j;
+        }
+    }
+    if sticky {
+        mant |= 1;
+    }
+    // Scale in bounded steps so an intermediate cannot overflow to infinity (or
+    // flush to zero) when the remaining steps would have brought it back.
+    let mut v = mant as f64;
+    let mut e = exp2;
+    while e > 512 {
+        v *= 2f64.powi(512);
+        e -= 512;
+    }
+    while e < -512 {
+        v *= 2f64.powi(-512);
+        e += 512;
+    }
+    v *= 2f64.powi(e);
+    Some((if neg { -v } else { v }, used))
 }
 
 /// The numeric code of the first character of `s`, for printf's `'c` / `"c`
@@ -46757,20 +46890,39 @@ fn strip_g_zeros(s: &str) -> String {
     format!("{mant}{exp}")
 }
 
+/// The spelling C's `printf` gives a value that is not finite, or `None` when
+/// the value is finite and the conversion's own digits are wanted.
+///
+/// Every float conversion shares this: `nan`/`inf` for the lower-case letters,
+/// `NAN`/`INF` for the upper-case ones, with the **sign bit** shown, so a
+/// negative NaN prints `-nan`. No Rust formatting impl will produce that — `{}`
+/// spells NaN `NaN` and drops its sign entirely — so the spelling has to be
+/// built here rather than filtered out of `format!`'s.
+///
+/// One helper for all four conversions because the answer does not vary by
+/// conversion: precision, `#` and `0` do not reach a value with no digits, and
+/// only the letter's case does. Spelling it per-arm is how `%f` came to print
+/// `NaN` while `%g` printed `nan`.
+fn format_nonfinite(f: f64, upper: bool) -> Option<String> {
+    let body = if f.is_nan() {
+        if upper { "NAN" } else { "nan" }
+    } else if f.is_infinite() {
+        if upper { "INF" } else { "inf" }
+    } else {
+        return None;
+    };
+    // `f < 0.0` is false for a negative NaN; the sign bit is the question.
+    let sign = if f.is_sign_negative() { "-" } else { "" };
+    Some(format!("{sign}{body}"))
+}
+
 /// Format a float using C's `%g`/`%G` rules: `prec` significant digits (a
 /// precision of 0 is treated as 1). Chooses `%e` style when the decimal
 /// exponent is `< -4` or `>= prec`, otherwise `%f` style; trailing zeros are
 /// removed unless the `#` (alternate) flag is set. `upper` selects `%G`.
 fn format_g(f: f64, prec: usize, upper: bool, hash: bool) -> String {
-    if !f.is_finite() {
-        let s = if f.is_nan() {
-            "nan".to_string()
-        } else if f < 0.0 {
-            "-inf".to_string()
-        } else {
-            "inf".to_string()
-        };
-        return if upper { s.to_uppercase() } else { s };
+    if let Some(s) = format_nonfinite(f, upper) {
+        return s;
     }
     let p = prec.max(1);
     // Format in %e style with p-1 fractional digits to learn the exponent and
@@ -46800,12 +46952,8 @@ fn format_g(f: f64, prec: usize, upper: bool, hash: bool) -> String {
 /// precision the fraction is rounded (round-half-to-even) to that many hex
 /// digits. `upper` selects the `%A` (uppercase `0X`/`P`) form.
 fn format_a(f: f64, prec: Option<usize>, upper: bool) -> String {
-    if f.is_nan() {
-        return if upper { "NAN".to_string() } else { "nan".to_string() };
-    }
-    if f.is_infinite() {
-        let s = if f < 0.0 { "-inf" } else { "inf" };
-        return if upper { s.to_uppercase() } else { s.to_string() };
+    if let Some(s) = format_nonfinite(f, upper) {
+        return s;
     }
     let bits = f.to_bits();
     let neg = (bits >> 63) == 1;
@@ -53251,6 +53399,88 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn printf_float_conversion() {
         assert_eq!(run("printf '%.2f' 3.14159").0, "3.14");
         assert_eq!(run("printf '%f' 1").0, "1.000000");
+    }
+
+    #[test]
+    fn printf_reads_the_hexadecimal_float_strtod_reads() {
+        // `strtod` knows C's hex form, and its binary exponent is optional.
+        assert_eq!(run("printf '%f\\n' 0x10").0, "16.000000\n");
+        assert_eq!(run("printf '%f\\n' 0X10").0, "16.000000\n");
+        assert_eq!(run("printf '%f\\n' 0xa.b").0, "10.687500\n");
+        assert_eq!(run("printf '%f\\n' 0x10.8").0, "16.500000\n");
+        assert_eq!(run("printf '%f\\n' 0x1p4").0, "16.000000\n");
+        assert_eq!(run("printf '%f\\n' 0X1P-2").0, "0.250000\n");
+        assert_eq!(run("printf '%f\\n' 0x.8p1").0, "1.000000\n");
+        assert_eq!(run("printf '%f\\n' -0x10").0, "-16.000000\n");
+        assert_eq!(run("printf '%f\\n' +0x10").0, "16.000000\n");
+        // Where it stops, it keeps the prefix it read: the value is printed and
+        // the complaint costs only the status.
+        for (word, want) in [
+            ("0x", "0.000000"),
+            ("0xg", "0.000000"),
+            ("0x.", "0.000000"),
+            ("0x10zz", "16.000000"),
+            // A `p` with no digits behind it is dropped, not failed.
+            ("0x1p", "1.000000"),
+            ("0x1p+", "1.000000"),
+            ("0x1p4z", "16.000000"),
+        ] {
+            let (out, st) = run(&format!("printf '%f\\n' {word} 2>/dev/null"));
+            assert_eq!(out, format!("{want}\n"), "{word}");
+            assert_eq!(st, 1, "{word}");
+        }
+    }
+
+    #[test]
+    fn printf_names_the_base_from_the_word_not_from_the_radix() {
+        // `sh_invalidnum` reads the raw word's first two bytes only, octal arm
+        // first, lower-case `x` only — so the base it names is not always the
+        // base the value was read in.
+        for (word, want) in [
+            ("0x3z", "invalid hex number"),
+            ("012x", "invalid octal number"),
+            ("09x", "invalid octal number"),
+            ("00z", "invalid octal number"),
+            // Upper-case `X` reads as hex but is not spelled as hex …
+            ("0X3z", "invalid number"),
+            // … and a sign or a blank in front hides the `0` from the message.
+            ("-012x", "invalid number"),
+            (" 0x3z", "invalid number"),
+            ("0.x", "invalid number"),
+        ] {
+            let d = run(&format!("printf '%d\\n' '{word}' 2>&1 >/dev/null")).0;
+            assert_eq!(d, format!("osh: printf: {word}: {want}\n"), "%d {word}");
+            let f = run(&format!("printf '%f\\n' '{word}' 2>&1 >/dev/null")).0;
+            assert_eq!(f, format!("osh: printf: {word}: {want}\n"), "%f {word}");
+        }
+        // The radix is still chosen case-insensitively: `0X3z` is 3, not 0.
+        assert_eq!(run("printf '%d\\n' 0X3z 2>/dev/null").0, "3\n");
+    }
+
+    #[test]
+    fn printf_spells_a_non_finite_value_by_the_letters_case() {
+        // `nan`/`inf` for the lower-case conversions, `NAN`/`INF` for the
+        // upper-case ones, and the sign bit shows — so a negative NaN is `-nan`,
+        // which no Rust formatting impl produces on its own.
+        for (c, want) in [
+            ('f', "nan|-nan|inf|-inf"),
+            ('e', "nan|-nan|inf|-inf"),
+            ('g', "nan|-nan|inf|-inf"),
+            ('a', "nan|-nan|inf|-inf"),
+            ('F', "NAN|-NAN|INF|-INF"),
+            ('E', "NAN|-NAN|INF|-INF"),
+            ('G', "NAN|-NAN|INF|-INF"),
+            ('A', "NAN|-NAN|INF|-INF"),
+        ] {
+            let cmd = format!("printf '%{c}|%{c}|%{c}|%{c}\\n' nan -nan inf -inf");
+            assert_eq!(run(&cmd).0, format!("{want}\n"), "%{c}");
+        }
+        // A value with no digits has nowhere to put a precision or a zero pad;
+        // the width still applies, and the sign flags still do.
+        assert_eq!(run("printf '[%08f]\\n' nan").0, "[     nan]\n");
+        assert_eq!(run("printf '[%-8f]\\n' nan").0, "[nan     ]\n");
+        assert_eq!(run("printf '[%8.3f]\\n' nan").0, "[     nan]\n");
+        assert_eq!(run("printf '[%+f][% f]\\n' nan nan").0, "[+nan][ nan]\n");
     }
 
     #[test]

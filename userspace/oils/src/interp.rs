@@ -68203,6 +68203,28 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         String::from_utf8_lossy(&take_capture(&buf)).into_owned()
     }
 
+    /// Block until no background job of `sh` is still running.
+    ///
+    /// A fixed `sleep` cannot do this job: how long it takes to spawn a
+    /// process, run it and reap it is the operating system's business, and the
+    /// test suite runs its own threads in parallel, so a margin that is ample
+    /// on an idle machine is not ample on a busy one. Three of these tests were
+    /// flaky for exactly that reason.
+    ///
+    /// `jobs -r` is the right thing to poll because it is the one listing that
+    /// does *not* consume what it filters out: a finished job it declines to
+    /// print stays in the table for the assertion that follows. So an empty
+    /// answer means "nothing running" and costs the caller nothing.
+    fn wait_for_bg(sh: &mut Shell) {
+        for _ in 0..1000 {
+            if listing(sh, "jobs -r").is_empty() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("a background job was still running after ten seconds");
+    }
+
     #[test]
     fn jobs_marks_the_current_and_previous_job() {
         // The `+`/`-` markers are decided when a job is *created* and survive
@@ -68265,7 +68287,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // for the next `jobs`, as does a jobspec that named someone else.
         let mut sh = new_shell();
         sh.run_source("sleep 0.2 &".as_bytes());
-        std::thread::sleep(std::time::Duration::from_millis(700));
+        wait_for_bg(&mut sh);
         assert_eq!(listing(&mut sh, "jobs -r"), "", "-r filters the finished job out");
         assert_eq!(listing(&mut sh, "jobs -s"), "", "no stopped jobs in a script shell");
         assert_eq!(listing(&mut sh, "jobs"), "[1]+  Done                    sleep 0.2\n");
@@ -68273,7 +68295,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Numbering restarts at 1 once the table has drained, and `-l` inserts
         // the pid between the marker and the state column.
         sh.run_source("sleep 0.2 &".as_bytes());
-        std::thread::sleep(std::time::Duration::from_millis(700));
+        wait_for_bg(&mut sh);
         let l = listing(&mut sh, "jobs -l");
         let pid = sh.last_bg_pid.expect("bg pid");
         assert_eq!(l, format!("[1]+ {pid} Done                    sleep 0.2\n"));
@@ -68296,12 +68318,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             ("( exit 143 ) &", "Exit 143                ( exit 143 )"),
         ] {
             sh.run_source(src.as_bytes());
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            wait_for_bg(&mut sh);
             assert_eq!(listing(&mut sh, "jobs"), format!("[1]+  {want}\n"), "{src}");
         }
         for (sig, want) in [("TERM", "Terminated"), ("PIPE", "Broken pipe")] {
             sh.run_source("sleep 5 &".as_bytes());
             sh.run_source(format!("kill -{sig} %1").as_bytes());
+            wait_for_bg(&mut sh);
             assert_eq!(
                 listing(&mut sh, "jobs"),
                 format!("[1]+  {want:<24}sleep 5\n"),

@@ -8867,6 +8867,26 @@ impl Shell {
                 self.last_status = 1;
                 return Flow::Next;
             }
+            // …and because the reference itself is what gets bound (see below),
+            // each word becomes its new *referent*, so each word has to name
+            // something. `x[1]` does — a reference may designate one element —
+            // but `5` and the empty word do not, and bash refuses them the way
+            // it refuses a bad loop-variable name: one complaint quoting the
+            // word, status 1, the loop abandoned where it stands with the
+            // reference still holding the last word that was a name, and
+            // neither errexit nor the ERR trap armed. The check is per
+            // iteration, after the header is announced, so `for r in aa 5 bb`
+            // runs its first body first.
+            //
+            // `select` does not share any of this: its control variable is
+            // bound *through* the reference like an ordinary write, so it never
+            // asks the question.
+            if self.nameref_attr.contains(&var) && split_assignment_target(&item).is_none() {
+                self.perrln(&bfmt![b"`", &item, b"': not a valid identifier"]);
+                self.last_status = 1;
+                self.for_name_failed = true;
+                return Flow::Next;
+            }
             // Binding the loop variable is an assignment, so the name's
             // attributes apply (`declare -i n` evaluates each word, `declare -u`
             // folds its case), an existing array is written at element 0, and

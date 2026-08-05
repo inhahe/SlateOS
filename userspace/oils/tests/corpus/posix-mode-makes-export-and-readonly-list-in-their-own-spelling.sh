@@ -14,9 +14,14 @@
 #
 # The two listings enumerate the whole environment, which differs between the
 # shells being compared, so everything here is filtered to the names this script
-# makes. They all contain `zz`.
+# makes. They all begin `ZZ`.
+#
+# The filter matches the *name* position of a listing line rather than the line
+# anywhere: a `zz` in some other shell's `PWD` — the harness runs each case in a
+# randomly named scratch directory, which is how this was found — would
+# otherwise drag that whole binding into the comparison on one run in a few.
 
-mine() { grep -i zz; :; }
+mine() { grep -E '^[a-z]+( -[A-Za-z]+)* ZZ[A-Z]*(=|$)'; :; }
 
 echo "=== export -p, outside posix mode and inside it"
 export ZZA=1

@@ -18808,11 +18808,11 @@ $ bash -c 'declare -n n=r; readonly r=1; n=2 true'   # n: readonly variable
 $ bash -c 'declare -n n=r; readonly r=1; n=2'        # r: readonly variable
 ```
 
-**Still open, found by the same probe:** bash *expands before it checks*, so a
-refused write still runs the RHS's side effects and still traces — see
-TD-OILS-A-REFUSED-ASSIGNMENT-STILL-EXPANDS-AND-TRACES.
+**Found by the same probe, fixed straight after:** bash *expands before it
+checks*, so a refused write still runs the RHS's side effects and still traces
+— see TD-OILS-A-REFUSED-ASSIGNMENT-STILL-EXPANDS-AND-TRACES.
 
-### TD-OILS-A-REFUSED-ASSIGNMENT-STILL-EXPANDS-AND-TRACES. bash expands an assignment's value before it asks whether the variable may be written, so a refused write still runs the RHS's side effects and still traces — OPEN 2026-08-04
+### TD-OILS-A-REFUSED-ASSIGNMENT-STILL-EXPANDS-AND-TRACES. bash expands an assignment's value before it asks whether the variable may be written, so a refused write still runs the RHS's side effects and still traces — 2026-08-04 — ✅ RESOLVED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::apply_assignment_inner`,
 which takes the readonly/`noassign` branch *before* it expands the value word.
@@ -18848,22 +18848,45 @@ osh: x: readonly variable
   $ osh  -c 'readonly x=1; set -x; x=5'      # only the refusal
   ```
 
-**Proper fix.** Move the value expansion in `Shell::apply_assignment_inner`
-ahead of the readonly/`noassign` guard — expanding the value, then the
-subscript, then checking — so that all three fall out at once. The guard itself
-does not move relative to the *store*, only relative to the expansion. The
-scalar trace already sits with the expansion, so it comes along for free.
+**Fixed** by moving the readonly guard out of the head of
+`apply_assignment_inner` and down to where the value is bound
+(`Shell::assignment_write_refused`, called from three places): after the value
+expansion for a subscript-less write, and after the subscript's own evaluation
+for an element one.
 
-Watch for: an expansion that itself aborts (`x=$(exit)` under `set -e`, a
-bad `declare -i` value, `${v:?}`) must keep reporting what it reports today,
-and the refusal must still come *after* whatever the expansion printed.
+Two shapes keep the guard at the head, because they have nothing left to do
+first and bash asks them there:
 
-**Impact.** A missing side effect and a missing trace line, in the shape
-"assignment to a readonly (or shell-maintained) variable". Discovered while
-mapping TD-OILS-READONLY-REFUSAL-NAMES-TARGET; deliberately left out of
-`tests/corpus/an-assignment-through-a-nameref-is-traced-and-blamed-by-the-name-as-written.sh`,
-which keeps its trace sections free of refusals so it stays green until this
-lands.
+* a **declaration builtin**'s operand, whose value the *command's* word
+  expansion already ran (`declare x=$(f)` runs `f` before `declare` sees it)
+  and whose subscript is plain text by then — which is why `declare x[]=9` onto
+  a readonly `x` is `x: readonly variable` rather than the bad subscript a bare
+  `q[]=v` gets;
+* a **compound literal**, which bash refuses without expanding at all
+  (`readonly x=1; x=($(f))` never runs `f`).
+
+**Five more orderings came right with it**, all of them a subscript's own
+complaint that osh used to bury under the refusal — `q[]=v`, `m[$blank]=v`,
+`q[1/0]=v`, `q[+]=v` and `q[-5]=v` on a readonly name now say what is wrong
+with the subscript, as bash does. The `-i` *value* goes the other way (`declare
+-i q; q[0]=1/0` on a readonly `q` reports the readonly), which falls out of
+putting the guard between the two.
+
+**And one unrelated bug the same move exposed:** an assignment whose value
+expansion ended the shell (`x=${u?boom}`, `set -u; x=$nope`) was still traced,
+`+ x=` with an empty value, because the bail-out after the expansion watched
+only `Shell::discard_error` and those arm `Shell::unbound_error` instead. It
+now watches both, so nothing is traced and nothing is asked.
+
+**Impact when open.** A missing side effect and a missing trace line, in the
+shape "assignment to a readonly variable". Discovered while mapping
+TD-OILS-READONLY-REFUSAL-NAMES-TARGET. Covered by the last five sections of
+`tests/corpus/an-assignment-through-a-nameref-is-traced-and-blamed-by-the-name-as-written.sh`.
+
+**Not fixed with it:** the `noassign` half. bash's own refusal for a
+shell-maintained name is silent and the status is the only thing that shows, so
+it is its own entry —
+TD-OILS-A-REFUSED-MAINTAINED-ASSIGNMENT-KEEPS-THE-SUBSTITUTION-STATUS.
 
 ### TD-OILS-A-REFUSED-MAINTAINED-ASSIGNMENT-KEEPS-THE-SUBSTITUTION-STATUS. An assignment-only command refused by `att_noassign` reports the command substitution's status where bash reports 1 — OPEN 2026-08-04
 

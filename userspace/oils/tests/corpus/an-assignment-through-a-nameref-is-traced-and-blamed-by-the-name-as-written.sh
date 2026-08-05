@@ -12,8 +12,9 @@
 #     the same seam as everywhere else a nameref meets an array: a write that
 #     makes one is about the reference's own name.
 #
-# The two are independent, so they are shown apart: the trace section never
-# refuses, and the refusal section never traces.
+# The two meet at the end, because bash asks whether the variable may be written
+# only once it has expanded what it was going to store: a refused assignment
+# still runs its value's side effects and still traces.
 
 echo '=== the trace is the line as typed'
 ( x=1; declare -n r=x; set -x; r=5 ) 2>&1
@@ -58,5 +59,34 @@ echo '=== without a reference the two names are one'
 ( readonly x=1; x[0]=5; echo "rc=$?" ) 2>&1
 ( readonly -a x=(1); x[0]=5; echo "rc=$?" ) 2>&1
 ( readonly x=1; x=(a b); echo "rc=$?" ) 2>&1
+
+echo '=== a refusal comes after the value has been expanded and traced'
+( readonly x=1; declare -n r=x; set -x; r=5 ) 2>&1
+( readonly x=1; declare -n r=x; set -x; r=$(echo v) ) 2>&1
+( readonly -a q=(1); declare -n r=q; set -x; r[0]=5 ) 2>&1
+( readonly x=1; declare -n r=x; set -x; r=(a b) ) 2>&1
+
+echo '=== …so the value runs its side effects, and the subscript runs second'
+( readonly x=1; declare -n r=x; r=$(echo SIDE >&2; echo v) ) 2>&1
+( readonly -a q=(1); declare -n r=q; r[$(echo SUB >&2; echo 0)]=$(echo VAL >&2; echo v) ) 2>&1
+( declare -A m=([k]=1); readonly m; declare -n r=m; r[$(echo SUB >&2; echo k)]=$(echo VAL >&2; echo v) ) 2>&1
+
+echo '=== …but a compound literal is refused without expanding anything'
+( readonly x=1; declare -n r=x; r=($(echo SIDE >&2; echo a)) ) 2>&1
+
+echo '=== everything the subscript itself owes is said first'
+( readonly -a q=(1); q[]=v ) 2>&1
+( readonly -a q=(1); q[1/0]=v ) 2>&1
+( readonly -a q=(1); q[-5]=v ) 2>&1
+( declare -A m=([k]=1); readonly m; b=; m[$b]=v ) 2>&1
+
+echo '=== …and the value the variable owes is said first the other way round'
+( readonly -a q=(1); declare -i q; q[0]=1/0 ) 2>&1
+( readonly x=1; declare -i x; x=1/0 ) 2>&1
+
+echo '=== an expansion that ends the shell says only that'
+( readonly x=1; set -x; x=${u?boom} ) 2>&1
+( readonly -a q=(1); q[0]=${u?boom} ) 2>&1
+( set -u; readonly x=1; x=$nope ) 2>&1
 
 echo still here

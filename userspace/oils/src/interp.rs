@@ -11500,6 +11500,28 @@ impl Shell {
         ok
     }
 
+    /// Refuse a write to a readonly variable, with the diagnostic it owes and
+    /// the failure that ends the command. `true` means the store must not
+    /// happen.
+    ///
+    /// An *array-shaped* write is blamed by the name the writer wrote, a scalar
+    /// one by the name it resolved to — see
+    /// [`Self::apply_assignment_spelled`]. Without a nameref in the way the two
+    /// are the same name and the distinction does not show.
+    fn assignment_write_refused(&mut self, a: &Assignment, spelled: &Assignment) -> bool {
+        if !self.readonly.contains(&a.name) {
+            return false;
+        }
+        let blame = if spelled.index.is_some() || matches!(spelled.value, AssignRhs::Array(_)) {
+            &spelled.name
+        } else {
+            &a.name
+        };
+        self.perrln(&format!("{blame}: readonly variable"));
+        self.note_shell_error(FatalWhen::ErrexitOrPosix);
+        true
+    }
+
     /// The body of [`Shell::apply_assignment`], which wraps it only to run the
     /// dynamic-variable write-back hook on every exit. `spelled` is the
     /// assignment as written — see [`Self::apply_assignment_spelled`].
@@ -11570,18 +11592,26 @@ impl Shell {
             self.emit_xtrace(&line);
         }
         // A readonly variable cannot be reassigned; report and leave it intact.
-        if self.readonly.contains(&a.name) {
-            // An *array-shaped* write is blamed by the name the writer wrote,
-            // a scalar one by the name it resolved to — see
-            // [`Self::apply_assignment_spelled`]. Without a nameref in the way
-            // the two are the same name and the distinction does not show.
-            let blame = if spelled.index.is_some() || matches!(spelled.value, AssignRhs::Array(_)) {
-                &spelled.name
-            } else {
-                &a.name
-            };
-            self.perrln(&format!("{blame}: readonly variable"));
-            self.note_shell_error(FatalWhen::ErrexitOrPosix);
+        //
+        // *When* that is asked depends on how the assignment arrived, because
+        // bash asks it where the value is bound rather than where the command
+        // starts. Two shapes have nothing left to do first and are asked here:
+        //
+        // * a **declaration builtin**'s operand, whose value the command's own
+        //   word expansion already ran (so `declare x=$(f)` runs `f` before
+        //   `declare` ever sees it) and whose subscript is plain text by then —
+        //   which is why `declare x[]=9` onto a readonly `x` is
+        //   `x: readonly variable` rather than the bad subscript it would
+        //   otherwise be;
+        // * a **compound literal**, which bash refuses without expanding at all:
+        //   `readonly x=1; x=($(f))` never runs `f`.
+        //
+        // A plain `name=value` or `name[sub]=value` is asked *last* — after the
+        // value and then the subscript have been expanded — so its side effects
+        // run, its trace is emitted, and a malformed subscript is diagnosed
+        // first. See the deferred call sites below.
+        let deferred = !self.decl_builtin_ctx && !matches!(a.value, AssignRhs::Array(_));
+        if !deferred && self.assignment_write_refused(a, spelled) {
             return false;
         }
         // A variable the shell maintains (`GROUPS`, `FUNCNAME`, …) refuses the
@@ -11609,16 +11639,25 @@ impl Shell {
             self.mark_exported(a.name.clone());
         }
         let is_assoc = self.assoc.contains_key(&a.name);
-        // A failing expansion in the value arms an abort (`discard_error`); what
-        // it *returns* is a fabricated stand-in (`0` for arithmetic). Storing that
-        // would overwrite the variable with a fiction, so the assignment has to be
-        // abandoned instead — bash leaves the old value in place. Snapshot the
-        // flag so an abort already armed before this assignment is not mistaken
+        // A failing expansion in the value arms an abort; what it *returns* is a
+        // fabricated stand-in (`0` for arithmetic, nothing at all for `${u?}`).
+        // Storing that would overwrite the variable with a fiction, so the
+        // assignment has to be abandoned instead — bash leaves the old value in
+        // place, traces nothing, and asks the variable nothing. Snapshot both
+        // flags so an abort already armed before this assignment is not mistaken
         // for one this value raised.
+        //
+        // The two are different aborts and both have to be watched:
+        // `discard_error` is the recoverable one an arithmetic error leaves
+        // behind, `unbound_error` the whole-shell one `${u?word}` and `set -u`
+        // raise (see [`Shell::arm_unbound_abort`]).
         let armed = self.discard_error;
+        let armed_unbound = self.unbound_error;
         macro_rules! bail_if_expansion_failed {
             () => {
-                if armed.is_none() && self.discard_error.is_some() {
+                if (armed.is_none() && self.discard_error.is_some())
+                    || (armed_unbound.is_none() && self.unbound_error.is_some())
+                {
                     return false;
                 }
             };
@@ -11636,6 +11675,13 @@ impl Shell {
                     let op: &[u8] = if spelled.append { b"+=" } else { b"=" };
                     let line = bfmt![prefix, &spelled.name, op, xtrace_quote_value(&val), b"\n"];
                     self.emit_xtrace(&line);
+                }
+                // The deferred readonly guard for a *subscript-less* write: the
+                // value is expanded and traced, and only then is the variable
+                // asked. An element write is asked further in, once its
+                // subscript has been evaluated too. See the note above.
+                if deferred && a.index.is_none() && self.assignment_write_refused(a, spelled) {
+                    return false;
                 }
                 // The scalar half of the `noassign` refusal (see above): traced,
                 // then dropped on the floor, and the command succeeds anyway.
@@ -11796,6 +11842,13 @@ impl Shell {
                             }
                             return false;
                         }
+                        // The subscript is settled, so the variable can be
+                        // asked — after every complaint the subscript itself
+                        // owes, and before the `-i` value is evaluated (a bad
+                        // one on a readonly name reports the readonly).
+                        if deferred && self.assignment_write_refused(a, spelled) {
+                            return false;
+                        }
                         let stored = if is_int {
                             let base = if a.append {
                                 self.assoc_element(&a.name, &key)
@@ -11878,6 +11931,16 @@ impl Shell {
                             }
                             return false;
                         };
+                        // The subscript is settled, so the variable can be
+                        // asked — see the associative branch above. The
+                        // widening just before it can therefore run on a name
+                        // about to be refused, which nothing can see: a refused
+                        // assignment ends the command *and* the shell, and the
+                        // one context where it does not (a declaration
+                        // builtin's operand) asked long before reaching here.
+                        if deferred && self.assignment_write_refused(a, spelled) {
+                            return false;
+                        }
                         let int_val = if is_int {
                             let base = if a.append {
                                 self.arrays

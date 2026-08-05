@@ -2681,6 +2681,29 @@ impl Parser {
         Err(self.cond_operand_error(pos))
     }
 
+    /// How bash names the offending token in `unexpected token X in conditional
+    /// command`, already quoted — or `None` where it prints no such line.
+    ///
+    /// bash's `cond_term` reaches that message from its final `else`, i.e. for
+    /// every token that cannot *begin* a term. In practice that is exactly the
+    /// operators: a word is a term, and the one word that is not — the `]]`
+    /// closer — leaves through an earlier arm that prints only the `near` line.
+    ///
+    /// The quoting is bash's `error_token_from_token`, which spells the token
+    /// when it can and returns nothing when it cannot. It cannot for
+    /// `IO_NUMBER` and `REDIR_WORD` (they carry a number and a word, not a fixed
+    /// text), and bash then falls through to a `%d` of the raw yacc token
+    /// number — so `[[ 2>Q ]]` really does say `unexpected token 284`, with no
+    /// quotes. The two numbers are from bash 5.2's generated `y.tab.h`.
+    fn cond_primary_token(&self) -> Option<Str> {
+        match self.peek() {
+            Some(Tok::VarFd(_)) => Some(b"283".to_vec()),
+            Some(Tok::Io(_)) => Some(b"284".to_vec()),
+            Some(Tok::Op(_)) => Some(bfmt![b"`", self.token_display(), b"'"]),
+            _ => None,
+        }
+    }
+
     /// Build bash's diagnostic for a missing/`]]`-filled operand slot inside
     /// `[[ … ]]`. When the offending token is present, bash echoes the source
     /// line (handled by `format_parse_error`); at end of input it uses an
@@ -2688,14 +2711,27 @@ impl Parser {
     /// end-of-file diagnostic there.
     fn cond_operand_error(&self, pos: CondPos) -> ParseError {
         if self.peek().is_none() {
-            return ParseError::new("syntax error: unexpected end of file");
+            // End of input in primary position is the one place bash *does*
+            // name the token: `cond_term` calls `read_token`, is handed `EOF`,
+            // and falls to the same `else` an operator falls to.
+            let eof = "syntax error: unexpected end of file";
+            return match pos {
+                CondPos::Primary => ParseError::new(&bfmt![
+                    b"unexpected token `EOF' in conditional command\n",
+                    eof.as_bytes()
+                ]),
+                CondPos::Unary | CondPos::Binary => ParseError::new(eof),
+            };
         }
         let tok = self.token_display();
         // A newline never becomes the token bash reports "near", so an operand
         // slot that a line end walked into names the operator instead.
         let near = bfmt![b"syntax error near `", self.cond_near(), b"'"];
         let msg = match pos {
-            CondPos::Primary => near,
+            CondPos::Primary => match self.cond_primary_token() {
+                Some(t) => bfmt![b"unexpected token ", t, b" in conditional command\n", near],
+                None => near,
+            },
             CondPos::Unary => bfmt![
                 b"unexpected argument `",
                 tok,

@@ -35541,11 +35541,27 @@ Note the wording: `in conditional command`, not the
 (`[[ P;Q ]]`) — which osh does print. The `near` line and the echoed line
 already match, so this is one missing line.
 
-**The proper fix** is to emit that clause from the `CondPos::Primary` arm when
-the offending token is a control operator, mirroring what the binary-operator
-position already does.
-
 **Impact.** Cosmetic; one diagnostic line.
+
+**Fixed 2026-08-05.** `cond_primary_token` says how bash names the token, and
+`CondPos::Primary` prepends the clause when it does. The rule turned out to be
+simpler than "control operator": bash's `cond_term` tries everything that can
+*begin* a term (`]]`, `(`, `!`, a unary operator, a word) and names whatever is
+left, which is every operator — including the redirection ones, so `[[ >Q ]]`
+and `[[ &>Q ]]` are named too. The one word that is not a term, the `]]` closer,
+leaves through an earlier arm and prints no such line, and end of input prints
+one spelled `EOF`.
+
+Two tokens bash cannot spell: `error_token_from_token` has no text for
+`IO_NUMBER` or `REDIR_WORD` (they carry a number and a word rather than a fixed
+spelling), so bash falls through to `%d` of the raw yacc token number and
+`[[ 2>Q ]]` says `unexpected token 284`, unquoted. osh reproduces both numbers
+from bash 5.2's generated `y.tab.h`.
+
+Primary position is wherever a *term* is expected, not just the first one, so
+`[[ ! ;Q ]]` and `[[ P == P && ;Q ]]` get the same line.
+
+**Pinned by** `tests/corpus/a-conditional-names-the-token-that-cannot-begin-a-term.sh`.
 
 
 ### TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT — 2026-08-05
@@ -35610,6 +35626,53 @@ path as a script file; the divergence is in *which* reader, not in the parser.
 
 **Impact.** Real, not cosmetic: a piped script runs commands after the error
 that bash never reaches — here `== b ]]` is attempted as a command.
+
+
+### TD-OILS-COND-ERROR-DROPS-THE-EXPECTED-PAREN-LINE — 2026-08-05
+
+**Where:** `userspace/oils/src/parser.rs`, `Parser::parse_cond_primary` — the
+`Op::LParen` branch, which propagates the inner parse's error with `?`.
+
+**What.** When a conditional fails *inside* a `( … )` group, bash prints one
+more line than osh does. Its `cond_term` reports the inner failure and returns
+an error; the group's own arm then still checks for the `)` it never reached and
+reports that too; only afterwards does the top level add the `near` line:
+
+```text
+[[ ( ;Q ) ]]   bash: unexpected token `;' in conditional command
+                     expected `)'
+                     syntax error near `;Q'
+                     `[[ ( ;Q ) ]]'
+               osh:  (same, without the `expected `)'` line)
+
+[[ ( a         bash: unexpected token `newline', conditional binary operator expected
+                     expected `)'
+                     syntax error near `a'
+                     `[[ ( a '
+               osh:  (same, without the `expected `)'` line)
+```
+
+Note where the missing line goes: *between* the inner diagnostic and the `near`
+line, not after it. osh already prints `unexpected token `X', expected `)'` when
+the group parses fine but no `)` follows (`[[ ( a ) b ]]`), so it is only the
+cascade — an inner error passing through a group — that loses it.
+
+**Why.** osh builds the whole diagnostic as one string in the erroring frame:
+`cond_operand_error` glues the `near` line onto its own message and returns it,
+and the group's `?` re-raises that string unchanged. There is no place left to
+insert a clause between the two lines.
+
+**The proper fix** is to stop treating a conditional diagnostic as a string
+until it is printed: carry the clauses and the `near` position in the error, so
+an enclosing group can append `expected `)'` to the clause list and the `near`
+line is rendered last, whoever raised it. That also gives
+TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT somewhere to put the alias's own
+text.
+
+**Impact.** Cosmetic; one diagnostic line, and only for a conditional that fails
+inside parentheses.
+`tests/corpus/a-conditional-names-the-token-that-cannot-begin-a-term.sh` runs
+those two cases through `grep -v` so they are pinned for everything else.
 
 
 ### TD-OILS-ARITH-COMMAND-CLOSES-ACROSS-A-CONTINUATION — 2026-08-05

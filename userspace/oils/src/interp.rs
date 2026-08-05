@@ -11052,6 +11052,38 @@ impl Shell {
         })
     }
 
+    /// The dynamic special that would take a subscript-less write to `name`, or
+    /// `None` when the write lands in the variable table like any other.
+    ///
+    /// [`Shell::dyn_special_write`] answers the same question by *doing* the
+    /// write; this is for the callers that need to know beforehand — `set -a`,
+    /// which marks the variable an assignment made and so must not mark a name
+    /// that makes none.
+    fn dyn_special_for_write(&self, name: &str) -> Option<&'static DynamicSpecial> {
+        // Each of these hooks belongs to the name's *dynamic* binding, so
+        // `unset` takes it away with the rest ([`Shell::dynamic_special`] answers
+        // `None` from then on): after `unset RANDOM` the name is ordinary and
+        // `RANDOM=5` really does store 5. See [`Shell::dyn_unset`].
+        //
+        // A `local` of the name, or the assignment prefix of the command now
+        // running, takes them away the same way for as long as it stands: bash's
+        // value and assign functions belong to the *global* variable, so behind
+        // an ordinary binding of the name it neither computes on a read nor
+        // reaches the counter on a write. `f() { local SECONDS=9; echo
+        // $SECONDS; }` prints 9 and leaves the clock outside alone, `f() { local
+        // SECONDS; SECONDS=7; }` writes the local rather than rebasing anything,
+        // and `SECONDS=100 eval 'SECONDS=5'` leaves the clock at 0 too. See
+        // [`Shell::is_ordinary_shadowed`], and the matching guard in
+        // [`Shell::dynamic_special_value`].
+        if self.is_ordinary_shadowed(name) {
+            return None;
+        }
+        // The call-stack arrays take an assignment as an ordinary array store;
+        // only the scalars are intercepted. (`BASH_ARGV0` is a scalar, and the
+        // one whose value is a string rather than a number.)
+        self.dynamic_special(name).filter(|d| !d.listed.is_array())
+    }
+
     /// Let a **dynamic special** take a write in place of a variable-table
     /// entry, and answer whether it did. `false` means `name` has no live
     /// dynamic binding and the write must go on to the ordinary store.
@@ -11084,25 +11116,7 @@ impl Shell {
     /// likewise), so the abort `eval_int_assign` armed is disarmed here and the
     /// write still answers `true`.
     fn dyn_special_write(&mut self, name: &str, val: BStr<'_>, append: bool) -> bool {
-        // Each of these hooks belongs to the name's *dynamic* binding, so
-        // `unset` takes it away with the rest ([`Shell::dynamic_special`] answers
-        // `None` from then on): after `unset RANDOM` the name is ordinary and
-        // `RANDOM=5` really does store 5. See [`Shell::dyn_unset`].
-        //
-        // A `local` of the name, or the assignment prefix of the command now
-        // running, takes them away the same way for as long as it stands: bash's
-        // value and assign functions belong to the *global* variable, so behind
-        // an ordinary binding of the name it neither computes on a read nor
-        // reaches the counter on a write. `f() { local SECONDS=9; echo
-        // $SECONDS; }` prints 9 and leaves the clock outside alone, `f() { local
-        // SECONDS; SECONDS=7; }` writes the local rather than rebasing anything,
-        // and `SECONDS=100 eval 'SECONDS=5'` leaves the clock at 0 too. See
-        // [`Shell::is_ordinary_shadowed`], and the matching guard in
-        // [`Shell::dynamic_special_value`].
-        if self.is_ordinary_shadowed(name) {
-            return false;
-        }
-        let Some(d) = self.dynamic_special(name) else {
+        let Some(d) = self.dyn_special_for_write(name) else {
             return false;
         };
         // `BASH_ARGV0=name` sets `$0` (the shell/script name used in diagnostics
@@ -11121,11 +11135,6 @@ impl Shell {
                 val.to_vec()
             };
             return true;
-        }
-        // The call-stack arrays take an assignment as an ordinary array store;
-        // only the scalars are intercepted here.
-        if d.listed.is_array() {
-            return false;
         }
         // Every one of these names is a number to bash, so the string is parsed
         // here and it is the *number* that is stored and acted on.
@@ -11187,11 +11196,6 @@ impl Shell {
     /// the write was refused (the diagnostic has already been given).
     fn scalar_write_store(&mut self, dest: &ScalarDest, val: Str) -> bool {
         let base = dest.base().to_string();
-        // `set -a` (allexport): any assigned variable is given the export
-        // attribute automatically.
-        if self.allexport {
-            self.mark_exported(base.clone());
-        }
         // A dynamic special takes the write itself, running the name's own side
         // effect instead of landing in the variable table — see
         // [`Shell::dyn_special_write`]. Asked before the value attributes,
@@ -11206,6 +11210,15 @@ impl Shell {
             && self.dyn_special_write(n, &val, false)
         {
             return true;
+        }
+        // `set -a` (allexport): the *scalar variable an assignment made* is given
+        // the export attribute automatically. An element write makes an array
+        // instead, and an array has no environment representation, so bash
+        // passes it over: `set -a; read 'zz[1]' <<< 9` leaves `declare -a zz`
+        // where `set -a; read zz <<< 9` gives `declare -x zz`. A write a dynamic
+        // special took makes no variable at all and has already returned above.
+        if matches!(dest, ScalarDest::Var(_)) && self.allexport {
+            self.mark_exported(base.clone());
         }
         let stored = match self.apply_value_attrs(&base, val) {
             // A bad `-i` expression stores nothing; the abort it armed ends the
@@ -11773,9 +11786,36 @@ impl Shell {
         if self.noassign.contains(&a.name) && matches!(a.value, AssignRhs::Array(_)) {
             return false;
         }
-        // `set -a` (allexport): any assigned variable is given the export
-        // attribute automatically.
-        if self.allexport {
+        // `set -a` (allexport): the *scalar variable this assignment makes* is
+        // given the export attribute automatically. Three writes make no such
+        // variable and are passed over, and the first two are judged on the
+        // assignment **as written** — the same array-shaped/scalar-shaped split
+        // the readonly blame uses (see [`Self::assignment_write_refused`]), so a
+        // reference designating an element is scalar-shaped here too
+        // (`x=(1 2); declare -n r=x[1]; set -a; r=9` exports `x`):
+        //
+        //   * a subscripted operand, which makes an array — and an array has no
+        //     environment representation, so bash never auto-exports one;
+        //   * a compound literal, for the same reason. A declaration builtin's
+        //     operand can still be exported — `set -a; declare zz=(1 2)` gives
+        //     `declare -ax zz` where the bare `zz=(1 2)` gives `declare -a zz` —
+        //     but only for some of the ways of spelling the builtin, so that
+        //     marking is made where the flags are known, in
+        //     [`Self::exec_declare_with_arrays`], rather than guessed at here;
+        //   * a write a *dynamic special* or a `noassign` name turns away, which
+        //     makes no variable at all: `set -a; SECONDS=5` leaves `declare -i
+        //     SECONDS`, and a child's environment carries no `SECONDS`. An
+        //     explicit `export SECONDS` still marks the name — that is a
+        //     declaration, not an assignment.
+        let makes_scalar_var = if spelled.index.is_some()
+            || matches!(spelled.value, AssignRhs::Array(_))
+        {
+            false
+        } else {
+            !self.noassign.contains(&a.name)
+                && (a.index.is_some() || self.dyn_special_for_write(&a.name).is_none())
+        };
+        if self.allexport && makes_scalar_var {
             self.mark_exported(a.name.clone());
         }
         let is_assoc = self.assoc.contains_key(&a.name);
@@ -13732,7 +13772,18 @@ impl Shell {
                 if self.refuse_readonly_store(name) {
                     return false;
                 }
-                self.put_var(name.to_string(), value);
+                // `${q:=v}` makes an ordinary scalar variable, so `set -a`
+                // marks it — under the same shape rule as any other write.
+                // The name that counts is the one the walk *landed* on: a
+                // reference or an indirection marks its target, not itself.
+                // The subscripted arm below makes an array, which has no
+                // environment representation, and so is never marked.
+                let mark = self.allexport && self.dyn_special_for_write(name).is_none();
+                let name = name.to_string();
+                self.put_var(name.clone(), value);
+                if mark {
+                    self.mark_exported(name);
+                }
             }
             Some(w) => {
                 if self.assoc.contains_key(name) {
@@ -34264,6 +34315,14 @@ impl Shell {
                         break;
                     };
                     self.put_var(name.to_string(), v);
+                    // A reference is a scalar variable like any other, and this
+                    // is the one write that does not go through
+                    // [`Shell::apply_assignment`], so `set -a` (allexport) has
+                    // to be applied here as well: `set -a; declare -n r=q`
+                    // reports `declare -nx r`.
+                    if self.allexport {
+                        self.mark_exported(name.to_string());
+                    }
                 } else if assoc || indexed {
                     // A string value assigned to an array via `declare`. bash
                     // treats a parenthesized string as a *compound array
@@ -35309,6 +35368,29 @@ impl Shell {
             // from, which decides whether the name is rolled back below.
             let saved_expanded = std::mem::replace(&mut self.compound_expanded, false);
             let bound = self.apply_assignment(a, false);
+            // `set -a` (allexport) and a compound operand. A compound literal
+            // never auto-exports on its own (an array has no environment
+            // representation — see the guard in
+            // [`Shell::apply_assignment_inner`]), but a declaration builtin can
+            // still bring the attribute with it, and exactly when it does is
+            // decided by *how the builtin was spelled*, not by the operand:
+            //
+            // ```text
+            // set -a; declare zz=(1 2)                 # declare -ax zz
+            // set -a; declare -a zz=(1 2)              # declare -a  zz
+            // set -a; declare -A mm=([k]=1)            # declare -A  mm
+            // set -a; f() { declare zz=(1 2); }; f     # declare -a  zz
+            // set -a; f() { declare -g zz=(1 2); }; f  # declare -ax zz
+            // ```
+            //
+            // Which is bash's own shape: without an array flag and without
+            // making a local, `declare NAME=(…)` reaches the variable through
+            // the ordinary scalar bind first — where allexport lives — and only
+            // then becomes an array. `-a`/`-A` make the array outright and
+            // `local` makes a local, and neither passes that way.
+            if self.allexport && !indexed && !assoc && !make_local {
+                self.mark_exported(target.clone());
+            }
             // `+a`/`+A` cannot un-make the array the literal just bound, so phase
             // 3 refuses this operand as well — and abandons it in exactly the
             // same place, before the removals below. Whether that refusal fires

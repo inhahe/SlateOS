@@ -18921,7 +18921,40 @@ the `noassign` branch.
 with a command substitution on the right. Found while probing
 TD-OILS-A-REFUSED-ASSIGNMENT-STILL-EXPANDS-AND-TRACES.
 
-### TD-OILS-ALLEXPORT-MARKS-EVERY-WRITE, NOT THE SCALAR-SHAPED ONES. `set -a` exports an array-shaped write and a write a dynamic special takes, and misses the nameref it was written through — OPEN 2026-08-04
+### TD-OILS-FOR-OVER-A-NAMEREF-REBINDS-IT-SILENTLY. A `for` loop whose control variable is a nameref repoints the reference instead of writing through it — bash does too, but refuses a word that is not an identifier — OPEN 2026-08-04
+
+**Where:** `userspace/oils/src/interp.rs` — the `for`-loop control-variable
+write. It repoints the reference (correct) but never checks the word.
+
+**What.** A `for` loop's control variable is one of the few write paths that
+does *not* go through a nameref: bash assigns the *reference itself*, so the
+word becomes the new referent name. Since a referent name must be an
+identifier, a word that is not one is refused, the loop body never runs, and
+the whole `for` is status 1:
+
+```
+$ declare -n r=zz; for r in 5 6; do echo "body $r"; done; echo "rc=$?"
+bash: `5': not a valid identifier
+rc=1
+$ declare -p r
+declare -n r="zz"
+```
+
+osh runs the body twice with `$r` empty, leaves `declare -n r="6"`, and exits
+0. The referent being set or unset makes no difference (`zz=1` first behaves
+the same), so this is about the *word*, not about what the reference reaches.
+
+**Proper fix.** At the control-variable write, when the name resolves to a
+nameref, validate the word with `crate::parser::is_valid_name` before storing;
+on failure emit ``line N: `WORD': not a valid identifier``, abandon the loop and
+give status 1. Note this is the `for` loop only — `read r`, `printf -v r`,
+`getopts … r` and `r=v` all still write *through* the reference.
+
+**Impact.** Small: a nameref as a `for` control variable is unusual. Found
+while measuring `set -a` attribution for
+TD-OILS-ALLEXPORT-MARKS-EVERY-WRITE.
+
+### TD-OILS-ALLEXPORT-MARKS-EVERY-WRITE, NOT THE SCALAR-SHAPED ONES. `set -a` exports an array-shaped write and a write a dynamic special takes, and misses the nameref it was written through — 2026-08-04 — ✅ RESOLVED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — the two `self.allexport` guards, in
 `Shell::apply_assignment_inner` (~11776) and `Shell::scalar_write_store`
@@ -18955,26 +18988,47 @@ in bash and 1 in osh. An explicit `export SECONDS` *does* mark the name and
 *does* reach the environment — that is a declaration, not an assignment — so
 the rule is about the write, not about the name.
 
-Two things are deliberately not in the table because they are a declaration
-builtin's own business and bash treats them differently again: `declare zz=(1
-2)` and `export zz=(1 2)` under `set -a` both give `declare -ax zz`, where the
-bare `zz=(1 2)` does not.
+The nameref row is the one whose first reading was wrong. `declare -nx r` is not
+the *write* marking the reference it went through — it is `declare -n r=zz`
+marking `r` from its own declaration, which happens whether or not anything is
+ever written through it. And the shape a nameref write is judged by is the one
+*as written*: `x=(1 2); declare -n r=x[1]; set -a; r=9` marks `x`, because `r=9`
+spells a plain name even though it lands on an element.
 
-**Proper fix.** Ask the shape once, in both guards. The dynamic-special half is
-already a method — `Shell::dyn_special_write` answers exactly "did the name take
-this write instead of the variable table" — so factor its `is_ordinary_shadowed`
-+ `dynamic_special` + non-array test into a `Shell::dyn_special_for_write`
-predicate the allexport guard can ask without doing the write. The array-shaped
-half is `a.index.is_some() || matches!(a.value, AssignRhs::Array(_))` in the
-assignment path and `matches!(dest, ScalarDest::Elem(_, _))` in the shared store.
-The nameref half wants the *written* name marked as well as the target, which is
-the `spelled` argument the same function already carries.
+A declaration builtin is judged by its own words rather than by the operand's
+shape, which is why `set -a; declare zz=(1 2)` gives `declare -ax zz` where the
+bare `zz=(1 2)` gives `declare -a zz`. The rule is: mark iff the command named
+no `-a`/`-A` **and** is not making a local — so `declare -a zz=(1 2)`,
+`declare -A mm=([k]=1)`, `f() { declare zz=(1 2); }` and `f() { local zz=5; }`
+are all unmarked, while `f() { declare -g zz=5; }` is marked.
+
+**Fixed** by asking the shape once, in each guard, and by moving two of the
+marks to where the words that decide them are in scope:
+
+* `Shell::dyn_special_for_write` — the `is_ordinary_shadowed` + `dynamic_special`
+  + non-array test factored out of `Shell::dyn_special_write`, so the allexport
+  guard can ask "would the name take this write instead of the variable table"
+  without doing the write.
+* `Shell::apply_assignment_inner` — a `makes_scalar_var` guard that reads the
+  **spelled** operand (`spelled.index` / `AssignRhs::Array`), then the dynamic
+  and `noassign` refusals.
+* `Shell::scalar_write_store` — the dynamic check moved above the marking, and
+  the marking gated on `ScalarDest::Var`, so an element destination is passed
+  over.
+* `Shell::exec_declare_with_arrays` — the declaration builtin's own mark, placed
+  where `indexed` / `assoc` / `make_local` are in scope.
+* The `declare -n ref=target` `put_var` site — marks the reference itself.
+* `Shell::assign_elem`'s unsubscripted arm — `${q:=v}` makes an ordinary scalar
+  and so is marked, under the same shape rule; the name that counts is the one
+  the walk landed on, so an indirection or a reference marks its target.
+
+Corpus: `allexport-marks-the-scalar-variable-an-assignment-made.sh`.
 
 **Impact.** Under `set -a` — rare in scripts, but `set -a` is exactly what a
-`.env`-style sourced file uses — osh puts arrays and shell-maintained names into
-every child's environment that bash does not, and leaves a nameref unexported
-that bash exports. Found while checking that the dynamic-special store fix did
-not disturb allexport.
+`.env`-style sourced file uses — osh put arrays and shell-maintained names into
+every child's environment that bash does not, and left a nameref unexported that
+bash exports. Found while checking that the dynamic-special store fix did not
+disturb allexport.
 
 ### TD-OILS-DYNAMIC-SPECIALS-ONLY-ANSWER-A-PLAIN-ASSIGNMENT. `SECONDS`, `RANDOM` and `BASH_SUBSHELL` act on a write only when it is spelled `NAME=value`; every other write path stores a string that nothing reads — 2026-08-04 — ✅ RESOLVED 2026-08-04
 

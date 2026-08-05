@@ -23408,7 +23408,15 @@ impl Shell {
     /// armed; only the fabricated `0` is withheld, so a caller with a *second*
     /// expression to evaluate can decline to evaluate it.
     fn eval_arith_index_text_checked(&mut self, s: BStr<'_>) -> Option<i64> {
-        let s = bytes::trim(s);
+        // Only the *leading* blanks go. bash's `subexpr` steps over them to
+        // decide whether the expression is empty and then keeps the string from
+        // there on, trailing blanks included — so `${a[ 1 z ]}` blames
+        // `"z "`, with the two spaces, and the expression it names is `1 z `.
+        // Every other arithmetic context already reaches the evaluator
+        // untrimmed at the end; a subscript is not the exception it looked
+        // like. The evaluator ignores trailing blanks in a *valid* expression,
+        // so this changes nothing but the diagnostic.
+        let s = bytes::trim_start(s);
         if s.is_empty() {
             return Some(0);
         }
@@ -48836,6 +48844,54 @@ mod tests {
             run_cmd("(( a[1+1]=9 )); echo \"${a[2]}\"").0,
             "9\n"
         );
+    }
+
+    #[test]
+    fn a_subscript_keeps_the_blanks_after_it_the_way_every_expression_does() {
+        // bash's `subexpr` steps over the *leading* blanks of an expression to
+        // decide whether it is empty and then keeps the string from there on.
+        // Nothing trims the other end, so a subscript's diagnostic carries its
+        // trailing blanks — in the echoed expression and in the error token
+        // both. osh used to trim both ends on the `${a[…]}` path only, which
+        // put it at odds with bash *and* with its own `(( a[…] ))` path.
+        fn run_cmd(src: &str) -> (String, i32) {
+            let mut sh = new_shell();
+            sh.set_command_mode();
+            sh.set_interactive_shell(false);
+            let buf = capture_sink();
+            let status = {
+                let mut out = Out::Capture(buf.clone());
+                sh.run_source_out(src.as_bytes(), &mut out, 0)
+            };
+            let buf = take_capture(&buf);
+            (String::from_utf8_lossy(&buf).into_owned(), status)
+        }
+        // Read, length, and slice: every `${…}` spelling of a subscript.
+        assert_eq!(
+            run_cmd("a=(1 2 3); { echo \"${a[ 1 @  ]}\"; } 2>&1").0,
+            "osh: line 1: 1 @  : syntax error: invalid arithmetic operator \
+             (error token is \"@  \")\n"
+        );
+        assert_eq!(
+            run_cmd("a=(1 2 3); { echo \"${#a[ 1 z  ]}\"; } 2>&1").0,
+            "osh: line 1: 1 z  : syntax error in expression (error token is \"z  \")\n"
+        );
+        // A `#` is an ordinary base separator here — a subscript is not scanned
+        // for comments the way a `$(( … ))` word is — so it reaches the
+        // evaluator with its blanks and is refused as an operand.
+        assert_eq!(
+            run_cmd("a=(1 2 3); { echo \"${a[ #1  ]}\"; } 2>&1").0,
+            "osh: line 1: #1  : syntax error: operand expected (error token is \"#1  \")\n"
+        );
+        // The write path agrees, as does an associative array's.
+        assert_eq!(
+            run_cmd("{ a[ 1 z  ]=v; } 2>&1").0,
+            "osh: line 1: 1 z  : syntax error in expression (error token is \"z  \")\n"
+        );
+        // Leading blanks still go, and a subscript of nothing but blanks is
+        // still index 0 rather than an error.
+        assert_eq!(run_cmd("a=(x y z); echo \"${a[   ]}\"").0, "x\n");
+        assert_eq!(run_cmd("a=(x y z); echo \"${a[ 1  ]}\"").0, "y\n");
     }
 
     #[test]

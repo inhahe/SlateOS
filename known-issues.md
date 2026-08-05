@@ -5169,6 +5169,50 @@ The corpus flake this entry opened with is the same race, from the same
 line: `f | cat` was the only case in the file that could interleave
 observably.
 
+### TD-OILS-CORPUS-JOBS-SWEEP-CURRENT-MARKER-FLAKE. `tests/corpus/jobs-sweep-line.sh` disagreed once on the `+` current-job marker — 2026-08-05 — OPEN (unreproduced; suspected bash-side timing, not an osh bug)
+
+**Where:** `userspace/oils/tests/corpus/jobs-sweep-line.sh` lines 13–17, the
+`== …but not the line itself` section:
+
+```sh
+echo "== …but not the line itself"
+true & sleep 0.2
+jobs
+jobs %1
+echo "rc=$?"
+```
+
+**Symptom.** One full `scripts/osh-bash-diff.py` run reported
+`381 matched, 0 waived, 1 failed`, the only differing line being the `jobs`
+listing: bash printed `[1]   Done                    true` (no marker) where osh
+printed `[1]+  Done                    true`. Nothing else in the ~40-line
+output differed — same rows, same statuses, same exit codes. The case was then
+re-run in isolation six times and matched every time, so the capture we have is
+the diff summary rather than a reproducible case.
+
+**Why it is probably bash's timing and not ours.** The `+` marks bash's
+*current* job, and bash recomputes it (`reset_current()` in `jobs.c`) whenever a
+job leaves: it prefers the last stopped job, then the last running one, and
+settles on no job at all if every entry is already dead. Here `true` is long
+finished and `sleep 0.2` is a foreground job that also occupies the table while
+it runs, so which answer `reset_current` gives depends on whether job 1's exit
+status had already been reaped when `sleep` left. Under load that reaping can
+land on the other side of the boundary, and bash then has no current job to
+mark. osh's marker is stable because it decides the current job from the table
+rather than from reap order.
+
+**Why it is not fixed.** Guessing at the mechanism is not the same as measuring
+it, and the observation to date is a single unreproduced line. Deliberately not
+"fixed" by relaxing the case — that would delete real coverage of the sweep for
+a flake we have not shown is a flake. **Next occurrence must be captured**: run
+the section in a loop against bash alone under parallel load (a few `cargo
+build`s alongside) and collect the listings until one drops the `+`. If bash
+turns out to be deterministic and osh is the one that varies, this is a real
+osh bug and the entry becomes a fix.
+
+**Impact.** A full-corpus run can report one spurious failure. It does not
+affect any shipped behaviour.
+
 ### TD-OILS-CORPUS-SECONDS-BOUNDARY-FLAKE. `tests/corpus/dynamic-var-assign.sh` reads `SECONDS` across a second boundary — ✅ RESOLVED 2026-07-31 (test bug, not a shell bug)
 
 **Where:** `userspace/oils/tests/corpus/dynamic-var-assign.sh` line 103,

@@ -12631,9 +12631,28 @@ impl Shell {
 
     /// All values of `name`, treating a plain scalar as a one-element array.
     fn array_elements(&self, name: &str) -> Vec<Str> {
+        self.array_elements_walks(name, 1)
+    }
+
+    /// [`Self::array_elements`] where the enumeration *is* the whole of a
+    /// `${a[@]}` / `${a[*]}` value read, which walks any nameref chain twice and
+    /// so reports a circular one twice.
+    ///
+    /// `[@]` and `[*]` are subscripts like any other, and the rule is
+    /// [`Self::param_elem_lookup`]'s: the name is resolved once to find the
+    /// array and again to read out of it. Every spelling of the read agrees —
+    /// quoted or not, joined or split, sliced, transformed, or reached through a
+    /// pointer — while the two questions that are *about* the array rather than
+    /// its contents keep the single walk: `${#a[@]}` and `${!a[@]}`.
+    ///
+    /// The plain one-walk form stays for the callers that have already resolved
+    /// (or deliberately silenced) the name and are enumerating as a second step,
+    /// where warning again would double a count that is already right.
+    fn array_elements_walks(&self, name: &str, walks: usize) -> Vec<Str> {
         // A reference designating one *element* names no array to enumerate, so
         // it yields nothing — the same answer the lookups below would give.
-        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
+        let Some(name) = &self.resolve_ref_use_walks(name, walks).and_then(RefTarget::into_name)
+        else {
             return Vec::new();
         };
         if let Some(m) = self.assoc.get(name) {
@@ -12958,7 +12977,7 @@ impl Shell {
             let count = if name == "@" || name == "*" {
                 self.positional.len()
             } else {
-                self.array_elements(name).len()
+                self.array_elements_walks(name, 2).len()
             };
             if count > 0 {
                 self.bad_transform_substitution(raw);
@@ -12968,7 +12987,7 @@ impl Shell {
         let elems: Vec<Str> = if name == "@" || name == "*" {
             self.positional.clone()
         } else {
-            self.array_elements(name)
+            self.array_elements_walks(name, 2)
         };
         elems
             .into_iter()
@@ -13428,7 +13447,15 @@ impl Shell {
     /// *recognise* what a reference names and will resolve it again, in full, if
     /// it turns out not to be theirs: resolving twice must not complain twice.
     fn param_elem_lookup(&mut self, name: &str, index: Option<&Word>) -> ElemValue {
-        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
+        // A subscript costs a second walk of any nameref chain, and a circular
+        // one is reported once per walk: `${c1[0]}` warns twice where `${c1}`
+        // warns once. The extra walk is the array lookup's own — the name is
+        // resolved once to find the variable and again to subscript it — which
+        // is the same split arithmetic's element read has. See
+        // [`Self::resolve_ref_use_walks`].
+        let walks = usize::from(index.is_some()) + 1;
+        let Some(name) = &self.resolve_ref_use_walks(name, walks).and_then(RefTarget::into_name)
+        else {
             return ElemValue::Absent;
         };
         let found = match index {
@@ -13720,7 +13747,7 @@ impl Shell {
             // `${name[@]}`/`${name[*]}` (bash). In this scalar (unjoined) path we
             // join with a space, matching `expand_array_ref`'s `[@]`/`[*]` join.
             if sub == "@" || sub == "*" {
-                return Some(self.array_elements(name).join(&b' '));
+                return Some(self.array_elements_walks(name, 2).join(&b' '));
             }
             // The base may itself be a nameref — `declare -n b=c; b=(p q)`
             // stores the array on `c` — so a subscript reached through a
@@ -15015,7 +15042,16 @@ impl Shell {
         // made about `written` rather than about whatever nameref chain the
         // read went down: `declare -n r=a; ${r[5]}` reports `r[5]`, not `a[5]`.
         let written = name;
-        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
+        // A *value* read subscripts the array it found, so it walks the chain
+        // twice and reports a circular one twice (see
+        // [`Self::param_elem_lookup`]). The `${#a[i]}` form does not: a
+        // subscripted length asks the array about its own shape in one go, and
+        // warns once — the exact inverse of the unsubscripted pair, where
+        // `${#c1}` is the one that walks twice and `${c1}` the one that walks
+        // once.
+        let walks = usize::from(!length) + 1;
+        let Some(name) = &self.resolve_ref_use_walks(name, walks).and_then(RefTarget::into_name)
+        else {
             // A circular chain is unset, and so is a reference that already
             // designates one element (there is no array left to subscript):
             // `${a[@]}` is empty, `${#a[@]}` is 0.
@@ -20467,7 +20503,7 @@ impl Shell {
                 },
             ] => {
                 self.saw_quoted_list = true;
-                Some(self.array_elements(name))
+                Some(self.array_elements_walks(name, 2))
             }
             [WordPart::ArrayKeys { name, star: false }] => {
                 self.saw_quoted_list = true;
@@ -21399,7 +21435,9 @@ impl Shell {
             }
             // `${#x}` counts *characters*; a byte that is not part of any
             // character counts as one, which is what bash's C locale does too.
-            WordPart::Length(name) => match self.param_value(name) {
+            // Two walks of any nameref chain: bash asks after the parameter and
+            // then reads the value to measure. See [`Self::param_value_walks`].
+            WordPart::Length(name) => match self.param_value_walks(name, 2) {
                 Some(v) => bytes::char_count(&v).to_string().into_bytes(),
                 None => {
                     // `${#!}` answers 0 rather than faulting: asking how long
@@ -22048,7 +22086,7 @@ impl Shell {
         let elements = if positional {
             self.positional.clone()
         } else {
-            self.array_elements(name)
+            self.array_elements_walks(name, 2)
         };
         let exists = if positional {
             !self.positional.is_empty()
@@ -23006,7 +23044,7 @@ impl Shell {
                 name,
                 index: ArrayIndex::All | ArrayIndex::Star,
                 length: false,
-            } => Some(SplitItems::List(self.array_elements(name))),
+            } => Some(SplitItems::List(self.array_elements_walks(name, 2))),
             WordPart::Param { name, .. } if name == "@" || name == "*" => {
                 Some(SplitItems::List(self.positional.clone()))
             }
@@ -23206,12 +23244,26 @@ impl Shell {
     }
 
     fn param_value(&self, name: &str) -> Option<Str> {
+        self.param_value_walks(name, 1)
+    }
+
+    /// [`Self::param_value`] for a path that walks a nameref chain more than
+    /// once, and so reports a circular one more than once.
+    ///
+    /// The one caller that does is `${#name}`, which asks after the parameter
+    /// before it reads the value to measure — so `${#c1}` warns twice where a
+    /// plain `${c1}` warns once. Note that this is the *opposite* way round from
+    /// the subscripted forms, where the value read walks twice
+    /// ([`Self::param_elem_lookup`]) and the length walks once
+    /// ([`Self::expand_array_ref`]): the two questions are answered by different
+    /// routes, and each route walks what it walks.
+    fn param_value_walks(&self, name: &str, walks: usize) -> Option<Str> {
         if let Some(v) = self.nameref_elem_value(name) {
             return Some(v);
         }
         // A reference designating an *element* names no variable, and the
         // element's own value was already answered by `nameref_elem_value`.
-        let name = &self.resolve_ref_use(name).and_then(RefTarget::into_name)?;
+        let name = &self.resolve_ref_use_walks(name, walks).and_then(RefTarget::into_name)?;
         match name.as_str() {
             "?" => Some(self.last_status.to_string().into_bytes()),
             "#" => Some(self.positional.len().to_string().into_bytes()),
@@ -63552,6 +63604,81 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("declare -a u=(1 2); declare -n r=u; (( r[1] += 4 )); declare -p u").0,
             "declare -a u=([0]=\"1\" [1]=\"6\")\n",
+        );
+    }
+
+    /// The same rule on the expansion side: a plain read walks a circular chain
+    /// once, a *subscripted* one twice — once to find the array, once to read
+    /// out of it — and `[@]`/`[*]` are subscripts like any other, however the
+    /// read is spelled. The exceptions are the two questions about the array
+    /// rather than its contents, `${#a[@]}` and `${!a[@]}`, which walk once —
+    /// and which is why the unsubscripted `${#c1}` reads the opposite way round
+    /// and walks twice.
+    #[test]
+    fn a_parameter_read_through_a_circular_nameref_warns_once_per_walk() {
+        let cyc = "declare -n c1=c2; declare -n c2=c1;";
+
+        // One walk: the plain read, and every modifier applied to one.
+        for src in [
+            "echo \"[$c1]\"",
+            "echo \"[${c1}]\"",
+            "echo \"[${c1:-d}]\"",
+            "echo \"[${c1:+x}]\"",
+            "echo \"[${c1#x}]\"",
+            "echo \"[${c1^^}]\"",
+            "echo \"[${c1@Q}]\"",
+            "echo \"[${c1/a/b}]\"",
+            "echo \"[${c1:0:1}]\"",
+            // The two questions about the array itself, which is why they are
+            // here rather than in the pair below.
+            "echo \"[${#c1[0]}]\"; :",
+            "echo \"[${#c1[@]}]\"; :",
+            "echo \"[${!c1[@]}]\"",
+        ] {
+            let out = run(&format!("{{ {cyc} {src}; }} 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), 1, "{src} -> {out:?}");
+        }
+
+        // Two walks: anything with a subscript on it.
+        for src in [
+            "echo \"[${c1[0]}]\"",
+            "echo \"[${c1[0]:-d}]\"",
+            "echo \"[${c1[0]#x}]\"",
+            "echo \"[${c1[0]^^}]\"",
+            "echo \"[${c1[0]@Q}]\"",
+            "echo \"[${c1[0]:0:1}]\"",
+            "echo \"[${c1[@]}]\"",
+            "echo [${c1[@]}]",
+            "echo \"[${c1[*]}]\"",
+            "echo \"[${c1[@]:0:1}]\"",
+            "echo \"[${c1[@]#x}]\"",
+            "echo \"[${c1[@]@Q}]\"",
+            "echo \"[${c1[@]:-d}]\"",
+            "x=(\"${c1[@]}\")",
+            "p=\"c1[@]\"; echo \"[${!p}]\"",
+            // The unsubscripted length is the inversion: it asks after the
+            // parameter and then reads the value to measure.
+            "echo \"[${#c1}]\"",
+        ] {
+            let out = run(&format!("{{ {cyc} {src}; }} 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), 2, "{src} -> {out:?}");
+        }
+
+        // None of it changes a value — the reads are all empty, and `${#…}` is
+        // 0 either way.
+        assert_eq!(
+            run(&format!("{{ {cyc} echo \"[${{c1[0]}}][${{#c1}}][${{#c1[@]}}]\"; }} 2>/dev/null")).0,
+            "[][0][0]\n",
+        );
+
+        // A chain that resolves walks it too, and says nothing.
+        assert_eq!(
+            run("t=v; declare -n r=t; { echo \"[$r][${#r}][${r[0]}]\"; } 2>&1").0,
+            "[v][1][v]\n",
+        );
+        assert_eq!(
+            run("u=(p q); declare -n r=u; { echo \"[${r[@]}][${#r[@]}][${!r[@]}]\"; } 2>&1").0,
+            "[p q][2][0 1]\n",
         );
     }
 

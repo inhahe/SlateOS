@@ -1479,17 +1479,13 @@ impl Spans {
     /// `None` when there is no source to slice — an alias-expanded stream, or a
     /// token that is not in this stream at all — leaving the caller to name the
     /// token instead.
-    fn near(&self, pos: usize) -> Option<Str> {
+    fn near(&self, pos: usize, r: Reader) -> Option<Str> {
         let t = &self.src;
-        let mut i = *self.ends.get(pos)? as usize;
-        // bash's *reader* deletes a `\<newline>` — `shell_getc` throws both
-        // characters away and reads on — so the character "just past the token"
-        // is the first one on the next line, and the backslash is text the
-        // parser never had. `[[ P;\<newline>Q ]]` is reported near `Q`, not
-        // near `;\`.
-        while let Some(n) = cont_len(t.get(i..).unwrap_or(&[])) {
-            i = i.saturating_add(n);
-        }
+        // Where the reader stopped, not where the token ended: a `\<newline>`
+        // its lookahead deleted is text the parser never had, so
+        // `[[ P;\<newline>Q ]]` is reported near `Q`, not near `;\`. See
+        // [`Spans::reader_stop`].
+        let (mut i, _) = self.reader_stop(pos, r)?;
         if t.is_empty() || i > t.len() {
             return None;
         }
@@ -1546,16 +1542,67 @@ impl Spans {
     /// The line already stamped on the token is the line of the span's *last*
     /// character (see [`Lexer::stamp_lines`](crate::lexer)), which is why a span
     /// ending in a continuation is worth exactly one more and not the whole run.
-    fn cont_lines(&self, pos: usize) -> u32 {
-        let Some(&end) = self.ends.get(pos) else { return 0 };
-        let end = end as usize;
+    ///
+    /// Which continuations the reader crossed — and so where it stopped — is
+    /// [`Spans::reader_stop`]'s job; this is only its second half.
+    fn cont_lines(&self, pos: usize, r: Reader) -> u32 {
+        self.reader_stop(pos, r).map_or(0, |(_, n)| n)
+    }
+
+    /// Where bash's reader had got to when the token at `pos` was handed over:
+    /// the offset into `src` it stopped at, and how many input lines it fetched
+    /// getting there.
+    ///
+    /// Both halves come out of the same walk because both are decided by the
+    /// same thing — how far the token's own reading looked past its last
+    /// character, and how many `\<newline>` pairs it deleted on the way. Three
+    /// cases, in the order they are tested:
+    ///
+    /// - A multi-character operator completed *by* its own lookahead
+    ///   (`r.peeks` false) never looked again. The reader is parked on the
+    ///   character after it, and a continuation standing there is text it has
+    ///   not reached: `[[ a>>\<newline>Q ]]` errors on line 1, near `a>>\`.
+    /// - Anything else looked at least once more, so a continuation flush
+    ///   against it is deleted and the reader is dragged onto the next line:
+    ///   `[[ a>\<newline>Q ]]` errors on line 2, near `Q`. The lexer may have
+    ///   eaten that continuation into the span already ([`Spans::ends_in_cont`])
+    ///   or left it ahead — after `;;` it eats, after `)` it does not — so both
+    ///   sides are counted, and they cannot double-count, since a span that ends
+    ///   in one leaves the walk starting past it.
+    /// - A word whose *terminator* is `<` or `>` reaches one character further
+    ///   still. `read_token_word` reads that terminator and, because `shellexp`
+    ///   holds for it, peeks once more to test for a `<( … )` process
+    ///   substitution. The peek is with removal on, so it deletes a continuation
+    ///   written after the `<`/`>` even though the word then pushes *both*
+    ///   characters back — and `shell_ungetc` cannot push past the start of the
+    ///   line it has just fetched, so the reader is left at the top of it:
+    ///   `[[ 2>\<newline>Q ]]` errors on line 2, near `Q`, while the very same
+    ///   token in `[[ 2>Q ]]` errors on line 1, near `2>`.
+    ///
+    /// `None` when the token has no source of its own to measure from.
+    fn reader_stop(&self, pos: usize, r: Reader) -> Option<(usize, u32)> {
+        let end = *self.ends.get(pos)? as usize;
+        if !r.peeks {
+            return Some((end, 0));
+        }
         let mut n = u32::from(self.ends_in_cont(end));
         let mut i = end;
         while let Some(len) = cont_len(self.src.get(i..).unwrap_or(&[])) {
             i = i.saturating_add(len);
             n = n.saturating_add(1);
         }
-        n
+        if n == 0 && r.word && matches!(self.src.get(end), Some(&Ch::U('<' | '>'))) {
+            let mut j = end.saturating_add(1);
+            let mut m = 0u32;
+            while let Some(len) = cont_len(self.src.get(j..).unwrap_or(&[])) {
+                j = j.saturating_add(len);
+                m = m.saturating_add(1);
+            }
+            if m > 0 {
+                return Some((j, m));
+            }
+        }
+        Some((i, n))
     }
 
     /// Whether the character just before `end` is the newline of a `\<newline>`
@@ -1571,6 +1618,72 @@ impl Spans {
             Some(&Ch::U('\\')) => true,
             Some(&Ch::U('\r')) => self.src.get(end.wrapping_sub(3)) == Some(&Ch::U('\\')),
             _ => false,
+        }
+    }
+}
+
+/// How far a token's own reading looked past its last character — the two facts
+/// [`Spans::reader_stop`] needs to place bash's reader.
+#[derive(Clone, Copy)]
+struct Reader {
+    /// Whether the reader looked at the character *after* the token at all,
+    /// which decides whether a `\<newline>` written flush against it was
+    /// deleted (dragging the reader onto the next line) or is still standing
+    /// there unread.
+    ///
+    /// bash's `read_token` (parse.y) reads one character, and for a shell
+    /// metacharacter immediately takes `peek_char = shell_getc (1)` — a read
+    /// *with* continuation removal. Where that peeked character completes a
+    /// longer operator, the operator is returned right then and the reader stops
+    /// on the character after it. Where it does not, the peek is pushed back
+    /// with `shell_ungetc` — but the continuation it deleted on the way is gone,
+    /// and `line_number` has already moved.
+    ///
+    /// So the rule is: **a token crosses a flush continuation unless it is a
+    /// multi-character operator that its own lookahead completed.** `>>`, `>&`,
+    /// `<&`, `<>`, `>|`, `|&`, `;&`, `&&`, `||`, `<<-`, `<<<`, `&>>` and `;;&`
+    /// all return the moment the last character is read. `<<`, `;;` and `&>` do
+    /// not — each peeks once more (for `<<-`/`<<<`, for `;;&`, for `&>>`) and
+    /// pushes that peek back — so they cross, as do the one-character
+    /// metacharacters and every word, whose scan reads its own terminator.
+    peeks: bool,
+    /// Whether the token came from `read_token_word`, whose terminator peek can
+    /// reach one character further than the token itself. See the third case in
+    /// [`Spans::reader_stop`].
+    word: bool,
+}
+
+impl Reader {
+    fn of(t: Option<&Tok>) -> Self {
+        Self {
+            peeks: !matches!(
+                t,
+                Some(Tok::Op(
+                    Op::DGreat
+                        | Op::GreatAnd
+                        | Op::LessAnd
+                        | Op::LessGreat
+                        | Op::GreatPipe
+                        | Op::PipeAmp
+                        | Op::AndIf
+                        | Op::OrIf
+                        | Op::SemiAmp
+                        | Op::DSemiAmp
+                        | Op::DLessDash
+                        | Op::TLess
+                        | Op::AmpDGreat
+                ))
+            ),
+            word: matches!(
+                t,
+                Some(
+                    Tok::Word(_)
+                        | Tok::Io(_)
+                        | Tok::VarFd(_)
+                        | Tok::ArrayAssign { .. }
+                        | Tok::Invalid(_)
+                )
+            ),
         }
     }
 }
@@ -1628,7 +1741,8 @@ impl Parser {
     /// token's own line but the reader's, which is a line further down for every
     /// `\<newline>` written flush after the token. See [`Spans::cont_lines`].
     fn reader_line(&self) -> u32 {
-        self.cur_line().saturating_add(self.spans.cont_lines(self.pos))
+        let r = Reader::of(self.toks.get(self.pos));
+        self.cur_line().saturating_add(self.spans.cont_lines(self.pos, r))
     }
 
     fn bump(&mut self) -> Option<Tok> {
@@ -2809,7 +2923,7 @@ impl Parser {
     /// token itself, trimmed the way [`cond_error_near`] describes.
     fn cond_near_at(&self, pos: usize) -> Str {
         self.spans
-            .near(pos)
+            .near(pos, Reader::of(self.toks.get(pos)))
             .unwrap_or_else(|| cond_error_near(&self.token_display_at(pos)))
     }
 

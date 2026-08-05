@@ -75,9 +75,9 @@ b )'
 echo "=== a redirection operator is read before the reader stops"
 # `>>` needs no test to tell it from anything, so the reader never looks past it
 # and the error stays on line 1 — as it does when a space, rather than the
-# continuation, is what it would have looked at. (A *single* `>` does look, and
-# that one shape osh does not yet follow: see
-# TD-OILS-A-ONE-CHARACTER-REDIRECTION-OPERATOR-PEEKS-PAST-A-CONTINUATION.)
+# continuation, is what it would have looked at. A *single* `>` does look, and
+# so carries the error down; which operators do which is pinned by
+# an-operator-crosses-a-continuation-only-if-it-looks-past-itself.sh.
 l '[[ 2>>\
 Q ]]'
 l '[[ 2> \

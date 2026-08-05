@@ -35543,67 +35543,78 @@ than one line. The `sed` workaround in
 `a-conditional-error-quotes-the-source-not-the-token.sh` is gone; that case is
 now compared whole.
 
-**Left behind:** TD-OILS-A-ONE-CHARACTER-REDIRECTION-OPERATOR-PEEKS-PAST-A-CONTINUATION,
-the one shape the reader-line rule does not reach.
+**Left behind:** TD-OILS-AN-OPERATOR-CROSSES-A-CONTINUATION-ONLY-IF-IT-LOOKS-PAST-ITSELF
+— the shapes where the reader stops short of the continuation, or reaches past
+it, rather than landing on it. Also fixed, the same day.
 
 
-### TD-OILS-A-ONE-CHARACTER-REDIRECTION-OPERATOR-PEEKS-PAST-A-CONTINUATION — 2026-08-05
+### TD-OILS-AN-OPERATOR-CROSSES-A-CONTINUATION-ONLY-IF-IT-LOOKS-PAST-ITSELF — 2026-08-05 — ✅ FIXED 2026-08-05
 
-**Where:** `userspace/oils/src/parser.rs` — `Parser::reader_line` /
-`Parser::cond_near_at`, which take the reader's position to be the end of the
-offending token.
+*(was TD-OILS-A-ONE-CHARACTER-REDIRECTION-OPERATOR-PEEKS-PAST-A-CONTINUATION,
+which named only the shape that reported too **early**; measuring the whole
+operator table turned up an opposite set that reported too **late**, and the two
+turned out to be one rule seen from both sides.)*
 
-**What.** A file-descriptor number written flush against a *single-character*
-redirection operator, with a continuation flush after that, leaves bash's reader
-a line further down than osh's:
+**Where:** `userspace/oils/src/parser.rs` — `Spans::reader_stop`, and the
+`Reader` descriptor that feeds it.
+
+**What.** A `\<newline>` moves a syntax error's line only when bash's reader
+actually reached it, and osh moved it for every token:
 
 ```text
 [[ 2>\           bash: line 2: unexpected token 284 in conditional command
 Q ]]                   line 2: syntax error near `Q'
                        line 2: `Q ]]'
-                 osh:  line 1: unexpected token 284 in conditional command
-                       line 1: syntax error near `2>'
-                       line 1: `[[ 2>\'
+                 was:  line 1: … near `2>' … `[[ 2>\'
+
+[[ a>>\          bash: line 1: unexpected token `>>', conditional binary …
+Q ]]                   line 1: syntax error near `a>>\'
+                       line 1: `[[ a>>\'
+                 was:  line 2: … near `Q' … `Q ]]'
 ```
 
-`[[ {fd}>\<nl>Q ]]` (token 283, REDIR_WORD) behaves the same way. Everything
-around it already agrees, and the pattern says exactly what the difference is:
+`[[ {fd}>\<nl>Q ]]` and `[[ {fd}<\<nl>Q ]]` (token 283, REDIR_WORD) went the
+first way; `[[ a>&\<nl>Q ]]`, `[[ >>\<nl>Q ]]` and `[[ 2&>>\<nl>Q ]]` the
+second. The second class was a regression from
+TD-OILS-COND-ERROR-LINE-AFTER-A-CONTINUATION's fix, which moved the line for
+*every* token.
 
-| written | bash | why |
-|---|---|---|
-| `[[ 2>\<nl>Q ]]` | line 2, near `Q` | **diverges** |
-| `[[ 2>>\<nl>Q ]]` | line 1, near `2>` | agrees — `>>` is unambiguous |
-| `[[ 2> \<nl>Q ]]` | line 1, near `2>` | agrees — the space is the peeked char |
-| `[[ 2\<nl>>Q ]]` | line 2, near `>` | agrees — the ordinary reader-line rule |
-| `[[ 2>Q\<nl>R ]]` | line 1, near `2>` | agrees |
+**Why.** bash's `read_token` reads one character and, for a shell
+metacharacter, immediately takes `peek_char = shell_getc (1)` — a read *with*
+continuation removal. Where that peek completes a longer operator the operator
+is returned right there, and the reader stops on the character after it. Where
+it does not, the peek is pushed back with `shell_ungetc` — but the continuation
+it deleted on the way is gone, and `line_number` has already moved. So an
+operator crosses a flush continuation **unless it is a multi-character operator
+its own lookahead completed**:
 
-**Why.** Having read `>`, bash reads one more character to tell `>` from `>>`,
-`>&` and `>|`. That read is a `shell_getc`, so it deletes the `\<newline>` — and
-deleting one bumps `line_number` and refills `shell_input_line` with the next
-line. The `>` is then pushed back, but the line bump and the refilled buffer are
-not undone, so both the reported line *and* `error_token_from_text`'s slice come
-from line 2. `>>` needs no such test and so never looks, which is why it agrees.
+| crosses | does not |
+|---|---|
+| `>` `<` `;` `&` `\|` `(` `)` — the peek was pushed back | `>>` `>&` `<&` `<>` `>\|` `\|&` `;&` `&&` `\|\|` `<<-` `<<<` `&>>` `;;&` |
+| `<<` `;;` `&>` — each peeks once *more* (for `<<-`/`<<<`, for `;;&`, for `&>>`) and pushes that peek back | |
 
-osh has no lookahead to model here: the offending token is the word `2`, whose
-span ends before the `>`, so `Spans::cont_lines` finds no continuation and
-`Spans::near` slices back from the `>` to give `2>`.
+A word reaches one character further still, and that is the first class. The
+cause is not the operator's disambiguation peek — if it were, `[[ 2>&\<nl>Q ]]`
+would diverge too, and it does not. It is `read_token_word`: having read the
+terminator that ends the word it tests `shellexp (character)`, true for `<` and
+`>`, and peeks once more for a `<( … )` process substitution. That peek deletes
+a continuation written after the `<`/`>` even though the word then pushes *both*
+characters back — and `shell_ungetc` cannot push past the start of the line it
+has just fetched, so the reader is left at the top of it. Hence line 2 and a
+slice of `Q`, where the same NUMBER token in `[[ 2>Q ]]` gives line 1 and `2>`.
 
-**The proper fix** is to let the reader position run past a single-character
-redirection operator lexed flush after the token — i.e. when `toks[pos]` is a
-NUMBER/REDIR_WORD and `toks[pos + 1]` is a one-character redirection operator
-starting exactly where `pos` ends, take `pos + 1`'s span as the reader's. Both
-the line number and the `near` slice then fall out of the existing machinery
-(`cont_lines` sees the continuation; `near` skips it and lands on `Q`). Needs its
-own measurement pass first over `>`, `<`, `>&`, `>|`, `<&`, `<>` and the
-`{fd}` forms.
+**Fixed by** replacing the unconditional continuation walk with
+`Spans::reader_stop`, which answers *where the reader stopped* and *how many
+lines it fetched* together, from a `Reader { peeks, word }` descriptor built off
+the token. `peeks` is false for exactly the thirteen operators above and
+suppresses the walk — which also keeps the backslash in `Spans::near`'s slice,
+as bash's does (`a>>\`). `word` marks the tokens `read_token_word` produces and
+enables the one-character-further step when the character at the span's end is
+`<` or `>` and a continuation follows it.
 
-**Impact.** Cosmetic, and confined to a diagnostic that is already exotic — the
-message prints a raw yacc token number (284/283) because bash's
-`error_token_from_token` switches on the global `current_token` rather than on
-the token it was handed. Not pinned by the corpus; the four *agreeing* shapes in
-the table above are, in
-`tests/corpus/a-continuation-after-a-token-moves-the-error-down-a-line.sh`, so a
-fix that overreached would be caught.
+**Pinned by**
+`tests/corpus/an-operator-crosses-a-continuation-only-if-it-looks-past-itself.sh`
+— the whole table, both directions, inside a conditional and outside it.
 
 
 ### TD-OILS-COND-ERROR-MISSES-THE-PRIMARY-OPERATOR-LINE — 2026-08-05

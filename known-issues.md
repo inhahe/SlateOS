@@ -362,6 +362,169 @@ of it while `unset -v 'n["1]'` complains.
 
 **Corpus:** `a-subscript-is-split-off-with-regard-for-its-quotes.sh`.
 
+### TD-OILS-A-NAMEREF-BASE-IS-FOLLOWED-WHEN-THE-REFERENCE-IS-READ. `declare -n base=n; declare -n r='base[2]'` read the string `n` where bash reads element 2 — 2026-08-05 — ✅ **FIXED 2026-08-05**
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::ref_target_value`.
+
+**What.** The base of a nameref that designates an array *element* — the `base`
+of `declare -n r='base[2]'` — is a **name**, and bash follows it through a
+nameref chain of its own before the subscript applies to anything:
+`array_variable_part` is `find_variable` on the base, and that chases references
+like every other lookup. osh took the written base as final and subscripted
+*it*, which for a nameref means subscripting a scalar whose value is the target
+name. Measured with `n=(a b c d)`, `i=2`, `s=SCALAR`,
+`declare -A mm=([k]=K)`:
+
+```text
+                              bash            osh (before)
+declare -n base=n
+  declare -n r='base[2]'      `c`             `n` — element 0 of the scalar
+  declare -n r='base[$i]'     `c`             `n`
+  declare -n r='base[-9]'     `n: bad array   `base: bad array subscript`
+                              subscript`
+declare -n base=s
+  declare -n r='base[0]'      `SCALAR`        `s`
+declare -n base=mm
+  declare -n r='base[k]'      `K`             `mm`
+declare -n base=nope          empty           `nope`
+declare -n base='n[1]'        empty           `n[1]`
+declare -n c1=c2; -n c2=c1
+  declare -n r='c1[0]'        two `circular   no warning, reads `c2`
+                              name reference`
+                              warnings, empty
+```
+
+**Fixed 2026-08-05.** `ref_target_value` resolves its base through
+`resolve_ref_use_walks(base, 2)` before either branch, and answers
+`ElemValue::Absent` when the chain names nothing — circular, unset, or ending on
+an element rather than a variable. Every later step then works on the *resolved*
+name: the associative/indexed choice, the element lookup, the whole-array
+enumeration, and the `bad array subscript` complaint, which is why that
+diagnostic now spells the base the chain arrived at.
+
+The walk count is **two**, and measured: the name is resolved once to find the
+array and again to read out of it, so a circular base is reported twice — which
+is `Shell::param_elem_lookup`'s rule for a subscripted read reached the ordinary
+way, `${c1[0]}` warning twice where `${c1}` warns once. Both branches pay it,
+`base[@]` included. The enumeration afterwards walks nothing further, the name
+handed to it being plain.
+
+**Corpus:** `a-nameref-base-is-followed-when-the-reference-is-read.sh`.
+
+Three divergences found alongside this one are *not* fixed and have their own
+entries. The *store* side deliberately does not follow the base at all —
+TD-OILS-A-NAMEREF-BASE-IS-FOLLOWED-ON-A-WRITE-WHERE-BASH-BINDS-THE-BASE-ITSELF
+— while `unset` follows it as the read does, and osh does neither:
+TD-OILS-UNSET-THROUGH-A-REFERENCE-TO-AN-ELEMENT-UNSETS-THE-BASE-INSTEAD. The
+third is unrelated to the base:
+TD-OILS-A-REFERENCE-TO-A-MISSING-ELEMENT-IS-UNBOUND-UNDER-SET-U.
+
+### TD-OILS-A-REFERENCE-TO-A-MISSING-ELEMENT-IS-UNBOUND-UNDER-SET-U. `set -u; declare -n V='n[9]'; echo "$V"` says `V: unbound variable` where bash prints nothing and carries on — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::param_value_walks`, which
+tries `nameref_elem_value` first and falls through to the ordinary resolution
+when the element is absent; the `into_name()` there answers `None` for an
+element reference, so the caller's `set -u` check sees an unset *parameter*.
+
+**What.** With `n=(a b c)`:
+
+```text
+                          bash                  osh
+set -u; declare -n V='n[9]'
+  echo "[$V]"             `[]`, status 0        `V: unbound variable`, status 1
+```
+
+bash reads a nameref-to-element through its array path, and that path yields the
+empty string for an element that is not there rather than reporting the
+*variable* unset — the same reason `${#V}` is 0 under `set +u` and the value's
+length under `set -u`. See `Shell::ref_length`, which already records the
+measurement.
+
+**Proper fix.** Part `ElemValue::Absent` in two: "this name is not an element
+reference at all", which must fall through to the ordinary resolution, and "it
+is one, and the element is missing", which is an empty value that satisfies
+`set -u`. `nameref_elem_value`'s `Option<Str>` cannot say which, so the split
+belongs in its signature and in `param_value_walks`'s use of it.
+
+**Impact.** Narrow — it needs `set -u` and a reference to a missing element —
+but under `set -u` the shell exits, so a script that reads a sparse array
+through a reference dies where bash carries on.
+
+### TD-OILS-A-NAMEREF-BASE-IS-FOLLOWED-ON-A-WRITE-WHERE-BASH-BINDS-THE-BASE-ITSELF. `declare -n base=n; declare -n r='base[0]'; r=V` writes `n[0]` where bash strips `base`'s nameref attribute and makes an array of it — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the `ScalarDest::Elem` arm of
+`Shell::scalar_write_store` and the `assign_elem` → `resolve_ref_elem_write`
+path underneath it.
+
+**What.** Reading through a nameref whose base is itself a nameref follows the
+chain (see
+TD-OILS-A-NAMEREF-BASE-IS-FOLLOWED-WHEN-THE-REFERENCE-IS-READ). **Writing does
+not.** bash binds `base[SUB]` where it is written: it warns
+`warning: base: removing nameref attribute`, takes the attribute off `base`, and
+converts `base` into a plain **indexed** array holding that one element — even
+when the chain's ultimate target was associative, in which case the key
+evaluates arithmetically to 0. The array the base pointed at is left untouched.
+Measured with `n=(a b c)` and `declare -A mm=([k]=K)`:
+
+```text
+                                  bash                       osh (before)
+declare -n base=n
+  declare -n r='base[0]'; r=V     `warning: base: removing   `n` becomes
+                                  nameref attribute`;        `(V b c)`;
+                                  `declare -a base=([0]="V")`; `base` still a
+                                  `n` still `(a b c)`        nameref
+declare -n base=mm
+  declare -n r='base[k]'; r=T     `declare -a base=([0]="T")`  `mm[k]` becomes
+                                  `mm` still `([k]="K")`      `T`
+```
+
+The asymmetry belongs to the *nameref-target* path alone. A written
+`base[2]=X`, and `printf -v 'base[2]'`, both **do** follow the chain in bash,
+and osh already agrees on those — so the fix must not be a blanket "stop
+following" in `assign_elem`.
+
+**Proper fix.** The nameref-target write needs its own step, taken before
+`assign_elem` is reached: when the base of the reference's own target carries
+the nameref attribute, warn `warning: <base>: removing nameref attribute`, drop
+the attribute and the value it held, and let the store fall on the base as a
+fresh indexed array. That is `Shell::resolve_ref_write_walks`'s treatment of a
+circular chain applied to a different trigger, so the two should share a helper
+rather than each open-code the strip.
+
+**Impact.** Narrow — it needs a reference whose base is itself a reference —
+but the write lands on the wrong variable, which is a silent corruption of the
+chain's target and a silent failure to build the array bash builds.
+
+### TD-OILS-UNSET-THROUGH-A-REFERENCE-TO-AN-ELEMENT-UNSETS-THE-BASE-INSTEAD. `declare -n base=n; declare -n r='base[0]'; unset -v r` deleted `base` where bash removes `n[0]` — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `unset`'s handling of a name that
+resolves to an element (around `Shell::nameref_elem_target`'s use there).
+
+**What.** `unset` on a reference designating an element removes the *element*,
+and bash follows the base through a nameref chain of its own to find it — the
+read side's rule, not the store side's (which binds the base where it is
+written; see
+TD-OILS-A-NAMEREF-BASE-IS-FOLLOWED-ON-A-WRITE-WHERE-BASH-BINDS-THE-BASE-ITSELF).
+Measured with `n=(a b c)`:
+
+```text
+                                      bash                   osh
+declare -n base=n; declare -n r='base[0]'
+  unset -v r                          `declare -n base="n"`  `base` deleted
+                                      `declare -a n=([1]="b" `n` untouched
+                                      [2]="c")`
+```
+
+osh subscripts the *unresolved* base, which for a nameref means element 0 of a
+scalar whose value is the target's name — and unsetting element 0 of a scalar
+deletes the variable, so `base` disappears entirely.
+
+**Proper fix.** Resolve the base through the chain before the element is
+removed, exactly as `Shell::ref_target_value` now does on the read side.
+
+**Impact.** Narrow — it needs a reference whose base is itself a reference —
+but it destroys the wrong variable outright.
+
 ### TD-OILS-A-COMMENT-INSIDE-ARITHMETIC-CAN-EAT-ITS-OWN-CLOSER. `$(( #5 ))` is not an arithmetic error at all — bash's second scan of the word honours `#`, so the comment swallows the `))` — 2026-08-04 — ✅ FIXED 2026-08-04
 
 **Where:** `userspace/oils/src/interp.rs` — `arith_comment_hides_closer`,

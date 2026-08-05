@@ -23982,8 +23982,30 @@ impl Shell {
     ///
     /// An array with no elements is *unset* rather than empty — `${g-D}` takes
     /// the default — which falls out of there being no value to join.
+    ///
+    /// The base is a **name**, and so is followed through a nameref chain of its
+    /// own before the subscript applies to anything: bash reaches the array with
+    /// `array_variable_part`, which is `find_variable` on the base, and that
+    /// chases references like every other lookup. So with `n=(a b c)` and
+    /// `declare -n base=n`, `declare -n r='base[2]'` reads `c`; a chain that
+    /// ends on a scalar reads the scalar at index 0, one that ends on an
+    /// associative array takes the subscript as a key, and one that ends
+    /// *nowhere* — unset, or on an element rather than a variable
+    /// (`declare -n base='n[1]'`) — reads as nothing. A subscript that names
+    /// nowhere blames the base the chain arrived at, not the one written.
+    ///
+    /// The chain is walked **twice**, so a circular one is reported twice, in
+    /// both branches: the name is resolved once to find the array and again to
+    /// read out of it, which is [`Self::param_elem_lookup`]'s rule for a
+    /// subscripted read reached the ordinary way.
     fn ref_target_value(&mut self, base: &str, sub: BStr<'_>) -> ElemValue {
+        let Some(base) = self.resolve_ref_use_walks(base, 2).and_then(RefTarget::into_name) else {
+            return ElemValue::Absent;
+        };
+        let base = base.as_str();
         if let Some(c) = Self::whole_array_sub(sub) {
+            // Already resolved, so the enumeration walks nothing further and
+            // adds no second report of a chain this has just refused.
             let elems = self.array_elements(base);
             let star = c == '*';
             return if elems.is_empty() {

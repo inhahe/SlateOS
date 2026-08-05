@@ -30722,7 +30722,24 @@ impl Shell {
                 i += 1;
                 break;
             }
-            if a.starts_with(b"-") && a.len() > 1 && !a.contains(&b'=') {
+            // A word is an option word because of its leading `-`, not because
+            // of what follows: getopt has no notion of an assignment, so an `=`
+            // in a flag cluster is just another letter, and an unknown one.
+            // Reading `-x=1` as a name operand instead is how `export -x=1`
+            // came to report `` `-x=1': not a valid identifier `` where bash
+            // says `export: -x: invalid option`. Measured against bash 5.2.37,
+            // the letter named is always the first one it does not take:
+            //
+            // ```sh
+            // export -x=1   # export: -x: invalid option (+ usage), status 2
+            // export -q=1   # export: -q: invalid option
+            // export -n=1   # export: -=: invalid option — `-n` is fine, `=` is not
+            // export -=1    # export: -=: invalid option
+            // ```
+            //
+            // `readonly`'s scan below never had the exception and already
+            // agreed; this brings `export` into line with it.
+            if a.starts_with(b"-") && a.len() > 1 {
                 for c in &a[1..] {
                     match c {
                         b'p' => print = true,
@@ -64417,6 +64434,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (out, st) = run("export -Z x 2>&1");
         assert_eq!(st, 2);
         assert!(out.contains("export: -Z: invalid option"), "{out:?}");
+    }
+
+    /// An `=` in a leading `-…` word does not make it a name operand: getopt has
+    /// no notion of an assignment, so the `=` is just another letter. osh read
+    /// `export -x=1` as an operand and reported `` `-x=1': not a valid
+    /// identifier `` where bash refuses the option.
+    #[test]
+    fn export_reads_an_equals_in_a_flag_word_as_a_letter() {
+        const USAGE: &str = "export: usage: export [-fn] [name[=value] ...] or export -p\n";
+        // The letter named is the first one `export` does not take — which for
+        // `-n=1` and `-f=1` is the `=` itself, the flags before it being fine.
+        for (cmd, bad) in [
+            ("export -x=1", "-x"),
+            ("export -q=1", "-q"),
+            ("export -=1", "-="),
+            ("export -=x", "-="),
+            ("export -n=1", "-="),
+            ("export -f=1", "-="),
+            ("export -p=1", "-="),
+            ("export -na=1", "-="),
+        ] {
+            let (o, s) = run(&format!("{cmd} 2>&1"));
+            assert_eq!(o, format!("osh: export: {bad}: invalid option\n{USAGE}"), "{cmd}");
+            assert_eq!(s, 2, "{cmd}");
+        }
+        // Only a *leading* word is scanned: once an operand has been seen the
+        // rest are operands too, `-` and all.
+        assert_eq!(
+            run("export a=1 -x=2 2>&1; declare -p a").0,
+            "osh: export: `-x=2': not a valid identifier\ndeclare -x a=\"1\"\n"
+        );
+        // And `--` ends the scan, so what follows is a bad name rather than a
+        // bad option.
+        assert_eq!(
+            run("export -- -x=1 2>&1").0,
+            "osh: export: `-x=1': not a valid identifier\n"
+        );
+        // `readonly`'s scan never had the exception and is unchanged.
+        let (o, s) = run("readonly -=1 2>&1");
+        assert_eq!(
+            o,
+            "osh: readonly: -=: invalid option\n\
+             readonly: usage: readonly [-aAf] [name[=value] ...] or readonly -p\n"
+        );
+        assert_eq!(s, 2);
     }
 
     #[test]

@@ -29929,20 +29929,33 @@ impl Shell {
                     b"unlimited" => None,
                     b"hard" => entry.1,
                     b"soft" => entry.0,
-                    // A limit is ASCII digits, so an operand that is not text is
-                    // not a number — the same answer `ulimit -f x` gets.
-                    n => match bytes::as_str(n).map(str::parse::<u64>) {
-                        Some(Ok(parsed)) => Some(parsed),
-                        _ => {
-                            self.berrln(&bfmt![
-                                self.err_prefix(),
-                                b"ulimit: ",
-                                n,
-                                b": invalid limit argument"
-                            ]);
-                            return 1;
-                        }
-                    },
+                    // A limit is *only* ASCII digits — `ulimit` reads it with
+                    // bash's `all_digits`, not with the `strtol` leniency
+                    // `shift` and `read` get, so no blank may lead and no sign
+                    // may: `ulimit -n +5` and `ulimit -n " 5"` are both refused
+                    // where `shift " 1"` is not. An operand of no bytes at all
+                    // passes that test vacuously and is the number zero, and
+                    // one too large for `strtol` saturates rather than failing.
+                    // Anything else is refused by the base it reached for.
+                    n if n.iter().all(u8::is_ascii_digit) => Some(
+                        n.iter()
+                            .fold(0u64, |acc, b| {
+                                acc.saturating_mul(10).saturating_add(u64::from(*b - b'0'))
+                            })
+                            // `strtol` stops at `LONG_MAX`, so the ceiling is
+                            // the signed one even though a limit is unsigned.
+                            .min(i64::MAX.unsigned_abs()),
+                    ),
+                    n => {
+                        self.berrln(&bfmt![
+                            self.err_prefix(),
+                            b"ulimit: ",
+                            n,
+                            b": ",
+                            sh_invalidnum_kind(n).as_bytes()
+                        ]);
+                        return 1;
+                    }
                 };
                 if set_soft {
                     entry.0 = new;
@@ -36140,11 +36153,14 @@ impl Shell {
         let n = match args.first() {
             None => 1i64,
             Some(s) => {
-                // bash parses the count as a signed integer, accepting a leading
-                // `+`/`-`; anything else is "numeric argument required".
-                // A count is a number, so a count that is not text is not
-                // one — the same complaint `shift x` gets.
-                let Some(v) = bytes::as_str(s).and_then(|t| t.parse::<i64>().ok()) else {
+                // bash reads the count with `legal_number`, which is `strtol`
+                // and so skips the blanks in front of the digits, takes a
+                // leading `+`/`-`, and lets blanks trail: `shift " 1"` and
+                // `shift "1 "` both shift once, and `shift " -1"` is a count
+                // out of range rather than no count at all. Anything else is
+                // "numeric argument required" — and a count that is not text is
+                // not a number, the same complaint `shift x` gets.
+                let Some(v) = legal_number(s) else {
                     self.berrln(&bfmt![
                         self.err_prefix(),
                         b"shift: ",
@@ -36597,29 +36613,37 @@ impl Shell {
                             'p' => prompt = Some(val),
                             // `-d ''` ⇒ NUL delimiter; otherwise the first byte.
                             'd' => delim = Some(val.first().copied().unwrap_or(0)),
-                            // `-n`/`-N` require a non-negative integer; bash
-                            // rejects anything else with `invalid number` (exit 1).
+                            // `-n`/`-N` want a count that fits an `int` and is
+                            // not negative. It is read with `legal_number`, so
+                            // the blanks `strtol` steps over are allowed on
+                            // either side and a `+` may lead; anything else is
+                            // refused by the base the word reached for (exit 1).
                             'n' | 'N' => {
-                                let Some(n) =
-                                    bytes::as_str(&val).and_then(|v| v.parse::<usize>().ok())
+                                let Some(n) = legal_number(&val)
+                                    .and_then(|n| i32::try_from(n).ok())
+                                    .and_then(|n| usize::try_from(n).ok())
                                 else {
                                     self.berrln(&bfmt![
                                         self.err_prefix(),
                                         b"read: ",
                                         &val,
-                                        b": invalid number"
+                                        b": ",
+                                        sh_invalidnum_kind(&val).as_bytes()
                                     ]);
                                     return 1;
                                 };
                                 nchars = Some(n);
                                 exact = c == 'N';
                             }
-                            // `-u` requires a valid (non-negative) fd number; bash
-                            // rejects anything else with `invalid file descriptor
-                            // specification` (exit 1).
+                            // `-u` wants an fd on the same terms — bash reads it
+                            // with `legal_number` too, so ` 2` is the descriptor
+                            // two and the complaint about it, if there is one,
+                            // comes later from the read itself. Only a word that
+                            // is no number, or one out of an `int`'s range, is
+                            // an invalid specification (exit 1).
                             'u' => {
-                                let Some(fd) = bytes::as_str(&val)
-                                    .and_then(|v| v.parse::<i32>().ok())
+                                let Some(fd) = legal_number(&val)
+                                    .and_then(|n| i32::try_from(n).ok())
                                     .filter(|fd| *fd >= 0)
                                 else {
                                     self.berrln(&bfmt![
@@ -36632,13 +36656,13 @@ impl Shell {
                                 };
                                 ufd = Some(fd);
                             }
-                            // `-t` requires a non-negative decimal timeout; bash
-                            // rejects anything else with `invalid timeout
+                            // `-t` wants a non-negative decimal timeout, read by
+                            // bash's own `uconvert` rather than by C's float
+                            // parser: see `read_timeout_seconds` for the grammar
+                            // it accepts. Anything else is `invalid timeout
                             // specification` (exit 1).
                             't' => {
-                                let ok = bytes::as_str(&val)
-                                    .and_then(|v| v.parse::<f64>().ok())
-                                    .filter(|v| v.is_finite() && *v >= 0.0);
+                                let ok = read_timeout_seconds(&val).filter(|v| *v >= 0.0);
                                 let Some(v) = ok else {
                                     self.berrln(&bfmt![
                                         self.err_prefix(),
@@ -42501,6 +42525,79 @@ const PSEUDO_SIGNALS: &[(u16, &str)] =
 /// read, does not answer at all.
 fn legal_number(word: BStr<'_>) -> Option<i64> {
     bytes::parse_i64(word)
+}
+
+/// bash's `sh_invalidnum`: the tail of the complaint a builtin makes about a
+/// word it could not read a number from.
+///
+/// The word is not re-parsed — bash looks at the first two bytes alone and
+/// names the base the writer *seems* to have reached for, so the reader is told
+/// which notation was refused rather than merely that one was:
+///
+/// ```text
+/// read -n 012x    read: 012x: invalid octal number
+/// read -n 0x3     read: 0x3: invalid hex number
+/// read -n 0X3     read: 0X3: invalid number
+/// read -n abc     read: abc: invalid number
+/// ```
+///
+/// Two details are the check's own, not a base's: the octal arm is tested
+/// first, so `0x` reaches the hex arm only because `x` is not a digit; and only
+/// a lowercase `x` counts, which is why `0X3` is refused as a plain number.
+/// Neither a sign nor leading blanks are stepped over first, so ` 0x3` is a
+/// plain number too.
+/// bash's `uconvert`: the seconds a `read -t` / `select` timeout word denotes,
+/// or `None` when the word is not one.
+///
+/// This is not C's float parser and not [`legal_number`] either — bash walks
+/// the word itself, which makes the grammar exactly
+/// `[+-]? DIGIT* ( '.' DIGIT* )?` with nothing left over. Three consequences
+/// are worth naming, because each is a word one of the other two parsers would
+/// have taken differently:
+///
+/// ```text
+/// read -t ''      a whole word of no digits is zero, and so is `read -t .`
+/// read -t ' 1'    no blank is stepped over, in front or behind: not a timeout
+/// read -t 1e2     an exponent is junk; so are `0x1`, `inf`, `nan` and `1,5`
+/// ```
+///
+/// `5.` and `.5` and `00.5` are all fine — a side that has no digits is zero,
+/// not a missing one. The sign is read but a negative value is refused by the
+/// caller, which is why `-0` is accepted and `-1` is not.
+fn read_timeout_seconds(word: BStr<'_>) -> Option<f64> {
+    let (neg, body) = match word.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        Some((b'+', rest)) => (false, rest),
+        _ => (false, word),
+    };
+    let digits = |s: &[u8]| s.iter().all(u8::is_ascii_digit);
+    let (whole, frac) = match body.iter().position(|b| *b == b'.') {
+        Some(i) => (body.get(..i)?, body.get(i + 1..)?),
+        None => (body, &[][..]),
+    };
+    if !digits(whole) || !digits(frac) {
+        return None;
+    }
+    // A side with no digits reads as zero, so the pieces are parsed as text
+    // that may be empty rather than as numbers that must be there.
+    let mut v = 0f64;
+    for b in whole {
+        v = v.mul_add(10.0, f64::from(b - b'0'));
+    }
+    let mut scale = 1f64;
+    for b in frac {
+        scale /= 10.0;
+        v = f64::from(b - b'0').mul_add(scale, v);
+    }
+    Some(if neg { -v } else { v })
+}
+
+fn sh_invalidnum_kind(word: BStr<'_>) -> &'static str {
+    match (word.first(), word.get(1)) {
+        (Some(b'0'), Some(c)) if c.is_ascii_digit() => "invalid octal number",
+        (Some(b'0'), Some(b'x')) => "invalid hex number",
+        _ => "invalid number",
+    }
 }
 
 /// bash's `decode_signal`: the number a signal spec names, or `None`.
@@ -51078,6 +51175,51 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn read_reads_its_counts_the_way_strtol_reads_them() {
+        // `-n`/`-N`/`-u` go through `legal_number`, so blanks either side and a
+        // leading sign are all part of the number.
+        assert_eq!(run("read -n ' 2' x <<< hello; echo \"[$x]\"").0, "[he]\n");
+        assert_eq!(run("read -N '2 ' x <<< hello; echo \"[$x]\"").0, "[he]\n");
+        assert_eq!(run("read -n '+2' x <<< hello; echo \"[$x]\"").0, "[he]\n");
+        assert_eq!(run("read -u ' 0' x <<< hi; echo \"[$x]\"").0, "[hi]\n");
+        // A refused count names the base it reached for, and only a lowercase
+        // `x` is a hex prefix.
+        assert_eq!(run("read -n 0x3 x <<< hi 2>&1").0, "osh: read: 0x3: invalid hex number\n");
+        assert_eq!(run("read -N 012x x <<< hi 2>&1").0, "osh: read: 012x: invalid octal number\n");
+        assert_eq!(run("read -n 0X3 x <<< hi 2>&1").0, "osh: read: 0X3: invalid number\n");
+        assert_eq!(run("read -n '' x <<< hi 2>&1").0, "osh: read: : invalid number\n");
+        // The descriptor keeps its own complaint whatever the word looks like.
+        assert_eq!(
+            run("read -u 0x1 x <<< hi 2>&1").0,
+            "osh: read: 0x1: invalid file descriptor specification\n"
+        );
+    }
+
+    #[test]
+    fn read_timeout_is_uconverts_grammar_not_a_floats() {
+        // `[+-]? DIGIT* ( . DIGIT* )?` and nothing left over: a side with no
+        // digits is zero, so a bare `.` and a wholly empty word are timeouts.
+        // (a zero timeout only asks whether input is ready, so `$x` is not the
+        // thing under test here — the status is.)
+        for word in ["", ".", "5.", ".5", "00.5", "-0"] {
+            let (out, st) = run(&format!("read -t '{word}' x <<< hi 2>&1; echo $?"));
+            assert_eq!(out, "0\n", "for {word:?}");
+            assert_eq!(st, 0, "for {word:?}");
+        }
+        // Everything C's float parser would also take, and bash does not: no
+        // blank is stepped over, and an exponent is junk.
+        for word in [" 1", "1 ", "1e2", "0x1", "1.2.3", "1,5", "inf", "nan", " "] {
+            let (out, st) = run(&format!("read -t '{word}' x <<< hi 2>&1"));
+            assert_eq!(
+                out,
+                format!("osh: read: {word}: invalid timeout specification\n"),
+                "for {word:?}"
+            );
+            assert_eq!(st, 1, "for {word:?}");
+        }
+    }
+
+    #[test]
     fn read_prompt_suppressed_for_non_tty_input() {
         // `-p PROMPT` is written to stderr *only* when the input is a real
         // terminal. Under a pipeline, here-string, or redirect the read is
@@ -53737,6 +53879,26 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("shopt -s shift_verbose; set -- a; shift -- 5 2>&1").0,
             "osh: shift: --: shift count out of range\n"
         );
+    }
+
+    #[test]
+    fn shift_steps_over_the_blanks_strtol_steps_over() {
+        // The count goes through `legal_number`, so a blank in front of the
+        // digits is stepped over, a blank behind them is allowed to trail, and
+        // a sign may lead.
+        assert_eq!(run("set -- a b c; shift ' 1'; echo $1").0, "b\n");
+        assert_eq!(run("set -- a b c; shift '1 '; echo $1").0, "b\n");
+        assert_eq!(run("set -- a b c; shift '\t1'; echo $1").0, "b\n");
+        assert_eq!(run("set -- a b c; shift '  +1'; echo $1").0, "b\n");
+        // A blank between the sign and the digits is not part of a number, and
+        // neither is an exponent or a hex prefix — `shift` names none of the
+        // bases, it only ever asks for a numeric argument.
+        assert_eq!(run("shift '+ 1' 2>&1").0, "osh: shift: + 1: numeric argument required\n");
+        assert_eq!(run("shift 0x1 2>&1").0, "osh: shift: 0x1: numeric argument required\n");
+        assert_eq!(run("shift '' 2>&1").0, "osh: shift: : numeric argument required\n");
+        // A negative count is a number, so it reaches the range check rather
+        // than the numeric one — with the blank still in the word bash names.
+        assert_eq!(run("shift ' -1' 2>&1").0, "osh: shift:  -1: shift count out of range\n");
     }
 
     #[test]
@@ -66956,7 +67118,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A bad limit argument is rejected without changing state.
         let (out, code) = run("ulimit -n abc 2>&1; ulimit -n");
         assert_eq!(code, 0); // trailing `ulimit -n` succeeds
-        assert!(out.contains("invalid limit argument"), "got {out:?}");
+        assert!(out.contains("abc: invalid number"), "got {out:?}");
         assert!(out.trim_end().ends_with("1024"), "limit unchanged: {out:?}");
         // Multiple resource letters print one labelled line each.
         let (out, code) = run("ulimit -c -n");
@@ -66991,6 +67153,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(out.contains("core file size              (blocks, -c) 0\n"), "got {out:?}");
         assert!(out.contains("open files                          (-n) 1024\n"), "got {out:?}");
         assert!(out.contains("pipe size                (512 bytes, -p) 8\n"), "got {out:?}");
+    }
+
+    #[test]
+    fn ulimit_wants_digits_and_names_the_base_it_refused() {
+        // `ulimit` reads its operand with `all_digits`, not with the `strtol`
+        // leniency `shift` and `read` get: no sign, no blank on either side.
+        assert_eq!(run("ulimit -n +5 2>&1").0, "osh: ulimit: +5: invalid number\n");
+        assert_eq!(run("ulimit -n ' 5' 2>&1").0, "osh: ulimit:  5: invalid number\n");
+        assert_eq!(run("ulimit -n '5 ' 2>&1").0, "osh: ulimit: 5 : invalid number\n");
+        // The complaint names the base the word reached for — octal before a
+        // digit, hex before a lowercase `x` alone.
+        assert_eq!(run("ulimit -n 012x 2>&1").0, "osh: ulimit: 012x: invalid octal number\n");
+        assert_eq!(run("ulimit -n 0x10 2>&1").0, "osh: ulimit: 0x10: invalid hex number\n");
+        assert_eq!(run("ulimit -n 0X10 2>&1").0, "osh: ulimit: 0X10: invalid number\n");
+        assert_eq!(run("ulimit -n 1e3 2>&1").0, "osh: ulimit: 1e3: invalid number\n");
+        // A leading `-` never reaches the operand at all: it is an option word,
+        // and an unknown one, which is the usage error rather than this.
+        let (out, code) = run("ulimit -n -5 2>&1");
+        assert_eq!(code, 2);
+        assert!(out.starts_with("osh: ulimit: -5: invalid option\n"), "got {out:?}");
+        // A word of no bytes passes `all_digits` vacuously and is zero; a `0`
+        // before a digit is read in base ten, not as octal.
+        assert_eq!(run("ulimit -c ''; ulimit -c").0, "0\n");
+        assert_eq!(run("ulimit -c 012; ulimit -c").0, "12\n");
     }
 
     #[test]

@@ -7,9 +7,13 @@
 # The marker sections need a *second* fact to be beyond doubt: whether a job was
 # still alive at the moment the **next** one was spawned, which is what earns it
 # the `-`. A lifetime shorter than a process spawn decides that by race, so the
-# short job in those two sections is 0.6s rather than 0.05s — comfortably longer
-# than a spawn even on a loaded machine, and still comfortably shorter than the
-# 1.0s the foreground `sleep` then waits before `jobs` looks.
+# short job in every section that reads a `-` off a *finished* job is 0.6s rather
+# than 0.05s — comfortably longer than a spawn even on a loaded machine, and
+# still comfortably shorter than the 1.0s the foreground `sleep` then waits
+# before `jobs` looks. (bash decides it the same way and is racy in the same
+# place: `set_current_job` in `jobs.c` falls back to `job_last_running`, which
+# skips a job already reaped, so a job that died before the next one spawned
+# earns no marker in either shell.)
 #
 # Those deliberate lifetimes add up, and each `sleep` costs a process spawn on
 # top, so the case runs long enough to trip the harness's 20s default when the
@@ -94,11 +98,14 @@ echo "=== …but only if the listing actually reported it"
 # `-r` filters the finished job out, so the next `jobs` still has it to report.
 sleep 0.05 & sleep 0.4; jobs -r; jobs
 wait
-# `-s` selects stopped jobs, of which a script shell has none.
-sleep 0.05 & sleep 0.7 & sleep 0.4; jobs -s; jobs
+# `-s` selects stopped jobs, of which a script shell has none. These two read a
+# `-` off job 1, so they take the long-short lifetimes the header describes:
+# job 1 must outlive job 2's spawn to earn the marker, and still be over by the
+# time `jobs` looks.
+sleep 0.6 & sleep 2 & sleep 1.0; jobs -s; jobs
 wait
 # A jobspec listing forgets only the job it named.
-sleep 0.05 & sleep 0.7 & sleep 0.4; jobs %2; jobs
+sleep 0.6 & sleep 2 & sleep 1.0; jobs %2; jobs
 wait
 
 echo "=== an unknown option is rejected with the usage line"

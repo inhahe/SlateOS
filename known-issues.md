@@ -118,6 +118,98 @@ for these builtins yet.
 from bash 5.2.37 rather than fixing this one entry, and add a corpus case that
 walks every builtin's short description.
 
+### TD-OILS-A-REFERENCES-SUBSCRIPT-IS-NEVER-EVALUATED-AS-ARITHMETIC. `declare -n r='n[1+]'` should be an arithmetic syntax error, not "not a valid identifier" — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped` and
+`declare_compounds_scoped`, the two places that inspect a `RefTarget`'s `sub`.
+
+**What.** bash *evaluates* a nameref target's subscript arithmetically the
+moment a declaration builtin follows the reference, and reports the evaluation's
+own error. osh never evaluates it: it either refuses the spelling as a name or
+says nothing at all.
+
+```text
+$ n=(a b c); declare -n r='n[1+]'; declare r=(x y)
+bash: 1+: syntax error: operand expected (error token is "+")
+osh : `n[1+]': not a valid identifier
+
+$ n=(a b c); declare -n r='n[1+]'; declare r        # valueless
+bash: 1+: syntax error: operand expected (error token is "+")   s=1
+osh : (silent)                                                  s=0
+
+$ n=(a b c); declare -n r='n[)]'; declare r=(x y)
+bash: ): syntax error: operand expected (error token is ")")
+osh : `n[)]': not a valid identifier
+```
+
+The valued (`declare r=v`), expansion (`echo "$r"`) and plain-assignment
+(`r=(x y)`) forms already agree — osh reaches the arithmetic evaluator on those
+routes. Only the two *declaration* routes skip it. `n[ ]` agrees on both sides
+(`n[ ]': not a valid identifier`), because an empty subscript is refused before
+arithmetic is attempted in bash too.
+
+**Why.** This is the same gate as
+`TD-OILS-A-WHOLE-ARRAY-REFERENCE-…-IS-MISSING-ITS-BAD-SUBSCRIPT-LINE`, one
+branch further along. `declare.def:733` decides between "reach for the base" and
+"bind the operand"; the *bind* path runs `bind_variable(name, NULL, ASS_FORCE)`,
+which follows the reference into `array_value_internal`, and that function
+evaluates the subscript with `evalexp` before it can decide whether the element
+exists. A malformed expression therefore raises the arithmetic error from inside
+the read — untagged, from the read rather than from the builtin, exactly as
+`err_badarraysub` does for `n[@]`.
+
+**Proper fix.** Where osh currently pattern-matches the subscript text
+(`whole_array_sub`, the "not a valid identifier" refusal), run the subscript
+through the arithmetic evaluator instead and let its error surface — untagged —
+then fall through to the existing behavior on success. Both the compound and the
+valueless routes need it. Add the M-series probes from `/d/tmp/hh/bx.sh` as a
+corpus case.
+
+### TD-OILS-A-DECLARATION-OPERAND-WRITTEN-WITH-A-SUBSCRIPT-IS-NOT-TRUNCATED-AT-THE-BRACKET. `declare 'r[1]'` through a reference is quiet in bash and refused in osh — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped`, the
+operand-name refusal that produces `` `NAME': not a valid identifier ``.
+
+**What.** bash truncates a declaration operand at its first `[` before doing
+anything with it. So `declare 'r[1]'` operates on `r` — and when `r` is a
+nameref, on whatever `r` points at — never on the spelling `r[1]`. With **no**
+flags this means the command quietly does nothing:
+
+```text
+$ n=(a b c); declare -n r='n[@]'; declare 'r[1]'
+bash: s=0                     # and `declare -p r` still shows `declare -a r`
+osh : declare: `n[@][1]': not a valid identifier    s=1
+
+$ n=(a b c); declare -n r='n[1]'; declare 'r[1]'
+bash: s=0
+osh : declare: `n[1][0]': not a valid identifier    s=1
+```
+
+Once *any* flag is present the two agree — bash then does emit the
+`n[@][1]` / `n[1][0]` refusal, because the flagged path reaches for the
+reference's base and the doubled subscript is genuinely unusable there:
+
+```text
+$ n=(a b c); declare -n r='n[@]'; declare -i 'r[1]'
+both: declare: `n[@][1]': not a valid identifier    s=1
+```
+
+Valued operands (`declare 'r[1]'=v`) agree too — both sides print
+`warning: r: removing nameref attribute` and succeed.
+
+**Why.** `declare.def:566–580` walks the operand for `[`, writes `*t = '\0'` in
+place and sets `making_array_special`; the truncated name is what the rest of the
+builtin sees. The flagless case then falls into the `declare.def:733` *bind*
+path, which has nothing to bind (no value, no flags) and returns success without
+touching anything. osh instead concatenates the reference's spelling with the
+operand's subscript and refuses the result unconditionally.
+
+**Proper fix.** Truncate the operand at `[` in `builtin_declare_scoped` the way
+bash does, keep the bracket text aside as `making_array_special` does, and gate
+the doubled-subscript refusal on the same "does this command ask for anything?"
+predicate already used for the bad-subscript line. Add the N-series probes from
+`/d/tmp/hh/bx.sh` as a corpus case.
+
 ### TD-TOOLS-A-CORPUS-CASE-RACED-TWO-PIPELINE-STAGES-FOR-THE-SAME-FD. `xtrace-pipeline` failed once in a full sweep and passed 5/5 alone — 2026-08-05 — ✅ FIXED 2026-08-05
 
 **Where:** `userspace/oils/tests/corpus/xtrace-pipeline.sh`, the "function and

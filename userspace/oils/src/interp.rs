@@ -11318,11 +11318,17 @@ impl Shell {
     /// nothing and the write simply does not happen — the chain was circular, or
     /// it ended on a subscript naming a whole array. Either way the warning has
     /// already been given, and the caller's `false` is what reports it further.
-    fn scalar_write_dest(&self, name: &str) -> Option<ScalarDest> {
+    fn scalar_write_dest(&mut self, name: &str) -> Option<ScalarDest> {
         let target = self.resolve_ref_use(name)?;
         let Some(sub) = target.sub else {
             return Some(ScalarDest::Var(target.base));
         };
+        // The base of an element destination is bound where it is written, so a
+        // reference there is stripped rather than followed — and stripped
+        // *first*, before the subscript is judged at all: `declare -n base=n;
+        // declare -n r='base[@]'; r=v` warns about the attribute and only then
+        // calls `base[@]` a bad subscript. See [`Self::unreference_elem_base`].
+        self.unreference_elem_base(&target.base);
         // A reference naming a whole array is no place to put one value, and
         // that is so whatever kind of array it is — an associative one takes a
         // *written* `m[*]=v` under the key `*`, but not one arriving this way.
@@ -11660,7 +11666,7 @@ impl Shell {
     /// readonly -a q=(1); declare -n r=q; r=5      # q: readonly variable
     /// readonly -a q=(1); declare -n r=q; ((r=5))  # r: readonly variable
     /// ```
-    fn arith_write_dest(&self, name: &str) -> Result<Option<ScalarDest>, arith::ArithError> {
+    fn arith_write_dest(&mut self, name: &str) -> Result<Option<ScalarDest>, arith::ArithError> {
         // Two walks, because bash resolves the name once to find the variable
         // and again to bind it. Unlike the element write above, a circular chain
         // keeps its nameref attribute: nothing is stored, so there is no array
@@ -11669,6 +11675,14 @@ impl Shell {
         let Some(target) = self.resolve_ref_use_walks(name, 2) else {
             return Ok(None);
         };
+        // The base of an element destination is bound where it is written, so a
+        // reference there is stripped rather than followed — and stripped before
+        // anything downstream judges the base: the whole-array refusal below, the
+        // readonly check, and the array kind are all about the *stripped* base.
+        // See [`Self::unreference_elem_base`].
+        if target.sub.is_some() {
+            self.unreference_elem_base(&target.base);
+        }
         // A reference naming a whole array is refused the same way here, and it
         // is `Ok(None)` for the same reason a cycle is: bash reports it, stores
         // nothing, and lets the expression carry on with the value it had, so
@@ -12000,6 +12014,16 @@ impl Shell {
             };
             target
         };
+        // The base of an element destination is bound where it is *written*, so
+        // a reference sitting on it is stripped rather than followed — and
+        // stripped before the refusal below, which is the order bash reports the
+        // two in. It is only a subscript arriving *through* a reference that
+        // does this: `base[0]=v` written out follows `base` like any other name,
+        // which is why the gate is `a.index.is_none()`. See
+        // [`Self::unreference_elem_base`].
+        if a.index.is_none() && target.sub.is_some() {
+            self.unreference_elem_base(&target.base);
+        }
         // A reference naming a whole array is no place to put one value, and the
         // refusal has to happen *before* the rewrite below: rewriting turns
         // `g=v` into `ka[*]=v`, which written out on an associative array is a
@@ -23884,6 +23908,30 @@ impl Shell {
         self.vars.remove(name);
     }
 
+    /// [`Self::unreference_for_declare`] with the warning, for the *base of an
+    /// element destination* that turns out to be a reference — and a no-op for
+    /// the ordinary base that is not one.
+    ///
+    /// An element store needs an array to store into, and where the destination
+    /// came from a nameref's own value (`declare -n r='base[0]'`) bash binds the
+    /// base **as written**: `find_or_make_array_variable` looks it up *without*
+    /// following, so a reference there is warned about, stripped, and made the
+    /// array itself. Everything downstream is then about that base rather than
+    /// about whatever it used to point at — its value attributes, its readonly
+    /// state, and its kind, which is why `declare -n base=mm` onto an
+    /// associative `mm` still leaves `declare -a base=([0]="T")`: the fresh
+    /// `base` is indexed, so the key evaluates as arithmetic.
+    ///
+    /// The *read* side does follow the base ([`Self::ref_target_value`]), and so
+    /// does `unset`. Only the store binds where it is written.
+    fn unreference_elem_base(&mut self, base: &str) {
+        if !self.nameref_attr.contains(base) {
+            return;
+        }
+        self.perrln(&format!("warning: {base}: removing nameref attribute"));
+        self.unreference_for_declare(base);
+    }
+
     /// If `name` is a nameref whose target is an array element (`arr[0]` /
     /// `m[key]`) or a whole array (`arr[@]` / `arr[*]`), return the value it
     /// reads as. `None` when there is no value to read — because `name` is not
@@ -34931,8 +34979,7 @@ impl Shell {
                 && value.is_some()
                 && !make_local;
             if unreference {
-                self.perrln(&format!("warning: {base_name}: removing nameref attribute"));
-                self.unreference_for_declare(base_name);
+                self.unreference_elem_base(base_name);
             }
             // `+n` follows on the same terms as any other letter, save that a
             // *local* binding never does: inside a function, `local -n r=w;

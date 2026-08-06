@@ -11994,6 +11994,14 @@ impl Shell {
         trace: bool,
         spelled: &Assignment,
     ) -> bool {
+        // One element is no place for a list, and the objection is raised on the
+        // word *as written* — before the name is resolved, the subscript
+        // evaluated or the literal expanded. See
+        // [`Self::refuse_list_to_array_member`].
+        if self.refuse_list_to_array_member(spelled) {
+            self.arm_discard(1);
+            return false;
+        }
         // A nameref (`declare -n ref=target`) redirects the assignment to its
         // target: rewrite the name and re-run. `resolve_ref_name` follows the
         // whole chain, so the rewritten name is not itself a nameref (no loop).
@@ -13003,6 +13011,41 @@ impl Shell {
         } else {
             map.set(key, val);
         }
+    }
+
+    /// Report `name[sub]=( … )` — one element is no place for a list. `true`
+    /// means the assignment must not happen; the caller owns the abort, which
+    /// each of the two reaches its own way.
+    ///
+    /// bash's word rule for a compound literal is about the **word**, not the
+    /// destination, so the shape parses like any other assignment and is
+    /// objected to here, when the value would be bound. Nothing about it is
+    /// resolved or expanded first: the name is the one *written* (`declare -n
+    /// r=n; r[1]=(x y)` blames `r[1]`, never `n[1]`), the subscript is quoted as
+    /// source (`n[$((1/0))]` raises no division error and `n[$(f)]` does not run
+    /// `f`), the literal's own words are left unexpanded, and the readonly guard
+    /// is never reached.
+    ///
+    /// The abort is the ordinary one, measured to be `a[-9]=x`'s in every shape:
+    /// the rest of the list goes and a function takes its caller's list down
+    /// with it, while an `eval` confines it and reports 1 — but only at the top
+    /// level, since inside a subshell the same `eval` does not confine it and
+    /// the subshell exits 1. A *command prefix* is a different word entirely and
+    /// gets its own refusal — see [`Self::prefix_assignment_name`].
+    fn refuse_list_to_array_member(&mut self, a: &Assignment) -> bool {
+        let Some(idx) = a.index.as_ref() else {
+            return false;
+        };
+        if !matches!(a.value, AssignRhs::Array(_)) {
+            return false;
+        }
+        self.perrln(&bfmt![
+            a.name.as_bytes(),
+            b"[",
+            &crate::unparse::word_src(idx),
+            b"]: cannot assign list to array member"
+        ]);
+        true
     }
 
     /// The name a command-prefix assignment (`FOO=bar cmd`) binds, or `None`
@@ -36465,6 +36508,15 @@ impl Shell {
         let mut bound: Vec<BoundCompound> = Vec::with_capacity(decl_arrays.len());
         for (k, d) in decl_arrays.iter().enumerate() {
             let a = &d.assign;
+            // One element is no place for a list — and this comes ahead of the
+            // reference resolution below, so `declare n[1]=(z) r=(x y)` is the
+            // subscript's complaint while `declare r=(x y) n[1]=(z)` is the
+            // reference's: operand order decides, as it does for every
+            // diagnostic here. See [`Self::refuse_list_to_array_member`].
+            if self.refuse_list_to_array_member(a) {
+                self.last_status = 1;
+                return Err(Flow::Discard);
+            }
             // bash resolves a nameref before it does anything with a compound
             // operand. `apply_assignment` already follows the reference to store
             // the values; everything *around* that store follows it too — the

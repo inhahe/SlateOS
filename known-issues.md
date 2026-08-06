@@ -679,16 +679,17 @@ whole-array complaint, with `Shell::warn_elem_not_identifier` on the target's
 spelling.
 
 The abort is the **ordinary** one (`Shell::arm_discard`), measured against
-`a[-9]=x` in every shape: an `eval` confines it and reports 1, and without one
-the rest of the list goes — a *function* taking its caller's list down too, and
-a subshell, whose body is a list of its own, exiting. `set -e` and `set -o
-posix` change nothing. (A first reading called it the deep abort; every case in
-the measurement behind that had been put in a subshell, where the two look
-alike.)
+`a[-9]=x` in every shape: the rest of the list goes — a *function* taking its
+caller's list down too, and a subshell, whose body is a list of its own,
+exiting. An `eval` confines it and reports 1, but only at the top level: inside
+a subshell the same `eval` does not, and the subshell exits 1 all the same.
+`set -e` and `set -o posix` change nothing. (A first reading called it the deep
+abort; every case in the measurement behind that had been put in a subshell,
+where the two look alike.)
 
 **Corpus:** `a-compound-literal-through-a-reference-to-an-element-is-refused.sh`.
 
-### TD-OILS-A-COMPOUND-LITERAL-IS-A-SYNTAX-ERROR-WHERE-BASH-PARSES-IT-AND-REFUSES-IT-AT-RUNTIME. `n[1]=(x y)` is `` syntax error near unexpected token `(' `` where bash says `n[1]: cannot assign list to array member` — 2026-08-05 — OPEN
+### TD-OILS-A-COMPOUND-LITERAL-IS-A-SYNTAX-ERROR-WHERE-BASH-PARSES-IT-AND-REFUSES-IT-AT-RUNTIME. `n[1]=(x y)` is `` syntax error near unexpected token `(' `` where bash says `n[1]: cannot assign list to array member` — 2026-08-05 — ✅ FIXED
 
 **Where:** `userspace/oils/src/parser.rs` — the assignment-word rule, which
 admits a compound literal only for an *unsubscripted* name.
@@ -724,6 +725,70 @@ being an ordinary failed assignment, it ends the parse unit.
 
 **Impact.** Any script containing `a[i]=(…)` anywhere — a typo, or a
 deliberately-unreached branch — refuses to parse at all under osh.
+
+**Fixed 2026-08-05.** The lexer's `try_array_assign` now scans a balanced
+subscript between the name and the `=`, carried on `Tok::ArrayAssign` as raw
+source; `parse_simple` reads it into the assignment's `index` with
+`word_verbatim_from_source`, exactly as the scalar form's is read. The refusal
+lives in `Shell::refuse_list_to_array_member`, called from both places a
+compound value is bound — `apply_assignment_inner` (which then arms the
+ordinary abort) and `declare_compounds_scoped`'s operand loop, ahead of its
+reference resolution, so `declare n[1]=(z) r=(x y)` is the subscript's
+complaint while `declare r=(x y) n[1]=(z)` is the reference's.
+
+Nothing is resolved or expanded first, as measured: the name blamed is the one
+written (a nameref is never followed), the subscript is quoted as source
+(`n[$((1/0))]` raises no division error, `n[$(f)]` does not run `f`, and
+`n[1 ]` keeps its space), the literal's words are never expanded, and the
+readonly guard is never reached. As a command *prefix* (`v=1 n[1]=(x y) true`)
+it stays the other refusal — `` `n[1]': not a valid identifier ``, status
+untouched, command run — which `prefix_assignment_name` already gave.
+
+**Still open alongside it:** *after* the command word osh names its own rule
+(`syntax error: array assignment is only valid before the command word`) where
+bash names the token that surprised it and echoes the line. That is not
+specific to the subscripted form — `echo n=(x y)` diverges the same way — and
+is tracked as
+TD-OILS-A-COMPOUND-LITERAL-AFTER-THE-COMMAND-WORD-DOES-NOT-NAME-THE-TOKEN-THAT-SURPRISED-IT.
+
+**Corpus:**
+`a-subscripted-compound-assignment-parses-and-is-refused-when-it-binds.sh`.
+
+### TD-OILS-A-COMPOUND-LITERAL-AFTER-THE-COMMAND-WORD-DOES-NOT-NAME-THE-TOKEN-THAT-SURPRISED-IT. `echo n=(x y)` says `array assignment is only valid before the command word` where bash names `` `(' `` and echoes the line — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `parse_simple`'s `Tok::ArrayAssign`
+arm, the `seen_word && !is_decl_operand` guard, which raises a rule of its own
+rather than letting the `(` be reported as the unexpected token it is.
+
+**What.** bash has no rule about compound literals after the command word: the
+word is just a word, and the `(` after it is a parser surprise like any other,
+reported by the shared `near unexpected token` machinery — which also echoes
+the offending line. osh short-circuits with a bespoke message and no second
+line. Measured (both forms diverge identically, so this is not about the
+subscript):
+
+```text
+                         bash                                 osh
+echo n=(x y)             syntax error near unexpected token   syntax error: array
+                         `('  /  `echo n=(x y)'               assignment is only valid
+                                                              before the command word
+echo n[1]=(x y)          the same, echoing `echo n[1]=(x y)'  the same message
+```
+
+**Proper fix.** Do not raise a rule at all. When an `ArrayAssign` token is
+reached after the command word and is not a declaration builtin's operand, the
+parser should re-report it as the `(` that surprised it, through the same path
+that already produces `` syntax error near unexpected token `(' `` plus the
+source line (see the `-c` cases asserted around `interp.rs:51022`). The token
+carries the name and the literal, so the line can be reprinted from source.
+
+**Impact.** Cosmetic — both shells fail the parse and a script does not survive
+either. But a script that greps its own stderr, or a user reading it, sees a
+message bash never prints.
+
+**Corpus:** none yet; the shape kills a script outright, so it needs a file of
+its own — planned as
+`a-compound-literal-after-the-command-word-names-the-token-that-surprised-it.sh`.
 
 ### TD-OILS-A-DECLARATION-BUILTIN-FOLLOWS-A-REFERENCE-TO-AN-ELEMENT-THAT-BASH-LEAVES-ALONE. `f() { declare -n r='n[1]'; declare r=(x y); }` refused where bash does nothing at all — 2026-08-05 — OPEN
 

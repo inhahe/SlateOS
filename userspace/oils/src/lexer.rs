@@ -259,6 +259,16 @@ pub enum Tok {
     /// word captured as its own [`Seg`] list.
     ArrayAssign {
         name: String,
+        /// The subscript of `name[sub]=( … )`, as raw source between the
+        /// brackets, for the parser to read as a word.
+        ///
+        /// bash's word rule for a compound literal is about the **word**, not
+        /// the destination: a subscripted name makes an assignment word like any
+        /// other, and putting a list in one element is objected to later, when
+        /// the value is bound (`n[1]: cannot assign list to array member`). So
+        /// the shape has to reach the interpreter rather than being refused
+        /// here.
+        index: Option<Str>,
         /// `+=` (append) rather than `=`.
         append: bool,
         elems: Vec<Vec<Seg>>,
@@ -2302,6 +2312,23 @@ impl Lexer {
                 break;
             }
         }
+        // A subscript may sit between the name and the `=`. It is taken as raw
+        // source and read as a word by the parser, exactly as the scalar form's
+        // is — see [`crate::parser::Parser::try_assignment`], whose
+        // `balanced_subscript_end` this mirrors: brackets are counted and
+        // nothing else is looked at, so `n[a[0]]=(v)` and `n[1 ]=(v)` are both
+        // the subscript they read as.
+        let index = if self.peek() == Some('[') {
+            let Some(close) = self.balanced_subscript_end() else {
+                self.pos = start;
+                return Ok(None);
+            };
+            let src = self.slice(self.pos.saturating_add(1), close);
+            self.pos = close.saturating_add(1);
+            Some(src)
+        } else {
+            None
+        };
         let append = self.peek() == Some('+');
         let eq_at = self.pos + usize::from(append);
         if name.is_empty()
@@ -2373,9 +2400,37 @@ impl Lexer {
         }
         Ok(Some(Tok::ArrayAssign {
             name,
+            index,
             append,
             elems,
         }))
+    }
+
+    /// The offset of the `]` closing the subscript the cursor stands on, or
+    /// `None` if it never closes.
+    ///
+    /// Brackets are counted and nothing else is examined — no quoting, no
+    /// blanks, no operators — which is what makes `n[a[0]]=(v)` nest and
+    /// `n[1 ]=(v)` hold its space. The counterpart for a word the lexer has
+    /// already split into segments is `parser::balanced_subscript_end`.
+    fn balanced_subscript_end(&self) -> Option<usize> {
+        debug_assert!(self.peek() == Some('['));
+        let mut depth = 0usize;
+        let mut i = self.pos;
+        while let Some(c) = self.at(i) {
+            match c {
+                '[' => depth = depth.saturating_add(1),
+                ']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+            i = i.saturating_add(1);
+        }
+        None
     }
 
     /// Read one word (until an unquoted operator, blank, or newline).

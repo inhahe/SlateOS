@@ -3280,6 +3280,7 @@ impl Parser {
                     }
                     let Some(Tok::ArrayAssign {
                         name,
+                        index,
                         append,
                         elems,
                     }) = self.bump()
@@ -3290,9 +3291,16 @@ impl Parser {
                     for segs in &elems {
                         items.push(parse_array_elem(segs, self.opts)?);
                     }
+                    // A subscript is parsed verbatim, as the scalar form's is —
+                    // see `Self::try_assignment` for why nothing in it is split
+                    // or trimmed.
+                    let index = match &index {
+                        Some(src) => Some(word_verbatim_from_source(src, self.opts)?),
+                        None => None,
+                    };
                     let assign = Assignment {
                         name,
-                        index: None,
+                        index,
                         append,
                         value: AssignRhs::Array(items),
                     };

@@ -35934,6 +35934,15 @@ impl Shell {
             // reference led to). They spell the refusal identically, so only the
             // name tells them apart. See the refusal for the measurements.
             let was_assoc = self.assoc.contains_key(base_name);
+            // Whether the name was bound to *anything* when the command arrived
+            // — bash's `var == 0` test, which is what decides whether the
+            // declaration creates the variable and so whether it is left
+            // visible. Read before the kind is applied just below, which is
+            // what creates the array for a subscripted operand. An invisible
+            // scalar counts as bound, exactly as it does in bash's hash table:
+            // `declare -i z; declare 'z[-5]=v'` finds `z` and leaves it
+            // invisible. See the store for what hangs on it.
+            let name_existed = self.name_is_bound(base_name.as_bytes());
             // The kind this command asks for goes on before the `+a`/`+A`
             // refusal below, because bash's own refusal comes from the variable
             // it has already created: `declare -a +a fresh` really does leave
@@ -36207,6 +36216,34 @@ impl Shell {
                         break;
                     }
                     if !ok {
+                        // The store failed ("bad array subscript"), but the
+                        // array it was going to store into is still there —
+                        // and bash makes it *visible*. `declare.def:786`
+                        // creates the variable for a subscripted operand with
+                        // `make_new_array_variable`, which leaves it visible,
+                        // and only re-hides it `if (offset == 0)` — i.e. only
+                        // when the operand carried no value at all. So
+                        // `declare 'z[]=v'` reports the empty-but-valued
+                        // `declare -a z=()` even though nothing was stored,
+                        // exactly like the `cannot destroy`/`cannot convert`
+                        // refusals above.
+                        //
+                        // Two limits, both measured. A name that was *already*
+                        // bound keeps whatever visibility it had, because bash
+                        // never reaches the creation branch at all: `declare -a
+                        // z; declare 'z[-5]=v'` still prints `declare -a z`,
+                        // and so does `declare -i z; declare 'z[-5]=v'`, whose
+                        // `z` is only an invisible *scalar* — it is the
+                        // variable that has to be absent, not the array. And a
+                        // local one is made by `make_local_array_variable`,
+                        // which hides it unconditionally, so `f() { declare
+                        // 'z[]=v'; }` and the `local` spelling both print
+                        // `declare -a z` — while `declare -g 'z[]=v'` in the
+                        // same function is back on the global path and prints
+                        // `=()`.
+                        if !name_existed && !make_local {
+                            self.array_valued.insert(base_name.to_string());
+                        }
                         status = 1;
                     }
                 }

@@ -74,6 +74,26 @@ echo '=== a valued one has a store to attempt, and is refused by the store inste
 ( z=(a b); declare 'z[]=v'; echo "rc=$?"; declare -p z )
 ( declare -A m; declare 'm[]=v'; echo "rc=$?"; declare -p m )
 
+echo '=== and the array the failed store made is left visible, being made for a value'
+( declare 'z[]=v';   echo "rc=$?"; declare -p z )
+( declare 'z[-5]=v'; echo "rc=$?"; declare -p z )
+( typeset 'z[]=v';   echo "rc=$?"; declare -p z )
+( declare -A 'm[]=v'; echo "rc=$?"; declare -p m )
+( declare 'z[]=v' 'y[]=v'; echo "rc=$?"; declare -p z y )
+( z=5; declare 'z[]=v'; echo "rc=$?"; declare -p z )
+( f(){ declare -g 'z[]=v'; }; f; echo "rc=$?"; declare -p z )
+( declare -g 'z[]=v'; echo "rc=$?"; declare -p z )
+
+echo '=== an array that was already there keeps the visibility it had'
+( declare -a z;   declare 'z[-5]=v'; echo "rc=$?"; declare -p z )
+( declare -a z=(); declare 'z[-5]=v'; echo "rc=$?"; declare -p z )
+( declare -A m;   declare 'm[]=v';   echo "rc=$?"; declare -p m )
+
+echo '=== and a local one is hidden however it is spelled'
+( f(){ local 'z[]=v';   echo "rc=$?"; declare -p z; }; f )
+( f(){ declare 'z[]=v'; echo "rc=$?"; declare -p z; }; f )
+( f(){ typeset 'z[-5]=v'; echo "rc=$?"; declare -p z; }; f )
+
 echo '=== a bracket that never closes, or that is not the last thing, is no name at all'
 ( declare 'z[1';     echo "rc=$?"; declare -p z )
 ( declare 'z[1]junk'; echo "rc=$?"; declare -p z )

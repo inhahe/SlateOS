@@ -552,7 +552,10 @@ fn run(args: &[Str], stack_size: usize) -> i32 {
         }
         InvokeMode::Repl => match args.get(base).map(Vec::as_slice) {
             Some(path) if opts_ended || !path.starts_with(b"-") => {
-                sh.set_name(path);
+                // `set_script_name`, not `set_name`: opening a script moves `$0`
+                // to the script's path but leaves the shell answering to its own
+                // `argv[0]`, which is what `\s` shows.
+                sh.set_script_name(path);
                 sh.set_script_mode();
                 sh.set_positional(positional_args(args.get(base + 1..)));
                 Plan::Script(path)

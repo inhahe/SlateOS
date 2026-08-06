@@ -3785,6 +3785,18 @@ pub struct Shell {
     /// Bytes, because a script path may hold any byte but `/` and NUL, and
     /// because `BASH_ARGV0=` can set it to any shell word at all.
     name: Str,
+    /// bash's `shell_name`: the name the shell was *started* under, as opposed
+    /// to `$0`, which is the name of what it is *running*.
+    ///
+    /// The two are the same almost everywhere — the startup `argv[0]`, the `-c`
+    /// *name* operand and a `BASH_ARGV0=` assignment all set both — and part
+    /// company only when a script file is opened, which gives `$0` the script's
+    /// path and leaves `shell_name` naming the shell: `bash d/s.sh` reports `$0`
+    /// as `d/s.sh` and `\s` as `bash`.
+    ///
+    /// Read only by `\s` (see [`Shell::prompt_decode`]), which shows its base
+    /// name.
+    shell_name: Str,
     /// The shell's working directory — absolute, `/`-separated, no trailing
     /// slash (see [`shell_path`]).
     ///
@@ -4348,6 +4360,23 @@ pub struct Shell {
     /// `$-` for `-c` invocations (always last, after the `set`-toggled options);
     /// consulted only by `option_flags`. Set once at startup by the binary.
     command_mode: bool,
+    /// bash's `current_command_number`: how many top-level commands the shell's
+    /// own reader has begun, counting from one *before* the first — so it is 1
+    /// while nothing has run yet, 2 while the first command runs, and so on.
+    ///
+    /// It is the reader loop that counts, and only it: bash increments this in
+    /// `reader_loop` between parsing a command and executing it, so everything
+    /// reached from *within* a command shares that command's number — a function
+    /// body, a loop body, a `$( … )`, an `eval` string, a `.`-sourced file, a
+    /// trap action. A `-c` string never touches it at all, because bash runs one
+    /// through `parse_and_execute` rather than the reader loop, so a `-c` shell's
+    /// number stays where it started.
+    ///
+    /// Read only by `\#` (see [`Shell::prompt_decode`]), which is why the count
+    /// starts one ahead: bash's `\#` subtracts one back off outside a
+    /// `PS0`/`PS1`/`PS2` string, leaving `${p@P}` and `PS4` naming the command
+    /// they are expanded for — and leaving a `-c` string's `\#` at 0.
+    command_number: u32,
     /// The shell is executing a **script file** (`osh SCRIPT`), as opposed to
     /// `-c` or the interactive REPL. Bash includes a bottom `main` pseudo-frame
     /// in `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO` only for script (and sourced)
@@ -5454,6 +5483,7 @@ impl Shell {
             func_redirects: HashMap::new(),
             positional: Vec::new(),
             name: b"osh".to_vec(),
+            shell_name: b"osh".to_vec(),
             cwd: shell_cwd(),
             last_status: 0,
             comsub_count: 0,
@@ -5521,6 +5551,7 @@ impl Shell {
             // `set -m` toggles it. See `job_control_enabled`.
             monitor: false,
             command_mode: false,
+            command_number: 1,
             script_mode: false,
             interactive_shell: true,
             reads_stdin: false,
@@ -5841,12 +5872,27 @@ impl Shell {
         self.array_valued.insert("BASH_CMDS".to_string());
     }
 
-    /// Set `$0`, the shell/script name.
+    /// Set `$0`, the shell/script name — *and* the name the shell answers to,
+    /// [`Shell::shell_name`].
     ///
     /// The argument is bytes because `$0` is routinely a *path* — the script
     /// osh was handed — and a path may hold any byte but `/` and NUL.
     ///
+    /// This is the form for every caller that renames the shell itself: the
+    /// startup `argv[0]`, the `-c` *name* operand, and a `BASH_ARGV0=`
+    /// assignment. A script file uses [`Shell::set_script_name`], which is the
+    /// one case where bash moves `$0` without moving `shell_name`.
     pub fn set_name(&mut self, name: BStr<'_>) {
+        self.name = name.to_vec();
+        self.shell_name = self.name.clone();
+    }
+
+    /// Set `$0` to the path of the script the shell is about to run, leaving
+    /// [`Shell::shell_name`] naming the shell itself.
+    ///
+    /// bash's `open_shell_script` assigns `dollar_vars[0]` and nothing else, so
+    /// `bash d/s.sh` answers `$0` with `d/s.sh` and `\s` with `bash`.
+    pub fn set_script_name(&mut self, name: BStr<'_>) {
         self.name = name.to_vec();
     }
 
@@ -7050,6 +7096,22 @@ impl Shell {
                     return self.parse_error_flow(&e);
                 }
             };
+            // The command number advances here and nowhere else, exactly where
+            // bash's `reader_loop` advances it: after the unit has parsed —
+            // a unit that did not parse never reaches this and never counts —
+            // and before it runs, so the command about to execute is the one
+            // `\#` names. Only this loop, and only when it is the shell's own
+            // reader: an `eval`/`source`/trap/`$( … )` body runs through the
+            // same function with [`HistRead::Off`] and leaves the number alone,
+            // as bash's `parse_and_execute` does. A `-c` string is bash's other
+            // `parse_and_execute` caller, so it does not count either.
+            //
+            // Saturating because the number is only ever displayed: a shell that
+            // has read four billion commands may keep going, showing the last
+            // number it could name rather than wrapping back to zero.
+            if hist == HistRead::Reader && !self.command_mode {
+                self.command_number = self.command_number.saturating_add(1);
+            }
             match self.exec_program_top(&prog, out, stdin) {
                 Flow::Next => {}
                 other => return other,
@@ -11257,6 +11319,7 @@ impl Shell {
             func_redirects: self.func_redirects.clone(),
             positional: self.positional.clone(),
             name: self.name.clone(),
+            shell_name: self.shell_name.clone(),
             // A subshell starts in the parent's directory and may wander freely
             // without the parent ever seeing it (bash: it is a separate process).
             cwd: self.cwd.clone(),
@@ -11426,6 +11489,10 @@ impl Shell {
             errtrace: self.errtrace,
             monitor: self.monitor,
             command_mode: self.command_mode,
+            // A subshell inherits the number of the command that spawned it and
+            // never advances it: bash forks, so `current_command_number` comes
+            // along, and nothing inside a subshell is the reader's own command.
+            command_number: self.command_number,
             script_mode: self.script_mode,
             interactive_shell: self.interactive_shell,
             reads_stdin: self.reads_stdin,
@@ -12019,6 +12086,9 @@ impl Shell {
             } else {
                 val.to_vec()
             };
+            // bash's `assign_bash_argv0` moves `shell_name` along with `$0`, so
+            // `BASH_ARGV0=zz` renames the shell as well: `\s` then reads `zz`.
+            self.shell_name = self.name.clone();
             return true;
         }
         // Every one of these names is a number to bash, so the string is parsed
@@ -16092,12 +16162,15 @@ impl Shell {
                     chars.next();
                 }
                 's' => {
-                    // Shell name — basename of `$0`.
-                    let arg0 = self.param_value("0").unwrap_or_default();
-                    let base = arg0
+                    // The base name of [`Shell::shell_name`] — the name the
+                    // shell was started under, *not* `$0`. The two differ for a
+                    // script, which is the ordinary case: `bash d/s.sh` shows
+                    // `bash`, not `s.sh` or `d/s.sh`.
+                    let base = self
+                        .shell_name
                         .rsplit(|b| matches!(b, b'/' | b'\\'))
                         .next()
-                        .unwrap_or(&arg0);
+                        .unwrap_or(&self.shell_name);
                     out.extend_from_slice(base);
                     chars.next();
                 }
@@ -16126,10 +16199,31 @@ impl Shell {
                     out.extend_from_slice(&self.prompt_cwd(true));
                     chars.next();
                 }
-                '!' | '#' => {
-                    // History / command number — no interactive history model,
-                    // so bash's first-command value.
-                    out.push(b'1');
+                '!' => {
+                    // The history number: the number the *newest* entry carries,
+                    // which is what `$HISTCMD` reports — bash's
+                    // `prompt_history_number` subtracts one from
+                    // `history_number()` outside `PS1`, landing on the same
+                    // value, and an interactive bash shows `$HISTCMD` and
+                    // `${p@P}` of `\!` as equal.
+                    //
+                    // A shell that has recorded nothing shows 1, not 0: bash
+                    // returns `history_number()` unadjusted when it is still 1,
+                    // so a script — which records no history at all — reads `\!`
+                    // as 1 even though its `$HISTCMD` is 0.
+                    let n = self.hist_number().max(1);
+                    out.extend_from_slice(n.to_string().as_bytes());
+                    chars.next();
+                }
+                '#' => {
+                    // The command number. See [`Shell::command_number`] for what
+                    // counts as a command; the subtraction is bash's, which
+                    // keeps the count one ahead for `PS1`'s sake and takes it
+                    // back off for everyone else. The only two strings decoded
+                    // here — `${var@P}` and `PS4` — are both "everyone else", and
+                    // osh has no `PS1` expansion to be the exception.
+                    let n = self.command_number.saturating_sub(1);
+                    out.extend_from_slice(n.to_string().as_bytes());
                     chars.next();
                 }
                 '$' => {

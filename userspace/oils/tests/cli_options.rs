@@ -799,3 +799,59 @@ fn interactivity_reaches_aliases_and_diagnostics() {
          braceexpand:hashall:histexpand:history:interactive-comments\n"
     );
 }
+
+/// `\#` and `\s` name the shell and the command it is running, and both depend
+/// on *how the shell was invoked* — which is why they are pinned here rather
+/// than in the corpus, whose cases are always script files.
+///
+/// `\#` is bash's `current_command_number`, advanced by the reader loop
+/// (`eval.c`'s `reader_loop`) once per top-level command. A `-c` string never
+/// goes through that loop — it is handed to `parse_and_execute` — so the counter
+/// is never touched and `\#` reads 0 for every command in the string. Reading
+/// the same commands from stdin *does* go through the reader loop and counts.
+#[test]
+fn prompt_command_number_counts_only_the_readers_own_commands() {
+    // `-c`: the counter stays at its initial value for the whole string, so the
+    // second command reads the same 0 as the first.
+    let (out, err, code) = run_osh(&["-c", r#"p='\#'; echo "${p@P}"; echo "${p@P}""#], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "0\n0\n");
+
+    // stdin: the same commands, read one at a time, are counted. The two
+    // assignments are commands too, so the first `echo` is the third — and the
+    // number is the one being run, not the one being read next.
+    let (out, err, code) = run_osh(&[], "p='\\#'\nq=1\necho \"${p@P}\"\necho \"${p@P}\"\n");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "3\n4\n");
+}
+
+/// `\s` is bash's `shell_name` — the name the shell was *started* under — and
+/// not `$0`, which names whatever it is running. The two coincide for a `-c`
+/// *name* operand, which sets both, and diverge when `$0` moves on its own.
+/// `\s` shows the base name (`base_pathname(shell_name)`), so an invocation by
+/// path still reports a bare name.
+#[test]
+fn prompt_shell_name_is_the_name_the_shell_started_under() {
+    let sh = shell_name();
+    let base = Path::new(sh)
+        .file_name()
+        .expect("binary has a file name")
+        .to_str()
+        .expect("binary name is UTF-8");
+
+    // No name operand: `$0` is the path cargo invoked, `\s` its base name.
+    let (out, err, code) = run_osh(&["-c", r#"s='\s'; echo "${s@P} | $0""#], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, format!("{base} | {sh}\n"));
+
+    // A `-c` name operand is the shell's own name, so both follow it.
+    let (out, err, code) = run_osh(&["-c", r#"s='\s'; echo "${s@P} | $0""#, "zzname"], "");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, "zzname | zzname\n");
+
+    // Reading from stdin does not name anything, so `\s` still answers for the
+    // shell itself.
+    let (out, err, code) = run_osh(&[], "s='\\s'\necho \"${s@P} | $0\"\n");
+    assert_eq!(code, 0, "stderr: {err:?}");
+    assert_eq!(out, format!("{base} | {sh}\n"));
+}

@@ -43,7 +43,132 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-NOUNSET-IN-A-REDIRECTION-WORD. An unbound variable in a here-doc body or a redirection target does not stop the command in osh, and then aborts a shell bash leaves running — 2026-08-06 — OPEN
+### TD-OILS-A-REDIRECT-LIST-IS-NOT-APPLIED-AS-IT-IS-BUILT. An earlier `2>` in the same list does not catch a diagnostic raised while a later word is expanded — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_redirect_list`, which
+resolves every redirect in the list before any of the plan is installed.
+
+**What.** bash performs a redirect list strictly left to right, and each redirect
+is *in effect* while the next one's word is expanded. osh resolves the whole list
+first and installs the plan afterwards, so anything written to fd 2 during
+expansion goes to the shell's original stderr instead of to the sink an earlier
+redirect in the same list already established.
+
+```text
+$ bash -c 'true 2>err > $(echo boom >&2; echo /dev/null)'; cat err
+boom                                  # bash: the 2>err is already in effect
+$ osh  -c 'true 2>err > $(echo boom >&2; echo /dev/null)'; cat err
+                                      # osh: empty, `boom` went to the terminal
+```
+
+Found while measuring TD-OILS-NOUNSET-IN-A-REDIRECTION-WORD, where it shows up
+as `set -u; true 2>err > $nope` leaving `err` empty (bash puts `nope: unbound
+variable` in it). It is **not** specific to `set -u` — the command-substitution
+form above has nothing to do with expansion errors — so it was logged separately
+rather than folded into that fix.
+
+Note this is a *different* thing from what `Shell::report_redirect_failure`
+already handles: that routes the message for a redirect that failed *as a
+redirect* through the partial plan, and is correct. The gap is only for output
+produced *during expansion* of a later word.
+
+**Proper fix.** Install each redirect's contribution to the plan as it is
+resolved rather than in one pass at the end — concretely, push the
+partial plan's stderr sink around each `resolve_one_redirect` call, the way
+`report_redirect_failure` does for the failure message, so a word expanded at
+step N sees steps 1..N-1. The ordering hazard to watch is that `RedirPlan` is
+order-free (see TD-OILS14), so this must not be mistaken for a general fix to
+dup-vs-close ordering.
+
+**Impact.** Diagnostics and command-substitution stderr raised while expanding a
+redirection word land in the wrong place whenever the same list already
+redirected fd 2. Silent — the output is not lost, just misrouted — and confined
+to multi-redirect lists.
+
+### TD-OILS-A-PIPELINE-STAGE-COUNTS-AS-A-SUBSHELL-FOR-THE-FATAL-ABORT-STATUS. A `set -u` abort in a pipeline stage yields 1 where bash yields 127 — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::fatal_abort_status`, which
+reads `subshell_depth`, and `Shell::enter_stage_subshell`, which raises it for a
+pipeline stage.
+
+**What.** `fatal_abort_status` gives the invocation-mode status (127 for
+nounset/`:?` under `bash -c`) only at `subshell_depth == 0`, and 1 otherwise.
+Its doc comment lists "pipeline stage" among the contexts that take 1. That is
+wrong for a stage that is a *simple command*: bash does not count one as a
+subshell level, and the higher status comes through.
+
+```text
+$ bash -c 'set -u; echo a | echo "$nope"; echo "rc=$?"'   rc=127
+$ osh  -c 'set -u; echo a | echo "$nope"; echo "rc=$?"'   rc=1
+```
+
+The distinction is bash's own and is directly observable — `BASH_SUBSHELL` is
+`0` in a simple-command stage and `1` in a compound one — and osh already
+reports `BASH_SUBSHELL` correctly, so the two counters have simply drifted
+apart:
+
+```text
+$ bash -c 'echo a | echo $BASH_SUBSHELL; echo a | { echo $BASH_SUBSHELL; }'   0 then 1
+$ osh  -c 'echo a | echo $BASH_SUBSHELL; echo a | { echo $BASH_SUBSHELL; }'   0 then 1
+```
+
+Correspondingly `echo a | ( echo "$nope" )` and `echo a | { echo "$nope"; }` are
+1 in both shells — only the bare simple-command stage differs.
+
+Found while fixing TD-OILS-NOUNSET-IN-A-REDIRECTION-WORD, which routes its new
+redirect-word statuses through the same `fatal_abort_status` and so inherits the
+skew (`echo a | cat > $nope` is 127 in bash, 1 in osh). It is a **pre-existing**
+divergence of the plain word-expansion path, not something that fix introduced,
+which is why it is logged on its own.
+
+**Proper fix.** Make `fatal_abort_status` consult the same notion of depth that
+`BASH_SUBSHELL` reports rather than `subshell_depth`, so a simple-command
+pipeline stage is depth 0; correct the doc comment's claim about pipeline
+stages at the same time. Check `enter_stage_subshell`'s other readers before
+changing what it increments — the safer change is likely a separate accessor
+than a change to the field.
+
+**Impact.** Wrong `$?` (1 instead of 127) for a fatal expansion error in a
+simple-command pipeline stage under `bash -c`. Narrow, but it is exactly the
+status a `set -u` script would branch on.
+
+### TD-OILS-FD-MOVE-REDIRECTS-ARE-NOT-IMPLEMENTED. `n>&m-` / `n<&m-` are rejected as an ambiguous redirect — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/ast.rs` — `dup_spelling` has no `Move` variant, so
+a target of `m-` falls through to `DupSpelling::Word`; `userspace/oils/src/interp.rs`
+— the `RedirectOp::DupIn` / `DupOut` arms of `Shell::resolve_one_redirect` and
+`Shell::apply_persistent_redirect`, which then try to treat `m-` as a filename.
+
+**What.** bash's *move* redirection duplicates fd `m` onto fd `n` and then closes
+`m` — one operation, spelled with a trailing `-`. osh does not implement it at
+all and reports the target as an ambiguous redirect.
+
+```text
+$ bash -c 'exec 3>&1; echo moved 1>&3-; echo "rc=$?"'
+moved
+rc=0
+$ osh  -c 'exec 3>&1; echo moved 1>&3-; echo "rc=$?"'
+osh: line 1: 3-: ambiguous redirect
+rc=1
+```
+
+Found while measuring TD-OILS-NOUNSET-IN-A-REDIRECTION-WORD: bash's
+null-command fork scan treats a bare-number move (`0<&2-`) as *not* forcing a
+fork, unlike the word form (`0<&$v-`), which is the one case where that
+classification is observable. `Shell::null_command_forces_fork` already
+classifies both correctly, so it will keep working once moves exist — but a
+corpus case cannot exercise the `0<&2-` row until then.
+
+**Proper fix.** Add a `DupSpelling::Move` (bash's `r_move_input`/`r_move_output`,
+and `_word` forms for a non-literal target), recognised by `dup_spelling` for a
+literal `[0-9]+-`, and handle it in both redirect appliers as a dup followed by a
+close of the source. `unparse` must print the trailing `-` back.
+
+**Impact.** Any script using the move idiom fails outright. The idiom is
+uncommon but not exotic — it is the tidy spelling of the `exec 3>&1 1>&2 2>&3
+3>&-` descriptor shuffle.
+
+### TD-OILS-NOUNSET-IN-A-REDIRECTION-WORD. An unbound variable in a here-doc body or a redirection target does not stop the command in osh, and then aborts a shell bash leaves running — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — the redirection-plan builder and the
 `RedirectOp::HereDoc` / `RedirectOp::HereStr` expansion paths, and whatever
@@ -85,6 +210,57 @@ here-doc body; and a script that bash keeps alive is killed. Only under
 `set -u`, and only when the unbound variable is inside a redirection word. It is
 why the whole-set corpus case deliberately omits the here-document and
 arithmetic-string contexts — a case there would be measuring this instead.
+
+**Fixed.** The two symptoms were right and the diagnosis half right: part (a) of
+the proposed fix holds, but part (b) — "reported as a command failure, not as a
+shell-fatal condition" — is backwards. bash *is* shell-fatal here. What was
+missing is that it is fatal to a **process**, not to the shell as such, and bash
+has usually already forked by the time the redirection is performed. Measured
+against bash 5.2.37, one rule covers every case:
+
+> A word that fails to expand fatally in a redirection — a `set -u` reference, a
+> `${x:?}`, an invalid indirect — is not a redirection failure at all. It is an
+> ordinary fatal expansion error, and it kills whichever process performs the
+> redirection.
+
+So the whole outcome turns on where bash forked, and nothing about the redirect
+itself matters:
+
+| performed by | contexts | outcome |
+|---|---|---|
+| a forked child | an external program (`command` prefix looked through); a `( … )` subshell; a pipeline stage; a null command whose list rebinds fd 0 or holds a `{v}>` | the child dies, the shell lives and takes the status |
+| the shell | a builtin; a function; a brace group; `while`/`if`/`for`; `exec`; a definition-time `f() { …; } >w`; a plain null command | the shell exits |
+
+Three consequences that had to be modelled separately:
+
+- **Nothing further is said.** bash gives up on the word at the error and never
+  counts its fields, so the "ambiguous redirect" complaint an empty expansion
+  would otherwise earn is *unreachable* — that was the spurious extra line.
+- **The partial text is never opened.** osh expanded straight into the open, so
+  `set -u; > "$nope"sub/x` created `sub/x` — a file from a path the redirect
+  never named. The guard therefore sits in `expand_redirect_target` and in
+  `apply_persistent_redirect`, before the open, not at the reporting site.
+- **The status is the expansion's own**, put through `fatal_abort_status`: 127
+  for nounset/`:?` and 1 for a bad indirect, and 1 in any subshell. A `( … )` is
+  always 1, because bash forks *and* counts the child a subshell level deeper
+  before applying the list; the fork for an external does neither.
+
+The null-command fork is bash's `execute_null_command` `forcefork` scan, which
+osh now reproduces in `Shell::null_command_forces_fork`. Its membership was
+measured rather than assumed, and is narrower than it looks: only fd **0**
+counts, and only for `<`, `<>`, a close, or a dup/move written as a *word* —
+a bare `0<&2` or `0<&2-` is resolved in place and does not fork, and neither
+does a here-document, an output redirect, or anything on another fd. A `{v}>`
+forces it whatever its fd or operator. Because the scan runs over the whole list
+before any of it is performed, one such redirect makes the *list* the child's,
+which is what lets an unrelated failure ride along: `< /dev/null > $nope`
+survives where `> $nope` alone kills the shell.
+
+Covered by
+`tests/corpus/a-failed-expansion-in-a-redirection-word-kills-whoever-performs-the-redirection.sh`.
+Two neighbouring gaps found while measuring this are logged separately and are
+**not** fixed here: TD-OILS-A-REDIRECT-LIST-IS-NOT-APPLIED-AS-IT-IS-BUILT and
+TD-OILS-FD-MOVE-REDIRECTS-ARE-NOT-IMPLEMENTED.
 
 ### TD-OILS-NOUNSET-SKIPS-ARITHMETIC. `set -u` never reaches arithmetic: `(( nope ))` reads 0 in osh where bash calls it an unbound variable and aborts — 2026-08-06 — ✅ FIXED 2026-08-06
 

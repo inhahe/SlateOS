@@ -9780,10 +9780,24 @@ impl Shell {
         let plan = match self.resolve_redirect_list(redirects, out, scope) {
             Ok(p) => p,
             Err(fail) => {
-                self.last_status = self.report_redirect_failure(&fail, out);
+                // A fatal expansion error in one of the words is not a
+                // redirection failure: it kills whoever performs the list. A
+                // subshell's list is applied in the fork, so only the subshell
+                // dies; every other compound command is redirected in the shell
+                // itself, so the shell does.
+                let flow = if fail.fatal {
+                    self.fatal_redirect_flow(if scope == VarfdScope::Subshell {
+                        RedirFatal::Subshell
+                    } else {
+                        RedirFatal::Shell
+                    })
+                } else {
+                    self.last_status = self.report_redirect_failure(&fail, out);
+                    Flow::Next
+                };
                 self.finish_procsubs(in_mark, out_mark);
                 self.stdin_redirected = saved_stdin_redirected;
-                return Flow::Next;
+                return flow;
             }
         };
         let flow =
@@ -16599,6 +16613,17 @@ impl Shell {
                     // Resolution itself created/truncated every output target,
                     // so a null command needs nothing further here.
                     Ok(_) => {}
+                    Err(fail) if fail.fatal => {
+                        // Whether this kills the shell depends on whether bash
+                        // forked to do the list at all — see
+                        // [`Self::null_command_forces_fork`].
+                        let kind = if Self::null_command_forces_fork(&sc.redirects) {
+                            RedirFatal::Child
+                        } else {
+                            RedirFatal::Shell
+                        };
+                        return self.fatal_redirect_flow(kind);
+                    }
                     Err(fail) => {
                         self.last_status = self.report_redirect_failure(&fail, out);
                     }
@@ -16741,6 +16766,12 @@ impl Shell {
         // still go through the plan-based path below.)
         if argv.len() == 1 && argv[0] == b"exec" && !sc.redirects.is_empty() {
             let rc = self.apply_exec_redirects(&sc.redirects, out);
+            // `exec` redirects the shell itself, so a fatal expansion error in
+            // one of the words leaves no child to confine it to: the shell dies
+            // and the redirects after it are never reached.
+            if self.expansion_failed() {
+                return self.fatal_redirect_flow(RedirFatal::Shell);
+            }
             self.last_status = rc;
             // A redirection failure on a POSIX special builtin ends a
             // non-interactive posix-mode shell, and `exec` is one.
@@ -16754,6 +16785,17 @@ impl Shell {
         // Resolve redirections (targets are expanded now).
         let redir = match self.resolve_redirects(&sc.redirects, out) {
             Ok(r) => r,
+            Err(fail) if fail.fatal => {
+                // Not a redirection failure but a fatal expansion error, which
+                // kills the process doing the redirection — the shell for a
+                // builtin or a function, a forked child for an external.
+                let kind = if self.simple_command_forks(&argv) {
+                    RedirFatal::Child
+                } else {
+                    RedirFatal::Shell
+                };
+                return self.fatal_redirect_flow(kind);
+            }
             Err(fail) => {
                 self.last_status = self.report_redirect_failure(&fail, out);
                 // bash decides this one from the command word as written, so a
@@ -17045,6 +17087,11 @@ impl Shell {
                 Ok(plan) => self.exec_with_redirects(plan, out, stdin, |sh, o, s| {
                     sh.exec_program(&body, o, s)
                 }),
+                // A fatal expansion error in one of those words kills the shell:
+                // a function body is run by the shell itself, so there is no
+                // fork to confine it to — `set -u; f() { :; } > $nope; f` never
+                // reaches the command after it.
+                Err(fail) if fail.fatal => self.fatal_redirect_flow(RedirFatal::Shell),
                 Err(fail) => {
                     self.last_status = self.report_redirect_failure(&fail, out);
                     Flow::Next
@@ -19636,9 +19683,27 @@ impl Shell {
     /// [`Self::resolve_redirects`]. `fd` is the already-resolved descriptor
     /// (varfd-allocated or literal).
     fn apply_persistent_redirect(&mut self, r: &Redirect, fd: i32, out: &Out) -> Result<(), Str> {
+        /// Expand a persistent redirect's target, refusing to hand back a
+        /// *partially* expanded one.
+        ///
+        /// bash abandons a redirection word at the first fatal expansion error
+        /// and never opens what came back, so `set -u; exec > "$nope"sub/x`
+        /// creates nothing. Expanding straight into the open would instead
+        /// create `sub/x`, from a path the redirect never named. The error text
+        /// is empty because the diagnostic was already made at expansion time;
+        /// the caller reports nothing further.
+        macro_rules! target {
+            () => {{
+                let s = self.expand_to_string(&r.target);
+                if self.expansion_failed() {
+                    return Err(Str::new());
+                }
+                s
+            }};
+        }
         match r.op {
             RedirectOp::Read => {
-                let path = self.expand_to_string(&r.target);
+                let path = target!();
                 if let Some(n) = special_redirect_fd(&path) {
                     return self.persistent_special_dup(fd, &path, n, true, out);
                 }
@@ -19667,7 +19732,7 @@ impl Shell {
                 // `exec {v}<> file` (persistent open-for-read-write). Create the
                 // file if absent, never truncate. Both halves are duplicates of
                 // the one open, so they share an OS file offset.
-                let path = self.expand_to_string(&r.target);
+                let path = target!();
                 if let Some(n) = special_redirect_fd(&path) {
                     return self.persistent_special_dup(fd, &path, n, fd == 0, out);
                 }
@@ -19713,7 +19778,7 @@ impl Shell {
                 }
             }
             RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
-                let target = self.expand_to_string(&r.target);
+                let target = target!();
                 let append = matches!(r.op, RedirectOp::AppendBoth);
                 if let Some(n) = special_redirect_fd(&target) {
                     return self.persistent_special_dup(fd, &target, n, false, out);
@@ -19730,7 +19795,7 @@ impl Shell {
                 self.set_std_read_half(2, None);
             }
             RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
-                let target = self.expand_to_string(&r.target);
+                let target = target!();
                 let append = matches!(r.op, RedirectOp::Append);
                 // A dup, not an open — so noclobber has no file to protect.
                 if let Some(n) = special_redirect_fd(&target) {
@@ -19760,11 +19825,11 @@ impl Shell {
                 }
             }
             RedirectOp::DupOut => {
-                let target = self.expand_to_string(&r.target);
+                let target = target!();
                 self.apply_persistent_dup_out(&DupOrigin::Word(r), fd, &target, out)?;
             }
             RedirectOp::DupIn => {
-                let target = self.expand_to_string(&r.target);
+                let target = target!();
                 self.apply_persistent_dup_in(&DupOrigin::Word(r), fd, &target, out)?;
             }
         }
@@ -20395,6 +20460,18 @@ impl Shell {
     /// Here-documents and here-strings are exempt and never routed through here.
     fn expand_redirect_target(&mut self, w: &Word, kind: RedirWord) -> Result<Str, Str> {
         let mut fields = self.expand_redirect_word(w, kind);
+        // A fatal expansion error — a `set -u` reference, a `${x:?}`, a bad
+        // indirect — abandons the word where it stands, and bash never looks at
+        // what came back. So it neither *counts* the fields (the ambiguity
+        // complaint below is unreachable: `set -u; > $nope` says only `nope:
+        // unbound variable`) nor opens the partial path, which would otherwise
+        // create a file the redirect never named — `set -u; > "$nope"sub/x`
+        // creates nothing. The error text is empty because the diagnostic was
+        // already made at expansion time; `resolve_redirect_list` recognises the
+        // pending failure and reports nothing further.
+        if self.expansion_failed() {
+            return Err(Str::new());
+        }
         if fields.len() == 1 {
             Ok(fields.pop().unwrap_or_default())
         } else {
@@ -20420,6 +20497,61 @@ impl Shell {
         self.resolve_redirect_list(redirs, out, VarfdScope::NullCommand)
     }
 
+    /// Whether bash performs a *null* command's redirect list in a forked child
+    /// rather than in the shell — `execute_null_command`'s `forcefork` scan.
+    ///
+    /// A null command has no program to run, so bash would ordinarily just do
+    /// the redirections in the shell and undo them again. It forks instead when
+    /// the list contains something the shell must not be left holding: a
+    /// `{v}>…` descriptor, or anything that rebinds *fd 0* to a new source.
+    /// Since the scan runs over the whole list before any of it is performed,
+    /// one such redirect makes the whole list the child's, which is what lets a
+    /// failure in an unrelated word ride along: `< /dev/null > $nope` survives
+    /// where `> $nope` alone kills the shell.
+    ///
+    /// Measured against bash 5.2.37; members, all on fd 0 unless noted:
+    ///
+    /// ```text
+    /// {v}>f  {v}<f  {v}>&-   any fd, any operator — the descriptor outlives it
+    /// 0< f            0<> f          rebind fd 0 to a file
+    /// 0<&-   0>&-                    close fd 0
+    /// 0<&"2" 0<&$v   0<&f   0<&$v-   a dup or move whose target is a *word*
+    /// ```
+    ///
+    /// and non-members: every fd but 0, `>`/`>>`, here-documents and
+    /// here-strings, and a dup or move written as a bare number (`0<&2`,
+    /// `0<&2-`) — bash resolves those at parse time and does them in place.
+    fn null_command_forces_fork(redirs: &[Redirect]) -> bool {
+        redirs.iter().any(|r| {
+            if r.varfd.is_some() {
+                return true;
+            }
+            if r.fd != 0 {
+                return false;
+            }
+            match r.op {
+                RedirectOp::Read | RedirectOp::ReadWrite => true,
+                RedirectOp::DupIn | RedirectOp::DupOut => {
+                    // A bare `[0-9]+` is bash's `r_duplicating_*` and a bare
+                    // `[0-9]+-` its `r_move_*`; neither forks. Everything else —
+                    // the `-` close included — is the `_word` form, which does.
+                    let [WordPart::Literal(s)] = r.target.parts.as_slice() else {
+                        return true;
+                    };
+                    let digits = s.strip_suffix(b"-").unwrap_or(s);
+                    digits.is_empty() || !digits.iter().all(u8::is_ascii_digit)
+                }
+                RedirectOp::Write
+                | RedirectOp::Clobber
+                | RedirectOp::Append
+                | RedirectOp::WriteBoth
+                | RedirectOp::AppendBoth
+                | RedirectOp::HereDoc
+                | RedirectOp::HereStr => false,
+            }
+        })
+    }
+
     fn resolve_redirect_list(
         &mut self,
         redirs: &[Redirect],
@@ -20429,18 +20561,163 @@ impl Shell {
         let mut plan = RedirPlan::default();
         let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
-            if let Err(msg) = self.resolve_one_redirect(r, &mut plan, &mut reserved, out, scope) {
+            let attempt = self.resolve_one_redirect(r, &mut plan, &mut reserved, out, scope);
+            // A fatal word-expansion error *inside* the redirect's word abandons
+            // the redirect and the command with it, before either is performed.
+            // Checked here rather than per-op so it covers every word alike —
+            // including the here-document and here-string bodies, which cannot
+            // fail as redirections at all and so would otherwise be planned from
+            // the half-built text and handed to a command bash never runs.
+            if self.expansion_failed() {
+                return Err(Box::new(RedirFailure {
+                    partial: plan,
+                    msg: Str::new(),
+                    fatal: true,
+                }));
+            }
+            if let Err(msg) = attempt {
                 // Hand the caller the plan built from the redirects *before* this
                 // one: bash applies redirections left to right against the real fd
                 // table, so the diagnostic for a failure goes to fd 2 as it stood
                 // at that moment (`2>err > /nodir/f` writes the message into
                 // `err`; `> /nodir/f 2>err` writes it to the original stderr and
                 // never creates `err`).
-                return Err(Box::new(RedirFailure { partial: plan, msg }));
+                return Err(Box::new(RedirFailure {
+                    partial: plan,
+                    msg,
+                    fatal: false,
+                }));
             }
         }
         Self::reconcile_dup_then_close(&mut plan);
         Ok(plan)
+    }
+
+    /// The [`Flow`] a command takes when a *word expansion inside one of its
+    /// redirections* failed fatally — a `set -u` reference, a `${x:?}`, an
+    /// invalid indirect expansion.
+    ///
+    /// bash does not treat this as a redirection failure at all. It is an
+    /// ordinary fatal expansion error, so it kills whichever *process* is
+    /// performing the redirection, and everything about the outcome follows
+    /// from where bash had already forked — see [`RedirFatal`]. Nothing is
+    /// printed here: the diagnostic was made at expansion time, and in
+    /// particular the ambiguity complaint an empty expansion would otherwise
+    /// earn is never reached, because bash gives up on the word at the error
+    /// and never counts its fields.
+    ///
+    /// The status is the one the expansion armed — 127 for nounset/`:?`, 1 for
+    /// a bad indirect — put through [`Self::fatal_abort_status`], which is what
+    /// makes it depend on the invocation mode (`bash -c` alone honours 127) and
+    /// on the subshell depth.
+    fn fatal_redirect_flow(&mut self, kind: RedirFatal) -> Flow {
+        if kind == RedirFatal::Shell {
+            // The shell performs the redirection itself, so the shell is what
+            // dies: `set -u; true > $nope; echo tail` prints no `tail`. An
+            // armed *discard* unwinds on its own terms here (`Flow::Discard`,
+            // or `Flow::Abort` past an `eval`), exactly as it does for a failed
+            // command-word expansion.
+            if let Some(flow) = self.take_discard_flow() {
+                return flow;
+            }
+            let code = self.unbound_error.take().unwrap_or(1);
+            let status = self.fatal_abort_status(code);
+            self.last_status = status;
+            return Flow::Exit(status);
+        }
+        // A child performs it, so whatever was armed dies with the child and
+        // becomes no more than this command's status — `set -u; cat < $nope;
+        // echo tail` does print `tail`. Both flags are cleared: nothing is left
+        // armed for the shell, which never saw the error.
+        let status = if kind == RedirFatal::Subshell {
+            // bash forked *and* counted the child as one subshell level deeper
+            // before applying the list, so the status is the subshell one
+            // whatever the enclosing shell's mode: `bash -c 'set -u; ( true >
+            // $nope ); echo $?'` prints 1 where the same redirect on a builtin
+            // in the shell itself prints 127.
+            1
+        } else {
+            // A bad indirect expansion arms a discard rather than a status, and
+            // carries 1; only nounset and `${x:?}` reach for the higher code.
+            self.unbound_error
+                .map_or(1, |code| self.fatal_abort_status(code))
+        };
+        self.discard_error = None;
+        self.unbound_error = None;
+        self.last_status = status;
+        Flow::Next
+    }
+
+    /// Whether bash performs this simple command's redirections in a forked
+    /// child, which is what decides whether a fatal expansion error in one of
+    /// their words can reach the shell — see [`Self::fatal_redirect_flow`].
+    ///
+    /// bash chooses from the command word *before* it does the redirections: a
+    /// shell function and a builtin are run by the shell itself, anything else
+    /// is forked and then `exec`ed. A `command` prefix is looked through — that
+    /// is what it is for, reaching past a function to the external — but
+    /// `builtin` is not, and neither is `command -v`/`-V`, which ask `command`
+    /// itself to do the work and so run in the shell:
+    ///
+    /// ```text
+    /// cat                  child      command cat           child
+    /// nosuchcmd            child      command f             child  (function bypassed)
+    /// echo                 shell      command echo          shell
+    /// f() { :; }; f        shell      command -v cat        shell
+    /// exec cat             shell      builtin command cat   shell
+    /// ```
+    fn simple_command_forks(&mut self, argv: &[Str]) -> bool {
+        // Set once a `command` prefix has been stepped over: from there on the
+        // word cannot name a function, because that is precisely what the
+        // prefix suppressed.
+        let mut bypassed_functions = false;
+        let mut i = 0;
+        loop {
+            let Some(word) = argv.get(i) else {
+                // Nothing left to name a command — `command --`, or `command`
+                // on its own. The prefix builtin runs in the shell.
+                return false;
+            };
+            let name = bytes::as_str(word).map(str::to_owned);
+            if !bypassed_functions
+                && self.funcs.contains_key(word.as_slice())
+                && !self.posix_special_builtin_first(name.as_deref())
+            {
+                return false;
+            }
+            let Some(name) = name.filter(|n| self.builtin_enabled(n)) else {
+                // Neither a function nor an enabled builtin: an external, which
+                // bash forks for even when `$PATH` holds no such file.
+                return true;
+            };
+            if name != "command" {
+                return false;
+            }
+            // Step over `command`'s own options. `-v`/`-V` keep the work in the
+            // shell; `-p` only changes the `$PATH` the search uses.
+            let mut j = i + 1;
+            while let Some(opt) = argv.get(j) {
+                let Some(opt) = bytes::as_str(opt) else { break };
+                if opt == "--" {
+                    j += 1;
+                    break;
+                }
+                let Some(flags) = opt.strip_prefix('-').filter(|f| !f.is_empty()) else {
+                    break;
+                };
+                if !flags.bytes().all(|c| matches!(c, b'p' | b'v' | b'V')) {
+                    // An option `command` does not accept: it fails in the
+                    // shell without ever reaching a command word.
+                    return false;
+                }
+                if flags.contains(['v', 'V']) {
+                    return false;
+                }
+                j += 1;
+            }
+            bypassed_functions = true;
+            i = j;
+        }
     }
 
     /// Report a redirection failure to fd 2 *as it stood when the failing
@@ -21346,6 +21623,12 @@ impl Shell {
                 res = self.commit_varfd(name, fd);
             }
             if let Err(e) = res {
+                // A fatal expansion error inside the word is not a redirection
+                // failure: it has already been reported, and it abandons the
+                // whole list rather than moving on to the next redirect.
+                if self.expansion_failed() {
+                    break;
+                }
                 let line = bfmt![self.err_prefix(), &e];
                 self.berrln(&line);
                 rc = 1;
@@ -44355,6 +44638,24 @@ impl ScalarDest {
     }
 }
 
+/// Which process performs a redirect list, and so which one a fatal expansion
+/// error inside one of its words kills. See [`Shell::fatal_redirect_flow`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RedirFatal {
+    /// The shell itself: a builtin, a function invocation, a brace group, a
+    /// `while`/`if`/`for`, an `exec`, and a null command whose list holds
+    /// nothing that forces a fork. The shell exits.
+    Shell,
+    /// A child bash forked to run an external program, or the one
+    /// `execute_null_command` forks for a list it must not perform in place.
+    /// The child is *not* a subshell level, so the status is still the
+    /// invocation-mode one; the shell survives and takes it as `$?`.
+    Child,
+    /// A `( … )` subshell, which bash forks *before* applying the list. The
+    /// child is one subshell level deeper, so the status is always 1.
+    Subshell,
+}
+
 /// Whether a redirect list belongs to a command bash actually runs, which is
 /// what decides where a `{v}>file` in it leaves its descriptor and its number.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44650,8 +44951,19 @@ fn builtin_runs_commands(name: &str, args: &[Str]) -> bool {
 struct RedirFailure {
     partial: RedirPlan,
     /// The diagnostic, as bytes: it echoes the redirect *target*, which is an
-    /// OS path and may hold any byte.
+    /// OS path and may hold any byte. Empty when `fatal` — the complaint was
+    /// already made by the expansion.
     msg: Str,
+    /// The redirect was abandoned by a fatal *word-expansion* error inside it —
+    /// a `set -u` reference, a `${x:?}`, a bad substitution — rather than by
+    /// anything about the redirection itself.
+    ///
+    /// This is a different kind of failure and takes a different exit: the
+    /// diagnostic has already been printed at expansion time, so there is none
+    /// to add, and in particular the ambiguity complaint that an expansion
+    /// yielding no fields would otherwise earn is never reached — bash gives up
+    /// on the word at the error and never counts its fields.
+    fatal: bool,
 }
 
 impl RedirPlan {

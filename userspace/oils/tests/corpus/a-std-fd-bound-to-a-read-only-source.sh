@@ -25,15 +25,24 @@
 # Which source it is does not enter into it: a here-document on fd 1 is as
 # read-only as a file is.
 #
+# An *external* command is handed the descriptor rather than told about it, so
+# the write that fails is the child's own and the status that reports it is the
+# child's too. What cannot be compared is the child's diagnostic: it names the
+# program by the spelling its parent passed as `argv[0]`, and osh passes the
+# resolved path where bash passes the word (TD-OILS-EXTERNAL-ARGV0-IS-THE-
+# RESOLVED-PATH). Every external probe below therefore discards fd 2 where fd 2
+# can still carry anything, and compares the status.
+#
 # Which fd 1 a dup copies is, as ever, a question of where it sits: `1<in >out`
 # writes to `out`, and `>out2 1<in` fails.
 #
 # Deliberately absent:
 #
-#   * every shape whose command is *external*. `sh -c 'echo W' 1<in` is
-#     `EBADF` in the child under bash; osh hands the child the ambient stdout
-#     instead, as it does for every descriptor it models but does not pass on.
-#     See TD-OILS-EXTERNAL-CHILD-HAS-NO-FD-3.
+#   * every external shape whose descriptor is fd 3 or above. osh maps only fd
+#     0, fd 1 and fd 2 onto a child, so a `>&3` inside a spawned program finds
+#     nothing — which is why the dup probes below hand the child fd 3's
+#     *description* as its fd 1 rather than fd 3 itself. See
+#     TD-OILS-EXTERNAL-CHILD-HAS-NO-FD-3.
 #   * `1>&0 <>rw` and `1>&0 0<&-`, where the entry *after* the dup changes what
 #     fd 0 is. osh resolves fd 0's write half against the finished plan rather
 #     than against the point in the list the dup sat at, so it copies the `<>`
@@ -105,6 +114,19 @@ echo "=== and 2>&1 after it copies a fd 1 that cannot be written either"
 echo "=== an <> source is the case that keeps both"
 ( { echo W >&2; } 3<>rw 2<&3;        echo "  rw rc=$?"; cat rw )
 ( { echo W; } 3<>rw2 1>&3;           echo "  rw2 rc=$?"; cat rw2 )
+
+echo "=== an external command is handed the descriptor and answers for itself"
+# Nothing appears on stdout in any of these: the `W` never leaves the child.
+( sh -c 'echo W' 1<in 2>/dev/null;      echo "  1<in rc=$?" )
+( sh -c 'echo W >&2' 2<in;              echo "  2<in rc=$?" )
+( sh -c 'echo W' 1<<<'zz' 2>/dev/null;  echo "  herestring rc=$?" )
+( sh -c 'echo W' 3<in 1>&3 2>/dev/null; echo "  1>&3 rc=$?" )
+( exec 1<in; sh -c 'echo W' 2>/dev/null ); echo "  exec rc=$?"
+# A child that reads as well as writes: `cat` gets the file on fd 0 and the
+# missing write half on fd 1, so it reads its input and then fails to pass it on.
+( sh -c 'cat' 0<in 1<in 2>/dev/null;    echo "  reads-too rc=$?" )
+# …and the write half is missing only where the list left it missing.
+( sh -c 'echo W' 1<in >out 2>/dev/null; echo "  then-write rc=$? out=[$(cat out)]" )
 
 echo "=== the order in the list decides, as ever"
 ( { echo W; } 1<in >out;             echo "  read-then-write rc=$? out=[$(cat out)]" )

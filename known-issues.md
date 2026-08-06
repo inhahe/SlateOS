@@ -43,6 +43,95 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-AN-EXTERNAL-CHILD-NEVER-GOT-A-READ-ONLY-FD-1-OR-2. `sh -c 'echo W' 1<in` printed `W` on the terminal — 2026-08-06 — ✅ FIXED 2026-08-06
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::run_external`'s fd 1 and fd 2
+wiring, and `child_read_only_out`.
+
+**What.** `1< file` binds fd 1 to a description with no write half; the shell's
+own builtins had answered a write through it with `EBADF` for as long as
+`tests/corpus/a-std-fd-bound-to-a-read-only-source.sh` has existed. An external
+command reached neither branch: `redir.stdout_read` was only ever consulted for
+the `>&N` and `exec` routes, so a *direct* `1< file` / `1<<HD` on a spawned
+command fell through to `Stdio::inherit()` and the child wrote to the shell's own
+terminal.
+
+```text
+$ sh -c 'echo W' 1<in; echo "rc=$?"
+bash: sh: line 1: echo: write error: Bad file descriptor / rc=1
+osh : W / rc=0                       # the child inherited the terminal
+
+$ sh -c 'echo W >&2' 2<in; echo "rc=$?"
+bash: rc=1        # nowhere to report it, so only the status survives
+osh : W / rc=0
+```
+
+Note this is *not* TD-OILS-EXTERNAL-CHILD-HAS-NO-FD-3, which is about fd 3 and
+above and stays open: fd 1 and fd 2 are passed to the child, and it was only the
+read-only shape of them that was never wired.
+
+**Fix (2026-08-06).** `run_external` consults `RedirPlan::stdout_is_read_only`
+/ `stderr_is_read_only` before every other fd 1 / fd 2 route and hands the child
+the descriptor via `child_read_only_out`. A byte snapshot — a here-document or
+here-string — has no OS object, so `child_read_only_out` now makes one: a pipe
+whose *read* end goes to the child (a write down it is `EBADF`, as for a
+read-only file, and a child that reads it instead gets the document's text).
+It previously handed `Stdio::null()`, which accepts writes — the exact bug the
+function exists to prevent.
+
+**Residue, deliberately left.** bash spills a here-document to a temp file and
+the child shares its *offset*, so a child that reads the descriptor leaves the
+shell less to read. osh copies the remaining bytes into the pipe rather than
+consuming them, so `exec 3<<HD; sh -c 'cat <&1' >&3; read -r l <&3` leaves `l`
+empty in bash and set in osh. Consuming instead would fix that one script and
+break the likelier one (`exec 3<<HD; cmd >&3; read -r l <&3`, where bash's child
+never read and the shell still finds the text). The faithful fix is to
+materialise the snapshot as a real read-only temp file the first time a child
+needs the descriptor, converting the `InputSrc::Bytes` to an `InputSrc::File` at
+the same offset — which is what bash does from the start.
+
+**Tests.** `tests/corpus/a-std-fd-bound-to-a-read-only-source.sh` gained an
+external section — `1<in`, `2<in`, a here-string, a dup, a persistent `exec`, a
+child that reads and then fails to pass it on, and a `1<in >out` control. The
+external shapes were previously named in that case's header as deliberately
+absent. The case fails without the fix.
+
+### TD-OILS-EXTERNAL-ARGV0-IS-THE-RESOLVED-PATH. A child is told it is `/usr/bin/sh`, not `sh` — 2026-08-06 — OPEN (host-blocked)
+
+**Where:** `userspace/oils/src/interp.rs` — the spawn path, which builds
+`PCommand::new(resolved_path)`.
+
+**What.** bash `execve`s the resolved path but passes the *word* as `argv[0]`,
+so a child names itself the way the script wrote it. osh passes the resolved
+path, and every diagnostic a child emits about itself differs:
+
+```text
+$ sh -c 'echo argv0=$0'
+bash: argv0=sh
+osh : argv0=/usr/bin/sh
+
+$ sh -c 'echo W' 1<in        # the child's own write error
+bash: sh: line 1: echo: write error: Bad file descriptor
+osh : /usr/bin/sh: line 1: echo: write error: Bad file descriptor
+```
+
+**Why not now.** Windows has no `argv[0]` separate from the program: a process's
+command line *is* its argv, and `std::process::Command` writes the program path
+into it. Unix's `CommandExt::arg0` has no Windows counterpart, and
+`raw_arg` appends arguments rather than replacing the zeroth. Setting it would
+mean building the command line by hand and spawning through `CreateProcessW`
+with a separate `lpApplicationName` — real platform code for a host that is not
+the target.
+
+**Proper fix.** On the SlateOS target, the spawn message carries argv itself and
+`argv[0]` is simply the word. If the host spelling starts blocking corpus cases
+before then, the Windows path is `lpApplicationName` = resolved path,
+`lpCommandLine` = the word plus the arguments, quoted per `CommandLineToArgvW`.
+
+**Found by** extending `a-std-fd-bound-to-a-read-only-source.sh` to external
+commands: the statuses matched but the children's diagnostics did not, so every
+external probe there discards fd 2 and compares the status.
+
 ### TD-OILS-PROMPT-COMMAND-NUMBER-AND-SHELL-NAME. `\#` never left 1, and `\s` answered with `$0` — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::prompt_decode`'s `'#'` and

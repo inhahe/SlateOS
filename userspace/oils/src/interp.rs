@@ -2282,12 +2282,25 @@ fn child_input(c: &InputFd) -> ChildIn {
 /// exists to avoid: the bytes would be swallowed and the child would exit 0
 /// where bash's exits 1.
 ///
-/// `Stdio::null()` is the fallback for the cases with no OS object to hand over
-/// — a here-document's byte snapshot, a directory, a source already closed, or a
-/// handle the host declines to duplicate. It is wrong in the same direction, but
-/// there is nothing else to give: a portable API offers no way to forge a
-/// descriptor that fails writes. Those are also the rare shapes; the ordinary
-/// `2>&3` under an `exec 3< file` is a real file and takes the first path.
+/// A byte snapshot — a here-document or here-string — has no OS object to hand
+/// over, so one is made: a pipe, with the snapshot's remaining bytes fed into
+/// the write end and the *read* end given to the child. That reproduces both
+/// halves of what bash's child sees, because bash spills a here-document to a
+/// temporary file and opens it read-only: a write down the descriptor fails
+/// (`EBADF` for a pipe's read end, as for a read-only file), and a child that
+/// reads it instead — `cat <&1` — gets the document's text.
+///
+/// The bytes are *copied*, not consumed: the shell's own cursor does not move.
+/// bash shares the offset, so a child that really read the descriptor would
+/// leave the shell less to read; but the child usually only writes, and
+/// consuming on its behalf would empty an `exec 3<<HD` for the shell's own later
+/// `read <&3`, which is the far likelier script.
+///
+/// `Stdio::null()` remains the fallback for the shapes that have neither an OS
+/// object nor bytes — a directory, a source already closed, a handle the host
+/// declines to duplicate. It is still wrong in the same direction, and
+/// TD-OILS-A-CHILD-GIVEN-A-WRITE-PROOF-FD-CAN-STILL-WRITE covers giving those a
+/// closed descriptor instead.
 fn child_read_only_out(src: &ReadOnlySrc) -> Stdio {
     let Some(c) = src else {
         return Stdio::null();
@@ -2295,9 +2308,25 @@ fn child_read_only_out(src: &ReadOnlySrc) -> Stdio {
     let mut guard = lock_input(c);
     match &mut *guard {
         InputSrc::File(f) => f.share().map_or_else(|_| Stdio::null(), Stdio::from),
-        InputSrc::Bytes(_) | InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => {
-            Stdio::null()
+        InputSrc::Bytes(cur) => {
+            let pos = usize::try_from(cur.position()).unwrap_or(usize::MAX);
+            let rest = cur.get_ref().get(pos..).unwrap_or_default().to_vec();
+            match io::pipe() {
+                Ok((r, mut w)) => {
+                    std::thread::spawn(move || {
+                        // Nobody may ever read this: fd 1 being write-proof is
+                        // the point, and the child's write is what fails. The
+                        // resulting `BrokenPipe` just ends the thread.
+                        let _ = w.write_all(&rest);
+                    });
+                    Stdio::from(r)
+                }
+                // No pipe to be had: fall back to the old approximation rather
+                // than fail a spawn that bash would complete.
+                Err(_) => Stdio::null(),
+            }
         }
+        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => Stdio::null(),
     }
 }
 
@@ -19530,7 +19559,18 @@ impl Shell {
                     }
                 }
                 None => {
-                    if redir.stdout_to_stderr {
+                    if redir.stdout_is_read_only() {
+                        // `cmd 1< file` / `cmd 1<<HD`: an *input* redirect aimed
+                        // at fd 1. The descriptor is open, so the redirect
+                        // succeeds and the command runs; what has no write half
+                        // is fd 1 itself, and it is the child's own write that
+                        // fails. The shell's builtins already answered such a
+                        // write with `EBADF` (`write_to_write_fd`); a child has
+                        // to be handed the descriptor to answer for itself, or
+                        // it would inherit the shell's terminal and print there
+                        // — which is what osh did.
+                        cmd.stdout(child_read_only_out(&redir.stdout_read));
+                    } else if redir.stdout_to_stderr {
                         // `1>&2` and fd 2 is not a file: send fd 1 to the current
                         // stderr sink (an enclosing compound `2>` redirect, or the
                         // shell's real stderr).
@@ -19659,6 +19699,11 @@ impl Shell {
             // would let the write *succeed*, and that is visible in the status:
             // `sh -c 'echo E >&2' 2>&-` exits 1 in bash and would exit 0 here.
             closed.stderr = true;
+        } else if redir.stderr_is_read_only() {
+            // `cmd 2< file` / `cmd 2<<HD`: fd 2 for the same reason fd 1 has one
+            // above — the descriptor is open and has no write half, so the
+            // child's diagnostics fail to go out and its status says so.
+            cmd.stderr(child_read_only_out(&redir.stderr_read));
         } else if let Some(n) = redir.stderr_to_fd {
             // `cmd 2>&N` (N ≥ 3): the child's fd 2 is a user-space write fd —
             // piped and drained when that fd names a capture, as for fd 1 above.

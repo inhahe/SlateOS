@@ -1,6 +1,18 @@
 add to roadmap-detailed to port libreoffice
+  [DONE 2026-08-06 — roadmap-detailed.md §4.7 "Port LibreOffice (office suite —
+   Writer/Calc/Impress/Draw; ~10M lines C++, MPL-2.0)", incl. the VCL-backend
+   strategy (a new backend for our toolkit, not a fork), dependency
+   prerequisites, gbuild notes, and the Linux-compat-layer interim option.]
 
-when it's done fixing fastpy, do the speed benchmarks again
+add to roadmap-detailed to provide a function for program profilers to see how long something took in terms of time divided by actual scheduling time the process got rather than absolute nanoseconds. especially useful for profiling while the cpu is under heavy use.
+  [DONE 2026-08-06 — roadmap-detailed.md §1.5 `debug.profile` → "Scheduling-normalized
+   timing" (the profiler-facing API: wall + granted-CPU + efficiency ratio,
+   preemption/migration counts, blocked-vs-preempted split, syscall-free fast path
+   via a per-thread shared page, ungated for self-measurement), backed by a new
+   §1.3 "CPU-time accounting (per-thread / per-process)" for the scheduler-side
+   counters it reads.]
+
+do the speed benchmarks on fastpy again since OS had to do some fixes.
 
 tell opus in OS:
 I told Fable 5 to optimize fastpy, so you may want to re-port whatever's necessary to assimilate the optimizations. Here's what Fable 5 said:

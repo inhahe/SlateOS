@@ -341,6 +341,32 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 - [x] Benchmark: pick_next_task must be O(1) or O(log n), never O(n)
 - [x] Benchmark: context switch target < 5us (Linux: 1-3us) — measured 67ns WHPX, 398ns TCG
 
+#### CPU-time accounting (per-thread / per-process)
+
+_The scheduler is the only component that knows how much CPU a thread actually
+received; every consumer of that number (profilers, Process Explorer, resource
+attribution, reservations) depends on it being maintained here rather than
+reconstructed from sampling. Keeping it in the scheduler also makes it exact —
+accumulated at each dispatch/preempt boundary, not estimated._
+
+- [ ] Accumulate per-thread **granted CPU time** at every context-switch boundary
+  (on-CPU → off-CPU), summed per-process; separate **user** and **kernel**
+  components as the syscall entry/exit path already delimits them.
+- [ ] Accumulate the complementary off-CPU time split two ways — **blocked**
+  (waiting on I/O, a lock, IPC, a timer) vs. **runnable-but-preempted** (ready,
+  but another task held the CPU) — since the two have completely different fixes
+  and cannot be told apart after the fact.
+- [ ] Count **involuntary preemptions** and **CPU migrations** per thread, for
+  consumers that need to know whether a cycle-counter delta spanning the region
+  is trustworthy.
+- [ ] Publish the running thread's counters in a per-thread shared page so
+  userspace can read them without a syscall (the profiler fast path, §1.5
+  `debug.profile` "scheduling-normalized timing"); a syscall provides the exact,
+  preemption-safe read and access to *other* threads/processes.
+- [ ] Consumers to wire up: the scheduling-normalized profiler API (§1.5),
+  Process Explorer's per-process CPU columns and resource attribution (§4.3), and
+  CPU-bandwidth reservation accounting (below).
+
 #### Guaranteed Resource Headroom for Interactive / Critical Processes
 _Goal: regular desktop use (compositor, window manager, input handling, shell,
 foreground app) never hangs, stalls, or feels sluggish because a runaway or
@@ -605,6 +631,46 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
   - [ ] Syscall timing
   - [ ] Lock contention timing
   - [ ] Per-function CPU sampling (via hardware perf counters)
+  - [ ] **Scheduling-normalized timing: measure a region in CPU time actually
+    received, not in wall-clock nanoseconds.** A profiler that times a region
+    with a wall clock is really measuring "how contended was the machine while I
+    ran", which makes results unreproducible the moment anything else runs — the
+    same function "takes" 3× longer during a parallel build than on an idle
+    desktop, and a real micro-optimization disappears into scheduling noise.
+    Provide a first-class timing primitive that divides the scheduler out: the OS
+    reports how much CPU time the measuring thread/process was *actually granted*
+    between two points, so a region's cost is expressed in time of execution
+    rather than time of elapsed reality. Shape:
+    - [ ] **Per-thread and per-process granted-CPU-time counters** maintained by
+      the scheduler (§1.3 "CPU-time accounting"), readable cheaply — the fast path
+      must not be a full syscall; publish the running thread's accumulated CPU
+      time in a per-thread shared page (same mechanism as vDSO-style clock reads)
+      so a profiler samples it with a plain load, falling back to a syscall only
+      when the value must be exact across a preemption.
+    - [ ] **Both numbers, always.** Every measurement returns *wall time*,
+      *granted CPU time*, and the derived **scheduling efficiency** (`cpu / wall`;
+      1.0 = never preempted). Neither alone is enough: CPU time is the
+      reproducible cost of the code, wall time is what the user feels, and the
+      ratio is the diagnostic that says which one you are looking at — a region at
+      efficiency 0.2 is not slow, it is starved, and the fix is
+      priority/reservation (§1.3 headroom), not micro-optimization.
+    - [ ] **Involuntary-preemption and migration counts** reported alongside the
+      times, so the profiler can flag a sample whose CPU time is trustworthy but
+      whose cycle-counter delta is not (thread migrated across cores mid-region,
+      or hit a frequency change) and discard it rather than silently averaging in
+      garbage.
+    - [ ] **Distinguish "not scheduled" from "blocked".** Time off-CPU waiting on
+      I/O, a lock, or IPC is not the same as time off-CPU because something else
+      was running. Report the two separately (off-CPU-blocked vs.
+      off-CPU-runnable-but-preempted) so "my program is slow" resolves to *I/O
+      bound* vs. *CPU starved* vs. *actually expensive* without a second tool.
+    - [ ] Exposed to userspace profilers through the language-neutral timing API
+      (§4.8 profiler tooling) and used by our own benchmark harness, so benchmark
+      numbers stop depending on what else the machine happens to be doing.
+    - [ ] **Not capability-gated for self-measurement.** A process reading *its
+      own* granted-CPU time needs no `debug.*` capability — that is the ordinary
+      case (a program profiling itself, a benchmark harness timing its own loops).
+      `debug.profile` gates reading *another* process's counters.
 
 #### Crash Dumps & Postmortem Debugging
 

@@ -411,14 +411,14 @@ handed to it being plain.
 
 **Corpus:** `a-nameref-base-is-followed-when-the-reference-is-read.sh`.
 
-Three divergences found alongside this one have their own entries, and one is
-still open. The *store* side deliberately does not follow the base at all —
+Three divergences found alongside this one have their own entries, and all
+three have since been fixed. The *store* side deliberately does not follow the
+base at all —
 TD-OILS-A-NAMEREF-BASE-IS-FOLLOWED-ON-A-WRITE-WHERE-BASH-BINDS-THE-BASE-ITSELF
-(since fixed) — while `unset` follows it as the read does, and osh did neither:
+— while `unset` follows it as the read does, and osh did neither:
 TD-OILS-UNSET-THROUGH-A-REFERENCE-TO-AN-ELEMENT-UNSETS-THE-BASE-INSTEAD. The
 third is unrelated to the base:
-TD-OILS-A-REFERENCE-TO-AN-ELEMENT-IS-EXEMPT-FROM-SET-U-UNBRACED
-(since fixed).
+TD-OILS-A-REFERENCE-TO-AN-ELEMENT-IS-EXEMPT-FROM-SET-U-UNBRACED.
 
 ### TD-OILS-A-NAMEREF-BASE-IS-FOLLOWED-ON-A-WRITE-WHERE-BASH-BINDS-THE-BASE-ITSELF. `declare -n base=n; declare -n r='base[0]'; r=V` wrote `n[0]` where bash warns, strips `base`, and makes *it* the array — 2026-08-05 — ✅ **FIXED 2026-08-05**
 
@@ -513,10 +513,9 @@ them, so `${V-DEF}` is still `DEF`.
 
 **Corpus:** `a-reference-to-an-element-is-exempt-from-set-u-unbraced.sh`.
 
-### TD-OILS-UNSET-THROUGH-A-REFERENCE-TO-AN-ELEMENT-UNSETS-THE-BASE-INSTEAD. `declare -n base=n; declare -n r='base[0]'; unset -v r` deleted `base` where bash removes `n[0]` — 2026-08-05 — OPEN
+### TD-OILS-UNSET-THROUGH-A-REFERENCE-TO-AN-ELEMENT-UNSETS-THE-BASE-INSTEAD. `declare -n base=n; declare -n r='base[0]'; unset -v r` deleted `base` where bash removes `n[0]` — 2026-08-05 — ✅ **FIXED 2026-08-05**
 
-**Where:** `userspace/oils/src/interp.rs` — `unset`'s handling of a name that
-resolves to an element (around `Shell::nameref_elem_target`'s use there).
+**Where:** `userspace/oils/src/interp.rs` — `builtin_unset`'s reference branch.
 
 **What.** `unset` on a reference designating an element removes the *element*,
 and bash follows the base through a nameref chain of its own to find it — the
@@ -526,22 +525,102 @@ TD-OILS-A-NAMEREF-BASE-IS-FOLLOWED-ON-A-WRITE-WHERE-BASH-BINDS-THE-BASE-ITSELF).
 Measured with `n=(a b c)`:
 
 ```text
-                                      bash                   osh
+                                      bash                   osh (before)
 declare -n base=n; declare -n r='base[0]'
   unset -v r                          `declare -n base="n"`  `base` deleted
                                       `declare -a n=([1]="b" `n` untouched
                                       [2]="c")`
 ```
 
-osh subscripts the *unresolved* base, which for a nameref means element 0 of a
+osh subscripted the *unresolved* base, which for a nameref means element 0 of a
 scalar whose value is the target's name — and unsetting element 0 of a scalar
-deletes the variable, so `base` disappears entirely.
+deletes the variable, so `base` disappeared entirely.
 
-**Proper fix.** Resolve the base through the chain before the element is
-removed, exactly as `Shell::ref_target_value` now does on the read side.
+**Fixed 2026-08-05.** The branch resolves the base with
+`Shell::resolve_ref_use` before removing anything. **One walk**, and measured: a
+circular base is reported once, removes nothing, and is not an error — unlike
+the read side, which resolves twice because it looks the name up again to fetch
+the value. A base that resolves nowhere (unset, or designating an element
+itself) removes nothing and is not an error either.
 
-**Impact.** Narrow — it needs a reference whose base is itself a reference —
-but it destroys the wrong variable outright.
+The rest follows from having the right name: an associative base removes by
+key, a scalar base is removed whole at index 0, and `base[@]` empties the array
+it found. A subscript the writer *wrote* (`unset 'base[0]'`) already followed
+the base and is untouched.
+
+**Corpus:** `unset-through-a-reference-to-an-element-follows-the-base.sh`.
+
+### TD-OILS-A-DEFAULTING-ASSIGNMENT-THROUGH-A-REFERENCE-TO-AN-ELEMENT-IS-REFUSED. `declare -n r='n[0]'; echo "${r:=D}"` said `` `n[0]': not a valid identifier `` where bash stores `D` in `n[0]` — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::assign_elem`, the
+`target.as_name()` refusal.
+
+**What.** `${name:=word}` writes through a nameref like any other store, and a
+reference designating an **element** is a perfectly good destination for it.
+osh refuses every target carrying a subscript, whether the subscript came from
+the reference or was written beside it — but only the second is a subscript on
+a subscript. Measured:
+
+```text
+                                       bash                osh
+n=(); declare -n r='n[0]'
+  echo "[${r:=D}]"                     `[D]`               `` `n[0]': not a
+                                       `declare -a n=      valid identifier ``
+                                       ([0]="D")`
+n=(a); declare -n r='n[0]'
+  echo "[${r:=D}]"                     `[a]`, no store     the same — agreed
+declare -a k=(); declare -n g='k[*]'
+  echo "[${g:=v}]"                     `k[*]: bad array    the same — agreed
+                                       subscript`
+n=(a b c); declare -n r='n[0]'
+  echo "[${r[1]:=D}]"                  refused             the same — agreed
+```
+
+The present-element case agrees only because nothing is ever stored there: the
+refusal is unreachable when the element already has a value.
+
+**Proper fix.** `assign_elem` reaches its refusal through `RefTarget::as_name`,
+which answers `None` for any subscripted target. Split the two: with no
+subscript of its own, a subscripted target is the element destination
+`base[sub]` — after the base is bound as written, see
+`Shell::unreference_elem_base` — and only a target carrying *both* is refused.
+
+**Impact.** `${ref:=default}` silently fails to initialise wherever `ref`
+designates an element, and the diagnostic blames a name the script never wrote.
+
+### TD-OILS-UNSET-THROUGH-A-REFERENCE-TO-AN-ELEMENT-CONSULTS-READONLY. `n=(a b c); readonly n; declare -n r='n[0]'; unset -v r` refused where bash removes the element — 2026-08-05 — ✅ **FIXED 2026-08-05**
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::unset_element_unchecked`
+(new), and `Shell::unset_element` reduced to the guard in front of it.
+
+**What.** bash consults the readonly guard for a subscript the *writer wrote*
+and not for one that arrived **through a reference**: `unset 'n[0]'` on a
+readonly `n` is refused, and `declare -n r='n[0]'; unset -v r` performs the very
+same removal. Measured with `n=(a b c)` and `readonly n`:
+
+```text
+                                       bash                     osh (before)
+unset -v 'n[0]'                        `unset: n: cannot unset:  the same — agreed
+                                       readonly variable`, s=1
+declare -n r=n; unset -v 'r[0]'        the same refusal          the same — agreed
+declare -n r=n; unset -v r             the same refusal          the same — agreed
+declare -n r='n[0]'; unset -v r        s=0, `declare -ar n=      the refusal
+                                       ([1]="b" [2]="c")`
+declare -n r='n[@]'; unset -v r        s=0, `declare -ar n=()`   the refusal
+s=hi; readonly s
+  declare -n r='s[0]'; unset -v r      s=0, `s` gone             the refusal
+```
+
+A readonly *scalar* is removed outright this way, which is as far from the
+guard as it gets. bash's `unset_builtin` reaches `unbind_array_element` directly
+for a nameref whose value carries a subscript, and nothing on the way asks about
+the attribute.
+
+**Fixed 2026-08-05.** `unset_element` is now the guard plus
+`unset_element_unchecked`, and the reference branch calls the latter. The
+written-subscript path keeps both halves, so nothing else moves.
+
+**Corpus:** `unset-through-a-reference-to-an-element-follows-the-base.sh`.
 
 ### TD-OILS-A-COMMENT-INSIDE-ARITHMETIC-CAN-EAT-ITS-OWN-CLOSER. `$(( #5 ))` is not an arithmetic error at all — bash's second scan of the word honours `#`, so the comment swallows the `))` — 2026-08-04 — ✅ FIXED 2026-08-04
 

@@ -37717,7 +37717,24 @@ impl Shell {
             // the entry it actually named.
             if let Some(sub) = target.as_ref().and_then(|t| t.sub.clone()) {
                 let base = target.as_ref().map_or_else(String::new, |t| t.base.clone());
-                if !self.unset_element(&base, &sub) {
+                // The base is a **name**, and is followed through a nameref
+                // chain of its own before the subscript applies to anything:
+                // `unset` reaches the array the way a *read* does (see
+                // [`Self::ref_target_value`]), not the way a store does, which
+                // binds the base where it is written. One walk — the name is
+                // resolved once — so a circular base is reported once, removes
+                // nothing, and is not an error; nor is a base that resolves
+                // nowhere, or that designates an element itself and so leaves
+                // this subscript nothing to apply to.
+                let Some(base) = self.resolve_ref_use(&base).and_then(RefTarget::into_name) else {
+                    continue;
+                };
+                // Unchecked: bash consults the readonly guard for a subscript
+                // the writer *wrote* and not for one arriving through a
+                // reference. `unset 'n[0]'` on a readonly `n` is refused, and
+                // `declare -n r='n[0]'; unset -v r` performs the very same
+                // removal — a readonly *scalar* is removed outright this way.
+                if !self.unset_element_unchecked(&base, &sub) {
                     status = 1;
                 }
                 continue;
@@ -37991,6 +38008,20 @@ impl Shell {
             self.perrln(&format!("unset: {name}: cannot unset: readonly variable"));
             return false;
         }
+        self.unset_element_unchecked(name, sub_src)
+    }
+
+    /// [`Self::unset_element`] without the readonly guard, for a subscript that
+    /// arrived **through a reference** rather than being written by the caller.
+    ///
+    /// bash consults the guard only on the written form. `unset 'n[0]'` on a
+    /// readonly `n` is refused and `declare -n r='n[0]'; unset -v r` performs
+    /// the very same removal — as does `declare -n r='n[@]'` on the whole array,
+    /// and a reference to element 0 of a readonly *scalar*, which removes the
+    /// variable outright. The `unset_builtin` path for a nameref whose value
+    /// carries a subscript reaches `unbind_array_element` directly, and nothing
+    /// on the way asks about the attribute.
+    fn unset_element_unchecked(&mut self, name: &str, sub_src: BStr<'_>) -> bool {
         // An unset variable is not probed at all: bash never even evaluates the
         // subscript, so `unset 'nosuch[x y]'` is silently fine.
         let is_assoc = self.assoc.contains_key(name);

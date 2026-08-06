@@ -36855,15 +36855,51 @@ impl Shell {
             // `self.arrays` — which looks exactly like silent data loss to a
             // script. Reject with bash's message and status 1, leaving the
             // variable untouched (`unset` first is the way to change kind).
-            if let Some(from) = self.array_kind_conflict(&target, assoc, indexed) {
-                let (from_kind, to_kind) = from;
+            if let Some((from_kind, to_kind)) = self.array_kind_conflict(&target, assoc, indexed) {
                 // The *literal* form is diagnosed by bash's compound-assignment
-                // machinery, not by the builtin, so it carries no `declare:` tag
-                // (unlike the bare-name form in `builtin_declare`) and it
-                // discards the rest of the parse unit rather than merely failing.
-                self.perrln(&format!("{}: cannot convert {from_kind} to {to_kind} array", a.name));
+                // machinery, which is why the first line carries no `declare:`
+                // tag (unlike the bare-name form in `builtin_declare`). What
+                // follows it depends on whether there is a function frame
+                // around the command, which is bash's `variable_context`:
+                //
+                //   * At top level the machinery's failure ends the parse unit,
+                //     so the builtin never runs and never speaks its half —
+                //     one line, and nothing after the command on that line.
+                //   * Inside a function it is an ordinary failure: the builtin
+                //     runs, is handed the same operand, and refuses it again
+                //     with its own tag. The command returns 1 and the function
+                //     carries on. The second half is held on the operand
+                //     rather than spoken here, for the same reason the
+                //     `noassign` and readonly refusals above hold theirs:
+                //     bash prints every machinery half before any builtin one.
+                //
+                // The machinery's half names the running function when the
+                // binding it would make is a *global* one — `declare -g` from
+                // inside a function. A declaration binding a local is
+                // untagged, as at top level. (This is the opposite way round
+                // from the readonly refusal above, which is tagged and only
+                // ever fires on a local; the two come from different places in
+                // bash.)
+                let msg: Str = bfmt![
+                    a.name.as_bytes(),
+                    format!(": cannot convert {from_kind} to {to_kind} array")
+                ];
+                let top = self.local_frames.is_empty();
+                let tag: Str = if make_local || top {
+                    Vec::new()
+                } else {
+                    bfmt![&self.fn_stack.last().cloned().unwrap_or_default(), b": "]
+                };
+                self.berrln(&bfmt![self.err_prefix(), &tag, &msg]);
                 self.last_status = 1;
-                return Err(Flow::Discard);
+                if top {
+                    return Err(Flow::Discard);
+                }
+                let held = bfmt![self.err_prefix(), cmd, b": ", &msg];
+                if let Some(e) = bound.last_mut() {
+                    e.refused_local = Some(held);
+                }
+                continue;
             }
             if assoc {
                 self.array_kind_apply(&target, true);

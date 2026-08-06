@@ -19661,7 +19661,11 @@ impl Shell {
                 }
             }
         } else {
-            match self.stderr_stack.last() {
+            // Through [`Shell::stderr_target_at`] rather than the raw stack: an
+            // `exec 2>…` that ran with an enclosing stderr redirect already in
+            // force is the later word on fd 2 and shadows it, for a child's
+            // fd 2 exactly as for the shell's own diagnostics.
+            match self.stderr_target_at(self.stderr_stack.len()) {
                 None => {
                     // Base fd 2: a persistent `exec 2> file` target, else inherit.
                     match &self.exec_stderr {
@@ -45172,7 +45176,11 @@ impl Shell {
     /// as well as fd 1, which is what keeps `x=$( { sleep 2 >/dev/null & } 2>&1 )`
     /// waiting even though the job redirected fd 1 away. See [`job_holds_sink`].
     fn stderr_aliases_capture(&self, out: &Out) -> bool {
-        match (self.stderr_stack.last(), out) {
+        // Through [`Shell::stderr_target_at`], so that an `exec 2>…` which ran
+        // with the `2>&1` already in force is seen to have rebound fd 2 away
+        // from the capture: `x=$( { exec 2>/dev/null; sleep 2 & } 2>&1 )`
+        // returns at once, where without the `exec` it waits for the job.
+        match (self.stderr_target_at(self.stderr_stack.len()), out) {
             (Some(StderrTarget::Buffer(b)), Out::Capture(sink)) => b.is(sink),
             _ => false,
         }
@@ -45214,7 +45222,11 @@ impl Shell {
     }
 
     fn child_stdio_for_stderr(&self) -> Result<ChildOut, String> {
-        match self.stderr_stack.last() {
+        // Through [`Shell::stderr_target_at`] rather than the raw stack, so an
+        // `exec 2>…` that ran with an enclosing stderr redirect already in
+        // force shadows it here exactly as it does for the shell's own
+        // diagnostics — it is the later word on fd 2.
+        match self.stderr_target_at(self.stderr_stack.len()) {
             // Base fd 2: a persistent `exec 2> file` target if one is set, else
             // a *dup of fd 2* — not `Stdio::inherit()`, because this descriptor
             // is about to become the child's fd **1** (`cmd >&2`), and

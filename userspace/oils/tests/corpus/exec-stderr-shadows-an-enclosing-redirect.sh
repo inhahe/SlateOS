@@ -18,6 +18,13 @@
 # command writes where it would have written had the `exec` never run — and a
 # sourced script's `exec 2>…` likewise stops at the `.` command's own redirect.
 #
+# None of that is about *diagnostics*: it is about which description fd 2 names,
+# so it must hold for everything fd 2 reaches. An external child is handed fd 2
+# rather than writing through it, and a `2>&1` inside a `$( … )` is *held* by
+# fd 2 for as long as a background job has it — both must read the same order,
+# or the `exec` appears to work for the shell's own messages and to do nothing
+# for anyone else's.
+#
 # Every probe runs in a subshell (or a capture) so a persistent redirect cannot
 # reach the next one. Stderr is collected and replayed at the end so it can be
 # compared in a fixed place; nothing here prints a pid, so it is replayed
@@ -46,6 +53,32 @@ printf 'exec 2>g1\ncd /nosuchdir\n' > s1.sh
 echo "  g1=[$(cat g1)]"
 echo "  e1=[$(cat e1)]"
 echo "  e2=[$(cat e2)]"
+
+echo "=== an external child's fd 2 reads the order the same way"
+( { exec 2>h1; sh -c 'echo E >&2'; } 2>h2 );  echo "  rc=$?"
+echo "  h1=[$(cat h1)] h2=[$(cat h2)]"
+# …and so does a child's `1>&2`, which is a dup of whichever fd 2 is in force.
+( { exec 2>h3; sh -c 'echo O' >&2; } 2>h4 );  echo "  dup rc=$?"
+echo "  h3=[$(cat h3)] h4=[$(cat h4)]"
+# An `exec 2>&-` shadows an enclosing redirect too, so the child is handed the
+# absence rather than the sink — and its own write to a missing fd 2 fails.
+( { exec 2>&-; sh -c 'echo E >&2'; } 2>h5 );  echo "  closed rc=$?"
+echo "  h5=[$(cat h5)]"
+# Written the other way round the group is the later word, as above.
+( exec 2>h6; { sh -c 'echo E >&2'; } 2>h7 );  echo "  reversed rc=$?"
+echo "  h6=[$(cat h6)] h7=[$(cat h7)]"
+
+echo "=== and a shadowed 2>&1 is no longer held by fd 2"
+# A `$( … )` ends when nothing still holds its capture. `{ …; } 2>&1` puts the
+# capture on fd 2, so a background job inheriting fd 2 holds it even after
+# redirecting fd 1 away — but an `exec 2>…` took fd 2 off the capture first,
+# and then the substitution returns at once. The job is given a lifetime
+# comfortably longer than a process spawn so which of the two happened is not
+# in doubt (the same reasoning as jobs-listing.sh).
+( v=$( { { sleep 0.6; echo late > n1; } >/dev/null & } 2>&1 )
+  echo "  held=[$(cat n1 2>/dev/null)]"; wait )
+( v=$( { exec 2>/dev/null; { sleep 0.6; echo late > n2; } >/dev/null & } 2>&1 )
+  echo "  shadowed=[$(cat n2 2>/dev/null)]"; wait )
 
 exec 2>&4 4>&-
 echo "=== what went to stderr"

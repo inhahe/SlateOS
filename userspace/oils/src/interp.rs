@@ -43200,7 +43200,15 @@ impl Shell {
                 // (see [`Shell::compgen_user_names`]).
                 "user" => cands.extend(self.compgen_user_names()),
                 "group" => cands.extend(self.compgen_group_names()),
-                // `binding` needs a live line editor, which osh has not got.
+                // Readline's funmap, which is `rl_funmap_names()` — the same
+                // list `bind -l` prints, already sorted, and available without a
+                // live line editor: bash answers this in a script, where it has
+                // told `bind -l` on the line above that line editing is not
+                // enabled. The names are readline's compiled-in ones, so a
+                // shell that cannot *run* a binding still knows them all.
+                "binding" => {
+                    cands.extend(str_bytes(crate::bind_tables::FUNCTION_NAMES.iter().copied()));
+                }
                 _ => {}
             }
         }
@@ -65462,6 +65470,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             out.lines().take(6).collect::<Vec<_>>(),
             vec!["do", "done", "dofn", "declare", "dirs", "disown"]
+        );
+    }
+
+    #[test]
+    fn the_binding_action_is_readlines_funmap() {
+        // `rl_funmap_names()` is a compiled-in table, so bash answers this in a
+        // script — no line editor required — with exactly what `bind -l` prints,
+        // in the same sorted order.
+        assert_eq!(
+            run("compgen -A binding yank").0,
+            "yank\nyank-last-arg\nyank-nth-arg\nyank-pop\n"
+        );
+        assert_eq!(
+            run("compgen -A binding vi-yank-").0,
+            "vi-yank-arg\nvi-yank-pop\nvi-yank-to\n"
+        );
+        assert_eq!(run("compgen -A binding zzz").0, "");
+        assert_eq!(run("compgen -A binding zzz").1, 1);
+        // The whole list is the whole list, warning and all.
+        let (names, _) = run("compgen -A binding");
+        assert_eq!(names.lines().count(), 174);
+        assert_eq!(names, run("bind -l 2>/dev/null").0);
+        // `binding` sorts before `builtin` in the action table, so its names
+        // come first whichever way round the two are written.
+        assert_eq!(
+            run("compgen -A builtin -A binding br").0,
+            "bracketed-paste-begin\nbreak\n"
         );
     }
 

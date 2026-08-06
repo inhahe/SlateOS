@@ -28,9 +28,10 @@
 # `<in <&-` does not. Both spellings of the operator name the same descriptor —
 # `0>&-` closes fd 0 exactly as `0<&-` does.
 #
-# Deliberately absent: an external `cmd <&-`, where bash's child fails on its
-# own missing descriptor and osh hands it an empty stdin instead. See
-# TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP.
+# An *external* `cmd <&-` is the last section: there the shell has nothing to
+# report, because the failure is the child's own. bash forks and leaves the
+# child without an fd 0; osh spawns and arranges the same absence, so the two
+# children fail alike. See TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0.
 #
 # Every persistent probe runs in a subshell so the close cannot reach the next
 # one. Stderr is collected and replayed at the end so it can be compared in a
@@ -84,3 +85,29 @@ echo "=== fd 1 is untouched by any of it"
 exec 2>&4 4>&-
 echo "=== what went to stderr"
 cat err
+
+# The child's own diagnostic names the command as it was started, and on this
+# host that is the resolved path rather than the word (TD-OILS-HOST-ARGV0, a
+# `std::process` limitation, not a target one), so the leading directories are
+# filtered off. Everything goes down one pipe so write order is one order.
+{
+  echo "=== an external child is given the closed descriptor, not an empty one"
+  ( exec 0<&-; cat; echo "  exec rc=$?" )
+  ( cat <&-; echo "  cmd rc=$?" )
+  ( cat 0<&-; echo "  0<&- rc=$?" )
+  ( cat 0>&-; echo "  0>&- rc=$?" )
+
+  echo "=== the last mention of fd 0 wins there too"
+  ( cat <&- <in; echo "  reopen rc=$?" )
+  ( cat <in <&-; echo "  close-after rc=$?" )
+  ( exec 0<&-; exec 0<in; cat; echo "  exec reopen rc=$?" )
+
+  echo "=== a pipeline head with no fd 0"
+  cat <&- | tr a-z A-Z; echo "  head rc=${PIPESTATUS[0]}"
+
+  echo "=== a child that never reads is untroubled"
+  ( exec 0<&-; echo E; echo "  echo rc=$?" )
+
+  echo "=== and the shell's own fd 0 is left as it was"
+  printf 'p\n' | { cat <&-; cat; echo "  after rc=$?"; }
+} 2>&1 | sed 's#^[^:]*/##'

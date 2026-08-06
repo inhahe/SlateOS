@@ -105,7 +105,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, IsTerminal, Read, Seek, Write};
 use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, RwLock, mpsc};
 
 use crate::arith::{self, VarLookup};
 use crate::assoc::{AssocArray, TableShape};
@@ -1275,11 +1275,194 @@ fn spawn_resolved(
     pc: &mut PCommand,
     word: BStr<'_>,
     resolved: Option<&std::path::Path>,
+    closed: ClosedStd,
 ) -> std::io::Result<std::process::Child> {
     if resolved.is_none() && !word.contains(&b'/') && !word.contains(&b'\\') {
         return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
     }
+    spawn_with_closed_std(pc, closed)
+}
+
+/// Which of a child's standard descriptors are handed over **closed** — not
+/// replaced by an empty stream, but genuinely absent, so that the child's own
+/// read or write fails with `EBADF` the way bash's does.
+///
+/// bash forks, so `cat <&-` simply leaves the child without an fd 0 and `cat`
+/// fails on it: `Bad file descriptor`, status 1. osh spawns through
+/// [`PCommand`], and [`Stdio`] has no closed form — `null()` is the nearest
+/// thing and is not the same thing, being an *open* stream that reads as
+/// immediate EOF, which `cat` copies happily and exits 0 on.
+#[derive(Clone, Copy, Default)]
+struct ClosedStd {
+    stdin: bool,
+    stdout: bool,
+    stderr: bool,
+}
+
+impl ClosedStd {
+    /// No fd 0 (`cmd <&-`), the only shape the read side needs.
+    const STDIN: Self = Self { stdin: true, stdout: false, stderr: false };
+
+    /// Whether anything at all is to be closed — the fast path is every other
+    /// spawn in the shell.
+    fn any(self) -> bool {
+        self.stdin || self.stdout || self.stderr
+    }
+}
+
+/// Serialises a spawn that nulls the shell's own standard handle slots (see
+/// [`NulledStdHandles`]) against every other spawn.
+///
+/// Those slots are process-global, and osh's pipeline stages and subshells run
+/// as *threads* of one process rather than as forks — so without this a stage
+/// arranging a closed fd 0 for its own child could hand a sibling stage's
+/// child, spawning at that moment with `Stdio::inherit()`, the same closed
+/// descriptor. Ordinary spawns share the read side and so never wait on each
+/// other; only the rare closing spawn takes the write side. On unix the
+/// mechanism is a per-child `pre_exec` and needs no exclusion at all, but the
+/// lock is cheap and keeping one shape for both platforms keeps the reasoning
+/// in one place.
+static SPAWN_STD_HANDLES: RwLock<()> = RwLock::new(());
+
+/// Start `pc`, giving the child closed standard descriptors where `closed`
+/// asks for them.
+fn spawn_with_closed_std(pc: &mut PCommand, closed: ClosedStd) -> std::io::Result<Child> {
+    if !closed.any() {
+        let _shared = SPAWN_STD_HANDLES
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        return pc.spawn();
+    }
+    // The Windows mechanism works *through* inheritance, so the descriptors
+    // being closed have to be the inherited ones — whatever the caller put
+    // there (`Stdio::null()`, most likely) is exactly what must not be used.
+    if closed.stdin {
+        pc.stdin(Stdio::inherit());
+    }
+    if closed.stdout {
+        pc.stdout(Stdio::inherit());
+    }
+    if closed.stderr {
+        pc.stderr(Stdio::inherit());
+    }
+    let _exclusive = SPAWN_STD_HANDLES
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(windows)]
+    let _nulled = NulledStdHandles::new(closed);
+    #[cfg(unix)]
+    close_std_before_exec(pc, closed);
     pc.spawn()
+}
+
+/// The `STD_INPUT_HANDLE` / `STD_OUTPUT_HANDLE` / `STD_ERROR_HANDLE` slot
+/// numbers, in fd order. They are negative constants in the Windows headers
+/// (`-10`, `-11`, `-12`) passed as an unsigned parameter.
+#[cfg(windows)]
+const STD_HANDLE_SLOTS: [u32; 3] = [-10i32 as u32, -11i32 as u32, -12i32 as u32];
+
+#[cfg(windows)]
+// SAFETY: the standard kernel32 signatures. `GetStdHandle` reads the slot and
+// returns the handle already stored there — a borrowed value, not a new
+// reference, so it needs no closing. `SetStdHandle` overwrites the slot and
+// returns zero on failure, touching nothing else.
+unsafe extern "system" {
+    fn GetStdHandle(slot: u32) -> *mut core::ffi::c_void;
+    fn SetStdHandle(slot: u32, handle: *mut core::ffi::c_void) -> i32;
+}
+
+/// Nulls the shell's own standard handle slots for the length of one spawn, and
+/// puts them back when dropped.
+///
+/// A child's standard handles are the three `STARTUPINFO` fields
+/// `CreateProcess` is given, and `Stdio::inherit()` fills them from the
+/// parent's own slots — *including* when a slot holds nothing, which the
+/// library passes straight through rather than treating as an error
+/// (`sys::pal::windows::process`: "If no stdio handle is available, then
+/// propagate the null value to the child"). So emptying the slot for the length
+/// of the `CreateProcess` call is how this shell says what bash's fork says by
+/// simply not having the descriptor. Measured against the reference shell: for
+/// `( exec 0<&-; cat )` both print `cat: failed to set file descriptor
+/// text/binary mode: Bad file descriptor` and exit 1.
+///
+/// The window is the spawn call, and the shell's *own* reads through the slot
+/// are not in it: a thread can only read the ambient fd 0 when its stdin is
+/// inherited, and a thread can only reach here having redirected fd 0 away, so
+/// the two are never the same thread — and no two concurrent threads inherit
+/// fd 0 together, since a pipeline gives it to the head stage alone and a `&`
+/// job gets an empty stream instead of it.
+#[cfg(windows)]
+struct NulledStdHandles {
+    /// The slots emptied, with what was in them.
+    saved: Vec<(u32, *mut core::ffi::c_void)>,
+}
+
+#[cfg(windows)]
+impl NulledStdHandles {
+    fn new(closed: ClosedStd) -> Self {
+        let mut saved = Vec::new();
+        let [stdin_slot, stdout_slot, stderr_slot] = STD_HANDLE_SLOTS;
+        for (slot, wanted) in [
+            (stdin_slot, closed.stdin),
+            (stdout_slot, closed.stdout),
+            (stderr_slot, closed.stderr),
+        ] {
+            if !wanted {
+                continue;
+            }
+            // SAFETY: both calls take a constant slot number and a plain
+            // handle value; neither dereferences anything. The handle read
+            // back is the one the slot already held, which this process owns
+            // and which `drop` puts back unchanged.
+            unsafe {
+                saved.push((slot, GetStdHandle(slot)));
+                SetStdHandle(slot, core::ptr::null_mut());
+            }
+        }
+        Self { saved }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for NulledStdHandles {
+    fn drop(&mut self) {
+        for &(slot, handle) in &self.saved {
+            // SAFETY: as in `new` — a constant slot number and the value that
+            // slot held a moment ago, neither of them dereferenced.
+            unsafe {
+                SetStdHandle(slot, handle);
+            }
+        }
+    }
+}
+
+/// The unix half of [`ClosedStd`]: close the descriptors in the child, between
+/// the fork and the `exec`, which is what bash's own child does.
+#[cfg(unix)]
+fn close_std_before_exec(pc: &mut PCommand, closed: ClosedStd) {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+
+    let fds: Vec<i32> = [(0, closed.stdin), (1, closed.stdout), (2, closed.stderr)]
+        .into_iter()
+        .filter_map(|(fd, wanted)| wanted.then_some(fd))
+        .collect();
+    // SAFETY: the closure runs in the forked child after the standard
+    // descriptors have been set up and before `exec`. It allocates nothing and
+    // calls nothing but `close`, so it is async-signal-safe as `pre_exec`
+    // requires.
+    unsafe {
+        pc.pre_exec(move || {
+            for &fd in &fds {
+                // SAFETY: taking ownership of a standard descriptor in a child
+                // that is about to `exec` and dropping it immediately: the
+                // close is the whole point, and nothing else in this child ever
+                // uses the descriptor again.
+                drop(unsafe { OwnedFd::from_raw_fd(fd) });
+            }
+            Ok(())
+        });
+    }
 }
 
 /// The way `exec` asks for a command to be started differently from an
@@ -2019,16 +2202,10 @@ enum ChildIn {
     /// has no OS object to hand over, so the shell replays it instead; the
     /// bytes are consumed from the source, which keeps its offset honest.
     Bytes(Vec<u8>),
-    /// The descriptor is closed (`cat <&-`), so the child should have no fd 0
-    /// at all.
-    ///
-    /// Known limitation: [`Stdio`] cannot express a *missing* descriptor —
-    /// `null()` is as close as it comes — so the child sees an empty stdin
-    /// rather than `EBADF`, and `cat <&-` exits 0 where bash's `cat` exits 1
-    /// complaining about the descriptor. Handing over a genuinely closed fd 0
-    /// needs a platform-specific `pre_exec`/handle dance; the same trade is
-    /// already made for a child's closed fd 1 and fd 2. See known-issues
-    /// TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP.
+    /// The descriptor is closed (`cat <&-`), so the child has no fd 0 at all —
+    /// handed over as [`ClosedStd::STDIN`], which is a genuinely missing
+    /// descriptor rather than [`Stdio::null`]'s empty one, so the child's own
+    /// read fails the way bash's does.
     Closed,
 }
 
@@ -2051,10 +2228,11 @@ fn child_input(c: &InputFd) -> ChildIn {
             let _ = cur.read_to_end(&mut rest);
             ChildIn::Bytes(rest)
         }
-        // None of these has bytes to hand over. A write-only fd 0 is a
-        // descriptor the child would really receive and really fail to read,
-        // but handing over one that answers `EBADF` on read needs the same
-        // platform-specific dance a closed one does — see [`ChildIn::Closed`].
+        // None of these has bytes to hand over, and all three are given the
+        // child as a *closed* fd 0. That is exact for the closed one. A
+        // write-only fd 0 is a descriptor the child would really receive and
+        // really fail to read: `EBADF` either way, though a child that says so
+        // by name would name the read rather than the descriptor's absence.
         // A directory is the same trade for a different reason: the host
         // *would* give up a handle for it, but reads through that handle say
         // `Permission denied` rather than `Is a directory`, so an approximation
@@ -2074,8 +2252,8 @@ enum HeadIn {
     /// A duplicate of a real input file, sharing the shell's offset.
     File(File),
     /// No fd 0 at all — the pipeline runs under a `<&-`. An in-process stage
-    /// keeps the closure faithfully; a child gets [`ChildIn::Closed`]'s
-    /// approximation of it.
+    /// keeps the closure faithfully; a child is given it as
+    /// [`ClosedStd::STDIN`].
     Closed,
 }
 
@@ -2088,14 +2266,17 @@ impl HeadIn {
             HeadIn::Closed => StdinSrc::Fd(closed_input()),
         }
     }
-}
 
-impl From<HeadIn> for Stdio {
-    fn from(h: HeadIn) -> Stdio {
-        match h {
-            HeadIn::Pipe(r) => Stdio::from(r),
-            HeadIn::File(f) => Stdio::from(f),
-            HeadIn::Closed => Stdio::null(),
+    /// As a child's fd 0: the [`Stdio`] to put on the command, and whether the
+    /// descriptor is to be handed over closed. The pair is needed because
+    /// `Stdio` alone cannot say "closed" — see [`ClosedStd`], whose spawn
+    /// replaces the `Stdio` when it does. The `null()` below is therefore only
+    /// what a host without the mechanism would fall back to.
+    fn into_child_stdin(self) -> (Stdio, ClosedStd) {
+        match self {
+            HeadIn::Pipe(r) => (Stdio::from(r), ClosedStd::default()),
+            HeadIn::File(f) => (Stdio::from(f), ClosedStd::default()),
+            HeadIn::Closed => (Stdio::null(), ClosedStd::STDIN),
         }
     }
 }
@@ -8633,7 +8814,7 @@ impl Shell {
         // The head stage reads the pipeline's own input, which is the shell's
         // real stdin only when the pipeline is not itself nested inside another
         // (`cmd | f`, where `f`'s body is `a | b`).
-        let mut head_stdio = self.pipeline_head_stdin(stdin).map(Stdio::from);
+        let mut head_stdio = self.pipeline_head_stdin(stdin).map(HeadIn::into_child_stdin);
         // Where the *last* stage's stdout goes. `Capture` is spawned as a pipe
         // and drained below; `Pipe` hands the child a duplicate of the write
         // end, so the bytes reach the enclosing pipeline directly (no relay
@@ -8715,8 +8896,13 @@ impl Shell {
             // stdin: the first stage takes the pipeline's own input; later
             // stages read the previous pipe (or a closed/null stream if the
             // previous stage failed to start).
+            let mut closed = ClosedStd::default();
             if i == 0 {
-                pc.stdin(head_stdio.take().unwrap_or_else(Stdio::inherit));
+                let (stdio, want_closed) = head_stdio
+                    .take()
+                    .unwrap_or_else(|| (Stdio::inherit(), ClosedStd::default()));
+                pc.stdin(stdio);
+                closed = want_closed;
             } else if let Some(so) = prev_stdout.take() {
                 pc.stdin(Stdio::from(so));
             } else {
@@ -8734,7 +8920,7 @@ impl Shell {
                 pc.stdout(Stdio::piped());
             }
 
-            match spawn_resolved(&mut pc, program, resolved.as_deref()) {
+            match spawn_resolved(&mut pc, program, resolved.as_deref(), closed) {
                 Ok(mut child) => {
                     if i != last {
                         prev_stdout = child.stdout.take();
@@ -18956,6 +19142,10 @@ impl Shell {
         // stdin — a here-doc/here-string body takes precedence, then a file
         // redirect, then the inherited pipeline input.
         let mut input_bytes: Option<Vec<u8>> = None;
+        // Standard descriptors the child is to be given *closed* rather than
+        // empty; see [`ClosedStd`]. Only fd 0 reaches here — a closed fd 1 or
+        // fd 2 is settled further down, in the `Out`/stderr ladder.
+        let mut closed = ClosedStd::default();
         if let Some(n) = redir.stdin_from_fd {
             if let Some(rd) = self.coproc_read_fds.get(&n) {
                 // `cmd <&"${COPROC[0]}"`: hand the child a dup of the live coproc
@@ -18984,11 +19174,9 @@ impl Shell {
                         input_bytes = Some(rest);
                         cmd.stdin(Stdio::piped());
                     }
-                    // `cmd <&0` under an `exec 0<&-`: the child ought to have no
-                    // fd 0 — see [`ChildIn::Closed`] for why it gets an empty
-                    // one instead.
+                    // `cmd <&0` under an `exec 0<&-`: the child has no fd 0.
                     Some(ChildIn::Closed) => {
-                        cmd.stdin(Stdio::null());
+                        closed = ClosedStd::STDIN;
                     }
                     // An unbound descriptor reads as immediate EOF.
                     None => {
@@ -19024,10 +19212,9 @@ impl Shell {
                         input_bytes = Some(rest);
                         cmd.stdin(Stdio::piped());
                     }
-                    // `cmd <&-`: no fd 0 for the child, as far as [`Stdio`]
-                    // can express it. See [`ChildIn::Closed`].
+                    // `cmd <&-`: no fd 0 for the child. See [`ClosedStd`].
                     ChildIn::Closed => {
-                        cmd.stdin(Stdio::null());
+                        closed = ClosedStd::STDIN;
                     }
                 },
                 None => match stdin {
@@ -19447,7 +19634,7 @@ impl Shell {
             }
         }
 
-        let mut child = match spawn_resolved(&mut cmd, &argv[0], resolved.as_deref()) {
+        let mut child = match spawn_resolved(&mut cmd, &argv[0], resolved.as_deref(), closed) {
             Ok(c) => c,
             Err(e) => {
                 let (msgs, status) =
@@ -19652,7 +19839,10 @@ impl Shell {
                 Some(ChildProgram { word: &argv[0], resolved: Some(&path) }),
             );
             let id = self.next_job_id();
-            let (pid, child, status) = match cmd.spawn() {
+            // Through the same funnel as every other spawn — nothing here is
+            // closed, but the shared side of [`SPAWN_STD_HANDLES`] is what
+            // keeps this child out of a concurrent closing spawn's window.
+            let (pid, child, status) = match spawn_with_closed_std(&mut cmd, ClosedStd::default()) {
                 Ok(child) => (child.id(), Some(JobBody::Process(child)), None),
                 Err(e) => {
                     // The name resolved but would not run — a directory, a file
@@ -64693,7 +64883,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let host_name = if cfg!(windows) { "cmd" } else { "sh" };
         let mut pc = PCommand::new(host_name);
         pc.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        let Err(e) = spawn_resolved(&mut pc, host_name.as_bytes(), None) else {
+        let Err(e) = spawn_resolved(&mut pc, host_name.as_bytes(), None, ClosedStd::default())
+        else {
             panic!("an unresolved bare word must not spawn");
         };
         assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
@@ -64704,7 +64895,40 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // the OS can say why that particular file will not run. Here it does not
         // exist, so the OS's own answer is the one that comes back.
         let mut pc = PCommand::new("./no-such-program-zq");
-        assert!(spawn_resolved(&mut pc, b"./no-such-program-zq", None).is_err());
+        assert!(
+            spawn_resolved(&mut pc, b"./no-such-program-zq", None, ClosedStd::default()).is_err()
+        );
+    }
+
+    /// Handing a child a closed fd 0 borrows the shell's own standard handle
+    /// slot for the length of the spawn (see [`NulledStdHandles`]), so the one
+    /// thing that must be true afterwards is that the borrow was given back —
+    /// the shell keeps reading its own script from that descriptor. Pinned for
+    /// the failing spawn as well, where the restore rides on `Drop` alone.
+    #[cfg(windows)]
+    #[test]
+    fn a_closing_spawn_gives_the_shells_own_standard_handle_back() {
+        let [stdin_slot, ..] = STD_HANDLE_SLOTS;
+        // SAFETY: a read of a constant slot number; nothing is dereferenced.
+        let before = unsafe { GetStdHandle(stdin_slot) };
+
+        // A spawn that succeeds. `cmd` is on every Windows host's `PATH`, and
+        // `/c exit 0` neither reads nor writes anything.
+        let mut pc = PCommand::new("cmd");
+        pc.args(["/c", "exit", "0"]);
+        pc.stdout(Stdio::null()).stderr(Stdio::null());
+        let mut child = spawn_with_closed_std(&mut pc, ClosedStd::STDIN)
+            .expect("cmd must be spawnable on a Windows host");
+        // SAFETY: as above.
+        assert_eq!(unsafe { GetStdHandle(stdin_slot) }, before);
+        let _ = child.wait();
+
+        // …and one that does not: the slot is put back by the guard's `Drop`
+        // rather than by anything on the success path.
+        let mut pc = PCommand::new("./no-such-program-zq");
+        assert!(spawn_with_closed_std(&mut pc, ClosedStd::STDIN).is_err());
+        // SAFETY: as above.
+        assert_eq!(unsafe { GetStdHandle(stdin_slot) }, before);
     }
 
     #[test]

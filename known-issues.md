@@ -796,7 +796,7 @@ r1                       # the pipeline read the script's own stdin
 `a_pipeline_head_stage_reads_the_ambient_fd_zero` and
 `an_exec_inside_a_redirected_group_rebinds_fd_zero_for_the_rest_of_it`.
 
-### TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0 — 2026-08-06 — OPEN
+### TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0 — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — `child_input` / `ChildIn::Closed`,
 and `HeadIn::Closed`, both of which fall back to `Stdio::null()`.
@@ -822,6 +822,69 @@ if either is ever done properly, do both together.
 
 **Impact.** A child that would have failed on a closed stdin instead succeeds
 reading nothing. Rare, and the shell's own status is the only thing that differs.
+
+**Fixed 2026-08-06** — and *without* the raw `CreateProcess` the entry assumed
+was needed, which is the interesting part. Reimplementing the spawn would have
+meant reimplementing Windows argument quoting, the environment block, the
+working directory and handle inheritance, and putting all of that on the path
+every external command in the shell takes; a bug in the quoting alone would have
+been far worse than the divergence being fixed.
+
+The observation that makes it a small change instead: on Windows a child's
+standard handles are the three `STARTUPINFO` fields, and `Stdio::inherit()`
+fills them from the *parent's own slots* — passing a null handle straight
+through when the parent has none, which the library does deliberately
+(`sys::pal::windows::process`: "If no stdio handle is available, then propagate
+the null value to the child"). So emptying the shell's own slot with
+`SetStdHandle` for the length of the `CreateProcess` call, and putting it back
+afterwards, hands the child exactly the closed descriptor bash's fork gives it.
+Measured before writing any of it, with a twenty-line probe: an MSYS `cat`
+spawned that way prints `cat: failed to set file descriptor text/binary mode:
+Bad file descriptor` and exits 1, which is bash's output character for
+character.
+
+The pieces, all in `interp.rs`:
+
+* `ClosedStd { stdin, stdout, stderr }` — which of a child's standard
+  descriptors are handed over closed. `ChildIn::Closed` and `HeadIn::Closed`
+  now produce `ClosedStd::STDIN` where they used to produce `Stdio::null()`.
+* `spawn_with_closed_std`, which every production spawn funnels through
+  (`spawn_resolved`'s two callers and the `&`-job shortcut, which used to call
+  `PCommand::spawn` directly). It forces `Stdio::inherit()` on the descriptors
+  being closed — the mechanism works *through* inheritance, so whatever the
+  caller put there is what must not be used.
+* `NulledStdHandles`, an RAII guard around the `GetStdHandle`/`SetStdHandle`
+  pair, so the slot is put back on the failing spawn as well as the succeeding
+  one. `close_std_before_exec` is the unix half: a `pre_exec` closure dropping
+  an `OwnedFd::from_raw_fd(0)` in the forked child, which is what bash's own
+  child does.
+* `SPAWN_STD_HANDLES`, an `RwLock<()>` every spawn takes — shared for an
+  ordinary one, exclusive for a closing one. The slots are process-global and
+  osh's pipeline stages and subshells are *threads* of one process, so without
+  it a stage arranging a closed fd 0 could hand a sibling stage's child, in
+  `CreateProcess` at that moment, the same closed descriptor. Ordinary spawns
+  share the read side and never wait on each other.
+
+The shell's own reads through the slot are not in the window, and by
+construction rather than by luck: a thread can only read the ambient fd 0 when
+its stdin is inherited, and a thread only reaches a closing spawn having
+redirected fd 0 away, so the two are never the same thread — and no two
+concurrent threads inherit fd 0 together, since a pipeline gives it to the head
+stage alone and a `&` job gets an empty stream instead of it.
+
+**Verified:** the last section of `tests/corpus/redirect-close-of-stdin.sh` —
+the persistent and per-command closes, both spellings of the operator, the
+reopen orderings, a pipeline head, a child that never reads, and the shell's own
+fd 0 still working after a closing spawn. Plus
+`a_closing_spawn_gives_the_shells_own_standard_handle_back`, which pins the
+restore on both the succeeding and the failing spawn.
+
+**The write side is still open.** `child_out_from_write_fd` refuses the redirect
+for `WriteFd::Closed`/`ReadOnly` rather than letting the child's own write fail
+— see TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP's two knowingly-left
+divergences. `ClosedStd` already carries `stdout`/`stderr` for it and the
+mechanism is the same; it is a separate change because it also has to unpick the
+refusal path, which reports through a different channel.
 
 ### TD-OILS-A-DUP-TARGET-OF-DOUBLE-DASH-IS-NOT-SPLIT-INTO-A-CLOSE-AND-AN-ARGUMENT. `>&--` is taken as one word — 2026-08-06 — ✅ FIXED 2026-08-06
 
@@ -36634,11 +36697,15 @@ is the distinction `{ echo Q >&0; } <&-` turns on — bash fails it at the
 divergence 2. `exec 0<&-; exec 3<&0` and `exec 3>&0` likewise fail at the `exec`,
 since a descriptor that is not there cannot be duplicated.
 
-One divergence is knowingly left, the fd 1 trade again: an external `cmd <&-`
-gets `Stdio::null()` (`ChildIn::Closed`), so it sees an empty stdin rather than
-`EBADF` and `cat <&-` exits 0 where bash's `cat` exits 1 complaining about the
-descriptor. `Stdio` cannot express a missing descriptor and forging one needs a
-platform-specific `pre_exec`/handle dance.
+One divergence was knowingly left, the fd 1 trade again: an external `cmd <&-`
+got `Stdio::null()` (`ChildIn::Closed`), so it saw an empty stdin rather than
+`EBADF` and `cat <&-` exited 0 where bash's `cat` exits 1 complaining about the
+descriptor. **Closed 2026-08-06** — `ClosedStd` hands the child the missing
+descriptor after all, without the raw `CreateProcess` that looked necessary;
+see TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0. The equivalent on
+the *write* side (an external `cmd >&-`, where osh refuses the redirect rather
+than letting the child's write fail) is still open and is the next use of the
+same mechanism.
 
 Covered by `tests/corpus/redirect-close-of-stdin.sh` plus four unit tests.
 

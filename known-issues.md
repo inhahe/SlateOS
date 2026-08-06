@@ -43,6 +43,168 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT. bash parses a `$( … )` body as it reads it; osh scans for the `)` first — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — the command-substitution scanner
+(the balanced-paren scan that raises ``unexpected EOF while looking for
+matching `)'``), and `userspace/oils/src/parser.rs`, which parses the body
+only after that scan has succeeded.
+
+**What.** osh finds the closing `)` first and parses the body second. bash
+does the opposite: `xparse_dolparen` (y.tab.c:6618) hands the *rest of the
+input* to a recursive `parse_string (string, "command substitution", …)`
+with `shell_eof_token = ')'`, so the body is parsed as it is read and the
+missing `)` is only noticed if that inner parse survives all the way to the
+end of input:
+
+```c
+  token_to_read = DOLPAREN;			/* let's trick the parser */
+  nc = parse_string (string, "command substitution", sflags, (COMMAND **)NULL, &ep);
+  …
+  if (base[*indp] != ')' && (flags & SX_NOLONGJMP) == 0)
+    {
+      if ((flags & SX_NOERROR) == 0)
+	parser_error (start_lineno, _("unexpected EOF while looking for matching `%c'"), ')');
+```
+
+The ordering is the whole bug. When the body is *both* syntactically bad and
+unterminated, bash reports the inner error and osh reports the missing paren:
+
+| script | bash | osh |
+|---|---|---|
+| `echo $(fi` | ``line 1: syntax error near unexpected token `fi'`` + echo | ``line 2: unexpected EOF while looking for matching `)'`` |
+| `echo $(;` | ``line 1: syntax error near unexpected token `;'`` + echo | same EOF message |
+| `echo $( ]]` | ``line 1: syntax error near unexpected token `]]'`` + echo | same EOF message |
+| `echo $(fi)x$(` | ``line 1: syntax error near unexpected token `fi'`` + echo | ``line 2: unexpected EOF …`` |
+
+The last row is the sharpest: the *first* substitution is the one bash
+complains about even though it is the *second* one that is unterminated,
+because bash parses substitutions left to right at parse time and never
+reaches the second. Note also that bash's line is the line the body's error
+is on, while osh's is the line past end of input.
+
+Everything where the body closes is already byte-exact — `echo $(fi)`,
+`$(;)`, `$(done)`, `$(then)`, `$(esac)`, `$(for)`, `$(a |)`, `$(!)` and
+`$(()` all match — so this is purely about which of two errors wins, not
+about parsing the body at all.
+
+**Proper fix:** invert the two steps — parse the body incrementally from
+the `$(`, stopping at a `)` in command-terminator position, and raise the
+unmatched-paren error only when that parse reaches end of input without
+one. That is the same restructuring the sibling entry below
+(`…ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS`) wants for `[[ ]]`, and both should
+be done together: bash's rule in each case is that a lexer that dies at EOF
+hands a bail token *back to the parser*, which then gets its own say.
+
+### TD-OILS-A-CONDITIONAL-RHS-THAT-DIES-AT-EOF-GETS-ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS. `[[ x =~ ( ]]` — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `cond_operand_error` and the
+conditional-expression parser around it; the error is raised by the lexer
+before that code is ever reached.
+
+**What.** An unterminated `(` in the RHS of a conditional binary operator
+draws *two* messages from bash and one from osh:
+
+```
+$ cat c1.sh
+echo A
+[[ x =~ ( ]]
+echo B
+
+bash                                                  osh
+A                                                     A
+c1.sh: line 2: unexpected EOF while looking …         c1.sh: line 2: unexpected EOF while looking …
+c1.sh: line 4: unexpected argument to conditional
+                             binary operator
+rc=2                                                  rc=2
+```
+
+The residue is the second line. The first was fixed under
+TD-OILS-COND-PAREN-REGEX (2026-07-28); this is what is left.
+
+**Why two.** `read_token_word` bails to the *parser*, it does not abort the
+parse. In regexp position (`PST_REGEXP`) a `(` is handed to
+`parse_matched_pair`, which on EOF prints the first message and returns
+`&matched_pair_error` (y.tab.c:6026); the caller then does
+
+```c
+	  if (ttok == &matched_pair_error)
+	    return -1;		/* Bail immediately. */
+```
+
+(y.tab.c:7297). `-1` is not `WORD`, so `cond_term`'s right-hand-side branch
+falls into its `else` and prints its own diagnostic (y.tab.c:7095) —
+`error_token_from_token(-1)` is `NULL`, which is why it is the bare form
+with no `` `X' `` in it. And `line_number` has by then run to *one past the
+last line of the file*, because `shell_getc` counted every line the failed
+scan swallowed:
+
+| file | last line | second message reported at |
+|---|---|---|
+| `echo A` / `[[ x =~ ( ]]` / `echo B` | 3 | line 4 |
+| `echo A` / `[[ x =~ ( ]]` | 2 | line 3 |
+| `[[ x =~ ( ]]` | 1 | line 2 |
+
+Reached by `[[ x =~ ( ]]`, `[[ x =~ (a ]]`, ``[[ x =~ ` ]]`` and
+`[[ x =~ $(echo a ]]` — the shapes whose RHS word dies at EOF. Not reached
+by `[[ x == ( ]]` (no `PST_REGEXP`, so `(` is never given to
+`parse_matched_pair`), nor by `[[ ( ]]`, `[[ x =~ ) ]]`, `[[ x =~ ( ) ]]`,
+all of which already match byte for byte.
+
+**Proper fix:** give osh's lexer a bail token. A matched-pair scan that hits
+EOF should print its message and yield a distinguished "erroneous token"
+rather than aborting the parse, so the conditional parser reaches
+`cond_operand_error` and can add bash's second line at the end-of-input
+line number. See the sibling entry above — the comsub ordering bug wants the
+same change.
+
+### TD-OILS-A-FLATTENED-ALIAS-TABLE-WAS-SORTED-THE-WRONG-WAY-AND-COMPGEN-NOT-AT-ALL. `compgen -A alias` answered in hash order, and `alias` put a high byte last — 2026-08-06 — ✅ FIXED 2026-08-06
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_alias`'s listing and
+the `alias`/`command` arms of the `compgen` action loop.
+
+**What.** bash has exactly one flattened view of the alias table,
+`all_aliases()`, and three readers of it: the `alias` / `alias -p` listing,
+`compgen -A alias`, and the alias run at the head of a command completion
+(`command_word_completion_function`, bashline.c:2105). osh had two bugs, one per
+half:
+
+* `compgen` did not sort at all — it handed back the hash table's own
+  enumeration order, which is `BASH_ALIASES`'s order and a different thing.
+* the listing sorted, but by plain byte order, where bash's comparator is
+  `qsort_alias_compare` (alias.c:135):
+
+  ```c
+  if ((result = (*as1)->name[0] - (*as2)->name[0]) == 0)
+    result = strcmp ((*as1)->name, (*as2)->name);
+  ```
+
+  The leading test looks like an optimization, but `name[0]` is a signed `char`
+  while `strcmp` compares as *unsigned* char, so the two halves disagree: a name
+  led by a byte at or above `\x80` is negative to the shortcut and sorts ahead
+  of every ASCII name, while a shared first byte hands the rest of the name back
+  to unsigned order.
+
+```text
+$ alias $'\xff'=1 a=2; alias
+bash: \xff first, then a
+osh : a first, then \xff        # plain byte order
+
+$ alias zqqa=1 zqqb=2 zqqc=3 zqqd=4; compgen -A alias
+bash: zqqa zqqb zqqc zqqd
+osh : zqqa zqqc zqqb zqqd       # the table's order, unsorted
+```
+
+**Fix (2026-08-06).** A free `alias_name_order` implements bash's comparator,
+and a `Shell::sorted_alias_names` is the single flattening all three readers go
+through — so a fourth reader cannot pick the wrong order by accident.
+
+**Tests.** `tests/corpus/a-flattened-alias-table-is-sorted-by-bashs-own-comparator.sh`
+(every section discriminates: the listing, the tie-break, both compgen
+spellings, the command completion, and the contrast against the unsorted
+`BASH_ALIASES` mirror) plus the
+`a_flattened_alias_table_is_sorted_by_bashs_own_comparator` unit test.
+
 ### TD-OILS-A-WRITE-PROOF-FD-WITH-NOTHING-TO-HAND-OVER-BECAME-AN-EMPTY-STREAM. `sh -c 'echo W' 1<somedir` exited 0 — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — `child_read_only_out`'s fallback.

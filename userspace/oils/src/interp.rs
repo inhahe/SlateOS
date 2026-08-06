@@ -100,6 +100,7 @@ use bstr::ByteSlice;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -33422,9 +33423,10 @@ impl Shell {
             // Sorted, unlike `hash`: bash's `alias -p` sorts the flattened alias
             // table before printing it, so the listing is alphabetical even
             // though `BASH_ALIASES` enumerates the table's own order. The two
-            // really do disagree, and both are pinned.
+            // really do disagree, and both are pinned. The order is bash's own
+            // (see [`alias_name_order`]), which is not plain byte order.
             let mut listing: Vec<(&Str, &Str)> = self.aliases.iter().map(|(k, v)| (k, v)).collect();
-            listing.sort_by(|a, b| a.0.cmp(b.0));
+            listing.sort_by(|a, b| alias_name_order(a.0, b.0));
             let mut buf = Str::new();
             for (name, val) in listing {
                 buf.extend_from_slice(&alias_line(name, val, reusable));
@@ -43111,7 +43113,11 @@ impl Shell {
                 // bash reads these out of arrays it keeps sorted, so the
                 // answer is sorted however the names went in.
                 "function" => cands.extend(sorted(self.funcs.keys().cloned().collect())),
-                "alias" => cands.extend(self.aliases.keys().cloned()),
+                // `all_aliases()` — the same sorted flattening `alias -p`
+                // prints, not the hash order `BASH_ALIASES` enumerates. See
+                // [`alias_name_order`] for why the order is not plain byte
+                // order.
+                "alias" => cands.extend(self.sorted_alias_names()),
                 "builtin" => {
                     cands.extend(sorted(str_bytes(BUILTIN_NAMES.iter().copied())));
                 }
@@ -43144,7 +43150,10 @@ impl Shell {
                 // A command name is looked for in the order the shell itself
                 // would look: alias, reserved word, function, builtin, $PATH.
                 "command" => {
-                    cands.extend(self.aliases.keys().cloned());
+                    // `command_word_completion_function` reaches for the same
+                    // `all_aliases()` the listing does (bashline.c:2105), so the
+                    // alias run of a command completion is sorted too.
+                    cands.extend(self.sorted_alias_names());
                     cands.extend(str_bytes(KEYWORDS.iter().copied()));
                     cands.extend(sorted(self.funcs.keys().cloned().collect()));
                     cands.extend(sorted(str_bytes(BUILTIN_NAMES.iter().copied())));
@@ -43294,6 +43303,20 @@ impl Shell {
         let write_status = self.write_bytes(out, redir, &result);
         // bash: status 1 when no candidates were produced, else the write status.
         if empty { 1 } else { write_status }
+    }
+
+    /// The alias table flattened the way bash's `all_aliases()` flattens it.
+    ///
+    /// Every consumer that wants a *list* of aliases rather than the table goes
+    /// through this: `alias -p`'s listing, `compgen -A alias`, and the alias run
+    /// at the head of a command completion (`command_word_completion_function`
+    /// calls `all_aliases()` too, bashline.c:2105). The order is
+    /// [`alias_name_order`]'s, which is bash's comparator and not plain byte
+    /// order.
+    fn sorted_alias_names(&self) -> Vec<Str> {
+        let mut names: Vec<Str> = self.aliases.keys().cloned().collect();
+        names.sort_by(|a, b| alias_name_order(a, b));
+        names
     }
 
     /// The job names the `job`, `running` and `stopped` actions offer.
@@ -48484,6 +48507,38 @@ fn legal_alias_name(name: BStr<'_>) -> bool {
                     | b'|' | b' ' | b'\t' | b'\n' | b'/'
             )
         })
+}
+
+/// The order bash puts alias names in when it flattens the table
+/// (`sort_aliases` → `qsort_alias_compare`, alias.c:135):
+///
+/// ```c
+/// if ((result = (*as1)->name[0] - (*as2)->name[0]) == 0)
+///   result = strcmp ((*as1)->name, (*as2)->name);
+/// ```
+///
+/// The leading test reads as an optimization — decide on the first byte, fall
+/// back to `strcmp` only when it cannot — but the two comparisons do not agree
+/// about what a byte is worth. `name[0]` is a `char`, which is **signed** on
+/// every platform bash builds on, while `strcmp` compares as *unsigned char*.
+/// So a name beginning with a byte ≥ 0x80 is a negative number to the shortcut
+/// and sorts ahead of every ASCII name — `alias $'\xff'=1 a=2; alias` lists
+/// `\xff` first — whereas two names sharing a first byte are ordered by the
+/// ordinary unsigned comparison from there on: `ab` before `a\xff`.
+///
+/// This is the order of every flattened view of the table — the `alias` /
+/// `alias -p` listing and the `compgen` alias and command actions alike, all of
+/// which go through `all_aliases()`. It is *not* the order `BASH_ALIASES`
+/// enumerates, which is the hash table's own.
+fn alias_name_order(a: BStr<'_>, b: BStr<'_>) -> Ordering {
+    // `name[0]` of an empty C string is the NUL terminator, i.e. 0. An empty
+    // alias name cannot be defined, but the comparator is total regardless.
+    let lead = |n: BStr<'_>| n.first().map_or(0i32, |byte| i32::from(*byte as i8));
+    match lead(a).cmp(&lead(b)) {
+        // `strcmp` on the whole string, which is what `Ord for [u8]` already is.
+        Ordering::Equal => a.cmp(b),
+        decided => decided,
+    }
 }
 
 /// One line of `alias` output: a command that would re-enter the alias.
@@ -65407,6 +65462,43 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             out.lines().take(6).collect::<Vec<_>>(),
             vec!["do", "done", "dofn", "declare", "dirs", "disown"]
+        );
+    }
+
+    #[test]
+    fn a_flattened_alias_table_is_sorted_by_bashs_own_comparator() {
+        // `all_aliases()` sorts with `qsort_alias_compare`, which decides on the
+        // *first* byte as a signed `char` and only falls back to `strcmp` — an
+        // unsigned comparison — when those bytes are equal. So a name led by a
+        // byte at or above \x80 is negative to the shortcut and sorts ahead of
+        // every ASCII name, while a shared first byte hands the rest of the name
+        // back to ordinary unsigned order.
+        let defs = r"alias $'\xff'=1 a=2 $'\x80z'=3 $'a\xff'=4 ab=5; ";
+        assert_eq!(
+            run_raw(&format!("{defs}compgen -A alias")).0,
+            b"\x80z\n\xff\na\nab\na\xff\n".to_vec()
+        );
+        // Every flattened view is that same list: the listing, the two spellings
+        // of the compgen action, and the alias run at the head of a command
+        // completion.
+        assert_eq!(
+            run_raw(&format!("{defs}compgen -a")).0,
+            run_raw(&format!("{defs}compgen -A alias")).0
+        );
+        assert_eq!(
+            run_raw(&format!("{defs}alias")).0,
+            b"alias \x80z='3'\nalias \xff='1'\nalias a='2'\nalias ab='5'\nalias a\xff='4'\n"
+                .to_vec()
+        );
+        assert_eq!(
+            run("alias zqqa=1 zqqb=2 zqqc=3 zqqd=4; compgen -c zqq").0,
+            "zqqa\nzqqb\nzqqc\nzqqd\n"
+        );
+        // …though the table those views flatten enumerates in its own order,
+        // which for these four names is not the sorted one.
+        assert_eq!(
+            run("alias zqqa=1 zqqb=2 zqqc=3 zqqd=4; echo ${!BASH_ALIASES[@]}").0,
+            "zqqa zqqc zqqb zqqd\n"
         );
     }
 

@@ -86,11 +86,12 @@ here-doc body; and a script that bash keeps alive is killed. Only under
 why the whole-set corpus case deliberately omits the here-document and
 arithmetic-string contexts — a case there would be measuring this instead.
 
-### TD-OILS-NOUNSET-SKIPS-ARITHMETIC. `set -u` never reaches arithmetic: `(( nope ))` reads 0 in osh where bash calls it an unbound variable and aborts — 2026-08-06 — OPEN
+### TD-OILS-NOUNSET-SKIPS-ARITHMETIC. `set -u` never reaches arithmetic: `(( nope ))` reads 0 in osh where bash calls it an unbound variable and aborts — 2026-08-06 — ✅ FIXED 2026-08-06
 
-**Where:** `userspace/oils/src/interp.rs` — the arithmetic evaluator's variable
-lookup (the path that turns a bare name into its value), used by `(( ))`,
-`$(( ))` and an array subscript.
+**Where:** `userspace/oils/src/arith.rs` — `VarLookup::note_arith_unbound` and
+its call sites in `eval_expr` / `note_lv_unbound`; `userspace/oils/src/interp.rs`
+— `Shell::arith_unbound_name`, `Shell::arith_var_visible`, and the `VarLookup
+for Shell` impl.
 
 **What.** Also found while fixing TD-OILS-INDIRECT-WHOLE-SET-NOUNSET. Under
 `set -u` bash treats a name read by the arithmetic evaluator exactly like any
@@ -111,17 +112,97 @@ Note that an *unset* name and a name holding the empty string are different
 here, as everywhere else: bash's arithmetic reads an empty-but-set variable as 0
 without complaint, so the check must be on set-ness, not on the text.
 
-**Proper fix.** Route the arithmetic evaluator's name lookup through the same
-nounset check the word expander uses, so an unset name raises
-`<name>: unbound variable` and takes the usual abort path. The lookup is shared
-by `(( ))`, `$(( ))`, array subscripts, `let`, the arithmetic `for`, and the
-arithmetic-string contexts (`${a[…]}` on the left of an assignment), so one
-place should cover all of them — but each needs a corpus case, because bash's
-arithmetic-string contexts are *quoted* and so differ from the others for
-whole-set references.
+**Fixed.** A new `VarLookup::note_arith_unbound` hook is asked once per operand
+the evaluator actually *reaches*, and its `Err` abandons the expression where it
+stands — which is bash's `longjmp` out of `expr_streval` (expr.c:1180), and is
+why only the first unset name of `(( nope1 + nope2 ))` is reported and
+`(( nope / 0 ))` never reaches the division.
 
-**Impact.** A whole class of `set -u` diagnostics is missing, and scripts that
-bash stops osh runs on with a silent 0. No effect with nounset off.
+The entry above got the shape right but the *question* wrong, and that was the
+whole difficulty. Arithmetic does **not** ask the word expander's question.
+It reads a name as a *variable*, so what matters is whether the variable exists
+and is visible — bash's `find_variable (tok) && invisible_p (tok) == 0` — not
+whether the thing addressed inside it has a value. The two answers differ in
+both directions, which is why sharing the word expander's check would have been
+wrong:
+
+```text
+declare -a a=();  "${a[0]}" → unbound error   $(( a[0] )) → silent 0
+declare -a a;     "${a[0]}" → unbound error   $(( a[0] )) → unbound error
+declare v;        "$v"      → unbound error   $(( v ))    → unbound error
+v=;               "$v"      → empty           $(( v ))    → silent 0
+```
+
+A bare `declare -a a` declares without assigning, so bash holds it *invisible*
+and arithmetic calls it unset; `a=()` assigned nothing but is visible, so it is
+0. `Shell::arith_var_visible` is that per-name question, and is deliberately
+neither `var_is_set` (which is `-v`, and reads a bare array name as element 0)
+nor `ref_name_exists` (which never asks about visibility).
+
+Three orderings had to be measured rather than guessed:
+
+* The check runs **before** the operand's subscript is evaluated, so
+  `(( nada[nope] ))` names `nada`, not `nope`.
+* A subscripted operand is read through `array_variable_part`, so its failure is
+  named after the *written* base however far a nameref would have reached:
+  `declare -n r=nada; (( r[0] ))` reports `r` where `(( r ))` beside it reports
+  `nada`.
+* A read-modify-write reads and a plain assignment does not, and they disagree
+  about which name they blame: `(( nada[nope] += 1 ))` reports the missing array
+  `nada`, while `(( nada[nope] = 1 ))` reaches the subscript first and reports
+  `nope`. Hence `note_lv_unbound`, called before the lvalue is resolved.
+
+The one place osh deliberately does *not* follow is an empty subscript — see
+TD-OILS-AN-EMPTY-ARITHMETIC-SUBSCRIPT-IS-NAMED-(null)-BY-BASH.
+
+`tests/corpus/arithmetic-asks-set-u-about-the-variable-not-about-the-value-it-holds.sh`
+covers all of it, including that the shell's own dynamic names (`RANDOM`,
+`SECONDS`, `LINENO`, `BASH_ALIASES`, …) are variables like any other even though
+they have no table entry until something assigns to one.
+
+### TD-OILS-AN-EMPTY-ARITHMETIC-SUBSCRIPT-IS-NAMED-(null)-BY-BASH. `set -u; $(( a[] ))` makes bash print a C null pointer as a variable name — NOT-A-BUG (bash defect, deliberately not replicated) — 2026-08-06
+
+**Where:** `userspace/oils/src/arith.rs` — the `Expr::EmptySub` arm of
+`eval_expr`, which is the one operand kind that does *not* call
+`VarLookup::note_arith_unbound`.
+
+**What.** Found while fixing TD-OILS-NOUNSET-SKIPS-ARITHMETIC. bash asks the
+`set -u` question for an empty arithmetic subscript like it does for every other
+operand, but by then it has already refused the subscript, and
+`array_variable_name` hands back a **null pointer** for a token it refused. The
+name is printed straight through, so what comes out is the literal text
+`(null)`:
+
+```text
+$ ( set -u; echo "$(( a[] ))" )
+bash: a[]: bad array subscript
+bash: a[]: bad array subscript
+bash: (null): unbound variable        ← and aborts
+osh : a[]: bad array subscript
+osh : a[]: bad array subscript
+osh : 0
+```
+
+The two `bad array subscript` lines are bash's own doubling and osh already
+matches them; it is only the third line that differs. It is the same whether the
+array exists or not (`declare -a a=(1)` and an entirely unknown `nada` both
+print `(null)`), which is itself the tell that no name was ever resolved.
+
+**Why not replicated.** `(null)` is glibc's rendering of a null pointer passed
+to `%s` — it is not a shell behaviour, it is undefined behaviour that happens to
+be survivable on glibc, and reproducing it would mean writing a variable name
+osh never had. osh evaluates the operand as 0 and carries on, which is what bash
+does for this operand with nounset *off*, and is the answer every other empty
+subscript already gets.
+
+**Boundary.** The whole-set subscript beside it is *not* affected and is matched
+exactly: `declare -a a; (( a[@] ))` is `a: unbound variable` alone (the nounset
+failure replaces the refusal), while `declare -a a=(1); (( a[@] ))` is the
+bad-subscript refusal alone. Only the *empty* subscript reaches bash's null.
+
+**Impact.** With `set -u` on, an empty arithmetic subscript aborts bash and does
+not abort osh. Reaching it requires writing `a[]` inside arithmetic, which is
+already a refused subscript twice over.
 
 ### TD-OILS-THE-DECLARATION-BUILTINS-GLOBAL-FLAG-COULD-BE-TAKEN-BACK-AND-HAD-NO-TWIN. `declare -g +g`, `declare -G` and `local -g` all landed in the wrong scope — 2026-08-06 — ✅ FIXED 2026-08-06
 

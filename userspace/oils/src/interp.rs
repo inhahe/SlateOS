@@ -11838,6 +11838,74 @@ impl Shell {
         Self::arith_elem_of(self.resolve_ref_use_walks(name, 2))
     }
 
+    /// The name an arithmetic operand's `set -u` complaint should carry, or
+    /// `None` when there is a variable there to read. See
+    /// [`VarLookup::note_arith_unbound`], which is the only caller.
+    ///
+    /// Resolution here is the *warning* [`Shell::resolve_ref_use`], one walk,
+    /// and that is deliberate: a circular chain always fails this check, so the
+    /// read that would have warned never happens and this walk is the only one
+    /// left to carry the warning. bash prints exactly one — for both spellings —
+    /// where with `set -u` off `(( c1[0] ))` prints two, because there the read
+    /// does happen and resolves twice. A chain that is *not* circular warns
+    /// nothing here, so the counts the read owns are untouched.
+    fn arith_unbound_name(&mut self, name: &str, subscripted: bool) -> Option<String> {
+        // The written base names the failure for a subscripted operand, however
+        // far a nameref would have reached — bash's `array_variable_name` gives
+        // back the token's own base, so `declare -n r=nada; (( r[0] ))` reports
+        // `r` where the unsubscripted `(( r ))` beside it reports `nada`.
+        let asked = if subscripted {
+            match Self::arith_elem_of(self.resolve_ref_use(name)) {
+                ArithElem::Array(base) => base,
+                // Neither designates an array, so there is none to find.
+                ArithElem::Element | ArithElem::Circular => return Some(name.to_owned()),
+            }
+        } else {
+            match self.resolve_ref_use(name) {
+                // An element reference asks about the array holding it.
+                Some(t) => t.base,
+                // A chain that closes on itself reaches nothing, whatever the
+                // name it started from still holds — that name's own value is
+                // the next link, not a value. bash reports where it started.
+                None => return Some(name.to_owned()),
+            }
+        };
+        if self.arith_var_visible(&asked) {
+            return None;
+        }
+        Some(if subscripted { name.to_owned() } else { asked })
+    }
+
+    /// Whether `name` is a variable arithmetic can read — bash's
+    /// `find_variable (tok) && invisible_p (tok) == 0`.
+    ///
+    /// Visibility is the whole point: a declaration is not an assignment, so a
+    /// bare `declare v` / `declare -a a` leaves a name that exists without
+    /// holding anything, and bash calls that unset. This is the per-name form of
+    /// the question [`Shell::visible_var_names`] answers in bulk, and it is
+    /// deliberately *not* [`Shell::var_is_set`] (which is `-v`, and reads a bare
+    /// array name as that array's element 0) nor [`Shell::ref_name_exists`]
+    /// (which does not ask about visibility at all).
+    fn arith_var_visible(&mut self, name: &str) -> bool {
+        if self.vars.contains_key(name) {
+            return true;
+        }
+        // An empty `a=()` was assigned and is visible; a bare `declare -a a` was
+        // not. So `(( a[0] ))` is 0 for the first and unbound for the second,
+        // where the word expansion `"${a[0]}"` is unbound for both.
+        if self.arrays.contains_key(name) || self.assoc.contains_key(name) {
+            return self.array_is_visible(name);
+        }
+        // The shell's own dynamic names (`RANDOM`, `SECONDS`, `LINENO`,
+        // `BASH_ALIASES`, …) have no table entry until something assigns to one,
+        // but they are variables and arithmetic reads them like any other. The
+        // lookup already accounts for one `unset` has dropped.
+        if self.dynamic_special(name).is_some() {
+            return true;
+        }
+        self.named_param_is_set(name)
+    }
+
     /// What a resolved chain designates, given the walk's answer. `None` is a
     /// circular chain, which designates nothing at all — notably *not* the name
     /// it started from, whose own value is the next name in the cycle and would
@@ -43830,6 +43898,19 @@ impl Shell {
 
 /// Let the arithmetic evaluator read shell variables.
 impl VarLookup for Shell {
+    fn note_arith_unbound(&mut self, name: &str, subscripted: bool) -> Result<(), arith::ArithError> {
+        if !self.nounset || self.expansion_failed() {
+            return Ok(());
+        }
+        let Some(shown) = self.arith_unbound_name(name, subscripted) else {
+            return Ok(());
+        };
+        self.raise_unbound(shown.as_bytes());
+        // The diagnostic is already out; the error exists only to abandon the
+        // expression the way bash's `longjmp` out of `expr_streval` does.
+        Err(arith::ArithError::silently_refused(shown))
+    }
+
     fn get_str(&mut self, name: &str) -> Option<Str> {
         // A reference naming a *whole* array is not a value arithmetic can
         // read. The expansion path hands one on as its elements joined (see
@@ -54135,6 +54216,96 @@ mod tests {
             run_cmd("(( a[1+1]=9 )); echo \"${a[2]}\"").0,
             "9\n"
         );
+    }
+
+    #[test]
+    fn arithmetic_asks_nounset_about_the_variable_not_about_the_value() {
+        // bash's `expr_streval` (expr.c:1180) checks `find_variable` and
+        // `invisible_p`, so arithmetic's `set -u` question is about the variable
+        // rather than about the thing addressed inside it. The two differ in
+        // both directions, which is what makes this worth its own test: an empty
+        // `a=()` is visible (so `$(( a[0] ))` is 0 where `"${a[0]}"` is unbound),
+        // and a bare `declare -a a` is invisible (so it is unbound in arithmetic
+        // even though no element was ever a value either way).
+        fn run_cmd(src: &str) -> String {
+            let mut sh = new_shell();
+            sh.set_command_mode();
+            sh.set_interactive_shell(false);
+            let buf = capture_sink();
+            {
+                let mut out = Out::Capture(buf.clone());
+                sh.run_source_out(src.as_bytes(), &mut out, 0);
+            }
+            String::from_utf8_lossy(&take_capture(&buf)).into_owned()
+        }
+        // The plain read, and the abort that comes with it — `tail` never runs.
+        assert_eq!(
+            run_cmd("set -u; { echo $((nope)); echo tail; } 2>&1"),
+            "osh: line 1: nope: unbound variable\n"
+        );
+        // Visible-vs-invisible, both ways round.
+        assert_eq!(
+            run_cmd("set -u; declare -a a=(); { echo $((a[0])); } 2>&1"),
+            "0\n"
+        );
+        assert_eq!(
+            run_cmd("set -u; declare -a a; { echo $((a[0])); } 2>&1"),
+            "osh: line 1: a: unbound variable\n"
+        );
+        assert_eq!(
+            run_cmd("set -u; declare -a a=(); { echo \"${a[0]}\"; } 2>&1"),
+            "osh: line 1: a[0]: unbound variable\n"
+        );
+        // An existing variable holding nothing is 0 in silence: the check is on
+        // the variable, and only then is its text looked at.
+        assert_eq!(run_cmd("set -u; e=; { echo $((e+1)); } 2>&1"), "1\n");
+        // An operand the evaluator never reaches is never asked (bash's
+        // `if (noeval) return 0` at the top of `expr_streval`).
+        assert_eq!(run_cmd("set -u; { echo $((0 && nope)); } 2>&1"), "0\n");
+        assert_eq!(run_cmd("set -u; { echo $((1 ? 2 : nope)); } 2>&1"), "2\n");
+        // The array is asked about before its subscript is evaluated, and the
+        // expression is abandoned at the first unset name.
+        assert_eq!(
+            run_cmd("set -u; { echo $((nada[nope])); } 2>&1"),
+            "osh: line 1: nada: unbound variable\n"
+        );
+        assert_eq!(
+            run_cmd("set -u; { echo $((nope1 + nope2)); } 2>&1"),
+            "osh: line 1: nope1: unbound variable\n"
+        );
+        assert_eq!(
+            run_cmd("set -u; { echo $((nope / 0)); } 2>&1"),
+            "osh: line 1: nope: unbound variable\n"
+        );
+        // A read-modify-write reads; the plain assignment beside it does not.
+        assert_eq!(run_cmd("set -u; { (( nope = 5 )); echo \"$nope\"; } 2>&1"), "5\n");
+        assert_eq!(
+            run_cmd("set -u; { (( nope += 5 )); echo tail; } 2>&1"),
+            "osh: line 1: nope: unbound variable\n"
+        );
+        // And the order is bash's: reading `nada[nope]` names the missing array,
+        // where assigning to it reaches the subscript first.
+        assert_eq!(
+            run_cmd("set -u; { (( nada[nope] += 1 )); } 2>&1"),
+            "osh: line 1: nada: unbound variable\n"
+        );
+        assert_eq!(
+            run_cmd("set -u; { (( nada[nope] = 1 )); } 2>&1"),
+            "osh: line 1: nope: unbound variable\n"
+        );
+        // A reference is asked about where it points — unless it carries a
+        // subscript, which bash reads through `array_variable_part` and names
+        // after the *written* base.
+        assert_eq!(
+            run_cmd("set -u; declare -n r=nope; { echo $((r)); } 2>&1"),
+            "osh: line 1: nope: unbound variable\n"
+        );
+        assert_eq!(
+            run_cmd("set -u; declare -n r=nada; { echo $((r[0])); } 2>&1"),
+            "osh: line 1: r: unbound variable\n"
+        );
+        // With nounset off it is simply zero.
+        assert_eq!(run_cmd("{ echo $((nope + 1)); } 2>&1"), "1\n");
     }
 
     #[test]

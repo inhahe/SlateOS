@@ -32,6 +32,45 @@ use crate::bytes::{self, BStr, Str};
 /// variable/element (the evaluator treats that as `0`). The write methods have
 /// empty defaults so a read-only implementor need not provide them.
 pub trait VarLookup {
+    /// Answer the `set -u` question for the operand `name` is about to be read
+    /// from, and refuse the whole expression if it is unset.
+    ///
+    /// bash asks this in `expr_streval` (expr.c:1180) and it is **not** the
+    /// question a word expansion asks. Arithmetic reads a name as a *variable*,
+    /// so what matters is whether the variable exists and is visible, not
+    /// whether the thing addressed within it has a value: `declare -a a=();
+    /// echo "${a[0]}"` is an unbound-variable error while `(( a[0] ))` is a
+    /// silent 0, and conversely a bare `declare -a a` — which declares without
+    /// assigning, so bash holds it *invisible* — is unbound in arithmetic even
+    /// though `a[0]` was never a value either way. An existing variable holding
+    /// the empty string is 0 without complaint, because bash checks the
+    /// variable and only then looks at its text.
+    ///
+    /// `subscripted` says the operand was written `name[…]`. bash reads that
+    /// form through `array_variable_part` rather than `find_variable`, which
+    /// changes two things: the question becomes "is there an array here" (an
+    /// index the array does not hold is a silent 0), and a failure is named
+    /// after the *written* base rather than after whatever a nameref would have
+    /// reached. The check also runs **before** the subscript is evaluated, so
+    /// `(( nada[nope] ))` names `nada`.
+    ///
+    /// Called for every operand the evaluator actually reaches and no others —
+    /// which is what makes `(( 0 && nope ))` and `(( 1 ? 2 : nope ))` silent.
+    /// bash gets the same effect one level up, by returning from `expr_streval`
+    /// before the check when `noeval` is set.
+    ///
+    /// The `Err` abandons the expression where it stands, as bash's `longjmp`
+    /// out of `expr_streval` does, so only the first unset name of
+    /// `(( nope1 + nope2 ))` is ever reported and `(( nope / 0 ))` never reaches
+    /// the division. It is an [`ArithError::silent`] one because the implementor
+    /// has already printed the diagnostic bash prints.
+    ///
+    /// The default accepts everything, for implementors with no such option.
+    fn note_arith_unbound(&mut self, name: &str, subscripted: bool) -> Result<(), ArithError> {
+        let _ = (name, subscripted);
+        Ok(())
+    }
+
     /// Return the scalar variable's raw value, or `None` if unset (treated as
     /// `0`). The value is not a plain integer: bash recursively evaluates it as
     /// an arithmetic expression, so `b=a; a=5; $((b))` yields `5` and
@@ -1261,31 +1300,55 @@ fn eval_expr(e: &Expr, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
     match e {
         Expr::Num(n) => Ok(*n),
         // A variable read resolves the raw value string and (like bash)
-        // recursively evaluates it as an arithmetic expression.
-        Expr::Var(n) => match vars.get_str(n) {
-            Some(s) => str_to_val(&s, vars, depth),
-            None => Ok(0),
-        },
+        // recursively evaluates it as an arithmetic expression. Every one of
+        // the three is a *variable* read and so answers to `set -u` first — see
+        // [`VarLookup::note_arith_unbound`], and note that the subscripted forms
+        // ask before evaluating their subscript.
+        Expr::Var(n) => {
+            vars.note_arith_unbound(n, false)?;
+            match vars.get_str(n) {
+                Some(s) => str_to_val(&s, vars, depth),
+                None => Ok(0),
+            }
+        }
         Expr::Index(n, ix) => {
+            vars.note_arith_unbound(n, true)?;
             let i = ix.eval(vars, depth)?;
             match vars.get_index_str(n, i) {
                 Some(s) => str_to_val(&s, vars, depth),
                 None => Ok(0),
             }
         }
-        Expr::Assoc(n, k) => match vars.get_assoc_str(n, k) {
-            Some(s) => str_to_val(&s, vars, depth),
-            None => Ok(0),
-        },
+        Expr::Assoc(n, k) => {
+            vars.note_arith_unbound(n, true)?;
+            match vars.get_assoc_str(n, k) {
+                Some(s) => str_to_val(&s, vars, depth),
+                None => Ok(0),
+            }
+        }
         // Complained about only when actually reached, so a short-circuited
         // `(( 1 ? 7 : a[] ))` is silent.
+        //
+        // Deliberately *not* asked about `set -u`, unlike the whole-array
+        // subscript below. bash does ask, but its `array_variable_name` returns
+        // a null pointer for a subscript it has already refused, so what comes
+        // out is the literal text `(null): unbound variable` — a printed C null,
+        // which is a defect rather than a behaviour. See known-issues
+        // TD-OILS-AN-EMPTY-ARITHMETIC-SUBSCRIPT-IS-NAMED-(null)-BY-BASH.
         Expr::EmptySub(n) => {
             vars.warn_empty_subscript_read(n);
             Ok(0)
         }
         // Same shape as the empty subscript beside it: reached only when the
         // operand is actually evaluated, so `(( 1 ? 7 : a[@] ))` is silent.
+        //
+        // `set -u` is asked first and *replaces* the refusal when it fires,
+        // because bash reaches the array's own variable before it looks at what
+        // the subscript says: `declare -a a; (( a[@] ))` is `a: unbound
+        // variable` alone, where the same expression with `a` assigned — or with
+        // nounset off — is the bad-subscript refusal alone.
         Expr::WholeSub(n, s) => {
+            vars.note_arith_unbound(n, true)?;
             vars.refuse_whole_array_subscript(n, *s);
             Ok(0)
         }
@@ -1336,6 +1399,9 @@ fn eval_expr(e: &Expr, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
             eval_expr(r, vars, depth)
         }
         Expr::Assign(lv, base, rhs) => {
+            if base.is_some() {
+                note_lv_unbound(lv, vars)?;
+            }
             let loc = resolve_lv(lv, vars, depth)?;
             let v = match base {
                 None => eval_expr(rhs, vars, depth)?,
@@ -1349,6 +1415,7 @@ fn eval_expr(e: &Expr, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
             Ok(v)
         }
         Expr::PreIncr(lv, inc) => {
+            note_lv_unbound(lv, vars)?;
             let loc = resolve_lv(lv, vars, depth)?;
             let step = if *inc { 1 } else { -1 };
             let v = load_rlv(&loc, vars, depth)?.wrapping_add(step);
@@ -1356,12 +1423,30 @@ fn eval_expr(e: &Expr, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
             Ok(v)
         }
         Expr::PostIncr(lv, inc) => {
+            note_lv_unbound(lv, vars)?;
             let loc = resolve_lv(lv, vars, depth)?;
             let old = load_rlv(&loc, vars, depth)?;
             let step = if *inc { 1 } else { -1 };
             store_rlv(&loc, old.wrapping_add(step), vars)?;
             Ok(old)
         }
+    }
+}
+
+/// The `set -u` check a read-modify-write owes for the variable it is about to
+/// read, asked *before* the location is resolved.
+///
+/// The order is bash's and it is observable: `(( nada[nope] += 1 ))` reads the
+/// whole `nada[nope]` through `expr_streval` and so reports the missing array
+/// `nada`, while the plain `(( nada[nope] = 1 ))` beside it never reads and
+/// reaches the subscript first, reporting `nope`.
+fn note_lv_unbound(lv: &Lvalue, vars: &mut dyn VarLookup) -> Result<(), ArithError> {
+    match lv {
+        Lvalue::Var(n) => vars.note_arith_unbound(n, false),
+        Lvalue::Index(n, _) | Lvalue::Assoc(n, _) => vars.note_arith_unbound(n, true),
+        // Neither addresses an element; the complaint each earns is its own and
+        // is made where it is read.
+        Lvalue::EmptySub(_) | Lvalue::WholeSub(..) => Ok(()),
     }
 }
 
@@ -1381,6 +1466,9 @@ fn resolve_lv(lv: &Lvalue, vars: &mut dyn VarLookup, depth: u32) -> Result<Resol
 }
 
 fn load_rlv(loc: &ResolvedLv, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
+    // The `set -u` question this read owes was asked by `note_lv_unbound`
+    // before the location was resolved, because bash asks about the variable
+    // before it evaluates the subscript.
     match loc {
         ResolvedLv::Var(n) => match vars.get_str(n) {
             Some(s) => str_to_val(&s, vars, depth),

@@ -3264,6 +3264,13 @@ impl Lexer {
             if c == '"' {
                 let q_open = self.cur_line();
                 cx.push_to(&mut raw);
+                // A double-quoted span is *not* opaque to this scan. Substitution
+                // still happens inside it, so a `)` in there may be a nested
+                // substitution's — and a `<<` in there may be a here-document
+                // whose body has to be fetched from past the enclosing `)`.
+                // bash's `parse_matched_pair` recurses into the same constructs
+                // with the same reader; copying to the closing quote verbatim
+                // instead would lose `"$(cat <<B)"` entirely.
                 loop {
                     match self.peek() {
                         Some('\\') => {
@@ -3275,6 +3282,48 @@ impl Lexer {
                             self.pos += 1;
                             raw.push(b'"');
                             break;
+                        }
+                        // Lexed on its own, exactly as outside the quotes — and
+                        // bash does not fetch a here-document declared in one
+                        // either, so nothing here does.
+                        Some('`') => {
+                            self.pos += 1;
+                            let (_, verbatim) = self.read_backtick(false)?;
+                            raw.push(b'`');
+                            raw.extend_from_slice(&verbatim);
+                            raw.push(b'`');
+                        }
+                        Some('$') if self.peek_at(1) == Some('{') => {
+                            self.pos += 2;
+                            let inner = self.read_dollar_brace()?;
+                            raw.extend_from_slice(b"${");
+                            raw.extend_from_slice(&inner);
+                            raw.push(b'}');
+                        }
+                        // `$(( … ))`: balanced parens with no here-document in
+                        // them — a `<<` there is a left shift. The cursor is left
+                        // on the inner `(`, which the balanced read counts as a
+                        // level of its own, so it stops on the second `)`.
+                        Some('$')
+                            if self.peek_at(1) == Some('(') && self.peek_at(2) == Some('(') =>
+                        {
+                            self.pos += 2;
+                            let inner = self.read_balanced_inner('(', ')', false)?;
+                            raw.extend_from_slice(b"$(");
+                            raw.extend_from_slice(&inner);
+                            raw.push(b')');
+                        }
+                        // A nested substitution, read by this same scan so that
+                        // its here-documents are gathered at *its* `)` like any
+                        // other's. Recursing rather than counting depth in the
+                        // quoted span is what keeps a bare `)` in the text — as
+                        // in `"a)b"` — from closing anything.
+                        Some('$') if self.peek_at(1) == Some('(') => {
+                            self.pos += 2;
+                            let inner = self.read_balanced_inner('(', ')', heredocs)?;
+                            raw.extend_from_slice(b"$(");
+                            raw.extend_from_slice(&inner);
+                            raw.push(b')');
                         }
                         Some(_) => self.take_into(&mut raw),
                         None => return Err(eof_matching('"').at(q_open)),

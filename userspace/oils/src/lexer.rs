@@ -2120,6 +2120,37 @@ impl Lexer {
                         self.emit_word(out, segs);
                     }
                 }
+                '-' if matches!(out.last(), Some(Tok::Op(Op::LessAnd | Op::GreatAnd))) => {
+                    // The `-` of `<&-` / `>&-` is a token in its own right, not
+                    // the first character of the target word. bash settles that
+                    // in the lexer, before `read_token_word` is ever entered
+                    // (`read_token`, `parse.y`):
+                    //
+                    //     /* Hack <&- (close stdin) case.  Also <&N- (dup and
+                    //        close). */
+                    //     if MBTEST(character == '-' &&
+                    //               (last_read_token == LESS_AND ||
+                    //                last_read_token == GREATER_AND))
+                    //       return (character);
+                    //
+                    // and its grammar then has literal `'-'` productions
+                    // (`GREATER_AND '-'`, `NUMBER LESS_AND '-'`, `REDIR_WORD
+                    // GREATER_AND '-'`, …) to receive it.
+                    //
+                    // So the target is *exactly* `-`, and whatever follows
+                    // begins a fresh word: `true 1>&--` is a close plus an
+                    // argument `-`, and `echo z 1>&-x` writes `z` to a closed
+                    // fd 1 and passes `x` along. Only a *leading* `-` is taken
+                    // this way — `1>&2-x` never reaches here, because the `2`
+                    // starts an ordinary word that swallows the rest, leaving
+                    // the whole `2-x` to fail as a dup target.
+                    //
+                    // Whitespace before it makes no difference either, since
+                    // bash skips blanks before this test: `1>& --` splits the
+                    // same way `1>&--` does.
+                    self.adv();
+                    self.emit_word(out, vec![Seg::Lit(b"-".to_vec())]);
+                }
                 _ => {
                     let segs = self.read_word(extpat)?;
                     self.emit_word(out, segs);

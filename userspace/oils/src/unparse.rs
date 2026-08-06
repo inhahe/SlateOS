@@ -990,6 +990,16 @@ pub fn name_index(name: &str, index: &Option<ArrayIndex>) -> Str {
 /// bash does.
 fn quoted_lit_src(text: BStr<'_>, escaped: bool) -> Str {
     if escaped {
+        // An escaped run with nothing in it is a backslash that escapes
+        // nothing — a *dangling* one. The lexer never builds such a part (a
+        // `\c` always carries its `c`); the one thing that does is
+        // [`crate::ast::dup_move_source`], which takes the final byte off a
+        // `>&x\-` because bash's parser takes it off the raw word. bash prints
+        // the remainder back verbatim, backslash and all, so `1>&x\-` reads
+        // back as it was written.
+        if text.is_empty() {
+            return Str::from(&b"\\"[..]);
+        }
         let mut s = Str::with_capacity(text.len() * 2);
         for c in bytes::chars(text) {
             s.push(b'\\');

@@ -1268,26 +1268,55 @@ impl DupSpelling {
 ///
 /// The `-` is part of the *source text*, never of an expansion: bash sorts the
 /// word at parse time, so `>&$v-` is a move whatever `$v` holds, while `>&$v`
-/// with `v=3-` is not one and ends up naming a file called `3-`. It has to be
-/// unquoted too, by the same rule that keeps `>&"2"` a word: `>&3"-"` is the
-/// filename `3-`.
+/// with `v=3-` is not one and ends up naming a file called `3-`.
+///
+/// The test is on the word's **raw last byte**, before quote removal, which is
+/// blunter than it looks. `>&3"-"` is not a move — its last byte is the closing
+/// quote — but `>&3\-` *is* one, because a backslash puts the dash last after
+/// all. And there is no exception for a dash that is already doubled: `>&$v--`
+/// is a move whose source is `$v-`. What keeps a lone `>&-` out of here is not
+/// a rule of this function's but the lexer's, which takes an unquoted leading
+/// `-` as a close token of its own before any word is collected.
 #[must_use]
 pub fn dup_move_source(target: &Word) -> Option<Word> {
     let (last, rest) = target.parts.split_last()?;
-    let WordPart::Literal(s) = last else {
-        return None;
+    let tail = match last {
+        // The ordinary spelling: the `-` is plain text at the end of the word.
+        WordPart::Literal(s) => {
+            let s = s.strip_suffix(b"-")?;
+            (!s.is_empty()).then(|| WordPart::Literal(s.to_vec()))
+        }
+        // `>&x\-`. bash's test is on the *raw* final byte of the word, with
+        // quoting not yet removed, so an escaped dash ends a move just as well
+        // as a bare one — see `make_redirection` (`make_cmd.c`), whose own
+        // comment on the test is `/* Yuck */`:
+        //
+        //     wlen = strlen (w->word) - 1;
+        //     if (w->word[wlen] == '-')
+        //       { w->word[wlen] = '\0'; … }
+        //
+        // Taking the byte off a `\-` leaves the backslash dangling, and bash
+        // then expands *that* as the source: quote removal drops it, so the
+        // source is empty. An escaped run with nothing left in it is exactly
+        // that dangling backslash — it expands to nothing and prints as `\`.
+        //
+        // Only `'-'` and `"-"` escape the rule, because their raw final byte is
+        // the closing quote rather than the dash.
+        WordPart::SingleQuoted {
+            text,
+            escaped: true,
+        } => Some(WordPart::SingleQuoted {
+            text: text.strip_suffix(b"-")?.to_vec(),
+            escaped: true,
+        }),
+        _ => return None,
     };
-    let s = s.strip_suffix(b"-")?;
-    // A bare `-` is a close, not a move with an empty source; and `>&--` is a
-    // close followed by the argument `-`, because bash's lexer takes the `>&-`
-    // before it ever collects a word. Neither leaves a source behind.
-    if s.first() == Some(&b'-') {
-        return None;
-    }
     let mut parts = rest.to_vec();
-    if !s.is_empty() {
-        parts.push(WordPart::Literal(s.to_vec()));
-    }
+    parts.extend(tail);
+    // Unreachable by construction: the only word that could leave nothing
+    // behind is a bare `-`, and the lexer takes that as a close token before a
+    // word is ever collected (see the `<&-` arm of [`crate::lexer`]). Kept so
+    // that a `Word` with no parts can never escape from here.
     if parts.is_empty() {
         return None;
     }
@@ -1334,6 +1363,45 @@ mod tests {
         sc.redirects[0].target.clone()
     }
 
+    /// The words of the first simple command, `>&-`'s own `-` included.
+    fn first_command_words(src: &str) -> Vec<Word> {
+        let prog = crate::parser::parse(src.as_bytes()).expect("parse");
+        let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+            panic!("not a simple command: {src}");
+        };
+        sc.words.clone()
+    }
+
+    #[test]
+    fn a_dup_targets_leading_dash_is_a_token_of_its_own_and_the_rest_is_a_word() {
+        // bash's lexer returns the `-` after `<&`/`>&` before it ever collects a
+        // word, so what follows starts a fresh one — `1>&--` closes fd 1 and
+        // passes `-` along as an argument.
+        let lit = |s: &str| Word {
+            parts: vec![WordPart::Literal(s.as_bytes().to_vec())],
+        };
+        for (src, want) in [
+            ("true 1>&--", vec![lit("true"), lit("-")]),
+            ("true 1>&-x", vec![lit("true"), lit("x")]),
+            ("true 1>&-abc", vec![lit("true"), lit("abc")]),
+            // Blanks before it make no difference: bash skips them first.
+            ("true 1>& --", vec![lit("true"), lit("-")]),
+            // Nothing follows the close here, so there is no extra word.
+            ("true 1>&-", vec![lit("true")]),
+        ] {
+            assert_eq!(first_command_words(src), want, "words of {src}");
+            assert_eq!(
+                dup_spelling(&first_redirect_target(src)),
+                DupSpelling::Close,
+                "spelling of {src}"
+            );
+        }
+
+        // Only a *leading* dash. A `2` starts an ordinary word, which then
+        // swallows the rest — so `1>&2-x` is one target word, not a close.
+        assert_eq!(first_command_words("true 1>&2-x"), vec![lit("true")]);
+    }
+
     #[test]
     fn a_move_is_sorted_by_how_the_dash_was_written_not_by_what_it_expands_to() {
         // The `-` belongs to the source text, so an expansion can neither supply
@@ -1347,15 +1415,29 @@ mod tests {
             // Only the `-` itself has to be bare: `>&"3"-` is still a move, but
             // of the *word* `"3"`, by the same rule that keeps `>&"2"` a word.
             ("true >&\"3\"-", DupSpelling::MoveWord),
-            // Quoted dash: not a move at all, just the filename `3-`.
+            // Quoted dash: not a move at all, just the filename `3-`. bash
+            // tests the word's raw last *byte*, which for these is the closing
+            // quote.
             ("true >&3\"-\"", DupSpelling::Word),
-            (r"true >&3\-", DupSpelling::Word),
+            ("true >&3'-'", DupSpelling::Word),
+            // …but a backslash leaves the dash last after all, so this one is a
+            // move — of the dangling `\`, which expands to nothing.
+            (r"true >&3\-", DupSpelling::MoveWord),
+            (r"true >&\-", DupSpelling::MoveWord),
+            (r"true >&x\-", DupSpelling::MoveWord),
             // The dash cannot come out of an expansion.
             ("true >&$v", DupSpelling::Word),
-            // A bare `-` is a close, not a move with an empty source; `--` is a
-            // close with an argument after it, so it is no move either.
+            // A bare `-` is a close — but that is the lexer's doing, not this
+            // function's: it returns the `-` as a token of its own, so `>&--`
+            // is a close plus an argument and never reaches the word path.
             ("true >&-", DupSpelling::Close),
+            ("true >&--", DupSpelling::Close),
             ("true >&3", DupSpelling::Number),
+            // There is no exception for an already-doubled dash once the word
+            // path *is* reached: only the final byte is taken off.
+            ("true >&x--", DupSpelling::MoveWord),
+            ("true >&$v--", DupSpelling::MoveWord),
+            ("true >&\"x\"--", DupSpelling::MoveWord),
         ] {
             assert_eq!(
                 dup_spelling(&first_redirect_target(src)),
@@ -1375,8 +1457,33 @@ mod tests {
         let src = dup_move_source(&first_redirect_target("true 1>&\"3\"-")).expect("a move");
         assert_eq!(dup_spelling_plain(&src), DupSpelling::Word);
 
-        // Nothing to take off, or nothing left after taking it off.
-        for src in ["true 1>&3", "true 1>&-", "true 1>&$v"] {
+        // Taking the dash off a `\-` leaves the backslash dangling, which is an
+        // escaped run with nothing in it: it expands to the empty string and
+        // prints back as `\`, so `1>&x\-` reads back exactly as written.
+        let src = dup_move_source(&first_redirect_target(r"true 1>&x\-")).expect("a move");
+        assert_eq!(
+            src.parts,
+            vec![
+                WordPart::Literal(b"x".to_vec()),
+                WordPart::SingleQuoted {
+                    text: Vec::new(),
+                    escaped: true
+                },
+            ]
+        );
+        // …and with nothing before it, the source is that backslash alone.
+        let src = dup_move_source(&first_redirect_target(r"true 1>&\-")).expect("a move");
+        assert_eq!(
+            src.parts,
+            vec![WordPart::SingleQuoted {
+                text: Vec::new(),
+                escaped: true
+            }]
+        );
+
+        // Nothing to take off. A bare `-` is not in this list because it cannot
+        // get here: the lexer takes it as a close token before a word is built.
+        for src in ["true 1>&3", "true 1>&$v", "true 1>&3\"-\""] {
             assert!(
                 dup_move_source(&first_redirect_target(src)).is_none(),
                 "{src} is not a move"

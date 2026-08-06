@@ -12,9 +12,16 @@
 # evaluated at all, before the readonly guard, and before the literal's own
 # words are expanded.
 #
-# The abort it raises is the deep one: a nested read-eval loop does not confine
-# it, so an `eval` — and a *function* — carries its caller down with it. A
-# subshell still confines it, being a shell of its own.
+# The abort it raises is the ordinary one — the same abort `a[-9]=x` raises, and
+# measured against it in every shape. The rest of the list goes with it, a
+# *function* takes its caller's list down too, and a subshell — whose body is a
+# list of its own — exits. An `eval` confines it and reports 1, but only at the
+# top level: inside a subshell the same `eval` does not, and the subshell exits
+# 1 all the same. Both shapes are below, each written twice so the reference
+# case can be read beside it.
+#
+# Every other case has to sit in a subshell of its own so the one after it is
+# reached at all — which is why the two depths look alike unless you go looking.
 
 echo '=== a reference to one element'
 ( n=(a b c); declare -n r='n[1]'; r=(x y); echo NOT; declare -p n r 2>&1 )
@@ -45,11 +52,20 @@ echo '=== the words are never expanded'
 echo '=== the rest of the parse unit goes with it'
 ( n=(a b c); declare -n r='n[1]'; r=(x y); echo NOT1
 echo NOT2 )
-echo '=== …and so does an eval, and its caller'
-( n=(a b c); declare -n r='n[1]'; eval 'r=(x y); echo NOT1'; echo NOT2 )
-echo '=== …and a function, and its caller'
+echo '=== at the top level an eval confines it, and reports 1'
+n=(a b c); declare -n r='n[1]'
+{ eval 'r=(x y); echo NOT'; echo "s=$?"; echo AFTER; }
+a=(1 2); { eval 'a[-9]=x; echo NOT'; echo "s=$?"; echo AFTER; }
+unset -n r; unset n a
+echo '=== inside a subshell the same eval does not, and the subshell exits'
+( n=(a b c); declare -n r='n[1]'
+  { eval 'r=(x y); echo NOT'; echo "s=$?"; }; echo AFTER )
+echo "s=$?"
+( a=(1 2); { eval 'a[-9]=x; echo NOT'; echo "s=$?"; }; echo AFTER )
+echo "s=$?"
+echo '=== a function takes its caller down with it'
 ( f() { declare -n r='n[1]'; r=(x y); echo NOT1; }; n=(a b c); f; echo NOT2 )
-echo '=== a subshell confines it, being a shell of its own'
+echo '=== a subshell exits, its body being a list of its own'
 ( n=(a b c); declare -n r='n[1]'; ( r=(x y); echo NOT ); echo "s=$?"; echo AFTER )
 echo '=== set -e and posix change nothing'
 ( set -e; n=(a b c); declare -n r='n[1]'; r=(x y); echo NOT ); echo "s=$?"

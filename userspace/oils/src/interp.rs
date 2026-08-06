@@ -12030,15 +12030,16 @@ impl Shell {
         // guard, and before the literal's own words are expanded (`r=($(f))`
         // never runs `f`).
         //
-        // The abort it raises is the deep one: a nested read-eval loop does not
-        // confine it, so `eval 'r=(x y); echo IN'` prints no `IN` and the
-        // caller of the `eval` gets no further either — and neither does the
-        // caller of a *function* that did it. See
-        // [`Self::arm_int_bind_discard`].
+        // The abort it raises is the ordinary one, which a nested read-eval loop
+        // *does* confine: `eval 'r=(x y)'` reports 1 and the list it sits in
+        // carries on. Written without the `eval` the rest of that list goes, as
+        // it does for a *function* that did it — and a subshell, whose body is a
+        // list of its own, exits. See [`Self::arm_discard`]; this is `a[-9]=x`'s
+        // behaviour exactly, measured against it in all four shapes.
         if a.index.is_none() && matches!(a.value, AssignRhs::Array(_)) && target.sub.is_some() {
             let spelled = target.spelling();
             self.warn_elem_not_identifier(&spelled);
-            self.arm_int_bind_discard();
+            self.arm_discard(1);
             return false;
         }
         // The base of an element destination is bound where it is *written*, so

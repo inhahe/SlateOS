@@ -678,11 +678,13 @@ whose resolved target carries a subscript, ahead of the unreference and the
 whole-array complaint, with `Shell::warn_elem_not_identifier` on the target's
 spelling.
 
-The abort is the **deep** one (`Shell::arm_int_bind_discard`), measured: a
-nested read-eval loop does not confine it, so `eval 'r=(x y); echo IN'` prints
-no `IN` and the caller of the `eval` gets no further either — and neither does
-the caller of a *function* that did it. A subshell still confines it, being a
-shell of its own, and `set -e` / `set -o posix` change nothing.
+The abort is the **ordinary** one (`Shell::arm_discard`), measured against
+`a[-9]=x` in every shape: an `eval` confines it and reports 1, and without one
+the rest of the list goes — a *function* taking its caller's list down too, and
+a subshell, whose body is a list of its own, exiting. `set -e` and `set -o
+posix` change nothing. (A first reading called it the deep abort; every case in
+the measurement behind that had been put in a subshell, where the two look
+alike.)
 
 **Corpus:** `a-compound-literal-through-a-reference-to-an-element-is-refused.sh`.
 

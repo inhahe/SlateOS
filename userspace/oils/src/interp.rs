@@ -12192,7 +12192,7 @@ impl Shell {
     /// The value a subscript-less reference to `name` sees — the inverse of
     /// [`Shell::set_scalar_store`], so it reads element/key `0` of an array
     /// rather than the (unreachable) scalar slot of the same name.
-    fn scalar_store(&self, name: &str) -> Option<Str> {
+    fn scalar_store(&mut self, name: &str) -> Option<Str> {
         if self.arrays.contains_key(name) {
             self.array_element(name, 0)
         } else if self.assoc.contains_key(name) {
@@ -13636,7 +13636,7 @@ impl Shell {
     }
 
     /// All values of `name`, treating a plain scalar as a one-element array.
-    fn array_elements(&self, name: &str) -> Vec<Str> {
+    fn array_elements(&mut self, name: &str) -> Vec<Str> {
         self.array_elements_walks(name, 1)
     }
 
@@ -13654,7 +13654,7 @@ impl Shell {
     /// The plain one-walk form stays for the callers that have already resolved
     /// (or deliberately silenced) the name and are enumerating as a second step,
     /// where warning again would double a count that is already right.
-    fn array_elements_walks(&self, name: &str, walks: usize) -> Vec<Str> {
+    fn array_elements_walks(&mut self, name: &str, walks: usize) -> Vec<Str> {
         // A reference designating one *element* names no array to enumerate, so
         // it yields nothing — the same answer the lookups below would give.
         let Some(name) = &self.resolve_ref_use_walks(name, walks).and_then(RefTarget::into_name)
@@ -13662,14 +13662,15 @@ impl Shell {
             return Vec::new();
         };
         if let Some(m) = self.assoc.get(name) {
-            m.iter().map(|(_, v)| v.clone()).collect()
-        } else if let Some(a) = self.arrays.get(name) {
-            a.values().cloned().collect()
-        } else if let Some(v) = self.vars.get(name) {
-            vec![v.clone()]
-        } else {
-            Vec::new()
+            return m.iter().map(|(_, v)| v.clone()).collect();
         }
+        if let Some(a) = self.arrays.get(name) {
+            return a.values().cloned().collect();
+        }
+        // `[@]`/`[*]` on a scalar is bash's `return (var_isset (var) ? 1 : 0)`,
+        // and a computed scalar is set like any other. See
+        // [`Shell::scalar_for_subscript`].
+        self.scalar_for_subscript(name).map_or_else(Vec::new, |v| vec![v])
     }
 
     /// Compute an array/positional slice (`${a[@]:off:len}`, `${@:off:len}`).
@@ -14344,19 +14345,22 @@ impl Shell {
     }
 
     /// The keys (associative) or indices (indexed) of `name`, in order.
-    fn array_keys(&self, name: &str) -> Vec<Str> {
+    fn array_keys(&mut self, name: &str) -> Vec<Str> {
         let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
             return Vec::new();
         };
         if let Some(m) = self.assoc.get(name) {
-            m.iter().map(|(k, _)| k.clone()).collect()
-        } else if let Some(a) = self.arrays.get(name) {
-            a.keys().map(|k| k.to_string().into_bytes()).collect()
-        } else if self.vars.contains_key(name) {
-            vec![b"0".to_vec()]
-        } else {
-            Vec::new()
+            return m.iter().map(|(k, _)| k.clone()).collect();
         }
+        if let Some(a) = self.arrays.get(name) {
+            return a.keys().map(|k| k.to_string().into_bytes()).collect();
+        }
+        // A scalar's one index is `0` — including a computed one, so
+        // `${!SECONDS[@]}` is `0`. See [`Shell::scalar_for_subscript`].
+        if self.scalar_for_subscript(name).is_some() {
+            return vec![b"0".to_vec()];
+        }
+        Vec::new()
     }
 
     /// Resolve a possibly-negative array subscript against a length, using bash
@@ -14398,24 +14402,46 @@ impl Shell {
             .map_or(0, |k| k.saturating_add(1))
     }
 
+    /// The scalar `name` answers a subscript with — the one bash's
+    /// `find_variable` hands back, so it is the *ordinary* binding when there is
+    /// one and otherwise a fresh reading from the name's value function.
+    ///
+    /// The second half is the reason this exists rather than a bare
+    /// `self.vars.get(name)`. bash draws no line between a stored scalar and a
+    /// computed one: both are a `SHELL_VAR` whose `value_cell` a subscripted
+    /// read reaches through `t = (ind == 0) ? value_cell (var) : NULL`. So
+    /// `${SECONDS[0]}`, `${SECONDS[@]}` and `${!SECONDS[@]}` all answer, exactly
+    /// as `${s[0]}` does for a plain `s=hi` — and every operator layered on top
+    /// of them (`+`, `:-`, `@Q`, a pattern) answers with them.
+    ///
+    /// Reading through here is also what *touches* the name, which is the same
+    /// side effect an unsubscripted read has: `${RANDOM[0]}` draws a number and
+    /// `${SECONDS[0]}` starts the listing. See
+    /// [`Shell::dynamic_special_value`], which is why the readers below take
+    /// `&mut self`.
+    fn scalar_for_subscript(&mut self, name: &str) -> Option<Str> {
+        if let Some(v) = self.vars.get(name) {
+            return Some(v.clone());
+        }
+        self.dynamic_special_value(name)
+    }
+
     /// A single array element by index (scalar acts as a one-element array).
     /// Negative indices count from the end (`-1` = last). `None` if the index
     /// is out of range.
-    fn array_element(&self, name: &str, idx: i64) -> Option<Str> {
+    fn array_element(&mut self, name: &str, idx: i64) -> Option<Str> {
         if let Some(a) = self.arrays.get(name) {
             // Negative indices count back from `highest_index + 1` (bash sparse
             // semantics), not from the element count.
             let bound = a.keys().next_back().map_or(0, |k| k.saturating_add(1));
             let real = Self::resolve_index(idx, bound)?;
-            a.get(&real).cloned()
-        } else if let Some(v) = self.vars.get(name) {
-            // A scalar behaves as a one-element array at index 0.
-            match Self::resolve_index(idx, 1)? {
-                0 => Some(v.clone()),
-                _ => None,
-            }
-        } else {
-            None
+            return a.get(&real).cloned();
+        }
+        // A scalar behaves as a one-element array at index 0.
+        let v = self.scalar_for_subscript(name)?;
+        match Self::resolve_index(idx, 1)? {
+            0 => Some(v),
+            _ => None,
         }
     }
 
@@ -45022,7 +45048,7 @@ impl VarLookup for Shell {
         self.param_value(name)
     }
 
-    fn get_index_str(&self, name: &str, index: i64) -> Option<Str> {
+    fn get_index_str(&mut self, name: &str, index: i64) -> Option<Str> {
         match self.arith_elem_read(name) {
             // `array_element` already applies bash negative-index semantics.
             ArithElem::Array(base) => self.array_element(&base, index),

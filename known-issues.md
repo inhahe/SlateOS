@@ -459,7 +459,7 @@ subscript to match.
 Found while corpus-locking the fatal-abort-status work above. Locked by
 `userspace/oils/tests/corpus/a-word-is-abandoned-at-its-first-fault-and-says-nothing-more.sh`.
 
-### TD-OILS-A-SCALAR-DYNAMIC-SPECIAL-READ-THROUGH-A-SUBSCRIPT-IS-EMPTY. `${SECONDS[0]}` / `${LINENO[@]}` / `${#PPID[0]}` read as unset — 2026-08-06 — OPEN
+### TD-OILS-A-SCALAR-DYNAMIC-SPECIAL-READ-THROUGH-A-SUBSCRIPT-IS-EMPTY. `${SECONDS[0]}` / `${LINENO[@]}` / `${#PPID[0]}` read as unset — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::array_element` (~14404) and
 `Shell::array_elements_walks` (~13657).
@@ -485,17 +485,74 @@ value/environment differences between the two shells, not this bug.
 `BASH_ARGC`/`BASH_ARGV` are the separate, already-logged
 TD-OILS-MISSING-SPECIAL-ARRAYS.)
 
-**Proper fix.** Have both helpers consult `Shell::dynamic_special_value` before
-giving up. The obstacle is a signature mismatch, which is why this is logged
-rather than fixed inline: `dynamic_special_value` is `&mut self` (it sets
-`dyn_touched`), while `array_element` and `array_elements_walks` are both
-`&self` with several callers each. The proper fix is to take the `&mut` through
-— not to duplicate the dynamic-special evaluation behind a `&self` shim, which
-would silently drop the `dyn_touched` bookkeeping that `RANDOM`/`SECONDS` depend
-on.
-
 **Impact.** Small but silent: a script that subscripts a scalar special reads
 empty instead of its value, and `${#SECONDS[0]}` reads 0.
+
+**Fixed 2026-08-06.** A single accessor, `Shell::scalar_for_subscript`, now
+answers "the scalar this name subscripts" — the ordinary binding when there is
+one, and otherwise `Shell::dynamic_special_value` — and `array_element`,
+`array_elements_walks` and `array_keys` all read through it. That last name is
+the one the measurement did not predict: `${!SECONDS[@]}` must answer `0`, and
+the key list had the same `self.vars.contains_key` gate.
+
+The `&mut` was taken through rather than shimmed around, because the touch *is*
+the semantics: reading a computed scalar through a subscript fills its value
+cell exactly as an unsubscripted read does, so `: "${SECONDS[0]}"` starts it
+listing as `declare -i SECONDS="0"` and `$(( RANDOM[0] ))` draws a number. That
+last spelling made `VarLookup::get_index_str` `&mut self` too, matching the
+`&mut` its sibling `get_str` already had for the same kind of reason.
+
+Two things deliberately did *not* soften, both because they are questions about
+the variable rather than its value: a scalar still has no highest index to count
+back from (`${SECONDS[-1]}` is `bad array subscript`), and a scalar still has no
+array shape, so `set -u; ${#SECONDS[0]}` still faults naming the base alone.
+
+Measured before and after over 8 specials × 13 spellings: 65 divergent rows
+before, 0 after (the 15 rows that still print differently are pid, path and
+clock *values*, which differ between the two shells by construction). Locked by
+`userspace/oils/tests/corpus/a-computed-scalar-answers-a-subscript-like-any-other.sh`.
+
+### TD-OILS-A-SUBSCRIPTED-READ-DRAWS-A-DIFFERENT-NUMBER-OF-TIMES. `${RANDOM[0]}` consumes one number where bash consumes two — 2026-08-06 — WON'T FIX (bash implementation artifact)
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::scalar_for_subscript`, which
+calls `Shell::dynamic_special_value` once per read.
+
+**What.** Found while writing the corpus case for the entry above, which first
+tried to assert that a subscripted read takes the same seeded sequence an
+unsubscripted one does. bash fails that assertion. Seeded with `RANDOM=1` the
+stream is `16807 10791 19566 13983 18126 …`, and:
+
+```text
+RANDOM=1; echo $RANDOM $RANDOM              16807 10791     1 draw each
+RANDOM=1; echo ${RANDOM[0]}; echo $RANDOM   10791 / 19566   2 draws
+RANDOM=1; echo ${#RANDOM[@]} $RANDOM        1 10791         1 draw
+RANDOM=1; echo ${!RANDOM[@]} $RANDOM        0 10791         1 draw
+RANDOM=1; echo ${#RANDOM[0]} $RANDOM        5 10791         1 draw
+RANDOM=1; echo ${RANDOM[0]#1} $RANDOM       3983 …          4 draws
+RANDOM=1; echo ${RANDOM[0]:0:2} $RANDOM     13 …            4 draws
+RANDOM=1; n=RANDOM; echo ${!n[0]} $RANDOM   16807 10791     1 draw
+```
+
+The count is not a rule about subscripts — it is a count of how many times
+bash's expander happens to call `find_variable` on the way to the value, and
+every operator has its own. A plain element read finds twice (once in
+`get_var_and_type` to classify the name, once to read the cell); the shape
+questions find once; a trim or a slice finds twice again; an *indirect*
+subscripted read finds once. Each find runs the value function, and `RANDOM` is
+the only name where running it is observable.
+
+**Deliberately not matched.** Reproducing this means reproducing bash's
+`find_variable` call counts through the whole expander, operator by operator,
+for no semantic gain — the same reasoning already applied to bash's stale-cache
+listing under TD-OILS-DECLARE-P-BULK-DYNAMICS. osh draws exactly once per read,
+which is the behaviour the *unsubscripted* spellings already agree on. The
+corpus case therefore asserts only that each subscripted read draws afresh from
+the seeded stream, which is checkable without printing a number.
+
+**Impact.** A script that seeds `RANDOM` and then mixes subscripted and
+unsubscripted reads gets a different sequence than bash would give. Scripts that
+seed `RANDOM` for reproducibility already get a different sequence, since the
+generator itself is not bash's.
 
 ### TD-OILS-FD-MOVE-REDIRECTS-ARE-NOT-IMPLEMENTED. `n>&m-` / `n<&m-` are rejected as an ambiguous redirect — 2026-08-06 — ✅ FIXED 2026-08-06
 

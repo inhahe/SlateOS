@@ -92,7 +92,12 @@ pub trait VarLookup {
     /// arithmetically (so `(( a[i+1] ))` and negative indices work). Like
     /// [`VarLookup::get_str`], the value is recursively arithmetic-evaluated.
     /// The default ignores subscripts — array-backed implementors override it.
-    fn get_index_str(&self, name: &str, index: i64) -> Option<Str> {
+    ///
+    /// `&mut` for [`VarLookup::get_str`]'s reason and one more: a scalar answers
+    /// `name[0]`, and a scalar whose value is *computed* answers it by computing
+    /// — so `$(( PPID[0] ))` is the pid and `$(( RANDOM[0] ))` draws a number,
+    /// exactly as the unsubscripted spellings do.
+    fn get_index_str(&mut self, name: &str, index: i64) -> Option<Str> {
         let _ = (name, index);
         None
     }
@@ -1627,7 +1632,7 @@ mod tests {
             self.scalars.insert(name.to_string(), value);
             Ok(())
         }
-        fn get_index_str(&self, name: &str, index: i64) -> Option<Str> {
+        fn get_index_str(&mut self, name: &str, index: i64) -> Option<Str> {
             if name != "a" {
                 return None;
             }

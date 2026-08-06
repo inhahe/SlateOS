@@ -797,7 +797,7 @@ errors `eval: line N:` and echoes the eval *string* rather than the script line.
 — which reaches the shape repeatedly through `eval` (confined, status 2), since
 a bare one kills the script and so has to go last.
 
-### TD-OILS-A-DECLARATION-BUILTIN-THAT-BINDS-A-LOCAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-MAKES-A-LOCAL-NAMED-BY-THE-SPELLING. `f() { declare -n r='n[1]'; declare r=zz; }` binds a local literally *named* `n[1]` — 2026-08-05 — OPEN
+### TD-OILS-A-DECLARATION-BUILTIN-THAT-BINDS-A-LOCAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-MAKES-A-LOCAL-NAMED-BY-THE-SPELLING. `f() { declare -n r='n[1]'; declare r=zz; }` binds a local literally *named* `n[1]` — 2026-08-05 — ✅ FIXED 2026-08-05
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_declare_scoped` (the
 scalar operand path, where `target` is applied as `(base, sub)`),
@@ -824,8 +824,9 @@ declare -n r='n[1]'; declare -i r=7+1   `declare -i n[1]="8"`      —
 declare -n r='n[1]'; declare -A r=([k]=v)
                                         `declare -A n[1]=([k]="v" )`
                                                                    —
-declare -n r='n[1]'; declare r          nothing at all, s=0        —
-declare -n r='n[1]'; declare -i r       nothing at all, s=0        —
+declare -n r='n[1]'; declare r          `declare -- n[1]`,         —
+                                        created but unset
+declare -n r='n[1]'; declare -i r       `declare -i n[1]`          —
 declare -n r='n[@]'; declare r=zz       a local named `n[@]`       the refusal
 declare -n r=n; declare r=(x y)         a local *array* `n`,       the same — agreed
                                         shadowing the global
@@ -834,8 +835,12 @@ declare -n r=nosuch; declare r=(x y)    a local `nosuch`           the same — 
 
 So there is no special case at all: the rule is simply *make a local of the
 target's spelling*, and the odd-looking outcomes follow from a spelling that is
-not an identifier. Only a **valued** operand makes one — a valueless `declare r`
-or `declare -i r` creates nothing and leaves `r` the reference it was.
+not an identifier. **Every** shape of the operand makes one, valued or not — a
+valueless `declare -i r` leaves `declare -i n[1]` created-but-unset. (An earlier
+reading of this entry said a valueless operand created nothing; that was a
+measurement artifact. It was taken with `set`, which lists only *valued* names.
+`declare -p 'n[1]'` finds it, and bash reports `declare: n[1]: not found` for a
+plain array, so the lookup really is by literal name.)
 
 The binding is real, frame-scoped and reachable: any nameref whose value is that
 same spelling finds it (`g() { declare -n s='n[1]'; echo "$s"; }` prints `zz`
@@ -863,6 +868,126 @@ treats the text as an element reference.
 **Impact.** osh writes the caller's array where bash writes a throwaway local,
 so a function using this shape silently corrupts data the caller still owns —
 and refuses outright on the compound form.
+
+**Fixed 2026-08-05,** in three places, all in `interp.rs`:
+
+* `Shell::spelled_local_name` states the rule once — a local-binding
+  declaration through a reference to an element is about the target's
+  *spelling* as a whole name — and both declaration paths ask it.
+  `builtin_declare_scoped` substitutes `(spelling, None)` for
+  `(base, sub)` where it applies the resolved target;
+  `declare_compounds_scoped` uses the spelling as its `target` and points the
+  store at it through `apply_assignment_spelled`, since re-resolving the
+  operand would find the element the name only looks like.
+* `Shell::resolve_ref_name` now looks the reference's value up as a *name*
+  (`Shell::name_is_bound`) before treating it as an element reference, which is
+  what makes such a local reachable: any nameref spelled the same way finds it,
+  from this frame or a deeper one, while `${n[1]}` still reads the array. It
+  falls through to the plain-name step rather than returning, so the name is
+  re-examined at the top of the walk like any other link.
+
+One structural limit remains, documented at `spelled_local_name`: osh keys its
+variable tables by `String`, so a subscript that is not valid UTF-8 cannot be a
+name here and falls back to the element store. bash would bind it. This is the
+same limit as TD-OILS-NONUTF8-ENV-NAME, reached from a different direction, and
+the shell grammar cannot spell such a reference — only a `declare -n r=$'m[\xff]'`
+built out of `$'…'` reaches it.
+
+Two neighbours were measured on the way and logged separately rather than folded
+in: TD-OILS-UNSET-N-ON-A-LOCAL-BINDING-FOLLOWS-A-REFERENCE-WHOSE-TARGET-DOES-NOT-EXIST
+(`declare +n r`, which turns out to follow after all in exactly the cases where
+the target is absent) and TD-OILS-SET-LISTS-A-DECLARED-BUT-UNVALUED-ARRAY.
+
+**Corpus:**
+`a-local-declared-through-a-reference-to-an-element-is-named-by-the-spelling.sh`
+
+### TD-OILS-UNSET-N-ON-A-LOCAL-BINDING-FOLLOWS-A-REFERENCE-WHOSE-TARGET-DOES-NOT-EXIST. `f() { declare -n r=nosuch; declare +n r; }` declares `nosuch` and leaves `r` a reference — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_declare_scoped`, the
+`follow` rule (`(!unset_nameref || !make_local)`) and the `+n` early exit just
+below `nameref_off_name`.
+
+**What.** osh's model is that `+n` follows a reference on the same terms as any
+other letter *except* when the declaration binds a local, where it never does —
+it is then about the reference's own binding. That is right for a target that
+exists, and wrong for one that does not. Measured inside a function, in every
+case with the reference local to the frame:
+
+```text
+                                          bash                      osh
+w=5;      declare -n r=w;      declare +n r     `r` becomes `"w"`,   the same — agreed
+                                                `w` untouched
+          declare -n r=nosuch; declare +n r     `declare -- nosuch`, `r` becomes
+                                                `r` stays `-n`       `"nosuch"`
+          declare -n r=nosuch; declare -x +n r  `declare -x nosuch`, `r` becomes
+                                                `r` stays `-n`       `declare -x r`
+declare nosuch; declare -n r=nosuch; declare +n r
+                                                `r` becomes          the same — agreed
+                                                `"nosuch"`
+n=(a b c); declare -n r='n[1]'; declare +n r    `declare -- n[1]`,   `r` becomes
+                                                `r` stays `-n`       `"n[1]"`
+n=(a b c); declare -n r='n[1]'; declare -x +n r `declare -x n[1]`,   `declare -x r`
+                                                `r` stays `-n`
+n=(a b c); declare -n r='n[1]'; declare +n r=zz `declare -- n[1]="zz"`, `r` becomes
+                                                `r` stays `-n`       `"zz"`
+n=(a b c); declare -n r='n[1]'; declare r=zz; declare +n r
+                                                `r` becomes `"n[1]"`, the same — agreed
+                                                the local keeps `zz`
+```
+
+So the rule is *`+n` on a local-binding declaration follows the reference iff the
+name it leads to does not already exist*, and "exists" is bash's `find_variable`
+— a name brought into being unvalued (`declare nosuch`) counts, and so does the
+spelling-named local a previous operand made (last row). Where it follows, the
+whole declaration is about the target and `+n` is a no-op there (the target
+carries no nameref attribute), so the operand's own reference survives intact.
+At top level `+n` never follows, which osh already gets right.
+
+An element reference reaches this every time, since a subscripted spelling can
+only exist as a name after
+TD-OILS-A-DECLARATION-BUILTIN-THAT-BINDS-A-LOCAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-MAKES-A-LOCAL-NAMED-BY-THE-SPELLING
+has made one.
+
+**Proper fix.** Peek at the target with the silent `Shell::resolve_ref_name`
+before computing `follow`, and let `+n` follow when the resolved target's
+spelling is not bound (`Shell::name_is_bound`). The `+n` early exit then has to
+step aside for that case — the attribute comes off the *target*, which never has
+it, so `r` keeps its own — and `nameref_off_name` has to name the target rather
+than the operand.
+
+**Impact.** Two names come out wrong: bash declares the target, osh de-references
+the operand. A function that uses `+n` to test whether a reference resolves sees
+the opposite answer, and any attribute in the same command lands on the wrong
+variable.
+
+### TD-OILS-SET-LISTS-A-DECLARED-BUT-UNVALUED-ARRAY. `declare -a qq` then `set` prints a bare `qq`; bash prints nothing — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the `set`-with-no-operands listing.
+
+**What.** `set` lists the shell's *variables and their values*, and bash leaves
+out a name that has been declared but never valued. osh leaves out unvalued
+scalars but not unvalued arrays:
+
+```sh
+f() { declare -a qq; declare -A qa; declare qs; declare -i qi; set | grep '^q'; }; f
+# bash: nothing
+# osh:  qa
+#       qq
+```
+
+The two agree on `declare -p` throughout (`declare -a qq` either way), so this
+is only the `set` listing. It surfaced while measuring
+TD-OILS-A-DECLARATION-BUILTIN-THAT-BINDS-A-LOCAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-MAKES-A-LOCAL-NAMED-BY-THE-SPELLING,
+where `declare -a r` through an element reference makes an unvalued array named
+`n[1]` and osh printed it.
+
+**Proper fix.** The listing should skip an array name that is not in
+`array_valued` (the same flag `declare -p` uses to decide between `declare -a q`
+and `declare -a q=()`), exactly as it already skips a scalar that is only in
+`declared`.
+
+**Impact.** Small and cosmetic, but `set` is what scripts diff to snapshot an
+environment, so a spurious line changes the snapshot.
 
 ### TD-OILS-A-DECLARATION-BUILTIN-UNDER--G-WITH-A-COMPOUND-VALUE-THROUGH-AN-ELEMENT-REFERENCE-DOES-NOTHING-IN-BASH. `f() { declare -g r=(x y); }` with a global `declare -n r='n[1]'` is silent where every neighbour is not — 2026-08-05 — OPEN
 

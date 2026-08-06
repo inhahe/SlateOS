@@ -23831,11 +23831,28 @@ impl Shell {
                 // `local -n r=r` legitimately means the caller's `r`, and bash
                 // rejects the global form at declaration time instead.
                 Some(v) if !v.is_empty() && v != cur.as_bytes() => {
-                    // An element reference ends the walk: no variable can be
-                    // *named* `arr[0]`, so it can carry no nameref attribute of
-                    // its own, and its subscript is a shell word whose bytes
-                    // have to reach the caller intact.
-                    if let Some((base, Some(sub))) = split_assignment_target(v) {
+                    // An element reference ends the walk: its subscript is a
+                    // shell word whose bytes have to reach the caller intact.
+                    //
+                    // …unless a variable really is *named* `arr[0]`. The shell
+                    // grammar cannot spell such a name, but a declaration
+                    // builtin binding a local through this very kind of
+                    // reference makes one (see
+                    // [`Self::spelled_local_name`]), and bash then finds it
+                    // the way it finds any other: by looking the reference's
+                    // value up as a name first, and only treating it as an
+                    // element when nothing answers. So `f() { declare -n
+                    // r='n[1]'; declare r=zz; declare -n s='n[1]'; }` reads
+                    // `zz` out of the local through `s`, while `${n[1]}` is
+                    // still the array's own element `b`.
+                    //
+                    // Falling through rather than returning is deliberate: the
+                    // name is looked up again at the top of the loop, so a
+                    // binding that somehow carried the nameref attribute would
+                    // be followed like any other link.
+                    if let Some((base, Some(sub))) = split_assignment_target(v)
+                        && !self.name_is_bound(v)
+                    {
                         return Some(RefTarget {
                             base: base.to_string(),
                             sub: Some(sub.to_vec()),
@@ -23853,6 +23870,62 @@ impl Shell {
                 _ => return Some(RefTarget::plain(cur)),
             }
         }
+    }
+
+    /// Whether some binding is visible under exactly these bytes as a name.
+    ///
+    /// Asked of text that *looks* like an element reference, to tell the
+    /// ordinary `arr[0]` from the variable literally called `arr[0]` that a
+    /// local declaration through such a reference leaves behind. "Visible"
+    /// means the live tables, which is the frame the shell is running in — the
+    /// binding is a local, so it stops answering when its frame returns, and
+    /// bash agrees.
+    ///
+    /// A name brought into being *unvalued* — `f() { declare q; }` — counts:
+    /// bash's `find_variable` answers with it, and the corners that ask this
+    /// question are measured to agree (`declare nosuch; declare -n r=nosuch;
+    /// declare +n r` behaves as it does for a valued `nosuch`, not for an
+    /// absent one).
+    fn name_is_bound(&self, name: BStr<'_>) -> bool {
+        let Some(name) = bytes::as_str(name) else {
+            return false;
+        };
+        self.vars.contains_key(name)
+            || self.arrays.contains_key(name)
+            || self.assoc.contains_key(name)
+            || self.declared.contains(name)
+    }
+
+    /// The name a declaration builtin binds when it follows a reference to an
+    /// *element* and the binding it writes is a **local** — the target's
+    /// spelling, whole and unparsed.
+    ///
+    /// bash's `declare_internal` resolves the nameref to a string and hands
+    /// that string to `make_local_variable`, which does not look for a
+    /// subscript in it. So the frame gets a variable whose name is `n[1]`,
+    /// `n[1+1]`, `n[ 1 ]`, `m[k]` or `n[@]` exactly as the reference spelled
+    /// it; the array the text seems to point at is never touched. Every shape
+    /// of the operand makes one, because every one of them is a declaration
+    /// about that name: a value binds it, and a valueless operand leaves it
+    /// created-but-unset with whatever attributes were asked for
+    /// (`declare -i r` gives `declare -i n[1]`), which `declare -p 'n[1]'`
+    /// then prints and `set` — listing only *valued* names — does not.
+    ///
+    /// `None` means the ordinary rule stands and the element is the target
+    /// after all:
+    ///
+    /// * a declaration that writes a *global* binding (top level, or `-g`)
+    ///   stores the element the reference names, as bash does;
+    /// * a subscript that is not valid UTF-8 cannot be a name here, because
+    ///   osh keys its variable tables by `String`. bash would bind it; the
+    ///   element store this falls back to is the nearest thing osh can
+    ///   represent. See `known-issues.md`'s TD-OILS-NONUTF8-ENV-NAME for the
+    ///   same structural limit reached from the environment.
+    fn spelled_local_name(target: &RefTarget, make_local: bool) -> Option<String> {
+        if !make_local || target.sub.is_none() {
+            return None;
+        }
+        String::from_utf8(target.spelling()).ok()
     }
 
     /// Resolve a nameref chain for a *use* of the name, reporting a circular
@@ -35200,9 +35273,17 @@ impl Shell {
             // — which is the name bash's "cannot destroy array variables"
             // refusal quotes, unlike every other diagnostic here.
             let operand_name = base_name;
-            let (base_name, subscript) = match &target {
-                Some(t) => (t.base.as_str(), t.sub.as_deref().or(subscript)),
-                None => (base_name, subscript),
+            // A local binding made through a reference to an *element* is
+            // named by the whole spelling instead — see
+            // [`Self::spelled_local_name`]. The name has to outlive the borrow
+            // below, so it is built here and lent out.
+            let spelled = target
+                .as_ref()
+                .and_then(|t| Self::spelled_local_name(t, make_local));
+            let (base_name, subscript) = match (&spelled, &target) {
+                (Some(s), _) => (s.as_str(), None),
+                (None, Some(t)) => (t.base.as_str(), t.sub.as_deref().or(subscript)),
+                (None, None) => (base_name, subscript),
             };
             // A `-n` declaration's value is the *name* it refers to, so bash
             // validates it here — before the readonly check below, which it
@@ -36539,13 +36620,25 @@ impl Shell {
             // `apply_assignment` already follows when it stores the values.
             let follow =
                 self.nameref_attr.contains(&a.name) && (!make_local || self.local_binds_here(&a.name));
-            let target = match if follow { self.resolve_ref_use(&a.name) } else { None } {
-                Some(RefTarget { base, sub: None }) => base,
+            let resolved = if follow { self.resolve_ref_use(&a.name) } else { None };
+            // A *local* binding made through a reference to an element is
+            // named by the whole spelling — see
+            // [`Shell::spelled_local_name`], which the scalar operand path
+            // asks the same question. The literal then binds to that name like
+            // any other, kind and all: `declare -A r=([k]=v)` through
+            // `declare -n r='n[1]'` leaves `declare -A n[1]=([k]="v" )`
+            // behind.
+            let spelled = resolved
+                .as_ref()
+                .and_then(|t| Self::spelled_local_name(t, make_local));
+            let target = match (&spelled, resolved) {
+                (Some(s), _) => s.clone(),
+                (None, Some(RefTarget { base, sub: None })) => base,
                 // An element reference names no variable a whole array literal
                 // could bind to. bash refuses it in the compound-assignment
                 // machinery's untagged spelling — the reference's own text, not
                 // the operand's — and discards the rest of the parse unit.
-                Some(RefTarget { base, sub: Some(sub) }) => {
+                (None, Some(RefTarget { base, sub: Some(sub) })) => {
                     let msg = bfmt![b"`", base.as_bytes(), b"[", &sub, b"]': not a valid identifier"];
                     self.berrln(&bfmt![self.err_prefix(), &msg]);
                     self.last_status = 1;
@@ -36556,11 +36649,11 @@ impl Shell {
                 // back to the name it was written with, and the reference
                 // attribute goes with the fallback: the literal is about to make
                 // that name an array, and no variable is both.
-                None if follow => {
+                (None, None) if follow => {
                     self.unreference_for_declare(&a.name);
                     a.name.clone()
                 }
-                None => a.name.clone(),
+                (None, None) => a.name.clone(),
             };
             // `positions` is in `argv` space, where index 0 is the command word;
             // the builtin's operand loop walks `argv[1..]`, so the position is
@@ -36823,7 +36916,19 @@ impl Shell {
             // The same call marks which of the operand's two passes a failure came
             // from, which decides whether the name is rolled back below.
             let saved_expanded = std::mem::replace(&mut self.compound_expanded, false);
-            let bound = self.apply_assignment(a, false);
+            // A spelling-named local is the one target the operand cannot
+            // reach by being re-resolved: `apply_assignment` would follow the
+            // reference again and find the element the name only looks like.
+            // So the store is pointed at the name directly, with the operand
+            // as written kept for the diagnostics and the trace.
+            let bound = match &spelled {
+                Some(name) => {
+                    let mut a2 = a.clone();
+                    a2.name.clone_from(name);
+                    self.apply_assignment_spelled(&a2, false, Some(a))
+                }
+                None => self.apply_assignment(a, false),
+            };
             // `set -a` (allexport) and a compound operand. A compound literal
             // never auto-exports on its own (an array has no environment
             // representation — see the guard in

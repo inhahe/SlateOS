@@ -4232,6 +4232,38 @@ pub struct Shell {
     /// bytes. (An array *subscript* gets no such tag: `${a[1 z]}` reports the
     /// bare expression.)
     arith_cmd: Option<Cow<'static, [u8]>>,
+    /// The same `this_command_name`, as the *word-expansion* machinery sees it:
+    /// the name of the innermost simple command that is still running.
+    ///
+    /// bash sets `this_command_name` from a simple command's first word only
+    /// *after* that command's words have been expanded, and clears it — to
+    /// nothing, not to what it was — when the command returns. So during a
+    /// command's expansion the name in force belongs to whatever command is
+    /// still running *around* it, and is gone the moment any sibling command has
+    /// run and returned:
+    ///
+    /// ```sh
+    /// declare -n r='n[1]'
+    /// eval 'declare r=(x y)'         # eval: `n[1]': not a valid identifier
+    /// eval 'true; declare r=(x y)'   # `n[1]': not a valid identifier — `true`
+    ///                                #   cleared it on the way out
+    /// ```
+    ///
+    /// Only a builtin that runs *shell code* can be observed this way, because
+    /// only inside one can a command's expansion happen while another command is
+    /// still running: `eval`, `source` and `.`, and it is their own name that
+    /// shows even when they were reached through `builtin`/`command`. Everything
+    /// else either runs nothing (an external command), or is refused before the
+    /// name could be used (a function body, where the declaration binds a local
+    /// named by the reference's spelling and complains about nothing).
+    ///
+    /// Separate from [`Shell::arith_cmd`] because bash reads the one name in two
+    /// places that clear it differently: arithmetic evaluation blanks it for
+    /// `$(( … ))` and for every assignment statement, and the parameter-offset
+    /// and `((`/`let`/`declare` paths *replace* it, so osh gets those right by
+    /// only ever setting `arith_cmd` where bash has a name to show. Merging the
+    /// two would mean re-deriving each of bash's blanking sites instead.
+    expand_cmd: Option<Str>,
     /// True while an assignment is being applied on behalf of a
     /// `declare`/`local`/`readonly`/`export` *operand* rather than a bare
     /// `name=…` / `name=(…)` assignment command. bash re-parses the builtin's
@@ -5058,6 +5090,7 @@ impl Shell {
             dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
+            expand_cmd: None,
             decl_builtin_ctx: false,
             xtrace_compound: None,
             compound_expanded: false,
@@ -9029,6 +9062,13 @@ impl Shell {
                 }
                 DebugVerdict::Exit(code) => return Flow::Exit(code),
             }
+            // bash blanks `this_command_name` here — once the header has been
+            // announced, before the loop variable is bound — so a loop body is
+            // the one compound body that does *not* inherit the name of whatever
+            // is running around it: `eval 'for i in 1; do declare r=(x y);
+            // done'` gives an untagged refusal where `eval '{ declare r=(x y);
+            // }'` gives an `eval`-tagged one. See [`Shell::expand_cmd`].
+            self.expand_cmd = None;
             // A readonly loop variable cannot be bound. bash finds this out at
             // the moment it first tries — so the word list is expanded either
             // way and a loop over an *empty* list is silent — then abandons the
@@ -9194,6 +9234,10 @@ impl Shell {
             }
             DebugVerdict::Exit(code) => return Flow::Exit(code),
         }
+        // Blanked before the word list is expanded, as `execute_select_command`
+        // does — see the same clear in [`Shell::exec_for`] and
+        // [`Shell::expand_cmd`].
+        self.expand_cmd = None;
         let items: Vec<Str> = match &c.words {
             Some(words) => {
                 let mut v = Vec::new();
@@ -9345,6 +9389,12 @@ impl Shell {
     fn eval_arith_cmd(&mut self, raw: BStr<'_>, tag: &'static [u8]) -> Option<i64> {
         let saved = self.arith_cmd.take();
         self.arith_cmd = Some(Cow::Borrowed(tag));
+        // bash sets the name and leaves it — `execute_arith_command` and
+        // `execute_arith_for_command` never put back what they found — so it is
+        // still in force for the loop's body and for whatever *follows* the
+        // command: `(( 1 )); declare r=(x y)` through a reference to an element
+        // is refused with a `((` tag. See [`Shell::expand_cmd`].
+        self.expand_cmd = Some(tag.to_vec());
         let r = self.eval_arith_raw(raw);
         self.arith_cmd = saved;
         r
@@ -10279,6 +10329,11 @@ impl Shell {
             DebugVerdict::Exit(code) => return Flow::Exit(code),
         }
         self.cond_regex_error = false;
+        // Set and left, exactly as for `((` — bash's `execute_cond_command`
+        // never puts back the name it found, so `[[ 1 == 1 ]]; declare r=(x y)`
+        // through a reference to an element is refused with a `[[` tag. See
+        // [`Shell::expand_cmd`].
+        self.expand_cmd = Some(b"[[".to_vec());
         let ok = self.cond_eval(e);
         // A `=~` RHS that failed to compile as a regex makes bash return 2, not
         // the ordinary 1 "expression false" — surface that distinct status.
@@ -10881,6 +10936,11 @@ impl Shell {
             dquote: false,
             cond_regex_error: false,
             arith_cmd: None,
+            // A fork inherits the name in force, because bash's is an ordinary
+            // global: `eval '(declare r=(x y))'` and `eval 'declare r=(x y) |
+            // cat'` are both refused with an `eval` tag, and so is a command
+            // substitution's body. See [`Shell::expand_cmd`].
+            expand_cmd: self.expand_cmd.clone(),
             decl_builtin_ctx: false,
             xtrace_compound: None,
             compound_expanded: false,
@@ -13158,7 +13218,13 @@ impl Shell {
     fn prefix_assignments(&mut self, assignments: &[Assignment]) -> Vec<(String, Str)> {
         let depth = self.temp_shadow.len();
         let mut hashed = None;
+        // Applied with no command name in force, exactly as a bare assignment
+        // statement is — bash runs both through `do_assignment_statements`,
+        // which blanks `this_command_name` around each word and puts it back.
+        // See [`Shell::expand_cmd`].
+        let saved_cmd = self.expand_cmd.take();
         let assigns = self.prefix_assignments_staged(assignments, &mut hashed);
+        self.expand_cmd = saved_cmd;
         // Unwind whatever was staged, on every path out — including the ones
         // that abandoned the prefix part-way.
         while self.temp_shadow.len() > depth {
@@ -16018,6 +16084,12 @@ impl Shell {
         // the restore puts this command's own word back for the bind below.
         let outer = self.pending_last_arg.take();
         let flow = self.exec_simple_inner(sc, out, stdin);
+        // A finished simple command leaves no name behind — bash blanks
+        // `this_command_name` on the way out rather than putting back the one it
+        // found, so a command that runs *after* another inside the same `eval`
+        // is expanded with no name in force at all. See
+        // [`Shell::expand_cmd`].
+        self.expand_cmd = None;
         // Whatever the command was — a function whose body refused a `for`
         // variable, an `eval` of one, or something else entirely — the status it
         // hands back is its own, and an ordinary failure. See
@@ -16178,11 +16250,19 @@ impl Shell {
             let comsub_before = self.comsub_count;
             let refused_outer = self.assign_refused_maintained.take();
             let mut ok = true;
+            // An assignment statement is applied with no command name in force:
+            // bash blanks `this_command_name` around each one and puts it back
+            // after, so a substitution in the value is expanded as if nothing
+            // were running around it. Hence `eval 'v=$(declare r=(x y))'` gives
+            // an *untagged* refusal where `eval 'echo "$(declare r=(x y))"'`
+            // gives an `eval`-tagged one. See [`Shell::expand_cmd`].
+            let saved_cmd = self.expand_cmd.take();
             for a in &sc.assignments {
                 if !self.apply_assignment(a, true) {
                     ok = false;
                 }
             }
+            self.expand_cmd = saved_cmd;
             // A refusal *inside* one of those substitutions was that command's
             // own business and has already been answered for; put the caller's
             // flag back and keep only what this command's own words did.
@@ -26646,6 +26726,11 @@ impl Shell {
                     self.builtin_invalid_option("eval", &[b'-', opt], "eval [arg ...]")
                 } else {
                     let joined = strip_end_of_options(args).join(b" ".as_slice());
+                    // The first command in the string is expanded while `eval`
+                    // itself is still the command that is running, so a
+                    // diagnostic raised during that expansion is tagged `eval`.
+                    // See [`Shell::expand_cmd`].
+                    self.expand_cmd = Some(b"eval".to_vec());
                     self.eval_string(&joined, out, stdin)
                 }
             }
@@ -36958,8 +37043,20 @@ impl Shell {
                     {
                         self.warn_whole_array_sub(&base, c);
                     }
+                    // The refusal is the compound-assignment machinery's, raised
+                    // while the operand is being *expanded* — before the
+                    // declaration builtin has become the command that is
+                    // running — so the name it carries is not the builtin's but
+                    // whatever command is still running around the expansion:
+                    // nothing at all at the top of a script, `eval` for the
+                    // first command of an `eval` string, `source`/`.` for the
+                    // first line of a sourced file. See [`Shell::expand_cmd`].
+                    let tag = match &self.expand_cmd {
+                        Some(name) => bfmt![name.as_slice(), b": "],
+                        None => Str::new(),
+                    };
                     let msg = bfmt![b"`", base.as_bytes(), b"[", &sub, b"]': not a valid identifier"];
-                    self.berrln(&bfmt![self.err_prefix(), &msg]);
+                    self.berrln(&bfmt![self.err_prefix(), &tag, &msg]);
                     self.last_status = 1;
                     return Err(Flow::Discard);
                 }
@@ -40432,6 +40529,13 @@ impl Shell {
                 // bash, just as `eval`'s string is: `set -x; . f` traces
                 // `+ . f` and then the script's own commands one `+` deeper.
                 self.xtrace_level = self.xtrace_level.saturating_add(1);
+                // The script's *first* command is expanded while the `source`
+                // builtin is still the command that is running, so a diagnostic
+                // raised during that expansion is tagged with the name the
+                // builtin was invoked by — `source` or `.`, and its own name
+                // even when it was reached through `builtin`/`command`. See
+                // [`Shell::expand_cmd`].
+                self.expand_cmd = Some(tag.as_bytes().to_vec());
                 let run =
                     self.run_source_flow_result(&src, out, stdin, &LineMap::Offset(0), HistRead::Off);
                 self.xtrace_level = self.xtrace_level.saturating_sub(1);

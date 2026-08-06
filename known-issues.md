@@ -1222,10 +1222,10 @@ over by then, so a base it may have made is unobservable, and one osh left
 behind would not be. Corpus:
 `the-kind-of-a-compound-through-a-reference-to-an-element-is-the-base-arrays.sh`.
 
-The *scalar* operand path asks the same question with the same misplaced blame;
-that is the entry below, still open.
+The *scalar* operand path asked the same question with the same misplaced blame;
+that is the entry below, fixed the same day.
 
-### TD-OILS-A-KIND-CONVERSION-REFUSAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-BLAMES-THE-OPERAND. `declare -n r='n[1]'; declare -A r` says `r:` where bash says `n:` — 2026-08-05 — OPEN
+### TD-OILS-A-KIND-CONVERSION-REFUSAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-BLAMES-THE-OPERAND. `declare -n r='n[1]'; declare -A r` says `r:` where bash says `n:` — 2026-08-05 — ✅ FIXED 2026-08-05
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_declare_scoped`, the
 indexed/associative conversion refusal.
@@ -1252,6 +1252,18 @@ same terms the store already follows the reference.
 
 **Impact.** A misleading diagnostic: a script's error output names a variable
 that was never the one being converted.
+
+**Fixed.** `builtin_declare_scoped` now computes a `kind_blame` beside
+`base_name`/`operand_name` and hands *that* to the conversion refusal. It is the
+operand as written — reference and all, so a reference to a plain name still
+reports `r` — except where the resolved target carries a subscript and the
+operand did not bind the spelling, in which case it is the target's base. An
+operand written with a subscript of its own (`declare -A 'n[1]'`) already
+reported its base, since that is what `base_name` is; the new name only makes
+the two paths agree. The self-conflict refusal just below (`declare -aA r`)
+still names the target, because that one is raised against the array the command
+has by then already made. Corpus:
+`tests/corpus/a-kind-conversion-refusal-through-a-reference-to-an-element-blames-the-base.sh`.
 
 ### TD-OILS-A-DECLARATION-REFUSAL-INSIDE-EVAL-IS-NOT-TAGGED-EVAL. `eval 'declare r=(x y)'` through a reference to an element drops the `eval:` tag bash puts on it — 2026-08-05 — OPEN
 

@@ -35349,6 +35349,21 @@ impl Shell {
                 (None, Some(t)) => (t.base.as_str(), t.sub.as_deref().or(subscript)),
                 (None, None) => (base_name, subscript),
             };
+            // The name the array-kind conversion refusal quotes. Ordinarily it
+            // is the operand as written, reference and all — `declare -n r=t;
+            // declare -A r` on an indexed `t` reports `r`. A reference to an
+            // *element* moves it to the **base** array, though, because that is
+            // the array whose kind is being asked to change: the same command
+            // through `declare -n r='n[1]'` reports `n`. (An operand carrying a
+            // subscript of its own already reports its base, since that is what
+            // `base_name` is.) This is the scalar half of the compound path's
+            // rule in [`Shell::declare_compounds_scoped`].
+            let kind_blame = if spelled.is_none() && target.as_ref().is_some_and(|t| t.sub.is_some())
+            {
+                base_name
+            } else {
+                operand_name
+            };
             // A `-n` declaration's value is the *name* it refers to, so bash
             // validates it here — before the readonly check below, which it
             // therefore pre-empts (`readonly r; declare -n r='a b'` reports the
@@ -35632,14 +35647,15 @@ impl Shell {
                 status = 1;
                 continue;
             }
-            // The conversion refusal quotes the operand as *written* too, like
-            // the destroy one above — but the self-conflict just below does not,
-            // even though it is spelled the same way: that one is raised against
-            // the array the command has by then already made, which is the
-            // target's (`declare -n r=t; declare -aA r` reports `t`).
+            // The conversion refusal quotes the operand as *written* like the
+            // destroy one above, except where a reference led to an element —
+            // see `kind_blame`. The self-conflict just below is spelled the same
+            // way but chooses differently again: that one is raised against the
+            // array the command has by then already made, which is the target's
+            // (`declare -n r=t; declare -aA r` reports `t`).
             if let Some((from_kind, to_kind)) = kind_conflict {
                 self.perrln(&format!(
-                    "{tag}: {operand_name}: cannot convert {from_kind} to {to_kind} array"
+                    "{tag}: {kind_blame}: cannot convert {from_kind} to {to_kind} array"
                 ));
                 status = 1;
                 continue;

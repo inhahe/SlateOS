@@ -43,6 +43,123 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-HERE-DOCUMENT-DELIMITER-STOPPED-AT-THE-FIRST-SEPARATOR-INSIDE-A-GROUP. `<<E$(a b)` was read as a delimiter `E$(a` and a stray word `b)` — 2026-08-06 — ✅ FIXED 2026-08-06
+
+**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_heredoc_delim`, and the
+new `Lexer::delim_group_at` / `take_delim_group_at` / `take_delim_group` beside
+it.
+
+**What.** bash reads a here-document delimiter with `read_token_word`, the same
+function that reads every other word, so a `$( … )`, `$(( … ))`, `${ … }` or
+`` ` … ` `` in it is scanned as a matched pair and becomes part of the
+delimiter's text. osh's delimiter scan instead stopped at any metacharacter,
+which cut those groups in half:
+
+```text
+cat <<E$(a b)          bash: delimiter `E$(a b)`
+body                   osh:  delimiter `E$(a`, then a word `b)` — and then the
+E$(a b)                      here-document was never delimited at all
+```
+
+Nothing is ever *expanded* — the text is compared against each body line
+literally, so `<<E$(echo 1)` is closed by a line reading `E$(echo 1)`, not by
+`E1`. bash only has to *scan* the substitution to know where the word ends. Nor
+does a group quote the word: `<<E$(echo "a b")` still expands `$x` in the body,
+unlike `<<"E"`.
+
+**Also fixed: a group that never closes.** The first cut of the scan swallowed
+input to the end and left the fragment in the delimiter. bash's
+`parse_matched_pair` end-of-input path is fatal — `unexpected EOF while looking
+for matching \`)'`, `rc=2`, the delimiter word discarded. Which line it blames
+says which of bash's readers took the group, and they are not the same:
+
+| delimiter | reader | line blamed |
+|---|---|---|
+| `<<E${` | `parse_matched_pair` | the opener's line (its `start_lineno`) |
+| ``<<E` `` | `parse_matched_pair` | the opener's line |
+| `<<E$((` | `parse_matched_pair` (`P_ARITH`) | the opener's line |
+| `<<E$(` | `parse_comsub` | the **end of the input** |
+
+Nesting is what makes the first three visible: `cat <<E${` / `body` / `E${` is
+blamed on line 3, because the `${` on line 3 opened a recursive
+`parse_matched_pair` call with a `start_lineno` of its own. The `$(` row stays
+pinned to end-of-input however deep it nests, there being no `start_lineno` in
+play at all — `cat <<E$({` / `a` / `b` / `c` is blamed on line 5, one past the
+file. So the openers are kept apart in `take_delim_group_at` rather than lumped
+into one paren scan, which is what an earlier attempt did (it got every
+delimiter's *text* right and every unterminated one's *line* wrong).
+
+Two smaller rules fell out of reading `parse_matched_pair` (parse.y:3775–3781,
+3936–3966) rather than guessing:
+
+* A bare `open` counts only where bash counts it. `${ … }` is entered with
+  `P_FIRSTCLOSE`, so a lone `{` inside it neither opens nor closes anything;
+  inside `$(( … ))` every `(` counts.
+* Nothing nests inside a backquote pair — bash guards its `$(`/`${` branch with
+  ``open != '`'`` — and the pair itself never nests. So `` cat <<E`a `` /
+  `body` / `` E`a `` closes on line 3's backquote, wants a delimiter with two
+  newlines in it that no line can equal, and leaves `b` as a separate argument.
+
+**Pinned by** `tests/corpus/a-here-document-delimiter-is-a-whole-word-groups-and-all.sh`
+(which fails on its *first* case without the fix) and two unit tests,
+`a_here_document_delimiter_takes_a_group_whole` and
+`an_unclosed_group_in_a_here_document_delimiter_is_fatal`.
+
+**Left behind:** TD-OILS-A-SYNTAX-ERROR-ON-A-LINE-THAT-DECLARED-A-HERE-DOCUMENT-IS-BLAMED-TOO-EARLY,
+found while writing the corpus case.
+
+### TD-OILS-A-SYNTAX-ERROR-ON-A-LINE-THAT-DECLARED-A-HERE-DOCUMENT-IS-BLAMED-TOO-EARLY. bash reports at the line body collection stopped on — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `Parser::reader_line`, which is
+`cur_line()` plus `Spans::cont_lines`.
+
+**What.** bash stamps a syntax error with `line_number` — *the reader's* current
+line, not the offending token's. osh already models that for line continuations
+(TD-OILS-A-CONTINUATION-AFTER-A-TOKEN-MOVES-THE-ERROR-DOWN-A-LINE), but a
+here-document moves the reader the same way and is not counted: collecting a
+body fetches every body line, so by the time the parser sees the token, the
+reader is at the delimiter line — or at the end of input if the delimiter never
+came.
+
+```text
+cat <<E(          bash: line 3: syntax error near unexpected token `('
+body                    line 3: `cat <<E('
+E                 osh:  line 1: … (same message, same echoed line)
+echo tail
+```
+
+The `(` is on line 1 in both; only the stamp differs. Measured shapes:
+
+| source | bash | osh |
+|---|---|---|
+| `cat <<E(` / `body` / `E` / `echo tail` | 3 | 1 |
+| the same with three body lines | 5 | 1 |
+| `echo one` first | 4 | 2 |
+| `cat <<E(` / `body` / `E(` (never delimited) | end of input | 1 |
+
+Control probes agree, which is what says the here-document is the whole of it:
+`echo (` on its own, and `cat <<E` / `body` / `E` / `echo (`, both match.
+
+**Reproduce:** put the deleted final section back into
+`tests/corpus/a-here-document-delimiter-is-a-whole-word-groups-and-all.sh`:
+
+```sh
+echo "=== and the group has to close"
+cat <<E(
+body
+E(
+```
+
+bash blames line 79, osh line 77.
+
+**Proper fix.** Extend the reader model to here-documents: the reader's line
+after a token is `cur_line()` + continuations crossed + **the body lines the
+pending here-documents consumed**. The lexer already knows both numbers — it
+records `body_line` and `eof_line` for the unterminated-here-document warning
+(`ReaderWarning::HeredocEof`) — so the missing piece is carrying the reader's
+final position out of `collect_heredocs` and into `Spans`, next to
+`cont_lines`, rather than a new scan.
+
 ### TD-OILS-A-LONE-CONDITIONAL-END-RAN-AS-A-COMMAND. `]]` was an ordinary word to osh where bash makes it a reserved token — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/parser.rs` — the `RESERVED` table, which listed

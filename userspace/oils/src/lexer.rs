@@ -2046,7 +2046,7 @@ impl Lexer {
                                 self.pos += 1;
                                 out.push(Tok::Op(Op::TLess));
                             } else {
-                                self.lex_heredoc_op(out);
+                                self.lex_heredoc_op(out)?;
                             }
                         }
                         _ => out.push(Tok::Op(Op::Less)),
@@ -3437,7 +3437,7 @@ impl Lexer {
                         // the re-lex has to draw the same expand/no-expand
                         // conclusion from it that `read_heredoc_delim` just did.
                         let word = self.pos;
-                        let (delim, _) = self.read_heredoc_delim(false);
+                        let (delim, _) = self.read_heredoc_delim(false)?;
                         let written = self.slice(word, self.pos);
                         raw.extend_from_slice(&written);
                         pending.push((delim, strip));
@@ -3901,7 +3901,7 @@ impl Lexer {
     /// Handle a `<<` / `<<-` here-document operator: read the delimiter word on
     /// the current line, emit the operator token plus a placeholder body token,
     /// and record the here-doc for body collection at the next newline.
-    fn lex_heredoc_op(&mut self, out: &mut Vec<Tok>) {
+    fn lex_heredoc_op(&mut self, out: &mut Vec<Tok>) -> Result<(), LexError> {
         // Everything up to the delimiter is read after the reader's deletions,
         // so `<<-` may be written with a continuation inside it and blanks and
         // continuations may alternate freely before the word (see
@@ -3918,7 +3918,7 @@ impl Lexer {
                 break;
             }
         }
-        let (delim, expand) = self.read_heredoc_delim(true);
+        let (delim, expand) = self.read_heredoc_delim(true)?;
         out.push(Tok::Op(if strip { Op::DLessDash } else { Op::DLess }));
         let tok_index = out.len();
         out.push(Tok::HereDoc(Vec::new(), delim.clone(), !expand));
@@ -3928,6 +3928,7 @@ impl Lexer {
             expand,
             tok_index,
         });
+        Ok(())
     }
 
     /// Read a here-document delimiter word. Any quoting (`'EOF'`, `"EOF"`,
@@ -3940,7 +3941,21 @@ impl Lexer {
     /// inside `'…'` the pair is data, so `<<'E\<newline>OF'` wants a delimiter
     /// with a newline in it, which no line can equal. `record` is
     /// [`Lexer::skip_conts`]'s.
-    fn read_heredoc_delim(&mut self, record: bool) -> (Str, bool) {
+    ///
+    /// The word is a *shell word*, which is why a `$( … )`, `$(( … ))`,
+    /// `${ … }` or `` ` … ` `` in it is taken whole rather than stopping the
+    /// scan. bash reads the delimiter with `read_token_word` like any other
+    /// word, so those are scanned as matched pairs and become part of its text;
+    /// nothing is ever *expanded* — the text is matched against each body line
+    /// literally, so `<<E$(echo 1)` wants a line reading `E$(echo 1)`. A
+    /// separator inside such a group is data: `<<E$(a b)` is one delimiter, not
+    /// a delimiter `E$(a` followed by a word `b)`. Nor does a group quote the
+    /// word: a quote *inside* one — `<<E$(echo "a b")` — leaves the body
+    /// expanding, unlike a quote around the delimiter itself.
+    ///
+    /// A group that never closes is fatal, and is [`Lexer::take_delim_group`]'s
+    /// to report.
+    fn read_heredoc_delim(&mut self, record: bool) -> Result<(Str, bool), LexError> {
         let mut delim = Str::new();
         let mut expand = true;
         loop {
@@ -3948,6 +3963,9 @@ impl Lexer {
             let Some(c) = self.peek() else { break };
             match c {
                 ' ' | '\t' | '\n' | '\r' | ';' | '&' | '|' | '<' | '>' | '(' | ')' => break,
+                '`' | '$' if self.delim_group_at() => {
+                    self.take_delim_group_at(&mut delim, record)?;
+                }
                 '\'' => {
                     expand = false;
                     self.pos += 1;
@@ -3978,7 +3996,135 @@ impl Lexer {
                 _ => self.take_into(&mut delim),
             }
         }
-        (delim, expand)
+        Ok((delim, expand))
+    }
+
+    /// Whether the cursor is on the opener of a group — `` ` ``, `$(`, `$((` or
+    /// `${` — that [`Lexer::take_delim_group_at`] would take whole.
+    fn delim_group_at(&self) -> bool {
+        match self.peek() {
+            Some('`') => true,
+            Some('$') => matches!(self.peek_at(1), Some('(' | '{')),
+            _ => false,
+        }
+    }
+
+    /// Append a group opened at the cursor — its opener, body and closer,
+    /// verbatim — to `out`.
+    ///
+    /// Which of bash's readers an opener goes to decides which line an
+    /// unterminated one is blamed on, so the openers are kept apart here rather
+    /// than lumped into one paren scan:
+    ///
+    /// * `${` and `` ` `` are `parse_matched_pair`, which reports at the
+    ///   `start_lineno` it captured on entry — so the blame is the *opener's*
+    ///   line. Nesting makes that visible: `<<E${` / `body` / `E${` dies on
+    ///   line 3, whose `${` opened the innermost unclosed group.
+    /// * `$((` is `parse_matched_pair` as well (`P_ARITH`), so likewise the
+    ///   opener's line: `echo $((1+1` / `a` / `b` is blamed on line 1.
+    /// * `$(` alone is `parse_comsub`, which parses the body as a command and so
+    ///   reports where *that* parse died — the end of the input. `echo $(1` /
+    ///   `a` / `b` is blamed on line 4, one past the last line of the file.
+    fn take_delim_group_at(&mut self, out: &mut Str, record: bool) -> Result<(), LexError> {
+        let opened = self.cur_line();
+        if self.peek() == Some('`') {
+            self.take_into(out);
+            return self.take_delim_group(out, '`', '`', record, 1, Some(opened));
+        }
+        self.take_into(out);
+        let opener = self.peek();
+        self.take_into(out);
+        match opener {
+            Some('{') => self.take_delim_group(out, '{', '}', record, 1, Some(opened)),
+            // `$((` opens two parens at once, which is why the scan below has to
+            // count down to the second `)`.
+            _ if self.peek() == Some('(') => {
+                self.take_into(out);
+                self.take_delim_group(out, '(', ')', record, 2, Some(opened))
+            }
+            _ => self.take_delim_group(out, '(', ')', record, 1, None),
+        }
+    }
+
+    /// Append the body and closer of a group already opened in a here-document
+    /// delimiter word, verbatim, to `out`.
+    ///
+    /// The opener has been consumed by [`Lexer::take_delim_group_at`], which
+    /// also fixed the starting `depth` and the `stamp` an end-of-input error
+    /// takes. This reads to the matching `close`, stepping over `\`-escapes and
+    /// single- and double-quoted runs, in which a `close` is data.
+    ///
+    /// `open == close` (a backquote) never nests, and nothing nests inside it —
+    /// bash guards its `$(`/`${` branch with `open != '`'`. So `` <<E`a `` /
+    /// `body` / `` E`a `` closes on line 3's backquote and wants a delimiter
+    /// with two newlines in it, which no line can equal.
+    ///
+    /// A group *inside* the group is a reader of its own and recurses, carrying
+    /// its own stamp — which is what moves the blame for `<<E${` / `body` /
+    /// `E${` from line 1 to line 3. A bare `open` is only a count, and not even
+    /// that everywhere: bash passes `P_FIRSTCLOSE` for `${ … }`, so a lone `{`
+    /// in there closes nothing and opens nothing, while inside `$(( … ))` every
+    /// `(` counts.
+    ///
+    /// Running out of input is bash's end-of-input error, `unexpected EOF while
+    /// looking for matching \`)'`, and it is fatal — the delimiter word is *not*
+    /// whatever was read up to there.
+    fn take_delim_group(
+        &mut self,
+        out: &mut Str,
+        open: char,
+        close: char,
+        record: bool,
+        mut depth: usize,
+        stamp: Option<u32>,
+    ) -> Result<(), LexError> {
+        loop {
+            self.skip_conts(record);
+            let Some(c) = self.peek() else {
+                // `stamp` is the opener's line for the `parse_matched_pair`
+                // readers. A `$( … )` has none and takes the end of the input,
+                // the same stamp every other unterminated substitution body
+                // gets (see [`Lexer::read_subst_body`]'s call sites).
+                return Err(eof_matching(close).at(stamp.unwrap_or_else(|| self.eof_line())));
+            };
+            if open != '`' && self.delim_group_at() {
+                self.take_delim_group_at(out, record)?;
+                continue;
+            }
+            self.take_into(out);
+            match c {
+                // A `\` takes the next character with it, whatever it is. At the
+                // end of input there is nothing to take, and the loop's own EOF
+                // check on the next turn raises.
+                '\\' if self.peek().is_some() => self.take_into(out),
+                '\'' | '"' => {
+                    let quote = c;
+                    let q_open = self.cur_line();
+                    loop {
+                        self.skip_conts(record);
+                        let Some(q) = self.peek() else {
+                            return Err(eof_matching(quote).at(q_open));
+                        };
+                        self.take_into(out);
+                        if q == quote {
+                            break;
+                        }
+                        // A `\` escapes inside `"…"` and is literal inside `'…'`.
+                        if q == '\\' && quote == '"' && self.peek().is_some() {
+                            self.take_into(out);
+                        }
+                    }
+                }
+                _ if c == close => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                _ if c == open && open == '(' => depth += 1,
+                _ => {}
+            }
+        }
     }
 
     /// Collect the bodies of all pending here-documents from the lines following
@@ -4572,6 +4718,98 @@ mod tests {
     fn here_string_op() {
         let toks = tokenize("cmd <<< word").unwrap();
         assert!(toks.iter().any(|t| matches!(t, Tok::Op(Op::TLess))));
+    }
+
+    /// A here-document delimiter is a whole shell word, so a `$( … )`,
+    /// `$(( … ))`, `${ … }` or `` ` … ` `` in it is scanned as a matched pair
+    /// and becomes part of the delimiter — separators and all — rather than
+    /// stopping the scan. Nothing is expanded: the text goes on to be compared
+    /// against each body line literally. Measured from bash 5.2; see
+    /// [`Lexer::take_delim_group_at`].
+    #[test]
+    fn a_here_document_delimiter_takes_a_group_whole() {
+        // (source, the delimiter word bash wants)
+        let delims: &[(&str, &str)] = &[
+            // The substitution is never run, only scanned, so the delimiter is
+            // the text as written.
+            ("cat <<E$(echo 1)\n", "E$(echo 1)"),
+            // A separator inside the group is data: one delimiter, not `E$(a`
+            // followed by a stray word `b)`.
+            ("cat <<E$(a b)\n", "E$(a b)"),
+            // Arithmetic closes on the second paren, not the first.
+            ("cat <<E$((1+1))\n", "E$((1+1))"),
+            ("cat <<E${y:-a b}\n", "E${y:-a b}"),
+            ("cat <<E`a b`\n", "E`a b`"),
+            // A group can begin the word and can be the whole of it.
+            ("cat <<$(echo x)\n", "$(echo x)"),
+            // Nested groups of every combination.
+            ("cat <<E$(f $(g))\n", "E$(f $(g))"),
+            ("cat <<E$(f `g`)\n", "E$(f `g`)"),
+            ("cat <<E${x:-$(y)}\n", "E${x:-$(y)}"),
+            // A `close` inside a quoted run is data…
+            ("cat <<E$(echo \"a )b\")\n", "E$(echo \"a )b\")"),
+            ("cat <<E$(echo 'a )b')\n", "E$(echo 'a )b')"),
+            // …as is one behind a backslash.
+            ("cat <<E$(echo \\))\n", "E$(echo \\))"),
+            // A backquote pair never nests, so this closes on the second one and
+            // the `c` that follows is a separate word.
+            ("cat <<E`a `b c\n", "E`a `b"),
+            // A group is not a quote — not even one with quotes inside it. Only
+            // quoting the delimiter *itself* turns off expansion in the body,
+            // which is why the parallel unquoted/quoted pair is here.
+            ("cat <<E$(echo \"a b\")\n", "E$(echo \"a b\")"),
+            ("cat <<\"E$(echo 1)\"\n", "E$(echo 1)"),
+        ];
+        for (src, want) in delims {
+            let toks = tokenize(src).unwrap();
+            let got = toks
+                .iter()
+                .find_map(|t| match t {
+                    Tok::HereDoc(_, delim, _) => Some(delim.clone()),
+                    _ => None,
+                })
+                .expect("here-doc token");
+            assert_eq!(crate::bytes::as_str(&got), Some(*want), "{src:?}");
+        }
+    }
+
+    /// A group in a here-document delimiter that never closes is fatal — the
+    /// delimiter is *not* whatever was read up to there. Which line bash blames
+    /// says which of its readers took the group: `${`, `` ` `` and `$((` are
+    /// `parse_matched_pair`, which reports at the `start_lineno` it captured on
+    /// entry, while `$(` alone is `parse_comsub`, which parses the body as a
+    /// command and so reports where that parse died — the end of the input.
+    /// Measured from bash 5.2.
+    #[test]
+    fn an_unclosed_group_in_a_here_document_delimiter_is_fatal() {
+        // (source, the character named, the line blamed)
+        let cases: &[(&str, char, u32)] = &[
+            // `parse_comsub`: the end of the input, however far away it is.
+            ("cat <<E$(\n", ')', 2),
+            ("cat <<E$(\nbody\nE$(\n", ')', 4),
+            ("cat <<E$(x\nbody\nE$(x\necho tail\n", ')', 5),
+            // …and nesting does not move it, there being no `start_lineno` in
+            // play at all.
+            ("cat <<E$({\na\nb\nc\n", ')', 5),
+            // `parse_matched_pair`: the opener's own line.
+            ("cat <<E${\na\nb\nc\nd\ne\n", '}', 1),
+            ("cat <<E`x\na\nb\n", '`', 1),
+            ("cat <<E$((\na\nb\nc\n", ')', 1),
+            // …and there nesting *does* move it, each level being a recursive
+            // call with a `start_lineno` of its own.
+            ("cat <<E${\nbody\nE${\n", '}', 3),
+            ("cat <<E${\na\n${\nb\n", '}', 3),
+            // A quoted run inside a group is a reader of its own too, and is
+            // blamed on the quote's line rather than the group's.
+            ("cat <<E$(echo \"a\nb\n", '"', 1),
+            ("cat <<E$(echo 'a\nb\n", '\'', 1),
+        ];
+        for (src, close, line) in cases {
+            let err = tokenize(src).expect_err(&format!("{src:?} must not lex"));
+            let want = format!("unexpected EOF while looking for matching `{close}'");
+            assert_eq!(crate::bytes::as_str(&err.msg), Some(want.as_str()), "{src:?}");
+            assert_eq!(err.line, Some(*line), "{src:?}");
+        }
     }
 
     /// The unterminated-here-document warnings of a scan, in order, as

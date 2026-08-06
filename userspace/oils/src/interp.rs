@@ -14119,7 +14119,7 @@ impl Shell {
         // the store to fall back on: bash walks once more, stores nothing, and
         // the caller discards the command. Either way the read that led here has
         // already paid for its own walks.
-        let target = match index {
+        let mut target = match index {
             Some(_) => self.resolve_ref_elem_write(name),
             None => {
                 let Some(target) = self.resolve_ref_use_walks(name, 1) else {
@@ -14128,12 +14128,45 @@ impl Shell {
                 target
             }
         };
+        // A reference designating one element *is* the destination when nothing
+        // was written beside it: `${r:=v}` through `declare -n r='n[0]'` stores
+        // in `n[0]`, making the array if it has to. The subscript travels as the
+        // bytes the reference carries and is read as the shell word it is — see
+        // [`Self::sub_word`] — after which this is the ordinary subscripted
+        // store, and takes that path's readonly guard, key rules and diagnostics.
+        //
+        // The base is bound where it is *written*, so a reference on it is
+        // stripped rather than followed, and stripped before the whole-array
+        // refusal below reports anything: bash gives the warning first and calls
+        // `base[*]` a bad subscript second. See [`Self::unreference_elem_base`].
+        let derived = match (index.is_none(), target.sub.take()) {
+            (true, Some(sub)) => {
+                // The read that led here has already evaluated this very
+                // subscript — the bytes come from the reference, not from the
+                // caller — so an expression that will not evaluate has been
+                // reported once already, and bash does not report it twice.
+                if self.discard_error.is_some() {
+                    return false;
+                }
+                if let Some(c) = Self::whole_array_sub(&sub) {
+                    self.warn_whole_array_sub(&target.base, c);
+                    return false;
+                }
+                self.unreference_elem_base(&target.base);
+                Some(self.sub_word(&sub))
+            }
+            (_, sub) => {
+                target.sub = sub;
+                None
+            }
+        };
+        let index = derived.as_ref().or(index.as_deref());
         // A reference that already designates one element leaves the subscript
         // written here nothing to apply to — bash refuses and stores nothing,
         // naming the target as the reference spells it. A reference naming an
-        // array *whole* is refused too, but as the bad subscript it is: `${g:=v}`
-        // through `declare -n g='k[*]'` says `k[*]: bad array subscript`, and
-        // says it whatever kind of array `k` is. See
+        // array *whole* is refused too, but as the bad subscript it is:
+        // `${g[1]:=v}` through `declare -n g='k[*]'` says `k[*]: bad array
+        // subscript`, and says it whatever kind of array `k` is. See
         // [`Shell::warn_whole_array_sub`].
         let Some(name) = target.as_name() else {
             if let Some(sub) = &target.sub

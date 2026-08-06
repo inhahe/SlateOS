@@ -550,19 +550,18 @@ the base and is untouched.
 
 **Corpus:** `unset-through-a-reference-to-an-element-follows-the-base.sh`.
 
-### TD-OILS-A-DEFAULTING-ASSIGNMENT-THROUGH-A-REFERENCE-TO-AN-ELEMENT-IS-REFUSED. `declare -n r='n[0]'; echo "${r:=D}"` said `` `n[0]': not a valid identifier `` where bash stores `D` in `n[0]` — 2026-08-05 — OPEN
+### TD-OILS-A-DEFAULTING-ASSIGNMENT-THROUGH-A-REFERENCE-TO-AN-ELEMENT-IS-REFUSED. `declare -n r='n[0]'; echo "${r:=D}"` said `` `n[0]': not a valid identifier `` where bash stores `D` in `n[0]` — 2026-08-05 — ✅ **FIXED 2026-08-05**
 
-**Where:** `userspace/oils/src/interp.rs` — `Shell::assign_elem`, the
-`target.as_name()` refusal.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::assign_elem`.
 
 **What.** `${name:=word}` writes through a nameref like any other store, and a
 reference designating an **element** is a perfectly good destination for it.
-osh refuses every target carrying a subscript, whether the subscript came from
+osh refused every target carrying a subscript, whether the subscript came from
 the reference or was written beside it — but only the second is a subscript on
 a subscript. Measured:
 
 ```text
-                                       bash                osh
+                                       bash                osh (before)
 n=(); declare -n r='n[0]'
   echo "[${r:=D}]"                     `[D]`               `` `n[0]': not a
                                        `declare -a n=      valid identifier ``
@@ -576,17 +575,27 @@ n=(a b c); declare -n r='n[0]'
   echo "[${r[1]:=D}]"                  refused             the same — agreed
 ```
 
-The present-element case agrees only because nothing is ever stored there: the
-refusal is unreachable when the element already has a value.
+The present-element case agreed only because nothing is ever stored there: the
+refusal was unreachable when the element already had a value.
 
-**Proper fix.** `assign_elem` reaches its refusal through `RefTarget::as_name`,
-which answers `None` for any subscripted target. Split the two: with no
-subscript of its own, a subscripted target is the element destination
-`base[sub]` — after the base is bound as written, see
-`Shell::unreference_elem_base` — and only a target carrying *both* is refused.
+**Fixed 2026-08-05.** `assign_elem` reached its refusal through
+`RefTarget::as_name`, which answers `None` for any subscripted target. The two
+are now split: with no subscript of its own, a subscripted target *is* the
+element destination `base[sub]`, taken through `Shell::sub_word` and handed to
+the ordinary subscripted store — which brings that path's readonly guard, key
+rules and diagnostics with it. Only a target carrying *both* subscripts is
+refused.
 
-**Impact.** `${ref:=default}` silently fails to initialise wherever `ref`
-designates an element, and the diagnostic blames a name the script never wrote.
+Two orderings come with it, both measured. The base is bound where it is
+written, so a reference on it is stripped (`Shell::unreference_elem_base`)
+*before* the whole-array refusal reports anything — bash gives the warning
+first and calls `base[*]` a bad subscript second. And a subscript that will not
+evaluate has already been reported by the read that led here, the bytes being
+the reference's rather than the caller's, so the store does not report it again.
+
+**Corpus:** `a-defaulting-assignment-through-a-reference-to-an-element.sh` —
+which subscripts element 0 throughout, bash crashing on every other shape (see
+TD-OILS-BASH-CRASHES-ON-A-DEFAULTING-ASSIGNMENT-THROUGH-A-REFERENCE).
 
 ### TD-OILS-UNSET-THROUGH-A-REFERENCE-TO-AN-ELEMENT-CONSULTS-READONLY. `n=(a b c); readonly n; declare -n r='n[0]'; unset -v r` refused where bash removes the element — 2026-08-05 — ✅ **FIXED 2026-08-05**
 
@@ -621,6 +630,41 @@ the attribute.
 written-subscript path keeps both halves, so nothing else moves.
 
 **Corpus:** `unset-through-a-reference-to-an-element-follows-the-base.sh`.
+
+### TD-OILS-BASH-CRASHES-ON-A-DEFAULTING-ASSIGNMENT-THROUGH-A-REFERENCE. `n=(); declare -n r='n[1]'; : "${r:=D}"` segfaults bash 5.2.37 — 2026-08-05 — ⚠️ **NOT EMULATED (upstream bug)**
+
+**Where:** nothing of ours — recorded so the gap in
+`a-defaulting-assignment-through-a-reference-to-an-element.sh` is not mistaken
+for an oversight.
+
+**What.** `${ref:=word}` through a nameref designating an element crashes bash
+outright for every subscript except indexed element **0**. Measured on bash
+5.2.37 (MSYS), each in its own subshell:
+
+```text
+n=(); declare -n r='n[0]'                    `[D]`, `declare -a n=([0]="D")`
+declare -a n; declare -n r='n[0]'            `[D]`
+declare -n r='nosuch[0]'                     `[D]`, the base is made
+n=(); declare -n b1='n[0]'; declare -n r=b1  `[D]`, through the chain
+
+n=(); declare -n r='n[1]'                    Segmentation fault (139)
+declare -A mm=(); declare -n r='mm[k]'       Segmentation fault (139)
+declare -A mm=([z]=Z); declare -n r='mm[k]'  Segmentation fault (139)
+n=(a); declare -n r='n[1]'                   `[a]` — wrong, and `n[1]` is `D`
+```
+
+The last line is the same fault surviving: the expansion answers the *other*
+element's value while the store lands correctly, which is what a read through a
+freed or mis-sized array looks like.
+
+**Why it is not emulated.** There is no behaviour here to be byte-exact with. A
+crash is not a specification, and the one non-crashing wrong answer is a
+by-product of the same corruption. osh does the obvious right thing throughout
+— it creates the element and expands to the new value, for every subscript and
+both array kinds — which agrees with bash exactly where bash is standing up.
+
+**If bash is ever fixed** the corpus case can be widened past element 0; until
+then it stays where the two shells can be compared at all.
 
 ### TD-OILS-A-COMMENT-INSIDE-ARITHMETIC-CAN-EAT-ITS-OWN-CLOSER. `$(( #5 ))` is not an arithmetic error at all — bash's second scan of the word honours `#`, so the comment swallows the `))` — 2026-08-04 — ✅ FIXED 2026-08-04
 

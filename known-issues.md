@@ -1206,6 +1206,22 @@ The last row is the ordinary assignment, which carries no tag under `eval`
 either — so the tag is the *builtin operand* path's, and `eval` only supplies
 the name because nothing has replaced it yet.
 
+`source` says the same thing, with the command word as it was written. Measured
+with a file holding `declare r=(x y)`:
+
+```text
+                                       bash                     osh
+source srcbody.sh                      ``srcbody.sh: line 1:    the located prefix
+                                       source: `n[1]': not a    but no tag
+                                       valid identifier``
+. ./srcbody.sh                         the same, tagged `.:`    likewise untagged
+```
+
+The located prefix — the sourced file's name and line, not the caller's — osh
+already gets right; only the tag is missing. (`source /dev/stdin <<<…` says the
+same but osh cannot run that shape yet, for an unrelated reason: see
+TD-OILS-DEV-PATHS-OTHER-THAN-NULL-ARE-NOT-EMULATED.)
+
 **Proper fix.** `err_prefix` answers the builtin tag; the refusal at
 `declare_compounds_scoped` runs before the builtin is entered and so should take
 the *ambient* command name instead — the same one `Shell::arith_cmd` carries for

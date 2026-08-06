@@ -1876,9 +1876,27 @@ fn is_error_delim(c: Option<&Ch>) -> bool {
 }
 
 /// Reserved words that terminate a command list or introduce a compound.
+///
+/// bash's `word_token_alist` (parse.y:2205), minus the entries this parser
+/// recognises by spelling at the one place they can appear — `time`,
+/// `function`, `coproc` and `[[`, all of which stay ordinary words elsewhere.
+/// `]]` is *not* one of those: `CHECK_FOR_RESERVED_WORD` consults the table on
+/// the single condition `reserved_word_acceptable (last_read_token)`, so `]]`
+/// is the token `COND_END` wherever a command could start — whether or not a
+/// `[[` is open — and the grammar has no production that begins with it. The
+/// one line of the macro that mentions the conditional state only clears it:
+///
+/// ```c
+///     else if (word_token_alist[i].token == COND_END) \
+///       parser_state &= ~(PST_CONDCMD|PST_CONDEXPR); \
+/// ```
+///
+/// Past the command word `reserved_word_acceptable` is false, so `echo ]]`
+/// prints `]]` like any other word. Membership here says exactly that: a
+/// reserved word in command position, nothing more.
 const RESERVED: &[&str] = &[
     "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "{", "}",
-    "!", "case", "esac", "select",
+    "!", "case", "esac", "select", "]]",
 ];
 
 impl Parser {
@@ -5563,6 +5581,48 @@ mod tests {
         }
         // A well-formed redirection still parses.
         assert!(parse("echo hi > out.txt").is_ok());
+    }
+
+    #[test]
+    fn a_lone_conditional_end_is_a_reserved_word_wherever_a_command_could_start() {
+        // `CHECK_FOR_RESERVED_WORD` looks `]]` up in `word_token_alist` on the
+        // single condition `reserved_word_acceptable (last_read_token)`, so it
+        // is the token `COND_END` wherever a command could start — no open `[[`
+        // required — and the grammar has no production that begins with one.
+        for src in [
+            "]]",
+            "true; ]]",
+            "]] ]]",
+            "true && ]]",
+            "true || ]]",
+            "true | ]]",
+            "{ ]]; }",
+            "( ]] )",
+            "if ]]; then :; fi",
+            "while ]]; do :; done",
+            "until ]]; do break; done",
+            "for x in a; do ]]; done",
+            "case a in a) ]];; esac",
+        ] {
+            assert_eq!(
+                emsg(&parse(src).unwrap_err()),
+                "syntax error near unexpected token `]]'",
+                "src {src:?}"
+            );
+        }
+        // Past the command word `reserved_word_acceptable` is false, so `]]` is
+        // an ordinary word — and the pairing it exists for still closes.
+        for src in [
+            "echo ]]",
+            "echo a ]] b",
+            "x=]]",
+            "for x in ]]; do echo $x; done",
+            "case ]] in ]]) echo hit;; esac",
+            "echo \"]]\" ${x-]]}",
+            "[[ x ]]",
+        ] {
+            assert!(parse(src).is_ok(), "src {src:?}");
+        }
     }
 
     #[test]

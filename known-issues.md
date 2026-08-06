@@ -118,7 +118,7 @@ for these builtins yet.
 from bash 5.2.37 rather than fixing this one entry, and add a corpus case that
 walks every builtin's short description.
 
-### TD-OILS-A-REFERENCES-SUBSCRIPT-IS-NEVER-EVALUATED-AS-ARITHMETIC. `declare -n r='n[1+]'` should be an arithmetic syntax error, not "not a valid identifier" — 2026-08-06 — OPEN
+### TD-OILS-A-REFERENCES-SUBSCRIPT-IS-NEVER-EVALUATED-AS-ARITHMETIC. `declare -n r='n[1+]'` should be an arithmetic syntax error, not "not a valid identifier" — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped` and
 `declare_compounds_scoped`, the two places that inspect a `RefTarget`'s `sub`.
@@ -158,12 +158,80 @@ exists. A malformed expression therefore raises the arithmetic error from inside
 the read — untagged, from the read rather than from the builtin, exactly as
 `err_badarraysub` does for `n[@]`.
 
-**Proper fix.** Where osh currently pattern-matches the subscript text
-(`whole_array_sub`, the "not a valid identifier" refusal), run the subscript
-through the arithmetic evaluator instead and let its error surface — untagged —
-then fall through to the existing behavior on success. Both the compound and the
-valueless routes need it. Add the M-series probes from `/d/tmp/hh/bx.sh` as a
-corpus case.
+**Fixed** by `Shell::declare_ref_bind_read`, which is the element store's own
+three answers in its own order — whole-array token, empty associative key,
+unevaluable or too-negative index — called from the two sites that already
+decided whether the command asks for anything: the `RefTarget { sub: Some(_) }`
+arm of `declare_compounds_scoped` and the flagless-valueless branch of
+`builtin_declare_scoped`. The arithmetic error returns `Err(Flow::Discard)` with
+status 1, which pre-empts the `not a valid identifier` refusal exactly as bash's
+`jump_to_top_level` does; a `bad array subscript` only complains and the refusal
+still follows it. On a subscript that *does* evaluate, the valueless branch falls
+through to the ordinary path as before rather than swallowing the operand —
+`declare -n q='nope[1]'; declare q` still has to leave `declare -a nope` behind.
+
+The gate is the same predicate the whole-array line already used, because it *is*
+that line: bash reaches for a reference's base only when the command asks for
+something, and with nothing asked it falls through to `bind_variable`, which
+lands in `assign_array_element` on the target's spelling
+(`variables.c:bind_variable_internal`, the `valid_array_reference (newval)` arm).
+The two halves disagree about which letters count, because the
+compound-assignment machinery rebuilds a command's flags rather than passing them
+on — so `declare -r r=(x y)` evaluates and `declare -r r` does not.
+
+Corpus: `a-declaration-with-nothing-to-do-evaluates-the-subscript-the-reference-carries.sh`.
+
+What that bind then *stores* is still not modelled — see
+`TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`
+below.
+
+### TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE. `declare -n q='n[1]'; declare q` makes bash's `n` read as empty — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::declare_ref_bind_read` reads
+the element the reference designates but performs no store; the store would have
+to reach `Shell::arrays` / `Shell::assoc`, whose element type is `Str`.
+
+**What.** The bind described in the entry above is passed a **null value**, not
+an empty string. bash's `array_insert` puts that null pointer in the element,
+and from then on every reader of the array trips over it — the array reads as
+having no elements at all, while the elements are still there:
+
+```text
+$ n=(a b c); declare -n q='n[1]'; declare q
+$ declare -p n            # bash: declare -a n      osh: declare -a n=([0]="a" [1]="b" [2]="c")
+$ echo "${#n[@]} [${!n[@]}] [${n[@]}]"
+  bash: 0 [] []           osh: 3 [0 1 2] [a b c]
+$ echo "${n[1]-UNSET}"    # bash: UNSET             osh: b
+$ n[5]=z; declare -p n    # bash: declare -a n=([0]="a" [1]= [2]="c" [5]="z")
+```
+
+The last line is the tell: `[1]=` prints without quotes, and `[0]`/`[2]` are back
+— so nothing was ever removed. It is the null in element 1 that the readers
+cannot walk past, and one further store past the end makes them able to again.
+
+The same happens to an associative base (`declare -A m=([k]=v [j]=w)` reads as
+`declare -A m` afterwards), to a scalar base (`n=abc` becomes an empty
+`declare -a n` rather than osh's `declare -a n=([0]="abc")`), and to a
+**readonly** one — the bind carries `ASS_FORCE`, so `readonly n` does not stop
+it and no `readonly variable` is reported. Every flag that makes the command ask
+for something takes it off this path, exactly as in the entry above.
+
+**Why.** `declare q` → `bind_variable("q", NULL, ASS_FORCE)` →
+`bind_variable_internal` follows the last nameref, sees `valid_array_reference
+("n[1]")` and calls `assign_array_element("n[1]", NULL, …)` →
+`bind_array_variable("n", 1, NULL, ASS_FORCE)` →
+`bind_array_var_internal` → `make_array_variable_value(…, NULL, …)` returns
+`NULL` → `array_insert(array_cell(n), 1, NULL)`.
+
+**Proper fix.** This is very likely an upstream bash bug rather than a designed
+behavior — a null element value is not otherwise reachable, and the array is
+left in a state no bash-level operation can produce or explain. Reproducing it
+would mean making osh's element type nullable (`Option<Str>`) and teaching every
+array reader — listing, `${!a[@]}`, `${#a[@]}`, `${a[@]}`, `${a[i]-D}` — to stop
+at the first null, which is a large change to the value model in service of a
+defect. **Ask the operator before doing it** (`open-questions.md`), and prefer
+waiving it in the corpus if the answer is no. Probes: `/d/tmp/hh/bo.sh` (T-series)
+and `/d/tmp/hh/bp.sh` (U-series).
 
 ### TD-OILS-A-DECLARATION-OPERAND-WRITTEN-WITH-A-SUBSCRIPT-IS-NOT-TRUNCATED-AT-THE-BRACKET. `declare 'r[1]'` through a reference is quiet in bash and refused in osh — 2026-08-06 — OPEN
 

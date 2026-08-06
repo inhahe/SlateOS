@@ -24345,6 +24345,83 @@ impl Shell {
         self.perrln(&format!("{base}[{c}]: bad array subscript"));
     }
 
+    /// What a declaration builtin that has been given **nothing to do** does to
+    /// the element a reference designates.
+    ///
+    /// bash reaches for a reference's *base* only when the command asks for
+    /// something — a flag in either direction, `-g`, `export`/`readonly`'s
+    /// standing global scope, or a value. With none of those it has no new name
+    /// to build, and falls through to an ordinary `bind_variable` of the operand
+    /// — which follows the reference and lands in `assign_array_element` on the
+    /// target's spelling (`variables.c:bind_variable_internal`, the
+    /// `valid_array_reference (newval)` arm). So `declare r` and `declare r=(x
+    /// y)` through `declare -n r='n[1+]'` really do *evaluate* `1+`, and report
+    /// the evaluation's own error rather than anything about identifiers:
+    ///
+    /// ```text
+    /// n=(a b c); declare -n r='n[1+]'; declare r      # 1+: syntax error …
+    /// n=(a b c); declare -n r='n[9/0]'; declare r     # 9/0: division by 0 …
+    /// n=(a b c); declare -n r='n[-9]'; declare r      # n[-9]: bad array subscript
+    /// n=(a b c); declare -n r='n[@]'; declare r       # n[@]: bad array subscript
+    /// ```
+    ///
+    /// The three answers are `assign_array_element`'s own, in its own order: the
+    /// whole-array tokens are refused before anything is evaluated, an
+    /// associative base takes the subscript as a key and only minds an *empty*
+    /// one, and an indexed base evaluates it as arithmetic and then minds a
+    /// negative that still points before the start. An arithmetic error is fatal
+    /// the way every arithmetic error in an expansion is; the other two only
+    /// complain, and the caller's own refusal still follows them.
+    ///
+    /// The letters that take a command off this path are the same ones that
+    /// silence the whole-array line, because it *is* this line — see the two
+    /// call sites. The base is used as the reference spells it, unresolved, for
+    /// the same reason the diagnostics spell it that way.
+    ///
+    /// What bash then *stores* is not modelled: the bind is passed a null value,
+    /// which leaves the element holding a null pointer that every reader of the
+    /// array trips over. See `TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-
+    /// NULL-THROUGH-THE-REFERENCE` in `known-issues.md`.
+    fn declare_ref_bind_read(&mut self, base: &str, sub: BStr<'_>) -> Result<(), Flow> {
+        if let Some(c) = Self::whole_array_sub(sub) {
+            self.warn_whole_array_sub(base, c);
+            return Ok(());
+        }
+        // Live shell syntax, read afresh here as at every other use — see
+        // [`Shell::sub_word`].
+        let w = self.sub_word(sub);
+        if self.assoc.contains_key(base) {
+            // A key, not an expression. Only nothing at all is refused, and the
+            // complaint quotes the subscript's *source* rather than what it
+            // expanded to, as the sibling store does.
+            if self.expand_to_string(&w).is_empty() {
+                self.berrln(&bfmt![
+                    self.err_prefix(),
+                    base,
+                    b"[",
+                    &crate::unparse::word_src(&w),
+                    b"]: bad array subscript"
+                ]);
+            }
+            return Ok(());
+        }
+        let src = self.expand_to_arith_string(&w);
+        let Some(idx) = self.eval_arith_index_text_checked(&src) else {
+            return Err(Flow::Discard);
+        };
+        if idx < 0 && Self::resolve_index(idx, self.elem_write_bound(base)).is_none() {
+            let src = self.expand_to_string(&w);
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                base,
+                b"[",
+                &src,
+                b"]: bad array subscript"
+            ]);
+        }
+        Ok(())
+    }
+
     /// The value a reference designating one element — or a whole array — reads
     /// as, with *why* it is nothing when it is.
     ///
@@ -35474,9 +35551,11 @@ impl Shell {
             // direction, no `-g`, no value — does not reach for the reference's
             // base at all. bash has nothing to build a new name out of, so it
             // falls through to an ordinary bind of the operand, which follows
-            // the reference and finds a whole-array subscript there:
+            // the reference into the element it designates:
             // `n=(a b c); declare -n r='n[@]'; declare r` says
-            // `n[@]: bad array subscript`, declares nothing, and succeeds.
+            // `n[@]: bad array subscript`, declares nothing, and succeeds, while
+            // `declare -n r='n[1+]'; declare r` evaluates the subscript and
+            // fails on it. See [`Shell::declare_ref_bind_read`].
             //
             // Any flag at all takes the operand off that path — even one that
             // only *removes* an attribute, and even one bash cannot honour —
@@ -35497,10 +35576,25 @@ impl Shell {
                 && !other_attrs
                 && let Some(t) = &target
                 && let Some(sub) = &t.sub
-                && let Some(c) = Self::whole_array_sub(sub)
             {
-                self.warn_whole_array_sub(&t.base, c);
-                continue;
+                let (base, sub) = (t.base.clone(), sub.clone());
+                let whole = Self::whole_array_sub(&sub).is_some();
+                if self.declare_ref_bind_read(&base, &sub).is_err() {
+                    // The arithmetic error jumps straight out of the builtin, so
+                    // no operand after this one is looked at either; the command
+                    // driver takes the armed discard from there.
+                    status = 1;
+                    break;
+                }
+                // Only a whole-array reference names nothing the operand could
+                // go on to be about. A subscript that *did* evaluate still
+                // designates an element, and bash's bind brings the base array
+                // into being when it has to (`declare -n q='nope[1]'; declare q`
+                // leaves `declare -a nope` behind), which is what the ordinary
+                // path below does.
+                if whole {
+                    continue;
+                }
             }
             // The operand as the user wrote it, before a reference was followed
             // — which is the name bash's "cannot destroy array variables"
@@ -37033,15 +37127,25 @@ impl Shell {
                     // `declare -p`, `declare -I` and even `declare +a` all still
                     // give the line, while `declare -i`, `declare +l` and
                     // `export` do not.
+                    //
+                    // A subscript that is neither whole-array nor evaluable is
+                    // answered on the same path and reported the same way, and
+                    // an arithmetic error there is fatal before the refusal
+                    // below is ever reached — so `declare r=(x y)` through
+                    // `declare -n r='n[1+]'` says only `1+: syntax error …`.
                     if !kind_or_scope_flag
                         && !global_builtin
                         && !int_named
                         && !seen_lower
                         && !seen_upper
                         && !seen_capcase
-                        && let Some(c) = Self::whole_array_sub(&sub)
                     {
-                        self.warn_whole_array_sub(&base, c);
+                        // The arithmetic error carries the same failed status
+                        // out of the parse unit that the refusal below does.
+                        if let Err(flow) = self.declare_ref_bind_read(&base, &sub) {
+                            self.last_status = 1;
+                            return Err(flow);
+                        }
                     }
                     // The refusal is the compound-assignment machinery's, raised
                     // while the operand is being *expanded* — before the

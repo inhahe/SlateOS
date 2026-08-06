@@ -44,6 +44,19 @@ echo "=== an external command keeps its own status too"
 ( cat /nosuchfile 2>&- );              echo "  ext rc=$?"
 ( exec 2>&-; cat /nosuchfile );        echo "  exec ext rc=$?"
 
+# An external child is handed the *absence* of fd 2, not an empty stream. Both
+# drop the diagnostic, but only the first makes the child's own write fail, and
+# that is visible in its status — which is the whole difference here, fd 2
+# having nothing to report a failed write on. A child that never writes to
+# fd 2 is untroubled either way.
+echo "=== the child's own write to a missing fd 2 fails"
+( sh -c 'echo E >&2' 2>&- );           echo "  ext write rc=$?"
+( sh -c 'echo E >&2; exit 7' 2>&- );   echo "  keeps its own status rc=$?"
+( exec 2>&-; sh -c 'echo E >&2' );     echo "  exec rc=$?"
+( { sh -c 'echo E >&2'; } 2>&- );      echo "  group rc=$?"
+( sh -c 'exit 0' 2>&- );               echo "  quiet rc=$?"
+( { sh -c 'echo O' 1>&2; } 2>&- );     echo "  ext dup rc=$?"
+
 echo "=== duplicating a descriptor that is not there"
 ( { echo A >&2; } 2>&- );              echo "  group dup rc=$?"
 ( exec 2>&-; echo B >&2 );             echo "  exec dup rc=$?"

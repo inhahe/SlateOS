@@ -2517,6 +2517,17 @@ enum StderrTarget {
     /// dropped. bash does the same: `ls /nosuch 2>&0 < f` prints nothing at all
     /// and still exits 2.
     Discard,
+    /// `2>&-` — fd 2 is not open at all. Inside the shell that looks exactly
+    /// like [`StderrTarget::Discard`]: the bytes go nowhere and there is no
+    /// second stderr to say so on.
+    ///
+    /// It is a separate variant because of what leaves the shell. An external
+    /// child handed a *closed* fd 2 has its own write fail, and that shows in
+    /// its status — `sh -c 'echo E >&2' 2>&-` exits 1 — where a child handed an
+    /// empty stream writes successfully into nothing and exits 0. A dup is the
+    /// other place they part: `1>&2` copies a read-only fd 2 happily and cannot
+    /// copy a closed one at all.
+    Closed,
 }
 
 /// What a user-space write descriptor (fd ≥ 3, in [`Shell::open_write_fds`])
@@ -2574,7 +2585,10 @@ impl WriteFd {
             WriteFd::Capture(sink) => StderrTarget::Buffer(sink.clone()),
             // Neither can take bytes, and there is no second stderr on which to
             // report that they could not — so what fd 2 is handed is dropped.
-            WriteFd::ReadOnly | WriteFd::Closed => StderrTarget::Discard,
+            // The two are still told apart, because a child and a dup can tell
+            // them apart (see [`StderrTarget::Closed`]).
+            WriteFd::ReadOnly => StderrTarget::Discard,
+            WriteFd::Closed => StderrTarget::Closed,
         }
     }
 
@@ -2665,11 +2679,19 @@ fn child_out_from_write_fd(w: &WriteFd, what: &str) -> Result<ChildOut, String> 
             .try_clone()
             .map(|f| ChildOut::Handle(Stdio::from(f)))
             .map_err(|e| format!("{what}: {e}")),
-        // bash hands the child the read-only (or absent) description and lets
-        // the child's own write fail; we cannot forge a descriptor that behaves
-        // that way on every host — `Stdio` has no "closed" form — so the shell
-        // refuses the redirect instead. Same status (1) and same stream,
-        // different wording — see TD-OILS-FD0-WRITE.
+        // Every caller is resolving a *dup source* for a child, and the two
+        // reach that answer for different reasons.
+        //
+        // `Closed` agrees with bash: a descriptor that is not there cannot be
+        // duplicated, and bash fails such a redirect when it is set up rather
+        // than when the child writes.
+        //
+        // `ReadOnly` does not. bash hands the child the read-only description
+        // and lets the child's own write fail; `WriteFd::ReadOnly` is a
+        // handle-less unit variant recording an access mode, so there is
+        // nothing here to hand over. For fd 1 the status still agrees (1) and
+        // only the wording differs; for fd 2 it does not — see
+        // TD-OILS-A-READ-ONLY-FD-2-IS-HANDED-TO-AN-EXTERNAL-CHILD-AS-AN-EMPTY-STREAM.
         WriteFd::ReadOnly | WriteFd::Closed => Err(format!("{what}: Bad file descriptor")),
     }
 }
@@ -10258,7 +10280,7 @@ impl Shell {
             // is what a subshell clone inherits — `stderr_file` carries the
             // closed state rather than being left unset, which would mean the
             // ambient stderr.
-            self.stderr_stack.push(StderrTarget::Discard);
+            self.stderr_stack.push(StderrTarget::Closed);
             stderr_file = Some(WriteFd::Closed);
             pushed_stderr = true;
         } else if plan.stderr_is_read_only() {
@@ -19467,12 +19489,11 @@ impl Shell {
         // `B\nA` where bash's `dup2` gives `A\nB`.
         let mut merged_capture: Option<io::PipeReader> = None;
         if redir.stderr_closed {
-            // `cmd 2>&-`: bash hands the child a closed fd 2 and lets its writes
-            // fail. `Stdio::null()` is behaviourally the same from outside — the
-            // diagnostics are lost and the child's own status is untouched
-            // (`ls /nosuchdir 2>&-` still exits 2) — so unlike fd 1 there is
-            // nothing here worth refusing the redirect over.
-            cmd.stderr(Stdio::null());
+            // `cmd 2>&-`: the child is handed no fd 2, so its own write to fd 2
+            // fails. An empty stream would drop the diagnostics the same way but
+            // would let the write *succeed*, and that is visible in the status:
+            // `sh -c 'echo E >&2' 2>&-` exits 1 in bash and would exit 0 here.
+            closed.stderr = true;
         } else if let Some(n) = redir.stderr_to_fd {
             // `cmd 2>&N` (N ≥ 3): the child's fd 2 is a user-space write fd —
             // piped and drained when that fd names a capture, as for fd 1 above.
@@ -19583,17 +19604,28 @@ impl Shell {
                                 return;
                             }
                         },
-                        // A fd 2 with no writable description behind it — an
-                        // `exec 2>&0` onto a read-only fd 0, or a closed one:
-                        // the child's diagnostics go nowhere, as in bash.
-                        Some(WriteFd::ReadOnly | WriteFd::Closed) => {
+                        // `exec 2>&0` onto a read-only fd 0: the descriptor is
+                        // there, so the child gets one — its writes fail on it,
+                        // and there is nowhere to say so. (An empty stream is
+                        // not the same descriptor; see the fd 2 note in
+                        // TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0.)
+                        Some(WriteFd::ReadOnly) => {
                             cmd.stderr(Stdio::null());
+                        }
+                        // A persistent `exec 2>&-`: there is no fd 2 to give.
+                        Some(WriteFd::Closed) => {
+                            closed.stderr = true;
                         }
                         None => {}
                     }
                 }
                 Some(StderrTarget::Discard) => {
                     cmd.stderr(Stdio::null());
+                }
+                // An enclosing `{ …; } 2>&-` / `( … ) 2>&-`: the body has no
+                // fd 2, and neither does anything it starts.
+                Some(StderrTarget::Closed) => {
+                    closed.stderr = true;
                 }
                 Some(StderrTarget::File(f)) => match f.try_clone() {
                     Ok(fc) => {
@@ -21628,7 +21660,7 @@ impl Shell {
         // Checked first because the resolver has already applied
         // last-writer-wins between fd 2's destinations.
         if redir.stderr_closed {
-            self.stderr_stack.push(StderrTarget::Discard);
+            self.stderr_stack.push(StderrTarget::Closed);
             return true;
         }
         // `cd /nosuchdir 2<in`: fd 2 has no write half, so the diagnostic is
@@ -44589,7 +44621,7 @@ impl Shell {
     /// `2: Bad file descriptor` itself invisible for the same reason.
     fn stderr_has_no_write_half(&self, depth: usize) -> bool {
         match self.stderr_target_at(depth) {
-            Some(StderrTarget::Discard) => true,
+            Some(StderrTarget::Discard | StderrTarget::Closed) => true,
             Some(_) => false,
             None => matches!(
                 self.exec_stderr,
@@ -44632,9 +44664,9 @@ impl Shell {
             Some(StderrTarget::Buffer(b)) => {
                 lock_capture(b).extend_from_slice(bytes);
             }
-            // fd 2 names a descriptor that cannot be written to; the diagnostic
-            // is lost, exactly as it is under bash.
-            Some(StderrTarget::Discard) => {}
+            // fd 2 names a descriptor that cannot be written to, or none at
+            // all; the diagnostic is lost, exactly as it is under bash.
+            Some(StderrTarget::Discard | StderrTarget::Closed) => {}
             Some(StderrTarget::WriteFd(f)) => {
                 let _ = (&**f).write_all(bytes);
             }
@@ -45103,6 +45135,13 @@ impl Shell {
             // exactly as [`Shell::child_stdio_for_stdout`] does for fd 1.
             Some(StderrTarget::Buffer(sink)) => Ok(ChildOut::Sink(sink.clone())),
             Some(StderrTarget::Discard) => Ok(ChildOut::Handle(Stdio::null())),
+            // `cmd 1>&2` under an enclosing `2>&-` is a dup of a descriptor
+            // that is not there, and bash fails it when the redirect is set up
+            // rather than when the child writes: `{ sh -c 'echo O' 1>&2; } 2>&-`
+            // prints nothing and exits 1. The message names fd 2 and is itself
+            // invisible, having only the closed fd 2 to be reported on — which
+            // is why this is an `Err` rather than a closed child descriptor.
+            Some(StderrTarget::Closed) => Err("2: Bad file descriptor".to_string()),
             Some(StderrTarget::File(f)) => f
                 .try_clone()
                 .map(|f| ChildOut::Handle(Stdio::from(f)))

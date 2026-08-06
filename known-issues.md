@@ -796,7 +796,7 @@ r1                       # the pipeline read the script's own stdin
 `a_pipeline_head_stage_reads_the_ambient_fd_zero` and
 `an_exec_inside_a_redirected_group_rebinds_fd_zero_for_the_rest_of_it`.
 
-### TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0 — 2026-08-06 — ✅ FIXED 2026-08-06 (fd 0 and fd 1; fd 2 still open, see the end)
+### TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0 — 2026-08-06 — ✅ FIXED 2026-08-06 (all three descriptors)
 
 **Where:** `userspace/oils/src/interp.rs` — `child_input` / `ChildIn::Closed`,
 and `HeadIn::Closed`, both of which fall back to `Stdio::null()`.
@@ -911,14 +911,38 @@ pipeline *tail* stage with no fd 1, `sleep` (which never writes and is
 untroubled) beside `cat /dev/null` (which is not, because it closes fd 1 at
 exit), an empty capture, and the shell's own fd 1 still working afterwards.
 
-**fd 2 is what is left.** `RedirPlan::stderr_closed` hands the child
-`Stdio::null()`, which drops the diagnostics as bash does but leaves the child's
-write *succeeding*: `sh -c 'echo E >&2' 2>&-` exits 1 in bash and 0 here.
-Closing it properly needs `StderrTarget` to tell a closed fd 2 from a read-only
-one — today both are `StderrTarget::Discard`, deliberately, because dropping was
-the whole answer while children got `null()` — and `ChildOut` to carry the
-closure through `child_stdio_for_stderr`, which is also `1>&2`'s path. That is a
-wider change than fd 1's and is why it is not in the same commit.
+**fd 2 completed the set**, in the commit after fd 1's. It needed the wider
+change the handoff here predicted: a new `StderrTarget::Closed` beside
+`Discard`, because a closed fd 2 and a read-only one are indistinguishable
+*inside* the shell — both drop what is written and have no second stderr to
+report on — and differ only in what leaves it:
+
+```text
+$ sh -c 'echo E >&2' 2>&-              # both shells now
+                                       → 1   (the child's own write failed)
+$ sh -c 'echo E >&2' 2>/dev/null       → 0   (an empty stream takes it)
+```
+
+`Discard` remains what a fd 2 with no *write half* maps to (`2>&0` onto a
+read-only fd 0 — the descriptor is there, so the child gets one); `Closed` is
+what `2>&-`, `exec 2>&-` and a `WriteFd::Closed` target map to. The two sites
+that pushed `StderrTarget::Discard` for a close now push `Closed`, and the four
+places that only care "can this be written to?" —
+`stderr_has_no_write_half`, `emit_stderr_depth`, and the external command's
+`exec_stderr` and stack arms — match on `Discard | Closed` or on `Closed`
+alone as the question requires.
+
+One of them is not a write at all. `child_stdio_for_stderr` is `1>&2`'s path as
+well as fd 2's own, and a dup of a descriptor that is not there fails when the
+redirect is *set up*, not when the child writes — so `StderrTarget::Closed`
+answers it with `Err("2: Bad file descriptor")`, and
+`{ sh -c 'echo O' 1>&2; } 2>&-` prints nothing and exits 1 as bash's does. The
+diagnostic is itself invisible, having only the closed fd 2 to be reported on.
+
+**Verified** by the new "the child's own write to a missing fd 2 fails" section
+of `tests/corpus/redirect-close-of-stderr.sh`: the per-command and persistent
+closes, a group, a child that keeps its own non-zero status through the failed
+write, a child that never touches fd 2 and is untroubled, and the `1>&2` dup.
 
 ### TD-OILS-A-DUP-TARGET-OF-DOUBLE-DASH-IS-NOT-SPLIT-INTO-A-CLOSE-AND-AN-ARGUMENT. `>&--` is taken as one word — 2026-08-06 — ✅ FIXED 2026-08-06
 
@@ -1615,6 +1639,52 @@ Probes: `/d/tmp/hh/bx.sh` (N-series), `/d/tmp/hh/bz.sh`, `/d/tmp/hh/da.sh`, and
 model end to end: which name the array is made of, that the subscript is never
 evaluated, the `=`-outside-the-subscript split, the empty-subscript refusal, and
 which letters put the operand back on the built-name path.
+
+### TD-OILS-A-READ-ONLY-FD-2-IS-HANDED-TO-AN-EXTERNAL-CHILD-AS-AN-EMPTY-STREAM. `cmd 2>&3` with a read-only fd 3 lets the child's write succeed — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the external-command stderr wiring:
+the `Some(WriteFd::ReadOnly)` arm under `exec_stderr` and the
+`Some(StderrTarget::Discard)` arm beside it, both `cmd.stderr(Stdio::null())`.
+
+**What.** A fd 2 that names a descriptor open for *reading only* is still a
+descriptor: bash gives the child that descriptor and the child's own write to it
+fails. osh gives an empty stream instead, so the write succeeds and the status
+differs:
+
+```text
+$ ( exec 3<in; sh -c 'echo E >&2' 2>&3 ); echo rc=$?
+bash: sh: line 1: echo: write error: Bad file descriptor   →  rc=1
+osh :                                                      →  rc=0
+```
+
+Only the child's *status* diverges; the diagnostic is invisible either way,
+since the only fd 2 there is to report it on is the unwritable one. A child that
+carries its own non-zero status through the failed write (`echo E >&2; exit 7`)
+already agrees, because that status is its own.
+
+This is the sibling of the closed-fd-2 case fixed the same day in
+TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0, and it is the *reason*
+`StderrTarget::Discard` and `StderrTarget::Closed` are separate variants: the
+closed one is now handed over as a genuine absence, the read-only one still is
+not.
+
+**Why it is not fixed with the other.** `WriteFd::ReadOnly` is a handle-less
+unit variant on purpose — it records an *access mode*, not a descriptor. Giving
+it a real handle to pass to the child would mean every read-only fd carrying a
+clone of itself for a use it can never serve, and for `2>&0` in particular there
+may be no handle at all to carry: fd 0 can be a here-doc buffer or the read end
+of a pipe that the plan owns rather than a file. The honest fix is for the
+`WriteFd` enum to hold the underlying object for the read-only case too and for
+the child wiring to `try_clone` it, with a `Stdio::null()` fallback only where
+there genuinely is no object; that is a change to the shape of `WriteFd` and to
+every site that builds one.
+
+**Impact.** Narrow. It needs an fd deliberately opened read-only *and* aimed at
+an external command's fd 2 *and* that command writing a diagnostic — and it
+changes only the status, never any output. Builtins already agree
+(`( exec 3<in; { echo E >&2; } 2>&3 )` exits 1 in both shells), as does the fd 1
+form (`cmd >&3` onto a read-only fd 3 exits 1 in both, though bash's message
+comes from the child and osh's from the shell).
 
 ### TD-TOOLS-A-CORPUS-CASE-RACED-TWO-PIPELINE-STAGES-FOR-THE-SAME-FD. `xtrace-pipeline` failed once in a full sweep and passed 5/5 alone — 2026-08-05 — ✅ FIXED 2026-08-05
 
@@ -36586,8 +36656,8 @@ command runs with its stream still attached.
 
 **Reproduce** (measured 2026-08-01 against the reference bash; `rc` and the
 diagnostic are bash's, the osh column is what it did *before* the fixes below.
-Every row now matches bash except the external-command ones, which are the
-documented trade recorded at the end):
+Every row now matches bash, the external-command ones included since
+2026-08-06 — see the note at the end of each fd's section):
 
 | | bash | osh |
 |---|---|---|
@@ -36680,20 +36750,31 @@ last-writer-wins ordering fd 1 got. What is *visible* differs, though, because a
 failed write to fd 2 has nowhere to be reported: closing fd 2 does not turn the
 diagnostic into an error, it simply **drops** it, and the status stays exactly
 what it would have been (`cd /nosuchdir 2>&-` still exits 1, silently). So a
-closed fd 2 resolves to the existing `StderrTarget::Discard` — no new stderr
-variant was needed.
+closed fd 2 resolved to the existing `StderrTarget::Discard` — no new stderr
+variant seemed to be needed.
 
 The interesting part is what other redirects can then do with fd 2. `1>&2` is a
 *dup* performed at redirect setup, so with fd 2 gone it fails outright: status 1,
 nothing written, and its own `2: Bad file descriptor` invisible for the same
 reason everything else is. Measurement showed bash answers a *read-only* fd 2
-(`2>&0` under a plain `< file`) identically, which is why `Discard` can stand for
-"no write half" uniformly rather than splitting closed from read-only. `exec
-3>&2` likewise fails, while a `>&2` taken *before* the close copies fd 2 while it
-is still open, so `echo hi >&2 2>&-` writes to the original stderr and exits 0.
-External children get `Stdio::null()`, which drops their diagnostics the same way
-without needing a closed `Stdio` — the fd 1 trade above does not arise here,
-because dropping is the correct answer rather than a substitute for one.
+(`2>&0` under a plain `< file`) identically wherever the shell itself does the
+writing, which is why `Discard` stood for "no write half" uniformly at first.
+`exec 3>&2` likewise fails, while a `>&2` taken *before* the close copies fd 2
+while it is still open, so `echo hi >&2 2>&-` writes to the original stderr and
+exits 0.
+
+External children were given `Stdio::null()`, on the reasoning that dropping is
+the correct answer here rather than a substitute for one. That was half right:
+dropping *is* correct, but an empty stream drops by taking the bytes, and taking
+them means the child's write succeeds. **Corrected 2026-08-06** — `sh -c 'echo E
+>&2' 2>&-` exits 1 in bash and did exit 0 here, so `StderrTarget::Closed` was
+split out of `Discard` after all and the child is handed a genuine absence via
+`ClosedStd`. `Discard` kept the read-only meaning. The `1>&2` refusal above is
+now that variant's doing rather than a `WriteFd` check. See
+TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0 for the mechanism, and
+TD-OILS-A-READ-ONLY-FD-2-IS-HANDED-TO-AN-EXTERNAL-CHILD-AS-AN-EMPTY-STREAM for
+the half of the original reasoning that is still true of `Discard` and still
+diverges.
 
 The same divergence fd 1 has remains: `2>&- >&2` (bash fails the dup, osh does
 not) is the order-free-plan limit, identical in kind to `>&- 3>&1`.
@@ -36737,9 +36818,10 @@ got `Stdio::null()` (`ChildIn::Closed`), so it saw an empty stdin rather than
 `EBADF` and `cat <&-` exited 0 where bash's `cat` exits 1 complaining about the
 descriptor. **Closed 2026-08-06** — `ClosedStd` hands the child the missing
 descriptor after all, without the raw `CreateProcess` that looked necessary;
-see TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0. The equivalent on
-the *write* side (an external `cmd >&-`) was closed by the same mechanism on the
-same day; fd 2 is the remaining one, and is tracked in that entry.
+see TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0. The equivalents on
+the *write* side (an external `cmd >&-` and `cmd 2>&-`) were closed by the same
+mechanism on the same day, so all three descriptors now agree with bash; that
+entry tracks the set.
 
 Covered by `tests/corpus/redirect-close-of-stdin.sh` plus four unit tests.
 

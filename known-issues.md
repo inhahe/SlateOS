@@ -131,7 +131,7 @@ and a miss.
 The blank-indented line this entry also noticed is a different, larger gap; see
 TD-OILS-HELP-HAS-NO-LONG-DESCRIPTIONS below.
 
-### TD-OILS-HELP-HAS-NO-LONG-DESCRIPTIONS. `help cd` prints one line where bash prints thirty — 2026-08-06 — OPEN
+### TD-OILS-HELP-HAS-NO-LONG-DESCRIPTIONS. `help cd` prints one line where bash prints thirty — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — `HELP_TABLE` (three columns: name,
 synopsis, short description) and the `help` builtin that formats it.

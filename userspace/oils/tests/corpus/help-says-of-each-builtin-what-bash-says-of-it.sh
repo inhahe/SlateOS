@@ -23,6 +23,22 @@ for n in 'for' 'for ((' 'while' 'until' 'if' 'case' 'select' 'function' \
   help -d -- "$n"
 done
 
+echo '=== and the long form of each: synopsis, description, blank, body'
+for n in $(compgen -b); do
+  help -- "$n"
+done
+
+echo '=== including the reserved words'
+for n in 'for' 'for ((' 'while' 'until' 'if' 'case' 'select' 'function' \
+         'time' 'coproc' '{ ... }' '(( ... ))' 'variables'; do
+  help -- "$n"
+done
+
+echo '=== -d beats -m and -s, and -m beats -s'
+help -sd cd
+help -ds cd
+help -md cd
+
 echo '=== a pattern matches every topic that starts with it'
 help -d 'read*'
 help -s 'unal*'
